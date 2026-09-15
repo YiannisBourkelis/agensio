@@ -6,9 +6,21 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #else
+#include <cerrno>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/uio.h>
+#elif defined(__linux__)
+#include <sys/sendfile.h>
+#elif defined(__FreeBSD__)
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/uio.h>
+#endif
 #endif
 
 namespace agensio {
@@ -97,6 +109,39 @@ void File::close() noexcept {
 }
 
 #endif
+
+SendFileResult send_file(int socket_fd, const File& file, std::uint64_t offset, std::uint64_t count) noexcept {
+    SendFileResult r;
+#if defined(__APPLE__)
+    off_t len = static_cast<off_t>(count);
+    int rc = ::sendfile(file.native_handle(), socket_fd, static_cast<off_t>(offset), &len, nullptr, 0);
+    r.sent = static_cast<std::int64_t>(len);
+    if (rc == 0) return r;
+    if (errno == EAGAIN || errno == EINTR) { r.would_block = true; return r; }
+    r.sent = -1;
+    return r;
+#elif defined(__linux__)
+    off_t off = static_cast<off_t>(offset);
+    std::size_t chunk = static_cast<std::size_t>(count > 0x7ffff000u ? 0x7ffff000u : count);
+    ssize_t n = ::sendfile(socket_fd, file.native_handle(), &off, chunk);
+    if (n >= 0) { r.sent = n; return r; }
+    if (errno == EAGAIN || errno == EINTR) { r.would_block = true; return r; }
+    r.sent = -1;
+    return r;
+#elif defined(__FreeBSD__)
+    off_t sbytes = 0;
+    int rc = ::sendfile(file.native_handle(), socket_fd, static_cast<off_t>(offset), static_cast<std::size_t>(count), nullptr, &sbytes, 0);
+    r.sent = static_cast<std::int64_t>(sbytes);
+    if (rc == 0) return r;
+    if (errno == EAGAIN || errno == EINTR) { r.would_block = true; return r; }
+    r.sent = -1;
+    return r;
+#else
+    (void)socket_fd; (void)file; (void)offset; (void)count;
+    r.unsupported = true;
+    return r;
+#endif
+}
 
 bool File::read_all(void* buf, std::size_t len) const noexcept {
     std::size_t done = 0;

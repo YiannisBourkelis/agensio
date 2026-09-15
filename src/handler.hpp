@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <ctime>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -33,6 +34,8 @@ struct Route {
 struct WorkerState {
     DateCache date;
     LocalIndex local;
+    std::string prefix200;          // "HTTP/1.1 200 OK\r\nServer: ..\r\nDate: ..\r\n", refreshed per second
+    std::time_t prefix200_time = 0;
     std::string path;      // normalised request path
     std::string fs_path;   // filesystem path being served
     std::string tmp;
@@ -41,7 +44,12 @@ struct WorkerState {
 struct ResponsePlan {
     enum class Body { none, entry, file, inline_text };
 
-    std::string header;                 // complete header block, ends with "\r\n\r\n"
+    // The header is written as up to three pieces without concatenation:
+    //   header (owned) + headers2 (borrowed, usually the cache entry's prebuilt block,
+    //   kept alive by `entry`) + tail (static). Empty pieces are skipped.
+    std::string header;
+    std::string_view headers2;
+    std::string_view tail;
     Body body = Body::none;
     EntryPtr entry;                     // Body::entry
     File file;                          // Body::file
@@ -52,6 +60,8 @@ struct ResponsePlan {
 
     void reset() {
         header.clear();
+        headers2 = {};
+        tail = {};
         body = Body::none;
         entry.reset();
         file.close();
@@ -75,7 +85,8 @@ private:
     void begin_header(int status, WorkerState& ws, ResponsePlan& plan);
     void end_header(const Request& req, ResponsePlan& plan);
     void end_header(bool keep_alive, int version_minor, ResponsePlan& plan);
-    void serve_entry(const Request& req, EntryPtr e, WorkerState& ws, ResponsePlan& plan);  // takes ownership of the ref
+    void serve_entry(const Request& req, EntryPtr e, std::time_t now, WorkerState& ws, ResponsePlan& plan);  // takes ownership of the ref
+    std::string_view prefix200(WorkerState& ws, std::time_t now);
     void serve_file(const Request& req, File&& f, const FileInfo& fi, WorkerState& ws, ResponsePlan& plan);
     void redirect_slash(const Request& req, WorkerState& ws, ResponsePlan& plan);
     static bool not_modified(const Request& req, std::string_view etag, std::string_view last_modified) noexcept;

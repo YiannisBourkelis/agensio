@@ -75,7 +75,7 @@ cmake --build build
 ./build/agensio_tests                      # unit tests (parser, path, cache, mime, date)
 ./build/agensio -c bench/agensio.toml      # http://127.0.0.1:8080 and https://127.0.0.1:8443
 ./build/agensio -t -c config/agensio.toml  # config check only
-bench/run.sh                               # full benchmark, see bench/results/
+bench/run.sh                               # 5 s per case; -d 15s for publishable numbers
 ```
 
 Source map (all in `src/`): `config` (TOML model + loader), `http_parser` (request head),
@@ -123,30 +123,88 @@ Source map (all in `src/`): `config` (TOML model + loader), `http_parser` (reque
 
 ## Performance notes (measured, keep current)
 
-- `asio::ssl::stream` encrypts only the first buffer of a buffer sequence per `write_some`,
-  so a header+body pair becomes two TLS records and two syscalls. `Connection` coalesces
-  header and body prefix into one 16 KB record for TLS (`out_`). Plain sockets use
-  scatter-gather with no copy.
-- `SSL_MODE_RELEASE_BUFFERS` was measured: no gain, so it is not set.
-- On macOS, nginx's plain-HTTP path is slower than its TLS path because it uses `sendfile`
-  for small files; do not read that as a TLS anomaly in agensio's numbers.
-- First full run (`bench/results/20260915-040303.md`, M1 Pro, 15 s): plain HTTP 1 KB agensio
-  126-134k req/s vs nginx 106k vs Caddy 33k. 100 KB and 10 MB plain: parity with nginx
-  (bandwidth bound). HTTPS 1 KB: parity. **HTTPS 100 KB and 10 MB: agensio is about 33 %
-  behind nginx** (24k vs 36k req/s; 2.35 vs 3.57 GB/s).
-- Root cause of the HTTPS gap (by construction, not yet profiled): `asio::ssl::stream` uses a
-  BIO pair with a 17 KB buffer, so every 16 KB TLS record costs one async socket write and
-  one trip through the event loop plus two memcpys. nginx uses a socket BIO and calls
-  `SSL_write` directly until `EAGAIN`. Next perf task: a custom TLS stream that puts the
-  non-blocking socket in a socket BIO and uses `socket.async_wait(wait_read/wait_write)` for
-  readiness, keeping `SSL_read/SSL_write` on the fd. Expected to close the gap.
-- HTTPS p99 (1.8-7 ms vs nginx 0.8-4 ms) likely shares the same cause.
-- Cache hit path measured (2026-09-15): cutting the per-hit shared-line traffic from two
-  refcount inc/dec pairs plus a `last_access` store down to one pair and a once-per-second
-  store changed plain HTTP 1 KB throughput by under 2 % (noise). The hit path is not the
-  bottleneck on 10 cores; per-request syscalls (writev, read, kevent) are. Kept the change
-  because it is correct and will matter on higher core counts; do not spend more time here
-  before profiling with `sample`/`perf`.
+Measure **server CPU microseconds per request** (`ps -o cputime` delta divided by wrk's
+request count), not only req/s: wrk shares the cores with the server, so req/s hides
+CPU efficiency. Numbers below are M1 Pro, 64 connections, 10 s, 2026-09-15.
+
+| case | agensio | nginx 1.31 |
+|---|---|---|
+| HTTPS 1 KB | 21.8 us | 21.0 us |
+| HTTPS 100 KB | 88.5 us | 92.6 us |
+| HTTP 1 KB | 18.5 us | 27.1 us (nginx uses sendfile even for small files; slow on macOS) |
+| HTTP 10 MB stream | 1.18 ms | 1.21 ms |
+| HTTPS 10 MB stream | 10.0 ms | 9.6 ms (AES dominates) |
+
+Latency-bound check (wrk with 2 threads so it cannot starve the server): HTTPS 1 KB
+agensio 140.5k req/s at p50 308 us, nginx 140.0k at 320 us. Any remaining gap in the
+10-thread runs is CPU competition with wrk, i.e. CPU per request.
+
+Single worker vs single nginx worker process (`bench/results/20260915-single-worker.md`,
+one core saturated, so us/req is exact): HTTP 1 KB 7.8 vs 11.6 us, HTTPS 1 KB 9.3 vs 12.6,
+HTTPS 100 KB 55.5 vs 67.8, HTTP 100 KB 19.8 vs 18.9 (nginx's sendfile from the page cache
+beats our 100 KB memory copy; only row nginx wins). One agensio worker does 128k plain
+1 KB req/s, the same as ten workers: multi-worker runs on this laptop are wrk-bound.
+
+Full single-worker run with tuned nginx (`bench/results/20260915-110001.md`, wrk 4
+threads): agensio vs nginx req/s: HTTP 1 KB 127k vs 82k, HTTPS 1 KB 107k vs 77k, HTTPS
+100 KB 17.9k vs 13.7k, HTTPS 10 MB 182 vs 151, HTTP 10 MB 755 vs 723; HTTP 100 KB 48.0k vs
+50.7k is the only loss (page-cache sendfile vs our memory copy, see above).
+
+Benchmark hygiene: `pkill -x nginx` does not kill nginx (it retitles its processes); a
+stale instance keeps the ports and silently serves the next run. `bench/run.sh` now
+refuses to start when a port is busy; kill with `pkill -f 'nginx: '`.
+
+What got us there, in order of impact:
+
+1. **Inline completions (biggest win, ~30 %).** Every handler asio *posts* makes the
+   scheduler run a non-blocking `kevent` poll before executing it, so a request cost three
+   kevent calls instead of one. `Connection` and `TlsStream` bind an immediate executor
+   (`asio::bind_immediate_executor(worker.ctx.get_executor(), h)`) so speculative
+   completions run inline; `TlsStream::complete` calls the handler directly. Keep every
+   new handler on the hot path wrapped in `immediate(...)`.
+2. **Own TLS stream (`src/tls_stream.hpp`) instead of `asio::ssl::stream`.** Writes go
+   through a socket BIO: one `SSL_write` pushes all records with back-to-back `send()`
+   until EAGAIN. `asio::ssl::stream` uses a 17 KB BIO pair, costing one async write and
+   one event-loop trip per 16 KB record (100 KB HTTPS went from 24k to 32k req/s on this
+   alone). Reads use the socket's speculative `async_read_some` into a staging buffer that
+   a custom zero-copy BIO feeds to OpenSSL; `socket.async_wait()` was rejected because
+   asio re-registers the kevent filter on every non-speculative op.
+3. `SSL_set_read_ahead(1)` (one read per record), no `ERR_clear_error()` before each call
+   (only after an error), `SSL_MODE_RELEASE_BUFFERS` not set (measured: no gain).
+4. Header + body prefix coalesced into one 16 KB record for TLS (`Connection::out_`).
+5. **sendfile for streamed files on plain sockets** (`Connection::sendfile_step`,
+   `send_file` in `file.cpp`; macOS, Linux, FreeBSD). The pread + send path copied every
+   byte twice and cost 2.22 ms CPU per 10 MB; sendfile costs 1.18 ms. Chunk size on the
+   copy path was measured to make no difference (64 KB vs 256 KB). `server.sendfile = false`
+   switches it off. TLS still uses the copy path (kTLS would fix that on Linux).
+6. One `steady_clock::now()` per response, not per read: clock reads were 7 % of user time.
+7. **Header assembly** (`tests/bench_header.cpp`, run `build/agensio_bench_header`): the old
+   server's 11-append concatenation costs 67 ns per header, the prebuilt-entry-block
+   version 33 ns, the current zero-concatenation path 4 ns (per-worker cached
+   "status + Server + Date" prefix refreshed once per second, the entry's terminated
+   header block borrowed, static tail, one writev of up to 4 buffers). End-to-end effect:
+   none measurable (a header is <0.5 % of the 18 us a request costs). Kept because it is
+   simpler on the hot path, but header building is not where time goes any more.
+
+The remaining 4 % CPU gap to nginx on HTTPS 1 KB is one extra syscall per request: asio's
+reactor tries a speculative `recv` (EAGAIN) after every response before waiting in
+kevent; nginx knows from the kqueue event that nothing is readable. asio cannot avoid it
+without patching the reactor (`socket.async_wait` re-registers the filter instead, same
+cost). Accepted.
+
+Things measured with no effect (do not retry without new evidence): cache hit-path
+refcount and `last_access` traffic (under 2 %), `SSL_MODE_RELEASE_BUFFERS`, streaming
+chunk size, memory-BIO reads.
+
+How to profile on macOS: `sample <pid> 5 -file out.txt` while wrk runs, then read the
+"Sort by top of stack" section at the end for self time; `kevent` there is blocked time,
+not CPU. CPU per request: `ps -o cputime= -p <pid>` before and after a wrk run (sum over
+nginx's worker processes with `pgrep -f nginx`).
+
+Open: HTTPS p99 is noisier than nginx at 256 connections (run-to-run 5-25 ms); likely
+CPU contention with wrk on the same 10 cores. Check on a Linux box with a separate load
+generator before touching code. kTLS (Linux, `SSL_OP_ENABLE_KTLS`) is the next lever
+there: it would allow `sendfile` for streamed files over TLS.
 
 ## Benchmark protocol (phase 1)
 
@@ -155,9 +213,17 @@ Source map (all in `src/`): `config` (TOML model + loader), `http_parser` (reque
 - `bench/run.sh` runs the servers one at a time on native macOS (brew nginx and caddy), plain
   HTTP and HTTPS with the same self-signed cert (`bench/certs/gen-cert.sh`), docroot from
   `bench/gen-www.sh`. Ports: agensio 8080/8443, nginx 8081/8444, caddy 8082/8445.
-  Configs: `bench/agensio.toml`, `bench/nginx.conf`, `bench/Caddyfile`.
-- Each server tuned sensibly, not crippled: nginx `worker_processes auto; sendfile on;
-  open_file_cache; access_log off`; Caddy default `file_server`, admin and auto-https off.
+- **Single worker by default** (`-w 1`): agensio `workers`, nginx `worker_processes`, Caddy
+  `GOMAXPROCS` all get the same count, and wrk runs with 4 threads (`-t`). Workers plus wrk
+  threads must stay well under the core count, otherwise wrk steals CPU from the server
+  and the run measures the load generator. Configs are generated per run from the
+  templates `bench/agensio.toml` and `bench/nginx.conf` (`@WORKERS@`, `@BENCH@`) into
+  `bench/tmp/`; `bench/Caddyfile` is used as is.
+- nginx is tuned for static files, not crippled: sendfile, tcp_nopush, open_file_cache
+  valid 60 s, keepalive_requests 1M, multi_accept, backlog 4096, session cache and tickets,
+  access_log off. Caddy: default `file_server`, admin and auto-https off. Note that Caddy
+  with GOMAXPROCS=1 still uses extra OS threads for blocking syscalls, so it is not strictly
+  one core; it wins the plain 10 MB stream that way.
 - Default matrix: `/` (1 KB) and `/style.css` (100 KB) at 64 and 256 connections, `/big.bin`
   (10 MB, above the cache limit, streamed) at 16. Body checksums are verified against disk
   before each measurement. Raw wrk output lands in `bench/results/raw/<stamp>/`.

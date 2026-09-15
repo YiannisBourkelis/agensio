@@ -1,8 +1,11 @@
-# agensio configuration used by the benchmark harness.
+# agensio template for the benchmark. bench/run.sh substitutes @WORKERS@ and writes the
+# result to bench/tmp/agensio.toml (paths there are absolute).
 [server]
-workers = 0
-idle_timeout = 30
+workers = @WORKERS@
+idle_timeout = 65
 reuse_port = "auto"
+tcp_nodelay = true
+sendfile = true
 
 [cache]
 max_file_size = "4MB"
@@ -11,11 +14,11 @@ max_size = "256MB"
 [[site]]
 server_name = ["localhost", "127.0.0.1"]
 listen = ["127.0.0.1:8080"]
-root = "www"
+root = "@BENCH@/www"
 default = true
 
 [[site]]
 server_name = ["localhost", "127.0.0.1"]
 listen = ["127.0.0.1:8443"]
-root = "www"
-tls = { cert = "certs/cert.pem", key = "certs/key.pem" }
+root = "@BENCH@/www"
+tls = { cert = "@BENCH@/certs/cert.pem", key = "@BENCH@/certs/key.pem" }

@@ -28,7 +28,7 @@ namespace agensio {
 struct CacheEntry {
     std::vector<char> data;
     std::string file_path;      // filesystem path, for revalidation
-    std::string headers;        // "Content-Type: ..\r\nContent-Length: ..\r\nLast-Modified: ..\r\nETag: ..\r\n"
+    std::string headers;        // "Content-Type: ..\r\nContent-Length: ..\r\nLast-Modified: ..\r\nETag: ..\r\n\r\n" (terminated)
     std::string etag;           // including the quotes
     std::string last_modified;  // IMF-fixdate
     std::int64_t mtime = 0;

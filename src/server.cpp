@@ -130,7 +130,6 @@ void Server::start_accept(std::size_t index) {
             const Listener& l = *acc.listener;
             if (l.tls) {
 #ifdef AGENSIO_HAS_TLS
-                using TlsStream = asio::ssl::stream<asio::ip::tcp::socket>;
                 auto c = std::make_shared<Connection<TlsStream>>(TlsStream(std::move(sock), *l.ssl), target, l, cfg_, handler_);
                 if (&target == acc.owner) c->start();
                 else asio::post(target.ctx, [c] { c->start(); });

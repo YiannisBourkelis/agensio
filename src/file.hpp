@@ -44,8 +44,21 @@ public:
 
     void close() noexcept;
 
+    int native_handle() const noexcept { return fd_; }
+
 private:
     int fd_ = -1;
 };
+
+struct SendFileResult {
+    std::int64_t sent = 0;      // bytes handed to the socket in this call
+    bool would_block = false;   // socket buffer full; wait for writability and call again
+    bool unsupported = false;   // platform has no sendfile: use the read/write path
+};
+
+// Zero-copy file-to-socket transfer (sendfile on macOS, Linux, FreeBSD). The socket
+// must be non-blocking. sent == 0 with would_block == false means EOF (file shrank).
+// sent < 0 means a socket error (errno set).
+SendFileResult send_file(int socket_fd, const File& file, std::uint64_t offset, std::uint64_t count) noexcept;
 
 }  // namespace agensio

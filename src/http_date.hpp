@@ -16,8 +16,10 @@ void format_http_date(std::time_t t, char* out);
 // One instance per worker thread, never shared.
 class DateCache {
 public:
-    std::string_view now() {
-        std::time_t t = std::time(nullptr);
+    std::string_view now() { return at(std::time(nullptr)); }
+
+    // Same, for a caller that already read the clock.
+    std::string_view at(std::time_t t) {
         if (t != last_) {
             format_http_date(t, buf_);
             last_ = t;

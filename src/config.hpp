@@ -32,6 +32,7 @@ struct Config {
     std::size_t max_header_size = 16 * 1024;
     std::string reuse_port = "auto";     // auto | on | off
     bool tcp_nodelay = true;
+    bool sendfile = true;                // zero-copy streaming of uncached files on plain sockets
     std::string server_header = "agensio";
 
     // [cache]

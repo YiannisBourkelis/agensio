@@ -1,0 +1,4 @@
+agensio 0.1.0 starting with 1 worker(s), shared acceptor
+  listening on http://127.0.0.1:8080  sites: localhost
+  listening on https://127.0.0.1:8443  sites: localhost
+agensio stopped

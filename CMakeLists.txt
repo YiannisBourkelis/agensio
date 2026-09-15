@@ -97,3 +97,9 @@ if(AGENSIO_TESTS)
   target_link_libraries(agensio_tests PRIVATE agensio_core)
   add_test(NAME unit COMMAND agensio_tests)
 endif()
+
+if(AGENSIO_TESTS AND NOT WIN32)
+  add_test(NAME integration COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration.sh $<TARGET_FILE:agensio>)
+endif()
+
+add_executable(agensio_bench_header tests/bench_header.cpp)

@@ -113,7 +113,16 @@ bool RequestHandler::not_modified(const Request& req, std::string_view etag, std
     return false;
 }
 
-void RequestHandler::serve_entry(const Request& req, EntryPtr e, WorkerState& ws, ResponsePlan& plan) {
+std::string_view RequestHandler::prefix200(WorkerState& ws, std::time_t now) {
+    if (ws.prefix200_time != now) {
+        ws.prefix200.clear();
+        ws.prefix200.append(status_line(200)).append(server_line_).append("Date: ").append(ws.date.at(now)).append("\r\n");
+        ws.prefix200_time = now;
+    }
+    return ws.prefix200;
+}
+
+void RequestHandler::serve_entry(const Request& req, EntryPtr e, std::time_t now, WorkerState& ws, ResponsePlan& plan) {
     const bool head = req.method == Method::HEAD;
     if (not_modified(req, e->etag, e->last_modified)) {
         begin_header(304, ws, plan);
@@ -121,9 +130,15 @@ void RequestHandler::serve_entry(const Request& req, EntryPtr e, WorkerState& ws
         end_header(req, plan);
         return;
     }
-    begin_header(200, ws, plan);
-    plan.header.append(e->headers);
-    end_header(req, plan);
+    // No per-request concatenation: prefix copied from the per-worker cache, the
+    // entry's prebuilt block (which ends with the blank line) borrowed, tail static.
+    plan.header.assign(prefix200(ws, now));
+    if (plan.keep_alive && req.version_minor == 1) {
+        plan.headers2 = e->headers;
+    } else {
+        plan.headers2 = std::string_view(e->headers).substr(0, e->headers.size() - 2);
+        plan.tail = plan.keep_alive ? std::string_view("Connection: keep-alive\r\n\r\n") : std::string_view("Connection: close\r\n\r\n");
+    }
     if (!head) {
         plan.body = ResponsePlan::Body::entry;
         plan.entry = std::move(e);
@@ -226,7 +241,7 @@ void RequestHandler::handle(const Request& req, const Route& route, WorkerState&
         if (raw->last_access.load(std::memory_order_relaxed) != now) raw->last_access.store(now, std::memory_order_relaxed);
         // Exactly one strong reference is taken for the duration of the response.
         EntryPtr ref = fetched ? std::move(fetched) : *local;
-        serve_entry(req, std::move(ref), ws, plan);
+        serve_entry(req, std::move(ref), now, ws, plan);
         return;
     }
 
@@ -284,14 +299,14 @@ void RequestHandler::handle(const Request& req, const Route& route, WorkerState&
         entry->headers.reserve(160);
         entry->headers.append("Content-Type: ").append(mime_for_path(ws.fs_path)).append("\r\nContent-Length: ");
         append_number(entry->headers, fi.size);
-        entry->headers.append("\r\nLast-Modified: ").append(entry->last_modified).append("\r\nETag: ").append(entry->etag).append("\r\n");
+        entry->headers.append("\r\nLast-Modified: ").append(entry->last_modified).append("\r\nETag: ").append(entry->etag).append("\r\n\r\n");
         entry->last_access.store(now, std::memory_order_relaxed);
         entry->last_validated.store(now, std::memory_order_relaxed);
 
         EntryPtr canonical = cache_.insert(key, entry);
         if (canonical) ws.local.insert(key, canonical);
         else canonical = std::move(entry);  // cache full for this size class: serve once, uncached
-        serve_entry(req, std::move(canonical), ws, plan);
+        serve_entry(req, std::move(canonical), now, ws, plan);
         return;
     }
 

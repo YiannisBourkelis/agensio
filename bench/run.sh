@@ -1,22 +1,29 @@
 #!/usr/bin/env bash
 # Benchmarks agensio against nginx and Caddy serving the same static docroot.
 #
-# usage: bench/run.sh [-d DURATION] [-t THREADS] [-s "agensio nginx caddy"] [-p "http https"] [-u URLSPEC ...]
+# usage: bench/run.sh [-w WORKERS] [-t THREADS] [-d DURATION] [-s "agensio nginx caddy"] [-p "http https"] [-u URLSPEC ...]
+#   -w  server workers: agensio workers, nginx worker_processes, caddy GOMAXPROCS (default 1)
+#   -t  wrk threads (default 4). Keep WORKERS + THREADS well below the core count, otherwise
+#       the load generator steals CPU from the server and the numbers measure wrk, not the server.
+#   -d  duration per case (default 5s; use 15s for numbers worth publishing)
 #   URLSPEC is "path:conns[,conns...]", default: "/:64,256" "/style.css:64,256" "/big.bin:16"
 #
-# Servers run one at a time so they never compete for CPU. Raw wrk output goes to
+# Servers run one at a time with configs generated from the templates in this directory
+# (bench/tmp/agensio.toml, bench/tmp/nginx.conf). Raw wrk output goes to
 # bench/results/raw/, a summary table to bench/results/<timestamp>.md.
 set -euo pipefail
 
 BENCH="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$BENCH")"
-DURATION=15s
-THREADS="$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
+DURATION=5s
+WORKERS=1
+THREADS=4
 SERVERS="agensio nginx caddy"
 PROTOS="http https"
 URLSPECS=()
-while getopts "d:t:s:p:u:" opt; do
+while getopts "w:d:t:s:p:u:" opt; do
   case $opt in
+    w) WORKERS=$OPTARG ;;
     d) DURATION=$OPTARG ;;
     t) THREADS=$OPTARG ;;
     s) SERVERS=$OPTARG ;;
@@ -38,6 +45,17 @@ OUT="$BENCH/results/$STAMP.md"
 RAW="$BENCH/results/raw/$STAMP"
 mkdir -p "$RAW" "$BENCH/tmp"
 
+CORES="$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
+if [ $((WORKERS + THREADS)) -gt "$CORES" ]; then
+  echo "warning: $WORKERS worker(s) + $THREADS wrk thread(s) exceed $CORES cores; results will be load-generator bound"
+fi
+
+# Generate server configs from the templates.
+sed "s#@WORKERS@#$WORKERS#g; s#@BENCH@#$BENCH#g" "$BENCH/agensio.toml" > "$BENCH/tmp/agensio.toml"
+sed "s#@WORKERS@#$WORKERS#g; s#@BENCH@#$BENCH#g" "$BENCH/nginx.conf" > "$BENCH/tmp/nginx.conf"
+"$ROOT/build/agensio" -t -c "$BENCH/tmp/agensio.toml" >/dev/null
+nginx -p "$BENCH" -c "$BENCH/tmp/nginx.conf" -t >/dev/null 2>&1 || { nginx -p "$BENCH" -c "$BENCH/tmp/nginx.conf" -t; exit 1; }
+
 port_of() {  # server proto -> port
   case "$1-$2" in
     agensio-http) echo 8080 ;; agensio-https) echo 8443 ;;
@@ -48,10 +66,17 @@ port_of() {  # server proto -> port
 
 SERVER_PID=""
 start_server() {
+  # A stale instance from an earlier run would silently serve the benchmark instead.
+  for proto in http https; do
+    port=$(port_of "$1" "$proto")
+    if nc -z 127.0.0.1 "$port" 2>/dev/null; then
+      echo "port $port is already in use; stop the running $1 first (pkill -f '$1')"; exit 1
+    fi
+  done
   case "$1" in
-    agensio) (cd "$BENCH" && exec "$ROOT/build/agensio" -c agensio.toml) >"$RAW/$1.log" 2>&1 & ;;
-    nginx)   (cd "$BENCH" && exec nginx -p "$BENCH" -c "$BENCH/nginx.conf" -g 'daemon off;') >"$RAW/$1.log" 2>&1 & ;;
-    caddy)   (cd "$BENCH" && exec caddy run --config Caddyfile --adapter caddyfile) >"$RAW/$1.log" 2>&1 & ;;
+    agensio) (cd "$BENCH" && exec "$ROOT/build/agensio" -c "$BENCH/tmp/agensio.toml") >"$RAW/$1.log" 2>&1 & ;;
+    nginx)   (cd "$BENCH" && exec nginx -p "$BENCH" -c "$BENCH/tmp/nginx.conf" -g 'daemon off;') >"$RAW/$1.log" 2>&1 & ;;
+    caddy)   (cd "$BENCH" && GOMAXPROCS=$WORKERS exec caddy run --config Caddyfile --adapter caddyfile) >"$RAW/$1.log" 2>&1 & ;;
   esac
   SERVER_PID=$!
   local port; port=$(port_of "$1" http)
@@ -60,11 +85,11 @@ start_server() {
 }
 stop_server() {
   [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null && wait "$SERVER_PID" 2>/dev/null || true
-  pkill -x "$1" 2>/dev/null || true   # nginx forks workers
+  pkill -f "^$1( |:)" 2>/dev/null || true   # nginx retitles its master and worker processes
   SERVER_PID=""
   sleep 0.5
 }
-trap 'for s in $SERVERS; do pkill -x $s 2>/dev/null || true; done' EXIT
+trap 'for s in $SERVERS; do pkill -f "^$s( |:)" 2>/dev/null || true; done' EXIT
 
 version_of() {
   case "$1" in
@@ -79,6 +104,7 @@ version_of() {
   echo
   echo "- machine: $(uname -m), $(sysctl -n machdep.cpu.brand_string 2>/dev/null || grep -m1 'model name' /proc/cpuinfo | cut -d: -f2), $(uname -sr)"
   echo "- commit: $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo uncommitted)"
+  echo "- server workers: $WORKERS (agensio workers / nginx worker_processes / caddy GOMAXPROCS), cores: $CORES"
   echo "- load generator: $(wrk -v 2>&1 | head -1 | awk '{print $1, $2, $3}'), threads=$THREADS, duration=$DURATION, keep-alive"
   for s in $SERVERS; do echo "- $s: $(version_of "$s")"; done
   echo

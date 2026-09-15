@@ -215,6 +215,7 @@ Config load_config(const fs::path& path) {
     if (cfg.reuse_port != "auto" && cfg.reuse_port != "on" && cfg.reuse_port != "off")
         fail("server.reuse_port must be \"auto\", \"on\" or \"off\"");
     cfg.tcp_nodelay = server["tcp_nodelay"].value_or(true);
+    cfg.sendfile = server["sendfile"].value_or(true);
     cfg.server_header = server["server_header"].value_or(std::string("agensio"));
 
     auto cache = root["cache"];
