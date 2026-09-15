@@ -75,7 +75,7 @@ private:
     void begin_header(int status, WorkerState& ws, ResponsePlan& plan);
     void end_header(const Request& req, ResponsePlan& plan);
     void end_header(bool keep_alive, int version_minor, ResponsePlan& plan);
-    void serve_entry(const Request& req, const EntryPtr& e, WorkerState& ws, ResponsePlan& plan);
+    void serve_entry(const Request& req, EntryPtr e, WorkerState& ws, ResponsePlan& plan);  // takes ownership of the ref
     void serve_file(const Request& req, File&& f, const FileInfo& fi, WorkerState& ws, ResponsePlan& plan);
     void redirect_slash(const Request& req, WorkerState& ws, ResponsePlan& plan);
     static bool not_modified(const Request& req, std::string_view etag, std::string_view last_modified) noexcept;

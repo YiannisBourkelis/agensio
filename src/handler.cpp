@@ -113,7 +113,7 @@ bool RequestHandler::not_modified(const Request& req, std::string_view etag, std
     return false;
 }
 
-void RequestHandler::serve_entry(const Request& req, const EntryPtr& e, WorkerState& ws, ResponsePlan& plan) {
+void RequestHandler::serve_entry(const Request& req, EntryPtr e, WorkerState& ws, ResponsePlan& plan) {
     const bool head = req.method == Method::HEAD;
     if (not_modified(req, e->etag, e->last_modified)) {
         begin_header(304, ws, plan);
@@ -126,7 +126,7 @@ void RequestHandler::serve_entry(const Request& req, const EntryPtr& e, WorkerSt
     end_header(req, plan);
     if (!head) {
         plan.body = ResponsePlan::Body::entry;
-        plan.entry = e;
+        plan.entry = std::move(e);
     }
 }
 
@@ -193,31 +193,40 @@ void RequestHandler::handle(const Request& req, const Route& route, WorkerState&
     const std::time_t now = std::time(nullptr);
     const CacheKeyView key{site, ws.path};
 
-    // 1. Worker-local index (no lock), then the shared store.
-    EntryPtr e = ws.local.find(key);
-    if (e && e->stale.load(std::memory_order_acquire)) {
-        ws.local.erase(key);
-        e.reset();
+    // 1. Worker-local index (no lock, no refcount traffic), then the shared store.
+    //    `raw` is only dereferenced on this thread before any index mutation.
+    CacheEntry* raw = nullptr;
+    const EntryPtr* local = ws.local.find(key);
+    if (local) {
+        if ((*local)->stale.load(std::memory_order_acquire)) { ws.local.erase(key); local = nullptr; }
+        else raw = local->get();
     }
-    if (!e) {
-        e = cache_.find(key);
-        if (e) ws.local.insert(key, e);
-    }
-    // 2. Revalidate against the filesystem at most once per interval.
-    if (e && cfg_.cache_revalidate_s > 0 &&
-        now - e->last_validated.load(std::memory_order_relaxed) >= static_cast<std::int64_t>(cfg_.cache_revalidate_s)) {
-        FileInfo fi;
-        if (!stat_path(e->file_path.c_str(), fi) || !fi.is_regular || fi.mtime != e->mtime || fi.size != e->size) {
-            cache_.erase(key, e.get());
-            ws.local.erase(key);
-            e.reset();
-        } else {
-            e->last_validated.store(now, std::memory_order_relaxed);
+    EntryPtr fetched;  // only set when we had to go to the shared store
+    if (!raw) {
+        fetched = cache_.find(key);
+        if (fetched) {
+            raw = fetched.get();
+            ws.local.insert(key, fetched);  // may rehash: `local` is not used after this point
         }
     }
-    if (e) {
-        e->last_access.store(now, std::memory_order_relaxed);
-        serve_entry(req, e, ws, plan);
+    // 2. Revalidate against the filesystem at most once per interval.
+    if (raw && cfg_.cache_revalidate_s > 0 &&
+        now - raw->last_validated.load(std::memory_order_relaxed) >= static_cast<std::int64_t>(cfg_.cache_revalidate_s)) {
+        FileInfo fi;
+        if (!stat_path(raw->file_path.c_str(), fi) || !fi.is_regular || fi.mtime != raw->mtime || fi.size != raw->size) {
+            cache_.erase(key, raw);
+            ws.local.erase(key);
+            raw = nullptr;
+        } else {
+            raw->last_validated.store(now, std::memory_order_relaxed);
+        }
+    }
+    if (raw) {
+        // Write the shared line at most once per second, not once per hit.
+        if (raw->last_access.load(std::memory_order_relaxed) != now) raw->last_access.store(now, std::memory_order_relaxed);
+        // Exactly one strong reference is taken for the duration of the response.
+        EntryPtr ref = fetched ? std::move(fetched) : *local;
+        serve_entry(req, std::move(ref), ws, plan);
         return;
     }
 
@@ -282,7 +291,7 @@ void RequestHandler::handle(const Request& req, const Route& route, WorkerState&
         EntryPtr canonical = cache_.insert(key, entry);
         if (canonical) ws.local.insert(key, canonical);
         else canonical = std::move(entry);  // cache full for this size class: serve once, uncached
-        serve_entry(req, canonical, ws, plan);
+        serve_entry(req, std::move(canonical), ws, plan);
         return;
     }
 

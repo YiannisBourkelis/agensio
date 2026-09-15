@@ -141,6 +141,12 @@ Source map (all in `src/`): `config` (TOML model + loader), `http_parser` (reque
   non-blocking socket in a socket BIO and uses `socket.async_wait(wait_read/wait_write)` for
   readiness, keeping `SSL_read/SSL_write` on the fd. Expected to close the gap.
 - HTTPS p99 (1.8-7 ms vs nginx 0.8-4 ms) likely shares the same cause.
+- Cache hit path measured (2026-09-15): cutting the per-hit shared-line traffic from two
+  refcount inc/dec pairs plus a `last_access` store down to one pair and a once-per-second
+  store changed plain HTTP 1 KB throughput by under 2 % (noise). The hit path is not the
+  bottleneck on 10 cores; per-request syscalls (writev, read, kevent) are. Kept the change
+  because it is correct and will matter on higher core counts; do not spend more time here
+  before profiling with `sample`/`perf`.
 
 ## Benchmark protocol (phase 1)
 

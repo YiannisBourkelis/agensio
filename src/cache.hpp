@@ -104,9 +104,11 @@ class LocalIndex {
 public:
     explicit LocalIndex(std::size_t max_entries = 8192) : max_entries_(max_entries) {}
 
-    EntryPtr find(const CacheKeyView& key) noexcept {
+    // Returns a pointer to the stored shared_ptr (no refcount traffic) or nullptr.
+    // The pointer is invalidated by the next insert/erase on this index.
+    const EntryPtr* find(const CacheKeyView& key) noexcept {
         auto it = map_.find(key);
-        return it == map_.end() ? nullptr : it->second;
+        return it == map_.end() ? nullptr : &it->second;
     }
     void insert(const CacheKeyView& key, EntryPtr entry) {
         if (map_.size() >= max_entries_) map_.clear();
