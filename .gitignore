@@ -1,0 +1,27 @@
+# build
+build/
+build-*/
+cmake-build-*/
+out/
+*.o
+*.a
+*.so
+*.dylib
+
+# editors / os
+.DS_Store
+.vscode/
+.idea/
+*.swp
+compile_commands.json
+.cache/
+
+# benchmark scratch (keep committed results under bench/results/)
+bench/tmp/
+bench/www/*.bin
+bench/www/style.css
+bench/certs/*.pem
+
+# local secrets / certs
+*.pem
+*.key

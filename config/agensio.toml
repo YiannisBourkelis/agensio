@@ -1,0 +1,33 @@
+# agensio configuration
+# Paths are resolved relative to this file's directory.
+
+[server]
+workers = 0              # 0 = one worker per hardware thread
+idle_timeout = 15        # seconds a keep-alive connection may stay idle
+max_header_size = "16KB" # request head larger than this gets a 431
+reuse_port = "auto"      # auto | on | off  (SO_REUSEPORT per worker; auto = on for Linux)
+tcp_nodelay = true
+server_header = "agensio"
+
+[cache]
+max_file_size = "4MB"    # larger files are streamed from disk, never cached
+max_size = "256MB"       # total bytes held in memory
+evict_fraction = 0.2     # when full, free this fraction (least recently used first)
+revalidate_interval = 1  # seconds between stat() checks of a cached file; 0 = never
+stream_chunk_size = "64KB"
+
+# Extra site files, e.g. one per virtual host written by a hosting panel.
+include = ["sites.d/*.toml"]
+
+[[site]]
+server_name = ["localhost", "127.0.0.1"]
+listen = ["0.0.0.0:8080"]
+root = "../bench/www"
+index = ["index.html", "index.htm"]
+default = true
+
+# [[site]]
+# server_name = ["localhost"]
+# listen = ["0.0.0.0:8443"]
+# root = "../bench/www"
+# tls = { cert = "../bench/certs/cert.pem", key = "../bench/certs/key.pem" }

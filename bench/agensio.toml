@@ -1,0 +1,21 @@
+# agensio configuration used by the benchmark harness.
+[server]
+workers = 0
+idle_timeout = 30
+reuse_port = "auto"
+
+[cache]
+max_file_size = "4MB"
+max_size = "256MB"
+
+[[site]]
+server_name = ["localhost", "127.0.0.1"]
+listen = ["127.0.0.1:8080"]
+root = "www"
+default = true
+
+[[site]]
+server_name = ["localhost", "127.0.0.1"]
+listen = ["127.0.0.1:8443"]
+root = "www"
+tls = { cert = "certs/cert.pem", key = "certs/key.pem" }

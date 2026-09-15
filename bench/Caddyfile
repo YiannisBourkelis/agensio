@@ -1,0 +1,17 @@
+# Caddy configuration for the benchmark. Run from the bench directory:
+#   caddy run --config Caddyfile --adapter caddyfile
+{
+    admin off
+    auto_https off
+}
+
+http://127.0.0.1:8082 {
+    root * www
+    file_server
+}
+
+https://127.0.0.1:8445 {
+    tls certs/cert.pem certs/key.pem
+    root * www
+    file_server
+}
