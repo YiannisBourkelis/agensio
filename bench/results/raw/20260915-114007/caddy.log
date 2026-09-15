@@ -1,0 +1,22 @@
+{"level":"info","ts":1789461716.424862,"msg":"maxprocs: Leaving GOMAXPROCS=10: CPU quota undefined"}
+{"level":"info","ts":1789461716.42494,"msg":"GOMEMLIMIT is updated","GOMEMLIMIT":15461882265,"previous":9223372036854775807}
+{"level":"info","ts":1789461716.424947,"msg":"using config from file","file":"Caddyfile"}
+{"level":"info","ts":1789461716.424951,"msg":"adapted config to JSON","adapter":"caddyfile"}
+{"level":"warn","ts":1789461716.4249542,"msg":"Caddyfile input is not formatted; run 'caddy fmt --overwrite' to fix inconsistencies","adapter":"caddyfile","file":"Caddyfile","line":4}
+{"level":"warn","ts":1789461716.424973,"logger":"admin","msg":"admin endpoint disabled"}
+{"level":"info","ts":1789461716.425975,"logger":"tls.cache.maintenance","msg":"started background certificate maintenance","cache":"0x16a030bb1a00"}
+{"level":"info","ts":1789461716.427225,"logger":"http.auto_https","msg":"automatic HTTPS is completely disabled for server","server_name":"srv0"}
+{"level":"info","ts":1789461716.427237,"logger":"http.auto_https","msg":"automatic HTTPS is completely disabled for server","server_name":"srv1"}
+{"level":"warn","ts":1789461716.428004,"logger":"http","msg":"HTTP/2 skipped because it requires TLS","network":"tcp","addr":":8082"}
+{"level":"warn","ts":1789461716.4280121,"logger":"http","msg":"HTTP/3 skipped because it requires TLS","network":"tcp","addr":":8082"}
+{"level":"info","ts":1789461716.4280162,"logger":"http.log","msg":"server running","name":"srv0","protocols":["h1","h2","h3"]}
+{"level":"info","ts":1789461716.4282188,"logger":"http","msg":"enabling HTTP/3 listener","addr":":8445"}
+{"level":"info","ts":1789461716.4292731,"logger":"http.log","msg":"server running","name":"srv1","protocols":["h1","h2","h3"]}
+{"level":"info","ts":1789461716.429734,"msg":"autosaved config (load with --resume flag)","file":"/Users/yiannis/Library/Application Support/Caddy/autosave.json"}
+{"level":"info","ts":1789461716.429743,"msg":"serving initial configuration"}
+{"level":"info","ts":1789461716.43964,"logger":"tls","msg":"storage cleaning happened too recently; skipping for now","storage":"FileStorage:/Users/yiannis/Library/Application Support/Caddy","instance":"f41b24cf-547b-46d1-9bc2-cd2caf1066ed","try_again":1789548116.439638,"try_again_in":86399.99999975}
+{"level":"info","ts":1789461716.4397628,"logger":"tls","msg":"finished cleaning storage units"}
+{"level":"info","ts":1789461769.43529,"msg":"shutting down apps, then terminating","signal":"SIGTERM"}
+{"level":"warn","ts":1789461769.43553,"msg":"exiting; byeee!! 👋","signal":"SIGTERM"}
+{"level":"info","ts":1789461769.435576,"logger":"http","msg":"servers shutting down with eternal grace period"}
+{"level":"info","ts":1789461769.435937,"msg":"shutdown complete","signal":"SIGTERM","exit_code":0}

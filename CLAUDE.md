@@ -148,7 +148,19 @@ beats our 100 KB memory copy; only row nginx wins). One agensio worker does 128k
 Full single-worker run with tuned nginx (`bench/results/20260915-110001.md`, wrk 4
 threads): agensio vs nginx req/s: HTTP 1 KB 127k vs 82k, HTTPS 1 KB 107k vs 77k, HTTPS
 100 KB 17.9k vs 13.7k, HTTPS 10 MB 182 vs 151, HTTP 10 MB 755 vs 723; HTTP 100 KB 48.0k vs
-50.7k is the only loss (page-cache sendfile vs our memory copy, see above).
+50.7k was the only loss before item 8 above (sendfile for cached entries >= 48 KB) closed it.
+
+One agensio worker vs nginx `worker_processes auto` (10) and Caddy on all cores
+(`bench/results/20260915-114007.md`, wrk 4 threads, CPU us/req = server CPU time over all its
+processes / requests): agensio 1 core does 127-132k plain 1 KB req/s at 7.5 us and 7-11 MB
+RSS; nginx on 10 cores 112-114k at 27-29 us and 27-103 MB; Caddy 34k at 229 us. Plain
+100 KB: 51-54k vs 53-54k (nginx) at 18 vs 39 us. HTTPS 1 KB: 100-104k (1 core, 9.5-9.9 us)
+vs nginx 138-143k (10 cores, 18-24 us). HTTPS 100 KB: 16k at 62 us vs 35-37k at 97-106 us.
+Streams (10 MB): agensio's single core caps at 760 plain / 160 TLS req/s; nginx and Caddy
+win those rows only by using more cores (their CPU per response is 1.4-1.8x higher).
+Conclusion: per request agensio costs 2.5-3.5x less CPU than nginx and 20-30x less than
+Caddy, and a single worker beats ten nginx workers on plain HTTP; nginx only pulls ahead on
+TLS by spending 10 cores. `bench/run.sh` prints the CPU and RSS columns by default now.
 
 Benchmark hygiene: `pkill -x nginx` does not kill nginx (it retitles its processes); a
 stale instance keeps the ports and silently serves the next run. `bench/run.sh` now
@@ -178,6 +190,14 @@ What got us there, in order of impact:
    copy path was measured to make no difference (64 KB vs 256 KB). `server.sendfile = false`
    switches it off. TLS still uses the copy path (kTLS would fix that on Linux).
 6. One `steady_clock::now()` per response, not per read: clock reads were 7 % of user time.
+8. **sendfile for cached entries on plain sockets** (`cache.sendfile_min_size`, default
+   48 KB): the entry keeps its descriptor open and the kernel sends from the page cache,
+   headers attached to the same `sendfile` call on macOS/FreeBSD (Linux: writev then
+   sendfile). Measured single-worker CPU per request, memory copy vs sendfile: 8 KB 8.2 vs
+   10.6-11.3 us, 32 KB 10.6 vs 13.2 us, 64 KB 16.2-17.0 vs 14.7 us, 100 KB 20.0-21.7 vs
+   17.6-18.7 us. Crossover about 48 KB; below it the per-call cost of sendfile exceeds the
+   copy (which is why nginx, sendfile for everything, does 82k req/s on 1 KB where we do
+   128k). The open-file soft limit is raised to the hard limit at startup for this.
 7. **Header assembly** (`tests/bench_header.cpp`, run `build/agensio_bench_header`): the old
    server's 11-append concatenation costs 67 ns per header, the prebuilt-entry-block
    version 33 ns, the current zero-concatenation path 4 ns (per-worker cached

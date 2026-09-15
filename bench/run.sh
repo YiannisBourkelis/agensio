@@ -3,6 +3,10 @@
 #
 # usage: bench/run.sh [-w WORKERS] [-t THREADS] [-d DURATION] [-s "agensio nginx caddy"] [-p "http https"] [-u URLSPEC ...]
 #   -w  server workers: agensio workers, nginx worker_processes, caddy GOMAXPROCS (default 1)
+#       Per-server override via env: AGENSIO_WORKERS=1 NGINX_WORKERS=auto CADDY_WORKERS=0
+#       (agensio 0 = all cores, nginx auto = all cores, caddy 0 = leave GOMAXPROCS unset).
+#   Each row also reports server CPU microseconds per request (CPU time of all server
+#   processes divided by requests served) and resident memory after the run.
 #   -t  wrk threads (default 4). Keep WORKERS + THREADS well below the core count, otherwise
 #       the load generator steals CPU from the server and the numbers measure wrk, not the server.
 #   -d  duration per case (default 5s; use 15s for numbers worth publishing)
@@ -50,9 +54,14 @@ if [ $((WORKERS + THREADS)) -gt "$CORES" ]; then
   echo "warning: $WORKERS worker(s) + $THREADS wrk thread(s) exceed $CORES cores; results will be load-generator bound"
 fi
 
+AGENSIO_WORKERS="${AGENSIO_WORKERS:-$WORKERS}"
+NGINX_WORKERS="${NGINX_WORKERS:-$WORKERS}"
+CADDY_WORKERS="${CADDY_WORKERS:-$WORKERS}"
+
 # Generate server configs from the templates.
-sed "s#@WORKERS@#$WORKERS#g; s#@BENCH@#$BENCH#g" "$BENCH/agensio.toml" > "$BENCH/tmp/agensio.toml"
-sed "s#@WORKERS@#$WORKERS#g; s#@BENCH@#$BENCH#g" "$BENCH/nginx.conf" > "$BENCH/tmp/nginx.conf"
+SENDFILE_MIN="${SENDFILE_MIN:-48KB}"   # env override for experiments: cached files >= this go out via sendfile
+sed "s#@WORKERS@#$AGENSIO_WORKERS#g; s#@BENCH@#$BENCH#g; s#@SENDFILE_MIN@#$SENDFILE_MIN#g" "$BENCH/agensio.toml" > "$BENCH/tmp/agensio.toml"
+sed "s#@WORKERS@#$NGINX_WORKERS#g; s#@BENCH@#$BENCH#g" "$BENCH/nginx.conf" > "$BENCH/tmp/nginx.conf"
 "$ROOT/build/agensio" -t -c "$BENCH/tmp/agensio.toml" >/dev/null
 nginx -p "$BENCH" -c "$BENCH/tmp/nginx.conf" -t >/dev/null 2>&1 || { nginx -p "$BENCH" -c "$BENCH/tmp/nginx.conf" -t; exit 1; }
 
@@ -76,7 +85,11 @@ start_server() {
   case "$1" in
     agensio) (cd "$BENCH" && exec "$ROOT/build/agensio" -c "$BENCH/tmp/agensio.toml") >"$RAW/$1.log" 2>&1 & ;;
     nginx)   (cd "$BENCH" && exec nginx -p "$BENCH" -c "$BENCH/tmp/nginx.conf" -g 'daemon off;') >"$RAW/$1.log" 2>&1 & ;;
-    caddy)   (cd "$BENCH" && GOMAXPROCS=$WORKERS exec caddy run --config Caddyfile --adapter caddyfile) >"$RAW/$1.log" 2>&1 & ;;
+    caddy)   if [ "$CADDY_WORKERS" = "0" ]; then
+               (cd "$BENCH" && exec caddy run --config Caddyfile --adapter caddyfile) >"$RAW/$1.log" 2>&1 &
+             else
+               (cd "$BENCH" && GOMAXPROCS=$CADDY_WORKERS exec caddy run --config Caddyfile --adapter caddyfile) >"$RAW/$1.log" 2>&1 &
+             fi ;;
   esac
   SERVER_PID=$!
   local port; port=$(port_of "$1" http)
@@ -85,11 +98,23 @@ start_server() {
 }
 stop_server() {
   [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null && wait "$SERVER_PID" 2>/dev/null || true
+  pkill -x "$1" 2>/dev/null || true
   pkill -f "^$1( |:)" 2>/dev/null || true   # nginx retitles its master and worker processes
   SERVER_PID=""
   sleep 0.5
 }
-trap 'for s in $SERVERS; do pkill -f "^$s( |:)" 2>/dev/null || true; done' EXIT
+trap 'for s in $SERVERS; do pkill -x "$s" 2>/dev/null || true; pkill -f "^$s( |:)" 2>/dev/null || true; done' EXIT
+
+# All processes of a server (nginx retitles master and workers).
+pids_of() { { pgrep -x "$1" 2>/dev/null; pgrep -f "^$1( |:)" 2>/dev/null; } | sort -u | paste -sd, - ; }
+cpu_seconds() {  # sum of CPU time over the server's processes
+  local pids; pids=$(pids_of "$1"); [ -z "$pids" ] && { echo 0; return; }
+  ps -o cputime= -p "$pids" | LC_NUMERIC=C awk -F'[:.]' '{ if (NF==3) s+=$1*60+$2+$3/100; else s+=$1*3600+$2*60+$3+$4/100 } END{printf "%.2f", s}'
+}
+rss_mb() {  # resident memory summed over the server's processes
+  local pids; pids=$(pids_of "$1"); [ -z "$pids" ] && { echo 0; return; }
+  ps -o rss= -p "$pids" | awk '{s+=$1} END{printf "%.0f", s/1024}'
+}
 
 version_of() {
   case "$1" in
@@ -104,12 +129,12 @@ version_of() {
   echo
   echo "- machine: $(uname -m), $(sysctl -n machdep.cpu.brand_string 2>/dev/null || grep -m1 'model name' /proc/cpuinfo | cut -d: -f2), $(uname -sr)"
   echo "- commit: $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo uncommitted)"
-  echo "- server workers: $WORKERS (agensio workers / nginx worker_processes / caddy GOMAXPROCS), cores: $CORES"
+  echo "- server workers: agensio=$AGENSIO_WORKERS nginx=$NGINX_WORKERS caddy=$CADDY_WORKERS (0/auto = all cores), cores: $CORES"
   echo "- load generator: $(wrk -v 2>&1 | head -1 | awk '{print $1, $2, $3}'), threads=$THREADS, duration=$DURATION, keep-alive"
   for s in $SERVERS; do echo "- $s: $(version_of "$s")"; done
   echo
-  echo "| server | proto | path | conns | req/s | transfer/s | p50 | p99 | errors |"
-  echo "|---|---|---|---|---|---|---|---|---|"
+  echo "| server | proto | path | conns | req/s | transfer/s | p50 | p99 | cpu us/req | rss MB | errors |"
+  echo "|---|---|---|---|---|---|---|---|---|---|---|"
 } > "$OUT"
 
 for server in $SERVERS; do
@@ -130,15 +155,20 @@ for server in $SERVERS; do
         t=$THREADS; [ "$c" -lt "$t" ] && t=$c
         rawfile="$RAW/$server-$proto-${path//\//_}-c$c.txt"
         printf '  %-6s %-11s c=%-4s ' "$proto" "$path" "$c"
+        cpu0=$(cpu_seconds "$server")
         wrk -t"$t" -c"$c" -d"$DURATION" --latency "$url" > "$rawfile" 2>&1
+        cpu1=$(cpu_seconds "$server")
+        total=$(awk '/requests in/{print $1}' "$rawfile")
+        cpureq=$(LC_NUMERIC=C awk -v a="$cpu0" -v b="$cpu1" -v n="$total" 'BEGIN{ if (n>0) printf "%.1f", (b-a)*1e6/n; else print "-" }')
+        rss=$(rss_mb "$server")
         rps=$(awk '/^Requests\/sec/{print $2}' "$rawfile")
         tps=$(awk '/^Transfer\/sec/{print $2}' "$rawfile")
         p50=$(awk '/^ +50%/{print $2}' "$rawfile")
         p99=$(awk '/^ +99%/{print $2}' "$rawfile")
         errs=$(awk '/Socket errors/{sub(/^ +Socket errors: /,""); print} /Non-2xx/{print}' "$rawfile" | tr '\n' ' ')
         [ -z "$errs" ] && errs="-"
-        echo "$rps req/s  $tps  p50=$p50 p99=$p99 $errs"
-        echo "| $server | $proto | $path | $c | $rps | $tps | $p50 | $p99 | $errs |" >> "$OUT"
+        echo "$rps req/s  $tps  p50=$p50 p99=$p99  cpu=${cpureq}us/req rss=${rss}MB $errs"
+        echo "| $server | $proto | $path | $c | $rps | $tps | $p50 | $p99 | $cpureq | $rss | $errs |" >> "$OUT"
       done
     done
   done

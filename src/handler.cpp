@@ -289,7 +289,8 @@ void RequestHandler::handle(const Request& req, const Route& route, WorkerState&
             error(500, req.keep_alive, head, ws, plan);
             return;
         }
-        f.close();
+        if (cfg_.cache_sendfile_min_size > 0 && fi.size >= cfg_.cache_sendfile_min_size) entry->fd = std::move(f);
+        else f.close();
         entry->file_path = ws.fs_path;
         entry->mtime = fi.mtime;
         entry->size = fi.size;

@@ -4,6 +4,7 @@
 #include <stdexcept>
 
 #include "connection.hpp"
+#include "file.hpp"
 
 #ifdef AGENSIO_HAS_TLS
 #include <openssl/ssl.h>
@@ -145,6 +146,7 @@ void Server::start_accept(std::size_t index) {
 }
 
 void Server::run() {
+    raise_open_file_limit();
     if (reuse_port_) {
         for (auto& l : listeners_)
             for (auto& w : workers_) open_acceptor(l, *w, true);

@@ -10,6 +10,7 @@ sendfile = true
 [cache]
 max_file_size = "4MB"
 max_size = "256MB"
+sendfile_min_size = "@SENDFILE_MIN@"
 
 [[site]]
 server_name = ["localhost", "127.0.0.1"]

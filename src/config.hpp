@@ -41,6 +41,7 @@ struct Config {
     double cache_evict_fraction = 0.2;
     std::uint32_t cache_revalidate_s = 1;
     std::size_t stream_chunk_size = 64 * 1024;
+    std::size_t cache_sendfile_min_size = 48 * 1024;  // cached files at least this large are served by sendfile on plain sockets (0 = never)
 
     std::vector<SiteConfig> sites;
 

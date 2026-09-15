@@ -223,6 +223,7 @@ Config load_config(const fs::path& path) {
     cfg.cache_max_size = size_node(cache["max_size"], cfg.cache_max_size, "cache.max_size");
     cfg.stream_chunk_size = size_node(cache["stream_chunk_size"], cfg.stream_chunk_size, "cache.stream_chunk_size");
     if (cfg.stream_chunk_size < 4096) fail("cache.stream_chunk_size must be at least 4096");
+    cfg.cache_sendfile_min_size = size_node(cache["sendfile_min_size"], cfg.cache_sendfile_min_size, "cache.sendfile_min_size");
     if (auto f = cache["evict_fraction"].value<double>()) {
         if (*f <= 0.0 || *f > 1.0) fail("cache.evict_fraction must be in (0, 1]");
         cfg.cache_evict_fraction = *f;

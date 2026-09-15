@@ -10,7 +10,7 @@ cd "$ROOT"
 printf '<html><body>sub index</body></html>\n' > bench/www/sub/index.html
 
 mkdir -p bench/tmp
-sed "s#@WORKERS@#0#g; s#@BENCH@#$ROOT/bench#g" bench/agensio.toml > bench/tmp/agensio-test.toml
+sed "s#@WORKERS@#0#g; s#@BENCH@#$ROOT/bench#g; s#@SENDFILE_MIN@#${SENDFILE_MIN:-48KB}#g" bench/agensio.toml > bench/tmp/agensio-test.toml
 "$BIN" -c bench/tmp/agensio-test.toml >/dev/null 2>&1 &
 PID=$!
 trap 'kill $PID 2>/dev/null; wait $PID 2>/dev/null' EXIT

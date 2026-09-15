@@ -50,15 +50,27 @@ private:
     int fd_ = -1;
 };
 
+struct IoSlice {
+    const void* data;
+    std::size_t len;
+};
+
 struct SendFileResult {
-    std::int64_t sent = 0;      // bytes handed to the socket in this call
-    bool would_block = false;   // socket buffer full; wait for writability and call again
-    bool unsupported = false;   // platform has no sendfile: use the read/write path
+    std::int64_t sent = 0;            // bytes handed to the socket in this call (headers included)
+    bool would_block = false;         // socket buffer full; wait for writability and call again
+    bool unsupported = false;         // platform has no sendfile: use the read/write path
+    bool headers_unsupported = false; // platform cannot attach headers: write them first, then call again
 };
 
 // Zero-copy file-to-socket transfer (sendfile on macOS, Linux, FreeBSD). The socket
-// must be non-blocking. sent == 0 with would_block == false means EOF (file shrank).
-// sent < 0 means a socket error (errno set).
-SendFileResult send_file(int socket_fd, const File& file, std::uint64_t offset, std::uint64_t count) noexcept;
+// must be non-blocking. Up to `header_count` header slices are sent before the file
+// data where the platform supports it (macOS, FreeBSD). `sent` counts header bytes
+// first, then file bytes. sent == 0 with would_block == false and no headers pending
+// means EOF (file shrank). sent < 0 means a socket error (errno set).
+SendFileResult send_file(int socket_fd, const File& file, std::uint64_t offset, std::uint64_t count,
+                         const IoSlice* headers = nullptr, int header_count = 0) noexcept;
+
+// Raises the soft open-file limit to the hard limit. Returns the resulting soft limit.
+std::uint64_t raise_open_file_limit() noexcept;
 
 }  // namespace agensio
