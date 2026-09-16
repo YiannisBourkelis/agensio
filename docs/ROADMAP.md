@@ -135,6 +135,8 @@ same after it (that is the checkpoint).
 - [x] B8 Hardened build flags, sanitizer and fuzz build options, accept-loop EMFILE backoff
       (2026-09-16).
 - [ ] B6 IPv6 listeners tested; `SO_REUSEPORT` path tested on Linux (Docker).
+- [ ] B9 103 Early Hints for static and proxied responses (asked of nginx; cheap once
+      bodies are sources).
 - [ ] Checkpoint: h1 compliance run (a scripted curl/python suite in `tests/`), fuzzers
       clean for 1h, benchmark unchanged.
 
@@ -188,7 +190,8 @@ Rules:
 - [ ] C2 Read-only commands, JSON and plain text (`Accept: text/plain` gives a human answer):
       `status`, `cache` (count, bytes, hit ratio) and `cache/entries` (path, size, age,
       hits), `sites`, `config` (effective, with sources), `connections`, `metrics`
-      (Prometheus text as well).
+      (Prometheus text as well; per upstream and per certificate metrics from phases E/G,
+      the top metrics requests on the Caddy and nginx trackers).
 - [ ] C3 Mutating commands: `config/validate`, `reload` (SIGHUP equivalent, atomic swap of
       config + listeners), `cache/purge` (all or by path), `sites/create` (writes
       `sites.d/<domain>.toml` from a preset: static, laravel, php, proxy; validates;
@@ -273,15 +276,21 @@ Rules:
 
 ### Phase G. Production hardening  `[ ]`
 - [ ] G1 Zero-downtime reload: new config applied by worker 0 atomically; listeners added
-      or removed; TLS certs reloaded on change (file watch or `ctl reload`).
+      or removed; **TLS certificates watched and reloaded automatically when the files
+      change** (the request nginx and Caddy users share most) as well as via `ctl reload`;
+      reload must not stall new QUIC connections (nginx's known weakness).
 - [ ] G2 Start as root, bind, drop privileges (`user =`); systemd unit; pid file; log
       rotation via `SIGUSR1`/reopen.
-- [ ] G3 Certificates: built-in ACME client (HTTP-01 and TLS-ALPN-01, Let's Encrypt and any
-      RFC 8555 CA), automatic renewal, cross-platform; until then documented reload hooks
-      for certbot / win-acme / acme.sh. OCSP stapling.
+- [ ] G3 Certificates: built-in ACME client (HTTP-01, TLS-ALPN-01 **and DNS-01 with a
+      provider interface**: HTTP-01-only is the main criticism of nginx's 2025 module and
+      DNS challenges are Caddy's second most upvoted request), any RFC 8555 CA, short-lived
+      certificate profiles, automatic renewal, cross-platform; until then documented reload
+      hooks for certbot / win-acme / acme.sh. OCSP stapling.
 - [ ] G4 Rate limiting and connection limits per IP; request id header; error pages
       configurable.
-- [ ] G5 Metrics endpoint scraped by Prometheus; structured JSON logs option.
+- [ ] G5 Metrics endpoint scraped by Prometheus; structured JSON logs option with a
+      request id that also appears in the error log; W3C `traceparent` passthrough for
+      OpenTelemetry.
 - [ ] G6 Memory/CPU profile under 10k idle keep-alive connections; per-connection memory
       budget documented (target: < 8 KB idle h1 connection).
 - [ ] G7 Packaging: Debian/Arch packages, Docker image, Homebrew formula; CI on Linux and
@@ -298,7 +307,17 @@ Rules:
 - [ ] H4 Benchmark with `h2load --npn-list h3` or `quiche` client vs nginx `quic`.
 - [ ] Checkpoint: browsers connect over h3; h1/h2 numbers unchanged.
 
+### Principles confirmed by user research (`docs/web-server-feedback.md`)
+- Everything ships in the one open build; no feature is held back for a paid tier. The
+  nginx Plus and OpenLiteSpeed/Enterprise gaps are the most repeated complaints about
+  those servers.
+- Presets and a validator that explains beat more directives; "if is evil" and `.htaccess`
+  migrations are the configuration complaints that never go away.
+- Memory and CPU per request stay published numbers; Caddy's OOM reports and Apache's
+  footprint are why people look for alternatives.
+
 ### Later / ideas
+- Shared-dictionary compression (RFC 9842) once compression exists.
 - io_uring backend for Linux (Asio supports it; measure).
 - kTLS on Linux: sendfile over TLS.
 - Brotli precompression at cache load time.
