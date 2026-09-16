@@ -191,6 +191,41 @@ pinned to one CPU cripples the Go runtime; not a fair row). Two lessons from tha
 - Docker's CPU on macOS shows under `com.apple.Virtualization.VirtualMachine` in Activity
   Monitor (231 % of a core during a run), not under docker or colima.
 
+Native Linux run, 2026-09-16 (AMD Ryzen 9 9900X, 12 cores/24 threads, Debian 13 trixie, kernel
+6.12.107, GCC 14.2, nginx 1.26.3, Caddy 2.11.4, wrk 4.1 epoll; `bench/results/20260916-1951*`
+to `1958*.md` and `docker-20260916-230123.md`). The doc steps ran inside a `debian:trixie`
+container with the repo bind-mounted, because the host has other services on ports 8080-8082
+and no sudo; Docker shares the kernel, so these are native numbers (loopback, no VM). Stamps
+in the native file names are UTC. Single worker each, wrk 4 threads, 5 s, agensio vs nginx CPU
+us/req: HTTP 1 KB 1.9-2.0 vs 3.0 (518k vs 329k req/s), HTTP 100 KB 5.5 vs 5.8-5.9 (183k vs
+171k), HTTP 10 MB stream 323 vs 302 (3.1k vs 3.3k, nginx's only win), HTTPS 1 KB 2.7-2.8 vs
+4.3-4.4 (354-367k vs 229-235k), HTTPS 100 KB 19.7 vs 25 (50.8k vs 39-40k), HTTPS 10 MB 1994
+vs 2268 (501 vs 441). Caddy one worker: 17-20 us plain, 44-48 us HTTPS 100 KB, 55k req/s.
+Multi-worker with `SO_REUSEPORT` (first time on Linux) works with no errors or timeouts:
+plain 1 KB 946-967k req/s at 2.0-2.1 us with 2 workers and 1.43-1.47M at 2.6-2.7 us with 4
+(nginx 612k at 3.2-3.3 and 1.0M at 3.9-4.0); HTTPS 1 KB 4 workers 0.98-1.03M vs 738-780k.
+Per-request CPU rises with worker count for both servers (cross-core cache traffic on
+loopback, not investigated). One agensio worker vs nginx `auto` (24) and Caddy on all cores:
+agensio 495-515k plain 1 KB at 2.0 us and 12-15 MB RSS, nginx 1.25-1.27M at 4.9-5.0 us and
+247 MB, Caddy 331-354k at 50 us; HTTPS 1 KB 352-356k (2.8 us) vs nginx 781-821k (5.1-5.2 us,
+wrk-bound). Container run (`bench/docker/run.sh`, servers pinned to CPU 0, wrk 2 threads on
+CPUs 1-3, adds OpenLiteSpeed): plain 1 KB agensio 337k at 2.9 us, nginx 232k at 4.3, OLS
+200k at 4.9, Caddy 48k at 20; HTTPS 1 KB 240k/4.2 vs 170k/5.8 vs OLS 150k/6.6; HTTPS 100 KB
+is the one row OLS wins (27.3k at 36.7 us vs agensio 20.8k at 47.6, nginx 19.7k at 49.7) and
+HTTPS 10 MB too (OLS 324 req/s, nginx 248, agensio 204: the TLS copy path, kTLS is the fix).
+Linux differences from macOS: (1) **agensio died with SIGPIPE** (exit 141) the moment wrk
+closed its HTTPS connections, in every run: OpenSSL's socket BIO in `TlsStream` and our
+`sendfile()` write to the descriptor without `MSG_NOSIGNAL`, and macOS hides this because
+Asio sets `SO_NOSIGPIPE` there. `Server::run` now ignores SIGPIPE; peers that vanish surface
+as EPIPE and close the connection. Sanitizer build (unit, integration, HTTPS load) and both
+fuzzers (2 min each, 41.9M and 13.0M runs) reported nothing else. (2) Linux costs about 4x
+less CPU per plain 1 KB request than macOS (1.9 vs 7.5 us) and nginx's sendfile is cheap
+here (3.0 us vs 11.6 on macOS), so the agensio advantage is 1.5x on plain and 1.3-1.6x on
+TLS instead of 2.5-3.5x. (3) The plain 10 MB stream is the only case where nginx is ahead
+(302 vs 323 us; parity on macOS). (4) nginx's plain 100 KB p99 was 39-43 ms with one worker
+(p50 235 us); not seen for agensio. (5) `bench/docker/run.sh` printed decimal commas under
+the Greek host locale; it now pins `LC_NUMERIC=C` like `bench/run.sh`.
+
 Benchmark hygiene: `pkill -x nginx` does not kill nginx (it retitles its processes); a
 stale instance keeps the ports and silently serves the next run. `bench/run.sh` now
 refuses to start when a port is busy; kill with `pkill -f 'nginx: '`.

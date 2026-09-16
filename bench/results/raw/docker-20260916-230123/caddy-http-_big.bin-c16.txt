@@ -1,0 +1,13 @@
+Running 5s test @ http://caddy:80/big.bin
+  2 threads and 16 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     6.21ms    3.31ms  30.09ms   73.92%
+    Req/Sec     0.99k    73.71     1.16k    69.00%
+  Latency Distribution
+     50%    5.51ms
+     75%    7.75ms
+     90%   10.74ms
+     99%   16.84ms
+  9921 requests in 5.05s, 96.92GB read
+Requests/sec:   1963.79
+Transfer/sec:     19.19GB

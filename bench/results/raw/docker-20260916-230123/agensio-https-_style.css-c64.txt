@@ -1,0 +1,13 @@
+Running 5s test @ https://agensio:443/style.css
+  2 threads and 64 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     3.04ms  178.90us   8.11ms   97.62%
+    Req/Sec    10.55k   249.91    10.96k    79.00%
+  Latency Distribution
+     50%    3.05ms
+     75%    3.07ms
+     90%    3.09ms
+     99%    3.33ms
+  104991 requests in 5.04s, 10.04GB read
+Requests/sec:  20823.66
+Transfer/sec:      1.99GB
