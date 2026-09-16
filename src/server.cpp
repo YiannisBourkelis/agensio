@@ -1,6 +1,7 @@
 #include "server.hpp"
 
 #include <chrono>
+#include <csignal>
 #include <iostream>
 #include <stdexcept>
 
@@ -172,6 +173,13 @@ void Server::start_accept(std::size_t index) {
 
 void Server::run() {
     raise_open_file_limit();
+#ifndef _WIN32
+    // A peer that closes mid-response must surface as EPIPE from send()/sendfile(), not kill
+    // the process. Asio passes MSG_NOSIGNAL (Linux) or sets SO_NOSIGPIPE (BSD/macOS) on its
+    // own sockets, but OpenSSL's socket BIO (TlsStream) and our sendfile() calls write to the
+    // descriptor directly; on Linux those raised SIGPIPE under load.
+    std::signal(SIGPIPE, SIG_IGN);
+#endif
     if (reuse_port_) {
         for (auto& l : listeners_)
             for (auto& w : workers_)
