@@ -21,15 +21,17 @@ constexpr Status kStatus[] = {
     {404, "HTTP/1.1 404 Not Found\r\n", "Not Found"},
     {405, "HTTP/1.1 405 Method Not Allowed\r\n", "Method Not Allowed"},
     {413, "HTTP/1.1 413 Content Too Large\r\n", "Content Too Large"},
+    {417, "HTTP/1.1 417 Expectation Failed\r\n", "Expectation Failed"},
     {431, "HTTP/1.1 431 Request Header Fields Too Large\r\n", "Request Header Fields Too Large"},
     {500, "HTTP/1.1 500 Internal Server Error\r\n", "Internal Server Error"},
+    {501, "HTTP/1.1 501 Not Implemented\r\n", "Not Implemented"},
     {505, "HTTP/1.1 505 HTTP Version Not Supported\r\n", "HTTP Version Not Supported"},
 };
 
 const Status& lookup(int code) noexcept {
     for (auto& s : kStatus)
         if (s.code == code) return s;
-    return kStatus[9];  // 500
+    return lookup(500);
 }
 
 const std::map<int, ErrorPage>& pages() {

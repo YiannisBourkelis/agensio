@@ -181,10 +181,8 @@ void StaticHandler::handle(Stream& s, const Route& route, WorkerState& ws) {
         error(s, 405, req.keep_alive, "GET, HEAD");
         return;
     }
-    if (req.has_body) {  // we do not read request bodies; refuse and close
-        error(s, 413, false);
-        return;
-    }
+    // A body on GET/HEAD is ignored: the connection drains it after the response (nginx
+    // behaviour); oversize bodies were already refused with 413 before we were called.
     if (req.version_minor == 1 && req.host.empty()) {
         error(s, 400, false);
         return;

@@ -15,6 +15,8 @@ enum class ParseStatus {
     bad_request,            // malformed; respond 400 and close
     version_not_supported,  // HTTP major version != 1
     too_many_headers,       // more than kMaxHeaderCount fields; respond 431 and close
+    unsupported_transfer_encoding,  // a coding other than a lone "chunked"; respond 501 and close
+    expectation_failed,             // Expect other than 100-continue; respond 417 and close
 };
 
 // Hard limits that do not depend on configuration.
@@ -27,6 +29,7 @@ inline constexpr std::size_t kMaxContentLengthDigits = 19;  // fits in 64 bits
 // values, invalid characters in field names, whitespace before the colon, duplicate
 // or conflicting Content-Length, Content-Length together with Transfer-Encoding,
 // Transfer-Encoding on HTTP/1.0, duplicate Host, and Host with forbidden characters.
+// Fills content_length, chunked and expect_continue for the connection's body reader.
 ParseStatus parse_request(std::string_view buf, Request& out) noexcept;
 
 // Case-insensitive ASCII compare.

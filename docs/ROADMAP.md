@@ -117,8 +117,14 @@ same after it (that is the checkpoint).
       Content-Length, chunked or close-delimited framing, `src/http1/chunked.hpp`). The
       `StreamBody` path is exercised end to end from A3/C1 on; only the framing has unit
       tests today. A/B on Linux: see the commit.
-- [ ] A3 Request bodies: `Content-Length` and `chunked` decoders as `BodySource`s, size
-      limits, `Expect: 100-continue`, body timeouts, `413`.
+- [x] A3 (2026-09-17) Request bodies: `Request::body` is a `StreamBody` pull source the
+      HTTP/1 connection implements (Content-Length and chunked decoders,
+      `http1/chunked.hpp`, fuzzed with `fuzz_chunked`); `server.max_body_size` (413 up
+      front, error mid-stream for chunked), `server.body_timeout`, `Expect: 100-continue`
+      (100 sent on first read; `Connection: close` when answered unread), unread bodies
+      drained after the response, 501 for other transfer codings, 417 for other
+      expectations. No handler reads a body yet (B1/C1); the drain path exercises the
+      decoders end to end in `tests/integration.sh`. A/B on Linux: see the commit.
 - [ ] A4 `Router`: sites (Host/SNI) -> ordered `[[site.location]]` blocks (prefix, exact,
       regex later) -> handler; `try_files`; per-location settings. Config schema for it.
 - [ ] A5 Access log and error log services: "combined" format (fail2ban filters for

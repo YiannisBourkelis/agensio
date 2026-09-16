@@ -1,5 +1,6 @@
 #include "http1/parser.hpp"
 
+#include <charconv>
 #include <cstring>
 
 #include "core/strings.hpp"
@@ -165,7 +166,18 @@ ParseStatus parse_request(std::string_view buf, Request& out) noexcept {
                     if (seen_content_length && value != content_length) return ParseStatus::bad_request;
                     seen_content_length = true;
                     content_length = value;
-                    if (nonzero) out.has_body = true;
+                    if (nonzero) {
+                        out.has_body = true;
+                        auto r = std::from_chars(value.data(), value.data() + value.size(), out.content_length);
+                        if (r.ec != std::errc() || r.ptr != value.data() + value.size())
+                            return ParseStatus::bad_request;
+                    }
+                }
+                break;
+            case 'e':
+                if (iequals(name, "expect") && out.version_minor >= 1) {  // ignored on HTTP/1.0 (RFC 9110 10.1.1)
+                    if (!iequals(value, "100-continue")) return ParseStatus::expectation_failed;
+                    out.expect_continue = true;
                 }
                 break;
             case 'i':
@@ -175,7 +187,12 @@ ParseStatus parse_request(std::string_view buf, Request& out) noexcept {
             case 't':
                 if (iequals(name, "transfer-encoding")) {
                     if (out.version_minor == 0) return ParseStatus::bad_request;  // not defined for HTTP/1.0
+                    if (seen_transfer_encoding) return ParseStatus::bad_request;
                     seen_transfer_encoding = true;
+                    // Only a lone "chunked" is implemented; anything else (gzip, "chunked, x",
+                    // "x, chunked") is 501 (RFC 9112 6.1), never silently accepted.
+                    if (!iequals(value, "chunked")) return ParseStatus::unsupported_transfer_encoding;
+                    out.chunked = true;
                     out.has_body = true;
                 }
                 break;

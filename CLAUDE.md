@@ -155,8 +155,17 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   `listen`, `root`, `index`, `tls`, `default`; `include = ["sites.d/*.toml"]` for
   panel-generated per-site files. Loading never creates sockets; `Server` is built from the
   `Config` struct. `agensio -t` validates.
+- **Request bodies** (A3): the HTTP/1 connection is the pull source behind
+  `Request::body` (`StreamBody`: `async_read` with backpressure), decoding Content-Length
+  or chunked (`http1/chunked.hpp`, fuzzed) from its receive buffer and socket.
+  `server.max_body_size` (1 MB) gives 413 up front for a declared length and an error
+  mid-stream for chunked; `server.body_timeout` (60 s) bounds the wait between reads;
+  `Expect: 100-continue` is answered on the first read, or with `Connection: close` when
+  the handler answers without reading. A body the handler did not read is drained after
+  the response so keep-alive and pipelining survive. Unknown transfer codings get 501,
+  unknown expectations 417. HTTP/2 will feed the same interface from DATA frames.
 - **Not in phase 1**: Range requests (no `Accept-Ranges` is sent), directory listing,
-  request bodies (405 for non-GET/HEAD, 413 if a body is announced), access log, reload.
+  methods other than GET/HEAD (405; bodies are drained), access log, reload.
 
 ## Performance notes (measured, keep current)
 
@@ -329,8 +338,10 @@ Each item was benchmarked before and after on the reduced matrix (`bench/run.sh 
    Content-Length with different values, Content-Length lists or more than 19 digits,
    Transfer-Encoding on HTTP/1.0, duplicate Host, Host with whitespace or delimiters,
    obs-fold continuation lines, bare CR inside a line, control characters in values,
-   non-token characters in names; 431 and close above 100 header fields. Any announced
-   body still gets 413 and close, so a smuggled second request is never parsed.
+   non-token characters in names; 431 and close above 100 header fields. Since A3 an
+   announced body is consumed by the connection's own decoders (exact Content-Length
+   count, chunked state machine), so the boundary to a pipelined request is the framing's
+   and never a guess; a declared length above `max_body_size` gets 413 and close.
 2. **Path policies** (`handler.cpp`, `path.cpp`): `hidden_files = false` per site (default)
    answers 404 for any dot-segment (`.env`, `.git/`); `symlinks = "deny"` checks the
    realpath stays under the root on each cache miss (default `allow`, like nginx, because

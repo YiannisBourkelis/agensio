@@ -1,13 +1,18 @@
 // A parsed request head, protocol-independent. Views point into storage owned by the
-// stream (HTTP/1: the connection's receive buffer). Request bodies arrive in phase A3.
+// stream (HTTP/1: the connection's receive buffer). The body, if any, is a pull source
+// the connection provides (Content-Length or chunked decoded, size limit and body
+// timeout applied); a handler that does not read it gets it drained after the response.
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string_view>
 
 #include "core/headers.hpp"
 
 namespace agensio {
+
+class StreamBody;
 
 enum class Method { GET, HEAD, OTHER };
 
@@ -24,7 +29,11 @@ struct Request {
     std::string_view if_none_match;
     std::string_view if_modified_since;
 
-    bool has_body = false;   // Content-Length > 0 or Transfer-Encoding present
+    bool has_body = false;             // Content-Length > 0 or Transfer-Encoding: chunked
+    bool chunked = false;              // Transfer-Encoding: chunked (HTTP/1.1 only)
+    bool expect_continue = false;      // Expect: 100-continue (HTTP/1.1 only)
+    std::uint64_t content_length = 0;  // declared length when !chunked
+    StreamBody* body = nullptr;        // the body as a pull source when has_body; owned by the connection
     bool keep_alive = true;
     std::size_t length = 0;  // HTTP/1: bytes of the head consumed from the buffer
 
@@ -33,7 +42,9 @@ struct Request {
         method_name = target = host = connection = if_none_match = if_modified_since = {};
         version_minor = 1;
         headers.clear();
-        has_body = false;
+        has_body = chunked = expect_continue = false;
+        content_length = 0;
+        body = nullptr;
         keep_alive = true;
         length = 0;
     }

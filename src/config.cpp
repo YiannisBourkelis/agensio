@@ -226,6 +226,11 @@ Config load_config(const fs::path& path) {
     }
     cfg.max_header_size = size_node(server["max_header_size"], cfg.max_header_size, "server.max_header_size");
     if (cfg.max_header_size < 1024) fail("server.max_header_size must be at least 1024");
+    cfg.max_body_size = size_node(server["max_body_size"], cfg.max_body_size, "server.max_body_size");
+    if (auto t = server["body_timeout"].value<std::int64_t>()) {
+        if (*t < 1) fail("server.body_timeout must be at least 1 second");
+        cfg.body_timeout_s = static_cast<std::uint32_t>(*t);
+    }
     cfg.reuse_port = to_lower(server["reuse_port"].value_or(std::string("auto")));
     if (cfg.reuse_port != "auto" && cfg.reuse_port != "on" && cfg.reuse_port != "off")
         fail("server.reuse_port must be \"auto\", \"on\" or \"off\"");

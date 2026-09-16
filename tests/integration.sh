@@ -57,6 +57,17 @@ check "bad request" "HTTP/1.1 400 Bad Request" "$(printf 'GARBAGE\r\n\r\n' | ncq
 check "tls 1.2 accepted" "200" "$(code -k --tls-max 1.2 https://127.0.0.1:8443/)"
 check "tls 1.3 negotiated" "TLSv1.3" "$(echo | openssl s_client -connect 127.0.0.1:8443 -tls1_3 2>/dev/null | sed -n 's/^ *Protocol *: *//p' | head -1)"
 check "no plain http on tls port" "000" "$(code http://127.0.0.1:8443/ 2>/dev/null)"
+# ---- request bodies (A3): decoded, limited, drained after the response ----
+check "body on GET: served, drained, pipelined request answered" "2" "$(printf 'GET / HTTP/1.1\r\nHost: l\r\nContent-Length: 5\r\n\r\nhelloGET /sub/ HTTP/1.1\r\nHost: l\r\nConnection: close\r\n\r\n' | ncq 127.0.0.1 8080 | grep -c 'HTTP/1.1 200')"
+check "POST with body: 405, then keep-alive" "405 200" "$(printf 'POST / HTTP/1.1\r\nHost: l\r\nContent-Length: 3\r\n\r\nx=1GET / HTTP/1.1\r\nHost: l\r\nConnection: close\r\n\r\n' | ncq 127.0.0.1 8080 | awk '/^HTTP\/1.1/{printf "%s ", $2}' | sed 's/ $//')"
+check "chunked body on GET: drained, pipelined request answered" "2" "$(printf 'GET / HTTP/1.1\r\nHost: l\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\nGET /sub/ HTTP/1.1\r\nHost: l\r\nConnection: close\r\n\r\n' | ncq 127.0.0.1 8080 | grep -c 'HTTP/1.1 200')"
+check "malformed chunked body: response, then close" "1" "$(printf 'GET / HTTP/1.1\r\nHost: l\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nGET /sub/ HTTP/1.1\r\nHost: l\r\n\r\n' | ncq 127.0.0.1 8080 | grep -c '^HTTP/1.1')"
+check "Content-Length above max_body_size: 413" "HTTP/1.1 413 Content Too Large" "$(printf 'GET / HTTP/1.1\r\nHost: l\r\nContent-Length: 999999999\r\n\r\n' | ncq 127.0.0.1 8080 | head -1 | tr -d '\r')"
+check "413 closes the connection" "1" "$(printf 'GET / HTTP/1.1\r\nHost: l\r\nContent-Length: 999999999\r\n\r\nGET / HTTP/1.1\r\nHost: l\r\n\r\n' | ncq 127.0.0.1 8080 | grep -c '^HTTP/1.1')"
+check "Expect: 100-continue not read by handler: final answer, no 100, close" "405 close" "$(printf 'POST / HTTP/1.1\r\nHost: l\r\nContent-Length: 3\r\nExpect: 100-continue\r\n\r\n' | ncq 127.0.0.1 8080 | tr -d '\r' | awk '/^HTTP\/1.1/{s=$2} /^Connection:/{c=$2} END{print s, c}')"
+check "unknown transfer coding: 501" "HTTP/1.1 501 Not Implemented" "$(printf 'POST / HTTP/1.1\r\nHost: l\r\nTransfer-Encoding: gzip\r\n\r\n' | ncq 127.0.0.1 8080 | head -1 | tr -d '\r')"
+check "Expect other than 100-continue: 417" "HTTP/1.1 417 Expectation Failed" "$(printf 'POST / HTTP/1.1\r\nHost: l\r\nContent-Length: 1\r\nExpect: x\r\n\r\n' | ncq 127.0.0.1 8080 | head -1 | tr -d '\r')"
+check "curl POST 405 keeps the connection for the next request" "0" "$(curl -sS -o /dev/null -o /dev/null -w '%{num_connects}\n' -d 'a=b' http://127.0.0.1:8080/ http://127.0.0.1:8080/ | tail -1)"
 printf '<html><body>changed</body></html>\n' > bench/www/sub/index.html; sleep 1.2
 check "revalidation picks up change" "changed" "$(curl -sS http://127.0.0.1:8080/sub/ | sed 's/<[^>]*>//g')"
 printf '<html><body>sub index</body></html>\n' > bench/www/sub/index.html
@@ -75,7 +86,7 @@ rm -f bench/www/stream.bin
 kill $PID; wait $PID 2>/dev/null
 
 # Second instance with symlinks = "deny", hidden_files = true and a 2-request keep-alive cap.
-sed 's/^default = true/default = true\nsymlinks = "deny"\nhidden_files = true/; s/^max_requests_per_connection = .*/max_requests_per_connection = 2/' bench/tmp/agensio-test.toml > bench/tmp/agensio-test2.toml
+sed 's/^default = true/default = true\nsymlinks = "deny"\nhidden_files = true/; s/^max_requests_per_connection = .*/max_requests_per_connection = 2\nbody_timeout = 1/' bench/tmp/agensio-test.toml > bench/tmp/agensio-test2.toml
 "$BIN" -c bench/tmp/agensio-test2.toml >/dev/null 2>&1 &
 PID=$!
 for _ in $(seq 1 50); do nc -z 127.0.0.1 8080 2>/dev/null && break; sleep 0.1; done
@@ -85,5 +96,25 @@ check "dotfile served with hidden_files=true" "200" "$(code http://127.0.0.1:808
 three=$(printf 'GET / HTTP/1.1\r\nHost: l\r\n\r\nGET / HTTP/1.1\r\nHost: l\r\n\r\nGET / HTTP/1.1\r\nHost: l\r\n\r\n' | ncq 127.0.0.1 8080)
 check "request cap: 2 responses then close" "2" "$(echo "$three" | grep -c '^HTTP/1.1 200')"
 check "request cap: Connection: close on last" "1" "$(echo "$three" | grep -c '^Connection: close')"
+# Body timeout (1 s here): the response is served, then the missing body bytes never come
+# and the server closes the connection instead of waiting for the idle timeout (65 s).
+# (nc cannot be used here: it stays up while its stdin is open even after the peer closes.)
+slow=$(python3 - <<'PY'
+import socket, time
+s = socket.create_connection(("127.0.0.1", 8080)); s.settimeout(5)
+s.sendall(b"GET / HTTP/1.1\r\nHost: l\r\nContent-Length: 10\r\n\r\nabc")
+t0 = time.time(); data = b""
+try:
+    while True:
+        chunk = s.recv(65536)
+        if not chunk: break
+        data += chunk
+    closed = "closed"
+except socket.timeout:
+    closed = "still open"
+print(data.split(b"\r\n")[0].decode(), closed, "within 4s" if time.time() - t0 <= 4 else "late")
+PY
+)
+check "body timeout: response served, then the server closes" "HTTP/1.1 200 OK closed within 4s" "$slow"
 kill $PID; wait $PID 2>/dev/null
 [ $fails -eq 0 ] && echo "integration: all passed" || { echo "integration: $fails failure(s)"; exit 1; }

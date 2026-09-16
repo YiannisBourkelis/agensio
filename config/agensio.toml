@@ -6,6 +6,8 @@ workers = 0              # 0 = one worker per hardware thread
 idle_timeout = 15        # seconds a keep-alive connection may stay idle
 max_requests_per_connection = 1000  # then the server closes the connection (0 = unlimited)
 max_header_size = "16KB" # request head larger than this gets a 431
+max_body_size = "1MB"    # request body larger than this gets a 413 (nginx client_max_body_size)
+body_timeout = 60        # seconds allowed between two reads of a request body
 reuse_port = "auto"      # auto | on | off  (SO_REUSEPORT per worker; auto = on for Linux)
 tcp_nodelay = true
 sendfile = true          # zero-copy streaming of files above cache.max_file_size (plain HTTP)

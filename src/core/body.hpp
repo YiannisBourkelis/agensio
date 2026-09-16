@@ -10,8 +10,10 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <system_error>
+#include <type_traits>
 #include <variant>
 
 #include "file.hpp"
@@ -48,4 +50,31 @@ using Body = std::variant<NoBody, MemoryBody, FileBody, std::unique_ptr<StreamBo
 
 inline bool has_body(const Body& b) noexcept { return !std::holds_alternative<NoBody>(b); }
 
+// Errors a body source can complete with (besides transport errors from Asio).
+enum class BodyError {
+    too_large = 1,  // exceeds server.max_body_size
+    malformed = 2,  // bad chunked framing
+};
+
+inline const std::error_category& body_category() noexcept {
+    static const struct Category final : std::error_category {
+        const char* name() const noexcept override { return "agensio.body"; }
+        std::string message(int c) const override {
+            switch (static_cast<BodyError>(c)) {
+                case BodyError::too_large: return "request body too large";
+                case BodyError::malformed: return "malformed request body";
+            }
+            return "body error";
+        }
+    } category;
+    return category;
+}
+
+inline std::error_code make_error_code(BodyError e) noexcept {
+    return std::error_code(static_cast<int>(e), body_category());
+}
+
 }  // namespace agensio
+
+template <>
+struct std::is_error_code_enum<agensio::BodyError> : std::true_type {};

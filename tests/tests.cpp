@@ -306,6 +306,29 @@ static void test_cache() {
     CHECK(local.find(CacheKeyView{&site, "/z"}) != nullptr);
 }
 
+// Feeds `wire` to a fresh decoder in pieces of `step` bytes with an output buffer of
+// `out_cap`; returns the decoded body, or "<error>" / "<incomplete>". `rest` receives the
+// wire bytes the decoder did not consume (a pipelined next request).
+static std::string decode_chunked(std::string_view wire, std::size_t step, std::size_t out_cap, std::string* rest) {
+    ChunkedDecoder d;
+    std::string body, out(out_cap, '\0');
+    std::size_t pos = 0;
+    while (pos < wire.size()) {
+        std::string_view piece = wire.substr(pos, step);
+        std::size_t used = 0, produced = 0;
+        const auto st = d.decode(piece, used, out.data(), out.size(), produced);
+        body.append(out.data(), produced);
+        pos += used;
+        if (st == ChunkedDecoder::Status::error) return "<error>";
+        if (st == ChunkedDecoder::Status::done) {
+            if (rest) *rest = std::string(wire.substr(pos));
+            return body;
+        }
+        if (used == 0 && produced == 0) return "<stuck>";
+    }
+    return d.done() ? body : "<incomplete>";
+}
+
 static void test_chunked() {
     ChunkSizeBuffer buf;
     CHECK_EQ(chunk_size_line(0, buf), std::string_view("0\r\n"));
@@ -313,6 +336,54 @@ static void test_chunked() {
     CHECK_EQ(chunk_size_line(65536, buf), std::string_view("10000\r\n"));
     CHECK_EQ(chunk_size_line(0xffffffffffffffffull, buf), std::string_view("ffffffffffffffff\r\n"));
     CHECK_EQ(kLastChunk, std::string_view("0\r\n\r\n"));
+
+    // Decoder: every split of the wire bytes and every output size yields the same body,
+    // and the bytes after the final CRLF are left alone.
+    const std::string_view wire = "4\r\nWiki\r\n5\r\npedia\r\nE\r\n in\r\n\r\nchunks.\r\n0\r\n\r\nGET / HTTP/1.1";
+    for (std::size_t step : {1, 2, 3, 7, 64})
+        for (std::size_t cap : {1, 4, 5, 1024}) {
+            std::string rest;
+            CHECK_EQ(decode_chunked(wire, step, cap, &rest), std::string("Wikipedia in\r\n\r\nchunks."));
+            CHECK_EQ(rest, std::string("GET / HTTP/1.1"));
+        }
+    CHECK_EQ(decode_chunked("0\r\n\r\n", 1, 8, nullptr), std::string(""));
+    CHECK_EQ(decode_chunked("A;ext=1\r\n0123456789\r\n0\r\nX-Trailer: v\r\n\r\n", 3, 4, nullptr),
+             std::string("0123456789"));
+    CHECK_EQ(decode_chunked("0002\r\nab\r\n0\r\n\r\n", 5, 8, nullptr), std::string("ab"));  // leading zeros
+    CHECK_EQ(decode_chunked("aB\r\n", 1, 8, nullptr), std::string("<incomplete>"));       // uppercase hex accepted
+    CHECK_EQ(decode_chunked("zz\r\n", 1, 8, nullptr), std::string("<error>"));            // not hex
+    CHECK_EQ(decode_chunked("\r\n", 1, 8, nullptr), std::string("<error>"));              // empty size
+    CHECK_EQ(decode_chunked("1\nA\r\n0\r\n\r\n", 1, 8, nullptr), std::string("<error>"));  // bare LF
+    CHECK_EQ(decode_chunked("2\r\nabX\n", 1, 8, nullptr), std::string("<error>"));       // data not followed by CRLF
+    CHECK_EQ(decode_chunked("0\r\n T: v\r\n\r\n", 1, 8, nullptr), std::string("<error>"));  // obs-fold trailer
+    CHECK_EQ(decode_chunked("11111111111111111\r\n", 1, 8, nullptr), std::string("<error>"));  // 17 hex digits
+    CHECK_EQ(decode_chunked(std::string("1;") + std::string(5000, 'x') + "\r\nA\r\n0\r\n\r\n", 64, 8, nullptr),
+             std::string("<error>"));  // extension line too long
+
+    // Parser: body framing fields.
+    Request r;
+    CHECK(parse_request("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 12\r\n\r\n", r) == ParseStatus::complete);
+    CHECK(r.has_body && !r.chunked && r.content_length == 12 && !r.expect_continue && r.body == nullptr);
+    CHECK(parse_request("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 0\r\n\r\n", r) == ParseStatus::complete);
+    CHECK(!r.has_body && r.content_length == 0);
+    CHECK(parse_request("POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: Chunked\r\n\r\n", r) ==
+          ParseStatus::complete);
+    CHECK(r.has_body && r.chunked);
+    CHECK(parse_request("POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: gzip, chunked\r\n\r\n", r) ==
+          ParseStatus::unsupported_transfer_encoding);
+    CHECK(parse_request("POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n"
+                        "Transfer-Encoding: chunked\r\n\r\n",
+                        r) == ParseStatus::bad_request);
+    CHECK(parse_request("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nExpect: 100-continue\r\n\r\n", r) ==
+          ParseStatus::complete);
+    CHECK(r.expect_continue);
+    CHECK(parse_request("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nExpect: nope\r\n\r\n", r) ==
+          ParseStatus::expectation_failed);
+    CHECK(parse_request("POST / HTTP/1.0\r\nContent-Length: 5\r\nExpect: 100-continue\r\n\r\n", r) ==
+          ParseStatus::complete);
+    CHECK(!r.expect_continue);  // ignored on HTTP/1.0
+    CHECK(parse_request("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 99999999999999999999\r\n\r\n", r) ==
+          ParseStatus::bad_request);  // 20 digits
 }
 
 static void test_core_types() {
@@ -398,6 +469,16 @@ static void test_security_regressions() {
         const std::string name = entry.path().filename().string();
         if (name == "cl-te-smuggle" || name == "obs-fold") CHECK(st == ParseStatus::bad_request);
     }
+    std::size_t chunked_files = 0;
+    for (const auto& entry : fs::directory_iterator(base / "chunked")) {
+        if (!entry.is_regular_file()) continue;
+        ++chunked_files;
+        std::ifstream in(entry.path(), std::ios::binary);
+        std::string wire((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        for (std::size_t step : {1, 3, 4096})
+            CHECK(decode_chunked(wire, step, 7, nullptr) != "<stuck>");  // never spins, never crashes
+    }
+    CHECK(chunked_files > 0);
     for (const auto& entry : fs::directory_iterator(base / "path")) {
         if (!entry.is_regular_file()) continue;
         ++path_files;

@@ -33,6 +33,8 @@ struct Config {
     std::uint32_t idle_timeout_s = 15;
     std::uint32_t max_requests_per_connection = 1000;  // then Connection: close (0 = unlimited)
     std::size_t max_header_size = 16 * 1024;
+    std::size_t max_body_size = 1024 * 1024;  // request bodies above this get 413 (nginx client_max_body_size)
+    std::uint32_t body_timeout_s = 60;        // between two reads of a request body (nginx client_body_timeout)
     std::string reuse_port = "auto";  // auto | on | off
     bool tcp_nodelay = true;
     bool sendfile = true;  // zero-copy streaming of uncached files on plain sockets
