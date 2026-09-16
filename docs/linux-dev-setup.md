@@ -66,8 +66,8 @@ bench/docker/run.sh                           # builds agensio for Linux, runs a
 
 `bench/docker/docker-compose.yml` pins servers to CPU 0 and wrk to CPUs 1-3; on a machine
 with more cores, widen the wrk cpuset. The docroot is a bind mount; for the 10 MB stream
-row use a docroot on a local filesystem (see CLAUDE.md, virtiofs note) or expect the
-open-per-request cost until roadmap item A1b lands.
+row use a docroot on a local filesystem (see CLAUDE.md, virtiofs note); since A1b the
+descriptor is cached, so only the first request pays the open.
 
 ## 4. What to send back
 

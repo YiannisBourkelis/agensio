@@ -24,6 +24,10 @@ Everything under "Architecture" below is what the code does now, not a proposal.
   under "Dependencies". Prefer header-only, vendored under `third_party/` with its license.
 - **Performance is the product.** A change on the request hot path is not done until the
   benchmark has been run before and after and the numbers are in the PR/commit message.
+  The gate is `bench/ab.sh <base-ref>` on the Linux box (alternates the base and new
+  binaries in one session; noise floor about 3 % on the 1 KB rows at 5 s, 2 rounds):
+  every phase checkpoint and every performance-sensitive change gets its A/B there before
+  it counts. Linux-only work (kTLS, io_uring, Landlock, FUSE behaviour) is developed there.
   Never trade throughput for convenience on the hot path (no allocations per request that
   the old design avoided, no locks on the cache-hit path, no per-request string formatting
   of constant headers).
@@ -136,7 +140,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   a connection mid-write keeps its entry alive through its own `shared_ptr`. Entry carries the
   prebuilt `Content-Type/Content-Length/Last-Modified/ETag` header block; ETag is
   `"hex(mtime)-hex(size)"` like nginx. Revalidation: `stat()` at most once per
-  `revalidate_interval` seconds per entry; no filesystem watcher.
+  `revalidate_interval` seconds per entry; no filesystem watcher. Files above
+  `max_file_size` get a *descriptor entry* (`descriptor_only`: open fd + prebuilt headers,
+  no bytes, budget `cache.max_open_files`, default 1024, LRU like bytes but a separate
+  budget), so streamed responses skip the per-request open/fstat/realpath (A1b).
 - **Response**: prebuilt header fragments; `Date:` refreshed once per second per worker;
   one `async_write` with a `std::array<const_buffer, N>` of header + body. Uncached large
   files stream in 64 KB chunks from an open fd (`sendfile` on Linux later).

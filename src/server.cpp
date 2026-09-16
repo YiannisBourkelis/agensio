@@ -39,7 +39,7 @@ asio::ip::tcp::endpoint parse_endpoint(const std::string& address) {
 
 Server::Server(Config cfg)
     : cfg_(std::move(cfg)),
-      cache_(cfg_.cache_max_file_size, cfg_.cache_max_size, cfg_.cache_evict_fraction),
+      cache_(cfg_.cache_max_file_size, cfg_.cache_max_size, cfg_.cache_evict_fraction, cfg_.cache_max_open_files),
       handler_(cfg_, cache_) {
     warm_response_tables();
     build_listeners();

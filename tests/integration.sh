@@ -60,6 +60,17 @@ check "no plain http on tls port" "000" "$(code http://127.0.0.1:8443/ 2>/dev/nu
 printf '<html><body>changed</body></html>\n' > bench/www/sub/index.html; sleep 1.2
 check "revalidation picks up change" "changed" "$(curl -sS http://127.0.0.1:8080/sub/ | sed 's/<[^>]*>//g')"
 printf '<html><body>sub index</body></html>\n' > bench/www/sub/index.html
+# Streamed files (above cache.max_file_size = 4MB) keep a cached descriptor; a replaced file
+# with a different size must be picked up after the revalidate interval.
+head -c 5242880 /dev/urandom > bench/www/stream.bin
+S1=$(sum < bench/www/stream.bin)
+check "streamed file body" "$S1" "$(curl -sS http://127.0.0.1:8080/stream.bin | sum)"
+check "streamed file body again (cached descriptor)" "$S1" "$(curl -sSk https://127.0.0.1:8443/stream.bin | sum)"
+head -c 6291456 /dev/urandom > bench/www/stream.bin.new && mv -f bench/www/stream.bin.new bench/www/stream.bin; sleep 1.2
+S2=$(sum < bench/www/stream.bin)
+check "streamed file replaced: new body" "$S2" "$(curl -sS http://127.0.0.1:8080/stream.bin | sum)"
+check "streamed file replaced: new length" "6291456" "$(curl -sSI http://127.0.0.1:8080/stream.bin | tr -d '\r' | awk '/^Content-Length/{print $2}')"
+rm -f bench/www/stream.bin
 
 kill $PID; wait $PID 2>/dev/null
 

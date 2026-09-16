@@ -21,6 +21,10 @@ stream_chunk_size = "64KB"
 sendfile_min_size = "48KB" # cached files at least this large are sent from the kernel page cache via
                          # sendfile on plain HTTP (keeps one open descriptor per such entry); below that
                          # a memory copy is cheaper. 0 disables. Measured crossover on macOS: ~48 KB.
+max_open_files = 1024    # files above max_file_size are streamed, but their open descriptor and
+                         # prebuilt headers stay cached (nginx open_file_cache), so a repeat request
+                         # costs no open/fstat. Least recently used are closed beyond this count.
+                         # 0 = open per request. Must stay well under the process file limit.
 
 # Extra site files, e.g. one per virtual host written by a hosting panel.
 include = ["sites.d/*.toml"]

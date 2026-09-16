@@ -1,0 +1,12 @@
+base 1 http /big.bin 16 347.68 2870.42
+base 1 https /big.bin 16 2057.49 486.68
+new 1 http /big.bin 16 323.14 3090.26
+new 1 https /big.bin 16 2078.14 480.59
+base 2 http /big.bin 16 315.12 3169.46
+base 2 https /big.bin 16 2012.07 496.75
+new 2 http /big.bin 16 309.14 3228.16
+new 2 https /big.bin 16 2030.04 482.96
+base 3 http /big.bin 16 319.08 3129.75
+base 3 https /big.bin 16 2071.10 474.32
+new 3 http /big.bin 16 328.54 3036.22
+new 3 https /big.bin 16 2030.11 491.24

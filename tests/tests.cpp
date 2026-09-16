@@ -225,7 +225,7 @@ static void test_size() {
 }
 
 static void test_cache() {
-    FileCache cache(100, 250, 0.5);
+    FileCache cache(100, 250, 0.5, 2);
     auto make = [](std::size_t n, std::int64_t access) {
         auto e = std::make_shared<CacheEntry>();
         e->data.assign(n, 'x');
@@ -254,6 +254,47 @@ static void test_cache() {
     cache.erase(CacheKeyView{&site, "/c"}, c1.get());
     CHECK(cache.find(CacheKeyView{&site, "/c"}) == nullptr);
     CHECK(c1->stale.load());
+
+    // Descriptor entries (streamed files, A1b): no bytes, counted against max_open_files (2 here).
+    auto make_fd = [](std::int64_t access) {
+        auto e = std::make_shared<CacheEntry>();
+        e->descriptor_only = true;
+        e->size = 10'000'000;
+        e->last_access = access;
+        return e;
+    };
+    const std::size_t bytes_before = cache.total_bytes();  // /b only
+    auto d1 = cache.insert(CacheKeyView{&site, "/d1"}, make_fd(1));
+    CHECK(d1 != nullptr);
+    CHECK(cache.insert(CacheKeyView{&site, "/d2"}, make_fd(5)) != nullptr);
+    CHECK_EQ(cache.open_files(), 2u);
+    CHECK_EQ(cache.total_bytes(), bytes_before);
+    // Third descriptor exceeds the budget: the oldest descriptor entry goes, memory entries stay.
+    auto d3 = cache.insert(CacheKeyView{&site, "/d3"}, make_fd(6));
+    CHECK(d3 != nullptr);
+    CHECK(d1->stale.load());
+    CHECK(cache.find(CacheKeyView{&site, "/d1"}) == nullptr);
+    CHECK(cache.open_files() <= 2u);
+    CHECK(cache.find(CacheKeyView{&site, "/b"}) != nullptr);
+    // Byte pressure evicts memory entries only: /b (access 2) is older than the descriptors but
+    // the descriptors free no bytes, so they survive.
+    auto b = cache.find(CacheKeyView{&site, "/b"});
+    CHECK(cache.insert(CacheKeyView{&site, "/e"}, make(100, 7)) != nullptr);
+    CHECK(cache.insert(CacheKeyView{&site, "/f"}, make(100, 8)) != nullptr);
+    CHECK(b->stale.load());
+    CHECK(!d3->stale.load());
+    CHECK(cache.find(CacheKeyView{&site, "/d3"}) != nullptr);
+    CHECK_EQ(cache.open_files(), 2u);
+    // erase releases the descriptor budget.
+    cache.erase(CacheKeyView{&site, "/d3"}, d3.get());
+    CHECK_EQ(cache.open_files(), 1u);
+    // A zero-byte memory entry is not a descriptor entry.
+    CHECK(cache.insert(CacheKeyView{&site, "/empty"}, make(0, 9)) != nullptr);
+    CHECK_EQ(cache.open_files(), 1u);
+    // max_open_files = 0 refuses descriptor entries; the handler then streams uncached.
+    FileCache none(100, 250, 0.5, 0);
+    CHECK(none.insert(CacheKeyView{&site, "/d"}, make_fd(1)) == nullptr);
+    CHECK(none.insert(CacheKeyView{&site, "/m"}, make(10, 1)) != nullptr);
 
     LocalIndex local(2);
     local.insert(CacheKeyView{&site, "/x"}, make(1, 0));

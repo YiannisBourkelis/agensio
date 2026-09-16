@@ -48,6 +48,8 @@ struct Config {
     std::size_t stream_chunk_size = 64 * 1024;
     std::size_t cache_sendfile_min_size =
         48 * 1024;  // cached files at least this large are served by sendfile on plain sockets (0 = never)
+    std::size_t cache_max_open_files =
+        1024;  // streamed files (above max_file_size) whose open descriptor is kept in the cache (0 = none)
 
     std::vector<SiteConfig> sites;
 

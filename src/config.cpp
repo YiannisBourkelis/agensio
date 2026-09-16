@@ -251,6 +251,10 @@ Config load_config(const fs::path& path) {
         if (*r < 0) fail("cache.revalidate_interval must not be negative");
         cfg.cache_revalidate_s = static_cast<std::uint32_t>(*r);
     }
+    if (auto m = cache["max_open_files"].value<std::int64_t>()) {
+        if (*m < 0) fail("cache.max_open_files must not be negative");
+        cfg.cache_max_open_files = static_cast<std::size_t>(*m);
+    }
 
     parse_sites_from(root, base_dir, cfg, path.filename().string());
 

@@ -11,6 +11,11 @@
 // invalidation sets `stale`; local indexes drop stale entries lazily. A worker that
 // is in the middle of writing an entry keeps it alive through its shared_ptr, so
 // eviction can never free a buffer that is being sent.
+//
+// Files above max_file_size are not loaded but still get an entry: `descriptor_only`
+// entries hold the open descriptor and the prebuilt headers (nginx's open_file_cache),
+// so a streamed response costs no open/fstat/realpath per request. They add nothing to
+// the byte budget and are counted against max_open_files instead.
 #pragma once
 
 #include <atomic>
@@ -28,8 +33,9 @@
 namespace agensio {
 
 struct CacheEntry {
-    std::vector<char> data;
-    File fd;                // open descriptor for sendfile on plain sockets (may be closed)
+    std::vector<char> data;     // empty for descriptor_only entries
+    File fd;                    // open descriptor: sendfile for large memory entries, the body for descriptor_only
+    bool descriptor_only = false;  // streamed file: body is read/sent from `fd`, counted against max_open_files
     std::string file_path;  // filesystem path, for revalidation
     std::string
         headers;       // "Content-Type: ..\r\nContent-Length: ..\r\nLast-Modified: ..\r\nETag: ..\r\n\r\n" (terminated)
@@ -83,33 +89,40 @@ using CacheMap = std::unordered_map<CacheKey, EntryPtr, CacheKeyHash, CacheKeyEq
 
 class FileCache {
 public:
-    FileCache(std::size_t max_file_size, std::size_t max_total_size, double evict_fraction);
+    FileCache(std::size_t max_file_size, std::size_t max_total_size, double evict_fraction,
+              std::size_t max_open_files);
 
     std::size_t max_file_size() const noexcept { return max_file_size_; }
+    std::size_t max_open_files() const noexcept { return max_open_files_; }
 
     // Returns the entry or nullptr.
     EntryPtr find(const CacheKeyView& key);
 
     // Inserts entry unless an entry for the key already exists (then that one is
-    // returned). Evicts least recently used entries first if needed. Returns the
-    // canonical entry for the key, or nullptr if the entry does not fit at all.
+    // returned). Evicts least recently used entries first if needed, bytes and open
+    // descriptors being separate budgets. Returns the canonical entry for the key, or
+    // nullptr if the entry does not fit at all (larger than max_file_size, or a
+    // descriptor_only entry with max_open_files = 0).
     EntryPtr insert(const CacheKeyView& key, EntryPtr entry);
 
     // Removes the entry for key if it is still `expected`. Marks it stale.
     void erase(const CacheKeyView& key, const CacheEntry* expected);
 
     std::size_t total_bytes() const noexcept { return total_.load(std::memory_order_relaxed); }
+    std::size_t open_files() const noexcept { return open_.load(std::memory_order_relaxed); }
     std::size_t entry_count();
 
 private:
-    void evict_locked(std::size_t needed);
+    void evict_locked(std::size_t needed_bytes, std::size_t needed_files);
 
     const std::size_t max_file_size_;
     const std::size_t max_total_size_;
     const double evict_fraction_;
+    const std::size_t max_open_files_;
     std::mutex mutex_;
     CacheMap map_;
-    std::atomic<std::size_t> total_{0};
+    std::atomic<std::size_t> total_{0};  // bytes held by memory entries
+    std::atomic<std::size_t> open_{0};   // descriptor_only entries
 };
 
 class LocalIndex {

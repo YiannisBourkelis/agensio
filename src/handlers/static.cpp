@@ -111,8 +111,28 @@ void StaticHandler::serve_entry(Stream& s, EntryPtr e) {
     r.status = 200;
     r.prebuilt_headers = e->headers;
     r.prebuilt_terminated = true;
-    r.body = MemoryBody{std::string_view(e->data.data(), e->data.size())};
+    if (e->descriptor_only) r.body = FileBody{&e->fd, e->size, 0};  // streamed from the cached descriptor
+    else r.body = MemoryBody{std::string_view(e->data.data(), e->data.size())};
     r.entry = std::move(e);
+}
+
+void StaticHandler::fill_entry(CacheEntry& entry, const FileInfo& fi, const WorkerState& ws, std::time_t now) {
+    entry.file_path = ws.fs_path;
+    entry.mtime = fi.mtime;
+    entry.size = fi.size;
+    make_etag(fi.mtime, fi.size, entry.etag);
+    entry.last_modified.resize(kHttpDateLength);
+    format_http_date(static_cast<std::time_t>(fi.mtime), entry.last_modified.data());
+    entry.headers.reserve(160);
+    entry.headers.append("Content-Type: ").append(mime_for_path(ws.fs_path)).append("\r\nContent-Length: ");
+    append_number(entry.headers, fi.size);
+    entry.headers.append("\r\nLast-Modified: ")
+        .append(entry.last_modified)
+        .append("\r\nETag: ")
+        .append(entry.etag)
+        .append("\r\n\r\n");
+    entry.last_access.store(now, std::memory_order_relaxed);
+    entry.last_validated.store(now, std::memory_order_relaxed);
 }
 
 void StaticHandler::serve_file(Stream& s, File&& f, const FileInfo& fi, WorkerState& ws) {
@@ -290,22 +310,7 @@ void StaticHandler::handle(Stream& s, const Route& route, WorkerState& ws) {
         }
         if (cfg_.cache_sendfile_min_size > 0 && fi.size >= cfg_.cache_sendfile_min_size) entry->fd = std::move(f);
         else f.close();
-        entry->file_path = ws.fs_path;
-        entry->mtime = fi.mtime;
-        entry->size = fi.size;
-        make_etag(fi.mtime, fi.size, entry->etag);
-        entry->last_modified.resize(kHttpDateLength);
-        format_http_date(static_cast<std::time_t>(fi.mtime), entry->last_modified.data());
-        entry->headers.reserve(160);
-        entry->headers.append("Content-Type: ").append(mime_for_path(ws.fs_path)).append("\r\nContent-Length: ");
-        append_number(entry->headers, fi.size);
-        entry->headers.append("\r\nLast-Modified: ")
-            .append(entry->last_modified)
-            .append("\r\nETag: ")
-            .append(entry->etag)
-            .append("\r\n\r\n");
-        entry->last_access.store(now, std::memory_order_relaxed);
-        entry->last_validated.store(now, std::memory_order_relaxed);
+        fill_entry(*entry, fi, ws, now);
 
         EntryPtr canonical = cache_.insert(key, entry);
         if (canonical) ws.local.insert(key, canonical);
@@ -314,7 +319,23 @@ void StaticHandler::handle(Stream& s, const Route& route, WorkerState& ws) {
         return;
     }
 
-    // 5. Too large to cache: stream from the open file.
+    // 5. Too large to hold in memory: keep the open descriptor and the prebuilt headers in
+    //    the cache (descriptor entry), so repeat requests stream it without an
+    //    open/fstat/realpath or header formatting. Every reader uses pread/sendfile with
+    //    explicit offsets, so one descriptor serves concurrent responses.
+    if (cache_.max_open_files() > 0) {
+        auto entry = std::make_shared<CacheEntry>();
+        entry->descriptor_only = true;
+        entry->fd = std::move(f);
+        fill_entry(*entry, fi, ws, now);
+        EntryPtr canonical = cache_.insert(key, entry);
+        if (canonical) {
+            ws.local.insert(key, canonical);
+            serve_entry(s, std::move(canonical));
+            return;
+        }
+        f = std::move(entry->fd);  // store refused it: serve once from the open file
+    }
     serve_file(s, std::move(f), fi, ws);
 }
 

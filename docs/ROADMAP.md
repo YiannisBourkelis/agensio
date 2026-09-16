@@ -104,11 +104,12 @@ same after it (that is the checkpoint).
       in `src/http1/`, static handler in `src/handlers/` producing a `Response`; the HTTP/1
       connection serialises it. A/B vs the pre-A1 binary: equal CPU per request on all
       four rows. Files moved as touched.
-- [ ] A1b Descriptor cache for streamed files: the file `BodySource` takes its descriptor
-      from the cache (entries above `max_file_size` hold an open fd and metadata, no bytes),
-      so a 10 MB stream no longer costs an `openat` + `fstat` + `close` per request
-      (measured on Linux/virtiofs: 467 us per open, 8 % of the response). nginx's
-      `open_file_cache` equivalent.
+- [x] A1b (2026-09-17) Descriptor cache for streamed files: entries above `max_file_size`
+      hold an open fd and the prebuilt headers, no bytes (`CacheEntry::descriptor_only`,
+      budget `cache.max_open_files`), so a 10 MB stream no longer costs an `openat` +
+      `fstat` + `close` (+ `realpath` with `symlinks = "deny"`) per request (measured on
+      Linux/virtiofs: 467 us per open, 8 % of the response; on local ext4 about 1 us, within
+      noise). nginx's `open_file_cache` equivalent. A/B on Linux: see the commit.
 - [ ] A2 Split `Connection` into `Http1Connection` (I/O + parser) that drives one `Stream`;
       response writing consumes a `BodySource` (keeps the writev / TLS-coalescing /
       sendfile fast paths exactly as they are today).

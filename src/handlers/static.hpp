@@ -42,6 +42,8 @@ public:
 
 private:
     void serve_entry(Stream& s, EntryPtr e);  // takes ownership of the ref
+    // Metadata and prebuilt header block shared by memory and descriptor entries.
+    void fill_entry(CacheEntry& e, const FileInfo& fi, const WorkerState& ws, std::time_t now);
     void serve_file(Stream& s, File&& f, const FileInfo& fi, WorkerState& ws);
     void redirect_slash(Stream& s, WorkerState& ws);
     static bool not_modified(const Request& req, std::string_view etag, std::string_view last_modified) noexcept;
