@@ -266,9 +266,7 @@ there: it would allow `sendfile` for streamed files over TLS.
 
 ## Roadmap
 
-1. Static files + benchmark harness (this phase).
-2. TLS via `asio::ssl` + OpenSSL, HTTP/1.1 only.
-3. Conditional requests and Range done properly; precompressed (`.gz`, `.br`) variants.
-4. FastCGI to php-fpm (this is where ddev becomes useful: run agensio inside a ddev project
-   as its web server).
-5. Reverse proxy, config reload, access log, HTTP/2.
+See `docs/ROADMAP.md`: phases A (core refactor: streams, body sources, router), B (full
+HTTP/1.1 + hardening), C (control API + agentic/MCP), D (PHP/FastCGI, Laravel), E (reverse
+proxy, WebSocket, CGI), F (HTTP/2 via nghttp2), G (production hardening), H (HTTP/3 via
+ngtcp2+nghttp3). One phase at a time, each with a benchmark checkpoint at `-w 1`.
