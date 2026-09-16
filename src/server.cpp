@@ -5,8 +5,8 @@
 #include <iostream>
 #include <stdexcept>
 
-#include "connection.hpp"
 #include "file.hpp"
+#include "http1/connection.hpp"
 #include "response.hpp"
 
 #ifdef AGENSIO_HAS_TLS
@@ -101,6 +101,8 @@ void Server::build_workers() {
     if (n == 0) n = 1;
     for (unsigned i = 0; i < n; ++i)
         workers_.push_back(std::make_unique<Worker>(i));
+    for (auto& w : workers_)
+        if (!cfg_.server_header.empty()) w->state.server_line = "Server: " + cfg_.server_header + "\r\n";
 
     reuse_port_ = false;
     if (cfg_.reuse_port == "on") reuse_port_ = kHasReusePort;

@@ -71,10 +71,10 @@ add_library(agensio_core STATIC
   src/mime.cpp
   src/file.cpp
   src/path.cpp
-  src/http_parser.cpp
+  src/http1/parser.cpp
   src/cache.cpp
   src/response.cpp
-  src/handler.cpp
+  src/handlers/static.cpp
   src/server.cpp)
 target_include_directories(agensio_core PUBLIC src)
 target_link_libraries(agensio_core PUBLIC asio tomlplusplus)
@@ -129,7 +129,7 @@ add_executable(agensio_bench_header tests/bench_header.cpp)
 # ---------------------------------------------------------------- fuzzers (parsers only, no asio)
 if(AGENSIO_FUZZ)
   foreach(t parser path)
-    add_executable(fuzz_${t} tests/fuzz/fuzz_${t}.cpp src/http_parser.cpp src/path.cpp)
+    add_executable(fuzz_${t} tests/fuzz/fuzz_${t}.cpp src/http1/parser.cpp src/path.cpp)
     target_include_directories(fuzz_${t} PRIVATE src)
     target_compile_features(fuzz_${t} PRIVATE cxx_std_20)
     target_compile_options(fuzz_${t} PRIVATE -fsanitize=fuzzer,address,undefined -g -O1 -fno-omit-frame-pointer)

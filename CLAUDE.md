@@ -91,11 +91,18 @@ cmake -B build-fuzz -DAGENSIO_FUZZ=ON -DAGENSIO_TESTS=OFF -DAGENSIO_TLS=OFF \
 build-fuzz/fuzz_parser corpus -max_len=4096 -max_total_time=60   # and fuzz_path
 ```
 
-Source map (all in `src/`): `config` (TOML model + loader), `http_parser` (request head),
-`path` (target decoding/normalisation), `mime`, `http_date`, `file` (fd wrapper),
-`cache` (shared store + per-worker index), `response` (status lines, error pages),
-`handler` (request -> ResponsePlan), `connection.hpp` (template over plain/TLS stream),
-`server` (workers, listeners, accept loop), `main`. Tests in `tests/tests.cpp`.
+Source map (`src/`, files move into subdirectories as they are touched, see the roadmap):
+- `core/`: `result.hpp` (`Result<T>`, to become `std::expected`), `headers.hpp` (fixed-capacity
+  name/value views), `request.hpp`, `response.hpp` (status, prebuilt header block, extra
+  fields, `Body`), `body.hpp` (`MemoryBody`, `FileBody`, `StreamBody` for later phases),
+  `stream.hpp` (one request/response exchange), `worker_state.hpp`, `strings.hpp`.
+- `http1/`: `parser` (request head into `Request`), `connection.hpp` (template over
+  plain/TLS socket: reads, drives one `Stream` through the handler, writes the `Response`
+  as HTTP/1 bytes with the writev / TLS-coalescing / sendfile fast paths).
+- `handlers/`: `static` (`StaticHandler`: cache, files, policies; `Route` until A4).
+- top level, not yet moved: `config`, `path`, `mime`, `http_date`, `file`, `cache`,
+  `response` (status lines, error pages), `tls_stream.hpp`, `server`, `main`.
+Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
 
 ## Architecture (as implemented)
 
@@ -107,6 +114,14 @@ Source map (all in `src/`): `config` (TOML model + loader), `http_parser` (reque
 - **Session**: `std::shared_ptr<Connection>` with `enable_shared_from_this`, handlers as
   lambdas capturing `self`. Receive buffer reused across keep-alive requests; hard cap on
   header size (default 16 KB) and an idle timeout (default 15 s) via `asio::steady_timer`.
+- **Request core (phase A1)**: the unit of work is a `Stream` (`Request` + `Response`);
+  HTTP/1 embeds one per connection. Handlers fill a `Response`: status, an optional
+  prebuilt header block (the cache entry's, already terminated), extra `Headers`, and a
+  `Body` variant (memory, file, or a `StreamBody` pulled with backpressure in later
+  phases). The HTTP/1 writer serialises status line + Server + Date, the block, and the
+  extra fields into at most three head buffers plus the body: the same zero-concatenation
+  write as before, now behind a protocol-independent interface. A/B against the pre-A1
+  binary: identical CPU per request.
 - **Parser**: hand-written incremental HTTP/1.1 request parser over `std::string_view`.
   Methods GET and HEAD (others get 405). Headers of interest: Host, Connection,
   If-None-Match, If-Modified-Since, Range, Accept-Encoding. Pipelining supported by leaving

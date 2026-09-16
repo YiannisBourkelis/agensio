@@ -99,8 +99,11 @@ src/main.cpp
 Prerequisite for everything else. No new features; the static path must benchmark the
 same after it (that is the checkpoint).
 
-- [ ] A1 Introduce `Stream`, `Request`, `Response`, `Headers`, `BodySource`; port the static
-      handler to produce a `Response` with a memory/file `BodySource`.
+- [x] A1 (2026-09-17) `Stream`, `Request`, `Response`, `Headers`, `Body` (`MemoryBody`,
+      `FileBody`, `StreamBody` interface), `Result<T>`, `WorkerState` in `src/core/`; parser
+      in `src/http1/`, static handler in `src/handlers/` producing a `Response`; the HTTP/1
+      connection serialises it. A/B vs the pre-A1 binary: equal CPU per request on all
+      four rows. Files moved as touched.
 - [ ] A1b Descriptor cache for streamed files: the file `BodySource` takes its descriptor
       from the cache (entries above `max_file_size` hold an open fd and metadata, no bytes),
       so a 10 MB stream no longer costs an `openat` + `fstat` + `close` per request

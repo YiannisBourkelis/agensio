@@ -2,7 +2,7 @@
 
 #include <cstring>
 
-#include "strings.hpp"
+#include "core/strings.hpp"
 
 namespace agensio {
 

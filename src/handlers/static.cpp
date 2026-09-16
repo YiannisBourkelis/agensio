@@ -1,13 +1,14 @@
-#include "handler.hpp"
+#include "handlers/static.hpp"
 
 #include <charconv>
 #include <cstring>
 #include <ctime>
 
+#include "core/strings.hpp"
+#include "http_date.hpp"
 #include "mime.hpp"
 #include "path.hpp"
 #include "response.hpp"
-#include "strings.hpp"
 
 namespace agensio {
 
@@ -59,44 +60,21 @@ const SiteConfig* Route::lookup(std::string_view host) const noexcept {
     return it == by_name.end() ? default_site : it->second;
 }
 
-RequestHandler::RequestHandler(const Config& cfg, FileCache& cache) : cfg_(cfg), cache_(cache) {
-    if (!cfg.server_header.empty()) server_line_ = "Server: " + cfg.server_header + "\r\n";
-}
+StaticHandler::StaticHandler(const Config& cfg, FileCache& cache) : cfg_(cfg), cache_(cache) {}
 
-void RequestHandler::begin_header(int status, WorkerState& ws, ResponsePlan& plan) {
-    plan.header.append(status_line(status));
-    plan.header.append(server_line_);
-    plan.header.append("Date: ");
-    plan.header.append(ws.date.now());
-    plan.header.append("\r\n");
-}
-
-void RequestHandler::end_header(bool keep_alive, int version_minor, ResponsePlan& plan) {
-    if (!keep_alive) plan.header.append("Connection: close\r\n");
-    else if (version_minor == 0) plan.header.append("Connection: keep-alive\r\n");
-    plan.header.append("\r\n");
-}
-
-void RequestHandler::end_header(const Request& req, ResponsePlan& plan) {
-    end_header(plan.keep_alive, req.version_minor, plan);
-}
-
-void RequestHandler::error(int status, bool keep_alive, bool head, WorkerState& ws, ResponsePlan& plan,
-                           std::string_view extra_headers) {
-    plan.reset();
-    plan.keep_alive = keep_alive;
+void StaticHandler::error(Stream& s, int status, bool keep_alive, std::string_view allow) {
+    Response& r = s.response;
+    r.reset();
     const ErrorPage& page = error_page(status);
-    begin_header(status, ws, plan);
-    plan.header.append(page.headers);
-    plan.header.append(extra_headers);
-    end_header(keep_alive, 1, plan);
-    if (!head) {
-        plan.body = ResponsePlan::Body::inline_text;
-        plan.inline_text = page.body;
-    }
+    r.status = status;
+    r.keep_alive = keep_alive;
+    r.head = s.request.method == Method::HEAD;
+    r.prebuilt_headers = page.headers;  // Content-Type + Content-Length, not terminated
+    if (!allow.empty()) r.headers.add("Allow", allow);
+    r.body = MemoryBody{page.body};
 }
 
-bool RequestHandler::not_modified(const Request& req, std::string_view etag, std::string_view last_modified) noexcept {
+bool StaticHandler::not_modified(const Request& req, std::string_view etag, std::string_view last_modified) noexcept {
     if (!req.if_none_match.empty()) {
         std::string_view v = req.if_none_match;
         if (v == "*") return true;
@@ -119,128 +97,103 @@ bool RequestHandler::not_modified(const Request& req, std::string_view etag, std
     return false;
 }
 
-std::string_view RequestHandler::prefix200(WorkerState& ws, std::time_t now) {
-    if (ws.prefix200_time != now) {
-        ws.prefix200.clear();
-        ws.prefix200.append(status_line(200))
-            .append(server_line_)
-            .append("Date: ")
-            .append(ws.date.at(now))
-            .append("\r\n");
-        ws.prefix200_time = now;
-    }
-    return ws.prefix200;
-}
-
-void RequestHandler::serve_entry(const Request& req, EntryPtr e, std::time_t now, WorkerState& ws, ResponsePlan& plan) {
-    const bool head = req.method == Method::HEAD;
-    if (not_modified(req, e->etag, e->last_modified)) {
-        begin_header(304, ws, plan);
-        plan.header.append("ETag: ")
-            .append(e->etag)
-            .append("\r\nLast-Modified: ")
-            .append(e->last_modified)
-            .append("\r\n");
-        end_header(req, plan);
+void StaticHandler::serve_entry(Stream& s, EntryPtr e) {
+    Response& r = s.response;
+    r.head = s.request.method == Method::HEAD;
+    if (not_modified(s.request, e->etag, e->last_modified)) {
+        r.status = 304;
+        r.headers.add("ETag", e->etag);
+        r.headers.add("Last-Modified", e->last_modified);
+        r.entry = std::move(e);  // keeps the views above alive
         return;
     }
-    // No per-request concatenation: prefix copied from the per-worker cache, the
-    // entry's prebuilt block (which ends with the blank line) borrowed, tail static.
-    plan.header.assign(prefix200(ws, now));
-    if (plan.keep_alive && req.version_minor == 1) {
-        plan.headers2 = e->headers;
-    } else {
-        plan.headers2 = slice(e->headers, 0, e->headers.size() - 2);
-        plan.tail = plan.keep_alive ? std::string_view("Connection: keep-alive\r\n\r\n")
-                                    : std::string_view("Connection: close\r\n\r\n");
-    }
-    if (!head) {
-        plan.body = ResponsePlan::Body::entry;
-        plan.entry = std::move(e);
-    }
+    // Zero-concatenation path: the entry's prebuilt block already ends with the blank line.
+    r.status = 200;
+    r.prebuilt_headers = e->headers;
+    r.prebuilt_terminated = true;
+    r.body = MemoryBody{std::string_view(e->data.data(), e->data.size())};
+    r.entry = std::move(e);
 }
 
-void RequestHandler::serve_file(const Request& req, File&& f, const FileInfo& fi, WorkerState& ws, ResponsePlan& plan) {
-    const bool head = req.method == Method::HEAD;
-    std::string& etag = ws.tmp;
+void StaticHandler::serve_file(Stream& s, File&& f, const FileInfo& fi, WorkerState& ws) {
+    Response& r = s.response;
+    r.head = s.request.method == Method::HEAD;
+    std::string etag;
     make_etag(fi.mtime, fi.size, etag);
     char lm[kHttpDateLength];
     format_http_date(static_cast<std::time_t>(fi.mtime), lm);
-    if (not_modified(req, etag, std::string_view(lm, kHttpDateLength))) {
-        begin_header(304, ws, plan);
-        plan.header.append("ETag: ")
+    if (not_modified(s.request, etag, std::string_view(lm, kHttpDateLength))) {
+        r.status = 304;
+        r.scratch.assign("ETag: ")
             .append(etag)
             .append("\r\nLast-Modified: ")
             .append(lm, kHttpDateLength)
             .append("\r\n");
-        end_header(req, plan);
+        r.prebuilt_headers = r.scratch;
         return;
     }
-    begin_header(200, ws, plan);
-    plan.header.append("Content-Type: ").append(mime_for_path(ws.fs_path)).append("\r\nContent-Length: ");
-    append_number(plan.header, fi.size);
-    plan.header.append("\r\nLast-Modified: ")
+    r.status = 200;
+    r.scratch.assign("Content-Type: ").append(mime_for_path(ws.fs_path)).append("\r\nContent-Length: ");
+    append_number(r.scratch, fi.size);
+    r.scratch.append("\r\nLast-Modified: ")
         .append(lm, kHttpDateLength)
         .append("\r\nETag: ")
         .append(etag)
-        .append("\r\n");
-    end_header(req, plan);
-    if (!head) {
-        plan.body = ResponsePlan::Body::file;
-        plan.file = std::move(f);
-        plan.file_size = fi.size;
-        plan.file_sent = 0;
-    }
+        .append("\r\n\r\n");
+    r.prebuilt_headers = r.scratch;
+    r.prebuilt_terminated = true;
+    r.owned_file = std::move(f);
+    r.body = FileBody{&r.owned_file, fi.size, 0};
 }
 
-void RequestHandler::redirect_slash(const Request& req, WorkerState& ws, ResponsePlan& plan) {
+void StaticHandler::redirect_slash(Stream& s, WorkerState& ws) {
+    Response& r = s.response;
     const ErrorPage& page = error_page(301);
-    begin_header(301, ws, plan);
-    plan.header.append("Location: ").append(ws.path).append("/\r\n");
-    plan.header.append(page.headers);
-    end_header(req, plan);
-    if (req.method != Method::HEAD) {
-        plan.body = ResponsePlan::Body::inline_text;
-        plan.inline_text = page.body;
-    }
+    r.status = 301;
+    r.head = s.request.method == Method::HEAD;
+    r.scratch.assign(ws.path).push_back('/');
+    r.headers.add("Location", r.scratch);
+    r.prebuilt_headers = page.headers;
+    r.body = MemoryBody{page.body};
 }
 
-void RequestHandler::handle(const Request& req, const Route& route, WorkerState& ws, ResponsePlan& plan) {
-    plan.reset();
-    plan.keep_alive = req.keep_alive;
-    const bool head = req.method == Method::HEAD;
+void StaticHandler::handle(Stream& s, const Route& route, WorkerState& ws) {
+    const Request& req = s.request;
+    Response& r = s.response;
+    r.reset();
+    r.keep_alive = req.keep_alive;
 
     if (req.method == Method::OTHER) {
-        error(405, req.keep_alive, head, ws, plan, "Allow: GET, HEAD\r\n");
+        error(s, 405, req.keep_alive, "GET, HEAD");
         return;
     }
     if (req.has_body) {  // we do not read request bodies; refuse and close
-        error(413, false, head, ws, plan);
+        error(s, 413, false);
         return;
     }
     if (req.version_minor == 1 && req.host.empty()) {
-        error(400, false, head, ws, plan);
+        error(s, 400, false);
         return;
     }
     if (!normalize_target(req.target, ws.path)) {
-        error(400, false, head, ws, plan);
+        error(s, 400, false);
         return;
     }
 
     const SiteConfig* site = route.lookup(req.host);
 #ifdef _WIN32
     if (!windows_path_ok(ws.path)) {
-        error(400, false, head, ws, plan);
+        error(s, 400, false);
         return;
     }
 #endif
     // Dotfiles and dot-directories (.env, .git, .htaccess) are never served unless the
     // site opts in. 404 rather than 403 so their existence is not disclosed.
     if (!site->hidden_files && has_hidden_segment(ws.path)) {
-        error(404, req.keep_alive, head, ws, plan);
+        error(s, 404, req.keep_alive);
         return;
     }
-    const std::time_t now = std::time(nullptr);
+    const std::time_t now = ws.now;
     const CacheKeyView key{site, ws.path};
 
     // 1. Worker-local index (no lock, no refcount traffic), then the shared store.
@@ -281,7 +234,7 @@ void RequestHandler::handle(const Request& req, const Route& route, WorkerState&
             raw->last_access.store(now, std::memory_order_relaxed);
         // Exactly one strong reference is taken for the duration of the response.
         EntryPtr ref = fetched ? std::move(fetched) : *local;
-        serve_entry(req, std::move(ref), now, ws, plan);
+        serve_entry(s, std::move(ref));
         return;
     }
 
@@ -302,28 +255,28 @@ void RequestHandler::handle(const Request& req, const Route& route, WorkerState&
             ws.fs_path.resize(base);
             FileInfo dir;
             const bool exists = stat_path(ws.fs_path.c_str(), dir) && dir.is_directory;
-            error(exists ? 403 : 404, req.keep_alive, head, ws, plan);
+            error(s, exists ? 403 : 404, req.keep_alive);
             return;
         }
     } else {
         f = File::open(ws.fs_path.c_str());
         if (!f.is_open() || !f.info(fi)) {
-            error(404, req.keep_alive, head, ws, plan);
+            error(s, 404, req.keep_alive);
             return;
         }
         if (fi.is_directory) {
-            redirect_slash(req, ws, plan);
+            redirect_slash(s, ws);
             return;
         }
         if (!fi.is_regular) {
-            error(404, req.keep_alive, head, ws, plan);
+            error(s, 404, req.keep_alive);
             return;
         }
     }
 
     // Symlink policy: with symlinks = "deny" the resolved file must stay under the root.
     if (site->symlinks_deny && !path_within_root(ws.fs_path.c_str(), site->root)) {
-        error(404, req.keep_alive, head, ws, plan);
+        error(s, 404, req.keep_alive);
         return;
     }
 
@@ -332,7 +285,7 @@ void RequestHandler::handle(const Request& req, const Route& route, WorkerState&
         auto entry = std::make_shared<CacheEntry>();
         entry->data.resize(static_cast<std::size_t>(fi.size));
         if (fi.size > 0 && !entry->data.empty() && !f.read_all(entry->data.data(), entry->data.size())) {
-            error(500, req.keep_alive, head, ws, plan);
+            error(s, 500, req.keep_alive);
             return;
         }
         if (cfg_.cache_sendfile_min_size > 0 && fi.size >= cfg_.cache_sendfile_min_size) entry->fd = std::move(f);
@@ -357,12 +310,12 @@ void RequestHandler::handle(const Request& req, const Route& route, WorkerState&
         EntryPtr canonical = cache_.insert(key, entry);
         if (canonical) ws.local.insert(key, canonical);
         else canonical = std::move(entry);  // cache full for this size class: serve once, uncached
-        serve_entry(req, std::move(canonical), now, ws, plan);
+        serve_entry(s, std::move(canonical));
         return;
     }
 
     // 5. Too large to cache: stream from the open file.
-    serve_file(req, std::move(f), fi, ws, plan);
+    serve_file(s, std::move(f), fi, ws);
 }
 
 }  // namespace agensio

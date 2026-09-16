@@ -4,7 +4,7 @@
 #include <array>
 #include <cctype>
 
-#include "strings.hpp"
+#include "core/strings.hpp"
 
 namespace agensio {
 

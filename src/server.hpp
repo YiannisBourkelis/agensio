@@ -14,7 +14,8 @@
 
 #include "cache.hpp"
 #include "config.hpp"
-#include "handler.hpp"
+#include "core/worker_state.hpp"
+#include "handlers/static.hpp"
 
 namespace agensio {
 
@@ -66,7 +67,7 @@ private:
 
     Config cfg_;
     FileCache cache_;
-    RequestHandler handler_;
+    StaticHandler handler_;
     std::vector<std::unique_ptr<Worker>> workers_;
     std::vector<Listener> listeners_;
     std::vector<std::unique_ptr<Acceptor>> acceptors_;

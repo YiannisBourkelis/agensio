@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <string_view>
 
-#include "http_parser.hpp"
+#include "http1/parser.hpp"
 
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size) {
     std::string_view buf(reinterpret_cast<const char*>(data), size);

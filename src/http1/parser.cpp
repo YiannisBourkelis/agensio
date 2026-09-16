@@ -1,8 +1,8 @@
-#include "http_parser.hpp"
+#include "http1/parser.hpp"
 
 #include <cstring>
 
-#include "strings.hpp"
+#include "core/strings.hpp"
 
 namespace agensio {
 
@@ -82,7 +82,7 @@ bool has_token(std::string_view value, std::string_view token) noexcept {
 }
 
 ParseStatus parse_request(std::string_view buf, Request& out) noexcept {
-    out = Request{};
+    out.reset();
     std::size_t pos = 0;
     std::string_view line;
     std::size_t next = 0;
@@ -137,6 +137,7 @@ ParseStatus parse_request(std::string_view buf, Request& out) noexcept {
         for (unsigned char c : name)
             if (!is_tchar(c)) return ParseStatus::bad_request;  // also rejects whitespace before the colon
         std::string_view value = trim(slice(line, colon + 1));
+        if (!out.headers.add(name, value)) return ParseStatus::too_many_headers;
         for (unsigned char c : value)
             if ((c < 0x20 && c != '\t') || c == 0x7f) return ParseStatus::bad_request;  // field-value: no CTLs
 

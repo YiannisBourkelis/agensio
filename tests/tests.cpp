@@ -9,9 +9,11 @@
 
 #include "cache.hpp"
 #include "config.hpp"
-#include "handler.hpp"
+#include "core/headers.hpp"
+#include "core/result.hpp"
+#include "handlers/static.hpp"
+#include "http1/parser.hpp"
 #include "http_date.hpp"
-#include "http_parser.hpp"
 #include "mime.hpp"
 #include "path.hpp"
 
@@ -262,6 +264,44 @@ static void test_cache() {
     CHECK(local.find(CacheKeyView{&site, "/z"}) != nullptr);
 }
 
+static void test_core_types() {
+    Headers h;
+    CHECK(h.empty());
+    CHECK(h.add("Host", "a"));
+    CHECK(h.add("X-Test", "1"));
+    CHECK_EQ(h.size(), 2u);
+    CHECK_EQ(h.get("host"), "a");
+    CHECK_EQ(h.get("HOST"), "a");
+    CHECK(h.contains("x-test"));
+    CHECK(!h.contains("missing"));
+    CHECK(h.get("missing").empty());
+    for (std::size_t i = h.size(); i < Headers::kCapacity; ++i)
+        CHECK(h.add("X", "y"));
+    CHECK(!h.add("Overflow", "z"));
+    h.clear();
+    CHECK(h.empty());
+
+    Result<int> ok = 42;
+    CHECK(ok && ok.value() == 42 && !ok.error());
+    Result<int> bad = std::errc::no_such_file_or_directory;
+    CHECK(!bad && bad.error() == std::errc::no_such_file_or_directory);
+    Result<std::string> moved = std::string("abc");
+    Result<std::string> taken = std::move(moved);
+    CHECK(taken && *taken == "abc");
+    Result<void> fine;
+    CHECK(fine.ok());
+    Result<void> failed = std::errc::permission_denied;
+    CHECK(!failed && failed.error() == std::errc::permission_denied);
+
+    // The parser fills the generic header list as well as the extracted fields.
+    Request r;
+    CHECK(parse_request("GET / HTTP/1.1\r\nHost: a\r\nX-Custom: v\r\nAccept: */*\r\n\r\n", r) == ParseStatus::complete);
+    CHECK_EQ(r.headers.size(), 3u);
+    CHECK_EQ(r.headers.get("x-custom"), "v");
+    CHECK_EQ(r.headers.get("Accept"), "*/*");
+    CHECK_EQ(r.headers[0].name, "Host");
+}
+
 static void test_route_and_etag() {
     SiteConfig a, b;
     Route r;
@@ -339,6 +379,7 @@ int main() {
     test_mime();
     test_size();
     test_cache();
+    test_core_types();
     test_route_and_etag();
     if (failures) {
         std::printf("%d failure(s)\n", failures);
