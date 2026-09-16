@@ -5,8 +5,9 @@
 #include <ctime>
 
 #include "mime.hpp"
-#include "response.hpp"
 #include "path.hpp"
+#include "response.hpp"
+#include "strings.hpp"
 
 namespace agensio {
 
@@ -24,7 +25,9 @@ inline void append_hex(std::string& s, std::uint64_t v) {
     s.append(buf, r.ptr);
 }
 
-inline char lower(char c) noexcept { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c; }
+inline char lower(char c) noexcept {
+    return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
+}
 
 }  // namespace
 
@@ -42,15 +45,16 @@ const SiteConfig* Route::lookup(std::string_view host) const noexcept {
     // Strip the port: "example.com:8080", "[::1]:8080".
     if (host.front() == '[') {
         auto close = host.find(']');
-        if (close != std::string_view::npos) host = host.substr(1, close - 1);
+        if (close != std::string_view::npos) host = slice(host, 1, close - 1);
     } else {
         auto colon = host.rfind(':');
-        if (colon != std::string_view::npos) host = host.substr(0, colon);
+        if (colon != std::string_view::npos) host = slice(host, 0, colon);
     }
     if (!host.empty() && host.back() == '.') host.remove_suffix(1);
     if (host.size() > 253) return default_site;
     char buf[256];
-    for (std::size_t i = 0; i < host.size(); ++i) buf[i] = lower(host[i]);
+    for (std::size_t i = 0; i < host.size(); ++i)
+        buf[i] = lower(host[i]);
     auto it = by_name.find(std::string_view(buf, host.size()));
     return it == by_name.end() ? default_site : it->second;
 }
@@ -100,9 +104,11 @@ bool RequestHandler::not_modified(const Request& req, std::string_view etag, std
         while (i < v.size()) {
             std::size_t j = v.find(',', i);
             if (j == std::string_view::npos) j = v.size();
-            std::string_view tag = v.substr(i, j - i);
-            while (!tag.empty() && (tag.front() == ' ' || tag.front() == '\t')) tag.remove_prefix(1);
-            while (!tag.empty() && (tag.back() == ' ' || tag.back() == '\t')) tag.remove_suffix(1);
+            std::string_view tag = slice(v, i, j - i);
+            while (!tag.empty() && (tag.front() == ' ' || tag.front() == '\t'))
+                tag.remove_prefix(1);
+            while (!tag.empty() && (tag.back() == ' ' || tag.back() == '\t'))
+                tag.remove_suffix(1);
             if (tag.size() > 2 && tag[0] == 'W' && tag[1] == '/') tag.remove_prefix(2);
             if (tag == etag) return true;
             i = j + 1;
@@ -116,7 +122,11 @@ bool RequestHandler::not_modified(const Request& req, std::string_view etag, std
 std::string_view RequestHandler::prefix200(WorkerState& ws, std::time_t now) {
     if (ws.prefix200_time != now) {
         ws.prefix200.clear();
-        ws.prefix200.append(status_line(200)).append(server_line_).append("Date: ").append(ws.date.at(now)).append("\r\n");
+        ws.prefix200.append(status_line(200))
+            .append(server_line_)
+            .append("Date: ")
+            .append(ws.date.at(now))
+            .append("\r\n");
         ws.prefix200_time = now;
     }
     return ws.prefix200;
@@ -126,7 +136,11 @@ void RequestHandler::serve_entry(const Request& req, EntryPtr e, std::time_t now
     const bool head = req.method == Method::HEAD;
     if (not_modified(req, e->etag, e->last_modified)) {
         begin_header(304, ws, plan);
-        plan.header.append("ETag: ").append(e->etag).append("\r\nLast-Modified: ").append(e->last_modified).append("\r\n");
+        plan.header.append("ETag: ")
+            .append(e->etag)
+            .append("\r\nLast-Modified: ")
+            .append(e->last_modified)
+            .append("\r\n");
         end_header(req, plan);
         return;
     }
@@ -136,8 +150,9 @@ void RequestHandler::serve_entry(const Request& req, EntryPtr e, std::time_t now
     if (plan.keep_alive && req.version_minor == 1) {
         plan.headers2 = e->headers;
     } else {
-        plan.headers2 = std::string_view(e->headers).substr(0, e->headers.size() - 2);
-        plan.tail = plan.keep_alive ? std::string_view("Connection: keep-alive\r\n\r\n") : std::string_view("Connection: close\r\n\r\n");
+        plan.headers2 = slice(e->headers, 0, e->headers.size() - 2);
+        plan.tail = plan.keep_alive ? std::string_view("Connection: keep-alive\r\n\r\n")
+                                    : std::string_view("Connection: close\r\n\r\n");
     }
     if (!head) {
         plan.body = ResponsePlan::Body::entry;
@@ -153,14 +168,22 @@ void RequestHandler::serve_file(const Request& req, File&& f, const FileInfo& fi
     format_http_date(static_cast<std::time_t>(fi.mtime), lm);
     if (not_modified(req, etag, std::string_view(lm, kHttpDateLength))) {
         begin_header(304, ws, plan);
-        plan.header.append("ETag: ").append(etag).append("\r\nLast-Modified: ").append(lm, kHttpDateLength).append("\r\n");
+        plan.header.append("ETag: ")
+            .append(etag)
+            .append("\r\nLast-Modified: ")
+            .append(lm, kHttpDateLength)
+            .append("\r\n");
         end_header(req, plan);
         return;
     }
     begin_header(200, ws, plan);
     plan.header.append("Content-Type: ").append(mime_for_path(ws.fs_path)).append("\r\nContent-Length: ");
     append_number(plan.header, fi.size);
-    plan.header.append("\r\nLast-Modified: ").append(lm, kHttpDateLength).append("\r\nETag: ").append(etag).append("\r\n");
+    plan.header.append("\r\nLast-Modified: ")
+        .append(lm, kHttpDateLength)
+        .append("\r\nETag: ")
+        .append(etag)
+        .append("\r\n");
     end_header(req, plan);
     if (!head) {
         plan.body = ResponsePlan::Body::file;
@@ -213,8 +236,10 @@ void RequestHandler::handle(const Request& req, const Route& route, WorkerState&
     CacheEntry* raw = nullptr;
     const EntryPtr* local = ws.local.find(key);
     if (local) {
-        if ((*local)->stale.load(std::memory_order_acquire)) { ws.local.erase(key); local = nullptr; }
-        else raw = local->get();
+        if ((*local)->stale.load(std::memory_order_acquire)) {
+            ws.local.erase(key);
+            local = nullptr;
+        } else raw = local->get();
     }
     EntryPtr fetched;  // only set when we had to go to the shared store
     if (!raw) {
@@ -226,9 +251,11 @@ void RequestHandler::handle(const Request& req, const Route& route, WorkerState&
     }
     // 2. Revalidate against the filesystem at most once per interval.
     if (raw && cfg_.cache_revalidate_s > 0 &&
-        now - raw->last_validated.load(std::memory_order_relaxed) >= static_cast<std::int64_t>(cfg_.cache_revalidate_s)) {
+        now - raw->last_validated.load(std::memory_order_relaxed) >=
+            static_cast<std::int64_t>(cfg_.cache_revalidate_s)) {
         FileInfo fi;
-        if (!stat_path(raw->file_path.c_str(), fi) || !fi.is_regular || fi.mtime != raw->mtime || fi.size != raw->size) {
+        if (!stat_path(raw->file_path.c_str(), fi) || !fi.is_regular || fi.mtime != raw->mtime ||
+            fi.size != raw->size) {
             cache_.erase(key, raw);
             ws.local.erase(key);
             raw = nullptr;
@@ -238,7 +265,8 @@ void RequestHandler::handle(const Request& req, const Route& route, WorkerState&
     }
     if (raw) {
         // Write the shared line at most once per second, not once per hit.
-        if (raw->last_access.load(std::memory_order_relaxed) != now) raw->last_access.store(now, std::memory_order_relaxed);
+        if (raw->last_access.load(std::memory_order_relaxed) != now)
+            raw->last_access.store(now, std::memory_order_relaxed);
         // Exactly one strong reference is taken for the duration of the response.
         EntryPtr ref = fetched ? std::move(fetched) : *local;
         serve_entry(req, std::move(ref), now, ws, plan);
@@ -300,7 +328,11 @@ void RequestHandler::handle(const Request& req, const Route& route, WorkerState&
         entry->headers.reserve(160);
         entry->headers.append("Content-Type: ").append(mime_for_path(ws.fs_path)).append("\r\nContent-Length: ");
         append_number(entry->headers, fi.size);
-        entry->headers.append("\r\nLast-Modified: ").append(entry->last_modified).append("\r\nETag: ").append(entry->etag).append("\r\n\r\n");
+        entry->headers.append("\r\nLast-Modified: ")
+            .append(entry->last_modified)
+            .append("\r\nETag: ")
+            .append(entry->etag)
+            .append("\r\n\r\n");
         entry->last_access.store(now, std::memory_order_relaxed);
         entry->last_validated.store(now, std::memory_order_relaxed);
 

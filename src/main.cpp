@@ -9,7 +9,8 @@
 namespace {
 
 void usage() {
-    std::cout << "agensio " AGENSIO_VERSION " - a fast static web server built on Asio\n\n"
+    std::cout << "agensio " AGENSIO_VERSION
+                 " - a fast static web server built on Asio\n\n"
                  "usage: agensio [-c config.toml] [-t] [-v]\n"
                  "  -c, --config FILE   configuration file (default: agensio.toml, then config/agensio.toml)\n"
                  "  -t, --test          check the configuration and exit\n"
@@ -24,6 +25,7 @@ std::filesystem::path default_config() {
 
 }  // namespace
 
+// NOLINTNEXTLINE(bugprone-exception-escape): everything that can throw is inside the try blocks below.
 int main(int argc, char** argv) {
     std::filesystem::path config_path;
     bool test_only = false;
@@ -31,9 +33,17 @@ int main(int argc, char** argv) {
         std::string a = argv[i];
         if ((a == "-c" || a == "--config") && i + 1 < argc) config_path = argv[++i];
         else if (a == "-t" || a == "--test") test_only = true;
-        else if (a == "-v" || a == "--version") { std::cout << "agensio " AGENSIO_VERSION "\n"; return 0; }
-        else if (a == "-h" || a == "--help") { usage(); return 0; }
-        else { std::cerr << "unknown argument: " << a << "\n"; usage(); return 2; }
+        else if (a == "-v" || a == "--version") {
+            std::cout << "agensio " AGENSIO_VERSION "\n";
+            return 0;
+        } else if (a == "-h" || a == "--help") {
+            usage();
+            return 0;
+        } else {
+            std::cerr << "unknown argument: " << a << "\n";
+            usage();
+            return 2;
+        }
     }
     if (config_path.empty()) config_path = default_config();
 
@@ -55,7 +65,8 @@ int main(int argc, char** argv) {
                   << (server.reuse_port_enabled() ? ", SO_REUSEPORT per worker" : ", shared acceptor") << "\n";
         for (const auto& l : server.listeners()) {
             std::cout << "  listening on " << (l.tls ? "https://" : "http://") << l.address << "  sites:";
-            for (const auto& n : l.site_names) std::cout << ' ' << n;
+            for (const auto& n : l.site_names)
+                std::cout << ' ' << n;
             std::cout << "\n";
         }
         server.run();

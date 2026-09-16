@@ -63,7 +63,10 @@ std::int64_t File::read_at(void* buf, std::size_t len, std::uint64_t offset) con
 }
 
 void File::close() noexcept {
-    if (fd_ >= 0) { _close(fd_); fd_ = -1; }
+    if (fd_ >= 0) {
+        _close(fd_);
+        fd_ = -1;
+    }
 }
 
 #else
@@ -106,7 +109,10 @@ std::int64_t File::read_at(void* buf, std::size_t len, std::uint64_t offset) con
 }
 
 void File::close() noexcept {
-    if (fd_ >= 0) { ::close(fd_); fd_ = -1; }
+    if (fd_ >= 0) {
+        ::close(fd_);
+        fd_ = -1;
+    }
 }
 
 #endif
@@ -138,20 +144,37 @@ SendFileResult send_file(int socket_fd, const File& file, std::uint64_t offset, 
     r.sent = static_cast<std::int64_t>(sbytes);
 #endif
     if (rc == 0) return r;
-    if (errno == EAGAIN || errno == EINTR) { r.would_block = true; return r; }
+    if (errno == EAGAIN || errno == EINTR) {
+        r.would_block = true;
+        return r;
+    }
     r.sent = -1;
     return r;
 #elif defined(__linux__)
-    if (header_count > 0) { r.headers_unsupported = true; return r; }
+    if (header_count > 0) {
+        r.headers_unsupported = true;
+        return r;
+    }
     off_t off = static_cast<off_t>(offset);
     std::size_t chunk = static_cast<std::size_t>(count > 0x7ffff000u ? 0x7ffff000u : count);
     ssize_t n = ::sendfile(socket_fd, file.native_handle(), &off, chunk);
-    if (n >= 0) { r.sent = n; return r; }
-    if (errno == EAGAIN || errno == EINTR) { r.would_block = true; return r; }
+    if (n >= 0) {
+        r.sent = n;
+        return r;
+    }
+    if (errno == EAGAIN || errno == EINTR) {
+        r.would_block = true;
+        return r;
+    }
     r.sent = -1;
     return r;
 #else
-    (void)socket_fd; (void)file; (void)offset; (void)count; (void)headers; (void)header_count;
+    (void)socket_fd;
+    (void)file;
+    (void)offset;
+    (void)count;
+    (void)headers;
+    (void)header_count;
     r.unsupported = true;
     return r;
 #endif

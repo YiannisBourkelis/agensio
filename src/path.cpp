@@ -2,6 +2,8 @@
 
 #include <cstring>
 
+#include "strings.hpp"
+
 namespace agensio {
 
 namespace {
@@ -19,9 +21,9 @@ bool normalize_target(std::string_view target, std::string& out) {
 
     // Strip query (and fragment, which clients should never send).
     auto q = target.find('?');
-    if (q != std::string_view::npos) target = target.substr(0, q);
+    if (q != std::string_view::npos) target = slice(target, 0, q);
     auto h = target.find('#');
-    if (h != std::string_view::npos) target = target.substr(0, h);
+    if (h != std::string_view::npos) target = slice(target, 0, h);
 
     // 1. Percent-decode into `out`.
     out.reserve(target.size() + 1);
@@ -49,11 +51,12 @@ bool normalize_target(std::string_view target, std::string& out) {
         if (e == std::string::npos) e = n;
         const std::size_t len = e - r;
         if (len == 0 || (len == 1 && out[r] == '.')) {
-            dir = true;                                  // "//", "/./", trailing "/"
+            dir = true;  // "//", "/./", trailing "/"
         } else if (len == 2 && out[r] == '.' && out[r + 1] == '.') {
-            if (w == 0) return false;                    // would climb above the root
-            while (w > 0 && out[w - 1] != '/') --w;      // drop the last segment
-            --w;                                         // and its leading slash
+            if (w == 0) return false;  // would climb above the root
+            while (w > 0 && out[w - 1] != '/')
+                --w;  // drop the last segment
+            --w;      // and its leading slash
             dir = true;
         } else {
             out[w++] = '/';

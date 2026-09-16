@@ -10,7 +10,7 @@ namespace agensio {
 
 struct FileInfo {
     std::uint64_t size = 0;
-    std::int64_t mtime = 0;     // seconds since epoch
+    std::int64_t mtime = 0;  // seconds since epoch
     bool is_regular = false;
     bool is_directory = false;
 };
@@ -25,7 +25,10 @@ public:
     File& operator=(const File&) = delete;
     File(File&& o) noexcept : fd_(std::exchange(o.fd_, -1)) {}
     File& operator=(File&& o) noexcept {
-        if (this != &o) { close(); fd_ = std::exchange(o.fd_, -1); }
+        if (this != &o) {
+            close();
+            fd_ = std::exchange(o.fd_, -1);
+        }
         return *this;
     }
     ~File() { close(); }
@@ -56,10 +59,10 @@ struct IoSlice {
 };
 
 struct SendFileResult {
-    std::int64_t sent = 0;            // bytes handed to the socket in this call (headers included)
-    bool would_block = false;         // socket buffer full; wait for writability and call again
-    bool unsupported = false;         // platform has no sendfile: use the read/write path
-    bool headers_unsupported = false; // platform cannot attach headers: write them first, then call again
+    std::int64_t sent = 0;             // bytes handed to the socket in this call (headers included)
+    bool would_block = false;          // socket buffer full; wait for writability and call again
+    bool unsupported = false;          // platform has no sendfile: use the read/write path
+    bool headers_unsupported = false;  // platform cannot attach headers: write them first, then call again
 };
 
 // Zero-copy file-to-socket transfer (sendfile on macOS, Linux, FreeBSD). The socket

@@ -14,9 +14,11 @@ namespace fs = std::filesystem;
 
 std::size_t parse_size(std::string_view text) {
     std::size_t i = 0;
-    while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i]))) ++i;
+    while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i])))
+        ++i;
     std::size_t start = i;
-    while (i < text.size() && std::isdigit(static_cast<unsigned char>(text[i]))) ++i;
+    while (i < text.size() && std::isdigit(static_cast<unsigned char>(text[i])))
+        ++i;
     if (start == i) throw std::invalid_argument("size must start with a number: '" + std::string(text) + "'");
     std::uint64_t value = 0;
     auto [ptr, ec] = std::from_chars(text.data() + start, text.data() + i, value);
@@ -24,7 +26,8 @@ std::size_t parse_size(std::string_view text) {
     std::string unit;
     for (; i < text.size(); ++i) {
         char c = text[i];
-        if (!std::isspace(static_cast<unsigned char>(c))) unit += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (!std::isspace(static_cast<unsigned char>(c)))
+            unit += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     }
     std::uint64_t mult = 1;
     if (unit.empty() || unit == "b") mult = 1;
@@ -38,11 +41,14 @@ std::size_t parse_size(std::string_view text) {
 namespace {
 
 std::string to_lower(std::string s) {
-    for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (auto& c : s)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return s;
 }
 
-[[noreturn]] void fail(const std::string& msg) { throw std::runtime_error(msg); }
+[[noreturn]] void fail(const std::string& msg) {
+    throw std::runtime_error(msg);
+}
 
 std::size_t size_node(const toml::node_view<const toml::node>& n, std::size_t fallback, const char* what) {
     if (!n) return fallback;
@@ -53,9 +59,7 @@ std::size_t size_node(const toml::node_view<const toml::node>& n, std::size_t fa
     if (auto s = n.value<std::string>()) {
         try {
             return parse_size(*s);
-        } catch (const std::exception& e) {
-            fail(std::string(what) + ": " + e.what());
-        }
+        } catch (const std::exception& e) { fail(std::string(what) + ": " + e.what()); }
     }
     fail(std::string(what) + " must be an integer or a size string like \"4MB\"");
 }
@@ -107,10 +111,12 @@ fs::path resolve(const fs::path& base_dir, const std::string& p) {
 
 void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, const std::string& where) {
     SiteConfig site;
-    for (auto& n : string_list(t["server_name"], (where + ".server_name").c_str())) site.server_names.push_back(to_lower(n));
+    for (auto& n : string_list(t["server_name"], (where + ".server_name").c_str()))
+        site.server_names.push_back(to_lower(n));
     if (site.server_names.empty()) site.server_names.push_back("*");
 
-    for (auto& l : string_list(t["listen"], (where + ".listen").c_str())) site.listen.push_back(normalise_listen(l));
+    for (auto& l : string_list(t["listen"], (where + ".listen").c_str()))
+        site.listen.push_back(normalise_listen(l));
     if (site.listen.empty()) fail(where + ": 'listen' is required");
 
     auto root = t["root"].value<std::string>();
@@ -120,7 +126,8 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     if (!fs::is_directory(root_path, ec)) fail(where + ": root '" + root_path.string() + "' is not a directory");
     site.root = fs::canonical(root_path, ec).string();
     if (ec) fail(where + ": cannot resolve root '" + root_path.string() + "'");
-    while (site.root.size() > 1 && site.root.back() == '/') site.root.pop_back();
+    while (site.root.size() > 1 && site.root.back() == '/')
+        site.root.pop_back();
 
     if (t.contains("index")) {
         site.index = string_list(t["index"], (where + ".index").c_str());
@@ -223,7 +230,8 @@ Config load_config(const fs::path& path) {
     cfg.cache_max_size = size_node(cache["max_size"], cfg.cache_max_size, "cache.max_size");
     cfg.stream_chunk_size = size_node(cache["stream_chunk_size"], cfg.stream_chunk_size, "cache.stream_chunk_size");
     if (cfg.stream_chunk_size < 4096) fail("cache.stream_chunk_size must be at least 4096");
-    cfg.cache_sendfile_min_size = size_node(cache["sendfile_min_size"], cfg.cache_sendfile_min_size, "cache.sendfile_min_size");
+    cfg.cache_sendfile_min_size =
+        size_node(cache["sendfile_min_size"], cfg.cache_sendfile_min_size, "cache.sendfile_min_size");
     if (auto f = cache["evict_fraction"].value<double>()) {
         if (*f <= 0.0 || *f > 1.0) fail("cache.evict_fraction must be in (0, 1]");
         cfg.cache_evict_fraction = *f;

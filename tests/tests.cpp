@@ -15,14 +15,21 @@
 using namespace agensio;
 
 static int failures = 0;
-#define CHECK(cond)                                                                       \
-    do {                                                                                  \
-        if (!(cond)) { std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); ++failures; } \
+#define CHECK(cond)                                                     \
+    do {                                                                \
+        if (!(cond)) {                                                  \
+            std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
+            ++failures;                                                 \
+        }                                                               \
     } while (0)
-#define CHECK_EQ(a, b)                                                                              \
-    do {                                                                                            \
-        auto _a = (a); auto _b = (b);                                                               \
-        if (!(_a == _b)) { std::printf("FAIL %s:%d: %s == %s\n", __FILE__, __LINE__, #a, #b); ++failures; } \
+#define CHECK_EQ(a, b)                                                         \
+    do {                                                                       \
+        auto _a = (a);                                                         \
+        auto _b = (b);                                                         \
+        if (!(_a == _b)) {                                                     \
+            std::printf("FAIL %s:%d: %s == %s\n", __FILE__, __LINE__, #a, #b); \
+            ++failures;                                                        \
+        }                                                                      \
     } while (0)
 
 static std::string norm(std::string_view t) {
@@ -104,7 +111,8 @@ static void test_parser() {
     CHECK_EQ(r.length, two.size() / 2);
 
     // Conditional headers.
-    CHECK(parse_request("GET / HTTP/1.1\r\nHost: a\r\nIf-None-Match: \"abc\"\r\nIf-Modified-Since: x\r\n\r\n", r) == ParseStatus::complete);
+    CHECK(parse_request("GET / HTTP/1.1\r\nHost: a\r\nIf-None-Match: \"abc\"\r\nIf-Modified-Since: x\r\n\r\n", r) ==
+          ParseStatus::complete);
     CHECK_EQ(r.if_none_match, "\"abc\"");
     CHECK_EQ(r.if_modified_since, "x");
 
@@ -148,7 +156,9 @@ static void test_size() {
     CHECK_EQ(parse_size("2 MB"), 2u * 1024 * 1024);
     CHECK_EQ(parse_size("1g"), 1024u * 1024 * 1024);
     bool threw = false;
-    try { parse_size("abc"); } catch (const std::exception&) { threw = true; }
+    try {
+        parse_size("abc");
+    } catch (const std::exception&) { threw = true; }
     CHECK(threw);
 }
 
@@ -220,7 +230,10 @@ int main() {
     test_size();
     test_cache();
     test_route_and_etag();
-    if (failures) { std::printf("%d failure(s)\n", failures); return 1; }
+    if (failures) {
+        std::printf("%d failure(s)\n", failures);
+        return 1;
+    }
     std::printf("all tests passed\n");
     return 0;
 }

@@ -54,8 +54,12 @@ public:
     }
 
     TlsStream(TlsStream&& o) noexcept
-        : socket_(std::move(o.socket_)), ssl_(std::move(o.ssl_)), rbio_(std::exchange(o.rbio_, nullptr)),
-          rbuf_(std::move(o.rbuf_)), rpos_(o.rpos_), rlen_(o.rlen_) {
+        : socket_(std::move(o.socket_)),
+          ssl_(std::move(o.ssl_)),
+          rbio_(std::exchange(o.rbio_, nullptr)),
+          rbuf_(std::move(o.rbuf_)),
+          rpos_(o.rpos_),
+          rlen_(o.rlen_) {
         if (rbio_) BIO_set_data(rbio_, this);  // the read BIO calls back into this object
     }
     TlsStream& operator=(TlsStream&&) = delete;
@@ -70,7 +74,10 @@ public:
 
     // Best-effort close_notify; never blocks, errors ignored.
     void shutdown_notify() noexcept {
-        if (ssl_) { SSL_shutdown(ssl_.get()); ERR_clear_error(); }
+        if (ssl_) {
+            SSL_shutdown(ssl_.get());
+            ERR_clear_error();
+        }
     }
 
     // Server-side handshake. Handler: void(std::error_code).
@@ -83,7 +90,10 @@ public:
     template <class MutableBufferSequence, class Handler>
     void async_read_some(const MutableBufferSequence& buffers, Handler&& handler) {
         asio::mutable_buffer b = first_buffer<asio::mutable_buffer>(buffers);
-        if (b.size() == 0) { complete(std::forward<Handler>(handler), std::error_code(), 0); return; }
+        if (b.size() == 0) {
+            complete(std::forward<Handler>(handler), std::error_code(), 0);
+            return;
+        }
         do_read(b, std::forward<Handler>(handler));
     }
 
@@ -91,7 +101,10 @@ public:
     template <class ConstBufferSequence, class Handler>
     void async_write_some(const ConstBufferSequence& buffers, Handler&& handler) {
         asio::const_buffer b = first_buffer<asio::const_buffer>(buffers);
-        if (b.size() == 0) { complete(std::forward<Handler>(handler), std::error_code(), 0); return; }
+        if (b.size() == 0) {
+            complete(std::forward<Handler>(handler), std::error_code(), 0);
+            return;
+        }
         do_write(b, std::forward<Handler>(handler));
     }
 
@@ -100,7 +113,8 @@ private:
     static Buffer first_buffer(const Sequence& s) {
         auto it = asio::buffer_sequence_begin(s);
         auto end = asio::buffer_sequence_end(s);
-        while (it != end && Buffer(*it).size() == 0) ++it;
+        while (it != end && Buffer(*it).size() == 0)
+            ++it;
         return it == end ? Buffer() : Buffer(*it);
     }
 
@@ -140,7 +154,10 @@ private:
     template <class Handler>
     void do_handshake(Handler handler) {
         int ret = SSL_do_handshake(ssl_.get());
-        if (ret == 1) { complete(std::move(handler), std::error_code()); return; }
+        if (ret == 1) {
+            complete(std::move(handler), std::error_code());
+            return;
+        }
         int err = SSL_get_error(ssl_.get(), ret);
         if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
             retry_after(err, [this, h = std::move(handler)](std::error_code ec) mutable {
@@ -157,7 +174,10 @@ private:
     template <class Handler>
     void do_read(asio::mutable_buffer b, Handler handler) {
         int ret = SSL_read(ssl_.get(), b.data(), static_cast<int>(std::min<std::size_t>(b.size(), 1u << 30)));
-        if (ret > 0) { complete(std::move(handler), std::error_code(), static_cast<std::size_t>(ret)); return; }
+        if (ret > 0) {
+            complete(std::move(handler), std::error_code(), static_cast<std::size_t>(ret));
+            return;
+        }
         int err = SSL_get_error(ssl_.get(), ret);
         if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
             retry_after(err, [this, b, h = std::move(handler)](std::error_code ec) mutable {
@@ -177,7 +197,10 @@ private:
         // and only returns early on WANT_WRITE, after which it must be retried with the
         // same arguments (OpenSSL remembers its position).
         int ret = SSL_write(ssl_.get(), b.data(), static_cast<int>(std::min<std::size_t>(b.size(), 1u << 30)));
-        if (ret > 0) { complete(std::move(handler), std::error_code(), static_cast<std::size_t>(ret)); return; }
+        if (ret > 0) {
+            complete(std::move(handler), std::error_code(), static_cast<std::size_t>(ret));
+            return;
+        }
         int err = SSL_get_error(ssl_.get(), ret);
         if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
             retry_after(err, [this, b, h = std::move(handler)](std::error_code ec) mutable {
@@ -203,11 +226,12 @@ private:
                 rlen_ -= rpos_;
                 rpos_ = 0;
             }
-            socket_.async_read_some(asio::buffer(rbuf_.get() + rlen_, kReadBufferSize - rlen_),
-                                    immediate([this, r = std::forward<Retry>(retry)](std::error_code ec, std::size_t n) mutable {
-                                        rlen_ += n;
-                                        r(ec);
-                                    }));
+            socket_.async_read_some(
+                asio::buffer(rbuf_.get() + rlen_, kReadBufferSize - rlen_),
+                immediate([this, r = std::forward<Retry>(retry)](std::error_code ec, std::size_t n) mutable {
+                    rlen_ += n;
+                    r(ec);
+                }));
         } else {
             socket_.async_wait(socket_type::wait_write, std::forward<Retry>(retry));
         }
@@ -231,13 +255,16 @@ private:
     }
     static long bio_ctrl(BIO* b, int cmd, long, void*) {
         switch (cmd) {
-            case BIO_CTRL_FLUSH: return 1;
-            case BIO_CTRL_EOF: return 0;
+            case BIO_CTRL_FLUSH:
+                return 1;
+            case BIO_CTRL_EOF:
+                return 0;
             case BIO_CTRL_PENDING: {
                 auto* self = static_cast<TlsStream*>(BIO_get_data(b));
                 return static_cast<long>(self->rlen_ - self->rpos_);
             }
-            default: return 0;
+            default:
+                return 0;
         }
     }
     static BIO_METHOD* read_bio_method() {
@@ -245,7 +272,10 @@ private:
             BIO_METHOD* method = BIO_meth_new(BIO_get_new_index() | BIO_TYPE_SOURCE_SINK, "agensio_read_buffer");
             BIO_meth_set_read_ex(method, &bio_read_ex);
             BIO_meth_set_ctrl(method, &bio_ctrl);
-            BIO_meth_set_create(method, [](BIO* b) { BIO_set_init(b, 1); return 1; });
+            BIO_meth_set_create(method, [](BIO* b) {
+                BIO_set_init(b, 1);
+                return 1;
+            });
             BIO_meth_set_destroy(method, [](BIO*) { return 1; });
             return method;
         }();
@@ -254,17 +284,21 @@ private:
 
     static constexpr std::size_t kReadBufferSize = 17 * 1024;  // one max-size TLS record plus overhead
 
-    struct SslDeleter { void operator()(SSL* s) const noexcept { SSL_free(s); } };
-    struct BioDeleter { void operator()(BIO* b) const noexcept { BIO_free(b); } };
+    struct SslDeleter {
+        void operator()(SSL* s) const noexcept { SSL_free(s); }
+    };
+    struct BioDeleter {
+        void operator()(BIO* b) const noexcept { BIO_free(b); }
+    };
     using SslPtr = std::unique_ptr<SSL, SslDeleter>;
     using BioPtr = std::unique_ptr<BIO, BioDeleter>;
 
     socket_type socket_;
     SslPtr ssl_;
-    BIO* rbio_ = nullptr;             // non-owning: owned by ssl_, used to update the callback data on move
-    std::unique_ptr<char[]> rbuf_;    // ciphertext staging read by the custom BIO
-    std::size_t rpos_ = 0;            // consumed
-    std::size_t rlen_ = 0;            // filled
+    BIO* rbio_ = nullptr;           // non-owning: owned by ssl_, used to update the callback data on move
+    std::unique_ptr<char[]> rbuf_;  // ciphertext staging read by the custom BIO
+    std::size_t rpos_ = 0;          // consumed
+    std::size_t rlen_ = 0;          // filled
 };
 
 }  // namespace agensio

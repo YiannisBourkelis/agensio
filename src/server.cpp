@@ -5,6 +5,7 @@
 
 #include "connection.hpp"
 #include "file.hpp"
+#include "response.hpp"
 
 #ifdef AGENSIO_HAS_TLS
 #include <openssl/ssl.h>
@@ -38,18 +39,24 @@ Server::Server(Config cfg)
     : cfg_(std::move(cfg)),
       cache_(cfg_.cache_max_file_size, cfg_.cache_max_size, cfg_.cache_evict_fraction),
       handler_(cfg_, cache_) {
+    warm_response_tables();
     build_listeners();
     build_workers();
 }
 
-Server::~Server() { stop(); }
+Server::~Server() {
+    stop();
+}
 
 void Server::build_listeners() {
     for (const auto& site : cfg_.sites) {
         for (const auto& address : site.listen) {
             Listener* l = nullptr;
             for (auto& existing : listeners_)
-                if (existing.address == address) { l = &existing; break; }
+                if (existing.address == address) {
+                    l = &existing;
+                    break;
+                }
             if (!l) {
                 listeners_.emplace_back();
                 l = &listeners_.back();
@@ -68,7 +75,8 @@ void Server::build_listeners() {
                     // SSL_MODE_RELEASE_BUFFERS deliberately not set: it costs a malloc/free per record.
                     SSL_CTX_set_options(l->ssl->native_handle(), SSL_OP_NO_COMPRESSION);
 #else
-                    throw std::runtime_error("site on " + address + " requires TLS but agensio was built without OpenSSL");
+                    throw std::runtime_error("site on " + address +
+                                             " requires TLS but agensio was built without OpenSSL");
 #endif
                 }
             }
@@ -89,7 +97,8 @@ void Server::build_listeners() {
 void Server::build_workers() {
     unsigned n = cfg_.workers ? cfg_.workers : std::thread::hardware_concurrency();
     if (n == 0) n = 1;
-    for (unsigned i = 0; i < n; ++i) workers_.push_back(std::make_unique<Worker>(i));
+    for (unsigned i = 0; i < n; ++i)
+        workers_.push_back(std::make_unique<Worker>(i));
 
     reuse_port_ = false;
     if (cfg_.reuse_port == "on") reuse_port_ = kHasReusePort;
@@ -120,57 +129,70 @@ void Server::open_acceptor(Listener& listener, Worker& worker, bool reuse_port) 
 
 void Server::start_accept(std::size_t index) {
     Acceptor& acc = *acceptors_[index];
-    Worker& target = reuse_port_ ? *acc.owner : *workers_[next_worker_.fetch_add(1, std::memory_order_relaxed) % workers_.size()];
-    acc.socket.async_accept(target.ctx, [this, index, &acc, &target](const asio::error_code& ec, asio::ip::tcp::socket sock) {
-        if (ec == asio::error::operation_aborted || stopping_.load(std::memory_order_relaxed)) return;
-        if (!ec) {
-            if (cfg_.tcp_nodelay) {
-                asio::error_code ignored;
-                sock.set_option(asio::ip::tcp::no_delay(true), ignored);
-            }
-            const Listener& l = *acc.listener;
-            if (l.tls) {
+    Worker& target =
+        reuse_port_ ? *acc.owner : *workers_[next_worker_.fetch_add(1, std::memory_order_relaxed) % workers_.size()];
+    acc.socket.async_accept(
+        target.ctx, [this, index, &acc, &target](const asio::error_code& ec, asio::ip::tcp::socket sock) {
+            if (ec == asio::error::operation_aborted || stopping_.load(std::memory_order_relaxed)) return;
+            if (!ec) {
+                if (cfg_.tcp_nodelay) {
+                    asio::error_code ignored;
+                    sock.set_option(asio::ip::tcp::no_delay(true), ignored);
+                }
+                const Listener& l = *acc.listener;
+                if (l.tls) {
 #ifdef AGENSIO_HAS_TLS
-                auto c = std::make_shared<Connection<TlsStream>>(TlsStream(std::move(sock), *l.ssl), target, l, cfg_, handler_);
-                if (&target == acc.owner) c->start();
-                else asio::post(target.ctx, [c] { c->start(); });
+                    auto c = std::make_shared<Connection<TlsStream>>(TlsStream(std::move(sock), *l.ssl), target, l,
+                                                                     cfg_, handler_);
+                    if (&target == acc.owner) c->start();
+                    else asio::post(target.ctx, [c] { c->start(); });
 #endif
-            } else {
-                auto c = std::make_shared<Connection<asio::ip::tcp::socket>>(std::move(sock), target, l, cfg_, handler_);
-                if (&target == acc.owner) c->start();
-                else asio::post(target.ctx, [c] { c->start(); });
+                } else {
+                    auto c =
+                        std::make_shared<Connection<asio::ip::tcp::socket>>(std::move(sock), target, l, cfg_, handler_);
+                    if (&target == acc.owner) c->start();
+                    else asio::post(target.ctx, [c] { c->start(); });
+                }
             }
-        }
-        start_accept(index);
-    });
+            start_accept(index);
+        });
 }
 
 void Server::run() {
     raise_open_file_limit();
     if (reuse_port_) {
         for (auto& l : listeners_)
-            for (auto& w : workers_) open_acceptor(l, *w, true);
+            for (auto& w : workers_)
+                open_acceptor(l, *w, true);
     } else {
-        for (auto& l : listeners_) open_acceptor(l, *workers_[0], false);
+        for (auto& l : listeners_)
+            open_acceptor(l, *workers_[0], false);
     }
-    for (auto& w : workers_) guards_.push_back(std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(w->ctx.get_executor()));
-    for (std::size_t i = 0; i < acceptors_.size(); ++i) start_accept(i);
+    for (auto& w : workers_)
+        guards_.push_back(
+            std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(w->ctx.get_executor()));
+    for (std::size_t i = 0; i < acceptors_.size(); ++i)
+        start_accept(i);
 
     asio::signal_set signals(workers_[0]->ctx, SIGINT, SIGTERM);
-    signals.async_wait([this](const asio::error_code& ec, int) { if (!ec) stop(); });
+    signals.async_wait([this](const asio::error_code& ec, int) {
+        if (!ec) stop();
+    });
 
     for (std::size_t i = 1; i < workers_.size(); ++i) {
         Worker* w = workers_[i].get();
         threads_.emplace_back([w] { w->ctx.run(); });
     }
     workers_[0]->ctx.run();
-    for (auto& t : threads_) t.join();
+    for (auto& t : threads_)
+        t.join();
     threads_.clear();
 }
 
 void Server::stop() {
     if (stopping_.exchange(true)) return;
-    for (auto& w : workers_) w->ctx.stop();
+    for (auto& w : workers_)
+        w->ctx.stop();
 }
 
 }  // namespace agensio

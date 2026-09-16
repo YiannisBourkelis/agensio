@@ -7,4 +7,9 @@ TIDY="$(command -v clang-tidy || echo /opt/homebrew/opt/llvm/bin/clang-tidy)"
 [ -x "$TIDY" ] || { echo "clang-tidy not found (brew install llvm)"; exit 1; }
 [ -f "$BUILD/compile_commands.json" ] || { echo "configure first: cmake -S $ROOT -B $BUILD"; exit 1; }
 cd "$ROOT"
-"$TIDY" -p "$BUILD" --quiet src/*.cpp "$@"
+EXTRA=()
+if [ "$(uname)" = "Darwin" ]; then
+  # Homebrew's clang-tidy does not know the Apple SDK; point it at the standard headers.
+  EXTRA+=(--extra-arg="-isysroot$(xcrun --show-sdk-path)")
+fi
+"$TIDY" -p "$BUILD" --quiet "${EXTRA[@]}" src/*.cpp "$@"

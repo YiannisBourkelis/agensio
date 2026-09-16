@@ -48,7 +48,10 @@ public:
         if constexpr (is_tls_stream<Stream>::value) {
             auto self = this->shared_from_this();
             stream_.async_handshake([self](const asio::error_code& ec) {
-                if (ec) { self->close(); return; }
+                if (ec) {
+                    self->close();
+                    return;
+                }
                 self->last_activity_ = std::chrono::steady_clock::now();
                 self->do_read();
             });
@@ -92,7 +95,10 @@ private:
     }
 
     void on_read(const asio::error_code& ec, std::size_t n) {
-        if (ec) { close(); return; }
+        if (ec) {
+            close();
+            return;
+        }
         in_len_ += n;
         // last_activity_ is refreshed once per response in on_write; a second clock read
         // here was visible in profiles and buys nothing for the idle timer.
@@ -128,7 +134,8 @@ private:
         const auto& p = plan_;
         const std::string_view body = p.body == ResponsePlan::Body::entry
                                           ? std::string_view(p.entry->data.data(), p.entry->data.size())
-                                          : p.body == ResponsePlan::Body::inline_text ? p.inline_text : std::string_view();
+                                      : p.body == ResponsePlan::Body::inline_text ? p.inline_text
+                                                                                  : std::string_view();
         if constexpr (is_tls_stream<Stream>::value) {
             // TlsStream encrypts one buffer per write_some, so coalesce everything up to
             // one full-size record; the rest of the body follows as-is.
@@ -139,10 +146,12 @@ private:
             const std::size_t room = out_.size() < kRecord ? kRecord - out_.size() : 0;
             const std::size_t take = std::min(room, body.size());
             out_.insert(out_.end(), body.data(), body.data() + take);
-            if (take == body.size())
-                asio::async_write(stream_, asio::buffer(out_), done);
+            if (take == body.size()) asio::async_write(stream_, asio::buffer(out_), done);
             else
-                asio::async_write(stream_, std::array<asio::const_buffer, 2>{asio::buffer(out_), asio::buffer(body.data() + take, body.size() - take)}, done);
+                asio::async_write(stream_,
+                                  std::array<asio::const_buffer, 2>{
+                                      asio::buffer(out_), asio::buffer(body.data() + take, body.size() - take)},
+                                  done);
             return;
         } else {
             if (cfg_.sendfile && !sendfile_unsupported_) {
@@ -165,18 +174,32 @@ private:
             if (!p.tail.empty()) bufs[n++] = asio::buffer(p.tail);
             if (!body.empty()) bufs[n++] = asio::buffer(body);
             switch (n) {
-                case 1: asio::async_write(stream_, bufs[0], done); return;
-                case 2: asio::async_write(stream_, std::array<asio::const_buffer, 2>{bufs[0], bufs[1]}, done); return;
-                case 3: asio::async_write(stream_, std::array<asio::const_buffer, 3>{bufs[0], bufs[1], bufs[2]}, done); return;
-                default: asio::async_write(stream_, bufs, done); return;
+                case 1:
+                    asio::async_write(stream_, bufs[0], done);
+                    return;
+                case 2:
+                    asio::async_write(stream_, std::array<asio::const_buffer, 2>{bufs[0], bufs[1]}, done);
+                    return;
+                case 3:
+                    asio::async_write(stream_, std::array<asio::const_buffer, 3>{bufs[0], bufs[1], bufs[2]}, done);
+                    return;
+                default:
+                    asio::async_write(stream_, bufs, done);
+                    return;
             }
         }
     }
 
     void on_write(const asio::error_code& ec) {
-        if (ec) { close(); return; }
+        if (ec) {
+            close();
+            return;
+        }
         last_activity_ = std::chrono::steady_clock::now();
-        if (sf_file_) { sendfile_step(); return; }  // headers went out via writev; now the file
+        if (sf_file_) {
+            sendfile_step();
+            return;
+        }  // headers went out via writev; now the file
         if (plan_.body == ResponsePlan::Body::file && plan_.file_sent < plan_.file_size) {
             stream_chunk();
             return;
@@ -189,7 +212,10 @@ private:
         const std::uint64_t remaining = plan_.file_size - plan_.file_sent;
         const std::size_t want = static_cast<std::size_t>(std::min<std::uint64_t>(remaining, chunk_.size()));
         const std::int64_t got = plan_.file.read_at(chunk_.data(), want, plan_.file_sent);
-        if (got <= 0) { close(); return; }  // file shrank or read error: the client sees a short body
+        if (got <= 0) {
+            close();
+            return;
+        }  // file shrank or read error: the client sees a short body
         plan_.file_sent += static_cast<std::uint64_t>(got);
         auto self = this->shared_from_this();
         asio::async_write(stream_, asio::buffer(chunk_.data(), static_cast<std::size_t>(got)),
@@ -220,7 +246,10 @@ private:
         std::size_t skip = hdr_sent_;
         int n = 0;
         for (const auto& piece : pieces) {
-            if (skip >= piece.size()) { skip -= piece.size(); continue; }
+            if (skip >= piece.size()) {
+                skip -= piece.size();
+                continue;
+            }
             iov[n++] = IoSlice{piece.data() + skip, piece.size() - skip};
             skip = 0;
         }
@@ -231,16 +260,22 @@ private:
         for (;;) {
             const std::uint64_t remaining = sf_size_ - sf_sent_;
             const std::size_t hdr_remaining = hdr_total_ - hdr_sent_;
-            if (remaining == 0 && hdr_remaining == 0) { sf_file_ = nullptr; finish_response(); return; }
+            if (remaining == 0 && hdr_remaining == 0) {
+                sf_file_ = nullptr;
+                finish_response();
+                return;
+            }
             IoSlice iov[3];
             const int n = hdr_remaining ? pending_headers(iov) : 0;
-            SendFileResult r = send_file(static_cast<int>(socket().native_handle()), *sf_file_, sf_sent_, remaining, iov, n);
+            SendFileResult r =
+                send_file(static_cast<int>(socket().native_handle()), *sf_file_, sf_sent_, remaining, iov, n);
             if (r.headers_unsupported) {
                 // Write the headers with writev; on_write() comes back here for the file.
                 auto self = this->shared_from_this();
                 std::array<asio::const_buffer, 3> bufs;
                 int k = 0;
-                for (int i = 0; i < n; ++i) bufs[k++] = asio::buffer(iov[i].data, iov[i].len);
+                for (int i = 0; i < n; ++i)
+                    bufs[k++] = asio::buffer(iov[i].data, iov[i].len);
                 hdr_sent_ = hdr_total_;
                 auto done = immediate([self](const asio::error_code& ec, std::size_t) { self->on_write(ec); });
                 if (k == 1) asio::async_write(stream_, bufs[0], done);
@@ -251,11 +286,17 @@ private:
             if (r.unsupported) {
                 sendfile_unsupported_ = true;
                 sf_file_ = nullptr;
-                if (plan_.body == ResponsePlan::Body::file) { write_response(); return; }  // header via writev, then pread chunks
+                if (plan_.body == ResponsePlan::Body::file) {
+                    write_response();
+                    return;
+                }  // header via writev, then pread chunks
                 write_response();  // entry: falls through to the writev path
                 return;
             }
-            if (r.sent < 0) { close(); return; }
+            if (r.sent < 0) {
+                close();
+                return;
+            }
             std::uint64_t sent = static_cast<std::uint64_t>(r.sent);
             if (hdr_remaining) {
                 const std::uint64_t h = std::min<std::uint64_t>(sent, hdr_remaining);
@@ -266,13 +307,19 @@ private:
             if (r.would_block) {
                 auto self = this->shared_from_this();
                 socket().async_wait(asio::ip::tcp::socket::wait_write, [self](const asio::error_code& ec) {
-                    if (ec) { self->close(); return; }
+                    if (ec) {
+                        self->close();
+                        return;
+                    }
                     self->last_activity_ = std::chrono::steady_clock::now();
                     self->sendfile_step();
                 });
                 return;
             }
-            if (r.sent == 0) { close(); return; }  // file shrank underneath us
+            if (r.sent == 0) {
+                close();
+                return;
+            }  // file shrank underneath us
         }
     }
 
@@ -283,7 +330,10 @@ private:
         if (consumed_ < in_len_) std::memmove(in_.data(), in_.data() + consumed_, in_len_ - consumed_);
         in_len_ -= consumed_;
         consumed_ = 0;
-        if (!keep_alive) { close(); return; }
+        if (!keep_alive) {
+            close();
+            return;
+        }
         if (in_len_ > 0) process();  // pipelined request already buffered
         else do_read();
     }
@@ -312,9 +362,9 @@ private:
     std::size_t in_len_ = 0;
     std::size_t consumed_ = 0;
     std::vector<char> chunk_;
-    std::vector<char> out_;   // TLS only: coalesced header + body prefix
+    std::vector<char> out_;  // TLS only: coalesced header + body prefix
     bool sendfile_unsupported_ = false;
-    const File* sf_file_ = nullptr;   // sendfile in progress (entry fd or plan_.file)
+    const File* sf_file_ = nullptr;  // sendfile in progress (entry fd or plan_.file)
     std::uint64_t sf_size_ = 0, sf_sent_ = 0;
     std::size_t hdr_total_ = 0, hdr_sent_ = 0;
     Request req_;

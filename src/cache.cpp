@@ -42,7 +42,10 @@ std::size_t FileCache::entry_count() {
 // Called with mutex_ held. Frees at least `needed` bytes plus evict_fraction_ of
 // the cache, oldest access first.
 void FileCache::evict_locked(std::size_t needed) {
-    struct Candidate { CacheMap::iterator it; std::int64_t last_access; };
+    struct Candidate {
+        CacheMap::iterator it;
+        std::int64_t last_access;
+    };
     std::vector<Candidate> candidates;
     candidates.reserve(map_.size());
     for (auto it = map_.begin(); it != map_.end(); ++it)

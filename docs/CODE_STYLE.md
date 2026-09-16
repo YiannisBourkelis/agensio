@@ -42,8 +42,14 @@ in checklist form for the coding agent.
 
 ### Interfaces and functions (I.*, F.*)
 - Small, single-purpose functions (F.2, F.3). `noexcept` where nothing can throw (F.6).
-- No exceptions on the request hot path; errors are `std::error_code`s or return values.
-  Exceptions are for configuration and startup only (E.2, E.3).
+- **Exceptions stay enabled in the compiler** (decided 2026-09-16) but are permitted only
+  in configuration loading and server construction, where `main` catches and reports.
+  The request path is exception-free and its functions are `noexcept`; errors there are
+  `std::error_code`s, return values, or (from phase A) an `expected`-style result type.
+  Rationale: with the table-based ABI non-throwing code pays nothing at runtime; the
+  flag would only cost friction with Asio and toml++. A `-fno-exceptions` build is a
+  planned phase A measurement; if it wins more than ~2 % CPU per request, we switch
+  (E.2, E.3; `bugprone-exception-escape` and `performance-noexcept-*` enforce this).
 - `const` by default; `constexpr` for compile-time constants (Con.1-5).
 - No global mutable state (I.2); per-worker state lives in `WorkerState`, shared state
   is read-mostly and documented.
@@ -93,9 +99,14 @@ in checklist form for the coding agent.
 - Comments say *why*, in English, and are kept current; measured facts carry the number.
 
 ## Tooling
+- `brew install llvm` (macOS) provides clang-format and clang-tidy in
+  `/opt/homebrew/opt/llvm/bin`; the scripts find them there.
 - `scripts/lint.sh`: clang-tidy with the checks in `.clang-tidy` (bugprone, cert,
   cppcoreguidelines, performance, concurrency, modernize, readability) over `src/`.
-- `scripts/format.sh`: clang-format check or fix.
+  Baseline 2026-09-16 after tuning: mostly `misc-const-correctness`,
+  `cppcoreguidelines-pro-type-member-init`, `avoid-c-arrays`; fix when touching a file.
+- `scripts/format.sh`: clang-format check (`--fix` rewrites). The whole tree was formatted
+  once on 2026-09-16; keep it that way.
 - Sanitizer builds: `cmake -B build-asan -DAGENSIO_SANITIZE=address,undefined` (added in
   phase A); hardened standard library (`_GLIBCXX_ASSERTIONS` / libc++ hardening) in
   Debug and test builds, per Herb Sutter's 2026 trip report on production hardening.

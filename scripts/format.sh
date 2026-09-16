@@ -3,6 +3,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+export PATH="/opt/homebrew/opt/llvm/bin:$PATH"
 FILES=$(git ls-files 'src/*.cpp' 'src/*.hpp' 'tests/*.cpp')
 if [ "${1:-}" = "--fix" ]; then
   clang-format -i $FILES

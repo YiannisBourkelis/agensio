@@ -27,7 +27,7 @@ struct Worker {
 };
 
 struct Listener {
-    std::string address;              // "host:port" as configured
+    std::string address;  // "host:port" as configured
     asio::ip::tcp::endpoint endpoint;
     Route route;
     bool tls = false;
@@ -59,7 +59,7 @@ private:
     struct Acceptor {
         asio::ip::tcp::acceptor socket;
         Listener* listener;
-        Worker* owner;   // the worker whose io_context runs this acceptor
+        Worker* owner;  // the worker whose io_context runs this acceptor
         Acceptor(asio::io_context& ctx, Listener* l, Worker* w) : socket(ctx), listener(l), owner(w) {}
     };
 

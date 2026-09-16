@@ -21,7 +21,18 @@ Checks: >
   -modernize-use-trailing-return-type,
   -readability-identifier-length,
   -readability-function-cognitive-complexity,
-  -misc-include-cleaner
+  -misc-include-cleaner,
+  -readability-braces-around-statements,
+  -readability-inconsistent-ifelse-braces,
+  -modernize-use-designated-initializers,
+  -readability-convert-member-functions-to-static,
+  -cppcoreguidelines-avoid-const-or-ref-data-members,
+  -readability-implicit-bool-conversion,
+  -readability-use-concise-preprocessor-directives,
+  -misc-no-recursion,
+  -cppcoreguidelines-pro-bounds-avoid-unchecked-container-access
+# Disabled on purpose: inline async completions recurse by design (Connection, TlsStream),
+# and parsers index buffers after an explicit length check for speed.
 WarningsAsErrors: ''
 HeaderFilterRegex: '.*/src/.*'
 FormatStyle: file

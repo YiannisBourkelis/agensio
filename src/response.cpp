@@ -6,7 +6,11 @@ namespace agensio {
 
 namespace {
 
-struct Status { int code; std::string_view line; std::string_view reason; };
+struct Status {
+    int code;
+    std::string_view line;
+    std::string_view reason;
+};
 
 constexpr Status kStatus[] = {
     {200, "HTTP/1.1 200 OK\r\n", "OK"},
@@ -37,7 +41,8 @@ const std::map<int, ErrorPage>& pages() {
             std::string title = std::to_string(s.code) + " " + std::string(s.reason);
             p.body = "<!doctype html><html><head><title>" + title + "</title></head><body><center><h1>" + title +
                      "</h1></center><hr><center>agensio</center></body></html>\n";
-            p.headers = "Content-Type: text/html; charset=utf-8\r\nContent-Length: " + std::to_string(p.body.size()) + "\r\n";
+            p.headers =
+                "Content-Type: text/html; charset=utf-8\r\nContent-Length: " + std::to_string(p.body.size()) + "\r\n";
             out.emplace(s.code, std::move(p));
         }
         return out;
@@ -47,12 +52,22 @@ const std::map<int, ErrorPage>& pages() {
 
 }  // namespace
 
-std::string_view status_line(int code) noexcept { return lookup(code).line; }
+std::string_view status_line(int code) noexcept {
+    return lookup(code).line;
+}
 
-const ErrorPage& error_page(int code) noexcept {
+void warm_response_tables() {
+    (void)pages();
+}
+
+// NOLINTNEXTLINE(bugprone-exception-escape): the page table is built once, at Server construction
+// (warm_response_tables).
+// The page table is built once at Server construction (warm_response_tables), so this cannot throw at runtime.
+const ErrorPage& error_page(int code) noexcept {  // NOLINT(bugprone-exception-escape)
     auto& m = pages();
     auto it = m.find(code);
-    return it == m.end() ? m.at(500) : it->second;
+    if (it == m.end()) it = m.find(500);  // always present
+    return it->second;
 }
 
 }  // namespace agensio

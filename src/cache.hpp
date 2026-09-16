@@ -29,10 +29,11 @@ namespace agensio {
 
 struct CacheEntry {
     std::vector<char> data;
-    File fd;                    // open descriptor for sendfile on plain sockets (may be closed)
-    std::string file_path;      // filesystem path, for revalidation
-    std::string headers;        // "Content-Type: ..\r\nContent-Length: ..\r\nLast-Modified: ..\r\nETag: ..\r\n\r\n" (terminated)
-    std::string etag;           // including the quotes
+    File fd;                // open descriptor for sendfile on plain sockets (may be closed)
+    std::string file_path;  // filesystem path, for revalidation
+    std::string
+        headers;       // "Content-Type: ..\r\nContent-Length: ..\r\nLast-Modified: ..\r\nETag: ..\r\n\r\n" (terminated)
+    std::string etag;  // including the quotes
     std::string last_modified;  // IMF-fixdate
     std::int64_t mtime = 0;
     std::uint64_t size = 0;
@@ -43,8 +44,8 @@ struct CacheEntry {
 };
 
 struct CacheKey {
-    const void* site = nullptr;   // identifies the virtual host
-    std::string path;             // normalised request path
+    const void* site = nullptr;  // identifies the virtual host
+    std::string path;            // normalised request path
 };
 
 struct CacheKeyView {
@@ -63,10 +64,18 @@ struct CacheKeyHash {
 
 struct CacheKeyEq {
     using is_transparent = void;
-    bool operator()(const CacheKeyView& a, const CacheKeyView& b) const noexcept { return a.site == b.site && a.path == b.path; }
-    bool operator()(const CacheKey& a, const CacheKeyView& b) const noexcept { return a.site == b.site && a.path == b.path; }
-    bool operator()(const CacheKeyView& a, const CacheKey& b) const noexcept { return a.site == b.site && a.path == b.path; }
-    bool operator()(const CacheKey& a, const CacheKey& b) const noexcept { return a.site == b.site && a.path == b.path; }
+    bool operator()(const CacheKeyView& a, const CacheKeyView& b) const noexcept {
+        return a.site == b.site && a.path == b.path;
+    }
+    bool operator()(const CacheKey& a, const CacheKeyView& b) const noexcept {
+        return a.site == b.site && a.path == b.path;
+    }
+    bool operator()(const CacheKeyView& a, const CacheKey& b) const noexcept {
+        return a.site == b.site && a.path == b.path;
+    }
+    bool operator()(const CacheKey& a, const CacheKey& b) const noexcept {
+        return a.site == b.site && a.path == b.path;
+    }
 };
 
 using EntryPtr = std::shared_ptr<CacheEntry>;

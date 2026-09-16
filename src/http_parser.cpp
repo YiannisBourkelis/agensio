@@ -2,17 +2,23 @@
 
 #include <cstring>
 
+#include "strings.hpp"
+
 namespace agensio {
 
 namespace {
 
-inline char lower(char c) noexcept { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c; }
+inline char lower(char c) noexcept {
+    return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
+}
 
 inline std::string_view trim(std::string_view s) noexcept {
     std::size_t b = 0, e = s.size();
-    while (b < e && (s[b] == ' ' || s[b] == '\t')) ++b;
-    while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t')) --e;
-    return s.substr(b, e - b);
+    while (b < e && (s[b] == ' ' || s[b] == '\t'))
+        ++b;
+    while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t'))
+        --e;
+    return slice(s, b, e - b);
 }
 
 // Finds the next line end. Returns the line (without CR/LF) and the index just past it.
@@ -24,7 +30,7 @@ inline bool next_line(std::string_view buf, std::size_t pos, std::string_view& l
     std::size_t lf_idx = static_cast<std::size_t>(static_cast<const char*>(lf) - buf.data());
     std::size_t end = lf_idx;
     if (end > pos && buf[end - 1] == '\r') --end;
-    line = buf.substr(pos, end - pos);
+    line = slice(buf, pos, end - pos);
     next = lf_idx + 1;
     return true;
 }
@@ -34,8 +40,21 @@ inline bool is_tchar(unsigned char c) noexcept {
     if (c >= 'A' && c <= 'Z') return true;
     if (c >= '0' && c <= '9') return true;
     switch (c) {
-        case '!': case '#': case '$': case '%': case '&': case '\'': case '*': case '+':
-        case '-': case '.': case '^': case '_': case '`': case '|': case '~':
+        case '!':
+        case '#':
+        case '$':
+        case '%':
+        case '&':
+        case '\'':
+        case '*':
+        case '+':
+        case '-':
+        case '.':
+        case '^':
+        case '_':
+        case '`':
+        case '|':
+        case '~':
             return true;
         default:
             return false;
@@ -56,7 +75,7 @@ bool has_token(std::string_view value, std::string_view token) noexcept {
     while (i < value.size()) {
         std::size_t j = value.find(',', i);
         if (j == std::string_view::npos) j = value.size();
-        if (iequals(trim(value.substr(i, j - i)), token)) return true;
+        if (iequals(trim(slice(value, i, j - i)), token)) return true;
         i = j + 1;
     }
     return false;
@@ -69,7 +88,8 @@ ParseStatus parse_request(std::string_view buf, Request& out) noexcept {
     std::size_t next = 0;
 
     // Tolerate leading CRLFs (RFC 7230 3.5).
-    while (pos < buf.size() && (buf[pos] == '\r' || buf[pos] == '\n')) ++pos;
+    while (pos < buf.size() && (buf[pos] == '\r' || buf[pos] == '\n'))
+        ++pos;
 
     if (!next_line(buf, pos, line, next)) return ParseStatus::incomplete;
 
@@ -79,19 +99,19 @@ ParseStatus parse_request(std::string_view buf, Request& out) noexcept {
     std::size_t sp2 = line.find(' ', sp1 + 1);
     if (sp2 == std::string_view::npos || sp2 == sp1 + 1) return ParseStatus::bad_request;
 
-    out.method_name = line.substr(0, sp1);
+    out.method_name = slice(line, 0, sp1);
     for (unsigned char c : out.method_name)
         if (!is_tchar(c)) return ParseStatus::bad_request;
     if (out.method_name == "GET") out.method = Method::GET;
     else if (out.method_name == "HEAD") out.method = Method::HEAD;
     else out.method = Method::OTHER;
 
-    out.target = line.substr(sp1 + 1, sp2 - sp1 - 1);
+    out.target = slice(line, sp1 + 1, sp2 - sp1 - 1);
     for (unsigned char c : out.target)
         if (c <= 0x20 || c == 0x7f) return ParseStatus::bad_request;
 
-    std::string_view version = line.substr(sp2 + 1);
-    if (version.size() != 8 || version.substr(0, 5) != "HTTP/" || version[6] != '.') return ParseStatus::bad_request;
+    std::string_view version = slice(line, sp2 + 1);
+    if (version.size() != 8 || slice(version, 0, 5) != "HTTP/" || version[6] != '.') return ParseStatus::bad_request;
     if (version[5] != '1') return ParseStatus::version_not_supported;
     if (version[7] == '1') out.version_minor = 1;
     else if (version[7] == '0') out.version_minor = 0;
@@ -105,9 +125,9 @@ ParseStatus parse_request(std::string_view buf, Request& out) noexcept {
 
         std::size_t colon = line.find(':');
         if (colon == std::string_view::npos || colon == 0) return ParseStatus::bad_request;
-        std::string_view name = line.substr(0, colon);
+        std::string_view name = slice(line, 0, colon);
         if (name.back() == ' ' || name.back() == '\t') return ParseStatus::bad_request;  // RFC 7230 3.2.4
-        std::string_view value = trim(line.substr(colon + 1));
+        std::string_view value = trim(slice(line, colon + 1));
 
         switch (lower(name[0])) {
             case 'h':

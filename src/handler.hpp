@@ -34,10 +34,10 @@ struct Route {
 struct WorkerState {
     DateCache date;
     LocalIndex local;
-    std::string prefix200;          // "HTTP/1.1 200 OK\r\nServer: ..\r\nDate: ..\r\n", refreshed per second
+    std::string prefix200;  // "HTTP/1.1 200 OK\r\nServer: ..\r\nDate: ..\r\n", refreshed per second
     std::time_t prefix200_time = 0;
-    std::string path;      // normalised request path
-    std::string fs_path;   // filesystem path being served
+    std::string path;     // normalised request path
+    std::string fs_path;  // filesystem path being served
     std::string tmp;
 };
 
@@ -51,11 +51,11 @@ struct ResponsePlan {
     std::string_view headers2;
     std::string_view tail;
     Body body = Body::none;
-    EntryPtr entry;                     // Body::entry
-    File file;                          // Body::file
+    EntryPtr entry;  // Body::entry
+    File file;       // Body::file
     std::uint64_t file_size = 0;
     std::uint64_t file_sent = 0;
-    std::string_view inline_text;       // Body::inline_text (static storage)
+    std::string_view inline_text;  // Body::inline_text (static storage)
     bool keep_alive = true;
 
     void reset() {
@@ -85,7 +85,8 @@ private:
     void begin_header(int status, WorkerState& ws, ResponsePlan& plan);
     void end_header(const Request& req, ResponsePlan& plan);
     void end_header(bool keep_alive, int version_minor, ResponsePlan& plan);
-    void serve_entry(const Request& req, EntryPtr e, std::time_t now, WorkerState& ws, ResponsePlan& plan);  // takes ownership of the ref
+    void serve_entry(const Request& req, EntryPtr e, std::time_t now, WorkerState& ws,
+                     ResponsePlan& plan);  // takes ownership of the ref
     std::string_view prefix200(WorkerState& ws, std::time_t now);
     void serve_file(const Request& req, File&& f, const FileInfo& fi, WorkerState& ws, ResponsePlan& plan);
     void redirect_slash(const Request& req, WorkerState& ws, ResponsePlan& plan);
@@ -93,7 +94,7 @@ private:
 
     const Config& cfg_;
     FileCache& cache_;
-    std::string server_line_;   // "Server: agensio\r\n"
+    std::string server_line_;  // "Server: agensio\r\n"
 };
 
 // Helpers shared with tests.
