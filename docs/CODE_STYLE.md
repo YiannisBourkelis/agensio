@@ -79,7 +79,7 @@ in checklist form for the coding agent.
   `ERR_clear_error`, or refcount traffic to the request path.
 - Data layout over cleverness: flat structs, contiguous vectors, cache-line awareness for
   anything shared between workers (`alignas(64)` and a comment).
-- Templates over virtual dispatch on the hot path (`Connection<Stream>`); virtual
+- Templates over virtual dispatch on the hot path (`Http1Connection<Socket>`, `Http1Writer<Socket, Owner>`); virtual
   dispatch is fine at configuration time.
 
 ### Security (CERT, and this project's threat model)

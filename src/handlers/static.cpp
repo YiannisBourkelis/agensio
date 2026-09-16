@@ -14,12 +14,6 @@ namespace agensio {
 
 namespace {
 
-inline void append_number(std::string& s, std::uint64_t v) {
-    char buf[24];
-    auto r = std::to_chars(buf, buf + sizeof(buf), v);
-    s.append(buf, r.ptr);
-}
-
 inline void append_hex(std::string& s, std::uint64_t v) {
     char buf[24];
     auto r = std::to_chars(buf, buf + sizeof(buf), v, 16);

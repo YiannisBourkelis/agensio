@@ -157,14 +157,14 @@ void Server::start_accept(std::size_t index) {
                 const Listener& l = *acc.listener;
                 if (l.tls) {
 #ifdef AGENSIO_HAS_TLS
-                    auto c = std::make_shared<Connection<TlsStream>>(TlsStream(std::move(sock), *l.ssl), target, l,
+                    auto c = std::make_shared<Http1Connection<TlsStream>>(TlsStream(std::move(sock), *l.ssl), target, l,
                                                                      cfg_, handler_);
                     if (&target == acc.owner) c->start();
                     else asio::post(target.ctx, [c] { c->start(); });
 #endif
                 } else {
                     auto c =
-                        std::make_shared<Connection<asio::ip::tcp::socket>>(std::move(sock), target, l, cfg_, handler_);
+                        std::make_shared<Http1Connection<asio::ip::tcp::socket>>(std::move(sock), target, l, cfg_, handler_);
                     if (&target == acc.owner) c->start();
                     else asio::post(target.ctx, [c] { c->start(); });
                 }

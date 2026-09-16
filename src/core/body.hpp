@@ -30,6 +30,10 @@ struct FileBody {
     std::uint64_t sent = 0;
 };
 
+// The HTTP/1 writer frames a StreamBody itself: Content-Length when length() is known,
+// otherwise chunked on HTTP/1.1 or close-delimited on HTTP/1.0. Handlers producing one
+// must not add Content-Length or Transfer-Encoding fields. A read error mid-body closes
+// the connection, so the client sees a truncated body rather than a false end.
 class StreamBody {
 public:
     virtual ~StreamBody() = default;

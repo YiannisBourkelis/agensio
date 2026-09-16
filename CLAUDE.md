@@ -100,9 +100,11 @@ Source map (`src/`, files move into subdirectories as they are touched, see the 
   name/value views), `request.hpp`, `response.hpp` (status, prebuilt header block, extra
   fields, `Body`), `body.hpp` (`MemoryBody`, `FileBody`, `StreamBody` for later phases),
   `stream.hpp` (one request/response exchange), `worker_state.hpp`, `strings.hpp`.
-- `http1/`: `parser` (request head into `Request`), `connection.hpp` (template over
-  plain/TLS socket: reads, drives one `Stream` through the handler, writes the `Response`
-  as HTTP/1 bytes with the writev / TLS-coalescing / sendfile fast paths).
+- `http1/`: `parser` (request head into `Request`), `connection.hpp` (`Http1Connection`,
+  the I/O loop: reads, parses, drives one `Stream`, keep-alive/pipelining/timer),
+  `writer.hpp` (`Http1Writer`: `Response` to bytes, owns the writev/TLS-coalescing/
+  sendfile fast paths and the pull path for `StreamBody`), `chunked.hpp` (chunk framing).
+  Both are templates over the plain/TLS socket type.
 - `handlers/`: `static` (`StaticHandler`: cache, files, policies; `Route` until A4).
 - top level, not yet moved: `config`, `path`, `mime`, `http_date`, `file`, `cache`,
   `response` (status lines, error pages), `tls_stream.hpp`, `server`, `main`.

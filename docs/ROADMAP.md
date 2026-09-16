@@ -110,9 +110,13 @@ same after it (that is the checkpoint).
       `fstat` + `close` (+ `realpath` with `symlinks = "deny"`) per request (measured on
       Linux/virtiofs: 467 us per open, 8 % of the response; on local ext4 about 1 us, within
       noise). nginx's `open_file_cache` equivalent. A/B on Linux: see the commit.
-- [ ] A2 Split `Connection` into `Http1Connection` (I/O + parser) that drives one `Stream`;
-      response writing consumes a `BodySource` (keeps the writev / TLS-coalescing /
-      sendfile fast paths exactly as they are today).
+- [x] A2 (2026-09-17) `Connection` split into `Http1Connection` (`src/http1/connection.hpp`:
+      I/O loop, parser, keep-alive, pipelining, idle timer, inline budget; drives one
+      `Stream`) and `Http1Writer` (`src/http1/writer.hpp`: `Response` to bytes; the writev /
+      TLS-coalescing / sendfile paths unchanged, plus the pull path for `StreamBody` with
+      Content-Length, chunked or close-delimited framing, `src/http1/chunked.hpp`). The
+      `StreamBody` path is exercised end to end from A3/C1 on; only the framing has unit
+      tests today. A/B on Linux: see the commit.
 - [ ] A3 Request bodies: `Content-Length` and `chunked` decoders as `BodySource`s, size
       limits, `Expect: 100-continue`, body timeouts, `413`.
 - [ ] A4 `Router`: sites (Host/SNI) -> ordered `[[site.location]]` blocks (prefix, exact,

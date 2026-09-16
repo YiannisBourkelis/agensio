@@ -8,6 +8,7 @@
 #include <string_view>
 
 #include "cache.hpp"
+#include "http1/chunked.hpp"
 #include "config.hpp"
 #include "core/headers.hpp"
 #include "core/result.hpp"
@@ -305,6 +306,15 @@ static void test_cache() {
     CHECK(local.find(CacheKeyView{&site, "/z"}) != nullptr);
 }
 
+static void test_chunked() {
+    ChunkSizeBuffer buf;
+    CHECK_EQ(chunk_size_line(0, buf), std::string_view("0\r\n"));
+    CHECK_EQ(chunk_size_line(255, buf), std::string_view("ff\r\n"));
+    CHECK_EQ(chunk_size_line(65536, buf), std::string_view("10000\r\n"));
+    CHECK_EQ(chunk_size_line(0xffffffffffffffffull, buf), std::string_view("ffffffffffffffff\r\n"));
+    CHECK_EQ(kLastChunk, std::string_view("0\r\n\r\n"));
+}
+
 static void test_core_types() {
     Headers h;
     CHECK(h.empty());
@@ -420,6 +430,7 @@ int main() {
     test_mime();
     test_size();
     test_cache();
+    test_chunked();
     test_core_types();
     test_route_and_etag();
     if (failures) {
