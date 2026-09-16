@@ -60,7 +60,8 @@ CADDY_WORKERS="${CADDY_WORKERS:-$WORKERS}"
 
 # Generate server configs from the templates.
 SENDFILE_MIN="${SENDFILE_MIN:-48KB}"   # env override for experiments: cached files >= this go out via sendfile
-sed "s#@WORKERS@#$AGENSIO_WORKERS#g; s#@BENCH@#$BENCH#g; s#@SENDFILE_MIN@#$SENDFILE_MIN#g" "$BENCH/agensio.toml" > "$BENCH/tmp/agensio.toml"
+ACCESS_LOG="${ACCESS_LOG:-off}"        # env override: path of an access log to measure its cost (default off)
+sed "s#@WORKERS@#$AGENSIO_WORKERS#g; s#@BENCH@#$BENCH#g; s#@SENDFILE_MIN@#$SENDFILE_MIN#g; s#@ACCESS_LOG@#$ACCESS_LOG#g" "$BENCH/agensio.toml" > "$BENCH/tmp/agensio.toml"
 sed "s#@WORKERS@#$NGINX_WORKERS#g; s#@BENCH@#$BENCH#g" "$BENCH/nginx.conf" > "$BENCH/tmp/nginx.conf"
 "$ROOT/build/agensio" -t -c "$BENCH/tmp/agensio.toml" >/dev/null
 nginx -p "$BENCH" -c "$BENCH/tmp/nginx.conf" -t >/dev/null 2>&1 || { nginx -p "$BENCH" -c "$BENCH/tmp/nginx.conf" -t; exit 1; }

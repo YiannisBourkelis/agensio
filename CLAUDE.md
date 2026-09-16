@@ -169,8 +169,18 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   the handler answers without reading. A body the handler did not read is drained after
   the response so keep-alive and pipelining survive. Unknown transfer codings get 501,
   unknown expectations 417. HTTP/2 will feed the same interface from DATA frames.
+- **Logging** (A5, `src/services/log.*`): access log in Apache/nginx "combined" format
+  (same escaping, so fail2ban filters work) or JSON, per site (`access_log`) with the
+  `[log] access` default; one descriptor per path opened `O_APPEND`, per-worker buffers
+  flushed at 32 KB or by a 1 s timer, `SIGUSR1` reopens every file (the replaced
+  descriptor is kept until the next reopen so a racing worker never writes to a recycled
+  fd). Error log (`[log] error`, `level`) to stderr or a file. **On by default**
+  (`logs/access.log` next to the config file): measured on Linux, one worker, alternated
+  off/on twice, plain 1 KB 2.0 -> 2.0-2.1 us, TLS 1 KB 2.8 -> 2.9-3.0 us, 100 KB rows
+  within noise, i.e. 0.1-0.2 us per request, under the 1 us bar the roadmap set. Benchmark
+  templates: off, like the nginx and Caddy bench configs.
 - **Not in phase 1**: Range requests (no `Accept-Ranges` is sent), directory listing,
-  methods other than GET/HEAD (405; bodies are drained), access log, reload.
+  methods other than GET/HEAD (405; bodies are drained), reload.
 
 ## Performance notes (measured, keep current)
 

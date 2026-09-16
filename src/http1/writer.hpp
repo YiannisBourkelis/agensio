@@ -62,9 +62,13 @@ public:
     void write(Stream& stream, WorkerState& ws) {
         stream_ = &stream;
         source_done_ = false;
+        body_sent_ = 0;
         build_head(ws);
         start();
     }
+
+    // Body bytes handed to the kernel for the current or last response (access log).
+    std::uint64_t body_bytes_sent() const noexcept { return body_sent_; }
 
     // Forgets any transfer in progress (the connection is closing).
     void reset() noexcept {
@@ -166,6 +170,7 @@ private:
     void start() {
         Response& r = response();
         const std::string_view body = memory_body();
+        body_sent_ = body.size();  // memory bodies go out whole; file paths count as they send
         auto done = write_done();
         if constexpr (IsTlsStream<Socket>::value) {
             // TlsStream encrypts one buffer per write_some, so coalesce everything up to
@@ -264,6 +269,7 @@ private:
             return;
         }
         fb.sent += static_cast<std::uint64_t>(got);
+        body_sent_ += static_cast<std::uint64_t>(got);
         asio::async_write(socket_, asio::buffer(chunk_.data(), static_cast<std::size_t>(got)), write_done());
     }
 
@@ -288,6 +294,7 @@ private:
             else finish();
             return;
         }
+        body_sent_ += n;
         if (chunked_) {
             const std::string_view size_line = chunk_size_line(n, chunk_size_);
             asio::async_write(socket_,
@@ -308,6 +315,7 @@ private:
         sf_file_ = file;
         sf_size_ = size;
         sf_sent_ = 0;
+        body_sent_ = 0;
         hdr_sent_ = 0;
         hdr_total_ = hdr_.size() + block_.size() + tail_.size();
         if (!lowest().non_blocking()) {
@@ -384,6 +392,7 @@ private:
                 sent -= h;
             }
             sf_sent_ += sent;
+            body_sent_ += sent;
             if (r.would_block) {
                 lowest().async_wait(asio::ip::tcp::socket::wait_write,
                                     [self = self(), this](const asio::error_code& ec) {
@@ -415,6 +424,7 @@ private:
     std::string hdr_;           // status line + Server + Date
     std::string_view block_;    // the response's prebuilt block (view; kept alive by the response)
     std::string tail_;          // extra fields + blank line, empty on the fast path
+    std::uint64_t body_sent_ = 0;  // body bytes handed to the kernel (access log)
     bool chunked_ = false;      // StreamBody of unknown length on HTTP/1.1
     bool source_done_ = false;  // StreamBody reported end of body
     ChunkSizeBuffer chunk_size_{};

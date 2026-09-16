@@ -17,6 +17,7 @@
 #include "core/router.hpp"
 #include "core/worker_state.hpp"
 #include "handlers/static.hpp"
+#include "services/log.hpp"
 
 namespace agensio {
 
@@ -25,6 +26,7 @@ struct Worker {
     unsigned id;
     asio::io_context ctx{1};  // concurrency hint 1: single thread, no internal locking
     WorkerState state;
+    asio::steady_timer flush_timer{ctx};  // access log buffers, once per second
     std::atomic<std::uint64_t> connections{0};
 };
 
@@ -57,6 +59,8 @@ private:
     void build_workers();
     void open_acceptor(Listener& listener, Worker& worker, bool reuse_port);
     void start_accept(std::size_t acceptor_index);
+    void open_logs();
+    void arm_flush(Worker& w);
 
     struct Acceptor {
         asio::ip::tcp::acceptor socket;
@@ -67,6 +71,9 @@ private:
     };
 
     Config cfg_;
+    LogRegistry logs_;
+    ErrorLog error_log_;
+    bool access_logging_ = false;
     FileCache cache_;
     StaticHandler handler_;
     std::vector<std::unique_ptr<Worker>> workers_;

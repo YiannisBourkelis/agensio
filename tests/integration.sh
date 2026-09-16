@@ -11,7 +11,8 @@ printf '<html><body>sub index</body></html>\n' > bench/www/sub/index.html
 printf '<html><body>app shell</body></html>\n' > bench/www/app.html
 
 mkdir -p bench/tmp
-sed "s#@WORKERS@#0#g; s#@BENCH@#$ROOT/bench#g; s#@SENDFILE_MIN@#${SENDFILE_MIN:-48KB}#g" bench/agensio.toml > bench/tmp/agensio-test.toml
+rm -f bench/tmp/access.log bench/tmp/access.log.1
+sed "s#@WORKERS@#0#g; s#@BENCH@#$ROOT/bench#g; s#@SENDFILE_MIN@#${SENDFILE_MIN:-48KB}#g; s#@ACCESS_LOG@#$ROOT/bench/tmp/access.log#" bench/agensio.toml > bench/tmp/agensio-test.toml
 # Locations (A4) on the plain site: an SPA fallback, an aliased root, an exact match and a
 # try_files status. Inserted after the site's `default = true` line.
 python3 - bench/tmp/agensio-test.toml "$ROOT/bench/www" <<'PY'
@@ -111,6 +112,23 @@ check "Expect: 100-continue not read by handler: final answer, no 100, close" "4
 check "unknown transfer coding: 501" "HTTP/1.1 501 Not Implemented" "$(printf 'POST / HTTP/1.1\r\nHost: l\r\nTransfer-Encoding: gzip\r\n\r\n' | ncq 127.0.0.1 8080 | head -1 | tr -d '\r')"
 check "Expect other than 100-continue: 417" "HTTP/1.1 417 Expectation Failed" "$(printf 'POST / HTTP/1.1\r\nHost: l\r\nContent-Length: 1\r\nExpect: x\r\n\r\n' | ncq 127.0.0.1 8080 | head -1 | tr -d '\r')"
 check "curl POST 405 keeps the connection for the next request" "0" "$(curl -sS -o /dev/null -o /dev/null -w '%{num_connects}\n' -d 'a=b' http://127.0.0.1:8080/ http://127.0.0.1:8080/ | tail -1)"
+# ---- access log (A5): combined format, buffered per worker, flushed each second ----
+curl -sS -o /dev/null -A 'agensio-test/1.0' -e 'http://ref.example/' http://127.0.0.1:8080/
+curl -sS -o /dev/null -I http://127.0.0.1:8080/
+curl -sS -o /dev/null http://127.0.0.1:8080/nope
+sleep 1.2
+IDXLEN=$(wc -c < bench/www/index.html | tr -d ' ')
+check "access log: GET line with status, size, referer, agent" "1" "$(grep -c "^127.0.0.1 - - \[.*\] \"GET / HTTP/1.1\" 200 $IDXLEN \"http://ref.example/\" \"agensio-test/1.0\"$" bench/tmp/access.log)"
+check "access log: HEAD counts no body bytes" "yes" "$(grep -q '"HEAD / HTTP/1.1" 200 0 ' bench/tmp/access.log && echo yes)"
+check "access log: 404 logged" "yes" "$(grep -q '"GET /nope HTTP/1.1" 404 ' bench/tmp/access.log && echo yes)"
+check "access log: 405 POST logged" "yes" "$(grep -q '"POST / HTTP/1.1" 405 ' bench/tmp/access.log && echo yes)"
+check "access log: streamed 10MB logs its size" "yes" "$(grep -q '"GET /big.bin HTTP/1.1" 200 10485760 ' bench/tmp/access.log && echo yes)"
+check "access log: unparsable request logged as 400" "yes" "$(grep -q '"-" 400 ' bench/tmp/access.log && echo yes)"
+check "access log: 501 logged with its request line" "yes" "$(grep -q '"POST / HTTP/1.1" 501 ' bench/tmp/access.log && echo yes)"
+mv bench/tmp/access.log bench/tmp/access.log.1
+kill -USR1 $PID; sleep 0.3
+curl -sS -o /dev/null http://127.0.0.1:8080/style.css; sleep 1.2
+check "access log: SIGUSR1 reopens the file" "yes" "$([ -s bench/tmp/access.log ] && grep -q '"GET /style.css HTTP/1.1" 200 ' bench/tmp/access.log && echo yes)"
 printf '<html><body>changed</body></html>\n' > bench/www/sub/index.html; sleep 1.2
 check "revalidation picks up change" "changed" "$(curl -sS http://127.0.0.1:8080/sub/ | sed 's/<[^>]*>//g')"
 printf '<html><body>sub index</body></html>\n' > bench/www/sub/index.html
@@ -129,7 +147,7 @@ rm -f bench/www/stream.bin
 kill $PID; wait $PID 2>/dev/null
 
 # Second instance with symlinks = "deny", hidden_files = true and a 2-request keep-alive cap.
-sed 's/^default = true/default = true\nsymlinks = "deny"\nhidden_files = true/; s/^max_requests_per_connection = .*/max_requests_per_connection = 2\nbody_timeout = 1/' bench/tmp/agensio-test.toml > bench/tmp/agensio-test2.toml
+sed 's/^default = true/default = true\nsymlinks = "deny"\nhidden_files = true/; s/^max_requests_per_connection = .*/max_requests_per_connection = 2\nbody_timeout = 1/; s/^access = \(.*\)/access = \1\nformat = "json"/' bench/tmp/agensio-test.toml > bench/tmp/agensio-test2.toml
 "$BIN" -c bench/tmp/agensio-test2.toml >/dev/null 2>&1 &
 PID=$!
 for _ in $(seq 1 50); do nc -z 127.0.0.1 8080 2>/dev/null && break; sleep 0.1; done
@@ -139,6 +157,8 @@ check "dotfile served with hidden_files=true" "200" "$(code http://127.0.0.1:808
 three=$(printf 'GET / HTTP/1.1\r\nHost: l\r\n\r\nGET / HTTP/1.1\r\nHost: l\r\n\r\nGET / HTTP/1.1\r\nHost: l\r\n\r\n' | ncq 127.0.0.1 8080)
 check "request cap: 2 responses then close" "2" "$(echo "$three" | grep -c '^HTTP/1.1 200')"
 check "request cap: Connection: close on last" "1" "$(echo "$three" | grep -c '^Connection: close')"
+sleep 1.2
+check "access log: json format" "yes" "$(grep -q '^{"time":"[0-9T:+-]*","remote":"127.0.0.1","host":"127.0.0.1:8080","method":"GET","target":"/","proto":"HTTP/1.1","status":200,"bytes":[0-9]*,"referer":"","user_agent":"curl/[^"]*"}$' bench/tmp/access.log && echo yes)"
 # Body timeout (1 s here): the response is served, then the missing body bytes never come
 # and the server closes the connection instead of waiting for the idle timeout (65 s).
 # (nc cannot be used here: it stays up while its stdin is open even after the peer closes.)

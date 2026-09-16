@@ -53,7 +53,7 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT="$BENCH/results/ab-$STAMP.md"
 RAW="$BENCH/results/raw/ab-$STAMP"
 mkdir -p "$RAW" "$BENCH/tmp"
-sed "s#@WORKERS@#$WORKERS#g; s#@BENCH@#$BENCH#g; s#@SENDFILE_MIN@#${SENDFILE_MIN:-48KB}#g" "$BENCH/agensio.toml" > "$BENCH/tmp/ab-agensio.toml"
+sed "s#@WORKERS@#$WORKERS#g; s#@BENCH@#$BENCH#g; s#@SENDFILE_MIN@#${SENDFILE_MIN:-48KB}#g; s#@ACCESS_LOG@#${ACCESS_LOG:-off}#g" "$BENCH/agensio.toml" > "$BENCH/tmp/ab-agensio.toml"
 
 PID=""
 start() {  # binary

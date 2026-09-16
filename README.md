@@ -41,6 +41,10 @@ idle_timeout = 15
 max_file_size = "4MB"  # bigger files stream from disk
 max_size = "256MB"
 
+[log]
+access = "/var/log/agensio/access.log"  # combined format; a site can override with access_log = "..." or "off"
+error = "stderr"
+
 include = ["sites.d/*.toml"]
 
 [[site]]

@@ -14,6 +14,15 @@ sendfile = true          # zero-copy streaming of files above cache.max_file_siz
 sendfile_max_chunk = "1MB" # bytes per sendfile() call (measured: one 10 MB call costs 6x more kernel time)
 server_header = "agensio"
 
+[log]
+access = "logs/access.log" # default access log for every site: a path (relative to this file) or "off";
+                         # this is also the built-in default. A site can set its own `access_log = "path"`
+                         # or "off". Buffered per worker, flushed each second; SIGUSR1 reopens all log
+                         # files (logrotate). Measured cost: 0.1-0.2 us per request.
+format = "combined"      # "combined" (Apache/nginx, fail2ban-compatible) or "json" (one object per line)
+error = "stderr"         # "stderr" or a path
+level = "warn"           # error | warn | info
+
 [cache]
 max_file_size = "4MB"    # larger files are streamed from disk, never cached
 max_size = "256MB"       # total bytes held in memory

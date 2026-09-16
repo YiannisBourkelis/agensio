@@ -18,6 +18,7 @@
 #include <cstring>
 #include <ctime>
 #include <memory>
+#include <string>
 #include <system_error>
 #include <vector>
 
@@ -32,6 +33,7 @@
 #include "http1/parser.hpp"
 #include "http1/writer.hpp"
 #include "server.hpp"
+#include "services/log.hpp"
 
 namespace agensio {
 
@@ -86,6 +88,7 @@ public:
     // next request, or close.
     void on_response_written() {
         const bool keep_alive = stream_.response.keep_alive;
+        log_request();
         stream_.reset();
         compact();
         if (!keep_alive) {
@@ -102,6 +105,7 @@ public:
     void close() {
         asio::error_code ec;
         timer_.cancel();
+        if (!request_logged_ && stream_.request.length > 0) log_request();  // client went away mid-response
         writer_.reset();
         body_pending_ = false;
         if (lowest().is_open()) {
@@ -200,6 +204,32 @@ private:
     };
 
     static constexpr std::string_view kContinue = "HTTP/1.1 100 Continue\r\n\r\n";
+
+    // One access log line per request, when the site logs. Costs nothing when it does not:
+    // one pointer test. The client address is resolved once per connection, lazily.
+    void log_request() {
+        request_logged_ = true;
+        const auto* site = static_cast<const SiteConfig*>(worker_.state.site);
+        if (!site) site = listener_.router.default_site();
+        if (!site || site->access_log_sink < 0) return;
+        if (remote_.empty()) {
+            asio::error_code ec;
+            const auto ep = lowest().remote_endpoint(ec);
+            remote_ = ec ? std::string("-") : ep.address().to_string();
+        }
+        const Request& req = stream_.request;
+        AccessRecord rec;
+        rec.remote = remote_;
+        rec.host = req.host;
+        rec.method = req.method_name;
+        rec.target = req.target;
+        rec.version_minor = req.version_minor;
+        rec.status = stream_.response.status;
+        rec.bytes = writer_.body_bytes_sent();
+        rec.referer = req.headers.get("referer");
+        rec.user_agent = req.headers.get("user-agent");
+        worker_.state.logs.log(site->access_log_sink, worker_.state.now, rec);
+    }
     static constexpr std::size_t kDrainChunk = 8192;
 
     auto& lowest() { return socket_.lowest_layer(); }
@@ -278,6 +308,8 @@ private:
                 return;
         }
         consumed_ = req.length;
+        request_logged_ = false;
+        worker_.state.site = nullptr;
         if (req.has_body) {
             if (!req.chunked && req.content_length > cfg_.max_body_size) {
                 fail_request(413);  // refused before the handler runs; the client gets it while it may still be sending
@@ -306,6 +338,8 @@ private:
     // Protocol-level error: answer, drop whatever is buffered, close.
     void fail_request(int status) {
         worker_.state.now = std::time(nullptr);
+        request_logged_ = false;
+        worker_.state.site = nullptr;
         handler_.error(stream_, status, false);
         consumed_ = in_len_;
         body_pending_ = false;
@@ -406,6 +440,8 @@ private:
     std::uint64_t body_read_ = 0;   // decoded bytes delivered so far
     ChunkedDecoder chunked_;
     std::vector<char> drain_;  // scratch for discarding an unread body (allocated on first use)
+    std::string remote_;       // client address for the access log, resolved on first use
+    bool request_logged_ = false;
     Stream stream_;
     Http1Writer<Socket, Http1Connection> writer_;  // last: it references socket_ and *this
 };

@@ -8,6 +8,9 @@ reuse_port = "auto"
 tcp_nodelay = true
 sendfile = true
 
+[log]
+access = "@ACCESS_LOG@"   # off in the benchmark (nginx and Caddy bench configs log nothing either); ACCESS_LOG=path to measure
+
 [cache]
 max_file_size = "4MB"
 max_size = "256MB"

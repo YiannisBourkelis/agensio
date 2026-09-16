@@ -382,6 +382,7 @@ void StaticHandler::handle(Stream& s, const Router& router, WorkerState& ws) {
 #endif
 
     const SiteConfig* site = router.site(req.host);
+    ws.site = site;
     const LocationConfig* loc = &Router::location(*site, ws.path);
     for (int hops = 0;; ++hops) {
         if (serve_location(s, *loc, ws) == Outcome::done) return;

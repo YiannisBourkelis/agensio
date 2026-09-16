@@ -1,6 +1,7 @@
 #include "server.hpp"
 
 #include <chrono>
+#include <functional>
 #include <csignal>
 #include <iostream>
 #include <stdexcept>
@@ -41,6 +42,7 @@ Server::Server(Config cfg)
     : cfg_(std::move(cfg)),
       cache_(cfg_.cache_max_file_size, cfg_.cache_max_size, cfg_.cache_evict_fraction, cfg_.cache_max_open_files),
       handler_(cfg_, cache_) {
+    open_logs();
     warm_response_tables();
     build_listeners();
     build_workers();
@@ -48,6 +50,29 @@ Server::Server(Config cfg)
 
 Server::~Server() {
     stop();
+}
+
+// One sink per distinct path; the error log first so startup messages have somewhere to go.
+void Server::open_logs() {
+    const int error_sink = logs_.add(cfg_.log.error);
+    for (auto& site : cfg_.sites) {
+        site.access_log_sink = logs_.add(site.access_log);
+        if (site.access_log_sink >= 0) access_logging_ = true;
+    }
+    std::string err;
+    if (!logs_.open_all(err)) throw std::runtime_error(err);
+    LogLevel level = LogLevel::warn;
+    parse_log_level(cfg_.log.level, level);
+    error_log_.configure(&logs_, error_sink, level);
+}
+
+void Server::arm_flush(Worker& w) {
+    w.flush_timer.expires_after(std::chrono::seconds(1));
+    w.flush_timer.async_wait([this, &w](const asio::error_code& ec) {
+        if (ec) return;
+        w.state.logs.flush();
+        arm_flush(w);
+    });
 }
 
 void Server::build_listeners() {
@@ -102,7 +127,7 @@ void Server::build_workers() {
     if (cfg_.reuse_port == "auto") reuse_port_ = kHasReusePort;
 #endif
     if (cfg_.reuse_port == "on" && !kHasReusePort)
-        std::cerr << "warning: SO_REUSEPORT is not available on this platform; using a shared acceptor\n";
+        error_log_.warn("SO_REUSEPORT is not available on this platform; using a shared acceptor");
 }
 
 void Server::open_acceptor(Listener& listener, Worker& worker, bool reuse_port) {
@@ -134,7 +159,7 @@ void Server::start_accept(std::size_t index) {
                 ec == std::errc::too_many_files_open_in_system) {
                 // Out of descriptors: retrying immediately would spin at 100 % CPU while the
                 // clients holding them idle. Pause, let timeouts free some, then resume.
-                std::cerr << "accept: " << ec.message() << "; pausing accepts for 100 ms\n";
+                error_log_.error("accept: " + ec.message() + "; pausing accepts for 100 ms");
                 acc.backoff.expires_after(std::chrono::milliseconds(100));
                 acc.backoff.async_wait([this, index](const asio::error_code& tec) {
                     if (!tec) start_accept(index);
@@ -155,8 +180,8 @@ void Server::start_accept(std::size_t index) {
                     else asio::post(target.ctx, [c] { c->start(); });
 #endif
                 } else {
-                    auto c =
-                        std::make_shared<Http1Connection<asio::ip::tcp::socket>>(std::move(sock), target, l, cfg_, handler_);
+                    auto c = std::make_shared<Http1Connection<asio::ip::tcp::socket>>(std::move(sock), target, l,
+                                                                                       cfg_, handler_);
                     if (&target == acc.owner) c->start();
                     else asio::post(target.ctx, [c] { c->start(); });
                 }
@@ -182,9 +207,13 @@ void Server::run() {
         for (auto& l : listeners_)
             open_acceptor(l, *workers_[0], false);
     }
-    for (auto& w : workers_)
+    for (auto& w : workers_) {
         guards_.push_back(
             std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(w->ctx.get_executor()));
+        w->state.logs.attach(&logs_,
+                             cfg_.log.json ? AccessLogFormat::json : AccessLogFormat::combined);
+        if (access_logging_) arm_flush(*w);
+    }
     for (std::size_t i = 0; i < acceptors_.size(); ++i)
         start_accept(i);
 
@@ -192,6 +221,18 @@ void Server::run() {
     signals.async_wait([this](const asio::error_code& ec, int) {
         if (!ec) stop();
     });
+#ifndef _WIN32
+    // Log rotation: SIGUSR1 reopens every log file (logrotate's postrotate hook).
+    asio::signal_set reopen(workers_[0]->ctx, SIGUSR1);
+    auto on_reopen = std::make_shared<std::function<void(const asio::error_code&, int)>>();
+    *on_reopen = [this, &reopen, on_reopen](const asio::error_code& ec, int) {
+        if (ec) return;
+        logs_.reopen_all();
+        error_log_.info("log files reopened (SIGUSR1)");
+        reopen.async_wait(*on_reopen);
+    };
+    reopen.async_wait(*on_reopen);
+#endif
 
     for (std::size_t i = 1; i < workers_.size(); ++i) {
         Worker* w = workers_[i].get();
@@ -201,6 +242,8 @@ void Server::run() {
     for (auto& t : threads_)
         t.join();
     threads_.clear();
+    for (auto& w : workers_)
+        w->state.logs.flush();
 }
 
 void Server::stop() {

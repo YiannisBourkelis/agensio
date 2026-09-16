@@ -55,6 +55,17 @@ struct SiteConfig {
     bool symlinks_deny = false;  // refuse files whose canonical path leaves the root (realpath per cache miss)
     // Sorted for Router::location: exact before prefix, longer before shorter, "/" last.
     std::vector<LocationConfig> locations;
+    std::string access_log;    // absolute path, or "" for no access log (site `access_log`, default [log] access)
+    int access_log_sink = -1;  // set by the Server: index into its log registry
+};
+
+// [log]
+struct LogConfig {
+    std::string access;     // default access log path for sites, "" = off; the loader defaults it to
+                            // "logs/access.log" next to the configuration file (measured: 0.1-0.2 us/request)
+    bool json = false;      // format = "json" instead of "combined"
+    std::string error = "stderr";  // "stderr" or a path
+    std::string level = "warn";    // error | warn | info
 };
 
 struct Config {
@@ -71,6 +82,8 @@ struct Config {
     std::size_t sendfile_max_chunk =
         1024 * 1024;  // bytes per sendfile() call; one huge call holds the socket lock and the loop
     std::string server_header = "agensio";
+
+    LogConfig log;
 
     // [cache]
     std::size_t cache_max_file_size = 4u * 1024 * 1024;

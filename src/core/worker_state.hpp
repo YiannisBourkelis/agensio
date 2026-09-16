@@ -6,6 +6,7 @@
 
 #include "cache.hpp"
 #include "http_date.hpp"
+#include "services/log.hpp"
 
 namespace agensio {
 
@@ -18,6 +19,8 @@ struct WorkerState {
     std::time_t prefix200_time = 0;
     std::string path;     // normalised request path
     std::string fs_path;  // filesystem path being served
+    const void* site = nullptr;  // the SiteConfig chosen for the current request (for the access log)
+    WorkerLogs logs;             // per-worker access log buffers
 };
 
 }  // namespace agensio

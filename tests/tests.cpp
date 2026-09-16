@@ -19,6 +19,7 @@
 #include "http_date.hpp"
 #include "mime.hpp"
 #include "path.hpp"
+#include "services/log.hpp"
 
 using namespace agensio;
 
@@ -495,6 +496,64 @@ static void test_route_and_etag() {
     CHECK_EQ(etag, "\"5a630d3c-6b\"");
 }
 
+static void test_log_format() {
+    AccessRecord r;
+    r.remote = "203.0.113.9";
+    r.host = "example.com";
+    r.method = "GET";
+    r.target = "/a\"b?x=1";
+    r.status = 200;
+    r.bytes = 1024;
+    r.referer = "";
+    r.user_agent = "curl/8.0 \\ \x01";
+    std::string out;
+    WorkerLogs::format_combined(out, "17/Sep/2026:10:15:32 +0300", r);
+    CHECK_EQ(out, std::string("203.0.113.9 - - [17/Sep/2026:10:15:32 +0300] \"GET /a\\x22b?x=1 HTTP/1.1\" 200 1024 "
+                              "\"-\" \"curl/8.0 \\x5C \\x01\"\n"));
+    out.clear();
+    WorkerLogs::format_json(out, "2026-09-17T10:15:32+03:00", r);
+    CHECK_EQ(out, std::string("{\"time\":\"2026-09-17T10:15:32+03:00\",\"remote\":\"203.0.113.9\","
+                              "\"host\":\"example.com\","
+                              "\"method\":\"GET\",\"target\":\"/a\\\"b?x=1\",\"proto\":\"HTTP/1.1\",\"status\":200,"
+                              "\"bytes\":1024,\"referer\":\"\",\"user_agent\":\"curl/8.0 \\\\ \\u0001\"}\n"));
+    // A request that never parsed: no request line, no method.
+    AccessRecord bad;
+    bad.status = 400;
+    out.clear();
+    WorkerLogs::format_combined(out, "t", bad);
+    CHECK_EQ(out, std::string("- - - [t] \"-\" 400 0 \"-\" \"-\"\n"));
+    LogLevel level;
+    CHECK(parse_log_level("info", level) && level == LogLevel::info);
+    CHECK(!parse_log_level("debug", level));
+    // Registry: same path shares a sink, "off" is none, and the file receives whole lines.
+    LogRegistry reg;
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-log-" + std::to_string(::getpid()));
+    fs::create_directories(dir);
+    const std::string path = (dir / "a.log").string();
+    CHECK_EQ(reg.add("off"), -1);
+    CHECK_EQ(reg.add(path), 0);
+    CHECK_EQ(reg.add(path), 0);
+    CHECK_EQ(reg.add((dir / "b.log").string()), 1);
+    std::string err;
+    CHECK(reg.open_all(err));
+    WorkerLogs logs;
+    logs.attach(&reg, AccessLogFormat::combined);
+    logs.log(0, 1'000'000, r);
+    logs.flush();
+    fs::rename(dir / "a.log", dir / "a.log.1");
+    reg.reopen_all();
+    logs.log(0, 1'000'001, r);
+    logs.flush();
+    std::ifstream in1(dir / "a.log.1"), in2(dir / "a.log");
+    std::string l1, l2;
+    std::getline(in1, l1);
+    std::getline(in2, l2);
+    CHECK(l1.find("\"GET /a") != std::string::npos);
+    CHECK(l2.find("\"GET /a") != std::string::npos);  // after reopen the new file gets the line
+    fs::remove_all(dir);
+}
+
 // Loads a configuration with locations from a temporary directory.
 static void test_config_locations() {
     namespace fs = std::filesystem;
@@ -504,6 +563,7 @@ static void test_config_locations() {
         std::ofstream(dir / name) << text;
     };
     write("ok.toml",
+          "[log]\naccess = \"logs/access.log\"\nformat = \"json\"\nlevel = \"info\"\n"
           "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\ntry_files = [\"$uri\", \"=404\"]\n"
           "[[site.location]]\npath = \"/assets/\"\nalias = \"www/assets\"\nhidden_files = true\ntry_files = []\n"
           "[[site.location]]\npath = \"/app/\"\ntry_files = [\"$uri\", \"/index.html\"]\nsymlinks = \"deny\"\n"
@@ -511,6 +571,10 @@ static void test_config_locations() {
     Config cfg = load_config(dir / "ok.toml");
     CHECK_EQ(cfg.sites.size(), 1u);
     const SiteConfig& site = cfg.sites[0];
+    CHECK(cfg.log.json && cfg.log.level == "info" && cfg.log.error == "stderr");
+    CHECK(cfg.log.access.size() > 16 &&
+          cfg.log.access.compare(cfg.log.access.size() - 16, 16, "/logs/access.log") == 0);
+    CHECK(site.access_log == cfg.log.access);  // inherited
     CHECK_EQ(site.locations.size(), 4u);  // three configured + implicit "/"
     const LocationConfig& assets = Router::location(site, "/assets/a.png");
     CHECK_EQ(assets.path, "/assets/");
@@ -540,6 +604,12 @@ static void test_config_locations() {
     CHECK(rejects("bad5.toml", head + "[[site.location]]\npath = \"/a/\"\nroot = \"nope\"\n"));
     CHECK(rejects("bad6.toml", head + "try_files = [\"=500\"]\n"));
     CHECK(rejects("bad7.toml", head + "[[site.location]]\npath = \"/a\"\nalias = \"www\"\n"));  // alias needs '/'
+    CHECK(rejects("bad9.toml", "[log]\nformat = \"csv\"\n" + head));
+    CHECK(rejects("bad10.toml", "[log]\nlevel = \"debug\"\n" + head));
+    write("off.toml", "[log]\naccess = \"x.log\"\n" + head + "access_log = \"off\"\n");
+    CHECK(load_config(dir / "off.toml").sites[0].access_log.empty());
+    write("default.toml", head);  // no [log]: on by default, next to the config file
+    CHECK(load_config(dir / "default.toml").log.access == (dir / "logs" / "access.log").string());
     CHECK(rejects("bad8.toml", head + "[[site.location]]\npath = \"/a/\"\nroot = \"www\"\nalias = \"www\"\n"));
     fs::remove_all(dir);
 }
@@ -615,6 +685,7 @@ int main() {
     test_core_types();
     test_route_and_etag();
     test_config_locations();
+    test_log_format();
     if (failures) {
         std::printf("%d failure(s)\n", failures);
         return 1;

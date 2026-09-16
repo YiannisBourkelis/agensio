@@ -202,6 +202,9 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     site.is_default = t["default"].value_or(false);
     site.hidden_files = t["hidden_files"].value_or(false);
     site.symlinks_deny = symlinks_deny_of(t["symlinks"], false, where);
+    if (auto a = t["access_log"].value<std::string>())
+        site.access_log = (*a == "off" || a->empty()) ? std::string() : resolve(base_dir, *a).string();
+    else site.access_log = cfg.log.access;
 
     if (auto arr = t["location"].as_array()) {
         std::size_t idx = 0;
@@ -379,6 +382,19 @@ Config load_config(const fs::path& path) {
         if (*m < 0) fail("cache.max_open_files must not be negative");
         cfg.cache_max_open_files = static_cast<std::size_t>(*m);
     }
+
+    auto log = root["log"];
+    if (auto a = log["access"].value<std::string>())
+        cfg.log.access = (*a == "off" || a->empty()) ? std::string() : resolve(base_dir, *a).string();
+    else cfg.log.access = resolve(base_dir, "logs/access.log").string();  // on by default (see CLAUDE.md)
+    std::string format = to_lower(log["format"].value_or(std::string("combined")));
+    if (format != "combined" && format != "json") fail("log.format must be \"combined\" or \"json\"");
+    cfg.log.json = format == "json";
+    if (auto e = log["error"].value<std::string>())
+        cfg.log.error = (*e == "stderr" || e->empty()) ? std::string("stderr") : resolve(base_dir, *e).string();
+    cfg.log.level = to_lower(log["level"].value_or(std::string("warn")));
+    if (cfg.log.level != "error" && cfg.log.level != "warn" && cfg.log.level != "info")
+        fail("log.level must be \"error\", \"warn\" or \"info\"");
 
     parse_sites_from(root, base_dir, cfg, path.filename().string());
 

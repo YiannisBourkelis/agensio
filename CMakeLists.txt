@@ -74,6 +74,7 @@ add_library(agensio_core STATIC
   src/http1/parser.cpp
   src/cache.cpp
   src/core/router.cpp
+  src/services/log.cpp
   src/response.cpp
   src/handlers/static.cpp
   src/server.cpp)

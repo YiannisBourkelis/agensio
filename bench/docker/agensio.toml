@@ -5,6 +5,9 @@ idle_timeout = 65
 max_requests_per_connection = 1000000
 reuse_port = "auto"
 
+[log]
+access = "off"
+
 [cache]
 max_file_size = "4MB"
 max_size = "256MB"

@@ -145,11 +145,13 @@ same after it (that is the checkpoint).
       the site's settings. `try_files`: `$uri`, `$uri/`, `=403`/`=404`, `/fallback`
       (internal redirect routed again, 8 hops max). Cache keys are location + path. A/B on
       Linux: see the commit.
-- [ ] A5 Access log and error log services: "combined" format (fail2ban filters for
-      nginx/apache work unchanged), optional JSON, per-worker buffers flushed by a timer or
-      size, reopen on `SIGUSR1`/`ctl reopen` for rotation. Configurable per site; the
-      benchmark config turns it off. Decide the default after measuring: nginx and Apache
-      log by default, Caddy does not; recommendation is on if the cost is < 1 us/request.
+- [x] A5 (2026-09-17) Access and error logs (`src/services/log.*`): "combined" (byte-
+      compatible with nginx/Apache, fail2ban filters unchanged) or JSON, per site
+      (`access_log`) with a `[log] access` default, per-worker buffers flushed at 32 KB
+      or each second, `SIGUSR1` reopens every file (`ctl reopen` comes with F). Error log
+      to stderr or a file with `level`. Benchmark templates off. Measured on Linux (one
+      worker, off/on alternated twice): 0.1-0.2 us per request, so the default is **on**
+      (`logs/access.log` next to the config file).
 - [ ] Checkpoint: static benchmark equal to phase 1 within noise; new unit tests for body
       decoders and router.
 
