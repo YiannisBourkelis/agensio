@@ -1,0 +1,22 @@
+BasedOnStyle: Google
+IndentWidth: 4
+ColumnLimit: 120
+AccessModifierOffset: -4
+DerivePointerAlignment: false
+PointerAlignment: Left
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: AllIfsAndElse
+AllowShortBlocksOnASingleLine: Always
+AllowShortLoopsOnASingleLine: false
+AlignAfterOpenBracket: Align
+BinPackArguments: true
+BinPackParameters: true
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^"'
+    Priority: 3
+  - Regex: '^<(asio|openssl|toml)'
+    Priority: 2
+  - Regex: '^<'
+    Priority: 1
+SortIncludes: CaseSensitive

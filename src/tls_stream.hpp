@@ -39,46 +39,38 @@ public:
     using executor_type = socket_type::executor_type;
 
     TlsStream(socket_type&& socket, asio::ssl::context& ctx)
-        : socket_(std::move(socket)), rbuf_(new char[kReadBufferSize]) {
-        ssl_ = SSL_new(ctx.native_handle());
+        : socket_(std::move(socket)), rbuf_(std::make_unique_for_overwrite<char[]>(kReadBufferSize)) {
+        ssl_.reset(SSL_new(ctx.native_handle()));
         if (!ssl_) throw std::runtime_error("SSL_new failed");
-        BIO* wbio = BIO_new_socket(static_cast<int>(socket_.native_handle()), BIO_NOCLOSE);
-        rbio_ = BIO_new(read_bio_method());
-        if (!wbio || !rbio_) {
-            if (wbio) BIO_free(wbio);
-            if (rbio_) BIO_free(rbio_);
-            SSL_free(ssl_);
-            throw std::runtime_error("BIO allocation failed");
-        }
-        BIO_set_data(rbio_, this);
-        SSL_set_bio(ssl_, rbio_, wbio);     // SSL owns both
-        SSL_set_mode(ssl_, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_AUTO_RETRY);
-        SSL_set_read_ahead(ssl_, 1);        // take everything staged in one BIO read
-        SSL_set_accept_state(ssl_);
+        BioPtr wbio(BIO_new_socket(static_cast<int>(socket_.native_handle()), BIO_NOCLOSE));
+        BioPtr rbio(BIO_new(read_bio_method()));
+        if (!wbio || !rbio) throw std::runtime_error("BIO allocation failed");
+        BIO_set_data(rbio.get(), this);
+        rbio_ = rbio.get();
+        SSL_set_bio(ssl_.get(), rbio.release(), wbio.release());  // SSL takes ownership of both
+        SSL_set_mode(ssl_.get(), SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_AUTO_RETRY);
+        SSL_set_read_ahead(ssl_.get(), 1);  // take everything staged in one BIO read
+        SSL_set_accept_state(ssl_.get());
     }
 
     TlsStream(TlsStream&& o) noexcept
-        : socket_(std::move(o.socket_)), ssl_(std::exchange(o.ssl_, nullptr)),
-          rbio_(std::exchange(o.rbio_, nullptr)), rbuf_(std::move(o.rbuf_)),
-          rpos_(o.rpos_), rlen_(o.rlen_) {
-        if (rbio_) BIO_set_data(rbio_, this);
+        : socket_(std::move(o.socket_)), ssl_(std::move(o.ssl_)), rbio_(std::exchange(o.rbio_, nullptr)),
+          rbuf_(std::move(o.rbuf_)), rpos_(o.rpos_), rlen_(o.rlen_) {
+        if (rbio_) BIO_set_data(rbio_, this);  // the read BIO calls back into this object
     }
     TlsStream& operator=(TlsStream&&) = delete;
     TlsStream(const TlsStream&) = delete;
     TlsStream& operator=(const TlsStream&) = delete;
-
-    ~TlsStream() {
-        if (ssl_) SSL_free(ssl_);
-    }
+    ~TlsStream() = default;
 
     lowest_layer_type& lowest_layer() noexcept { return socket_; }
     const lowest_layer_type& lowest_layer() const noexcept { return socket_; }
     executor_type get_executor() noexcept { return socket_.get_executor(); }
-    SSL* native_handle() noexcept { return ssl_; }
+    SSL* native_handle() noexcept { return ssl_.get(); }
 
     // Best-effort close_notify; never blocks, errors ignored.
     void shutdown_notify() noexcept {
-        if (ssl_) { SSL_shutdown(ssl_); ERR_clear_error(); }
+        if (ssl_) { SSL_shutdown(ssl_.get()); ERR_clear_error(); }
     }
 
     // Server-side handshake. Handler: void(std::error_code).
@@ -147,9 +139,9 @@ private:
 
     template <class Handler>
     void do_handshake(Handler handler) {
-        int ret = SSL_do_handshake(ssl_);
+        int ret = SSL_do_handshake(ssl_.get());
         if (ret == 1) { complete(std::move(handler), std::error_code()); return; }
-        int err = SSL_get_error(ssl_, ret);
+        int err = SSL_get_error(ssl_.get(), ret);
         if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
             retry_after(err, [this, h = std::move(handler)](std::error_code ec) mutable {
                 if (ec) h(ec);
@@ -164,9 +156,9 @@ private:
 
     template <class Handler>
     void do_read(asio::mutable_buffer b, Handler handler) {
-        int ret = SSL_read(ssl_, b.data(), static_cast<int>(std::min<std::size_t>(b.size(), 1u << 30)));
+        int ret = SSL_read(ssl_.get(), b.data(), static_cast<int>(std::min<std::size_t>(b.size(), 1u << 30)));
         if (ret > 0) { complete(std::move(handler), std::error_code(), static_cast<std::size_t>(ret)); return; }
-        int err = SSL_get_error(ssl_, ret);
+        int err = SSL_get_error(ssl_.get(), ret);
         if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
             retry_after(err, [this, b, h = std::move(handler)](std::error_code ec) mutable {
                 if (ec) h(ec, 0);
@@ -184,9 +176,9 @@ private:
         // Without SSL_MODE_ENABLE_PARTIAL_WRITE this loops over all records internally
         // and only returns early on WANT_WRITE, after which it must be retried with the
         // same arguments (OpenSSL remembers its position).
-        int ret = SSL_write(ssl_, b.data(), static_cast<int>(std::min<std::size_t>(b.size(), 1u << 30)));
+        int ret = SSL_write(ssl_.get(), b.data(), static_cast<int>(std::min<std::size_t>(b.size(), 1u << 30)));
         if (ret > 0) { complete(std::move(handler), std::error_code(), static_cast<std::size_t>(ret)); return; }
-        int err = SSL_get_error(ssl_, ret);
+        int err = SSL_get_error(ssl_.get(), ret);
         if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
             retry_after(err, [this, b, h = std::move(handler)](std::error_code ec) mutable {
                 if (ec) h(ec, 0);
@@ -262,9 +254,14 @@ private:
 
     static constexpr std::size_t kReadBufferSize = 17 * 1024;  // one max-size TLS record plus overhead
 
+    struct SslDeleter { void operator()(SSL* s) const noexcept { SSL_free(s); } };
+    struct BioDeleter { void operator()(BIO* b) const noexcept { BIO_free(b); } };
+    using SslPtr = std::unique_ptr<SSL, SslDeleter>;
+    using BioPtr = std::unique_ptr<BIO, BioDeleter>;
+
     socket_type socket_;
-    SSL* ssl_ = nullptr;
-    BIO* rbio_ = nullptr;             // owned by ssl_
+    SslPtr ssl_;
+    BIO* rbio_ = nullptr;             // non-owning: owned by ssl_, used to update the callback data on move
     std::unique_ptr<char[]> rbuf_;    // ciphertext staging read by the custom BIO
     std::size_t rpos_ = 0;            // consumed
     std::size_t rlen_ = 0;            // filled

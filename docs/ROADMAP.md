@@ -134,10 +134,52 @@ same after it (that is the checkpoint).
       clean for 1h, benchmark unchanged.
 
 ### Phase C. Control API and agentic interface  `[ ]`
-Cheap, independent, and useful for every later phase (inspect cache, reload config).
-- [ ] C1 Control socket: unix domain socket (`/run/agensio.sock`, owner-only) speaking HTTP/1.1
-      + JSON through the same core; optional loopback TCP listener with a bearer token
-      (off by default on POSIX, default on Windows). One API, two transports.
+Independent of the other phases and useful for all of them (inspect cache, reload config).
+**Security is the first requirement here**: a compromised control interface owns the
+server and every site on it. The rules below are binding for every step in this phase.
+
+Threat model (what the interface must resist):
+- a local unprivileged user, or a compromised PHP/Node app running as its own user
+- a browser on the administrator's machine (CSRF, DNS rebinding against loopback)
+- anything on the network (the interface must never be reachable from it by default)
+- an AI agent or a script misusing the interface, by mistake or through prompt injection
+- an attacker who obtained a token or a config file backup
+
+Rules:
+- [ ] C0 Security design, implemented before any command exists:
+  - **Off the data plane.** The control API is a separate listener with its own code path;
+    no site listener can ever route to it, no shared port, no path-prefix trick.
+  - **Unix socket by default**, mode `0600` owned by the server's user, optional admin
+    group at `0660`. Peer credentials (`SO_PEERCRED` / `LOCAL_PEERCRED`) are checked on
+    every connection regardless of file permissions, and the peer uid/gid is written to
+    the audit log with every mutating command. The PHP/proxy app users are never in the
+    admin group.
+  - **Loopback TCP is opt-in**, `127.0.0.1`/`::1` only; binding to any other address is
+    refused unless `remote = { tls = ..., client_ca = ... }` is set, i.e. remote access
+    requires mutual TLS with client certificates, never a token alone.
+  - **Token auth for TCP**: 32 random bytes generated at first start, stored `0600`,
+    rotated with `ctl token rotate`, compared in constant time, failures rate-limited and
+    logged. Tokens are never printed by any command.
+  - **Browser defences on TCP**: requests must carry `Host: localhost|127.0.0.1|[::1]`
+    (DNS rebinding), must not carry an `Origin` header (no browser is a client), must
+    carry a custom header (`X-Agensio-Control: 1`), no CORS ever.
+  - **Roles**: `viewer` (read-only), `operator` (reload, purge, reopen logs), `admin`
+    (create/disable sites, edit config, token rotate). Role comes from peer uid/group on
+    the socket or from the token on TCP; default: socket owner = admin, admin group =
+    operator, everything else refused.
+  - **Mutations are safe by construction**: validate the resulting config before
+    applying; atomic file writes with a `.bak` of anything overwritten; `sites/create`
+    accepts only syntactically valid domains and paths under a configured `sites_root`
+    (no symlink escape, checked after canonicalisation); generated TOML comes from
+    templates, never string concatenation; the API never executes shell commands.
+  - **Audit log**: every mutating command appended as one line (time, peer, role, command,
+    arguments, result), separate from the access log, rotated with it.
+  - **Kill switch**: `control.enabled = false` removes the listener entirely; the
+    interface is also absent when the config does not mention it.
+  - Same fuzzed HTTP/1.1 parser as the data plane; JSON parsing with size limits.
+- [ ] C1 Control socket: unix domain socket (`/run/agensio.sock`) speaking HTTP/1.1 + JSON
+      through the same core; optional loopback TCP listener with the token; remote only
+      with mTLS. One API, several transports, one permission model.
 - [ ] C2 Read-only commands, JSON and plain text (`Accept: text/plain` gives a human answer):
       `status`, `cache` (count, bytes, hit ratio) and `cache/entries` (path, size, age,
       hits), `sites`, `config` (effective, with sources), `connections`, `metrics`
@@ -149,15 +191,29 @@ Cheap, independent, and useful for every later phase (inspect cache, reload conf
 - [ ] C4 Natural-language front: a small intent matcher for the questions in the brief
       ("how many files are in cache?", "create a website in /var/www/x for x.com") mapping
       to C2/C3 commands, answering in text. No model inside the server.
-- [ ] C5 Agent integration (agentic tools, to look at in detail when phase C starts): expose
-      the same commands as an **MCP server** (Model Context Protocol) so agentic OS tooling
-      (e.g. Omarchy's agent setup) can call them as tools; `agensio mcp` subcommand as a
-      stdio bridge to the control socket; MCP streamable-HTTP on the loopback listener.
-      The server never embeds a model; it offers precise, auditable tools.
+- [ ] C5 MCP server (decided 2026-09-16, first-class feature): expose the same commands as
+      **Model Context Protocol** tools so agentic OS tooling (e.g. Omarchy) and
+      administrators' assistants can inspect and configure the server.
+  - `agensio mcp` runs as a stdio MCP server that connects to the control socket **as the
+    invoking user**: it inherits the OS permission model and needs no secret of its own.
+  - MCP over streamable HTTP is available only on the loopback listener, with the token,
+    and validates `Origin` as the MCP spec requires.
+  - Tools carry the MCP annotations (`readOnlyHint`, `destructiveHint`) so agent hosts ask
+    the user before mutations; mutating tools additionally require `confirm: true` and a
+    short `reason` string that is written to the audit log.
+  - The tool set is the role's command set: a viewer's MCP session cannot see mutating
+    tools at all.
+  - The server never embeds a model and never fetches anything from the network on behalf
+    of an agent; it offers precise, auditable tools and nothing else.
 - [ ] C6 CLI: `agensio ctl <command>` wrapping the socket, so shell scripts and panels
       (ISPConfig style) get the same interface.
+- [ ] C7 Security review of the phase: a written checklist against the threat model above,
+      tests for each rule (wrong uid refused, `Origin` refused, non-loopback bind refused,
+      token rate limit, symlink escape in `sites/create` refused, viewer cannot mutate),
+      and a fuzz target for the JSON command parser.
 - [ ] Checkpoint: control traffic measured to add zero cost to data-plane workers (runs on
-      worker 0's loop but only when called); docs page with every command.
+      worker 0's loop but only when called); docs page with every command, every role and
+      the threat model.
 
 ### Phase D. PHP by design (FastCGI to php-fpm), Laravel first  `[ ]`
 - [ ] D1 `FcgiClient`: async FastCGI/1.1 over unix socket or TCP, per-worker connection
@@ -270,10 +326,13 @@ Cheap, independent, and useful for every later phase (inspect cache, reload conf
 1. **HTTP/2 and HTTP/3 libraries.** Start with nghttp2 and ngtcp2 + nghttp3. Benchmark h2
    and h3 against nginx and Caddy; if the numbers disappoint, write HTTP/2 framing + HPACK
    ourselves (QUIC stays a library either way).
-2. **Control interface.** HTTP + JSON API over a unix domain socket by default (owner-only,
-   no network exposure); an optional loopback TCP listener with a bearer token, off by
-   default on POSIX and the default on Windows. The MCP server and the `agensio ctl` CLI
-   are thin adapters over the same API. Created sites are written to `sites.d/`.
+2. **Control interface: security first, MCP built in** (reaffirmed 2026-09-16). HTTP + JSON
+   API over a unix domain socket by default with peer-credential checks; an optional
+   loopback TCP listener with a bearer token (off by default on POSIX, the default on
+   Windows); remote access only with mutual TLS. Roles viewer/operator/admin, audit log
+   for every mutation, kill switch. The MCP server (stdio bridge and loopback HTTP) and the
+   `agensio ctl` CLI are thin adapters over the same API and the same permission model.
+   Created sites are written to `sites.d/`. Full threat model and rules: phase C0.
 3. **PHP test bed: ddev** (present on both macOS and Linux dev machines). php-fpm only;
    Octane out of scope.
 4. **Proxy: upstream groups from the first cut**, kept simple: list of backends,

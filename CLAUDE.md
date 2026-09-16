@@ -33,6 +33,15 @@ Everything under "Architecture" below is what the code does now, not a proposal.
 - Cross-platform: macOS (kqueue) and Linux (epoll) are first-class; Windows should compile
   but is not benchmarked.
 
+## Code rules
+
+`docs/CODE_STYLE.md` is binding: RAII everywhere, raw pointers and references are never
+owning, no exceptions on the request path, no per-request allocation on the hot path,
+`static_cast` only, one worker's state is never touched by another. Enforced by
+`.clang-format` / `.clang-tidy` (`scripts/format.sh`, `scripts/lint.sh`). The agent skills
+`cpp-guidelines`, `perf-check` and `security-review-cpp` in `.claude/skills/` are the
+checklists to apply when writing, measuring and reviewing.
+
 ## Working agreement with the agent
 
 - Discuss before building anything larger than a bug fix: the owner wants to review the
