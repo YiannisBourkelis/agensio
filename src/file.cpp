@@ -10,6 +10,8 @@
 #include <climits>
 #include <cstdlib>
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -179,6 +181,19 @@ SendFileResult send_file(int socket_fd, const File& file, std::uint64_t offset, 
     (void)header_count;
     r.unsupported = true;
     return r;
+#endif
+}
+
+void set_tcp_cork(int socket_fd, bool on) noexcept {
+#if defined(__linux__)
+    int v = on ? 1 : 0;
+    ::setsockopt(socket_fd, IPPROTO_TCP, TCP_CORK, &v, sizeof v);
+#elif defined(__APPLE__) || defined(__FreeBSD__)
+    int v = on ? 1 : 0;
+    ::setsockopt(socket_fd, IPPROTO_TCP, TCP_NOPUSH, &v, sizeof v);
+#else
+    (void)socket_fd;
+    (void)on;
 #endif
 }
 

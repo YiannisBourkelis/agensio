@@ -1,0 +1,8 @@
+build/
+build-*/
+bench/results/
+bench/tmp/
+bench/www/*.bin
+bench/www/style.css
+bench/certs/*.pem
+.git/

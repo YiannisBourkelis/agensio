@@ -101,6 +101,11 @@ same after it (that is the checkpoint).
 
 - [ ] A1 Introduce `Stream`, `Request`, `Response`, `Headers`, `BodySource`; port the static
       handler to produce a `Response` with a memory/file `BodySource`.
+- [ ] A1b Descriptor cache for streamed files: the file `BodySource` takes its descriptor
+      from the cache (entries above `max_file_size` hold an open fd and metadata, no bytes),
+      so a 10 MB stream no longer costs an `openat` + `fstat` + `close` per request
+      (measured on Linux/virtiofs: 467 us per open, 8 % of the response). nginx's
+      `open_file_cache` equivalent.
 - [ ] A2 Split `Connection` into `Http1Connection` (I/O + parser) that drives one `Stream`;
       response writing consumes a `BodySource` (keeps the writev / TLS-coalescing /
       sendfile fast paths exactly as they are today).
@@ -407,6 +412,24 @@ Rules:
    format (Apache/nginx "combined" so existing fail2ban filters work unchanged), buffered
    and written off the hot path. Default: see the note in phase A5 (recommendation: on,
    measured cost must stay under 1 us/request).
+
+### Phase A start decisions (2026-09-16)
+- Source layout moves file by file as each is touched (`src/core`, `src/http1`, `src/handlers`,
+  `src/services`, `src/net`, `src/os`), no single big rename.
+- Data-plane errors use a small in-house `Result<T>` (about 60 lines). **When the project
+  moves to a standard that has `std::expected` (C++23; needs GCC 13+, i.e. after Debian 12
+  is dropped), replace it with the standard type.**
+- Limits: 100 header fields, 16 KB head, 8 KB per field; request body 1 MB default with
+  per-site override (PHP presets raise it). Timeouts: header read 10 s, body read 30 s
+  between chunks, write stall 30 s, keep-alive idle 15 s; all configurable.
+- Access log: on by default in combined format if measured under 1 us/request, else off;
+  **always off in the benchmark templates**, matching the nginx and Caddy bench configs.
+- Names: `Stream`, `Request`, `Response`, `Headers`, `BodySource`; conventions per
+  `docs/CODE_STYLE.md`.
+- One commit per step A1-A5 with before/after numbers; the owner commits.
+- **OpenLiteSpeed joins the benchmark** via the Linux container harness (`bench/docker/`),
+  since it has no macOS build; that harness runs agensio, nginx, Caddy and OpenLiteSpeed
+  with wrk on one Docker network, one worker each.
 
 ## 5. Platform layer (Windows and POSIX)
 

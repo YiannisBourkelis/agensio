@@ -1,0 +1,13 @@
+Running 5s test @ https://caddy:443/style.css
+  2 threads and 64 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    25.77ms   26.86ms 240.66ms   91.66%
+    Req/Sec     1.43k   229.86     2.75k    89.00%
+  Latency Distribution
+     50%   27.91ms
+     75%   40.60ms
+     90%   50.32ms
+     99%  131.65ms
+  14195 requests in 5.01s, 1.36GB read
+Requests/sec:   2833.86
+Transfer/sec:    277.59MB

@@ -1,0 +1,14 @@
+Running 5s test @ http://caddy:80/
+  2 threads and 64 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    53.37ms   67.85ms 451.27ms   81.84%
+    Req/Sec     1.73k   486.72     4.10k    73.47%
+  Latency Distribution
+     50%   21.04ms
+     75%   96.89ms
+     90%  154.87ms
+     99%  251.23ms
+  16913 requests in 4.92s, 20.00MB read
+  Socket errors: connect 0, read 0, write 0, timeout 6
+Requests/sec:   3440.81
+Transfer/sec:      4.07MB

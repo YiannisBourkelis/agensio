@@ -257,6 +257,9 @@ private:
             asio::error_code ec;
             socket().non_blocking(true, ec);
         }
+        // Cork for the duration of the transfer (nginx: tcp_nopush with sendfile). Measured on
+        // Linux loopback: without it each spliced page batch leaves as its own small segment.
+        set_tcp_cork(static_cast<int>(socket().native_handle()), true);
         sendfile_step();
     }
 
@@ -282,13 +285,18 @@ private:
             const std::size_t hdr_remaining = hdr_total_ - hdr_sent_;
             if (remaining == 0 && hdr_remaining == 0) {
                 sf_file_ = nullptr;
+                set_tcp_cork(static_cast<int>(socket().native_handle()), false);  // flush the tail
                 finish_response();
                 return;
             }
             IoSlice iov[3];
             const int n = hdr_remaining ? pending_headers(iov) : 0;
+            // Cap each call (nginx's sendfile_max_chunk): a single 10 MB sendfile() was measured
+            // at 3.85 ms of kernel time, six times nginx's 1 MB calls, because it holds the socket
+            // lock against the receiver and the worker's loop for the whole transfer.
+            const std::uint64_t count = std::min<std::uint64_t>(remaining, cfg_.sendfile_max_chunk);
             SendFileResult r =
-                send_file(static_cast<int>(socket().native_handle()), *sf_file_, sf_sent_, remaining, iov, n);
+                send_file(static_cast<int>(socket().native_handle()), *sf_file_, sf_sent_, count, iov, n);
             if (r.headers_unsupported) {
                 // Write the headers with writev; on_write() comes back here for the file.
                 auto self = this->shared_from_this();

@@ -1,0 +1,32 @@
+# Container benchmark: every server on one Docker network, one worker each, pinned to CPU 0;
+# the load generator pinned to the other CPUs. Run with bench/docker/run.sh.
+name: agensio-bench
+services:
+  agensio:
+    build: { context: ../.., dockerfile: bench/docker/Dockerfile.agensio }
+    cpuset: "0"
+    volumes: [ "../www:/bench/www:ro", "../certs:/bench/certs:ro" ]
+    ulimits: { nofile: { soft: 65536, hard: 65536 } }
+  nginx:
+    image: nginx:1.27-alpine
+    cpuset: "0"
+    volumes: [ "../www:/bench/www:ro", "../certs:/bench/certs:ro", "./nginx.conf:/etc/nginx/nginx.conf:ro" ]
+    ulimits: { nofile: { soft: 65536, hard: 65536 } }
+  caddy:
+    image: caddy:2-alpine
+    cpuset: "0"
+    environment: { GOMAXPROCS: "1" }
+    volumes: [ "../www:/bench/www:ro", "../certs:/bench/certs:ro", "./Caddyfile:/etc/caddy/Caddyfile:ro" ]
+    ulimits: { nofile: { soft: 65536, hard: 65536 } }
+  openlitespeed:
+    image: litespeedtech/openlitespeed:latest
+    cpuset: "0"
+    volumes: [ "../www:/var/www/vhosts/localhost/html:ro", "../certs:/bench/certs:ro",
+               "./ols/httpd_config.conf:/usr/local/lsws/conf/httpd_config.conf:ro",
+               "./ols/docker.conf:/usr/local/lsws/conf/templates/docker.conf:ro" ]
+    ulimits: { nofile: { soft: 65536, hard: 65536 } }
+  wrk:
+    build: { context: ., dockerfile: Dockerfile.wrk }
+    cpuset: "1-3"
+    volumes: [ "../www:/bench/www:ro" ]
+    ulimits: { nofile: { soft: 65536, hard: 65536 } }

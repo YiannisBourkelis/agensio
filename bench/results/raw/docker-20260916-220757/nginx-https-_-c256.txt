@@ -1,0 +1,13 @@
+Running 5s test @ https://nginx:443/
+  2 threads and 256 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     3.11ms    1.48ms  52.73ms   98.70%
+    Req/Sec    41.82k     6.09k   45.15k    98.00%
+  Latency Distribution
+     50%    2.92ms
+     75%    3.01ms
+     90%    3.30ms
+     99%    4.75ms
+  415921 requests in 5.04s, 485.50MB read
+Requests/sec:  82587.82
+Transfer/sec:     96.40MB

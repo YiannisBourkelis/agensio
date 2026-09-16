@@ -231,6 +231,9 @@ Config load_config(const fs::path& path) {
         fail("server.reuse_port must be \"auto\", \"on\" or \"off\"");
     cfg.tcp_nodelay = server["tcp_nodelay"].value_or(true);
     cfg.sendfile = server["sendfile"].value_or(true);
+    cfg.sendfile_max_chunk =
+        size_node(server["sendfile_max_chunk"], cfg.sendfile_max_chunk, "server.sendfile_max_chunk");
+    if (cfg.sendfile_max_chunk < 65536) fail("server.sendfile_max_chunk must be at least 64KB");
     cfg.server_header = server["server_header"].value_or(std::string("agensio"));
 
     auto cache = root["cache"];

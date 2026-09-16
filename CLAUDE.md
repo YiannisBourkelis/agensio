@@ -175,6 +175,22 @@ Conclusion: per request agensio costs 2.5-3.5x less CPU than nginx and 20-30x le
 Caddy, and a single worker beats ten nginx workers on plain HTTP; nginx only pulls ahead on
 TLS by spending 10 cores. `bench/run.sh` prints the CPU and RSS columns by default now.
 
+Linux container run (`bench/docker/`, Colima VM 4 vCPUs, `bench/results/docker-*.md`):
+agensio one worker 238-242k plain 1 KB req/s at 4.1 us, HTTPS 154k at 6.5 us, 100 KB 90k
+at 11 us; nginx 130k / 91k / 70k; OpenLiteSpeed 93k / 79k / 9.5k; Caddy 3.4k (GOMAXPROCS=1
+pinned to one CPU cripples the Go runtime; not a fair row). Two lessons from that run:
+- **Inline completions need a yield budget** (see item 1): the first Linux run timed out
+  all 256 HTTPS connections; `kInlineBudget` fixed it.
+- **Opening the streamed file per request is expensive on FUSE/network filesystems**: on the
+  virtiofs bind mount a 10 MB stream cost 2.8 ms and 218 req/s against nginx's 850, because
+  every open invalidates the FUSE page cache; from a container-local ext4 docroot agensio does
+  801 req/s at 438 us, nginx 784 at 428 (parity). `sendfile_max_chunk` (1 MB, kept) and
+  TCP_CORK around sendfile (kept, nginx's tcp_nopush) were measured on that path: no change.
+  The fix is the descriptor cache for streamed files, roadmap A1b, which also matters for
+  NFS-backed docroots in hosting.
+- Docker's CPU on macOS shows under `com.apple.Virtualization.VirtualMachine` in Activity
+  Monitor (231 % of a core during a run), not under docker or colima.
+
 Benchmark hygiene: `pkill -x nginx` does not kill nginx (it retitles its processes); a
 stale instance keeps the ports and silently serves the next run. `bench/run.sh` now
 refuses to start when a port is busy; kill with `pkill -f 'nginx: '`.
@@ -186,7 +202,11 @@ What got us there, in order of impact:
    kevent calls instead of one. `Connection` and `TlsStream` bind an immediate executor
    (`asio::bind_immediate_executor(worker.ctx.get_executor(), h)`) so speculative
    completions run inline; `TlsStream::complete` calls the handler directly. Keep every
-   new handler on the hot path wrapped in `immediate(...)`.
+   new handler on the hot path wrapped in `immediate(...)`. **But bound it**: a connection
+   whose client answers instantly can chain request after request inline and starve every
+   other connection on the worker (seen on Linux loopback as 2 s timeouts on all 256
+   connections). `Connection::finish_response` yields to the loop with `asio::post` every
+   `kInlineBudget` (8) responses; measured cost on macOS: none.
 2. **Own TLS stream (`src/tls_stream.hpp`) instead of `asio::ssl::stream`.** Writes go
    through a socket BIO: one `SSL_write` pushes all records with back-to-back `send()`
    until EAGAIN. `asio::ssl::stream` uses a 17 KB BIO pair, costing one async write and

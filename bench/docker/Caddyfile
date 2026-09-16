@@ -1,0 +1,13 @@
+{
+    admin off
+    auto_https off
+}
+http://:80 {
+    root * /bench/www
+    file_server
+}
+https://:443 {
+    tls /bench/certs/cert.pem /bench/certs/key.pem
+    root * /bench/www
+    file_server
+}

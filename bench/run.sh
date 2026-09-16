@@ -107,9 +107,14 @@ trap 'for s in $SERVERS; do pkill -x "$s" 2>/dev/null || true; pkill -f "^$s( |:
 
 # All processes of a server (nginx retitles master and workers).
 pids_of() { { pgrep -x "$1" 2>/dev/null; pgrep -f "^$1( |:)" 2>/dev/null; } | sort -u | paste -sd, - ; }
-cpu_seconds() {  # sum of CPU time over the server's processes
+cpu_seconds() {  # sum of CPU time over the server's processes (user + system)
   local pids; pids=$(pids_of "$1"); [ -z "$pids" ] && { echo 0; return; }
-  ps -o cputime= -p "$pids" | LC_NUMERIC=C awk -F'[:.]' '{ if (NF==3) s+=$1*60+$2+$3/100; else s+=$1*3600+$2*60+$3+$4/100 } END{printf "%.2f", s}'
+  if [ -d /proc ]; then  # Linux: /proc/<pid>/stat fields 14 (utime) and 15 (stime) in clock ticks
+    local tck; tck=$(getconf CLK_TCK)
+    for p in ${pids//,/ }; do cat /proc/$p/stat 2>/dev/null; done | awk -v tck="$tck" '{ s+=($14+$15)/tck } END{printf "%.2f", s}'
+  else  # macOS: ps prints m:ss.cc or h:mm:ss.cc
+    ps -o cputime= -p "$pids" | LC_NUMERIC=C awk -F'[:.]' '{ if (NF==3) s+=$1*60+$2+$3/100; else s+=$1*3600+$2*60+$3+$4/100 } END{printf "%.2f", s}'
+  fi
 }
 rss_mb() {  # resident memory summed over the server's processes
   local pids; pids=$(pids_of "$1"); [ -z "$pids" ] && { echo 0; return; }
@@ -127,7 +132,7 @@ version_of() {
 {
   echo "# Static file benchmark $STAMP"
   echo
-  echo "- machine: $(uname -m), $(sysctl -n machdep.cpu.brand_string 2>/dev/null || grep -m1 'model name' /proc/cpuinfo | cut -d: -f2), $(uname -sr)"
+  echo "- machine: $(uname -m), $(sysctl -n machdep.cpu.brand_string 2>/dev/null || grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | sed 's/^ *//'), $(uname -sr), $(sysctl -n hw.ncpu 2>/dev/null || nproc) cores"
   echo "- commit: $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo uncommitted)"
   echo "- server workers: agensio=$AGENSIO_WORKERS nginx=$NGINX_WORKERS caddy=$CADDY_WORKERS (0/auto = all cores), cores: $CORES"
   echo "- load generator: $(wrk -v 2>&1 | head -1 | awk '{print $1, $2, $3}'), threads=$THREADS, duration=$DURATION, keep-alive"

@@ -1,0 +1,22 @@
+# agensio config for the container benchmark: one worker, ports 80/443, docroot mounted at /bench/www.
+[server]
+workers = 1
+idle_timeout = 65
+max_requests_per_connection = 1000000
+reuse_port = "auto"
+
+[cache]
+max_file_size = "4MB"
+max_size = "256MB"
+
+[[site]]
+server_name = ["*"]
+listen = ["0.0.0.0:80"]
+root = "/bench/www"
+default = true
+
+[[site]]
+server_name = ["*"]
+listen = ["0.0.0.0:443"]
+root = "/bench/www"
+tls = { cert = "/bench/certs/cert.pem", key = "/bench/certs/key.pem" }

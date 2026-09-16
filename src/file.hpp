@@ -73,6 +73,11 @@ struct SendFileResult {
 SendFileResult send_file(int socket_fd, const File& file, std::uint64_t offset, std::uint64_t count,
                          const IoSlice* headers = nullptr, int header_count = 0) noexcept;
 
+// TCP_CORK (Linux) / TCP_NOPUSH (BSD, macOS): while set, the kernel coalesces sendfile
+// page batches into full-size segments instead of pushing each one; must be cleared at the
+// end of the response to flush the tail. No-op on other platforms.
+void set_tcp_cork(int socket_fd, bool on) noexcept;
+
 // Raises the soft open-file limit to the hard limit. Returns the resulting soft limit.
 std::uint64_t raise_open_file_limit() noexcept;
 

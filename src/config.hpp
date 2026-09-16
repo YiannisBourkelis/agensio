@@ -36,6 +36,8 @@ struct Config {
     std::string reuse_port = "auto";  // auto | on | off
     bool tcp_nodelay = true;
     bool sendfile = true;  // zero-copy streaming of uncached files on plain sockets
+    std::size_t sendfile_max_chunk =
+        1024 * 1024;  // bytes per sendfile() call; one huge call holds the socket lock and the loop
     std::string server_header = "agensio";
 
     // [cache]

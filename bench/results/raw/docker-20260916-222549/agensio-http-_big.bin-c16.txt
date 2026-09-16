@@ -1,0 +1,13 @@
+Running 5s test @ http://agensio:80/big.bin
+  2 threads and 16 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    75.46ms   66.30ms 706.11ms   59.38%
+    Req/Sec   111.65     24.39   171.00     73.00%
+  Latency Distribution
+     50%   91.97ms
+     75%  112.83ms
+     90%  131.71ms
+     99%  270.13ms
+  1115 requests in 5.01s, 10.89GB read
+Requests/sec:    222.38
+Transfer/sec:      2.17GB

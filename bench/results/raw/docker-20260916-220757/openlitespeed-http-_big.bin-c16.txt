@@ -1,0 +1,13 @@
+Running 5s test @ http://openlitespeed:80/big.bin
+  2 threads and 16 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    16.60ms    9.68ms  91.46ms   77.70%
+    Req/Sec   377.07     32.30   450.00     64.29%
+  Latency Distribution
+     50%   14.05ms
+     75%   20.70ms
+     90%   29.80ms
+     99%   49.51ms
+  3784 requests in 5.03s, 36.97GB read
+Requests/sec:    751.61
+Transfer/sec:      7.34GB

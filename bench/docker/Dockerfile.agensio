@@ -1,0 +1,20 @@
+# Linux build of agensio for the container benchmark (Debian 12: GCC 12, C++20 floor).
+# Asio is fetched by CMake because Debian 12 ships 1.22, older than the 1.30 needed for
+# bind_immediate_executor.
+FROM debian:bookworm-slim AS build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      g++ cmake ninja-build git ca-certificates libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY . .
+RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DAGENSIO_TESTS=ON \
+    && cmake --build build \
+    && ./build/agensio_tests
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/build/agensio /usr/local/bin/agensio
+COPY bench/docker/agensio.toml /bench/agensio.toml
+EXPOSE 80 443
+ENTRYPOINT ["/usr/local/bin/agensio", "-c", "/bench/agensio.toml"]
