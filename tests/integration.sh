@@ -8,9 +8,41 @@ cd "$ROOT"
 [ -f bench/www/big.bin ] && [ -L bench/www/outside.txt ] || bench/gen-www.sh >/dev/null
 [ -f bench/certs/cert.pem ] || bench/certs/gen-cert.sh >/dev/null
 printf '<html><body>sub index</body></html>\n' > bench/www/sub/index.html
+printf '<html><body>app shell</body></html>\n' > bench/www/app.html
 
 mkdir -p bench/tmp
 sed "s#@WORKERS@#0#g; s#@BENCH@#$ROOT/bench#g; s#@SENDFILE_MIN@#${SENDFILE_MIN:-48KB}#g" bench/agensio.toml > bench/tmp/agensio-test.toml
+# Locations (A4) on the plain site: an SPA fallback, an aliased root, an exact match and a
+# try_files status. Inserted after the site's `default = true` line.
+python3 - bench/tmp/agensio-test.toml "$ROOT/bench/www" <<'PY'
+import sys
+path, www = sys.argv[1], sys.argv[2]
+block = f"""default = true
+
+[[site.location]]
+path = "/app/"
+try_files = ["$uri", "$uri/", "/app.html"]
+
+[[site.location]]
+path = "/alias/"
+alias = "{www}/sub"
+
+[[site.location]]
+path = "/spa/"
+try_files = ["$uri", "/index.html"]
+
+[[site.location]]
+path = "/index.html"
+match = "exact"
+root = "{www}/sub"
+
+[[site.location]]
+path = "/private/"
+try_files = ["=403"]
+"""
+text = open(path).read().replace("default = true\n", block, 1)
+open(path, "w").write(text)
+PY
 "$BIN" -c bench/tmp/agensio-test.toml >/dev/null 2>&1 &
 PID=$!
 trap 'kill $PID 2>/dev/null; wait $PID 2>/dev/null' EXIT
@@ -46,6 +78,17 @@ for base in http://127.0.0.1:8080 https://127.0.0.1:8443; do
   check "$p keep-alive reuse"   "1 0" "$(curl -sSk -o /dev/null -o /dev/null -w '%{num_connects} ' $base/ $base/style.css | sed 's/ $//' | tr '\n' ' ' | sed 's/ $//')"
   check "$p 3 x 10MB one conn"  "$BIG $BIG $BIG" "$(curl -sSk $base/big.bin $base/big.bin $base/big.bin | (a=$(head -c 10485760 | sum); b=$(head -c 10485760 | sum); c=$(sum); echo "$a $b $c"))"
 done
+# ---- locations and try_files (A4) ----
+check "location: SPA fallback serves the app shell for a missing path" "app shell" "$(curl -sS http://127.0.0.1:8080/app/some/route | sed 's/<[^>]*>//g')"
+check "location: SPA fallback for the directory URI" "app shell" "$(curl -sS http://127.0.0.1:8080/app/ | sed 's/<[^>]*>//g')"
+check "location: alias replaces the prefix" "sub index" "$(curl -sS http://127.0.0.1:8080/alias/ | sed 's/<[^>]*>//g')"
+check "location: alias file path" "sub index" "$(curl -sS http://127.0.0.1:8080/alias/index.html | sed 's/<[^>]*>//g')"
+check "location: fallback is routed again (hits the exact /index.html location)" "sub index" "$(curl -sS http://127.0.0.1:8080/spa/missing | sed 's/<[^>]*>//g')"
+check "location: exact match wins over the root prefix" "sub index" "$(curl -sS http://127.0.0.1:8080/index.html | sed 's/<[^>]*>//g')"
+check "location: exact does not prefix-match" "404" "$(code http://127.0.0.1:8080/index.htmlx)"
+check "location: root prefix still serves the site" "$IDX" "$(curl -sS http://127.0.0.1:8080/ | sum)"
+check "location: try_files =403" "403" "$(code http://127.0.0.1:8080/private/anything)"
+check "location: fallback result served again (cache hit on the target)" "app shell" "$(curl -sS http://127.0.0.1:8080/app/some/route | sed 's/<[^>]*>//g')"
 check "dotfile hidden (404)" "404" "$(code http://127.0.0.1:8080/.env)"
 check "dot-directory hidden (404)" "404" "$(code http://127.0.0.1:8080/.git/config)"
 check "symlink outside root served with symlinks=allow" "200" "$(code http://127.0.0.1:8080/outside.txt)"

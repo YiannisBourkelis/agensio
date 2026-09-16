@@ -293,7 +293,7 @@ private:
             req.body = &body_source_;
         }
         worker_.state.now = std::time(nullptr);
-        handler_.handle(stream_, listener_.route, worker_.state);
+        handler_.handle(stream_, listener_.router, worker_.state);
         Response& r = stream_.response;
         if (cfg_.max_requests_per_connection != 0 && ++requests_served_ >= cfg_.max_requests_per_connection)
             r.keep_alive = false;  // cap reached: this is the last response

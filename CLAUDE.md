@@ -99,7 +99,10 @@ Source map (`src/`, files move into subdirectories as they are touched, see the 
 - `core/`: `result.hpp` (`Result<T>`, to become `std::expected`), `headers.hpp` (fixed-capacity
   name/value views), `request.hpp`, `response.hpp` (status, prebuilt header block, extra
   fields, `Body`), `body.hpp` (`MemoryBody`, `FileBody`, `StreamBody` for later phases),
-  `stream.hpp` (one request/response exchange), `worker_state.hpp`, `strings.hpp`.
+  `stream.hpp` (one request/response exchange), `worker_state.hpp`, `strings.hpp`,
+  `router.hpp/.cpp` (`Router`: site by Host, then `Router::location`: exact before
+  prefix, longest prefix first, implicit `/` last; `try_files` fallbacks re-enter it,
+  at most 8 hops).
 - `http1/`: `parser` (request head into `Request`), `connection.hpp` (`Http1Connection`,
   the I/O loop: reads, parses, drives one `Stream`, keep-alive/pipelining/timer),
   `writer.hpp` (`Http1Writer`: `Response` to bytes, owns the writev/TLS-coalescing/
@@ -152,7 +155,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
 - **MIME**: static extension table compiled in (nginx `mime.types` equivalent), overridable
   from config.
 - **Config**: TOML (vendored toml++). `[server]`, `[cache]`, `[[site]]` with `server_name`,
-  `listen`, `root`, `index`, `tls`, `default`; `include = ["sites.d/*.toml"]` for
+  `listen`, `root`, `index`, `try_files`, `tls`, `default`, and `[[site.location]]` blocks
+  (`path`, `match = "prefix" | "exact"`, per-location `root` or `alias`/`index`/`try_files`/
+  `hidden_files`/`symlinks`/`handler`); `include = ["sites.d/*.toml"]` for
   panel-generated per-site files. Loading never creates sockets; `Server` is built from the
   `Config` struct. `agensio -t` validates.
 - **Request bodies** (A3): the HTTP/1 connection is the pull source behind

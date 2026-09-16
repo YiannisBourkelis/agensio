@@ -20,10 +20,6 @@ inline void append_hex(std::string& s, std::uint64_t v) {
     s.append(buf, r.ptr);
 }
 
-inline char lower(char c) noexcept {
-    return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
-}
-
 }  // namespace
 
 void make_etag(std::int64_t mtime, std::uint64_t size, std::string& out) {
@@ -33,25 +29,6 @@ void make_etag(std::int64_t mtime, std::uint64_t size, std::string& out) {
     out.push_back('-');
     append_hex(out, size);
     out.push_back('"');
-}
-
-const SiteConfig* Route::lookup(std::string_view host) const noexcept {
-    if (host.empty() || by_name.empty()) return default_site;
-    // Strip the port: "example.com:8080", "[::1]:8080".
-    if (host.front() == '[') {
-        auto close = host.find(']');
-        if (close != std::string_view::npos) host = slice(host, 1, close - 1);
-    } else {
-        auto colon = host.rfind(':');
-        if (colon != std::string_view::npos) host = slice(host, 0, colon);
-    }
-    if (!host.empty() && host.back() == '.') host.remove_suffix(1);
-    if (host.size() > 253) return default_site;
-    char buf[256];
-    for (std::size_t i = 0; i < host.size(); ++i)
-        buf[i] = lower(host[i]);
-    auto it = by_name.find(std::string_view(buf, host.size()));
-    return it == by_name.end() ? default_site : it->second;
 }
 
 StaticHandler::StaticHandler(const Config& cfg, FileCache& cache) : cfg_(cfg), cache_(cache) {}
@@ -171,42 +148,111 @@ void StaticHandler::redirect_slash(Stream& s, WorkerState& ws) {
     r.body = MemoryBody{page.body};
 }
 
-void StaticHandler::handle(Stream& s, const Route& route, WorkerState& ws) {
+// The filesystem path for ws.path under the location: root + path, or with `alias` the
+// alias directory in place of the location prefix (nginx semantics).
+static void fs_path_of(const LocationConfig& loc, WorkerState& ws) {
+    if (loc.alias.empty()) ws.fs_path.assign(loc.root).append(ws.path);
+    else ws.fs_path.assign(loc.alias).append(ws.path, loc.path.size() - 1, std::string::npos);  // keeps the '/'
+}
+
+// Opens the first index file of the directory ws.path (which ends with '/') under loc.root.
+// Leaves ws.fs_path at the file that was opened, or at the directory if none was.
+bool StaticHandler::open_index(const LocationConfig& loc, WorkerState& ws, File& f, FileInfo& fi) {
+    fs_path_of(loc, ws);
+    const std::size_t base = ws.fs_path.size();
+    for (const auto& index : loc.index) {
+        ws.fs_path.resize(base);
+        ws.fs_path.append(index);
+        f = File::open(ws.fs_path.c_str());
+        if (f.is_open() && f.info(fi) && fi.is_regular) return true;
+        f.close();
+    }
+    ws.fs_path.resize(base);
+    return false;
+}
+
+// The rule without try_files: a directory URI serves its index (403 without one, 404 if
+// the directory does not exist); a file URI serves the file, redirects to the slash form
+// for a directory, and is 404 otherwise.
+StaticHandler::Lookup StaticHandler::plain_lookup(Stream& s, const LocationConfig& loc, WorkerState& ws, File& f,
+                                                  FileInfo& fi) {
+    const bool keep_alive = s.request.keep_alive;
+    if (ws.path.back() == '/') {
+        if (open_index(loc, ws, f, fi)) return Lookup::found;
+        FileInfo dir;
+        const bool exists = stat_path(ws.fs_path.c_str(), dir) && dir.is_directory;
+        error(s, exists ? 403 : 404, keep_alive);
+        return Lookup::responded;
+    }
+    fs_path_of(loc, ws);
+    f = File::open(ws.fs_path.c_str());
+    if (!f.is_open() || !f.info(fi)) {
+        error(s, 404, keep_alive);
+        return Lookup::responded;
+    }
+    if (fi.is_directory) {
+        redirect_slash(s, ws);
+        return Lookup::responded;
+    }
+    if (!fi.is_regular) {
+        error(s, 404, keep_alive);
+        return Lookup::responded;
+    }
+    return Lookup::found;
+}
+
+// try_files (nginx semantics, minus variables other than $uri): the first element that
+// resolves wins; "$uri" is a regular file, "$uri/" a directory (its index when the URI
+// ends with '/', otherwise a redirect to the slash form), "=code" answers that status,
+// and a path is an internal redirect the caller routes again. Nothing matched is 404.
+StaticHandler::Lookup StaticHandler::try_files_lookup(Stream& s, const LocationConfig& loc, WorkerState& ws,
+                                                      File& f, FileInfo& fi) {
+    const bool keep_alive = s.request.keep_alive;
+    const bool dir_uri = ws.path.back() == '/';
+    for (const TryStep& step : loc.try_files) {
+        switch (step.kind) {
+            case TryStep::Kind::uri:
+                if (dir_uri) break;
+                fs_path_of(loc, ws);
+                f = File::open(ws.fs_path.c_str());
+                if (f.is_open() && f.info(fi) && fi.is_regular) return Lookup::found;
+                f.close();
+                break;
+            case TryStep::Kind::uri_dir: {
+                if (dir_uri) {
+                    if (open_index(loc, ws, f, fi)) return Lookup::found;
+                    break;
+                }
+                fs_path_of(loc, ws);
+                FileInfo dir;
+                if (stat_path(ws.fs_path.c_str(), dir) && dir.is_directory) {
+                    redirect_slash(s, ws);
+                    return Lookup::responded;
+                }
+                break;
+            }
+            case TryStep::Kind::status:
+                error(s, step.status, keep_alive);
+                return Lookup::responded;
+            case TryStep::Kind::fallback:
+                ws.path = step.target;
+                return Lookup::redirect;
+        }
+    }
+    error(s, 404, keep_alive);
+    return Lookup::responded;
+}
+
+StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationConfig& loc, WorkerState& ws) {
     const Request& req = s.request;
-    Response& r = s.response;
-    r.reset();
-    r.keep_alive = req.keep_alive;
-
-    if (req.method == Method::OTHER) {
-        error(s, 405, req.keep_alive, "GET, HEAD");
-        return;
-    }
-    // A body on GET/HEAD is ignored: the connection drains it after the response (nginx
-    // behaviour); oversize bodies were already refused with 413 before we were called.
-    if (req.version_minor == 1 && req.host.empty()) {
-        error(s, 400, false);
-        return;
-    }
-    if (!normalize_target(req.target, ws.path)) {
-        error(s, 400, false);
-        return;
-    }
-
-    const SiteConfig* site = route.lookup(req.host);
-#ifdef _WIN32
-    if (!windows_path_ok(ws.path)) {
-        error(s, 400, false);
-        return;
-    }
-#endif
     // Dotfiles and dot-directories (.env, .git, .htaccess) are never served unless the
-    // site opts in. 404 rather than 403 so their existence is not disclosed.
-    if (!site->hidden_files && has_hidden_segment(ws.path)) {
+    // location opts in. 404 rather than 403 so their existence is not disclosed.
+    if (!loc.hidden_files && has_hidden_segment(ws.path)) {
         error(s, 404, req.keep_alive);
-        return;
+        return Outcome::done;
     }
     const std::time_t now = ws.now;
-    const CacheKeyView key{site, ws.path};
+    const CacheKeyView key{&loc, ws.path};
 
     // 1. Worker-local index (no lock, no refcount traffic), then the shared store.
     //    `raw` is only dereferenced on this thread before any index mutation.
@@ -247,49 +293,25 @@ void StaticHandler::handle(Stream& s, const Route& route, WorkerState& ws) {
         // Exactly one strong reference is taken for the duration of the response.
         EntryPtr ref = fetched ? std::move(fetched) : *local;
         serve_entry(s, std::move(ref));
-        return;
+        return Outcome::done;
     }
 
-    // 3. Miss: resolve on the filesystem.
-    ws.fs_path.assign(site->root).append(ws.path);
+    // 3. Miss: resolve on the filesystem, by the plain rule or the location's try_files.
     File f;
     FileInfo fi;
-    if (ws.path.back() == '/') {
-        const std::size_t base = ws.fs_path.size();
-        for (const auto& index : site->index) {
-            ws.fs_path.resize(base);
-            ws.fs_path.append(index);
-            f = File::open(ws.fs_path.c_str());
-            if (f.is_open() && f.info(fi) && fi.is_regular) break;
-            f.close();
-        }
-        if (!f.is_open()) {
-            ws.fs_path.resize(base);
-            FileInfo dir;
-            const bool exists = stat_path(ws.fs_path.c_str(), dir) && dir.is_directory;
-            error(s, exists ? 403 : 404, req.keep_alive);
-            return;
-        }
-    } else {
-        f = File::open(ws.fs_path.c_str());
-        if (!f.is_open() || !f.info(fi)) {
-            error(s, 404, req.keep_alive);
-            return;
-        }
-        if (fi.is_directory) {
-            redirect_slash(s, ws);
-            return;
-        }
-        if (!fi.is_regular) {
-            error(s, 404, req.keep_alive);
-            return;
-        }
+    switch (loc.try_files.empty() ? plain_lookup(s, loc, ws, f, fi) : try_files_lookup(s, loc, ws, f, fi)) {
+        case Lookup::found:
+            break;
+        case Lookup::responded:
+            return Outcome::done;
+        case Lookup::redirect:
+            return Outcome::redirect;
     }
 
-    // Symlink policy: with symlinks = "deny" the resolved file must stay under the root.
-    if (site->symlinks_deny && !path_within_root(ws.fs_path.c_str(), site->root)) {
+    // Symlink policy: with symlinks = "deny" the resolved file must stay under the root (or alias).
+    if (loc.symlinks_deny && !path_within_root(ws.fs_path.c_str(), loc.alias.empty() ? loc.root : loc.alias)) {
         error(s, 404, req.keep_alive);
-        return;
+        return Outcome::done;
     }
 
     // 4. Small enough: load into the cache and serve from there.
@@ -298,7 +320,7 @@ void StaticHandler::handle(Stream& s, const Route& route, WorkerState& ws) {
         entry->data.resize(static_cast<std::size_t>(fi.size));
         if (fi.size > 0 && !entry->data.empty() && !f.read_all(entry->data.data(), entry->data.size())) {
             error(s, 500, req.keep_alive);
-            return;
+            return Outcome::done;
         }
         if (cfg_.cache_sendfile_min_size > 0 && fi.size >= cfg_.cache_sendfile_min_size) entry->fd = std::move(f);
         else f.close();
@@ -308,7 +330,7 @@ void StaticHandler::handle(Stream& s, const Route& route, WorkerState& ws) {
         if (canonical) ws.local.insert(key, canonical);
         else canonical = std::move(entry);  // cache full for this size class: serve once, uncached
         serve_entry(s, std::move(canonical));
-        return;
+        return Outcome::done;
     }
 
     // 5. Too large to hold in memory: keep the open descriptor and the prebuilt headers in
@@ -324,11 +346,53 @@ void StaticHandler::handle(Stream& s, const Route& route, WorkerState& ws) {
         if (canonical) {
             ws.local.insert(key, canonical);
             serve_entry(s, std::move(canonical));
-            return;
+            return Outcome::done;
         }
         f = std::move(entry->fd);  // store refused it: serve once from the open file
     }
     serve_file(s, std::move(f), fi, ws);
+    return Outcome::done;
+}
+
+void StaticHandler::handle(Stream& s, const Router& router, WorkerState& ws) {
+    const Request& req = s.request;
+    Response& r = s.response;
+    r.reset();
+    r.keep_alive = req.keep_alive;
+
+    if (req.method == Method::OTHER) {
+        error(s, 405, req.keep_alive, "GET, HEAD");
+        return;
+    }
+    // A body on GET/HEAD is ignored: the connection drains it after the response (nginx
+    // behaviour); oversize bodies were already refused with 413 before we were called.
+    if (req.version_minor == 1 && req.host.empty()) {
+        error(s, 400, false);
+        return;
+    }
+    if (!normalize_target(req.target, ws.path)) {
+        error(s, 400, false);
+        return;
+    }
+#ifdef _WIN32
+    if (!windows_path_ok(ws.path)) {
+        error(s, 400, false);
+        return;
+    }
+#endif
+
+    const SiteConfig* site = router.site(req.host);
+    const LocationConfig* loc = &Router::location(*site, ws.path);
+    for (int hops = 0;; ++hops) {
+        if (serve_location(s, *loc, ws) == Outcome::done) return;
+        // try_files fallback: ws.path is the new target; route it again, bounded so two
+        // locations pointing at each other cannot loop.
+        if (hops >= kMaxInternalRedirects) {
+            error(s, 500, req.keep_alive);
+            return;
+        }
+        loc = &Router::location(*site, ws.path);
+    }
 }
 
 }  // namespace agensio

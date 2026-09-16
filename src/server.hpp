@@ -14,6 +14,7 @@
 
 #include "cache.hpp"
 #include "config.hpp"
+#include "core/router.hpp"
 #include "core/worker_state.hpp"
 #include "handlers/static.hpp"
 
@@ -30,7 +31,7 @@ struct Worker {
 struct Listener {
     std::string address;  // "host:port" as configured
     asio::ip::tcp::endpoint endpoint;
-    Route route;
+    Router router;  // site by Host, location by path
     bool tls = false;
 #ifdef AGENSIO_HAS_TLS
     std::shared_ptr<asio::ssl::context> ssl;

@@ -6,12 +6,14 @@
 #include <iterator>
 #include <string>
 #include <string_view>
+#include <unistd.h>
 
 #include "cache.hpp"
 #include "http1/chunked.hpp"
 #include "config.hpp"
 #include "core/headers.hpp"
 #include "core/result.hpp"
+#include "core/router.hpp"
 #include "handlers/static.hpp"
 #include "http1/parser.hpp"
 #include "http_date.hpp"
@@ -426,22 +428,120 @@ static void test_core_types() {
 
 static void test_route_and_etag() {
     SiteConfig a, b;
-    Route r;
-    r.by_name.emplace("example.com", &a);
-    r.by_name.emplace("www.example.com", &a);
-    r.by_name.emplace("other.test", &b);
-    r.default_site = &a;
-    CHECK(r.lookup("example.com") == &a);
-    CHECK(r.lookup("EXAMPLE.com:8080") == &a);
-    CHECK(r.lookup("other.test:443") == &b);
-    CHECK(r.lookup("other.test.") == &b);
-    CHECK(r.lookup("[::1]:8080") == &a);
-    CHECK(r.lookup("unknown.host") == &a);
-    CHECK(r.lookup("") == &a);
+    a.server_names = {"example.com", "www.example.com"};
+    a.is_default = true;
+    b.server_names = {"other.test"};
+    Router r;
+    r.add_site(a);
+    r.add_site(b);
+    CHECK(r.site("example.com") == &a);
+    CHECK(r.site("EXAMPLE.com:8080") == &a);
+    CHECK(r.site("other.test:443") == &b);
+    CHECK(r.site("other.test.") == &b);
+    CHECK(r.site("[::1]:8080") == &a);
+    CHECK(r.site("unknown.host") == &a);
+    CHECK(r.site("") == &a);
+
+    // Locations: exact beats prefix, longer prefix beats shorter, implicit "/" catches the rest.
+    SiteConfig s;
+    s.root = "/srv";
+    s.index = {"index.html"};
+    auto loc = [](std::string path, bool exact) {
+        LocationConfig l;
+        l.path = std::move(path);
+        l.exact = exact;
+        return l;
+    };
+    s.locations = {loc("/static/", false), loc("/static/app/", false), loc("/static/app/", true),
+                   loc("/index.html", true)};
+    finalize_site(s);
+    CHECK_EQ(s.locations.size(), 5u);
+    CHECK(s.locations.back().path == "/" && !s.locations.back().exact);
+    CHECK_EQ(s.locations.back().root, "/srv");  // implicit location inherits the site
+    CHECK_EQ(Router::location(s, "/").path, "/");
+    CHECK_EQ(Router::location(s, "/style.css").path, "/");
+    CHECK_EQ(Router::location(s, "/static/x.png").path, "/static/");
+    CHECK_EQ(Router::location(s, "/static/app/x.js").path, "/static/app/");
+    CHECK(!Router::location(s, "/static/app/x.js").exact);
+    CHECK(Router::location(s, "/static/app/").exact);
+    CHECK(Router::location(s, "/index.html").exact);
+    CHECK_EQ(Router::location(s, "/index.htmlx").path, "/");  // exact does not prefix-match
+
+    // try_files grammar.
+    auto tf = parse_try_files({"$uri", "$uri/", "/index.html?$query_string"});
+    CHECK_EQ(tf.size(), 3u);
+    CHECK(tf[0].kind == TryStep::Kind::uri && tf[1].kind == TryStep::Kind::uri_dir);
+    CHECK(tf[2].kind == TryStep::Kind::fallback);
+    CHECK_EQ(tf[2].target, "/index.html");
+    CHECK(parse_try_files({"$uri", "=404"})[1].status == 404);
+    CHECK(parse_try_files({"/a/../b"})[0].target == "/b");
+    auto throws = [](std::vector<std::string> items) {
+        try {
+            parse_try_files(items);
+        } catch (const std::invalid_argument&) {
+            return true;
+        }
+        return false;
+    };
+    CHECK(throws({"=404", "$uri"}));       // status must be last
+    CHECK(throws({"/x", "$uri"}));         // fallback must be last
+    CHECK(throws({"=500"}));               // only 403/404
+    CHECK(throws({"$args"}));              // unknown variable
+    CHECK(throws({"/x/$uri"}));            // variables in fallbacks not supported
+    CHECK(throws({"index.html"}));         // must start with '/'
 
     std::string etag;
     make_etag(0x5a630d3c, 0x6b, etag);
     CHECK_EQ(etag, "\"5a630d3c-6b\"");
+}
+
+// Loads a configuration with locations from a temporary directory.
+static void test_config_locations() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-test-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "www" / "assets");
+    auto write = [&](const char* name, const std::string& text) {
+        std::ofstream(dir / name) << text;
+    };
+    write("ok.toml",
+          "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\ntry_files = [\"$uri\", \"=404\"]\n"
+          "[[site.location]]\npath = \"/assets/\"\nalias = \"www/assets\"\nhidden_files = true\ntry_files = []\n"
+          "[[site.location]]\npath = \"/app/\"\ntry_files = [\"$uri\", \"/index.html\"]\nsymlinks = \"deny\"\n"
+          "[[site.location]]\npath = \"/exact\"\nmatch = \"exact\"\n");
+    Config cfg = load_config(dir / "ok.toml");
+    CHECK_EQ(cfg.sites.size(), 1u);
+    const SiteConfig& site = cfg.sites[0];
+    CHECK_EQ(site.locations.size(), 4u);  // three configured + implicit "/"
+    const LocationConfig& assets = Router::location(site, "/assets/a.png");
+    CHECK_EQ(assets.path, "/assets/");
+    CHECK(assets.root == site.root);
+    CHECK(assets.alias.size() > 7 && assets.alias.compare(assets.alias.size() - 7, 7, "/assets") == 0);
+    CHECK(assets.hidden_files && assets.try_files.empty() && !assets.symlinks_deny);
+    const LocationConfig& app = Router::location(site, "/app/route");
+    CHECK(app.root == site.root && app.try_files.size() == 2 && app.symlinks_deny);
+    CHECK(Router::location(site, "/exact").exact);
+    const LocationConfig& root = Router::location(site, "/other");
+    CHECK(root.path == "/" && root.try_files.size() == 2 && root.try_files[1].status == 404);  // site default
+
+    auto rejects = [&](const char* name, const std::string& text) {
+        write(name, text);
+        try {
+            load_config(dir / name);
+        } catch (const std::runtime_error&) {
+            return true;
+        }
+        return false;
+    };
+    const std::string head = "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n";
+    CHECK(rejects("bad1.toml", head + "[[site.location]]\npath = \"assets/\"\n"));            // no leading '/'
+    CHECK(rejects("bad2.toml", head + "[[site.location]]\npath = \"/a/\"\nhandler = \"fastcgi\"\n"));
+    CHECK(rejects("bad3.toml", head + "[[site.location]]\npath = \"/a/\"\nmatch = \"regex\"\n"));
+    CHECK(rejects("bad4.toml", head + "[[site.location]]\npath = \"/a/\"\n[[site.location]]\npath = \"/a/\"\n"));
+    CHECK(rejects("bad5.toml", head + "[[site.location]]\npath = \"/a/\"\nroot = \"nope\"\n"));
+    CHECK(rejects("bad6.toml", head + "try_files = [\"=500\"]\n"));
+    CHECK(rejects("bad7.toml", head + "[[site.location]]\npath = \"/a\"\nalias = \"www\"\n"));  // alias needs '/'
+    CHECK(rejects("bad8.toml", head + "[[site.location]]\npath = \"/a/\"\nroot = \"www\"\nalias = \"www\"\n"));
+    fs::remove_all(dir);
 }
 
 // ---- security: replay every recorded fuzz/attack input with the fuzzers' invariants ----
@@ -514,6 +614,7 @@ int main() {
     test_chunked();
     test_core_types();
     test_route_and_etag();
+    test_config_locations();
     if (failures) {
         std::printf("%d failure(s)\n", failures);
         return 1;

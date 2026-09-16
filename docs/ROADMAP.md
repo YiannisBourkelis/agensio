@@ -138,8 +138,13 @@ same after it (that is the checkpoint).
       drained after the response, 501 for other transfer codings, 417 for other
       expectations. No handler reads a body yet (B1/C1); the drain path exercises the
       decoders end to end in `tests/integration.sh`. A/B on Linux: see the commit.
-- [ ] A4 `Router`: sites (Host/SNI) -> ordered `[[site.location]]` blocks (prefix, exact,
-      regex later) -> handler; `try_files`; per-location settings. Config schema for it.
+- [x] A4 (2026-09-17) `Router` (`src/core/router.*`): site by Host, then
+      `[[site.location]]` blocks (`path`, `match = "prefix" | "exact"`; regex later) with
+      per-location `root` or `alias`, `index`, `try_files`, `hidden_files`, `symlinks`, `handler`
+      (static only until C). Exact before prefix, longest prefix first, implicit `/` from
+      the site's settings. `try_files`: `$uri`, `$uri/`, `=403`/`=404`, `/fallback`
+      (internal redirect routed again, 8 hops max). Cache keys are location + path. A/B on
+      Linux: see the commit.
 - [ ] A5 Access log and error log services: "combined" format (fail2ban filters for
       nginx/apache work unchanged), optional JSON, per-worker buffers flushed by a timer or
       size, reopen on `SIGUSR1`/`ctl reopen` for rotation. Configurable per site; the

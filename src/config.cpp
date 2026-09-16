@@ -1,5 +1,7 @@
 #include "config.hpp"
 
+#include "path.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <charconv>
@@ -109,6 +111,66 @@ fs::path resolve(const fs::path& base_dir, const std::string& p) {
     return path.lexically_normal();
 }
 
+std::string resolve_root(const fs::path& base_dir, const std::string& root, const std::string& where) {
+    fs::path root_path = resolve(base_dir, root);
+    std::error_code ec;
+    if (!fs::is_directory(root_path, ec)) fail(where + ": root '" + root_path.string() + "' is not a directory");
+    std::string out = fs::canonical(root_path, ec).string();
+    if (ec) fail(where + ": cannot resolve root '" + root_path.string() + "'");
+    while (out.size() > 1 && out.back() == '/')
+        out.pop_back();
+    return out;
+}
+
+std::vector<std::string> index_list(const toml::node_view<const toml::node>& n, const std::string& where) {
+    auto list = string_list(n, (where + ".index").c_str());
+    for (auto& i : list)
+        if (i.empty() || i.find('/') != std::string::npos) fail(where + ": index names must be plain file names");
+    return list;
+}
+
+std::vector<TryStep> try_files_of(const toml::node_view<const toml::node>& n, const std::string& where) {
+    try {
+        return parse_try_files(string_list(n, (where + ".try_files").c_str()));
+    } catch (const std::invalid_argument& e) {
+        fail(where + ".try_files: " + e.what());
+    }
+}
+
+bool symlinks_deny_of(const toml::node_view<const toml::node>& n, bool fallback, const std::string& where) {
+    if (!n) return fallback;
+    std::string symlinks = to_lower(n.value_or(std::string("allow")));
+    if (symlinks != "allow" && symlinks != "deny") fail(where + ": symlinks must be \"allow\" or \"deny\"");
+    return symlinks == "deny";
+}
+
+void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& site, const std::string& where) {
+    LocationConfig loc;
+    auto path = t["path"].value<std::string>();
+    if (!path || path->empty() || (*path)[0] != '/') fail(where + ": 'path' is required and must start with '/'");
+    loc.path = *path;
+    std::string match = to_lower(t["match"].value_or(std::string("prefix")));
+    if (match != "prefix" && match != "exact") fail(where + ": match must be \"prefix\" or \"exact\"");
+    loc.exact = match == "exact";
+    for (const auto& other : site.locations)
+        if (other.path == loc.path && other.exact == loc.exact) fail(where + ": duplicate location '" + loc.path + "'");
+    if (auto root = t["root"].value<std::string>()) loc.root = resolve_root(base_dir, *root, where);
+    else loc.root = site.root;
+    if (auto alias = t["alias"].value<std::string>()) {
+        if (t.contains("root")) fail(where + ": 'root' and 'alias' are mutually exclusive");
+        if (loc.exact || loc.path.back() != '/') fail(where + ": 'alias' needs a prefix path ending with '/'");
+        loc.alias = resolve_root(base_dir, *alias, where);
+    }
+    loc.index = t.contains("index") ? index_list(t["index"], where) : site.index;
+    loc.try_files = t.contains("try_files") ? try_files_of(t["try_files"], where) : site.try_files;
+    loc.hidden_files = t["hidden_files"].value_or(site.hidden_files);
+    loc.symlinks_deny = symlinks_deny_of(t["symlinks"], site.symlinks_deny, where);
+    loc.handler = to_lower(t["handler"].value_or(std::string("static")));
+    if (loc.handler != "static")
+        fail(where + ": handler \"" + loc.handler + "\" is not available yet (only \"static\")");
+    site.locations.push_back(std::move(loc));
+}
+
 void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, const std::string& where) {
     SiteConfig site;
     for (auto& n : string_list(t["server_name"], (where + ".server_name").c_str()))
@@ -121,19 +183,10 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
 
     auto root = t["root"].value<std::string>();
     if (!root) fail(where + ": 'root' is required");
-    fs::path root_path = resolve(base_dir, *root);
-    std::error_code ec;
-    if (!fs::is_directory(root_path, ec)) fail(where + ": root '" + root_path.string() + "' is not a directory");
-    site.root = fs::canonical(root_path, ec).string();
-    if (ec) fail(where + ": cannot resolve root '" + root_path.string() + "'");
-    while (site.root.size() > 1 && site.root.back() == '/')
-        site.root.pop_back();
+    site.root = resolve_root(base_dir, *root, where);
 
-    if (t.contains("index")) {
-        site.index = string_list(t["index"], (where + ".index").c_str());
-        for (auto& i : site.index)
-            if (i.empty() || i.find('/') != std::string::npos) fail(where + ": index names must be plain file names");
-    }
+    if (t.contains("index")) site.index = index_list(t["index"], where);
+    if (t.contains("try_files")) site.try_files = try_files_of(t["try_files"], where);
 
     if (auto tls = t["tls"].as_table()) {
         auto cert = (*tls)["cert"].value<std::string>();
@@ -148,9 +201,20 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     }
     site.is_default = t["default"].value_or(false);
     site.hidden_files = t["hidden_files"].value_or(false);
-    std::string symlinks = to_lower(t["symlinks"].value_or(std::string("allow")));
-    if (symlinks != "allow" && symlinks != "deny") fail(where + ": symlinks must be \"allow\" or \"deny\"");
-    site.symlinks_deny = symlinks == "deny";
+    site.symlinks_deny = symlinks_deny_of(t["symlinks"], false, where);
+
+    if (auto arr = t["location"].as_array()) {
+        std::size_t idx = 0;
+        for (auto& node : *arr) {
+            auto* lt = node.as_table();
+            if (!lt) fail(where + ": each [[site.location]] must be a table");
+            parse_location(*lt, base_dir, site, where + " [[location]] #" + std::to_string(idx + 1));
+            ++idx;
+        }
+    } else if (t.contains("location")) {
+        fail(where + ": 'location' must be an array of tables ([[site.location]])");
+    }
+    finalize_site(site);
     cfg.sites.push_back(std::move(site));
 }
 
@@ -194,6 +258,61 @@ std::vector<fs::path> expand_include(const fs::path& base_dir, const std::string
 }
 
 }  // namespace
+
+std::vector<TryStep> parse_try_files(const std::vector<std::string>& items) {
+    std::vector<TryStep> out;
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        const std::string& item = items[i];
+        const bool last = i + 1 == items.size();
+        TryStep step;
+        if (item == "$uri") {
+            step.kind = TryStep::Kind::uri;
+        } else if (item == "$uri/") {
+            step.kind = TryStep::Kind::uri_dir;
+        } else if (!item.empty() && item[0] == '=') {
+            if (!last) throw std::invalid_argument("'" + item + "' must be the last element");
+            if (item != "=403" && item != "=404")
+                throw std::invalid_argument("'" + item + "': only =403 and =404 are supported");
+            step.kind = TryStep::Kind::status;
+            step.status = item == "=403" ? 403 : 404;
+        } else if (!item.empty() && item[0] == '/') {
+            if (!last) throw std::invalid_argument("fallback '" + item + "' must be the last element");
+            // A "?$query_string" suffix (the nginx idiom) is accepted and dropped: static
+            // serving ignores the query, and FastCGI (phase C) forwards the original one.
+            std::string target = item.substr(0, item.find('?'));
+            if (target.find('$') != std::string::npos)
+                throw std::invalid_argument("'" + item + "': variables are not supported in a fallback path");
+            if (!normalize_target(target, step.target))
+                throw std::invalid_argument("'" + item + "' is not a valid fallback path");
+            step.kind = TryStep::Kind::fallback;
+        } else {
+            throw std::invalid_argument("'" + item + "': expected $uri, $uri/, =403, =404 or a /path");
+        }
+        out.push_back(std::move(step));
+    }
+    return out;
+}
+
+void finalize_site(SiteConfig& site) {
+    bool has_root_prefix = false;
+    for (const auto& loc : site.locations)
+        if (!loc.exact && loc.path == "/") has_root_prefix = true;
+    if (!has_root_prefix) {
+        LocationConfig loc;
+        loc.path = "/";
+        loc.root = site.root;
+        loc.index = site.index;
+        loc.try_files = site.try_files;
+        loc.hidden_files = site.hidden_files;
+        loc.symlinks_deny = site.symlinks_deny;
+        site.locations.push_back(std::move(loc));
+    }
+    std::stable_sort(site.locations.begin(), site.locations.end(),
+                     [](const LocationConfig& a, const LocationConfig& b) {
+                         if (a.path.size() != b.path.size()) return a.path.size() > b.path.size();
+                         return a.exact && !b.exact;
+                     });
+}
 
 Config load_config(const fs::path& path) {
     Config cfg;

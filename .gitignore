@@ -20,6 +20,7 @@ compile_commands.json
 bench/tmp/
 bench/www/*.bin
 bench/www/style.css
+bench/www/app.html
 bench/certs/*.pem
 
 # local secrets / certs

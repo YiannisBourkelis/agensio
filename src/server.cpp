@@ -82,15 +82,7 @@ void Server::build_listeners() {
 #endif
                 }
             }
-            for (const auto& name : site.server_names) {
-                if (name == "*") {
-                    if (!l->route.default_site) l->route.default_site = &site;
-                } else {
-                    l->route.by_name.emplace(name, &site);
-                }
-            }
-            if (site.is_default) l->route.default_site = &site;
-            if (!l->route.default_site) l->route.default_site = &site;
+            l->router.add_site(site);
             l->site_names.push_back(site.server_names.front());
         }
     }

@@ -1,46 +1,43 @@
 // Static file handler: turns a request into a Response served from the cache or a file.
-// No socket I/O here; the protocol connection writes the Response.
+// No socket I/O here; the protocol connection writes the Response. The router picks the
+// site and the location; this handler applies the location's root, index, try_files and
+// policies. An internal redirect from try_files re-enters the router with the new path.
 #pragma once
 
 #include <cstdint>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 
 #include "cache.hpp"
 #include "config.hpp"
+#include "core/router.hpp"
 #include "core/stream.hpp"
 #include "core/worker_state.hpp"
 #include "file.hpp"
 
 namespace agensio {
 
-struct StringViewHash {
-    using is_transparent = void;
-    std::size_t operator()(std::string_view s) const noexcept { return std::hash<std::string_view>{}(s); }
-};
-
-// Which site serves which Host header on one listening address. (Phase A4 grows this
-// into the router with locations.)
-struct Route {
-    std::unordered_map<std::string, const SiteConfig*, StringViewHash, std::equal_to<>> by_name;
-    const SiteConfig* default_site = nullptr;
-
-    // host is the raw Host header value (may include a port).
-    const SiteConfig* lookup(std::string_view host) const noexcept;
-};
-
 class StaticHandler {
 public:
     StaticHandler(const Config& cfg, FileCache& cache);
 
     // Fills s.response for s.request. ws.now must be set by the caller.
-    void handle(Stream& s, const Route& route, WorkerState& ws);
+    void handle(Stream& s, const Router& router, WorkerState& ws);
 
     // Fills s.response with a canned error page. `allow` adds an Allow header (405).
     void error(Stream& s, int status, bool keep_alive, std::string_view allow = {});
 
+    static constexpr int kMaxInternalRedirects = 8;  // try_files fallbacks per request (nginx: 10)
+
 private:
+    enum class Outcome { done, redirect };  // redirect: ws.path holds the try_files target
+    enum class Lookup { found, responded, redirect };
+
+    Outcome serve_location(Stream& s, const LocationConfig& loc, WorkerState& ws);
+    Lookup plain_lookup(Stream& s, const LocationConfig& loc, WorkerState& ws, File& f, FileInfo& fi);
+    Lookup try_files_lookup(Stream& s, const LocationConfig& loc, WorkerState& ws, File& f, FileInfo& fi);
+    static bool open_index(const LocationConfig& loc, WorkerState& ws, File& f, FileInfo& fi);
+
     void serve_entry(Stream& s, EntryPtr e);  // takes ownership of the ref
     // Metadata and prebuilt header block shared by memory and descriptor entries.
     void fill_entry(CacheEntry& e, const FileInfo& fi, const WorkerState& ws, std::time_t now);

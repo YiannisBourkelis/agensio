@@ -16,15 +16,45 @@ struct TlsConfig {
     std::filesystem::path key;
 };
 
+// One element of a try_files list.
+struct TryStep {
+    enum class Kind {
+        uri,       // "$uri": the request path as a regular file
+        uri_dir,   // "$uri/": the request path as a directory (index, or redirect to the slash form)
+        fallback,  // "/path": internal redirect, routed again through the locations
+        status,    // "=404": answer with this status
+    };
+    Kind kind = Kind::uri;
+    std::string target;  // fallback: normalised path (a "?query" suffix is dropped)
+    int status = 0;      // status: 403 or 404
+};
+
+// A [[site.location]] block, fully resolved: every field has the site's value unless the
+// block set its own. The site always ends with an implicit "/" prefix location.
+struct LocationConfig {
+    std::string path;  // prefix ("/", "/static/") or, with exact, the whole path
+    bool exact = false;
+    std::string root;   // absolute, canonical, no trailing slash; the file is root + path
+    std::string alias;  // nginx alias: the file is alias + (path minus the location prefix); empty = use root
+    std::vector<std::string> index;
+    std::vector<TryStep> try_files;  // empty: plain lookup (file, directory index, 404)
+    bool hidden_files = false;
+    bool symlinks_deny = false;
+    std::string handler = "static";  // "fastcgi", "proxy" arrive in later phases
+};
+
 struct SiteConfig {
     std::vector<std::string> server_names;  // lower-case host names, "*" matches anything
     std::vector<std::string> listen;        // "host:port" strings, normalised
     std::string root;                       // absolute document root, no trailing slash
     std::vector<std::string> index{"index.html"};
+    std::vector<TryStep> try_files;  // default for locations that do not set their own
     std::optional<TlsConfig> tls;
     bool is_default = false;
     bool hidden_files = false;   // serve paths with a segment starting with '.' (.env, .git, .htaccess)
     bool symlinks_deny = false;  // refuse files whose canonical path leaves the root (realpath per cache miss)
+    // Sorted for Router::location: exact before prefix, longer before shorter, "/" last.
+    std::vector<LocationConfig> locations;
 };
 
 struct Config {
@@ -60,6 +90,14 @@ struct Config {
 
 // Parses "4MB", "256k", "1G", "65536". Throws std::invalid_argument.
 std::size_t parse_size(std::string_view text);
+
+// Parses a try_files list: "$uri", "$uri/", "=403"/"=404", or "/path" (last element only
+// for the latter two). Throws std::invalid_argument.
+std::vector<TryStep> parse_try_files(const std::vector<std::string>& items);
+
+// Appends the implicit "/" location from the site's own settings if none is configured
+// and sorts the locations for Router::location. The loader calls it; exposed for tests.
+void finalize_site(SiteConfig& site);
 
 // Loads and validates a configuration file. Throws std::runtime_error with a
 // human readable message on any problem.

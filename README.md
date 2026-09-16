@@ -54,6 +54,12 @@ server_name = ["example.com"]
 listen = ["0.0.0.0:443"]
 root = "/var/www/example"
 tls = { cert = "/etc/ssl/example/fullchain.pem", key = "/etc/ssl/example/privkey.pem" }
+try_files = ["$uri", "$uri/", "/index.html"]   # single-page app: unknown paths get the app shell
+
+[[site.location]]            # exact matches win, then the longest prefix; "/" is implicit
+path = "/assets/"
+alias = "/var/www/example-assets"   # /assets/x.png -> /var/www/example-assets/x.png
+try_files = ["$uri", "=404"]
 ```
 
 `agensio -t -c file.toml` validates a configuration without starting.
