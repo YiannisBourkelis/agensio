@@ -118,30 +118,52 @@ ParseStatus parse_request(std::string_view buf, Request& out) noexcept {
     else return ParseStatus::version_not_supported;
 
     pos = next;
+    std::size_t header_count = 0;
+    bool seen_host = false, seen_content_length = false, seen_transfer_encoding = false;
+    std::string_view content_length;
     for (;;) {
         if (!next_line(buf, pos, line, next)) return ParseStatus::incomplete;
         pos = next;
         if (line.empty()) break;  // end of head
+        if (++header_count > kMaxHeaderCount) return ParseStatus::too_many_headers;
+
+        // obs-fold (RFC 9112 5.2) and bare CR (RFC 9112 2.2) are rejected outright.
+        if (line[0] == ' ' || line[0] == '\t') return ParseStatus::bad_request;
+        if (std::memchr(line.data(), '\r', line.size()) != nullptr) return ParseStatus::bad_request;
 
         std::size_t colon = line.find(':');
         if (colon == std::string_view::npos || colon == 0) return ParseStatus::bad_request;
         std::string_view name = slice(line, 0, colon);
-        if (name.back() == ' ' || name.back() == '\t') return ParseStatus::bad_request;  // RFC 7230 3.2.4
+        for (unsigned char c : name)
+            if (!is_tchar(c)) return ParseStatus::bad_request;  // also rejects whitespace before the colon
         std::string_view value = trim(slice(line, colon + 1));
+        for (unsigned char c : value)
+            if ((c < 0x20 && c != '\t') || c == 0x7f) return ParseStatus::bad_request;  // field-value: no CTLs
 
         switch (lower(name[0])) {
             case 'h':
-                if (iequals(name, "host")) out.host = value;
+                if (iequals(name, "host")) {
+                    if (seen_host) return ParseStatus::bad_request;  // RFC 9112 3.2: exactly one Host
+                    seen_host = true;
+                    for (unsigned char c : value)
+                        if (c <= 0x20 || c == '/' || c == '\\' || c == '"' || c == '<' || c == '>')
+                            return ParseStatus::bad_request;
+                    out.host = value;
+                }
                 break;
             case 'c':
                 if (iequals(name, "connection")) out.connection = value;
                 else if (iequals(name, "content-length")) {
-                    if (value.empty()) return ParseStatus::bad_request;
+                    if (value.empty() || value.size() > kMaxContentLengthDigits) return ParseStatus::bad_request;
                     bool nonzero = false;
                     for (unsigned char c : value) {
                         if (c < '0' || c > '9') return ParseStatus::bad_request;
                         if (c != '0') nonzero = true;
                     }
+                    // Duplicates are only tolerated when identical (RFC 9110 8.6).
+                    if (seen_content_length && value != content_length) return ParseStatus::bad_request;
+                    seen_content_length = true;
+                    content_length = value;
                     if (nonzero) out.has_body = true;
                 }
                 break;
@@ -150,12 +172,18 @@ ParseStatus parse_request(std::string_view buf, Request& out) noexcept {
                 else if (iequals(name, "if-modified-since")) out.if_modified_since = value;
                 break;
             case 't':
-                if (iequals(name, "transfer-encoding")) out.has_body = true;
+                if (iequals(name, "transfer-encoding")) {
+                    if (out.version_minor == 0) return ParseStatus::bad_request;  // not defined for HTTP/1.0
+                    seen_transfer_encoding = true;
+                    out.has_body = true;
+                }
                 break;
             default:
                 break;
         }
     }
+    // Both framing headers present is the request-smuggling signature (RFC 9112 6.1).
+    if (seen_content_length && seen_transfer_encoding) return ParseStatus::bad_request;
 
     if (out.version_minor == 1) out.keep_alive = !has_token(out.connection, "close");
     else out.keep_alive = has_token(out.connection, "keep-alive");

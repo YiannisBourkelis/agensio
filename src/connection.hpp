@@ -14,6 +14,7 @@
 #include "handler.hpp"
 #include "http_parser.hpp"
 #include "server.hpp"
+#include "strings.hpp"
 #include "tls_stream.hpp"
 
 namespace agensio {
@@ -110,6 +111,20 @@ private:
             case ParseStatus::complete:
                 consumed_ = req_.length;
                 handler_.handle(req_, listener_.route, worker_.state, plan_);
+                if (cfg_.max_requests_per_connection != 0 && ++requests_served_ >= cfg_.max_requests_per_connection &&
+                    plan_.keep_alive) {
+                    // Cap reached: this response is the last one on the connection.
+                    plan_.keep_alive = false;
+                    if (plan_.tail.empty()) {
+                        // Fast path built "prefix + entry block(with blank line)"; re-terminate with Connection: close.
+                        if (!plan_.headers2.empty())
+                            plan_.headers2 = slice(plan_.headers2, 0, plan_.headers2.size() - 2);
+                        else plan_.header.resize(plan_.header.size() - 2);
+                        plan_.tail = "Connection: close\r\n\r\n";
+                    } else {
+                        plan_.tail = "Connection: close\r\n\r\n";
+                    }
+                }
                 write_response();
                 return;
             case ParseStatus::incomplete:
@@ -122,6 +137,11 @@ private:
                 return;
             case ParseStatus::version_not_supported:
                 handler_.error(505, false, false, worker_.state, plan_);
+                consumed_ = in_len_;
+                write_response();
+                return;
+            case ParseStatus::too_many_headers:
+                handler_.error(431, false, false, worker_.state, plan_);
                 consumed_ = in_len_;
                 write_response();
                 return;
@@ -361,6 +381,7 @@ private:
     std::vector<char> in_;
     std::size_t in_len_ = 0;
     std::size_t consumed_ = 0;
+    std::uint32_t requests_served_ = 0;
     std::vector<char> chunk_;
     std::vector<char> out_;  // TLS only: coalesced header + body prefix
     bool sendfile_unsupported_ = false;

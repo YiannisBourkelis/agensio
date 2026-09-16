@@ -76,4 +76,9 @@ SendFileResult send_file(int socket_fd, const File& file, std::uint64_t offset, 
 // Raises the soft open-file limit to the hard limit. Returns the resulting soft limit.
 std::uint64_t raise_open_file_limit() noexcept;
 
+// True if the canonical (symlink-resolved) form of `path` is `root` itself or lies
+// under `root/`. `root` must already be canonical. False if the path cannot be
+// resolved. Costs one realpath() call; only used on cache misses.
+bool path_within_root(const char* path, std::string_view root) noexcept;
+
 }  // namespace agensio

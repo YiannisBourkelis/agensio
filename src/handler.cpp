@@ -228,6 +228,18 @@ void RequestHandler::handle(const Request& req, const Route& route, WorkerState&
     }
 
     const SiteConfig* site = route.lookup(req.host);
+#ifdef _WIN32
+    if (!windows_path_ok(ws.path)) {
+        error(400, false, head, ws, plan);
+        return;
+    }
+#endif
+    // Dotfiles and dot-directories (.env, .git, .htaccess) are never served unless the
+    // site opts in. 404 rather than 403 so their existence is not disclosed.
+    if (!site->hidden_files && has_hidden_segment(ws.path)) {
+        error(404, req.keep_alive, head, ws, plan);
+        return;
+    }
     const std::time_t now = std::time(nullptr);
     const CacheKeyView key{site, ws.path};
 
@@ -307,6 +319,12 @@ void RequestHandler::handle(const Request& req, const Route& route, WorkerState&
             error(404, req.keep_alive, head, ws, plan);
             return;
         }
+    }
+
+    // Symlink policy: with symlinks = "deny" the resolved file must stay under the root.
+    if (site->symlinks_deny && !path_within_root(ws.fs_path.c_str(), site->root)) {
+        error(404, req.keep_alive, head, ws, plan);
+        return;
     }
 
     // 4. Small enough: load into the cache and serve from there.

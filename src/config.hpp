@@ -23,12 +23,15 @@ struct SiteConfig {
     std::vector<std::string> index{"index.html"};
     std::optional<TlsConfig> tls;
     bool is_default = false;
+    bool hidden_files = false;   // serve paths with a segment starting with '.' (.env, .git, .htaccess)
+    bool symlinks_deny = false;  // refuse files whose canonical path leaves the root (realpath per cache miss)
 };
 
 struct Config {
     // [server]
     unsigned workers = 0;  // 0 = hardware threads
     std::uint32_t idle_timeout_s = 15;
+    std::uint32_t max_requests_per_connection = 1000;  // then Connection: close (0 = unlimited)
     std::size_t max_header_size = 16 * 1024;
     std::string reuse_port = "auto";  // auto | on | off
     bool tcp_nodelay = true;

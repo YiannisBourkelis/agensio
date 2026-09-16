@@ -26,4 +26,8 @@ head -c $((10 * 1024 * 1024)) /dev/urandom > big.bin
 mkdir -p sub
 printf '<html><body>sub index</body></html>\n' > sub/index.html
 
+# security fixtures: a dotfile and a symlink escaping the docroot
+printf 'SECRET=1\n' > .env
+ln -sfn ../../LICENSE outside.txt
+
 ls -la

@@ -4,6 +4,7 @@
 [server]
 workers = 0              # 0 = one worker per hardware thread
 idle_timeout = 15        # seconds a keep-alive connection may stay idle
+max_requests_per_connection = 1000  # then the server closes the connection (0 = unlimited)
 max_header_size = "16KB" # request head larger than this gets a 431
 reuse_port = "auto"      # auto | on | off  (SO_REUSEPORT per worker; auto = on for Linux)
 tcp_nodelay = true
@@ -29,6 +30,9 @@ listen = ["0.0.0.0:8080"]
 root = "../bench/www"
 index = ["index.html", "index.htm"]
 default = true
+hidden_files = false     # never serve .env, .git/, .htaccess and other dot-paths (404)
+symlinks = "allow"       # "deny" refuses files whose resolved path leaves root (one realpath per cache miss;
+                         # note Laravel's public/storage link points outside public/)
 
 # [[site]]
 # server_name = ["localhost"]

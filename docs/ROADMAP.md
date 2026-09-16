@@ -124,11 +124,16 @@ same after it (that is the checkpoint).
       serves `.br`/`.gz` siblings by `Accept-Encoding` (no CPU); `compression = "on-the-fly"`
       gzip/brotli for dynamic responses with level setting; measure and document the
       CPU and latency cost of each.
-- [ ] B4 Request-smuggling and parser hardening: CL vs TE rules, obs-fold rejected, header
-      count/size limits, URI normalisation edge cases, `Host` validation; libFuzzer target
-      for the parser and the chunked decoder run in CI.
-- [ ] B5 Timeouts everywhere: header read, body read, write stall, keep-alive idle,
-      per-connection request cap; `Connection: close` on shutdown; graceful drain.
+- [~] B4 Request-smuggling and parser hardening: **done 2026-09-16** for the request head
+      (CL vs TE rules, duplicate CL/Host, obs-fold, bare CR, CTLs, header count limit,
+      `Host` validation; libFuzzer targets for the parser and path normaliser). Remaining:
+      chunked decoder fuzzing once bodies exist (A3), running fuzzers in CI.
+- [~] B5 Timeouts everywhere: header read, body read, write stall, keep-alive idle,
+      per-connection request cap (**done 2026-09-16**: `max_requests_per_connection`; idle
+      timeout also bounds slow header sends); `Connection: close` on shutdown; graceful drain.
+- [x] B7 Path policies (2026-09-16): `hidden_files`, `symlinks = "deny"`, Windows path rules.
+- [x] B8 Hardened build flags, sanitizer and fuzz build options, accept-loop EMFILE backoff
+      (2026-09-16).
 - [ ] B6 IPv6 listeners tested; `SO_REUSEPORT` path tested on Linux (Docker).
 - [ ] Checkpoint: h1 compliance run (a scripted curl/python suite in `tests/`), fuzzers
       clean for 1h, benchmark unchanged.

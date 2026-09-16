@@ -226,6 +226,12 @@ private:
                 rlen_ -= rpos_;
                 rpos_ = 0;
             }
+            if (rlen_ >= kReadBufferSize) {
+                // A full staging buffer OpenSSL refuses to consume means a record larger
+                // than the protocol allows: a zero-length read here would spin forever.
+                complete(std::forward<Retry>(retry), std::error_code(asio::error::message_size));
+                return;
+            }
             socket_.async_read_some(
                 asio::buffer(rbuf_.get() + rlen_, kReadBufferSize - rlen_),
                 immediate([this, r = std::forward<Retry>(retry)](std::error_code ec, std::size_t n) mutable {

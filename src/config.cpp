@@ -147,6 +147,10 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
         site.tls = std::move(tc);
     }
     site.is_default = t["default"].value_or(false);
+    site.hidden_files = t["hidden_files"].value_or(false);
+    std::string symlinks = to_lower(t["symlinks"].value_or(std::string("allow")));
+    if (symlinks != "allow" && symlinks != "deny") fail(where + ": symlinks must be \"allow\" or \"deny\"");
+    site.symlinks_deny = symlinks == "deny";
     cfg.sites.push_back(std::move(site));
 }
 
@@ -215,6 +219,10 @@ Config load_config(const fs::path& path) {
     if (auto t = server["idle_timeout"].value<std::int64_t>()) {
         if (*t < 1) fail("server.idle_timeout must be at least 1 second");
         cfg.idle_timeout_s = static_cast<std::uint32_t>(*t);
+    }
+    if (auto m = server["max_requests_per_connection"].value<std::int64_t>()) {
+        if (*m < 0) fail("server.max_requests_per_connection must not be negative");
+        cfg.max_requests_per_connection = static_cast<std::uint32_t>(*m);
     }
     cfg.max_header_size = size_node(server["max_header_size"], cfg.max_header_size, "server.max_header_size");
     if (cfg.max_header_size < 1024) fail("server.max_header_size must be at least 1024");

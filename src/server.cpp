@@ -1,5 +1,6 @@
 #include "server.hpp"
 
+#include <chrono>
 #include <iostream>
 #include <stdexcept>
 
@@ -134,6 +135,17 @@ void Server::start_accept(std::size_t index) {
     acc.socket.async_accept(
         target.ctx, [this, index, &acc, &target](const asio::error_code& ec, asio::ip::tcp::socket sock) {
             if (ec == asio::error::operation_aborted || stopping_.load(std::memory_order_relaxed)) return;
+            if (ec == asio::error::no_descriptors || ec == asio::error::no_buffer_space ||
+                ec == std::errc::too_many_files_open_in_system) {
+                // Out of descriptors: retrying immediately would spin at 100 % CPU while the
+                // clients holding them idle. Pause, let timeouts free some, then resume.
+                std::cerr << "accept: " << ec.message() << "; pausing accepts for 100 ms\n";
+                acc.backoff.expires_after(std::chrono::milliseconds(100));
+                acc.backoff.async_wait([this, index](const asio::error_code& tec) {
+                    if (!tec) start_accept(index);
+                });
+                return;
+            }
             if (!ec) {
                 if (cfg_.tcp_nodelay) {
                     asio::error_code ignored;

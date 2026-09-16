@@ -107,9 +107,14 @@ in checklist form for the coding agent.
   `cppcoreguidelines-pro-type-member-init`, `avoid-c-arrays`; fix when touching a file.
 - `scripts/format.sh`: clang-format check (`--fix` rewrites). The whole tree was formatted
   once on 2026-09-16; keep it that way.
-- Sanitizer builds: `cmake -B build-asan -DAGENSIO_SANITIZE=address,undefined` (added in
-  phase A); hardened standard library (`_GLIBCXX_ASSERTIONS` / libc++ hardening) in
-  Debug and test builds, per Herb Sutter's 2026 trip report on production hardening.
+- Hardened builds are the default (`AGENSIO_HARDEN=ON`): stack protector, zero-initialised
+  locals, fortify, hardened libc++ / `_GLIBCXX_ASSERTIONS` (bounds-checked `[]`), RELRO/PIE.
+  Measured on the request path: no cost (CLAUDE.md "Security hardening"). This follows
+  Herb Sutter's 2026 trip report on production hardening (Google: >1000 bugs, 0.3 % cost).
+- Sanitizer builds: `cmake -B build-asan -DAGENSIO_SANITIZE=address,undefined`.
+- Fuzzing: `cmake -B build-fuzz -DAGENSIO_FUZZ=ON ...` with brew clang; every parser gets a
+  target in `tests/fuzz/`; run for at least a minute after touching a parser, an hour before
+  a release; crashing inputs become unit tests.
 
 ## Known deviations (fix when touched)
 - `CacheKey::site` is a `const void*` used as an identity; a site index would be cleaner.

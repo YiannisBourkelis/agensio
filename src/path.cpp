@@ -72,4 +72,49 @@ bool normalize_target(std::string_view target, std::string& out) {
     return true;
 }
 
+bool has_hidden_segment(std::string_view path) noexcept {
+    for (std::size_t i = 0; i + 1 < path.size(); ++i)
+        if (path[i] == '/' && path[i + 1] == '.') return true;
+    return false;
+}
+
+namespace {
+inline char upper(char c) noexcept {
+    return (c >= 'a' && c <= 'z') ? static_cast<char>(c - 32) : c;
+}
+
+bool reserved_device_name(std::string_view seg) noexcept {
+    auto dot = seg.find('.');
+    std::string_view base = dot == std::string_view::npos ? seg : seg.substr(0, dot);
+    if (base.size() == 3) {
+        char a = upper(base[0]), b = upper(base[1]), c = upper(base[2]);
+        if ((a == 'C' && b == 'O' && c == 'N') || (a == 'P' && b == 'R' && c == 'N') ||
+            (a == 'A' && b == 'U' && c == 'X') || (a == 'N' && b == 'U' && c == 'L'))
+            return true;
+    }
+    if (base.size() == 4 && base[3] >= '1' && base[3] <= '9') {
+        char a = upper(base[0]), b = upper(base[1]), c = upper(base[2]);
+        if ((a == 'C' && b == 'O' && c == 'M') || (a == 'L' && b == 'P' && c == 'T')) return true;
+    }
+    return false;
+}
+}  // namespace
+
+bool windows_path_ok(std::string_view path) noexcept {
+    std::size_t start = 0;
+    for (std::size_t i = 0; i <= path.size(); ++i) {
+        if (i < path.size() && path[i] != '/') {
+            if (path[i] == '\\' || path[i] == ':') return false;
+            continue;
+        }
+        std::string_view seg = path.substr(start, i - start);
+        if (!seg.empty()) {
+            if (seg.back() == '.' || seg.back() == ' ') return false;
+            if (reserved_device_name(seg)) return false;
+        }
+        start = i + 1;
+    }
+    return true;
+}
+
 }  // namespace agensio

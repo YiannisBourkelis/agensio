@@ -5,7 +5,7 @@ set -uo pipefail
 BIN="${1:-build/agensio}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-[ -f bench/www/big.bin ] || bench/gen-www.sh >/dev/null
+[ -f bench/www/big.bin ] && [ -L bench/www/outside.txt ] || bench/gen-www.sh >/dev/null
 [ -f bench/certs/cert.pem ] || bench/certs/gen-cert.sh >/dev/null
 printf '<html><body>sub index</body></html>\n' > bench/www/sub/index.html
 
@@ -44,6 +44,12 @@ for base in http://127.0.0.1:8080 https://127.0.0.1:8443; do
   check "$p keep-alive reuse"   "1 0" "$(curl -sSk -o /dev/null -o /dev/null -w '%{num_connects} ' $base/ $base/style.css | sed 's/ $//' | tr '\n' ' ' | sed 's/ $//')"
   check "$p 3 x 10MB one conn"  "$BIG $BIG $BIG" "$(curl -sSk $base/big.bin $base/big.bin $base/big.bin | (a=$(head -c 10485760 | sum); b=$(head -c 10485760 | sum); c=$(sum); echo "$a $b $c"))"
 done
+check "dotfile hidden (404)" "404" "$(code http://127.0.0.1:8080/.env)"
+check "dot-directory hidden (404)" "404" "$(code http://127.0.0.1:8080/.git/config)"
+check "symlink outside root served with symlinks=allow" "200" "$(code http://127.0.0.1:8080/outside.txt)"
+check "smuggling CL+TE rejected" "HTTP/1.1 400 Bad Request" "$(printf 'GET / HTTP/1.1\r\nHost: l\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\nGET /sub/ HTTP/1.1\r\nHost: l\r\n\r\n' | nc 127.0.0.1 8080 | head -1 | tr -d '\r')"
+check "smuggling: connection closed after 400" "1" "$(printf 'GET / HTTP/1.1\r\nHost: l\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\nGET /sub/ HTTP/1.1\r\nHost: l\r\n\r\n' | nc 127.0.0.1 8080 | grep -c '^HTTP/1.1')"
+check "obs-fold rejected" "HTTP/1.1 400 Bad Request" "$(printf 'GET / HTTP/1.1\r\nHost: l\r\nX: a\r\n b\r\n\r\n' | nc 127.0.0.1 8080 | head -1 | tr -d '\r')"
 check "pipelining" "2" "$(printf 'GET / HTTP/1.1\r\nHost: l\r\n\r\nGET /sub/ HTTP/1.1\r\nHost: l\r\nConnection: close\r\n\r\n' | nc 127.0.0.1 8080 | grep -c 'HTTP/1.1 200')"
 check "bad request" "HTTP/1.1 400 Bad Request" "$(printf 'GARBAGE\r\n\r\n' | nc 127.0.0.1 8080 | head -1 | tr -d '\r')"
 check "tls 1.2 accepted" "200" "$(code -k --tls-max 1.2 https://127.0.0.1:8443/)"
@@ -53,5 +59,18 @@ printf '<html><body>changed</body></html>\n' > bench/www/sub/index.html; sleep 1
 check "revalidation picks up change" "changed" "$(curl -sS http://127.0.0.1:8080/sub/ | sed 's/<[^>]*>//g')"
 printf '<html><body>sub index</body></html>\n' > bench/www/sub/index.html
 
+kill $PID; wait $PID 2>/dev/null
+
+# Second instance with symlinks = "deny", hidden_files = true and a 2-request keep-alive cap.
+sed 's/^default = true/default = true\nsymlinks = "deny"\nhidden_files = true/; s/^max_requests_per_connection = .*/max_requests_per_connection = 2/' bench/tmp/agensio-test.toml > bench/tmp/agensio-test2.toml
+"$BIN" -c bench/tmp/agensio-test2.toml >/dev/null 2>&1 &
+PID=$!
+for _ in $(seq 1 50); do nc -z 127.0.0.1 8080 2>/dev/null && break; sleep 0.1; done
+check "symlink outside root refused with symlinks=deny" "404" "$(code http://127.0.0.1:8080/outside.txt)"
+check "regular file still served with symlinks=deny" "200" "$(code http://127.0.0.1:8080/)"
+check "dotfile served with hidden_files=true" "200" "$(code http://127.0.0.1:8080/.env)"
+three=$(printf 'GET / HTTP/1.1\r\nHost: l\r\n\r\nGET / HTTP/1.1\r\nHost: l\r\n\r\nGET / HTTP/1.1\r\nHost: l\r\n\r\n' | nc 127.0.0.1 8080)
+check "request cap: 2 responses then close" "2" "$(echo "$three" | grep -c '^HTTP/1.1 200')"
+check "request cap: Connection: close on last" "1" "$(echo "$three" | grep -c '^Connection: close')"
 kill $PID; wait $PID 2>/dev/null
 [ $fails -eq 0 ] && echo "integration: all passed" || { echo "integration: $fails failure(s)"; exit 1; }

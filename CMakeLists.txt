@@ -13,6 +13,10 @@ endif()
 option(AGENSIO_TLS "Build TLS support (requires OpenSSL)" ON)
 option(AGENSIO_TESTS "Build unit tests" ON)
 option(AGENSIO_NATIVE "Compile for the build machine's CPU (-march=native)" OFF)
+option(AGENSIO_HARDEN "Hardened build: stack protector, fortify, hardened std library, zero-init locals, RELRO/PIE" ON)
+set(AGENSIO_SANITIZE "" CACHE STRING "Sanitizers for all targets, e.g. address,undefined")
+option(AGENSIO_FUZZ "Build libFuzzer targets (needs clang with libFuzzer, e.g. brew llvm)" OFF)
+option(AGENSIO_HARDEN_ZERO_INIT "Part of AGENSIO_HARDEN: zero-initialise automatic variables (-ftrivial-auto-var-init=zero)" ON)
 
 # ---------------------------------------------------------------- asio (standalone, header-only)
 find_path(ASIO_INCLUDE_DIR asio.hpp
@@ -81,10 +85,27 @@ if(AGENSIO_HAS_TLS)
   target_link_libraries(agensio_core PUBLIC OpenSSL::SSL OpenSSL::Crypto)
 endif()
 if(MSVC)
-  target_compile_options(agensio_core PUBLIC /W4 /permissive-)
+  target_compile_options(agensio_core PUBLIC /W4 /permissive- $<$<BOOL:${AGENSIO_HARDEN}>:/GS /guard:cf /sdl>)
 else()
   target_compile_options(agensio_core PUBLIC -Wall -Wextra -Wpedantic
     $<$<BOOL:${AGENSIO_NATIVE}>:-march=native>)
+  if(AGENSIO_HARDEN)
+    # Measured cost of this set on the request path: see CLAUDE.md "Performance notes".
+    target_compile_options(agensio_core PUBLIC -fstack-protector-strong
+      $<$<BOOL:${AGENSIO_HARDEN_ZERO_INIT}>:-ftrivial-auto-var-init=zero>)
+    target_compile_definitions(agensio_core PUBLIC
+      $<$<NOT:$<CONFIG:Debug>>:_FORTIFY_SOURCE=2>
+      _LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_FAST   # libc++: bounds checks on [] and iterators
+      _GLIBCXX_ASSERTIONS)                                 # libstdc++: same
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+      set_target_properties(agensio_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+      target_link_options(agensio_core PUBLIC -Wl,-z,relro,-z,now -pie)
+    endif()
+  endif()
+  if(AGENSIO_SANITIZE)
+    target_compile_options(agensio_core PUBLIC -fsanitize=${AGENSIO_SANITIZE} -fno-omit-frame-pointer -g)
+    target_link_options(agensio_core PUBLIC -fsanitize=${AGENSIO_SANITIZE})
+  endif()
 endif()
 
 add_executable(agensio src/main.cpp)
@@ -103,3 +124,14 @@ if(AGENSIO_TESTS AND NOT WIN32)
 endif()
 
 add_executable(agensio_bench_header tests/bench_header.cpp)
+
+# ---------------------------------------------------------------- fuzzers (parsers only, no asio)
+if(AGENSIO_FUZZ)
+  foreach(t parser path)
+    add_executable(fuzz_${t} tests/fuzz/fuzz_${t}.cpp src/http_parser.cpp src/path.cpp)
+    target_include_directories(fuzz_${t} PRIVATE src)
+    target_compile_features(fuzz_${t} PRIVATE cxx_std_20)
+    target_compile_options(fuzz_${t} PRIVATE -fsanitize=fuzzer,address,undefined -g -O1 -fno-omit-frame-pointer)
+    target_link_options(fuzz_${t} PRIVATE -fsanitize=fuzzer,address,undefined)
+  endforeach()
+endif()

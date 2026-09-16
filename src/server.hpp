@@ -58,9 +58,10 @@ private:
 
     struct Acceptor {
         asio::ip::tcp::acceptor socket;
+        asio::steady_timer backoff;  // pauses accepting when descriptors run out
         Listener* listener;
         Worker* owner;  // the worker whose io_context runs this acceptor
-        Acceptor(asio::io_context& ctx, Listener* l, Worker* w) : socket(ctx), listener(l), owner(w) {}
+        Acceptor(asio::io_context& ctx, Listener* l, Worker* w) : socket(ctx), backoff(ctx), listener(l), owner(w) {}
     };
 
     Config cfg_;

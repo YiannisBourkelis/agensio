@@ -3,6 +3,7 @@
 [server]
 workers = @WORKERS@
 idle_timeout = 65
+max_requests_per_connection = 1000000   # parity with nginx keepalive_requests in bench/nginx.conf
 reuse_port = "auto"
 tcp_nodelay = true
 sendfile = true

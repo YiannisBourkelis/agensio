@@ -85,6 +85,10 @@ cmake --build build
 ./build/agensio -c bench/agensio.toml      # http://127.0.0.1:8080 and https://127.0.0.1:8443
 ./build/agensio -t -c config/agensio.toml  # config check only
 bench/run.sh                               # 5 s per case; -d 15s for publishable numbers
+scripts/lint.sh && scripts/format.sh       # clang-tidy / clang-format
+cmake -B build-fuzz -DAGENSIO_FUZZ=ON -DAGENSIO_TESTS=OFF -DAGENSIO_TLS=OFF \
+  -DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++ && cmake --build build-fuzz
+build-fuzz/fuzz_parser corpus -max_len=4096 -max_total_time=60   # and fuzz_path
 ```
 
 Source map (all in `src/`): `config` (TOML model + loader), `http_parser` (request head),
@@ -234,6 +238,42 @@ Open: HTTPS p99 is noisier than nginx at 256 connections (run-to-run 5-25 ms); l
 CPU contention with wrk on the same 10 cores. Check on a Linux box with a separate load
 generator before touching code. kTLS (Linux, `SSL_OP_ENABLE_KTLS`) is the next lever
 there: it would allow `sendfile` for streamed files over TLS.
+
+## Security hardening (2026-09-16, measured: no cost)
+
+Each item was benchmarked before and after on the reduced matrix (`bench/run.sh -s agensio
+-w 1 -t 4 -u "/:256" -u "/style.css:256"`); CPU per request stayed at 7.5-7.6 / 17.6-18.0 /
+9.3-9.6 / 56.6-57.7 us throughout (noise band about 3 %).
+
+1. **Request smuggling / field syntax** (`http_parser.cpp`, 17 unit tests, 3 live checks):
+   400 and close for Content-Length together with Transfer-Encoding, duplicate
+   Content-Length with different values, Content-Length lists or more than 19 digits,
+   Transfer-Encoding on HTTP/1.0, duplicate Host, Host with whitespace or delimiters,
+   obs-fold continuation lines, bare CR inside a line, control characters in values,
+   non-token characters in names; 431 and close above 100 header fields. Any announced
+   body still gets 413 and close, so a smuggled second request is never parsed.
+2. **Path policies** (`handler.cpp`, `path.cpp`): `hidden_files = false` per site (default)
+   answers 404 for any dot-segment (`.env`, `.git/`); `symlinks = "deny"` checks the
+   realpath stays under the root on each cache miss (default `allow`, like nginx, because
+   Laravel's `public/storage` link points outside `public/`); Windows path rules
+   (`windows_path_ok`: backslash, `:`/ADS, trailing dot or space, reserved device names)
+   applied on Windows and unit-tested everywhere.
+3. **Memory safety**: `AGENSIO_HARDEN=ON` (default) adds `-fstack-protector-strong`,
+   `-ftrivial-auto-var-init=zero`, `_FORTIFY_SOURCE=2`, hardened libc++ fast mode /
+   `_GLIBCXX_ASSERTIONS` (bounds-checked `[]`), RELRO + PIE on Linux, `/GS /guard:cf` on
+   MSVC. `AGENSIO_SANITIZE=address,undefined` builds everything with sanitizers.
+   `AGENSIO_FUZZ=ON` builds libFuzzer targets (`tests/fuzz/`, brew clang): parser and path
+   normaliser ran 16M and 5.7M inputs under ASan+UBSan with no findings. Also fixed: a
+   theoretical zero-length-read spin in `TlsStream` when the staging buffer is full, and
+   the accept loop now pauses 100 ms on EMFILE/ENFILE instead of spinning at 100 % CPU.
+4. **Keep-alive request cap**: `server.max_requests_per_connection` (default 1000, nginx's
+   default; 1M in the benchmark template for parity) sends `Connection: close` on the last
+   allowed response.
+
+Still to do (roadmap phases B and G): per-IP connection and rate limits, request-body
+limits and timeouts once bodies exist, security response headers option (HSTS,
+nosniff), TLS ticket key rotation and OCSP, access log with fail2ban-friendly format,
+privilege drop, fuzz targets for every new parser (chunked, FastCGI), h1 compliance suite.
 
 ## Benchmark protocol (phase 1)
 

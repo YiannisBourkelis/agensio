@@ -62,6 +62,26 @@ static void test_path() {
     CHECK_EQ(norm("/a/../b/../c/"), "/c/");
     CHECK_EQ(norm("/..a/b"), "/..a/b");
     CHECK_EQ(norm("/.hidden"), "/.hidden");
+
+    CHECK(has_hidden_segment("/.env"));
+    CHECK(has_hidden_segment("/.git/config"));
+    CHECK(has_hidden_segment("/a/.hidden/b"));
+    CHECK(!has_hidden_segment("/a.b/c.d"));
+    CHECK(!has_hidden_segment("/"));
+    CHECK(!has_hidden_segment("/a/b."));
+
+    CHECK(windows_path_ok("/a/b.txt"));
+    CHECK(!windows_path_ok("/a\\b"));
+    CHECK(!windows_path_ok("/a:b"));
+    CHECK(!windows_path_ok("/file.txt::$DATA"));
+    CHECK(!windows_path_ok("/a/.. /b"));
+    CHECK(!windows_path_ok("/a/b."));
+    CHECK(!windows_path_ok("/CON"));
+    CHECK(!windows_path_ok("/a/nul.txt"));
+    CHECK(!windows_path_ok("/com1"));
+    CHECK(!windows_path_ok("/LPT9.log"));
+    CHECK(windows_path_ok("/com10"));
+    CHECK(windows_path_ok("/console"));
 }
 
 static void test_parser() {
@@ -123,6 +143,33 @@ static void test_parser() {
     CHECK(parse_request("GET / HTTP/1.1\r\nHost : a\r\n\r\n", r) == ParseStatus::bad_request);
     CHECK(parse_request("GET / HTTP/1.1\r\nHost: a\r\nContent-Length: x\r\n\r\n", r) == ParseStatus::bad_request);
     CHECK(parse_request("G\x01T / HTTP/1.1\r\n\r\n", r) == ParseStatus::bad_request);
+
+    // Request-smuggling and field-syntax hardening (RFC 9112).
+    auto st = [&](std::string_view req) { return parse_request(req, r); };
+    CHECK(st("GET / HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n") ==
+          ParseStatus::bad_request);
+    CHECK(st("GET / HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\n") ==
+          ParseStatus::bad_request);
+    CHECK(st("GET / HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\n") == ParseStatus::complete);
+    CHECK(st("GET / HTTP/1.1\r\nHost: a\r\nContent-Length: 5, 5\r\n\r\n") == ParseStatus::bad_request);
+    CHECK(st("GET / HTTP/1.1\r\nHost: a\r\nContent-Length: 99999999999999999999\r\n\r\n") == ParseStatus::bad_request);
+    CHECK(st("GET / HTTP/1.0\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n") == ParseStatus::bad_request);
+    CHECK(st("GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n") == ParseStatus::bad_request);
+    CHECK(st("GET / HTTP/1.1\r\nHost: a b\r\n\r\n") == ParseStatus::bad_request);
+    CHECK(st("GET / HTTP/1.1\r\nHost: a/b\r\n\r\n") == ParseStatus::bad_request);
+    CHECK(st("GET / HTTP/1.1\r\nHost: a\r\nX-Fold: 1\r\n continued\r\n\r\n") == ParseStatus::bad_request);
+    CHECK(st("GET / HTTP/1.1\r\nHost: a\r\nX-Bare: a\rb\r\n\r\n") == ParseStatus::bad_request);
+    CHECK(st("GET / HTTP/1.1\r\nHost: a\r\nX-Ctl: a\x01b\r\n\r\n") == ParseStatus::bad_request);
+    CHECK(st("GET / HTTP/1.1\r\nHost: a\r\nX-Tab: a\tb\r\n\r\n") == ParseStatus::complete);
+    CHECK(st("GET / HTTP/1.1\r\nHost: a\r\nBad Name: x\r\n\r\n") == ParseStatus::bad_request);
+    CHECK(st("GET / HTTP/1.1\r\nHost: a\r\nX-(paren): x\r\n\r\n") == ParseStatus::bad_request);
+    {
+        std::string many = "GET / HTTP/1.1\r\nHost: a\r\n";
+        for (int i = 0; i < 101; ++i)
+            many += "X-H: v\r\n";
+        many += "\r\n";
+        CHECK(st(many) == ParseStatus::too_many_headers);
+    }
 
     CHECK(has_token("keep-alive, Upgrade", "upgrade"));
     CHECK(!has_token("keep-alive", "close"));

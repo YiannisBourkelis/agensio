@@ -7,6 +7,8 @@
 #include <sys/types.h>
 #else
 #include <cerrno>
+#include <climits>
+#include <cstdlib>
 #include <fcntl.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
@@ -196,6 +198,20 @@ std::uint64_t raise_open_file_limit() noexcept {
         ::getrlimit(RLIMIT_NOFILE, &rl);
     }
     return static_cast<std::uint64_t>(rl.rlim_cur);
+#endif
+}
+
+bool path_within_root(const char* path, std::string_view root) noexcept {
+#ifdef _WIN32
+    (void)path;
+    (void)root;
+    return true;  // TODO(windows): GetFinalPathNameByHandle; symlinks = "deny" is refused at config load
+#else
+    char resolved[PATH_MAX];
+    if (::realpath(path, resolved) == nullptr) return false;
+    std::string_view r(resolved);
+    if (r.size() < root.size() || r.compare(0, root.size(), root) != 0) return false;
+    return r.size() == root.size() || r[root.size()] == '/' || root == "/";
 #endif
 }
 
