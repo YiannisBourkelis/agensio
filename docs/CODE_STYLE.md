@@ -88,7 +88,7 @@ in checklist form for the coding agent.
 - Paths: decode, normalise, then check containment under the root after
   canonicalisation; deny-rules compare case-insensitively on Windows.
 - No format strings from data, no `system()`/shell, no secrets in logs.
-- Control interface: see `docs/ROADMAP.md` phase C0.
+- Control interface: see `docs/ROADMAP.md` phase F0.
 
 ### Style (mechanical, enforced by `.clang-format`)
 - 4 spaces, 120 columns, braces on the same line, `PointerAlignment: Left` (`char* p`).

@@ -175,18 +175,18 @@ Top criticisms
 
 ## What this means for agensio's roadmap
 
-Already covered: presets over knobs (D3), control API and hot reload (C, G1), reverse proxy
-with `Forwarded` (E2), HTTP/3 (H), no paid tier, low memory by design, hidden-file defaults.
+Already covered: presets over knobs (C3), control API and hot reload (F, H1), reverse proxy
+with `Forwarded` (D2), HTTP/3 (I), no paid tier, low memory by design, hidden-file defaults.
 
 Added to the roadmap on 2026-09-16 because of this research:
-- certificate file watching with automatic reload (G1), the one request nginx and Caddy
+- certificate file watching with automatic reload (H1), the one request nginx and Caddy
   users share most;
-- ACME with DNS-01 as well as HTTP-01 and TLS-ALPN-01 (G3), since HTTP-01-only is the
+- ACME with DNS-01 as well as HTTP-01 and TLS-ALPN-01 (H3), since HTTP-01-only is the
   main criticism of nginx's new module;
 - Prometheus metrics per upstream and per certificate, structured JSON logs with a
-  request id, OpenTelemetry-compatible trace headers (C2, G5);
-- 103 Early Hints (B), shared-dictionary compression noted for later;
-- reload semantics must keep QUIC connections alive (H3);
+  request id, OpenTelemetry-compatible trace headers (F2, H5);
+- 103 Early Hints (E8), shared-dictionary compression noted for later;
+- reload semantics must keep QUIC connections alive (I3);
 - a public principle: every feature is in the open build, nothing is gated.
 
 ## Sources

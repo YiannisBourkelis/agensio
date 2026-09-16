@@ -360,7 +360,7 @@ Each item was benchmarked before and after on the reduced matrix (`bench/run.sh 
    default; 1M in the benchmark template for parity) sends `Connection: close` on the last
    allowed response.
 
-Still to do (roadmap phases B and G): per-IP connection and rate limits, request-body
+Still to do (roadmap phases E and H): per-IP connection and rate limits, request-body
 limits and timeouts once bodies exist, security response headers option (HSTS,
 nosniff), TLS ticket key rotation and OCSP, access log with fail2ban-friendly format,
 privilege drop, fuzz targets for every new parser (chunked, FastCGI), h1 compliance suite.
@@ -405,7 +405,11 @@ privilege drop, fuzz targets for every new parser (chunked, FastCGI), h1 complia
 
 ## Roadmap
 
-See `docs/ROADMAP.md`: phases A (core refactor: streams, body sources, router), B (full
-HTTP/1.1 + hardening), C (control API + agentic/MCP), D (PHP/FastCGI, Laravel), E (reverse
-proxy, WebSocket, CGI), F (HTTP/2 via nghttp2), G (production hardening), H (HTTP/3 via
-ngtcp2+nghttp3). One phase at a time, each with a benchmark checkpoint at `-w 1`.
+See `docs/ROADMAP.md`, lettered in execution order (renumbered 2026-09-17): A core refactor
+(streams, bodies, router; A1-A3 done), B methods beyond GET/HEAD, C PHP/FastCGI (Laravel,
+Statamic, WordPress), D reverse proxy (WebSocket, CGI; Rails, Node, Python, Java, Go apps),
+E rest of HTTP/1.1 and hardening, F control API and agentic/MCP, G HTTP/2 via nghttp2,
+H production hardening, I HTTP/3 via ngtcp2+nghttp3. Real applications come before Range,
+compression and the control API so the body model, router and upstream design are validated
+first; section 6 of the roadmap lists the application matrix. One step at a time, each gated
+by an A/B on the Debian machine and the tests.
