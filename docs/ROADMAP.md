@@ -108,8 +108,11 @@ same after it (that is the checkpoint).
       limits, `Expect: 100-continue`, body timeouts, `413`.
 - [ ] A4 `Router`: sites (Host/SNI) -> ordered `[[site.location]]` blocks (prefix, exact,
       regex later) -> handler; `try_files`; per-location settings. Config schema for it.
-- [ ] A5 Access log and error log services (async, per worker buffers, off by default in
-      the benchmark config; measured cost when on).
+- [ ] A5 Access log and error log services: "combined" format (fail2ban filters for
+      nginx/apache work unchanged), optional JSON, per-worker buffers flushed by a timer or
+      size, reopen on `SIGUSR1`/`ctl reopen` for rotation. Configurable per site; the
+      benchmark config turns it off. Decide the default after measuring: nginx and Apache
+      log by default, Caddy does not; recommendation is on if the cost is < 1 us/request.
 - [ ] Checkpoint: static benchmark equal to phase 1 within noise; new unit tests for body
       decoders and router.
 
@@ -117,8 +120,10 @@ same after it (that is the checkpoint).
 - [ ] B1 Methods: OPTIONS, POST/PUT/DELETE/PATCH passed to handlers; `405` with `Allow`
       per location; `TRACE` rejected.
 - [ ] B2 Range requests (single range, `206`, `416`, `If-Range`) on memory and file sources.
-- [ ] B3 Compression: serve precompressed `.br`/`.gz` siblings by `Accept-Encoding`; on-the-
-      fly gzip/brotli for dynamic responses as an option (measure CPU; off by default).
+- [ ] B3 Compression, off by default, per site/location: `compression = "precompressed"`
+      serves `.br`/`.gz` siblings by `Accept-Encoding` (no CPU); `compression = "on-the-fly"`
+      gzip/brotli for dynamic responses with level setting; measure and document the
+      CPU and latency cost of each.
 - [ ] B4 Request-smuggling and parser hardening: CL vs TE rules, obs-fold rejected, header
       count/size limits, URI normalisation edge cases, `Host` validation; libFuzzer target
       for the parser and the chunked decoder run in CI.
@@ -131,7 +136,8 @@ same after it (that is the checkpoint).
 ### Phase C. Control API and agentic interface  `[ ]`
 Cheap, independent, and useful for every later phase (inspect cache, reload config).
 - [ ] C1 Control socket: unix domain socket (`/run/agensio.sock`, owner-only) speaking HTTP/1.1
-      through the same core; optional loopback TCP listener; token auth for TCP.
+      + JSON through the same core; optional loopback TCP listener with a bearer token
+      (off by default on POSIX, default on Windows). One API, two transports.
 - [ ] C2 Read-only commands, JSON and plain text (`Accept: text/plain` gives a human answer):
       `status`, `cache` (count, bytes, hit ratio) and `cache/entries` (path, size, age,
       hits), `sites`, `config` (effective, with sources), `connections`, `metrics`
@@ -143,9 +149,11 @@ Cheap, independent, and useful for every later phase (inspect cache, reload conf
 - [ ] C4 Natural-language front: a small intent matcher for the questions in the brief
       ("how many files are in cache?", "create a website in /var/www/x for x.com") mapping
       to C2/C3 commands, answering in text. No model inside the server.
-- [ ] C5 Agent integration: expose the same commands as an **MCP server** (Model Context
-      Protocol) over the control socket so agentic OS tooling (e.g. Omarchy's Claude/Codex
-      setup) can call them as tools; `agensio mcp` subcommand as stdio bridge.
+- [ ] C5 Agent integration (agentic tools, to look at in detail when phase C starts): expose
+      the same commands as an **MCP server** (Model Context Protocol) so agentic OS tooling
+      (e.g. Omarchy's agent setup) can call them as tools; `agensio mcp` subcommand as a
+      stdio bridge to the control socket; MCP streamable-HTTP on the loopback listener.
+      The server never embeds a model; it offers precise, auditable tools.
 - [ ] C6 CLI: `agensio ctl <command>` wrapping the socket, so shell scripts and panels
       (ISPConfig style) get the same interface.
 - [ ] Checkpoint: control traffic measured to add zero cost to data-plane workers (runs on
@@ -159,12 +167,16 @@ Cheap, independent, and useful for every later phase (inspect cache, reload conf
 - [ ] D2 Parameter set matching nginx's `fastcgi_params` plus `PATH_INFO` splitting,
       `HTTPS`, `REMOTE_ADDR`, `SERVER_PORT`, `REQUEST_SCHEME`, forwarded headers.
 - [ ] D3 Config: `php = { socket = "unix:/run/php/php-fpm.sock" }` at site level and
-      **presets**: `app = "laravel"` expands to root `public/`, `try_files $uri
-      /index.php?$query_string`, deny `.env`/dotfiles, static caching rules; `app = "php"`
-      plain; `app = "wordpress"` later.
-- [ ] D4 Test bed: Laravel skeleton in `bench/laravel/` served by brew php-fpm (macOS) and
-      by ddev's php-fpm in Docker (Linux); integration test hits the welcome route, a JSON
-      route, a POST with body, a file upload.
+      **presets** (future todo, agreed 2026-09-16): `app = "laravel"` expands to root
+      `public/`, `try_files $uri /index.php?$query_string`, deny `.env`/dotfiles, static
+      caching rules; `app = "php"` plain; `app = "wordpress"`, `app = "proxy"`,
+      `app = "static"` later. A preset is the whole config for a common site; every
+      expansion is printable with `agensio -t --explain` so nothing is hidden.
+- [ ] D4 Test bed: Laravel skeleton as a ddev project (`bench/laravel/` with `.ddev/`),
+      agensio connecting to ddev's php-fpm (expose port 9000 from the web container via a
+      `docker-compose.agensio.yaml` override, or run agensio inside the container as a
+      custom webserver); integration test hits the welcome route, a JSON route, a POST
+      with body, a file upload. Same setup on macOS and Linux.
 - [ ] D5 Benchmark: Laravel `GET /` and a JSON route through agensio vs nginx (same php-fpm,
       same pool size). Record req/s, CPU per request on the *web server* processes only.
 - [ ] Checkpoint: Laravel welcome page served with one worker; benchmark table.
@@ -177,8 +189,10 @@ Cheap, independent, and useful for every later phase (inspect cache, reload conf
       `Forwarded`, `Host` passthrough or rewrite, `proxy_set_header` equivalent.
 - [ ] E3 WebSocket / `Upgrade` tunnelling (Rocket.Chat, ThingsBoard need it), plus
       HTTP/2-to-HTTP/1.1 downgrade for upstreams once phase F exists.
-- [ ] E4 Upstream groups: several backends, round-robin, passive health marking, retries on
-      idempotent requests; TLS to upstream (verify on/off).
+- [ ] E4 Upstream groups from the start: `upstream = ["http://a:3000", "http://b:3000"]`,
+      round-robin, passive health marking (N failures -> down for T seconds), retries on
+      idempotent requests only; TLS to upstream (verify on/off). No active checks or
+      weights until needed.
 - [ ] E5 CGI handler: spawn a process per request with CGI/1.1 env and pipes, for legacy
       applications; async pipes via Asio; concurrency cap.
 - [ ] E6 Presets: `app = "proxy"` with `upstream = "http://127.0.0.1:3000"`; examples for
@@ -201,8 +215,9 @@ Cheap, independent, and useful for every later phase (inspect cache, reload conf
       or removed; TLS certs reloaded on change (file watch or `ctl reload`).
 - [ ] G2 Start as root, bind, drop privileges (`user =`); systemd unit; pid file; log
       rotation via `SIGUSR1`/reopen.
-- [ ] G3 ACME (Let's Encrypt) HTTP-01 and TLS-ALPN-01 built in, or documented certbot
-      hooks (open question 6). OCSP stapling.
+- [ ] G3 Certificates: built-in ACME client (HTTP-01 and TLS-ALPN-01, Let's Encrypt and any
+      RFC 8555 CA), automatic renewal, cross-platform; until then documented reload hooks
+      for certbot / win-acme / acme.sh. OCSP stapling.
 - [ ] G4 Rate limiting and connection limits per IP; request id header; error pages
       configurable.
 - [ ] G5 Metrics endpoint scraped by Prometheus; structured JSON logs option.
@@ -250,23 +265,56 @@ Cheap, independent, and useful for every later phase (inspect cache, reload conf
 
 ---
 
-## 4. Open questions (answer before phase A starts)
+## 4. Decisions (2026-09-16)
 
-1. **HTTP/2 and HTTP/3 libraries.** Accept nghttp2 and ngtcp2+nghttp3 as dependencies, or
-   write HTTP/2 framing + HPACK ourselves (feasible, ~5k lines, more control, more risk)
-   and still use ngtcp2 for QUIC (writing QUIC ourselves is not reasonable)?
-2. **Control interface reach.** Unix socket only, or also a loopback HTTP listener with a
-   token? Should mutating commands (create site, reload) be on by default or opt-in?
-   Where should `sites/create` write: `sites.d/` next to the main config?
-3. **PHP test environment.** Local brew `php-fpm` + a Laravel skeleton (fast, macOS), or
-   ddev in Docker (closer to production Linux), or both? Is Laravel Octane
-   (FrankenPHP/Swoole) in scope, or classic php-fpm only?
-4. **Proxy scope for the first cut.** Single upstream per location with WebSocket support,
-   or upstream groups with balancing from the start?
-5. **Compression policy.** Precompressed files only (zero CPU), or on-the-fly gzip/brotli
-   for PHP/proxy responses too?
-6. **Certificates.** Built-in ACME like Caddy (big convenience, a few thousand lines), or
-   rely on certbot/acme.sh with a reload hook?
-7. **Platforms.** Linux (Debian/Arch) production and macOS development are given. Does
-   Windows need to keep compiling, or can it be dropped to simplify the network code?
-8. **Logging default.** Access log off by default (fastest) or on with a cheap format?
+1. **HTTP/2 and HTTP/3 libraries.** Start with nghttp2 and ngtcp2 + nghttp3. Benchmark h2
+   and h3 against nginx and Caddy; if the numbers disappoint, write HTTP/2 framing + HPACK
+   ourselves (QUIC stays a library either way).
+2. **Control interface.** HTTP + JSON API over a unix domain socket by default (owner-only,
+   no network exposure); an optional loopback TCP listener with a bearer token, off by
+   default on POSIX and the default on Windows. The MCP server and the `agensio ctl` CLI
+   are thin adapters over the same API. Created sites are written to `sites.d/`.
+3. **PHP test bed: ddev** (present on both macOS and Linux dev machines). php-fpm only;
+   Octane out of scope.
+4. **Proxy: upstream groups from the first cut**, kept simple: list of backends,
+   round-robin, passive health marking (N failures -> down for T seconds), retries on
+   idempotent requests only. No active health checks, no weights, until asked for.
+   General rule: take the good parts of nginx and other servers, keep it simple and stable.
+5. **Compression is a per-site/location setting, off by default.** Precompressed siblings
+   (`.br`, `.gz`) cost nothing and are served when present and enabled; on-the-fly
+   gzip/brotli is a separate switch with a measured CPU/latency cost documented.
+6. **Certificates: later (phase G), automatic once set up, cross-platform.** Built-in ACME
+   (HTTP-01 and TLS-ALPN-01, keys and JWS via OpenSSL) is the only option that works the
+   same on Linux, macOS and Windows; external clients (certbot, win-acme, acme.sh) get a
+   reload hook meanwhile.
+7. **Windows stays supported** as a compile-and-run target with CI, best-effort performance.
+   All OS-specific code lives behind a small `src/os/` interface (see below); if it starts
+   to bend the core design, revisit.
+8. **Access logging is a configuration option** with a human-readable, fail2ban-friendly
+   format (Apache/nginx "combined" so existing fail2ban filters work unchanged), buffered
+   and written off the hot path. Default: see the note in phase A5 (recommendation: on,
+   measured cost must stay under 1 us/request).
+
+## 5. Platform layer (Windows and POSIX)
+
+Everything that differs by OS goes behind `src/os/` with one header per concern and a
+`posix/` and `win32/` implementation; the core never includes OS headers.
+
+| concern | POSIX | Windows | notes |
+|---|---|---|---|
+| sockets, timers, TLS | Asio (kqueue/epoll) + OpenSSL | Asio (IOCP) + OpenSSL | same code; speculative-read tuning is POSIX-only |
+| zero-copy send | `sendfile` | `TransmitFile` | both behind `send_file()`; copy path fallback everywhere |
+| files, stat, pread | POSIX | `_sopen_s`, `_fstat64` | already shimmed in `file.cpp` |
+| multi-worker accept | `SO_REUSEPORT` (Linux) | shared acceptor | shared acceptor path exists |
+| control socket | unix domain socket | AF_UNIX (Win10 1803+) or loopback + token | Asio `local::stream_protocol` on both |
+| signals / reload / stop | SIGHUP, SIGTERM, SIGUSR1 | console ctrl handler, service control | `os::on_reload()`, `os::on_stop()` |
+| privilege drop | `setuid/setgid` after bind | run as a service account | `os::drop_privileges()` no-op on Windows |
+| daemon / service | systemd unit | Windows service (`agensio --service`) | phase G |
+| process spawn (CGI, php-cgi) | `posix_spawn` + pipes | `CreateProcess` + pipes | `os::Process` |
+| paths | case-sensitive, `/` | case-insensitive, `\`, reserved names (`CON`, `NUL`), trailing dots/spaces, `::$DATA` streams | path normaliser gets a Windows mode; deny-rules compare case-insensitively |
+| PHP | php-fpm (unix socket / TCP) | `php-cgi.exe -b 127.0.0.1:9000` (FastCGI over TCP) | same FastCGI client |
+| kTLS, io_uring | Linux only | n/a | optional accelerators, never required |
+
+Estimated share of OS-specific code: under 10 %, all in `src/os/`. A GitHub Actions matrix
+(Linux, macOS, Windows) builds and runs the unit tests from phase A on; the integration
+suite runs on Linux and macOS.
