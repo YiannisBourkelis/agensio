@@ -53,7 +53,7 @@ for server in $SERVERS; do
         wexec wrk -t"$t" -c"$c" -d"$DURATION" --latency "$url" > "$rawfile" 2>&1 || true
         cpu1=$(cpu_usec "$server")
         total=$(awk '/requests in/{print $1}' "$rawfile")
-        cpureq=$(awk -v a="$cpu0" -v b="$cpu1" -v n="$total" 'BEGIN{ if (n>0) printf "%.1f", (b-a)/n; else print "-" }')
+        cpureq=$(LC_NUMERIC=C awk -v a="$cpu0" -v b="$cpu1" -v n="$total" 'BEGIN{ if (n>0) printf "%.1f", (b-a)/n; else print "-" }')
         rss=$(rss_mb "$server")
         rps=$(awk '/^Requests\/sec/{print $2}' "$rawfile"); tps=$(awk '/^Transfer\/sec/{print $2}' "$rawfile")
         p50=$(awk '/^ +50%/{print $2}' "$rawfile"); p99=$(awk '/^ +99%/{print $2}' "$rawfile")
