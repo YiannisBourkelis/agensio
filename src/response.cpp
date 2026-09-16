@@ -14,6 +14,7 @@ struct Status {
 
 constexpr Status kStatus[] = {
     {200, "HTTP/1.1 200 OK\r\n", "OK"},
+    {204, "HTTP/1.1 204 No Content\r\n", "No Content"},
     {301, "HTTP/1.1 301 Moved Permanently\r\n", "Moved Permanently"},
     {304, "HTTP/1.1 304 Not Modified\r\n", "Not Modified"},
     {400, "HTTP/1.1 400 Bad Request\r\n", "Bad Request"},
@@ -38,7 +39,7 @@ const std::map<int, ErrorPage>& pages() {
     static const std::map<int, ErrorPage> m = [] {
         std::map<int, ErrorPage> out;
         for (auto& s : kStatus) {
-            if (s.code == 200 || s.code == 304) continue;
+            if (s.code == 200 || s.code == 204 || s.code == 304) continue;
             ErrorPage p;
             std::string title = std::to_string(s.code) + " " + std::string(s.reason);
             p.body = "<!doctype html><html><head><title>" + title + "</title></head><body><center><h1>" + title +

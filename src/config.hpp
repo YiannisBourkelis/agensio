@@ -9,6 +9,8 @@
 #include <string_view>
 #include <vector>
 
+#include "core/request.hpp"
+
 namespace agensio {
 
 struct TlsConfig {
@@ -41,6 +43,8 @@ struct LocationConfig {
     bool hidden_files = false;
     bool symlinks_deny = false;
     std::string handler = "static";  // "fastcgi", "proxy" arrive in later phases
+    MethodSet methods = kStaticMethods;      // what the handler serves here (`methods = [...]` narrows it)
+    std::string allow = "GET, HEAD, OPTIONS";  // Allow header for 405 and OPTIONS
 };
 
 struct SiteConfig {

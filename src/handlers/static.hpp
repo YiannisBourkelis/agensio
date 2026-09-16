@@ -26,6 +26,8 @@ public:
 
     // Fills s.response with a canned error page. `allow` adds an Allow header (405).
     void error(Stream& s, int status, bool keep_alive, std::string_view allow = {});
+    // 204 with an Allow header (OPTIONS).
+    void no_content(Stream& s, std::string_view allow);
 
     static constexpr int kMaxInternalRedirects = 8;  // try_files fallbacks per request (nginx: 10)
 

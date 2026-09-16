@@ -168,6 +168,20 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
     loc.handler = to_lower(t["handler"].value_or(std::string("static")));
     if (loc.handler != "static")
         fail(where + ": handler \"" + loc.handler + "\" is not available yet (only \"static\")");
+    if (t.contains("methods")) {
+        MethodSet set = 0;
+        for (const auto& name : string_list(t["methods"], (where + ".methods").c_str())) {
+            Method m;
+            if (!parse_method(name, m) || m == Method::trace || m == Method::connect || m == Method::other)
+                fail(where + ".methods: unknown method '" + name + "'");
+            if (!(kStaticMethods & method_bit(m)))
+                fail(where + ".methods: the static handler does not implement " + name);
+            set |= method_bit(m);
+        }
+        if (set == 0) fail(where + ".methods must list at least one method");
+        loc.methods = set;
+        loc.allow = allow_header(set);
+    }
     site.locations.push_back(std::move(loc));
 }
 

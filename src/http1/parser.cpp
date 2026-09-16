@@ -103,9 +103,7 @@ ParseStatus parse_request(std::string_view buf, Request& out) noexcept {
     out.method_name = slice(line, 0, sp1);
     for (unsigned char c : out.method_name)
         if (!is_tchar(c)) return ParseStatus::bad_request;
-    if (out.method_name == "GET") out.method = Method::GET;
-    else if (out.method_name == "HEAD") out.method = Method::HEAD;
-    else out.method = Method::OTHER;
+    if (!parse_method(out.method_name, out.method)) out.method = Method::other;
 
     out.target = slice(line, sp1 + 1, sp2 - sp1 - 1);
     for (unsigned char c : out.target)
@@ -207,6 +205,38 @@ ParseStatus parse_request(std::string_view buf, Request& out) noexcept {
     else out.keep_alive = has_token(out.connection, "keep-alive");
     out.length = pos;
     return ParseStatus::complete;
+}
+
+namespace {
+struct MethodName {
+    std::string_view name;
+    Method method;
+};
+// Ordered by frequency; also the Allow header order below.
+constexpr MethodName kMethods[] = {
+    {"GET", Method::get},     {"HEAD", Method::head},       {"POST", Method::post},
+    {"PUT", Method::put},     {"DELETE", Method::del},      {"PATCH", Method::patch},
+    {"OPTIONS", Method::options}, {"TRACE", Method::trace}, {"CONNECT", Method::connect},
+};
+}  // namespace
+
+bool parse_method(std::string_view name, Method& out) noexcept {
+    for (const auto& m : kMethods)
+        if (m.name == name) {
+            out = m.method;
+            return true;
+        }
+    return false;
+}
+
+std::string allow_header(MethodSet set) {
+    std::string out;
+    for (const auto& m : kMethods) {
+        if (!(set & method_bit(m.method))) continue;
+        if (!out.empty()) out.append(", ");
+        out.append(m.name);
+    }
+    return out;
 }
 
 }  // namespace agensio

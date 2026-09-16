@@ -152,13 +152,17 @@ same after it (that is the checkpoint).
       to stderr or a file with `level`. Benchmark templates off. Measured on Linux (one
       worker, off/on alternated twice): 0.1-0.2 us per request, so the default is **on**
       (`logs/access.log` next to the config file).
-- [ ] Checkpoint: static benchmark equal to phase 1 within noise; new unit tests for body
-      decoders and router.
+- [x] Checkpoint (2026-09-17): every step A1-A5 was gated by `bench/ab.sh` on Linux, CPU
+      per request equal within noise on all six rows; unit tests cover the chunked decoder,
+      the router, try_files, the config schema and the log formatters.
 
 ### Phase B. Methods beyond GET/HEAD  `[ ]`
 Small on purpose: the first real applications need forms, logins and uploads; the rest of HTTP/1.1 is phase E.
-- [ ] B1 Methods: OPTIONS, POST/PUT/DELETE/PATCH passed to handlers; `405` with `Allow`
-      per location; `TRACE` rejected.
+- [x] B1 (2026-09-17) Methods: the parser knows every standard method; a location carries
+      the `MethodSet` its handler implements (static: GET/HEAD/OPTIONS, `methods = [...]`
+      narrows) and its `Allow`; OPTIONS answers 204 + Allow (also `OPTIONS *`), everything
+      else 405 + Allow, TRACE and CONNECT always. POST/PUT/DELETE/PATCH reach the handler
+      with their body (A3); the static handler declines them, FastCGI (C1) will accept.
 
 ### Phase C. PHP by design (FastCGI to php-fpm), Laravel first  `[ ]`
 - [ ] C1 `FcgiClient`: async FastCGI/1.1 over unix socket or TCP, per-worker connection

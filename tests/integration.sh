@@ -40,6 +40,11 @@ root = "{www}/sub"
 [[site.location]]
 path = "/private/"
 try_files = ["=403"]
+
+[[site.location]]
+path = "/readonly/"
+alias = "{www}/sub"
+methods = ["GET", "HEAD"]
 """
 text = open(path).read().replace("default = true\n", block, 1)
 open(path, "w").write(text)
@@ -101,6 +106,16 @@ check "bad request" "HTTP/1.1 400 Bad Request" "$(printf 'GARBAGE\r\n\r\n' | ncq
 check "tls 1.2 accepted" "200" "$(code -k --tls-max 1.2 https://127.0.0.1:8443/)"
 check "tls 1.3 negotiated" "TLSv1.3" "$(echo | openssl s_client -connect 127.0.0.1:8443 -tls1_3 2>/dev/null | sed -n 's/^ *Protocol *: *//p' | head -1)"
 check "no plain http on tls port" "000" "$(code http://127.0.0.1:8443/ 2>/dev/null)"
+# ---- methods (B1): OPTIONS answered, others 405 with the location's Allow ----
+check "OPTIONS /: 204 with Allow" "204 GET, HEAD, OPTIONS" "$(curl -sSi -X OPTIONS http://127.0.0.1:8080/ | tr -d '\r' | awk '/^HTTP/{s=$2} /^Allow:/{sub(/^Allow: /,""); a=$0} END{print s, a}')"
+check "OPTIONS * (server-wide): 204" "HTTP/1.1 204 No Content" "$(printf 'OPTIONS * HTTP/1.1\r\nHost: l\r\nConnection: close\r\n\r\n' | ncq 127.0.0.1 8080 | head -1 | tr -d '\r')"
+check "OPTIONS: no body, keep-alive works" "204 200" "$(printf 'OPTIONS / HTTP/1.1\r\nHost: l\r\n\r\nGET / HTTP/1.1\r\nHost: l\r\nConnection: close\r\n\r\n' | ncq 127.0.0.1 8080 | awk '/^HTTP\/1.1/{printf "%s ", $2}' | sed 's/ $//')"
+check "TRACE: 405" "405 GET, HEAD, OPTIONS" "$(curl -sSi -X TRACE http://127.0.0.1:8080/ | tr -d '\r' | awk '/^HTTP/{s=$2} /^Allow:/{sub(/^Allow: /,""); a=$0} END{print s, a}')"
+check "DELETE: 405 with Allow" "405 GET, HEAD, OPTIONS" "$(curl -sSi -X DELETE http://127.0.0.1:8080/style.css | tr -d '\r' | awk '/^HTTP/{s=$2} /^Allow:/{sub(/^Allow: /,""); a=$0} END{print s, a}')"
+check "PUT with body: 405, connection reused" "405 200" "$(printf 'PUT /x HTTP/1.1\r\nHost: l\r\nContent-Length: 2\r\n\r\nhiGET / HTTP/1.1\r\nHost: l\r\nConnection: close\r\n\r\n' | ncq 127.0.0.1 8080 | awk '/^HTTP\/1.1/{printf "%s ", $2}' | sed 's/ $//')"
+check "unknown method: 405" "405" "$(code -X PURGE http://127.0.0.1:8080/)"
+check "location methods: OPTIONS refused where narrowed" "405 GET, HEAD" "$(curl -sSi -X OPTIONS http://127.0.0.1:8080/readonly/ | tr -d '\r' | awk '/^HTTP/{s=$2} /^Allow:/{sub(/^Allow: /,""); a=$0} END{print s, a}')"
+check "location methods: GET still served" "sub index" "$(curl -sS http://127.0.0.1:8080/readonly/ | sed 's/<[^>]*>//g')"
 # ---- request bodies (A3): decoded, limited, drained after the response ----
 check "body on GET: served, drained, pipelined request answered" "2" "$(printf 'GET / HTTP/1.1\r\nHost: l\r\nContent-Length: 5\r\n\r\nhelloGET /sub/ HTTP/1.1\r\nHost: l\r\nConnection: close\r\n\r\n' | ncq 127.0.0.1 8080 | grep -c 'HTTP/1.1 200')"
 check "POST with body: 405, then keep-alive" "405 200" "$(printf 'POST / HTTP/1.1\r\nHost: l\r\nContent-Length: 3\r\n\r\nx=1GET / HTTP/1.1\r\nHost: l\r\nConnection: close\r\n\r\n' | ncq 127.0.0.1 8080 | awk '/^HTTP\/1.1/{printf "%s ", $2}' | sed 's/ $//')"

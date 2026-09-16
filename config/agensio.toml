@@ -41,7 +41,9 @@ max_open_files = 1024    # files above max_file_size are streamed, but their ope
 # with match = "exact", the whole path. Exact matches win, then the longest prefix; a "/"
 # prefix location with the site's own settings is always present. A location may override
 # root (file = root + path) or alias (file = alias + path minus the prefix, nginx alias),
-# index, try_files, hidden_files and symlinks; `handler` is "static" until phase C.
+# index, try_files, hidden_files, symlinks and methods (`methods = ["GET", "HEAD"]` narrows
+# what the handler serves; the static handler implements GET, HEAD and OPTIONS; anything
+# else is 405 with an Allow header); `handler` is "static" until phase C.
 # try_files = ["$uri", "$uri/", "/index.html"]  tries the file, then the directory, then
 # routes the fallback path again; "=403" / "=404" answer directly. Without try_files the
 # rule is: file, directory index (403 without one), 301 to the slash form, 404.

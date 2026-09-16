@@ -39,10 +39,18 @@ void StaticHandler::error(Stream& s, int status, bool keep_alive, std::string_vi
     const ErrorPage& page = error_page(status);
     r.status = status;
     r.keep_alive = keep_alive;
-    r.head = s.request.method == Method::HEAD;
+    r.head = s.request.method == Method::head;
     r.prebuilt_headers = page.headers;  // Content-Type + Content-Length, not terminated
     if (!allow.empty()) r.headers.add("Allow", allow);
     r.body = MemoryBody{page.body};
+}
+
+void StaticHandler::no_content(Stream& s, std::string_view allow) {
+    Response& r = s.response;
+    r.reset();
+    r.status = 204;
+    r.keep_alive = s.request.keep_alive;
+    r.headers.add("Allow", allow);
 }
 
 bool StaticHandler::not_modified(const Request& req, std::string_view etag, std::string_view last_modified) noexcept {
@@ -70,7 +78,7 @@ bool StaticHandler::not_modified(const Request& req, std::string_view etag, std:
 
 void StaticHandler::serve_entry(Stream& s, EntryPtr e) {
     Response& r = s.response;
-    r.head = s.request.method == Method::HEAD;
+    r.head = s.request.method == Method::head;
     if (not_modified(s.request, e->etag, e->last_modified)) {
         r.status = 304;
         r.headers.add("ETag", e->etag);
@@ -108,7 +116,7 @@ void StaticHandler::fill_entry(CacheEntry& entry, const FileInfo& fi, const Work
 
 void StaticHandler::serve_file(Stream& s, File&& f, const FileInfo& fi, WorkerState& ws) {
     Response& r = s.response;
-    r.head = s.request.method == Method::HEAD;
+    r.head = s.request.method == Method::head;
     std::string etag;
     make_etag(fi.mtime, fi.size, etag);
     char lm[kHttpDateLength];
@@ -141,7 +149,7 @@ void StaticHandler::redirect_slash(Stream& s, WorkerState& ws) {
     Response& r = s.response;
     const ErrorPage& page = error_page(301);
     r.status = 301;
-    r.head = s.request.method == Method::HEAD;
+    r.head = s.request.method == Method::head;
     r.scratch.assign(ws.path).push_back('/');
     r.headers.add("Location", r.scratch);
     r.prebuilt_headers = page.headers;
@@ -360,14 +368,16 @@ void StaticHandler::handle(Stream& s, const Router& router, WorkerState& ws) {
     r.reset();
     r.keep_alive = req.keep_alive;
 
-    if (req.method == Method::OTHER) {
-        error(s, 405, req.keep_alive, "GET, HEAD");
-        return;
-    }
-    // A body on GET/HEAD is ignored: the connection drains it after the response (nginx
-    // behaviour); oversize bodies were already refused with 413 before we were called.
+    // Bodies on requests we do not read are drained by the connection after the response
+    // (nginx behaviour); oversize bodies were already refused with 413 before we were called.
     if (req.version_minor == 1 && req.host.empty()) {
         error(s, 400, false);
+        return;
+    }
+    if (req.method == Method::options && req.target == "*") {  // server-wide OPTIONS
+        const SiteConfig* site = router.site(req.host);
+        ws.site = site;
+        no_content(s, Router::location(*site, "/").allow);
         return;
     }
     if (!normalize_target(req.target, ws.path)) {
@@ -384,6 +394,16 @@ void StaticHandler::handle(Stream& s, const Router& router, WorkerState& ws) {
     const SiteConfig* site = router.site(req.host);
     ws.site = site;
     const LocationConfig* loc = &Router::location(*site, ws.path);
+    // Methods are a per-location policy: what the handler implements, narrowed by `methods`.
+    // TRACE and CONNECT are in no set, so they are always 405.
+    if (!(loc->methods & method_bit(req.method))) {
+        error(s, 405, req.keep_alive, loc->allow);
+        return;
+    }
+    if (req.method == Method::options) {
+        no_content(s, loc->allow);
+        return;
+    }
     for (int hops = 0;; ++hops) {
         if (serve_location(s, *loc, ws) == Outcome::done) return;
         // try_files fallback: ws.path is the new target; route it again, bounded so two

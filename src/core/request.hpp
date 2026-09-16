@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <string_view>
 
 #include "core/headers.hpp"
@@ -14,10 +15,20 @@ namespace agensio {
 
 class StreamBody;
 
-enum class Method { GET, HEAD, OTHER };
+enum class Method : std::uint8_t { get, head, post, put, del, patch, options, trace, connect, other };
+
+// A set of methods as bits (Allow header, per-location policy).
+using MethodSet = std::uint16_t;
+constexpr MethodSet method_bit(Method m) noexcept { return static_cast<MethodSet>(1u << static_cast<unsigned>(m)); }
+constexpr MethodSet kStaticMethods = method_bit(Method::get) | method_bit(Method::head) | method_bit(Method::options);
+
+// "GET" -> Method::get; unknown tokens give false (the request keeps Method::other).
+bool parse_method(std::string_view name, Method& out) noexcept;
+// "GET, HEAD, OPTIONS" for a set, in the RFC's customary order.
+std::string allow_header(MethodSet set);
 
 struct Request {
-    Method method = Method::OTHER;
+    Method method = Method::other;
     std::string_view method_name;
     std::string_view target;  // as sent, e.g. "/a/b?x=1"
     int version_minor = 1;    // HTTP/1.0 -> 0, HTTP/1.1 -> 1 (HTTP/2, /3 report 1 for handler purposes)
@@ -38,7 +49,7 @@ struct Request {
     std::size_t length = 0;  // HTTP/1: bytes of the head consumed from the buffer
 
     void reset() noexcept {  // cheaper than *this = Request{}: leaves the field array alone
-        method = Method::OTHER;
+        method = Method::other;
         method_name = target = host = connection = if_none_match = if_modified_since = {};
         version_minor = 1;
         headers.clear();

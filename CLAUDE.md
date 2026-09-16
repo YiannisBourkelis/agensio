@@ -132,7 +132,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   write as before, now behind a protocol-independent interface. A/B against the pre-A1
   binary: identical CPU per request.
 - **Parser**: hand-written incremental HTTP/1.1 request parser over `std::string_view`.
-  Methods GET and HEAD (others get 405). Headers of interest: Host, Connection,
+  All standard methods are recognised (`Method`); each location carries the `MethodSet`
+  its handler implements (static: GET, HEAD, OPTIONS; `methods = [...]` narrows it) and
+  the matching `Allow` value, so OPTIONS gets 204 + Allow (also `OPTIONS *`) and anything
+  else, TRACE and CONNECT included, gets 405 + Allow. Headers of interest: Host, Connection,
   If-None-Match, If-Modified-Since, Range, Accept-Encoding. Pipelining supported by leaving
   unconsumed bytes in the buffer.
 - **Request target**: percent-decode, reject control characters, normalise (`.`/`..`
@@ -179,8 +182,7 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   off/on twice, plain 1 KB 2.0 -> 2.0-2.1 us, TLS 1 KB 2.8 -> 2.9-3.0 us, 100 KB rows
   within noise, i.e. 0.1-0.2 us per request, under the 1 us bar the roadmap set. Benchmark
   templates: off, like the nginx and Caddy bench configs.
-- **Not in phase 1**: Range requests (no `Accept-Ranges` is sent), directory listing,
-  methods other than GET/HEAD (405; bodies are drained), reload.
+- **Not yet**: Range requests (no `Accept-Ranges` is sent), directory listing, reload.
 
 ## Performance notes (measured, keep current)
 

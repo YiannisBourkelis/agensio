@@ -104,7 +104,7 @@ static void test_parser() {
     Request r;
     std::string_view req = "GET /index.html HTTP/1.1\r\nHost: example.com\r\nConnection: keep-alive\r\n\r\n";
     CHECK(parse_request(req, r) == ParseStatus::complete);
-    CHECK(r.method == Method::GET);
+    CHECK(r.method == Method::get);
     CHECK_EQ(r.target, "/index.html");
     CHECK_EQ(r.host, "example.com");
     CHECK_EQ(r.version_minor, 1);
@@ -124,10 +124,10 @@ static void test_parser() {
     CHECK(r.keep_alive);
 
     CHECK(parse_request("HEAD / HTTP/1.1\r\nhost: a\r\n\r\n", r) == ParseStatus::complete);
-    CHECK(r.method == Method::HEAD);
+    CHECK(r.method == Method::head);
     CHECK_EQ(r.host, "a");
     CHECK(parse_request("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\n\r\nhello", r) == ParseStatus::complete);
-    CHECK(r.method == Method::OTHER);
+    CHECK(r.method == Method::post);
     CHECK(r.has_body);
     CHECK(parse_request("GET / HTTP/1.1\r\nHost: a\r\nContent-Length: 0\r\n\r\n", r) == ParseStatus::complete);
     CHECK(!r.has_body);
@@ -363,6 +363,24 @@ static void test_chunked() {
     CHECK_EQ(decode_chunked(std::string("1;") + std::string(5000, 'x') + "\r\nA\r\n0\r\n\r\n", 64, 8, nullptr),
              std::string("<error>"));  // extension line too long
 
+    // Methods.
+    for (auto [name, m] : {std::pair{"GET", Method::get}, std::pair{"HEAD", Method::head},
+                           std::pair{"POST", Method::post}, std::pair{"PUT", Method::put},
+                           std::pair{"DELETE", Method::del}, std::pair{"PATCH", Method::patch},
+                           std::pair{"OPTIONS", Method::options}, std::pair{"TRACE", Method::trace},
+                           std::pair{"CONNECT", Method::connect}}) {
+        Request m_r;
+        CHECK(parse_request(std::string(name) + " / HTTP/1.1\r\nHost: a\r\n\r\n", m_r) == ParseStatus::complete);
+        CHECK(m_r.method == m);
+    }
+    Request other;
+    CHECK(parse_request("PURGE / HTTP/1.1\r\nHost: a\r\n\r\n", other) == ParseStatus::complete);
+    CHECK(other.method == Method::other && other.method_name == "PURGE");
+    CHECK(parse_request("get / HTTP/1.1\r\nHost: a\r\n\r\n", other) == ParseStatus::complete);
+    CHECK(other.method == Method::other);  // methods are case-sensitive
+    CHECK_EQ(allow_header(kStaticMethods), std::string("GET, HEAD, OPTIONS"));
+    CHECK_EQ(allow_header(method_bit(Method::head) | method_bit(Method::get)), std::string("GET, HEAD"));
+
     // Parser: body framing fields.
     Request r;
     CHECK(parse_request("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 12\r\n\r\n", r) == ParseStatus::complete);
@@ -567,7 +585,7 @@ static void test_config_locations() {
           "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\ntry_files = [\"$uri\", \"=404\"]\n"
           "[[site.location]]\npath = \"/assets/\"\nalias = \"www/assets\"\nhidden_files = true\ntry_files = []\n"
           "[[site.location]]\npath = \"/app/\"\ntry_files = [\"$uri\", \"/index.html\"]\nsymlinks = \"deny\"\n"
-          "[[site.location]]\npath = \"/exact\"\nmatch = \"exact\"\n");
+          "[[site.location]]\npath = \"/exact\"\nmatch = \"exact\"\nmethods = [\"GET\", \"HEAD\"]\n");
     Config cfg = load_config(dir / "ok.toml");
     CHECK_EQ(cfg.sites.size(), 1u);
     const SiteConfig& site = cfg.sites[0];
@@ -584,6 +602,9 @@ static void test_config_locations() {
     const LocationConfig& app = Router::location(site, "/app/route");
     CHECK(app.root == site.root && app.try_files.size() == 2 && app.symlinks_deny);
     CHECK(Router::location(site, "/exact").exact);
+    CHECK(Router::location(site, "/exact").methods == (method_bit(Method::get) | method_bit(Method::head)));
+    CHECK_EQ(Router::location(site, "/exact").allow, std::string("GET, HEAD"));
+    CHECK_EQ(Router::location(site, "/other").allow, std::string("GET, HEAD, OPTIONS"));
     const LocationConfig& root = Router::location(site, "/other");
     CHECK(root.path == "/" && root.try_files.size() == 2 && root.try_files[1].status == 404);  // site default
 
@@ -605,6 +626,10 @@ static void test_config_locations() {
     CHECK(rejects("bad6.toml", head + "try_files = [\"=500\"]\n"));
     CHECK(rejects("bad7.toml", head + "[[site.location]]\npath = \"/a\"\nalias = \"www\"\n"));  // alias needs '/'
     CHECK(rejects("bad9.toml", "[log]\nformat = \"csv\"\n" + head));
+    // The static handler does not implement POST.
+    CHECK(rejects("bad11.toml", head + "[[site.location]]\npath = \"/a/\"\nmethods = [\"POST\"]\n"));
+    CHECK(rejects("bad12.toml", head + "[[site.location]]\npath = \"/a/\"\nmethods = [\"TRACE\"]\n"));
+    CHECK(rejects("bad13.toml", head + "[[site.location]]\npath = \"/a/\"\nmethods = []\n"));
     CHECK(rejects("bad10.toml", "[log]\nlevel = \"debug\"\n" + head));
     write("off.toml", "[log]\naccess = \"x.log\"\n" + head + "access_log = \"off\"\n");
     CHECK(load_config(dir / "off.toml").sites[0].access_log.empty());
