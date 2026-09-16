@@ -227,7 +227,11 @@ Rules:
 - [ ] D1 `FcgiClient`: async FastCGI/1.1 over unix socket or TCP, per-worker connection
       pool with keep-alive (`FCGI_KEEP_CONN`), request body streaming to fpm, response
       header parsing (`Status:`, `Location:`), body streaming back as a `BodySource`,
-      timeouts, `502`/`504` mapping, buffering on/off.
+      timeouts, `502`/`504` mapping. **Response buffering on by default**: read the
+      whole fpm response into memory (spill to a temp file above a threshold) and release
+      the fpm child at once, so a slow client never holds a PHP worker hostage; buffering
+      off per location for streaming (SSE). Recommend one php-fpm pool per site in the
+      presets so sites cannot starve each other.
 - [ ] D2 Parameter set matching nginx's `fastcgi_params` plus `PATH_INFO` splitting,
       `HTTPS`, `REMOTE_ADDR`, `SERVER_PORT`, `REQUEST_SCHEME`, forwarded headers.
 - [ ] D3 Config: `php = { socket = "unix:/run/php/php-fpm.sock" }` at site level and
@@ -236,6 +240,12 @@ Rules:
       caching rules; `app = "php"` plain; `app = "wordpress"`, `app = "proxy"`,
       `app = "static"` later. A preset is the whole config for a common site; every
       expansion is printable with `agensio -t --explain` so nothing is hidden.
+- [ ] D3b **Per-site users (ISPConfig / IIS app-pool model, made native)**: `user = "web1"`
+      on a site; agensio generates the php-fpm pool for it (user/group, socket owned by the
+      site user with group-only access for agensio, private tmp and session dirs,
+      `open_basedir`, child limits, timeouts), writes per-site logs owned by that user, and
+      refuses at validation any pool socket, docroot or `.env` whose ownership or mode would
+      let sites read each other. `sites/create` in the control API does all of it.
 - [ ] D4 Test bed: Laravel skeleton as a ddev project (`bench/laravel/` with `.ddev/`),
       agensio connecting to ddev's php-fpm (expose port 9000 from the web container via a
       `docker-compose.agensio.yaml` override, or run agensio inside the container as a
@@ -286,6 +296,13 @@ Rules:
       DNS challenges are Caddy's second most upvoted request), any RFC 8555 CA, short-lived
       certificate profiles, automatic renewal, cross-platform; until then documented reload
       hooks for certbot / win-acme / acme.sh. OCSP stapling.
+- [ ] G3b **Kernel-enforced containment of the web server itself** (Linux, FreeBSD): open
+      files relative to a per-site root descriptor with `openat2(RESOLVE_BENEATH)` (and
+      `RESOLVE_NO_SYMLINKS` for `symlinks = "deny"`), so containment does not depend on path
+      code; Landlock rules at startup restricting each worker to reading the docroots and
+      connecting to upstream sockets; a seccomp filter for the request-path syscalls.
+      macOS/Windows keep the path checks (fuzzed). Closes the gap in the ISPConfig model,
+      where PHP is isolated but the shared web server user can read every site.
 - [ ] G4 Rate limiting and connection limits per IP; request id header; error pages
       configurable.
 - [ ] G5 Metrics endpoint scraped by Prometheus; structured JSON logs option with a
@@ -318,11 +335,24 @@ Rules:
 
 ### Later / ideas
 - Shared-dictionary compression (RFC 9842) once compression exists.
+- Asynchronous cold-cache file reads: a slow disk stalls the worker's loop for
+  milliseconds today. Use Asio's own async file I/O (`asio::random_access_file`,
+  `async_read_some_at`) on the worker's loop: io_uring on Linux (`ASIO_HAS_IO_URING`,
+  files only, sockets stay on epoll) and IOCP on Windows. macOS/FreeBSD have no async file
+  backend in Asio, so there a small `asio::thread_pool` does the read and posts the
+  completion back to the worker. Only the miss path is affected; warm the page cache the
+  same way before `sendfile` of a cold streamed file (nginx's `aio threads` trick).
+  Moving sockets to io_uring as well (`ASIO_HAS_IO_URING_AS_DEFAULT`, nginx's most upvoted
+  request) is a separate measurement.
 - io_uring backend for Linux (Asio supports it; measure).
 - kTLS on Linux: sendfile over TLS.
 - Brotli precompression at cache load time.
 - Static site presets (Hugo/Astro output), SPA fallback.
-- Per-site resource limits (CPU time, memory) for shared hosting panels.
+- **Hosting mode: one process per site user.** A front process accepts, reads SNI/Host,
+  and passes the descriptor (SCM_RIGHTS) to the site's own agensio process running as the
+  site user, so even a web-server exploit is confined to that user; per-site cgroups give
+  CPU, memory and connection limits panels ask for. Affordable because a process is
+  7-11 MB. Needs the proxy and control API first.
 
 ---
 
