@@ -116,6 +116,7 @@ if(AGENSIO_TESTS)
   enable_testing()
   add_executable(agensio_tests tests/tests.cpp)
   target_link_libraries(agensio_tests PRIVATE agensio_core)
+  target_compile_definitions(agensio_tests PRIVATE AGENSIO_REGRESSIONS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/regressions")
   add_test(NAME unit COMMAND agensio_tests)
 endif()
 

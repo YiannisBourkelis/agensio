@@ -1,6 +1,9 @@
 // Minimal self-contained unit tests (no framework dependency).
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <string_view>
 
@@ -49,12 +52,6 @@ static void test_path() {
     CHECK_EQ(norm("/a/.."), "/");
     CHECK_EQ(norm("/a/."), "/a/");
     CHECK_EQ(norm("/a%20b/c%2Fd"), "/a b/c/d");
-    CHECK_EQ(norm("/%2e%2e/etc/passwd"), "<invalid>");
-    CHECK_EQ(norm("/../etc/passwd"), "<invalid>");
-    CHECK_EQ(norm("/a/../../x"), "<invalid>");
-    CHECK_EQ(norm("/a%00b"), "<invalid>");
-    CHECK_EQ(norm("/a%zz"), "<invalid>");
-    CHECK_EQ(norm("/a%2"), "<invalid>");
     CHECK_EQ(norm("index.html"), "<invalid>");
     CHECK_EQ(norm("/a?b=c/../d"), "/a");
     CHECK_EQ(norm("/a/b?x"), "/a/b");
@@ -62,6 +59,19 @@ static void test_path() {
     CHECK_EQ(norm("/a/../b/../c/"), "/c/");
     CHECK_EQ(norm("/..a/b"), "/..a/b");
     CHECK_EQ(norm("/.hidden"), "/.hidden");
+}
+
+// ---- security: path traversal, hidden files, Windows filesystem rules ----
+static void test_security_path() {
+    CHECK_EQ(norm("/%2e%2e/etc/passwd"), "<invalid>");
+    CHECK_EQ(norm("/../etc/passwd"), "<invalid>");
+    CHECK_EQ(norm("/a/../../x"), "<invalid>");
+    CHECK_EQ(norm("/..%2f..%2fetc/passwd"), "<invalid>");
+    CHECK_EQ(norm("/%2e%2e%2f%2e%2e%2fetc/passwd"), "<invalid>");
+    CHECK_EQ(norm("/a%00b"), "<invalid>");
+    CHECK_EQ(norm("/a%zz"), "<invalid>");
+    CHECK_EQ(norm("/a%2"), "<invalid>");
+    CHECK_EQ(norm("/%c0%ae%c0%ae/x"), "/\xC0\xAE\xC0\xAE/x");  // overlong UTF-8 is not a dot
 
     CHECK(has_hidden_segment("/.env"));
     CHECK(has_hidden_segment("/.git/config"));
@@ -144,7 +154,14 @@ static void test_parser() {
     CHECK(parse_request("GET / HTTP/1.1\r\nHost: a\r\nContent-Length: x\r\n\r\n", r) == ParseStatus::bad_request);
     CHECK(parse_request("G\x01T / HTTP/1.1\r\n\r\n", r) == ParseStatus::bad_request);
 
-    // Request-smuggling and field-syntax hardening (RFC 9112).
+    CHECK(has_token("keep-alive, Upgrade", "upgrade"));
+    CHECK(!has_token("keep-alive", "close"));
+    CHECK(iequals("Host", "hOST"));
+}
+
+// ---- security: request smuggling and field-syntax hardening (RFC 9112) ----
+static void test_security_parser() {
+    Request r;
     auto st = [&](std::string_view req) { return parse_request(req, r); };
     CHECK(st("GET / HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n") ==
           ParseStatus::bad_request);
@@ -170,10 +187,6 @@ static void test_parser() {
         many += "\r\n";
         CHECK(st(many) == ParseStatus::too_many_headers);
     }
-
-    CHECK(has_token("keep-alive, Upgrade", "upgrade"));
-    CHECK(!has_token("keep-alive", "close"));
-    CHECK(iequals("Host", "hOST"));
 }
 
 static void test_date() {
@@ -269,9 +282,59 @@ static void test_route_and_etag() {
     CHECK_EQ(etag, "\"5a630d3c-6b\"");
 }
 
+// ---- security: replay every recorded fuzz/attack input with the fuzzers' invariants ----
+static void test_security_regressions() {
+    namespace fs = std::filesystem;
+    const fs::path base = AGENSIO_REGRESSIONS_DIR;
+    std::size_t parser_files = 0, path_files = 0;
+
+    for (const auto& entry : fs::directory_iterator(base / "parser")) {
+        if (!entry.is_regular_file()) continue;
+        ++parser_files;
+        std::ifstream in(entry.path(), std::ios::binary);
+        std::string buf((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        Request r;
+        const auto st = parse_request(buf, r);
+        if (st == ParseStatus::complete) {
+            auto inside = [&](std::string_view v) {
+                return v.empty() || (v.data() >= buf.data() && v.data() + v.size() <= buf.data() + buf.size());
+            };
+            CHECK(r.length > 0 && r.length <= buf.size());
+            CHECK(inside(r.method_name) && inside(r.target) && inside(r.host) && inside(r.connection));
+            CHECK(!r.target.empty() && r.target.find(' ') == std::string_view::npos);
+        }
+        // Known attack files must be rejected outright.
+        const std::string name = entry.path().filename().string();
+        if (name == "cl-te-smuggle" || name == "obs-fold") CHECK(st == ParseStatus::bad_request);
+    }
+    for (const auto& entry : fs::directory_iterator(base / "path")) {
+        if (!entry.is_regular_file()) continue;
+        ++path_files;
+        std::ifstream in(entry.path(), std::ios::binary);
+        std::string target((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        std::string out;
+        const bool ok = normalize_target(target, out);
+        if (ok) {
+            CHECK(!out.empty() && out[0] == '/');
+            CHECK(out.find("//") == std::string::npos);
+            CHECK(out.find("/./") == std::string::npos && out.find("/../") == std::string::npos);
+            CHECK(!(out.size() >= 3 && out.compare(out.size() - 3, 3, "/..") == 0));
+            for (unsigned char c : out)
+                CHECK(c >= 0x20 && c != 0x7f);
+        }
+        const std::string name = entry.path().filename().string();
+        if (name == "encoded-traversal" || name == "mixed-encoded" || name == "nul") CHECK(!ok);
+    }
+    CHECK(parser_files >= 3);
+    CHECK(path_files >= 3);
+}
+
 int main() {
     test_path();
     test_parser();
+    test_security_parser();
+    test_security_path();
+    test_security_regressions();
     test_date();
     test_mime();
     test_size();

@@ -114,7 +114,12 @@ in checklist form for the coding agent.
 - Sanitizer builds: `cmake -B build-asan -DAGENSIO_SANITIZE=address,undefined`.
 - Fuzzing: `cmake -B build-fuzz -DAGENSIO_FUZZ=ON ...` with brew clang; every parser gets a
   target in `tests/fuzz/`; run for at least a minute after touching a parser, an hour before
-  a release; crashing inputs become unit tests.
+  a release.
+- **Security regression rule**: every security fix adds the attack input as a unit test
+  (`test_security_*` in `tests/tests.cpp`) and, for parser or path inputs, as a file under
+  `tests/fuzz/regressions/`, which `agensio_tests` replays on every build with the
+  fuzzers' invariants. Save the input first, then fix, so the test is red before green.
+  Same discipline as the benchmark rule for performance changes.
 
 ## Known deviations (fix when touched)
 - `CacheKey::site` is a `const void*` used as an identity; a site index would be cleaner.
