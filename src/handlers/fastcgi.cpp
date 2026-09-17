@@ -168,7 +168,7 @@ std::shared_ptr<FcgiRequest> FcgiHandler::start(Stream& s, const SiteConfig& sit
         w.params_tail.clear();
         append_request_params(w.params_tail, *x->stream, *x->site, *x->loc, w, x->path_info, x->body.size,
                               length_known);
-        x->req = std::make_shared<FcgiRequest>(*x->pool, x->loc->fastcgi.address, x->loc->fastcgi.options);
+        x->req = std::make_shared<FcgiRequest>(*x->pool, x->loc->fastcgi.addresses, x->loc->fastcgi.options);
         x->req->start(x->loc->fastcgi.params_prefix, w.params_tail, std::move(x->body), x->loc->priority, retry_ok,
                       [this, x](FcgiResult& r) { finish(*x, r); });
     };

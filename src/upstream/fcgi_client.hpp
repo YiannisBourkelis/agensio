@@ -23,8 +23,8 @@ using FcgiResult = UpstreamResult;
 
 class FcgiRequest final : public UpstreamRequest {
 public:
-    FcgiRequest(UpstreamPool& pool, const UpstreamAddress& address, const UpstreamOptions& options)
-        : UpstreamRequest(pool, address, options) {}
+    FcgiRequest(UpstreamPool& pool, const std::vector<UpstreamAddress>& group, const UpstreamOptions& options)
+        : UpstreamRequest(pool, group, options) {}
 
     // Sends the request: `params_prefix` (prebuilt) then `params_tail` (this request),
     // then `body`. See UpstreamRequest::begin for `done` and `retry_ok`.

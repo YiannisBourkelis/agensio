@@ -228,6 +228,7 @@ void parse_fcgi_table(const toml::table& t, const fs::path& base_dir, FcgiConfig
             text = resolve(base_dir, text).string();  // a bare path: relative to the config file
         std::string err;
         if (!parse_fcgi_address(text, out.address, err)) fail(where + ".socket: " + err);
+        out.addresses = {out.address};
         out.configured = true;
     }
     if (auto rr = t["remote_root"].value<std::string>()) {
@@ -263,6 +264,11 @@ void parse_fcgi_table(const toml::table& t, const fs::path& base_dir, FcgiConfig
         }
     };
     count("max_idle", out.options.max_idle, 0, 1024);
+    if (auto v = t["max_fails"].value<std::int64_t>()) {
+        if (*v < 1 || *v > 1000) fail(where + ".max_fails out of range");
+        out.options.max_fails = static_cast<unsigned>(*v);
+    }
+    seconds("fail_timeout", out.options.fail_timeout);
     count("max_connections", out.options.max_connections, 1, 65536);
     count("queue_depth", out.options.queue_depth, 0, 1 << 20);
     if (auto v = t["priority_reserve"].value<double>()) {
@@ -341,22 +347,39 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
     } else if (t.contains("proxy")) {
         fail(where + ": 'proxy' must be a table");
     }
-    if (auto up = t["upstream"].value<std::string>()) {
-        std::string text = *up;
+    // `upstream = "http://host:port"` or a list of them (a group: round-robin per worker,
+    // failed members skipped, see max_fails / fail_timeout).
+    std::vector<std::string> upstreams;
+    if (auto up = t["upstream"].value<std::string>()) upstreams.push_back(*up);
+    else if (t.contains("upstream")) upstreams = string_list(t["upstream"], (where + ".upstream").c_str());
+    if (t.contains("upstream") && upstreams.empty()) fail(where + ".upstream: empty list");
+    for (std::size_t i = 0; i < upstreams.size(); ++i) {
+        std::string text = upstreams[i];
         if (text.starts_with("http://")) text = text.substr(7);
-        else if (text.starts_with("https://")) fail(where + ".upstream: TLS to the origin arrives with D4");
+        else if (text.starts_with("https://")) fail(where + ".upstream: TLS to the origin arrives with D4b");
         // A URI part ("http://host:port/" or ".../v1/") replaces the location's prefix
-        // (nginx proxy_pass semantics); without one the target is forwarded as sent.
+        // (nginx proxy_pass semantics); without one the target is forwarded as sent. Every
+        // member of a group must agree on it.
+        std::string rewrite;
         if (!text.starts_with("unix:")) {
             if (const std::size_t slash = text.find('/'); slash != std::string::npos) {
-                loc.proxy.rewrite = text.substr(slash);
+                rewrite = text.substr(slash);
                 text.resize(slash);
                 if (loc.exact || loc.suffix) fail(where + ".upstream: a URI part needs a prefix location");
-                if (loc.proxy.rewrite.back() != '/') loc.proxy.rewrite += '/';
+                if (rewrite.back() != '/') rewrite += '/';
             }
         }
+        if (i == 0) loc.proxy.rewrite = rewrite;
+        else if (rewrite != loc.proxy.rewrite) fail(where + ".upstream: every member of the group needs the same URI part");
+        UpstreamAddress a;
         std::string err;
-        if (!parse_upstream_address(text, loc.proxy.address, err)) fail(where + ".upstream: " + err);
+        if (!parse_upstream_address(text, a, err)) fail(where + ".upstream: " + err);
+        for (const auto& other : loc.proxy.addresses)
+            if (other.key == a.key) fail(where + ".upstream: " + a.key + " listed twice");
+        loc.proxy.addresses.push_back(std::move(a));
+    }
+    if (!loc.proxy.addresses.empty()) {
+        loc.proxy.address = loc.proxy.addresses.front();
         loc.proxy.configured = true;
     }
     if (loc.proxy.configured && !t.contains("handler")) loc.handler = "proxy";
@@ -532,6 +555,7 @@ void parse_pool(const toml::table* php, const fs::path& base_dir, const Config& 
     pool.socket = cfg.pools_run + "/" + pool.name + ".sock";
     std::string err;
     if (!parse_fcgi_address("unix:" + pool.socket, site.php.address, err)) fail(where + ": " + err);
+    site.php.addresses = {site.php.address};
     site.php.configured = true;
     // Keep-alive sized so kept connections cannot pin every child (C3a), unless set by hand.
     if (!php || !php->contains("keep_conn")) site.php.options.keep_conn = true;
@@ -780,7 +804,10 @@ void explain_config(const Config& cfg, std::ostream& out) {
             out << "handler = \"" << loc.handler << "\"\n";
             if (loc.kind == HandlerKind::fastcgi) print_fcgi(out, "fastcgi", loc.fastcgi);
             if (loc.kind == HandlerKind::proxy) {
-                out << "upstream = \"" << loc.proxy.address.key << loc.proxy.rewrite << "\"\n";
+                out << "upstream = [";
+                for (std::size_t i = 0; i < loc.proxy.addresses.size(); ++i)
+                    out << (i ? ", " : "") << '"' << loc.proxy.addresses[i].key << loc.proxy.rewrite << '"';
+                out << "]\n";
                 print_fcgi(out, "proxy", loc.proxy);
                 out << "proxy.host = \"" << loc.proxy.host << "\"\nproxy.forwarded = \"" << loc.proxy.forwarded
                     << "\"\nproxy.redirects = \"" << (loc.proxy.rewrite_redirects ? "rewrite" : "pass")
@@ -982,19 +1009,24 @@ Config load_config(const fs::path& path) {
             const UpstreamConfig& up = loc.kind == HandlerKind::fastcgi ? loc.fastcgi : loc.proxy;
             const FcgiOptions& o = up.options;
             const std::string where = site.server_names.front() + " location '" + loc.path + "'";
-            auto it = pools.find(up.address.key);
-            if (it == pools.end()) {
-                pools.emplace(up.address.key, PoolBounds{&o, where});
-                continue;
+            std::vector<std::string> keys;
+            if (loc.kind == HandlerKind::fastcgi) keys.push_back(up.address.key);
+            else for (const auto& a : up.addresses) keys.push_back(a.key);
+            for (const auto& key : keys) {
+                auto it = pools.find(key);
+                if (it == pools.end()) {
+                    pools.emplace(key, PoolBounds{&o, where});
+                    continue;
+                }
+                const FcgiOptions& f = *it->second.opts;
+                if (o.max_connections != f.max_connections || o.queue_depth != f.queue_depth ||
+                    o.queue_wait != f.queue_wait || o.priority_reserve != f.priority_reserve ||
+                    o.max_idle != f.max_idle || o.keep_conn != f.keep_conn)
+                    fail(where + ": pool limits (max_connections, queue_depth, queue_wait, priority_reserve, "
+                                 "max_idle, keep_conn) for upstream " +
+                         key + " differ from " + it->second.where +
+                         "; the pool is per upstream, set them once (site-level php = {...} or proxy = {...})");
             }
-            const FcgiOptions& f = *it->second.opts;
-            if (o.max_connections != f.max_connections || o.queue_depth != f.queue_depth ||
-                o.queue_wait != f.queue_wait || o.priority_reserve != f.priority_reserve ||
-                o.max_idle != f.max_idle || o.keep_conn != f.keep_conn)
-                fail(where + ": pool limits (max_connections, queue_depth, queue_wait, priority_reserve, "
-                             "max_idle, keep_conn) for upstream " +
-                     up.address.key + " differ from " + it->second.where +
-                     "; the pool is per upstream, set them once (site-level php = {...})");
         }
 
     // Sites sharing a listen address must agree on TLS on/off.

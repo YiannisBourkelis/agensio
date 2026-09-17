@@ -7,6 +7,7 @@
 #include <string>
 #include <map>
 #include <sstream>
+#include <thread>
 #include <string_view>
 #include <unistd.h>
 
@@ -1268,6 +1269,40 @@ static void test_proxy() {
     CHECK(pl.proxy.forwarded == "both" && pl.proxy.host == "app.internal" && !pl.proxy.rewrite_redirects);
     CHECK(pl.proxy.hide.size() == 1 && pl.proxy.set_headers.size() == 2 && pl.proxy.set_headers[0].second == "2");
     CHECK(pl.proxy.options.keep_conn && pl.proxy.options.max_connections == 256);
+    // Groups (D4): a list of origins, round-robin per worker, failures skipped for fail_timeout.
+    write("group.toml", "[[site]]\nlisten = [\"127.0.0.1:18097\"]\nroot = \"www\"\n[[site.location]]\npath = \"/g/\"\n"
+                        "upstream = [\"http://127.0.0.1:9107/\", \"http://127.0.0.1:9108/\", \"http://127.0.0.1:9109/\"]\nproxy = { max_fails = 2, fail_timeout = 0.2 }\n");
+    const LocationConfig& g = Router::location(load_config(dir / "group.toml").sites[0], "/g/x");
+    CHECK(g.proxy.addresses.size() == 3 && g.proxy.address.key == "127.0.0.1:9107" && g.proxy.rewrite == "/" &&
+          g.proxy.options.max_fails == 2 && g.proxy.options.fail_timeout.count() == 200);
+    CHECK(refused("gmix.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/\"\nupstream = [\"http://127.0.0.1:9107/\", \"http://127.0.0.1:9108\"]\n", "same URI part"));
+    CHECK(refused("gdup.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/\"\nupstream = [\"http://127.0.0.1:9107\", \"http://127.0.0.1:9107\"]\n", "listed twice"));
+    {
+        asio::io_context ctx;
+        UpstreamPool pool(ctx);
+        const auto& grp = g.proxy.addresses;
+        const UpstreamOptions& o = g.proxy.options;
+        // Round-robin over the group, then the next member after a given one, skipping tried ones.
+        CHECK(pool.pick(grp, o, SIZE_MAX, 0) == 0 && pool.pick(grp, o, SIZE_MAX, 0) == 1 && pool.pick(grp, o, SIZE_MAX, 0) == 2 &&
+              pool.pick(grp, o, SIZE_MAX, 0) == 0);
+        CHECK(pool.pick(grp, o, 1, 0b010) == 2 && pool.pick(grp, o, 2, 0b111) == SIZE_MAX);
+        // Two failures mark a member down: it is skipped until fail_timeout passes, unless all are down.
+        std::string note;
+        pool.mark_failure(grp[1], o, note);
+        CHECK(note.empty());
+        pool.mark_failure(grp[1], o, note);
+        CHECK(note.find("127.0.0.1:9108 marked down") != std::string::npos);
+        CHECK(pool.pick(grp, o, 0, 0b001) == 2);  // 1 is down: the next after 0 is 2
+        pool.mark_failure(grp[0], o, note); pool.mark_failure(grp[0], o, note);
+        pool.mark_failure(grp[2], o, note); pool.mark_failure(grp[2], o, note);
+        CHECK(pool.pick(grp, o, SIZE_MAX, 0) == 1);  // everything down: the one marked longest ago
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        CHECK(pool.pick(grp, o, 0, 0b001) == 1);  // the timeout passed: 1 is available again
+        note.clear();
+        pool.mark_success(grp[1], note);
+        CHECK(note == "127.0.0.1:9108 is back");
+        pool.mark_success(grp[1], note);  // a healthy member says nothing
+    }
     CHECK(refused("badfwd.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/\"\nupstream = \"http://127.0.0.1:9100\"\nproxy = { forwarded = \"maybe\" }\n", "forwarded must be"));
     fs::remove_all(dir);
 }

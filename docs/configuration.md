@@ -419,6 +419,17 @@ proxy = { buffering = false, read_timeout = 3600 }
 path = "/assets/"
 ```
 
+**Groups.** `upstream = ["http://10.0.0.11:3000", "http://10.0.0.12:3000"]` spreads
+requests over several origins, round-robin within each worker. An origin that fails
+`max_fails` times in a row (default 3) is skipped for `fail_timeout` (default 10 s), then
+tried again; when every member is down the one marked longest ago is tried anyway. A
+request whose origin refuses the connection or times out before answering moves to the
+next member: any request when nothing was sent yet (a refused connection), only GET and
+HEAD once bytes went out, so a POST is never delivered twice. Each member is a pool of its
+own with the location's limits; all members must share the URI part. Both events are in
+the error log: `marked down for 10 s after 3 failure(s)` and `is back`. No weights and no
+active health checks until a real deployment asks for them.
+
 **Target.** The client's request line is forwarded as sent. With a URI part on `upstream`
 (`http://host:port/` or `.../v1/`) the location's prefix is replaced by it, the way
 nginx's `proxy_pass` with a URI works; without one the path is untouched. Exact and
@@ -478,6 +489,7 @@ on a location.
 | `keep_conn`, `max_idle` | `true`, 64 | keep-alive to the origin; idle connections kept per worker |
 | `max_connections`, `queue_depth`, `queue_wait` | 256, 1024, 5 s | per worker: in flight, waiting, and the longest wait before a 503 with `Retry-After` |
 | `head_max` | 64 KB | an origin head larger than this is a 502 |
+| `max_fails`, `fail_timeout` | 3, 10 s | consecutive failures that mark a group member down, and for how long |
 
 The pool is per worker, so an origin sees at most workers x `max_connections` connections
 and workers x `max_idle` idle ones. A GET or HEAD whose kept connection turns out dead is

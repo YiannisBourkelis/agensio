@@ -121,7 +121,7 @@ std::vector<std::string> check_upstreams(const Config& cfg) {
         for (const auto& loc : site.locations) {
             if (loc.kind == HandlerKind::static_) continue;
             const bool fcgi = loc.kind == HandlerKind::fastcgi;
-            const UpstreamAddress& a = fcgi ? loc.fastcgi.address : loc.proxy.address;
+            for (const UpstreamAddress& a : fcgi ? loc.fastcgi.addresses : loc.proxy.addresses) {
             if (std::find(seen.begin(), seen.end(), a.key) != seen.end()) continue;
             seen.push_back(a.key);
             asio::io_context ctx;
@@ -158,6 +158,7 @@ std::vector<std::string> check_upstreams(const Config& cfg) {
             else if (v == ECONNREFUSED) hint += "; nothing is listening there";
             warnings.push_back(std::string(fcgi ? "fastcgi" : "proxy") + " upstream " + a.key + " (" +
                                site.server_names.front() + " location '" + loc.path + "'): " + hint);
+            }
         }
     return warnings;
 }
@@ -275,6 +276,49 @@ void UpstreamPool::tick() {
     });
 }
 
+std::size_t UpstreamPool::pick(const std::vector<UpstreamAddress>& group, const UpstreamOptions& opts,
+                               std::size_t after, unsigned tried_mask) {
+    const std::size_t n = group.size();
+    if (n == 0) return SIZE_MAX;
+    const auto now = std::chrono::steady_clock::now();
+    std::size_t start;
+    if (after == SIZE_MAX) {
+        unsigned& pos = rotation_[&group];
+        start = pos % n;
+        pos = static_cast<unsigned>((start + 1) % n);
+    } else {
+        start = (after + 1) % n;
+    }
+    std::size_t fallback = SIZE_MAX;  // when every member is down: the one marked longest ago
+    for (std::size_t k = 0; k < n; ++k) {
+        const std::size_t i = (start + k) % n;
+        if (i < 32 && (tried_mask & (1u << i))) continue;
+        const Health& h = health(group[i]);
+        if (h.down_until <= now) return i;
+        if (fallback == SIZE_MAX || h.marked < health(group[fallback]).marked) fallback = i;
+    }
+    (void)opts;
+    return fallback;
+}
+
+void UpstreamPool::mark_failure(const UpstreamAddress& a, const UpstreamOptions& opts, std::string& note) {
+    Health& h = health(a);
+    const auto now = std::chrono::steady_clock::now();
+    if (++h.failures >= opts.max_fails && h.down_until <= now) {
+        h.down_until = now + opts.fail_timeout;
+        h.marked = now;
+        note = a.key + " marked down for " + std::to_string(opts.fail_timeout.count() / 1000) + " s after " +
+               std::to_string(h.failures) + " failure(s)";
+    }
+}
+
+void UpstreamPool::mark_success(const UpstreamAddress& a, std::string& note) {
+    auto it = health_.find(a.key);
+    if (it == health_.end() || it->second.failures == 0) return;
+    if (it->second.down_until != std::chrono::steady_clock::time_point{}) note = a.key + " is back";
+    it->second = Health{};
+}
+
 // ---- streaming source ----
 
 class UpstreamRequest::Source final : public StreamBody {
@@ -304,8 +348,15 @@ static auto immediate(asio::io_context& ctx, F&& f) {
     return asio::bind_immediate_executor(ctx.get_executor(), std::forward<F>(f));
 }
 
-UpstreamRequest::UpstreamRequest(UpstreamPool& pool, const UpstreamAddress& address, const UpstreamOptions& options)
-    : options_(options), pool_(pool), address_(address) {}
+UpstreamRequest::UpstreamRequest(UpstreamPool& pool, const std::vector<UpstreamAddress>& group,
+                                 const UpstreamOptions& options)
+    : options_(options), pool_(pool), group_(&group) {
+    member_ = pool_.pick(group, options_, SIZE_MAX, 0);
+    if (member_ != SIZE_MAX) {
+        address_ = group[member_];
+        if (member_ < 32) tried_ |= 1u << member_;
+    }
+}
 
 UpstreamRequest::~UpstreamRequest() { pool_.unwatch(this); }
 
@@ -475,6 +526,7 @@ void UpstreamRequest::quick_ack() noexcept {
 
 void UpstreamRequest::send_head() {
     arm(options_.send_timeout);
+    sent_any_ = true;
     auto self = shared_from_this();
     asio::async_write(conn_->socket, asio::buffer(out_), immediate(pool_.context(), [self](const asio::error_code& ec, std::size_t) {
         if (self->phase_ != Phase::sending) return;
@@ -547,7 +599,7 @@ void UpstreamRequest::send_body_next() {
 
 void UpstreamRequest::body_sent() {
     phase_ = Phase::receiving;
-    if (!retry_ok_) {
+    if (!retry_ok_) {  // no resend possible any more: the head buffer is not needed
         out_.clear();
         out_.shrink_to_fit();
     }
@@ -699,6 +751,7 @@ bool UpstreamRequest::store_body(std::string_view bytes) {
 void UpstreamRequest::finish() {
     phase_ = Phase::finished;
     pool_.unwatch(this);
+    pool_.mark_success(address_, note_);
     release_connection(true);
     if (!options_.buffering) {
         if (!head_delivered_) deliver_head();
@@ -737,8 +790,40 @@ void UpstreamRequest::deliver_head() {
     }
 }
 
+// A connect failure sent nothing, so any request may move on; after bytes went out only
+// an idempotent one (retry_ok_) that has seen no response byte may. Pool refusals are the
+// pool's verdict for this worker and are not retried elsewhere.
+bool UpstreamRequest::try_next_address(UpstreamFailure why) {
+    if (!group_ || group_->size() < 2 || phase_ == Phase::cancelled) return false;
+    if (why == UpstreamFailure::pool_saturated || why == UpstreamFailure::queue_timeout) return false;
+    if (sent_any_ && (!retry_ok_ || result_.head_bytes > 0)) return false;
+    const std::size_t next = pool_.pick(*group_, options_, member_, tried_);
+    if (next == SIZE_MAX) return false;
+    // Give this address's slot and connection back, start again on the next one.
+    std::unique_ptr<UpstreamConnection> c = std::move(conn_);
+    if (c) {
+        asio::error_code ignored;
+        if (c->socket.is_open()) c->socket.close(ignored);
+    }
+    if (phase_ != Phase::queued) pool_.release(address_.key, options_, nullptr);
+    member_ = next;
+    address_ = (*group_)[next];
+    if (next < 32) tried_ |= 1u << next;
+    attempts_ = 0;
+    sent_any_ = false;
+    body_pos_ = 0;
+    phase_ = Phase::queued;
+    arm(options_.queue_wait);
+    pool_.acquire(address_.key, options_, priority_, shared_from_this());
+    return true;
+}
+
 void UpstreamRequest::fail(UpstreamFailure why, std::error_code ec) {
     if (phase_ == Phase::cancelled || phase_ == Phase::finished || phase_ == Phase::failed) return;
+    if (why != UpstreamFailure::pool_saturated && why != UpstreamFailure::queue_timeout &&
+        why != UpstreamFailure::spill_error)
+        pool_.mark_failure(address_, options_, note_);
+    if (try_next_address(why)) return;
     const Phase was = phase_;
     phase_ = Phase::failed;
     pool_.unwatch(this);

@@ -21,8 +21,8 @@ namespace agensio {
 
 class HttpRequest final : public UpstreamRequest {
 public:
-    HttpRequest(UpstreamPool& pool, const UpstreamAddress& address, const UpstreamOptions& options)
-        : UpstreamRequest(pool, address, options) {}
+    HttpRequest(UpstreamPool& pool, const std::vector<UpstreamAddress>& group, const UpstreamOptions& options)
+        : UpstreamRequest(pool, group, options) {}
 
     // `head` is the request line and the fields to forward, each line CRLF-terminated,
     // without the framing fields and without the final blank line. `is_head`: a HEAD

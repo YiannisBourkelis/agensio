@@ -84,6 +84,15 @@ public:
     // Removes a queued request (its wait expired or it was cancelled).
     void dequeue(const std::string& key, const UpstreamRequest* req) noexcept;
 
+    // Passive health per address, per worker (no sharing, no locks; nginx's is per worker
+    // too). `pick` chooses the next member of `group` round-robin, skipping the ones marked
+    // down, starting at the member after `after` (SIZE_MAX: the group's own rotation);
+    // returns SIZE_MAX when every member has been tried in this exchange.
+    std::size_t pick(const std::vector<UpstreamAddress>& group, const UpstreamOptions& opts,
+                     std::size_t after, unsigned tried_mask);
+    void mark_failure(const UpstreamAddress& a, const UpstreamOptions& opts, std::string& note);
+    void mark_success(const UpstreamAddress& a, std::string& note);
+
 private:
     struct Waiter {
         std::shared_ptr<UpstreamRequest> req;
@@ -99,8 +108,17 @@ private:
 
     void tick();
 
+    struct Health {
+        unsigned failures = 0;
+        std::chrono::steady_clock::time_point down_until{};
+        std::chrono::steady_clock::time_point marked{};
+    };
+    Health& health(const UpstreamAddress& a) { return health_[a.key]; }
+
     asio::io_context& ctx_;
     std::unordered_map<std::string, Upstream> upstreams_;
+    std::unordered_map<std::string, Health> health_;
+    std::unordered_map<const void*, unsigned> rotation_;  // round-robin position per group
     std::vector<UpstreamRequest*> watched_;  // exchanges with a deadline; swap-removed by index
     asio::steady_timer tick_;
     bool ticking_ = false;
@@ -135,8 +153,15 @@ class UpstreamRequest : public std::enable_shared_from_this<UpstreamRequest> {
 public:
     using Completion = std::function<void(UpstreamResult&)>;
 
-    UpstreamRequest(UpstreamPool& pool, const UpstreamAddress& address, const UpstreamOptions& options);
+    // `group`: the addresses to try (a proxy group, or the one FastCGI socket); the first
+    // pick is the pool's round-robin, failures before any response byte move to the next.
+    UpstreamRequest(UpstreamPool& pool, const std::vector<UpstreamAddress>& group, const UpstreamOptions& options);
     virtual ~UpstreamRequest();
+
+    // The address this exchange talked to (for logs).
+    const UpstreamAddress& address() const noexcept { return address_; }
+    // Health notes produced along the way ("marked down ..."), for the error log.
+    const std::string& health_note() const noexcept { return note_; }
 
     // Client gone: drop everything, no callbacks.
     void cancel() noexcept;
@@ -215,8 +240,15 @@ private:
     void satisfy_waiter();
     void release_connection(bool reusable);
 
+    bool try_next_address(UpstreamFailure why);  // another member of the group, when allowed
+
     UpstreamPool& pool_;
+    const std::vector<UpstreamAddress>* group_ = nullptr;
+    std::size_t member_ = SIZE_MAX;   // index of address_ in the group
+    unsigned tried_ = 0;              // bit per member tried in this exchange
     UpstreamAddress address_;
+    std::string note_;
+    bool sent_any_ = false;           // bytes went to this address: a retry is only for idempotent requests
     std::chrono::steady_clock::time_point deadline_{};  // when the current phase becomes a timeout
     std::string out_;           // the encoded head (+ body when in memory); kept for a retry
     std::string body_chunk_;    // one body chunk, framed, from the spill file / client stream

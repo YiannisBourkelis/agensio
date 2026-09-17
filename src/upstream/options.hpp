@@ -56,12 +56,18 @@ struct UpstreamOptions {
     // Request body handling.
     bool request_buffering = true;                  // read the whole body before talking to the upstream
     std::size_t request_buffer_max = 256 * 1024;    // request body in memory up to this, then a temp file
+    // Passive health (a group of origins): after `max_fails` consecutive failures an
+    // address is skipped for `fail_timeout`; a success clears the count. When every
+    // address is down the least recently marked one is tried anyway.
+    unsigned max_fails = 3;
+    std::chrono::milliseconds fail_timeout{10000};
 };
 
 // A resolved `fastcgi = { ... }` / `php = { ... }` / `proxy = { ... }` table.
 struct UpstreamConfig {
     bool configured = false;  // a socket / upstream was given
-    UpstreamAddress address;
+    UpstreamAddress address;                 // the first (or only) address; FastCGI has one
+    std::vector<UpstreamAddress> addresses;  // proxy: the group, round-robin per worker
     UpstreamOptions options;
     // FastCGI: the location's root as the FastCGI server sees it when it runs in another
     // filesystem namespace (a container): SCRIPT_FILENAME, DOCUMENT_ROOT and

@@ -36,7 +36,8 @@ unsigned g_port = 9100;
 constexpr std::string_view kJson = R"({"ok":true,"service":"upstream"})";
 
 std::string head(std::string_view content_length, bool close, bool chunked = false) {
-    std::string h = "HTTP/1.1 200 OK\r\nServer: upstream\r\nContent-Type: application/json\r\n";
+    std::string h = "HTTP/1.1 200 OK\r\nServer: upstream\r\nX-Upstream-Port: " + std::to_string(g_port) +
+                    "\r\nContent-Type: application/json\r\n";
     if (chunked) h += "Transfer-Encoding: chunked\r\n";
     else h += "Content-Length: " + std::string(content_length) + "\r\n";
     if (close) h += "Connection: close\r\n";
@@ -274,7 +275,8 @@ private:
 
     void send_echo(bool close) {
         g_requests.fetch_add(1, std::memory_order_relaxed);
-        head_ = "HTTP/1.1 200 OK\r\nServer: upstream\r\nContent-Type: application/octet-stream\r\nContent-Length: " +
+        head_ = "HTTP/1.1 200 OK\r\nServer: upstream\r\nX-Upstream-Port: " + std::to_string(g_port) +
+                "\r\nContent-Type: application/octet-stream\r\nContent-Length: " +
                 std::to_string(echo_.size()) + (close ? "\r\nConnection: close\r\n\r\n" : "\r\n\r\n");
         write(echo_, close);
     }

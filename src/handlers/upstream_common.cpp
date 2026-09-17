@@ -63,11 +63,13 @@ namespace {
 
 // "http://<origin address><rewrite prefix>rest" -> "<scheme>://<host><location prefix>rest".
 bool rewrite_location(std::string& out, std::string_view value, const Stream& s, const LocationConfig& loc) {
-    const std::string_view origin = loc.proxy.address.key;
-    if (loc.proxy.address.unix || !value.starts_with("http://")) return false;
+    if (!value.starts_with("http://")) return false;
     std::string_view rest = value.substr(7);
-    if (!rest.starts_with(origin)) return false;
-    rest.remove_prefix(origin.size());
+    const UpstreamAddress* origin = nullptr;
+    for (const auto& a : loc.proxy.addresses)
+        if (!a.unix && rest.starts_with(a.key)) origin = &a;
+    if (!origin) return false;
+    rest.remove_prefix(origin->key.size());
     if (!rest.empty() && rest.front() != '/') return false;  // a longer host name
     const std::string_view prefix = loc.proxy.rewrite.empty() ? std::string_view("/") : loc.proxy.rewrite;
     if (rest.starts_with(prefix)) rest.remove_prefix(prefix.size());

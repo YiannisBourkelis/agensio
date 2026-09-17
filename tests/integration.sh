@@ -142,6 +142,15 @@ path = "/policy/"
 upstream = "http://127.0.0.1:9107/"
 proxy = {{ host = "app.internal", forwarded = "both", headers = {{ "X-Real-IP" = "$remote_addr", "X-Site" = "$scheme://$host", "Accept" = "" }}, hide = ["X-Powered-By"] }}
 
+[[site.location]]                       # D4: a group of two origins, round-robin
+path = "/group/"
+upstream = ["http://127.0.0.1:9107/", "http://127.0.0.1:9108/"]
+
+[[site.location]]                       # D4: one dead member, skipped after max_fails
+path = "/failover/"
+upstream = ["http://127.0.0.1:9199/", "http://127.0.0.1:9108/"]
+proxy = {{ max_fails = 2, fail_timeout = 30 }}
+
 [[site.location]]                       # D2: redirects passed through untouched
 path = "/raw/"
 upstream = "http://127.0.0.1:9107/"
@@ -153,14 +162,16 @@ upstream = "http://127.0.0.1:9107"
 """
 open(path, "w").write(text)
 PY
-UP_PID=""
+UP_PID=""; UP2_PID=""
 if [ -x build/agensio_upstream ]; then
   build/agensio_upstream -p 9107 >/dev/null 2>&1 &
   UP_PID=$!
+  build/agensio_upstream -p 9108 >/dev/null 2>&1 &
+  UP2_PID=$!
 fi
 "$BIN" -c bench/tmp/agensio-test.toml >/dev/null 2>&1 &
 PID=$!
-trap 'kill $PID 2>/dev/null; wait $PID 2>/dev/null; [ -n "$FPM_PID" ] && kill $FPM_PID 2>/dev/null; [ -n "$UP_PID" ] && kill $UP_PID 2>/dev/null; true' EXIT
+trap 'kill $PID 2>/dev/null; wait $PID 2>/dev/null; [ -n "$FPM_PID" ] && kill $FPM_PID 2>/dev/null; [ -n "$UP_PID" ] && kill $UP_PID 2>/dev/null; [ -n "$UP2_PID" ] && kill $UP2_PID 2>/dev/null; true' EXIT
 for _ in $(seq 1 50); do nc -z 127.0.0.1 8080 2>/dev/null && nc -z 127.0.0.1 8443 2>/dev/null && break; sleep 0.1; done
 
 fails=0
@@ -438,6 +449,14 @@ if [ -n "$UP_PID" ]; then
   R=$(curl -sS -i $P/policy/redirect | tr -d '\r')
   check "proxy: hidden field dropped" "0" "$(echo "$R" | grep -c '^X-Powered-By:')"
   check "proxy: redirects = pass leaves Location alone" "Location: http://127.0.0.1:9107/json" "$(curl -sS -i $P/raw/redirect | tr -d '\r' | grep '^Location:')"
+  # Groups (D4): one keep-alive client connection stays on one worker, whose rotation
+  # alternates the members; the dead member of the failover group is tried, marked down
+  # after max_fails, and then skipped; a POST is retried too (a connect failure sent nothing).
+  check "proxy: group round-robin alternates the members" "yes" "$(curl -sS -i $P/group/json $P/group/json $P/group/json $P/group/json | tr -d '\r' | awk '/^X-Upstream-Port:/{print $2}' | paste -sd' ' | grep -Eq '^(9107 9108 9107 9108|9108 9107 9108 9107)$' && echo yes)"
+  check "proxy: failover group answers from the live member" "200 200 200 | 3" "$(curl -sS -o /dev/null -o /dev/null -o /dev/null -w '%{http_code} ' $P/failover/json $P/failover/json $P/failover/json | sed 's/ $//') | $(curl -sS -i $P/failover/json $P/failover/json $P/failover/json | tr -d '\r' | grep -c '^X-Upstream-Port: 9108')"
+  check "proxy: dead member marked down after max_fails" "yes" "$(grep -q '127.0.0.1:9199 marked down for 30 s after 2 failure' bench/tmp/error.log && echo yes)"
+  check "proxy: POST retried on the next member after a connect failure" "abc 9108" "$(printf abc | curl -sS -i --data-binary @- $P/failover/echo | tr -d '\r' | awk '/^X-Upstream-Port:/{p=$2} END{print $0, p}')"
+  check "proxy: -t warns about every dead member" "yes" "$("$BIN" -t -c bench/tmp/agensio-test.toml 2>&1 >/dev/null | grep -c 'proxy upstream 127.0.0.1:9199' | grep -Eq '^[1-9]' && echo yes)"
   # Upgrade tunnelling (D3): 101 passed through with Upgrade/Connection, bytes flow both
   # ways (including the ones sent right behind the request head), the origin's close ends it.
   tunnel=$(python3 - <<'PYT'

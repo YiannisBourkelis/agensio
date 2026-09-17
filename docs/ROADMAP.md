@@ -327,10 +327,20 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       Upgrade/Connection and no Content-Length, early bytes, 100 KB both ways, close
       propagation, a 101 logged with `upstream=upgrade`. HTTP/2-to-HTTP/1.1 downgrade
       for upstreams moves to phase G where it belongs.
-- [ ] D4 Upstream groups from the start: `upstream = ["http://a:3000", "http://b:3000"]`,
-      round-robin, passive health marking (N failures -> down for T seconds), retries on
-      idempotent requests only; TLS to upstream (verify on/off). No active checks or
-      weights until needed.
+- [x] D4 (2026-09-17) Upstream groups: `upstream = ["http://a:3000", "http://b:3000"]`,
+      round-robin per worker (`UpstreamPool::pick`), passive health per worker
+      (`max_fails` consecutive failures mark a member down for `fail_timeout`, a success
+      clears; all down: the one marked longest ago), and moving to the next member on a
+      failure before any response byte: any request after a connect failure (nothing was
+      sent), GET/HEAD only after bytes went out (`UpstreamRequest::try_next_address`,
+      the slot of the failed member released, the head buffer kept). Every member is a
+      pool of its own; `-t` probes all; the error log carries "marked down" and "is
+      back". Integration: alternation on one connection, failover with a dead member,
+      the dead member marked down after max_fails, a POST retried after a refused
+      connection. No weights or active checks.
+- [ ] D4b TLS to the origin (`https://` upstreams, verify on/off, SNI): needs a client
+      mode of `TlsStream` (connect state, verification against the system store) and
+      an `UpstreamConnection` that is plain or TLS behind the same read/write calls.
 - [ ] D5 CGI handler: spawn a process per request with CGI/1.1 env and pipes, for legacy
       applications; async pipes via Asio; concurrency cap.
 - [ ] D6 Presets: `app = "proxy"` with `upstream = "http://127.0.0.1:3000"`; examples for

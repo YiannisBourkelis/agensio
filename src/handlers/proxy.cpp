@@ -150,7 +150,7 @@ std::shared_ptr<UpstreamRequest> ProxyHandler::start(Stream& s, const LocationCo
         target = rewritten;
     }
     const bool upgrading = build_head(ws.scratch, s, target, loc.proxy);
-    x->req = std::make_shared<HttpRequest>(pool, loc.proxy.address, opts);
+    x->req = std::make_shared<HttpRequest>(pool, loc.proxy.addresses, opts);
     // The head text is handed to the request as an owned string: collecting the body may
     // run the connection's reads inline, and ws.scratch belongs to whoever runs next.
     std::string head = ws.scratch;
@@ -183,11 +183,12 @@ void ProxyHandler::finish(Exchange& x, UpstreamResult& res) {
     Stream& s = *x.stream;
     const LocationConfig& loc = *x.loc;
     if (res.failure != UpstreamFailure::none) {
-        std::string msg = "proxy " + loc.proxy.address.key + " " + to_string(res.failure) + " for " +
+        const std::string& origin = x.req->address().key;
+        std::string msg = "proxy " + origin + " " + to_string(res.failure) + " for " +
                           std::string(s.request.method_name) + " " + std::string(s.request.target);
         if (res.error) msg += " (" + res.error.message() + ")";
         switch (res.failure) {
-            case UpstreamFailure::connect_refused: msg += ": nothing is listening on " + loc.proxy.address.key; break;
+            case UpstreamFailure::connect_refused: msg += ": nothing is listening on " + origin; break;
             case UpstreamFailure::closed_early:
                 msg += res.head_bytes == 0 ? ": the origin closed the connection before answering"
                                            : ": the origin closed the connection mid-response";
@@ -198,6 +199,7 @@ void ProxyHandler::finish(Exchange& x, UpstreamResult& res) {
                 break;
             default: break;
         }
+        if (!x.req->health_note().empty()) msg += "; " + x.req->health_note();
         log_.error(msg);
         const int status = status_for(res.failure);
         upstream_error(s, status, status == 503 ? std::string_view(loc.proxy.retry_after) : std::string_view());
@@ -206,6 +208,7 @@ void ProxyHandler::finish(Exchange& x, UpstreamResult& res) {
         x.done();
         return;
     }
+    if (!x.req->health_note().empty()) log_.warn("proxy " + x.req->health_note());  // a member down or back
     apply_upstream_result(s, res, res.streamed ? x.req->body_source() : nullptr, "ok", loc);
     if (res.upgraded) {
         s.response.upgrade = true;
