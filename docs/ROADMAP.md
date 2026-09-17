@@ -197,12 +197,20 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       `try_files`, `wp-content/uploads` and `wp-includes` as `final` prefix locations
       (nginx `^~`, new in the router) with `deny_suffixes` for PHP sources and
       Cache-Control. `app = "proxy"` comes with phase D.
-- [ ] C3a FastCGI keep-alive worth its default: with `keep_conn = true, max_connections`
-      at the child count, the JSON route costs half the web-server CPU (C5), but the
-      78 KB page fell from 3.4k to 1.35k req/s with no errors. Reproduce without
-      docker-proxy (unix socket pool, Linux bind mount), find the cause (delayed ACK on
-      the reused connection? record boundaries? the `in_len != 0` reuse rule?), then
-      decide the default per pool type.
+- [x] C3a (2026-09-17) FastCGI keep-alive: the 78 KB page collapsing under `keep_conn`
+      on TCP was Nagle on php-fpm's side meeting our delayed ACK (a fresh connection's
+      close() flushes the tail; a kept one waits up to 40 ms). Fixed with TCP_QUICKACK
+      before each read on kept TCP connections and TCP_NODELAY on the upstream socket:
+      direct TCP with keep-alive 1051 -> 3749 req/s, level with the unix socket.
+      Measured the transports too (`bench/results/laravel-keepconn-20260917.md`): the
+      bed now has a unix-socket pool in a bind mount (`bench.sh -p unix`, Linux hosts);
+      the socket alone takes agensio from 85 to 51 us per page request (nginx 110 to 74),
+      keep-alive on top saves 6 us more. Through docker-proxy keep-alive stays broken
+      (the delayed ACK is inside the container) and fresh connections straight to the
+      container IP cost 150-500 us in conntrack, so the TCP pool keeps fresh connections.
+      Default stays off: the pool must be sized so kept connections cannot pin every
+      child (`max_connections` x workers <= `pm.max_children`), which C3b's generated
+      pools will do.
 - [ ] C3b **Per-site users (ISPConfig / IIS app-pool model, made native)**: `user = "web1"`
       on a site; agensio generates the php-fpm pool for it (user/group, socket owned by the
       site user with group-only access for agensio, private tmp and session dirs,

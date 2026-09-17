@@ -144,6 +144,7 @@ private:
     enum class Phase { queued, connecting, sending, sending_body, receiving, finished, failed, cancelled };
 
     void connect();
+    void quick_ack() noexcept;
     void send_head();
     void send_body_next();
     void body_sent();

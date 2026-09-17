@@ -8,6 +8,12 @@
 #include <cstring>
 #include <utility>
 
+#ifndef _WIN32
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+#endif
+
 namespace agensio {
 
 // ---- reasons ----
@@ -392,9 +398,29 @@ void FcgiRequest::connect() {
     } else {
         asio::ip::tcp::endpoint ep(asio::ip::make_address(address_.host), address_.port);
         conn_->socket.open(asio::generic::stream_protocol(ep.protocol()), ec);
-        if (!ec) conn_->socket.async_connect(ep, on_connect);
+        if (!ec) {
+            // Our writes must not wait for the upstream's ACK (a streamed request body is
+            // many small writes); nginx sets this on upstream connections too.
+            asio::error_code ignored;
+            conn_->socket.set_option(asio::ip::tcp::no_delay(true), ignored);
+            conn_->socket.async_connect(ep, on_connect);
+        }
     }
     if (ec) fail(FcgiFailure::connect_error, ec);
+}
+
+// On a kept TCP connection the child's last partial segment of a response sits in Nagle
+// until we ACK the segment before it, and our kernel delays that ACK by up to 40 ms
+// (php-fpm does not set TCP_NODELAY; a fresh connection never shows this because close()
+// flushes). Measured on the Laravel bed: the 78 KB page fell from 3.4k to 1.1k req/s.
+// TCP_QUICKACK (Linux) acknowledges immediately; the kernel clears it, so it is set
+// before every read of a kept connection. Unix sockets and fresh connections need nothing.
+void FcgiRequest::quick_ack() noexcept {
+#ifdef TCP_QUICKACK
+    if (address_.unix || !options_.keep_conn) return;
+    const int one = 1;
+    ::setsockopt(conn_->socket.native_handle(), IPPROTO_TCP, TCP_QUICKACK, &one, sizeof one);
+#endif
 }
 
 void FcgiRequest::send_head() {
@@ -500,6 +526,7 @@ void FcgiRequest::read_more() {
     if (conn_->in_len == conn_->in.size()) conn_->in.resize(conn_->in.size() * 2);  // one huge record
     reading_ = true;
     arm(options_.read_timeout);
+    quick_ack();
     auto self = shared_from_this();
     conn_->socket.async_read_some(asio::buffer(conn_->in.data() + conn_->in_len, conn_->in.size() - conn_->in_len),
                                   [self](const asio::error_code& ec, std::size_t n) {

@@ -190,7 +190,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   Retry-After beyond), `priority_reserve` for `priority = true` locations. `keep_conn`
   (FCGI_KEEP_CONN) is off by default: php-fpm binds a child to every open connection, so
   idle keep-alive connections of N workers pin N children and starve the rest (measured in
-  the suite: 24 workers, 4 children, every further request a 504). Timeouts give
+  the suite: 24 workers, 4 children, every further request a 504). TCP upstreams get
+  TCP_NODELAY, and kept TCP connections TCP_QUICKACK before each read (C3a: php-fpm's
+  Nagle plus our delayed ACK stalled every large response by 40 ms). Timeouts give
   504, connection and protocol failures 502, each with an `FcgiFailure` reason in the
   error log (with a fix hint: socket owner/mode vs our uid, SCRIPT_FILENAME, bytes seen
   before a close) and in the JSON access log's `upstream` field. `match = "suffix"`
@@ -211,7 +213,8 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   creates it, `tests/laravel.sh build/agensio` runs the live checks (skips when the project
   is down). php-fpm inside the web container is published on 127.0.0.1:9000 by the ddev
   override files; `php = { ..., remote_root = "/var/www/html/public" }` rewrites the
-  script paths into the container's filesystem. `setup.sh` switches the bed to cookie
+  script paths into the container's filesystem; a second pool listens on a unix socket
+  in the bind-mounted `.ddev/run/` (Linux hosts, `bench.sh -p unix`). `setup.sh` switches the bed to cookie
   sessions and a file cache: Laravel's default sqlite database sessions serialise every
   request (170 req/s), file sessions leave a file per request and their garbage
   collection triples the PHP cost after tens of thousands. `bench/laravel/bench.sh` is
@@ -331,8 +334,15 @@ servers are application-bound at 3.4k req/s on the 78 KB welcome page and 3.5k o
 route (2.2 ms of PHP per request); the web server's own CPU per request is agensio 85-86 us
 vs nginx 110-111 us on the page and 54-55 vs 58-59 us on JSON. Most of that is the TCP
 connection opened to php-fpm per request: `keep_conn = true` with `max_connections` at the
-child count halves it (26.6 us on JSON) but made the 78 KB page 2.5x slower through
-docker-proxy, unexplained (roadmap C3a). php-fpm CPU is read from the container's cgroup
+child count halves it (26.6 us on JSON). The 78 KB page collapsing under keep-alive on
+TCP (1.05k req/s, p50 59 ms even without docker-proxy) was Nagle on php-fpm's side
+meeting our delayed ACK; `FcgiRequest::quick_ack` (TCP_QUICKACK before each read on a
+kept TCP connection, plus TCP_NODELAY on the upstream socket) restores 3.75k req/s
+(`bench/results/laravel-keepconn-20260917.md`). Transport matters more than keep-alive:
+the bind-mounted unix socket alone is 51 / 26 us (nginx 74 / 31), keep-alive on top 45 /
+25. Through docker-proxy keep-alive stays broken (the ACK delay is inside the container)
+and fresh connections to the container IP cost 150-500 us in conntrack: benchmark PHP
+over the unix socket. php-fpm CPU is read from the container's cgroup
 because the children respawn. Two bed findings that would wreck any PHP benchmark: sqlite
 database sessions (Laravel's default) serialise requests, file sessions grow a directory
 the garbage collector then scans; cookie sessions are stable. And wrk ends a run by

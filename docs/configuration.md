@@ -241,9 +241,16 @@ location on the same socket must agree on them: set them once on the site.
 | `queue_depth`, `queue_wait` | 64, 5 s | queue size and longest wait; beyond either, 503 with `Retry-After` |
 | `priority_reserve` | 0 | share of `max_connections` kept for `priority = true` locations |
 | `max_idle` | 8 | idle connections kept per worker to this socket when `keep_conn` is on |
-| `keep_conn` | `false` | FastCGI keep-alive; php-fpm pins a child per idle connection, so enable only with a pool sized for it |
+| `keep_conn` | `false` | FastCGI keep-alive; php-fpm pins a child to every kept connection, so `max_connections` x workers must stay below `pm.max_children`. Not worth it through a Docker-published port (see below) |
 | `head_max` | `"64KB"` | reply head larger than this is 502 |
 | `path_info` | `true` | split `/x.php/extra` into SCRIPT_NAME and PATH_INFO |
+
+Transport, measured on a Laravel page (`bench/results/laravel-keepconn-20260917.md`):
+a unix socket costs agensio about half the CPU per request of a TCP port, and
+`keep_conn` on top of it saves a little more. On TCP, agensio sets `TCP_NODELAY` and,
+for kept connections, `TCP_QUICKACK` (Linux) so php-fpm's Nagle cannot stall large
+responses; a port published through docker-proxy is out of reach of that fix, so keep
+`keep_conn` off there or bind-mount the socket directory instead.
 
 Failures are logged with a reason and a fix hint (socket owner/group/mode against
 agensio's uid, the script php-fpm could not open, bytes seen before a child closed) and

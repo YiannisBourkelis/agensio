@@ -7,6 +7,7 @@ if [ ! -f .ddev/config.yaml ]; then
   ddev config --project-type=laravel --docroot=public --project-name=agensio-laravel --php-version=8.3 \
     --disable-settings-management
 fi
+mkdir -p .ddev/run  # the unix-socket pool's directory (bind mount, see docker-compose.agensio.yaml)
 ddev start -y
 if [ ! -f artisan ]; then
   ddev composer create-project "laravel/laravel:^12" . --no-interaction

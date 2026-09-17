@@ -1,6 +1,10 @@
 # agensio test bed: publish the web container's php-fpm (the extra TCP pool from
-# web-build/Dockerfile.agensio) to the host, where agensio runs natively.
+# web-build/Dockerfile.agensio) to the host, where agensio runs natively, and share a
+# directory for the unix-socket pool (Linux: the socket in a bind mount works across the
+# boundary because php-fpm in the container runs as the host user).
 services:
   web:
     ports:
       - "127.0.0.1:9000:9000"
+    volumes:
+      - ./run:/run/agensio

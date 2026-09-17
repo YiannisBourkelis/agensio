@@ -67,7 +67,8 @@ max_open_files = 1024    # files above max_file_size are streamed, but their ope
 # path_info (default true: "/index.php/extra" -> SCRIPT_NAME /index.php, PATH_INFO /extra),
 # head_max (response head cap, 502 above), keep_conn (FCGI_KEEP_CONN, default off: php-fpm
 # pins a child per idle connection, so only enable it with pm.max_children sized for
-# workers x max_idle plus the concurrency), max_idle.
+# workers x max_idle plus the concurrency; not through a Docker-published port, whose
+# proxy stalls large responses by 40 ms per request), max_idle.
 # Directory URIs use the location's `index` (set index = ["index.php"]). A missing script is
 # 404 without asking fpm. Every 502/503/504 is logged with its reason and a fix hint.
 #
