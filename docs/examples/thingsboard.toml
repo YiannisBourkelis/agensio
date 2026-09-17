@@ -1,0 +1,10 @@
+# ThingsBoard on 127.0.0.1:8080 (Java): the web UI plus device telemetry over WebSockets
+# (/api/ws), and MQTT which is not HTTP and stays on its own port. Device HTTP telemetry
+# posts small bodies at a high rate: request buffering keeps the origin's connections short.
+[[site]]
+server_name = ["iot.example.com"]
+listen = ["0.0.0.0:443"]
+tls = { cert = "/etc/ssl/iot/fullchain.pem", key = "/etc/ssl/iot/privkey.pem" }
+app = "proxy"
+upstream = "http://127.0.0.1:8080"
+proxy = { read_timeout = 120, max_connections = 512 }

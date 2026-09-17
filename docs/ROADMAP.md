@@ -358,13 +358,23 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       from the FastCGI parameter builders (`fcgi::for_each_param` decodes them) plus
       `cgi.env`, runs an `interpreter` when given. Every other descriptor is closed in the
       child (`close_range`). 13 integration checks with shell scripts in `tests/cgi/`.
-- [ ] D6 Presets: `app = "proxy"` with `upstream = "http://127.0.0.1:3000"`; examples for
-      Node, Rails, Rocket.Chat, ThingsBoard in `docs/examples/`.
+- [x] D6 (2026-09-17) Presets: `app = "proxy"` with a site-level `upstream` (string or
+      list) and `proxy = { ... }` defaults, `root` optional, hand-written locations
+      coexisting (a location's own `upstream` or `handler = "proxy"` decides; static
+      otherwise). Examples in `docs/examples/` for Node, Rails, Rocket.Chat and
+      ThingsBoard. Two real-world beds with live checks that skip when down:
+      `bench/redmine/` (Redmine 6, Rails, official image with SQLite, `tests/redmine.sh`:
+      page, stylesheet, login with CSRF token and session cookie, redirect kept on this
+      host, Rails 404, keep-alive) and `bench/uptime-kuma/` (Uptime Kuma, Node, `tests/
+      uptime-kuma.sh`: app shell, bundle, Socket.IO long-polling handshake and a real
+      Socket.IO session over a WebSocket through the tunnel, connect acknowledged).
 - [ ] D7 Benchmark: hello-world Node upstream through agensio vs nginx; WebSocket echo.
       Left on the table from D1 if ever needed: per-exchange allocations (Exchange,
       HttpRequest, std::function, the forwarded head string) and the pool's string-keyed
       lookup; the syscalls are already at the minimum.
-- [ ] Checkpoint: Rocket.Chat or a Node app fully usable behind agensio.
+- [x] Checkpoint (2026-09-17): Uptime Kuma (Node, WebSocket UI) and Redmine (Rails) fully
+      usable behind agensio; Rocket.Chat has its example config, a bed can follow when a
+      MongoDB-backed setup is wanted.
 
 ### Phase E. Complete HTTP/1.1 and hardening  `[ ]`
 - [ ] E1 Range requests (single range, `206`, `416`, `If-Range`) on memory and file sources.
@@ -385,6 +395,11 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       (2026-09-16).
 - [ ] E8 103 Early Hints for static and proxied responses (asked of nginx; cheap once
       bodies are sources).
+- [ ] E8b The tunnel integration check ("101, fields, early bytes, 100 KB both ways")
+      failed once with an empty result on 2026-09-17 (the D6 gate) and passed on every
+      other run before and after; the Python client prints nothing when its 5 s recv
+      times out, so the cause is unknown. Capture the client's exception in the check
+      and, if it repeats, trace the tunnel's first reads.
 - [ ] E9 Client abort while an upstream request is pending (found with C5): the HTTP/1
       connection has no read in flight while its FastCGI request waits in the pool queue
       or runs, so a client that goes away (wrk closing 64 connections, a browser

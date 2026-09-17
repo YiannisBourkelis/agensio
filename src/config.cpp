@@ -306,6 +306,56 @@ std::vector<std::pair<std::string, std::string>> headers_of(const toml::table* t
     return out;
 }
 
+// `upstream = "http://host:port"` or a list of them (a group: round-robin per worker,
+// failed members skipped, see max_fails / fail_timeout), on a location or on a site
+// (the `app = "proxy"` preset). A URI part ("http://host:port/" or ".../v1/") replaces
+// the location's prefix (nginx proxy_pass semantics) and needs a prefix location.
+void parse_upstreams(const toml::node_view<const toml::node>& n, UpstreamConfig& out, bool prefix_location,
+                     const std::string& where) {
+    std::vector<std::string> upstreams;
+    if (auto up = n.value<std::string>()) upstreams.push_back(*up);
+    else if (n) upstreams = string_list(n, where.c_str());
+    if (n && upstreams.empty()) fail(where + ": empty list");
+    for (std::size_t i = 0; i < upstreams.size(); ++i) {
+        std::string text = upstreams[i];
+        bool tls = false;
+        if (text.starts_with("http://")) text = text.substr(7);
+        else if (text.starts_with("https://")) {
+            text = text.substr(8);
+            tls = true;
+#ifndef AGENSIO_HAS_TLS
+            fail(where + ": https:// needs a build with TLS");
+#endif
+        }
+        std::string rewrite;
+        if (!text.starts_with("unix:")) {
+            if (const std::size_t slash = text.find('/'); slash != std::string::npos) {
+                rewrite = text.substr(slash);
+                text.resize(slash);
+                if (!prefix_location) fail(where + ": a URI part needs a prefix location");
+                if (rewrite.back() != '/') rewrite += '/';
+            }
+        }
+        if (i == 0) out.rewrite = rewrite;
+        else if (rewrite != out.rewrite) fail(where + ": every member of the group needs the same URI part");
+        UpstreamAddress a;
+        std::string err;
+        if (!parse_upstream_address(text, a, err)) fail(where + ": " + err);
+        if (tls) {
+            if (a.unix) fail(where + ": TLS over a unix socket is not supported");
+            a.tls = true;
+            a.key = "https://" + a.key;
+        }
+        for (const auto& other : out.addresses)
+            if (other.key == a.key) fail(where + ": " + a.key + " listed twice");
+        out.addresses.push_back(std::move(a));
+    }
+    if (!out.addresses.empty()) {
+        out.address = out.addresses.front();
+        out.configured = true;
+    }
+}
+
 void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& site, const std::string& where) {
     LocationConfig loc;
     auto path = t["path"].value<std::string>();
@@ -348,63 +398,22 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
     else if (t.contains("add_headers")) fail(where + ": 'add_headers' must be a table");
     // `upstream = "http://host:port"` (or unix:/path) makes a proxy location; `proxy = { ... }`
     // carries the options (the same keys as php/fastcgi) and may name the upstream too.
-    // The site's `proxy = { ... }` is the default; the location's table refines it.
+    // The site's `proxy = { ... }` is the default; the location's table refines it. A
+    // location without its own `upstream` inherits the site's (the proxy preset's origin).
     loc.proxy = site.proxy;
-    loc.proxy.configured = false;
+    if (t.contains("upstream")) {
+        loc.proxy.addresses.clear();
+        loc.proxy.configured = false;
+        loc.proxy.rewrite.clear();
+    }
     if (auto pt = t["proxy"].as_table()) {
         parse_fcgi_table(*pt, base_dir, loc.proxy, where + ".proxy");
         parse_proxy_policy(*pt, base_dir, loc.proxy, where + ".proxy");
     } else if (t.contains("proxy")) {
         fail(where + ": 'proxy' must be a table");
     }
-    // `upstream = "http://host:port"` or a list of them (a group: round-robin per worker,
-    // failed members skipped, see max_fails / fail_timeout).
-    std::vector<std::string> upstreams;
-    if (auto up = t["upstream"].value<std::string>()) upstreams.push_back(*up);
-    else if (t.contains("upstream")) upstreams = string_list(t["upstream"], (where + ".upstream").c_str());
-    if (t.contains("upstream") && upstreams.empty()) fail(where + ".upstream: empty list");
-    for (std::size_t i = 0; i < upstreams.size(); ++i) {
-        std::string text = upstreams[i];
-        bool tls = false;
-        if (text.starts_with("http://")) text = text.substr(7);
-        else if (text.starts_with("https://")) {
-            text = text.substr(8);
-            tls = true;
-#ifndef AGENSIO_HAS_TLS
-            fail(where + ".upstream: https:// needs a build with TLS");
-#endif
-        }
-        // A URI part ("http://host:port/" or ".../v1/") replaces the location's prefix
-        // (nginx proxy_pass semantics); without one the target is forwarded as sent. Every
-        // member of a group must agree on it.
-        std::string rewrite;
-        if (!text.starts_with("unix:")) {
-            if (const std::size_t slash = text.find('/'); slash != std::string::npos) {
-                rewrite = text.substr(slash);
-                text.resize(slash);
-                if (loc.exact || loc.suffix) fail(where + ".upstream: a URI part needs a prefix location");
-                if (rewrite.back() != '/') rewrite += '/';
-            }
-        }
-        if (i == 0) loc.proxy.rewrite = rewrite;
-        else if (rewrite != loc.proxy.rewrite) fail(where + ".upstream: every member of the group needs the same URI part");
-        UpstreamAddress a;
-        std::string err;
-        if (!parse_upstream_address(text, a, err)) fail(where + ".upstream: " + err);
-        if (tls) {
-            if (a.unix) fail(where + ".upstream: TLS over a unix socket is not supported");
-            a.tls = true;
-            a.key = "https://" + a.key;
-        }
-        for (const auto& other : loc.proxy.addresses)
-            if (other.key == a.key) fail(where + ".upstream: " + a.key + " listed twice");
-        loc.proxy.addresses.push_back(std::move(a));
-    }
-    if (!loc.proxy.addresses.empty()) {
-        loc.proxy.address = loc.proxy.addresses.front();
-        loc.proxy.configured = true;
-    }
-    if (loc.proxy.configured && !t.contains("handler")) loc.handler = "proxy";
+    parse_upstreams(t["upstream"], loc.proxy, !loc.exact && !loc.suffix, where + ".upstream");
+    if (t.contains("upstream") && !t.contains("handler")) loc.handler = "proxy";  // the site's origin needs handler = "proxy"
     else if (t.contains("cgi") && !t.contains("handler")) loc.handler = "cgi";
     else loc.handler = to_lower(t["handler"].value_or(std::string("static")));
     if (loc.handler == "static") {
@@ -509,6 +518,27 @@ void apply_preset(SiteConfig& site, const std::string& where) {
         loc.fastcgi.params_prefix = FcgiHandler::prebuild_params(site, loc);
         return loc;
     };
+    if (site.app == "proxy") {
+        // Everything to the origin(s) named on the site; a hand-written "/" location wins,
+        // and other locations (static assets from disk, a second service) coexist.
+        if (!site.proxy.configured) fail(where + ": app = \"proxy\" needs upstream = \"http://host:port\" on the site");
+        if (!has("/", false, false)) {
+            LocationConfig loc;
+            loc.path = "/";
+            loc.root = site.root;
+            loc.index = site.index;
+            loc.hidden_files = site.hidden_files;
+            loc.symlinks_deny = site.symlinks_deny;
+            loc.handler = "proxy";
+            loc.kind = HandlerKind::proxy;
+            loc.proxy = site.proxy;
+            loc.methods = kFcgiMethods;
+            loc.allow = allow_header(kFcgiMethods);
+            loc.origin = "preset:proxy";
+            site.locations.push_back(std::move(loc));
+        }
+        return;
+    }
     if (!site.php.configured)
         fail(where + ": app = \"" + site.app + "\" needs php = { socket = \"...\" } on the site");
     if (site.app == "laravel") {
@@ -633,11 +663,12 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
 
     site.app = to_lower(t["app"].value_or(std::string()));
     if (!site.app.empty() && site.app != "laravel" && site.app != "php" && site.app != "static" &&
-        site.app != "wordpress")
-        fail(where + ": app must be \"laravel\", \"wordpress\", \"php\" or \"static\" (\"proxy\" arrives later)");
+        site.app != "wordpress" && site.app != "proxy")
+        fail(where + ": app must be \"laravel\", \"wordpress\", \"php\", \"proxy\" or \"static\"");
     auto root = t["root"].value<std::string>();
-    if (!root) fail(where + ": 'root' is required");
-    site.root = resolve_root(base_dir, *root, where);
+    if (!root && site.app != "proxy") fail(where + ": 'root' is required");
+    // A proxied application needs no document root; hand-written static locations bring their own.
+    site.root = root ? resolve_root(base_dir, *root, where) : base_dir.string();
     const std::string root_given = site.root;  // the project directory for app = "laravel"
     if (site.app == "laravel") {
         // The project directory is given; the web root is its public/ (never the project itself).
@@ -666,6 +697,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     } else if (t.contains("proxy")) {
         fail(where + ": 'proxy' must be a table");
     }
+    parse_upstreams(t["upstream"], site.proxy, true, where + ".upstream");  // the preset's origin
     site.user = account_name(t["user"], where + ".user");
     site.group = account_name(t["group"], where + ".group");
     if (!site.group.empty() && site.user.empty()) fail(where + ": 'group' needs 'user'");

@@ -1,0 +1,14 @@
+# Redmine (Ruby on Rails) as a real-world origin for the reverse proxy (roadmap D6).
+# The official image with its built-in SQLite database; Rails listens on 3000 inside,
+# published on 127.0.0.1:3010 for agensio on the host (bench/redmine/agensio.toml).
+services:
+  redmine:
+    image: redmine:6
+    ports:
+      - "127.0.0.1:3010:3000"
+    volumes:
+      - redmine-files:/usr/src/redmine/files
+      - redmine-sqlite:/usr/src/redmine/sqlite
+volumes:
+  redmine-files:
+  redmine-sqlite:

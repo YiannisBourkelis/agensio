@@ -170,6 +170,32 @@ add_headers = { "Cache-Control" = "public, max-age=2592000" }
 there. `wp-config.php` is under the root and would be executed by PHP (it prints
 nothing), exactly as with nginx; `.htaccess` and `.user.ini` are dotfiles and hidden.
 
+## 4b. Proxied applications: `app = "proxy"`
+
+Node, Rails, Go, Java, Python: anything that speaks HTTP on a local port. `root` is not
+needed; hand-written locations serve files from disk next to the proxied application.
+
+```toml
+[[site]]
+server_name = ["app.example.com"]
+listen = ["0.0.0.0:80"]
+app = "proxy"
+upstream = "http://127.0.0.1:3000"        # or a list: round-robin with health marking
+proxy = { read_timeout = 120 }            # defaults for every proxied location of the site
+
+[[site.location]]                         # optional: assets straight from disk
+path = "/assets/"
+alias = "/srv/app/public/assets"
+add_headers = { "Cache-Control" = "public, max-age=31536000, immutable" }
+```
+
+Equivalent by hand: one `[[site.location]]` with `path = "/"`, `handler = "proxy"` and the
+site's upstreams and options. WebSockets, redirects pointing at the origin, forwarded
+headers and keep-alive need nothing (section 12). Worked examples for Node, Rails,
+Rocket.Chat and ThingsBoard are in `docs/examples/`; two real applications run this
+way in the repository's test beds, Redmine (Rails) in `bench/redmine/` and Uptime Kuma
+(Node, Socket.IO over WebSockets) in `bench/uptime-kuma/`.
+
 ## 5. Customising a preset
 
 A preset never overrides what the site writes itself:

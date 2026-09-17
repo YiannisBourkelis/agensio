@@ -1,0 +1,15 @@
+# A Node.js application (Express, Next.js, NestJS, ...) listening on 127.0.0.1:3000.
+# `app = "proxy"` forwards everything; static files that the app would serve itself can
+# come straight from disk with a location, as /public here.
+[[site]]
+server_name = ["app.example.com"]
+listen = ["0.0.0.0:443"]
+tls = { cert = "/etc/ssl/app/fullchain.pem", key = "/etc/ssl/app/privkey.pem" }
+app = "proxy"
+upstream = "http://127.0.0.1:3000"
+proxy = { read_timeout = 120 }             # long API calls; WebSockets need nothing
+
+[[site.location]]                          # the app's public directory, served by agensio
+path = "/public/"
+alias = "/srv/app/public"
+add_headers = { "Cache-Control" = "public, max-age=86400" }

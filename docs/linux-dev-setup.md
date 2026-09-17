@@ -78,7 +78,9 @@ bench/laravel/bench.sh -d 10s -c 64 -r 2   # C5: agensio vs nginx in front of th
 bench/laravel/bench.sh -p unix             # the same over the bind-mounted unix socket (.ddev/run/php-fpm.sock)
 docker run --rm --user root -v "$PWD:$PWD" -w "$PWD" agensio-devbox tests/pools.sh build/agensio   # C3b: two users, generated pools, privilege drop
 cmake --build build --target agensio_upstream && bench/proxy/run.sh   # D0: proxy baseline, upstream direct vs nginx vs Caddy (vs agensio from D1)
-bench/ab.sh HEAD -P                                                   # the A/B gate with the proxy rows (needs bench/proxy/ab-site.toml, D1)
+bench/ab.sh HEAD -P                                                   # the A/B gate with the proxy rows
+bench/redmine/setup.sh && tests/redmine.sh build/agensio              # D6: Redmine (Rails) behind the proxy preset, http://127.0.0.1:8075
+bench/uptime-kuma/setup.sh && tests/uptime-kuma.sh build/agensio      # D6: Uptime Kuma (Node, WebSockets), http://127.0.0.1:8076
 bench/statamic/.ddev/setup.sh   # same for Statamic: control panel http://127.0.0.1:8071/cp, admin@admin.com / 4444
 bench/wordpress/.ddev/setup.sh  # same for WordPress: http://wp.agensio.ddev.site:8072, wp-admin admin / 4444
 ```

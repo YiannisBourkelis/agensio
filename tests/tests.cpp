@@ -1315,6 +1315,15 @@ static void test_proxy() {
         CHECK(note == "127.0.0.1:9108 is back");
         pool.mark_success(grp[1], note);  // a healthy member says nothing
     }
+    // The proxy preset (D6): a site with `upstream` and no root; other locations coexist.
+    write("preset.toml", "[[site]]\nlisten = [\"127.0.0.1:18097\"]\napp = \"proxy\"\nupstream = \"http://127.0.0.1:3000\"\nproxy = { read_timeout = 120 }\n"
+                         "[[site.location]]\npath = \"/assets/\"\nalias = \"" + dir.string() + "/www\"\n");
+    const Config prcfg = load_config(dir / "preset.toml");
+    const LocationConfig& pr = Router::location(prcfg.sites[0], "/anything");
+    CHECK(pr.kind == HandlerKind::proxy && pr.origin == "preset:proxy" && pr.proxy.address.key == "127.0.0.1:3000" &&
+          pr.proxy.options.read_timeout.count() == 120000 && pr.proxy.options.keep_conn);
+    CHECK(Router::location(prcfg.sites[0], "/assets/x.js").kind == HandlerKind::static_);
+    CHECK(refused("noup.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\napp = \"proxy\"\n", "needs upstream"));
     CHECK(refused("badfwd.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/\"\nupstream = \"http://127.0.0.1:9100\"\nproxy = { forwarded = \"maybe\" }\n", "forwarded must be"));
     fs::remove_all(dir);
 }

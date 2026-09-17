@@ -1,0 +1,13 @@
+# Rocket.Chat on 127.0.0.1:3000: a Node.js app whose clients keep a WebSocket open
+# (DDP over /websocket and /sockjs). Upgrades are tunnelled automatically and tunnels have
+# no idle limit by default, so nothing here is WebSocket-specific. Uploads can be large.
+[server]
+max_body_size = "100MB"
+
+[[site]]
+server_name = ["chat.example.com"]
+listen = ["0.0.0.0:443"]
+tls = { cert = "/etc/ssl/chat/fullchain.pem", key = "/etc/ssl/chat/privkey.pem" }
+app = "proxy"
+upstream = "http://127.0.0.1:3000"
+proxy = { read_timeout = 300 }

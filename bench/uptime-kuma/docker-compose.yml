@@ -1,0 +1,14 @@
+# Uptime Kuma (Node.js) as a real-world origin for the reverse proxy (roadmap D6): its
+# whole UI talks Socket.IO over WebSockets, so it exercises the Upgrade tunnel (D3).
+# Listens on 3001 inside, published on 127.0.0.1:3011 for agensio on the host.
+services:
+  uptime-kuma:
+    image: louislam/uptime-kuma:1
+    ports:
+      - "127.0.0.1:3011:3001"
+    volumes:
+      - kuma-data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # monitors reach agensio on the host by this name
+volumes:
+  kuma-data:

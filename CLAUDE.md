@@ -271,6 +271,12 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   logs `agensio:<site group> 0640`, then drop privileges. `tests/pools.sh` runs the whole
   thing with two real users in a root devbox (`docker run --user root ... agensio-devbox
   tests/pools.sh build/agensio`).
+- **Proxy test beds** (D6): `bench/redmine/` (Rails, `docker compose`, admin / admin,
+  agensio on 8075) and `bench/uptime-kuma/` (Node, Socket.IO over WebSockets, agensio on
+  8076); `setup.sh` starts each, `tests/redmine.sh` and `tests/uptime-kuma.sh` run the
+  live checks and skip when the bed is down. `app = "proxy"` with a site-level `upstream`
+  is the preset both use; examples for Node, Rails, Rocket.Chat and ThingsBoard in
+  `docs/examples/`.
 - **Logging** (A5, `src/services/log.*`): access log in Apache/nginx "combined" format
   (same escaping, so fail2ban filters work) or JSON, per site (`access_log`) with the
   `[log] access` default; one descriptor per path opened `O_APPEND`, per-worker buffers

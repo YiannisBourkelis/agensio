@@ -1,0 +1,13 @@
+# agensio in front of Uptime Kuma (bench/uptime-kuma/setup.sh starts the container):
+# http://127.0.0.1:8076 (the first visit creates the admin account). Listens on every
+# interface so the container's monitors can reach it as http://host.docker.internal:8076.
+[server]
+workers = 1
+[log]
+access = "off"
+error = "stderr"
+[[site]]
+server_name = ["*"]
+listen = ["0.0.0.0:8076"]
+app = "proxy"
+upstream = "http://127.0.0.1:3011"

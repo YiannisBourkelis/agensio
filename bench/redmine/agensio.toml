@@ -1,0 +1,15 @@
+# agensio in front of Redmine (bench/redmine/setup.sh starts the container):
+# http://127.0.0.1:8075 (login admin / admin, Redmine asks for a new password first).
+# Listens on every interface so Uptime Kuma's container can monitor it as
+# http://host.docker.internal:8075.
+[server]
+workers = 1
+[log]
+access = "off"
+error = "stderr"
+[[site]]
+server_name = ["*"]
+listen = ["0.0.0.0:8075"]
+app = "proxy"
+upstream = "http://127.0.0.1:3010"
+proxy = { read_timeout = 120 }
