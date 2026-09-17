@@ -37,6 +37,7 @@ const char* to_string(UpstreamFailure f) noexcept {
         case UpstreamFailure::head_too_large: return "head_too_large";
         case UpstreamFailure::protocol_error: return "protocol_error";
         case UpstreamFailure::spill_error: return "spill_error";
+        case UpstreamFailure::tls_error: return "tls_error";
     }
     return "unknown";
 }
@@ -203,7 +204,7 @@ void UpstreamPool::grant(Upstream& u, Waiter w) {
 void UpstreamPool::release(const std::string& key, const UpstreamOptions& opts, std::unique_ptr<UpstreamConnection> conn) {
     Upstream& u = upstreams_[key];
     if (u.active > 0) --u.active;
-    if (conn && conn->socket.is_open() && u.idle.size() < opts.max_idle) {
+    if (conn && conn->sock().is_open() && u.idle.size() < opts.max_idle) {
         conn->reused = false;
         conn->in_len = 0;
         u.idle.push_back(std::move(conn));
@@ -312,6 +313,30 @@ void UpstreamPool::mark_failure(const UpstreamAddress& a, const UpstreamOptions&
     }
 }
 
+#ifdef AGENSIO_HAS_TLS
+asio::ssl::context* UpstreamPool::tls_context(const TlsClientConfig& tc, std::string& error) {
+    auto it = tls_contexts_.find(tc.key());
+    if (it != tls_contexts_.end()) return it->second.get();
+    auto ctx = std::make_unique<asio::ssl::context>(asio::ssl::context::tls_client);
+    asio::error_code ec;
+    ctx->set_options(asio::ssl::context::default_workarounds | asio::ssl::context::no_sslv2 |
+                     asio::ssl::context::no_sslv3 | asio::ssl::context::no_tlsv1 | asio::ssl::context::no_tlsv1_1);
+    if (tc.verify) {
+        if (tc.ca_file.empty()) ctx->set_default_verify_paths(ec);
+        else ctx->load_verify_file(tc.ca_file, ec);
+        if (ec) {
+            error = "cannot load the CA bundle " + (tc.ca_file.empty() ? std::string("(system store)") : tc.ca_file) +
+                    ": " + ec.message();
+            return nullptr;
+        }
+        ctx->set_verify_mode(asio::ssl::verify_peer);
+    } else {
+        ctx->set_verify_mode(asio::ssl::verify_none);
+    }
+    return (tls_contexts_[tc.key()] = std::move(ctx)).get();
+}
+#endif
+
 void UpstreamPool::mark_success(const UpstreamAddress& a, std::string& note) {
     auto it = health_.find(a.key);
     if (it == health_.end() || it->second.failures == 0) return;
@@ -349,8 +374,8 @@ static auto immediate(asio::io_context& ctx, F&& f) {
 }
 
 UpstreamRequest::UpstreamRequest(UpstreamPool& pool, const std::vector<UpstreamAddress>& group,
-                                 const UpstreamOptions& options)
-    : options_(options), pool_(pool), group_(&group) {
+                                 const UpstreamOptions& options, const TlsClientConfig* tls)
+    : options_(options), pool_(pool), tls_(tls), group_(&group) {
     member_ = pool_.pick(group, options_, SIZE_MAX, 0);
     if (member_ != SIZE_MAX) {
         address_ = group[member_];
@@ -399,7 +424,7 @@ void UpstreamRequest::on_slot(std::unique_ptr<UpstreamConnection> conn) {
     }
     ++attempts_;
     conn_ = std::move(conn);
-    if (conn_->socket.is_open()) {
+    if (conn_->sock().is_open()) {
         phase_ = Phase::sending;
         send_head();
     } else {
@@ -415,7 +440,7 @@ void UpstreamRequest::cancel() noexcept {
     pool_.unwatch(this);
     if (was == Phase::queued) pool_.dequeue(address_.key, this);
     else if (was != Phase::finished && was != Phase::failed) release_connection(false);
-    if (conn_ && conn_->socket.is_open()) conn_->socket.close(ec);
+    if (conn_ && conn_->sock().is_open()) conn_->sock().close(ec);
     conn_.reset();
     if (waiter_.handler) {  // a pull in flight must not hang
         auto h = std::move(waiter_.handler);
@@ -482,6 +507,10 @@ void UpstreamRequest::connect() {
             self->fail(why, ec);
             return;
         }
+        if (self->address_.tls) {
+            self->handshake();
+            return;
+        }
         self->phase_ = Phase::sending;
         self->send_head();
     };
@@ -489,23 +518,55 @@ void UpstreamRequest::connect() {
     if (address_.unix) {
 #ifdef ASIO_HAS_LOCAL_SOCKETS
         asio::local::stream_protocol::endpoint ep(address_.path);
-        conn_->socket.open(asio::generic::stream_protocol(ep.protocol()), ec);
-        if (!ec) conn_->socket.async_connect(ep, immediate(pool_.context(), on_connect));
+        conn_->sock().open(asio::generic::stream_protocol(ep.protocol()), ec);
+        if (!ec) conn_->sock().async_connect(ep, immediate(pool_.context(), on_connect));
 #else
         ec = asio::error::operation_not_supported;
 #endif
     } else {
         asio::ip::tcp::endpoint ep(asio::ip::make_address(address_.host), address_.port);
-        conn_->socket.open(asio::generic::stream_protocol(ep.protocol()), ec);
+        conn_->sock().open(asio::generic::stream_protocol(ep.protocol()), ec);
         if (!ec) {
             // Our writes must not wait for the upstream's ACK (a streamed request body is
             // many small writes); nginx sets this on upstream connections too.
             asio::error_code ignored;
-            conn_->socket.set_option(asio::ip::tcp::no_delay(true), ignored);
-            conn_->socket.async_connect(ep, immediate(pool_.context(), on_connect));
+            conn_->sock().set_option(asio::ip::tcp::no_delay(true), ignored);
+            conn_->sock().async_connect(ep, immediate(pool_.context(), on_connect));
         }
     }
     if (ec) fail(UpstreamFailure::connect_error, ec);
+}
+
+// TLS to the origin: the stream wraps the connected socket, SNI and verification from the
+// location's tls table, the handshake runs before the request head goes out.
+void UpstreamRequest::handshake() {
+#ifdef AGENSIO_HAS_TLS
+    std::string error;
+    asio::ssl::context* ctx = pool_.tls_context(tls_ ? *tls_ : TlsClientConfig{}, error);
+    if (!ctx) {
+        fail(UpstreamFailure::tls_error, std::error_code(asio::error::invalid_argument));
+        return;
+    }
+    const TlsClientConfig tc = tls_ ? *tls_ : TlsClientConfig{};
+    conn_->tls = std::make_unique<BasicTlsStream<UpstreamConnection::Socket>>(std::move(conn_->socket), *ctx);
+    if (!conn_->tls->set_client(tc.server_name, tc.verify)) {
+        fail(UpstreamFailure::tls_error, std::error_code(asio::error::invalid_argument));
+        return;
+    }
+    phase_ = Phase::sending;  // the send timeout covers the handshake
+    arm(options_.send_timeout);
+    auto self = shared_from_this();
+    conn_->tls->async_handshake([self](std::error_code ec) {
+        if (self->phase_ != Phase::sending) return;
+        if (ec) {
+            self->fail(UpstreamFailure::tls_error, ec);
+            return;
+        }
+        self->send_head();
+    });
+#else
+    fail(UpstreamFailure::tls_error, std::error_code(asio::error::operation_not_supported));
+#endif
 }
 
 // On a kept TCP connection the peer's last partial segment of a response sits in Nagle
@@ -520,7 +581,7 @@ void UpstreamRequest::quick_ack() noexcept {
     // never stalls, and this saves a setsockopt per exchange on the common case.
     if (address_.unix || !options_.keep_conn || !head_done_) return;
     const int one = 1;
-    ::setsockopt(conn_->socket.native_handle(), IPPROTO_TCP, TCP_QUICKACK, &one, sizeof one);
+    ::setsockopt(conn_->sock().native_handle(), IPPROTO_TCP, TCP_QUICKACK, &one, sizeof one);
 #endif
 }
 
@@ -528,7 +589,7 @@ void UpstreamRequest::send_head() {
     arm(options_.send_timeout);
     sent_any_ = true;
     auto self = shared_from_this();
-    asio::async_write(conn_->socket, asio::buffer(out_), immediate(pool_.context(), [self](const asio::error_code& ec, std::size_t) {
+    conn_->async_write(asio::buffer(out_), immediate(pool_.context(), [self](const asio::error_code& ec, std::size_t) {
         if (self->phase_ != Phase::sending) return;
         if (ec) {
             if (self->try_retry(ec)) return;
@@ -559,7 +620,7 @@ void UpstreamRequest::send_body_next() {
         const bool last = got == 0;
         encode_body_chunk(body_chunk_, std::string_view(stream_chunk_.data(), static_cast<std::size_t>(got)), last);
         arm(options_.send_timeout);
-        asio::async_write(conn_->socket, asio::buffer(body_chunk_),
+        conn_->async_write(asio::buffer(body_chunk_),
                           [self, last](const asio::error_code& ec, std::size_t) {
                               if (self->phase_ != Phase::sending_body) return;
                               if (ec) {
@@ -584,7 +645,7 @@ void UpstreamRequest::send_body_next() {
         const bool last = n == 0;
         self->encode_body_chunk(self->body_chunk_, std::string_view(self->stream_chunk_.data(), n), last);
         self->arm(self->options_.send_timeout);
-        asio::async_write(self->conn_->socket, asio::buffer(self->body_chunk_),
+        self->conn_->async_write(asio::buffer(self->body_chunk_),
                           [self, last](const asio::error_code& wec, std::size_t) {
                               if (self->phase_ != Phase::sending_body) return;
                               if (wec) {
@@ -631,7 +692,7 @@ void UpstreamRequest::read_more() {
     // The first read after sending is a speculative recv that returns EAGAIN while the
     // upstream still works; waiting for readiness instead costs an epoll_ctl (asio re-arms
     // the descriptor for non-speculative ops), the same price. Measured: no difference.
-    conn_->socket.async_read_some(asio::buffer(conn_->in.data() + conn_->in_len, conn_->in.size() - conn_->in_len),
+    conn_->async_read_some(asio::buffer(conn_->in.data() + conn_->in_len, conn_->in.size() - conn_->in_len),
                                   immediate(pool_.context(), on_read));
 }
 
@@ -642,7 +703,7 @@ bool UpstreamRequest::try_retry(std::error_code ec) {
     if (!retry_ok_ || attempts_ != 1 || !conn_ || !conn_->reused || result_.head_bytes > 0) return false;
     if (ec != asio::error::eof && ec != asio::error::connection_reset && ec != asio::error::broken_pipe) return false;
     asio::error_code ignored;
-    conn_->socket.close(ignored);
+    conn_->sock().close(ignored);
     conn_ = pool_.fresh();
     ++attempts_;
     connect();
@@ -773,7 +834,7 @@ void UpstreamRequest::release_connection(bool reusable) {
     std::unique_ptr<UpstreamConnection> c = std::move(conn_);
     if (c && (!reusable || !options_.keep_conn || c->in_len != 0 || !keep_alive_ok())) {
         asio::error_code ignored;
-        if (c->socket.is_open()) c->socket.close(ignored);
+        if (c->sock().is_open()) c->sock().close(ignored);
         c.reset();
     }
     pool_.release(address_.key, options_, std::move(c));
@@ -803,7 +864,7 @@ bool UpstreamRequest::try_next_address(UpstreamFailure why) {
     std::unique_ptr<UpstreamConnection> c = std::move(conn_);
     if (c) {
         asio::error_code ignored;
-        if (c->socket.is_open()) c->socket.close(ignored);
+        if (c->sock().is_open()) c->sock().close(ignored);
     }
     if (phase_ != Phase::queued) pool_.release(address_.key, options_, nullptr);
     member_ = next;

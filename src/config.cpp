@@ -177,7 +177,7 @@ std::string default_pools_run() {
 std::vector<std::pair<std::string, std::string>> headers_of(const toml::table* t, const std::string& where);
 
 // The proxy's header policy keys of a `proxy = { ... }` table (site defaults or a location).
-void parse_proxy_policy(const toml::table& t, UpstreamConfig& out, const std::string& where) {
+void parse_proxy_policy(const toml::table& t, const fs::path& base_dir, UpstreamConfig& out, const std::string& where) {
     if (auto h = t["host"].value<std::string>()) {
         out.host = *h == "pass" || *h == "upstream" ? *h : to_lower(*h);
         if (out.host.empty() || out.host.find_first_of(" \t\r\n/") != std::string::npos)
@@ -212,6 +212,16 @@ void parse_proxy_policy(const toml::table& t, UpstreamConfig& out, const std::st
         const std::string mode = to_lower(*r);
         if (mode != "rewrite" && mode != "pass") fail(where + ".redirects must be \"rewrite\" or \"pass\"");
         out.rewrite_redirects = mode == "rewrite";
+    }
+    if (auto tt = t["tls"].as_table()) {
+        out.tls.verify = (*tt)["verify"].value_or(out.tls.verify);
+        out.tls.server_name = (*tt)["server_name"].value_or(out.tls.server_name);
+        if (auto ca = (*tt)["ca"].value<std::string>()) {
+            out.tls.ca_file = resolve(base_dir, *ca).string();
+            if (!fs::is_regular_file(out.tls.ca_file)) fail(where + ".tls.ca: file not found: " + out.tls.ca_file);
+        }
+    } else if (t.contains("tls")) {
+        fail(where + ".tls must be a table { verify, server_name, ca }");
     }
     out.upgrade = t["upgrade"].value_or(out.upgrade);
     if (auto v = t["tunnel_timeout"].value<std::int64_t>()) {
@@ -343,7 +353,7 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
     loc.proxy.configured = false;
     if (auto pt = t["proxy"].as_table()) {
         parse_fcgi_table(*pt, base_dir, loc.proxy, where + ".proxy");
-        parse_proxy_policy(*pt, loc.proxy, where + ".proxy");
+        parse_proxy_policy(*pt, base_dir, loc.proxy, where + ".proxy");
     } else if (t.contains("proxy")) {
         fail(where + ": 'proxy' must be a table");
     }
@@ -355,8 +365,15 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
     if (t.contains("upstream") && upstreams.empty()) fail(where + ".upstream: empty list");
     for (std::size_t i = 0; i < upstreams.size(); ++i) {
         std::string text = upstreams[i];
+        bool tls = false;
         if (text.starts_with("http://")) text = text.substr(7);
-        else if (text.starts_with("https://")) fail(where + ".upstream: TLS to the origin arrives with D4b");
+        else if (text.starts_with("https://")) {
+            text = text.substr(8);
+            tls = true;
+#ifndef AGENSIO_HAS_TLS
+            fail(where + ".upstream: https:// needs a build with TLS");
+#endif
+        }
         // A URI part ("http://host:port/" or ".../v1/") replaces the location's prefix
         // (nginx proxy_pass semantics); without one the target is forwarded as sent. Every
         // member of a group must agree on it.
@@ -374,6 +391,11 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
         UpstreamAddress a;
         std::string err;
         if (!parse_upstream_address(text, a, err)) fail(where + ".upstream: " + err);
+        if (tls) {
+            if (a.unix) fail(where + ".upstream: TLS over a unix socket is not supported");
+            a.tls = true;
+            a.key = "https://" + a.key;
+        }
         for (const auto& other : loc.proxy.addresses)
             if (other.key == a.key) fail(where + ".upstream: " + a.key + " listed twice");
         loc.proxy.addresses.push_back(std::move(a));
@@ -606,7 +628,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     site.proxy.options.max_idle = 64;
     if (auto pt = t["proxy"].as_table()) {
         parse_fcgi_table(*pt, base_dir, site.proxy, where + ".proxy");
-        parse_proxy_policy(*pt, site.proxy, where + ".proxy");
+        parse_proxy_policy(*pt, base_dir, site.proxy, where + ".proxy");
     } else if (t.contains("proxy")) {
         fail(where + ": 'proxy' must be a table");
     }
@@ -813,6 +835,12 @@ void explain_config(const Config& cfg, std::ostream& out) {
                     << "\"\nproxy.redirects = \"" << (loc.proxy.rewrite_redirects ? "rewrite" : "pass")
                     << "\"\nproxy.upgrade = " << (loc.proxy.upgrade ? "true" : "false")
                     << "\nproxy.tunnel_timeout = " << loc.proxy.tunnel_timeout_s << "\n";
+                for (const auto& a : loc.proxy.addresses)
+                    if (a.tls) {
+                        out << "proxy.tls = { verify = " << (loc.proxy.tls.verify ? "true" : "false") << ", server_name = \""
+                            << loc.proxy.tls.server_name << "\", ca = \"" << loc.proxy.tls.ca_file << "\" }\n";
+                        break;
+                    }
                 if (!loc.proxy.set_headers.empty()) {
                     out << "proxy.headers = {";
                     for (std::size_t i = 0; i < loc.proxy.set_headers.size(); ++i)

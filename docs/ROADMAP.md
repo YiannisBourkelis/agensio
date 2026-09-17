@@ -338,9 +338,15 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       back". Integration: alternation on one connection, failover with a dead member,
       the dead member marked down after max_fails, a POST retried after a refused
       connection. No weights or active checks.
-- [ ] D4b TLS to the origin (`https://` upstreams, verify on/off, SNI): needs a client
-      mode of `TlsStream` (connect state, verification against the system store) and
-      an `UpstreamConnection` that is plain or TLS behind the same read/write calls.
+- [x] D4b (2026-09-17) TLS to the origin: `TlsStream` became `BasicTlsStream<Socket>`
+      with a client mode (`set_client`: connect state, SNI, `SSL_set1_host` verification);
+      `UpstreamConnection` carries an optional TLS layer behind `async_read_some` /
+      `async_write` / `sock()`, so the exchange, the tunnel and the pool never know which;
+      `UpstreamPool::tls_context` builds one client context per verify/CA setup on first
+      use. `https://` upstreams get their own pool key; `proxy = { tls = { verify,
+      server_name, ca } }`. Integration against the suite's own HTTPS site: verify off,
+      verified with the bench CA and name, system-store verification failing with a 502
+      `tls_error`, keep-alive across requests.
 - [ ] D5 CGI handler: spawn a process per request with CGI/1.1 env and pipes, for legacy
       applications; async pipes via Asio; concurrency cap.
 - [ ] D6 Presets: `app = "proxy"` with `upstream = "http://127.0.0.1:3000"`; examples for

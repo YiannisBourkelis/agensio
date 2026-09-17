@@ -43,6 +43,8 @@ struct IsTlsStream : std::false_type {};
 #ifdef AGENSIO_HAS_TLS
 template <>
 struct IsTlsStream<TlsStream> : std::true_type {};
+template <class S>
+struct IsTlsStream<BasicTlsStream<S>> : std::true_type {};
 #endif
 
 template <class Socket, class Owner>

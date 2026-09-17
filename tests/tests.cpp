@@ -1192,12 +1192,22 @@ static void test_proxy() {
         write(name, text);
         try { load_config(dir / name); return false; } catch (const std::exception& e) { return std::string(e.what()).find(needle) != std::string::npos; }
     };
-    CHECK(refused("tls.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/\"\nupstream = \"https://127.0.0.1:9100\"\n", "D4"));
+    // TLS to the origin (D4b): https:// sets the flag and keeps the pool apart; the tls table.
+    std::ofstream(dir / "ca.pem") << "-----BEGIN CERTIFICATE-----\n";
+    write("tls.toml", "[[site]]\nlisten = [\"127.0.0.1:18097\"]\nroot = \"www\"\n[[site.location]]\npath = \"/\"\nupstream = \"https://127.0.0.1:9100\"\n"
+                      "proxy = { tls = { verify = false, server_name = \"origin.internal\", ca = \"ca.pem\" } }\n");
+    const Config tcfg = load_config(dir / "tls.toml");
+    const LocationConfig& tl = Router::location(tcfg.sites[0], "/");
+    CHECK(tl.proxy.address.tls && tl.proxy.address.key == "https://127.0.0.1:9100" && tl.proxy.address.port == 9100);
+    CHECK(!tl.proxy.tls.verify && tl.proxy.tls.server_name == "origin.internal" && tl.proxy.tls.ca_file == fs::canonical(dir / "ca.pem").string());
+    CHECK(refused("tlsunix.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/\"\nupstream = \"https://unix:/run/x.sock\"\n", "unix socket"));
+    CHECK(refused("tlsca.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/\"\nupstream = \"https://127.0.0.1:9100\"\nproxy = { tls = { ca = \"missing.pem\" } }\n", "file not found"));
     CHECK(refused("noup.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/\"\nhandler = \"proxy\"\n", "needs upstream"));
     CHECK(refused("name.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/\"\nupstream = \"http://origin:3000\"\n", "IP literal"));
     CHECK(api.proxy.rewrite.empty() && api.proxy.options.max_connections == 256 && api.proxy.options.max_idle == 64);
     write("rw.toml", "[[site]]\nlisten = [\"127.0.0.1:18097\"]\nroot = \"www\"\n[[site.location]]\npath = \"/api/\"\nupstream = \"http://127.0.0.1:9100/v1\"\n");
-    CHECK(Router::location(load_config(dir / "rw.toml").sites[0], "/api/x").proxy.rewrite == "/v1/");
+    const Config rwcfg = load_config(dir / "rw.toml");
+    CHECK(Router::location(rwcfg.sites[0], "/api/x").proxy.rewrite == "/v1/");
     CHECK(refused("rwexact.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/x\"\nmatch = \"exact\"\nupstream = \"http://127.0.0.1:9100/\"\n", "prefix location"));
 
     // The forwarded head: hop-by-hop dropped, Host kept, X-Forwarded-* set.
@@ -1265,14 +1275,16 @@ static void test_proxy() {
     // The policy keys through the loader, site defaults refined by the location.
     write("policy.toml", "[[site]]\nlisten = [\"127.0.0.1:18097\"]\nroot = \"www\"\nproxy = { forwarded = \"both\", hide = [\"X-Powered-By\"], headers = { \"X-A\" = \"1\" } }\n"
                          "[[site.location]]\npath = \"/\"\nupstream = \"http://127.0.0.1:9100\"\nproxy = { host = \"app.internal\", headers = { \"X-A\" = \"2\", \"X-B\" = \"$host\" }, redirects = \"pass\" }\n");
-    const LocationConfig& pl = Router::location(load_config(dir / "policy.toml").sites[0], "/");
+    const Config pcfg = load_config(dir / "policy.toml");  // keep the Config alive behind the reference
+    const LocationConfig& pl = Router::location(pcfg.sites[0], "/");
     CHECK(pl.proxy.forwarded == "both" && pl.proxy.host == "app.internal" && !pl.proxy.rewrite_redirects);
     CHECK(pl.proxy.hide.size() == 1 && pl.proxy.set_headers.size() == 2 && pl.proxy.set_headers[0].second == "2");
     CHECK(pl.proxy.options.keep_conn && pl.proxy.options.max_connections == 256);
     // Groups (D4): a list of origins, round-robin per worker, failures skipped for fail_timeout.
     write("group.toml", "[[site]]\nlisten = [\"127.0.0.1:18097\"]\nroot = \"www\"\n[[site.location]]\npath = \"/g/\"\n"
                         "upstream = [\"http://127.0.0.1:9107/\", \"http://127.0.0.1:9108/\", \"http://127.0.0.1:9109/\"]\nproxy = { max_fails = 2, fail_timeout = 0.2 }\n");
-    const LocationConfig& g = Router::location(load_config(dir / "group.toml").sites[0], "/g/x");
+    const Config gcfg = load_config(dir / "group.toml");
+    const LocationConfig& g = Router::location(gcfg.sites[0], "/g/x");
     CHECK(g.proxy.addresses.size() == 3 && g.proxy.address.key == "127.0.0.1:9107" && g.proxy.rewrite == "/" &&
           g.proxy.options.max_fails == 2 && g.proxy.options.fail_timeout.count() == 200);
     CHECK(refused("gmix.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/\"\nupstream = [\"http://127.0.0.1:9107/\", \"http://127.0.0.1:9108\"]\n", "same URI part"));

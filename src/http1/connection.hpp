@@ -131,7 +131,7 @@ public:
         if (!request_logged_ && stream_.request.length > 0) log_request();  // client went away mid-response
         tunnel_ = false;
         if (peer_) {
-            if (peer_->socket.is_open()) peer_->socket.close(ec);
+            if (peer_->sock().is_open()) peer_->sock().close(ec);
             peer_.reset();
         }
         writer_.reset();
@@ -411,7 +411,7 @@ private:
         body_pending_ = false;
         if (idle_s == 0) timer_.cancel();
         else rearm(std::chrono::seconds(idle_s));
-        peer_->socket.set_option(asio::ip::tcp::no_delay(true), tunnel_ec_);
+        peer_->sock().set_option(asio::ip::tcp::no_delay(true), tunnel_ec_);
         if (peer_->in.size() < 16 * 1024) peer_->in.resize(16 * 1024);
         // Client bytes after the request head (in_[0, in_len_)) and origin bytes after
         // the 101 head (peer_->in[0, in_len)) are forwarded before the pumps start reading.
@@ -434,7 +434,7 @@ private:
 
     void tunnel_write_peer(std::size_t n) {
         auto self = this->shared_from_this();
-        asio::async_write(peer_->socket, asio::buffer(in_.data(), n),
+        peer_->async_write(asio::buffer(in_.data(), n),
                           immediate([self](const asio::error_code& ec, std::size_t) {
                               if (!self->tunnel_) return;
                               if (ec) return self->close();
@@ -445,7 +445,7 @@ private:
 
     void tunnel_read_peer() {
         auto self = this->shared_from_this();
-        peer_->socket.async_read_some(asio::buffer(peer_->in.data(), peer_->in.size()),
+        peer_->async_read_some(asio::buffer(peer_->in.data(), peer_->in.size()),
                                       immediate([self](const asio::error_code& ec, std::size_t n) {
                                           if (!self->tunnel_) return;
                                           if (ec) return self->tunnel_peer_eof();
@@ -468,7 +468,7 @@ private:
     void tunnel_client_eof() {
         client_eof_ = true;
         if (peer_eof_) return close();
-        peer_->socket.shutdown(asio::socket_base::shutdown_send, tunnel_ec_);
+        peer_->sock().shutdown(asio::socket_base::shutdown_send, tunnel_ec_);
     }
 
     void tunnel_peer_eof() {

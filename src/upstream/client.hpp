@@ -39,13 +39,38 @@
 #include "core/body.hpp"
 #include "core/headers.hpp"
 #include "file.hpp"
+#include "tls_stream.hpp"
 #include "upstream/options.hpp"
 
 namespace agensio {
 
+// One connection to an upstream: a plain socket, or the same socket under a TLS stream
+// once start_tls() ran. I/O goes through async_read_some / async_write so the callers
+// never know which; socket-level calls (options, close, shutdown) use sock().
 struct UpstreamConnection {
+    using Socket = asio::generic::stream_protocol::socket;
     explicit UpstreamConnection(asio::io_context& ctx) : socket(ctx) {}
-    asio::generic::stream_protocol::socket socket;
+    Socket socket;
+#ifdef AGENSIO_HAS_TLS
+    std::unique_ptr<BasicTlsStream<Socket>> tls;
+    Socket& sock() noexcept { return tls ? tls->lowest_layer() : socket; }
+    template <class Buffers, class Handler>
+    void async_read_some(const Buffers& b, Handler&& h) {
+        if (tls) tls->async_read_some(b, std::forward<Handler>(h));
+        else socket.async_read_some(b, std::forward<Handler>(h));
+    }
+    template <class Buffers, class Handler>
+    void async_write(const Buffers& b, Handler&& h) {
+        if (tls) asio::async_write(*tls, b, std::forward<Handler>(h));
+        else asio::async_write(socket, b, std::forward<Handler>(h));
+    }
+#else
+    Socket& sock() noexcept { return socket; }
+    template <class Buffers, class Handler>
+    void async_read_some(const Buffers& b, Handler&& h) { socket.async_read_some(b, std::forward<Handler>(h)); }
+    template <class Buffers, class Handler>
+    void async_write(const Buffers& b, Handler&& h) { asio::async_write(socket, b, std::forward<Handler>(h)); }
+#endif
     std::vector<char> in;  // bytes read from the upstream, not yet consumed
     std::size_t in_len = 0;
     bool reused = false;   // came from the idle list (retry candidate on reset)
@@ -92,6 +117,11 @@ public:
                      std::size_t after, unsigned tried_mask);
     void mark_failure(const UpstreamAddress& a, const UpstreamOptions& opts, std::string& note);
     void mark_success(const UpstreamAddress& a, std::string& note);
+#ifdef AGENSIO_HAS_TLS
+    // One client context per distinct verify/CA setup, built on first use (system store or
+    // the configured bundle). Returns nullptr with `error` set when the CA cannot be loaded.
+    asio::ssl::context* tls_context(const TlsClientConfig& tc, std::string& error);
+#endif
 
 private:
     struct Waiter {
@@ -119,6 +149,9 @@ private:
     std::unordered_map<std::string, Upstream> upstreams_;
     std::unordered_map<std::string, Health> health_;
     std::unordered_map<const void*, unsigned> rotation_;  // round-robin position per group
+#ifdef AGENSIO_HAS_TLS
+    std::unordered_map<std::string, std::unique_ptr<asio::ssl::context>> tls_contexts_;
+#endif
     std::vector<UpstreamRequest*> watched_;  // exchanges with a deadline; swap-removed by index
     asio::steady_timer tick_;
     bool ticking_ = false;
@@ -155,7 +188,8 @@ public:
 
     // `group`: the addresses to try (a proxy group, or the one FastCGI socket); the first
     // pick is the pool's round-robin, failures before any response byte move to the next.
-    UpstreamRequest(UpstreamPool& pool, const std::vector<UpstreamAddress>& group, const UpstreamOptions& options);
+    UpstreamRequest(UpstreamPool& pool, const std::vector<UpstreamAddress>& group, const UpstreamOptions& options,
+                    const TlsClientConfig* tls = nullptr);
     virtual ~UpstreamRequest();
 
     // The address this exchange talked to (for logs).
@@ -227,6 +261,7 @@ private:
     enum class Phase { queued, connecting, sending, sending_body, receiving, finished, failed, cancelled };
 
     void connect();
+    void handshake();  // TLS to the origin, after connect; then send_head
     void quick_ack() noexcept;
     void send_head();
     void send_body_next();
@@ -243,6 +278,7 @@ private:
     bool try_next_address(UpstreamFailure why);  // another member of the group, when allowed
 
     UpstreamPool& pool_;
+    const TlsClientConfig* tls_ = nullptr;
     const std::vector<UpstreamAddress>* group_ = nullptr;
     std::size_t member_ = SIZE_MAX;   // index of address_ in the group
     unsigned tried_ = 0;              // bit per member tried in this exchange

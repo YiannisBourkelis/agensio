@@ -151,6 +151,20 @@ path = "/failover/"
 upstream = ["http://127.0.0.1:9199/", "http://127.0.0.1:9108/"]
 proxy = {{ max_fails = 2, fail_timeout = 30 }}
 
+[[site.location]]                       # D4b: TLS to an origin (this suite's own HTTPS site), self-signed
+path = "/tls/"
+upstream = "https://127.0.0.1:8443/"
+proxy = {{ tls = {{ verify = false }} }}
+
+[[site.location]]                       # D4b: verified against the bench CA with its name
+path = "/tlsverify/"
+upstream = "https://127.0.0.1:8443/"
+proxy = {{ tls = {{ ca = "{root}/bench/certs/cert.pem", server_name = "localhost" }} }}
+
+[[site.location]]                       # D4b: verification against the system store must fail
+path = "/tlsbad/"
+upstream = "https://127.0.0.1:8443/"
+
 [[site.location]]                       # D2: redirects passed through untouched
 path = "/raw/"
 upstream = "http://127.0.0.1:9107/"
@@ -182,7 +196,7 @@ code() { curl -sS -o /dev/null -w '%{http_code}' "$@"; }
 if command -v sha256sum >/dev/null; then sum() { sha256sum | cut -c1-16; }; else sum() { shasum -a 256 | cut -c1-16; }; fi
 # Debian's netcat-openbsd needs -q to exit after stdin EOF; macOS nc has no -q.
 if nc -h 2>&1 | grep -q -- '-q'; then ncq() { nc -q 1 "$@"; }; else ncq() { nc "$@"; }; fi
-BIG=$(sum < bench/www/big.bin); CSS=$(sum < bench/www/style.css); IDX=$(sum < bench/www/index.html)
+BIG=$(sum < bench/www/big.bin); CSS=$(sum < bench/www/style.css); IDX=$(sum < bench/www/index.html); IDXLEN=$(stat -c %s bench/www/index.html)
 
 for base in http://127.0.0.1:8080 https://127.0.0.1:8443; do
   p=${base%%:*}
@@ -449,6 +463,12 @@ if [ -n "$UP_PID" ]; then
   R=$(curl -sS -i $P/policy/redirect | tr -d '\r')
   check "proxy: hidden field dropped" "0" "$(echo "$R" | grep -c '^X-Powered-By:')"
   check "proxy: redirects = pass leaves Location alone" "Location: http://127.0.0.1:9107/json" "$(curl -sS -i $P/raw/redirect | tr -d '\r' | grep '^Location:')"
+  # TLS to the origin (D4b): the suite's HTTPS site is the origin; the body is the docroot's index.
+  check "proxy: https origin, verification off" "$IDX" "$(curl -sS $P/tls/ | sum)"
+  check "proxy: https origin verified against the configured CA and name" "$IDX" "$(curl -sS $P/tlsverify/ | sum)"
+  check "proxy: https origin failing verification is a 502" "502" "$(code $P/tlsbad/)"
+  check "proxy: tls_error logged with the hint" "yes" "$(grep -q 'https://127.0.0.1:8443 tls_error .*proxy.tls' bench/tmp/error.log && echo yes)"
+  check "proxy: https origin keeps its connection (one handshake for three requests)" "$IDX $IDX $IDX" "$(curl -sS $P/tls/ $P/tls/ $P/tls/ | (a=$(head -c $IDXLEN | sum); b=$(head -c $IDXLEN | sum); c=$(sum); echo "$a $b $c"))"
   # Groups (D4): one keep-alive client connection stays on one worker, whose rotation
   # alternates the members; the dead member of the failover group is tried, marked down
   # after max_fails, and then skipped; a POST is retried too (a connect failure sent nothing).

@@ -32,13 +32,14 @@
 
 namespace agensio {
 
-class TlsStream {
+template <class Socket>
+class BasicTlsStream {
 public:
-    using socket_type = asio::ip::tcp::socket;
+    using socket_type = Socket;
     using lowest_layer_type = socket_type;
     using executor_type = socket_type::executor_type;
 
-    TlsStream(socket_type&& socket, asio::ssl::context& ctx)
+    BasicTlsStream(socket_type&& socket, asio::ssl::context& ctx)
         : socket_(std::move(socket)), rbuf_(std::make_unique_for_overwrite<char[]>(kReadBufferSize)) {
         ssl_.reset(SSL_new(ctx.native_handle()));
         if (!ssl_) throw std::runtime_error("SSL_new failed");
@@ -53,7 +54,7 @@ public:
         SSL_set_accept_state(ssl_.get());
     }
 
-    TlsStream(TlsStream&& o) noexcept
+    BasicTlsStream(BasicTlsStream&& o) noexcept
         : socket_(std::move(o.socket_)),
           ssl_(std::move(o.ssl_)),
           rbio_(std::exchange(o.rbio_, nullptr)),
@@ -62,10 +63,23 @@ public:
           rlen_(o.rlen_) {
         if (rbio_) BIO_set_data(rbio_, this);  // the read BIO calls back into this object
     }
-    TlsStream& operator=(TlsStream&&) = delete;
-    TlsStream(const TlsStream&) = delete;
-    TlsStream& operator=(const TlsStream&) = delete;
-    ~TlsStream() = default;
+    BasicTlsStream& operator=(BasicTlsStream&&) = delete;
+    BasicTlsStream(const BasicTlsStream&) = delete;
+    BasicTlsStream& operator=(const BasicTlsStream&) = delete;
+    ~BasicTlsStream() = default;
+
+    // Client side (TLS to an origin): connect state, SNI and, when `verify`, the peer's
+    // certificate checked against the context's store and its name against `server_name`.
+    // Call before async_handshake.
+    bool set_client(const std::string& server_name, bool verify) noexcept {
+        SSL_set_connect_state(ssl_.get());
+        if (!server_name.empty() && SSL_set_tlsext_host_name(ssl_.get(), server_name.c_str()) != 1) return false;
+        if (verify) {
+            SSL_set_verify(ssl_.get(), SSL_VERIFY_PEER, nullptr);
+            if (!server_name.empty() && SSL_set1_host(ssl_.get(), server_name.c_str()) != 1) return false;
+        }
+        return true;
+    }
 
     lowest_layer_type& lowest_layer() noexcept { return socket_; }
     const lowest_layer_type& lowest_layer() const noexcept { return socket_; }
@@ -80,7 +94,7 @@ public:
         }
     }
 
-    // Server-side handshake. Handler: void(std::error_code).
+    // Handshake in the stream's current direction (accept by default). Handler: void(std::error_code).
     template <class Handler>
     void async_handshake(Handler&& handler) {
         do_handshake(std::forward<Handler>(handler));
@@ -245,7 +259,7 @@ private:
 
     // ---- custom read BIO over rbuf_ ----
     static int bio_read_ex(BIO* b, char* out, std::size_t len, std::size_t* readbytes) {
-        auto* self = static_cast<TlsStream*>(BIO_get_data(b));
+        auto* self = static_cast<BasicTlsStream*>(BIO_get_data(b));
         BIO_clear_retry_flags(b);
         const std::size_t avail = self->rlen_ - self->rpos_;
         if (avail == 0) {
@@ -266,7 +280,7 @@ private:
             case BIO_CTRL_EOF:
                 return 0;
             case BIO_CTRL_PENDING: {
-                auto* self = static_cast<TlsStream*>(BIO_get_data(b));
+                auto* self = static_cast<BasicTlsStream*>(BIO_get_data(b));
                 return static_cast<long>(self->rlen_ - self->rpos_);
             }
             default:
@@ -306,6 +320,8 @@ private:
     std::size_t rpos_ = 0;          // consumed
     std::size_t rlen_ = 0;          // filled
 };
+
+using TlsStream = BasicTlsStream<asio::ip::tcp::socket>;
 
 }  // namespace agensio
 

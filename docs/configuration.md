@@ -430,6 +430,14 @@ own with the location's limits; all members must share the URI part. Both events
 the error log: `marked down for 10 s after 3 failure(s)` and `is back`. No weights and no
 active health checks until a real deployment asks for them.
 
+**TLS to the origin.** `upstream = "https://10.0.0.11:8443"` talks TLS to the origin,
+keep-alive included, so a handshake is paid once per pooled connection rather than per
+request. The certificate is verified against the system store by default;
+`proxy = { tls = { ca = "/etc/ssl/internal-ca.pem", server_name = "app.internal" } }`
+names a private CA and the name to check (also sent as SNI; needed whenever the address is
+an IP literal), and `tls = { verify = false }` accepts anything, for a self-signed origin
+you control. A failed handshake or verification is a 502 logged as `tls_error`.
+
 **Target.** The client's request line is forwarded as sent. With a URI part on `upstream`
 (`http://host:port/` or `.../v1/`) the location's prefix is replaced by it, the way
 nginx's `proxy_pass` with a URI works; without one the path is untouched. Exact and
@@ -490,6 +498,7 @@ on a location.
 | `max_connections`, `queue_depth`, `queue_wait` | 256, 1024, 5 s | per worker: in flight, waiting, and the longest wait before a 503 with `Retry-After` |
 | `head_max` | 64 KB | an origin head larger than this is a 502 |
 | `max_fails`, `fail_timeout` | 3, 10 s | consecutive failures that mark a group member down, and for how long |
+| `tls` | verify on, system store | `{ verify, server_name, ca }` for `https://` origins |
 
 The pool is per worker, so an origin sees at most workers x `max_connections` connections
 and workers x `max_idle` idle ones. A GET or HEAD whose kept connection turns out dead is

@@ -15,6 +15,7 @@ namespace agensio {
 
 struct UpstreamAddress {
     bool unix = false;
+    bool tls = false;  // "https://": TLS to the origin (the key carries the scheme so pools stay apart)
     std::string path;  // unix socket path
     std::string host;  // IPv4/IPv6 literal
     std::uint16_t port = 0;
@@ -63,6 +64,14 @@ struct UpstreamOptions {
     std::chrono::milliseconds fail_timeout{10000};
 };
 
+// `proxy = { tls = { ... } }`: how TLS to an https:// origin is set up.
+struct TlsClientConfig {
+    bool verify = true;        // the origin's certificate against the store below
+    std::string server_name;   // SNI and the name checked (default: none; needed for verify with an IP literal)
+    std::string ca_file;       // a PEM bundle; "" = the system store
+    std::string key() const { return (verify ? "v:" : "n:") + ca_file; }  // one ssl::context per distinct setup
+};
+
 // A resolved `fastcgi = { ... }` / `php = { ... }` / `proxy = { ... }` table.
 struct UpstreamConfig {
     bool configured = false;  // a socket / upstream was given
@@ -95,6 +104,7 @@ struct UpstreamConfig {
     // default: nginx's 60 s read timeout dropping idle WebSockets is a classic complaint).
     bool upgrade = true;
     std::uint32_t tunnel_timeout_s = 0;
+    TlsClientConfig tls;
     std::string params_prefix;  // FastCGI: constant FCGI_PARAMS pairs of this location, encoded once at load
     std::string retry_after;    // "Retry-After" value for 503s (queue_wait in seconds)
 };
@@ -117,6 +127,7 @@ enum class UpstreamFailure : std::uint8_t {
     head_too_large,
     protocol_error,
     spill_error,             // temp file for a body could not be written
+    tls_error,               // handshake or certificate verification with an https:// origin failed
 };
 
 const char* to_string(UpstreamFailure f) noexcept;

@@ -228,7 +228,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   tunnels bytes both ways (`start_tunnel`, two pumps, half-close, idle timer reused with
   `tunnel_timeout`, none by default). Groups (D4): `upstream = [...]`, round-robin and
   passive health per worker in `UpstreamPool` (`pick`, `mark_failure`, `mark_success`),
-  next-member retry only when nothing binding was sent (`try_next_address`).
+  next-member retry only when nothing binding was sent (`try_next_address`). TLS to the
+  origin (D4b): `BasicTlsStream<Socket>` in client mode inside `UpstreamConnection`,
+  contexts cached per pool, `https://` in the pool key, `proxy.tls = { verify,
+  server_name, ca }`.
 - **Presets** (C3): `app = "laravel" | "wordpress" | "php" | "static"` on a site expands
   at load into root, index, try_files and locations (Laravel: only `/index.php` is ever
   executed, `/build/` gets an immutable Cache-Control via `add_headers`; WordPress: any

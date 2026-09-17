@@ -150,7 +150,7 @@ std::shared_ptr<UpstreamRequest> ProxyHandler::start(Stream& s, const LocationCo
         target = rewritten;
     }
     const bool upgrading = build_head(ws.scratch, s, target, loc.proxy);
-    x->req = std::make_shared<HttpRequest>(pool, loc.proxy.addresses, opts);
+    x->req = std::make_shared<HttpRequest>(pool, loc.proxy.addresses, opts, &loc.proxy.tls);
     // The head text is handed to the request as an owned string: collecting the body may
     // run the connection's reads inline, and ws.scratch belongs to whoever runs next.
     std::string head = ws.scratch;
@@ -196,6 +196,9 @@ void ProxyHandler::finish(Exchange& x, UpstreamResult& res) {
             case UpstreamFailure::read_timeout:
                 msg += ": no bytes from the origin for " + std::to_string(loc.proxy.options.read_timeout.count() / 1000) +
                        " s (proxy.read_timeout)";
+                break;
+            case UpstreamFailure::tls_error:
+                msg += ": TLS handshake or certificate verification failed (proxy.tls: verify, server_name, ca)";
                 break;
             default: break;
         }
