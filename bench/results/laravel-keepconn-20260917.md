@@ -41,3 +41,15 @@ Findings:
   php-fpm child, so `max_connections` per worker times the worker count must not exceed
   `pm.max_children` (here 1 worker x 8 = 8 children). That sizing belongs to the per-site
   pools of C3b, which will turn it on for the pools they generate.
+
+## Rerun after D1 (shared exchange class: per-pool deadline tick instead of a timer per phase, inline completions)
+
+| pool transport | agensio options | / (78 KB) req/s | / web us/req | /json req/s | /json web us/req | file |
+|---|---|---|---|---|---|---|
+| unix socket | defaults | 3669 | 46.6 (was 51.0) | 3746 | 25.6 (was 26.2) | 181754 |
+| unix socket | `keep_conn = true, max_connections = 8` | 3761 | 45.4 (was 45.4) | 3876 | 23.0 (was 25.1) | 181823 |
+| TCP via docker-proxy | defaults | 3351 | 86.8 (was 85-86) | 3495 | 56.0 (was 54-55) | 181853 |
+
+The FastCGI path gained 2-9 % on the unix-socket rows and nothing measurable through
+docker-proxy: its cost is the connect per request (fresh connections) and the userland
+proxy, not the timers. Single rounds; the bench's noise is about 3 %.

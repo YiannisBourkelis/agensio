@@ -1,5 +1,7 @@
 #include "handlers/fastcgi.hpp"
 
+#include "handlers/upstream_common.hpp"
+
 #include <cstring>
 #include <sys/stat.h>
 #ifndef _WIN32
@@ -29,15 +31,7 @@ struct FcgiHandler::Exchange : std::enable_shared_from_this<Exchange> {
 };
 
 void FcgiHandler::error(Stream& s, int status, std::string_view retry_after) {
-    Response& r = s.response;
-    r.reset();
-    const ErrorPage& page = error_page(status);
-    r.status = status;
-    r.keep_alive = s.request.keep_alive;
-    r.head = s.request.method == Method::head;
-    r.prebuilt_headers = page.headers;
-    if (!retry_after.empty()) r.headers.add("Retry-After", retry_after);
-    r.body = MemoryBody{page.body};
+    upstream_error(s, status, retry_after);
 }
 
 namespace {
@@ -192,43 +186,16 @@ std::shared_ptr<FcgiRequest> FcgiHandler::start(Stream& s, const SiteConfig& sit
         return x->completed ? nullptr : x->req;
     }
     // Collect the body first: memory up to request_buffer_max, then a temp file. Bounded by
-    // server.max_body_size in the connection.
-    x->chunk.resize(64 * 1024);
-    struct Reader {
-        static void step(std::shared_ptr<Exchange> x, std::size_t memory_max, std::function<void(bool)> launch) {
-            StreamBody* src = x->stream->request.body;
-            src->async_read(x->chunk.data(), x->chunk.size(),
-                            [x, memory_max, launch = std::move(launch)](std::error_code ec, std::size_t n) mutable {
-                                if (ec) return;  // the connection closed itself; nothing to answer
-                                if (n == 0) {
-                                    launch(true);
-                                    return;
-                                }
-                                x->body.size += n;
-                                if (x->body.spill.is_open() || x->body.memory.size() + n > memory_max) {
-                                    if (!x->body.spill.is_open()) x->body.spill = File::temporary();
-                                    if (!x->body.spill.is_open() || !x->body.spill.append(x->chunk.data(), n)) {
-                                        // Cannot spool the body: answer 502 spill_error.
-                                        FcgiResult r;
-                                        r.failure = FcgiFailure::spill_error;
-                                        r.error = std::error_code(errno, std::generic_category());
-                                        x->req.reset();
-                                        launch = nullptr;
-                                        FcgiHandler::error(*x->stream, 502);
-                                        x->stream->response.upstream = "fastcgi:spill_error";
-                                        x->completed = true;
-                                        x->done();
-                                        return;
-                                    }
-                                } else {
-                                    x->body.memory.append(x->chunk.data(), n);
-                                }
-                                step(x, memory_max, std::move(launch));
-                            });
+    // server.max_body_size in the connection. `launch` may run inline when the body was
+    // already buffered; a spill failure was answered (502) by the collector.
+    collect_request_body(s, x->body, opts.request_buffer_max, x->chunk, x, [x, launch](bool ok) {
+        if (ok) launch(true);
+        else {
+            x->req.reset();
+            x->completed = true;
+            x->done();
         }
-    };
-    Reader::step(x, opts.request_buffer_max, launch);
-    // The body may have been entirely buffered already, in which case launch ran inline.
+    });
     return x->completed ? nullptr : x->req;
 }
 
@@ -263,7 +230,7 @@ void FcgiHandler::log_failure(const Exchange& x, const FcgiResult& res) {
             msg += ": php-fpm could not open SCRIPT_FILENAME " + x.script +
                    "; check the fpm pool's user can read it and that chroot/open_basedir allow it";
             break;
-        case FcgiFailure::child_closed_early:
+        case FcgiFailure::closed_early:
             if (res.head_bytes == 0)
                 msg += ": the connection closed before any byte of the response arrived "
                        "(child crashed or fpm reloaded)";
@@ -313,41 +280,8 @@ void FcgiHandler::finish(Exchange& x, FcgiResult& res) {
         return;
     }
     if (res.failure == FcgiFailure::primary_script_unknown) log_failure(x, res);
-    r.reset();
-    r.status = res.status;
-    r.keep_alive = s.request.keep_alive;
-    r.head = s.request.method == Method::head;
-    r.upstream = to_string(res.failure);  // "ok" or "primary_script_unknown"
-    // Head: every upstream field except the ones the writer owns (framing, connection).
-    const bool no_body_status = res.status == 204 || res.status == 304 || res.status < 200;
-    const bool streaming = res.streamed;  // buffering off, or the temp-file cap switched it mid-response
-    r.scratch.reserve(res.head.size() + 64);
-    for (const HeaderField& h : res.headers) {
-        if (Headers::iequals(h.name, "content-length") || Headers::iequals(h.name, "transfer-encoding") ||
-            Headers::iequals(h.name, "connection") || Headers::iequals(h.name, "keep-alive"))
-            continue;
-        r.scratch.append(h.name).append(": ").append(h.value).append("\r\n");
-    }
-    if (streaming) {
-        r.prebuilt_headers = r.scratch;  // the writer adds Content-Length or chunked framing
-        if (!no_body_status) r.body = x.req->body_source();
-    } else {
-        if (!no_body_status) {
-            r.scratch.append("Content-Length: ");
-            append_number(r.scratch, res.body_size);
-            r.scratch.append("\r\n");
-        }
-        r.prebuilt_headers = r.scratch;
-        if (!no_body_status) {
-            if (res.spill.is_open()) {
-                r.owned_file = std::move(res.spill);
-                r.body = FileBody{&r.owned_file, res.body_size, 0};
-            } else {
-                r.buffer = std::move(res.body);
-                r.body = MemoryBody{std::string_view(r.buffer)};
-            }
-        }
-    }
+    apply_upstream_result(s, res, res.streamed ? x.req->body_source() : nullptr,
+                          to_string(res.failure));  // "ok" or "primary_script_unknown"
     x.completed = true;
     x.done();
 }

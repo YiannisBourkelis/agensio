@@ -50,7 +50,8 @@ Server::Server(Config cfg)
       cache_(cfg_.cache_max_file_size, cfg_.cache_max_size, cfg_.cache_evict_fraction, cfg_.cache_max_open_files),
       handler_(cfg_, cache_),
       fcgi_handler_(cfg_, error_log_),
-      dispatcher_(handler_, fcgi_handler_) {
+      proxy_handler_(cfg_, error_log_),
+      dispatcher_(handler_, fcgi_handler_, proxy_handler_) {
     open_logs();
     warm_response_tables();
     build_listeners();

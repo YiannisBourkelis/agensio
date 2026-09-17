@@ -1,0 +1,6 @@
+base 1 http / 64 1.94 513600.52
+base 1 http /style.css 64 5.60 178512.90
+base 1 https / 64 2.91 344086.80
+base 1 https /style.css 64 19.70 50771.92
+base 1 http /big.bin 16 324.42 3082.51
+base 1 https /big.bin 16 2056.77 485.92

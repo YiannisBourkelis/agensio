@@ -1,0 +1,19 @@
+# agensio as a reverse proxy in front of the benchmark upstream (bench/proxy/run.sh):
+# one worker, no logs, the same shape as the nginx and Caddy configurations it generates.
+[server]
+workers = 1
+idle_timeout = 65
+max_requests_per_connection = 1000000
+
+[log]
+access = "off"
+error = "stderr"
+
+[[site]]
+server_name = ["*"]
+listen = ["127.0.0.1:8093"]
+root = "../www"
+
+[[site.location]]
+path = "/"
+upstream = "http://127.0.0.1:9100"

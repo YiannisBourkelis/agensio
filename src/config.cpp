@@ -284,7 +284,36 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
     loc.symlinks_deny = symlinks_deny_of(t["symlinks"], site.symlinks_deny, where);
     if (auto ht = t["add_headers"].as_table()) loc.add_headers = headers_of(ht, where);
     else if (t.contains("add_headers")) fail(where + ": 'add_headers' must be a table");
-    loc.handler = to_lower(t["handler"].value_or(std::string("static")));
+    // `upstream = "http://host:port"` (or unix:/path) makes a proxy location; `proxy = { ... }`
+    // carries the options (the same keys as php/fastcgi) and may name the upstream too.
+    // Proxy defaults: keep-alive to the origin, and pool bounds sized for a front-end
+    // (per worker: 256 in flight, 1024 waiting, 64 idle kept), not for php-fpm children.
+    loc.proxy.options.keep_conn = true;
+    loc.proxy.options.max_connections = 256;
+    loc.proxy.options.queue_depth = 1024;
+    loc.proxy.options.max_idle = 64;
+    if (auto pt = t["proxy"].as_table()) parse_fcgi_table(*pt, base_dir, loc.proxy, where + ".proxy");
+    else if (t.contains("proxy")) fail(where + ": 'proxy' must be a table");
+    if (auto up = t["upstream"].value<std::string>()) {
+        std::string text = *up;
+        if (text.starts_with("http://")) text = text.substr(7);
+        else if (text.starts_with("https://")) fail(where + ".upstream: TLS to the origin arrives with D4");
+        // A URI part ("http://host:port/" or ".../v1/") replaces the location's prefix
+        // (nginx proxy_pass semantics); without one the target is forwarded as sent.
+        if (!text.starts_with("unix:")) {
+            if (const std::size_t slash = text.find('/'); slash != std::string::npos) {
+                loc.proxy.rewrite = text.substr(slash);
+                text.resize(slash);
+                if (loc.exact || loc.suffix) fail(where + ".upstream: a URI part needs a prefix location");
+                if (loc.proxy.rewrite.back() != '/') loc.proxy.rewrite += '/';
+            }
+        }
+        std::string err;
+        if (!parse_upstream_address(text, loc.proxy.address, err)) fail(where + ".upstream: " + err);
+        loc.proxy.configured = true;
+    }
+    if (loc.proxy.configured && !t.contains("handler")) loc.handler = "proxy";
+    else loc.handler = to_lower(t["handler"].value_or(std::string("static")));
     if (loc.handler == "static") {
         loc.kind = HandlerKind::static_;
     } else if (loc.handler == "fastcgi") {
@@ -297,8 +326,14 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
         loc.methods = kFcgiMethods;
         loc.allow = allow_header(kFcgiMethods);
         loc.priority = t["priority"].value_or(false);
+    } else if (loc.handler == "proxy") {
+        loc.kind = HandlerKind::proxy;
+        if (!loc.proxy.configured) fail(where + ": handler \"proxy\" needs upstream = \"http://host:port\"");
+        loc.methods = kFcgiMethods;  // every method an application may see
+        loc.allow = allow_header(kFcgiMethods);
+        loc.priority = t["priority"].value_or(false);
     } else {
-        fail(where + ": handler \"" + loc.handler + "\" is not available yet (\"static\" or \"fastcgi\")");
+        fail(where + ": handler \"" + loc.handler + "\" is not available (\"static\", \"fastcgi\" or \"proxy\")");
     }
     if (loc.kind == HandlerKind::fastcgi) loc.fastcgi.params_prefix = FcgiHandler::prebuild_params(site, loc);
     if (t.contains("methods")) {
@@ -684,6 +719,10 @@ void explain_config(const Config& cfg, std::ostream& out) {
             print_try_files(out, loc.try_files);
             out << "handler = \"" << loc.handler << "\"\n";
             if (loc.kind == HandlerKind::fastcgi) print_fcgi(out, "fastcgi", loc.fastcgi);
+            if (loc.kind == HandlerKind::proxy) {
+                out << "upstream = \"" << loc.proxy.address.key << loc.proxy.rewrite << "\"\n";
+                print_fcgi(out, "proxy", loc.proxy);
+            }
             if (loc.priority) out << "priority = true\n";
             out << "methods = \"" << loc.allow << "\"\n";
             out << "hidden_files = " << (loc.hidden_files ? "true" : "false") << "\nsymlinks = \""
@@ -867,12 +906,13 @@ Config load_config(const fs::path& path) {
     std::map<std::string, PoolBounds> pools;
     for (const auto& site : cfg.sites)
         for (const auto& loc : site.locations) {
-            if (loc.kind != HandlerKind::fastcgi) continue;
-            const FcgiOptions& o = loc.fastcgi.options;
+            if (loc.kind == HandlerKind::static_) continue;
+            const UpstreamConfig& up = loc.kind == HandlerKind::fastcgi ? loc.fastcgi : loc.proxy;
+            const FcgiOptions& o = up.options;
             const std::string where = site.server_names.front() + " location '" + loc.path + "'";
-            auto it = pools.find(loc.fastcgi.address.key);
+            auto it = pools.find(up.address.key);
             if (it == pools.end()) {
-                pools.emplace(loc.fastcgi.address.key, PoolBounds{&o, where});
+                pools.emplace(up.address.key, PoolBounds{&o, where});
                 continue;
             }
             const FcgiOptions& f = *it->second.opts;
@@ -881,7 +921,7 @@ Config load_config(const fs::path& path) {
                 o.max_idle != f.max_idle || o.keep_conn != f.keep_conn)
                 fail(where + ": pool limits (max_connections, queue_depth, queue_wait, priority_reserve, "
                              "max_idle, keep_conn) for upstream " +
-                     loc.fastcgi.address.key + " differ from " + it->second.where +
+                     up.address.key + " differ from " + it->second.where +
                      "; the pool is per upstream, set them once (site-level php = {...})");
         }
 

@@ -6,6 +6,7 @@
 //   /slow?ms=N      the JSON answer after N ms: a working application, connection pools
 //   /chunked        the JSON body in three chunks: the proxy's chunked decoder
 //   /close          the JSON answer with Connection: close: reconnects
+//   /echo           the request body back (Content-Type: application/octet-stream): body forwarding
 //   /stats          {"connections":N,"requests":M} accepted so far: proves pool reuse
 // Build: target agensio_upstream. Run: agensio_upstream [-p 9100] [-w 1] [-b 102400].
 #include <asio.hpp>
@@ -90,9 +91,46 @@ private:
             }
             pos = eol + 2;
         }
-        // A request body is not part of the benchmark; skip it (it arrived with the head or
-        // will be read and dropped before the next request).
         consumed_ = request.size();
+        bool chunked = false;
+        {
+            std::size_t p2 = request.find("\r\n") + 2;
+            while (p2 < request.size() - 2) {
+                const std::size_t eol = request.find("\r\n", p2);
+                const std::string_view line = request.substr(p2, eol - p2);
+                if (line.size() > 18 && iequals(line.substr(0, 18), "transfer-encoding:") &&
+                    line.find("chunked") != std::string_view::npos)
+                    chunked = true;
+                p2 = eol + 2;
+            }
+        }
+        if (target.substr(0, target.find('?')) == "/echo" && chunked) {
+            // Chunked request body: decode what is here, read the rest.
+            echo_.clear();
+            echo_close_ = close;
+            echo_chunked_ = true;
+            chunk_left_ = 0;
+            chunk_done_ = false;
+            decode_chunks();
+            if (chunk_done_) return send_echo(close);
+            return read_echo_chunked();
+        }
+        if (target.substr(0, target.find('?')) == "/echo") {
+            // Keep the body: wait for all of it, then send it back.
+            const std::size_t have = len_ - consumed_;
+            if (have < body) {
+                echo_want_ = body;
+                echo_close_ = close;
+                echo_.assign(buf_.data() + consumed_, have);
+                consumed_ = len_;
+                return read_echo();
+            }
+            echo_.assign(buf_.data() + consumed_, body);
+            consumed_ += body;
+            return send_echo(close);
+        }
+        // Any other request body is not part of the benchmark; skip it (it arrived with the
+        // head or will be read and dropped before the next request).
         if (body > 0) {
             const std::size_t have = len_ - consumed_;
             if (have < body) {
@@ -137,6 +175,69 @@ private:
         head_ = "HTTP/1.1 404 Not Found\r\nServer: upstream\r\nContent-Type: application/json\r\nContent-Length: " +
                 std::to_string(nf.size()) + (close ? "\r\nConnection: close\r\n\r\n" : "\r\n\r\n");
         write(nf, close);
+    }
+
+    void read_echo() {
+        auto self = shared_from_this();
+        const std::size_t want = std::min(echo_want_ - echo_.size(), buf_.size());
+        socket_.async_read_some(asio::buffer(buf_.data(), want), [self](const asio::error_code& ec, std::size_t n) {
+            if (ec) return self->close();
+            self->echo_.append(self->buf_.data(), n);
+            self->len_ = self->consumed_ = 0;
+            if (self->echo_.size() < self->echo_want_) return self->read_echo();
+            self->send_echo(self->echo_close_);
+        });
+    }
+    // Minimal chunked decoder over buf_[consumed_, len_): hex size line, data, CRLF, 0 ends.
+    void decode_chunks() {
+        for (;;) {
+            std::string_view in(buf_.data() + consumed_, len_ - consumed_);
+            if (chunk_left_ == 0) {
+                const std::size_t eol = in.find("\r\n");
+                if (eol == std::string_view::npos) return;
+                std::size_t size = 0;
+                std::from_chars(in.data(), in.data() + eol, size, 16);
+                consumed_ += eol + 2;
+                if (size == 0) {  // last chunk: skip the trailer's CRLF when present
+                    in = std::string_view(buf_.data() + consumed_, len_ - consumed_);
+                    if (in.starts_with("\r\n")) consumed_ += 2;
+                    chunk_done_ = true;
+                    return;
+                }
+                chunk_left_ = size + 2;  // data + CRLF
+                continue;
+            }
+            const std::size_t take = std::min(chunk_left_, in.size());
+            if (take == 0) return;
+            const std::size_t data = chunk_left_ > 2 ? std::min(take, chunk_left_ - 2) : 0;
+            echo_.append(in.data(), data);
+            consumed_ += take;
+            chunk_left_ -= take;
+        }
+    }
+    void read_echo_chunked() {
+        if (consumed_ > 0 && consumed_ < len_) std::memmove(buf_.data(), buf_.data() + consumed_, len_ - consumed_);
+        len_ -= consumed_;
+        consumed_ = 0;
+        auto self = shared_from_this();
+        socket_.async_read_some(asio::buffer(buf_.data() + len_, buf_.size() - len_),
+                                [self](const asio::error_code& ec, std::size_t n) {
+                                    if (ec) return self->close();
+                                    self->len_ += n;
+                                    self->decode_chunks();
+                                    if (self->chunk_done_) {
+                                        self->echo_chunked_ = false;
+                                        return self->send_echo(self->echo_close_);
+                                    }
+                                    self->read_echo_chunked();
+                                });
+    }
+
+    void send_echo(bool close) {
+        g_requests.fetch_add(1, std::memory_order_relaxed);
+        head_ = "HTTP/1.1 200 OK\r\nServer: upstream\r\nContent-Type: application/octet-stream\r\nContent-Length: " +
+                std::to_string(echo_.size()) + (close ? "\r\nConnection: close\r\n\r\n" : "\r\n\r\n");
+        write(echo_, close);
     }
 
     void send(std::string h, std::string_view body, bool close) {
@@ -186,6 +287,12 @@ private:
     std::size_t skip_ = 0;
     std::string head_;
     std::string stats_;
+    std::string echo_;
+    std::size_t echo_want_ = 0;
+    bool echo_close_ = false;
+    bool echo_chunked_ = false;
+    std::size_t chunk_left_ = 0;
+    bool chunk_done_ = false;
 };
 
 void accept_loop(asio::ip::tcp::acceptor& acc) {

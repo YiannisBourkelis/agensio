@@ -13,6 +13,8 @@ tcp_nodelay = true
 sendfile = true          # zero-copy streaming of files above cache.max_file_size (plain HTTP)
 sendfile_max_chunk = "1MB" # bytes per sendfile() call (measured: one 10 MB call costs 6x more kernel time)
 server_header = "agensio"
+# Reverse proxy (docs/configuration.md section 12): on a location, `upstream = "http://127.0.0.1:3000"`
+# forwards everything under it; `proxy = { buffering = false, read_timeout = 3600 }` for streams.
 # Hosting, one user per site (docs/configuration.md section 11): `user = "web1"` on a site
 # derives a php-fpm pool that `agensio pools` writes; `user`/`group` are what agensio runs
 # as: started as root it binds, opens the logs and then becomes that user.

@@ -14,6 +14,8 @@
 #include "http1/chunked.hpp"
 #include "config.hpp"
 #include "services/pools.hpp"
+#include "upstream/http_head.hpp"
+#include "handlers/proxy.hpp"
 #include "core/headers.hpp"
 #include "core/result.hpp"
 #include "core/router.hpp"
@@ -26,7 +28,7 @@
 #include "path.hpp"
 #include "services/log.hpp"
 #include "upstream/fcgi.hpp"
-#include "upstream/fcgi_options.hpp"
+#include "upstream/options.hpp"
 
 using namespace agensio;
 
@@ -904,7 +906,7 @@ static void test_config_locations() {
     CHECK(!parse_fcgi_address("127.0.0.1:0", a, err));
     CHECK(!parse_fcgi_address("relative.sock", a, err));
     CHECK(status_for(FcgiFailure::pool_saturated) == 503 && status_for(FcgiFailure::read_timeout) == 504 &&
-          status_for(FcgiFailure::child_closed_early) == 502);
+          status_for(FcgiFailure::closed_early) == 502);
     CHECK(rejects("bad10.toml", "[log]\nlevel = \"debug\"\n" + head));
     write("off.toml", "[log]\naccess = \"x.log\"\n" + head + "access_log = \"off\"\n");
     CHECK(load_config(dir / "off.toml").sites[0].access_log.empty());
@@ -1154,6 +1156,75 @@ static void test_hosting_rules() {
     fs::remove_all(dir);
 }
 
+// D1: the HTTP response-head parser and the proxy location.
+static void test_proxy() {
+    namespace fs = std::filesystem;
+    using http::HeadStatus;
+    http::ResponseHead h;
+    CHECK(http::parse_response_head("HTTP/1.1 200 OK\r\nContent-Length: 3\r\nX-A: b\r\n\r\nabc", h) == HeadStatus::complete);
+    CHECK(h.status == 200 && h.version_minor == 1 && h.length == 46 && h.headers.get("x-a") == "b");
+    CHECK(http::parse_response_head("HTTP/1.0 404\r\n\r\n", h) == HeadStatus::complete && h.version_minor == 0 && h.status == 404);
+    CHECK(http::parse_response_head("HTTP/1.1 200 OK\r\nContent-Len", h) == HeadStatus::incomplete);
+    CHECK(http::parse_response_head("HTTP/2 200\r\n\r\n", h) == HeadStatus::error);
+    CHECK(http::parse_response_head("HTTP/1.1 99 x\r\n\r\n", h) == HeadStatus::error);
+    CHECK(http::parse_response_head("HTTP/1.1 200 OK\r\nBad Name: 1\r\n\r\n", h) == HeadStatus::error);
+    CHECK(http::parse_response_head("HTTP/1.1 200 OK\r\nX: a\nb\r\n\r\n", h) == HeadStatus::error);  // bare LF
+    CHECK(http::parse_response_head("HTTP/1.1 200 OK\r\nX: a\x01\r\n\r\n", h) == HeadStatus::error);
+    CHECK(http::connection_lists("close", "close") && http::connection_lists("keep-alive, X-Custom", "x-custom") &&
+          !http::connection_lists("keep-alive", "close"));
+    CHECK(http::is_hop_by_hop("Transfer-Encoding") && http::is_hop_by_hop("connection") && !http::is_hop_by_hop("Host"));
+
+    const fs::path dir = fs::temp_directory_path() / ("agensio-proxy-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "www");
+    auto write = [&](const char* name, const std::string& text) { std::ofstream(dir / name) << text; };
+    write("p.toml", "[[site]]\nlisten = [\"127.0.0.1:18097\"]\nroot = \"www\"\n"
+                    "[[site.location]]\npath = \"/api/\"\nupstream = \"http://127.0.0.1:9100\"\nproxy = { buffering = false, read_timeout = 2 }\n"
+                    "[[site.location]]\npath = \"/sock/\"\nupstream = \"unix:/run/app.sock\"\n");
+    Config cfg = load_config(dir / "p.toml");
+    const LocationConfig& api = Router::location(cfg.sites[0], "/api/x");
+    CHECK(api.kind == HandlerKind::proxy && api.handler == "proxy" && api.proxy.address.key == "127.0.0.1:9100");
+    CHECK(api.proxy.options.keep_conn && !api.proxy.options.buffering && api.proxy.options.read_timeout.count() == 2000);
+    CHECK((api.methods & method_bit(Method::post)) != 0);
+    CHECK(Router::location(cfg.sites[0], "/sock/").proxy.address.unix);
+    CHECK(Router::location(cfg.sites[0], "/").kind == HandlerKind::static_);
+    auto refused = [&](const char* name, const std::string& text, const char* needle) {
+        write(name, text);
+        try { load_config(dir / name); return false; } catch (const std::exception& e) { return std::string(e.what()).find(needle) != std::string::npos; }
+    };
+    CHECK(refused("tls.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/\"\nupstream = \"https://127.0.0.1:9100\"\n", "D4"));
+    CHECK(refused("noup.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/\"\nhandler = \"proxy\"\n", "needs upstream"));
+    CHECK(refused("name.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/\"\nupstream = \"http://origin:3000\"\n", "IP literal"));
+    CHECK(api.proxy.rewrite.empty() && api.proxy.options.max_connections == 256 && api.proxy.options.max_idle == 64);
+    write("rw.toml", "[[site]]\nlisten = [\"127.0.0.1:18097\"]\nroot = \"www\"\n[[site.location]]\npath = \"/api/\"\nupstream = \"http://127.0.0.1:9100/v1\"\n");
+    CHECK(Router::location(load_config(dir / "rw.toml").sites[0], "/api/x").proxy.rewrite == "/v1/");
+    CHECK(refused("rwexact.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/x\"\nmatch = \"exact\"\nupstream = \"http://127.0.0.1:9100/\"\n", "prefix location"));
+
+    // The forwarded head: hop-by-hop dropped, Host kept, X-Forwarded-* set.
+    Stream st;
+    st.request.method = Method::post;
+    st.request.method_name = "POST";
+    st.request.target = "/api/x?y=1";
+    st.request.host = "app.example.com";
+    st.request.headers.add("Host", "app.example.com");
+    st.request.headers.add("Connection", "keep-alive, X-Drop");
+    st.request.headers.add("X-Drop", "1");
+    st.request.headers.add("Transfer-Encoding", "chunked");
+    st.request.headers.add("Content-Length", "5");
+    st.request.headers.add("X-Forwarded-For", "10.0.0.1");
+    st.request.headers.add("Accept", "*/*");
+    st.conn.remote_address = "192.0.2.7";
+    st.conn.tls = true;
+    std::string head;
+    ProxyHandler::build_head(head, st, st.request.target);
+    CHECK(head.starts_with("POST /api/x?y=1 HTTP/1.1\r\n"));
+    CHECK(head.find("Host: app.example.com\r\n") != std::string::npos && head.find("Accept: */*\r\n") != std::string::npos);
+    CHECK(head.find("X-Drop") == std::string::npos && head.find("Transfer-Encoding") == std::string::npos &&
+          head.find("Content-Length") == std::string::npos && head.find("Connection:") == std::string::npos);
+    CHECK(head.find("X-Forwarded-For: 10.0.0.1, 192.0.2.7\r\n") != std::string::npos);
+    CHECK(head.find("X-Forwarded-Proto: https\r\n") != std::string::npos && head.find("X-Forwarded-Host: app.example.com\r\n") != std::string::npos);
+    fs::remove_all(dir);
+}
+
 int main() {
     test_path();
     test_parser();
@@ -1175,6 +1246,7 @@ int main() {
     test_fcgi_codec();
     test_pools();
     test_hosting_rules();
+    test_proxy();
     if (failures) {
         std::printf("%d failure(s)\n", failures);
         return 1;

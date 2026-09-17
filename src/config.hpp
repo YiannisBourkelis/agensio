@@ -12,11 +12,11 @@
 
 #include "core/request.hpp"
 #include "net/cidr.hpp"
-#include "upstream/fcgi_options.hpp"
+#include "upstream/options.hpp"
 
 namespace agensio {
 
-enum class HandlerKind : std::uint8_t { static_, fastcgi };
+enum class HandlerKind : std::uint8_t { static_, fastcgi, proxy };
 
 struct TlsConfig {
     std::filesystem::path cert;
@@ -55,6 +55,7 @@ struct LocationConfig {
     std::vector<std::pair<std::string, std::string>> add_headers;  // response fields added on 200/304
     std::string origin;  // "" when configured by hand, else the preset that generated it (explain)
     FcgiConfig fastcgi;                        // handler = "fastcgi": upstream and options
+    UpstreamConfig proxy;                      // handler = "proxy": the origin (`upstream = "http://..."`) and options
     bool priority = false;                     // may use the pool slots reserved by priority_reserve
     MethodSet methods = kStaticMethods;      // what the handler serves here (`methods = [...]` narrows it)
     std::string allow = "GET, HEAD, OPTIONS";  // Allow header for 405 and OPTIONS

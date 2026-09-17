@@ -18,6 +18,7 @@
 #include "core/worker_state.hpp"
 #include "handlers/dispatch.hpp"
 #include "handlers/fastcgi.hpp"
+#include "handlers/proxy.hpp"
 #include "handlers/static.hpp"
 #include "services/log.hpp"
 #include "upstream/fcgi_client.hpp"
@@ -30,7 +31,7 @@ struct Worker {
     asio::io_context ctx{1};  // concurrency hint 1: single thread, no internal locking
     WorkerState state;
     asio::steady_timer flush_timer{ctx};  // access log buffers, once per second
-    FcgiPool fcgi_pool{ctx};              // idle FastCGI connections of this worker
+    UpstreamPool upstream_pool{ctx};      // this worker's FastCGI and origin connections
     std::atomic<std::uint64_t> connections{0};
 };
 
@@ -85,6 +86,7 @@ private:
     FileCache cache_;
     StaticHandler handler_;
     FcgiHandler fcgi_handler_;
+    ProxyHandler proxy_handler_;
     Dispatcher dispatcher_;
     std::vector<std::unique_ptr<Worker>> workers_;
     std::vector<Listener> listeners_;

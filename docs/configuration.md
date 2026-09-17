@@ -388,7 +388,59 @@ connection. Started as that user already, as systemd would, it just runs. Starte
 without `user` it warns and keeps running as root. Without root the per-site chown fails
 and one warning per site says which customer cannot read their log.
 
-## 12. TLS
+## 12. Reverse proxy
+
+`upstream = "http://host:port"` (or `"unix:/path"`) on a location forwards everything under
+it to an HTTP/1.1 origin:
+
+```toml
+[[site]]
+server_name = ["app.example.com"]
+listen = ["0.0.0.0:80"]
+root = "/var/www/app/public"      # static files served here first when a location says so
+
+[[site.location]]                 # the application
+path = "/"
+upstream = "http://127.0.0.1:3000"
+
+[[site.location]]                 # server-sent events: stream, do not buffer
+path = "/events/"
+upstream = "http://127.0.0.1:3000"
+proxy = { buffering = false, read_timeout = 3600 }
+
+[[site.location]]                 # assets straight from disk
+path = "/assets/"
+```
+
+What the origin sees: the client's request line as sent, every field except the hop-by-hop
+ones (Connection and whatever it lists, Keep-Alive, TE, Trailer, Transfer-Encoding,
+Upgrade, Expect) and the framing ones, Host passed through, `X-Forwarded-For` with the
+client address appended, `X-Forwarded-Proto` and `X-Forwarded-Host` set. The body goes as
+Content-Length when its size is known (also after agensio collected a chunked body), else
+chunked. Rewriting Host, the target prefix and custom fields arrive with the next step.
+
+What the client sees: the origin's status and fields except framing and connection ones,
+Server and Date (agensio's own). A chunked origin body is re-framed with a Content-Length
+when buffered, passed on as chunked when streaming.
+
+`proxy = { ... }` takes the same keys as `php = { ... }` (section 7) with these defaults
+and meanings for an origin:
+
+| option | default | meaning |
+|---|---|---|
+| `keep_conn` | `true` | keep-alive to the origin; the pool is per worker, so workers x `max_idle` idle connections at most |
+| `buffering` | `true` | collect the whole answer (memory, then a temp file above `buffer_max`) so a slow client never holds the origin; `false` streams with backpressure |
+| `request_buffering` | `true` | collect the request body before connecting; `false` streams it as it arrives |
+| `connect_timeout`, `send_timeout`, `read_timeout` | 5, 30, 60 s | 504 when exceeded; `read_timeout` is between two reads from the origin |
+| `max_connections`, `queue_depth`, `queue_wait` | 16, 64, 5 s | per worker: in flight, waiting, and the longest wait before a 503 with `Retry-After` |
+| `head_max` | 64 KB | an origin head larger than this is a 502 |
+
+A GET or HEAD whose kept connection turns out dead is retried once on a fresh one. An
+origin that is down gives 502, a timeout 504, a full queue 503; each is logged with the
+reason and appears in the JSON access log as `upstream`. `agensio -t` connects to every
+origin once and warns when it cannot.
+
+## 13. TLS
 
 ```toml
 [[site]]

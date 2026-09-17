@@ -393,16 +393,20 @@ private:
         const LocationConfig* loc = dispatcher_.route(stream_, listener_.router, ws);
         int hops = 0;
         while (loc) {
-            if (loc->kind == HandlerKind::fastcgi) {
+            if (loc->kind != HandlerKind::static_) {  // FastCGI or proxy: completes asynchronously
                 fill_connection_info();
                 const unsigned gen = ++request_gen_;
                 auto self = this->shared_from_this();
-                auto req = dispatcher_.fcgi().start(
-                    stream_, *static_cast<const SiteConfig*>(ws.site), *loc, ws, worker_.fcgi_pool, [self, gen] {
-                        if (self->request_gen_ != gen) return;  // connection closed meanwhile
-                        self->upstream_.reset();
-                        self->respond();
-                    });
+                auto done = [self, gen] {
+                    if (self->request_gen_ != gen) return;  // connection closed meanwhile
+                    self->upstream_.reset();
+                    self->respond();
+                };
+                std::shared_ptr<UpstreamRequest> req =
+                    loc->kind == HandlerKind::fastcgi
+                        ? dispatcher_.fcgi().start(stream_, *static_cast<const SiteConfig*>(ws.site), *loc, ws,
+                                                   worker_.upstream_pool, std::move(done))
+                        : dispatcher_.proxy().start(stream_, *loc, ws, worker_.upstream_pool, std::move(done));
                 if (req && request_gen_ == gen) upstream_ = std::move(req);
                 return;
             }
@@ -555,7 +559,7 @@ private:
     bool trusted_peer_ = false;
     bool request_logged_ = false;
     unsigned request_gen_ = 0;               // bumps per request and on close; guards late upstream callbacks
-    std::shared_ptr<FcgiRequest> upstream_;  // FastCGI exchange in flight, cancelled on close
+    std::shared_ptr<UpstreamRequest> upstream_;  // FastCGI/proxy exchange in flight, cancelled on close
     Stream stream_;
     Http1Writer<Socket, Http1Connection> writer_;  // last: it references socket_ and *this
 };

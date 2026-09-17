@@ -9,16 +9,19 @@
 #include "core/stream.hpp"
 #include "core/worker_state.hpp"
 #include "handlers/fastcgi.hpp"
+#include "handlers/proxy.hpp"
 #include "handlers/static.hpp"
 
 namespace agensio {
 
 class Dispatcher {
 public:
-    Dispatcher(StaticHandler& static_handler, FcgiHandler& fcgi) : static_(static_handler), fcgi_(fcgi) {}
+    Dispatcher(StaticHandler& static_handler, FcgiHandler& fcgi, ProxyHandler& proxy)
+        : static_(static_handler), fcgi_(fcgi), proxy_(proxy) {}
 
     StaticHandler& static_handler() noexcept { return static_; }
     FcgiHandler& fcgi() noexcept { return fcgi_; }
+    ProxyHandler& proxy() noexcept { return proxy_; }
 
     // Validates the request, resolves site (ws.site) and location, applies the location's
     // method policy and answers OPTIONS for static locations. Returns nullptr when
@@ -38,6 +41,7 @@ private:
 
     StaticHandler& static_;
     FcgiHandler& fcgi_;
+    ProxyHandler& proxy_;
 };
 
 }  // namespace agensio

@@ -100,6 +100,7 @@ path = "/readonly/"
 alias = "{www}/sub"
 methods = ["GET", "HEAD"]
 """
+import os
 text = open(path).read().replace("default = true\n", block, 1)
 # The TLS site gets the same php upstream and a /php/ location (HTTPS=on check).
 tls_line = [l for l in text.splitlines() if l.startswith("tls = ")][0]
@@ -114,11 +115,42 @@ root = "{root}/tests/laravel"
 app = "laravel"
 php = {{ socket = "unix:{root}/bench/tmp/php/fpm.sock" }}
 """
+# The reverse proxy (D1) in front of the benchmark upstream on 127.0.0.1:9107, on its own port.
+if os.path.exists(f"{root}/build/agensio_upstream"):
+    text += f"""
+[[site]]
+server_name = ["proxy.test"]
+listen = ["127.0.0.1:8091"]
+root = "{root}/bench/www"
+
+[[site.location]]
+path = "/api/"
+upstream = "http://127.0.0.1:9107/"
+proxy = {{ read_timeout = 1 }}
+
+[[site.location]]
+path = "/stream/"
+upstream = "http://127.0.0.1:9107/"
+proxy = {{ buffering = false, request_buffering = false }}
+
+[[site.location]]
+path = "/down/"
+upstream = "http://127.0.0.1:9199"
+
+[[site.location]]
+path = "/"
+upstream = "http://127.0.0.1:9107"
+"""
 open(path, "w").write(text)
 PY
+UP_PID=""
+if [ -x build/agensio_upstream ]; then
+  build/agensio_upstream -p 9107 >/dev/null 2>&1 &
+  UP_PID=$!
+fi
 "$BIN" -c bench/tmp/agensio-test.toml >/dev/null 2>&1 &
 PID=$!
-trap 'kill $PID 2>/dev/null; wait $PID 2>/dev/null; [ -n "$FPM_PID" ] && kill $FPM_PID 2>/dev/null; true' EXIT
+trap 'kill $PID 2>/dev/null; wait $PID 2>/dev/null; [ -n "$FPM_PID" ] && kill $FPM_PID 2>/dev/null; [ -n "$UP_PID" ] && kill $UP_PID 2>/dev/null; true' EXIT
 for _ in $(seq 1 50); do nc -z 127.0.0.1 8080 2>/dev/null && nc -z 127.0.0.1 8443 2>/dev/null && break; sleep 0.1; done
 
 fails=0
@@ -343,6 +375,41 @@ if [ -n "$FPM_PID" ]; then
   check "php: fpm gone gives 502" "502" "$(code http://127.0.0.1:8080/php/)"
   check "-t warns about the unreachable upstream" "yes" "$("$BIN" -t -c bench/tmp/agensio-test.toml 2>&1 >/dev/null | grep -q 'warning: fastcgi upstream' && echo yes)"
   check "php: 502 reason names the socket" "yes" "$(grep -q -E 'socket_missing|connect_refused' bench/tmp/error.log && echo yes)"
+fi
+# Reverse proxy (D1) against the benchmark upstream: bodies of every framing, streaming,
+# forwarded request bodies (memory, spilled, chunked, streamed), errors, keep-alive reuse.
+if [ -n "$UP_PID" ]; then
+  P=http://127.0.0.1:8091
+  UPS=http://127.0.0.1:9107
+  check "proxy: json passthrough" '{"ok":true,"service":"upstream"}' "$(curl -sS $P/json)"
+  check "proxy: status and length of a 100 KB body" "200 102399" "$(curl -sS -o /dev/null -w '%{http_code} %{size_download}' $P/big)"
+  check "proxy: chunked upstream body re-framed with Content-Length" "Content-Length: 32" "$(curl -sSi $P/chunked | tr -d '\r' | grep '^Content-Length')"
+  check "proxy: chunked body content" '{"ok":true,"service":"upstream"}' "$(curl -sS $P/chunked)"
+  check "proxy: streaming location passes a chunked body through as chunked" "Transfer-Encoding: chunked" "$(curl -sSi $P/stream/chunked | tr -d '\r' | grep -i '^Transfer-Encoding')"
+  check "proxy: streaming body content" '{"ok":true,"service":"upstream"}' "$(curl -sS $P/stream/chunked)"
+  check "proxy: streamed 100 KB body" "102399" "$(curl -sS $P/stream/big | wc -c | tr -d ' ')"
+  check "proxy: upstream Connection: close answered, client kept" "200 1 200 0" "$(curl -sS -o /dev/null -o /dev/null -w '%{http_code} %{num_connects} ' $P/close $P/json | sed 's/ $//')"
+  check "proxy: location prefix replaced by the upstream URI" "200" "$(code "$P/api/json")"
+  check "proxy: HEAD has no body" "200 0" "$(curl -sS -I $P/json -o /dev/null -w '%{http_code} %{size_download}')"
+  check "proxy: upstream 404 passed through" "404" "$(code $P/nope)"
+  check "proxy: upstream Server and Date replaced by ours" "1 1" "$(curl -sSi $P/json | tr -d '\r' | awk '/^Server:/{s++} /^Date:/{d++} END{print s, d}')"
+  check "proxy: POST body forwarded (memory)" "hello proxy" "$(printf 'hello proxy' | curl -sS --data-binary @- $P/echo)"
+  head -c 300000 /dev/urandom > bench/tmp/proxy-blob
+  check "proxy: POST 300 KB forwarded (spilled)" "same" "$(curl -sS --data-binary @bench/tmp/proxy-blob $P/echo | cmp -s - bench/tmp/proxy-blob && echo same)"
+  check "proxy: chunked request body forwarded with a length" "same" "$(curl -sS -H 'Transfer-Encoding: chunked' --data-binary @bench/tmp/proxy-blob $P/echo | cmp -s - bench/tmp/proxy-blob && echo same)"
+  check "proxy: streamed request body (request_buffering off)" "same" "$(curl -sS --data-binary @bench/tmp/proxy-blob $P/stream/echo | cmp -s - bench/tmp/proxy-blob && echo same)"
+  check "proxy: streamed chunked request body goes out chunked" "same" "$(curl -sS -H 'Transfer-Encoding: chunked' --data-binary @bench/tmp/proxy-blob $P/stream/echo | cmp -s - bench/tmp/proxy-blob && echo same)"
+  check "proxy: slow upstream within the timeout" "200" "$(code "$P/slow?ms=100")"
+  check "proxy: read timeout gives 504" "504" "$(code "$P/api/slow?ms=1500")"
+  check "proxy: origin down gives 502" "502" "$(code $P/down/json)"
+  check "proxy: 502 reason in the error log" "yes" "$(grep -q 'proxy 127.0.0.1:9199 connect_refused' bench/tmp/error.log && echo yes)"
+  before=$(curl -sS $UPS/stats | sed 's/.*"connections":\([0-9]*\).*/\1/')
+  for _ in 1 2 3 4 5 6 7 8 9 10; do curl -sS -o /dev/null $P/json; done
+  after=$(curl -sS $UPS/stats | sed 's/.*"connections":\([0-9]*\).*/\1/')
+  check "proxy: 10 client connections open at most one upstream connection" "yes" "$([ $((after - before - 1)) -le 1 ] && echo yes)"
+  check "proxy: -t warns about the unreachable origin" "yes" "$("$BIN" -t -c bench/tmp/agensio-test.toml 2>&1 >/dev/null | grep -q 'warning: proxy upstream 127.0.0.1:9199' && echo yes)"
+  sleep 1.2
+  check "access log: upstream field for the proxy" "yes" "$(grep -q '"target":"/json".*"upstream":"ok"}$' bench/tmp/access.log && echo yes)"
 fi
 # Body timeout (1 s here): the response is served, then the missing body bytes never come
 # and the server closes the connection instead of waiting for the idle timeout (65 s).

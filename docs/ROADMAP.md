@@ -274,9 +274,33 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       keepalive, `proxy_http_version 1.1`) and Caddy one worker each, later agensio, and
       records req/s, latency, proxy CPU per request and the upstream connections each
       proxy opened. The baseline rows are the targets for D1-D4.
-- [ ] D1 `HttpClient`: async HTTP/1.1 upstream, per-worker keep-alive pool, request body
-      forwarding, response `BodySource` (chunked/length/close-delimited), streaming
-      (SSE) with buffering off, timeouts (connect/read/write), `502`/`504`.
+- [x] D1 (2026-09-17) HTTP/1.1 upstream client: `UpstreamRequest` (`src/upstream/client.*`)
+      now holds what FastCGI and HTTP share (pool slot, connect, timeouts, one retry,
+      request body from memory / spill / stream, response buffering with spill, the
+      streaming pull source); `FcgiRequest` and `HttpRequest` only encode and decode
+      their protocol. `HttpRequest` frames the body it sends (Content-Length or chunked),
+      decodes Content-Length, chunked and close-delimited bodies, skips 1xx, keeps the
+      connection when the origin allows. `ProxyHandler` + `handlers/upstream_common.*`
+      (shared with FastCGI). Config: `upstream = "http://host:port[/prefix/]"` on a
+      location, `proxy = { ... }` with proxy-sized pool defaults (256 in flight, 1024
+      queued, 64 idle per worker). Profiled with strace inside the perf devbox
+      (`agensio-devbox-perf`, perf + valgrind + strace): the static path makes 2 syscalls
+      per request, the first proxy did 7, three of them overhead: two timerfd_settime
+      from arming an Asio timer per phase and an epoll_ctl from a readiness wait. Fixed
+      by giving the pool one 250 ms tick that checks each exchange's deadline (the idle
+      timer's lazy pattern) and by running upstream completions inline (immediate
+      executor); TCP_QUICKACK only while a body is still arriving. Now 4 syscalls per
+      proxied request (send and receive each way), the minimum.
+      `bench/results/proxy-20260917-181006.md` (one worker each, D0 upstream): JSON at
+      64 connections agensio 201k req/s at 4.98 us per request vs nginx 176k at 5.70
+      (13 % less CPU), at 16 connections 5.01 vs 5.54, 100 KB body 17.7 vs 32.6 us
+      (46 % less), 20 ms application at 256 connections 7.5 vs 8.3; connection reuse
+      like nginx's. Integration suite: 22 proxy checks (framings, streaming both ways,
+      spilled and chunked request bodies, 502/504, reuse, logs); fuzz target
+      `fuzz_http_head`, 23M runs clean. `bench/ab.sh <ref> -P` is the gate from here on.
+      The FastCGI path shares the change: Laravel over the unix socket went from 51.0 to
+      46.6 us per page request (fresh connections) and 25.1 to 23.0 us per JSON request
+      (keep-alive); TCP through docker-proxy unchanged (`laravel-keepconn-20260917.md`).
 - [ ] D2 Header handling: hop-by-hop stripping, `X-Forwarded-For/Proto/Host`,
       `Forwarded`, `Host` passthrough or rewrite, `proxy_set_header` equivalent.
 - [ ] D3 WebSocket / `Upgrade` tunnelling (Rocket.Chat, ThingsBoard need it), plus
@@ -290,6 +314,9 @@ Small on purpose: the first real applications need forms, logins and uploads; th
 - [ ] D6 Presets: `app = "proxy"` with `upstream = "http://127.0.0.1:3000"`; examples for
       Node, Rails, Rocket.Chat, ThingsBoard in `docs/examples/`.
 - [ ] D7 Benchmark: hello-world Node upstream through agensio vs nginx; WebSocket echo.
+      Left on the table from D1 if ever needed: per-exchange allocations (Exchange,
+      HttpRequest, std::function, the forwarded head string) and the pool's string-keyed
+      lookup; the syscalls are already at the minimum.
 - [ ] Checkpoint: Rocket.Chat or a Node app fully usable behind agensio.
 
 ### Phase E. Complete HTTP/1.1 and hardening  `[ ]`

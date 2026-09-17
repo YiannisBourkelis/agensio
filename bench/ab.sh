@@ -87,8 +87,13 @@ start() {  # binary
   fi
   (cd "$BENCH" && exec "$1" -c "$cfg") >>"$RAW/server.log" 2>&1 &
   PID=$!
-  for _ in $(seq 1 50); do nc -z 127.0.0.1 8080 2>/dev/null && nc -z 127.0.0.1 8443 2>/dev/null && return 0; sleep 0.1; done
-  echo "server did not start: $1"; cat "$RAW/server.log"; exit 1
+  for _ in $(seq 1 50); do nc -z 127.0.0.1 8080 2>/dev/null && nc -z 127.0.0.1 8443 2>/dev/null && break; sleep 0.1; done
+  nc -z 127.0.0.1 8080 2>/dev/null || { echo "server did not start: $1"; cat "$RAW/server.log"; exit 1; }
+  # A base that ignores the `upstream` key serves the proxy site as static files (404s):
+  # only a side that answers 200 through the proxy gets the proxy rows.
+  if [ $SIDE_PROXY = 1 ] && [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8093/json)" != 200 ]; then
+    SIDE_PROXY=0; echo "  (this side does not proxy: static rows only)"
+  fi
 }
 stop() { [ -n "$PID" ] && kill "$PID" 2>/dev/null && wait "$PID" 2>/dev/null || true; PID=""; sleep 0.3; }
 trap 'stop; [ -n "$UP_PID" ] && kill "$UP_PID" 2>/dev/null; true' EXIT

@@ -1,0 +1,11 @@
+
+# The proxy site of the A/B gate (bench/ab.sh -P): appended to the generated static
+# configuration, forwards 127.0.0.1:8093 to the benchmark upstream on 127.0.0.1:9100.
+[[site]]
+server_name = ["proxy-gate"]
+listen = ["127.0.0.1:8093"]
+root = "../www"
+
+[[site.location]]
+path = "/"
+upstream = "http://127.0.0.1:9100"

@@ -114,13 +114,18 @@ Source map (`src/`, files move into subdirectories as they are touched, see the 
 - `handlers/`: `dispatch` (`Dispatcher`: request prologue, site/location routing, method
   policy; the connection drives the hop loop because handlers may finish asynchronously),
   `static` (`StaticHandler`: cache, files, try_files, policies), `fastcgi` (`FcgiHandler`:
-  params from a prebuilt per-location block plus a per-request tail, request body in
-  memory / temp file / streamed, CGI head to `Response`, failure reasons to both logs).
-- `upstream/`: `fcgi.hpp` (FastCGI record and params codec, CGI head parser; fuzzed),
-  `fcgi_client` (`FcgiPool`: per-worker, bounded, explicit queue with priority reserve,
-  idle keep-alive connections; `FcgiRequest`: one exchange with connect/send/read
-  timeouts, one retry for GET/HEAD on a dead reused connection, response buffered with
-  temp-file spill or streamed with a high-water mark), `fcgi_options.hpp`.
+  params from a prebuilt per-location block plus a per-request tail), `proxy`
+  (`ProxyHandler`: the forwarded head), `upstream_common` (what both share: error page,
+  request body collection in memory / temp file / streamed, upstream result to
+  `Response`, failure reasons to both logs).
+- `upstream/`: `options.hpp` (address, options, failure reasons), `client` (`UpstreamPool`:
+  per-worker, bounded, explicit queue with priority reserve, idle keep-alive
+  connections; `UpstreamRequest`: one exchange with connect/send/read timeouts, one
+  retry for GET/HEAD on a dead reused connection, request body from memory / spill /
+  stream, response buffered with temp-file spill or streamed with a high-water mark),
+  `fcgi.hpp` (FastCGI record and params codec, CGI head parser; fuzzed), `fcgi_client`
+  (`FcgiRequest`, the FastCGI encoding/decoding), `http_head.hpp` (response head parser;
+  fuzzed), `http_client` (`HttpRequest`: HTTP/1.1 framing both ways, keep-alive rules).
 - top level, not yet moved: `config`, `path`, `mime`, `http_date`, `file`, `cache`,
   `response` (status lines, error pages), `tls_stream.hpp`, `server`, `main`.
 Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
@@ -203,6 +208,18 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   (`/index.php/extra`). `server.trusted_proxies` (CIDRs, `net/cidr.hpp`): from those
   peers X-Forwarded-For (rightmost untrusted hop) and X-Forwarded-Proto set the client
   address for the access log and REMOTE_ADDR / HTTPS / REQUEST_SCHEME for FastCGI.
+- **Reverse proxy** (D1, `src/upstream/http_client.*`, `src/handlers/proxy.*`):
+  `upstream = "http://host:port"` on a location. The FastCGI and HTTP clients share
+  `UpstreamRequest` (`src/upstream/client.*`: pool slot, connect, timeouts, one retry,
+  request body from memory / spill / stream, response buffering with spill and the
+  streaming pull source); each derived class only encodes its request and decodes its
+  response (`FcgiRequest`, `HttpRequest`). The HTTP client frames the body it sends
+  (Content-Length or chunked), decodes Content-Length, chunked and close-delimited
+  bodies, skips 1xx, and keeps the connection when the origin allows. `ProxyHandler`
+  builds the forwarded head (hop-by-hop stripped, Host through, X-Forwarded-For/Proto/
+  Host) and `handlers/upstream_common.*` holds what both handlers share (error page,
+  body collection, result to Response). Response-head parser in
+  `src/upstream/http_head.hpp` (fuzzed). Gate: `bench/ab.sh <ref> -P`.
 - **Presets** (C3): `app = "laravel" | "wordpress" | "php" | "static"` on a site expands
   at load into root, index, try_files and locations (Laravel: only `/index.php` is ever
   executed, `/build/` gets an immutable Cache-Control via `add_headers`; WordPress: any
@@ -364,6 +381,27 @@ database sessions (Laravel's default) serialise requests, file sessions grow a d
 the garbage collector then scans; cookie sessions are stable. And wrk ends a run by
 dropping its connections with requests still queued for php-fpm, which agensio only
 notices when it writes the response (roadmap E9): wait 2 s between runs.
+
+Reverse proxy (D1, `bench/results/proxy-20260917-181006.md`, one worker each in front of
+the D0 upstream which alone does 500k req/s at 2 us): JSON at 64 connections agensio 201k
+req/s at 4.98 us per request vs nginx 176k at 5.70 (13 % less CPU), at 16 connections 5.01
+vs 5.54; 100 KB body agensio 56k at 17.7 us vs nginx 31k at 32.6 (46 % less); a 20 ms
+application at 256 connections 7.5 vs 8.3 us; both reuse upstream connections (1 per run).
+Caddy: 40k at 25 us. How it got there, by syscall count (strace -c under wrk, in the
+`agensio-devbox-perf` image which adds perf, valgrind and strace; run it with
+`--cap-add SYS_ADMIN --cap-add PERFMON --user root` for perf): the static path makes 2
+syscalls per request (recvfrom, sendmsg); the first proxy made 7. Two `timerfd_settime`
+came from arming an Asio steady_timer per exchange phase: with 64 exchanges in flight the
+completing one is always the earliest timer, so every cancel and re-arm reprogrammed the
+reactor's timerfd. The pool now runs one 250 ms tick that checks each exchange's recorded
+deadline, the same lazy pattern as the connection's idle timer, and no exchange owns a
+timer. One `epoll_ctl` came from an `async_wait` for readiness, which asio implements by
+re-arming the edge-triggered descriptor; a speculative recv that returns EAGAIN costs the
+same, so the simpler read stays. Upstream completions are bound to the immediate executor
+like the connection's own (posting them cost a loop trip per step). TCP_QUICKACK is set
+only while a body is still arriving (the C3a stall needs a multi-segment response). Result:
+4 syscalls per proxied request, the minimum, 6.98 -> 4.98 us. The gate for proxy code is
+`bench/ab.sh <ref> -P` (adds the proxy rows; a base that does not proxy gets none).
 
 Benchmark hygiene: `pkill -x nginx` does not kill nginx (it retitles its processes); a
 stale instance keeps the ports and silently serves the next run. `bench/run.sh` now
