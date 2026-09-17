@@ -193,18 +193,33 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       location, index.php/index.html, `=404`), `app = "static"`. A preset never overrides
       a location the site defines. `add_headers` per location. `agensio -t --explain`
       prints the expansion; `-t` also warns about unreachable FastCGI upstreams.
-      `app = "wordpress"` and `app = "proxy"` come with their phases.
+      `app = "wordpress"` (added with the C4 bed): `.php` suffix location, permalink
+      `try_files`, `wp-content/uploads` and `wp-includes` as `final` prefix locations
+      (nginx `^~`, new in the router) with `deny_suffixes` for PHP sources and
+      Cache-Control. `app = "proxy"` comes with phase D.
 - [ ] C3b **Per-site users (ISPConfig / IIS app-pool model, made native)**: `user = "web1"`
       on a site; agensio generates the php-fpm pool for it (user/group, socket owned by the
       site user with group-only access for agensio, private tmp and session dirs,
       `open_basedir`, child limits, timeouts), writes per-site logs owned by that user, and
       refuses at validation any pool socket, docroot or `.env` whose ownership or mode would
       let sites read each other. `sites/create` in the control API does all of it.
-- [ ] C4 Test bed: Laravel skeleton as a ddev project (`bench/laravel/` with `.ddev/`),
-      agensio connecting to ddev's php-fpm (expose port 9000 from the web container via a
-      `docker-compose.agensio.yaml` override, or run agensio inside the container as a
-      custom webserver); integration test hits the welcome route, a JSON route, a POST
-      with body, a file upload. Same setup on macOS and Linux.
+- [x] C4 (2026-09-17) Test bed: `bench/laravel/` is a ddev Laravel project
+      (`setup.sh` creates it once: `ddev config`, `ddev start`, `composer create-project`,
+      test routes). `.ddev/web-build/Dockerfile.agensio` adds a second php-fpm pool on
+      TCP 9000 and `.ddev/docker-compose.agensio.yaml` publishes it to 127.0.0.1:9000;
+      agensio runs natively with `bench/laravel/.ddev/agensio.toml` (`app = "laravel"`,
+      `php = { socket = "127.0.0.1:9000", remote_root = "/var/www/html/public" }`). The
+      new `remote_root` maps SCRIPT_FILENAME/DOCUMENT_ROOT/PATH_TRANSLATED into the
+      container. `tests/laravel.sh`: welcome, JSON, POST, 300 KB upload, client IP,
+      mapped script path, static asset, Laravel's 404, dotfile, keep-alive; skips when
+      the project is not running. Same files work on macOS (ddev + Docker Desktop/Colima).
+      `bench/statamic/` is a second bed of the same shape (Statamic on the laravel preset,
+      flat-file, pool published on 9001, agensio on 8071, control panel for uploads and
+      PUT/PATCH/DELETE by hand: `bench/statamic/.ddev/setup.sh`, login admin@admin.com / 4444).
+      `bench/wordpress/` is the third: WordPress on `app = "php"` with the permalink
+      `try_files`, MariaDB from ddev, pool on 9002, agensio on 8072, reachable as
+      http://wp.agensio.ddev.site:8072 (wp-admin admin / 4444); the bed for the
+      `app = "wordpress"` preset and the page cache later.
 - [ ] C5 Benchmark: Laravel `GET /` and a JSON route through agensio vs nginx (same php-fpm,
       same pool size). Record req/s, CPU per request on the *web server* processes only.
 - [ ] Checkpoint: Laravel welcome page served with one worker; benchmark table.

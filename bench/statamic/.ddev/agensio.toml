@@ -1,0 +1,22 @@
+# agensio in front of the ddev Statamic project in this directory (Statamic is a Laravel
+# application, so the laravel preset is the whole configuration).
+# Run: build/agensio -c bench/statamic/.ddev/agensio.toml
+# Site: http://127.0.0.1:8071/   control panel: http://127.0.0.1:8071/cp  (admin@admin.com / 4444)
+[server]
+workers = 1
+idle_timeout = 65
+max_body_size = "64MB"   # control panel asset uploads
+
+[log]
+access = "off"
+error = "stderr"
+
+[cache]
+max_size = "64MB"
+
+[[site]]
+server_name = ["statamic.agensio.test", "localhost", "127.0.0.1"]
+listen = ["127.0.0.1:8071"]
+root = ".."
+app = "laravel"
+php = { socket = "127.0.0.1:9001", remote_root = "/var/www/html/public", read_timeout = 60 }

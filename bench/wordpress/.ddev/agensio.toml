@@ -1,0 +1,22 @@
+# agensio in front of the ddev WordPress project in this directory.
+# Run:  build/agensio -c bench/wordpress/.ddev/agensio.toml
+# Site: http://wp.agensio.ddev.site:8072/   admin: http://wp.agensio.ddev.site:8072/wp-admin/  (admin / 4444)
+# (*.ddev.site resolves to 127.0.0.1; WordPress's siteurl is set to this host:port by setup.sh)
+[server]
+workers = 1
+idle_timeout = 65
+max_body_size = "64MB"   # media uploads
+
+[log]
+access = "off"
+error = "stderr"
+
+[cache]
+max_size = "64MB"
+
+[[site]]
+server_name = ["wp.agensio.ddev.site", "localhost", "127.0.0.1"]
+listen = ["0.0.0.0:8072"]   # not loopback only: php-fpm in the container calls the site (loopback checks, cron)
+root = ".."
+app = "wordpress"
+php = { socket = "127.0.0.1:9002", remote_root = "/var/www/html", read_timeout = 120 }

@@ -1,0 +1,5 @@
+# A second php-fpm pool listening on TCP for agensio on the host (ddev's own pool keeps
+# its unix socket for nginx inside the container). Same user, same docroot, 8 children.
+ARG BASE_IMAGE
+FROM $BASE_IMAGE
+RUN for d in /etc/php/*/fpm/pool.d; do printf '[agensio]\nuser = www-data\ngroup = www-data\nlisten = 0.0.0.0:9000\npm = static\npm.max_children = 8\npm.max_requests = 500\ncatch_workers_output = yes\nclear_env = no\n' > "$d/zz-agensio.conf"; done

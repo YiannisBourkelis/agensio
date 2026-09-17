@@ -14,6 +14,7 @@
 // for a TLS stream.
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <ctime>
@@ -92,6 +93,15 @@ public:
         log_request();
         stream_.reset();
         compact();
+        // Bytes of a pipelined next request that arrived together with the body go back to
+        // the head buffer, which now has room (the body was only read after in_ was drained).
+        if (bpos_ < blen_) {
+            const std::size_t n = std::min(blen_ - bpos_, in_.size() - in_len_);
+            std::memcpy(in_.data() + in_len_, body_buf_.data() + bpos_, n);
+            in_len_ += n;
+            bpos_ += n;
+            if (bpos_ == blen_) bpos_ = blen_ = 0;
+        }
         if (!keep_alive) {
             close();
             return;
@@ -114,6 +124,7 @@ public:
         if (!request_logged_ && stream_.request.length > 0) log_request();  // client went away mid-response
         writer_.reset();
         body_pending_ = false;
+        bpos_ = blen_ = 0;
         if (lowest().is_open()) {
             if constexpr (IsTlsStream<Socket>::value) socket_.shutdown_notify();
             lowest().shutdown(asio::ip::tcp::socket::shutdown_both, ec);
@@ -150,12 +161,20 @@ public:
                 return;
             }
         }
-        if (consumed_ < in_len_) {
+        // Body bytes come first from what arrived with the head (still in in_, after the
+        // head) and then from body_buf_. The head buffer is never compacted while the
+        // request is alive: the Request's views (target, Host, every header) point into it
+        // and handlers read them after the body, so moving it would corrupt the params.
+        const bool from_head_buf = consumed_ < in_len_;
+        std::string_view avail;
+        if (from_head_buf) avail = std::string_view(in_.data() + consumed_, in_len_ - consumed_);
+        else if (bpos_ < blen_) avail = std::string_view(body_buf_.data() + bpos_, blen_ - bpos_);
+        if (!avail.empty()) {
             std::size_t used = 0, produced = 0;
             std::error_code ec;
-            const bool done = decode_body(std::string_view(in_.data() + consumed_, in_len_ - consumed_), buf, len,
-                                          used, produced, ec);
-            consumed_ += used;
+            const bool done = decode_body(avail, buf, len, used, produced, ec);
+            if (from_head_buf) consumed_ += used;
+            else bpos_ += used;
             if (ec) {
                 body_pending_ = false;
                 close();
@@ -169,8 +188,9 @@ public:
             }
             // Chunked framing consumed without data yet: fall through and read more.
         }
-        compact();
-        if (in_len_ >= in_.size()) {  // cannot happen: the decoders always consume or produce
+        if (body_buf_.empty()) body_buf_.resize(in_.size());
+        if (bpos_ == blen_) bpos_ = blen_ = 0;
+        if (blen_ >= body_buf_.size()) {  // cannot happen: the decoders always consume or produce
             body_pending_ = false;
             close();
             handler(make_error_code(BodyError::malformed), 0);
@@ -179,7 +199,7 @@ public:
         rearm(body_timeout_);
         auto self = this->shared_from_this();
         socket_.async_read_some(
-            asio::buffer(in_.data() + in_len_, in_.size() - in_len_),
+            asio::buffer(body_buf_.data() + blen_, body_buf_.size() - blen_),
             immediate([self, buf, len, h = std::move(handler)](const asio::error_code& ec, std::size_t n) mutable {
                 self->rearm(self->idle_timeout_);
                 if (ec) {
@@ -187,7 +207,7 @@ public:
                     h(ec, 0);
                     return;
                 }
-                self->in_len_ += n;
+                self->blen_ += n;
                 self->read_body(buf, len, std::move(h));
             }));
     }
@@ -525,6 +545,8 @@ private:
     std::uint64_t body_read_ = 0;   // decoded bytes delivered so far
     ChunkedDecoder chunked_;
     std::vector<char> drain_;  // scratch for discarding an unread body (allocated on first use)
+    std::vector<char> body_buf_;  // body bytes read after the head (allocated on first use)
+    std::size_t bpos_ = 0, blen_ = 0;
     std::string remote_;       // client address for the access log / handlers, resolved on first use
     std::uint16_t remote_port_ = 0;
     asio::ip::address remote_addr_;

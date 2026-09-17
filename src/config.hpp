@@ -42,6 +42,8 @@ struct LocationConfig {
     std::string path;  // prefix ("/", "/static/"), the whole path (exact) or an ending (suffix, ".php")
     bool exact = false;
     bool suffix = false;
+    bool final = false;  // prefix only (nginx ^~): when it is the longest prefix match, suffix locations are skipped
+    std::vector<std::string> deny_suffixes;  // request paths ending with one of these get 403 (".php" under uploads)
     std::string root;   // absolute, canonical, no trailing slash; the file is root + path
     std::string alias;  // nginx alias: the file is alias + (path minus the location prefix); empty = use root
     std::vector<std::string> index;

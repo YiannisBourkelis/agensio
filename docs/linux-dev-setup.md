@@ -69,6 +69,15 @@ with more cores, widen the wrk cpuset. The docroot is a bind mount; for the 10 M
 row use a docroot on a local filesystem (see CLAUDE.md, virtiofs note); since A1b the
 descriptor is cached, so only the first request pays the open.
 
+## 3b. Laravel test bed (ddev)
+
+```sh
+bench/laravel/.ddev/setup.sh    # once: ddev project + composer create-project + test routes
+tests/laravel.sh build/agensio  # live checks through agensio -> published php-fpm port
+bench/statamic/.ddev/setup.sh   # same for Statamic: control panel http://127.0.0.1:8071/cp, admin@admin.com / 4444
+bench/wordpress/.ddev/setup.sh  # same for WordPress: http://wp.agensio.ddev.site:8072, wp-admin admin / 4444
+```
+
 ## 4. What to send back
 
 Commit `bench/results/<stamp>.md` (native) and `bench/results/docker-<stamp>.md`, and

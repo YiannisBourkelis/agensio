@@ -59,6 +59,10 @@ struct FcgiConfig {
     bool configured = false;  // a socket was given
     FcgiAddress address;
     FcgiOptions options;
+    // The location's root as the FastCGI server sees it when it runs in another
+    // filesystem namespace (a container): SCRIPT_FILENAME, DOCUMENT_ROOT and
+    // PATH_TRANSLATED are rewritten from the local root to this one. Empty: same paths.
+    std::string remote_root;
     std::string params_prefix;  // constant FCGI_PARAMS pairs of this location, encoded once at load
     std::string retry_after;    // "Retry-After" value for 503s (queue_wait in seconds)
 };

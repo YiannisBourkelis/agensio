@@ -1,0 +1,6 @@
+# agensio test bed: publish the web container's extra php-fpm pool (TCP 9000 inside) on
+# host port 9001, next to the Laravel project's 9000.
+services:
+  web:
+    ports:
+      - "127.0.0.1:9001:9000"

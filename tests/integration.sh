@@ -90,6 +90,12 @@ path = "/private/"
 try_files = ["=403"]
 
 [[site.location]]
+path = "/uploads/"
+alias = "{root}/tests/php"
+final = true
+deny_suffixes = [".php"]
+
+[[site.location]]
 path = "/readonly/"
 alias = "{www}/sub"
 methods = ["GET", "HEAD"]
@@ -156,6 +162,7 @@ check "location: directory index is routed to the location owning it" "exact" "$
 check "location: exact does not prefix-match" "404" "$(code http://127.0.0.1:8080/sub/index.htmlx)"
 check "location: root prefix still serves the site" "$IDX" "$(curl -sS http://127.0.0.1:8080/ | sum)"
 check "location: try_files =403" "403" "$(code http://127.0.0.1:8080/private/anything)"
+check "location: final prefix keeps .php out of the suffix location, deny_suffixes gives 403" "403" "$(code http://127.0.0.1:8080/uploads/index.php)"
 check "location: fallback result served again (cache hit on the target)" "app shell" "$(curl -sS http://127.0.0.1:8080/app/some/route | sed 's/<[^>]*>//g')"
 check "dotfile hidden (404)" "404" "$(code http://127.0.0.1:8080/.env)"
 check "dot-directory hidden (404)" "404" "$(code http://127.0.0.1:8080/.git/config)"
@@ -196,6 +203,8 @@ check "php: TRACE still 405" "405" "$(code -X TRACE http://127.0.0.1:8080/php/pa
 check "php: POST form body" "7 $(printf 'a=1&b=2' | md5sum | cut -d' ' -f1) a=1&b=2" "$(curl -sS -d 'a=1&b=2' http://127.0.0.1:8080/php/post.php)"
 head -c 600000 /dev/urandom > bench/tmp/big-post.bin
 check "php: large POST body spilled to a temp file, intact" "600000 $(md5sum < bench/tmp/big-post.bin | cut -d' ' -f1) " "$(curl -sS -H 'Content-Type: application/octet-stream' --data-binary @bench/tmp/big-post.bin http://127.0.0.1:8080/php/post.php)"
+check "php: request fields intact after a body that arrives late (Expect)" "yes" "$(curl -sS -H 'Expect: 100-continue' -d 'a=1' 'http://127.0.0.1:8080/php/params.php?late=1' | grep -q '"REQUEST_URI":"/php/params.php?late=1"' && echo yes)"
+check "php: request fields intact after a body larger than the head buffer" "yes" "$(curl -sS -H 'Content-Type: application/octet-stream' --data-binary @bench/tmp/big-post.bin 'http://127.0.0.1:8080/php/params.php?big=1' | grep -q '"REQUEST_URI":"/php/params.php?big=1"' && echo yes)"
 check "php: chunked request body" "7 $(printf 'a=1&b=2' | md5sum | cut -d' ' -f1) a=1&b=2" "$(curl -sS -H 'Transfer-Encoding: chunked' -H 'Content-Type: application/x-www-form-urlencoded' -d 'a=1&b=2' http://127.0.0.1:8080/php/post.php)"
 H=$(curl -sSi http://127.0.0.1:8080/php/headers.php | tr -d '\r')
 check "php: Status from the script" "201" "$(echo "$H" | awk '/^HTTP/{print $2}')"

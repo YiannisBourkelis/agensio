@@ -198,11 +198,25 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   (`/index.php/extra`). `server.trusted_proxies` (CIDRs, `net/cidr.hpp`): from those
   peers X-Forwarded-For (rightmost untrusted hop) and X-Forwarded-Proto set the client
   address for the access log and REMOTE_ADDR / HTTPS / REQUEST_SCHEME for FastCGI.
-- **Presets** (C3): `app = "laravel" | "php" | "static"` on a site expands at load into
-  root, index, try_files and locations (Laravel: only `/index.php` is ever executed,
-  `/build/` gets an immutable Cache-Control via `add_headers`); hand-written locations
-  win over the preset's. `agensio -t --explain` prints the effective configuration;
+- **Presets** (C3): `app = "laravel" | "wordpress" | "php" | "static"` on a site expands
+  at load into root, index, try_files and locations (Laravel: only `/index.php` is ever
+  executed, `/build/` gets an immutable Cache-Control via `add_headers`; WordPress: any
+  `.php` runs, `wp-content/uploads` and `wp-includes` are `final` prefix locations, nginx
+  `^~`, with `deny_suffixes` so PHP there is 403 and never executed); hand-written
+  locations win over the preset's. `agensio -t --explain` prints the effective configuration;
+  `docs/configuration.md` documents each preset's expansion and every option (keep it
+  current when a key or preset changes);
   `-t` connects to every FastCGI upstream once and warns, with the reason, if it cannot.
+- **Laravel test bed** (C4): `bench/laravel/` is a ddev project; `bench/laravel/.ddev/setup.sh`
+  creates it, `tests/laravel.sh build/agensio` runs the live checks (skips when the project
+  is down). php-fpm inside the web container is published on 127.0.0.1:9000 by the ddev
+  override files; `php = { ..., remote_root = "/var/www/html/public" }` rewrites the
+  script paths into the container's filesystem. `bench/statamic/` is the same setup for
+  Statamic (pool on 9001, agensio on 8071, control panel at http://127.0.0.1:8071/cp,
+  login admin@admin.com / 4444; a 429 there is Statamic's login throttle, cleared with
+  `ddev exec php please cache:clear` in bench/statamic). `bench/wordpress/` is the same
+  for WordPress on `app = "php"` (pool on 9002, agensio on 8072, site
+  http://wp.agensio.ddev.site:8072, wp-admin admin / 4444).
 - **Logging** (A5, `src/services/log.*`): access log in Apache/nginx "combined" format
   (same escaping, so fail2ban filters work) or JSON, per site (`access_log`) with the
   `[log] access` default; one descriptor per path opened `O_APPEND`, per-worker buffers

@@ -39,12 +39,19 @@ max_open_files = 1024    # files above max_file_size are streamed, but their ope
                          # costs no open/fstat. Least recently used are closed beyond this count.
                          # 0 = open per request. Must stay well under the process file limit.
 
-# Presets: `app = "laravel"` on a site whose root is the project directory serves public/,
+# Presets: `app = "wordpress"` runs any .php, falls back to index.php for permalinks, and
+# shields wp-content/uploads and wp-includes (final prefix locations: nothing there is ever
+# executed, .php there is 403, files are cacheable). Set server.max_body_size for uploads.
+# `app = "laravel"` on a site whose root is the project directory serves public/,
 # routes everything to /index.php (only the front controller is ever executed), keeps
 # dotfiles hidden and caches /build/ (Vite output) for a year; `app = "php"` runs any .php
 # under the root with index.php/index.html; `app = "static"` is the default. A preset never
 # overrides a location the site defines itself. `agensio -t --explain` prints the result.
 # `add_headers = { "Cache-Control" = "..." }` on a location adds response fields on 200/304.
+#
+# PHP in a container (ddev, docker compose): publish its php-fpm port and set
+# `remote_root = "/var/www/html/public"`, the docroot as php-fpm sees it; SCRIPT_FILENAME,
+# DOCUMENT_ROOT and PATH_TRANSLATED are rewritten from the local root to it.
 #
 # PHP (FastCGI to php-fpm): `php = { socket = "unix:/run/php/php8.4-fpm.sock" }` on a site
 # gives every `handler = "fastcgi"` location its upstream; a location's `fastcgi = { ... }`
@@ -63,6 +70,10 @@ max_open_files = 1024    # files above max_file_size are streamed, but their ope
 # workers x max_idle plus the concurrency), max_idle.
 # Directory URIs use the location's `index` (set index = ["index.php"]). A missing script is
 # 404 without asking fpm. Every 502/503/504 is logged with its reason and a fix hint.
+#
+# Location extras: `final = true` on a prefix location is nginx's ^~: when it is the longest
+# prefix match, suffix locations are not consulted (keeps .php under uploads static);
+# `deny_suffixes = [".php"]` answers 403 for those endings.
 #
 # Locations: [[site.location]] blocks under a site. `path` is a prefix ("/static/"), with
 # match = "exact" the whole path, or with match = "suffix" an ending such as ".php". Exact

@@ -30,6 +30,12 @@ public:
     const LocationConfig* serve_static(Stream& s, const LocationConfig& loc, WorkerState& ws, int& hops);
 
 private:
+    // Applies loc's method policy. False when a 405 was produced. A method the static
+    // handler cannot serve is let through when the location's try_files has a fallback,
+    // so a POST to a Laravel route reaches /index.php as nginx would route it; the static
+    // handler then answers 405 only if the request resolves to an actual file.
+    bool check_method(Stream& s, const LocationConfig& loc, WorkerState& ws);
+
     StaticHandler& static_;
     FcgiHandler& fcgi_;
 };

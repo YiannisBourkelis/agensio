@@ -1,0 +1,6 @@
+# agensio test bed: publish the web container's php-fpm (the extra TCP pool from
+# web-build/Dockerfile.agensio) to the host, where agensio runs natively.
+services:
+  web:
+    ports:
+      - "127.0.0.1:9000:9000"

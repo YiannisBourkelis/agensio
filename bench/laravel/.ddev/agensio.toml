@@ -1,0 +1,19 @@
+# agensio in front of the ddev Laravel project in this directory: php-fpm reached over the
+# port published by .ddev/docker-compose.agensio.yaml, paths mapped to the container.
+[server]
+workers = 1
+idle_timeout = 65
+
+[log]
+access = "off"
+error = "stderr"
+
+[cache]
+max_size = "64MB"
+
+[[site]]
+server_name = ["laravel.agensio.test", "localhost", "127.0.0.1"]
+listen = ["127.0.0.1:8070"]
+root = ".."
+app = "laravel"
+php = { socket = "127.0.0.1:9000", remote_root = "/var/www/html/public", read_timeout = 30 }

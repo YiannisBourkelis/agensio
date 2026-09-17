@@ -273,6 +273,23 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
         error(s, 404, req.keep_alive);
         return Outcome::done;
     }
+    // Endings this location refuses outright (PHP sources under an uploads directory).
+    for (const std::string& d : loc.deny_suffixes)
+        if (std::string_view(ws.path).ends_with(d)) {
+            error(s, 403, req.keep_alive);
+            return Outcome::done;
+        }
+    // A method this handler does not serve (POST to a Laravel route): only try_files can
+    // rescue it by redirecting to an application location; a real file means 405.
+    if (!ws.method_allowed) {
+        File f;
+        FileInfo fi;
+        switch (try_files_lookup(s, loc, ws, f, fi)) {
+            case Lookup::redirect: return Outcome::redirect;
+            case Lookup::found: error(s, 405, req.keep_alive, loc.allow); return Outcome::done;
+            case Lookup::responded: return Outcome::done;
+        }
+    }
     const std::time_t now = ws.now;
     const CacheKeyView key{&loc, ws.path};
 

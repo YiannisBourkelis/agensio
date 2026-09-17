@@ -34,13 +34,21 @@ public:
     // The location serving `path` (normalised, starting with '/'). A site always has at
     // least the implicit "/" prefix location, so this never fails.
     static const LocationConfig& location(const SiteConfig& site, std::string_view path) noexcept {
+        // One pass over the sorted list: an exact hit wins at once; the first suffix and
+        // the first (= longest) prefix hits are remembered. A `final` prefix (nginx ^~)
+        // shields its subtree from suffix locations: /wp-content/uploads/x.php stays static.
+        const LocationConfig* suffix = nullptr;
         for (const LocationConfig& loc : site.locations) {
-            const bool hit = loc.exact    ? path == loc.path
-                             : loc.suffix ? suffix_hit(path, loc.path)
-                                          : path.starts_with(loc.path);
-            if (hit) return loc;
+            if (loc.exact) {
+                if (path == loc.path) return loc;
+            } else if (loc.suffix) {
+                if (!suffix && suffix_hit(path, loc.path)) suffix = &loc;
+            } else if (path.starts_with(loc.path)) {
+                if (loc.final || !suffix) return loc;
+                return *suffix;
+            }
         }
-        return site.locations.back();
+        return suffix ? *suffix : site.locations.back();
     }
 
     // A suffix matches at the end of the path or before a '/' ("/index.php/extra": PATH_INFO).

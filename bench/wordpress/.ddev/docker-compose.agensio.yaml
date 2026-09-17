@@ -1,0 +1,10 @@
+# agensio test bed: publish the web container's extra php-fpm pool (TCP 9000 inside) on
+# host port 9002, and let PHP inside the container reach agensio on the host by the site
+# name (WordPress loopback requests, REST API self-checks, cron): host-gateway is the
+# host's address on the Docker bridge, which is why agensio.toml listens on 0.0.0.0.
+services:
+  web:
+    ports:
+      - "127.0.0.1:9002:9000"
+    extra_hosts:
+      - "wp.agensio.ddev.site:host-gateway"

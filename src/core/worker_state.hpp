@@ -20,6 +20,7 @@ struct WorkerState {
     std::string path;     // normalised request path
     std::string fs_path;  // filesystem path being served
     const void* site = nullptr;  // the SiteConfig chosen for the current request (for the access log)
+    bool method_allowed = true;  // the current location accepts the request method (else only a try_files fallback may)
     WorkerLogs logs;             // per-worker access log buffers
     std::string scratch;         // handler scratch (capacity retained)
     std::string params_tail;     // FastCGI per-request params (capacity retained)

@@ -490,6 +490,20 @@ static void test_route_and_etag() {
     CHECK(Router::location(s, "/static/app/").exact);
     CHECK(Router::location(s, "/index.html").exact);
     CHECK_EQ(Router::location(s, "/index.htmlx").path, "/");  // exact does not prefix-match
+    // final (nginx ^~): a shielded prefix keeps suffix locations out of its subtree.
+    SiteConfig w;
+    w.root = "/srv";
+    LocationConfig php = loc(".php", false);
+    php.suffix = true;
+    LocationConfig uploads = loc("/uploads/", false);
+    uploads.final = true;
+    w.locations = {php, uploads, loc("/plugins/", false)};
+    finalize_site(w);
+    CHECK_EQ(Router::location(w, "/uploads/x.php").path, "/uploads/");
+    CHECK_EQ(Router::location(w, "/plugins/x.php").path, ".php");  // not final: suffix wins
+    CHECK_EQ(Router::location(w, "/uploads/a.jpg").path, "/uploads/");
+    CHECK_EQ(Router::location(w, "/x.php").path, ".php");
+    CHECK_EQ(Router::location(w, "/x.txt").path, "/");
 
     // try_files grammar.
     auto tf = parse_try_files({"$uri", "$uri/", "/index.html?$query_string"});
@@ -541,7 +555,7 @@ static void test_fcgi_codec() {
     out.clear();
     append_stream(out, RecordType::stdin_, 1, std::string(70000, 'x'), true);
     // 65535 (+1 padding) + 4465 (+7 padding) + empty terminator
-    CHECK_EQ(out.size(), (8 + 65535 + 1) + (8 + 4465 + 7) + 8);
+    CHECK_EQ(out.size(), std::size_t{(8 + 65535 + 1) + (8 + 4465 + 7) + 8});
     // Reader: needs the whole record, reports content without padding, leaves the rest.
     std::string wire;
     append_record(wire, RecordType::stdout_, 1, "hello");
@@ -730,6 +744,23 @@ static void test_presets() {
                                    "php = { socket = \"unix:/run/php/fpm.sock\" }\n"));
     CHECK(rejects("badhdr.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n"
                                  "[[site.location]]\npath = \"/x/\"\nadd_headers = { \"Bad Name\" = \"v\" }\n"));
+    write("wp.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\napp = \"wordpress\"\n"
+                     "php = { socket = \"unix:/run/php/fpm.sock\" }\n");
+    Config wcfg = load_config(dir / "wp.toml");
+    const SiteConfig& w = wcfg.sites[0];
+    CHECK(w.index.size() == 1 && w.index[0] == "index.php" && w.try_files.size() == 3);
+    CHECK(Router::location(w, "/wp-login.php").kind == HandlerKind::fastcgi);
+    CHECK(Router::location(w, "/wp-content/plugins/x/ajax.php").kind == HandlerKind::fastcgi);
+    const LocationConfig& up = Router::location(w, "/wp-content/uploads/2026/shell.php");
+    CHECK(up.path == "/wp-content/uploads/" && up.final && up.kind == HandlerKind::static_);
+    CHECK(up.deny_suffixes.size() == 6 && up.add_headers.size() == 1 && up.origin == "preset:wordpress");
+    CHECK(Router::location(w, "/wp-includes/js/x.js").final);
+    CHECK(Router::location(w, "/wp-admin/").path == "/");
+    CHECK(rejects("badfinal.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n"
+                                   "[[site.location]]\npath = \".php\"\nmatch = \"suffix\"\nfinal = true\n"));
+    CHECK(rejects("baddeny.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n"
+                                  "[[site.location]]\npath = \"/u/\"\ndeny_suffixes = [\"php\"]\n"));
+
     fs::remove_all(dir);
 }
 
@@ -836,6 +867,14 @@ static void test_config_locations() {
                                       "fastcgi = { socket = \"localhost:9000\" }\n"));
     CHECK(rejects("bad16.toml", head + "[[site.location]]\npath = \".php\"\nmatch = \"suffix\"\nalias = \"www\"\n"));
     CHECK(rejects("bad17.toml", "[server]\ntrusted_proxies = [\"10.0.0.0/40\"]\n" + head));
+    write("remote.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n"
+                         "php = { socket = \"127.0.0.1:9000\", remote_root = \"/var/www/html/public/\" }\n"
+                         "[[site.location]]\npath = \".php\"\nmatch = \"suffix\"\nhandler = \"fastcgi\"\n");
+    Config rcfg = load_config(dir / "remote.toml");
+    const LocationConfig& rl = Router::location(rcfg.sites[0], "/x.php");
+    CHECK_EQ(rl.fastcgi.remote_root, std::string("/var/www/html/public"));
+    CHECK(decode_params(rl.fastcgi.params_prefix).find("DOCUMENT_ROOT=/var/www/html/public\n") != std::string::npos);
+    CHECK(rejects("badremote.toml", head + "php = { socket = \"127.0.0.1:9000\", remote_root = \"relative\" }\n"));
     write("proxies.toml", "[server]\ntrusted_proxies = [\"127.0.0.1\", \"10.0.0.0/8\"]\n" + head);
     CHECK(load_config(dir / "proxies.toml").trusted_proxies.size() == 2);
     // Two locations on one upstream must agree on the pool bounds.

@@ -27,3 +27,29 @@ bench/certs/*.pem
 # local secrets / certs
 *.pem
 *.key
+
+# ddev test beds (Laravel, Statamic): only the ddev files, the agensio config and setup.sh are tracked
+bench/laravel/*
+!bench/laravel/.ddev/
+bench/laravel/.ddev/*
+!bench/laravel/.ddev/config.yaml
+!bench/laravel/.ddev/docker-compose.agensio.yaml
+!bench/laravel/.ddev/web-build/
+!bench/laravel/.ddev/agensio.toml
+!bench/laravel/.ddev/setup.sh
+bench/statamic/*
+!bench/statamic/.ddev/
+bench/statamic/.ddev/*
+!bench/statamic/.ddev/config.yaml
+!bench/statamic/.ddev/docker-compose.agensio.yaml
+!bench/statamic/.ddev/web-build/
+!bench/statamic/.ddev/agensio.toml
+!bench/statamic/.ddev/setup.sh
+bench/wordpress/*
+!bench/wordpress/.ddev/
+bench/wordpress/.ddev/*
+!bench/wordpress/.ddev/config.yaml
+!bench/wordpress/.ddev/docker-compose.agensio.yaml
+!bench/wordpress/.ddev/web-build/
+!bench/wordpress/.ddev/agensio.toml
+!bench/wordpress/.ddev/setup.sh

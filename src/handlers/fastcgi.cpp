@@ -57,7 +57,8 @@ std::string FcgiHandler::prebuild_params(const SiteConfig& site, const LocationC
     fcgi::append_param(out, "GATEWAY_INTERFACE", "CGI/1.1");
     fcgi::append_param(out, "SERVER_SOFTWARE", "agensio/" AGENSIO_VERSION);
     fcgi::append_param(out, "REDIRECT_STATUS", "200");  // PHP's cgi.force_redirect wants it
-    fcgi::append_param(out, "DOCUMENT_ROOT", loc.alias.empty() ? loc.root : loc.alias);
+    const std::string& local_root = loc.alias.empty() ? loc.root : loc.alias;
+    fcgi::append_param(out, "DOCUMENT_ROOT", loc.fastcgi.remote_root.empty() ? local_root : loc.fastcgi.remote_root);
     if (const std::string& first = site.server_names.front(); first != "*")
         fcgi::append_param(out, "SERVER_NAME", first);
     return out;
@@ -92,13 +93,21 @@ void FcgiHandler::append_request_params(std::string& out, Stream& s, const SiteC
     auto add = [&](std::string_view name, std::string_view value) { fcgi::append_param(out, name, value); };
     add("SERVER_PROTOCOL", req.version_minor == 0 ? "HTTP/1.0" : "HTTP/1.1");
     add("REQUEST_METHOD", req.method_name);
-    add("SCRIPT_FILENAME", ws.fs_path);
+    // The script as the FastCGI server sees it: the local root swapped for remote_root.
+    const std::string& local_root = loc.alias.empty() ? loc.root : loc.alias;
+    const std::string& doc_root = loc.fastcgi.remote_root.empty() ? local_root : loc.fastcgi.remote_root;
+    if (loc.fastcgi.remote_root.empty()) {
+        add("SCRIPT_FILENAME", ws.fs_path);
+    } else {
+        tmp.assign(doc_root).append(std::string_view(ws.fs_path).substr(local_root.size()));
+        add("SCRIPT_FILENAME", tmp);
+    }
     add("SCRIPT_NAME", ws.path);
     add("REQUEST_URI", req.target);
     add("DOCUMENT_URI", ws.path);
     if (!path_info.empty()) {
         add("PATH_INFO", path_info);
-        tmp.assign(loc.alias.empty() ? loc.root : loc.alias).append(path_info);
+        tmp.assign(doc_root).append(path_info);
         add("PATH_TRANSLATED", tmp);
     }
     const std::size_t q = req.target.find('?');

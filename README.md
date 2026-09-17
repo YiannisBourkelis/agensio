@@ -74,7 +74,10 @@ php = { socket = "unix:/run/php/php8.4-fpm.sock" }
 # app = "php" runs any .php under the root instead; `agensio -t --explain` shows the expansion
 ```
 
-`agensio -t -c file.toml` validates a configuration without starting.
+`agensio -t -c file.toml` validates a configuration without starting. Worked examples for
+static sites, plain PHP, Laravel, Statamic and WordPress, with what each `app = "..."`
+preset expands to and every option you can change, are in
+[docs/configuration.md](docs/configuration.md).
 
 ## Benchmark
 

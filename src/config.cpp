@@ -157,6 +157,11 @@ void parse_fcgi_table(const toml::table& t, const fs::path& base_dir, FcgiConfig
         if (!parse_fcgi_address(text, out.address, err)) fail(where + ".socket: " + err);
         out.configured = true;
     }
+    if (auto rr = t["remote_root"].value<std::string>()) {
+        if (rr->empty() || (*rr)[0] != '/') fail(where + ".remote_root must be an absolute path");
+        out.remote_root = *rr;
+        while (out.remote_root.size() > 1 && out.remote_root.back() == '/') out.remote_root.pop_back();
+    }
     out.options.buffering = t["buffering"].value_or(out.options.buffering);
     out.options.keep_conn = t["keep_conn"].value_or(out.options.keep_conn);
     auto seconds = [&](const char* key, std::chrono::milliseconds& target) {
@@ -227,6 +232,13 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
     if (loc.suffix) {
         if (loc.path.size() < 2) fail(where + ": a suffix location needs an ending such as \".php\"");
         loc.path.erase(0, 1);  // the leading '/' only marks it as a path; ".php" is what is matched
+    }
+    loc.final = t["final"].value_or(false);
+    if (loc.final && (loc.exact || loc.suffix)) fail(where + ": 'final' applies to prefix locations only");
+    if (t.contains("deny_suffixes")) {
+        loc.deny_suffixes = string_list(t["deny_suffixes"], (where + ".deny_suffixes").c_str());
+        for (const auto& d : loc.deny_suffixes)
+            if (d.size() < 2 || d[0] != '.') fail(where + ".deny_suffixes: entries are endings such as \".php\"");
     }
     for (const auto& other : site.locations)
         if (other.path == loc.path && other.exact == loc.exact && other.suffix == loc.suffix)
@@ -331,6 +343,30 @@ void apply_preset(SiteConfig& site, const std::string& where) {
     } else if (site.app == "php") {
         if (site.try_files.empty()) site.try_files = parse_try_files({"$uri", "$uri/", "=404"});
         if (!has(".php", false, true)) site.locations.push_back(fcgi_location(".php", false, true));
+    } else if (site.app == "wordpress") {
+        // Any .php runs (wp-login.php, wp-admin/*, wp-cron.php, plugin endpoints); pretty
+        // permalinks fall back to index.php; nothing under uploads or wp-includes is ever
+        // executed and their files are cacheable. Site-wide asset caching stays modest
+        // because WordPress versions assets by query string, not by file name.
+        if (site.try_files.empty()) site.try_files = parse_try_files({"$uri", "$uri/", "/index.php?$query_string"});
+        if (!has(".php", false, true)) site.locations.push_back(fcgi_location(".php", false, true));
+        auto shielded = [&](const char* path, const char* cache) {
+            if (has(path, false, false)) return;
+            LocationConfig loc;
+            loc.path = path;
+            loc.final = true;
+            loc.root = site.root;
+            loc.index = site.index;
+            loc.try_files = parse_try_files({"$uri", "=404"});
+            loc.hidden_files = site.hidden_files;
+            loc.symlinks_deny = site.symlinks_deny;
+            loc.deny_suffixes = {".php", ".phtml", ".phar", ".php5", ".php7", ".phps"};
+            loc.add_headers.emplace_back("Cache-Control", cache);
+            loc.origin = "preset:wordpress";
+            site.locations.push_back(std::move(loc));
+        };
+        shielded("/wp-content/uploads/", "public, max-age=604800");
+        shielded("/wp-includes/", "public, max-age=2592000");
     }
     // Locations the preset created inherit the site's try_files decided above.
     for (auto& loc : site.locations)
@@ -349,8 +385,9 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     if (site.listen.empty()) fail(where + ": 'listen' is required");
 
     site.app = to_lower(t["app"].value_or(std::string()));
-    if (!site.app.empty() && site.app != "laravel" && site.app != "php" && site.app != "static")
-        fail(where + ": app must be \"laravel\", \"php\" or \"static\" (\"wordpress\" and \"proxy\" arrive later)");
+    if (!site.app.empty() && site.app != "laravel" && site.app != "php" && site.app != "static" &&
+        site.app != "wordpress")
+        fail(where + ": app must be \"laravel\", \"wordpress\", \"php\" or \"static\" (\"proxy\" arrives later)");
     auto root = t["root"].value<std::string>();
     if (!root) fail(where + ": 'root' is required");
     site.root = resolve_root(base_dir, *root, where);
@@ -360,6 +397,8 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
         site.index = {"index.php"};
     } else if (site.app == "php") {
         site.index = {"index.php", "index.html"};
+    } else if (site.app == "wordpress") {
+        site.index = {"index.php"};
     }
 
     if (t.contains("index")) site.index = index_list(t["index"], where);
@@ -499,7 +538,9 @@ void print_try_files(std::ostream& out, const std::vector<TryStep>& v) {
 }
 void print_fcgi(std::ostream& out, const char* key, const FcgiConfig& f) {
     const FcgiOptions& o = f.options;
-    out << key << " = { socket = \"" << f.address.key << "\", buffering = " << (o.buffering ? "true" : "false")
+    out << key << " = { socket = \"" << f.address.key << "\"";
+    if (!f.remote_root.empty()) out << ", remote_root = \"" << f.remote_root << "\"";
+    out << ", buffering = " << (o.buffering ? "true" : "false")
         << ", request_buffering = " << (o.request_buffering ? "true" : "false")
         << ", keep_conn = " << (o.keep_conn ? "true" : "false") << ", max_connections = " << o.max_connections
         << ", queue_depth = " << o.queue_depth << ", queue_wait = " << o.queue_wait.count() / 1000.0
@@ -537,6 +578,8 @@ void explain_config(const Config& cfg, std::ostream& out) {
             out << "\n";
             const char* match = loc.exact ? "exact" : loc.suffix ? "suffix" : "prefix";
             out << "path = \"" << loc.path << "\"\nmatch = \"" << match << "\"\n";
+            if (loc.final) out << "final = true\n";
+            if (!loc.deny_suffixes.empty()) print_list(out, "deny_suffixes", loc.deny_suffixes);
             if (!loc.alias.empty()) out << "alias = \"" << loc.alias << "\"\n";
             else out << "root = \"" << loc.root << "\"\n";
             print_list(out, "index", loc.index);
