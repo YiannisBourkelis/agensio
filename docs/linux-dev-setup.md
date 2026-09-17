@@ -74,6 +74,7 @@ descriptor is cached, so only the first request pays the open.
 ```sh
 bench/laravel/.ddev/setup.sh    # once: ddev project + composer create-project + test routes
 tests/laravel.sh build/agensio  # live checks through agensio -> published php-fpm port
+bench/laravel/bench.sh -d 10s -c 64 -r 2   # C5: agensio vs nginx in front of the bed's php-fpm pool
 bench/statamic/.ddev/setup.sh   # same for Statamic: control panel http://127.0.0.1:8071/cp, admin@admin.com / 4444
 bench/wordpress/.ddev/setup.sh  # same for WordPress: http://wp.agensio.ddev.site:8072, wp-admin admin / 4444
 ```

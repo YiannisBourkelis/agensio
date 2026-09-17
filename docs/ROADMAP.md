@@ -197,6 +197,12 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       `try_files`, `wp-content/uploads` and `wp-includes` as `final` prefix locations
       (nginx `^~`, new in the router) with `deny_suffixes` for PHP sources and
       Cache-Control. `app = "proxy"` comes with phase D.
+- [ ] C3a FastCGI keep-alive worth its default: with `keep_conn = true, max_connections`
+      at the child count, the JSON route costs half the web-server CPU (C5), but the
+      78 KB page fell from 3.4k to 1.35k req/s with no errors. Reproduce without
+      docker-proxy (unix socket pool, Linux bind mount), find the cause (delayed ACK on
+      the reused connection? record boundaries? the `in_len != 0` reuse rule?), then
+      decide the default per pool type.
 - [ ] C3b **Per-site users (ISPConfig / IIS app-pool model, made native)**: `user = "web1"`
       on a site; agensio generates the php-fpm pool for it (user/group, socket owned by the
       site user with group-only access for agensio, private tmp and session dirs,
@@ -220,9 +226,20 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       `try_files`, MariaDB from ddev, pool on 9002, agensio on 8072, reachable as
       http://wp.agensio.ddev.site:8072 (wp-admin admin / 4444); the bed for the
       `app = "wordpress"` preset and the page cache later.
-- [ ] C5 Benchmark: Laravel `GET /` and a JSON route through agensio vs nginx (same php-fpm,
-      same pool size). Record req/s, CPU per request on the *web server* processes only.
-- [ ] Checkpoint: Laravel welcome page served with one worker; benchmark table.
+- [x] C5 (2026-09-17) Benchmark: `bench/laravel/bench.sh` runs agensio and nginx (one
+      worker each, nginx from the devbox image on the host network when the host has none)
+      in front of the same php-fpm pool (the bed's, 8 static children) and records req/s,
+      latency, CPU per request of the web server's processes and of the container's
+      cgroup (the application). `bench/results/laravel-20260917-100530.md`: both servers
+      are application-bound at 3.4k (78 KB welcome page) and 3.5k (`/json`) req/s, 2.2 ms
+      of PHP per request; web-server CPU per request agensio 85-86 us vs nginx 110-111 us
+      on the page, 54-55 vs 58-59 us on JSON, dominated by the per-request TCP connection
+      to php-fpm. `keep_conn = true, max_connections = 8` halves agensio's cost on JSON
+      (26.6 us, 3840 req/s) but the 78 KB page dropped to 1354 req/s through docker-proxy,
+      not understood yet (C3b). Found and recorded on the way: sqlite database sessions
+      and file sessions both make the bed unusable for load (setup.sh sets cookie
+      sessions), and abandoned client requests keep their pool slots (E9).
+- [x] Checkpoint (2026-09-17): Laravel welcome page served with one worker; table above.
 
 ### Phase D. Reverse proxy  `[ ]`
 - [ ] D1 `HttpClient`: async HTTP/1.1 upstream, per-worker keep-alive pool, request body
@@ -262,6 +279,15 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       (2026-09-16).
 - [ ] E8 103 Early Hints for static and proxied responses (asked of nginx; cheap once
       bodies are sources).
+- [ ] E9 Client abort while an upstream request is pending (found with C5): the HTTP/1
+      connection has no read in flight while its FastCGI request waits in the pool queue
+      or runs, so a client that goes away (wrk closing 64 connections, a browser
+      navigating on) is noticed only when the response is written. Until then the request
+      keeps its queue slot and php-fpm executes it; after a burst that is up to
+      `queue_depth` wasted requests and a 503 storm for the next 0.5 s. nginx aborts the
+      upstream request on client EOF (`fastcgi_ignore_client_abort off`). Fix: a
+      zero-byte read for EOF on the client socket while `upstream_` is set (FastCGI and
+      proxy paths only, nothing on the static path), cancelling the exchange; measure.
 - [ ] Checkpoint: h1 compliance run (a scripted curl/python suite in `tests/`), fuzzers
       clean for 1h, benchmark unchanged.
 

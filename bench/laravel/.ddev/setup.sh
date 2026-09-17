@@ -11,6 +11,12 @@ ddev start -y
 if [ ! -f artisan ]; then
   ddev composer create-project "laravel/laravel:^12" . --no-interaction
 fi
+# Sessions in the cookie and the cache on files instead of the sqlite database. With the
+# database driver every request writes the session table and sqlite serialises the
+# writers (eight php-fpm children manage 170 req/s at 3 ms of CPU each); with the file
+# driver every benchmark request leaves a session file behind and Laravel's garbage
+# collection triples the CPU per request once there are tens of thousands (bench.sh, C5).
+sed -i -e 's/^SESSION_DRIVER=\(database\|file\)$/SESSION_DRIVER=cookie/' -e 's/^CACHE_STORE=database$/CACHE_STORE=file/' .env
 # Test routes: JSON, a POST echo (CSRF-exempt) and a file upload.
 if ! grep -q 'agensio test routes' routes/web.php; then
   cat >> routes/web.php <<'PHP'

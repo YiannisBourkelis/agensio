@@ -30,6 +30,7 @@ bench/certs/*.pem
 
 # ddev test beds (Laravel, Statamic): only the ddev files, the agensio config and setup.sh are tracked
 bench/laravel/*
+!bench/laravel/bench.sh
 !bench/laravel/.ddev/
 bench/laravel/.ddev/*
 !bench/laravel/.ddev/config.yaml

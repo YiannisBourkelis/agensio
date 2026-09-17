@@ -211,7 +211,11 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   creates it, `tests/laravel.sh build/agensio` runs the live checks (skips when the project
   is down). php-fpm inside the web container is published on 127.0.0.1:9000 by the ddev
   override files; `php = { ..., remote_root = "/var/www/html/public" }` rewrites the
-  script paths into the container's filesystem. `bench/statamic/` is the same setup for
+  script paths into the container's filesystem. `setup.sh` switches the bed to cookie
+  sessions and a file cache: Laravel's default sqlite database sessions serialise every
+  request (170 req/s), file sessions leave a file per request and their garbage
+  collection triples the PHP cost after tens of thousands. `bench/laravel/bench.sh` is
+  the C5 benchmark (agensio vs nginx in front of the same pool). `bench/statamic/` is the same setup for
   Statamic (pool on 9001, agensio on 8071, control panel at http://127.0.0.1:8071/cp,
   login admin@admin.com / 4444; a 429 there is Statamic's login throttle, cleared with
   `ddev exec php please cache:clear` in bench/statamic). `bench/wordpress/` is the same
@@ -320,6 +324,20 @@ TLS instead of 2.5-3.5x. (3) The plain 10 MB stream is the only case where nginx
 (302 vs 323 us; parity on macOS). (4) nginx's plain 100 KB p99 was 39-43 ms with one worker
 (p50 235 us); not seen for agensio. (5) `bench/docker/run.sh` printed decimal commas under
 the Greek host locale; it now pins `LC_NUMERIC=C` like `bench/run.sh`.
+
+Laravel through FastCGI (C5, `bench/results/laravel-20260917-100530.md`, same Linux box,
+one worker each, the bed's php-fpm pool with 8 static children through docker-proxy): both
+servers are application-bound at 3.4k req/s on the 78 KB welcome page and 3.5k on a JSON
+route (2.2 ms of PHP per request); the web server's own CPU per request is agensio 85-86 us
+vs nginx 110-111 us on the page and 54-55 vs 58-59 us on JSON. Most of that is the TCP
+connection opened to php-fpm per request: `keep_conn = true` with `max_connections` at the
+child count halves it (26.6 us on JSON) but made the 78 KB page 2.5x slower through
+docker-proxy, unexplained (roadmap C3a). php-fpm CPU is read from the container's cgroup
+because the children respawn. Two bed findings that would wreck any PHP benchmark: sqlite
+database sessions (Laravel's default) serialise requests, file sessions grow a directory
+the garbage collector then scans; cookie sessions are stable. And wrk ends a run by
+dropping its connections with requests still queued for php-fpm, which agensio only
+notices when it writes the response (roadmap E9): wait 2 s between runs.
 
 Benchmark hygiene: `pkill -x nginx` does not kill nginx (it retitles its processes); a
 stale instance keeps the ports and silently serves the next run. `bench/run.sh` now
