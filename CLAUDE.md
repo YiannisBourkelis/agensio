@@ -224,6 +224,14 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   `ddev exec php please cache:clear` in bench/statamic). `bench/wordpress/` is the same
   for WordPress on `app = "php"` (pool on 9002, agensio on 8072, site
   http://wp.agensio.ddev.site:8072, wp-admin admin / 4444).
+- **Per-site users** (C3b-1, `src/services/pools.*`, design in
+  `docs/design-per-site-users.md`): `user = "web1"` on a site derives a php-fpm pool
+  (socket `<pools_run>/agensio-web1.sock`, state dir, `open_basedir`, sizing from
+  `php = { children, pm, ... }`), sets `keep_conn = true` with `max_connections =
+  children / workers`, and `agensio pools` writes the pool file into the distro's
+  directory (exit 3 when php-fpm needs a reload). Sites of one user share a pool and
+  must agree on it; different users never share a socket. Validation of ownership and
+  per-site log ownership are C3b-2/3.
 - **Logging** (A5, `src/services/log.*`): access log in Apache/nginx "combined" format
   (same escaping, so fail2ban filters work) or JSON, per site (`access_log`) with the
   `[log] access` default; one descriptor per path opened `O_APPEND`, per-worker buffers

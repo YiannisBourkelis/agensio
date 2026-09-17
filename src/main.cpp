@@ -5,6 +5,7 @@
 
 #include "config.hpp"
 #include "server.hpp"
+#include "services/pools.hpp"
 #include "upstream/fcgi_client.hpp"
 
 namespace {
@@ -13,10 +14,14 @@ void usage() {
     std::cout << "agensio " AGENSIO_VERSION
                  " - a fast static web server built on Asio\n\n"
                  "usage: agensio [-c config.toml] [-t] [-v]\n"
+                 "       agensio pools [-c config.toml] [--out DIR] [--dry-run]\n"
                  "  -c, --config FILE   configuration file (default: agensio.toml, then config/agensio.toml)\n"
                  "  -t, --test          check the configuration (and FastCGI upstreams) and exit\n"
                  "      --explain       with -t: print the effective configuration after presets\n"
-                 "  -v, --version       print the version and exit\n";
+                 "  -v, --version       print the version and exit\n"
+                 "  pools               write the php-fpm pool of every site with `user` into the pool\n"
+                 "                      directory (server.pools or the distro's); exit 3 when files changed\n"
+                 "                      (reload php-fpm), 0 when up to date; --dry-run only reports\n";
 }
 
 std::filesystem::path default_config() {
@@ -32,11 +37,17 @@ int main(int argc, char** argv) {
     std::filesystem::path config_path;
     bool test_only = false;
     bool explain = false;
+    bool pools = false;
+    bool dry_run = false;
+    std::filesystem::path pools_out;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if ((a == "-c" || a == "--config") && i + 1 < argc) config_path = argv[++i];
         else if (a == "-t" || a == "--test") test_only = true;
         else if (a == "--explain") explain = true;
+        else if (a == "pools" && i == 1) pools = true;
+        else if (pools && a == "--out" && i + 1 < argc) pools_out = argv[++i];
+        else if (pools && a == "--dry-run") dry_run = true;
         else if (a == "-v" || a == "--version") {
             std::cout << "agensio " AGENSIO_VERSION "\n";
             return 0;
@@ -57,6 +68,21 @@ int main(int argc, char** argv) {
     } catch (const std::exception& e) {
         std::cerr << "configuration error: " << e.what() << "\n";
         return 1;
+    }
+    if (pools) {
+        if (pools_out.empty()) {
+            std::string version;
+            for (const auto& s : cfg.sites)
+                if (s.pool.generated && !s.pool.version.empty()) version = s.pool.version;
+            pools_out = agensio::pools_dir(cfg, version);
+            if (pools_out.empty()) {
+                std::cerr << "error: no php-fpm pool directory found; set server.pools or pass --out DIR\n";
+                return 1;
+            }
+        }
+        const int rc = agensio::write_pools(cfg, pools_out, dry_run, std::cout);
+        std::cout.flush();
+        return rc;
     }
     if (test_only || explain) {
         if (explain) agensio::explain_config(cfg, std::cout);

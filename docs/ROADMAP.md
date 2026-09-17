@@ -217,6 +217,12 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       `open_basedir`, child limits, timeouts), writes per-site logs owned by that user, and
       refuses at validation any pool socket, docroot or `.env` whose ownership or mode would
       let sites read each other. `sites/create` in the control API does all of it.
+      Design `docs/design-per-site-users.md` (accepted 2026-09-17, all five questions as
+      proposed). C3b-1 done 2026-09-17: `user`/`group` on a site, pool keys in `php`,
+      derived socket and keep-alive sizing, `src/services/pools.*` rendering the pool
+      file, `agensio pools` (writes, prunes, exit 3 on change), `-t --explain` shows the
+      pool, unit tests. Next: C3b-2 validation rules, C3b-3 root start + privilege drop
+      + per-site log ownership.
 - [x] C4 (2026-09-17) Test bed: `bench/laravel/` is a ddev Laravel project
       (`setup.sh` creates it once: `ddev config`, `ddev start`, `composer create-project`,
       test routes). `.ddev/web-build/Dockerfile.agensio` adds a second php-fpm pool on

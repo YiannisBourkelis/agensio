@@ -13,6 +13,13 @@ tcp_nodelay = true
 sendfile = true          # zero-copy streaming of files above cache.max_file_size (plain HTTP)
 sendfile_max_chunk = "1MB" # bytes per sendfile() call (measured: one 10 MB call costs 6x more kernel time)
 server_header = "agensio"
+# Hosting, one user per site (docs/configuration.md section 11): `user = "web1"` on a site
+# derives a php-fpm pool that `agensio pools` writes; `group` is the group agensio runs as.
+# group = "agensio"
+# pools = "/etc/php/8.3/fpm/pool.d"   # default: detected per distro
+# pools_run = "/run/php"              # default: per distro
+# state_dir = "/var/lib/agensio"
+# strict_users = false
 # trusted_proxies = ["127.0.0.1", "10.0.0.0/8"]  # believe X-Forwarded-For / X-Forwarded-Proto from these:
                          # the client address (access log, REMOTE_ADDR) and HTTPS for FastCGI come from them
 

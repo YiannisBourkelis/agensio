@@ -12,6 +12,7 @@
 #include "cache.hpp"
 #include "http1/chunked.hpp"
 #include "config.hpp"
+#include "services/pools.hpp"
 #include "core/headers.hpp"
 #include "core/result.hpp"
 #include "core/router.hpp"
@@ -989,6 +990,80 @@ static void test_security_regressions() {
     CHECK(path_files >= 3);
 }
 
+// C3b-1: `user` on a site derives a php-fpm pool; `agensio pools` writes it.
+static void test_pools() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-pools-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "app" / "public");
+    fs::create_directories(dir / "blog");
+    fs::create_directories(dir / "pool.d");
+    auto write = [&](const char* name, const std::string& text) { std::ofstream(dir / name) << text; };
+    const std::string server = "[server]\nworkers = 2\ngroup = \"www\"\npools_run = \"" + dir.string() +
+                               "/run\"\nstate_dir = \"" + dir.string() + "/state\"\n";
+    const std::string shop = "[[site]]\nserver_name = [\"shop\"]\nlisten = [\"127.0.0.1:18090\"]\nroot = \"app\"\n"
+                             "user = \"web1\"\napp = \"laravel\"\n";
+    write("a.toml", server + shop + "php = { children = 6, memory_limit = \"512M\", extra = { \"date.timezone\" = \"UTC\" } }\n"
+                    "[[site]]\nserver_name = [\"blog\"]\nlisten = [\"127.0.0.1:18090\"]\nroot = \"blog\"\n"
+                    "user = \"web2\"\ngroup = \"client2\"\napp = \"wordpress\"\nphp = { pm = \"dynamic\", keep_conn = false, max_connections = 5 }\n");
+    Config cfg = load_config(dir / "a.toml");
+    const SiteConfig& a = cfg.sites[0];
+    const SiteConfig& b = cfg.sites[1];
+    // Derived socket, keep-alive sized to children / workers, project root in open_basedir.
+    CHECK(a.pool.generated && a.pool.name == "agensio-web1" &&
+          a.php.address.key == "unix:" + dir.string() + "/run/agensio-web1.sock");
+    CHECK(a.php.options.keep_conn && a.php.options.max_connections == 3);
+    CHECK(a.pool.open_basedir.size() == 3 && a.pool.open_basedir[0] == fs::canonical(dir / "app").string());
+    CHECK(a.pool.state_dir == dir.string() + "/state/web1");
+    // Hand-written FastCGI options win over the pool's defaults.
+    CHECK(!b.php.options.keep_conn && b.php.options.max_connections == 5 && b.group == "client2");
+    const std::string ini = render_pool(cfg, a, "www");
+    for (const char* line : {"[agensio-web1]", "user = web1", "group = web1", "listen.group = www",
+                             "listen.mode = 0660", "pm = static", "pm.max_children = 6", "clear_env = yes",
+                             "php_admin_value[memory_limit] = 512M", "php_admin_value[date.timezone] = UTC",
+                             "php_admin_value[upload_max_filesize] = 1M"})
+        CHECK(ini.find(std::string(line) + "\n") != std::string::npos);
+    CHECK(ini.find("php_admin_value[open_basedir] = " + a.pool.open_basedir[0] + ":") != std::string::npos);
+    CHECK(render_pool(cfg, b, "www").find("pm.start_servers = 4\n") != std::string::npos);
+    CHECK(generated_pools(cfg, "www").size() == 2);
+
+    // Writing: files appear, a rerun changes nothing, a dropped user's file is removed,
+    // a foreign file with our name is refused.
+    std::ostringstream log;
+    CHECK(write_pools(cfg, dir / "pool.d", true, log) == 3 && !fs::exists(dir / "pool.d" / "agensio-web1.conf"));
+    CHECK(write_pools(cfg, dir / "pool.d", false, log) == 3);
+    CHECK(fs::is_regular_file(dir / "pool.d" / "agensio-web2.conf") && fs::is_directory(dir / "state" / "web2" / "sessions"));
+    CHECK(write_pools(cfg, dir / "pool.d", false, log) == 0);
+    write("b.toml", server + shop + "\n");
+    Config one = load_config(dir / "b.toml");
+    CHECK(write_pools(one, dir / "pool.d", false, log) == 3 && !fs::exists(dir / "pool.d" / "agensio-web2.conf") &&
+          fs::exists(dir / "pool.d" / "agensio-web1.conf"));
+    write("pool.d/agensio-web1.conf", "[agensio-web1]\nuser = someone\n");
+    CHECK(write_pools(one, dir / "pool.d", false, log) == 1);
+
+    // Refusals at load time.
+    auto refused = [&](const char* name, const std::string& text, const char* needle) {
+        write(name, text);
+        try {
+            load_config(dir / name);
+            return false;
+        } catch (const std::exception& e) {
+            return std::string(e.what()).find(needle) != std::string::npos;
+        }
+    };
+    CHECK(refused("nouser.toml", server + "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"blog\"\nphp = { socket = \"unix:/x.sock\", children = 4 }\n", "need 'user'"));
+    CHECK(refused("badname.toml", server + "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"blog\"\nuser = \"../web1\"\n", "not a valid account name"));
+    CHECK(refused("badpm.toml", server + shop + "php = { pm = \"forever\" }\n", "pm must be"));
+    CHECK(refused("strict.toml", "[server]\nstrict_users = true\n[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"blog\"\n", "'user' is required"));
+    CHECK(refused("differs.toml", server + shop + "php = { children = 6 }\n" + shop + "php = { children = 8 }\n", "php.children differs"));
+    CHECK(refused("shared.toml", server + "[[site]]\nserver_name = [\"x\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"blog\"\nuser = \"web1\"\napp = \"php\"\nphp = { socket = \"unix:/one.sock\" }\n"
+                                     "[[site]]\nserver_name = [\"y\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"blog\"\nuser = \"web2\"\napp = \"php\"\nphp = { socket = \"unix:/one.sock\" }\n", "different users but the same php socket"));
+    // An existing pool given by hand under a user is kept as is.
+    write("own.toml", server + shop + "php = { socket = \"unix:/run/php/mine.sock\" }\n");
+    Config own = load_config(dir / "own.toml");
+    CHECK(!own.sites[0].pool.generated && own.sites[0].php.address.key == "unix:/run/php/mine.sock" && !own.sites[0].php.options.keep_conn);
+    fs::remove_all(dir);
+}
+
 int main() {
     test_path();
     test_parser();
@@ -1008,6 +1083,7 @@ int main() {
     test_fcgi_http_params();
     test_log_format();
     test_fcgi_codec();
+    test_pools();
     if (failures) {
         std::printf("%d failure(s)\n", failures);
         return 1;

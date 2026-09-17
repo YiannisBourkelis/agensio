@@ -2,10 +2,12 @@
 
 #include "handlers/fastcgi.hpp"
 #include "path.hpp"
+#include "services/pools.hpp"
 
 #include <algorithm>
 #include <map>
 #include <ostream>
+#include <sstream>
 #include <cctype>
 #include <charconv>
 #include <stdexcept>
@@ -145,6 +147,31 @@ bool symlinks_deny_of(const toml::node_view<const toml::node>& n, bool fallback,
     std::string symlinks = to_lower(n.value_or(std::string("allow")));
     if (symlinks != "allow" && symlinks != "deny") fail(where + ": symlinks must be \"allow\" or \"deny\"");
     return symlinks == "deny";
+}
+
+// A user or group name as the pool file and the system will take it: a POSIX portable
+// name, so it can never carry a path, a space or an ini delimiter. "" when absent.
+std::string account_name(const toml::node_view<const toml::node>& n, const std::string& where) {
+    const std::string name = n.value_or(std::string());
+    if (name.empty()) return name;
+    if (name.size() > 32) fail(where + ": name too long");
+    for (std::size_t i = 0; i < name.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(name[i]);
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' ||
+                        (i > 0 && ((c >= '0' && c <= '9') || c == '-'));
+        if (!ok) fail(where + ": '" + name + "' is not a valid account name");
+    }
+    return name;
+}
+
+// Where the distro's php-fpm keeps its sockets, for generated pools.
+std::string default_pools_run() {
+#ifdef __APPLE__
+    for (const char* prefix : {"/opt/homebrew", "/usr/local"})
+        if (fs::is_directory(std::string(prefix) + "/etc/php")) return std::string(prefix) + "/var/run";
+#endif
+    if (fs::is_directory("/etc/php-fpm.d")) return "/run/php-fpm";  // RHEL, Fedora
+    return "/run/php";                                               // Debian, Ubuntu, Alpine
 }
 
 // `php = { ... }` (site) or `fastcgi = { ... }` (location): socket plus options, on top of `base`.
@@ -374,6 +401,64 @@ void apply_preset(SiteConfig& site, const std::string& where) {
             loc.try_files = site.try_files;
 }
 
+// The pool keys of `php = { ... }` for a site with `user` (docs/design-per-site-users.md).
+// Without `php.socket` the pool is agensio's to generate: the socket, the state directory
+// and the FastCGI sizing follow from the user, which is what makes a site's isolation one
+// line of configuration.
+void parse_pool(const toml::table* php, const fs::path& base_dir, const Config& cfg, SiteConfig& site,
+                const std::string& project_root, const std::string& where) {
+    PhpPool& pool = site.pool;
+    static constexpr const char* kKeys[] = {"children", "version", "max_requests", "memory_limit",
+                                            "max_execution_time", "pm", "open_basedir", "extra"};
+    bool any = false;
+    if (php)
+        for (const char* k : kKeys) any = any || php->contains(k);
+    if (site.user.empty()) {
+        if (any) fail(where + ".php: pool keys (children, pm, ...) need 'user' on the site");
+        return;
+    }
+    if (php) {
+        const std::string w = where + ".php";
+        auto count = [&](const char* key, unsigned& target, std::int64_t lo, std::int64_t hi) {
+            if (auto v = (*php)[key].value<std::int64_t>()) {
+                if (*v < lo || *v > hi) fail(w + "." + key + " out of range");
+                target = static_cast<unsigned>(*v);
+            }
+        };
+        count("children", pool.children, 1, 10000);
+        count("max_requests", pool.max_requests, 0, 1000000);
+        count("max_execution_time", pool.max_execution_time, 0, 86400);
+        pool.version = (*php)["version"].value_or(std::string());
+        pool.memory_limit = (*php)["memory_limit"].value_or(pool.memory_limit);
+        pool.pm = to_lower((*php)["pm"].value_or(pool.pm));
+        if (pool.pm != "static" && pool.pm != "dynamic" && pool.pm != "ondemand")
+            fail(w + ".pm must be \"static\", \"dynamic\" or \"ondemand\"");
+        for (const auto& text : string_list((*php)["open_basedir"], (w + ".open_basedir").c_str()))
+            pool.open_basedir.push_back(resolve(base_dir, text).string());
+        for (const auto& [k, v] : headers_of((*php)["extra"].as_table(), w))  // same shape: name = "value"
+            pool.extra.emplace_back(k, v);
+        for (const auto& [k, v] : pool.extra)
+            if (k.find_first_of("[]=\n") != std::string::npos || v.find('\n') != std::string::npos)
+                fail(w + ".extra: bad key or value '" + k + "'");
+    }
+    pool.name = "agensio-" + site.user;
+    pool.state_dir = cfg.state_dir + "/" + site.user;
+    if (pool.open_basedir.empty())
+        pool.open_basedir = {project_root, pool.state_dir + "/tmp", pool.state_dir + "/sessions"};
+    if (site.php.configured) return;  // an existing pool: nothing generated, the socket is theirs
+    pool.generated = true;
+    pool.socket = cfg.pools_run + "/" + pool.name + ".sock";
+    std::string err;
+    if (!parse_fcgi_address("unix:" + pool.socket, site.php.address, err)) fail(where + ": " + err);
+    site.php.configured = true;
+    // Keep-alive sized so kept connections cannot pin every child (C3a), unless set by hand.
+    if (!php || !php->contains("keep_conn")) site.php.options.keep_conn = true;
+    if (!php || !php->contains("max_connections")) {
+        const unsigned workers = cfg.workers ? cfg.workers : std::max(1u, std::thread::hardware_concurrency());
+        site.php.options.max_connections = std::max(1u, pool.children / workers);
+    }
+}
+
 void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, const std::string& where) {
     SiteConfig site;
     for (auto& n : string_list(t["server_name"], (where + ".server_name").c_str()))
@@ -391,6 +476,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     auto root = t["root"].value<std::string>();
     if (!root) fail(where + ": 'root' is required");
     site.root = resolve_root(base_dir, *root, where);
+    const std::string root_given = site.root;  // the project directory for app = "laravel"
     if (site.app == "laravel") {
         // The project directory is given; the web root is its public/ (never the project itself).
         site.root = resolve_root(base_dir, site.root + "/public", where + " (app = \"laravel\")");
@@ -405,6 +491,11 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     if (t.contains("try_files")) site.try_files = try_files_of(t["try_files"], where);
     if (auto pt = t["php"].as_table()) parse_fcgi_table(*pt, base_dir, site.php, where + ".php");
     else if (t.contains("php")) fail(where + ": 'php' must be a table");
+    site.user = account_name(t["user"], where + ".user");
+    site.group = account_name(t["group"], where + ".group");
+    if (!site.group.empty() && site.user.empty()) fail(where + ": 'group' needs 'user'");
+    if (cfg.strict_users && site.user.empty()) fail(where + ": 'user' is required (server.strict_users)");
+    parse_pool(t["php"].as_table(), base_dir, cfg, site, root_given, where);
 
     if (auto tls = t["tls"].as_table()) {
         auto cert = (*tls)["cert"].value<std::string>();
@@ -567,7 +658,14 @@ void explain_config(const Config& cfg, std::ostream& out) {
         if (site.tls)
             out << "tls = { cert = \"" << site.tls->cert.string() << "\", key = \"" << site.tls->key.string()
                 << "\" }\n";
+        if (!site.user.empty()) out << "user = \"" << site.user << "\"\n";
+        if (!site.group.empty()) out << "group = \"" << site.group << "\"\n";
         if (site.php.configured) print_fcgi(out, "php", site.php);
+        if (site.pool.generated) {
+            out << "# php-fpm pool " << site.pool.name << " (generated by `agensio pools`):\n";
+            std::istringstream ini(render_pool(cfg, site, cfg.group.empty() ? "<agensio group>" : cfg.group));
+            for (std::string line; std::getline(ini, line);) out << "#   " << line << "\n";
+        }
         out << "hidden_files = " << (site.hidden_files ? "true" : "false") << "\nsymlinks = \""
             << (site.symlinks_deny ? "deny" : "allow") << "\"\n";
         out << "access_log = \"" << (site.access_log.empty() ? "off" : site.access_log) << "\"\n";
@@ -675,6 +773,13 @@ Config load_config(const fs::path& path) {
         if (!parse_cidr(text, c, err)) fail("server.trusted_proxies: " + err);
         cfg.trusted_proxies.push_back(c);
     }
+    cfg.group = account_name(server["group"], "server.group");
+    if (auto d = server["pools"].value<std::string>()) cfg.pools_dir = resolve(base_dir, *d).string();
+    cfg.pools_run = server["pools_run"].value_or(default_pools_run());
+    if (cfg.pools_run.empty() || cfg.pools_run[0] != '/') fail("server.pools_run must be an absolute path");
+    cfg.state_dir = server["state_dir"].value_or(cfg.state_dir);
+    if (cfg.state_dir.empty() || cfg.state_dir[0] != '/') fail("server.state_dir must be an absolute path");
+    cfg.strict_users = server["strict_users"].value_or(false);
 
     auto cache = root["cache"];
     cfg.cache_max_file_size = size_node(cache["max_file_size"], cfg.cache_max_file_size, "cache.max_file_size");
@@ -724,6 +829,33 @@ Config load_config(const fs::path& path) {
     }
 
     if (cfg.sites.empty()) fail(path.string() + ": no [[site]] defined");
+
+    // One user, one pool: sites of the same user share it and must size it alike; sites of
+    // different users never share a socket, whatever they say.
+    for (const auto& a : cfg.sites) {
+        if (a.user.empty()) continue;
+        for (const auto& b : cfg.sites) {
+            if (&a == &b || b.user.empty()) continue;
+            const std::string pair = a.server_names.front() + " and " + b.server_names.front();
+            if (a.user != b.user) {
+                if (a.php.configured && b.php.configured && a.php.address.key == b.php.address.key)
+                    fail(pair + " have different users but the same php socket " + a.php.address.key);
+                continue;
+            }
+            if (!a.pool.generated || !b.pool.generated) continue;
+            const PhpPool& x = a.pool;
+            const PhpPool& y = b.pool;
+            const char* differs = x.children != y.children         ? "children"
+                                  : x.pm != y.pm                    ? "pm"
+                                  : x.max_requests != y.max_requests ? "max_requests"
+                                  : x.memory_limit != y.memory_limit ? "memory_limit"
+                                  : x.max_execution_time != y.max_execution_time ? "max_execution_time"
+                                  : x.version != y.version                       ? "version"
+                                  : x.extra != y.extra                           ? "extra"
+                                                                                 : nullptr;
+            if (differs) fail(pair + " share user " + a.user + " but php." + differs + " differs");
+        }
+    }
 
     // The FastCGI pool is per upstream address (and worker), so every location on the same
     // socket must agree on the pool bounds; the first definition wins, a conflict is an error.

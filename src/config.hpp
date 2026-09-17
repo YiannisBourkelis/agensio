@@ -64,8 +64,28 @@ struct LocationConfig {
 constexpr MethodSet kFcgiMethods = kStaticMethods | method_bit(Method::post) | method_bit(Method::put) |
                                    method_bit(Method::del) | method_bit(Method::patch);
 
+// The php-fpm pool agensio generates for a site with `user` and no `php.socket`
+// (C3b, docs/design-per-site-users.md): `agensio pools` writes it, `-t --explain` shows it.
+struct PhpPool {
+    bool generated = false;
+    std::string name;       // "agensio-<user>", also the pool file's stem
+    std::string socket;     // <server.pools_run>/agensio-<user>.sock
+    std::string state_dir;  // <server.state_dir>/<user>, holding tmp/ and sessions/
+    std::string version;    // php version for the pool directory ("" = newest installed)
+    std::string pm = "static";  // static | dynamic | ondemand
+    unsigned children = 8;      // pm.max_children
+    unsigned max_requests = 500;
+    std::string memory_limit = "256M";
+    unsigned max_execution_time = 60;
+    std::vector<std::string> open_basedir;                      // default: project root, tmp, sessions
+    std::vector<std::pair<std::string, std::string>> extra;    // php_admin_value passthrough
+};
+
 struct SiteConfig {
     std::vector<std::string> server_names;  // lower-case host names, "*" matches anything
+    std::string user;   // hosting: PHP runs as this user in its own pool, logs are owned by it
+    std::string group;  // default: the user's primary group
+    PhpPool pool;
     std::vector<std::string> listen;        // "host:port" strings, normalised
     std::string app;                        // preset: "laravel", "php", "static" or "" (none)
     std::string root;                       // absolute document root, no trailing slash
@@ -109,6 +129,14 @@ struct Config {
     // rightmost untrusted address becomes the client (REMOTE_ADDR, access log) and the
     // scheme sets HTTPS / REQUEST_SCHEME for FastCGI. Empty (default): headers are ignored.
     std::vector<Cidr> trusted_proxies;
+    // Hosting (C3b): the group agensio runs as (pool sockets grant it access; "" = the
+    // process's group), where `agensio pools` writes pool files ("" = detected per distro),
+    // where generated pools listen, and the per-user state directories.
+    std::string group;
+    std::string pools_dir;
+    std::string pools_run;  // defaulted by the loader per platform
+    std::string state_dir = "/var/lib/agensio";
+    bool strict_users = false;  // every site must name a user
 
     LogConfig log;
 

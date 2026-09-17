@@ -299,7 +299,65 @@ client address in the access log and `REMOTE_ADDR`, and `X-Forwarded-Proto: http
 `HTTPS` and `REQUEST_SCHEME` for PHP. Unset, the headers are ignored, so nothing can be
 spoofed from the open internet.
 
-## 11. TLS
+## 11. Hosting: one user per site
+
+`user = "web1"` on a site makes PHP for that site run as `web1` in a php-fpm pool that
+agensio generates. Nothing else is needed:
+
+```toml
+[server]
+group = "agensio"            # the group agensio runs as; the pool socket grants it access
+# pools = "/etc/php/8.3/fpm/pool.d"   # where `agensio pools` writes (default: detected)
+# pools_run = "/run/php"              # where generated pools listen (default: per distro)
+# state_dir = "/var/lib/agensio"      # per-user tmp and session directories
+# strict_users = true                 # refuse a site without `user`
+
+[[site]]
+server_name = ["shop.example.com"]
+listen = ["0.0.0.0:80"]
+root = "/var/www/clients/web1/shop"
+user = "web1"
+group = "client1"            # optional, default: the user's primary group
+app = "laravel"
+php = { children = 8 }       # no socket: it is derived, /run/php/agensio-web1.sock
+```
+
+Then, as root:
+
+```sh
+agensio pools -c /etc/agensio/agensio.toml   # writes agensio-web1.conf, exit 3 when something changed
+systemctl reload php8.3-fpm
+```
+
+What the pool gets: `user`/`group` of the site, socket `0660 web1:agensio`, `pm` and
+`children`, `pm.max_requests`, a private `tmp/` and `sessions/` under
+`state_dir/web1` (0700, owned by the user), `open_basedir` at the project directory
+plus those two, `memory_limit`, `max_execution_time`, upload limits from
+`max_body_size`, `clear_env`, `expose_php = off`. `agensio -t --explain` prints the
+whole file. agensio's own FastCGI options for a generated pool default to
+`keep_conn = true` with `max_connections = children / workers`, so kept connections can
+never pin every child (section 7).
+
+Pool keys in `php = { ... }`, all optional:
+
+| key | default | meaning |
+|---|---|---|
+| `children` | 8 | `pm.max_children` |
+| `pm` | `"static"` | `"static"`, `"dynamic"` (half the children on standby) or `"ondemand"` |
+| `max_requests` | 500 | `pm.max_requests`; 0 = unlimited |
+| `memory_limit` | `"256M"` | `memory_limit` |
+| `max_execution_time` | 60 | seconds |
+| `version` | newest installed | php version whose pool directory `agensio pools` writes to |
+| `open_basedir` | project, tmp, sessions | replaces the default list |
+| `extra` | none | `{ "date.timezone" = "Europe/Athens" }` becomes `php_admin_value[...]` lines |
+
+Rules: two sites with the same `user` share one pool and must agree on these keys;
+sites with different users may never name the same socket; a site with `user` and an
+explicit `php.socket` keeps its own pool and gets no generated file. Ownership checks on
+roots, secrets, sockets and logs, and per-site log ownership, follow in the next steps
+(`docs/design-per-site-users.md`).
+
+## 12. TLS
 
 ```toml
 [[site]]
