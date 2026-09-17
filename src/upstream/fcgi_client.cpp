@@ -1,6 +1,9 @@
 #include "upstream/fcgi_client.hpp"
 
+#include "config.hpp"
+
 #include <algorithm>
+#include <chrono>
 #include <cerrno>
 #include <cstring>
 #include <utility>
@@ -99,6 +102,55 @@ bool parse_fcgi_address(std::string_view text, FcgiAddress& out, std::string& er
     out.port = static_cast<std::uint16_t>(p);
     out.key = (addr.is_v6() ? "[" + out.host + "]" : out.host) + ":" + std::to_string(p);
     return true;
+}
+
+// ---- config-time check ----
+
+std::vector<std::string> check_upstreams(const Config& cfg) {
+    std::vector<std::string> warnings;
+    std::vector<std::string> seen;
+    for (const auto& site : cfg.sites)
+        for (const auto& loc : site.locations) {
+            if (loc.kind != HandlerKind::fastcgi) continue;
+            const FcgiAddress& a = loc.fastcgi.address;
+            if (std::find(seen.begin(), seen.end(), a.key) != seen.end()) continue;
+            seen.push_back(a.key);
+            asio::io_context ctx;
+            asio::generic::stream_protocol::socket s(ctx);
+            asio::error_code ec;
+            bool done = false;
+            auto on_connect = [&](const asio::error_code& e) {
+                ec = e;
+                done = true;
+            };
+            if (a.unix) {
+#ifdef ASIO_HAS_LOCAL_SOCKETS
+                asio::local::stream_protocol::endpoint ep(a.path);
+                s.open(asio::generic::stream_protocol(ep.protocol()), ec);
+                if (!ec) s.async_connect(ep, on_connect);
+#else
+                ec = asio::error::operation_not_supported;
+#endif
+            } else {
+                asio::ip::tcp::endpoint ep(asio::ip::make_address(a.host), a.port);
+                s.open(asio::generic::stream_protocol(ep.protocol()), ec);
+                if (!ec) s.async_connect(ep, on_connect);
+            }
+            if (!ec && !done) {
+                ctx.run_for(std::chrono::seconds(1));
+                if (!done) ec = asio::error::timed_out;
+            }
+            if (!ec) continue;
+            std::string hint = ec.message();
+            const bool os = ec.category() == asio::system_category() || ec.category() == std::system_category();
+            const int v = os ? ec.value() : 0;
+            if (v == ENOENT) hint += "; is php-fpm running and is its `listen` this path?";
+            else if (v == EACCES || v == EPERM) hint += "; check listen.owner/listen.group/listen.mode of the fpm pool";
+            else if (v == ECONNREFUSED) hint += "; nothing is listening there";
+            warnings.push_back("fastcgi upstream " + a.key + " (" + site.server_names.front() + " location '" +
+                               loc.path + "'): " + hint);
+        }
+    return warnings;
 }
 
 // ---- pool ----

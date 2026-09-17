@@ -5,6 +5,7 @@
 
 #include "config.hpp"
 #include "server.hpp"
+#include "upstream/fcgi_client.hpp"
 
 namespace {
 
@@ -13,7 +14,8 @@ void usage() {
                  " - a fast static web server built on Asio\n\n"
                  "usage: agensio [-c config.toml] [-t] [-v]\n"
                  "  -c, --config FILE   configuration file (default: agensio.toml, then config/agensio.toml)\n"
-                 "  -t, --test          check the configuration and exit\n"
+                 "  -t, --test          check the configuration (and FastCGI upstreams) and exit\n"
+                 "      --explain       with -t: print the effective configuration after presets\n"
                  "  -v, --version       print the version and exit\n";
 }
 
@@ -29,10 +31,12 @@ std::filesystem::path default_config() {
 int main(int argc, char** argv) {
     std::filesystem::path config_path;
     bool test_only = false;
+    bool explain = false;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if ((a == "-c" || a == "--config") && i + 1 < argc) config_path = argv[++i];
         else if (a == "-t" || a == "--test") test_only = true;
+        else if (a == "--explain") explain = true;
         else if (a == "-v" || a == "--version") {
             std::cout << "agensio " AGENSIO_VERSION "\n";
             return 0;
@@ -54,7 +58,11 @@ int main(int argc, char** argv) {
         std::cerr << "configuration error: " << e.what() << "\n";
         return 1;
     }
-    if (test_only) {
+    if (test_only || explain) {
+        if (explain) agensio::explain_config(cfg, std::cout);
+        std::cout.flush();
+        for (const auto& w : agensio::check_upstreams(cfg))
+            std::cerr << "warning: " << w << "\n";
         std::cout << "configuration " << cfg.config_path.string() << " is OK (" << cfg.sites.size() << " site(s))\n";
         return 0;
     }

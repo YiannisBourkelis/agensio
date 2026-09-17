@@ -38,9 +38,10 @@ private:
 
     Lookup plain_lookup(Stream& s, const LocationConfig& loc, WorkerState& ws, File& f, FileInfo& fi);
     Lookup try_files_lookup(Stream& s, const LocationConfig& loc, WorkerState& ws, File& f, FileInfo& fi);
-    static bool open_index(const LocationConfig& loc, WorkerState& ws, File& f, FileInfo& fi);
+    Lookup index_lookup(const LocationConfig& loc, WorkerState& ws, File& f, FileInfo& fi);
 
     void serve_entry(Stream& s, EntryPtr e);  // takes ownership of the ref
+    static void add_headers(Stream& s, const LocationConfig& loc);
     // Metadata and prebuilt header block shared by memory and descriptor entries.
     void fill_entry(CacheEntry& e, const FileInfo& fi, const WorkerState& ws, std::time_t now);
     void serve_file(Stream& s, File&& f, const FileInfo& fi, WorkerState& ws);

@@ -78,12 +78,12 @@ alias = "{www}/sub"
 
 [[site.location]]
 path = "/spa/"
-try_files = ["$uri", "/index.html"]
+try_files = ["$uri", "/sub/index.html"]
 
 [[site.location]]
-path = "/index.html"
+path = "/sub/index.html"
 match = "exact"
-root = "{www}/sub"
+add_headers = {{ "X-Loc" = "exact" }}
 
 [[site.location]]
 path = "/private/"
@@ -99,6 +99,15 @@ text = open(path).read().replace("default = true\n", block, 1)
 tls_line = [l for l in text.splitlines() if l.startswith("tls = ")][0]
 text = text.replace(tls_line + "\n", tls_line + f'\nphp = {{ socket = "unix:{root}/bench/tmp/php/fpm.sock" }}\n\n[[site.location]]\npath = "/php/"\nalias = "{root}/tests/php"\nindex = ["index.php"]\nhandler = "fastcgi"\n', 1)
 text = text.replace("[log]\n", f'[log]\nerror = "{root}/bench/tmp/error.log"\n', 1)
+# A Laravel-shaped project through the preset, on its own port.
+text += f"""
+[[site]]
+server_name = ["laravel.test"]
+listen = ["127.0.0.1:8090"]
+root = "{root}/tests/laravel"
+app = "laravel"
+php = {{ socket = "unix:{root}/bench/tmp/php/fpm.sock" }}
+"""
 open(path, "w").write(text)
 PY
 "$BIN" -c bench/tmp/agensio-test.toml >/dev/null 2>&1 &
@@ -141,9 +150,10 @@ check "location: SPA fallback serves the app shell for a missing path" "app shel
 check "location: SPA fallback for the directory URI" "app shell" "$(curl -sS http://127.0.0.1:8080/app/ | sed 's/<[^>]*>//g')"
 check "location: alias replaces the prefix" "sub index" "$(curl -sS http://127.0.0.1:8080/alias/ | sed 's/<[^>]*>//g')"
 check "location: alias file path" "sub index" "$(curl -sS http://127.0.0.1:8080/alias/index.html | sed 's/<[^>]*>//g')"
-check "location: fallback is routed again (hits the exact /index.html location)" "sub index" "$(curl -sS http://127.0.0.1:8080/spa/missing | sed 's/<[^>]*>//g')"
-check "location: exact match wins over the root prefix" "sub index" "$(curl -sS http://127.0.0.1:8080/index.html | sed 's/<[^>]*>//g')"
-check "location: exact does not prefix-match" "404" "$(code http://127.0.0.1:8080/index.htmlx)"
+check "location: fallback is routed again (hits the exact location, its header added)" "sub index exact" "$(curl -sSi http://127.0.0.1:8080/spa/missing | tr -d '\r' | awk '/^X-Loc:/{h=$2} /<body>/{gsub(/<[^>]*>/,""); b=$0} END{print b, h}')"
+check "location: exact match wins over the root prefix" "sub index exact" "$(curl -sSi http://127.0.0.1:8080/sub/index.html | tr -d '\r' | awk '/^X-Loc:/{h=$2} /<body>/{gsub(/<[^>]*>/,""); b=$0} END{print b, h}')"
+check "location: directory index is routed to the location owning it" "exact" "$(curl -sSI http://127.0.0.1:8080/sub/ | tr -d '\r' | awk '/^X-Loc:/{print $2}')"
+check "location: exact does not prefix-match" "404" "$(code http://127.0.0.1:8080/sub/index.htmlx)"
 check "location: root prefix still serves the site" "$IDX" "$(curl -sS http://127.0.0.1:8080/ | sum)"
 check "location: try_files =403" "403" "$(code http://127.0.0.1:8080/private/anything)"
 check "location: fallback result served again (cache hit on the target)" "app shell" "$(curl -sS http://127.0.0.1:8080/app/some/route | sed 's/<[^>]*>//g')"
@@ -218,6 +228,19 @@ check "php: forwarded headers still passed as HTTP_" "yes" "$(echo "$FW" | grep 
 else
   echo "skip php-fpm checks (php-fpm not installed)"
 fi
+# ---- presets (C3): app = "laravel" ----
+if [ -n "$FPM_PID" ]; then
+check "laravel: any route reaches the front controller" "laravel /some/route?x=1 /index.php -" "$(curl -sS 'http://127.0.0.1:8090/some/route?x=1')"
+check "laravel: root goes to index.php" "laravel / /index.php -" "$(curl -sS http://127.0.0.1:8090/)"
+check "laravel: static asset served from public/ with immutable caching" "console.log(\"app\"); public, max-age=31536000, immutable" "$(curl -sS http://127.0.0.1:8090/build/app.js | tr -d '\n') $(curl -sSI http://127.0.0.1:8090/build/app.js | tr -d '\r' | awk '/^Cache-Control:/{sub(/^Cache-Control: /,""); print}')"
+check "laravel: dotfiles in public/ hidden" "404" "$(code http://127.0.0.1:8090/.env)"
+check "laravel: project files outside public/ unreachable" "400" "$(code --path-as-is 'http://127.0.0.1:8090/../.env')"
+check "laravel: other .php files are routed to the front controller, never executed" "laravel /anything.php /index.php -" "$(curl -sS http://127.0.0.1:8090/anything.php)"
+check "laravel: /index.php/extra also lands in the front controller" "laravel /index.php/extra /index.php -" "$(curl -sS 'http://127.0.0.1:8090/index.php/extra')"
+fi
+"$BIN" -t --explain -c bench/tmp/agensio-test.toml > bench/tmp/explain.out 2>bench/tmp/explain.err
+check "explain: preset expansion is printed" "yes" "$(grep -q '# from preset:laravel' bench/tmp/explain.out && echo yes)"
+check "explain: -t reports OK" "yes" "$("$BIN" -t -c bench/tmp/agensio-test.toml 2>/dev/null | grep -q 'is OK' && echo yes)"
 # ---- request bodies (A3): decoded, limited, drained after the response ----
 check "body on GET: served, drained, pipelined request answered" "2" "$(printf 'GET / HTTP/1.1\r\nHost: l\r\nContent-Length: 5\r\n\r\nhelloGET /sub/ HTTP/1.1\r\nHost: l\r\nConnection: close\r\n\r\n' | ncq 127.0.0.1 8080 | grep -c 'HTTP/1.1 200')"
 check "POST with body: 405, then keep-alive" "405 200" "$(printf 'POST / HTTP/1.1\r\nHost: l\r\nContent-Length: 3\r\n\r\nx=1GET / HTTP/1.1\r\nHost: l\r\nConnection: close\r\n\r\n' | ncq 127.0.0.1 8080 | awk '/^HTTP\/1.1/{printf "%s ", $2}' | sed 's/ $//')"
@@ -275,7 +298,7 @@ python3 - bench/tmp/agensio-test2.toml <<'PY'
 import sys
 path = sys.argv[1]
 text = open(path).read()
-i = text.rfind("[[site]]")
+i = text.find("[[site]]", text.find("[[site]]") + 1)  # before the second site: the block joins the first
 text = text[:i] + '[[site.location]]\npath = ".php"\nmatch = "suffix"\nhandler = "fastcgi"\n\n' + text[i:]
 # Pool bounds are per upstream: set them once on the site so every location agrees.
 text = text.replace('php = { socket = ', 'php = { max_connections = 1, queue_depth = 0, socket = ')
@@ -309,6 +332,7 @@ if [ -n "$FPM_PID" ]; then
   check "access log: upstream field for php" "yes" "$(grep -q '"target":"/php/".*"upstream":"ok"}$' bench/tmp/access.log && echo yes)"
   kill $FPM_PID; wait $FPM_PID 2>/dev/null; FPM_PID=""; sleep 0.3
   check "php: fpm gone gives 502" "502" "$(code http://127.0.0.1:8080/php/)"
+  check "-t warns about the unreachable upstream" "yes" "$("$BIN" -t -c bench/tmp/agensio-test.toml 2>&1 >/dev/null | grep -q 'warning: fastcgi upstream' && echo yes)"
   check "php: 502 reason names the socket" "yes" "$(grep -q -E 'socket_missing|connect_refused' bench/tmp/error.log && echo yes)"
 fi
 # Body timeout (1 s here): the response is served, then the missing body bytes never come

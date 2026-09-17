@@ -198,6 +198,11 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   (`/index.php/extra`). `server.trusted_proxies` (CIDRs, `net/cidr.hpp`): from those
   peers X-Forwarded-For (rightmost untrusted hop) and X-Forwarded-Proto set the client
   address for the access log and REMOTE_ADDR / HTTPS / REQUEST_SCHEME for FastCGI.
+- **Presets** (C3): `app = "laravel" | "php" | "static"` on a site expands at load into
+  root, index, try_files and locations (Laravel: only `/index.php` is ever executed,
+  `/build/` gets an immutable Cache-Control via `add_headers`); hand-written locations
+  win over the preset's. `agensio -t --explain` prints the effective configuration;
+  `-t` connects to every FastCGI upstream once and warns, with the reason, if it cannot.
 - **Logging** (A5, `src/services/log.*`): access log in Apache/nginx "combined" format
   (same escaping, so fail2ban filters work) or JSON, per site (`access_log`) with the
   `[log] access` default; one descriptor per path opened `O_APPEND`, per-worker buffers

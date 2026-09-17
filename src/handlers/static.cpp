@@ -161,20 +161,34 @@ void fs_path_of(const LocationConfig& loc, WorkerState& ws) {
     else ws.fs_path.assign(loc.alias).append(ws.path, loc.path.size() - 1, std::string::npos);  // keeps the '/'
 }
 
-// Opens the first index file of the directory ws.path (which ends with '/') under loc.root.
-// Leaves ws.fs_path at the file that was opened, or at the directory if none was.
-bool StaticHandler::open_index(const LocationConfig& loc, WorkerState& ws, File& f, FileInfo& fi) {
+// The index file of the directory ws.path (which ends with '/'): `found` with it open and
+// ws.fs_path at it, `responded` when there is none (ws.fs_path at the directory), or
+// `redirect` when the index belongs to another location. That last case is nginx's
+// `index` semantics, an internal redirect to path + index: a Laravel site's "/" becomes
+// "/index.php", which the exact FastCGI location owns, not the static one.
+StaticHandler::Lookup StaticHandler::index_lookup(const LocationConfig& loc, WorkerState& ws, File& f, FileInfo& fi) {
     fs_path_of(loc, ws);
     const std::size_t base = ws.fs_path.size();
     for (const auto& index : loc.index) {
         ws.fs_path.resize(base);
         ws.fs_path.append(index);
         f = File::open(ws.fs_path.c_str());
-        if (f.is_open() && f.info(fi) && fi.is_regular) return true;
-        f.close();
+        if (!f.is_open() || !f.info(fi) || !fi.is_regular) {
+            f.close();
+            continue;
+        }
+        const auto* site = static_cast<const SiteConfig*>(ws.site);
+        const std::size_t path_len = ws.path.size();
+        ws.path.append(index);
+        if (&Router::location(*site, ws.path) != &loc) {
+            f.close();
+            return Lookup::redirect;  // ws.path is now the index path; the caller routes it again
+        }
+        ws.path.resize(path_len);
+        return Lookup::found;
     }
     ws.fs_path.resize(base);
-    return false;
+    return Lookup::responded;
 }
 
 // The rule without try_files: a directory URI serves its index (403 without one, 404 if
@@ -184,7 +198,8 @@ StaticHandler::Lookup StaticHandler::plain_lookup(Stream& s, const LocationConfi
                                                   FileInfo& fi) {
     const bool keep_alive = s.request.keep_alive;
     if (ws.path.back() == '/') {
-        if (open_index(loc, ws, f, fi)) return Lookup::found;
+        const Lookup r = index_lookup(loc, ws, f, fi);
+        if (r != Lookup::responded) return r;
         FileInfo dir;
         const bool exists = stat_path(ws.fs_path.c_str(), dir) && dir.is_directory;
         error(s, exists ? 403 : 404, keep_alive);
@@ -226,7 +241,8 @@ StaticHandler::Lookup StaticHandler::try_files_lookup(Stream& s, const LocationC
                 break;
             case TryStep::Kind::uri_dir: {
                 if (dir_uri) {
-                    if (open_index(loc, ws, f, fi)) return Lookup::found;
+                    const Lookup r = index_lookup(loc, ws, f, fi);
+                    if (r != Lookup::responded) return r;
                     break;
                 }
                 fs_path_of(loc, ws);
@@ -299,6 +315,7 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
         // Exactly one strong reference is taken for the duration of the response.
         EntryPtr ref = fetched ? std::move(fetched) : *local;
         serve_entry(s, std::move(ref));
+        add_headers(s, loc);
         return Outcome::done;
     }
 
@@ -336,6 +353,7 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
         if (canonical) ws.local.insert(key, canonical);
         else canonical = std::move(entry);  // cache full for this size class: serve once, uncached
         serve_entry(s, std::move(canonical));
+        add_headers(s, loc);
         return Outcome::done;
     }
 
@@ -352,12 +370,20 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
         if (canonical) {
             ws.local.insert(key, canonical);
             serve_entry(s, std::move(canonical));
+            add_headers(s, loc);
             return Outcome::done;
         }
         f = std::move(entry->fd);  // store refused it: serve once from the open file
     }
     serve_file(s, std::move(f), fi, ws);
+    add_headers(s, loc);
     return Outcome::done;
+}
+
+// Configured response fields (add_headers) on 200 and 304; the values live in the config.
+void StaticHandler::add_headers(Stream& s, const LocationConfig& loc) {
+    for (const auto& h : loc.add_headers)
+        s.response.headers.add(h.first, h.second);
 }
 
 }  // namespace agensio

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <map>
+#include <ostream>
 #include <cctype>
 #include <charconv>
 #include <stdexcept>
@@ -194,6 +195,23 @@ void parse_fcgi_table(const toml::table& t, const fs::path& base_dir, FcgiConfig
     out.retry_after = std::to_string(wait_s < 1 ? 1 : wait_s);
 }
 
+std::vector<std::pair<std::string, std::string>> headers_of(const toml::table* t, const std::string& where) {
+    std::vector<std::pair<std::string, std::string>> out;
+    if (!t) return out;
+    for (auto& [name, node] : *t) {
+        auto value = node.value<std::string>();
+        if (!value) fail(where + ".add_headers." + std::string(name.str()) + " must be a string");
+        for (unsigned char c : name.str())
+            if (c <= 0x20 || c == ':' || c == 0x7f)
+                fail(where + ".add_headers: bad field name '" + std::string(name.str()) + "'");
+        for (unsigned char c : *value)
+            if ((c < 0x20 && c != '\t') || c == 0x7f)
+                fail(where + ".add_headers." + std::string(name.str()) + ": control character in value");
+        out.emplace_back(std::string(name.str()), *value);
+    }
+    return out;
+}
+
 void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& site, const std::string& where) {
     LocationConfig loc;
     auto path = t["path"].value<std::string>();
@@ -225,6 +243,8 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
     loc.try_files = t.contains("try_files") ? try_files_of(t["try_files"], where) : site.try_files;
     loc.hidden_files = t["hidden_files"].value_or(site.hidden_files);
     loc.symlinks_deny = symlinks_deny_of(t["symlinks"], site.symlinks_deny, where);
+    if (auto ht = t["add_headers"].as_table()) loc.add_headers = headers_of(ht, where);
+    else if (t.contains("add_headers")) fail(where + ": 'add_headers' must be a table");
     loc.handler = to_lower(t["handler"].value_or(std::string("static")));
     if (loc.handler == "static") {
         loc.kind = HandlerKind::static_;
@@ -260,6 +280,64 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
     site.locations.push_back(std::move(loc));
 }
 
+// A preset is the whole configuration of a common kind of site. It never overrides what
+// the site configured by hand: a location the site already defines is left alone, and
+// try_files is only set when the site did not set one.
+void apply_preset(SiteConfig& site, const std::string& where) {
+    if (site.app.empty() || site.app == "static") return;
+    auto has = [&](const std::string& path, bool exact, bool suffix) {
+        for (const auto& l : site.locations)
+            if (l.path == path && l.exact == exact && l.suffix == suffix) return true;
+        return false;
+    };
+    auto fcgi_location = [&](std::string path, bool exact, bool suffix) {
+        LocationConfig loc;
+        loc.path = std::move(path);
+        loc.exact = exact;
+        loc.suffix = suffix;
+        loc.root = site.root;
+        loc.index = site.index;
+        loc.try_files = site.try_files;
+        loc.hidden_files = site.hidden_files;
+        loc.symlinks_deny = site.symlinks_deny;
+        loc.handler = "fastcgi";
+        loc.kind = HandlerKind::fastcgi;
+        loc.fastcgi = site.php;
+        loc.methods = kFcgiMethods;
+        loc.allow = allow_header(kFcgiMethods);
+        loc.origin = "preset:" + site.app;
+        loc.fastcgi.params_prefix = FcgiHandler::prebuild_params(site, loc);
+        return loc;
+    };
+    if (!site.php.configured)
+        fail(where + ": app = \"" + site.app + "\" needs php = { socket = \"...\" } on the site");
+    if (site.app == "laravel") {
+        // Front controller only: no other .php is ever executed, dotfiles stay hidden
+        // (site default), Vite's hashed build output is cached for a year.
+        if (site.try_files.empty()) site.try_files = parse_try_files({"$uri", "$uri/", "/index.php?$query_string"});
+        if (!has("/index.php", true, false)) site.locations.push_back(fcgi_location("/index.php", true, false));
+        if (!has("/build/", false, false)) {
+            LocationConfig assets;
+            assets.path = "/build/";
+            assets.root = site.root;
+            assets.index = site.index;
+            assets.try_files = parse_try_files({"$uri", "=404"});
+            assets.hidden_files = site.hidden_files;
+            assets.symlinks_deny = site.symlinks_deny;
+            assets.add_headers.emplace_back("Cache-Control", "public, max-age=31536000, immutable");
+            assets.origin = "preset:laravel";
+            site.locations.push_back(std::move(assets));
+        }
+    } else if (site.app == "php") {
+        if (site.try_files.empty()) site.try_files = parse_try_files({"$uri", "$uri/", "=404"});
+        if (!has(".php", false, true)) site.locations.push_back(fcgi_location(".php", false, true));
+    }
+    // Locations the preset created inherit the site's try_files decided above.
+    for (auto& loc : site.locations)
+        if (loc.origin == "preset:" + site.app && loc.kind == HandlerKind::fastcgi && loc.try_files.empty())
+            loc.try_files = site.try_files;
+}
+
 void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, const std::string& where) {
     SiteConfig site;
     for (auto& n : string_list(t["server_name"], (where + ".server_name").c_str()))
@@ -270,9 +348,19 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
         site.listen.push_back(normalise_listen(l));
     if (site.listen.empty()) fail(where + ": 'listen' is required");
 
+    site.app = to_lower(t["app"].value_or(std::string()));
+    if (!site.app.empty() && site.app != "laravel" && site.app != "php" && site.app != "static")
+        fail(where + ": app must be \"laravel\", \"php\" or \"static\" (\"wordpress\" and \"proxy\" arrive later)");
     auto root = t["root"].value<std::string>();
     if (!root) fail(where + ": 'root' is required");
     site.root = resolve_root(base_dir, *root, where);
+    if (site.app == "laravel") {
+        // The project directory is given; the web root is its public/ (never the project itself).
+        site.root = resolve_root(base_dir, site.root + "/public", where + " (app = \"laravel\")");
+        site.index = {"index.php"};
+    } else if (site.app == "php") {
+        site.index = {"index.php", "index.html"};
+    }
 
     if (t.contains("index")) site.index = index_list(t["index"], where);
     if (t.contains("try_files")) site.try_files = try_files_of(t["try_files"], where);
@@ -308,6 +396,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     } else if (t.contains("location")) {
         fail(where + ": 'location' must be an array of tables ([[site.location]])");
     }
+    apply_preset(site, where);
     finalize_site(site);
     cfg.sites.push_back(std::move(site));
 }
@@ -385,6 +474,88 @@ std::vector<TryStep> parse_try_files(const std::vector<std::string>& items) {
         out.push_back(std::move(step));
     }
     return out;
+}
+
+namespace {
+void print_list(std::ostream& out, const char* key, const std::vector<std::string>& v) {
+    out << key << " = [";
+    for (std::size_t i = 0; i < v.size(); ++i) out << (i ? ", " : "") << '"' << v[i] << '"';
+    out << "]\n";
+}
+void print_try_files(std::ostream& out, const std::vector<TryStep>& v) {
+    if (v.empty()) return;
+    out << "try_files = [";
+    for (std::size_t i = 0; i < v.size(); ++i) {
+        out << (i ? ", " : "") << '"';
+        switch (v[i].kind) {
+            case TryStep::Kind::uri: out << "$uri"; break;
+            case TryStep::Kind::uri_dir: out << "$uri/"; break;
+            case TryStep::Kind::status: out << "=" << v[i].status; break;
+            case TryStep::Kind::fallback: out << v[i].target; break;
+        }
+        out << '"';
+    }
+    out << "]\n";
+}
+void print_fcgi(std::ostream& out, const char* key, const FcgiConfig& f) {
+    const FcgiOptions& o = f.options;
+    out << key << " = { socket = \"" << f.address.key << "\", buffering = " << (o.buffering ? "true" : "false")
+        << ", request_buffering = " << (o.request_buffering ? "true" : "false")
+        << ", keep_conn = " << (o.keep_conn ? "true" : "false") << ", max_connections = " << o.max_connections
+        << ", queue_depth = " << o.queue_depth << ", queue_wait = " << o.queue_wait.count() / 1000.0
+        << ", priority_reserve = " << o.priority_reserve << ", connect_timeout = " << o.connect_timeout.count() / 1000.0
+        << ", send_timeout = " << o.send_timeout.count() / 1000.0
+        << ", read_timeout = " << o.read_timeout.count() / 1000.0
+        << ", buffer_max = " << o.buffer_max << ", buffer_file_max = " << o.buffer_file_max
+        << ", request_buffer_max = " << o.request_buffer_max << ", head_max = " << o.head_max
+        << ", path_info = " << (o.path_info ? "true" : "false") << " }\n";
+}
+}  // namespace
+
+void explain_config(const Config& cfg, std::ostream& out) {
+    out << "# effective configuration of " << cfg.config_path.string() << " (presets expanded)\n";
+    for (const auto& site : cfg.sites) {
+        out << "\n[[site]]";
+        if (!site.app.empty()) out << "  # app = \"" << site.app << "\"";
+        out << "\n";
+        print_list(out, "server_name", site.server_names);
+        print_list(out, "listen", site.listen);
+        out << "root = \"" << site.root << "\"\n";
+        print_list(out, "index", site.index);
+        print_try_files(out, site.try_files);
+        if (site.tls)
+            out << "tls = { cert = \"" << site.tls->cert.string() << "\", key = \"" << site.tls->key.string()
+                << "\" }\n";
+        if (site.php.configured) print_fcgi(out, "php", site.php);
+        out << "hidden_files = " << (site.hidden_files ? "true" : "false") << "\nsymlinks = \""
+            << (site.symlinks_deny ? "deny" : "allow") << "\"\n";
+        out << "access_log = \"" << (site.access_log.empty() ? "off" : site.access_log) << "\"\n";
+        for (const auto& loc : site.locations) {
+            out << "\n[[site.location]]";
+            if (!loc.origin.empty()) out << "  # from " << loc.origin;
+            else if (loc.path == "/" && !loc.exact && !loc.suffix) out << "  # implicit";
+            out << "\n";
+            const char* match = loc.exact ? "exact" : loc.suffix ? "suffix" : "prefix";
+            out << "path = \"" << loc.path << "\"\nmatch = \"" << match << "\"\n";
+            if (!loc.alias.empty()) out << "alias = \"" << loc.alias << "\"\n";
+            else out << "root = \"" << loc.root << "\"\n";
+            print_list(out, "index", loc.index);
+            print_try_files(out, loc.try_files);
+            out << "handler = \"" << loc.handler << "\"\n";
+            if (loc.kind == HandlerKind::fastcgi) print_fcgi(out, "fastcgi", loc.fastcgi);
+            if (loc.priority) out << "priority = true\n";
+            out << "methods = \"" << loc.allow << "\"\n";
+            out << "hidden_files = " << (loc.hidden_files ? "true" : "false") << "\nsymlinks = \""
+                << (loc.symlinks_deny ? "deny" : "allow") << "\"\n";
+            if (!loc.add_headers.empty()) {
+                out << "add_headers = {";
+                for (std::size_t i = 0; i < loc.add_headers.size(); ++i)
+                    out << (i ? ", " : " ") << '"' << loc.add_headers[i].first << "\" = \""
+                        << loc.add_headers[i].second << '"';
+                out << " }\n";
+            }
+        }
+    }
 }
 
 void finalize_site(SiteConfig& site) {

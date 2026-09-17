@@ -39,6 +39,13 @@ max_open_files = 1024    # files above max_file_size are streamed, but their ope
                          # costs no open/fstat. Least recently used are closed beyond this count.
                          # 0 = open per request. Must stay well under the process file limit.
 
+# Presets: `app = "laravel"` on a site whose root is the project directory serves public/,
+# routes everything to /index.php (only the front controller is ever executed), keeps
+# dotfiles hidden and caches /build/ (Vite output) for a year; `app = "php"` runs any .php
+# under the root with index.php/index.html; `app = "static"` is the default. A preset never
+# overrides a location the site defines itself. `agensio -t --explain` prints the result.
+# `add_headers = { "Cache-Control" = "..." }` on a location adds response fields on 200/304.
+#
 # PHP (FastCGI to php-fpm): `php = { socket = "unix:/run/php/php8.4-fpm.sock" }` on a site
 # gives every `handler = "fastcgi"` location its upstream; a location's `fastcgi = { ... }`
 # table overrides it. Keys: socket ("unix:/path", "/path" or "ip:port"), buffering (true:

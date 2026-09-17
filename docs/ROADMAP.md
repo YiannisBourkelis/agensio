@@ -186,12 +186,14 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       (httpoxy), header names with `_` dropped and repeats joined like nginx, temp-file
       cap `buffer_file_max` (1 GB) switching to streaming, pool bounds validated per
       upstream, fewer copies in the client.
-- [ ] C3 Config: `php = { socket = "unix:/run/php/php-fpm.sock" }` at site level and
-      **presets** (future todo, agreed 2026-09-16): `app = "laravel"` expands to root
-      `public/`, `try_files $uri /index.php?$query_string`, deny `.env`/dotfiles, static
-      caching rules; `app = "php"` plain; `app = "wordpress"`, `app = "proxy"`,
-      `app = "static"` later. A preset is the whole config for a common site; every
-      expansion is printable with `agensio -t --explain` so nothing is hidden.
+- [x] C3 (2026-09-17) `php = { socket = ... }` at site level (C1) and presets:
+      `app = "laravel"` (root/public, index.php, `try_files $uri $uri/ /index.php?$query_string`,
+      exact `/index.php` fastcgi location so no other script ever runs, dotfiles hidden,
+      `/build/` with a one-year immutable Cache-Control), `app = "php"` (`.php` suffix
+      location, index.php/index.html, `=404`), `app = "static"`. A preset never overrides
+      a location the site defines. `add_headers` per location. `agensio -t --explain`
+      prints the expansion; `-t` also warns about unreachable FastCGI upstreams.
+      `app = "wordpress"` and `app = "proxy"` come with their phases.
 - [ ] C3b **Per-site users (ISPConfig / IIS app-pool model, made native)**: `user = "web1"`
       on a site; agensio generates the php-fpm pool for it (user/group, socket owned by the
       site user with group-only access for agensio, private tmp and session dirs,

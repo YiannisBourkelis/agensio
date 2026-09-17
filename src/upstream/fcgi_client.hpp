@@ -52,6 +52,12 @@ struct FcgiConnection {
 };
 
 class FcgiRequest;
+struct Config;
+
+// `agensio -t`: tries to connect to every FastCGI upstream (1 s each) and returns one
+// warning line per unreachable one, naming the reason (missing socket, permission,
+// refused). Warnings, not errors: php-fpm may legitimately start after us.
+std::vector<std::string> check_upstreams(const Config& cfg);
 
 class FcgiPool {
 public:

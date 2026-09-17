@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <sstream>
 #include <string_view>
 #include <unistd.h>
 
@@ -676,6 +677,62 @@ static void test_fcgi_http_params() {
     CHECK(lines.find("PROXY") == std::string::npos && lines.find("FORWARDED") == std::string::npos);
 }
 
+static void test_presets() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-preset-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "app" / "public" / "build");
+    fs::create_directories(dir / "www");
+    auto write = [&](const char* name, const std::string& text) { std::ofstream(dir / name) << text; };
+    write("laravel.toml",
+          "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"app\"\napp = \"laravel\"\n"
+          "php = { socket = \"unix:/run/php/fpm.sock\" }\n"
+          "[[site.location]]\npath = \"/build/\"\nadd_headers = { \"Cache-Control\" = \"no-store\" }\n");
+    Config cfg = load_config(dir / "laravel.toml");
+    const SiteConfig& s = cfg.sites[0];
+    CHECK(s.app == "laravel" && s.root == fs::canonical(dir / "app" / "public").string());
+    CHECK(s.index.size() == 1 && s.index[0] == "index.php");
+    CHECK(s.try_files.size() == 3 && s.try_files[2].kind == TryStep::Kind::fallback &&
+          s.try_files[2].target == "/index.php");
+    const LocationConfig& fc = Router::location(s, "/index.php");
+    CHECK(fc.exact && fc.kind == HandlerKind::fastcgi && fc.origin == "preset:laravel" && fc.try_files.size() == 3);
+    CHECK(Router::location(s, "/other.php").kind == HandlerKind::static_);  // only the front controller runs
+    const LocationConfig& build = Router::location(s, "/build/app.js");
+    // The hand-written /build/ location wins over the preset's.
+    CHECK(build.origin.empty() && build.add_headers.size() == 1 && build.add_headers[0].second == "no-store");
+    CHECK(Router::location(s, "/").try_files.size() == 3);
+    std::ostringstream explain;
+    explain_config(cfg, explain);
+    const std::string text = explain.str();
+    CHECK(text.find("# app = \"laravel\"") != std::string::npos);
+    CHECK(text.find("# from preset:laravel") != std::string::npos);
+    CHECK(text.find("try_files = [\"$uri\", \"$uri/\", \"/index.php\"]") != std::string::npos);
+    CHECK(text.find("add_headers = { \"Cache-Control\" = \"no-store\" }") != std::string::npos);
+
+    write("php.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\napp = \"php\"\n"
+                      "php = { socket = \"unix:/run/php/fpm.sock\" }\n");
+    Config pcfg = load_config(dir / "php.toml");
+    const SiteConfig& p = pcfg.sites[0];
+    CHECK(p.index.size() == 2 && Router::location(p, "/a/b.php").kind == HandlerKind::fastcgi);
+    CHECK(Router::location(p, "/a/b.php").suffix && p.try_files.size() == 3 && p.try_files[2].status == 404);
+
+    auto rejects = [&](const char* name, const std::string& text) {
+        write(name, text);
+        try {
+            load_config(dir / name);
+        } catch (const std::runtime_error&) {
+            return true;
+        }
+        return false;
+    };
+    CHECK(rejects("nosock.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"app\"\napp = \"laravel\"\n"));
+    CHECK(rejects("unknown.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\napp = \"drupal\"\n"));
+    CHECK(rejects("nopublic.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\napp = \"laravel\"\n"
+                                   "php = { socket = \"unix:/run/php/fpm.sock\" }\n"));
+    CHECK(rejects("badhdr.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n"
+                                 "[[site.location]]\npath = \"/x/\"\nadd_headers = { \"Bad Name\" = \"v\" }\n"));
+    fs::remove_all(dir);
+}
+
 static void test_cidr() {
     Cidr c;
     std::string err;
@@ -908,6 +965,7 @@ int main() {
     test_route_and_etag();
     test_config_locations();
     test_cidr();
+    test_presets();
     test_fcgi_http_params();
     test_log_format();
     test_fcgi_codec();

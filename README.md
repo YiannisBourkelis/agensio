@@ -65,18 +65,13 @@ path = "/assets/"
 alias = "/var/www/example-assets"   # /assets/x.png -> /var/www/example-assets/x.png
 try_files = ["$uri", "=404"]
 
-[[site]]                     # PHP application through php-fpm
+[[site]]                     # a Laravel project: the preset is the whole configuration
 server_name = ["app.example.com"]
 listen = ["0.0.0.0:80"]
-root = "/var/www/app/public"
-index = ["index.php"]
-try_files = ["$uri", "$uri/", "/index.php?$query_string"]
+root = "/var/www/app"      # the project; the preset serves its public/
+app = "laravel"
 php = { socket = "unix:/run/php/php8.4-fpm.sock" }
-
-[[site.location]]
-path = ".php"
-match = "suffix"
-handler = "fastcgi"        # buffered by default; fastcgi = { buffering = false } streams (SSE)
+# app = "php" runs any .php under the root instead; `agensio -t --explain` shows the expansion
 ```
 
 `agensio -t -c file.toml` validates a configuration without starting.

@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <ostream>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -49,6 +50,8 @@ struct LocationConfig {
     bool symlinks_deny = false;
     std::string handler = "static";  // "static" or "fastcgi" ("proxy" arrives in phase D)
     HandlerKind kind = HandlerKind::static_;
+    std::vector<std::pair<std::string, std::string>> add_headers;  // response fields added on 200/304
+    std::string origin;  // "" when configured by hand, else the preset that generated it (explain)
     FcgiConfig fastcgi;                        // handler = "fastcgi": upstream and options
     bool priority = false;                     // may use the pool slots reserved by priority_reserve
     MethodSet methods = kStaticMethods;      // what the handler serves here (`methods = [...]` narrows it)
@@ -62,6 +65,7 @@ constexpr MethodSet kFcgiMethods = kStaticMethods | method_bit(Method::post) | m
 struct SiteConfig {
     std::vector<std::string> server_names;  // lower-case host names, "*" matches anything
     std::vector<std::string> listen;        // "host:port" strings, normalised
+    std::string app;                        // preset: "laravel", "php", "static" or "" (none)
     std::string root;                       // absolute document root, no trailing slash
     std::vector<std::string> index{"index.html"};
     std::vector<TryStep> try_files;  // default for locations that do not set their own
@@ -132,6 +136,10 @@ std::vector<TryStep> parse_try_files(const std::vector<std::string>& items);
 // Appends the implicit "/" location from the site's own settings if none is configured
 // and sorts the locations for Router::location. The loader calls it; exposed for tests.
 void finalize_site(SiteConfig& site);
+
+// Prints the effective configuration after presets, one TOML-like block per site and
+// location, so nothing a preset did is hidden (`agensio -t --explain`).
+void explain_config(const Config& cfg, std::ostream& out);
 
 // Loads and validates a configuration file. Throws std::runtime_error with a
 // human readable message on any problem.
