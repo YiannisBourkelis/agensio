@@ -1,4 +1,11 @@
 #include "server.hpp"
+#include "services/pools.hpp"
+
+#ifndef _WIN32
+#include <grp.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 #include <chrono>
 #include <functional>
@@ -66,6 +73,62 @@ void Server::open_logs() {
     LogLevel level = LogLevel::warn;
     parse_log_level(cfg_.log.level, level);
     error_log_.configure(&logs_, error_sink, level);
+    own_site_logs();
+}
+
+// A site with `user` gets its access log as agensio:<site group> 0640: agensio writes it
+// as the owner (also after a SIGUSR1 reopen once privileges are dropped), the customer
+// reads it through the group, nobody else. Needs root (or CAP_CHOWN); otherwise one
+// warning per site and the file stays ours.
+void Server::own_site_logs() {
+#ifndef _WIN32
+    const HostFacts facts = system_facts();
+    unsigned agensio_uid = ::geteuid();
+    unsigned agensio_gid = ::getegid();
+    if (!cfg_.user.empty()) {
+        unsigned primary = 0;
+        if (facts.user(cfg_.user, agensio_uid, primary)) agensio_gid = primary;
+    }
+    if (!cfg_.group.empty()) facts.group(cfg_.group, agensio_gid);
+    for (const auto& site : cfg_.sites) {
+        if (site.user.empty() || site.access_log.empty()) continue;
+        unsigned uid = 0, gid = 0;
+        if (!facts.user(site.user, uid, gid)) continue;  // check_hosting already refused this
+        if (!site.group.empty()) facts.group(site.group, gid);
+        if (::chown(site.access_log.c_str(), agensio_uid, gid) != 0) {
+            error_log_.warn("cannot chown " + site.access_log + " to " + std::to_string(agensio_uid) + ":" +
+                            (site.group.empty() ? site.user : site.group) + " (not root); " + site.user +
+                            " cannot read its log");
+            continue;
+        }
+        ::chmod(site.access_log.c_str(), 0640);
+    }
+#endif
+}
+
+// Root only for what needs it: binding privileged ports and opening files other users
+// must not write. Everything after this runs as server.user. Sockets and log descriptors
+// stay open across the switch. Refuses to keep running as root when no user is given.
+void Server::drop_privileges() {
+#ifndef _WIN32
+    if (cfg_.user.empty()) {
+        if (::geteuid() == 0) error_log_.warn("running as root; set server.user to drop privileges after binding");
+        return;
+    }
+    unsigned uid = 0, gid = 0;
+    const HostFacts facts = system_facts();
+    if (!facts.user(cfg_.user, uid, gid)) throw std::runtime_error("server.user: user '" + cfg_.user + "' does not exist");
+    if (!cfg_.group.empty() && !facts.group(cfg_.group, gid))
+        throw std::runtime_error("server.group: group '" + cfg_.group + "' does not exist");
+    if (::geteuid() == uid && ::getegid() == gid) return;  // already that user (started by systemd as it)
+    if (::geteuid() != 0)
+        throw std::runtime_error("server.user is set to '" + cfg_.user + "' but agensio is not root and cannot switch");
+    if (::initgroups(cfg_.user.c_str(), static_cast<gid_t>(gid)) != 0 || ::setgid(static_cast<gid_t>(gid)) != 0 ||
+        ::setuid(static_cast<uid_t>(uid)) != 0)
+        throw std::runtime_error("cannot switch to user " + cfg_.user + ": " + std::strerror(errno));
+    if (::setuid(0) == 0) throw std::runtime_error("privilege drop did not stick");
+    error_log_.info("running as " + cfg_.user + " (uid " + std::to_string(uid) + ", gid " + std::to_string(gid) + ")");
+#endif
 }
 
 void Server::arm_flush(Worker& w) {
@@ -211,6 +274,7 @@ void Server::run() {
         for (auto& l : listeners_)
             open_acceptor(l, *workers_[0], false);
     }
+    drop_privileges();  // ports are bound and logs open: nothing else needs root
     for (auto& w : workers_) {
         guards_.push_back(
             std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(w->ctx.get_executor()));

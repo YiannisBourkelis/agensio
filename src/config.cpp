@@ -773,6 +773,7 @@ Config load_config(const fs::path& path) {
         if (!parse_cidr(text, c, err)) fail("server.trusted_proxies: " + err);
         cfg.trusted_proxies.push_back(c);
     }
+    cfg.user = account_name(server["user"], "server.user");
     cfg.group = account_name(server["group"], "server.group");
     if (auto d = server["pools"].value<std::string>()) cfg.pools_dir = resolve(base_dir, *d).string();
     cfg.pools_run = server["pools_run"].value_or(default_pools_run());

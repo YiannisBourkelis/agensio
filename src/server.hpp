@@ -66,6 +66,8 @@ private:
     void open_acceptor(Listener& listener, Worker& worker, bool reuse_port);
     void start_accept(std::size_t acceptor_index);
     void open_logs();
+    void own_site_logs();     // per-site logs: agensio:<site group> 0640, when we can chown
+    void drop_privileges();   // server.user: after binding and opening logs
     void arm_flush(Worker& w);
 
     struct Acceptor {

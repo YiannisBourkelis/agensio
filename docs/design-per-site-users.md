@@ -1,7 +1,10 @@
 # Design: per-site users and generated php-fpm pools (C3b)
 
-Status: accepted 2026-09-17 (every question below as proposed). C3b-1 built; C3b-2 and
-C3b-3 pending.
+Status: accepted 2026-09-17 (every question below as proposed) and built the same day
+(C3b-1, C3b-2, C3b-3). One change from the proposal: per-site logs are
+`agensio:<site group> 0640` rather than `<user>:<agensio group> 0640`, because agensio
+must reopen them after a SIGUSR1 once it has dropped privileges, and as owner it can;
+the customer still reads through their group.
 
 ## Goal
 

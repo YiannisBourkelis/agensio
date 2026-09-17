@@ -132,6 +132,7 @@ struct Config {
     // Hosting (C3b): the group agensio runs as (pool sockets grant it access; "" = the
     // process's group), where `agensio pools` writes pool files ("" = detected per distro),
     // where generated pools listen, and the per-user state directories.
+    std::string user;   // start as root, bind, open logs, then become this user (H2 pulled forward)
     std::string group;
     std::string pools_dir;
     std::string pools_run;  // defaulted by the loader per platform

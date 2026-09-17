@@ -14,7 +14,9 @@ sendfile = true          # zero-copy streaming of files above cache.max_file_siz
 sendfile_max_chunk = "1MB" # bytes per sendfile() call (measured: one 10 MB call costs 6x more kernel time)
 server_header = "agensio"
 # Hosting, one user per site (docs/configuration.md section 11): `user = "web1"` on a site
-# derives a php-fpm pool that `agensio pools` writes; `group` is the group agensio runs as.
+# derives a php-fpm pool that `agensio pools` writes; `user`/`group` are what agensio runs
+# as: started as root it binds, opens the logs and then becomes that user.
+# user = "agensio"
 # group = "agensio"
 # pools = "/etc/php/8.3/fpm/pool.d"   # default: detected per distro
 # pools_run = "/run/php"              # default: per distro

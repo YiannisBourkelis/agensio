@@ -211,7 +211,7 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       Default stays off: the pool must be sized so kept connections cannot pin every
       child (`max_connections` x workers <= `pm.max_children`), which C3b's generated
       pools will do.
-- [ ] C3b **Per-site users (ISPConfig / IIS app-pool model, made native)**: `user = "web1"`
+- [x] C3b (2026-09-17) **Per-site users (ISPConfig / IIS app-pool model, made native)**: `user = "web1"`
       on a site; agensio generates the php-fpm pool for it (user/group, socket owned by the
       site user with group-only access for agensio, private tmp and session dirs,
       `open_basedir`, child limits, timeouts), writes per-site logs owned by that user, and
@@ -221,8 +221,15 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       proposed). C3b-1 done 2026-09-17: `user`/`group` on a site, pool keys in `php`,
       derived socket and keep-alive sizing, `src/services/pools.*` rendering the pool
       file, `agensio pools` (writes, prunes, exit 3 on change), `-t --explain` shows the
-      pool, unit tests. Next: C3b-2 validation rules, C3b-3 root start + privilege drop
-      + per-site log ownership.
+      pool, unit tests. C3b-2 the same day: `check_hosting` (`src/services/pools.*`)
+      runs the six ownership rules of the design behind an injectable `HostFacts`
+      (unit-tested over a described machine), under `-t` and before every start.
+      C3b-3: `server.user` (H2 pulled forward): bind and open logs as root, per-site
+      access logs `agensio:<site group> 0640`, then `initgroups/setgid/setuid`; started
+      as that user it just runs. `tests/pools.sh` (root devbox, two real users, the
+      distro php-fpm) proves the isolation end to end: PHP runs as each site's user,
+      `open_basedir` blocks the other site's `.env`, sessions land in the private
+      directory, `-t` refuses a world-readable `.env` and a socket with the wrong group.
 - [x] C4 (2026-09-17) Test bed: `bench/laravel/` is a ddev Laravel project
       (`setup.sh` creates it once: `ddev config`, `ddev start`, `composer create-project`,
       test routes). `.ddev/web-build/Dockerfile.agensio` adds a second php-fpm pool on
@@ -403,8 +410,9 @@ Rules:
       or removed; **TLS certificates watched and reloaded automatically when the files
       change** (the request nginx and Caddy users share most) as well as via `ctl reload`;
       reload must not stall new QUIC connections (nginx's known weakness).
-- [ ] H2 Start as root, bind, drop privileges (`user =`); systemd unit; pid file; log
-      rotation via `SIGUSR1`/reopen.
+- [~] H2 Start as root, bind, drop privileges (`user =`): **done 2026-09-17 with C3b-3**
+      (`server.user`); log rotation via `SIGUSR1`/reopen done with A5. Remaining: systemd
+      unit, pid file.
 - [ ] H3 Certificates: built-in ACME client (HTTP-01, TLS-ALPN-01 **and DNS-01 with a
       provider interface**: HTTP-01-only is the main criticism of nginx's 2025 module and
       DNS challenges are Caddy's second most upvoted request), any RFC 8555 CA, short-lived

@@ -84,9 +84,15 @@ int main(int argc, char** argv) {
         std::cout.flush();
         return rc;
     }
+    // Hosting rules (sites with `user`): ownership and sharing, checked the same way before
+    // a start and under -t so the message names the path and the mode to fix.
+    const auto hosting_errors = agensio::check_hosting(cfg, agensio::system_facts());
+    for (const auto& e : hosting_errors) std::cerr << "configuration error: " << e << "\n";
+    if (!hosting_errors.empty() && !explain) return 1;
     if (test_only || explain) {
         if (explain) agensio::explain_config(cfg, std::cout);
         std::cout.flush();
+        if (!hosting_errors.empty()) return 1;
         for (const auto& w : agensio::check_upstreams(cfg))
             std::cerr << "warning: " << w << "\n";
         std::cout << "configuration " << cfg.config_path.string() << " is OK (" << cfg.sites.size() << " site(s))\n";

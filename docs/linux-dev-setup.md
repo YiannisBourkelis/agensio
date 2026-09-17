@@ -76,6 +76,7 @@ bench/laravel/.ddev/setup.sh    # once: ddev project + composer create-project +
 tests/laravel.sh build/agensio  # live checks through agensio -> published php-fpm port
 bench/laravel/bench.sh -d 10s -c 64 -r 2   # C5: agensio vs nginx in front of the bed's php-fpm pool (TCP)
 bench/laravel/bench.sh -p unix             # the same over the bind-mounted unix socket (.ddev/run/php-fpm.sock)
+docker run --rm --user root -v "$PWD:$PWD" -w "$PWD" agensio-devbox tests/pools.sh build/agensio   # C3b: two users, generated pools, privilege drop
 bench/statamic/.ddev/setup.sh   # same for Statamic: control panel http://127.0.0.1:8071/cp, admin@admin.com / 4444
 bench/wordpress/.ddev/setup.sh  # same for WordPress: http://wp.agensio.ddev.site:8072, wp-admin admin / 4444
 ```

@@ -230,8 +230,13 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   `php = { children, pm, ... }`), sets `keep_conn = true` with `max_connections =
   children / workers`, and `agensio pools` writes the pool file into the distro's
   directory (exit 3 when php-fpm needs a reload). Sites of one user share a pool and
-  must agree on it; different users never share a socket. Validation of ownership and
-  per-site log ownership are C3b-2/3.
+  must agree on it; different users never share a socket. `check_hosting` (C3b-2) runs
+  the ownership rules (roots, secrets, sockets, logs, nothing shared between users) under
+  `-t` and before every start, behind an injectable `HostFacts` so the unit tests describe
+  a machine. `server.user` (C3b-3, H2 pulled forward): bind and open logs as root, site
+  logs `agensio:<site group> 0640`, then drop privileges. `tests/pools.sh` runs the whole
+  thing with two real users in a root devbox (`docker run --user root ... agensio-devbox
+  tests/pools.sh build/agensio`).
 - **Logging** (A5, `src/services/log.*`): access log in Apache/nginx "combined" format
   (same escaping, so fail2ban filters work) or JSON, per site (`access_log`) with the
   `[log] access` default; one descriptor per path opened `O_APPEND`, per-worker buffers

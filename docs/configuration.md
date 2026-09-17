@@ -353,9 +353,40 @@ Pool keys in `php = { ... }`, all optional:
 
 Rules: two sites with the same `user` share one pool and must agree on these keys;
 sites with different users may never name the same socket; a site with `user` and an
-explicit `php.socket` keeps its own pool and gets no generated file. Ownership checks on
-roots, secrets, sockets and logs, and per-site log ownership, follow in the next steps
-(`docs/design-per-site-users.md`).
+explicit `php.socket` keeps its own pool and gets no generated file.
+
+**What `agensio -t` (and every start) refuses** for a site with `user`, naming the path,
+its owner and mode, and what was expected:
+
+- the user or group does not exist;
+- the root or an `open_basedir` entry is not owned by the user (or root), or is writable
+  by other users;
+- a secret is readable by other users: `.env`, `config/`, `storage/` and `.git` for
+  Laravel (in the project directory), `wp-config.php` for WordPress, `.env` and `.git`
+  under the root otherwise (make them `0640 user:group`);
+- the pool socket is not owned by the user, not in agensio's group, or has mode bits for
+  others; or its directory is world-writable;
+- the access log is readable by other users, or its directory is writable by them;
+- two sites with different users share a root (or nest one inside the other), an access
+  log or a state directory.
+
+Sites without `user` are not checked, so a single-tenant machine changes nothing.
+
+**Starting as root.** With `user` set on sites you normally want privileged ports and
+per-site logs too:
+
+```toml
+[server]
+user = "agensio"     # bind, open the logs, then become this user
+group = "agensio"
+```
+
+agensio binds its listeners and opens every log as root, makes each site's access log
+`agensio:<site group> 0640` (agensio writes it, the customer reads it through their
+group, nobody else), then switches to `user` with its groups before accepting the first
+connection. Started as that user already, as systemd would, it just runs. Started as root
+without `user` it warns and keeps running as root. Without root the per-site chown fails
+and one warning per site says which customer cannot read their log.
 
 ## 12. TLS
 

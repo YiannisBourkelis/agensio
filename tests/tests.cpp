@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <map>
 #include <sstream>
 #include <string_view>
 #include <unistd.h>
@@ -1064,6 +1065,95 @@ static void test_pools() {
     fs::remove_all(dir);
 }
 
+// C3b-2: the ownership rules over a described machine.
+static void test_hosting_rules() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-hosting-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "app" / "public");
+    fs::create_directories(dir / "blog");
+    auto write = [&](const char* name, const std::string& text) { std::ofstream(dir / name) << text; };
+    const std::string server = "[server]\nworkers = 1\ngroup = \"agensio\"\npools_run = \"/run/php\"\nstate_dir = \"/var/lib/agensio\"\n[log]\naccess = \"/var/log/agensio/access.log\"\n";
+    write("h.toml", server +
+          "[[site]]\nserver_name = [\"shop\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"app\"\nuser = \"web1\"\napp = \"laravel\"\naccess_log = \"/var/log/agensio/shop.log\"\n"
+          "[[site]]\nserver_name = [\"blog\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"blog\"\nuser = \"web2\"\napp = \"wordpress\"\naccess_log = \"/var/log/agensio/blog.log\"\n");
+    Config cfg = load_config(dir / "h.toml");
+    const std::string app = fs::canonical(dir / "app").string();
+    const std::string blog = fs::canonical(dir / "blog").string();
+    // The machine: users web1 (1001:1001) and web2 (1002:1002), agensio group 33.
+    std::map<std::string, FileFacts> files;
+    HostFacts facts;
+    facts.user = [](const std::string& n, unsigned& uid, unsigned& gid) {
+        if (n == "web1") { uid = 1001; gid = 1001; return true; }
+        if (n == "web2") { uid = 1002; gid = 1002; return true; }
+        return false;
+    };
+    facts.group = [](const std::string& n, unsigned& gid) {
+        if (n == "agensio") { gid = 33; return true; }
+        if (n == "web1") { gid = 1001; return true; }
+        return false;
+    };
+    facts.stat = [&](const std::string& path, FileFacts& out) {
+        auto it = files.find(path);
+        if (it == files.end()) return false;
+        out = it->second;
+        return true;
+    };
+    auto count_with = [&](const char* needle) {
+        int n = 0;
+        for (const auto& e : check_hosting(cfg, facts)) n += e.find(needle) != std::string::npos;
+        return n;
+    };
+    auto file = [](unsigned uid, unsigned gid, unsigned mode, bool d = false) { return FileFacts{d, uid, gid, mode}; };
+    // A correct layout passes.
+    files[app] = file(1001, 1001, 0750, true);
+    files[app + "/public"] = file(1001, 1001, 0750, true);
+    files[app + "/.env"] = file(1001, 1001, 0640);
+    files[blog] = file(1002, 1002, 0755, true);
+    files[blog + "/wp-config.php"] = file(1002, 1002, 0640);
+    files["/run/php/agensio-web1.sock"] = file(1001, 33, 0660);
+    files["/run/php"] = file(0, 0, 0755, true);
+    files["/var/log/agensio"] = file(33, 33, 0750, true);
+    files["/var/log/agensio/shop.log"] = file(33, 1001, 0640);
+    CHECK(check_hosting(cfg, facts).empty());
+    // Each rule, one failure at a time.
+    files[app + "/public"] = file(1003, 1001, 0750, true);
+    CHECK(count_with("expected owner web1") == 1);
+    files[app + "/public"] = file(1001, 1001, 0757, true);
+    CHECK(count_with("writable by other users") == 1);
+    files[app + "/public"] = file(1001, 1001, 0750, true);
+    files[app + "/.env"] = file(1001, 1001, 0644);
+    CHECK(count_with(".env is readable by other users") == 1);
+    files[app + "/.env"] = file(1001, 1001, 0640);
+    files[blog + "/wp-config.php"] = file(1002, 33, 0640);  // readable by a group that is not web2's
+    CHECK(count_with("wp-config.php is readable") == 1);
+    files[blog + "/wp-config.php"] = file(1002, 1002, 0640);
+    files["/run/php/agensio-web1.sock"] = file(1001, 1001, 0666);
+    CHECK(count_with("expected group agensio") == 1 && count_with("any user could connect") == 1);
+    files["/run/php/agensio-web1.sock"] = file(1002, 33, 0660);
+    CHECK(count_with("socket /run/php/agensio-web1.sock is owned") == 1);
+    files["/run/php/agensio-web1.sock"] = file(1001, 33, 0660);
+    files["/var/log/agensio/shop.log"] = file(33, 33, 0644);
+    CHECK(count_with("access log /var/log/agensio/shop.log is readable") == 1);
+    files["/var/log/agensio/shop.log"] = file(33, 1001, 0640);
+    files["/var/log/agensio"] = file(33, 1001, 0770, true);
+    CHECK(count_with("log directory /var/log/agensio is writable") == 2);  // both sites log there
+    files["/var/log/agensio"] = file(33, 33, 0750, true);
+    CHECK(check_hosting(cfg, facts).empty());
+    // Accounts and sharing.
+    facts.group = [](const std::string& n, unsigned& gid) { if (n == "agensio") { gid = 33; return true; } return false; };
+    cfg.sites[1].user = "nobody-here";
+    CHECK(count_with("user 'nobody-here' does not exist") == 1);
+    cfg.sites[1].user = "web2";
+    cfg.sites[1].access_log = "/var/log/agensio/shop.log";
+    CHECK(count_with("same access log") == 1);
+    cfg.sites[1].access_log = "/var/log/agensio/blog.log";
+    cfg.sites[1].root = app + "/public";
+    CHECK(count_with("nested or equal roots") == 1);
+    cfg.group = "missing";
+    CHECK(count_with("server.group") == 1);
+    fs::remove_all(dir);
+}
+
 int main() {
     test_path();
     test_parser();
@@ -1084,6 +1174,7 @@ int main() {
     test_log_format();
     test_fcgi_codec();
     test_pools();
+    test_hosting_rules();
     if (failures) {
         std::printf("%d failure(s)\n", failures);
         return 1;

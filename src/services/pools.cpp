@@ -1,7 +1,7 @@
 #include "services/pools.hpp"
 
+#include <cstdio>
 #include <fstream>
-#include <map>
 #include <sstream>
 
 #ifndef _WIN32
@@ -120,6 +120,179 @@ fs::path pools_dir(const Config& cfg, const std::string& version) {
         if (n.starts_with("php") && fs::is_directory(entry.path() / "php-fpm.d", ec)) return entry.path() / "php-fpm.d";
     }
     return {};
+}
+
+HostFacts system_facts() {
+    HostFacts f;
+#ifndef _WIN32
+    f.stat = [](const std::string& path, FileFacts& out) {
+        struct stat st {};
+        if (::stat(path.c_str(), &st) != 0) return false;
+        out.is_dir = S_ISDIR(st.st_mode);
+        out.uid = st.st_uid;
+        out.gid = st.st_gid;
+        out.mode = st.st_mode & 07777;
+        return true;
+    };
+    f.user = [](const std::string& name, unsigned& uid, unsigned& gid) {
+        const struct passwd* pw = ::getpwnam(name.c_str());
+        if (!pw) return false;
+        uid = pw->pw_uid;
+        gid = pw->pw_gid;
+        return true;
+    };
+    f.group = [](const std::string& name, unsigned& gid) {
+        const struct group* gr = ::getgrnam(name.c_str());
+        if (!gr) return false;
+        gid = gr->gr_gid;
+        return true;
+    };
+#else
+    f.stat = [](const std::string&, FileFacts&) { return false; };
+    f.user = [](const std::string&, unsigned&, unsigned&) { return false; };
+    f.group = [](const std::string&, unsigned&) { return false; };
+#endif
+    return f;
+}
+
+namespace {
+
+std::string octal(unsigned mode) {
+    char buf[8];
+    std::snprintf(buf, sizeof buf, "%04o", mode);
+    return buf;
+}
+
+// One site's accounts and the paths its rules apply to.
+struct SiteFacts {
+    const SiteConfig* site = nullptr;
+    std::string name;
+    unsigned uid = 0, gid = 0;
+};
+
+}  // namespace
+
+std::vector<std::string> check_hosting(const Config& cfg, const HostFacts& facts) {
+    std::vector<std::string> errors;
+    std::vector<SiteFacts> sites;
+    unsigned agensio_gid = 0;
+    bool have_agensio_gid = false;
+    bool any_user = false;
+    for (const auto& site : cfg.sites) any_user = any_user || !site.user.empty();
+    if (!any_user) return errors;
+    const std::string agensio_group = cfg.group.empty() ? current_group_name() : cfg.group;
+    if (agensio_group.empty() || !facts.group(agensio_group, agensio_gid)) {
+        errors.push_back("server.group: group '" + agensio_group + "' does not exist (the group agensio runs as)");
+    } else {
+        have_agensio_gid = true;
+    }
+
+    // Rule 1: accounts exist.
+    for (const auto& site : cfg.sites) {
+        if (site.user.empty()) continue;
+        SiteFacts sf;
+        sf.site = &site;
+        sf.name = "site " + site.server_names.front();
+        unsigned primary = 0;
+        if (!facts.user(site.user, sf.uid, primary)) {
+            errors.push_back(sf.name + ": user '" + site.user + "' does not exist");
+            continue;
+        }
+        sf.gid = primary;
+        if (!site.group.empty() && !facts.group(site.group, sf.gid)) {
+            errors.push_back(sf.name + ": group '" + site.group + "' does not exist");
+            continue;
+        }
+        sites.push_back(sf);
+    }
+
+    auto describe = [&](const FileFacts& f) { return "owned by uid " + std::to_string(f.uid) + " gid " +
+                                                     std::to_string(f.gid) + " mode " + octal(f.mode); };
+    // Rule 2: a directory the user's PHP runs from is the user's (or root's) and nobody else
+    // can write into it. Rule 3: a secret is readable by the user's own group at most.
+    auto check_root = [&](const SiteFacts& sf, const std::string& path, const char* what) {
+        FileFacts f;
+        if (!facts.stat(path, f)) return;  // state directories appear with `agensio pools`
+        if (f.uid != sf.uid && f.uid != 0)
+            errors.push_back(sf.name + ": " + what + " " + path + " is " + describe(f) + "; expected owner " +
+                             sf.site->user + " (uid " + std::to_string(sf.uid) + ") or root");
+        if ((f.mode & 0002) || ((f.mode & 0020) && f.gid != sf.gid))
+            errors.push_back(sf.name + ": " + what + " " + path + " is writable by other users (" + describe(f) +
+                             "); remove the write bit for others" +
+                             ((f.mode & 0020) && f.gid != sf.gid ? " and for group " + std::to_string(f.gid) : ""));
+    };
+    auto check_secret = [&](const SiteFacts& sf, const std::string& path) {
+        FileFacts f;
+        if (!facts.stat(path, f)) return;
+        if ((f.mode & 0004) || ((f.mode & 0040) && f.gid != sf.gid))
+            errors.push_back(sf.name + ": " + path + " is readable by other users (" + describe(f) +
+                             "); make it 0640 " + sf.site->user + ":" + (sf.site->group.empty() ? sf.site->user : sf.site->group));
+    };
+    for (const auto& sf : sites) {
+        const SiteConfig& site = *sf.site;
+        check_root(sf, site.root, "root");
+        for (const auto& dir : site.pool.open_basedir)
+            if (dir != site.root) check_root(sf, dir, "open_basedir entry");
+        const std::string project = site.pool.open_basedir.empty() ? site.root : site.pool.open_basedir.front();
+        check_secret(sf, site.root + "/.git");
+        if (site.app == "laravel") {
+            for (const char* rel : {"/.env", "/config", "/storage", "/.git"}) check_secret(sf, project + rel);
+        } else if (site.app == "wordpress") {
+            check_secret(sf, site.root + "/wp-config.php");
+        } else {
+            check_secret(sf, site.root + "/.env");
+        }
+        // Rule 4: the pool socket is the user's, and only agensio's group may connect.
+        if (site.php.configured && site.php.address.unix) {
+            FileFacts f;
+            const std::string& sock = site.php.address.path;
+            if (facts.stat(sock, f)) {
+                if (f.uid != sf.uid)
+                    errors.push_back(sf.name + ": socket " + sock + " is " + describe(f) + "; expected owner " +
+                                     site.user);
+                if (have_agensio_gid && f.gid != agensio_gid)
+                    errors.push_back(sf.name + ": socket " + sock + " has gid " + std::to_string(f.gid) +
+                                     "; expected group " + agensio_group + " (gid " + std::to_string(agensio_gid) +
+                                     ") so that only agensio can connect");
+                if (f.mode & 0007)
+                    errors.push_back(sf.name + ": socket " + sock + " is mode " + octal(f.mode) +
+                                     "; any user could connect, make it 0660");
+            }
+            FileFacts d;
+            const std::string dir = fs::path(sock).parent_path().string();
+            if (facts.stat(dir, d) && (d.mode & 0002) && !(d.mode & 01000))
+                errors.push_back(sf.name + ": socket directory " + dir + " is world-writable (" + describe(d) +
+                                 "); another user could replace the socket");
+        }
+        // Rule 6: the access log is the site's to read, nobody else's.
+        if (!site.access_log.empty()) {
+            FileFacts f;
+            if (facts.stat(site.access_log, f) &&
+                ((f.mode & 0004) || ((f.mode & 0040) && f.gid != sf.gid && (!have_agensio_gid || f.gid != agensio_gid))))
+                errors.push_back(sf.name + ": access log " + site.access_log + " is readable by other users (" +
+                                 describe(f) + ")");
+            FileFacts d;
+            const std::string dir = fs::path(site.access_log).parent_path().string();
+            if (facts.stat(dir, d) && ((d.mode & 0002) || ((d.mode & 0020) && d.uid != 0 && d.gid != agensio_gid)))
+                errors.push_back(sf.name + ": log directory " + dir + " is writable by other users (" + describe(d) +
+                                 "); a site user could plant a symlink there");
+        }
+    }
+    // Rule 5: nothing is shared between different users.
+    for (std::size_t i = 0; i < sites.size(); ++i)
+        for (std::size_t j = i + 1; j < sites.size(); ++j) {
+            const SiteConfig& a = *sites[i].site;
+            const SiteConfig& b = *sites[j].site;
+            if (a.user == b.user) continue;
+            const std::string pair = sites[i].name + " (" + a.user + ") and " + b.server_names.front() + " (" + b.user + ")";
+            if (a.root == b.root || a.root.starts_with(b.root + "/") || b.root.starts_with(a.root + "/"))
+                errors.push_back(pair + " have different users but nested or equal roots " + a.root + " and " + b.root);
+            if (!a.access_log.empty() && a.access_log == b.access_log)
+                errors.push_back(pair + " have different users but the same access log " + a.access_log);
+            if (a.pool.generated && b.pool.generated && a.pool.state_dir == b.pool.state_dir)
+                errors.push_back(pair + " have different users but the same state directory " + a.pool.state_dir);
+        }
+    return errors;
 }
 
 int write_pools(const Config& cfg, const fs::path& out_dir, bool dry_run, std::ostream& out) {
