@@ -423,6 +423,19 @@ only while a body is still arriving (the C3a stall needs a multi-segment respons
 4 syscalls per proxied request, the minimum, 6.98 -> 4.98 us. The gate for proxy code is
 `bench/ab.sh <ref> -P` (adds the proxy rows; a base that does not proxy gets none).
 
+Behind a real origin (D7): a single Node.js hello-world process tops out at 156-160k
+req/s, so with it both proxies sit at the origin's limit and the row measures what each
+makes the origin parse. Sending the same fields (Host, X-Forwarded-For, X-Forwarded-Proto)
+they tie, nginx 155-157k and agensio 153-158k, agensio at 5-6 % less CPU of its own
+(`bench/proxy/run.sh -o node`, `proxy-20260917-210504.md`); forwarding nothing puts agensio
+at 164-168k vs 159-164k. Rule learned: every field forwarded costs the origin about 2-3 %
+on a hello-world, so agensio sends no `Connection: keep-alive` on kept connections
+(HTTP/1.1 is persistent) and `X-Forwarded-Host` only when Host was rewritten or a proxy in
+front set it (otherwise it repeats Host). WebSocket-shaped echo through 64 tunnels
+(`bench/proxy/ws.sh`, `proxy-ws-20260917-204524.md`): nginx 3.75 us and agensio 3.80 us
+of CPU per 1 KB message crossing the proxy twice, parity; the Python load generator
+bounds the rate at about 137k msg/s.
+
 Benchmark hygiene: `pkill -x nginx` does not kill nginx (it retitles its processes); a
 stale instance keeps the ports and silently serves the next run. `bench/run.sh` now
 refuses to start when a port is busy; kill with `pkill -f 'nginx: '`.

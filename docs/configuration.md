@@ -474,7 +474,9 @@ suffix locations cannot rewrite.
 - `Host` as the client sent it. (nginx forwards the upstream's address unless told
   otherwise, which is the first thing everyone has to fix; here `host = "upstream"` is the
   opt-in and `host = "app.internal"` a literal.)
-- `X-Forwarded-For`, `X-Forwarded-Proto` and `X-Forwarded-Host`, always set by agensio.
+- `X-Forwarded-For` and `X-Forwarded-Proto`, always set by agensio; `X-Forwarded-Host`
+  only when Host was rewritten (or a trusted proxy in front sent one), because with Host
+  passed through it would only repeat it and every field costs the origin parsing time.
   A client that is not one of `server.trusted_proxies` gets its own X-Forwarded-* replaced,
   never appended to, so nothing from the open internet reaches the application as a
   believed address. Behind a trusted proxy the chain is appended to. `forwarded =

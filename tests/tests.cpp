@@ -1235,7 +1235,8 @@ static void test_proxy() {
           head.find("Content-Length") == std::string::npos && head.find("Connection:") == std::string::npos);
     // An untrusted peer: its X-Forwarded-For is replaced, not appended to.
     CHECK(head.find("X-Forwarded-For: 192.0.2.7\r\n") != std::string::npos && head.find("10.0.0.1") == std::string::npos);
-    CHECK(head.find("X-Forwarded-Proto: https\r\n") != std::string::npos && head.find("X-Forwarded-Host: app.example.com\r\n") != std::string::npos);
+    CHECK(head.find("X-Forwarded-Proto: https\r\n") != std::string::npos);
+    CHECK(head.find("X-Forwarded-Host:") == std::string::npos);  // Host passes through: the field would only repeat it
     CHECK(head.find("Forwarded:") == std::string::npos);
     // A trusted proxy in front: appended; both conventions; Host rewritten; configured fields.
     st.conn.trusted_peer = true;
@@ -1247,6 +1248,7 @@ static void test_proxy() {
     CHECK(head.find("X-Forwarded-For: 10.0.0.1, 192.0.2.7\r\n") != std::string::npos);
     CHECK(head.find("Forwarded: for=192.0.2.7;proto=https;host=app.example.com\r\n") != std::string::npos);
     CHECK(head.find("\r\nHost: app.internal\r\n") != std::string::npos && head.find("\r\nHost: app.example.com") == std::string::npos);
+    CHECK(head.find("X-Forwarded-Host: app.example.com\r\n") != std::string::npos);  // Host rewritten: the original goes along
     CHECK(head.find("X-Real-IP: 192.0.2.7\r\n") != std::string::npos && head.find("X-Site: https://app.example.com:443\r\n") != std::string::npos);
     CHECK(head.find("Accept:") == std::string::npos);  // "" removes
     policy.host = "upstream";

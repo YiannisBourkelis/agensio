@@ -6,23 +6,27 @@
 # during the run (from /stats: a proxy that reuses connections opens a few, one that does
 # not opens one per request).
 #
-#   bench/proxy/run.sh [-d 10s] [-t 4] [-s "direct nginx caddy agensio"] [-u /json:64 -u /big:64 ...] [-r 1]
+#   bench/proxy/run.sh [-d 10s] [-t 4] [-s "direct nginx caddy agensio"] [-u /json:64 -u /big:64 ...] [-r 1] [-o d0|node]
+#   -o node uses a Node.js hello-world (node:22-alpine, one process, host network) as the origin
+#   instead of the D0 upstream: what a real application server looks like behind each proxy.
 #
 # nginx and Caddy: the host binaries if present, else the agensio-devbox image on the host
 # network. agensio runs from build/agensio with bench/proxy/agensio.toml once phase D1 exists.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 TMP="$ROOT/bench/tmp/proxy"
-DUR=10s; THREADS=4; ROUNDS=1; SERVERS="direct nginx caddy agensio"; URLS=()
+DUR=10s; THREADS=4; ROUNDS=1; SERVERS="direct nginx caddy agensio"; URLS=(); ORIGIN=d0
 UP=127.0.0.1:9100
 PORT_DIRECT=9100; PORT_AGENSIO=8093; PORT_NGINX=8094; PORT_CADDY=8095
-while getopts 'd:t:s:u:r:' o; do
+while getopts 'd:t:s:u:r:o:' o; do
   case $o in
     d) DUR=$OPTARG ;; t) THREADS=$OPTARG ;; s) SERVERS=$OPTARG ;; u) URLS+=("$OPTARG") ;; r) ROUNDS=$OPTARG ;;
-    *) exit 2 ;;
+    o) ORIGIN=$OPTARG ;; *) exit 2 ;;
   esac
 done
-[ ${#URLS[@]} -eq 0 ] && URLS=(/json:64 /json:16 /big:64 "/slow?ms=20:256")
+if [ ${#URLS[@]} -eq 0 ]; then
+  if [ $ORIGIN = node ]; then URLS=(/json:64 /json:16); else URLS=(/json:64 /json:16 /big:64 "/slow?ms=20:256"); fi
+fi
 export LC_NUMERIC=C
 mkdir -p "$TMP"
 [ -x "$ROOT/build/agensio_upstream" ] || { echo "build/agensio_upstream missing (cmake --build build --target agensio_upstream)" >&2; exit 1; }
@@ -54,14 +58,17 @@ http {
   client_body_temp_path $TMP/nginx/body; fastcgi_temp_path $TMP/nginx/fastcgi;
   proxy_temp_path $TMP/nginx/proxy; uwsgi_temp_path $TMP/nginx/uwsgi; scgi_temp_path $TMP/nginx/scgi;
   upstream origin { server $UP; keepalive 64; keepalive_requests 1000000; }
+  map \$http_upgrade \$connection_upgrade { default upgrade; "" ""; }
   server {
     listen 127.0.0.1:$PORT_NGINX default_server;
     location / {
       proxy_pass http://origin;
       proxy_http_version 1.1;
-      proxy_set_header Connection "";
+      proxy_set_header Upgrade \$http_upgrade;
+      proxy_set_header Connection \$connection_upgrade;
       proxy_set_header Host \$host;
       proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto \$scheme;   # what agensio forwards by default
     }
   }
 }
@@ -77,12 +84,20 @@ http://127.0.0.1:$PORT_CADDY {
 CADDY
 
 # ---- process control ---------------------------------------------------------
-UP_PID=""; SERVER_PID=""; CONTAINER=""
+UP_PID=""; SERVER_PID=""; CONTAINER=""; UP_CONTAINER=""
+# The Node.js hello-world: one process, the same JSON answer as the D0 upstream.
+NODE_SERVER='require("http").createServer((q, s) => { s.setHeader("Content-Type", "application/json"); s.end("{\"ok\":true,\"service\":\"node\"}"); }).listen(9100, "127.0.0.1", () => console.log("node on 9100"))'
 start_upstream() {
-  "$ROOT/build/agensio_upstream" -p $PORT_DIRECT -w 1 > "$TMP/upstream.out" 2>&1 &
-  UP_PID=$!
-  for _ in $(seq 1 50); do nc -z 127.0.0.1 $PORT_DIRECT 2>/dev/null && return 0; sleep 0.1; done
-  echo "upstream did not start" >&2; exit 1
+  if [ $ORIGIN = node ]; then
+    UP_CONTAINER=agensio-bench-node
+    docker rm -f $UP_CONTAINER >/dev/null 2>&1 || true
+    docker run -d --name $UP_CONTAINER --network host --init node:22-alpine node -e "$NODE_SERVER" >/dev/null
+  else
+    "$ROOT/build/agensio_upstream" -p $PORT_DIRECT -w 1 > "$TMP/upstream.out" 2>&1 &
+    UP_PID=$!
+  fi
+  for _ in $(seq 1 100); do nc -z 127.0.0.1 $PORT_DIRECT 2>/dev/null && return 0; sleep 0.1; done
+  echo "upstream did not start" >&2; [ -n "$UP_CONTAINER" ] && docker logs $UP_CONTAINER 2>&1 | tail -3; exit 1
 }
 docker_start() {  # name, command...
   CONTAINER=$1; shift
@@ -100,7 +115,7 @@ start_server() {
       if [ $CADDY_MODE = native ]; then GOMAXPROCS=1 caddy run --config "$TMP/Caddyfile" --adapter caddyfile > "$TMP/caddy.out" 2>&1 & SERVER_PID=$!
       else docker_start agensio-bench-proxy-caddy caddy run --config "$TMP/Caddyfile" --adapter caddyfile; fi ;;
     agensio)
-      "$ROOT/build/agensio" -c "$ROOT/bench/proxy/agensio.toml" > "$TMP/agensio.out" 2>&1 & SERVER_PID=$! ;;
+      "$ROOT/build/agensio" -c "${AGENSIO_PROXY_CONF:-$ROOT/bench/proxy/agensio.toml}" > "$TMP/agensio.out" 2>&1 & SERVER_PID=$! ;;
   esac
   local port; port=$(port_of "$1")
   for _ in $(seq 1 50); do nc -z 127.0.0.1 "$port" 2>/dev/null && return 0; sleep 0.1; done
@@ -111,11 +126,11 @@ stop_server() {
   if [ -n "$SERVER_PID" ]; then kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=""; fi
   sleep 0.5
 }
-trap 'stop_server; [ -n "$UP_PID" ] && kill "$UP_PID" 2>/dev/null; true' EXIT
+trap 'stop_server; [ -n "$UP_PID" ] && kill "$UP_PID" 2>/dev/null; [ -n "$UP_CONTAINER" ] && docker rm -f "$UP_CONTAINER" >/dev/null 2>&1; true' EXIT
 port_of() { case $1 in direct) echo $PORT_DIRECT ;; agensio) echo $PORT_AGENSIO ;; nginx) echo $PORT_NGINX ;; caddy) echo $PORT_CADDY ;; esac; }
 pids_of() {
   case $1 in
-    direct) echo "$UP_PID" ;;
+    direct) if [ -n "$UP_CONTAINER" ]; then docker top "$UP_CONTAINER" -o pid 2>/dev/null | tail -n +2 | paste -sd, -; else echo "$UP_PID"; fi ;;
     *) if [ -n "$CONTAINER" ]; then docker top "$CONTAINER" -o pid 2>/dev/null | tail -n +2 | paste -sd, -
        else { echo "$SERVER_PID"; pgrep -P "$SERVER_PID" 2>/dev/null; } | paste -sd, -; fi ;;
   esac
@@ -126,10 +141,10 @@ cpu_seconds() {
   for p in ${pids//,/ }; do cat /proc/"$p"/stat 2>/dev/null; done | awk -v tck="$tck" '{ s+=($14+$15)/tck } END{printf "%.3f", s+0}'
 }
 rss_mb() { local pids; pids=$(pids_of "$1"); [ -z "$pids" ] && { echo 0; return; }; ps -o rss= -p "$pids" | awk '{s+=$1} END{printf "%.0f", s/1024}'; }
-upstream_connections() { curl -s "http://127.0.0.1:$PORT_DIRECT/stats" | sed 's/.*"connections":\([0-9]*\).*/\1/'; }
+upstream_connections() { [ $ORIGIN = node ] && { echo 0; return; }; curl -s "http://127.0.0.1:$PORT_DIRECT/stats" | sed 's/.*"connections":\([0-9]*\).*/\1/'; }
 version_of() {
   case $1 in
-    direct) echo "agensio_upstream" ;;
+    direct) if [ $ORIGIN = node ]; then echo "node $(docker run --rm node:22-alpine node --version)"; else echo "agensio_upstream"; fi ;;
     agensio) "$ROOT/build/agensio" -v ;;
     nginx) if [ $NGINX_MODE = docker ]; then docker run --rm $DOCKER_IMAGE nginx -v 2>&1; else nginx -v 2>&1; fi | sed 's#nginx version: ##' ;;
     caddy) if [ $CADDY_MODE = docker ]; then docker run --rm $DOCKER_IMAGE caddy version; else caddy version; fi | awk '{print "caddy " $1}' ;;
@@ -147,7 +162,7 @@ start_upstream
   echo "- machine: $(uname -m), $(grep -m1 'model name' /proc/cpuinfo | sed 's/.*: //'), $(uname -sr), $(nproc) threads"
   echo "- commit: $(git -C "$ROOT" rev-parse --short HEAD)$(git -C "$ROOT" diff --quiet || echo '+dirty')"
   echo "- servers: $(for s in $SERVERS; do printf '%s; ' "$(version_of "$s")"; done)nginx via $NGINX_MODE, caddy via $CADDY_MODE"
-  echo "- upstream: agensio_upstream, one worker on $UP; one proxy worker each (nginx worker_processes 1, caddy GOMAXPROCS=1)"
+  echo "- upstream: $([ $ORIGIN = node ] && echo 'Node.js hello-world (node:22-alpine, one process)' || echo 'agensio_upstream, one worker') on $UP; one proxy worker each (nginx worker_processes 1, caddy GOMAXPROCS=1)"
   echo "- wrk $THREADS threads, $DUR, $ROUNDS round(s); command: \`$0 $*\`"
   echo "- proxy us/req = CPU of the proxy's processes / requests (direct: the upstream's own CPU); upstream conns = connections the proxy opened to the upstream during the run"
   echo
@@ -158,7 +173,8 @@ start_upstream
 verify() {
   local s=$1 port; port=$(port_of "$s")
   local body; body=$(curl -s "http://127.0.0.1:$port/json")
-  [ "$body" = '{"ok":true,"service":"upstream"}' ] || { echo "$s: unexpected /json body: $body" >&2; exit 1; }
+  [ "$body" = "$(curl -s "http://127.0.0.1:$PORT_DIRECT/json")" ] || { echo "$s: unexpected /json body: $body" >&2; exit 1; }
+  [ $ORIGIN = node ] && return 0
   local size; size=$(curl -s -o /dev/null -w '%{size_download}' "http://127.0.0.1:$port/big")
   [ "$size" = "$(curl -s -o /dev/null -w '%{size_download}' "http://127.0.0.1:$PORT_DIRECT/big")" ] || { echo "$s: /big size differs" >&2; exit 1; }
   [ "$(curl -s "http://127.0.0.1:$port/chunked")" = '{"ok":true,"service":"upstream"}' ] || { echo "$s: /chunked body differs" >&2; exit 1; }
@@ -182,7 +198,7 @@ for round in $(seq 1 "$ROUNDS"); do
       p50=$(awk '$1=="50%" {print $2}' "$raw"); p99=$(awk '$1=="99%" {print $2}' "$raw")
       errs=$( (grep -E 'Socket errors|Non-2xx' "$raw" || true) | sed 's/^ *//' | paste -sd';' - ); [ -z "$errs" ] && errs="-"
       us=$(awk -v a="$c0" -v b="$c1" -v n="$reqs" 'BEGIN{ if (n>0) printf "%.2f", (b-a)*1e6/n; else print "n/a" }')
-      conns=$((k1 - k0)); [ "$s" = direct ] && conns="-"
+      conns=$((k1 - k0)); { [ "$s" = direct ] || [ $ORIGIN = node ]; } && conns="-"
       rss=$(rss_mb "$s")
       echo "$s $u c=$c: $rps req/s p50=$p50 p99=$p99 proxy=${us}us/req upstream-conns=$conns rss=${rss}MB $errs"
       echo "| $s | $u | $c | $rps | $p50 | $p99 | $us | $conns | $rss | $errs |" >> "$OUT"

@@ -368,10 +368,22 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       host, Rails 404, keep-alive) and `bench/uptime-kuma/` (Uptime Kuma, Node, `tests/
       uptime-kuma.sh`: app shell, bundle, Socket.IO long-polling handshake and a real
       Socket.IO session over a WebSocket through the tunnel, connect acknowledged).
-- [ ] D7 Benchmark: hello-world Node upstream through agensio vs nginx; WebSocket echo.
-      Left on the table from D1 if ever needed: per-exchange allocations (Exchange,
-      HttpRequest, std::function, the forwarded head string) and the pool's string-keyed
-      lookup; the syscalls are already at the minimum.
+- [x] D7 (2026-09-17) Benchmarks: `bench/proxy/run.sh -o node` puts a Node.js
+      hello-world (node:22-alpine, one process) behind each proxy: Node is the bottleneck
+      at 156-160k req/s, so the row measures what each proxy makes the origin parse. With
+      both forwarding Host, X-Forwarded-For and X-Forwarded-Proto they tie (nginx 155-157k,
+      agensio 153-158k, `proxy-20260917-210504.md`) with agensio at 5-6 % less CPU of its
+      own; forwarding nothing puts agensio at 164-168k against nginx's 159-164k. Two
+      changes came out of it: no `Connection: keep-alive` on kept origin connections
+      (HTTP/1.1 is persistent) and `X-Forwarded-Host` only when Host was rewritten or a
+      trusted proxy sent one (otherwise it repeats Host and costs the origin a field).
+      `bench/proxy/ws.sh`: 64 echo
+      tunnels, 1 KB messages, client-bound at 135-138k msg/s for everyone; per message
+      nginx 3.75 us, agensio 3.80 us (`proxy-ws-20260917-204524.md`); Caddy tunnels only
+      `Upgrade: websocket` so its row needs a framed client. Left on the table from D1 if
+      ever needed: per-exchange allocations (Exchange, HttpRequest, std::function, the
+      forwarded head string) and the pool's string-keyed lookup; the syscalls are at the
+      minimum.
 - [x] Checkpoint (2026-09-17): Uptime Kuma (Node, WebSocket UI) and Redmine (Rails) fully
       usable behind agensio; Rocket.Chat has its example config, a bed can follow when a
       MongoDB-backed setup is wanted.
