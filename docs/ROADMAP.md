@@ -165,14 +165,18 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       with their body (A3); the static handler declines them, FastCGI (C1) will accept.
 
 ### Phase C. PHP by design (FastCGI to php-fpm), Laravel first  `[ ]`
-- [ ] C1 `FcgiClient`: async FastCGI/1.1 over unix socket or TCP, per-worker connection
-      pool with keep-alive (`FCGI_KEEP_CONN`), request body streaming to fpm, response
-      header parsing (`Status:`, `Location:`), body streaming back as a `BodySource`,
-      timeouts, `502`/`504` mapping. **Response buffering on by default**: read the
-      whole fpm response into memory (spill to a temp file above a threshold) and release
-      the fpm child at once, so a slow client never holds a PHP worker hostage; buffering
-      off per location for streaming (SSE). Recommend one php-fpm pool per site in the
-      presets so sites cannot starve each other.
+- [x] C1 (2026-09-17) `FcgiClient` (`src/upstream/`, `src/handlers/fastcgi.*`): async
+      FastCGI/1.1 over unix or TCP, per-worker bounded pool with an explicit queue
+      (`max_connections`, `queue_depth`, `queue_wait` -> 503 + Retry-After, `priority_reserve`
+      for `priority` locations), `FCGI_KEEP_CONN` available but **off by default** (php-fpm
+      pins a child per idle connection; on with a pool sized for it), one retry on a fresh
+      connection for GET/HEAD when a reused one dies before the head, request body in memory
+      / temp file / streamed per location, prebuilt per-location params block + per-request
+      tail, growable response head up to `head_max`, `Status:`/`Location:` parsing, response
+      buffered (memory, temp-file spill, sendfile) or streamed as a `StreamBody`, timeouts to
+      504, `FcgiFailure` reasons with fix hints in the error log and the JSON access log.
+      `match = "suffix"` locations. Live tests against php-fpm in `tests/integration.sh`
+      (skipped when php-fpm is absent). Not here: `-t` socket check and presets (C3).
 - [ ] C2 Parameter set matching nginx's `fastcgi_params` plus `PATH_INFO` splitting,
       `HTTPS`, `REMOTE_ADDR`, `SERVER_PORT`, `REQUEST_SCHEME`, forwarded headers.
 - [ ] C3 Config: `php = { socket = "unix:/run/php/php-fpm.sock" }` at site level and

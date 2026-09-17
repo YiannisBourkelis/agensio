@@ -253,6 +253,10 @@ void WorkerLogs::format_json(std::string& out, std::string_view time_iso, const 
     append_json(out, r.referer);
     out.append(",\"user_agent\":");
     append_json(out, r.user_agent);
+    if (!r.upstream.empty()) {
+        out.append(",\"upstream\":");
+        append_json(out, r.upstream);
+    }
     out.append("}\n");
 }
 

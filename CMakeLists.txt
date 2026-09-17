@@ -77,6 +77,9 @@ add_library(agensio_core STATIC
   src/services/log.cpp
   src/response.cpp
   src/handlers/static.cpp
+  src/handlers/fastcgi.cpp
+  src/handlers/dispatch.cpp
+  src/upstream/fcgi_client.cpp
   src/server.cpp)
 target_include_directories(agensio_core PUBLIC src)
 target_link_libraries(agensio_core PUBLIC asio tomlplusplus)
@@ -130,7 +133,7 @@ add_executable(agensio_bench_header tests/bench_header.cpp)
 
 # ---------------------------------------------------------------- fuzzers (parsers only, no asio)
 if(AGENSIO_FUZZ)
-  foreach(t parser path chunked)
+  foreach(t parser path chunked fcgi)
     add_executable(fuzz_${t} tests/fuzz/fuzz_${t}.cpp src/http1/parser.cpp src/path.cpp)
     target_include_directories(fuzz_${t} PRIVATE src)
     target_compile_features(fuzz_${t} PRIVATE cxx_std_20)

@@ -11,14 +11,62 @@ printf '<html><body>sub index</body></html>\n' > bench/www/sub/index.html
 printf '<html><body>app shell</body></html>\n' > bench/www/app.html
 
 mkdir -p bench/tmp
-rm -f bench/tmp/access.log bench/tmp/access.log.1
+rm -f bench/tmp/access.log bench/tmp/access.log.1 bench/tmp/error.log
+# php-fpm for the FastCGI checks (skipped when not installed): a pool on a unix socket in bench/tmp.
+PHPFPM=$(command -v php-fpm8.4 || command -v php-fpm8.3 || command -v php-fpm || true)
+FPM_PID=""
+if [ -n "$PHPFPM" ]; then
+  mkdir -p bench/tmp/php
+  cat > bench/tmp/php/fpm.conf <<FPMCONF
+[global]
+pid = $ROOT/bench/tmp/php/fpm.pid
+error_log = $ROOT/bench/tmp/php/fpm.log
+daemonize = no
+[www]
+listen = $ROOT/bench/tmp/php/fpm.sock
+listen.mode = 0666
+pm = static
+pm.max_children = 4
+catch_workers_output = yes
+php_admin_flag[display_errors] = off
+FPMCONF
+  "$PHPFPM" -y bench/tmp/php/fpm.conf -F -p "$ROOT/bench/tmp/php" >/dev/null 2>&1 &
+  FPM_PID=$!
+  for _ in $(seq 1 50); do [ -S bench/tmp/php/fpm.sock ] && break; sleep 0.1; done
+  printf '<?php echo "hello ", $_SERVER["REQUEST_METHOD"], " ", $_GET["x"] ?? "-";\n' > bench/www/hello.php
+fi
 sed "s#@WORKERS@#0#g; s#@BENCH@#$ROOT/bench#g; s#@SENDFILE_MIN@#${SENDFILE_MIN:-48KB}#g; s#@ACCESS_LOG@#$ROOT/bench/tmp/access.log#" bench/agensio.toml > bench/tmp/agensio-test.toml
 # Locations (A4) on the plain site: an SPA fallback, an aliased root, an exact match and a
 # try_files status. Inserted after the site's `default = true` line.
-python3 - bench/tmp/agensio-test.toml "$ROOT/bench/www" <<'PY'
+python3 - bench/tmp/agensio-test.toml "$ROOT/bench/www" "$ROOT" <<'PY'
 import sys
-path, www = sys.argv[1], sys.argv[2]
+path, www, root = sys.argv[1], sys.argv[2], sys.argv[3]
 block = f"""default = true
+php = {{ socket = "unix:{root}/bench/tmp/php/fpm.sock", read_timeout = 3 }}
+
+[[site.location]]
+path = "/php/"
+alias = "{root}/tests/php"
+index = ["index.php"]
+handler = "fastcgi"
+
+[[site.location]]
+path = "/phpstream/"
+alias = "{root}/tests/php"
+handler = "fastcgi"
+fastcgi = {{ buffering = false }}
+
+[[site.location]]
+path = "/phpslow/"
+alias = "{root}/tests/php"
+handler = "fastcgi"
+fastcgi = {{ read_timeout = 1 }}
+
+[[site.location]]
+path = "/phpqueue/"
+alias = "{root}/tests/php"
+handler = "fastcgi"
+fastcgi = {{ max_connections = 1, queue_depth = 0 }}
 
 [[site.location]]
 path = "/app/"
@@ -47,11 +95,15 @@ alias = "{www}/sub"
 methods = ["GET", "HEAD"]
 """
 text = open(path).read().replace("default = true\n", block, 1)
+# The TLS site gets the same php upstream and a /php/ location (HTTPS=on check).
+tls_line = [l for l in text.splitlines() if l.startswith("tls = ")][0]
+text = text.replace(tls_line + "\n", tls_line + f'\nphp = {{ socket = "unix:{root}/bench/tmp/php/fpm.sock" }}\n\n[[site.location]]\npath = "/php/"\nalias = "{root}/tests/php"\nindex = ["index.php"]\nhandler = "fastcgi"\n', 1)
+text = text.replace("[log]\n", f'[log]\nerror = "{root}/bench/tmp/error.log"\n', 1)
 open(path, "w").write(text)
 PY
 "$BIN" -c bench/tmp/agensio-test.toml >/dev/null 2>&1 &
 PID=$!
-trap 'kill $PID 2>/dev/null; wait $PID 2>/dev/null' EXIT
+trap 'kill $PID 2>/dev/null; wait $PID 2>/dev/null; [ -n "$FPM_PID" ] && kill $FPM_PID 2>/dev/null; true' EXIT
 for _ in $(seq 1 50); do nc -z 127.0.0.1 8080 2>/dev/null && nc -z 127.0.0.1 8443 2>/dev/null && break; sleep 0.1; done
 
 fails=0
@@ -116,6 +168,43 @@ check "PUT with body: 405, connection reused" "405 200" "$(printf 'PUT /x HTTP/1
 check "unknown method: 405" "405" "$(code -X PURGE http://127.0.0.1:8080/)"
 check "location methods: OPTIONS refused where narrowed" "405 GET, HEAD" "$(curl -sSi -X OPTIONS http://127.0.0.1:8080/readonly/ | tr -d '\r' | awk '/^HTTP/{s=$2} /^Allow:/{sub(/^Allow: /,""); a=$0} END{print s, a}')"
 check "location methods: GET still served" "sub index" "$(curl -sS http://127.0.0.1:8080/readonly/ | sed 's/<[^>]*>//g')"
+# ---- FastCGI (C1): php-fpm behind /php/ (buffered), /phpstream/ (streaming), a .php suffix location ----
+if [ -n "$FPM_PID" ]; then
+check "php: index via directory URI" "index ok" "$(curl -sS http://127.0.0.1:8080/php/)"
+check "php: status and content type" "200 text/html; charset=UTF-8" "$(curl -sSi http://127.0.0.1:8080/php/ | tr -d '\r' | awk '/^HTTP/{s=$2} tolower($0) ~ /^content-type:/{sub(/^[Cc]ontent-[Tt]ype: /,""); c=$0} END{print s, c}')"
+P=$(curl -sS -H 'X-Test: yes' 'http://127.0.0.1:8080/php/params.php?a=1&b=2')
+check "php: QUERY_STRING" "yes" "$(echo "$P" | grep -q '"QUERY_STRING":"a=1&b=2"' && echo yes)"
+check "php: SCRIPT_FILENAME under the alias" "yes" "$(echo "$P" | grep -q "\"SCRIPT_FILENAME\":\"$ROOT/tests/php/params.php\"" && echo yes)"
+check "php: REMOTE_ADDR and SERVER_PORT" "yes" "$(echo "$P" | grep -q '"REMOTE_ADDR":"127.0.0.1"' && echo "$P" | grep -q '"SERVER_PORT":"8080"' && echo yes)"
+check "php: HTTP_ header passed" "yes" "$(echo "$P" | grep -q '"HTTP_X_TEST":"yes"' && echo yes)"
+check "php: SERVER_NAME from the site" "yes" "$(echo "$P" | grep -q '"SERVER_NAME":"localhost"' && echo yes)"
+check "php: no HTTPS on plain" "yes" "$(echo "$P" | grep -qv '"HTTPS"' && echo yes)"
+check "php: HTTPS=on over TLS" "yes" "$(curl -sSk https://127.0.0.1:8443/php/params.php | grep -q '"HTTPS":"on"' && echo yes)"
+check "php: OPTIONS reaches the application" "yes" "$(curl -sS -X OPTIONS http://127.0.0.1:8080/php/params.php | grep -q '"REQUEST_METHOD":"OPTIONS"' && echo yes)"
+check "php: TRACE still 405" "405" "$(code -X TRACE http://127.0.0.1:8080/php/params.php)"
+check "php: POST form body" "7 $(printf 'a=1&b=2' | md5sum | cut -d' ' -f1) a=1&b=2" "$(curl -sS -d 'a=1&b=2' http://127.0.0.1:8080/php/post.php)"
+head -c 600000 /dev/urandom > bench/tmp/big-post.bin
+check "php: large POST body spilled to a temp file, intact" "600000 $(md5sum < bench/tmp/big-post.bin | cut -d' ' -f1) " "$(curl -sS -H 'Content-Type: application/octet-stream' --data-binary @bench/tmp/big-post.bin http://127.0.0.1:8080/php/post.php)"
+check "php: chunked request body" "7 $(printf 'a=1&b=2' | md5sum | cut -d' ' -f1) a=1&b=2" "$(curl -sS -H 'Transfer-Encoding: chunked' -H 'Content-Type: application/x-www-form-urlencoded' -d 'a=1&b=2' http://127.0.0.1:8080/php/post.php)"
+H=$(curl -sSi http://127.0.0.1:8080/php/headers.php | tr -d '\r')
+check "php: Status from the script" "201" "$(echo "$H" | awk '/^HTTP/{print $2}')"
+check "php: custom and repeated headers passed through" "2 1" "$(echo "$H" | grep -c '^Set-Cookie: ') $(echo "$H" | grep -c '^X-Custom: v')"
+check "php: Location alone means 302" "302 /php/index.php" "$(curl -sSi http://127.0.0.1:8080/php/redirect.php | tr -d '\r' | awk '/^HTTP/{s=$2} /^Location:/{l=$2} END{print s, l}')"
+check "php: http_response_code(404) with body" "404 custom 404" "$(curl -sS -w ' %{http_code}' http://127.0.0.1:8080/php/status404.php | awk '{print $NF, $1, $2}')"
+BIGMD5=$(python3 -c "import hashlib,sys; print(hashlib.md5(b'0123456789abcdef'*196608).hexdigest())")
+check "php: 3 MB response spilled to a temp file, intact" "$BIGMD5 3145728" "$(curl -sS -o bench/tmp/big.out -w '%{size_download}' http://127.0.0.1:8080/php/big.php | (read n; echo "$(md5sum < bench/tmp/big.out | cut -d' ' -f1) $n"))"
+check "php: HEAD answered without a body" "200 0" "$(curl -sSI -o /dev/null -w '%{http_code} %{size_download}' http://127.0.0.1:8080/php/big.php)"
+check "php: streaming location sends chunked" "yes" "$(curl -sSi http://127.0.0.1:8080/phpstream/stream.php | tr -d '\r' | grep -q '^Transfer-Encoding: chunked' && echo yes)"
+check "php: streaming body intact" "chunk0 chunk1 chunk2 chunk3 chunk4" "$(curl -sS http://127.0.0.1:8080/phpstream/stream.php | tr '\n' ' ' | sed 's/ $//')"
+check "php: read_timeout gives 504" "504" "$(code 'http://127.0.0.1:8080/phpslow/slow.php?s=2')"
+check "php: timeout reason in the error log" "yes" "$(grep -q 'read_timeout' bench/tmp/error.log && echo yes)"
+check "php: missing script is 404 before fpm" "404" "$(code http://127.0.0.1:8080/php/missing.php)"
+check "php: fatal error gives PHP's 500" "500" "$(code http://127.0.0.1:8080/php/fatal.php)"
+check "php: stderr of the fatal error logged" "yes" "$(grep -q 'undefined_function_xyz' bench/tmp/error.log && echo yes)"
+check "php: keep-alive reuse across requests" "index okindex okindex ok" "$(curl -sS http://127.0.0.1:8080/php/ http://127.0.0.1:8080/php/ http://127.0.0.1:8080/php/)"
+else
+  echo "skip php-fpm checks (php-fpm not installed)"
+fi
 # ---- request bodies (A3): decoded, limited, drained after the response ----
 check "body on GET: served, drained, pipelined request answered" "2" "$(printf 'GET / HTTP/1.1\r\nHost: l\r\nContent-Length: 5\r\n\r\nhelloGET /sub/ HTTP/1.1\r\nHost: l\r\nConnection: close\r\n\r\n' | ncq 127.0.0.1 8080 | grep -c 'HTTP/1.1 200')"
 check "POST with body: 405, then keep-alive" "405 200" "$(printf 'POST / HTTP/1.1\r\nHost: l\r\nContent-Length: 3\r\n\r\nx=1GET / HTTP/1.1\r\nHost: l\r\nConnection: close\r\n\r\n' | ncq 127.0.0.1 8080 | awk '/^HTTP\/1.1/{printf "%s ", $2}' | sed 's/ $//')"
@@ -162,7 +251,19 @@ rm -f bench/www/stream.bin
 kill $PID; wait $PID 2>/dev/null
 
 # Second instance with symlinks = "deny", hidden_files = true and a 2-request keep-alive cap.
-sed 's/^default = true/default = true\nsymlinks = "deny"\nhidden_files = true/; s/^max_requests_per_connection = .*/max_requests_per_connection = 2\nbody_timeout = 1/; s/^access = \(.*\)/access = \1\nformat = "json"/' bench/tmp/agensio-test.toml > bench/tmp/agensio-test2.toml
+# One worker here: the FastCGI pool limits are per worker, so the 503 check needs both
+# requests on the same worker.
+sed 's/^workers = .*/workers = 1/; s/^default = true/default = true\nsymlinks = "deny"\nhidden_files = true/; s/^max_requests_per_connection = .*/max_requests_per_connection = 2\nbody_timeout = 1/; s/^access = \(.*\)/access = \1\nformat = "json"/' bench/tmp/agensio-test.toml > bench/tmp/agensio-test2.toml
+# A ".php" suffix location on the plain site (suffix beats prefix, like an nginx regex
+# location, so it lives in this instance where no aliased PHP prefix must win).
+python3 - bench/tmp/agensio-test2.toml <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+i = text.rfind("[[site]]")
+text = text[:i] + '[[site.location]]\npath = ".php"\nmatch = "suffix"\nhandler = "fastcgi"\nfastcgi = { max_connections = 1, queue_depth = 0 }\n\n' + text[i:]
+open(path, "w").write(text)
+PY
 "$BIN" -c bench/tmp/agensio-test2.toml >/dev/null 2>&1 &
 PID=$!
 for _ in $(seq 1 50); do nc -z 127.0.0.1 8080 2>/dev/null && break; sleep 0.1; done
@@ -174,6 +275,24 @@ check "request cap: 2 responses then close" "2" "$(echo "$three" | grep -c '^HTT
 check "request cap: Connection: close on last" "1" "$(echo "$three" | grep -c '^Connection: close')"
 sleep 1.2
 check "access log: json format" "yes" "$(grep -q '^{"time":"[0-9T:+-]*","remote":"127.0.0.1","host":"127.0.0.1:8080","method":"GET","target":"/","proto":"HTTP/1.1","status":200,"bytes":[0-9]*,"referer":"","user_agent":"curl/[^"]*"}$' bench/tmp/access.log && echo yes)"
+if [ -n "$FPM_PID" ]; then
+  check "php: suffix location under the site root" "hello GET 5" "$(curl -sS 'http://127.0.0.1:8080/hello.php?x=5')"
+  check "php: suffix beats prefix (documented, like nginx regex)" "yes" "$(curl -sS 'http://127.0.0.1:8080/app/x.php' | grep -q '404 Not Found' && echo yes)"
+  cp tests/php/slow.php bench/www/slow.php
+  curl -sS -o /dev/null -w '%{http_code}\n' 'http://127.0.0.1:8080/slow.php?s=1' > bench/tmp/q1.txt &
+  QPID=$!
+  sleep 0.3
+  curl -sSi 'http://127.0.0.1:8080/slow.php?s=1' | tr -d '\r' > bench/tmp/q2.txt
+  wait $QPID
+  check "php: pool of 1 with no queue: second request gets 503 at once" "200 503" "$(cat bench/tmp/q1.txt) $(awk '/^HTTP/{print $2}' bench/tmp/q2.txt)"
+  check "php: 503 carries Retry-After" "yes" "$(grep -q '^Retry-After: ' bench/tmp/q2.txt && echo yes)"
+  check "php: pool_saturated reason logged" "yes" "$(grep -q 'pool_saturated' bench/tmp/error.log && echo yes)"
+  curl -sS -o /dev/null http://127.0.0.1:8080/php/; sleep 1.2
+  check "access log: upstream field for php" "yes" "$(grep -q '"target":"/php/".*"upstream":"ok"}$' bench/tmp/access.log && echo yes)"
+  kill $FPM_PID; wait $FPM_PID 2>/dev/null; FPM_PID=""; sleep 0.3
+  check "php: fpm gone gives 502" "502" "$(code http://127.0.0.1:8080/php/)"
+  check "php: 502 reason names the socket" "yes" "$(grep -q -E 'socket_missing|connect_refused' bench/tmp/error.log && echo yes)"
+fi
 # Body timeout (1 s here): the response is served, then the missing body bytes never come
 # and the server closes the connection instead of waiting for the idle timeout (65 s).
 # (nc cannot be used here: it stays up while its stdin is open even after the peer closes.)

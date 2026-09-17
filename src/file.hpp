@@ -35,6 +35,10 @@ public:
 
     // Opens read-only. Returns an invalid File on failure (check is_open()).
     static File open(const char* path) noexcept;
+    // An anonymous read/write temporary file (unlinked at once; freed when closed).
+    static File temporary() noexcept;
+    // Appends len bytes (temporary files only). False on a short write or error.
+    bool append(const void* data, std::size_t len) noexcept;
 
     bool is_open() const noexcept { return fd_ >= 0; }
     bool info(FileInfo& out) const noexcept;

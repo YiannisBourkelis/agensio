@@ -1,5 +1,5 @@
 // Static file handler: turns a request into a Response served from the cache or a file.
-// No socket I/O here; the protocol connection writes the Response. The router picks the
+// No socket I/O here; the protocol connection writes the Response. The dispatcher picks the
 // site and the location; this handler applies the location's root, index, try_files and
 // policies. An internal redirect from try_files re-enters the router with the new path.
 #pragma once
@@ -21,8 +21,10 @@ class StaticHandler {
 public:
     StaticHandler(const Config& cfg, FileCache& cache);
 
-    // Fills s.response for s.request. ws.now must be set by the caller.
-    void handle(Stream& s, const Router& router, WorkerState& ws);
+    enum class Outcome { done, redirect };  // redirect: ws.path holds the try_files target
+
+    // Serves ws.path under `loc` (cache, file, try_files). ws.now must be set by the caller.
+    Outcome serve_location(Stream& s, const LocationConfig& loc, WorkerState& ws);
 
     // Fills s.response with a canned error page. `allow` adds an Allow header (405).
     void error(Stream& s, int status, bool keep_alive, std::string_view allow = {});
@@ -32,10 +34,8 @@ public:
     static constexpr int kMaxInternalRedirects = 8;  // try_files fallbacks per request (nginx: 10)
 
 private:
-    enum class Outcome { done, redirect };  // redirect: ws.path holds the try_files target
     enum class Lookup { found, responded, redirect };
 
-    Outcome serve_location(Stream& s, const LocationConfig& loc, WorkerState& ws);
     Lookup plain_lookup(Stream& s, const LocationConfig& loc, WorkerState& ws, File& f, FileInfo& fi);
     Lookup try_files_lookup(Stream& s, const LocationConfig& loc, WorkerState& ws, File& f, FileInfo& fi);
     static bool open_index(const LocationConfig& loc, WorkerState& ws, File& f, FileInfo& fi);
@@ -51,7 +51,10 @@ private:
     FileCache& cache_;
 };
 
-// Helpers shared with tests.
+// Helpers shared with tests and the other handlers.
 void make_etag(std::int64_t mtime, std::uint64_t size, std::string& out);
+// The filesystem path for ws.path under the location: root + path, or with `alias` the
+// alias directory in place of the location prefix (nginx semantics). Result in ws.fs_path.
+void fs_path_of(const LocationConfig& loc, WorkerState& ws);
 
 }  // namespace agensio

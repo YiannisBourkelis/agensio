@@ -29,11 +29,13 @@ struct Response {
     Body body;
     bool keep_alive = true;
     bool head = false;  // HEAD request: headers only, body length still declared
+    const char* upstream = nullptr;  // upstream outcome for the access log ("ok", "read_timeout", ...), static text
 
     // Resources the views above may point into.
     EntryPtr entry;
     File owned_file;
     std::string scratch;  // owned text built per response (capacity retained); views may point here
+    std::string buffer;   // owned body bytes (buffered upstream responses)
 
     void reset() {
         status = 200;
@@ -43,9 +45,11 @@ struct Response {
         body = NoBody{};
         keep_alive = true;
         head = false;
+        upstream = nullptr;
         entry.reset();
         owned_file.close();
         scratch.clear();
+        buffer.clear();
     }
 };
 

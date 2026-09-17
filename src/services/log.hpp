@@ -78,6 +78,7 @@ struct AccessRecord {
     std::uint64_t bytes = 0;  // body bytes sent
     std::string_view referer;
     std::string_view user_agent;
+    std::string_view upstream;  // "ok", an FcgiFailure name, or empty for static (json only)
 };
 
 class WorkerLogs {

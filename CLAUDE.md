@@ -108,7 +108,16 @@ Source map (`src/`, files move into subdirectories as they are touched, see the 
   `writer.hpp` (`Http1Writer`: `Response` to bytes, owns the writev/TLS-coalescing/
   sendfile fast paths and the pull path for `StreamBody`), `chunked.hpp` (chunk framing).
   Both are templates over the plain/TLS socket type.
-- `handlers/`: `static` (`StaticHandler`: cache, files, policies; `Route` until A4).
+- `handlers/`: `dispatch` (`Dispatcher`: request prologue, site/location routing, method
+  policy; the connection drives the hop loop because handlers may finish asynchronously),
+  `static` (`StaticHandler`: cache, files, try_files, policies), `fastcgi` (`FcgiHandler`:
+  params from a prebuilt per-location block plus a per-request tail, request body in
+  memory / temp file / streamed, CGI head to `Response`, failure reasons to both logs).
+- `upstream/`: `fcgi.hpp` (FastCGI record and params codec, CGI head parser; fuzzed),
+  `fcgi_client` (`FcgiPool`: per-worker, bounded, explicit queue with priority reserve,
+  idle keep-alive connections; `FcgiRequest`: one exchange with connect/send/read
+  timeouts, one retry for GET/HEAD on a dead reused connection, response buffered with
+  temp-file spill or streamed with a high-water mark), `fcgi_options.hpp`.
 - top level, not yet moved: `config`, `path`, `mime`, `http_date`, `file`, `cache`,
   `response` (status lines, error pages), `tls_stream.hpp`, `server`, `main`.
 Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
@@ -172,6 +181,20 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   the handler answers without reading. A body the handler did not read is drained after
   the response so keep-alive and pipelining survive. Unknown transfer codings get 501,
   unknown expectations 417. HTTP/2 will feed the same interface from DATA frames.
+- **FastCGI** (C1): `handler = "fastcgi"` locations talk to php-fpm over a unix or TCP
+  socket. Buffering on by default (whole reply in memory, spilled to an unlinked temp
+  file above `buffer_max` and then sent with sendfile, fpm child released at once);
+  `buffering = false` streams through a `StreamBody`. Request bodies likewise: memory up
+  to `request_buffer_max`, then a temp file, or `request_buffering = false` to stream.
+  Per-worker pool per upstream: `max_connections`, `queue_depth`, `queue_wait` (503 +
+  Retry-After beyond), `priority_reserve` for `priority = true` locations. `keep_conn`
+  (FCGI_KEEP_CONN) is off by default: php-fpm binds a child to every open connection, so
+  idle keep-alive connections of N workers pin N children and starve the rest (measured in
+  the suite: 24 workers, 4 children, every further request a 504). Timeouts give
+  504, connection and protocol failures 502, each with an `FcgiFailure` reason in the
+  error log (with a fix hint: socket owner/mode vs our uid, SCRIPT_FILENAME, bytes seen
+  before a close) and in the JSON access log's `upstream` field. `match = "suffix"`
+  locations (`.php`) route scripts anywhere under the root.
 - **Logging** (A5, `src/services/log.*`): access log in Apache/nginx "combined" format
   (same escaping, so fail2ban filters work) or JSON, per site (`access_log`) with the
   `[log] access` default; one descriptor per path opened `O_APPEND`, per-worker buffers

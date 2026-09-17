@@ -1,5 +1,6 @@
 #include "config.hpp"
 
+#include "handlers/fastcgi.hpp"
 #include "path.hpp"
 
 #include <algorithm>
@@ -144,21 +145,76 @@ bool symlinks_deny_of(const toml::node_view<const toml::node>& n, bool fallback,
     return symlinks == "deny";
 }
 
+// `php = { ... }` (site) or `fastcgi = { ... }` (location): socket plus options, on top of `base`.
+void parse_fcgi_table(const toml::table& t, const fs::path& base_dir, FcgiConfig& out, const std::string& where) {
+    if (auto sock = t["socket"].value<std::string>()) {
+        std::string text = *sock;
+        if (!text.starts_with("unix:") && text.find(':') == std::string::npos)
+            text = resolve(base_dir, text).string();  // a bare path: relative to the config file
+        std::string err;
+        if (!parse_fcgi_address(text, out.address, err)) fail(where + ".socket: " + err);
+        out.configured = true;
+    }
+    out.options.buffering = t["buffering"].value_or(out.options.buffering);
+    out.options.keep_conn = t["keep_conn"].value_or(out.options.keep_conn);
+    auto seconds = [&](const char* key, std::chrono::milliseconds& target) {
+        if (auto v = t[key].value<double>()) {
+            if (*v <= 0) fail(where + "." + key + " must be positive");
+            target = std::chrono::milliseconds(static_cast<long long>(*v * 1000));
+        }
+    };
+    seconds("connect_timeout", out.options.connect_timeout);
+    seconds("send_timeout", out.options.send_timeout);
+    seconds("read_timeout", out.options.read_timeout);
+    seconds("queue_wait", out.options.queue_wait);
+    out.options.buffer_max = size_node(t["buffer_max"], out.options.buffer_max, (where + ".buffer_max").c_str());
+    out.options.head_max = size_node(t["head_max"], out.options.head_max, (where + ".head_max").c_str());
+    if (out.options.head_max < 1024) fail(where + ".head_max must be at least 1024");
+    out.options.request_buffering = t["request_buffering"].value_or(out.options.request_buffering);
+    out.options.request_buffer_max =
+        size_node(t["request_buffer_max"], out.options.request_buffer_max, (where + ".request_buffer_max").c_str());
+    auto count = [&](const char* key, std::size_t& target, std::int64_t lo, std::int64_t hi) {
+        if (auto v = t[key].value<std::int64_t>()) {
+            if (*v < lo || *v > hi) fail(where + "." + key + " out of range");
+            target = static_cast<std::size_t>(*v);
+        }
+    };
+    count("max_idle", out.options.max_idle, 0, 1024);
+    count("max_connections", out.options.max_connections, 1, 65536);
+    count("queue_depth", out.options.queue_depth, 0, 1 << 20);
+    if (auto v = t["priority_reserve"].value<double>()) {
+        if (*v < 0.0 || *v > 1.0) fail(where + ".priority_reserve must be in [0, 1]");
+        out.options.priority_reserve = *v;
+    }
+    const auto wait_s = std::chrono::duration_cast<std::chrono::seconds>(out.options.queue_wait).count();
+    out.retry_after = std::to_string(wait_s < 1 ? 1 : wait_s);
+}
+
 void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& site, const std::string& where) {
     LocationConfig loc;
     auto path = t["path"].value<std::string>();
-    if (!path || path->empty() || (*path)[0] != '/') fail(where + ": 'path' is required and must start with '/'");
+    if (!path || path->empty() || ((*path)[0] != '/' && (*path)[0] != '.'))
+        fail(where + ": 'path' is required and must start with '/' (or '.' for a suffix location)");
     loc.path = *path;
+    if (loc.path[0] == '.') loc.path.insert(0, "/");  // ".php" and "/.php" both mean the suffix ".php"
     std::string match = to_lower(t["match"].value_or(std::string("prefix")));
-    if (match != "prefix" && match != "exact") fail(where + ": match must be \"prefix\" or \"exact\"");
+    if (match != "prefix" && match != "exact" && match != "suffix")
+        fail(where + ": match must be \"prefix\", \"exact\" or \"suffix\"");
     loc.exact = match == "exact";
+    loc.suffix = match == "suffix";
+    if (loc.suffix) {
+        if (loc.path.size() < 2) fail(where + ": a suffix location needs an ending such as \".php\"");
+        loc.path.erase(0, 1);  // the leading '/' only marks it as a path; ".php" is what is matched
+    }
     for (const auto& other : site.locations)
-        if (other.path == loc.path && other.exact == loc.exact) fail(where + ": duplicate location '" + loc.path + "'");
+        if (other.path == loc.path && other.exact == loc.exact && other.suffix == loc.suffix)
+            fail(where + ": duplicate location '" + loc.path + "'");
     if (auto root = t["root"].value<std::string>()) loc.root = resolve_root(base_dir, *root, where);
     else loc.root = site.root;
     if (auto alias = t["alias"].value<std::string>()) {
         if (t.contains("root")) fail(where + ": 'root' and 'alias' are mutually exclusive");
-        if (loc.exact || loc.path.back() != '/') fail(where + ": 'alias' needs a prefix path ending with '/'");
+        if (loc.exact || loc.suffix || loc.path.back() != '/')
+            fail(where + ": 'alias' needs a prefix path ending with '/'");
         loc.alias = resolve_root(base_dir, *alias, where);
     }
     loc.index = t.contains("index") ? index_list(t["index"], where) : site.index;
@@ -166,16 +222,31 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
     loc.hidden_files = t["hidden_files"].value_or(site.hidden_files);
     loc.symlinks_deny = symlinks_deny_of(t["symlinks"], site.symlinks_deny, where);
     loc.handler = to_lower(t["handler"].value_or(std::string("static")));
-    if (loc.handler != "static")
-        fail(where + ": handler \"" + loc.handler + "\" is not available yet (only \"static\")");
+    if (loc.handler == "static") {
+        loc.kind = HandlerKind::static_;
+    } else if (loc.handler == "fastcgi") {
+        loc.kind = HandlerKind::fastcgi;
+        loc.fastcgi = site.php;  // site-level `php = { socket = ... }` is the default
+        if (auto ft = t["fastcgi"].as_table()) parse_fcgi_table(*ft, base_dir, loc.fastcgi, where + ".fastcgi");
+        else if (t.contains("fastcgi")) fail(where + ": 'fastcgi' must be a table");
+        if (!loc.fastcgi.configured)
+            fail(where + ": handler \"fastcgi\" needs fastcgi.socket here or php.socket on the site");
+        loc.methods = kFcgiMethods;
+        loc.allow = allow_header(kFcgiMethods);
+        loc.priority = t["priority"].value_or(false);
+    } else {
+        fail(where + ": handler \"" + loc.handler + "\" is not available yet (\"static\" or \"fastcgi\")");
+    }
+    if (loc.kind == HandlerKind::fastcgi) loc.fastcgi.params_prefix = FcgiHandler::prebuild_params(site, loc);
     if (t.contains("methods")) {
+        const MethodSet implemented = loc.kind == HandlerKind::fastcgi ? kFcgiMethods : kStaticMethods;
         MethodSet set = 0;
         for (const auto& name : string_list(t["methods"], (where + ".methods").c_str())) {
             Method m;
             if (!parse_method(name, m) || m == Method::trace || m == Method::connect || m == Method::other)
                 fail(where + ".methods: unknown method '" + name + "'");
-            if (!(kStaticMethods & method_bit(m)))
-                fail(where + ".methods: the static handler does not implement " + name);
+            if (!(implemented & method_bit(m)))
+                fail(where + ".methods: the " + loc.handler + " handler does not implement " + name);
             set |= method_bit(m);
         }
         if (set == 0) fail(where + ".methods must list at least one method");
@@ -201,6 +272,8 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
 
     if (t.contains("index")) site.index = index_list(t["index"], where);
     if (t.contains("try_files")) site.try_files = try_files_of(t["try_files"], where);
+    if (auto pt = t["php"].as_table()) parse_fcgi_table(*pt, base_dir, site.php, where + ".php");
+    else if (t.contains("php")) fail(where + ": 'php' must be a table");
 
     if (auto tls = t["tls"].as_table()) {
         auto cert = (*tls)["cert"].value<std::string>();
@@ -324,10 +397,12 @@ void finalize_site(SiteConfig& site) {
         loc.symlinks_deny = site.symlinks_deny;
         site.locations.push_back(std::move(loc));
     }
+    // Exact matches first, then suffixes, then prefixes; within a kind the longest first.
+    auto rank = [](const LocationConfig& l) { return l.exact ? 0 : l.suffix ? 1 : 2; };
     std::stable_sort(site.locations.begin(), site.locations.end(),
-                     [](const LocationConfig& a, const LocationConfig& b) {
-                         if (a.path.size() != b.path.size()) return a.path.size() > b.path.size();
-                         return a.exact && !b.exact;
+                     [&](const LocationConfig& a, const LocationConfig& b) {
+                         if (rank(a) != rank(b)) return rank(a) < rank(b);
+                         return a.path.size() > b.path.size();
                      });
 }
 

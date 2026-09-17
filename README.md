@@ -60,10 +60,23 @@ root = "/var/www/example"
 tls = { cert = "/etc/ssl/example/fullchain.pem", key = "/etc/ssl/example/privkey.pem" }
 try_files = ["$uri", "$uri/", "/index.html"]   # single-page app: unknown paths get the app shell
 
-[[site.location]]            # exact matches win, then the longest prefix; "/" is implicit
+[[site.location]]            # exact matches win, then suffixes, then the longest prefix; "/" is implicit
 path = "/assets/"
 alias = "/var/www/example-assets"   # /assets/x.png -> /var/www/example-assets/x.png
 try_files = ["$uri", "=404"]
+
+[[site]]                     # PHP application through php-fpm
+server_name = ["app.example.com"]
+listen = ["0.0.0.0:80"]
+root = "/var/www/app/public"
+index = ["index.php"]
+try_files = ["$uri", "$uri/", "/index.php?$query_string"]
+php = { socket = "unix:/run/php/php8.4-fpm.sock" }
+
+[[site.location]]
+path = ".php"
+match = "suffix"
+handler = "fastcgi"        # buffered by default; fastcgi = { buffering = false } streams (SSE)
 ```
 
 `agensio -t -c file.toml` validates a configuration without starting.

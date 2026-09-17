@@ -1,0 +1,309 @@
+#include "handlers/fastcgi.hpp"
+
+#include <cstring>
+#include <sys/stat.h>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
+#include "core/strings.hpp"
+#include "handlers/static.hpp"
+#include "response.hpp"
+
+namespace agensio {
+
+// One in-flight exchange: owns the request body while it is collected, then the upstream request.
+struct FcgiHandler::Exchange : std::enable_shared_from_this<Exchange> {
+    Stream* stream = nullptr;
+    const SiteConfig* site = nullptr;
+    const LocationConfig* loc = nullptr;
+    WorkerState* ws = nullptr;
+    FcgiPool* pool = nullptr;
+    std::function<void()> done;
+    FcgiBodyInput body;
+    std::vector<char> chunk;  // body read scratch
+    std::shared_ptr<FcgiRequest> req;
+    std::string script;       // SCRIPT_FILENAME
+    bool completed = false;
+};
+
+void FcgiHandler::error(Stream& s, int status, std::string_view retry_after) {
+    Response& r = s.response;
+    r.reset();
+    const ErrorPage& page = error_page(status);
+    r.status = status;
+    r.keep_alive = s.request.keep_alive;
+    r.head = s.request.method == Method::head;
+    r.prebuilt_headers = page.headers;
+    if (!retry_after.empty()) r.headers.add("Retry-After", retry_after);
+    r.body = MemoryBody{page.body};
+}
+
+namespace {
+
+void append_upper_env(std::string& out, std::string_view name) {
+    for (char c : name) {
+        if (c == '-') out.push_back('_');
+        else if (c >= 'a' && c <= 'z') out.push_back(static_cast<char>(c - 32));
+        else out.push_back(c);
+    }
+}
+
+}  // namespace
+
+std::string FcgiHandler::prebuild_params(const SiteConfig& site, const LocationConfig& loc) {
+    std::string out;
+    fcgi::append_param(out, "GATEWAY_INTERFACE", "CGI/1.1");
+    fcgi::append_param(out, "SERVER_SOFTWARE", "agensio/" AGENSIO_VERSION);
+    fcgi::append_param(out, "DOCUMENT_ROOT", loc.alias.empty() ? loc.root : loc.alias);
+    if (const std::string& first = site.server_names.front(); first != "*")
+        fcgi::append_param(out, "SERVER_NAME", first);
+    return out;
+}
+
+void FcgiHandler::append_request_params(std::string& out, Stream& s, const SiteConfig& site, const LocationConfig& loc,
+                                        const WorkerState& ws, std::uint64_t content_length, bool length_known) const {
+    (void)loc;
+    const Request& req = s.request;
+    std::string& tmp = const_cast<WorkerState&>(ws).scratch;  // per-worker scratch, capacity retained
+    auto add = [&](std::string_view name, std::string_view value) { fcgi::append_param(out, name, value); };
+    add("SERVER_PROTOCOL", req.version_minor == 0 ? "HTTP/1.0" : "HTTP/1.1");
+    add("REQUEST_METHOD", req.method_name);
+    add("SCRIPT_FILENAME", ws.fs_path);
+    add("SCRIPT_NAME", ws.path);
+    add("REQUEST_URI", req.target);
+    add("DOCUMENT_URI", ws.path);
+    const std::size_t q = req.target.find('?');
+    add("QUERY_STRING", q == std::string_view::npos ? std::string_view() : req.target.substr(q + 1));
+    if (const std::string_view ct = req.headers.get("content-type"); !ct.empty()) add("CONTENT_TYPE", ct);
+    if (req.has_body && length_known) {
+        tmp.clear();
+        append_number(tmp, content_length);
+        add("CONTENT_LENGTH", tmp);
+    }
+    add("REMOTE_ADDR", s.conn.remote_address);
+    tmp.clear();
+    append_number(tmp, s.conn.remote_port);
+    add("REMOTE_PORT", tmp);
+    add("SERVER_ADDR", s.conn.local_address);
+    tmp.clear();
+    append_number(tmp, s.conn.local_port);
+    add("SERVER_PORT", tmp);
+    if (site.server_names.front() == "*") add("SERVER_NAME", req.host);
+    add("REQUEST_SCHEME", s.conn.tls ? "https" : "http");
+    if (s.conn.tls) add("HTTPS", "on");
+    for (const HeaderField& h : req.headers) {
+        tmp.assign("HTTP_");
+        append_upper_env(tmp, h.name);
+        add(tmp, h.value);
+    }
+}
+
+std::shared_ptr<FcgiRequest> FcgiHandler::start(Stream& s, const SiteConfig& site, const LocationConfig& loc,
+                                                WorkerState& ws, FcgiPool& pool, std::function<void()> done) {
+    // The script: the request path, plus the index for a directory URI, under root/alias.
+    if (ws.path.back() == '/') ws.path.append(loc.index.empty() ? std::string("index.php") : loc.index.front());
+    fs_path_of(loc, ws);
+    FileInfo fi;
+    if (!stat_path(ws.fs_path.c_str(), fi) || !fi.is_regular) {
+        error(s, 404);
+        s.response.upstream = "fastcgi:no_script";
+        done();
+        return nullptr;
+    }
+    auto x = std::make_shared<Exchange>();
+    x->stream = &s;
+    x->site = &site;
+    x->loc = &loc;
+    x->ws = &ws;
+    x->pool = &pool;
+    x->done = std::move(done);
+    x->script = ws.fs_path;
+    const FcgiOptions& opts = loc.fastcgi.options;
+    const Request& req = s.request;
+    const bool retry_ok = req.method == Method::get || req.method == Method::head;
+
+    // Everything after the body is settled: the per-request params, then the exchange.
+    auto launch = [this, x, retry_ok](bool length_known) {
+        WorkerState& w = *x->ws;
+        w.params_tail.clear();
+        append_request_params(w.params_tail, *x->stream, *x->site, *x->loc, w, x->body.size, length_known);
+        x->req = std::make_shared<FcgiRequest>(*x->pool, x->loc->fastcgi.address, x->loc->fastcgi.options);
+        x->req->start(x->loc->fastcgi.params_prefix, w.params_tail, std::move(x->body), x->loc->priority, retry_ok,
+                      [this, x](FcgiResult& r) { finish(*x, r); });
+    };
+
+    if (!req.has_body || !req.body) {
+        launch(true);
+        return x->completed ? nullptr : x->req;
+    }
+    if (!opts.request_buffering) {  // stream the body to fpm as it arrives
+        x->body.stream = req.body;
+        std::uint64_t declared = 0;
+        const bool known = req.body->length(declared);
+        x->body.size = declared;
+        launch(known);
+        return x->completed ? nullptr : x->req;
+    }
+    // Collect the body first: memory up to request_buffer_max, then a temp file. Bounded by
+    // server.max_body_size in the connection.
+    x->chunk.resize(64 * 1024);
+    struct Reader {
+        static void step(std::shared_ptr<Exchange> x, std::size_t memory_max, std::function<void(bool)> launch) {
+            StreamBody* src = x->stream->request.body;
+            src->async_read(x->chunk.data(), x->chunk.size(),
+                            [x, memory_max, launch = std::move(launch)](std::error_code ec, std::size_t n) mutable {
+                                if (ec) return;  // the connection closed itself; nothing to answer
+                                if (n == 0) {
+                                    launch(true);
+                                    return;
+                                }
+                                x->body.size += n;
+                                if (x->body.spill.is_open() || x->body.memory.size() + n > memory_max) {
+                                    if (!x->body.spill.is_open()) x->body.spill = File::temporary();
+                                    if (!x->body.spill.is_open() || !x->body.spill.append(x->chunk.data(), n)) {
+                                        // Cannot spool the body: answer 502 spill_error.
+                                        FcgiResult r;
+                                        r.failure = FcgiFailure::spill_error;
+                                        r.error = std::error_code(errno, std::generic_category());
+                                        x->req.reset();
+                                        launch = nullptr;
+                                        FcgiHandler::error(*x->stream, 502);
+                                        x->stream->response.upstream = "fastcgi:spill_error";
+                                        x->completed = true;
+                                        x->done();
+                                        return;
+                                    }
+                                } else {
+                                    x->body.memory.append(x->chunk.data(), n);
+                                }
+                                step(x, memory_max, std::move(launch));
+                            });
+        }
+    };
+    Reader::step(x, opts.request_buffer_max, launch);
+    // The body may have been entirely buffered already, in which case launch ran inline.
+    return x->completed ? nullptr : x->req;
+}
+
+void FcgiHandler::log_failure(const Exchange& x, const FcgiResult& res) {
+    const FcgiAddress& a = x.loc->fastcgi.address;
+    std::string msg = "fastcgi " + a.key + " " + to_string(res.failure) + " for " + x.script;
+    if (res.error) msg += " (" + res.error.message() + ")";
+    switch (res.failure) {
+        case FcgiFailure::socket_permission: {
+#ifndef _WIN32
+            struct stat st{};
+            if (::stat(a.path.c_str(), &st) == 0) {
+                char mode[8];
+                std::snprintf(mode, sizeof(mode), "%04o", static_cast<unsigned>(st.st_mode & 07777));
+                msg += ": socket " + a.path + " is owner " + std::to_string(st.st_uid) + ":" +
+                       std::to_string(st.st_gid) + " mode " + mode + ", agensio runs as " +
+                       std::to_string(::getuid()) + ":" + std::to_string(::getgid()) +
+                       "; fix listen.owner/listen.group/listen.mode in the fpm pool or add agensio to that group";
+            } else {
+                msg += ": socket " + a.path + " cannot be stat'ed";
+            }
+#endif
+            break;
+        }
+        case FcgiFailure::socket_missing:
+            msg += ": nothing created " + a.path + "; is php-fpm running and is `listen` in its pool this path?";
+            break;
+        case FcgiFailure::connect_refused:
+            msg += ": nothing is listening on " + a.key + "; is php-fpm running?";
+            break;
+        case FcgiFailure::primary_script_unknown:
+            msg += ": php-fpm could not open SCRIPT_FILENAME " + x.script +
+                   "; check the fpm pool's user can read it and that chroot/open_basedir allow it";
+            break;
+        case FcgiFailure::child_closed_early:
+            if (res.head_bytes == 0)
+                msg += ": the connection closed before any byte of the response arrived "
+                       "(child crashed or fpm reloaded)";
+            else
+                msg += ": the connection closed after " + std::to_string(res.head_bytes) +
+                       " bytes (child died mid-response)";
+            break;
+        case FcgiFailure::pool_saturated:
+            msg += ": " + std::to_string(x.loc->fastcgi.options.max_connections) + " in flight and " +
+                   std::to_string(x.loc->fastcgi.options.queue_depth) +
+                   " queued per worker; raise max_connections/queue_depth or pm.max_children";
+            break;
+        case FcgiFailure::queue_timeout:
+            msg += ": waited queue_wait in the pool queue; php-fpm is too slow for the load";
+            break;
+        case FcgiFailure::read_timeout:
+            msg += ": no data for read_timeout; raise fastcgi.read_timeout or fix the slow script";
+            break;
+        case FcgiFailure::head_too_large:
+            msg += ": response head exceeds head_max (" + std::to_string(x.loc->fastcgi.options.head_max) + " bytes)";
+            break;
+        default:
+            break;
+    }
+    if (res.failure == FcgiFailure::primary_script_unknown) log_.warn(msg);
+    else log_.error(msg);
+}
+
+void FcgiHandler::finish(Exchange& x, FcgiResult& res) {
+    Stream& s = *x.stream;
+    Response& r = s.response;
+    const LocationConfig& loc = *x.loc;
+    if (!res.stderr_text.empty() && res.failure != FcgiFailure::primary_script_unknown) {
+        std::string msg = "fastcgi " + loc.fastcgi.address.key + " stderr for " + x.script + ": ";
+        std::string_view text = res.stderr_text;
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.remove_suffix(1);
+        msg.append(text.substr(0, 1024));
+        log_.warn(msg);
+    }
+    if (res.failure != FcgiFailure::none && res.failure != FcgiFailure::primary_script_unknown) {
+        log_failure(x, res);
+        const int status = status_for(res.failure);
+        error(s, status, status == 503 ? std::string_view(loc.fastcgi.retry_after) : std::string_view());
+        r.upstream = to_string(res.failure);
+        x.completed = true;
+        x.done();
+        return;
+    }
+    if (res.failure == FcgiFailure::primary_script_unknown) log_failure(x, res);
+    r.reset();
+    r.status = res.status;
+    r.keep_alive = s.request.keep_alive;
+    r.head = s.request.method == Method::head;
+    r.upstream = to_string(res.failure);  // "ok" or "primary_script_unknown"
+    // Head: every upstream field except the ones the writer owns (framing, connection).
+    const bool no_body_status = res.status == 204 || res.status == 304 || res.status < 200;
+    const bool streaming = !loc.fastcgi.options.buffering;
+    r.scratch.reserve(res.head.size() + 64);
+    for (const HeaderField& h : res.headers) {
+        if (Headers::iequals(h.name, "content-length") || Headers::iequals(h.name, "transfer-encoding") ||
+            Headers::iequals(h.name, "connection") || Headers::iequals(h.name, "keep-alive"))
+            continue;
+        r.scratch.append(h.name).append(": ").append(h.value).append("\r\n");
+    }
+    if (streaming) {
+        r.prebuilt_headers = r.scratch;  // the writer adds Content-Length or chunked framing
+        if (!no_body_status) r.body = x.req->body_source();
+    } else {
+        if (!no_body_status) {
+            r.scratch.append("Content-Length: ");
+            append_number(r.scratch, res.body_size);
+            r.scratch.append("\r\n");
+        }
+        r.prebuilt_headers = r.scratch;
+        if (!no_body_status) {
+            if (res.spill.is_open()) {
+                r.owned_file = std::move(res.spill);
+                r.body = FileBody{&r.owned_file, res.body_size, 0};
+            } else {
+                r.buffer = std::move(res.body);
+                r.body = MemoryBody{std::string_view(r.buffer)};
+            }
+        }
+    }
+    x.completed = true;
+    x.done();
+}
+
+}  // namespace agensio

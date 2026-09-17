@@ -1,0 +1,5 @@
+Status: 302 Found
+Location: /x
+Set-Cookie: a=1
+Set-Cookie: b=2
+

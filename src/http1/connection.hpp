@@ -28,7 +28,7 @@
 #include "core/body.hpp"
 #include "core/stream.hpp"
 #include "core/worker_state.hpp"
-#include "handlers/static.hpp"
+#include "handlers/dispatch.hpp"
 #include "http1/chunked.hpp"
 #include "http1/parser.hpp"
 #include "http1/writer.hpp"
@@ -41,12 +41,12 @@ template <class Socket>
 class Http1Connection : public std::enable_shared_from_this<Http1Connection<Socket>> {
 public:
     Http1Connection(Socket&& socket, Worker& worker, const Listener& listener, const Config& cfg,
-                    StaticHandler& handler)
+                    Dispatcher& dispatcher)
         : socket_(std::move(socket)),
           worker_(worker),
           listener_(listener),
           cfg_(cfg),
-          handler_(handler),
+          dispatcher_(dispatcher),
           timer_(worker.ctx),
           idle_timeout_(std::chrono::seconds(cfg.idle_timeout_s)),
           body_timeout_(std::chrono::seconds(cfg.body_timeout_s)),
@@ -105,6 +105,11 @@ public:
     void close() {
         asio::error_code ec;
         timer_.cancel();
+        ++request_gen_;  // a late upstream completion must not touch this connection
+        if (upstream_) {
+            upstream_->cancel();
+            upstream_.reset();
+        }
         if (!request_logged_ && stream_.request.length > 0) log_request();  // client went away mid-response
         writer_.reset();
         body_pending_ = false;
@@ -228,6 +233,7 @@ private:
         rec.bytes = writer_.body_bytes_sent();
         rec.referer = req.headers.get("referer");
         rec.user_agent = req.headers.get("user-agent");
+        if (stream_.response.upstream) rec.upstream = stream_.response.upstream;
         worker_.state.logs.log(site->access_log_sink, worker_.state.now, rec);
     }
     static constexpr std::size_t kDrainChunk = 8192;
@@ -325,7 +331,35 @@ private:
             req.body = &body_source_;
         }
         worker_.state.now = std::time(nullptr);
-        handler_.handle(stream_, listener_.router, worker_.state);
+        dispatch();
+    }
+
+    // Routes the request and runs its handler; static completes inline, FastCGI later.
+    void dispatch() {
+        WorkerState& ws = worker_.state;
+        const LocationConfig* loc = dispatcher_.route(stream_, listener_.router, ws);
+        int hops = 0;
+        while (loc) {
+            if (loc->kind == HandlerKind::fastcgi) {
+                fill_connection_info();
+                const unsigned gen = ++request_gen_;
+                auto self = this->shared_from_this();
+                auto req = dispatcher_.fcgi().start(
+                    stream_, *static_cast<const SiteConfig*>(ws.site), *loc, ws, worker_.fcgi_pool, [self, gen] {
+                        if (self->request_gen_ != gen) return;  // connection closed meanwhile
+                        self->upstream_.reset();
+                        self->respond();
+                    });
+                if (req && request_gen_ == gen) upstream_ = std::move(req);
+                return;
+            }
+            loc = dispatcher_.serve_static(stream_, *loc, ws, hops);
+        }
+        respond();
+    }
+
+    // The response is filled in: apply connection policy and hand it to the writer.
+    void respond() {
         Response& r = stream_.response;
         if (cfg_.max_requests_per_connection != 0 && ++requests_served_ >= cfg_.max_requests_per_connection)
             r.keep_alive = false;  // cap reached: this is the last response
@@ -335,12 +369,29 @@ private:
         writer_.write(stream_, worker_.state);
     }
 
+    // Client address and listener for handlers that need them (FastCGI params), once.
+    void fill_connection_info() {
+        if (!stream_.conn.local_port) {
+            stream_.conn.local_address = listener_.address_text;
+            stream_.conn.local_port = listener_.port;
+            stream_.conn.tls = IsTlsStream<Socket>::value;
+        }
+        if (remote_.empty()) {
+            asio::error_code ec;
+            const auto ep = lowest().remote_endpoint(ec);
+            remote_ = ec ? std::string("-") : ep.address().to_string();
+            remote_port_ = ec ? 0 : ep.port();
+        }
+        stream_.conn.remote_address = remote_;
+        stream_.conn.remote_port = remote_port_;
+    }
+
     // Protocol-level error: answer, drop whatever is buffered, close.
     void fail_request(int status) {
         worker_.state.now = std::time(nullptr);
         request_logged_ = false;
         worker_.state.site = nullptr;
-        handler_.error(stream_, status, false);
+        dispatcher_.static_handler().error(stream_, status, false);
         consumed_ = in_len_;
         body_pending_ = false;
         writer_.write(stream_, worker_.state);
@@ -418,7 +469,7 @@ private:
     Worker& worker_;
     const Listener& listener_;
     const Config& cfg_;
-    StaticHandler& handler_;
+    Dispatcher& dispatcher_;
     asio::steady_timer timer_;
     std::chrono::steady_clock::duration idle_timeout_;
     std::chrono::steady_clock::duration body_timeout_;
@@ -440,8 +491,11 @@ private:
     std::uint64_t body_read_ = 0;   // decoded bytes delivered so far
     ChunkedDecoder chunked_;
     std::vector<char> drain_;  // scratch for discarding an unread body (allocated on first use)
-    std::string remote_;       // client address for the access log, resolved on first use
+    std::string remote_;       // client address for the access log / handlers, resolved on first use
+    std::uint16_t remote_port_ = 0;
     bool request_logged_ = false;
+    unsigned request_gen_ = 0;               // bumps per request and on close; guards late upstream callbacks
+    std::shared_ptr<FcgiRequest> upstream_;  // FastCGI exchange in flight, cancelled on close
     Stream stream_;
     Http1Writer<Socket, Http1Connection> writer_;  // last: it references socket_ and *this
 };

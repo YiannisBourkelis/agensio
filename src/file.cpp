@@ -8,6 +8,7 @@
 #else
 #include <cerrno>
 #include <climits>
+#include <cstdio>
 #include <cstdlib>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -48,6 +49,29 @@ File File::open(const char* path) noexcept {
     if (_sopen_s(&fd, path, _O_RDONLY | _O_BINARY, _SH_DENYNO, 0) != 0) return f;
     f.fd_ = fd;
     return f;
+}
+
+File File::temporary() noexcept {
+    File f;
+    char path[L_tmpnam_s];
+    if (tmpnam_s(path, sizeof(path)) != 0) return f;
+    int fd = -1;
+    if (_sopen_s(&fd, path, _O_RDWR | _O_CREAT | _O_EXCL | _O_BINARY | _O_TEMPORARY, _SH_DENYRW,
+                 _S_IREAD | _S_IWRITE) != 0)
+        return f;
+    f.fd_ = fd;
+    return f;
+}
+
+bool File::append(const void* data, std::size_t len) noexcept {
+    const char* p = static_cast<const char*>(data);
+    while (len > 0) {
+        const int n = _write(fd_, p, static_cast<unsigned>(len));
+        if (n < 0) return false;
+        p += n;
+        len -= static_cast<std::size_t>(n);
+    }
+    return true;
 }
 
 bool File::info(FileInfo& out) const noexcept {
@@ -95,6 +119,34 @@ File File::open(const char* path) noexcept {
     File f;
     f.fd_ = ::open(path, O_RDONLY | O_CLOEXEC);
     return f;
+}
+
+File File::temporary() noexcept {
+    File f;
+    const char* dir = std::getenv("TMPDIR");
+    if (!dir || !*dir) dir = "/tmp";
+#ifdef O_TMPFILE
+    f.fd_ = ::open(dir, O_TMPFILE | O_RDWR | O_CLOEXEC, 0600);
+    if (f.fd_ >= 0) return f;
+#endif
+    std::string tmpl = std::string(dir) + "/agensio-XXXXXX";
+    f.fd_ = ::mkstemp(tmpl.data());
+    if (f.fd_ >= 0) ::unlink(tmpl.c_str());
+    return f;
+}
+
+bool File::append(const void* data, std::size_t len) noexcept {
+    const char* p = static_cast<const char*>(data);
+    while (len > 0) {
+        const ssize_t n = ::write(fd_, p, len);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        p += n;
+        len -= static_cast<std::size_t>(n);
+    }
+    return true;
 }
 
 bool File::info(FileInfo& out) const noexcept {

@@ -16,8 +16,11 @@
 #include "config.hpp"
 #include "core/router.hpp"
 #include "core/worker_state.hpp"
+#include "handlers/dispatch.hpp"
+#include "handlers/fastcgi.hpp"
 #include "handlers/static.hpp"
 #include "services/log.hpp"
+#include "upstream/fcgi_client.hpp"
 
 namespace agensio {
 
@@ -27,12 +30,15 @@ struct Worker {
     asio::io_context ctx{1};  // concurrency hint 1: single thread, no internal locking
     WorkerState state;
     asio::steady_timer flush_timer{ctx};  // access log buffers, once per second
+    FcgiPool fcgi_pool{ctx};              // idle FastCGI connections of this worker
     std::atomic<std::uint64_t> connections{0};
 };
 
 struct Listener {
     std::string address;  // "host:port" as configured
     asio::ip::tcp::endpoint endpoint;
+    std::string address_text;  // the bound IP as text (SERVER_ADDR)
+    std::uint16_t port = 0;
     Router router;  // site by Host, location by path
     bool tls = false;
 #ifdef AGENSIO_HAS_TLS
@@ -76,6 +82,8 @@ private:
     bool access_logging_ = false;
     FileCache cache_;
     StaticHandler handler_;
+    FcgiHandler fcgi_handler_;
+    Dispatcher dispatcher_;
     std::vector<std::unique_ptr<Worker>> workers_;
     std::vector<Listener> listeners_;
     std::vector<std::unique_ptr<Acceptor>> acceptors_;

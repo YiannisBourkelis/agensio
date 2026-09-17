@@ -156,9 +156,7 @@ void StaticHandler::redirect_slash(Stream& s, WorkerState& ws) {
     r.body = MemoryBody{page.body};
 }
 
-// The filesystem path for ws.path under the location: root + path, or with `alias` the
-// alias directory in place of the location prefix (nginx semantics).
-static void fs_path_of(const LocationConfig& loc, WorkerState& ws) {
+void fs_path_of(const LocationConfig& loc, WorkerState& ws) {
     if (loc.alias.empty()) ws.fs_path.assign(loc.root).append(ws.path);
     else ws.fs_path.assign(loc.alias).append(ws.path, loc.path.size() - 1, std::string::npos);  // keeps the '/'
 }
@@ -360,60 +358,6 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
     }
     serve_file(s, std::move(f), fi, ws);
     return Outcome::done;
-}
-
-void StaticHandler::handle(Stream& s, const Router& router, WorkerState& ws) {
-    const Request& req = s.request;
-    Response& r = s.response;
-    r.reset();
-    r.keep_alive = req.keep_alive;
-
-    // Bodies on requests we do not read are drained by the connection after the response
-    // (nginx behaviour); oversize bodies were already refused with 413 before we were called.
-    if (req.version_minor == 1 && req.host.empty()) {
-        error(s, 400, false);
-        return;
-    }
-    if (req.method == Method::options && req.target == "*") {  // server-wide OPTIONS
-        const SiteConfig* site = router.site(req.host);
-        ws.site = site;
-        no_content(s, Router::location(*site, "/").allow);
-        return;
-    }
-    if (!normalize_target(req.target, ws.path)) {
-        error(s, 400, false);
-        return;
-    }
-#ifdef _WIN32
-    if (!windows_path_ok(ws.path)) {
-        error(s, 400, false);
-        return;
-    }
-#endif
-
-    const SiteConfig* site = router.site(req.host);
-    ws.site = site;
-    const LocationConfig* loc = &Router::location(*site, ws.path);
-    // Methods are a per-location policy: what the handler implements, narrowed by `methods`.
-    // TRACE and CONNECT are in no set, so they are always 405.
-    if (!(loc->methods & method_bit(req.method))) {
-        error(s, 405, req.keep_alive, loc->allow);
-        return;
-    }
-    if (req.method == Method::options) {
-        no_content(s, loc->allow);
-        return;
-    }
-    for (int hops = 0;; ++hops) {
-        if (serve_location(s, *loc, ws) == Outcome::done) return;
-        // try_files fallback: ws.path is the new target; route it again, bounded so two
-        // locations pointing at each other cannot loop.
-        if (hops >= kMaxInternalRedirects) {
-            error(s, 500, req.keep_alive);
-            return;
-        }
-        loc = &Router::location(*site, ws.path);
-    }
 }
 
 }  // namespace agensio

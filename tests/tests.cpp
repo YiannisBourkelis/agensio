@@ -20,6 +20,8 @@
 #include "mime.hpp"
 #include "path.hpp"
 #include "services/log.hpp"
+#include "upstream/fcgi.hpp"
+#include "upstream/fcgi_options.hpp"
 
 using namespace agensio;
 
@@ -514,6 +516,66 @@ static void test_route_and_etag() {
     CHECK_EQ(etag, "\"5a630d3c-6b\"");
 }
 
+static void test_fcgi_codec() {
+    using namespace fcgi;
+    // Records: header, content, padding to 8; the stream terminator; params encoding.
+    std::string out;
+    append_begin_request(out, 1, true);
+    CHECK_EQ(out.size(), 16u);
+    CHECK_EQ(static_cast<unsigned char>(out[1]), 1u);   // begin_request
+    CHECK_EQ(static_cast<unsigned char>(out[3]), 1u);   // request id 1
+    CHECK_EQ(static_cast<unsigned char>(out[5]), 8u);   // content length 8
+    CHECK_EQ(static_cast<unsigned char>(out[9]), 1u);   // role responder
+    CHECK_EQ(static_cast<unsigned char>(out[10]), 1u);  // keep-conn flag
+    std::string params;
+    append_param(params, "A", "b");
+    CHECK_EQ(params, std::string("\x01\x01" "Ab", 4));
+    params.clear();
+    append_param(params, "N", std::string(300, 'v'));
+    CHECK_EQ(params.size(), 1u + 4u + 1u + 300u);
+    CHECK_EQ(static_cast<unsigned char>(params[1]), 0x80u);  // 4-byte length, high bit set
+    CHECK_EQ(static_cast<unsigned char>(params[4]), 300u & 0xff);
+    out.clear();
+    append_stream(out, RecordType::stdin_, 1, std::string(70000, 'x'), true);
+    // 65535 (+1 padding) + 4465 (+7 padding) + empty terminator
+    CHECK_EQ(out.size(), (8 + 65535 + 1) + (8 + 4465 + 7) + 8);
+    // Reader: needs the whole record, reports content without padding, leaves the rest.
+    std::string wire;
+    append_record(wire, RecordType::stdout_, 1, "hello");
+    append_record(wire, RecordType::end_request, 1, std::string("\0\0\0\x07\0\0\0\0", 8));
+    std::size_t consumed = 0;
+    RecordHeader h;
+    std::string_view content;
+    CHECK(next_record(std::string_view(wire).substr(0, 10), consumed, h, content) == ReadStatus::need_more);
+    CHECK(next_record(wire, consumed, h, content) == ReadStatus::record);
+    CHECK(h.type == static_cast<std::uint8_t>(RecordType::stdout_) && content == "hello" && consumed == 16u);
+    std::string_view rest = std::string_view(wire).substr(consumed);
+    CHECK(next_record(rest, consumed, h, content) == ReadStatus::record);
+    EndRequest er;
+    CHECK(parse_end_request(content, er) && er.app_status == 7 &&
+          er.protocol_status == ProtocolStatus::request_complete);
+    CHECK_EQ(consumed, rest.size());
+    std::string bad = wire;
+    bad[0] = 2;  // version
+    CHECK(next_record(bad, consumed, h, content) == ReadStatus::error);
+    // CGI head: Status, Location default, LF endings, folding rejected.
+    CgiHead head;
+    CHECK(parse_cgi_head("Content-Type: text/html\r\nX-A: 1\r\n\r\nbody", head) == HeadStatus::complete);
+    CHECK(head.status == 200 && head.headers.size() == 2 && head.length == 35u);
+    CHECK_EQ(head.headers.get("x-a"), std::string_view("1"));
+    CHECK(parse_cgi_head("Status: 404 Not Found\nContent-Type: text/plain\n\n", head) == HeadStatus::complete);
+    CHECK(head.status == 404 && head.headers.size() == 1);
+    CHECK(parse_cgi_head("Location: /login\r\n\r\n", head) == HeadStatus::complete);
+    CHECK(head.status == 302 && head.headers.get("location") == "/login");
+    CHECK(parse_cgi_head("Status: 201\r\nLocation: /new\r\n\r\n", head) == HeadStatus::complete);
+    CHECK_EQ(head.status, 201);
+    CHECK(parse_cgi_head("Content-Type: text/html\r\n", head) == HeadStatus::incomplete);
+    CHECK(parse_cgi_head("No colon here\r\n\r\n", head) == HeadStatus::error);
+    CHECK(parse_cgi_head("Status: abc\r\n\r\n", head) == HeadStatus::error);
+    CHECK(parse_cgi_head("X: a\r\n b\r\n\r\n", head) == HeadStatus::error);  // obs-fold
+    CHECK(parse_cgi_head("X: a\x01\r\n\r\n", head) == HeadStatus::error);   // control char
+}
+
 static void test_log_format() {
     AccessRecord r;
     r.remote = "203.0.113.9";
@@ -583,6 +645,11 @@ static void test_config_locations() {
     write("ok.toml",
           "[log]\naccess = \"logs/access.log\"\nformat = \"json\"\nlevel = \"info\"\n"
           "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\ntry_files = [\"$uri\", \"=404\"]\n"
+          "php = { socket = \"unix:/run/php/fpm.sock\", read_timeout = 2.5 }\n"
+          "[[site.location]]\npath = \".php\"\nmatch = \"suffix\"\nhandler = \"fastcgi\"\npriority = true\n"
+          "fastcgi = { buffering = false, max_connections = 2, queue_depth = 3, queue_wait = 7, "
+          "priority_reserve = 0.5 }\n"
+          "[[site.location]]\npath = \"/api/\"\nhandler = \"fastcgi\"\nfastcgi = { socket = \"127.0.0.1:9000\" }\n"
           "[[site.location]]\npath = \"/assets/\"\nalias = \"www/assets\"\nhidden_files = true\ntry_files = []\n"
           "[[site.location]]\npath = \"/app/\"\ntry_files = [\"$uri\", \"/index.html\"]\nsymlinks = \"deny\"\n"
           "[[site.location]]\npath = \"/exact\"\nmatch = \"exact\"\nmethods = [\"GET\", \"HEAD\"]\n");
@@ -593,7 +660,20 @@ static void test_config_locations() {
     CHECK(cfg.log.access.size() > 16 &&
           cfg.log.access.compare(cfg.log.access.size() - 16, 16, "/logs/access.log") == 0);
     CHECK(site.access_log == cfg.log.access);  // inherited
-    CHECK_EQ(site.locations.size(), 4u);  // three configured + implicit "/"
+    CHECK_EQ(site.locations.size(), 6u);  // five configured + implicit "/"
+    const LocationConfig& php = Router::location(site, "/dir/x.php");
+    CHECK(php.suffix && php.path == ".php" && php.kind == HandlerKind::fastcgi && php.priority);
+    CHECK(php.fastcgi.address.unix && php.fastcgi.address.path == "/run/php/fpm.sock");
+    CHECK(php.fastcgi.options.read_timeout == std::chrono::milliseconds(2500));  // inherited from php = {...}
+    CHECK(!php.fastcgi.options.buffering && php.fastcgi.options.max_connections == 2 &&
+          php.fastcgi.options.queue_depth == 3 && php.fastcgi.options.priority_reserve == 0.5);
+    CHECK_EQ(php.fastcgi.retry_after, std::string("7"));
+    CHECK(!php.fastcgi.params_prefix.empty() && php.fastcgi.params_prefix.find("DOCUMENT_ROOT") != std::string::npos);
+    CHECK_EQ(php.allow, std::string("GET, HEAD, POST, PUT, DELETE, PATCH, OPTIONS"));
+    const LocationConfig& api = Router::location(site, "/api/x");
+    CHECK(api.kind == HandlerKind::fastcgi && !api.fastcgi.address.unix && api.fastcgi.address.port == 9000);
+    CHECK(api.fastcgi.options.buffering && !api.priority);
+    CHECK_EQ(Router::location(site, "/x.phpx").path, "/");  // suffix means the ending
     const LocationConfig& assets = Router::location(site, "/assets/a.png");
     CHECK_EQ(assets.path, "/assets/");
     CHECK(assets.root == site.root);
@@ -630,6 +710,22 @@ static void test_config_locations() {
     CHECK(rejects("bad11.toml", head + "[[site.location]]\npath = \"/a/\"\nmethods = [\"POST\"]\n"));
     CHECK(rejects("bad12.toml", head + "[[site.location]]\npath = \"/a/\"\nmethods = [\"TRACE\"]\n"));
     CHECK(rejects("bad13.toml", head + "[[site.location]]\npath = \"/a/\"\nmethods = []\n"));
+    CHECK(rejects("bad14.toml", head + "[[site.location]]\npath = \"/a/\"\nhandler = \"fastcgi\"\n"));  // no socket
+    CHECK(rejects("bad15.toml", head + "[[site.location]]\npath = \"/a/\"\nhandler = \"fastcgi\"\n"
+                                      "fastcgi = { socket = \"localhost:9000\" }\n"));
+    CHECK(rejects("bad16.toml", head + "[[site.location]]\npath = \".php\"\nmatch = \"suffix\"\nalias = \"www\"\n"));
+    // Address grammar.
+    FcgiAddress a;
+    std::string err;
+    CHECK(parse_fcgi_address("unix:/run/x.sock", a, err) && a.unix && a.key == "unix:/run/x.sock");
+    CHECK(parse_fcgi_address("/run/x.sock", a, err) && a.unix);
+    CHECK(parse_fcgi_address("127.0.0.1:9000", a, err) && !a.unix && a.port == 9000 && a.key == "127.0.0.1:9000");
+    CHECK(parse_fcgi_address("[::1]:9000", a, err) && a.host == "::1" && a.key == "[::1]:9000");
+    CHECK(!parse_fcgi_address("php-fpm:9000", a, err));
+    CHECK(!parse_fcgi_address("127.0.0.1:0", a, err));
+    CHECK(!parse_fcgi_address("relative.sock", a, err));
+    CHECK(status_for(FcgiFailure::pool_saturated) == 503 && status_for(FcgiFailure::read_timeout) == 504 &&
+          status_for(FcgiFailure::child_closed_early) == 502);
     CHECK(rejects("bad10.toml", "[log]\nlevel = \"debug\"\n" + head));
     write("off.toml", "[log]\naccess = \"x.log\"\n" + head + "access_log = \"off\"\n");
     CHECK(load_config(dir / "off.toml").sites[0].access_log.empty());
@@ -674,6 +770,26 @@ static void test_security_regressions() {
             CHECK(decode_chunked(wire, step, 7, nullptr) != "<stuck>");  // never spins, never crashes
     }
     CHECK(chunked_files > 0);
+    std::size_t fcgi_files = 0;
+    for (const auto& entry : fs::directory_iterator(base / "fcgi")) {
+        if (!entry.is_regular_file()) continue;
+        ++fcgi_files;
+        std::ifstream in(entry.path(), std::ios::binary);
+        std::string wire((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        std::string_view rest = wire;
+        for (int guard = 0; guard < 100000; ++guard) {
+            std::size_t used = 0;
+            fcgi::RecordHeader h;
+            std::string_view content;
+            const auto st = fcgi::next_record(rest, used, h, content);
+            if (st != fcgi::ReadStatus::record) break;
+            CHECK(used > 0 && used <= rest.size() && content.size() == h.content_length);
+            rest.remove_prefix(used);
+        }
+        fcgi::CgiHead head;
+        (void)fcgi::parse_cgi_head(wire, head);  // must not crash on any input
+    }
+    CHECK(fcgi_files > 0);
     for (const auto& entry : fs::directory_iterator(base / "path")) {
         if (!entry.is_regular_file()) continue;
         ++path_files;
@@ -711,6 +827,7 @@ int main() {
     test_route_and_etag();
     test_config_locations();
     test_log_format();
+    test_fcgi_codec();
     if (failures) {
         std::printf("%d failure(s)\n", failures);
         return 1;

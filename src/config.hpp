@@ -10,8 +10,11 @@
 #include <vector>
 
 #include "core/request.hpp"
+#include "upstream/fcgi_options.hpp"
 
 namespace agensio {
+
+enum class HandlerKind : std::uint8_t { static_, fastcgi };
 
 struct TlsConfig {
     std::filesystem::path cert;
@@ -34,18 +37,26 @@ struct TryStep {
 // A [[site.location]] block, fully resolved: every field has the site's value unless the
 // block set its own. The site always ends with an implicit "/" prefix location.
 struct LocationConfig {
-    std::string path;  // prefix ("/", "/static/") or, with exact, the whole path
+    std::string path;  // prefix ("/", "/static/"), the whole path (exact) or an ending (suffix, ".php")
     bool exact = false;
+    bool suffix = false;
     std::string root;   // absolute, canonical, no trailing slash; the file is root + path
     std::string alias;  // nginx alias: the file is alias + (path minus the location prefix); empty = use root
     std::vector<std::string> index;
     std::vector<TryStep> try_files;  // empty: plain lookup (file, directory index, 404)
     bool hidden_files = false;
     bool symlinks_deny = false;
-    std::string handler = "static";  // "fastcgi", "proxy" arrive in later phases
+    std::string handler = "static";  // "static" or "fastcgi" ("proxy" arrives in phase D)
+    HandlerKind kind = HandlerKind::static_;
+    FcgiConfig fastcgi;                        // handler = "fastcgi": upstream and options
+    bool priority = false;                     // may use the pool slots reserved by priority_reserve
     MethodSet methods = kStaticMethods;      // what the handler serves here (`methods = [...]` narrows it)
     std::string allow = "GET, HEAD, OPTIONS";  // Allow header for 405 and OPTIONS
 };
+
+// Every method an application handler may see; TRACE and CONNECT never reach a handler.
+constexpr MethodSet kFcgiMethods = kStaticMethods | method_bit(Method::post) | method_bit(Method::put) |
+                                   method_bit(Method::del) | method_bit(Method::patch);
 
 struct SiteConfig {
     std::vector<std::string> server_names;  // lower-case host names, "*" matches anything
@@ -53,6 +64,7 @@ struct SiteConfig {
     std::string root;                       // absolute document root, no trailing slash
     std::vector<std::string> index{"index.html"};
     std::vector<TryStep> try_files;  // default for locations that do not set their own
+    FcgiConfig php;                  // `php = { socket = ... }`: default upstream for fastcgi locations
     std::optional<TlsConfig> tls;
     bool is_default = false;
     bool hidden_files = false;   // serve paths with a segment starting with '.' (.env, .git, .htaccess)

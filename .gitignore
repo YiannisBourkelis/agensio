@@ -21,6 +21,7 @@ bench/tmp/
 bench/www/*.bin
 bench/www/style.css
 bench/www/app.html
+bench/www/*.php
 bench/certs/*.pem
 
 # local secrets / certs

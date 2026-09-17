@@ -2,7 +2,8 @@
 // site's locations serves a normalised path. Both lookups are read-only over structures
 // built at startup; per request they cost one hash lookup (host) and one scan over the
 // site's locations, which are sorted so that the first match is the winner: exact
-// matches before prefixes, longer prefixes before shorter ones, the implicit "/" last.
+// matches, then suffixes (".php"), then prefixes, longest first within a kind, the
+// implicit "/" last.
 // Handlers are chosen per location (only "static" until phase C).
 #pragma once
 
@@ -33,8 +34,10 @@ public:
     // The location serving `path` (normalised, starting with '/'). A site always has at
     // least the implicit "/" prefix location, so this never fails.
     static const LocationConfig& location(const SiteConfig& site, std::string_view path) noexcept {
-        for (const LocationConfig& loc : site.locations)
-            if (loc.exact ? path == loc.path : path.starts_with(loc.path)) return loc;
+        for (const LocationConfig& loc : site.locations) {
+            const bool hit = loc.exact ? path == loc.path : loc.suffix ? path.ends_with(loc.path) : path.starts_with(loc.path);
+            if (hit) return loc;
+        }
         return site.locations.back();
     }
 

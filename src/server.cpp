@@ -41,7 +41,9 @@ asio::ip::tcp::endpoint parse_endpoint(const std::string& address) {
 Server::Server(Config cfg)
     : cfg_(std::move(cfg)),
       cache_(cfg_.cache_max_file_size, cfg_.cache_max_size, cfg_.cache_evict_fraction, cfg_.cache_max_open_files),
-      handler_(cfg_, cache_) {
+      handler_(cfg_, cache_),
+      fcgi_handler_(cfg_, error_log_),
+      dispatcher_(handler_, fcgi_handler_) {
     open_logs();
     warm_response_tables();
     build_listeners();
@@ -89,6 +91,8 @@ void Server::build_listeners() {
                 l = &listeners_.back();
                 l->address = address;
                 l->endpoint = parse_endpoint(address);
+                l->address_text = l->endpoint.address().to_string();
+                l->port = l->endpoint.port();
                 l->tls = site.tls.has_value();
                 if (l->tls) {
 #ifdef AGENSIO_HAS_TLS
@@ -175,13 +179,13 @@ void Server::start_accept(std::size_t index) {
                 if (l.tls) {
 #ifdef AGENSIO_HAS_TLS
                     auto c = std::make_shared<Http1Connection<TlsStream>>(TlsStream(std::move(sock), *l.ssl), target, l,
-                                                                     cfg_, handler_);
+                                                                     cfg_, dispatcher_);
                     if (&target == acc.owner) c->start();
                     else asio::post(target.ctx, [c] { c->start(); });
 #endif
                 } else {
                     auto c = std::make_shared<Http1Connection<asio::ip::tcp::socket>>(std::move(sock), target, l,
-                                                                                       cfg_, handler_);
+                                                                                       cfg_, dispatcher_);
                     if (&target == acc.owner) c->start();
                     else asio::post(target.ctx, [c] { c->start(); });
                 }

@@ -21,6 +21,8 @@ struct WorkerState {
     std::string fs_path;  // filesystem path being served
     const void* site = nullptr;  // the SiteConfig chosen for the current request (for the access log)
     WorkerLogs logs;             // per-worker access log buffers
+    std::string scratch;         // handler scratch (capacity retained)
+    std::string params_tail;     // FastCGI per-request params (capacity retained)
 };
 
 }  // namespace agensio
