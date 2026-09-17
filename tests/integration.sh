@@ -165,6 +165,17 @@ proxy = {{ tls = {{ ca = "{root}/bench/certs/cert.pem", server_name = "localhost
 path = "/tlsbad/"
 upstream = "https://127.0.0.1:8443/"
 
+[[site.location]]                       # D5: CGI scripts, a process per request
+path = "/cgi-bin/"
+alias = "{root}/tests/cgi"
+index = ["index.cgi"]
+cgi = {{ env = {{ "APP_ENV" = "test" }} }}
+
+[[site.location]]                       # D5: a short timeout and a cap of one process
+path = "/cgi-slow/"
+alias = "{root}/tests/cgi"
+cgi = {{ read_timeout = 1, max_connections = 1, queue_depth = 0 }}
+
 [[site.location]]                       # D2: redirects passed through untouched
 path = "/raw/"
 upstream = "http://127.0.0.1:9107/"
@@ -463,6 +474,22 @@ if [ -n "$UP_PID" ]; then
   R=$(curl -sS -i $P/policy/redirect | tr -d '\r')
   check "proxy: hidden field dropped" "0" "$(echo "$R" | grep -c '^X-Powered-By:')"
   check "proxy: redirects = pass leaves Location alone" "Location: http://127.0.0.1:9107/json" "$(curl -sS -i $P/raw/redirect | tr -d '\r' | grep '^Location:')"
+  # CGI (D5): the script's output, environment, PATH_INFO, body on stdin, status and
+  # Location handling, stderr in the log, an exit without output, a timeout, the cap.
+  check "cgi: environment and PATH_INFO" "method=GET path_info=/extra/bit query=a=1 script=/cgi-bin/env.cgi x_test=yes" "$(curl -sS -H 'X-Test: yes' "$P/cgi-bin/env.cgi/extra/bit?a=1" | tr '\n' ' ' | sed 's/ cwd=.*//')"
+  check "cgi: runs in the script's directory" "yes" "$(curl -sS $P/cgi-bin/env.cgi | grep -q 'cwd=.*/tests/cgi$' && echo yes)"
+  check "cgi: directory index" "index cgi" "$(curl -sS $P/cgi-bin/)"
+  check "cgi: POST body on stdin, echoed" "same" "$(curl -sS --data-binary @bench/tmp/proxy-blob $P/cgi-bin/echo.cgi | cmp -s - bench/tmp/proxy-blob && echo same)"
+  check "cgi: 3 MB output spilled and intact" "3000000" "$(curl -sS $P/cgi-bin/big.cgi | wc -c | tr -d ' ')"
+  check "cgi: Status from the script" "404" "$(code $P/cgi-bin/status.cgi)"
+  check "cgi: Location alone is a 302" "302 /moved" "$(curl -sSi $P/cgi-bin/redirect.cgi | tr -d '\r' | awk '/^HTTP/{c=$2} /^Location:/{l=$2} END{print c, l}')"
+  check "cgi: stderr logged, output still served" "ok despite stderr yes" "$(curl -sS $P/cgi-bin/stderr.cgi | tr -d '\n') $(grep -q 'stderr.cgi stderr: something went sideways' bench/tmp/error.log && echo yes)"
+  check "cgi: exit without a header block is a 502" "502" "$(code $P/cgi-bin/crash.cgi)"
+  check "cgi: the crash's stderr and reason logged" "yes" "$(grep -q 'crash.cgi stderr: boom' bench/tmp/error.log && grep -q 'crash.cgi closed_early' bench/tmp/error.log && echo yes)"
+  check "cgi: missing script is 404" "404" "$(code $P/cgi-bin/nope.cgi)"
+  check "cgi: timeout kills the script, 504" "504" "$(code $P/cgi-slow/slow.cgi)"
+  check "cgi: process cap with no queue: 503 at once" "503" "$( (curl -sS -o /dev/null $P/cgi-slow/slow.cgi &) ; sleep 0.3; code $P/cgi-slow/slow.cgi)"
+  sleep 1.5
   # TLS to the origin (D4b): the suite's HTTPS site is the origin; the body is the docroot's index.
   check "proxy: https origin, verification off" "$IDX" "$(curl -sS $P/tls/ | sum)"
   check "proxy: https origin verified against the configured CA and name" "$IDX" "$(curl -sS $P/tlsverify/ | sum)"

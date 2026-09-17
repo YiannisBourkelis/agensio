@@ -18,6 +18,7 @@
 #include "core/worker_state.hpp"
 #include "handlers/dispatch.hpp"
 #include "handlers/fastcgi.hpp"
+#include "handlers/cgi.hpp"
 #include "handlers/proxy.hpp"
 #include "handlers/static.hpp"
 #include "services/log.hpp"
@@ -87,6 +88,7 @@ private:
     StaticHandler handler_;
     FcgiHandler fcgi_handler_;
     ProxyHandler proxy_handler_;
+    CgiHandler cgi_handler_;
     Dispatcher dispatcher_;
     std::vector<std::unique_ptr<Worker>> workers_;
     std::vector<Listener> listeners_;

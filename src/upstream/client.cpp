@@ -13,6 +13,8 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
+#include <csignal>
 #endif
 
 namespace agensio {
@@ -120,7 +122,7 @@ std::vector<std::string> check_upstreams(const Config& cfg) {
     std::vector<std::string> seen;
     for (const auto& site : cfg.sites)
         for (const auto& loc : site.locations) {
-            if (loc.kind == HandlerKind::static_) continue;
+            if (loc.kind == HandlerKind::static_ || loc.kind == HandlerKind::cgi) continue;
             const bool fcgi = loc.kind == HandlerKind::fastcgi;
             for (const UpstreamAddress& a : fcgi ? loc.fastcgi.addresses : loc.proxy.addresses) {
             if (std::find(seen.begin(), seen.end(), a.key) != seen.end()) continue;
@@ -259,15 +261,38 @@ void UpstreamPool::unwatch(UpstreamRequest* req) noexcept {
     req->watch_index = SIZE_MAX;
 }
 
+void UpstreamPool::reap_later(long pid) {
+    children_.emplace_back(pid, std::chrono::steady_clock::now());
+    if (ticking_) return;
+    ticking_ = true;
+    tick_.expires_after(kTick);
+    tick_.async_wait([this](const asio::error_code& ec) {
+        if (!ec) tick();
+    });
+}
+
 void UpstreamPool::tick() {
     const auto now = std::chrono::steady_clock::now();
+#ifndef _WIN32
+    for (std::size_t i = 0; i < children_.size();) {
+        int status = 0;
+        const pid_t pid = static_cast<pid_t>(children_[i].first);
+        if (::waitpid(pid, &status, WNOHANG) == pid) {
+            children_[i] = children_.back();
+            children_.pop_back();
+            continue;
+        }
+        if (now - children_[i].second > std::chrono::seconds(10)) ::kill(pid, SIGKILL);
+        ++i;
+    }
+#endif
     // An overdue exchange unwatches itself (swap-remove), so the slot is re-examined.
     for (std::size_t i = 0; i < watched_.size();) {
         UpstreamRequest* r = watched_[i];
         r->on_tick(now);
         if (i < watched_.size() && watched_[i] == r) ++i;
     }
-    if (watched_.empty()) {
+    if (watched_.empty() && children_.empty()) {
         ticking_ = false;
         return;
     }
@@ -442,6 +467,7 @@ void UpstreamRequest::cancel() noexcept {
     else if (was != Phase::finished && was != Phase::failed) release_connection(false);
     if (conn_ && conn_->sock().is_open()) conn_->sock().close(ec);
     conn_.reset();
+    on_end(false);
     if (waiter_.handler) {  // a pull in flight must not hang
         auto h = std::move(waiter_.handler);
         waiter_.handler = nullptr;
@@ -511,8 +537,7 @@ void UpstreamRequest::connect() {
             self->handshake();
             return;
         }
-        self->phase_ = Phase::sending;
-        self->send_head();
+        self->connected();
     };
     asio::error_code ec;
     if (address_.unix) {
@@ -658,7 +683,13 @@ void UpstreamRequest::send_body_next() {
     });
 }
 
+void UpstreamRequest::connected() {
+    phase_ = Phase::sending;
+    send_head();
+}
+
 void UpstreamRequest::body_sent() {
+    on_body_sent();
     phase_ = Phase::receiving;
     if (!retry_ok_) {  // no resend possible any more: the head buffer is not needed
         out_.clear();
@@ -813,6 +844,7 @@ void UpstreamRequest::finish() {
     phase_ = Phase::finished;
     pool_.unwatch(this);
     pool_.mark_success(address_, note_);
+    on_end(true);
     release_connection(true);
     if (!options_.buffering) {
         if (!head_delivered_) deliver_head();
@@ -888,6 +920,7 @@ void UpstreamRequest::fail(UpstreamFailure why, std::error_code ec) {
     const Phase was = phase_;
     phase_ = Phase::failed;
     pool_.unwatch(this);
+    on_end(false);
     if (was == Phase::queued) pool_.dequeue(address_.key, this);
     else release_connection(false);
     result_.error = ec;

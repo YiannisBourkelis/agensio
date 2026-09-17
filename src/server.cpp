@@ -51,7 +51,8 @@ Server::Server(Config cfg)
       handler_(cfg_, cache_),
       fcgi_handler_(cfg_, error_log_),
       proxy_handler_(cfg_, error_log_),
-      dispatcher_(handler_, fcgi_handler_, proxy_handler_) {
+      cgi_handler_(cfg_, error_log_),
+      dispatcher_(handler_, fcgi_handler_, proxy_handler_, cgi_handler_) {
     open_logs();
     warm_response_tables();
     build_listeners();

@@ -16,7 +16,7 @@
 
 namespace agensio {
 
-enum class HandlerKind : std::uint8_t { static_, fastcgi, proxy };
+enum class HandlerKind : std::uint8_t { static_, fastcgi, proxy, cgi };
 
 struct TlsConfig {
     std::filesystem::path cert;
@@ -56,6 +56,7 @@ struct LocationConfig {
     std::string origin;  // "" when configured by hand, else the preset that generated it (explain)
     FcgiConfig fastcgi;                        // handler = "fastcgi": upstream and options
     UpstreamConfig proxy;                      // handler = "proxy": the origin (`upstream = "http://..."`) and options
+    UpstreamConfig cgi;                        // handler = "cgi": a process per request (`cgi = { ... }`)
     bool priority = false;                     // may use the pool slots reserved by priority_reserve
     MethodSet methods = kStaticMethods;      // what the handler serves here (`methods = [...]` narrows it)
     std::string allow = "GET, HEAD, OPTIONS";  // Allow header for 405 and OPTIONS

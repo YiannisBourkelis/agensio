@@ -8,6 +8,7 @@
 #include "core/router.hpp"
 #include "core/stream.hpp"
 #include "core/worker_state.hpp"
+#include "handlers/cgi.hpp"
 #include "handlers/fastcgi.hpp"
 #include "handlers/proxy.hpp"
 #include "handlers/static.hpp"
@@ -16,8 +17,9 @@ namespace agensio {
 
 class Dispatcher {
 public:
-    Dispatcher(StaticHandler& static_handler, FcgiHandler& fcgi, ProxyHandler& proxy)
-        : static_(static_handler), fcgi_(fcgi), proxy_(proxy) {}
+    Dispatcher(StaticHandler& static_handler, FcgiHandler& fcgi, ProxyHandler& proxy, CgiHandler& cgi)
+        : static_(static_handler), fcgi_(fcgi), proxy_(proxy), cgi_(cgi) {}
+    CgiHandler& cgi() noexcept { return cgi_; }
 
     StaticHandler& static_handler() noexcept { return static_; }
     FcgiHandler& fcgi() noexcept { return fcgi_; }
@@ -42,6 +44,7 @@ private:
     StaticHandler& static_;
     FcgiHandler& fcgi_;
     ProxyHandler& proxy_;
+    CgiHandler& cgi_;
 };
 
 }  // namespace agensio

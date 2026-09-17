@@ -231,7 +231,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   next-member retry only when nothing binding was sent (`try_next_address`). TLS to the
   origin (D4b): `BasicTlsStream<Socket>` in client mode inside `UpstreamConnection`,
   contexts cached per pool, `https://` in the pool key, `proxy.tls = { verify,
-  server_name, ca }`.
+  server_name, ca }`. CGI (D5, `src/upstream/cgi_client.*`, `src/handlers/cgi.*`): the
+  exchange's connect step forks the script with a socketpair as stdin/stdout, so the
+  shared exchange code does the rest; processes capped and reaped per worker pool.
 - **Presets** (C3): `app = "laravel" | "wordpress" | "php" | "static"` on a site expands
   at load into root, index, try_files and locations (Laravel: only `/index.php` is ever
   executed, `/build/` gets an immutable Cache-Control via `add_headers`; WordPress: any

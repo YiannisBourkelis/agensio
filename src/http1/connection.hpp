@@ -499,10 +499,12 @@ private:
                     self->upstream_.reset();
                     self->respond();
                 };
+                const auto* site = static_cast<const SiteConfig*>(ws.site);
                 std::shared_ptr<UpstreamRequest> req =
                     loc->kind == HandlerKind::fastcgi
-                        ? dispatcher_.fcgi().start(stream_, *static_cast<const SiteConfig*>(ws.site), *loc, ws,
-                                                   worker_.upstream_pool, std::move(done))
+                        ? dispatcher_.fcgi().start(stream_, *site, *loc, ws, worker_.upstream_pool, std::move(done))
+                    : loc->kind == HandlerKind::cgi
+                        ? dispatcher_.cgi().start(stream_, *site, *loc, ws, worker_.upstream_pool, std::move(done))
                         : dispatcher_.proxy().start(stream_, *loc, ws, worker_.upstream_pool, std::move(done));
                 if (req && request_gen_ == gen) upstream_ = std::move(req);
                 return;

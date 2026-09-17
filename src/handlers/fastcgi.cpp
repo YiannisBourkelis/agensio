@@ -81,7 +81,7 @@ void FcgiHandler::append_http_params(std::string& out, const Headers& headers, s
 
 void FcgiHandler::append_request_params(std::string& out, Stream& s, const SiteConfig& site, const LocationConfig& loc,
                                         WorkerState& ws, std::string_view path_info, std::uint64_t content_length,
-                                        bool length_known) const {
+                                        bool length_known) {
     const Request& req = s.request;
     std::string& tmp = ws.scratch;  // per-worker scratch, capacity retained
     auto add = [&](std::string_view name, std::string_view value) { fcgi::append_param(out, name, value); };

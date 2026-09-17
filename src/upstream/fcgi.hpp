@@ -154,6 +154,32 @@ inline ReadStatus next_record(std::string_view in, std::size_t& consumed, Record
     return ReadStatus::record;
 }
 
+// Walks an encoded PARAMS block: f(name, value) per pair. Stops at a truncated pair.
+template <class F>
+inline void for_each_param(std::string_view params, F&& f) {
+    std::size_t pos = 0;
+    auto length = [&](std::size_t& n) {
+        if (pos >= params.size()) return false;
+        const unsigned char b = static_cast<unsigned char>(params[pos]);
+        if (b < 0x80) {
+            n = b;
+            ++pos;
+            return true;
+        }
+        if (pos + 4 > params.size()) return false;
+        n = (static_cast<std::size_t>(b & 0x7f) << 24) | (static_cast<unsigned char>(params[pos + 1]) << 16) |
+            (static_cast<unsigned char>(params[pos + 2]) << 8) | static_cast<unsigned char>(params[pos + 3]);
+        pos += 4;
+        return true;
+    };
+    for (;;) {
+        std::size_t nl = 0, vl = 0;
+        if (!length(nl) || !length(vl) || pos + nl + vl > params.size()) return;
+        f(params.substr(pos, nl), params.substr(pos + nl, vl));
+        pos += nl + vl;
+    }
+}
+
 // ---- CGI response head ----
 // "Status: 302 Found\r\nLocation: /x\r\nContent-Type: text/html\r\n\r\n" (LF or CRLF, RFC 3875
 // section 6). Status defaults to 200, or 302 when only Location is present (absolute or

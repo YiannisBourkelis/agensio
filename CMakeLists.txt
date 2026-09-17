@@ -80,11 +80,13 @@ add_library(agensio_core STATIC
   src/handlers/static.cpp
   src/handlers/fastcgi.cpp
   src/handlers/proxy.cpp
+  src/handlers/cgi.cpp
   src/handlers/upstream_common.cpp
   src/handlers/dispatch.cpp
   src/upstream/client.cpp
   src/upstream/fcgi_client.cpp
   src/upstream/http_client.cpp
+  src/upstream/cgi_client.cpp
   src/server.cpp)
 target_include_directories(agensio_core PUBLIC src)
 target_link_libraries(agensio_core PUBLIC asio tomlplusplus)

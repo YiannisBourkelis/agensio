@@ -347,8 +347,17 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       server_name, ca } }`. Integration against the suite's own HTTPS site: verify off,
       verified with the bench CA and name, system-store verification failing with a 502
       `tls_error`, keep-alive across requests.
-- [ ] D5 CGI handler: spawn a process per request with CGI/1.1 env and pipes, for legacy
-      applications; async pipes via Asio; concurrency cap.
+- [x] D5 (2026-09-17) CGI handler: `CgiRequest` is an `UpstreamRequest` whose connect
+      step forks and execs the script with a socketpair as its stdin/stdout (the parent
+      end is the exchange's connection, so body sending, the CGI head, buffering, spill
+      and streaming are the shared code; the body ends with the process's EOF like an
+      HTTP close-delimited one) and a pipe for stderr (captured for the log). The pool
+      caps processes per worker (`max_connections`, 8) and queues the rest; `read_timeout`
+      kills a silent script; children are reaped by the pool's tick. `CgiHandler` resolves
+      the script by Apache's longest-file rule with `PATH_INFO`, builds the environment
+      from the FastCGI parameter builders (`fcgi::for_each_param` decodes them) plus
+      `cgi.env`, runs an `interpreter` when given. Every other descriptor is closed in the
+      child (`close_range`). 13 integration checks with shell scripts in `tests/cgi/`.
 - [ ] D6 Presets: `app = "proxy"` with `upstream = "http://127.0.0.1:3000"`; examples for
       Node, Rails, Rocket.Chat, ThingsBoard in `docs/examples/`.
 - [ ] D7 Benchmark: hello-world Node upstream through agensio vs nginx; WebSocket echo.

@@ -105,6 +105,10 @@ struct UpstreamConfig {
     bool upgrade = true;
     std::uint32_t tunnel_timeout_s = 0;
     TlsClientConfig tls;
+    // CGI: the interpreter to run the script with ("" = the script itself, #! or binary)
+    // and extra environment entries.
+    std::string interpreter;
+    std::vector<std::pair<std::string, std::string>> env;
     std::string params_prefix;  // FastCGI: constant FCGI_PARAMS pairs of this location, encoded once at load
     std::string retry_after;    // "Retry-After" value for 503s (queue_wait in seconds)
 };

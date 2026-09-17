@@ -512,7 +512,37 @@ Not here on purpose: separate buffer-size knobs (nginx's `proxy_buffer_size`,
 switch, the three-directive Upgrade/Connection incantation for WebSockets, and
 `proxy_redirect` rules with regular expressions.
 
-## 13. TLS
+## 13. CGI
+
+`handler = "cgi"` (or just a `cgi = { ... }` table) on a location runs the requested file
+as a process per request with the CGI/1.1 environment, for the legacy applications that
+still ship that way:
+
+```toml
+[[site.location]]
+path = "/cgi-bin/"
+alias = "/var/www/cgi-bin"
+cgi = { max_connections = 8, read_timeout = 30, env = { "APP_ENV" = "production" } }
+
+[[site.location]]                 # scripts that need an interpreter in front
+path = "/legacy/"
+cgi = { interpreter = "/usr/bin/perl" }
+```
+
+The script is the longest leading part of the path that names a regular file (Apache's
+rule), the rest is `PATH_INFO`; a directory URI takes the location's `index`
+(`index.cgi` by default). The process runs in the script's directory with the same
+variables the FastCGI handler sends (`REQUEST_METHOD`, `SCRIPT_NAME`, `PATH_INFO`,
+`QUERY_STRING`, `CONTENT_LENGTH`, `REMOTE_ADDR`, `HTTPS`, `HTTP_*` and the rest), the
+location's `env` entries, and a plain `PATH`. The request body is its stdin, its stdout
+is the response (a CGI head with `Status:` or `Location:`, then the body until it exits),
+its stderr goes to the error log. The options are those of section 7 with these
+defaults: `max_connections = 8` processes per worker and `queue_depth = 32` waiting
+(more are a 503), `read_timeout = 30` (no output for that long: the process is killed,
+504), buffering and request buffering on. Every other descriptor of the server is closed
+in the child. Not a fast path: a process per request is what CGI is.
+
+## 14. TLS
 
 ```toml
 [[site]]

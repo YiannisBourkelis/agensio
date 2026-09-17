@@ -405,6 +405,7 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
         loc.proxy.configured = true;
     }
     if (loc.proxy.configured && !t.contains("handler")) loc.handler = "proxy";
+    else if (t.contains("cgi") && !t.contains("handler")) loc.handler = "cgi";
     else loc.handler = to_lower(t["handler"].value_or(std::string("static")));
     if (loc.handler == "static") {
         loc.kind = HandlerKind::static_;
@@ -418,6 +419,39 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
         loc.methods = kFcgiMethods;
         loc.allow = allow_header(kFcgiMethods);
         loc.priority = t["priority"].value_or(false);
+    } else if (loc.handler == "cgi") {
+        // A process per request: the pool caps them per worker (max_connections, default 8)
+        // and queues the rest; the script's own output is the response.
+        loc.kind = HandlerKind::cgi;
+        loc.cgi.options.max_connections = 8;
+        loc.cgi.options.queue_depth = 32;
+        loc.cgi.options.read_timeout = std::chrono::milliseconds(30000);
+        loc.cgi.options.keep_conn = false;
+        if (auto ct = t["cgi"].as_table()) {
+            parse_fcgi_table(*ct, base_dir, loc.cgi, where + ".cgi");
+            if (auto ip = (*ct)["interpreter"].value<std::string>()) {
+                loc.cgi.interpreter = resolve(base_dir, *ip).string();
+                if (!fs::is_regular_file(loc.cgi.interpreter))
+                    fail(where + ".cgi.interpreter: file not found: " + loc.cgi.interpreter);
+            }
+            if ((*ct).contains("env")) {
+                auto* et = (*ct)["env"].as_table();
+                if (!et) fail(where + ".cgi.env must be a table");
+                for (auto& [name, value] : headers_of(et, where + ".cgi")) {
+                    if (name.find('=') != std::string::npos) fail(where + ".cgi.env: bad name '" + name + "'");
+                    loc.cgi.env.emplace_back(name, value);
+                }
+            }
+        } else if (t.contains("cgi")) {
+            fail(where + ": 'cgi' must be a table");
+        }
+        loc.cgi.address.key = "cgi:" + site.server_names.front() + loc.path;  // one pool per location
+        loc.cgi.addresses = {loc.cgi.address};
+        loc.cgi.configured = true;
+        loc.cgi.retry_after = "1";
+        loc.methods = kFcgiMethods;
+        loc.allow = allow_header(kFcgiMethods);
+        loc.priority = t["priority"].value_or(false);
     } else if (loc.handler == "proxy") {
         loc.kind = HandlerKind::proxy;
         if (!loc.proxy.configured) fail(where + ": handler \"proxy\" needs upstream = \"http://host:port\"");
@@ -425,7 +459,7 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
         loc.allow = allow_header(kFcgiMethods);
         loc.priority = t["priority"].value_or(false);
     } else {
-        fail(where + ": handler \"" + loc.handler + "\" is not available (\"static\", \"fastcgi\" or \"proxy\")");
+        fail(where + ": handler \"" + loc.handler + "\" is not available (\"static\", \"fastcgi\", \"proxy\" or \"cgi\")");
     }
     if (loc.kind == HandlerKind::fastcgi) loc.fastcgi.params_prefix = FcgiHandler::prebuild_params(site, loc);
     if (t.contains("methods")) {
@@ -825,6 +859,10 @@ void explain_config(const Config& cfg, std::ostream& out) {
             print_try_files(out, loc.try_files);
             out << "handler = \"" << loc.handler << "\"\n";
             if (loc.kind == HandlerKind::fastcgi) print_fcgi(out, "fastcgi", loc.fastcgi);
+            if (loc.kind == HandlerKind::cgi) {
+                print_fcgi(out, "cgi", loc.cgi);
+                if (!loc.cgi.interpreter.empty()) out << "cgi.interpreter = \"" << loc.cgi.interpreter << "\"\n";
+            }
             if (loc.kind == HandlerKind::proxy) {
                 out << "upstream = [";
                 for (std::size_t i = 0; i < loc.proxy.addresses.size(); ++i)
@@ -1034,11 +1072,13 @@ Config load_config(const fs::path& path) {
     for (const auto& site : cfg.sites)
         for (const auto& loc : site.locations) {
             if (loc.kind == HandlerKind::static_) continue;
-            const UpstreamConfig& up = loc.kind == HandlerKind::fastcgi ? loc.fastcgi : loc.proxy;
+            const UpstreamConfig& up = loc.kind == HandlerKind::fastcgi ? loc.fastcgi
+                                       : loc.kind == HandlerKind::cgi   ? loc.cgi
+                                                                        : loc.proxy;
             const FcgiOptions& o = up.options;
             const std::string where = site.server_names.front() + " location '" + loc.path + "'";
             std::vector<std::string> keys;
-            if (loc.kind == HandlerKind::fastcgi) keys.push_back(up.address.key);
+            if (loc.kind != HandlerKind::proxy) keys.push_back(up.address.key);
             else for (const auto& a : up.addresses) keys.push_back(a.key);
             for (const auto& key : keys) {
                 auto it = pools.find(key);

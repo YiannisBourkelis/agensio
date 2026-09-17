@@ -41,11 +41,14 @@ public:
     // forwarded (httpoxy, CVE-2016-5385), repeated fields are joined with ", " (Cookie: "; ").
     static void append_http_params(std::string& out, const Headers& headers, std::string& scratch);
 
+    // The per-request pairs (protocol, method, script, path info, query, body length, peer
+    // and server addresses, scheme, HTTP_* fields); used by the CGI handler too.
+    static void append_request_params(std::string& out, Stream& s, const SiteConfig& site, const LocationConfig& loc,
+                                      WorkerState& ws, std::string_view path_info, std::uint64_t content_length,
+                                      bool length_known);
+
 private:
     struct Exchange;
-    void append_request_params(std::string& out, Stream& s, const SiteConfig& site, const LocationConfig& loc,
-                               WorkerState& ws, std::string_view path_info, std::uint64_t content_length,
-                               bool length_known) const;
     void finish(Exchange& x, FcgiResult& r);
     void log_failure(const Exchange& x, const FcgiResult& r);
 

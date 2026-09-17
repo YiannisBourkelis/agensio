@@ -117,6 +117,9 @@ public:
                      std::size_t after, unsigned tried_mask);
     void mark_failure(const UpstreamAddress& a, const UpstreamOptions& opts, std::string& note);
     void mark_success(const UpstreamAddress& a, std::string& note);
+    // A CGI child that had not exited when its exchange ended: reaped by the tick, killed
+    // after ten seconds of not exiting.
+    void reap_later(long pid);
 #ifdef AGENSIO_HAS_TLS
     // One client context per distinct verify/CA setup, built on first use (system store or
     // the configured bundle). Returns nullptr with `error` set when the CA cannot be loaded.
@@ -149,6 +152,7 @@ private:
     std::unordered_map<std::string, Upstream> upstreams_;
     std::unordered_map<std::string, Health> health_;
     std::unordered_map<const void*, unsigned> rotation_;  // round-robin position per group
+    std::vector<std::pair<long, std::chrono::steady_clock::time_point>> children_;  // pids to reap, since when
 #ifdef AGENSIO_HAS_TLS
     std::unordered_map<std::string, std::unique_ptr<asio::ssl::context>> tls_contexts_;
 #endif
@@ -237,6 +241,14 @@ protected:
     virtual bool on_eof() { return false; }
     // Whether the connection may serve another exchange after this one.
     virtual bool keep_alive_ok() const noexcept { return true; }
+    // Opens the connection for a fresh slot: connects the socket (default) or, for CGI,
+    // spawns the process; ends with connected() or fail().
+    virtual void connect();
+    void connected();  // the connection is open: send the head
+    // The whole request body went out (CGI shuts the child's stdin here).
+    virtual void on_body_sent() {}
+    // The exchange is over, successfully or not (CGI reaps its child here).
+    virtual void on_end(bool ok) { (void)ok; }
 
     // ---- helpers for decode() ----
     // Head bytes: collects up to head_max and parses; `used` is how much of `bytes` the
@@ -255,12 +267,12 @@ protected:
     std::unique_ptr<UpstreamConnection> conn_;
     UpstreamResult result_;
     UpstreamBodyInput body_;
+    UpstreamPool& pool_;
 
 private:
     class Source;
     enum class Phase { queued, connecting, sending, sending_body, receiving, finished, failed, cancelled };
 
-    void connect();
     void handshake();  // TLS to the origin, after connect; then send_head
     void quick_ack() noexcept;
     void send_head();
@@ -277,7 +289,6 @@ private:
 
     bool try_next_address(UpstreamFailure why);  // another member of the group, when allowed
 
-    UpstreamPool& pool_;
     const TlsClientConfig* tls_ = nullptr;
     const std::vector<UpstreamAddress>* group_ = nullptr;
     std::size_t member_ = SIZE_MAX;   // index of address_ in the group
