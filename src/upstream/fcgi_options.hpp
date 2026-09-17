@@ -41,7 +41,14 @@ struct FcgiOptions {
     // Response handling.
     bool buffering = true;                          // collect the whole response before answering
     std::size_t buffer_max = 1024 * 1024;           // buffering: spill to a temp file above this
+    // Cap on the temp file (nginx fastcgi_max_temp_file_size): beyond it the response is
+    // streamed for the rest (head delivered, memory + spill served first), never an
+    // unbounded disk write for a readfile() of a huge download.
+    std::uint64_t buffer_file_max = 1024ull * 1024 * 1024;
     std::size_t head_max = 64 * 1024;               // response head larger than this is 502 head_too_large
+    // PATH_INFO: split the request path at the first ".php/" (nginx fastcgi_split_path_info
+    // ^(.+\.php)(/.+)$): SCRIPT_NAME/SCRIPT_FILENAME get the script, PATH_INFO the rest.
+    bool path_info = true;
     // Request body handling.
     bool request_buffering = true;                  // read the whole body before talking to fpm
     std::size_t request_buffer_max = 256 * 1024;    // request body in memory up to this, then a temp file

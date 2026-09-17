@@ -4,6 +4,7 @@
 #include "path.hpp"
 
 #include <algorithm>
+#include <map>
 #include <cctype>
 #include <charconv>
 #include <stdexcept>
@@ -169,8 +170,11 @@ void parse_fcgi_table(const toml::table& t, const fs::path& base_dir, FcgiConfig
     seconds("queue_wait", out.options.queue_wait);
     out.options.buffer_max = size_node(t["buffer_max"], out.options.buffer_max, (where + ".buffer_max").c_str());
     out.options.head_max = size_node(t["head_max"], out.options.head_max, (where + ".head_max").c_str());
+    out.options.buffer_file_max = size_node(t["buffer_file_max"], static_cast<std::size_t>(out.options.buffer_file_max),
+                                            (where + ".buffer_file_max").c_str());
     if (out.options.head_max < 1024) fail(where + ".head_max must be at least 1024");
     out.options.request_buffering = t["request_buffering"].value_or(out.options.request_buffering);
+    out.options.path_info = t["path_info"].value_or(out.options.path_info);
     out.options.request_buffer_max =
         size_node(t["request_buffer_max"], out.options.request_buffer_max, (where + ".request_buffer_max").c_str());
     auto count = [&](const char* key, std::size_t& target, std::int64_t lo, std::int64_t hi) {
@@ -451,6 +455,12 @@ Config load_config(const fs::path& path) {
         size_node(server["sendfile_max_chunk"], cfg.sendfile_max_chunk, "server.sendfile_max_chunk");
     if (cfg.sendfile_max_chunk < 65536) fail("server.sendfile_max_chunk must be at least 64KB");
     cfg.server_header = server["server_header"].value_or(std::string("agensio"));
+    for (const auto& text : string_list(server["trusted_proxies"], "server.trusted_proxies")) {
+        Cidr c;
+        std::string err;
+        if (!parse_cidr(text, c, err)) fail("server.trusted_proxies: " + err);
+        cfg.trusted_proxies.push_back(c);
+    }
 
     auto cache = root["cache"];
     cfg.cache_max_file_size = size_node(cache["max_file_size"], cfg.cache_max_file_size, "cache.max_file_size");
@@ -500,6 +510,33 @@ Config load_config(const fs::path& path) {
     }
 
     if (cfg.sites.empty()) fail(path.string() + ": no [[site]] defined");
+
+    // The FastCGI pool is per upstream address (and worker), so every location on the same
+    // socket must agree on the pool bounds; the first definition wins, a conflict is an error.
+    struct PoolBounds {
+        const FcgiOptions* opts;
+        std::string where;
+    };
+    std::map<std::string, PoolBounds> pools;
+    for (const auto& site : cfg.sites)
+        for (const auto& loc : site.locations) {
+            if (loc.kind != HandlerKind::fastcgi) continue;
+            const FcgiOptions& o = loc.fastcgi.options;
+            const std::string where = site.server_names.front() + " location '" + loc.path + "'";
+            auto it = pools.find(loc.fastcgi.address.key);
+            if (it == pools.end()) {
+                pools.emplace(loc.fastcgi.address.key, PoolBounds{&o, where});
+                continue;
+            }
+            const FcgiOptions& f = *it->second.opts;
+            if (o.max_connections != f.max_connections || o.queue_depth != f.queue_depth ||
+                o.queue_wait != f.queue_wait || o.priority_reserve != f.priority_reserve ||
+                o.max_idle != f.max_idle || o.keep_conn != f.keep_conn)
+                fail(where + ": pool limits (max_connections, queue_depth, queue_wait, priority_reserve, "
+                             "max_idle, keep_conn) for upstream " +
+                     loc.fastcgi.address.key + " differ from " + it->second.where +
+                     "; the pool is per upstream, set them once (site-level php = {...})");
+        }
 
     // Sites sharing a listen address must agree on TLS on/off.
     for (auto& a : cfg.sites)

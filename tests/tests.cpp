@@ -14,10 +14,12 @@
 #include "core/headers.hpp"
 #include "core/result.hpp"
 #include "core/router.hpp"
+#include "handlers/fastcgi.hpp"
 #include "handlers/static.hpp"
 #include "http1/parser.hpp"
 #include "http_date.hpp"
 #include "mime.hpp"
+#include "net/cidr.hpp"
 #include "path.hpp"
 #include "services/log.hpp"
 #include "upstream/fcgi.hpp"
@@ -635,6 +637,68 @@ static void test_log_format() {
 }
 
 // Loads a configuration with locations from a temporary directory.
+// Decodes FCGI_PARAMS pairs back into name=value lines for assertions.
+static std::string decode_params(std::string_view p) {
+    std::string out;
+    std::size_t i = 0;
+    auto len = [&]() {
+        std::size_t n = static_cast<unsigned char>(p[i++]);
+        if (n & 0x80) {
+            n = (n & 0x7f) << 24;
+            n |= static_cast<std::size_t>(static_cast<unsigned char>(p[i++])) << 16;
+            n |= static_cast<std::size_t>(static_cast<unsigned char>(p[i++])) << 8;
+            n |= static_cast<unsigned char>(p[i++]);
+        }
+        return n;
+    };
+    while (i < p.size()) {
+        const std::size_t nl = len(), vl = len();
+        out.append(p.substr(i, nl)).append("=").append(p.substr(i + nl, vl)).append("\n");
+        i += nl + vl;
+    }
+    return out;
+}
+
+static void test_fcgi_http_params() {
+    Headers h;
+    h.add("Host", "example.com");
+    h.add("Proxy", "http://evil.example/");   // httpoxy: never forwarded
+    h.add("X_Forwarded_For", "203.0.113.9");  // underscore: dropped, cannot spoof X-Forwarded-For
+    h.add("X-Test", "a");
+    h.add("Cookie", "a=1");
+    h.add("X-Test", "b");
+    h.add("Cookie", "b=2");
+    h.add("x-test", "c");
+    std::string out, scratch;
+    FcgiHandler::append_http_params(out, h, scratch);
+    const std::string lines = decode_params(out);
+    CHECK_EQ(lines, std::string("HTTP_HOST=example.com\nHTTP_X_TEST=a, b, c\nHTTP_COOKIE=a=1; b=2\n"));
+    CHECK(lines.find("PROXY") == std::string::npos && lines.find("FORWARDED") == std::string::npos);
+}
+
+static void test_cidr() {
+    Cidr c;
+    std::string err;
+    CHECK(parse_cidr("10.0.0.0/8", c, err) && !c.v6 && c.prefix == 8);
+    CHECK(c.contains(asio::ip::make_address("10.200.3.4")));
+    CHECK(!c.contains(asio::ip::make_address("11.0.0.1")));
+    CHECK(c.contains(asio::ip::make_address("::ffff:10.1.1.1")));  // v4-mapped client
+    CHECK(parse_cidr("192.168.1.5", c, err) && c.prefix == 32);
+    CHECK(c.contains(asio::ip::make_address("192.168.1.5")) && !c.contains(asio::ip::make_address("192.168.1.6")));
+    CHECK(parse_cidr("fd00::/8", c, err) && c.v6);
+    CHECK(c.contains(asio::ip::make_address("fd12::1")) && !c.contains(asio::ip::make_address("fe80::1")));
+    CHECK(!c.contains(asio::ip::make_address("10.0.0.1")));
+    CHECK(parse_cidr("::1", c, err) && c.prefix == 128);
+    CHECK(!parse_cidr("10.0.0.0/33", c, err) && !parse_cidr("nope", c, err) && !parse_cidr("10.0.0.0/x", c, err));
+    std::vector<Cidr> list;
+    parse_cidr("127.0.0.1", c, err);
+    list.push_back(c);
+    CHECK(in_any(list, asio::ip::make_address("127.0.0.1")) && !in_any(list, asio::ip::make_address("127.0.0.2")));
+    // Suffix matching with PATH_INFO.
+    CHECK(Router::suffix_hit("/index.php", ".php") && Router::suffix_hit("/a/index.php/extra/x", ".php"));
+    CHECK(!Router::suffix_hit("/index.phpx", ".php") && !Router::suffix_hit("/x.php.bak", ".php"));
+}
+
 static void test_config_locations() {
     namespace fs = std::filesystem;
     const fs::path dir = fs::temp_directory_path() / ("agensio-test-" + std::to_string(::getpid()));
@@ -714,6 +778,23 @@ static void test_config_locations() {
     CHECK(rejects("bad15.toml", head + "[[site.location]]\npath = \"/a/\"\nhandler = \"fastcgi\"\n"
                                       "fastcgi = { socket = \"localhost:9000\" }\n"));
     CHECK(rejects("bad16.toml", head + "[[site.location]]\npath = \".php\"\nmatch = \"suffix\"\nalias = \"www\"\n"));
+    CHECK(rejects("bad17.toml", "[server]\ntrusted_proxies = [\"10.0.0.0/40\"]\n" + head));
+    write("proxies.toml", "[server]\ntrusted_proxies = [\"127.0.0.1\", \"10.0.0.0/8\"]\n" + head);
+    CHECK(load_config(dir / "proxies.toml").trusted_proxies.size() == 2);
+    // Two locations on one upstream must agree on the pool bounds.
+    CHECK(rejects("bad18.toml", head + "php = { socket = \"/run/a.sock\" }\n"
+                                       "[[site.location]]\npath = \"/a/\"\nhandler = \"fastcgi\"\n"
+                                       "fastcgi = { max_connections = 4 }\n"
+                                       "[[site.location]]\npath = \"/b/\"\nhandler = \"fastcgi\"\n"
+                                       "fastcgi = { max_connections = 8 }\n"));
+    write("pools.toml", head + "php = { socket = \"/run/a.sock\", max_connections = 4 }\n"
+                               "[[site.location]]\npath = \"/a/\"\nhandler = \"fastcgi\"\n"
+                               "fastcgi = { buffering = false }\n"
+                               "[[site.location]]\npath = \"/b/\"\nhandler = \"fastcgi\"\n"
+                               "fastcgi = { buffer_file_max = \"2MB\" }\n");
+    CHECK(load_config(dir / "pools.toml").sites[0].locations.size() == 3);
+    CHECK(load_config(dir / "pools.toml").sites[0].locations[1].fastcgi.options.buffer_file_max ==
+          2u * 1024 * 1024);
     // Address grammar.
     FcgiAddress a;
     std::string err;
@@ -826,6 +907,8 @@ int main() {
     test_core_types();
     test_route_and_etag();
     test_config_locations();
+    test_cidr();
+    test_fcgi_http_params();
     test_log_format();
     test_fcgi_codec();
     if (failures) {

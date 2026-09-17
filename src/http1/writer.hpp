@@ -129,6 +129,8 @@ private:
         const StreamBody* source = source_of(r);
         if (source) {
             source_sized = source->length(source_length);
+            source_sized_ = source_sized;
+            source_remaining_ = source_length;
             if (!source_sized) {
                 if (stream_->request.version_minor >= 1) chunked_ = true;
                 else r.keep_alive = false;  // HTTP/1.0: the end of the connection delimits the body
@@ -277,9 +279,20 @@ private:
     // Backpressure: the next chunk is requested only from on_write, i.e. after the
     // previous one has been handed to the kernel.
 
+    // A source that declared its length is held to it: never more bytes than declared
+    // (the surplus would be read as the next response on a keep-alive connection), and
+    // if it ends short the connection is closed so the client sees the truncation
+    // instead of a misframed next response.
     void pull(StreamBody& source) {
         if (chunk_.empty()) chunk_.resize(cfg_.stream_chunk_size);
-        source.async_read(chunk_.data(), chunk_.size(),
+        if (source_sized_ && source_remaining_ == 0) {
+            source_done_ = true;
+            finish();
+            return;
+        }
+        std::size_t want = chunk_.size();
+        if (source_sized_) want = static_cast<std::size_t>(std::min<std::uint64_t>(source_remaining_, want));
+        source.async_read(chunk_.data(), want,
                           [self = self(), this](std::error_code ec, std::size_t n) { on_pulled(ec, n); });
     }
 
@@ -289,10 +302,18 @@ private:
             return;
         }
         if (n == 0) {
+            if (source_sized_ && source_remaining_ > 0) {  // declared more than it delivered
+                owner_.close();
+                return;
+            }
             source_done_ = true;
             if (chunked_) asio::async_write(socket_, asio::buffer(kLastChunk), write_done());
             else finish();
             return;
+        }
+        if (source_sized_) {
+            if (n > source_remaining_) n = static_cast<std::size_t>(source_remaining_);
+            source_remaining_ -= n;
         }
         body_sent_ += n;
         if (chunked_) {
@@ -427,6 +448,8 @@ private:
     std::uint64_t body_sent_ = 0;  // body bytes handed to the kernel (access log)
     bool chunked_ = false;      // StreamBody of unknown length on HTTP/1.1
     bool source_done_ = false;  // StreamBody reported end of body
+    bool source_sized_ = false;         // the StreamBody declared its length
+    std::uint64_t source_remaining_ = 0;  // bytes of that length still to send
     ChunkSizeBuffer chunk_size_{};
     bool sendfile_unsupported_ = false;
     const File* sf_file_ = nullptr;  // sendfile in progress (entry fd or the response's owned file)

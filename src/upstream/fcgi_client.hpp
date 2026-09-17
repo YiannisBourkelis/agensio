@@ -105,6 +105,7 @@ struct FcgiResult {
     std::string body;         // buffered body (buffering on, at most buffer_max bytes)
     File spill;               // the body when it did not fit: an unlinked temp file
     std::uint64_t body_size = 0;
+    bool streamed = false;    // the body comes through body_source() (buffering off, or the spill cap was hit)
     std::string stderr_text;  // FCGI_STDERR output (capped), for the error log
 };
 
@@ -161,6 +162,7 @@ private:
     std::unique_ptr<FcgiConnection> conn_;
     std::string out_;        // BEGIN_REQUEST + PARAMS (+ STDIN when the body is in memory); kept for a retry
     std::string body_chunk_;  // STDIN records built from the spill file / client stream
+    std::string stream_chunk_;  // one client-body chunk in flight (request_buffering off)
     FcgiBodyInput body_;
     std::uint64_t body_pos_ = 0;  // bytes of the spill file already sent
     bool priority_ = false;
@@ -172,7 +174,9 @@ private:
     bool head_done_ = false;
     bool head_delivered_ = false;
     std::string head_buf_;  // STDOUT bytes until the head is complete (grows up to head_max)
-    // Streaming mode.
+    // Streaming mode (from the start, or after the temp-file cap switched to it).
+    std::uint64_t spilled_ = 0;      // bytes in result_.spill
+    std::uint64_t spill_read_ = 0;   // bytes of result_.spill already handed to a pull
     std::string pending_;    // body bytes not yet pulled
     std::size_t pending_pos_ = 0;
     bool reading_ = false;

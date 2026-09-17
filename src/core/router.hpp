@@ -35,10 +35,21 @@ public:
     // least the implicit "/" prefix location, so this never fails.
     static const LocationConfig& location(const SiteConfig& site, std::string_view path) noexcept {
         for (const LocationConfig& loc : site.locations) {
-            const bool hit = loc.exact ? path == loc.path : loc.suffix ? path.ends_with(loc.path) : path.starts_with(loc.path);
+            const bool hit = loc.exact    ? path == loc.path
+                             : loc.suffix ? suffix_hit(path, loc.path)
+                                          : path.starts_with(loc.path);
             if (hit) return loc;
         }
         return site.locations.back();
+    }
+
+    // A suffix matches at the end of the path or before a '/' ("/index.php/extra": PATH_INFO).
+    static bool suffix_hit(std::string_view path, std::string_view suffix) noexcept {
+        for (std::size_t p = path.find(suffix); p != std::string_view::npos; p = path.find(suffix, p + 1)) {
+            const std::size_t end = p + suffix.size();
+            if (end == path.size() || path[end] == '/') return true;
+        }
+        return false;
     }
 
     const SiteConfig* default_site() const noexcept { return default_site_; }

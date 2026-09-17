@@ -13,6 +13,8 @@ tcp_nodelay = true
 sendfile = true          # zero-copy streaming of files above cache.max_file_size (plain HTTP)
 sendfile_max_chunk = "1MB" # bytes per sendfile() call (measured: one 10 MB call costs 6x more kernel time)
 server_header = "agensio"
+# trusted_proxies = ["127.0.0.1", "10.0.0.0/8"]  # believe X-Forwarded-For / X-Forwarded-Proto from these:
+                         # the client address (access log, REMOTE_ADDR) and HTTPS for FastCGI come from them
 
 [log]
 access = "logs/access.log" # default access log for every site: a path (relative to this file) or "off";
@@ -43,8 +45,12 @@ max_open_files = 1024    # files above max_file_size are streamed, but their ope
 # the whole reply is collected, spilled to a temp file above buffer_max, and the fpm child
 # is released at once; false: streamed, for SSE), request_buffering / request_buffer_max
 # (same for the request body), connect_timeout / send_timeout / read_timeout (seconds; 504),
-# max_connections / queue_depth / queue_wait per worker (503 + Retry-After when exceeded),
+# buffer_file_max (temp file cap, default 1GB; beyond it the rest is streamed, never an
+# unbounded disk write), max_connections / queue_depth / queue_wait per worker (503 +
+# Retry-After when exceeded; pool bounds are per upstream socket, so every location on the
+# same socket must use the same values: set them once in the site's php = {...}),
 # priority_reserve (share of max_connections kept for locations with `priority = true`),
+# path_info (default true: "/index.php/extra" -> SCRIPT_NAME /index.php, PATH_INFO /extra),
 # head_max (response head cap, 502 above), keep_conn (FCGI_KEEP_CONN, default off: php-fpm
 # pins a child per idle connection, so only enable it with pm.max_children sized for
 # workers x max_idle plus the concurrency), max_idle.

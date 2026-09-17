@@ -177,8 +177,15 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       504, `FcgiFailure` reasons with fix hints in the error log and the JSON access log.
       `match = "suffix"` locations. Live tests against php-fpm in `tests/integration.sh`
       (skipped when php-fpm is absent). Not here: `-t` socket check and presets (C3).
-- [ ] C2 Parameter set matching nginx's `fastcgi_params` plus `PATH_INFO` splitting,
-      `HTTPS`, `REMOTE_ADDR`, `SERVER_PORT`, `REQUEST_SCHEME`, forwarded headers.
+- [x] C2 (2026-09-17) nginx's `fastcgi_params` set (plus `REDIRECT_STATUS`), `PATH_INFO` /
+      `PATH_TRANSLATED` split at the first `.php/` (suffix locations match there too),
+      `HTTPS` / `REQUEST_SCHEME` / `REMOTE_ADDR` from `X-Forwarded-Proto` / `X-Forwarded-For`
+      when the peer is in `server.trusted_proxies` (`src/net/cidr.hpp`); the access log
+      shows that client address as well. From the C1 review: a sized `StreamBody` is held
+      to its Content-Length (surplus cut, short body closes), `Proxy` never forwarded
+      (httpoxy), header names with `_` dropped and repeats joined like nginx, temp-file
+      cap `buffer_file_max` (1 GB) switching to streaming, pool bounds validated per
+      upstream, fewer copies in the client.
 - [ ] C3 Config: `php = { socket = "unix:/run/php/php-fpm.sock" }` at site level and
       **presets** (future todo, agreed 2026-09-16): `app = "laravel"` expands to root
       `public/`, `try_files $uri /index.php?$query_string`, deny `.env`/dotfiles, static

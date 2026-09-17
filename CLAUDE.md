@@ -194,7 +194,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   504, connection and protocol failures 502, each with an `FcgiFailure` reason in the
   error log (with a fix hint: socket owner/mode vs our uid, SCRIPT_FILENAME, bytes seen
   before a close) and in the JSON access log's `upstream` field. `match = "suffix"`
-  locations (`.php`) route scripts anywhere under the root.
+  locations (`.php`) route scripts anywhere under the root, also with PATH_INFO
+  (`/index.php/extra`). `server.trusted_proxies` (CIDRs, `net/cidr.hpp`): from those
+  peers X-Forwarded-For (rightmost untrusted hop) and X-Forwarded-Proto set the client
+  address for the access log and REMOTE_ADDR / HTTPS / REQUEST_SCHEME for FastCGI.
 - **Logging** (A5, `src/services/log.*`): access log in Apache/nginx "combined" format
   (same escaping, so fail2ban filters work) or JSON, per site (`access_log`) with the
   `[log] access` default; one descriptor per path opened `O_APPEND`, per-worker buffers

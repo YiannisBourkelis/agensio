@@ -24,6 +24,7 @@ struct FcgiHandler::Exchange : std::enable_shared_from_this<Exchange> {
     std::vector<char> chunk;  // body read scratch
     std::shared_ptr<FcgiRequest> req;
     std::string script;       // SCRIPT_FILENAME
+    std::string path_info;    // the part of the path after the script ("/index.php/extra" -> "/extra")
     bool completed = false;
 };
 
@@ -55,17 +56,39 @@ std::string FcgiHandler::prebuild_params(const SiteConfig& site, const LocationC
     std::string out;
     fcgi::append_param(out, "GATEWAY_INTERFACE", "CGI/1.1");
     fcgi::append_param(out, "SERVER_SOFTWARE", "agensio/" AGENSIO_VERSION);
+    fcgi::append_param(out, "REDIRECT_STATUS", "200");  // PHP's cgi.force_redirect wants it
     fcgi::append_param(out, "DOCUMENT_ROOT", loc.alias.empty() ? loc.root : loc.alias);
     if (const std::string& first = site.server_names.front(); first != "*")
         fcgi::append_param(out, "SERVER_NAME", first);
     return out;
 }
 
+void FcgiHandler::append_http_params(std::string& out, const Headers& headers, std::string& scratch) {
+    for (std::size_t i = 0; i < headers.size(); ++i) {
+        const HeaderField& h = headers[i];
+        if (h.name.find('_') != std::string_view::npos || Headers::iequals(h.name, "proxy")) continue;
+        bool seen = false;
+        for (std::size_t j = 0; j < i && !seen; ++j)
+            seen = Headers::iequals(headers[j].name, h.name);
+        if (seen) continue;  // merged into the first occurrence below
+        scratch.assign("HTTP_");
+        append_upper_env(scratch, h.name);
+        std::string_view value = h.value;
+        std::string joined;
+        for (std::size_t j = i + 1; j < headers.size(); ++j) {
+            if (!Headers::iequals(headers[j].name, h.name)) continue;
+            if (joined.empty()) joined.assign(value);
+            joined.append(Headers::iequals(h.name, "cookie") ? "; " : ", ").append(headers[j].value);
+        }
+        fcgi::append_param(out, scratch, joined.empty() ? value : std::string_view(joined));
+    }
+}
+
 void FcgiHandler::append_request_params(std::string& out, Stream& s, const SiteConfig& site, const LocationConfig& loc,
-                                        const WorkerState& ws, std::uint64_t content_length, bool length_known) const {
-    (void)loc;
+                                        WorkerState& ws, std::string_view path_info, std::uint64_t content_length,
+                                        bool length_known) const {
     const Request& req = s.request;
-    std::string& tmp = const_cast<WorkerState&>(ws).scratch;  // per-worker scratch, capacity retained
+    std::string& tmp = ws.scratch;  // per-worker scratch, capacity retained
     auto add = [&](std::string_view name, std::string_view value) { fcgi::append_param(out, name, value); };
     add("SERVER_PROTOCOL", req.version_minor == 0 ? "HTTP/1.0" : "HTTP/1.1");
     add("REQUEST_METHOD", req.method_name);
@@ -73,6 +96,11 @@ void FcgiHandler::append_request_params(std::string& out, Stream& s, const SiteC
     add("SCRIPT_NAME", ws.path);
     add("REQUEST_URI", req.target);
     add("DOCUMENT_URI", ws.path);
+    if (!path_info.empty()) {
+        add("PATH_INFO", path_info);
+        tmp.assign(loc.alias.empty() ? loc.root : loc.alias).append(path_info);
+        add("PATH_TRANSLATED", tmp);
+    }
     const std::size_t q = req.target.find('?');
     add("QUERY_STRING", q == std::string_view::npos ? std::string_view() : req.target.substr(q + 1));
     if (const std::string_view ct = req.headers.get("content-type"); !ct.empty()) add("CONTENT_TYPE", ct);
@@ -81,7 +109,7 @@ void FcgiHandler::append_request_params(std::string& out, Stream& s, const SiteC
         append_number(tmp, content_length);
         add("CONTENT_LENGTH", tmp);
     }
-    add("REMOTE_ADDR", s.conn.remote_address);
+    add("REMOTE_ADDR", s.conn.client_address.empty() ? s.conn.remote_address : s.conn.client_address);
     tmp.clear();
     append_number(tmp, s.conn.remote_port);
     add("REMOTE_PORT", tmp);
@@ -90,18 +118,25 @@ void FcgiHandler::append_request_params(std::string& out, Stream& s, const SiteC
     append_number(tmp, s.conn.local_port);
     add("SERVER_PORT", tmp);
     if (site.server_names.front() == "*") add("SERVER_NAME", req.host);
-    add("REQUEST_SCHEME", s.conn.tls ? "https" : "http");
-    if (s.conn.tls) add("HTTPS", "on");
-    for (const HeaderField& h : req.headers) {
-        tmp.assign("HTTP_");
-        append_upper_env(tmp, h.name);
-        add(tmp, h.value);
-    }
+    const bool https = s.conn.tls || s.conn.forwarded_https;
+    add("REQUEST_SCHEME", https ? "https" : "http");
+    if (https) add("HTTPS", "on");
+    append_http_params(out, req.headers, tmp);
 }
 
 std::shared_ptr<FcgiRequest> FcgiHandler::start(Stream& s, const SiteConfig& site, const LocationConfig& loc,
                                                 WorkerState& ws, FcgiPool& pool, std::function<void()> done) {
     // The script: the request path, plus the index for a directory URI, under root/alias.
+    // "/index.php/extra/path" is split into the script and PATH_INFO (nginx
+    // fastcgi_split_path_info ^(.+\.php)(/.+)$).
+    std::string path_info;
+    if (loc.fastcgi.options.path_info) {
+        const std::string_view marker = ".php/";
+        if (const std::size_t p = ws.path.find(marker); p != std::string::npos) {
+            path_info = ws.path.substr(p + marker.size() - 1);
+            ws.path.resize(p + marker.size() - 1);
+        }
+    }
     if (ws.path.back() == '/') ws.path.append(loc.index.empty() ? std::string("index.php") : loc.index.front());
     fs_path_of(loc, ws);
     FileInfo fi;
@@ -119,6 +154,7 @@ std::shared_ptr<FcgiRequest> FcgiHandler::start(Stream& s, const SiteConfig& sit
     x->pool = &pool;
     x->done = std::move(done);
     x->script = ws.fs_path;
+    x->path_info = std::move(path_info);
     const FcgiOptions& opts = loc.fastcgi.options;
     const Request& req = s.request;
     const bool retry_ok = req.method == Method::get || req.method == Method::head;
@@ -127,7 +163,8 @@ std::shared_ptr<FcgiRequest> FcgiHandler::start(Stream& s, const SiteConfig& sit
     auto launch = [this, x, retry_ok](bool length_known) {
         WorkerState& w = *x->ws;
         w.params_tail.clear();
-        append_request_params(w.params_tail, *x->stream, *x->site, *x->loc, w, x->body.size, length_known);
+        append_request_params(w.params_tail, *x->stream, *x->site, *x->loc, w, x->path_info, x->body.size,
+                              length_known);
         x->req = std::make_shared<FcgiRequest>(*x->pool, x->loc->fastcgi.address, x->loc->fastcgi.options);
         x->req->start(x->loc->fastcgi.params_prefix, w.params_tail, std::move(x->body), x->loc->priority, retry_ok,
                       [this, x](FcgiResult& r) { finish(*x, r); });
@@ -274,7 +311,7 @@ void FcgiHandler::finish(Exchange& x, FcgiResult& res) {
     r.upstream = to_string(res.failure);  // "ok" or "primary_script_unknown"
     // Head: every upstream field except the ones the writer owns (framing, connection).
     const bool no_body_status = res.status == 204 || res.status == 304 || res.status < 200;
-    const bool streaming = !loc.fastcgi.options.buffering;
+    const bool streaming = res.streamed;  // buffering off, or the temp-file cap switched it mid-response
     r.scratch.reserve(res.head.size() + 64);
     for (const HeaderField& h : res.headers) {
         if (Headers::iequals(h.name, "content-length") || Headers::iequals(h.name, "transfer-encoding") ||

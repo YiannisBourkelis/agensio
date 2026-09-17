@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "core/request.hpp"
+#include "net/cidr.hpp"
 #include "upstream/fcgi_options.hpp"
 
 namespace agensio {
@@ -98,6 +99,10 @@ struct Config {
     std::size_t sendfile_max_chunk =
         1024 * 1024;  // bytes per sendfile() call; one huge call holds the socket lock and the loop
     std::string server_header = "agensio";
+    // Proxies in front of us whose X-Forwarded-For / X-Forwarded-Proto are believed: the
+    // rightmost untrusted address becomes the client (REMOTE_ADDR, access log) and the
+    // scheme sets HTTPS / REQUEST_SCHEME for FastCGI. Empty (default): headers are ignored.
+    std::vector<Cidr> trusted_proxies;
 
     LogConfig log;
 

@@ -36,10 +36,16 @@ public:
     // The constant FCGI_PARAMS pairs of a location, encoded once at configuration load.
     static std::string prebuild_params(const SiteConfig& site, const LocationConfig& loc);
 
+    // Request headers as HTTP_* pairs, the way nginx does it: names with '_' are dropped
+    // (a client could otherwise spoof X-Forwarded-For with X_Forwarded_For), `Proxy` is never
+    // forwarded (httpoxy, CVE-2016-5385), repeated fields are joined with ", " (Cookie: "; ").
+    static void append_http_params(std::string& out, const Headers& headers, std::string& scratch);
+
 private:
     struct Exchange;
     void append_request_params(std::string& out, Stream& s, const SiteConfig& site, const LocationConfig& loc,
-                               const WorkerState& ws, std::uint64_t content_length, bool length_known) const;
+                               WorkerState& ws, std::string_view path_info, std::uint64_t content_length,
+                               bool length_known) const;
     void finish(Exchange& x, FcgiResult& r);
     void log_failure(const Exchange& x, const FcgiResult& r);
 

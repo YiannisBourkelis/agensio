@@ -29,6 +29,7 @@
 #include "core/stream.hpp"
 #include "core/worker_state.hpp"
 #include "handlers/dispatch.hpp"
+#include "net/cidr.hpp"
 #include "http1/chunked.hpp"
 #include "http1/parser.hpp"
 #include "http1/writer.hpp"
@@ -224,7 +225,7 @@ private:
         }
         const Request& req = stream_.request;
         AccessRecord rec;
-        rec.remote = remote_;
+        rec.remote = stream_.conn.client_address.empty() ? std::string_view(remote_) : stream_.conn.client_address;
         rec.host = req.host;
         rec.method = req.method_name;
         rec.target = req.target;
@@ -331,7 +332,39 @@ private:
             req.body = &body_source_;
         }
         worker_.state.now = std::time(nullptr);
+        if (!cfg_.trusted_proxies.empty()) apply_forwarded();
         dispatch();
+    }
+
+    // Behind a trusted proxy: the client is the rightmost X-Forwarded-For entry that is not
+    // itself a trusted proxy, and X-Forwarded-Proto says whether it used TLS.
+    void apply_forwarded() {
+        stream_.conn.client_address = {};
+        stream_.conn.forwarded_https = false;
+        fill_connection_info();
+        if (!trusted_checked_) {
+            trusted_peer_ = in_any(cfg_.trusted_proxies, remote_addr_);
+            trusted_checked_ = true;
+        }
+        if (!trusted_peer_) return;
+        const Request& req = stream_.request;
+        std::string_view xff = req.headers.get("x-forwarded-for");
+        while (!xff.empty()) {
+            const std::size_t comma = xff.rfind(',');
+            std::string_view entry = comma == std::string_view::npos ? xff : xff.substr(comma + 1);
+            xff = comma == std::string_view::npos ? std::string_view() : xff.substr(0, comma);
+            while (!entry.empty() && (entry.front() == ' ' || entry.front() == '\t')) entry.remove_prefix(1);
+            while (!entry.empty() && (entry.back() == ' ' || entry.back() == '\t')) entry.remove_suffix(1);
+            if (entry.empty()) continue;
+            asio::error_code ec;
+            const auto a = asio::ip::make_address(std::string(entry), ec);
+            if (ec) break;  // garbage: trust nothing further left
+            client_addr_ = entry;
+            stream_.conn.client_address = client_addr_;
+            if (!in_any(cfg_.trusted_proxies, a)) break;  // first hop that is not one of ours
+        }
+        const std::string_view proto = req.headers.get("x-forwarded-proto");
+        stream_.conn.forwarded_https = Headers::iequals(proto, "https");
     }
 
     // Routes the request and runs its handler; static completes inline, FastCGI later.
@@ -381,6 +414,7 @@ private:
             const auto ep = lowest().remote_endpoint(ec);
             remote_ = ec ? std::string("-") : ep.address().to_string();
             remote_port_ = ec ? 0 : ep.port();
+            if (!ec) remote_addr_ = ep.address();
         }
         stream_.conn.remote_address = remote_;
         stream_.conn.remote_port = remote_port_;
@@ -493,6 +527,10 @@ private:
     std::vector<char> drain_;  // scratch for discarding an unread body (allocated on first use)
     std::string remote_;       // client address for the access log / handlers, resolved on first use
     std::uint16_t remote_port_ = 0;
+    asio::ip::address remote_addr_;
+    std::string client_addr_;      // from X-Forwarded-For when the peer is a trusted proxy
+    bool trusted_checked_ = false;
+    bool trusted_peer_ = false;
     bool request_logged_ = false;
     unsigned request_gen_ = 0;               // bumps per request and on close; guards late upstream callbacks
     std::shared_ptr<FcgiRequest> upstream_;  // FastCGI exchange in flight, cancelled on close

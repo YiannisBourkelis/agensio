@@ -18,6 +18,9 @@ struct ConnectionInfo {
     std::string_view local_address;
     std::uint16_t local_port = 0;
     bool tls = false;
+    // Per request, from a trusted proxy's X-Forwarded-For / X-Forwarded-Proto (else empty/false).
+    std::string_view client_address;
+    bool forwarded_https = false;
 };
 
 struct Stream {

@@ -209,16 +209,13 @@ void FcgiRequest::start(std::string_view params_prefix, std::string_view params_
     out_.clear();
     out_.reserve(64 + params_prefix.size() + params_tail.size() + body_.memory.size() + 32);
     fcgi::append_begin_request(out_, 1, options_.keep_conn);
-    // One PARAMS stream from the two parts: records of at most kMaxContent bytes each.
-    if (params_prefix.size() + params_tail.size() <= fcgi::kMaxContent) {
-        std::string joined;
-        joined.reserve(params_prefix.size() + params_tail.size());
-        joined.append(params_prefix).append(params_tail);
-        fcgi::append_stream(out_, fcgi::RecordType::params, 1, joined, true);
-    } else {
-        fcgi::append_stream(out_, fcgi::RecordType::params, 1, params_prefix, false);
-        fcgi::append_stream(out_, fcgi::RecordType::params, 1, params_tail, true);
-    }
+    // The PARAMS stream: the prebuilt block and the per-request tail as separate records.
+    // Their boundary is a pair boundary, which is what matters: php-fpm cannot parse a
+    // name/value pair that spans two records. Neither part can reach kMaxContent (the
+    // request head is capped at 16 KB and the block is a few hundred bytes), so the
+    // 65535-byte split inside append_stream never lands inside a pair.
+    fcgi::append_stream(out_, fcgi::RecordType::params, 1, params_prefix, false);
+    fcgi::append_stream(out_, fcgi::RecordType::params, 1, params_tail, true);
     // Body entirely in memory: it rides in the same write; otherwise it follows the head.
     if (!body_.stream && !body_.spill.is_open()) {
         fcgi::append_stream(out_, fcgi::RecordType::stdin_, 1, body_.memory, true);
@@ -263,7 +260,11 @@ void FcgiRequest::cancel() noexcept {
     else if (was != Phase::finished && was != Phase::failed) release_connection(false);
     if (conn_ && conn_->socket.is_open()) conn_->socket.close(ec);
     conn_.reset();
-    waiter_.handler = nullptr;
+    if (waiter_.handler) {  // a pull in flight must not hang
+        auto h = std::move(waiter_.handler);
+        waiter_.handler = nullptr;
+        h(std::error_code(asio::error::operation_aborted), 0);
+    }
     done_ = nullptr;
 }
 
@@ -399,10 +400,11 @@ void FcgiRequest::send_body_next() {
                           });
         return;
     }
-    // Streaming from the client: pull a chunk, forward it, repeat until the end.
-    auto owner = std::make_shared<std::string>(kBodyChunk, '\0');  // ReadHandler is copyable: shared, not unique
-    body_.stream->async_read(owner->data(), owner->size(),
-                             [self, owner](std::error_code ec, std::size_t n) mutable {
+    // Streaming from the client: pull a chunk, forward it, repeat until the end. One pull
+    // is outstanding at a time, so one member buffer serves every chunk.
+    if (stream_chunk_.size() < kBodyChunk) stream_chunk_.resize(kBodyChunk);
+    body_.stream->async_read(stream_chunk_.data(), stream_chunk_.size(),
+                             [self](std::error_code ec, std::size_t n) mutable {
                                  if (self->phase_ != Phase::sending_body) return;
                                  if (ec) {
                                      self->fail(FcgiFailure::child_closed_early, ec);
@@ -411,7 +413,7 @@ void FcgiRequest::send_body_next() {
                                  self->body_chunk_.clear();
                                  if (n > 0)
                                      fcgi::append_stream(self->body_chunk_, fcgi::RecordType::stdin_, 1,
-                                                         std::string_view(owner->data(), n), false);
+                                                         std::string_view(self->stream_chunk_.data(), n), false);
                                  const bool last = n == 0;
                                  if (last) fcgi::append_record(self->body_chunk_, fcgi::RecordType::stdin_, 1, {});
                                  self->arm(self->options_.send_timeout);
@@ -568,10 +570,21 @@ bool FcgiRequest::store_body(std::string_view bytes) {
         return true;
     }
     if (result_.spill.is_open()) {
+        if (spilled_ + bytes.size() > options_.buffer_file_max) {
+            // Temp file cap: stream the rest. The head goes out now; pulls serve the spill
+            // file first, then what keeps arriving, under the high-water mark.
+            options_.buffering = false;
+            deliver_head();
+            if (phase_ == Phase::cancelled) return false;
+            pending_.append(bytes);
+            satisfy_waiter();
+            return true;
+        }
         if (!result_.spill.append(bytes.data(), bytes.size())) {
             fail(FcgiFailure::spill_error, std::error_code(errno, std::generic_category()));
             return false;
         }
+        spilled_ += bytes.size();
         return true;
     }
     if (result_.body.size() + bytes.size() > options_.buffer_max) {
@@ -581,6 +594,7 @@ bool FcgiRequest::store_body(std::string_view bytes) {
             fail(FcgiFailure::spill_error, std::error_code(errno, std::generic_category()));
             return false;
         }
+        spilled_ = result_.body_size;
         result_.body.clear();
         result_.body.shrink_to_fit();
         return true;
@@ -629,6 +643,7 @@ void FcgiRequest::release_connection(bool reusable) {
 void FcgiRequest::deliver_head() {
     if (head_delivered_ || phase_ == Phase::cancelled) return;
     head_delivered_ = true;
+    result_.streamed = !options_.buffering;
     if (done_) {
         Completion done = std::move(done_);
         done_ = nullptr;
@@ -663,6 +678,20 @@ void FcgiRequest::pull(char* buf, std::size_t len, StreamBody::ReadHandler handl
 
 void FcgiRequest::satisfy_waiter() {
     if (!waiter_.handler) return;
+    // After a mid-response switch to streaming: the bytes already spilled go first.
+    if (spill_read_ < spilled_ && result_.spill.is_open()) {
+        const std::size_t want = static_cast<std::size_t>(std::min<std::uint64_t>(spilled_ - spill_read_, waiter_.len));
+        const std::int64_t got = result_.spill.read_at(waiter_.buf, want, spill_read_);
+        auto h = std::move(waiter_.handler);
+        waiter_.handler = nullptr;
+        if (got <= 0) {
+            h(std::error_code(asio::error::connection_reset), 0);
+            return;
+        }
+        spill_read_ += static_cast<std::uint64_t>(got);
+        h(std::error_code{}, static_cast<std::size_t>(got));
+        return;
+    }
     const std::size_t avail = pending_.size() - pending_pos_;
     if (avail > 0) {
         const std::size_t n = std::min(avail, waiter_.len);
