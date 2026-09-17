@@ -708,6 +708,14 @@ void UpstreamRequest::finish() {
     deliver_head();
 }
 
+void UpstreamRequest::finish_upgraded() {
+    phase_ = Phase::finished;
+    pool_.unwatch(this);
+    pool_.release(address_.key, options_, nullptr);
+    result_.upgraded = true;
+    deliver_head();
+}
+
 void UpstreamRequest::release_connection(bool reusable) {
     std::unique_ptr<UpstreamConnection> c = std::move(conn_);
     if (c && (!reusable || !options_.keep_conn || c->in_len != 0 || !keep_alive_ok())) {

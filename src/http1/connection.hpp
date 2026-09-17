@@ -91,6 +91,13 @@ public:
     void on_response_written() {
         const bool keep_alive = stream_.response.keep_alive;
         log_request();
+        if (peer_) {
+            const std::uint32_t idle_s = stream_.response.tunnel_timeout_s;
+            stream_.reset();
+            compact();
+            start_tunnel(idle_s);
+            return;
+        }
         stream_.reset();
         compact();
         // Bytes of a pipelined next request that arrived together with the body go back to
@@ -122,6 +129,11 @@ public:
             upstream_.reset();
         }
         if (!request_logged_ && stream_.request.length > 0) log_request();  // client went away mid-response
+        tunnel_ = false;
+        if (peer_) {
+            if (peer_->socket.is_open()) peer_->socket.close(ec);
+            peer_.reset();
+        }
         writer_.reset();
         body_pending_ = false;
         bpos_ = blen_ = 0;
@@ -388,6 +400,87 @@ private:
         stream_.conn.forwarded_https = Headers::iequals(proto, "https");
     }
 
+    // ---- tunnel (D3): after a 101 the connection is two byte pumps ----
+    // Client bytes go to the origin, origin bytes to the client, each direction with its
+    // own buffer and read in flight. Whatever either side had already sent past the head
+    // goes first. A side's EOF half-closes the other; the second EOF or any error ends
+    // both. Idle limit: the connection's own timer with the tunnel's timeout (0 = none).
+
+    void start_tunnel(std::uint32_t idle_s) {
+        tunnel_ = true;
+        body_pending_ = false;
+        if (idle_s == 0) timer_.cancel();
+        else rearm(std::chrono::seconds(idle_s));
+        peer_->socket.set_option(asio::ip::tcp::no_delay(true), tunnel_ec_);
+        if (peer_->in.size() < 16 * 1024) peer_->in.resize(16 * 1024);
+        // Client bytes after the request head (in_[0, in_len_)) and origin bytes after
+        // the 101 head (peer_->in[0, in_len)) are forwarded before the pumps start reading.
+        if (in_len_ > 0) tunnel_write_peer(in_len_);
+        else tunnel_read_client();
+        if (peer_->in_len > 0) tunnel_write_client(peer_->in_len);
+        else tunnel_read_peer();
+    }
+
+    void tunnel_read_client() {
+        auto self = this->shared_from_this();
+        socket_.async_read_some(asio::buffer(in_.data(), in_.size()),
+                                immediate([self](const asio::error_code& ec, std::size_t n) {
+                                    if (!self->tunnel_) return;
+                                    if (ec) return self->tunnel_client_eof();
+                                    self->last_activity_ = std::chrono::steady_clock::now();
+                                    self->tunnel_write_peer(n);
+                                }));
+    }
+
+    void tunnel_write_peer(std::size_t n) {
+        auto self = this->shared_from_this();
+        asio::async_write(peer_->socket, asio::buffer(in_.data(), n),
+                          immediate([self](const asio::error_code& ec, std::size_t) {
+                              if (!self->tunnel_) return;
+                              if (ec) return self->close();
+                              self->in_len_ = 0;
+                              self->tunnel_read_client();
+                          }));
+    }
+
+    void tunnel_read_peer() {
+        auto self = this->shared_from_this();
+        peer_->socket.async_read_some(asio::buffer(peer_->in.data(), peer_->in.size()),
+                                      immediate([self](const asio::error_code& ec, std::size_t n) {
+                                          if (!self->tunnel_) return;
+                                          if (ec) return self->tunnel_peer_eof();
+                                          self->last_activity_ = std::chrono::steady_clock::now();
+                                          self->tunnel_write_client(n);
+                                      }));
+    }
+
+    void tunnel_write_client(std::size_t n) {
+        auto self = this->shared_from_this();
+        asio::async_write(socket_, asio::buffer(peer_->in.data(), n),
+                          immediate([self](const asio::error_code& ec, std::size_t) {
+                              if (!self->tunnel_) return;
+                              if (ec) return self->close();
+                              self->peer_->in_len = 0;
+                              self->tunnel_read_peer();
+                          }));
+    }
+
+    void tunnel_client_eof() {
+        client_eof_ = true;
+        if (peer_eof_) return close();
+        peer_->socket.shutdown(asio::socket_base::shutdown_send, tunnel_ec_);
+    }
+
+    void tunnel_peer_eof() {
+        peer_eof_ = true;
+        if (client_eof_) return close();
+        if constexpr (IsTlsStream<Socket>::value) {
+            close();  // TLS has no half-close worth the name: close_notify ends the session
+        } else {
+            lowest().shutdown(asio::ip::tcp::socket::shutdown_send, tunnel_ec_);
+        }
+    }
+
     // Routes the request and runs its handler; static completes inline, FastCGI later.
     void dispatch() {
         WorkerState& ws = worker_.state;
@@ -400,6 +493,9 @@ private:
                 auto self = this->shared_from_this();
                 auto done = [self, gen] {
                     if (self->request_gen_ != gen) return;  // connection closed meanwhile
+                    // A 101: the origin connection becomes the other end of a tunnel once
+                    // the head is out (on_response_written).
+                    if (self->stream_.response.upgrade && self->upstream_) self->peer_ = self->upstream_->take_connection();
                     self->upstream_.reset();
                     self->respond();
                 };
@@ -561,6 +657,11 @@ private:
     bool request_logged_ = false;
     unsigned request_gen_ = 0;               // bumps per request and on close; guards late upstream callbacks
     std::shared_ptr<UpstreamRequest> upstream_;  // FastCGI/proxy exchange in flight, cancelled on close
+    std::unique_ptr<UpstreamConnection> peer_;   // the origin side of a tunnel after a 101
+    bool tunnel_ = false;
+    bool client_eof_ = false;
+    bool peer_eof_ = false;
+    asio::error_code tunnel_ec_;
     Stream stream_;
     Http1Writer<Socket, Http1Connection> writer_;  // last: it references socket_ and *this
 };

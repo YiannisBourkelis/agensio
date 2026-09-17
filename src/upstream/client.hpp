@@ -127,6 +127,7 @@ struct UpstreamResult {
     File spill;               // the body when it did not fit: an unlinked temp file
     std::uint64_t body_size = 0;
     bool streamed = false;    // the body comes through body_source() (buffering off, or the spill cap was hit)
+    bool upgraded = false;    // HTTP 101: no body, the connection is now a tunnel (take_connection())
     std::string stderr_text;  // FastCGI: FCGI_STDERR output (capped), for the error log
 };
 
@@ -142,6 +143,9 @@ public:
 
     // Streaming mode: the response body as a pull source (valid after `done` ran).
     std::unique_ptr<StreamBody> body_source();
+    // After a 101: the origin connection, with any bytes that followed the head still in
+    // its `in` buffer. The exchange is over; the pool slot was already given back.
+    std::unique_ptr<UpstreamConnection> take_connection() noexcept { return std::move(conn_); }
 
     // Called by the pool.
     void on_slot(std::unique_ptr<UpstreamConnection> conn);
@@ -184,6 +188,7 @@ protected:
     bool store_body(std::string_view bytes);
     void consume(std::size_t n) noexcept;  // drops n bytes from the front of conn_->in
     void finish();
+    void finish_upgraded();  // 101: the slot goes back, the connection stays for take_connection()
     void fail(UpstreamFailure why, std::error_code ec);
     bool head_done() const noexcept { return head_done_; }
 

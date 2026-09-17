@@ -23,7 +23,8 @@ void HttpRequest::encode_head(std::string& out) {
         chunked_out_ = true;
         out.append("Transfer-Encoding: chunked\r\n");
     }
-    out.append(options_.keep_conn ? "Connection: keep-alive\r\n\r\n" : "Connection: close\r\n\r\n");
+    if (upgrade_) out.append("Connection: Upgrade\r\n\r\n");
+    else out.append(options_.keep_conn ? "Connection: keep-alive\r\n\r\n" : "Connection: close\r\n\r\n");
     head_.clear();
     head_.shrink_to_fit();
 }
@@ -65,7 +66,15 @@ bool HttpRequest::on_head_complete() {
         reset_head();
         return false;
     }
-    if (is_head_ || status == 204 || status == 304 || status == 101) {
+    if (status == 101) {
+        if (!upgrade_) {  // a 101 nobody asked for: the connection is unusable
+            fail(UpstreamFailure::protocol_error, std::error_code());
+            return true;
+        }
+        finish_upgraded();
+        return true;
+    }
+    if (is_head_ || status == 204 || status == 304) {
         framing_ = Framing::none;
         return true;
     }
@@ -108,7 +117,7 @@ bool HttpRequest::decode() {
             consume(used);
             if (hs == HeadStatus::incomplete) return true;
             if (!on_head_complete()) continue;  // a 1xx was skipped: parse the next head
-            if (result_.failure != UpstreamFailure::none) return false;
+            if (result_.failure != UpstreamFailure::none || result_.upgraded) return false;
             if (framing_ == Framing::none || (framing_ == Framing::length && remaining_ == 0)) {
                 finish();
                 return false;

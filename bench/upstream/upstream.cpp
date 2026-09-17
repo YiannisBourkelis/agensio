@@ -8,6 +8,9 @@
 //   /close          the JSON answer with Connection: close: reconnects
 //   /echo           the request body back (Content-Type: application/octet-stream): body forwarding
 //   /headers        the request head back as text/plain: what the proxy forwarded
+//   /tunnel         with an Upgrade field: 101 with the same Upgrade value, then every byte
+//                   echoed back until the client closes (a WebSocket-shaped tunnel without
+//                   the framing); other paths ignore Upgrade like an application would
 //   /redirect       302 to http://127.0.0.1:<port>/json with X-Powered-By: redirect and hide rules
 //   /stats          {"connections":N,"requests":M} accepted so far: proves pool reuse
 // Build: target agensio_upstream. Run: agensio_upstream [-p 9100] [-w 1] [-b 102400].
@@ -95,6 +98,26 @@ private:
             pos = eol + 2;
         }
         consumed_ = request.size();
+        if (target.substr(0, target.find('?')) == "/tunnel") {
+            std::size_t p2 = request.find("\r\n") + 2;
+            while (p2 < request.size() - 2) {
+                const std::size_t eol = request.find("\r\n", p2);
+                const std::string_view line = request.substr(p2, eol - p2);
+                if (line.size() > 8 && iequals(line.substr(0, 8), "upgrade:")) {
+                    std::string_view proto = line.substr(8);
+                    while (!proto.empty() && proto.front() == ' ') proto.remove_prefix(1);
+                    g_requests.fetch_add(1, std::memory_order_relaxed);
+                    head_ = "HTTP/1.1 101 Switching Protocols\r\nServer: upstream\r\nUpgrade: " + std::string(proto) +
+                            "\r\nConnection: Upgrade\r\n\r\n";
+                    tunnel_ = true;
+                    // Bytes that came with the head are echoed right behind the 101.
+                    echo_.assign(buf_.data() + consumed_, len_ - consumed_);
+                    len_ = consumed_ = 0;
+                    return write(echo_, false);
+                }
+                p2 = eol + 2;
+            }
+        }
         bool chunked = false;
         {
             std::size_t p2 = request.find("\r\n") + 2;
@@ -270,7 +293,18 @@ private:
         });
     }
 
+    void tunnel_echo() {
+        auto self = shared_from_this();
+        socket_.async_read_some(asio::buffer(buf_.data(), buf_.size()), [self](const asio::error_code& ec, std::size_t n) {
+            if (ec) return self->close();
+            self->echo_.assign(self->buf_.data(), n);
+            self->head_.clear();
+            self->write(self->echo_, false);
+        });
+    }
+
     void next() {
+        if (tunnel_) return tunnel_echo();
         if (consumed_ < len_) std::memmove(buf_.data(), buf_.data() + consumed_, len_ - consumed_);
         len_ -= consumed_;
         consumed_ = 0;
@@ -307,6 +341,7 @@ private:
     std::size_t echo_want_ = 0;
     bool echo_close_ = false;
     bool echo_chunked_ = false;
+    bool tunnel_ = false;
     std::size_t chunk_left_ = 0;
     bool chunk_done_ = false;
 };

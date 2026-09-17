@@ -30,6 +30,10 @@ struct Response {
     bool keep_alive = true;
     bool head = false;  // HEAD request: headers only, body length still declared
     const char* upstream = nullptr;  // upstream outcome for the access log ("ok", "read_timeout", ...), static text
+    // A 101 from a proxied origin: after this head the connection tunnels bytes between the
+    // client and the origin (the handler's exchange holds the origin connection).
+    bool upgrade = false;
+    std::uint32_t tunnel_timeout_s = 0;  // idle limit for the tunnel, 0 = none
 
     // Resources the views above may point into.
     EntryPtr entry;
@@ -46,6 +50,8 @@ struct Response {
         keep_alive = true;
         head = false;
         upstream = nullptr;
+        upgrade = false;
+        tunnel_timeout_s = 0;
         entry.reset();
         owned_file.close();
         scratch.clear();

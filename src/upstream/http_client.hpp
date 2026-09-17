@@ -27,10 +27,11 @@ public:
     // `head` is the request line and the fields to forward, each line CRLF-terminated,
     // without the framing fields and without the final blank line. `is_head`: a HEAD
     // request, whose response has no body. See UpstreamRequest::begin for the rest.
-    void start(std::string head, bool is_head, UpstreamBodyInput body, bool priority, bool retry_ok,
+    void start(std::string head, bool is_head, bool upgrade, UpstreamBodyInput body, bool priority, bool retry_ok,
                Completion done) {
         head_ = std::move(head);
         is_head_ = is_head;
+        upgrade_ = upgrade;
         begin(std::move(body), priority, retry_ok, std::move(done));
     }
 
@@ -47,6 +48,7 @@ private:
 
     std::string head_;
     bool is_head_ = false;
+    bool upgrade_ = false;  // an Upgrade request: "Connection: Upgrade" goes out, a 101 becomes a tunnel
     bool chunked_out_ = false;  // the request body goes out chunked (size unknown)
     Framing framing_ = Framing::none;
     std::uint64_t remaining_ = 0;  // Framing::length: body bytes still expected

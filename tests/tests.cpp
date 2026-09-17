@@ -1244,6 +1244,23 @@ static void test_proxy() {
     head.clear();
     ProxyHandler::build_head(head, st, st.request.target, policy);
     CHECK(head.find("Host: 127.0.0.1:9100\r\n") != std::string::npos && head.find("X-Forwarded") == std::string::npos);
+    // An Upgrade request is recognised and its Upgrade field forwarded; not with a body.
+    Stream ws;
+    ws.request.method = Method::get;
+    ws.request.method_name = "GET";
+    ws.request.target = "/socket";
+    ws.request.host = "app.example.com";
+    ws.request.headers.add("Connection", "Upgrade");
+    ws.request.headers.add("Upgrade", "websocket");
+    ws.request.headers.add("Sec-WebSocket-Key", "x");
+    ws.conn.remote_address = "192.0.2.7";
+    UpstreamConfig p2;
+    head.clear();
+    CHECK(ProxyHandler::build_head(head, ws, ws.request.target, p2));
+    CHECK(head.find("Upgrade: websocket\r\n") != std::string::npos && head.find("Sec-WebSocket-Key: x\r\n") != std::string::npos);
+    p2.upgrade = false;
+    head.clear();
+    CHECK(!ProxyHandler::build_head(head, ws, ws.request.target, p2) && head.find("Upgrade:") == std::string::npos);
     // The policy keys through the loader, site defaults refined by the location.
     write("policy.toml", "[[site]]\nlisten = [\"127.0.0.1:18097\"]\nroot = \"www\"\nproxy = { forwarded = \"both\", hide = [\"X-Powered-By\"], headers = { \"X-A\" = \"1\" } }\n"
                          "[[site.location]]\npath = \"/\"\nupstream = \"http://127.0.0.1:9100\"\nproxy = { host = \"app.internal\", headers = { \"X-A\" = \"2\", \"X-B\" = \"$host\" }, redirects = \"pass\" }\n");

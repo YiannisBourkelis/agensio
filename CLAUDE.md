@@ -224,6 +224,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   Host passed through, X-Forwarded-* replaced from untrusted peers and appended behind
   `trusted_proxies`, RFC 7239 on request, `$`-variables in configured fields, hidden
   response fields, origin-pointing Location rewritten; see `docs/configuration.md` 12.
+  Upgrades (D3): the origin's 101 hands its connection to `Http1Connection`, which
+  tunnels bytes both ways (`start_tunnel`, two pumps, half-close, idle timer reused with
+  `tunnel_timeout`, none by default).
 - **Presets** (C3): `app = "laravel" | "wordpress" | "php" | "static"` on a site expands
   at load into root, index, try_files and locations (Laravel: only `/index.php` is ever
   executed, `/build/` gets an immutable Cache-Control via `add_headers`; WordPress: any

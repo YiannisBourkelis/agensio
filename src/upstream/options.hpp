@@ -84,6 +84,11 @@ struct UpstreamConfig {
     std::vector<std::pair<std::string, std::string>> set_headers;
     std::vector<std::string> hide;
     bool rewrite_redirects = true;
+    // Proxy: forward `Upgrade` requests (WebSocket) and, on a 101, tunnel bytes both ways
+    // until a side closes; `tunnel_timeout_s` closes an idle tunnel (0 = never, the
+    // default: nginx's 60 s read timeout dropping idle WebSockets is a classic complaint).
+    bool upgrade = true;
+    std::uint32_t tunnel_timeout_s = 0;
     std::string params_prefix;  // FastCGI: constant FCGI_PARAMS pairs of this location, encoded once at load
     std::string retry_after;    // "Retry-After" value for 503s (queue_wait in seconds)
 };

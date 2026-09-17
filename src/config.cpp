@@ -213,6 +213,11 @@ void parse_proxy_policy(const toml::table& t, UpstreamConfig& out, const std::st
         if (mode != "rewrite" && mode != "pass") fail(where + ".redirects must be \"rewrite\" or \"pass\"");
         out.rewrite_redirects = mode == "rewrite";
     }
+    out.upgrade = t["upgrade"].value_or(out.upgrade);
+    if (auto v = t["tunnel_timeout"].value<std::int64_t>()) {
+        if (*v < 0 || *v > 86400 * 30) fail(where + ".tunnel_timeout out of range (seconds, 0 = none)");
+        out.tunnel_timeout_s = static_cast<std::uint32_t>(*v);
+    }
 }
 
 // `php = { ... }` (site) or `fastcgi = { ... }` (location): socket plus options, on top of `base`.
@@ -778,7 +783,9 @@ void explain_config(const Config& cfg, std::ostream& out) {
                 out << "upstream = \"" << loc.proxy.address.key << loc.proxy.rewrite << "\"\n";
                 print_fcgi(out, "proxy", loc.proxy);
                 out << "proxy.host = \"" << loc.proxy.host << "\"\nproxy.forwarded = \"" << loc.proxy.forwarded
-                    << "\"\nproxy.redirects = \"" << (loc.proxy.rewrite_redirects ? "rewrite" : "pass") << "\"\n";
+                    << "\"\nproxy.redirects = \"" << (loc.proxy.rewrite_redirects ? "rewrite" : "pass")
+                    << "\"\nproxy.upgrade = " << (loc.proxy.upgrade ? "true" : "false")
+                    << "\nproxy.tunnel_timeout = " << loc.proxy.tunnel_timeout_s << "\n";
                 if (!loc.proxy.set_headers.empty()) {
                     out << "proxy.headers = {";
                     for (std::size_t i = 0; i < loc.proxy.set_headers.size(); ++i)

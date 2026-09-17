@@ -454,6 +454,13 @@ and location (`redirects = "pass"` leaves it alone). The location's `add_headers
 added on 2xx and 3xx answers (HSTS, CORS, cache policy), for proxied and PHP responses
 alike.
 
+**WebSockets and other upgrades** need nothing: a request carrying `Connection: Upgrade`
+and an `Upgrade` field is forwarded as one, and when the origin answers 101 the connection
+becomes a tunnel that copies bytes both ways until a side closes. There is no idle limit on
+a tunnel by default (nginx's 60 s read timeout silently dropping idle WebSockets is the
+usual surprise); `tunnel_timeout = 3600` sets one, `upgrade = false` refuses upgrades
+on a location.
+
 **Options** of `proxy = { ... }`, on a site (defaults for its locations) or a location:
 
 | option | default | meaning |
@@ -463,6 +470,8 @@ alike.
 | `headers` | none | fields set toward the origin, `{ "X-Real-IP" = "$remote_addr" }`; `""` removes |
 | `hide` | none | fields dropped from the origin's answer, `["X-Powered-By"]` |
 | `redirects` | `"rewrite"` | Location pointing at the origin rewritten to this site, or `"pass"` |
+| `upgrade` | `true` | forward Upgrade requests and tunnel after a 101 (WebSocket) |
+| `tunnel_timeout` | 0 | seconds a tunnel may stay idle in both directions; 0 = no limit |
 | `buffering` | `true` | collect the whole answer (memory, then a temp file above `buffer_max`) so a slow client never holds the origin; `false` streams with backpressure |
 | `request_buffering` | `true` | collect the request body before connecting; `false` streams it as it arrives |
 | `connect_timeout`, `send_timeout`, `read_timeout` | 5, 30, 60 s | 504 when exceeded; `read_timeout` is between two reads from the origin |
@@ -479,7 +488,7 @@ queue 503; each is logged with the reason and appears in the JSON access log as
 
 Not here on purpose: separate buffer-size knobs (nginx's `proxy_buffer_size`,
 `proxy_buffers`, `proxy_busy_buffers_size` and their interplay), a `proxy_http_version`
-switch, the Upgrade/Connection incantation for WebSockets (automatic in D3), and
+switch, the three-directive Upgrade/Connection incantation for WebSockets, and
 `proxy_redirect` rules with regular expressions.
 
 ## 13. TLS

@@ -37,7 +37,8 @@ public:
 
     // The request head to send: request line and the forwarded fields per `policy`
     // (public for tests).
-    static void build_head(std::string& out, const Stream& s, std::string_view target, const UpstreamConfig& policy);
+    // Returns true for an Upgrade request that was forwarded as one (WebSocket).
+    static bool build_head(std::string& out, const Stream& s, std::string_view target, const UpstreamConfig& policy);
 
 private:
     struct Exchange;

@@ -58,10 +58,16 @@ void forwarded_for(std::string& out, std::string_view addr) {
 
 }  // namespace
 
-void ProxyHandler::build_head(std::string& out, const Stream& s, std::string_view target, const UpstreamConfig& policy) {
+bool ProxyHandler::build_head(std::string& out, const Stream& s, std::string_view target, const UpstreamConfig& policy) {
     const Request& req = s.request;
     out.append(req.method_name).append(" ").append(target).append(" HTTP/1.1\r\n");
     const std::string_view connection = req.headers.get("connection");
+    // An Upgrade request (WebSocket): the Upgrade field goes through and the origin gets
+    // "Connection: Upgrade"; a body cannot ride along.
+    const std::string_view upgrade = req.headers.get("upgrade");
+    const bool upgrading = policy.upgrade && !upgrade.empty() && !req.has_body &&
+                           http::connection_lists(connection, "upgrade");
+    if (upgrading) out.append("Upgrade: ").append(upgrade).append("\r\n");
     const bool trusted = s.conn.trusted_peer;
     const bool x_forwarded = policy.forwarded == "x-forwarded" || policy.forwarded == "both";
     const bool rfc_forwarded = policy.forwarded == "forwarded" || policy.forwarded == "both";
@@ -115,6 +121,7 @@ void ProxyHandler::build_head(std::string& out, const Stream& s, std::string_vie
         expand(out, h.second, s);
         out.append("\r\n");
     }
+    return upgrading;
 }
 
 std::shared_ptr<UpstreamRequest> ProxyHandler::start(Stream& s, const LocationConfig& loc, WorkerState& ws,
@@ -142,18 +149,18 @@ std::shared_ptr<UpstreamRequest> ProxyHandler::start(Stream& s, const LocationCo
         if (!target.starts_with(loc.path)) rewritten.append(query);
         target = rewritten;
     }
-    build_head(ws.scratch, s, target, loc.proxy);
+    const bool upgrading = build_head(ws.scratch, s, target, loc.proxy);
     x->req = std::make_shared<HttpRequest>(pool, loc.proxy.address, opts);
     // The head text is handed to the request as an owned string: collecting the body may
     // run the connection's reads inline, and ws.scratch belongs to whoever runs next.
     std::string head = ws.scratch;
-    auto go = [this, x, retry_ok, head = std::move(head)](bool ok) mutable {
+    auto go = [this, x, retry_ok, upgrading, head = std::move(head)](bool ok) mutable {
         if (!ok) {  // the body could not be spooled: upstream_error already answered 502
             x->completed = true;
             x->done();
             return;
         }
-        x->req->start(std::move(head), x->stream->request.method == Method::head, std::move(x->body),
+        x->req->start(std::move(head), x->stream->request.method == Method::head, upgrading, std::move(x->body),
                       x->loc->priority, retry_ok, [this, x](UpstreamResult& r) { finish(*x, r); });
     };
     if (!req.has_body || !req.body) {
@@ -200,6 +207,11 @@ void ProxyHandler::finish(Exchange& x, UpstreamResult& res) {
         return;
     }
     apply_upstream_result(s, res, res.streamed ? x.req->body_source() : nullptr, "ok", loc);
+    if (res.upgraded) {
+        s.response.upgrade = true;
+        s.response.tunnel_timeout_s = loc.proxy.tunnel_timeout_s;
+        s.response.upstream = "upgrade";
+    }
     x.completed = true;
     x.done();
 }

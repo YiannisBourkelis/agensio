@@ -115,6 +115,8 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
         }
         r.scratch.append(h.name).append(": ").append(h.value).append("\r\n");
     }
+    // 101: the writer adds no framing (no body) and the client needs the switch confirmed.
+    if (res.upgraded) r.scratch.append("Connection: upgrade\r\n");
     // Configured response fields, on the statuses nginx's add_header applies to.
     const int st = res.status;
     if (st == 200 || st == 201 || st == 204 || st == 206 || st == 301 || st == 302 || st == 303 || st == 304 ||

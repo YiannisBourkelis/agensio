@@ -316,8 +316,17 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       nginx knobs left out on purpose. 18 integration checks against the upstream's new
       `/headers` and `/redirect` modes. Gate (`ab-20260917-184508.md`, 3 rounds): proxy
       JSON 4.38 -> 4.49 us, the untouched static row moved the same 2.6 %, so noise.
-- [ ] D3 WebSocket / `Upgrade` tunnelling (Rocket.Chat, ThingsBoard need it), plus
-      HTTP/2-to-HTTP/1.1 downgrade for upstreams once phase G exists.
+- [x] D3 (2026-09-17) WebSocket / `Upgrade` tunnelling: a request with `Connection:
+      Upgrade` and an `Upgrade` field (and no body) is forwarded as one (`Connection:
+      Upgrade` to the origin, the field passed through); a 101 ends the exchange
+      (`finish_upgraded`: slot back, connection kept) and `Http1Connection` takes the
+      origin connection as the peer of a tunnel: two byte pumps with their own buffers,
+      bytes that followed either head forwarded first, a side's EOF half-closing the
+      other (TLS clients: close), the idle timer reused with `tunnel_timeout` (0 = none
+      by default). `upgrade = false` per location refuses. Integration: 101 with
+      Upgrade/Connection and no Content-Length, early bytes, 100 KB both ways, close
+      propagation, a 101 logged with `upstream=upgrade`. HTTP/2-to-HTTP/1.1 downgrade
+      for upstreams moves to phase G where it belongs.
 - [ ] D4 Upstream groups from the start: `upstream = ["http://a:3000", "http://b:3000"]`,
       round-robin, passive health marking (N failures -> down for T seconds), retries on
       idempotent requests only; TLS to upstream (verify on/off). No active checks or

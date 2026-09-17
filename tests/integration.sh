@@ -438,6 +438,38 @@ if [ -n "$UP_PID" ]; then
   R=$(curl -sS -i $P/policy/redirect | tr -d '\r')
   check "proxy: hidden field dropped" "0" "$(echo "$R" | grep -c '^X-Powered-By:')"
   check "proxy: redirects = pass leaves Location alone" "Location: http://127.0.0.1:9107/json" "$(curl -sS -i $P/raw/redirect | tr -d '\r' | grep '^Location:')"
+  # Upgrade tunnelling (D3): 101 passed through with Upgrade/Connection, bytes flow both
+  # ways (including the ones sent right behind the request head), the origin's close ends it.
+  tunnel=$(python3 - <<'PYT'
+import socket
+s = socket.create_connection(("127.0.0.1", 8091)); s.settimeout(5)
+s.sendall(b"GET /tunnel HTTP/1.1\r\nHost: t\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\nearly")
+data = b""
+while b"\r\n\r\n" not in data: data += s.recv(4096)
+head, rest = data.split(b"\r\n\r\n", 1)
+lines = head.decode().split("\r\n")
+status = lines[0]; fields = {l.split(":")[0].lower(): l.split(":", 1)[1].strip() for l in lines[1:]}
+while len(rest) < 5: rest += s.recv(4096)
+s.sendall(b"ping-" * 20000)  # 100 KB through the tunnel
+got = rest[5:]
+while len(got) < 100000: got += s.recv(65536)
+s.shutdown(socket.SHUT_WR)
+tail = b""
+try:
+    while True:
+        c = s.recv(4096)
+        if not c: break
+        tail += c
+    closed = "closed"
+except socket.timeout:
+    closed = "open"
+print(status, fields.get("upgrade"), fields.get("connection"), "content-length" in fields, rest[:5].decode(), got == b"ping-" * 20000, closed)
+PYT
+)
+  check "proxy: Upgrade tunnel: 101, fields, early bytes, 100 KB both ways, close follows" "HTTP/1.1 101 Switching Protocols echo upgrade False early True closed" "$tunnel"
+  check "proxy: Upgrade to an origin path that ignores it is a normal answer" "200" "$(code -H 'Connection: Upgrade' -H 'Upgrade: websocket' $P/json)"
+  sleep 1.2
+  check "access log: the 101 logged with upstream=upgrade" "yes" "$(grep -q '"target":"/tunnel".*"status":101.*"upstream":"upgrade"' bench/tmp/access.log && echo yes)"
   check "proxy: -t warns about the unreachable origin" "yes" "$("$BIN" -t -c bench/tmp/agensio-test.toml 2>&1 >/dev/null | grep -q 'warning: proxy upstream 127.0.0.1:9199' && echo yes)"
   sleep 1.2
   check "access log: upstream field for the proxy" "yes" "$(grep -q '"target":"/json".*"upstream":"ok"}$' bench/tmp/access.log && echo yes)"
