@@ -132,6 +132,10 @@ endif()
 
 add_executable(agensio_bench_header tests/bench_header.cpp)
 
+# Benchmark upstream for the reverse proxy (roadmap D0): shares nothing with agensio_core.
+add_executable(agensio_upstream bench/upstream/upstream.cpp)
+target_link_libraries(agensio_upstream PRIVATE asio Threads::Threads)
+
 # ---------------------------------------------------------------- fuzzers (parsers only, no asio)
 if(AGENSIO_FUZZ)
   foreach(t parser path chunked fcgi)

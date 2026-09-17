@@ -263,6 +263,17 @@ Small on purpose: the first real applications need forms, logins and uploads; th
 - [x] Checkpoint (2026-09-17): Laravel welcome page served with one worker; table above.
 
 ### Phase D. Reverse proxy  `[ ]`
+- [x] D0 (2026-09-17) Benchmark upstream and baseline before the first line of proxy code:
+      `bench/upstream/upstream.cpp` (target `agensio_upstream`, Asio, shares nothing with
+      agensio) answers 500k+ req/s on one core so the proxy in front of it is the
+      bottleneck and its CPU per request is what a run reads, as with static files and
+      Laravel. Modes by path: `/json`, `/big` (100 KB), `/slow?ms=N` (a working
+      application: connection pools and concurrency under a delayed answer), `/chunked`,
+      `/close` (reconnects), `/stats` (connections accepted, so a test can prove the pool
+      reuses them). `bench/proxy/run.sh` runs the upstream direct, nginx (`upstream`
+      keepalive, `proxy_http_version 1.1`) and Caddy one worker each, later agensio, and
+      records req/s, latency, proxy CPU per request and the upstream connections each
+      proxy opened. The baseline rows are the targets for D1-D4.
 - [ ] D1 `HttpClient`: async HTTP/1.1 upstream, per-worker keep-alive pool, request body
       forwarding, response `BodySource` (chunked/length/close-delimited), streaming
       (SSE) with buffering off, timeouts (connect/read/write), `502`/`504`.

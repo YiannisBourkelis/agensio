@@ -27,7 +27,10 @@ Everything under "Architecture" below is what the code does now, not a proposal.
   The gate is `bench/ab.sh <base-ref>` on the Linux box (alternates the base and new
   binaries in one session; noise floor about 3 % on the 1 KB rows at 5 s, 2 rounds):
   every phase checkpoint and every performance-sensitive change gets its A/B there before
-  it counts. Linux-only work (kTLS, io_uring, Landlock, FUSE behaviour) is developed there.
+  it counts. Proxy code (`src/upstream/http*`, `src/handlers/proxy*`, phase D) is gated
+  with `bench/ab.sh <base-ref> -P`, which adds the proxy rows through the benchmark
+  upstream (`bench/upstream/`, D0); `bench/proxy/run.sh` is the comparison against nginx
+  and Caddy. Linux-only work (kTLS, io_uring, Landlock, FUSE behaviour) is developed there.
   Never trade throughput for convenience on the hot path (no allocations per request that
   the old design avoided, no locks on the cache-hit path, no per-request string formatting
   of constant headers).
