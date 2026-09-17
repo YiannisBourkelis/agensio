@@ -9,6 +9,7 @@
 #include <string_view>
 #include <vector>
 
+#include "config.hpp"
 #include "core/stream.hpp"
 #include "upstream/client.hpp"
 
@@ -26,9 +27,11 @@ void collect_request_body(Stream& s, UpstreamBodyInput& body, std::size_t memory
                           std::shared_ptr<void> holder, std::function<void(bool)> then);
 
 // The client's response from a successful exchange: status, every head field except the
-// framing and connection ones the writer owns, and the body as the result carries it.
-// `source` is the streaming body when the result is streamed. `log_name` is the access
-// log's upstream field.
-void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<StreamBody> source, const char* log_name);
+// framing and connection ones the writer owns (and, for a proxy location, the fields it
+// hides; a Location naming the origin is rewritten to this site), the location's
+// add_headers on 2xx/3xx, and the body as the result carries it. `source` is the
+// streaming body when the result is streamed. `log_name` is the access log's upstream field.
+void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<StreamBody> source, const char* log_name,
+                           const LocationConfig& loc);
 
 }  // namespace agensio

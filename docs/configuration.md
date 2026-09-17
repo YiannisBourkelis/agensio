@@ -391,17 +391,24 @@ and one warning per site says which customer cannot read their log.
 ## 12. Reverse proxy
 
 `upstream = "http://host:port"` (or `"unix:/path"`) on a location forwards everything under
-it to an HTTP/1.1 origin:
+it to an HTTP/1.1 origin. The defaults are what a site behind a proxy needs, so most setups
+are one line per location:
 
 ```toml
 [[site]]
 server_name = ["app.example.com"]
-listen = ["0.0.0.0:80"]
-root = "/var/www/app/public"      # static files served here first when a location says so
+listen = ["0.0.0.0:443"]
+root = "/var/www/app/public"      # static files served here where a location says so
+tls = { cert = "...", key = "..." }
+proxy = { read_timeout = 120 }    # site-wide defaults for every proxy location below
 
 [[site.location]]                 # the application
 path = "/"
 upstream = "http://127.0.0.1:3000"
+
+[[site.location]]                 # an API on another service, its prefix dropped:
+path = "/api/"                    # /api/users -> http://127.0.0.1:4000/users
+upstream = "http://127.0.0.1:4000/"
 
 [[site.location]]                 # server-sent events: stream, do not buffer
 path = "/events/"
@@ -412,33 +419,68 @@ proxy = { buffering = false, read_timeout = 3600 }
 path = "/assets/"
 ```
 
-What the origin sees: the client's request line as sent, every field except the hop-by-hop
-ones (Connection and whatever it lists, Keep-Alive, TE, Trailer, Transfer-Encoding,
-Upgrade, Expect) and the framing ones, Host passed through, `X-Forwarded-For` with the
-client address appended, `X-Forwarded-Proto` and `X-Forwarded-Host` set. The body goes as
-Content-Length when its size is known (also after agensio collected a chunked body), else
-chunked. Rewriting Host, the target prefix and custom fields arrive with the next step.
+**Target.** The client's request line is forwarded as sent. With a URI part on `upstream`
+(`http://host:port/` or `.../v1/`) the location's prefix is replaced by it, the way
+nginx's `proxy_pass` with a URI works; without one the path is untouched. Exact and
+suffix locations cannot rewrite.
 
-What the client sees: the origin's status and fields except framing and connection ones,
-Server and Date (agensio's own). A chunked origin body is re-framed with a Content-Length
-when buffered, passed on as chunked when streaming.
+**What the origin sees**, with no configuration:
 
-`proxy = { ... }` takes the same keys as `php = { ... }` (section 7) with these defaults
-and meanings for an origin:
+- `Host` as the client sent it. (nginx forwards the upstream's address unless told
+  otherwise, which is the first thing everyone has to fix; here `host = "upstream"` is the
+  opt-in and `host = "app.internal"` a literal.)
+- `X-Forwarded-For`, `X-Forwarded-Proto` and `X-Forwarded-Host`, always set by agensio.
+  A client that is not one of `server.trusted_proxies` gets its own X-Forwarded-* replaced,
+  never appended to, so nothing from the open internet reaches the application as a
+  believed address. Behind a trusted proxy the chain is appended to. `forwarded =
+  "forwarded"` sends RFC 7239 `Forwarded` instead, `"both"` sends both, `"off"` neither.
+- Every other field except the hop-by-hop ones (`Connection` and whatever it lists,
+  `Keep-Alive`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`, `Expect`) and the framing.
+- The body with a Content-Length when its size is known (also after agensio collected a
+  chunked body), chunked otherwise. Keep-alive to the origin, HTTP/1.1: nothing to enable.
+
+`headers = { ... }` sets fields on the way to the origin. A value may use `$host`,
+`$remote_addr` (the client as agensio knows it, forwarded-aware), `$scheme`,
+`$server_name` and `$server_port`; an empty value removes the client's field. A site's
+`proxy = { headers = ... }` and a location's are merged, the location winning per field:
+nothing is silently reset by a nested table, which is nginx's best-known
+`proxy_set_header` trap.
+
+**What the client sees.** The origin's status and fields, except framing and connection
+ones, `Server` and `Date` (agensio's own), and whatever `hide = [...]` lists. A chunked
+origin body is re-framed with a Content-Length when buffered, passed on as chunked when
+streaming. A `Location` that points at the origin's own address is rewritten to this site
+and location (`redirects = "pass"` leaves it alone). The location's `add_headers` are
+added on 2xx and 3xx answers (HSTS, CORS, cache policy), for proxied and PHP responses
+alike.
+
+**Options** of `proxy = { ... }`, on a site (defaults for its locations) or a location:
 
 | option | default | meaning |
 |---|---|---|
-| `keep_conn` | `true` | keep-alive to the origin; the pool is per worker, so workers x `max_idle` idle connections at most |
+| `host` | `"pass"` | `"pass"` the client's Host, `"upstream"` the origin's address, or a literal name |
+| `forwarded` | `"x-forwarded"` | `"x-forwarded"`, `"forwarded"` (RFC 7239), `"both"`, `"off"` |
+| `headers` | none | fields set toward the origin, `{ "X-Real-IP" = "$remote_addr" }`; `""` removes |
+| `hide` | none | fields dropped from the origin's answer, `["X-Powered-By"]` |
+| `redirects` | `"rewrite"` | Location pointing at the origin rewritten to this site, or `"pass"` |
 | `buffering` | `true` | collect the whole answer (memory, then a temp file above `buffer_max`) so a slow client never holds the origin; `false` streams with backpressure |
 | `request_buffering` | `true` | collect the request body before connecting; `false` streams it as it arrives |
 | `connect_timeout`, `send_timeout`, `read_timeout` | 5, 30, 60 s | 504 when exceeded; `read_timeout` is between two reads from the origin |
-| `max_connections`, `queue_depth`, `queue_wait` | 16, 64, 5 s | per worker: in flight, waiting, and the longest wait before a 503 with `Retry-After` |
+| `keep_conn`, `max_idle` | `true`, 64 | keep-alive to the origin; idle connections kept per worker |
+| `max_connections`, `queue_depth`, `queue_wait` | 256, 1024, 5 s | per worker: in flight, waiting, and the longest wait before a 503 with `Retry-After` |
 | `head_max` | 64 KB | an origin head larger than this is a 502 |
 
-A GET or HEAD whose kept connection turns out dead is retried once on a fresh one. An
-origin that is down gives 502, a timeout 504, a full queue 503; each is logged with the
-reason and appears in the JSON access log as `upstream`. `agensio -t` connects to every
-origin once and warns when it cannot.
+The pool is per worker, so an origin sees at most workers x `max_connections` connections
+and workers x `max_idle` idle ones. A GET or HEAD whose kept connection turns out dead is
+retried once on a fresh one. An origin that is down gives 502, a timeout 504, a full
+queue 503; each is logged with the reason and appears in the JSON access log as
+`upstream`. `agensio -t` connects to every origin once and warns when it cannot, and
+`-t --explain` prints the effective policy of every proxy location.
+
+Not here on purpose: separate buffer-size knobs (nginx's `proxy_buffer_size`,
+`proxy_buffers`, `proxy_busy_buffers_size` and their interplay), a `proxy_http_version`
+switch, the Upgrade/Connection incantation for WebSockets (automatic in D3), and
+`proxy_redirect` rules with regular expressions.
 
 ## 13. TLS
 

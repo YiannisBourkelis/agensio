@@ -93,6 +93,7 @@ struct SiteConfig {
     std::vector<std::string> index{"index.html"};
     std::vector<TryStep> try_files;  // default for locations that do not set their own
     FcgiConfig php;                  // `php = { socket = ... }`: default upstream for fastcgi locations
+    UpstreamConfig proxy;            // `proxy = { ... }`: defaults for the proxy locations of this site
     std::optional<TlsConfig> tls;
     bool is_default = false;
     bool hidden_files = false;   // serve paths with a segment starting with '.' (.env, .git, .htaccess)

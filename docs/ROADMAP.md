@@ -301,8 +301,21 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       The FastCGI path shares the change: Laravel over the unix socket went from 51.0 to
       46.6 us per page request (fresh connections) and 25.1 to 23.0 us per JSON request
       (keep-alive); TCP through docker-proxy unchanged (`laravel-keepconn-20260917.md`).
-- [ ] D2 Header handling: hop-by-hop stripping, `X-Forwarded-For/Proto/Host`,
-      `Forwarded`, `Host` passthrough or rewrite, `proxy_set_header` equivalent.
+- [x] D2 (2026-09-17) Header policy, designed around what nginx gets criticised for:
+      Host passed through by default (`host = "pass" | "upstream" | "name"`),
+      X-Forwarded-For/Proto/Host always set and, from a peer that is not a trusted proxy,
+      replaced rather than appended (nothing a client sends is believed); `forwarded =
+      "x-forwarded" | "forwarded" | "both" | "off"` (RFC 7239 with bracketed IPv6);
+      `headers = { name = "value" }` toward the origin with `$host`, `$remote_addr`,
+      `$scheme`, `$server_name`, `$server_port`, `""` removing, site and location tables
+      merged per field (no `proxy_set_header` reset trap); `hide = [...]` on the way back;
+      `redirects = "rewrite"` (a Location naming the origin becomes this site and location)
+      or `"pass"`; the location's `add_headers` on 2xx/3xx for proxied and PHP answers
+      alike; a site-level `proxy = { ... }` as the default for its locations. Documented
+      as the complete proxy reference in `docs/configuration.md` section 12, with the
+      nginx knobs left out on purpose. 18 integration checks against the upstream's new
+      `/headers` and `/redirect` modes. Gate (`ab-20260917-184508.md`, 3 rounds): proxy
+      JSON 4.38 -> 4.49 us, the untouched static row moved the same 2.6 %, so noise.
 - [ ] D3 WebSocket / `Upgrade` tunnelling (Rocket.Chat, ThingsBoard need it), plus
       HTTP/2-to-HTTP/1.1 downgrade for upstreams once phase G exists.
 - [ ] D4 Upstream groups from the start: `upstream = ["http://a:3000", "http://b:3000"]`,

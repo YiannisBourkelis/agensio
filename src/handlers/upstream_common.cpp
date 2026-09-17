@@ -59,8 +59,39 @@ void collect_request_body(Stream& s, UpstreamBodyInput& body, std::size_t memory
     BodyReader::step(s, body, memory_max, chunk, std::move(holder), std::move(then));
 }
 
-void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<StreamBody> source, const char* log_name) {
+namespace {
+
+// "http://<origin address><rewrite prefix>rest" -> "<scheme>://<host><location prefix>rest".
+bool rewrite_location(std::string& out, std::string_view value, const Stream& s, const LocationConfig& loc) {
+    const std::string_view origin = loc.proxy.address.key;
+    if (loc.proxy.address.unix || !value.starts_with("http://")) return false;
+    std::string_view rest = value.substr(7);
+    if (!rest.starts_with(origin)) return false;
+    rest.remove_prefix(origin.size());
+    if (!rest.empty() && rest.front() != '/') return false;  // a longer host name
+    const std::string_view prefix = loc.proxy.rewrite.empty() ? std::string_view("/") : loc.proxy.rewrite;
+    if (rest.starts_with(prefix)) rest.remove_prefix(prefix.size());
+    else if (rest.empty() || rest == "/") rest = {};
+    else return false;  // outside the mapped prefix: leave it
+    const bool https = s.conn.tls || s.conn.forwarded_https;
+    out.append(https ? "https://" : "http://").append(s.request.host).append(loc.path);
+    if (!loc.path.empty() && loc.path.back() != '/' && !rest.empty()) out.push_back('/');
+    out.append(rest);
+    return true;
+}
+
+bool hidden(std::string_view name, const LocationConfig& loc) {
+    for (const auto& h : loc.proxy.hide)
+        if (Headers::iequals(h, name)) return true;
+    return false;
+}
+
+}  // namespace
+
+void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<StreamBody> source, const char* log_name,
+                           const LocationConfig& loc) {
     Response& r = s.response;
+    const bool proxied = loc.kind == HandlerKind::proxy;
     r.reset();
     r.status = res.status;
     r.keep_alive = s.request.keep_alive;
@@ -75,8 +106,20 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
             Headers::iequals(h.name, "connection") || Headers::iequals(h.name, "keep-alive") ||
             Headers::iequals(h.name, "server") || Headers::iequals(h.name, "date"))
             continue;
+        if (proxied && hidden(h.name, loc)) continue;
+        if (proxied && loc.proxy.rewrite_redirects && Headers::iequals(h.name, "location")) {
+            r.scratch.append("Location: ");
+            if (!rewrite_location(r.scratch, h.value, s, loc)) r.scratch.append(h.value);
+            r.scratch.append("\r\n");
+            continue;
+        }
         r.scratch.append(h.name).append(": ").append(h.value).append("\r\n");
     }
+    // Configured response fields, on the statuses nginx's add_header applies to.
+    const int st = res.status;
+    if (st == 200 || st == 201 || st == 204 || st == 206 || st == 301 || st == 302 || st == 303 || st == 304 ||
+        st == 307 || st == 308)
+        for (const auto& h : loc.add_headers) r.scratch.append(h.first).append(": ").append(h.second).append("\r\n");
     if (res.streamed) {  // buffering off, or the temp-file cap switched it mid-response
         r.prebuilt_headers = r.scratch;  // the writer adds Content-Length or chunked framing
         if (!no_body_status) r.body = std::move(source);

@@ -219,7 +219,11 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   builds the forwarded head (hop-by-hop stripped, Host through, X-Forwarded-For/Proto/
   Host) and `handlers/upstream_common.*` holds what both handlers share (error page,
   body collection, result to Response). Response-head parser in
-  `src/upstream/http_head.hpp` (fuzzed). Gate: `bench/ab.sh <ref> -P`.
+  `src/upstream/http_head.hpp` (fuzzed). Gate: `bench/ab.sh <ref> -P`. Header policy
+  (D2, `proxy = { host, forwarded, headers, hide, redirects }`, site table as defaults):
+  Host passed through, X-Forwarded-* replaced from untrusted peers and appended behind
+  `trusted_proxies`, RFC 7239 on request, `$`-variables in configured fields, hidden
+  response fields, origin-pointing Location rewritten; see `docs/configuration.md` 12.
 - **Presets** (C3): `app = "laravel" | "wordpress" | "php" | "static"` on a site expands
   at load into root, index, try_files and locations (Laravel: only `/index.php` is ever
   executed, `/build/` gets an immutable Cache-Control via `add_headers`; WordPress: any

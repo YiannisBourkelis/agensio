@@ -8,6 +8,8 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace agensio {
 
@@ -68,6 +70,20 @@ struct UpstreamConfig {
     // Proxy: `upstream = "http://host:port/prefix/"` replaces the location's prefix of the
     // target with "/prefix/" (nginx proxy_pass with a URI); "" forwards the target as sent.
     std::string rewrite;
+    // Proxy header policy (D2). `host`: "pass" (the client's Host, default), "upstream" (the
+    // origin's address) or a literal name. `forwarded`: which client-address convention
+    // goes to the origin: "x-forwarded" (X-Forwarded-For/Proto/Host, default),
+    // "forwarded" (RFC 7239), "both" or "off". A peer that is not a trusted proxy gets its
+    // own X-Forwarded-* replaced, never appended to (nothing a client sends is believed).
+    // `set_headers`: fields set on the way to the origin ("" removes; values may use $host,
+    // $remote_addr, $scheme, $server_name, $server_port). `hide`: fields dropped from the
+    // origin's answer. `rewrite_redirects`: a Location pointing at the origin's address is
+    // rewritten to this site.
+    std::string host = "pass";
+    std::string forwarded = "x-forwarded";
+    std::vector<std::pair<std::string, std::string>> set_headers;
+    std::vector<std::string> hide;
+    bool rewrite_redirects = true;
     std::string params_prefix;  // FastCGI: constant FCGI_PARAMS pairs of this location, encoded once at load
     std::string retry_after;    // "Retry-After" value for 503s (queue_wait in seconds)
 };

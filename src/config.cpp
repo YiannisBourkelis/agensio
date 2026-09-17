@@ -174,6 +174,47 @@ std::string default_pools_run() {
     return "/run/php";                                               // Debian, Ubuntu, Alpine
 }
 
+std::vector<std::pair<std::string, std::string>> headers_of(const toml::table* t, const std::string& where);
+
+// The proxy's header policy keys of a `proxy = { ... }` table (site defaults or a location).
+void parse_proxy_policy(const toml::table& t, UpstreamConfig& out, const std::string& where) {
+    if (auto h = t["host"].value<std::string>()) {
+        out.host = *h == "pass" || *h == "upstream" ? *h : to_lower(*h);
+        if (out.host.empty() || out.host.find_first_of(" \t\r\n/") != std::string::npos)
+            fail(where + ".host must be \"pass\", \"upstream\" or a host name");
+    }
+    if (auto f = t["forwarded"].value<std::string>()) {
+        out.forwarded = to_lower(*f);
+        if (out.forwarded != "x-forwarded" && out.forwarded != "forwarded" && out.forwarded != "both" &&
+            out.forwarded != "off")
+            fail(where + ".forwarded must be \"x-forwarded\", \"forwarded\", \"both\" or \"off\"");
+    }
+    if (t.contains("headers")) {
+        auto* ht = t["headers"].as_table();
+        if (!ht) fail(where + ".headers must be a table");
+        for (auto& [name, value] : headers_of(ht, where)) {
+            bool replaced = false;
+            for (auto& existing : out.set_headers)
+                if (Headers::iequals(existing.first, name)) {
+                    existing.second = value;
+                    replaced = true;
+                }
+            if (!replaced) out.set_headers.emplace_back(name, value);
+        }
+    }
+    if (t.contains("hide"))
+        for (const auto& name : string_list(t["hide"], (where + ".hide").c_str())) {
+            for (unsigned char c : name)
+                if (c <= 0x20 || c == ':' || c == 0x7f) fail(where + ".hide: bad field name '" + name + "'");
+            out.hide.push_back(name);
+        }
+    if (auto r = t["redirects"].value<std::string>()) {
+        const std::string mode = to_lower(*r);
+        if (mode != "rewrite" && mode != "pass") fail(where + ".redirects must be \"rewrite\" or \"pass\"");
+        out.rewrite_redirects = mode == "rewrite";
+    }
+}
+
 // `php = { ... }` (site) or `fastcgi = { ... }` (location): socket plus options, on top of `base`.
 void parse_fcgi_table(const toml::table& t, const fs::path& base_dir, FcgiConfig& out, const std::string& where) {
     if (auto sock = t["socket"].value<std::string>()) {
@@ -286,14 +327,15 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
     else if (t.contains("add_headers")) fail(where + ": 'add_headers' must be a table");
     // `upstream = "http://host:port"` (or unix:/path) makes a proxy location; `proxy = { ... }`
     // carries the options (the same keys as php/fastcgi) and may name the upstream too.
-    // Proxy defaults: keep-alive to the origin, and pool bounds sized for a front-end
-    // (per worker: 256 in flight, 1024 waiting, 64 idle kept), not for php-fpm children.
-    loc.proxy.options.keep_conn = true;
-    loc.proxy.options.max_connections = 256;
-    loc.proxy.options.queue_depth = 1024;
-    loc.proxy.options.max_idle = 64;
-    if (auto pt = t["proxy"].as_table()) parse_fcgi_table(*pt, base_dir, loc.proxy, where + ".proxy");
-    else if (t.contains("proxy")) fail(where + ": 'proxy' must be a table");
+    // The site's `proxy = { ... }` is the default; the location's table refines it.
+    loc.proxy = site.proxy;
+    loc.proxy.configured = false;
+    if (auto pt = t["proxy"].as_table()) {
+        parse_fcgi_table(*pt, base_dir, loc.proxy, where + ".proxy");
+        parse_proxy_policy(*pt, loc.proxy, where + ".proxy");
+    } else if (t.contains("proxy")) {
+        fail(where + ": 'proxy' must be a table");
+    }
     if (auto up = t["upstream"].value<std::string>()) {
         std::string text = *up;
         if (text.starts_with("http://")) text = text.substr(7);
@@ -526,6 +568,19 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     if (t.contains("try_files")) site.try_files = try_files_of(t["try_files"], where);
     if (auto pt = t["php"].as_table()) parse_fcgi_table(*pt, base_dir, site.php, where + ".php");
     else if (t.contains("php")) fail(where + ": 'php' must be a table");
+    // Proxy defaults for the site's locations: keep-alive to the origin, and pool bounds
+    // sized for a front-end (per worker: 256 in flight, 1024 waiting, 64 idle kept), not
+    // for php-fpm children.
+    site.proxy.options.keep_conn = true;
+    site.proxy.options.max_connections = 256;
+    site.proxy.options.queue_depth = 1024;
+    site.proxy.options.max_idle = 64;
+    if (auto pt = t["proxy"].as_table()) {
+        parse_fcgi_table(*pt, base_dir, site.proxy, where + ".proxy");
+        parse_proxy_policy(*pt, site.proxy, where + ".proxy");
+    } else if (t.contains("proxy")) {
+        fail(where + ": 'proxy' must be a table");
+    }
     site.user = account_name(t["user"], where + ".user");
     site.group = account_name(t["group"], where + ".group");
     if (!site.group.empty() && site.user.empty()) fail(where + ": 'group' needs 'user'");
@@ -722,6 +777,16 @@ void explain_config(const Config& cfg, std::ostream& out) {
             if (loc.kind == HandlerKind::proxy) {
                 out << "upstream = \"" << loc.proxy.address.key << loc.proxy.rewrite << "\"\n";
                 print_fcgi(out, "proxy", loc.proxy);
+                out << "proxy.host = \"" << loc.proxy.host << "\"\nproxy.forwarded = \"" << loc.proxy.forwarded
+                    << "\"\nproxy.redirects = \"" << (loc.proxy.rewrite_redirects ? "rewrite" : "pass") << "\"\n";
+                if (!loc.proxy.set_headers.empty()) {
+                    out << "proxy.headers = {";
+                    for (std::size_t i = 0; i < loc.proxy.set_headers.size(); ++i)
+                        out << (i ? ", " : " ") << '"' << loc.proxy.set_headers[i].first << "\" = \""
+                            << loc.proxy.set_headers[i].second << '"';
+                    out << " }\n";
+                }
+                if (!loc.proxy.hide.empty()) print_list(out, "proxy.hide", loc.proxy.hide);
             }
             if (loc.priority) out << "priority = true\n";
             out << "methods = \"" << loc.allow << "\"\n";

@@ -1,5 +1,7 @@
 #include "handlers/proxy.hpp"
 
+#include <charconv>
+
 #include "handlers/upstream_common.hpp"
 #include "upstream/http_head.hpp"
 
@@ -16,28 +18,103 @@ struct ProxyHandler::Exchange : std::enable_shared_from_this<Exchange> {
     bool completed = false;
 };
 
-void ProxyHandler::build_head(std::string& out, const Stream& s, std::string_view target) {
+namespace {
+
+// $host, $remote_addr, $scheme, $server_name, $server_port in a configured header value.
+void expand(std::string& out, std::string_view value, const Stream& s) {
+    std::size_t pos = 0;
+    while (pos < value.size()) {
+        const std::size_t dollar = value.find('$', pos);
+        if (dollar == std::string_view::npos) {
+            out.append(value.substr(pos));
+            return;
+        }
+        out.append(value.substr(pos, dollar - pos));
+        const std::string_view rest = value.substr(dollar);
+        auto take = [&](std::string_view name, std::string_view replacement) {
+            if (!rest.starts_with(name)) return false;
+            out.append(replacement);
+            pos = dollar + name.size();
+            return true;
+        };
+        const std::string_view client = s.conn.client_address.empty() ? s.conn.remote_address : s.conn.client_address;
+        const bool https = s.conn.tls || s.conn.forwarded_https;
+        char port[8];
+        const auto r = std::to_chars(port, port + sizeof port, s.conn.local_port);
+        if (take("$host", s.request.host) || take("$remote_addr", client) || take("$scheme", https ? "https" : "http") ||
+            take("$server_name", s.request.host) ||
+            take("$server_port", std::string_view(port, static_cast<std::size_t>(r.ptr - port))))
+            continue;
+        out.push_back('$');
+        pos = dollar + 1;
+    }
+}
+
+// RFC 7239 "for=" needs IPv6 literals bracketed and quoted.
+void forwarded_for(std::string& out, std::string_view addr) {
+    if (addr.find(':') != std::string_view::npos) out.append("\"[").append(addr).append("]\"");
+    else out.append(addr);
+}
+
+}  // namespace
+
+void ProxyHandler::build_head(std::string& out, const Stream& s, std::string_view target, const UpstreamConfig& policy) {
     const Request& req = s.request;
     out.append(req.method_name).append(" ").append(target).append(" HTTP/1.1\r\n");
     const std::string_view connection = req.headers.get("connection");
-    bool saw_xff = false, saw_host = false;
+    const bool trusted = s.conn.trusted_peer;
+    const bool x_forwarded = policy.forwarded == "x-forwarded" || policy.forwarded == "both";
+    const bool rfc_forwarded = policy.forwarded == "forwarded" || policy.forwarded == "both";
+    auto configured = [&](std::string_view name) {
+        for (const auto& h : policy.set_headers)
+            if (Headers::iequals(h.first, name)) return true;
+        return false;
+    };
+    std::string_view xff, xfh, forwarded;
     for (const HeaderField& h : req.headers) {
         if (http::is_hop_by_hop(h.name) || Headers::iequals(h.name, "expect") ||
             (!connection.empty() && http::connection_lists(connection, h.name)))
             continue;
-        if (Headers::iequals(h.name, "x-forwarded-for")) {
-            saw_xff = true;
-            out.append("X-Forwarded-For: ").append(h.value).append(", ").append(s.conn.remote_address).append("\r\n");
+        if (configured(h.name)) continue;  // set below from the configuration
+        if (Headers::iequals(h.name, "host")) {
+            if (policy.host == "pass") out.append("Host: ").append(h.value).append("\r\n");
             continue;
         }
-        if (Headers::iequals(h.name, "x-forwarded-proto") || Headers::iequals(h.name, "x-forwarded-host")) continue;
-        if (Headers::iequals(h.name, "host")) saw_host = true;
+        // The client's forwarding fields are believed only from a trusted proxy (then
+        // appended to), never from the open internet (then replaced).
+        if (Headers::iequals(h.name, "x-forwarded-for")) { if (trusted) xff = h.value; continue; }
+        if (Headers::iequals(h.name, "x-forwarded-host")) { if (trusted) xfh = h.value; continue; }
+        if (Headers::iequals(h.name, "x-forwarded-proto") || Headers::iequals(h.name, "x-forwarded-port")) continue;
+        if (Headers::iequals(h.name, "forwarded")) { if (trusted) forwarded = h.value; continue; }
         out.append(h.name).append(": ").append(h.value).append("\r\n");
     }
-    if (!saw_host) out.append("Host: ").append(req.host).append("\r\n");
-    if (!saw_xff) out.append("X-Forwarded-For: ").append(s.conn.remote_address).append("\r\n");
-    out.append("X-Forwarded-Proto: ").append(s.conn.tls || s.conn.forwarded_https ? "https" : "http").append("\r\n");
-    if (!req.host.empty()) out.append("X-Forwarded-Host: ").append(req.host).append("\r\n");
+    if (policy.host == "upstream") out.append("Host: ").append(policy.address.key).append("\r\n");
+    else if (policy.host != "pass") out.append("Host: ").append(policy.host).append("\r\n");
+    else if (req.headers.get("host").empty() && !req.host.empty()) out.append("Host: ").append(req.host).append("\r\n");
+    const bool https = s.conn.tls || s.conn.forwarded_https;
+    const std::string_view host = xfh.empty() ? req.host : xfh;
+    if (x_forwarded) {
+        out.append("X-Forwarded-For: ");
+        if (!xff.empty()) out.append(xff).append(", ");
+        out.append(s.conn.remote_address).append("\r\n");
+        out.append("X-Forwarded-Proto: ").append(https ? "https" : "http").append("\r\n");
+        if (!host.empty()) out.append("X-Forwarded-Host: ").append(host).append("\r\n");
+    }
+    if (rfc_forwarded) {
+        out.append("Forwarded: ");
+        if (!forwarded.empty()) out.append(forwarded).append(", ");
+        out.append("for=");
+        forwarded_for(out, s.conn.remote_address);
+        out.append(";proto=").append(https ? "https" : "http");
+        if (!host.empty()) out.append(";host=").append(host);
+        out.append("\r\n");
+    }
+    for (const auto& h : policy.set_headers) {
+        if (h.second.empty()) continue;  // "" removes
+        out.append(h.first).append(": ");
+        expand(out, h.second, s);
+        out.append("\r\n");
+    }
 }
 
 std::shared_ptr<UpstreamRequest> ProxyHandler::start(Stream& s, const LocationConfig& loc, WorkerState& ws,
@@ -65,7 +142,7 @@ std::shared_ptr<UpstreamRequest> ProxyHandler::start(Stream& s, const LocationCo
         if (!target.starts_with(loc.path)) rewritten.append(query);
         target = rewritten;
     }
-    build_head(ws.scratch, s, target);
+    build_head(ws.scratch, s, target, loc.proxy);
     x->req = std::make_shared<HttpRequest>(pool, loc.proxy.address, opts);
     // The head text is handed to the request as an owned string: collecting the body may
     // run the connection's reads inline, and ws.scratch belongs to whoever runs next.
@@ -122,7 +199,7 @@ void ProxyHandler::finish(Exchange& x, UpstreamResult& res) {
         x.done();
         return;
     }
-    apply_upstream_result(s, res, res.streamed ? x.req->body_source() : nullptr, "ok");
+    apply_upstream_result(s, res, res.streamed ? x.req->body_source() : nullptr, "ok", loc);
     x.completed = true;
     x.done();
 }

@@ -7,6 +7,8 @@
 //   /chunked        the JSON body in three chunks: the proxy's chunked decoder
 //   /close          the JSON answer with Connection: close: reconnects
 //   /echo           the request body back (Content-Type: application/octet-stream): body forwarding
+//   /headers        the request head back as text/plain: what the proxy forwarded
+//   /redirect       302 to http://127.0.0.1:<port>/json with X-Powered-By: redirect and hide rules
 //   /stats          {"connections":N,"requests":M} accepted so far: proves pool reuse
 // Build: target agensio_upstream. Run: agensio_upstream [-p 9100] [-w 1] [-b 102400].
 #include <asio.hpp>
@@ -26,6 +28,7 @@ namespace {
 std::atomic<std::uint64_t> g_connections{0};
 std::atomic<std::uint64_t> g_requests{0};
 std::string g_big;
+unsigned g_port = 9100;
 
 constexpr std::string_view kJson = R"({"ok":true,"service":"upstream"})";
 
@@ -140,6 +143,13 @@ private:
                 consumed_ += body;
             }
         }
+        if (target.substr(0, target.find('?')) == "/headers") {
+            g_requests.fetch_add(1, std::memory_order_relaxed);
+            echo_.assign(request);
+            head_ = "HTTP/1.1 200 OK\r\nServer: upstream\r\nContent-Type: text/plain\r\nContent-Length: " +
+                    std::to_string(echo_.size()) + (close ? "\r\nConnection: close\r\n\r\n" : "\r\n\r\n");
+            return write(echo_, close);
+        }
         respond(target, close);
     }
 
@@ -165,6 +175,12 @@ private:
         if (path == "/chunked") {
             static const std::string chunks = "d\r\n{\"ok\":true,\"s\r\n" "f\r\nervice\":\"upstre\r\n" "4\r\nam\"}\r\n" "0\r\n\r\n";
             return send(head({}, close, true), chunks, close);
+        }
+        if (path == "/redirect") {
+            head_ = "HTTP/1.1 302 Found\r\nServer: upstream\r\nLocation: http://127.0.0.1:" + std::to_string(g_port) +
+                    "/json\r\nX-Powered-By: upstream\r\nContent-Length: 0" +
+                    std::string(close ? "\r\nConnection: close\r\n\r\n" : "\r\n\r\n");
+            return write({}, close);
         }
         if (path == "/stats") {
             stats_ = "{\"connections\":" + std::to_string(g_connections.load()) + ",\"requests\":" +
@@ -322,6 +338,7 @@ int main(int argc, char** argv) {
         }
     }
     g_big = "{\"data\":\"" + std::string(big > 12 ? big - 12 : 0, 'x') + "\"}";
+    g_port = port;
     if (workers == 0) workers = 1;
 #ifndef SO_REUSEPORT
     if (workers > 1) std::fprintf(stderr, "no SO_REUSEPORT here: one worker\n"), workers = 1;

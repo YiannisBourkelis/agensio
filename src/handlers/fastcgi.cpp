@@ -281,7 +281,7 @@ void FcgiHandler::finish(Exchange& x, FcgiResult& res) {
     }
     if (res.failure == FcgiFailure::primary_script_unknown) log_failure(x, res);
     apply_upstream_result(s, res, res.streamed ? x.req->body_source() : nullptr,
-                          to_string(res.failure));  // "ok" or "primary_script_unknown"
+                          to_string(res.failure), loc);  // "ok" or "primary_script_unknown"
     x.completed = true;
     x.done();
 }

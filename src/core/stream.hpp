@@ -21,6 +21,7 @@ struct ConnectionInfo {
     // Per request, from a trusted proxy's X-Forwarded-For / X-Forwarded-Proto (else empty/false).
     std::string_view client_address;
     bool forwarded_https = false;
+    bool trusted_peer = false;  // the peer is one of server.trusted_proxies
 };
 
 struct Stream {

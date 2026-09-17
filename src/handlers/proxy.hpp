@@ -35,8 +35,9 @@ public:
     std::shared_ptr<UpstreamRequest> start(Stream& s, const LocationConfig& loc, WorkerState& ws, UpstreamPool& pool,
                                            std::function<void()> done);
 
-    // The request head to send: request line and the forwarded fields (public for tests).
-    static void build_head(std::string& out, const Stream& s, std::string_view target);
+    // The request head to send: request line and the forwarded fields per `policy`
+    // (public for tests).
+    static void build_head(std::string& out, const Stream& s, std::string_view target, const UpstreamConfig& policy);
 
 private:
     struct Exchange;

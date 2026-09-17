@@ -366,6 +366,7 @@ private:
             trusted_peer_ = in_any(cfg_.trusted_proxies, remote_addr_);
             trusted_checked_ = true;
         }
+        stream_.conn.trusted_peer = trusted_peer_;
         if (!trusted_peer_) return;
         const Request& req = stream_.request;
         std::string_view xff = req.headers.get("x-forwarded-for");

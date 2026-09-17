@@ -137,6 +137,16 @@ proxy = {{ buffering = false, request_buffering = false }}
 path = "/down/"
 upstream = "http://127.0.0.1:9199"
 
+[[site.location]]                       # D2: header policy
+path = "/policy/"
+upstream = "http://127.0.0.1:9107/"
+proxy = {{ host = "app.internal", forwarded = "both", headers = {{ "X-Real-IP" = "$remote_addr", "X-Site" = "$scheme://$host", "Accept" = "" }}, hide = ["X-Powered-By"] }}
+
+[[site.location]]                       # D2: redirects passed through untouched
+path = "/raw/"
+upstream = "http://127.0.0.1:9107/"
+proxy = {{ redirects = "pass" }}
+
 [[site.location]]
 path = "/"
 upstream = "http://127.0.0.1:9107"
@@ -407,6 +417,27 @@ if [ -n "$UP_PID" ]; then
   for _ in 1 2 3 4 5 6 7 8 9 10; do curl -sS -o /dev/null $P/json; done
   after=$(curl -sS $UPS/stats | sed 's/.*"connections":\([0-9]*\).*/\1/')
   check "proxy: 10 client connections open at most one upstream connection" "yes" "$([ $((after - before - 1)) -le 1 ] && echo yes)"
+  # Header policy (D2). 127.0.0.1 is a trusted proxy in this configuration, so a client's
+  # X-Forwarded-For is appended to; the origin echoes the head it received.
+  H=$(curl -sS -H 'X-Forwarded-For: 10.0.0.1' -H 'Accept: text/x' -H 'X-Forwarded-Proto: https' $P/headers | tr -d '\r')
+  check "proxy: Host passed through" "Host: 127.0.0.1:8091" "$(echo "$H" | grep '^Host:')"
+  check "proxy: X-Forwarded-For appended behind a trusted proxy" "X-Forwarded-For: 10.0.0.1, 127.0.0.1" "$(echo "$H" | grep '^X-Forwarded-For:')"
+  check "proxy: X-Forwarded-Proto believed from a trusted proxy" "X-Forwarded-Proto: https" "$(echo "$H" | grep '^X-Forwarded-Proto:')"
+  check "proxy: X-Forwarded-Proto is ours when the client sends none" "X-Forwarded-Proto: http" "$(curl -sS $P/headers | tr -d '\r' | grep '^X-Forwarded-Proto:')"
+  check "proxy: X-Forwarded-Host set" "X-Forwarded-Host: 127.0.0.1:8091" "$(echo "$H" | grep '^X-Forwarded-Host:')"
+  check "proxy: no Forwarded by default, client fields kept" "0 Accept: text/x" "$(echo "$H" | grep -c '^Forwarded:') $(echo "$H" | grep '^Accept:')"
+  check "proxy: Connection to the origin is keep-alive, no hop-by-hop leak" "Connection: keep-alive" "$(echo "$H" | grep '^Connection:')"
+  H=$(curl -sS -H 'Accept: text/x' $P/policy/headers | tr -d '\r')
+  check "proxy: host rewritten" "Host: app.internal" "$(echo "$H" | grep '^Host:')"
+  check "proxy: RFC 7239 Forwarded added" "Forwarded: for=127.0.0.1;proto=http;host=127.0.0.1:8091" "$(echo "$H" | grep '^Forwarded:')"
+  check "proxy: configured fields with variables" "X-Real-IP: 127.0.0.1 X-Site: http://127.0.0.1:8091" "$(echo "$H" | grep -E '^X-(Real-IP|Site):' | paste -sd' ')"
+  check "proxy: configured empty value removes the client's field" "0" "$(echo "$H" | grep -c '^Accept:')"
+  R=$(curl -sS -i $P/api/redirect | tr -d '\r')
+  check "proxy: Location pointing at the origin rewritten to this site" "Location: http://127.0.0.1:8091/api/json" "$(echo "$R" | grep '^Location:')"
+  check "proxy: origin header visible without hide" "1" "$(echo "$R" | grep -c '^X-Powered-By:')"
+  R=$(curl -sS -i $P/policy/redirect | tr -d '\r')
+  check "proxy: hidden field dropped" "0" "$(echo "$R" | grep -c '^X-Powered-By:')"
+  check "proxy: redirects = pass leaves Location alone" "Location: http://127.0.0.1:9107/json" "$(curl -sS -i $P/raw/redirect | tr -d '\r' | grep '^Location:')"
   check "proxy: -t warns about the unreachable origin" "yes" "$("$BIN" -t -c bench/tmp/agensio-test.toml 2>&1 >/dev/null | grep -q 'warning: proxy upstream 127.0.0.1:9199' && echo yes)"
   sleep 1.2
   check "access log: upstream field for the proxy" "yes" "$(grep -q '"target":"/json".*"upstream":"ok"}$' bench/tmp/access.log && echo yes)"

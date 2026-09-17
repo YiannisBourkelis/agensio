@@ -1213,15 +1213,45 @@ static void test_proxy() {
     st.request.headers.add("X-Forwarded-For", "10.0.0.1");
     st.request.headers.add("Accept", "*/*");
     st.conn.remote_address = "192.0.2.7";
+    st.conn.local_port = 443;
     st.conn.tls = true;
+    UpstreamConfig policy;  // defaults: host pass, x-forwarded, rewrite redirects
     std::string head;
-    ProxyHandler::build_head(head, st, st.request.target);
+    ProxyHandler::build_head(head, st, st.request.target, policy);
     CHECK(head.starts_with("POST /api/x?y=1 HTTP/1.1\r\n"));
     CHECK(head.find("Host: app.example.com\r\n") != std::string::npos && head.find("Accept: */*\r\n") != std::string::npos);
     CHECK(head.find("X-Drop") == std::string::npos && head.find("Transfer-Encoding") == std::string::npos &&
           head.find("Content-Length") == std::string::npos && head.find("Connection:") == std::string::npos);
-    CHECK(head.find("X-Forwarded-For: 10.0.0.1, 192.0.2.7\r\n") != std::string::npos);
+    // An untrusted peer: its X-Forwarded-For is replaced, not appended to.
+    CHECK(head.find("X-Forwarded-For: 192.0.2.7\r\n") != std::string::npos && head.find("10.0.0.1") == std::string::npos);
     CHECK(head.find("X-Forwarded-Proto: https\r\n") != std::string::npos && head.find("X-Forwarded-Host: app.example.com\r\n") != std::string::npos);
+    CHECK(head.find("Forwarded:") == std::string::npos);
+    // A trusted proxy in front: appended; both conventions; Host rewritten; configured fields.
+    st.conn.trusted_peer = true;
+    policy.forwarded = "both";
+    policy.host = "app.internal";
+    policy.set_headers = {{"X-Real-IP", "$remote_addr"}, {"X-Site", "$scheme://$host:$server_port"}, {"Accept", ""}};
+    head.clear();
+    ProxyHandler::build_head(head, st, st.request.target, policy);
+    CHECK(head.find("X-Forwarded-For: 10.0.0.1, 192.0.2.7\r\n") != std::string::npos);
+    CHECK(head.find("Forwarded: for=192.0.2.7;proto=https;host=app.example.com\r\n") != std::string::npos);
+    CHECK(head.find("\r\nHost: app.internal\r\n") != std::string::npos && head.find("\r\nHost: app.example.com") == std::string::npos);
+    CHECK(head.find("X-Real-IP: 192.0.2.7\r\n") != std::string::npos && head.find("X-Site: https://app.example.com:443\r\n") != std::string::npos);
+    CHECK(head.find("Accept:") == std::string::npos);  // "" removes
+    policy.host = "upstream";
+    policy.forwarded = "off";
+    policy.address.key = "127.0.0.1:9100";
+    head.clear();
+    ProxyHandler::build_head(head, st, st.request.target, policy);
+    CHECK(head.find("Host: 127.0.0.1:9100\r\n") != std::string::npos && head.find("X-Forwarded") == std::string::npos);
+    // The policy keys through the loader, site defaults refined by the location.
+    write("policy.toml", "[[site]]\nlisten = [\"127.0.0.1:18097\"]\nroot = \"www\"\nproxy = { forwarded = \"both\", hide = [\"X-Powered-By\"], headers = { \"X-A\" = \"1\" } }\n"
+                         "[[site.location]]\npath = \"/\"\nupstream = \"http://127.0.0.1:9100\"\nproxy = { host = \"app.internal\", headers = { \"X-A\" = \"2\", \"X-B\" = \"$host\" }, redirects = \"pass\" }\n");
+    const LocationConfig& pl = Router::location(load_config(dir / "policy.toml").sites[0], "/");
+    CHECK(pl.proxy.forwarded == "both" && pl.proxy.host == "app.internal" && !pl.proxy.rewrite_redirects);
+    CHECK(pl.proxy.hide.size() == 1 && pl.proxy.set_headers.size() == 2 && pl.proxy.set_headers[0].second == "2");
+    CHECK(pl.proxy.options.keep_conn && pl.proxy.options.max_connections == 256);
+    CHECK(refused("badfwd.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/\"\nupstream = \"http://127.0.0.1:9100\"\nproxy = { forwarded = \"maybe\" }\n", "forwarded must be"));
     fs::remove_all(dir);
 }
 
