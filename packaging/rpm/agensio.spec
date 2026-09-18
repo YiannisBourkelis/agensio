@@ -61,5 +61,5 @@ exit 0
 %dir /var/www/html
 
 %changelog
-* Fri Sep 19 2026 Yiannis Bourkelis - 0.1.0-0.1.alpha.1
+* Sat Sep 19 2026 Yiannis Bourkelis - 0.1.0-0.1.alpha.1
 - First pre-alpha.

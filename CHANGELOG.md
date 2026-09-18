@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.0-alpha.2 (2026-09-19)
+
+Packages and release automation; no change to the server itself.
+
+- Debian package (`.deb`) and RPM built by CPack: binary in `/usr/sbin`, systemd unit,
+  log rotation, `/etc/agensio` with a default site serving `/var/www/html`, the
+  `agensio` service account and the `agensio-admin` group, start on first install when
+  port 80 is free. Upgrades keep edited configuration files; purge keeps certificates
+  and content. `tests/package.sh` exercises the whole cycle in a container.
+- `packaging/rpm/agensio.spec` for COPR and `packaging/arch/PKGBUILD` for the AUR.
+- GitHub Actions: `ci.yml` builds and tests on Ubuntu and macOS; `release.yml` builds
+  both packages on every `v*` tag, checks the version against the tag, attaches the
+  packages to the release and publishes a signed APT repository to GitHub Pages when the
+  signing key secret is present.
+- `scripts/release.sh` bumps the version everywhere, tags and pushes.
+- `docs/install.md`: the package routes for Debian/Ubuntu, Fedora and Arch.
+
 ## 0.1.0-alpha.1 (2026-09-19)
 
 First pre-alpha. Everything below is implemented and tested on Linux (Debian 13) and
