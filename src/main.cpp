@@ -12,6 +12,7 @@
 
 #include "config.hpp"
 #include "control/client.hpp"
+#include "control/mcp.hpp"
 #include "services/json.hpp"
 #include "server.hpp"
 #include "services/pools.hpp"
@@ -26,6 +27,7 @@ void usage() {
                  "       agensio pools [-c config.toml] [--out DIR] [--dry-run]\n"
                  "       agensio reload [-c config.toml]\n"
                  "       agensio ctl <command> [--socket PATH] [-c config.toml]\n"
+                 "       agensio mcp [--socket PATH] [-c config.toml]\n"
                  "  -c, --config FILE   configuration file (default: ./agensio.toml, ./config/agensio.toml,\n"
                  "                      /etc/agensio/agensio.toml, /usr/local/etc/agensio/agensio.toml)\n"
                  "  -t, --test          check the configuration (and FastCGI upstreams) and exit\n"
@@ -44,6 +46,9 @@ void usage() {
                  "                           [--no-redirect] [--hsts] [--listen-plain A] [--listen-tls A]\n"
                  "                      site-update NAME (same flags) | site-disable NAME | site-enable NAME |\n"
                  "                      site-delete NAME | cert-renew NAME\n"
+                 "  mcp                 Model Context Protocol server on stdin/stdout for an AI agent host,\n"
+                 "                      exposing the control commands as tools as the invoking user\n"
+                 "                      (spawn it locally or over SSH: ssh admin@host agensio mcp)\n"
                  "  pools               write the php-fpm pool of every site with `user` into the pool\n"
                  "                      directory (server.pools or the distro's); exit 3 when files changed\n"
                  "                      (reload php-fpm), 0 when up to date; --dry-run only reports\n";
@@ -76,6 +81,24 @@ int main(int argc, char** argv) {
         else if (a == "--explain") explain = true;
         else if (a == "pools" && i == 1) pools = true;
         else if (a == "reload" && i == 1) reload = true;
+        else if (a == "mcp" && i == 1) {
+            std::string socket_path;
+            for (int j = i + 1; j < argc; ++j) {
+                std::string b = argv[j];
+                if (b == "--socket" && j + 1 < argc) socket_path = argv[++j];
+                else if ((b == "-c" || b == "--config") && j + 1 < argc) config_path = argv[++j];
+                else { std::cerr << "mcp: unexpected argument " << b << "\n"; return 2; }
+            }
+            if (socket_path.empty()) {
+                try {
+                    agensio::Config cfg = agensio::load_config(config_path.empty() ? default_config() : config_path);
+                    socket_path = cfg.control.enabled ? cfg.control.socket : agensio::default_control_socket();
+                } catch (const std::exception&) {
+                    socket_path = agensio::default_control_socket();
+                }
+            }
+            return agensio::run_mcp(socket_path, std::cin, std::cout);
+        }
         else if (a == "ctl" && i == 1) {
             std::string command, socket_path, site_name, query;
             agensio::json::Value body = agensio::json::Value::object();

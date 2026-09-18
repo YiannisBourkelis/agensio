@@ -395,6 +395,43 @@ check "control: reload with a broken file on disk is refused, old configuration 
 rm -f bench/tmp/sites.d/broken.toml
 check "control: ctl site-create through the client reports the decisions" "1 yes" "$("$BIN" ctl site-create --domain cli.test --yes --socket $CS > bench/tmp/ctl.out 2>&1; echo -n "$? "; grep -q 'decisions needed' bench/tmp/ctl.out && echo yes)"
 check "control: audit has every mutation with its result" "yes" "$(grep -q 'sites (test): created' bench/tmp/audit.log && grep -q 'sites/created.test/delete: delete' bench/tmp/audit.log && grep -q 'reload: .*broken.toml' bench/tmp/audit.log && echo yes)"
+# The MCP bridge (F5): JSON-RPC on stdin/stdout, tools gated by role, calls forwarded to the socket.
+mcp=$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
+import json, subprocess, sys
+p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+def rpc(i, method, params=None):
+    msg = {"jsonrpc": "2.0", "id": i, "method": method}
+    if params is not None: msg["params"] = params
+    p.stdin.write(json.dumps(msg) + "\n"); p.stdin.flush()
+    return json.loads(p.stdout.readline())
+out = []
+r = rpc(1, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}})
+out.append(r["result"]["serverInfo"]["name"])
+p.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"); p.stdin.flush()
+tools = rpc(2, "tools/list")["result"]["tools"]
+out.append(str(len(tools)))
+out.append(str([t["annotations"]["readOnlyHint"] for t in tools if t["name"] == "health_check"][0]))
+r = rpc(3, "tools/call", {"name": "site_show", "arguments": {"name": "laravel.test"}})
+out.append("laravel" if not r["result"]["isError"] and r["result"]["structuredContent"]["app"] == "laravel" else "bad")
+r = rpc(4, "tools/call", {"name": "reload", "arguments": {"reason": "mcp"}})
+out.append("428" if r["result"]["isError"] and "confirm required" in r["result"]["content"][0]["text"] else "bad")
+r = rpc(5, "tools/call", {"name": "reload", "arguments": {"confirm": True, "reason": "mcp"}})
+out.append("reloaded" if not r["result"]["isError"] else "bad")
+r = rpc(6, "tools/call", {"name": "site_create", "arguments": {"domain": "mcp.test", "confirm": True, "reason": "mcp"}})
+out.append(",".join(n["field"] for n in r["result"]["structuredContent"]["needs"]))
+out.append(str(rpc(7, "nope")["error"]["code"]))
+out.append(str(len(rpc(8, "prompts/list")["result"]["prompts"])))
+p.stdin.close(); p.wait()
+print(" ".join(out))
+PYT
+)
+check "mcp: initialize, tool list with annotations, calls, confirm, decisions, prompts" "agensio 14 True laravel 428 reloaded https,root,app,user -32601 2" "$mcp"
+check "mcp: the reload through the bridge is in the audit log" "yes" "$(grep -q 'reload (mcp): ok' bench/tmp/audit.log && echo yes)"
+if ssh -o BatchMode=yes -o ConnectTimeout=2 localhost true >/dev/null 2>&1; then
+  check "mcp: over ssh localhost" "agensio" "$(printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n' | ssh -o BatchMode=yes localhost "$BIN" mcp --socket "$ROOT/bench/tmp/control.sock" | python3 -c 'import json,sys; print(json.loads(sys.stdin.readline())["result"]["serverInfo"]["name"])')"
+else
+  echo "skip mcp: over ssh localhost (no sshd on this host)"
+fi
 check "control: socket file mode and no access-log line for it" "666 no" "$(stat -c %a $CS 2>/dev/null || stat -f %Lp $CS) $(grep -q 'v1/status' bench/tmp/access.log && echo yes || echo no)"
 
 # ---- request bodies (A3): decoded, limited, drained after the response ----

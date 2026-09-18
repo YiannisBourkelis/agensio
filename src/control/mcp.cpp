@@ -1,0 +1,291 @@
+#include "control/mcp.hpp"
+
+#include <iostream>
+#include <string>
+#include <vector>
+
+#include "control/client.hpp"
+#include "control/roles.hpp"
+#include "services/json.hpp"
+
+namespace agensio {
+
+namespace {
+
+constexpr const char* kProtocol = "2025-06-18";
+
+struct Tool {
+    const char* name;
+    const char* title;
+    const char* description;
+    const char* method;  // GET or POST
+    const char* path;    // "{name}" is replaced by the `name` argument
+    bool read_only;
+    bool destructive;
+    Role needs;
+    json::Value schema;  // inputSchema
+};
+
+json::Value prop(const char* type, const char* description) {
+    return json::Value::object().set("type", type).set("description", description);
+}
+
+json::Value schema(std::vector<std::pair<std::string, json::Value>> props, std::vector<std::string> required) {
+    json::Value p = json::Value::object();
+    for (auto& [k, v] : props) p.set(k, std::move(v));
+    json::Value req = json::Value::array();
+    for (const auto& r : required) req.push(r);
+    return json::Value::object().set("type", "object").set("properties", std::move(p)).set("required", std::move(req));
+}
+
+json::Value name_arg() { return prop("string", "The site's host name (any of its server_name values)."); }
+json::Value reason_arg() { return prop("string", "One line saying why, written to the server's audit log."); }
+json::Value confirm_arg() {
+    return prop("boolean", "Must be true. Only set it after the user has explicitly agreed to this change.");
+}
+
+std::vector<std::pair<std::string, json::Value>> site_fields() {
+    return {
+        {"domain", prop("string", "The site's main host name, e.g. example.com.")},
+        {"aliases", json::Value::object().set("type", "array").set("items", prop("string", "host name")).set("description", "Other host names served by the same site, e.g. www.example.com.")},
+        {"https", json::Value::object().set("description", "\"auto\" (certificate obtained and renewed automatically, needs port 80 reachable), \"none\" (plain HTTP only), or an object {\"cert\": path, \"key\": path} for a certificate you manage.")},
+        {"redirect_http", prop("boolean", "With https: also redirect plain http to https (default true).")},
+        {"hsts", prop("boolean", "Add Strict-Transport-Security on the https site (default false; only once https is known to work).")},
+        {"user", json::Value::object().set("description", "A system account the site runs under (isolates it from other sites), or null for none. Ask the user; suggest a short name derived from the domain.")},
+        {"group", prop("string", "The account's group (default: its primary group).")},
+        {"app", json::Value::object().set("type", "string").set("enum", json::Value::array().push("static").push("php").push("laravel").push("wordpress").push("proxy")).set("description", "What runs there. A preset sets routing and PHP rules.")},
+        {"root", prop("string", "Document root (for Laravel: the project directory, its public/ is served). Required unless app is proxy.")},
+        {"upstream", prop("string", "app = proxy: where the application listens, e.g. http://127.0.0.1:3000.")},
+        {"php_socket", prop("string", "PHP without a site user: the php-fpm socket to use (unix:/path or host:port).")},
+        {"php_children", prop("integer", "PHP with a site user: pool size of the generated pool (default 8).")},
+        {"php_version", prop("string", "PHP version for the generated pool, e.g. \"8.3\" (default: newest installed).")},
+        {"listen_plain", prop("string", "Plain listener address (default 0.0.0.0:80).")},
+        {"listen_tls", prop("string", "TLS listener address (default 0.0.0.0:443).")},
+        {"confirm", confirm_arg()},
+        {"reason", reason_arg()},
+    };
+}
+
+std::vector<Tool> tools() {
+    std::vector<Tool> t;
+    t.push_back({"server_status", "Server status", "Version, pid, uptime, workers, open connections, listeners, sites and the caller's role.", "GET", "/v1/status", true, false, Role::viewer, schema({}, {})});
+    t.push_back({"sites_list", "List sites", "Every configured site with its listeners, root, app, user, redirect and certificate state (issuer, days left, whether it is still the placeholder).", "GET", "/v1/sites", true, false, Role::viewer, schema({}, {})});
+    t.push_back({"site_show", "Show one site", "One site in full: effective locations after the preset expanded, PHP pool, upstreams, certificate.", "GET", "/v1/sites/{name}", true, false, Role::viewer, schema({{"name", name_arg()}}, {"name"})});
+    t.push_back({"config_validate", "Validate configuration", "Loads the configuration file on disk again and runs the hosting rules; reports errors and the restart-only settings that differ from the running server.", "GET", "/v1/config/validate", true, false, Role::viewer, schema({}, {})});
+    t.push_back({"logs_query", "Query logs", "Recent lines from the error log and the access logs. Use it for questions like 'any errors in the last 3 hours?'. Summarise for the user; do not paste hundreds of lines.", "GET", "/v1/logs", true, false, Role::viewer,
+                 schema({{"site", prop("string", "A site's host name; omit for every site plus the error log.")},
+                         {"since", prop("string", "How far back: 3h, 45m, 2d, 1w, seconds, or a local YYYY-MM-DDThh:mm:ss (default 1h).")},
+                         {"level", json::Value::object().set("type", "string").set("enum", json::Value::array().push("error").push("warn").push("info")).set("description", "Error-log level filter (default warn = error and warn).")},
+                         {"status", prop("string", "Access-log filter: 5xx (default), 4xx, all, or a number for that status and above.")},
+                         {"limit", prop("integer", "Newest lines to return (default 200, max 5000).")}},
+                        {})});
+    t.push_back({"health_check", "Health check", "What an administrator should look at: certificates, missing redirects, port 80 for ACME, recent errors, settings waiting for a restart, root, shared accounts, stale pools. Each finding has a severity and a fix. Run this first on a server you do not know.", "GET", "/v1/health", true, false, Role::viewer, schema({}, {})});
+    t.push_back({"reload", "Reload configuration", "Validate the configuration on disk and switch to it without dropping a connection. Refused with the reason when it does not validate; nothing changes then.", "POST", "/v1/reload", false, false, Role::operator_, schema({{"confirm", confirm_arg()}, {"reason", reason_arg()}}, {"confirm", "reason"})});
+    t.push_back({"logs_reopen", "Reopen logs", "Reopen every log file after rotation.", "POST", "/v1/logs/reopen", false, false, Role::operator_, schema({{"confirm", confirm_arg()}, {"reason", reason_arg()}}, {"confirm", "reason"})});
+    t.push_back({"site_create", "Create a site", "Writes a new site file, validates and reloads. A new site is HTTPS-only with a redirect from http unless https is \"none\". Until https, root (or upstream), app and user are decided the server answers with the open questions and a suggestion each: ask the user each question, then call again with every field. If it answers with commands to run as root (missing account or directory), show them to the user, wait until they confirm they ran them, then call again with the same fields.", "POST", "/v1/sites", false, false, Role::admin, schema(site_fields(), {"domain", "confirm", "reason"})});
+    {
+        auto fields = site_fields();
+        fields.insert(fields.begin(), {"name", name_arg()});
+        t.push_back({"site_update", "Update a site", "Changes fields of a site that site_create wrote (aliases, https, user, app, root, upstream, PHP settings). Hand-written site files are refused; tell the user to edit those directly.", "POST", "/v1/sites/{name}", false, false, Role::admin, schema(fields, {"name", "confirm", "reason"})});
+    }
+    t.push_back({"site_disable", "Disable a site", "Stops serving the site (its file is renamed to .disabled) and reloads. Reversible with site_enable.", "POST", "/v1/sites/{name}/disable", false, false, Role::admin, schema({{"name", name_arg()}, {"confirm", confirm_arg()}, {"reason", reason_arg()}}, {"name", "confirm", "reason"})});
+    t.push_back({"site_enable", "Enable a site", "Brings a disabled site back and reloads.", "POST", "/v1/sites/{name}/enable", false, false, Role::admin, schema({{"name", name_arg()}, {"confirm", confirm_arg()}, {"reason", reason_arg()}}, {"name", "confirm", "reason"})});
+    t.push_back({"site_delete", "Delete a site", "Removes the site's configuration file (a .bak copy stays) and reloads. The site's files and account are never touched.", "POST", "/v1/sites/{name}/delete", false, true, Role::admin, schema({{"name", name_arg()}, {"confirm", confirm_arg()}, {"reason", reason_arg()}}, {"name", "confirm", "reason"})});
+    t.push_back({"cert_renew", "Renew certificate", "Orders the site's automatic certificate again now. Watch site_show and logs_query for the result.", "POST", "/v1/sites/{name}/renew", false, false, Role::operator_, schema({{"name", name_arg()}, {"confirm", confirm_arg()}, {"reason", reason_arg()}}, {"name", "confirm", "reason"})});
+    return t;
+}
+
+const char* kInstructions =
+    "You are connected to an agensio web server through its control socket, as the account that "
+    "started this bridge. Start a session on a server you do not know with health_check and "
+    "server_status, then explain the findings in plain words and offer the usual jobs: create a "
+    "site (HTTPS by default, ask about the site user and what runs there), inspect a site, look "
+    "at recent errors. Every change needs the user's explicit agreement first (confirm: true) "
+    "and a one-line reason. When the server answers with commands to run as root, show them "
+    "exactly, say that the server waits for them, and continue only when the user says they ran "
+    "them. Never invent settings: what a tool does not offer is not configurable here.";
+
+const char* kGettingStarted =
+    "Greet the administrator briefly. Run health_check and server_status. Summarise: how many "
+    "sites, which have certificates and their state, anything the health check flagged (with its "
+    "fix), whether the server runs under a service user. Then offer the next jobs: add a site, "
+    "check a site's logs for errors, renew a certificate, reload after a manual edit. Keep it "
+    "short and ask what they want to do.";
+
+const char* kNewSite =
+    "Create a website step by step. Ask for the domain (and whether www. should be included as "
+    "an alias). Call site_create with only the domain first: the server lists the open decisions "
+    "with a suggestion each. Ask the user each question in turn: HTTPS (recommend auto, which "
+    "needs port 80 reachable and the name pointing at this server), whether the site gets its own "
+    "system user (recommend yes, suggest the proposed name), what runs there (static, php, "
+    "laravel, wordpress or proxy) and where the files are. Call site_create again with every "
+    "field and confirm: true only after the user agreed. If the server returns commands to run "
+    "as root, show them verbatim and wait. After success, show next_steps and check with "
+    "site_show that the certificate arrives.";
+
+class Mcp {
+public:
+    Mcp(std::string socket, std::ostream& out) : socket_(std::move(socket)), out_(out), tools_(tools()) {
+        ControlReply reply;
+        std::string error;
+        if (control_request(socket_, "GET", "/v1/status", "", reply, error) && reply.status == 200) {
+            json::Value v;
+            if (json::parse(reply.body, v, error)) {
+                const std::string_view role = v["peer"].get("role");
+                role_ = role == "admin" ? Role::admin : role == "operator" ? Role::operator_ : role == "viewer" ? Role::viewer : Role::none;
+            }
+        } else {
+            unreachable_ = error.empty() ? "control socket answered HTTP " + std::to_string(reply.status) : error;
+            role_ = Role::viewer;  // list the read tools so the agent can retry once the server is up
+        }
+    }
+
+    void handle(const std::string& line) {
+        json::Value msg;
+        std::string err;
+        if (!json::parse(line, msg, err) || !msg.is_object()) {
+            send(json::Value::object().set("jsonrpc", "2.0").set("id", json::Value(nullptr))
+                     .set("error", json::Value::object().set("code", -32700).set("message", "parse error: " + err)));
+            return;
+        }
+        const std::string_view method = msg.get("method");
+        const json::Value& id = msg["id"];
+        const json::Value& params = msg["params"];
+        if (id.is_null()) return;  // a notification (initialized, cancelled): nothing to answer
+        if (method == "initialize") {
+            json::Value caps = json::Value::object();
+            caps.set("tools", json::Value::object().set("listChanged", false));
+            caps.set("prompts", json::Value::object().set("listChanged", false));
+            std::string instructions = kInstructions;
+            if (!unreachable_.empty())
+                instructions += " NOTE: the control socket is not reachable right now (" + unreachable_ +
+                                "); tell the user, and that the server must run with [control] enabled and this account must have a role.";
+            result(id, json::Value::object().set("protocolVersion", kProtocol).set("capabilities", std::move(caps))
+                           .set("serverInfo", json::Value::object().set("name", "agensio").set("version", AGENSIO_VERSION))
+                           .set("instructions", instructions));
+        } else if (method == "ping") {
+            result(id, json::Value::object());
+        } else if (method == "tools/list") {
+            json::Value list = json::Value::array();
+            for (const auto& t : tools_) {
+                if (t.needs > role_) continue;  // a viewer never sees the mutating tools
+                json::Value v = json::Value::object().set("name", t.name).set("title", t.title).set("description", t.description).set("inputSchema", t.schema);
+                v.set("annotations", json::Value::object().set("title", t.title).set("readOnlyHint", t.read_only)
+                                         .set("destructiveHint", t.destructive).set("idempotentHint", t.read_only).set("openWorldHint", false));
+                list.push(std::move(v));
+            }
+            result(id, json::Value::object().set("tools", std::move(list)));
+        } else if (method == "tools/call") {
+            call(id, params);
+        } else if (method == "prompts/list") {
+            json::Value list = json::Value::array();
+            list.push(json::Value::object().set("name", "getting_started").set("title", "Getting started").set("description", "Greet, check the server's health and offer the usual jobs."));
+            list.push(json::Value::object().set("name", "new_site").set("title", "Create a website").set("description", "Guide the user through creating a site: HTTPS, its own user, what runs there."));
+            result(id, json::Value::object().set("prompts", std::move(list)));
+        } else if (method == "prompts/get") {
+            const std::string_view name = params.get("name");
+            const char* text = name == "getting_started" ? kGettingStarted : name == "new_site" ? kNewSite : nullptr;
+            if (!text) {
+                error(id, -32602, "unknown prompt");
+                return;
+            }
+            json::Value msgs = json::Value::array();
+            msgs.push(json::Value::object().set("role", "user").set("content", json::Value::object().set("type", "text").set("text", text)));
+            result(id, json::Value::object().set("messages", std::move(msgs)));
+        } else {
+            error(id, -32601, "method not found: " + std::string(method));
+        }
+    }
+
+private:
+    void call(const json::Value& id, const json::Value& params) {
+        const std::string_view name = params.get("name");
+        const json::Value& args = params["arguments"];
+        const Tool* tool = nullptr;
+        for (const auto& t : tools_)
+            if (name == t.name) tool = &t;
+        if (!tool || tool->needs > role_) {
+            error(id, -32602, "unknown tool: " + std::string(name));
+            return;
+        }
+        std::string path = tool->path;
+        const std::size_t brace = path.find("{name}");
+        if (brace != std::string::npos) {
+            const std::string site(args.get("name"));
+            if (site.empty() || site.find('/') != std::string::npos) {
+                tool_error(id, "the 'name' argument is required: the site's host name");
+                return;
+            }
+            path.replace(brace, 6, site);
+        }
+        std::string body;
+        if (tool->method == std::string_view("POST")) {
+            json::Value b = json::Value::object();
+            for (const auto& m : args.members())
+                if (m.first != "name") b.set(m.first, m.second);
+            body = b.dump();
+        } else if (name == "logs_query") {
+            std::string q;
+            for (const char* k : {"site", "since", "level", "status", "limit"}) {
+                const json::Value& v = args[k];
+                if (v.is_null()) continue;
+                std::string text = v.is_string() ? std::string(v.str()) : std::to_string(static_cast<long>(v.num()));
+                std::string enc;
+                for (char c : text) {
+                    if (std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-' || c == '_' || c == ':') enc.push_back(c);
+                    else { char h[4]; std::snprintf(h, sizeof h, "%%%02X", static_cast<unsigned char>(c)); enc += h; }
+                }
+                q += (q.empty() ? "?" : "&") + std::string(k) + "=" + enc;
+            }
+            path += q;
+        }
+        ControlReply reply;
+        std::string err;
+        if (!control_request(socket_, tool->method, path, body, reply, err)) {
+            tool_error(id, "cannot reach the control socket: " + err);
+            return;
+        }
+        json::Value parsed;
+        const bool is_json = json::parse(reply.body, parsed, err);
+        json::Value content = json::Value::array();
+        content.push(json::Value::object().set("type", "text").set("text", reply.body));
+        json::Value r = json::Value::object().set("content", std::move(content)).set("isError", reply.status >= 400);
+        if (is_json && parsed.is_object()) r.set("structuredContent", parsed);
+        result(id, std::move(r));
+    }
+
+    void tool_error(const json::Value& id, const std::string& text) {
+        json::Value content = json::Value::array();
+        content.push(json::Value::object().set("type", "text").set("text", text));
+        result(id, json::Value::object().set("content", std::move(content)).set("isError", true));
+    }
+    void result(const json::Value& id, json::Value r) {
+        send(json::Value::object().set("jsonrpc", "2.0").set("id", id).set("result", std::move(r)));
+    }
+    void error(const json::Value& id, int code, const std::string& message) {
+        send(json::Value::object().set("jsonrpc", "2.0").set("id", id)
+                 .set("error", json::Value::object().set("code", code).set("message", message)));
+    }
+    void send(const json::Value& v) { out_ << v.dump() << '\n' << std::flush; }
+
+    std::string socket_;
+    std::ostream& out_;
+    std::vector<Tool> tools_;
+    Role role_ = Role::none;
+    std::string unreachable_;
+};
+
+}  // namespace
+
+int run_mcp(const std::string& socket_path, std::istream& in, std::ostream& out) {
+    Mcp server(socket_path, out);
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty() || line == "\r") continue;
+        if (line.back() == '\r') line.pop_back();
+        server.handle(line);
+    }
+    return 0;
+}
+
+}  // namespace agensio

@@ -319,6 +319,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   form (422) and root prerequisites as commands (409, `waiting`), writes managed
   `sites.d/<domain>.toml` files (spec JSON on line 1), validates through `reload` and
   undoes a refused change; also update/disable/enable/delete, `reload`, `cert-renew`.
+  `agensio mcp` (F5, `control/mcp.*`): stdio JSON-RPC MCP server, 14 tools with
+  annotations gated by the caller's role, prompts, meant to be spawned over SSH by the
+  agent host (`docs/mcp.md`). `agensio ctl` (F6) is the same client for shells.
 - **Not yet**: directory listing, TLS-ALPN-01 / DNS-01 (wildcards), OCSP stapling.
 
 ## Performance notes (measured, keep current)

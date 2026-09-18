@@ -810,6 +810,9 @@ Unknown commands answer a JSON 404, a wrong method a 405 with `Allow`, a role th
 low a 403 naming the role needed. `curl --unix-socket /run/agensio/control.sock
 http://control/v1/status` is the same call by hand.
 
+`agensio mcp` exposes the same commands to an AI agent host as Model Context Protocol
+tools, locally or over SSH: see `docs/mcp.md`.
+
 `agensio -t` on a shared host warns when a php-fpm pool, proxy origin or CGI location
 runs as the server's own user or as a member of the admin group: with everything under
 one account the peer-credential check cannot tell sites apart. Per-site users (section

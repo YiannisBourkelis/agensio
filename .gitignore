@@ -54,3 +54,4 @@ bench/wordpress/.ddev/*
 !bench/wordpress/.ddev/web-build/
 !bench/wordpress/.ddev/agensio.toml
 !bench/wordpress/.ddev/setup.sh
+.mcp.json

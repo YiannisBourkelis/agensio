@@ -572,7 +572,19 @@ Rules:
       connection (256 KB cap). `agensio ctl` grew the matching subcommands (`--yes`,
       `--reason`). Not done: `cache/purge` (needs the cache invalidation API, F2b).
 - [-] F4 Natural-language front: dropped 2026-09-18, the agent is the intent matcher.
-- [ ] F5 MCP server (decided 2026-09-16, first-class feature): expose the same commands as
+- [x] F5 (2026-09-18) `agensio mcp` (`src/control/mcp.*`): newline-delimited JSON-RPC on
+      stdin/stdout, protocol 2025-06-18, `initialize` / `ping` / `tools/list` /
+      `tools/call` / `prompts/list` / `prompts/get`; 14 tools mapped one to one onto the
+      control commands with input schemas, titles and the MCP annotations; the tool list
+      is the caller's role's (learned from `status` at start; read tools listed when the
+      socket is down so the agent can retry); mutating tools require `confirm` and
+      `reason`; results carry the API's JSON as text and `structuredContent`, `isError`
+      on any 4xx/5xx; two prompts (`getting_started`, `new_site`); server instructions
+      explain the root-commands protocol. `docs/mcp.md`: wiring over SSH for Claude Code
+      and Claude Desktop, tool table, a sample session. Tested in the integration suite
+      (driven by a Python client) and per role in `tests/control.sh`; the `ssh localhost`
+      check runs when an sshd is present (skipped on the dev box, which has none).
+- [ ] F5-old MCP server (decided 2026-09-16, first-class feature): expose the same commands as
       **Model Context Protocol** tools so agentic OS tooling (e.g. Omarchy) and
       administrators' assistants can inspect and configure the server.
   - `agensio mcp` runs as a stdio MCP server that connects to the control socket **as the
@@ -605,8 +617,9 @@ Rules:
     { tls, client_ca }` case of F0 with MCP over streamable HTTP: mutual TLS only, never
     a token alone, Origin validated, and it comes after the stdio path, opt-in, because it
     widens the reachable set from "whoever has SSH" to "whoever has a certificate".
-- [ ] F6 CLI: `agensio ctl <command>` wrapping the socket, so shell scripts and panels
-      (ISPConfig style) get the same interface.
+- [x] F6 (2026-09-18, with F1-F3) CLI: `agensio ctl <command>` wrapping the socket
+      (`control/client.*`, shared with the bridge): every read and change command, `--yes`
+      and `--reason` for changes, exit 1 on any 4xx/5xx with the JSON answer printed.
 - [ ] F7 Security review of the phase: a written checklist against the threat model above,
       tests for each rule (wrong uid refused, `Origin` refused, non-loopback bind refused,
       token rate limit, symlink escape in `sites/create` refused, viewer cannot mutate),

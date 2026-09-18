@@ -6,10 +6,19 @@
 workers = 1
 idle_timeout = 65
 max_body_size = "64MB"   # media uploads
+pid_file = "../../tmp/wp-agensio.pid"
 
 [log]
-access = "off"
-error = "stderr"
+access = "../../tmp/wp-access.log"
+error = "../../tmp/wp-error.log"
+level = "info"
+
+# The control socket: `agensio ctl` and the MCP bridge (docs/mcp.md) talk to it as the
+# invoking user. Claude Code: see .mcp.json at the repository root.
+[control]
+socket = "../../tmp/wp-control.sock"
+audit = "../../tmp/wp-audit.log"
+sites_root = "../../tmp/wp-sites"
 
 [cache]
 max_size = "64MB"
