@@ -223,8 +223,10 @@ trap 'kill $PID 2>/dev/null; wait $PID 2>/dev/null; [ -n "$FPM_PID" ] && kill $F
 for _ in $(seq 1 50); do nc -z 127.0.0.1 8080 2>/dev/null && nc -z 127.0.0.1 8443 2>/dev/null && break; sleep 0.1; done
 
 fails=0
+failed_names=""
 check() {  # name expected actual
-  if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: expected [$2] got [$3]"; fails=$((fails+1)); fi
+  if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: expected [$2] got [$3]"; fails=$((fails+1)); failed_names="$failed_names
+  - $1"; fi
 }
 code() { curl -sS -o /dev/null -w '%{http_code}' "$@"; }
 if command -v sha256sum >/dev/null; then sum() { sha256sum | cut -c1-16; }; else sum() { shasum -a 256 | cut -c1-16; }; fi
@@ -274,7 +276,9 @@ check "obs-fold rejected" "HTTP/1.1 400 Bad Request" "$(printf 'GET / HTTP/1.1\r
 check "pipelining" "2" "$(printf 'GET / HTTP/1.1\r\nHost: l\r\n\r\nGET /sub/ HTTP/1.1\r\nHost: l\r\nConnection: close\r\n\r\n' | ncq 127.0.0.1 8080 | grep -c 'HTTP/1.1 200')"
 check "bad request" "HTTP/1.1 400 Bad Request" "$(printf 'GARBAGE\r\n\r\n' | ncq 127.0.0.1 8080 | head -1 | tr -d '\r')"
 check "tls 1.2 accepted" "200" "$(code -k --tls-max 1.2 https://127.0.0.1:8443/)"
-check "tls 1.3 negotiated" "TLSv1.3" "$(echo | openssl s_client -connect 127.0.0.1:8443 -tls1_3 2>/dev/null | sed -n 's/^ *Protocol *: *//p' | head -1)"
+# -brief prints the protocol at connect time; the SSL-Session block only appears once a
+# ticket arrived, which OpenSSL 3.0 (Ubuntu 24.04) does not wait for when stdin is closed.
+check "tls 1.3 negotiated" "TLSv1.3" "$(echo | openssl s_client -connect 127.0.0.1:8443 -tls1_3 -brief 2>&1 | sed -n 's/^Protocol version: //p' | head -1)"
 check "no plain http on tls port" "000" "$(code http://127.0.0.1:8443/ 2>/dev/null)"
 # ---- methods (B1): OPTIONS answered, others 405 with the location's Allow ----
 check "OPTIONS /: 204 with Allow" "204 GET, HEAD, OPTIONS" "$(curl -sSi -X OPTIONS http://127.0.0.1:8080/ | tr -d '\r' | awk '/^HTTP/{s=$2} /^Allow:/{sub(/^Allow: /,""); a=$0} END{print s, a}')"
@@ -706,4 +710,4 @@ PY
 )
 check "body timeout: response served, then the server closes" "HTTP/1.1 200 OK closed within 4s" "$slow"
 kill $PID; wait $PID 2>/dev/null
-[ $fails -eq 0 ] && echo "integration: all passed" || { echo "integration: $fails failure(s)"; exit 1; }
+[ $fails -eq 0 ] && echo "integration: all passed" || { echo "integration: $fails failure(s):$failed_names"; exit 1; }
