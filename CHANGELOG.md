@@ -1,4 +1,8 @@
 # Changelog
+
+## 0.1.0-alpha.3 (2026-09-19)
+
+- 
 ## 0.1.0-alpha.2 (2026-09-19)
 
 Packages and release automation; no change to the server itself.
