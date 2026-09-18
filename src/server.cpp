@@ -10,6 +10,9 @@
 #endif
 
 #include <chrono>
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -272,7 +275,8 @@ void Server::open_control() {
     std::filesystem::create_directories(path.parent_path(), ec);
     if (ec) throw std::runtime_error("control: cannot create " + path.parent_path().string() + ": " + ec.message());
     ::chmod(path.parent_path().c_str(), 0755);
-    if (have_user && ::geteuid() == 0) ::chown(path.parent_path().c_str(), uid, gid) == 0 || (error_log_.warn("control: cannot chown " + path.parent_path().string()), true);
+    if (have_user && ::geteuid() == 0 && ::chown(path.parent_path().c_str(), uid, gid) != 0)
+        error_log_.warn("control: cannot chown " + path.parent_path().string());
     ::unlink(path.c_str());
     control_acceptor_ = std::make_unique<asio::local::stream_protocol::acceptor>(workers_[0]->ctx);
     control_acceptor_->open();

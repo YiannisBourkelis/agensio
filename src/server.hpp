@@ -151,7 +151,7 @@ private:
     std::vector<std::unique_ptr<Worker>> workers_;
     std::vector<std::unique_ptr<Acceptor>> acceptors_;
     std::vector<std::unique_ptr<asio::executor_work_guard<asio::io_context::executor_type>>> guards_;
-    std::vector<std::jthread> threads_;
+    std::vector<std::thread> threads_;  // joined in run(); not jthread: libc++ has it only as experimental
     std::atomic<unsigned> next_worker_{0};
     bool reuse_port_ = false;
     std::atomic<bool> stopping_{false};

@@ -3,6 +3,7 @@
 #include <ctime>
 
 #include <chrono>
+#include <cstdio>
 
 #include "control/commands.hpp"
 #include "control/sites.hpp"

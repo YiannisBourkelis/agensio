@@ -1,5 +1,7 @@
 #include "control/client.hpp"
 
+#include <cstdlib>
+#include <string>
 #include <asio.hpp>
 
 namespace agensio {

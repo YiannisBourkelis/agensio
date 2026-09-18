@@ -8,6 +8,8 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -901,7 +903,7 @@ void AcmeManager::check() {
     forced_.clear();
     busy_ = true;
     if (worker_.joinable()) worker_.join();
-    worker_ = std::jthread([this, due = std::move(due), cfg = cfg_] {
+    worker_ = std::thread([this, due = std::move(due), cfg = cfg_] {
         std::vector<std::pair<std::string, bool>> results;  // cert path, success
         for (const auto& site : due) {
             std::string error;

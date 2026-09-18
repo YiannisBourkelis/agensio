@@ -135,7 +135,7 @@ private:
     std::vector<std::string> forced_;  // cert paths to order at the next check regardless
     std::function<void()> on_renewed_;
     AcmeChallenges challenges_;
-    std::jthread worker_;
+    std::thread worker_;  // not jthread: libc++ (macOS) ships it only as experimental
     bool busy_ = false;
     bool stopped_ = false;
 };

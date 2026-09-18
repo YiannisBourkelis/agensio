@@ -11,9 +11,16 @@ jobs:
     runs-on: ubuntu-22.04   # oldest glibc we build against: the .deb runs on Debian 12+, Ubuntu 22.04+
     steps:
       - uses: actions/checkout@v4
+      # Ubuntu 22.04 ships CMake 3.22, GCC 11 and asio 1.18: too old for this project. A
+      # recent CMake comes from the action, GCC 12 from the distribution, and asio is
+      # fetched by CMake (asio-1-38-2) because no libasio-dev is installed.
+      - uses: lukka/get-cmake@latest
       - name: dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libasio-dev libssl-dev rpm dpkg-dev
+        run: sudo apt-get update && sudo apt-get install -y ninja-build g++-12 libssl-dev rpm dpkg-dev
       - name: configure and build
+        env:
+          CC: gcc-12
+          CXX: g++-12
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build
       - name: unit tests
         run: build/agensio_tests
@@ -26,7 +33,7 @@ jobs:
       - name: smoke-install the .deb
         run: |
           sudo dpkg -i build/agensio_*.deb
-          id agensio && test -f /etc/agensio/agensio.toml && sudo agensio -t && agensio -v
+          id agensio && test -f /etc/agensio/agensio.toml && sudo agensio -t -c /etc/agensio/agensio.toml && agensio -v
       - name: attach to the release
         env:
           GH_TOKEN: ${{ github.token }}
