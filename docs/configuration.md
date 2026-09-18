@@ -695,6 +695,35 @@ challenge path is answered before the redirect. For a TLS listener on a non-stan
 give the prefix instead: `redirect = "https://example.com:8443"`. A `redirect` on a site
 that itself has `tls` is refused (it would loop).
 
+**One canonical host.** To serve everything from `www.example.com` and send the bare
+name there, give the bare name its own redirecting sites, on both ports. The one on 443
+needs a certificate too (browsers check it before following any redirect), which
+`tls = "auto"` provides:
+
+```toml
+[[site]]
+server_name = ["example.com", "www.example.com"]
+listen = ["0.0.0.0:80"]
+redirect = "https://www.example.com"
+
+[[site]]
+server_name = ["example.com"]
+listen = ["0.0.0.0:443"]
+tls = "auto"
+redirect = "https://www.example.com"
+
+[[site]]
+server_name = ["www.example.com"]
+listen = ["0.0.0.0:443"]
+root = "/var/www/example.com/web"
+tls = "auto"
+```
+
+`http://example.com/x?y`, `http://www.example.com/x?y` and `https://example.com/x?y`
+all answer 301 to `https://www.example.com/x?y`. The same shape with the names swapped
+makes the bare name canonical. `redirect = "https"` (same host) is refused on a TLS site
+because it would loop; a prefix naming another host is fine there.
+
 The `Strict-Transport-Security` header is deliberately not automatic: once a browser has
 seen it, it refuses plain http for that host until `max-age` expires, so set it when the
 https site is known to work. `add_headers` on the `/` location puts it on every response

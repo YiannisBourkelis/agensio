@@ -585,12 +585,14 @@ Rules:
       key }` sites; automatic ones already reload themselves); reload must not stall new
       QUIC connections (nginx's known weakness).
 - [~] H2 Start as root, bind, drop privileges (`user =`): **done 2026-09-17 with C3b-3**
-      (`server.user`); log rotation via `SIGUSR1`/reopen done with A5. Remaining: systemd
-      unit, pid file, and `docs/install.md` for the alpha: build from source or package,
-      service user, directories (`/etc/agensio`, `/var/www`, `/var/log/agensio`,
-      `/run/agensio`), the unit file, first site with `-t`, php-fpm pool, certificate
-      hooks, upgrade and rollback. Written with the alpha, kept current by every phase that
-      changes an operator-visible step; H7 adds the package paths to it.
+      (`server.user`); log rotation via `SIGUSR1`/reopen done with A5; pid file with H1.
+      `docs/install.md` (2026-09-18) fixes the directory layout per platform (Linux FHS,
+      Homebrew prefix on macOS, ProgramData on Windows), the recommended per-domain site
+      tree with its owners, and the Linux steps (service user, directories, unit file,
+      first site with `-t`, pools, certificates, logrotate, reload, upgrade/rollback).
+      Remaining: ship the unit file and logrotate snippet in the repository, make the
+      macOS defaults (`$PREFIX/var/log`, `$PREFIX/var/lib`) and the Windows defaults the
+      binary's own, complete the macOS and Windows steps with the release, packages (H7).
 - [x] H3 (2026-09-18) Automatic certificates: built-in ACME v2 client (RFC 8555) with
       HTTP-01 (`src/services/acme.*`, JSON in `src/services/json.hpp`, JWS ES256 and CSRs
       through OpenSSL, no new dependency). `tls = "auto"` on a site plus

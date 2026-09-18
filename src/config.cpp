@@ -668,7 +668,8 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     if (auto r = t["redirect"].value<std::string>()) {
         if (*r != "https" && (!r->starts_with("https://") || r->size() <= 8 || r->find('/', 8) != std::string::npos))
             fail(where + ".redirect must be \"https\" or an \"https://host[:port]\" prefix");
-        if (t.contains("tls")) fail(where + ".redirect belongs on the plain listener's site, not a TLS one (loop)");
+        if (*r == "https" && t.contains("tls"))
+            fail(where + ".redirect = \"https\" on a TLS site would loop; give the target host: \"https://www.example.com\"");
         site.redirect = *r;
     } else if (t.contains("redirect")) {
         fail(where + ".redirect must be a string");

@@ -1454,7 +1454,12 @@ static void test_acme() {
     CHECK(refused(plain + "redirect = \"http://a.test\"\n", "redirect must be"));
     CHECK(refused(plain + "redirect = \"https://a.test/path\"\n", "redirect must be"));
     CHECK(refused(plain + "redirect = true\n", "redirect must be a string"));
-    CHECK(refused("[server]\nacme = { email = \"me@x.test\" }\n" + plain + "redirect = \"https\"\ntls = \"auto\"\n", "belongs on the plain listener"));
+    CHECK(refused("[server]\nacme = { email = \"me@x.test\" }\n" + plain + "redirect = \"https\"\ntls = \"auto\"\n", "would loop"));
+    {   // the bare name on 443 redirecting to www: allowed, with its own automatic certificate
+        std::ofstream(dir / "c.toml") << "[server]\nacme = { email = \"me@x.test\" }\n" + plain + "redirect = \"https://www.a.test\"\ntls = \"auto\"\n";
+        const Config cfg = load_config(dir / "c.toml");
+        CHECK(cfg.sites.size() == 1 && cfg.sites[0].redirect == "https://www.a.test" && cfg.sites[0].tls && cfg.sites[0].tls->automatic);
+    }
     std::filesystem::remove_all(dir);
 }
 #endif

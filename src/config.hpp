@@ -101,7 +101,8 @@ struct SiteConfig {
     std::vector<std::string> listen;        // "host:port" strings, normalised
     std::string app;                        // preset: "laravel", "php", "static" or "" (none)
     // `redirect = "https"`: every request gets a 301 to https://<Host><target>; a full
-    // "https://host[:port]" prefix names the target instead (non-standard port). No root needed.
+    // "https://host[:port]" prefix names the target instead (canonical www host, another
+    // port), also allowed on a TLS site. No root needed.
     std::string redirect;
     std::string root;                       // absolute document root, no trailing slash
     std::vector<std::string> index{"index.html"};
