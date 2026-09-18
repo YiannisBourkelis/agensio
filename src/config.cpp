@@ -220,6 +220,9 @@ void parse_proxy_policy(const toml::table& t, const fs::path& base_dir, Upstream
         if (auto ca = (*tt)["ca"].value<std::string>()) {
             out.tls.ca_file = resolve(base_dir, *ca).string();
             if (!fs::is_regular_file(out.tls.ca_file)) fail(where + ".tls.ca: file not found: " + out.tls.ca_file);
+            std::error_code ec;
+            const fs::path canon = fs::canonical(out.tls.ca_file, ec);  // like roots: symlinks resolved (macOS /var -> /private/var)
+            if (!ec) out.tls.ca_file = canon.string();
         }
     } else if (t.contains("tls")) {
         fail(where + ".tls must be a table { verify, server_name, ca }");

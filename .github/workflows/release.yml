@@ -16,7 +16,7 @@ jobs:
       # fetched by CMake (asio-1-38-2) because no libasio-dev is installed.
       - uses: lukka/get-cmake@latest
       - name: dependencies
-        run: sudo apt-get update && sudo apt-get install -y ninja-build g++-12 libssl-dev rpm dpkg-dev
+        run: sudo apt-get update && sudo apt-get install -y ninja-build g++-12 libssl-dev rpm dpkg-dev file
       - name: configure and build
         env:
           CC: gcc-12
@@ -33,7 +33,12 @@ jobs:
       - name: smoke-install the .deb
         run: |
           sudo dpkg -i build/agensio_*.deb
-          id agensio && test -f /etc/agensio/agensio.toml && sudo agensio -t -c /etc/agensio/agensio.toml && agensio -v
+          # /usr/sbin is not on a non-root runner's PATH: name the binary in full.
+          id agensio && test -f /etc/agensio/agensio.toml
+          sudo /usr/sbin/agensio -t -c /etc/agensio/agensio.toml
+          /usr/sbin/agensio -v
+          systemctl --no-pager status agensio || true
+          sudo systemctl stop agensio || true
       - name: attach to the release
         env:
           GH_TOKEN: ${{ github.token }}

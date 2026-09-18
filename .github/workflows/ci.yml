@@ -5,6 +5,8 @@ on:
   pull_request:
 jobs:
   build:
+    # A release commit is built and tested by release.yml (triggered by its tag); skip it here.
+    if: ${{ !startsWith(github.event.head_commit.message, 'Release v') }}
     strategy:
       matrix:
         os: [ubuntu-24.04, macos-14]
