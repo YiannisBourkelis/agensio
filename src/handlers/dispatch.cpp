@@ -1,8 +1,42 @@
 #include "handlers/dispatch.hpp"
 
+#include "response.hpp"
+
 #include "path.hpp"
 
 namespace agensio {
+
+// `redirect = "https"`: 301 to the same host and target over https. The host comes from
+// the Host header without its port (the target listens on 443), or from the configured
+// prefix; an HTTP/1.0 request without Host gets the site's first name.
+void Dispatcher::redirect_https(Stream& s, const SiteConfig& site) {
+    const Request& req = s.request;
+    Response& r = s.response;
+    std::string& location = r.scratch;
+    if (site.redirect == "https") {
+        std::string_view host = req.host;
+        if (host.empty()) host = site.server_names.front();
+        const std::size_t bracket = host.rfind(']');
+        const std::size_t colon = host.rfind(':');
+        if (colon != std::string_view::npos && (bracket == std::string_view::npos || colon > bracket))
+            host = host.substr(0, colon);
+        if (host.empty() || host == "*") {
+            static_.error(s, 400, false);
+            return;
+        }
+        location.assign("https://").append(host);
+    } else {
+        location.assign(site.redirect);
+    }
+    if (!req.target.empty() && req.target.front() == '/') location.append(req.target);
+    else location.push_back('/');
+    const ErrorPage& page = error_page(301);
+    r.status = 301;
+    r.head = req.method == Method::head;
+    r.headers.add("Location", location);
+    r.prebuilt_headers = page.headers;
+    r.body = MemoryBody{page.body};
+}
 
 const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerState& ws) {
     const Request& req = s.request;
@@ -32,8 +66,24 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
         return nullptr;
     }
 #endif
+    // ACME HTTP-01 (RFC 8555 section 8.3): the CA fetches the token over plain HTTP on any
+    // host, so this runs before site routing and only for the challenge prefix.
+    constexpr std::string_view kChallenge = "/.well-known/acme-challenge/";
+    if (acme_ && ws.path.starts_with(kChallenge) && acme_->lookup(ws.path.substr(kChallenge.size()), r.buffer)) {
+        ws.site = router.site(req.host);
+        r.scratch = "Content-Type: text/plain\r\nContent-Length: " + std::to_string(r.buffer.size()) + "\r\n\r\n";
+        r.prebuilt_headers = r.scratch;
+        r.prebuilt_terminated = true;
+        r.head = req.method == Method::head;
+        r.body = MemoryBody{std::string_view(r.buffer)};
+        return nullptr;
+    }
     const SiteConfig* site = router.site(req.host);
     ws.site = site;
+    if (!site->redirect.empty()) {
+        redirect_https(s, *site);
+        return nullptr;
+    }
     const LocationConfig* loc = &Router::location(*site, ws.path);
     if (!check_method(s, *loc, ws)) return nullptr;
     // Static locations answer OPTIONS themselves; an application (FastCGI) gets to see it.

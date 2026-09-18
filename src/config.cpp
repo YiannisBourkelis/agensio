@@ -665,8 +665,16 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     if (!site.app.empty() && site.app != "laravel" && site.app != "php" && site.app != "static" &&
         site.app != "wordpress" && site.app != "proxy")
         fail(where + ": app must be \"laravel\", \"wordpress\", \"php\", \"proxy\" or \"static\"");
+    if (auto r = t["redirect"].value<std::string>()) {
+        if (*r != "https" && (!r->starts_with("https://") || r->size() <= 8 || r->find('/', 8) != std::string::npos))
+            fail(where + ".redirect must be \"https\" or an \"https://host[:port]\" prefix");
+        if (t.contains("tls")) fail(where + ".redirect belongs on the plain listener's site, not a TLS one (loop)");
+        site.redirect = *r;
+    } else if (t.contains("redirect")) {
+        fail(where + ".redirect must be a string");
+    }
     auto root = t["root"].value<std::string>();
-    if (!root && site.app != "proxy") fail(where + ": 'root' is required");
+    if (!root && site.app != "proxy" && site.redirect.empty()) fail(where + ": 'root' is required");
     // A proxied application needs no document root; hand-written static locations bring their own.
     site.root = root ? resolve_root(base_dir, *root, where) : base_dir.string();
     const std::string root_given = site.root;  // the project directory for app = "laravel"
@@ -704,7 +712,20 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     if (cfg.strict_users && site.user.empty()) fail(where + ": 'user' is required (server.strict_users)");
     parse_pool(t["php"].as_table(), base_dir, cfg, site, root_given, where);
 
-    if (auto tls = t["tls"].as_table()) {
+    if (auto mode = t["tls"].value<std::string>()) {
+        if (*mode != "auto") fail(where + ".tls: \"auto\" or a table { cert, key }");
+        if (!cfg.acme.enabled) fail(where + ".tls = \"auto\" needs [server] acme = { email = \"...\" }");
+        for (const auto& n : site.server_names)
+            if (n == "*" || n.find('*') != std::string::npos)
+                fail(where + ".tls = \"auto\": a certificate needs real host names in server_name (wildcards "
+                     "need DNS-01, which is not supported yet)");
+        TlsConfig tc;
+        tc.automatic = true;
+        const fs::path dir = fs::path(cfg.acme.storage) / site.server_names.front();
+        tc.cert = dir / "fullchain.pem";
+        tc.key = dir / "key.pem";
+        site.tls = std::move(tc);
+    } else if (auto tls = t["tls"].as_table()) {
         auto cert = (*tls)["cert"].value<std::string>();
         auto key = (*tls)["key"].value<std::string>();
         if (!cert || !key) fail(where + ".tls: 'cert' and 'key' are required");
@@ -862,9 +883,12 @@ void explain_config(const Config& cfg, std::ostream& out) {
         out << "root = \"" << site.root << "\"\n";
         print_list(out, "index", site.index);
         print_try_files(out, site.try_files);
-        if (site.tls)
+        if (site.tls && site.tls->automatic)
+            out << "tls = \"auto\"  # " << site.tls->cert.string() << ", " << site.tls->key.string() << "\n";
+        else if (site.tls)
             out << "tls = { cert = \"" << site.tls->cert.string() << "\", key = \"" << site.tls->key.string()
                 << "\" }\n";
+        if (!site.redirect.empty()) out << "redirect = \"" << site.redirect << "\"\n";
         if (!site.user.empty()) out << "user = \"" << site.user << "\"\n";
         if (!site.group.empty()) out << "group = \"" << site.group << "\"\n";
         if (site.php.configured) print_fcgi(out, "php", site.php);
@@ -1017,6 +1041,22 @@ Config load_config(const fs::path& path) {
     cfg.state_dir = server["state_dir"].value_or(cfg.state_dir);
     if (cfg.state_dir.empty() || cfg.state_dir[0] != '/') fail("server.state_dir must be an absolute path");
     cfg.strict_users = server["strict_users"].value_or(false);
+    if (auto acme = server["acme"].as_table()) {
+        cfg.acme.enabled = true;
+        cfg.acme.email = (*acme)["email"].value_or(std::string());
+        if (cfg.acme.email.empty() || cfg.acme.email.find('@') == std::string::npos)
+            fail("server.acme.email is required (the CA's contact address for the account)");
+        cfg.acme.directory = (*acme)["directory"].value_or(cfg.acme.directory);
+        if (!cfg.acme.directory.starts_with("https://")) fail("server.acme.directory must be an https:// URL");
+        if (auto ca = (*acme)["ca"].value<std::string>()) {
+            cfg.acme.ca_file = resolve(base_dir, *ca).string();
+            if (!fs::is_regular_file(cfg.acme.ca_file)) fail("server.acme.ca: file not found: " + cfg.acme.ca_file);
+        }
+        if (auto st = (*acme)["storage"].value<std::string>()) cfg.acme.storage = resolve(base_dir, *st).string();
+        else cfg.acme.storage = cfg.state_dir + "/acme";
+    } else if (server.as_table() && server.as_table()->contains("acme")) {
+        fail("server.acme must be a table { email, directory, ca, storage }");
+    }
     if (auto pf = server["pid_file"].value<std::string>()) cfg.pid_file = pf->empty() ? std::string() : resolve(base_dir, *pf).string();
     else {
 #ifdef __APPLE__

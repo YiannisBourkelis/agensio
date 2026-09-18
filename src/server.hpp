@@ -21,6 +21,7 @@
 #include "handlers/cgi.hpp"
 #include "handlers/proxy.hpp"
 #include "handlers/static.hpp"
+#include "services/acme.hpp"
 #include "services/log.hpp"
 #include "upstream/fcgi_client.hpp"
 
@@ -110,6 +111,7 @@ private:
     void arm_flush(Worker& w);
     void write_pid_file();
     void remove_pid_file() noexcept;
+    void prepare_acme(const Config& cfg);  // storage tree and placeholder certificates for tls = "auto" sites
 
 
     Config cfg_;                            // the boot configuration: workers, cache, sendfile, user; restart-only
@@ -123,6 +125,7 @@ private:
     ProxyHandler proxy_handler_;
     CgiHandler cgi_handler_;
     Dispatcher dispatcher_;
+    AcmeManager acme_{error_log_};
     std::vector<std::unique_ptr<Worker>> workers_;
     std::vector<std::unique_ptr<Acceptor>> acceptors_;
     std::vector<std::unique_ptr<asio::executor_work_guard<asio::io_context::executor_type>>> guards_;

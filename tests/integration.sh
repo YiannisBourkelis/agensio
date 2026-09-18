@@ -115,6 +115,19 @@ root = "{root}/tests/laravel"
 app = "laravel"
 php = {{ socket = "unix:{root}/bench/tmp/php/fpm.sock" }}
 """
+# HTTPS-only sites (H3): the plain listener redirects, to the Host or to a fixed prefix.
+text += f"""
+[[site]]
+server_name = ["redir.test"]
+listen = ["127.0.0.1:8092"]
+default = true
+redirect = "https"
+
+[[site]]
+server_name = ["fixed.test"]
+listen = ["127.0.0.1:8092"]
+redirect = "https://secure.test:8443"
+"""
 # The reverse proxy (D1) in front of the benchmark upstream on 127.0.0.1:9107, on its own port.
 if os.path.exists(f"{root}/build/agensio_upstream"):
     text += f"""
@@ -335,6 +348,15 @@ fi
 "$BIN" -t --explain -c bench/tmp/agensio-test.toml > bench/tmp/explain.out 2>bench/tmp/explain.err
 check "explain: preset expansion is printed" "yes" "$(grep -q '# from preset:laravel' bench/tmp/explain.out && echo yes)"
 check "explain: -t reports OK" "yes" "$("$BIN" -t -c bench/tmp/agensio-test.toml 2>/dev/null | grep -q 'is OK' && echo yes)"
+# ---- HTTPS only (H3): redirect = "https" on the plain site ----
+R=http://127.0.0.1:8092
+check "redirect: 301 to https on the same host, port dropped, query kept" "301 https://redir.test/a/b?x=1" "$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Host: redir.test:8092' "$R/a/b?x=1")"
+check "redirect: fixed prefix with a port" "301 https://secure.test:8443/p?q" "$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Host: fixed.test' "$R/p?q")"
+check "redirect: POST is redirected too, HEAD has no body" "301 301 0" "$(curl -sS -o /dev/null -w '%{http_code} ' -X POST -d a=b "$R/x" -H 'Host: redir.test')$(curl -sS -I -o /dev/null -w '%{http_code} %{size_download}' "$R/x" -H 'Host: redir.test')"
+check "redirect: HTTP/1.0 without Host uses the site's name" "https://redir.test/y" "$(printf 'GET /y HTTP/1.0\r\n\r\n' | ncq 127.0.0.1 8092 | tr -d '\r' | awk '/^Location:/{print $2}')"
+check "redirect: an unknown ACME token is redirected, not served" "301" "$(code -H 'Host: redir.test' "$R/.well-known/acme-challenge/nothing")"
+check "redirect: keep-alive survives" "301 1 301 0" "$(curl -sS -o /dev/null -o /dev/null -w '%{http_code} %{num_connects} ' -H 'Host: redir.test' "$R/1" "$R/2" | sed 's/ $//')"
+
 # ---- request bodies (A3): decoded, limited, drained after the response ----
 check "body on GET: served, drained, pipelined request answered" "2" "$(printf 'GET / HTTP/1.1\r\nHost: l\r\nContent-Length: 5\r\n\r\nhelloGET /sub/ HTTP/1.1\r\nHost: l\r\nConnection: close\r\n\r\n' | ncq 127.0.0.1 8080 | grep -c 'HTTP/1.1 200')"
 check "POST with body: 405, then keep-alive" "405 200" "$(printf 'POST / HTTP/1.1\r\nHost: l\r\nContent-Length: 3\r\n\r\nx=1GET / HTTP/1.1\r\nHost: l\r\nConnection: close\r\n\r\n' | ncq 127.0.0.1 8080 | awk '/^HTTP\/1.1/{printf "%s ", $2}' | sed 's/ $//')"

@@ -63,9 +63,36 @@ Server::Server(Config cfg)
     if (!logs_.open_all(err)) throw std::runtime_error(err);
     own_site_logs(gen->cfg);
     warm_response_tables();
+    prepare_acme(gen->cfg);
     build_listeners(*gen);
     gen_ = std::move(gen);
     build_workers();
+    dispatcher_.set_acme(&acme_.challenges());
+}
+
+// The ACME storage tree, owned by server.user when we start as root so the manager can
+// still write renewals after the privilege drop, and a self-signed placeholder for every
+// certificate that does not exist yet so the listener can come up before the first order.
+void Server::prepare_acme(const Config& cfg) {
+#ifdef AGENSIO_HAS_TLS
+    const auto sites = acme::sites_of(cfg);
+    if (sites.empty()) return;
+    int uid = -1, gid = -1;
+#ifndef _WIN32
+    if (!cfg_.user.empty() && ::geteuid() == 0) {
+        unsigned u = 0, g = 0;
+        const HostFacts facts = system_facts();
+        if (facts.user(cfg_.user, u, g)) {
+            if (!cfg_.group.empty()) facts.group(cfg_.group, g);
+            uid = static_cast<int>(u);
+            gid = static_cast<int>(g);
+        }
+    }
+#endif
+    acme::prepare_storage(cfg, sites, uid, gid);
+#else
+    (void)cfg;
+#endif
 }
 
 Server::~Server() {
@@ -310,6 +337,14 @@ void Server::run() {
     write_pid_file();
     drop_privileges();  // ports are bound and logs open: nothing else needs root
     for (auto& w : workers_) w->gen = gen_;
+#ifdef AGENSIO_HAS_TLS
+    // Automatic certificates: orders run on the manager's thread, the result comes back
+    // through reload() so the new certificate is picked up without touching a request.
+    acme_.start(workers_[0]->ctx, gen_->cfg.acme, acme::sites_of(gen_->cfg), [this] {
+        error_log_.info("acme: new certificate(s) on disk, reloading");
+        reload();
+    });
+#endif
     for (auto& w : workers_) {
         guards_.push_back(
             std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(w->ctx.get_executor()));
@@ -360,6 +395,7 @@ void Server::run() {
 
 void Server::stop() {
     if (stopping_.exchange(true)) return;
+    acme_.stop();
     for (auto& w : workers_)
         w->ctx.stop();
 }
@@ -387,6 +423,7 @@ void Server::reload() {
     auto gen = std::make_shared<Generation>();
     gen->cfg = std::move(fresh);
     try {
+        prepare_acme(gen->cfg);
         build_listeners(*gen);
     } catch (const std::exception& e) {
         error_log_.error(std::string("reload refused: ") + e.what());
@@ -440,6 +477,9 @@ void Server::reload() {
             acc->socket.close(ignored);
         });
     }
+#ifdef AGENSIO_HAS_TLS
+    acme_.update(gen->cfg.acme, acme::sites_of(gen->cfg));
+#endif
     error_log_.warn("reloaded " + cfg_.config_path.string() + ": " + std::to_string(gen->cfg.sites.size()) +
                     " site(s), " + std::to_string(gen->listeners.size()) + " listener(s), " +
                     std::to_string(opened.size()) + " bound, " + std::to_string(removed) + " closed");

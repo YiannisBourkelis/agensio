@@ -17,6 +17,8 @@
 #include "services/pools.hpp"
 #include "upstream/http_head.hpp"
 #include "http1/range.hpp"
+#include "services/acme.hpp"
+#include "services/json.hpp"
 #include "handlers/proxy.hpp"
 #include "core/headers.hpp"
 #include "core/result.hpp"
@@ -1360,6 +1362,103 @@ static void test_range() {
           rq.range == "bytes=1-2" && rq.if_range == "\"e\"");
 }
 
+static void test_json() {
+    json::Value v;
+    std::string err;
+    CHECK(json::parse(R"({"a":1,"b":[true,null,"x\u00e9\n"],"c":{"d":-2.5e1},"e":""})", v, err));
+    CHECK(v.is_object() && v["a"].num() == 1 && v["b"].items().size() == 3 && v["b"].items()[0].boolean());
+    CHECK(v["b"].items()[1].is_null() && v["b"].items()[2].str() == "x\xc3\xa9\n");
+    CHECK(v["c"]["d"].num() == -25 && v.get("e").empty() && v.get("missing").empty() && v["zz"]["yy"].is_null());
+    CHECK(v.dump() == "{\"a\":1,\"b\":[true,null,\"x\xc3\xa9\\n\"],\"c\":{\"d\":-25},\"e\":\"\"}");
+    CHECK(json::Value::object().set("k", "v").set("n", 3).set("k", "w").dump() == R"({"k":"w","n":3})");
+    CHECK(json::Value("a\"b\\c\x01").dump() == R"("a\"b\\c\u0001")");
+    CHECK(!json::parse("{\"a\":}", v, err) && !err.empty());
+    CHECK(!json::parse("[1,2", v, err));
+    CHECK(!json::parse("{\"a\":1} x", v, err));
+    CHECK(!json::parse("\"\\q\"", v, err));
+    std::string deep(100, '[');
+    CHECK(!json::parse(deep, v, err));
+    CHECK(json::parse(" [ ] ", v, err) && v.is_array() && v.items().empty());
+    CHECK(json::parse("{\"s\":\"\\ud83d\\ude00\"}", v, err) && v.get("s") == "\xf0\x9f\x98\x80");
+}
+
+#ifdef AGENSIO_HAS_TLS
+static void test_acme() {
+    using namespace std::chrono;
+    // base64url, RFC 4648 section 5 test vectors and no padding.
+    CHECK(acme::base64url("") == "");
+    CHECK(acme::base64url("f") == "Zg" && acme::base64url("fo") == "Zm8" && acme::base64url("foo") == "Zm9v");
+    CHECK(acme::base64url("foob") == "Zm9vYg" && acme::base64url("fooba") == "Zm9vYmE" && acme::base64url("foobar") == "Zm9vYmFy");
+    CHECK(acme::base64url("\xfb\xff\xbf") == "-_-_");
+    // JWS ES256 over a P-256 key round-trips; the JWK thumbprint is stable and URL-safe.
+    const std::string key =
+        "-----BEGIN PRIVATE KEY-----\n"
+        "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgevZzL1gdAFr88hb2\n"
+        "OF/2NxApJCzGCEDdfSp6VQO30hyhRANCAAQRWz+jn65BtOMvdyHKcvjBeBSDZH2r\n"
+        "1RTwjmYSi9R/zpBnuQ4EiMnCqfMPWiZqB4QdbAd0E7oH50VpuZ1P087G\n"
+        "-----END PRIVATE KEY-----\n";
+    std::string jwk, thumb, err;
+    CHECK(acme::jwk_of(key, jwk, thumb, err));
+    CHECK(jwk.starts_with("{\"crv\":\"P-256\",\"kty\":\"EC\",\"x\":\"") && thumb.size() == 43);
+    CHECK(thumb.find_first_of("+/=") == std::string::npos);
+    const std::string jws = acme::jws_sign(key, R"({"alg":"ES256","nonce":"n","url":"https://ca/x","kid":"k"})", R"({"a":1})", err);
+    CHECK(!jws.empty() && err.empty());
+    CHECK(acme::jws_verify(key, jws, err));
+    std::string tampered = jws;
+    tampered.replace(tampered.find("\"payload\":\"") + 11, 1, "A");
+    CHECK(!acme::jws_verify(key, tampered, err));
+    CHECK(acme::jws_sign("not a key", "{}", "", err).empty() && !err.empty());
+    // Renewal: at a third of the lifetime left (90-day certificate: 30 days), never before.
+    const auto t0 = system_clock::time_point{};
+    const auto ninety = t0 + hours(24 * 90);
+    CHECK(!acme::renewal_due(t0, ninety, t0 + hours(24 * 59)));
+    CHECK(acme::renewal_due(t0, ninety, t0 + hours(24 * 61)));
+    CHECK(acme::renewal_due(t0, ninety, ninety + hours(1)));
+    CHECK(!acme::renewal_due(t0, t0 + hours(24 * 6), t0 + hours(24 * 3)));  // 6-day certificate renews after day 4
+    CHECK(acme::renewal_due(t0, t0 + hours(24 * 6), t0 + hours(24 * 4) + hours(1)));
+    std::string why;
+    CHECK(acme::needs_renewal("/nonexistent/fullchain.pem", {"a.test"}, system_clock::now(), why) && why == "no certificate yet");
+    // Configuration: tls = "auto" resolves the storage paths; the rules for it.
+    const auto dir = std::filesystem::temp_directory_path() / "agensio-acme-test";
+    std::filesystem::create_directories(dir);
+    {
+        std::ofstream(dir / "a.toml") << "[server]\nacme = { email = \"me@x.test\" }\n[[site]]\nserver_name = [\"a.test\", \"www.a.test\"]\nlisten = [\"127.0.0.1:8443\"]\nroot = \"" << dir.string() << "\"\ntls = \"auto\"\n";
+        const Config cfg = load_config(dir / "a.toml");
+        CHECK(cfg.acme.enabled && cfg.acme.storage == "/var/lib/agensio/acme" && cfg.acme.directory.find("letsencrypt") != std::string::npos);
+        CHECK(cfg.sites[0].tls && cfg.sites[0].tls->automatic && cfg.sites[0].tls->cert == "/var/lib/agensio/acme/a.test/fullchain.pem");
+        const auto sites = acme::sites_of(cfg);
+        CHECK(sites.size() == 1 && sites[0].names.size() == 2 && sites[0].key == "/var/lib/agensio/acme/a.test/key.pem");
+    }
+    auto refused = [&](const std::string& body, const std::string& what) {
+        std::ofstream(dir / "b.toml") << body;
+        try {
+            load_config(dir / "b.toml");
+            return false;
+        } catch (const std::exception& e) {
+            return std::string(e.what()).find(what) != std::string::npos;
+        }
+    };
+    const std::string site = "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:8443\"]\nroot = \"" + dir.string() + "\"\n";
+    CHECK(refused(site + "tls = \"auto\"\n", "needs [server] acme"));
+    CHECK(refused("[server]\nacme = { email = \"me@x.test\" }\n" + site + "tls = \"manual\"\n", "\"auto\" or a table"));
+    CHECK(refused("[server]\nacme = { email = \"me@x.test\", directory = \"http://ca\" }\n" + site, "must be an https:// URL"));
+    CHECK(refused("[server]\nacme = { email = \"nope\" }\n" + site, "server.acme.email"));
+    CHECK(refused("[server]\nacme = \"yes\"\n" + site, "server.acme must be a table"));
+    // redirect = "https": no root needed, only on plain sites, "https" or an https://host[:port] prefix.
+    {
+        std::ofstream(dir / "r.toml") << "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:80\"]\nredirect = \"https\"\n[[site]]\nserver_name = [\"b.test\"]\nlisten = [\"127.0.0.1:80\"]\nredirect = \"https://b.test:8443\"\n";
+        const Config cfg = load_config(dir / "r.toml");
+        CHECK(cfg.sites.size() == 2 && cfg.sites[0].redirect == "https" && cfg.sites[1].redirect == "https://b.test:8443");
+    }
+    const std::string plain = "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:80\"]\n";
+    CHECK(refused(plain + "redirect = \"http://a.test\"\n", "redirect must be"));
+    CHECK(refused(plain + "redirect = \"https://a.test/path\"\n", "redirect must be"));
+    CHECK(refused(plain + "redirect = true\n", "redirect must be a string"));
+    CHECK(refused("[server]\nacme = { email = \"me@x.test\" }\n" + plain + "redirect = \"https\"\ntls = \"auto\"\n", "belongs on the plain listener"));
+    std::filesystem::remove_all(dir);
+}
+#endif
+
 int main() {
     test_path();
     test_parser();
@@ -1383,6 +1482,10 @@ int main() {
     test_hosting_rules();
     test_proxy();
     test_range();
+    test_json();
+#ifdef AGENSIO_HAS_TLS
+    test_acme();
+#endif
     if (failures) {
         std::printf("%d failure(s)\n", failures);
         return 1;

@@ -1,0 +1,42 @@
+# A site on HTTPS with a certificate agensio obtains and renews itself (docs/configuration.md
+# section 14). Port 80 stays open for the HTTP-01 validation and for visitors; the
+# application below is the static preset, swap it for app = "laravel" or a proxy as needed.
+
+[server]
+user = "www-data"
+acme = { email = "admin@example.com" }
+# Staging while testing (no rate limits, untrusted chain):
+# acme = { email = "admin@example.com", directory = "https://acme-staging-v02.api.letsencrypt.org/directory" }
+
+[[site]]
+server_name = ["example.com", "www.example.com"]
+listen = ["0.0.0.0:80"]
+root = "/var/www/example/public"
+
+[[site]]
+server_name = ["example.com", "www.example.com"]
+listen = ["0.0.0.0:443"]
+root = "/var/www/example/public"
+tls = "auto"
+
+# ---------------------------------------------------------------------------------------
+# HTTPS only: the plain listener answers every request with a 301 to https:// (and still
+# serves the HTTP-01 validation, which agensio answers before the redirect). Every
+# response of the TLS site carries Strict-Transport-Security, so a browser that has seen
+# it once never asks for http:// again; add that header once the https site is known to
+# work, because browsers remember it for max-age.
+
+[[site]]
+server_name = ["secure.example.com"]
+listen = ["0.0.0.0:80"]
+redirect = "https"
+
+[[site]]
+server_name = ["secure.example.com"]
+listen = ["0.0.0.0:443"]
+root = "/var/www/secure/public"
+tls = "auto"
+
+[[site.location]]
+path = "/"
+add_headers = { "Strict-Transport-Security" = "max-age=31536000" }

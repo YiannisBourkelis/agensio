@@ -1,0 +1,16 @@
+# Pebble, Let's Encrypt's small ACME test server, for tests/acme.sh. The directory is
+# https://localhost:14000/dir (its own TLS certificate is signed by test/certs/pebble.minica.pem
+# inside the image); HTTP-01 validation connects to the identifier on port 5002, which
+# tests/acme.sh serves from agensio on the host (host.docker.internal). The management
+# interface on 15000 hands out the issuing roots so the test can verify the chain.
+services:
+  pebble:
+    image: ghcr.io/letsencrypt/pebble:latest
+    command: ["-config", "/test/config/pebble-config.json", "-strict"]
+    environment:
+      PEBBLE_VA_NOSLEEP: "1"
+    ports:
+      - "127.0.0.1:14000:14000"
+      - "127.0.0.1:15000:15000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

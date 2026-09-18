@@ -21,6 +21,16 @@ enum class HandlerKind : std::uint8_t { static_, fastcgi, proxy, cgi };
 struct TlsConfig {
     std::filesystem::path cert;
     std::filesystem::path key;
+    bool automatic = false;  // `tls = "auto"`: issued and renewed by the built-in ACME client (H3)
+};
+
+// [server] acme = { email, directory, ca, storage }: the CA the automatic certificates come from.
+struct AcmeConfig {
+    bool enabled = false;
+    std::string email;  // account contact; the CA sends expiry warnings there
+    std::string directory = "https://acme-v02.api.letsencrypt.org/directory";
+    std::string ca_file;  // trust anchor for the directory's own TLS ("" = system store; tests: Pebble's)
+    std::string storage;  // account key and per-site key.pem/fullchain.pem; default <state_dir>/acme
 };
 
 // One element of a try_files list.
@@ -90,6 +100,9 @@ struct SiteConfig {
     PhpPool pool;
     std::vector<std::string> listen;        // "host:port" strings, normalised
     std::string app;                        // preset: "laravel", "php", "static" or "" (none)
+    // `redirect = "https"`: every request gets a 301 to https://<Host><target>; a full
+    // "https://host[:port]" prefix names the target instead (non-standard port). No root needed.
+    std::string redirect;
     std::string root;                       // absolute document root, no trailing slash
     std::vector<std::string> index{"index.html"};
     std::vector<TryStep> try_files;  // default for locations that do not set their own
@@ -141,6 +154,7 @@ struct Config {
     std::string pools_run;  // defaulted by the loader per platform
     std::string state_dir = "/var/lib/agensio";
     bool strict_users = false;  // every site must name a user
+    AcmeConfig acme;
     std::string pid_file;       // written at start (before dropping privileges); `agensio reload` signals it.
                                 // Default: /run/agensio.pid (Linux), /usr/local/var/run/agensio.pid (macOS),
                                 // set by the loader; "" disables it

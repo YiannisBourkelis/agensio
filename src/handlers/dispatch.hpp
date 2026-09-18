@@ -12,6 +12,7 @@
 #include "handlers/fastcgi.hpp"
 #include "handlers/proxy.hpp"
 #include "handlers/static.hpp"
+#include "services/acme.hpp"
 
 namespace agensio {
 
@@ -20,6 +21,8 @@ public:
     Dispatcher(StaticHandler& static_handler, FcgiHandler& fcgi, ProxyHandler& proxy, CgiHandler& cgi)
         : static_(static_handler), fcgi_(fcgi), proxy_(proxy), cgi_(cgi) {}
     CgiHandler& cgi() noexcept { return cgi_; }
+    // HTTP-01: /.well-known/acme-challenge/<token> is answered from here before routing.
+    void set_acme(AcmeChallenges* challenges) noexcept { acme_ = challenges; }
 
     StaticHandler& static_handler() noexcept { return static_; }
     FcgiHandler& fcgi() noexcept { return fcgi_; }
@@ -40,11 +43,13 @@ private:
     // so a POST to a Laravel route reaches /index.php as nginx would route it; the static
     // handler then answers 405 only if the request resolves to an actual file.
     bool check_method(Stream& s, const LocationConfig& loc, WorkerState& ws);
+    void redirect_https(Stream& s, const SiteConfig& site);
 
     StaticHandler& static_;
     FcgiHandler& fcgi_;
     ProxyHandler& proxy_;
     CgiHandler& cgi_;
+    AcmeChallenges* acme_ = nullptr;
 };
 
 }  // namespace agensio

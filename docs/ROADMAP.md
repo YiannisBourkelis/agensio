@@ -581,10 +581,9 @@ Rules:
       switch without reconnecting, a 1.5 s upstream request finishing through a reload
       that removed its location, and wrk at 750k req/s across six reloads with no error.
       Restart-only: workers, reuse_port, user/group, sendfile, cache sizes (warned).
-- [ ] H1 (remaining) Zero-downtime reload: new config applied by worker 0 atomically; listeners added
-      or removed; **TLS certificates watched and reloaded automatically when the files
-      change** (the request nginx and Caddy users share most) as well as via `ctl reload`;
-      reload must not stall new QUIC connections (nginx's known weakness).
+- [ ] H1b Certificates watched and reloaded when the files change (manual `tls = { cert,
+      key }` sites; automatic ones already reload themselves); reload must not stall new
+      QUIC connections (nginx's known weakness).
 - [~] H2 Start as root, bind, drop privileges (`user =`): **done 2026-09-17 with C3b-3**
       (`server.user`); log rotation via `SIGUSR1`/reopen done with A5. Remaining: systemd
       unit, pid file, and `docs/install.md` for the alpha: build from source or package,
@@ -592,11 +591,30 @@ Rules:
       `/run/agensio`), the unit file, first site with `-t`, php-fpm pool, certificate
       hooks, upgrade and rollback. Written with the alpha, kept current by every phase that
       changes an operator-visible step; H7 adds the package paths to it.
-- [ ] H3 Certificates: built-in ACME client (HTTP-01, TLS-ALPN-01 **and DNS-01 with a
-      provider interface**: HTTP-01-only is the main criticism of nginx's 2025 module and
-      DNS challenges are Caddy's second most upvoted request), any RFC 8555 CA, short-lived
-      certificate profiles, automatic renewal, cross-platform; until then documented reload
-      hooks for certbot / win-acme / acme.sh. OCSP stapling.
+- [x] H3 (2026-09-18) Automatic certificates: built-in ACME v2 client (RFC 8555) with
+      HTTP-01 (`src/services/acme.*`, JSON in `src/services/json.hpp`, JWS ES256 and CSRs
+      through OpenSSL, no new dependency). `tls = "auto"` on a site plus
+      `[server] acme = { email, directory, storage, ca }`; any RFC 8555 CA, Let's Encrypt
+      by default. Start: placeholder self-signed certificate so the listener is up at
+      once, order right away; the dispatcher answers `/.well-known/acme-challenge/<token>`
+      before routing on any plain listener (one prefix compare per request); a fresh
+      P-256 key per issuance, files written atomically, the new certificate picked up
+      through `Server::reload` (H1) so no request is interrupted. Renewal check hourly on
+      worker 0, renew at a third of the lifetime left (short-lived profiles work), failed
+      orders retried after an hour with the CA's reason in the error log; names added to
+      `server_name` reorder. Network work is blocking on the manager's own thread (a few
+      requests a year, never on the request path). Storage handed to `server.user` when
+      started as root. `tests/acme.sh`: 17 checks against Pebble (`bench/acme/`),
+      including chain verification against Pebble's root and a restart keeping the
+      certificate. Unit tests: JSON, base64url, JWS sign/verify, renewal rule, config rules.
+      Same day: `redirect = "https"` (or an `https://host:port` prefix) on the plain site
+      for HTTPS-only setups: 301 to the same host and target, no root needed, the
+      challenge still answered first; HSTS stays an explicit `add_headers`.
+- [ ] H3a Certificates, next: TLS-ALPN-01 (no port 80), **DNS-01 with a provider
+      interface** (HTTP-01-only is the main criticism of nginx's 2025 module and DNS
+      challenges are Caddy's second most upvoted request; wildcards need it), external
+      account binding (ZeroSSL), OCSP stapling / ARI renewal hints, a stop flag for an
+      order in flight at shutdown.
 - [ ] H3b **Kernel-enforced containment of the web server itself** (Linux, FreeBSD): open
       files relative to a per-site root descriptor with `openat2(RESOLVE_BENEATH)` (and
       `RESOLVE_NO_SYMLINKS` for `symlinks = "deny"`), so containment does not depend on path

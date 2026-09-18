@@ -299,7 +299,14 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   `Server::reload` on SIGHUP validates, binds new listeners, then switches; in-flight
   work keeps the old generation alive. `agensio reload` validates and signals
   `server.pid_file`. `tests/reload.sh` proves no request fails across reloads.
-- **Not yet**: directory listing.
+- **Automatic certificates** (H3, `src/services/acme.*`, `services/json.hpp`): `tls = "auto"`
+  plus `[server] acme = { email }`; ACME v2 with HTTP-01 against any RFC 8555 CA, JWS ES256
+  and CSRs through OpenSSL. Placeholder certificate at start, order at once, challenge
+  answered by the dispatcher before routing, new certificate swapped in through
+  `Server::reload`, hourly renewal check on worker 0 (renew at a third of the lifetime
+  left), the network work blocking on the manager's own thread. `tests/acme.sh` runs 17
+  checks against Pebble (`bench/acme/docker-compose.yml`, `docker compose` needed).
+- **Not yet**: directory listing, TLS-ALPN-01 / DNS-01 (wildcards), OCSP stapling.
 
 ## Performance notes (measured, keep current)
 

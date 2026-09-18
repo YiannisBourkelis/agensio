@@ -615,5 +615,105 @@ root = "/var/www/example"
 tls = { cert = "/etc/ssl/example/fullchain.pem", key = "/etc/ssl/example/privkey.pem" }
 ```
 
-A listen address is either plain or TLS for every site on it. Automatic certificates come
-with phase H of the roadmap.
+A listen address is either plain or TLS for every site on it.
+
+### Automatic certificates
+
+```toml
+[server]
+acme = { email = "admin@example.com" }
+
+[[site]]
+server_name = ["example.com", "www.example.com"]
+listen = ["0.0.0.0:80"]
+root = "/var/www/example/public"
+
+[[site]]
+server_name = ["example.com", "www.example.com"]
+listen = ["0.0.0.0:443"]
+root = "/var/www/example/public"
+tls = "auto"
+```
+
+`tls = "auto"` makes agensio obtain and renew the certificate itself from an ACME
+(RFC 8555) certificate authority, Let's Encrypt by default. There is no separate client
+to install, no cron job and no reload hook: the server does the whole thing and switches
+to the new certificate through the reload path, so no request is interrupted.
+
+What happens:
+
+1. **Start.** If no certificate exists yet, a self-signed placeholder is written so the
+   listener can come up at once. An order is placed immediately.
+2. **Validation (HTTP-01).** The CA fetches
+   `http://<name>/.well-known/acme-challenge/<token>` for every name in `server_name`.
+   agensio answers that path itself, on any plain listener and before any site or location
+   rule, so nothing in your configuration can get in the way. The names must therefore
+   resolve to this server and **port 80 must be reachable from the internet** (the plain
+   site above). Nothing else needs configuring: no location, no writable webroot.
+3. **Issue.** A fresh P-256 key is generated per certificate, a CSR covering all the
+   names is finalized, the chain is downloaded and both files are written atomically.
+4. **Switch.** The server reloads itself (`reloaded ...` in the error log): new
+   connections get the new certificate, connections in flight finish undisturbed.
+5. **Renew.** Once an hour the certificates are checked and renewed when a third of
+   their lifetime is left (day 60 of a 90-day certificate, day 4 of a 6-day one), so
+   short-lived profiles work too. A failed order is logged with the CA's reason and
+   retried an hour later; the current certificate keeps serving meanwhile. Adding a
+   name to `server_name` triggers a new order at the next check (or at once on reload).
+
+`[server] acme` keys:
+
+| key | default | meaning |
+|---|---|---|
+| `email` | required | The account contact. The CA sends expiry warnings there; it never appears in a certificate. |
+| `directory` | Let's Encrypt production | The CA's directory URL. Staging: `https://acme-staging-v02.api.letsencrypt.org/directory`; any RFC 8555 CA (ZeroSSL, Buypass, Google, a private step-ca or Pebble) works. |
+| `storage` | `<state_dir>/acme` | Where the account key and the certificates live: `account.key`, then `<first server_name>/key.pem` (0600) and `<first server_name>/fullchain.pem`. Started as root with `server.user`, the tree is handed to that user so renewals work after the privilege drop. |
+| `ca` | system trust store | A PEM file to trust for the directory's own TLS; only for private CAs and tests. |
+
+### HTTPS only
+
+```toml
+[[site]]
+server_name = ["example.com", "www.example.com"]
+listen = ["0.0.0.0:80"]
+redirect = "https"
+
+[[site]]
+server_name = ["example.com", "www.example.com"]
+listen = ["0.0.0.0:443"]
+root = "/var/www/example/public"
+tls = "auto"
+
+[[site.location]]
+path = "/"
+add_headers = { "Strict-Transport-Security" = "max-age=31536000" }
+```
+
+`redirect = "https"` answers every request on that site with a 301 to the same host and
+path over https (the Host header without its port, the query string kept). The site
+needs no `root`, no locations and no preset. The ACME validation still works on it: the
+challenge path is answered before the redirect. For a TLS listener on a non-standard port
+give the prefix instead: `redirect = "https://example.com:8443"`. A `redirect` on a site
+that itself has `tls` is refused (it would loop).
+
+The `Strict-Transport-Security` header is deliberately not automatic: once a browser has
+seen it, it refuses plain http for that host until `max-age` expires, so set it when the
+https site is known to work. `add_headers` on the `/` location puts it on every response
+of the site.
+
+Rules checked by `agensio -t`: `tls = "auto"` needs `[server] acme`; `server_name` must
+list real host names (no `*`, no wildcards: those need DNS-01, which is not in this
+release); an `email` is required. `agensio -t --explain` prints the resolved file paths.
+Manual certificates on other sites, `tls = { cert, key }`, coexist with automatic ones.
+
+Backups: the `storage` tree is all there is to keep. Restoring it on another machine and
+starting agensio there continues renewals without a new account or order. Deleting a
+site's directory orders a new certificate at the next start.
+
+Not in this release: TLS-ALPN-01 (for servers with no port 80), DNS-01 and wildcards,
+OCSP stapling, external-account binding. They follow on the roadmap (H3a) in the order
+users ask for them.
+
+Testing against a local CA: `tests/acme.sh build/agensio` starts Pebble (Let's Encrypt's
+test server, `bench/acme/docker-compose.yml`), orders a certificate for
+`host.docker.internal` over port 5002, verifies the served chain against Pebble's root
+and checks that a restart keeps the certificate.
