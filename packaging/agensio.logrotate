@@ -1,0 +1,13 @@
+/var/log/agensio/*.log /var/log/agensio/sites/*/*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 agensio agensio
+    sharedscripts
+    postrotate
+        [ -f /run/agensio.pid ] && kill -USR1 "$(cat /run/agensio.pid)" 2>/dev/null || true
+    endscript
+}

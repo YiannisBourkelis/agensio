@@ -1,0 +1,5 @@
+#!/bin/sh
+getent group agensio >/dev/null || groupadd -r agensio
+getent group agensio-admin >/dev/null || groupadd -r agensio-admin
+getent passwd agensio >/dev/null || useradd -r -g agensio -d /var/lib/agensio -s /sbin/nologin agensio
+exit 0

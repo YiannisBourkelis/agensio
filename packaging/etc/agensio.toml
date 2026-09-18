@@ -1,0 +1,18 @@
+# agensio: main configuration. One file per site goes into sites.d/ (docs/configuration.md,
+# docs/install.md). `agensio -t` checks this file; `agensio reload` applies a change
+# without dropping a connection.
+include = ["sites.d/*.toml"]
+
+[server]
+user = "agensio"                   # started as root: bind, open the logs, then become this user
+# acme = { email = "admin@example.com" }   # uncomment for tls = "auto" (Let's Encrypt)
+
+[log]
+access = "/var/log/agensio/access.log"
+error = "/var/log/agensio/error.log"
+level = "warn"
+
+# The control socket for `agensio ctl` and the MCP server (`agensio mcp`): root and the
+# agensio user are admins; add your administrator account to the agensio-admin group.
+[control]
+admins = "agensio-admin"

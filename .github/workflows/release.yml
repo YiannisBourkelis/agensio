@@ -1,0 +1,63 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+jobs:
+  packages:
+    runs-on: ubuntu-22.04   # oldest glibc we build against: the .deb runs on Debian 12+, Ubuntu 22.04+
+    steps:
+      - uses: actions/checkout@v4
+      - name: dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libasio-dev libssl-dev rpm dpkg-dev
+      - name: configure and build
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build
+      - name: unit tests
+        run: build/agensio_tests
+      - name: version matches the tag
+        run: |
+          tag="${GITHUB_REF_NAME#v}"; ver="$(build/agensio -v | awk '{print $2}')"
+          [ "$tag" = "$ver" ] || { echo "tag $tag but binary says $ver: set AGENSIO_VERSION_STRING"; exit 1; }
+      - name: packages
+        run: cd build && cpack -G DEB && cpack -G RPM && ls -la *.deb *.rpm
+      - name: smoke-install the .deb
+        run: |
+          sudo dpkg -i build/agensio_*.deb
+          id agensio && test -f /etc/agensio/agensio.toml && sudo agensio -t && agensio -v
+      - name: attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" build/*.deb build/*.rpm --clobber
+      - name: build the APT repository
+        if: ${{ env.APT_GPG_PRIVATE_KEY != '' }}
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        run: |
+          echo "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
+          keyid=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/{print $5; exit}')
+          mkdir -p site/apt/pool/main site/apt/dists/stable/main/binary-amd64
+          cp build/*.deb site/apt/pool/main/
+          cd site/apt
+          dpkg-scanpackages --arch amd64 pool/ > dists/stable/main/binary-amd64/Packages
+          gzip -k9 dists/stable/main/binary-amd64/Packages
+          apt-ftparchive -o APT::FTPArchive::Release::Origin=agensio -o APT::FTPArchive::Release::Label=agensio \
+            -o APT::FTPArchive::Release::Suite=stable -o APT::FTPArchive::Release::Codename=stable \
+            -o APT::FTPArchive::Release::Architectures=amd64 -o APT::FTPArchive::Release::Components=main \
+            release dists/stable > dists/stable/Release
+          gpg --batch --yes -u "$keyid" -abs -o dists/stable/Release.gpg dists/stable/Release
+          gpg --batch --yes -u "$keyid" --clearsign -o dists/stable/InRelease dists/stable/Release
+          gpg --armor --export "$keyid" > ../agensio.gpg
+          cd ../..
+          printf '<h1>agensio packages</h1><p>APT: see docs/install.md</p>' > site/index.html
+      - name: publish the APT repository (GitHub Pages)
+        if: ${{ env.APT_GPG_PRIVATE_KEY != '' }}
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+          keep_files: true

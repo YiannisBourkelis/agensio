@@ -691,8 +691,22 @@ Rules:
       OpenTelemetry.
 - [ ] H6 Memory/CPU profile under 10k idle keep-alive connections; per-connection memory
       budget documented (target: < 8 KB idle h1 connection).
-- [ ] H7 Packaging: Debian/Arch packages, Docker image, Homebrew formula; CI on Linux and
-      macOS with ASan/UBSan builds and the fuzzers.
+- [~] H7 (2026-09-19, first part) Packaging: `packaging/` holds the systemd unit, the
+      logrotate file, the packaged `/etc/agensio` (main file plus a default site on
+      `/var/www/html`), the Debian maintainer scripts (account, groups, directories,
+      conffiles, start when port 80 is free, purge keeps certificates and content), the
+      RPM scripts and a COPR spec, and an AUR `PKGBUILD`. CMake gained install rules and
+      CPack for DEB and RPM (`cpack -G DEB` in `build/`; Debian version `0.1.0~alpha.1`).
+      `tests/package.sh` installs, runs, reinstalls, removes and purges the `.deb` as
+      root in the devbox (13 checks). `.github/workflows/release.yml` builds both
+      packages on every `v*` tag, checks the binary's version against the tag,
+      smoke-installs the `.deb`, attaches both to the release, and publishes a signed
+      APT repository to GitHub Pages when the `APT_GPG_PRIVATE_KEY` secret exists;
+      `ci.yml` builds and tests on Ubuntu and macOS for every push. Remaining: the GPG
+      key and Pages setup, the COPR project and the AUR submission (need accounts),
+      Docker image, Homebrew formula, aarch64 builds.
+- [ ] H7b CI additions: ASan/UBSan builds and the fuzzers on a schedule; Docker image;
+      Homebrew formula; aarch64 packages.
 - [ ] Checkpoint: runs a real site for a week; documented ops guide.
 
 ### Phase I. HTTP/3  `[ ]`

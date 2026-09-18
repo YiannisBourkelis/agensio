@@ -94,6 +94,7 @@ cmake --build build
 ./build/agensio_tests                      # unit tests (parser, path, cache, mime, date)
 ./build/agensio -c bench/agensio.toml      # http://127.0.0.1:8080 and https://127.0.0.1:8443
 ./build/agensio -t -c config/agensio.toml  # config check only
+(cd build && cpack -G DEB)                 # the .deb (packaging/, tests/package.sh runs it in the root devbox)
 bench/run.sh                               # 5 s per case; -d 15s for publishable numbers
 scripts/lint.sh && scripts/format.sh       # clang-tidy / clang-format
 cmake -B build-fuzz -DAGENSIO_FUZZ=ON -DAGENSIO_TESTS=OFF -DAGENSIO_TLS=OFF \

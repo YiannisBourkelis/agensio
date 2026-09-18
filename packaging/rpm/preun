@@ -1,0 +1,6 @@
+#!/bin/sh
+if [ "$1" = 0 ] && [ -d /run/systemd/system ] && command -v systemctl >/dev/null; then
+    systemctl stop agensio >/dev/null 2>&1 || true
+    systemctl disable agensio >/dev/null 2>&1 || true
+fi
+exit 0

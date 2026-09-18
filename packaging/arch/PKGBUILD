@@ -1,0 +1,28 @@
+# Maintainer: Yiannis Bourkelis
+pkgname=agensio
+_tag=0.1.0-alpha.1
+pkgver=0.1.0alpha1
+pkgrel=1
+pkgdesc="Fast web server with PHP, reverse proxy, automatic TLS and an MCP control plane"
+arch=('x86_64' 'aarch64')
+url="https://github.com/YiannisBourkelis/agensio"
+license=('MIT')
+depends=('openssl')
+makedepends=('cmake' 'ninja' 'asio')
+backup=('etc/agensio/agensio.toml' 'etc/agensio/sites.d/default.toml' 'etc/logrotate.d/agensio')
+install=agensio.install
+source=("$pkgname-$_tag.tar.gz::$url/archive/refs/tags/v$_tag.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cmake -S "$pkgname-$_tag" -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DAGENSIO_TESTS=OFF \
+        -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_SBINDIR=bin
+  cmake --build build
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+  # Arch has no /usr/sbin: the unit and the tools point at /usr/bin.
+  sed -i 's|/usr/sbin/agensio|/usr/bin/agensio|g' "$pkgdir/usr/lib/systemd/system/agensio.service"
+  install -Dm644 "$pkgname-$_tag/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

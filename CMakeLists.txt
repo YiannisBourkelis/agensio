@@ -159,3 +159,64 @@ if(AGENSIO_FUZZ)
     target_link_options(fuzz_${t} PRIVATE -fsanitize=fuzzer,address,undefined)
   endforeach()
 endif()
+
+# ---------------------------------------------------------------- install and packages (H7)
+include(GNUInstallDirs)
+set(CMAKE_INSTALL_DEFAULT_DIRECTORY_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+install(TARGETS agensio RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR})
+install(FILES packaging/etc/agensio.toml DESTINATION /etc/agensio)
+install(FILES packaging/etc/sites.d/default.toml DESTINATION /etc/agensio/sites.d)
+install(FILES packaging/agensio.logrotate DESTINATION /etc/logrotate.d RENAME agensio)
+install(FILES packaging/agensio.service DESTINATION /usr/lib/systemd/system)
+install(FILES packaging/www/index.html DESTINATION ${CMAKE_INSTALL_DATADIR}/agensio/www)
+install(FILES README.md CHANGELOG.md LICENSE docs/configuration.md docs/install.md docs/mcp.md
+              docs/security-control-plane.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
+install(DIRECTORY docs/examples DESTINATION ${CMAKE_INSTALL_DOCDIR})
+
+set(CPACK_PACKAGE_NAME agensio)
+set(CPACK_PACKAGE_VENDOR "Yiannis Bourkelis")
+set(CPACK_PACKAGE_CONTACT "Yiannis Bourkelis <yiannis@grbytes.com>")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Fast web server with PHP, reverse proxy, automatic TLS and an MCP control plane")
+set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/YiannisBourkelis/agensio")
+set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
+set(CPACK_PACKAGING_INSTALL_PREFIX /usr)
+set(CPACK_STRIP_FILES ON)
+set(CPACK_RESOURCE_FILE_LICENSE ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE)
+set(CPACK_GENERATOR "DEB;RPM")
+# Debian: a pre-release sorts before the release with a tilde.
+string(REPLACE "-" "~" AGENSIO_DEB_VERSION ${AGENSIO_VERSION_STRING})
+set(CPACK_DEBIAN_PACKAGE_VERSION ${AGENSIO_DEB_VERSION})
+set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
+set(CPACK_DEBIAN_PACKAGE_SECTION httpd)
+set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "adduser")
+set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "php-fpm, logrotate")
+set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA
+    ${CMAKE_CURRENT_SOURCE_DIR}/packaging/deb/conffiles
+    ${CMAKE_CURRENT_SOURCE_DIR}/packaging/deb/postinst
+    ${CMAKE_CURRENT_SOURCE_DIR}/packaging/deb/prerm
+    ${CMAKE_CURRENT_SOURCE_DIR}/packaging/deb/postrm)
+set(CPACK_DEBIAN_PACKAGE_CONTROL_STRICT_PERMISSION ON)
+# /etc files are conffiles (packaging/deb/conffiles): dpkg keeps the administrator's edits on upgrade.
+# RPM: version without the pre-release part, release carries it.
+set(CPACK_RPM_PACKAGE_VERSION ${PROJECT_VERSION})
+string(REGEX REPLACE "^[0-9.]+-?" "" AGENSIO_PRERELEASE ${AGENSIO_VERSION_STRING})
+if(AGENSIO_PRERELEASE)
+  string(REPLACE "." "" AGENSIO_PRERELEASE_TAG ${AGENSIO_PRERELEASE})
+  set(CPACK_RPM_PACKAGE_RELEASE "0.1.${AGENSIO_PRERELEASE_TAG}")
+else()
+  set(CPACK_RPM_PACKAGE_RELEASE 1)
+endif()
+set(CPACK_RPM_FILE_NAME RPM-DEFAULT)
+set(CPACK_RPM_PACKAGE_LICENSE MIT)
+set(CPACK_RPM_PACKAGE_GROUP "System Environment/Daemons")
+set(CPACK_RPM_PACKAGE_REQUIRES "openssl-libs, shadow-utils")
+set(CPACK_RPM_PRE_INSTALL_SCRIPT_FILE ${CMAKE_CURRENT_SOURCE_DIR}/packaging/rpm/pre)
+set(CPACK_RPM_POST_INSTALL_SCRIPT_FILE ${CMAKE_CURRENT_SOURCE_DIR}/packaging/rpm/post)
+set(CPACK_RPM_PRE_UNINSTALL_SCRIPT_FILE ${CMAKE_CURRENT_SOURCE_DIR}/packaging/rpm/preun)
+set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION "/etc/agensio;/etc/logrotate.d;/usr/lib/systemd;/usr/lib/systemd/system;/var;/var/www")
+set(CPACK_RPM_USER_FILELIST "%config(noreplace) %attr(0640,root,agensio) /etc/agensio/agensio.toml"
+                            "%config(noreplace) /etc/agensio/sites.d/default.toml"
+                            "%config(noreplace) /etc/logrotate.d/agensio")
+include(CPack)
+

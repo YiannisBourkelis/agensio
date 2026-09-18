@@ -1,0 +1,3 @@
+/etc/agensio/agensio.toml
+/etc/agensio/sites.d/default.toml
+/etc/logrotate.d/agensio

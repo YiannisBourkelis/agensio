@@ -1,0 +1,25 @@
+[Unit]
+Description=agensio web server
+Documentation=https://github.com/YiannisBourkelis/agensio
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Starts as root to bind the ports and open the logs, then becomes server.user
+# (agensio) before the first connection; see /etc/agensio/agensio.toml.
+ExecStartPre=/usr/sbin/agensio -t -c /etc/agensio/agensio.toml
+ExecStart=/usr/sbin/agensio -c /etc/agensio/agensio.toml
+ExecReload=/usr/sbin/agensio reload -c /etc/agensio/agensio.toml
+PIDFile=/run/agensio.pid
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=1048576
+# The process manages its own privileges; keep the sandbox to what does not break that.
+NoNewPrivileges=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictRealtime=true
+
+[Install]
+WantedBy=multi-user.target

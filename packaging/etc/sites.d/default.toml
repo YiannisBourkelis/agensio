@@ -1,0 +1,6 @@
+# The default site: everything not matched by another sites.d file, served from
+# /var/www/html. Replace or delete it once your own sites are in place.
+[[site]]
+server_name = ["*"]
+listen = ["0.0.0.0:80"]
+root = "/var/www/html"

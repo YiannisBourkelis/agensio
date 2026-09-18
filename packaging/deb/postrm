@@ -1,0 +1,12 @@
+#!/bin/sh
+# Remove keeps the account, the logs, the state (certificates!) and the sites. Purge
+# removes the configuration and the logs; /var/lib/agensio and /var/www stay: they hold
+# certificates and content the administrator may still want.
+set -e
+if [ "$1" = "purge" ]; then
+    rm -rf /etc/agensio /var/log/agensio
+    if getent passwd agensio >/dev/null; then userdel agensio 2>/dev/null || true; fi
+    getent group agensio-admin >/dev/null && groupdel agensio-admin 2>/dev/null || true
+fi
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null; then systemctl daemon-reload || true; fi
+exit 0

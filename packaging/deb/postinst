@@ -1,0 +1,33 @@
+#!/bin/sh
+# agensio: service account, directories, first content. Idempotent.
+set -e
+if [ "$1" = "configure" ]; then
+    getent group agensio >/dev/null || groupadd --system agensio
+    getent group agensio-admin >/dev/null || groupadd --system agensio-admin
+    getent passwd agensio >/dev/null || \
+        useradd --system --gid agensio --home-dir /var/lib/agensio --no-create-home --shell /usr/sbin/nologin agensio
+    install -d -o root    -g agensio -m 0750 /etc/agensio
+    install -d -o agensio -g agensio -m 0750 /etc/agensio/sites.d /var/log/agensio /var/lib/agensio
+    install -d -o root    -g root    -m 0755 /var/www
+    if [ ! -d /var/www/html ]; then
+        install -d -o root -g root -m 0755 /var/www/html
+    fi
+    if [ ! -e /var/www/html/index.html ] && [ -z "$(ls -A /var/www/html 2>/dev/null)" ]; then
+        install -o root -g root -m 0644 /usr/share/agensio/www/index.html /var/www/html/index.html
+    fi
+    chown root:agensio /etc/agensio/agensio.toml && chmod 0640 /etc/agensio/agensio.toml
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null; then
+        systemctl daemon-reload || true
+        if [ -z "$2" ]; then  # first install: enable, start only if port 80 is free
+            systemctl enable agensio >/dev/null 2>&1 || true
+            if ! (command -v ss >/dev/null && ss -ltn 2>/dev/null | grep -q ':80 '); then
+                systemctl start agensio || true
+            else
+                echo "agensio: port 80 is in use; not started. Adjust /etc/agensio/sites.d/default.toml, then: systemctl start agensio"
+            fi
+        elif systemctl is-active --quiet agensio; then
+            systemctl restart agensio || true
+        fi
+    fi
+fi
+exit 0

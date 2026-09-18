@@ -38,7 +38,7 @@ are separate accounts (section 3).
 
 | purpose | path | owner, mode | status |
 |---|---|---|---|
-| binary | `/usr/sbin/agensio` (package) or `/usr/local/sbin/agensio` (tarball, source build) | root 0755 | planned |
+| binary | `/usr/sbin/agensio` (package) or `/usr/local/sbin/agensio` (tarball, source build) | root 0755 | today (package) |
 | main configuration | `/etc/agensio/agensio.toml` | root:agensio 0640 | today (search path) |
 | one file per site | `/etc/agensio/sites.d/<domain>.toml`, pulled in by `include = ["sites.d/*.toml"]`; `agensio ctl site-create` writes here | agensio:agensio 0750 dir, files 0640 | today |
 | TLS material you manage yourself | `/etc/agensio/ssl/<domain>/` (`fullchain.pem`, `key.pem` 0600) | root 0700 | convention |
@@ -52,8 +52,8 @@ are separate accounts (section 3).
 | per-user PHP state | `/var/lib/agensio/<user>/tmp/`, `/var/lib/agensio/<user>/sessions/` | <user> 0700 | today (`agensio pools`) |
 | temporary spill files | the system temp directory, unlinked immediately (large upstream bodies and request bodies) | agensio | today |
 | site content | `/var/www/<domain>/` (section 3) | site user | convention |
-| systemd unit | `/lib/systemd/system/agensio.service` (package) or `/etc/systemd/system/agensio.service` | root 0644 | planned |
-| logrotate | `/etc/logrotate.d/agensio` (`postrotate: kill -USR1 $(cat /run/agensio.pid)`) | root 0644 | planned |
+| systemd unit | `/usr/lib/systemd/system/agensio.service` (package) or `/etc/systemd/system/agensio.service` | root 0644 | today (package, `packaging/agensio.service`) |
+| logrotate | `/etc/logrotate.d/agensio` (`postrotate: kill -USR1 $(cat /run/agensio.pid)`) | root 0644 | today (package) |
 
 ### macOS (Homebrew)
 
@@ -157,6 +157,27 @@ php-fpm pools with `agensio pools`, certificates, log rotation, reload, upgrade 
 rollback.
 
 ### 4.1 Linux
+
+0. **Packages.** Every release on GitHub carries a `.deb` and an `.rpm` built by the
+   release workflow; they install the binary, the unit file, log rotation, the packaged
+   configuration in `/etc/agensio` with a default site serving `/var/www/html`, create
+   the `agensio` account and the `agensio-admin` group, and start the service when port
+   80 is free. Steps 2 and 5 below are then already done.
+
+   ```
+   # Debian 12+, Ubuntu 22.04+: from the release page
+   sudo apt install ./agensio_0.1.0~alpha.1_amd64.deb
+   # or the APT repository (published once the release signing key is set up):
+   curl -fsSL https://yiannisbourkelis.github.io/agensio/agensio.gpg | sudo tee /usr/share/keyrings/agensio.gpg >/dev/null
+   echo "deb [signed-by=/usr/share/keyrings/agensio.gpg] https://yiannisbourkelis.github.io/agensio/apt stable main" | sudo tee /etc/apt/sources.list.d/agensio.list
+   sudo apt update && sudo apt install agensio
+   # Fedora, RHEL 9+ (COPR, once enabled):  sudo dnf copr enable yiannis/agensio && sudo dnf install agensio
+   # Arch (AUR, once published):            yay -S agensio     # packaging/arch/PKGBUILD
+   ```
+
+   Upgrades keep your edits to `/etc/agensio` (conffiles); removing the package keeps
+   the configuration, logs, certificates and content; purging removes the configuration
+   and logs and keeps `/var/lib/agensio` (certificates) and `/var/www`.
 
 1. **Binary.** `.deb` and `.rpm` packages, a static tarball, or a source build:
 
