@@ -483,6 +483,15 @@ Rules:
     arguments, result), separate from the access log, rotated with it.
   - **Kill switch**: `control.enabled = false` removes the listener entirely; the
     interface is also absent when the config does not mention it.
+  - **The socket's directory is part of the boundary** (agreed 2026-09-18): `/run/agensio/`
+    is created by the server, owned by its user, mode `0750`, never world-writable, so a
+    site user cannot replace the socket path; the token file lives there too.
+  - **Isolation warning at validation**: `agensio -t` reports, as a misconfiguration, a
+    control interface enabled while any php-fpm pool, proxy upstream process or CGI
+    location runs as the server's own user or as a member of the admin group. With every
+    site under `www-data` the peer-credential check cannot tell sites apart, and the
+    socket is only as safe as that one user; per-site users (C3b) are what makes the
+    control plane safe on a shared host. The warning names the offending site.
   - Same fuzzed HTTP/1.1 parser as the data plane; JSON parsing with size limits.
 - [ ] F1 Control socket: unix domain socket (`/run/agensio.sock`) speaking HTTP/1.1 + JSON
       through the same core; optional loopback TCP listener with the token; remote only
@@ -491,7 +500,12 @@ Rules:
       `status`, `cache` (count, bytes, hit ratio) and `cache/entries` (path, size, age,
       hits), `sites`, `config` (effective, with sources), `connections`, `metrics`
       (Prometheus text as well; per upstream and per certificate metrics from phases D/G,
-      the top metrics requests on the Caddy and nginx trackers).
+      the top metrics requests on the Caddy and nginx trackers). The upstream diagnostics
+      the FastCGI and proxy clients already compute are exposed as they are: per upstream
+      the pool state (in flight, queued, idle), the last failure reasons with their fix
+      hints, retry counts, queue timeouts and the slowest scripts and routes. Those are
+      the first answers an administrator or an agent asks for ("why is this site 502?")
+      and cost nothing new.
 - [ ] F3 Mutating commands: `config/validate`, `reload` (SIGHUP equivalent, atomic swap of
       config + listeners), `cache/purge` (all or by path), `sites/create` (writes
       `sites.d/<domain>.toml` from a preset: static, laravel, php, proxy; validates;
@@ -513,6 +527,25 @@ Rules:
     tools at all.
   - The server never embeds a model and never fetches anything from the network on behalf
     of an agent; it offers precise, auditable tools and nothing else.
+  - **The MCP server is not a listener** (agreed 2026-09-18): `agensio mcp` is spawned by
+    the agent host and talks on its own stdin/stdout, so nothing on the machine can
+    connect to it; the only thing that accepts connections is the control socket, guarded
+    by file mode, the directory, peer credentials and roles from F0. A local PHP or Node
+    site therefore has nothing to reach.
+  - **Remote administration goes through SSH first.** Servers live on remote VPSes; the
+    administrator's host spawns the bridge over the channel every VPS already has:
+    `{"command": "ssh", "args": ["admin@vps1", "agensio", "mcp"]}`. The bridge then
+    connects to the socket as the SSH user, so roles, audit and SSH's own keys and
+    fail2ban apply and no secret leaves the machine; one MCP server per VPS is the right
+    granularity. Requirements this puts on the bridge: stateless, starts in milliseconds,
+    works with no terminal, no environment and no home directory, exits cleanly when the
+    SSH session ends. The integration suite spawns it through `ssh localhost` so the
+    primary remote path is the one that is tested. The same bridge on the box serves an
+    agent run inside an SSH session.
+  - Direct network access (a panel or fleet controller without SSH) is the `remote =
+    { tls, client_ca }` case of F0 with MCP over streamable HTTP: mutual TLS only, never
+    a token alone, Origin validated, and it comes after the stdio path, opt-in, because it
+    widens the reachable set from "whoever has SSH" to "whoever has a certificate".
 - [ ] F6 CLI: `agensio ctl <command>` wrapping the socket, so shell scripts and panels
       (ISPConfig style) get the same interface.
 - [ ] F7 Security review of the phase: a written checklist against the threat model above,
@@ -554,7 +587,11 @@ Rules:
       reload must not stall new QUIC connections (nginx's known weakness).
 - [~] H2 Start as root, bind, drop privileges (`user =`): **done 2026-09-17 with C3b-3**
       (`server.user`); log rotation via `SIGUSR1`/reopen done with A5. Remaining: systemd
-      unit, pid file.
+      unit, pid file, and `docs/install.md` for the alpha: build from source or package,
+      service user, directories (`/etc/agensio`, `/var/www`, `/var/log/agensio`,
+      `/run/agensio`), the unit file, first site with `-t`, php-fpm pool, certificate
+      hooks, upgrade and rollback. Written with the alpha, kept current by every phase that
+      changes an operator-visible step; H7 adds the package paths to it.
 - [ ] H3 Certificates: built-in ACME client (HTTP-01, TLS-ALPN-01 **and DNS-01 with a
       provider interface**: HTTP-01-only is the main criticism of nginx's 2025 module and
       DNS challenges are Caddy's second most upvoted request), any RFC 8555 CA, short-lived
