@@ -290,7 +290,10 @@ void UpstreamPool::tick() {
     for (std::size_t i = 0; i < watched_.size();) {
         UpstreamRequest* r = watched_[i];
         r->on_tick(now);
-        if (i < watched_.size() && watched_[i] == r) ++i;
+        if (i < watched_.size() && watched_[i] == r) {
+            r->notify_slow(now);  // still in flight after a tick: the client gets watched
+            ++i;
+        }
     }
     if (watched_.empty() && children_.empty()) {
         ticking_ = false;
@@ -429,6 +432,7 @@ void UpstreamRequest::begin(UpstreamBodyInput body, bool priority, bool retry_ok
         body_.memory.shrink_to_fit();
     }
     phase_ = Phase::queued;
+    started_ = std::chrono::steady_clock::now();
     pool_.watch(this);
     arm(options_.queue_wait);
     pool_.acquire(address_.key, options_, priority_, shared_from_this());
@@ -461,6 +465,7 @@ void UpstreamRequest::cancel() noexcept {
     if (phase_ == Phase::cancelled) return;
     const Phase was = phase_;
     phase_ = Phase::cancelled;
+    slow_fn_ = nullptr;
     asio::error_code ec;
     pool_.unwatch(this);
     if (was == Phase::queued) pool_.dequeue(address_.key, this);

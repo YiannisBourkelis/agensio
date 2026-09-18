@@ -204,8 +204,9 @@ for round in $(seq 1 "$ROUNDS"); do
     verify "$s"
     port=$(port_of "$s")
     wrk -t"$THREADS" -c"$CONNS" -d2s "http://127.0.0.1:$port${URLS[0]}" >/dev/null 2>&1  # warm-up
-    # wrk drops its connections with their requests still queued for php-fpm; let those
-    # drain (they hold pool slots until the child has answered) before measuring.
+    # wrk drops its connections with their requests still queued for php-fpm; since E9 an
+    # abandoned request is cancelled within a tick, the pause only lets php-fpm finish
+    # the ones already running before measuring.
     sleep 2
     for u in "${URLS[@]}"; do
       raw="$RAW/$s${u//\//_}-r$round.txt"

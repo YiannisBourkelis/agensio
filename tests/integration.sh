@@ -176,6 +176,11 @@ path = "/cgi-slow/"
 alias = "{root}/tests/cgi"
 cgi = {{ read_timeout = 1, max_connections = 1, queue_depth = 0 }}
 
+[[site.location]]                       # E9: one slot, no queue (its own origin: pool limits are per upstream)
+path = "/abort/"
+upstream = "http://127.0.0.1:9109/"
+proxy = {{ max_connections = 1, queue_depth = 0 }}
+
 [[site.location]]                       # D2: redirects passed through untouched
 path = "/raw/"
 upstream = "http://127.0.0.1:9107/"
@@ -187,16 +192,18 @@ upstream = "http://127.0.0.1:9107"
 """
 open(path, "w").write(text)
 PY
-UP_PID=""; UP2_PID=""
+UP_PID=""; UP2_PID=""; UP3_PID=""
 if [ -x build/agensio_upstream ]; then
   build/agensio_upstream -p 9107 >/dev/null 2>&1 &
   UP_PID=$!
   build/agensio_upstream -p 9108 >/dev/null 2>&1 &
   UP2_PID=$!
+  build/agensio_upstream -p 9109 >/dev/null 2>&1 &
+  UP3_PID=$!
 fi
 "$BIN" -c bench/tmp/agensio-test.toml >/dev/null 2>&1 &
 PID=$!
-trap 'kill $PID 2>/dev/null; wait $PID 2>/dev/null; [ -n "$FPM_PID" ] && kill $FPM_PID 2>/dev/null; [ -n "$UP_PID" ] && kill $UP_PID 2>/dev/null; [ -n "$UP2_PID" ] && kill $UP2_PID 2>/dev/null; true' EXIT
+trap 'kill $PID 2>/dev/null; wait $PID 2>/dev/null; [ -n "$FPM_PID" ] && kill $FPM_PID 2>/dev/null; [ -n "$UP_PID" ] && kill $UP_PID 2>/dev/null; [ -n "$UP2_PID" ] && kill $UP2_PID 2>/dev/null; [ -n "$UP3_PID" ] && kill $UP3_PID 2>/dev/null; true' EXIT
 for _ in $(seq 1 50); do nc -z 127.0.0.1 8080 2>/dev/null && nc -z 127.0.0.1 8443 2>/dev/null && break; sleep 0.1; done
 
 fails=0
@@ -522,6 +529,23 @@ if [ -n "$UP_PID" ]; then
   check "proxy: dead member marked down after max_fails" "yes" "$(grep -q '127.0.0.1:9199 marked down for 30 s after 2 failure' bench/tmp/error.log && echo yes)"
   check "proxy: POST retried on the next member after a connect failure" "abc 9108" "$(printf abc | curl -sS -i --data-binary @- $P/failover/echo | tr -d '\r' | awk '/^X-Upstream-Port:/{p=$2} END{print $0, p}')"
   check "proxy: -t warns about every dead member" "yes" "$("$BIN" -t -c bench/tmp/agensio-test.toml 2>&1 >/dev/null | grep -c 'proxy upstream 127.0.0.1:9199' | grep -Eq '^[1-9]' && echo yes)"
+  # Client abort (E9): a client that leaves while its request waits on the origin gives the
+  # pool slot back within a tick; the next client gets it instead of a 503. Without the
+  # watch the slot stays held until the origin answers 1.5 s later.
+  abort=$(python3 - <<'PYT'
+import socket, time, subprocess
+s = socket.create_connection(("127.0.0.1", 8091))
+s.sendall(b"GET /abort/slow?ms=1500 HTTP/1.1\r\nHost: a\r\n\r\n")
+time.sleep(0.1)
+s.close()  # the client gives up
+time.sleep(0.5)  # a tick (250 ms) plus margin for the watch to notice the EOF
+t0 = time.time()
+out = subprocess.run(["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "http://127.0.0.1:8091/abort/slow?ms=100"], capture_output=True, text=True).stdout
+print(out, "fast" if time.time() - t0 < 1.0 else "slow")
+PYT
+)
+  check "proxy: an abandoned request frees its pool slot within a tick" "200 fast" "$abort"
+  check "proxy: the abandoned request was cancelled, not answered" "yes" "$(grep -q '"target":"/abort/slow?ms=1500".*"status":0' bench/tmp/access.log 2>/dev/null && echo yes || { sleep 1.2; grep -q '"target":"/abort/slow?ms=1500"' bench/tmp/access.log && echo yes; })"
   # Upgrade tunnelling (D3): 101 passed through with Upgrade/Connection, bytes flow both
   # ways (including the ones sent right behind the request head), the origin's close ends it.
   tunnel=$(python3 - <<'PYT'

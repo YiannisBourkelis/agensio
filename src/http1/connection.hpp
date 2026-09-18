@@ -89,6 +89,7 @@ public:
     // The whole response has been handed to the kernel: drain an unread body, then the
     // next request, or close.
     void on_response_written() {
+        responding_ = false;
         const bool keep_alive = stream_.response.keep_alive;
         log_request();
         if (peer_) {
@@ -130,6 +131,7 @@ public:
         }
         if (!request_logged_ && stream_.request.length > 0) log_request();  // client went away mid-response
         tunnel_ = false;
+        responding_ = false;
         if (peer_) {
             if (peer_->sock().is_open()) peer_->sock().close(ec);
             peer_.reset();
@@ -304,22 +306,53 @@ private:
     // ---- reading ----
 
     void do_read() {
+        if (read_pending_) return;  // an abort watch's read is out: its completion continues here
         if (in_len_ >= in_.size()) {  // buffer full without a complete request head
             fail_request(431);
             return;
         }
+        arm_read();
+    }
+
+    // The one read this connection may have in flight, whatever state it is in: the next
+    // request head, a client-abort watch during an upstream exchange, or the tunnel's
+    // client side. on_read() routes the completion by state.
+    void arm_read() {
+        read_pending_ = true;
         auto self = this->shared_from_this();
         socket_.async_read_some(asio::buffer(in_.data() + in_len_, in_.size() - in_len_),
                                 immediate([self](const asio::error_code& ec, std::size_t n) { self->on_read(ec, n); }));
     }
 
     void on_read(const asio::error_code& ec, std::size_t n) {
+        read_pending_ = false;
+        if (tunnel_) {
+            if (ec) return tunnel_client_eof();
+            last_activity_ = std::chrono::steady_clock::now();
+            in_len_ += n;
+            tunnel_write_peer(in_len_);
+            return;
+        }
         if (ec) {
-            close();
+            close();  // also cancels an exchange in flight: the client is gone (E9)
             return;
         }
         in_len_ += n;
+        // Bytes that arrive during an exchange or while the response goes out belong to a
+        // pipelined next request: kept, parsed once this response is done.
+        if (upstream_ || responding_) return;
         process();
+    }
+
+    // E9: an exchange that has run for a tick is watched for its client leaving, so the
+    // pool slot and the application's work are given back instead of held until the
+    // answer arrives. Fast exchanges never arm this (no syscall on the common path); a
+    // body still being read keeps the body reader as the watch.
+    static void on_slow_exchange(void* ctx, unsigned gen) {
+        auto* self = static_cast<Http1Connection*>(ctx);
+        if (self->request_gen_ != gen || !self->upstream_ || self->body_pending_ || self->read_pending_) return;
+        if (self->in_len_ >= self->in_.size()) return;  // no room to notice anything
+        self->arm_read();
     }
 
     void process() {
@@ -416,20 +449,14 @@ private:
         // Client bytes after the request head (in_[0, in_len_)) and origin bytes after
         // the 101 head (peer_->in[0, in_len)) are forwarded before the pumps start reading.
         if (in_len_ > 0) tunnel_write_peer(in_len_);
-        else tunnel_read_client();
+        else if (!read_pending_) tunnel_read_client();  // a pending abort watch delivers into the tunnel
         if (peer_->in_len > 0) tunnel_write_client(peer_->in_len);
         else tunnel_read_peer();
     }
 
     void tunnel_read_client() {
-        auto self = this->shared_from_this();
-        socket_.async_read_some(asio::buffer(in_.data(), in_.size()),
-                                immediate([self](const asio::error_code& ec, std::size_t n) {
-                                    if (!self->tunnel_) return;
-                                    if (ec) return self->tunnel_client_eof();
-                                    self->last_activity_ = std::chrono::steady_clock::now();
-                                    self->tunnel_write_peer(n);
-                                }));
+        in_len_ = 0;
+        arm_read();  // completes in on_read(), which routes to tunnel_write_peer while tunnel_ is set
     }
 
     void tunnel_write_peer(std::size_t n) {
@@ -506,7 +533,10 @@ private:
                     : loc->kind == HandlerKind::cgi
                         ? dispatcher_.cgi().start(stream_, *site, *loc, ws, worker_.upstream_pool, std::move(done))
                         : dispatcher_.proxy().start(stream_, *loc, ws, worker_.upstream_pool, std::move(done));
-                if (req && request_gen_ == gen) upstream_ = std::move(req);
+                if (req && request_gen_ == gen) {
+                    upstream_ = std::move(req);
+                    upstream_->on_slow(&Http1Connection::on_slow_exchange, this, gen);
+                }
                 return;
             }
             loc = dispatcher_.serve_static(stream_, *loc, ws, hops);
@@ -522,6 +552,7 @@ private:
         // A client waiting for "100 Continue" that gets a final answer instead will not send
         // the body, so there is nothing to drain: close after the response (RFC 9110 10.1.1).
         if (body_pending_ && expect_continue_ && !continue_sent_ && consumed_ >= in_len_) r.keep_alive = false;
+        responding_ = true;
         writer_.write(stream_, worker_.state);
     }
 
@@ -641,6 +672,8 @@ private:
     // Request body state.
     BodySource body_source_;
     bool body_pending_ = false;  // a body exists and has not been fully read
+    bool read_pending_ = false;  // one client read in flight (head, abort watch or tunnel)
+    bool responding_ = false;    // the writer is sending the response
     bool body_chunked_ = false;
     bool expect_continue_ = false;
     bool continue_sent_ = false;

@@ -287,6 +287,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   off/on twice, plain 1 KB 2.0 -> 2.0-2.1 us, TLS 1 KB 2.8 -> 2.9-3.0 us, 100 KB rows
   within noise, i.e. 0.1-0.2 us per request, under the 1 us bar the roadmap set. Benchmark
   templates: off, like the nginx and Caddy bench configs.
+- **Client abort** (E9): one client read in flight per connection, routed by state; an
+  upstream exchange older than a pool tick registers a slow callback and the connection
+  arms an EOF watch, so an abandoned request is cancelled (slot freed, CGI process
+  killed) instead of executed; nothing is armed for fast exchanges.
 - **Range requests** (E1, `src/http1/range.hpp`): one `bytes=` range with If-Range; 206
   as a slice of the cache entry or a `FileBody` with an offset (sendfile keeps the fast
   path), 416 past the end, `Accept-Ranges: bytes` prebuilt into the entry block.

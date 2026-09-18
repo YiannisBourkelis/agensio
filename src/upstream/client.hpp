@@ -198,6 +198,21 @@ public:
 
     // The address this exchange talked to (for logs).
     const UpstreamAddress& address() const noexcept { return address_; }
+    // Called once from the pool's tick when the exchange has been in flight for a tick
+    // (250 ms) and is still running: the connection then starts watching its client for
+    // EOF (E9). Fast exchanges never pay for it. `gen` is handed back to the callback.
+    using SlowFn = void (*)(void* ctx, unsigned gen);
+    void on_slow(SlowFn fn, void* ctx, unsigned gen) noexcept {
+        slow_fn_ = fn;
+        slow_ctx_ = ctx;
+        slow_gen_ = gen;
+    }
+    void notify_slow(std::chrono::steady_clock::time_point now) {
+        if (!slow_fn_ || now - started_ < UpstreamPool::kTick) return;
+        SlowFn fn = slow_fn_;
+        slow_fn_ = nullptr;
+        fn(slow_ctx_, slow_gen_);
+    }
     // Health notes produced along the way ("marked down ..."), for the error log.
     const std::string& health_note() const noexcept { return note_; }
 
@@ -297,6 +312,10 @@ private:
     std::string note_;
     bool sent_any_ = false;           // bytes went to this address: a retry is only for idempotent requests
     std::chrono::steady_clock::time_point deadline_{};  // when the current phase becomes a timeout
+    std::chrono::steady_clock::time_point started_{};   // begin(): for the slow notification
+    SlowFn slow_fn_ = nullptr;
+    void* slow_ctx_ = nullptr;
+    unsigned slow_gen_ = 0;
     std::string out_;           // the encoded head (+ body when in memory); kept for a retry
     std::string body_chunk_;    // one body chunk, framed, from the spill file / client stream
     std::string stream_chunk_;  // one client-body chunk in flight (request_buffering off)

@@ -422,15 +422,21 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       other run before and after; the Python client prints nothing when its 5 s recv
       times out, so the cause is unknown. Capture the client's exception in the check
       and, if it repeats, trace the tunnel's first reads.
-- [ ] E9 Client abort while an upstream request is pending (found with C5): the HTTP/1
-      connection has no read in flight while its FastCGI request waits in the pool queue
-      or runs, so a client that goes away (wrk closing 64 connections, a browser
-      navigating on) is noticed only when the response is written. Until then the request
-      keeps its queue slot and php-fpm executes it; after a burst that is up to
-      `queue_depth` wasted requests and a 503 storm for the next 0.5 s. nginx aborts the
-      upstream request on client EOF (`fastcgi_ignore_client_abort off`). Fix: a
-      zero-byte read for EOF on the client socket while `upstream_` is set (FastCGI and
-      proxy paths only, nothing on the static path), cancelling the exchange; measure.
+- [x] E9 (2026-09-18) Client abort while an upstream request is pending (found with C5).
+      The connection now has at most one client read in flight, routed by state
+      (`arm_read` / `on_read`: next request head, abort watch, tunnel client side). An
+      exchange that has run for one pool tick (250 ms) tells its connection
+      (`UpstreamRequest::on_slow`, a raw callback set at dispatch, no allocation), which
+      arms a read: EOF cancels the exchange, freeing the pool slot and, for CGI, killing
+      the process; bytes are a pipelined request and are kept for after the response.
+      Fast exchanges never arm it, so the proxy and FastCGI hot paths gain no syscall
+      (a speculative recv costs an EAGAIN, an async_wait an epoll_ctl: both measured in
+      D1). Applies to FastCGI, proxy and CGI alike; a body still being read keeps the
+      body reader as the watch. Integration: with one slot and no queue, a client that
+      leaves after 100 ms of a 1.5 s request lets the next client in within 600 ms
+      instead of a 503. The C5 burst (wrk dropping 64 queued requests on the Laravel
+      pool, then a strict client) now yields 7154 x 200 and no 503 where it gave 30k
+      503s; gate `ab-20260918-003305.md` flat (proxy JSON 1.010, static 0.96-1.00).
 - [ ] Checkpoint: h1 compliance run (a scripted curl/python suite in `tests/`), fuzzers
       clean for 1h, benchmark unchanged.
 
