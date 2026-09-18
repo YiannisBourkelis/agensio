@@ -576,18 +576,23 @@ void Server::stop() {
 
 // ---- reload ----
 
-void Server::reload() {
+bool Server::reload(std::string& error) {
+    auto refuse = [&](const std::string& why) {
+        error = why;
+        error_log_.error("reload refused: " + why);
+        return false;
+    };
     Config fresh;
     try {
         fresh = load_config(cfg_.config_path);
     } catch (const std::exception& e) {
-        error_log_.error(std::string("reload refused: ") + e.what());
-        return;
+        return refuse(e.what());
     }
     const auto hosting = check_hosting(fresh, system_facts());
     if (!hosting.empty()) {
-        for (const auto& e : hosting) error_log_.error("reload refused: " + e);
-        return;
+        std::string all;
+        for (const auto& e : hosting) all += (all.empty() ? "" : "; ") + e;
+        return refuse(all);
     }
     // Restart-only settings stay what they were; say so when the file changed them.
     if (fresh.workers != cfg_.workers || fresh.reuse_port != cfg_.reuse_port || fresh.user != cfg_.user ||
@@ -600,15 +605,11 @@ void Server::reload() {
         prepare_acme(gen->cfg);
         build_listeners(*gen);
     } catch (const std::exception& e) {
-        error_log_.error(std::string("reload refused: ") + e.what());
-        return;
+        return refuse(e.what());
     }
     assign_log_sinks(gen->cfg);
     std::string err;
-    if (!logs_.open_all(err)) {
-        error_log_.error("reload refused: " + err);
-        return;
-    }
+    if (!logs_.open_all(err)) return refuse(err);
     own_site_logs(gen->cfg);
 
     // New addresses are bound before anything switches, so a port that cannot be bound
@@ -630,8 +631,7 @@ void Server::reload() {
             acceptors_[i]->socket.close(ignored);
             acceptors_[i]->open = false;
         }
-        error_log_.error(std::string("reload refused: ") + e.what());
-        return;
+        return refuse(e.what());
     }
     // Switch: every worker takes the generation on its own loop; connections pick it up at
     // their next request, exchanges in flight keep the old one alive until they finish.
@@ -657,6 +657,30 @@ void Server::reload() {
     error_log_.warn("reloaded " + cfg_.config_path.string() + ": " + std::to_string(gen->cfg.sites.size()) +
                     " site(s), " + std::to_string(gen->listeners.size()) + " listener(s), " +
                     std::to_string(opened.size()) + " bound, " + std::to_string(removed) + " closed");
+    return true;
+}
+
+bool Server::renew_certificate(std::string_view site, std::string& error) {
+#ifdef AGENSIO_HAS_TLS
+    const SiteConfig* s = control::find_site(gen_->cfg, site);
+    if (!s) {
+        error = "no such site";
+        return false;
+    }
+    if (!s->tls || !s->tls->automatic) {
+        error = "the site has no automatic certificate (tls = \"auto\")";
+        return false;
+    }
+    if (!acme_.renew_now(s->tls->cert)) {
+        error = "certificate not managed";
+        return false;
+    }
+    return true;
+#else
+    (void)site;
+    error = "built without TLS";
+    return false;
+#endif
 }
 
 void Server::write_pid_file() {

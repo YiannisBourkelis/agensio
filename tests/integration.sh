@@ -37,6 +37,8 @@ FPMCONF
 fi
 sed "s#@WORKERS@#0#g; s#@BENCH@#$ROOT/bench#g; s#@SENDFILE_MIN@#${SENDFILE_MIN:-48KB}#g; s#@ACCESS_LOG@#$ROOT/bench/tmp/access.log#; s#^tcp_nodelay = true#tcp_nodelay = true\ntrusted_proxies = [\"127.0.0.1\"]#" bench/agensio.toml > bench/tmp/agensio-test.toml
 printf '\n[control]\nsocket = "%s/bench/tmp/control.sock"\naudit = "%s/bench/tmp/audit.log"\n' "$ROOT" "$ROOT" >> bench/tmp/agensio-test.toml
+rm -rf bench/tmp/sites.d; mkdir -p bench/tmp/sites.d bench/tmp/sites/created.test/web; echo created > bench/tmp/sites/created.test/web/index.html
+sed -i '1i include = ["sites.d/*.toml"]' bench/tmp/agensio-test.toml
 # Locations (A4) on the plain site: an SPA fallback, an aliased root, an exact match and a
 # try_files status. Inserted after the site's `default = true` line.
 python3 - bench/tmp/agensio-test.toml "$ROOT/bench/www" "$ROOT" <<'PY'
@@ -373,6 +375,26 @@ curl -sS -o /dev/null http://127.0.0.1:8080/control-probe-404 >/dev/null; sleep 
 check "control: logs finds the 404 just made" "yes" "$(curl -sS --unix-socket $CS 'http://control/v1/logs?since=1m&status=4xx' | grep -q 'control-probe-404' && echo yes)"
 check "control: health answers with findings" "yes" "$(curl -sS --unix-socket $CS http://control/v1/health | grep -q '"findings":\[' && echo yes)"
 check "control: ctl logs and health through the client" "0 0" "$("$BIN" ctl logs --since 5m --status all --socket $CS > /dev/null; echo -n "$? "; "$BIN" ctl health --socket $CS > /dev/null; echo $?)"
+# Mutations (F3): confirm required, the decision form, create, update, disable, enable, delete, reload.
+cpost() { curl -sS -o bench/tmp/ctl-reply.json -w '%{http_code}' --unix-socket $CS -X POST -H 'Content-Type: application/json' -d "$2" "http://control$1"; }
+check "control: a mutation without confirm is 428" "428" "$(cpost /v1/reload '{}')"
+check "control: reload through the socket" "200 yes" "$(cpost /v1/reload '{"confirm":true,"reason":"test"}') $(grep -q 'role=admin reload (test): ok' bench/tmp/audit.log && echo yes)"
+check "control: site-create asks for the open decisions" "422 https root app user" "$(cpost /v1/sites '{"domain":"created.test","confirm":true}') $(grep -o '"field":"[a-z_]*"' bench/tmp/ctl-reply.json | cut -d'"' -f4 | tr '\n' ' ' | sed 's/ $//')"
+check "control: site-create refuses a bad domain" "400" "$(cpost /v1/sites '{"domain":"Bad_Host","confirm":true}')"
+check "control: site-create names the root work still missing" "409 yes" "$(cpost /v1/sites "{\"domain\":\"created.test\",\"https\":\"none\",\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/bench/tmp/sites/nothere/web\",\"confirm\":true}") $(grep -q '"run_as_root":\["mkdir -p' bench/tmp/ctl-reply.json && echo yes)"
+check "control: site-create writes the file, reloads, the site answers" "201 created" "$(cpost /v1/sites "{\"domain\":\"created.test\",\"aliases\":[\"www.created.test\"],\"https\":\"none\",\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/bench/tmp/sites/created.test/web\",\"listen_plain\":\"127.0.0.1:8094\",\"confirm\":true,\"reason\":\"test\"}") $(curl -sS -H 'Host: www.created.test' http://127.0.0.1:8094/)"
+check "control: the managed file carries its spec and is listed by sites" "yes yes" "$(head -1 bench/tmp/sites.d/created.test.toml | grep -q '^# agensio:managed {"domain":"created.test"' && echo yes) $(curl -sS --unix-socket $CS http://control/v1/sites | grep -q '"server_name":\["created.test","www.created.test"\]' && echo yes)"
+check "control: site-update adds an alias without re-asking decided fields" "200 created" "$(cpost /v1/sites/created.test '{"aliases":["www.created.test","m.created.test"],"confirm":true}') $(curl -sS -H 'Host: m.created.test' http://127.0.0.1:8094/)"
+check "control: a hand-written site cannot be updated" "409" "$(cpost /v1/sites/laravel.test '{"aliases":["x.test"],"confirm":true}')"
+check "control: site-disable stops serving, keeps the file" "200 000 yes" "$(cpost /v1/sites/created.test/disable '{"confirm":true}') $(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:8094/ 2>/dev/null) $([ -f bench/tmp/sites.d/created.test.toml.disabled ] && echo yes)"
+check "control: site-enable brings it back" "200 created" "$(cpost /v1/sites/created.test/enable '{"confirm":true}') $(curl -sS http://127.0.0.1:8094/)"
+check "control: cert-renew on a site without automatic TLS is refused" "409" "$(cpost /v1/sites/created.test/renew '{"confirm":true}')"
+check "control: site-delete keeps a .bak and reloads" "200 yes 000" "$(cpost /v1/sites/created.test/delete '{"confirm":true}') $([ -f bench/tmp/sites.d/created.test.toml.bak ] && [ ! -f bench/tmp/sites.d/created.test.toml ] && echo yes) $(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:8094/ 2>/dev/null)"
+printf '[[site]\n' > bench/tmp/sites.d/broken.toml
+check "control: reload with a broken file on disk is refused, old configuration serves" "409 200" "$(cpost /v1/reload '{"confirm":true}') $(code http://127.0.0.1:8080/)"
+rm -f bench/tmp/sites.d/broken.toml
+check "control: ctl site-create through the client reports the decisions" "1 yes" "$("$BIN" ctl site-create --domain cli.test --yes --socket $CS > bench/tmp/ctl.out 2>&1; echo -n "$? "; grep -q 'decisions needed' bench/tmp/ctl.out && echo yes)"
+check "control: audit has every mutation with its result" "yes" "$(grep -q 'sites (test): created' bench/tmp/audit.log && grep -q 'sites/created.test/delete: delete' bench/tmp/audit.log && grep -q 'reload: .*broken.toml' bench/tmp/audit.log && echo yes)"
 check "control: socket file mode and no access-log line for it" "666 no" "$(stat -c %a $CS 2>/dev/null || stat -f %Lp $CS) $(grep -q 'v1/status' bench/tmp/access.log && echo yes || echo no)"
 
 # ---- request bodies (A3): decoded, limited, drained after the response ----

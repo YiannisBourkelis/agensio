@@ -130,6 +130,7 @@ struct ControlConfig {
     std::string operators;
     std::string viewers;
     std::string audit;      // one line per mutating command or refusal; default next to the error log
+    std::string sites_root; // where site_create suggests document roots ("" = /var/www)
 };
 
 struct LogConfig {
@@ -189,6 +190,7 @@ struct Config {
     std::vector<SiteConfig> sites;
 
     std::filesystem::path config_path;  // the file this came from
+    std::vector<std::string> includes;  // the `include` patterns as written (site_create checks sites.d is covered)
 };
 
 // Parses "4MB", "256k", "1G", "65536". Throws std::invalid_argument.

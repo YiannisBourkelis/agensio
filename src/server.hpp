@@ -86,7 +86,11 @@ public:
     // upstream exchanges and tunnels in flight finish on the configuration they started
     // with; keep-alive connections pick the new one up at their next request. A bad file
     // or a port that cannot be bound is logged and the current configuration keeps serving.
-    void reload();
+    void reload() {
+        std::string ignored;
+        reload(ignored);
+    }
+    bool reload(std::string& error);
 
     const std::vector<Listener>& listeners() const noexcept { return gen_->listeners; }
     unsigned worker_count() const noexcept { return static_cast<unsigned>(workers_.size()); }
@@ -124,6 +128,10 @@ private:
     json::Value validate() override;
     json::Value logs(std::string_view target) override;
     json::Value health() override;
+    bool reload_now(std::string& error) override { return reload(error); }
+    bool renew_certificate(std::string_view site, std::string& error) override;
+    void reopen_logs() override { logs_.reopen_all(); }
+    const Config& running() override { return gen_->cfg; }
 
 
     Config cfg_;                            // the boot configuration: workers, cache, sendfile, user; restart-only

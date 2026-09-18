@@ -1103,6 +1103,7 @@ Config load_config(const fs::path& path) {
     parse_sites_from(root, base_dir, cfg, path.filename().string());
 
     for (auto& pattern : string_list(root["include"], "include")) {
+        cfg.includes.push_back(pattern);
         for (auto& file : expand_include(base_dir, pattern)) {
             toml::table sub;
             try {
@@ -1199,6 +1200,7 @@ Config load_config(const fs::path& path) {
         cfg.control.admins = account_name((*ct)["admins"], "control.admins");
         cfg.control.operators = account_name((*ct)["operators"], "control.operators");
         cfg.control.viewers = account_name((*ct)["viewers"], "control.viewers");
+        if (auto sr = (*ct)["sites_root"].value<std::string>()) cfg.control.sites_root = resolve(base_dir, *sr).string();
         if (auto a = (*ct)["audit"].value<std::string>()) cfg.control.audit = resolve(base_dir, *a).string();
         else if (cfg.log.error != "stderr") cfg.control.audit = (fs::path(cfg.log.error).parent_path() / "audit.log").string();
         else cfg.control.audit = resolve(base_dir, "logs/audit.log").string();

@@ -314,7 +314,11 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   `tests/control.sh` runs the role matrix as root in the devbox. Read commands (F2,
   `control/commands.*`): `sites`, `site NAME`, `validate`, `logs` (three log formats parsed
   by hand, files read backwards with caps), `health` (findings with a fix each); all GET,
-  viewer role, pure functions over the Config so the unit tests cover them.
+  viewer role, pure functions over the Config so the unit tests cover them. Mutations
+  (F3, `control/sites.*`): POST with `confirm`, audited; `site-create` answers a decision
+  form (422) and root prerequisites as commands (409, `waiting`), writes managed
+  `sites.d/<domain>.toml` files (spec JSON on line 1), validates through `reload` and
+  undoes a refused change; also update/disable/enable/delete, `reload`, `cert-renew`.
 - **Not yet**: directory listing, TLS-ALPN-01 / DNS-01 (wildcards), OCSP stapling.
 
 ## Performance notes (measured, keep current)

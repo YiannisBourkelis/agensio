@@ -20,6 +20,7 @@
 #include "services/acme.hpp"
 #include "control/roles.hpp"
 #include "control/commands.hpp"
+#include "control/sites.hpp"
 #include "services/json.hpp"
 #include "handlers/proxy.hpp"
 #include "core/headers.hpp"
@@ -1579,6 +1580,105 @@ static void test_control_commands() {
     std::filesystem::remove_all(dir);
 }
 
+static void test_control_sites() {
+    using namespace control;
+    CHECK(valid_domain("example.com") && valid_domain("www.shop-1.example.co.uk") && valid_domain("xn--80ak6aa92e.com"));
+    CHECK(!valid_domain("Example.com") && !valid_domain("example") && !valid_domain("-a.com") && !valid_domain("a-.com"));
+    CHECK(!valid_domain("a..com") && !valid_domain(".a.com") && !valid_domain("a.com/x") && !valid_domain("a b.com"));
+    CHECK(!valid_domain(std::string(64, 'a') + ".com") && !valid_domain("../etc.com"));
+    CHECK(suggest_user("www.example.com") == "example" && suggest_user("shop.example.com") == "shop" && suggest_user("123.com") == "web123");
+    const auto dir = std::filesystem::temp_directory_path() / "agensio-sites-test";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir / "www");
+    CHECK(detect_app(dir / "www") == "static");
+    std::ofstream(dir / "www" / "index.php") << "<?php";
+    CHECK(detect_app(dir / "www") == "php");
+    std::ofstream(dir / "www" / "wp-config.php") << "<?php";
+    CHECK(detect_app(dir / "www") == "wordpress");
+    std::ofstream(dir / "artisan") << "#!";
+    CHECK(detect_app(dir / "www") == "laravel");
+    CHECK(detect_app(dir / "nope").empty());
+    // Decisions: everything open, then closed one by one; explicit null user counts as decided.
+    Config cfg;
+    cfg.config_path = dir / "agensio.toml";
+    cfg.includes = {"sites.d/*.toml"};
+    SiteSpec spec;
+    std::string err;
+    json::Value body;
+    CHECK(json::parse(R"({"domain":"shop.test"})", body, err));
+    auto needs = apply_request(body, cfg, spec, err);
+    CHECK(err.empty() && needs.size() == 4);
+    CHECK(needs[0].field == "https" && needs[1].field == "root" && needs[2].field == "app" && needs[3].field == "user" && needs[3].suggestion == "shop");
+    CHECK(json::parse(R"({"https":"auto"})", body, err) && (apply_request(body, cfg, spec, err), err.find("acme") != std::string::npos));
+    err.clear();
+    cfg.acme.enabled = true;
+    CHECK(json::parse(R"({"https":"auto","root":")" + (dir / "www").string() + R"(","user":null})", body, err));
+    needs = apply_request(body, cfg, spec, err);
+    CHECK(err.empty() && needs.size() == 1 && needs[0].field == "app" && needs[0].suggestion.starts_with("laravel"));
+    CHECK(json::parse(R"({"app":"php"})", body, err));
+    needs = apply_request(body, cfg, spec, err);
+    CHECK(needs.size() == 1 && needs[0].field == "php_socket");  // no user, so no generated pool
+    CHECK(json::parse(R"({"user":"shop","app":"laravel","aliases":["www.shop.test"]})", body, err));
+    needs = apply_request(body, cfg, spec, err);
+    CHECK(err.empty() && needs.empty() && spec.user == "shop" && spec.app == "laravel");
+    CHECK(json::parse(R"({"app":"weird"})", body, err) && (apply_request(body, cfg, spec, err), err.find("app must be") != std::string::npos));
+    err.clear();
+    CHECK(json::parse(R"({"aliases":["bad host"]})", body, err) && (apply_request(body, cfg, spec, err), err.find("alias") != std::string::npos));
+    err.clear();
+    spec.aliases = {"www.shop.test"};
+    spec.app = "laravel";  // the "weird" probe left its value behind
+    // Rendering: HTTPS-only with the redirect site, the managed header round-trips.
+    spec.hsts = true;
+    const std::string text = render_site(spec, "2026-09-18");
+    CHECK(text.starts_with(kManagedMarker));
+    CHECK(text.find("listen = [\"0.0.0.0:80\"]\nredirect = \"https\"") != std::string::npos);
+    CHECK(text.find("listen = [\"0.0.0.0:443\"]\nroot = ") != std::string::npos && text.find("app = \"laravel\"") != std::string::npos);
+    CHECK(text.find("user = \"shop\"") != std::string::npos && text.find("tls = \"auto\"") != std::string::npos);
+    CHECK(text.find("Strict-Transport-Security") != std::string::npos && text.find("server_name = [\"shop.test\", \"www.shop.test\"]") != std::string::npos);
+    std::filesystem::create_directories(dir / "sites.d");
+    CHECK(write_site_file(site_file(cfg, "shop.test"), text, err) && err.empty());
+    SiteSpec back;
+    CHECK(read_managed(site_file(cfg, "shop.test"), back) && back.domain == "shop.test" && back.user == "shop" && back.user_decided && back.hsts && back.aliases.size() == 1);
+    CHECK(write_site_file(site_file(cfg, "shop.test"), text + "\n", err) && std::filesystem::exists(dir / "sites.d" / "shop.test.toml.bak"));
+    std::ofstream(dir / "sites.d" / "hand.toml") << "[[site]]\n";
+    CHECK(!read_managed(dir / "sites.d" / "hand.toml", back));
+    CHECK(sites_dir_included(cfg));
+    cfg.includes = {"conf.d/*.toml"};
+    CHECK(!sites_dir_included(cfg));
+    // A plain-only site renders one block; proxy renders app and upstream.
+    SiteSpec plain;
+    plain.domain = "a.test";
+    plain.https = "none";
+    plain.app = "proxy";
+    plain.upstream = "http://127.0.0.1:3000";
+    const std::string whole = render_site(plain, "x");
+    const std::string p = whole.substr(whole.find("\n[[site]]"));  // past the managed header
+    CHECK(p.find("redirect") == std::string::npos && p.find("app = \"proxy\"\nupstream = \"http://127.0.0.1:3000\"") != std::string::npos);
+    CHECK(std::count(p.begin(), p.end(), '[') == 2 + 1 + 1);  // one [[site]] block: server_name and listen lists
+    // The managed file the loader accepts.
+    {
+        std::ofstream(dir / "agensio.toml") << "include = [\"sites.d/*.toml\"]\n[server]\nacme = { email = \"a@b.test\" }\n";
+        std::filesystem::remove(dir / "sites.d" / "hand.toml");
+        std::filesystem::create_directories(dir / "www" / "public");
+        SiteSpec ok = spec;
+        ok.app = "laravel";  // the "weird" probe above left its value in spec
+        ok.root = (dir / "www").string();
+        ok.user.clear();
+        ok.php_socket = "127.0.0.1:9000";
+        CHECK(write_site_file(site_file(cfg, "shop.test"), render_site(ok, "x"), err));
+        const Config loaded = load_config(dir / "agensio.toml");
+        CHECK(loaded.sites.size() == 2 && loaded.sites[0].redirect == "https" && loaded.sites[1].tls && loaded.sites[1].tls->automatic && loaded.sites[1].app == "laravel");
+        CHECK(prerequisites(ok, loaded).empty());
+        SiteSpec missing = ok;
+        missing.user = "no-such-user-zz";
+        missing.root = (dir / "missing").string();
+        const auto pre = prerequisites(missing, loaded);
+        CHECK(pre.size() == 2 && pre[0].starts_with("useradd") && pre[1].starts_with("mkdir -p"));
+        CHECK(next_steps(ok, loaded).size() == 1);  // the port-80 note for auto certificates
+    }
+    std::filesystem::remove_all(dir);
+}
+
 int main() {
     test_path();
     test_parser();
@@ -1605,6 +1705,7 @@ int main() {
     test_json();
     test_control();
     test_control_commands();
+    test_control_sites();
 #ifdef AGENSIO_HAS_TLS
     test_acme();
 #endif

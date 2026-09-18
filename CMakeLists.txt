@@ -79,6 +79,7 @@ add_library(agensio_core STATIC
   src/services/acme.cpp
   src/control/handler.cpp
   src/control/commands.cpp
+  src/control/sites.cpp
   src/control/client.cpp
   src/response.cpp
   src/handlers/static.cpp

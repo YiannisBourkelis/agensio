@@ -756,6 +756,7 @@ admins = "agensio-admin"               # groups; root and server.user are always
 operators = "agensio-ops"
 viewers = "agensio-view"
 audit = "/var/log/agensio/audit.log"   # default: audit.log next to the error log
+sites_root = "/var/www"                # where site-create suggests document roots
 ```
 
 The control API is how `agensio ctl`, the MCP bridge (`agensio mcp`) and any local tool
@@ -787,6 +788,23 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 | `validate` | viewer | loads the file on disk again and runs the hosting rules: `ok`, `errors`, site count, and the restart-only settings that differ from the running server |
 | `logs` | viewer | `--site NAME` (default: all sites plus the error log), `--since 3h` (`m`, `h`, `d`, `w`, seconds, or a local `YYYY-MM-DDThh:mm:ss`; default 1h), `--level error|warn|info` for the error log (default warn = error+warn), `--status 5xx|4xx|all|NNN` for access logs (default 5xx), `--limit N` (default 200, newest). Reads at most 2 MB per file from the end; `truncated` says when that cut in |
 | `health` | viewer | findings with `severity`, `code`, `site`, `message`, `fix`: configuration on disk invalid or failing the hosting rules, restart-only settings changed, running as root, certificate unreadable / still the placeholder / expired / expiring within 14 days (manual), `tls = "auto"` without a plain port-80 site for the names, no http-to-https redirect, application sites sharing the server's account, generated pools out of date, errors in the last 24 hours. `ok` is true when nothing above info level was found |
+
+**Changes** (`POST` with a JSON body; every one needs `"confirm": true`, takes a
+`"reason"` that goes to the audit log, and answers 428 without the confirmation):
+
+| command | role | what it does |
+|---|---|---|
+| `reload` | operator | the same as `agensio reload`: validate the file on disk, bind, switch; 409 with the reason when refused, nothing changed then |
+| `logs-reopen` | operator | reopen every log file (what `SIGUSR1` does) |
+| `site-create` | admin | writes `sites.d/<domain>.toml`, validates, reloads. Fields: `domain`, `aliases`, `https` (`auto`, `none`, or `{cert, key}`), `redirect_http` (default true), `hsts`, `user` (`null` for none), `group`, `app`, `root`, `upstream`, `php_socket`, `php_children`, `php_version`, `listen_plain`, `listen_tls`. Until `https`, `root` (or `upstream`), `app` and `user` are decided it answers 422 with the open questions and a suggestion each (a user name from the domain, the app the files under root suggest); when the account or the root directory does not exist it answers 409 with the commands to run as root and waits for the same command again. A new site is HTTPS-only: the plain site redirects. |
+| `site-update NAME` | admin | the same fields on a site `site-create` wrote (the file carries its spec on its first line); a hand-written file is refused with 409, edit it yourself |
+| `site-disable NAME`, `site-enable NAME` | admin | renames the file to `.disabled` and back, reloads |
+| `site-delete NAME` | admin | removes the file (a `.bak` stays), reloads; never touches the root or the account |
+| `cert-renew NAME` | operator | orders the site's automatic certificate again now |
+
+A change that does not validate is undone before the answer: the file is removed or the
+previous one restored, and the old configuration keeps serving. The server never runs
+a shell command for any of these; what needs root comes back as text.
 
 Unknown commands answer a JSON 404, a wrong method a 405 with `Allow`, a role that is too
 low a 403 naming the role needed. `curl --unix-socket /run/agensio/control.sock

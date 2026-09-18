@@ -557,10 +557,20 @@ Rules:
       hints, retry counts, queue timeouts and the slowest scripts and routes. Those are
       the first answers an administrator or an agent asks for ("why is this site 502?")
       and cost nothing new.
-- [ ] F3 Mutating commands: `config/validate`, `reload` (SIGHUP equivalent, atomic swap of
-      config + listeners), `cache/purge` (all or by path), `sites/create` (writes
-      `sites.d/<domain>.toml` from a preset: static, laravel, php, proxy; validates;
-      reloads), `sites/disable`.
+- [x] F3 (2026-09-18) Mutating commands (POST, `confirm` required, `reason` audited):
+      `reload` (`Server::reload` now returns the refusal), `logs-reopen`, `site-create`
+      / `site-update NAME` / `site-disable` / `site-enable` / `site-delete`, `cert-renew`
+      (`AcmeManager::renew_now`). `src/control/sites.*`: the `SiteSpec`, its TOML rendering
+      (HTTPS-only by default: redirect site on 80, TLS site on 443, optional HSTS
+      location), the decision form (`apply_request` lists what is still open with a
+      suggestion each: user from the domain, app from the files under root), the
+      prerequisites answered as root commands (useradd, mkdir/chown, certificate files)
+      with `waiting: true`, next steps (`agensio pools`, port 80 for ACME). Managed files
+      carry their spec as JSON on the first line (`# agensio:managed {...}`), so an update
+      merges into it and a hand-written file is refused. Every change validates through
+      the reload and is undone when refused. Request bodies read on the control
+      connection (256 KB cap). `agensio ctl` grew the matching subcommands (`--yes`,
+      `--reason`). Not done: `cache/purge` (needs the cache invalidation API, F2b).
 - [-] F4 Natural-language front: dropped 2026-09-18, the agent is the intent matcher.
 - [ ] F5 MCP server (decided 2026-09-16, first-class feature): expose the same commands as
       **Model Context Protocol** tools so agentic OS tooling (e.g. Omarchy) and
@@ -630,6 +640,12 @@ Rules:
       switch without reconnecting, a 1.5 s upstream request finishing through a reload
       that removed its location, and wrk at 750k req/s across six reloads with no error.
       Restart-only: workers, reuse_port, user/group, sendfile, cache sizes (warned).
+- [ ] H1a Flake in `tests/reload.sh` (seen 2026-09-18, about one run in three): right after
+      a reload added listener 8098, curl gets an answer from it but the next raw
+      connection to it waits 5 s for a response and times out (traceback at the python
+      block's line 7); the rest of that block then does not run. Not seen under wrk.
+      Suspect: the new SO_REUSEPORT acceptor group and the order in which the per-worker
+      acceptors start accepting. Reproduce with three consecutive runs; fix before the tag.
 - [ ] H1b Certificates watched and reloaded when the files change (manual `tls = { cert,
       key }` sites; automatic ones already reload themselves); reload must not stall new
       QUIC connections (nginx's known weakness).

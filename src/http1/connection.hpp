@@ -550,10 +550,14 @@ private:
         const LocationConfig* loc = dispatcher_.route(stream_, listener_->router, ws);
         int hops = 0;
         while (loc) {
-            if (loc->kind == HandlerKind::control) {  // the control socket's API: answered inline
+            if (loc->kind == HandlerKind::control) {  // the control socket's API (worker 0 only)
                 fill_connection_info();
-                dispatcher_.control().handle(stream_, ws);
-                break;
+                const unsigned gen = ++request_gen_;
+                auto self = this->shared_from_this();
+                dispatcher_.control().start(stream_, ws, [self, gen] {
+                    if (self->request_gen_ == gen) self->respond();
+                });
+                return;
             }
             if (loc->kind != HandlerKind::static_) {  // FastCGI or proxy: completes asynchronously
                 fill_connection_info();

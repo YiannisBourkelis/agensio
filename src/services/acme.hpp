@@ -118,6 +118,8 @@ public:
     void start(asio::io_context& ctx, const AcmeConfig& cfg, std::vector<AcmeSite> sites,
                std::function<void()> on_renewed);
     void update(const AcmeConfig& cfg, std::vector<AcmeSite> sites);
+    // Orders `cert` again now, whatever its state; false when no managed site has it.
+    bool renew_now(const std::filesystem::path& cert);
     void stop();
 
 private:
@@ -130,6 +132,7 @@ private:
     AcmeConfig cfg_;
     std::vector<AcmeSite> sites_;
     std::map<std::string, std::chrono::steady_clock::time_point> failed_at_;  // by cert path; retried after an hour
+    std::vector<std::string> forced_;  // cert paths to order at the next check regardless
     std::function<void()> on_renewed_;
     AcmeChallenges challenges_;
     std::jthread worker_;

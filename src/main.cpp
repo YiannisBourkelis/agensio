@@ -12,6 +12,7 @@
 
 #include "config.hpp"
 #include "control/client.hpp"
+#include "services/json.hpp"
 #include "server.hpp"
 #include "services/pools.hpp"
 #include "upstream/fcgi_client.hpp"
@@ -33,9 +34,16 @@ void usage() {
                  "  reload              validate the configuration, then signal the running server\n"
                  "                      (server.pid_file, SIGHUP) to switch to it without a restart\n"
                  "  ctl                 talk to the running server's control socket ([control]) as the\n"
-                 "                      invoking user: status | sites | site NAME | validate | health |\n"
+                 "                      invoking user. Read: status | sites | site NAME | validate | health |\n"
                  "                      logs [--site NAME] [--since 3h] [--level error|warn|info]\n"
                  "                           [--status 5xx|4xx|all] [--limit N]\n"
+                 "                      Change (need --yes, take --reason TEXT): reload | logs-reopen |\n"
+                 "                      site-create --domain D [--alias A]... [--https auto|none] [--cert F --key F]\n"
+                 "                           [--user U|--no-user] [--group G] [--app static|php|laravel|wordpress|proxy]\n"
+                 "                           [--root DIR] [--upstream URL] [--php-socket S] [--php-children N]\n"
+                 "                           [--no-redirect] [--hsts] [--listen-plain A] [--listen-tls A]\n"
+                 "                      site-update NAME (same flags) | site-disable NAME | site-enable NAME |\n"
+                 "                      site-delete NAME | cert-renew NAME\n"
                  "  pools               write the php-fpm pool of every site with `user` into the pool\n"
                  "                      directory (server.pools or the distro's); exit 3 when files changed\n"
                  "                      (reload php-fpm), 0 when up to date; --dry-run only reports\n";
@@ -70,27 +78,68 @@ int main(int argc, char** argv) {
         else if (a == "reload" && i == 1) reload = true;
         else if (a == "ctl" && i == 1) {
             std::string command, socket_path, site_name, query;
+            agensio::json::Value body = agensio::json::Value::object();
+            agensio::json::Value aliases = agensio::json::Value::array();
+            bool yes = false;
             for (int j = i + 1; j < argc; ++j) {
                 std::string b = argv[j];
                 auto value = [&](std::string& into) { if (j + 1 < argc) into = argv[++j]; };
+                auto field = [&](const char* key) { std::string v; value(v); body.set(key, v); };
                 if (b == "--socket") value(socket_path);
                 else if (b == "-c" || b == "--config") { std::string v; value(v); config_path = v; }
                 else if (b == "--site" || b == "--since" || b == "--level" || b == "--status" || b == "--limit") {
                     std::string v;
                     value(v);
                     query += (query.empty() ? "?" : "&") + b.substr(2) + "=" + v;
-                } else if (command.empty()) command = b;
-                else if (command == "site" && site_name.empty()) site_name = b;
+                } else if (b == "--yes") yes = true;
+                else if (b == "--reason") field("reason");
+                else if (b == "--domain") field("domain");
+                else if (b == "--alias") { std::string v; value(v); aliases.push(v); }
+                else if (b == "--https") field("https");
+                else if (b == "--cert" || b == "--key") {
+                    std::string v; value(v);
+                    agensio::json::Value h = body["https"].is_object() ? body["https"] : agensio::json::Value::object();
+                    h.set(b.substr(2), v);
+                    body.set("https", h);
+                } else if (b == "--user") field("user");
+                else if (b == "--no-user") body.set("user", agensio::json::Value(nullptr));
+                else if (b == "--group") field("group");
+                else if (b == "--app") field("app");
+                else if (b == "--root") field("root");
+                else if (b == "--upstream") field("upstream");
+                else if (b == "--php-socket") field("php_socket");
+                else if (b == "--php-children") { std::string v; value(v); body.set("php_children", std::atoi(v.c_str())); }
+                else if (b == "--php-version") field("php_version");
+                else if (b == "--no-redirect") body.set("redirect_http", false);
+                else if (b == "--hsts") body.set("hsts", true);
+                else if (b == "--listen-plain") field("listen_plain");
+                else if (b == "--listen-tls") field("listen_tls");
+                else if (command.empty()) command = b;
+                else if (site_name.empty() && command.starts_with("site") && command != "sites") site_name = b;
+                else if (site_name.empty() && command == "cert-renew") site_name = b;
                 else { std::cerr << "ctl: unexpected argument " << b << "\n"; return 2; }
             }
-            std::string path;
+            if (!aliases.items().empty()) body.set("aliases", aliases);
+            std::string path, method = "GET";
+            const bool mutation = command == "reload" || command == "logs-reopen" || command.starts_with("site-") || command == "cert-renew";
             if (command == "status" || command == "sites" || command == "health") path = "/v1/" + command;
             else if (command == "site" && !site_name.empty()) path = "/v1/sites/" + site_name;
             else if (command == "validate") path = "/v1/config/validate";
             else if (command == "logs") path = "/v1/logs" + query;
+            else if (command == "reload") path = "/v1/reload";
+            else if (command == "logs-reopen") path = "/v1/logs/reopen";
+            else if (command == "site-create") path = "/v1/sites";
+            else if (command == "site-update" && !site_name.empty()) path = "/v1/sites/" + site_name;
+            else if ((command == "site-disable" || command == "site-enable" || command == "site-delete") && !site_name.empty())
+                path = "/v1/sites/" + site_name + "/" + command.substr(5);
+            else if (command == "cert-renew" && !site_name.empty()) path = "/v1/sites/" + site_name + "/renew";
             else {
-                std::cerr << "ctl: unknown command '" << command << "' (status, sites, site NAME, validate, health, logs)\n";
+                std::cerr << "ctl: unknown or incomplete command '" << command << "' (see agensio --help)\n";
                 return 2;
+            }
+            if (mutation) {
+                method = "POST";
+                if (yes) body.set("confirm", true);
             }
             if (socket_path.empty()) {
                 try {
@@ -102,7 +151,7 @@ int main(int argc, char** argv) {
             }
             agensio::ControlReply reply;
             std::string error;
-            if (!agensio::control_request(socket_path, "GET", path, "", reply, error)) {
+            if (!agensio::control_request(socket_path, method, path, mutation ? body.dump() : std::string(), reply, error)) {
                 std::cerr << error << "\n";
                 return 1;
             }

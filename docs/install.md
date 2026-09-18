@@ -40,7 +40,7 @@ are separate accounts (section 3).
 |---|---|---|---|
 | binary | `/usr/sbin/agensio` (package) or `/usr/local/sbin/agensio` (tarball, source build) | root 0755 | planned |
 | main configuration | `/etc/agensio/agensio.toml` | root:agensio 0640 | today (search path) |
-| one file per site | `/etc/agensio/sites.d/<domain>.toml`, pulled in by `include = ["sites.d/*.toml"]` | root:agensio 0640 | today (include) |
+| one file per site | `/etc/agensio/sites.d/<domain>.toml`, pulled in by `include = ["sites.d/*.toml"]`; `agensio ctl site-create` writes here | agensio:agensio 0750 dir, files 0640 | today |
 | TLS material you manage yourself | `/etc/agensio/ssl/<domain>/` (`fullchain.pem`, `key.pem` 0600) | root 0700 | convention |
 | server logs | `/var/log/agensio/access.log`, `/var/log/agensio/error.log` | agensio 0750 dir, files 0640 | planned default; today `logs/` next to the configuration file |
 | per-site logs | `/var/log/agensio/sites/<domain>/access.log` or the site's own `log/` (section 3) | agensio:<site group> 0640 | today via `access_log`; ownership set at start |
@@ -173,7 +173,8 @@ rollback.
 
    ```
    sudo useradd --system --home /var/lib/agensio --shell /usr/sbin/nologin agensio
-   sudo install -d -o root    -g agensio -m 0750 /etc/agensio /etc/agensio/sites.d
+   sudo install -d -o root    -g agensio -m 0750 /etc/agensio
+   sudo install -d -o agensio -g agensio -m 0750 /etc/agensio/sites.d   # the control API writes site files here
    sudo install -d -o agensio -g agensio -m 0750 /var/log/agensio /var/lib/agensio
    sudo install -d -o root    -g root    -m 0755 /var/www
    ```

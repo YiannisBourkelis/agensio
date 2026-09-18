@@ -850,6 +850,16 @@ void AcmeManager::update(const AcmeConfig& cfg, std::vector<AcmeSite> sites) {
     if (!sites_.empty()) check();
 }
 
+bool AcmeManager::renew_now(const std::filesystem::path& cert) {
+    bool known = false;
+    for (const auto& s : sites_) known = known || s.cert == cert;
+    if (!known) return false;
+    failed_at_.erase(cert.string());
+    forced_.push_back(cert.string());
+    check();
+    return true;
+}
+
 void AcmeManager::stop() {
     stopped_ = true;
     if (timer_) timer_->cancel();
@@ -871,7 +881,9 @@ void AcmeManager::check() {
         auto failed = failed_at_.find(site.cert.string());
         if (failed != failed_at_.end() && now - failed->second < std::chrono::hours(1)) continue;
         std::string why;
-        if (acme::needs_renewal(site.cert, site.names, Clock::now(), why)) {
+        const bool forced = std::find(forced_.begin(), forced_.end(), site.cert.string()) != forced_.end();
+        if (forced) why = "requested";
+        if (forced || acme::needs_renewal(site.cert, site.names, Clock::now(), why)) {
             log_.info("acme: ordering a certificate for " + site.names.front() + " (" + why + ")");
             due.push_back(site);
         }
@@ -880,6 +892,7 @@ void AcmeManager::check() {
         arm(std::chrono::hours(1));
         return;
     }
+    forced_.clear();
     busy_ = true;
     if (worker_.joinable()) worker_.join();
     worker_ = std::jthread([this, due = std::move(due), cfg = cfg_] {

@@ -4,8 +4,11 @@
 // commands (F3) and refusals are written to the audit log, one line each.
 #pragma once
 
+#include <functional>
+#include <memory>
 #include <string_view>
 
+#include "config.hpp"
 #include "control/roles.hpp"
 #include "core/stream.hpp"
 #include "core/worker_state.hpp"
@@ -23,6 +26,11 @@ struct ControlBackend {
     virtual json::Value validate() = 0;
     virtual json::Value logs(std::string_view target) = 0;  // the request target with its query
     virtual json::Value health() = 0;
+    // Mutations (F3). Each returns false with `error` when refused; nothing changed then.
+    virtual bool reload_now(std::string& error) = 0;
+    virtual bool renew_certificate(std::string_view site, std::string& error) = 0;
+    virtual void reopen_logs() = 0;
+    virtual const Config& running() = 0;
 };
 
 class ControlHandler {
@@ -34,7 +42,10 @@ public:
         audit_ = audit_sink;
     }
 
-    // Answers s.request (ws.path is the normalised target). Synchronous.
+    // Reads the request body when there is one, answers, then runs `done` (inline when
+    // nothing had to be read). The connection keeps itself alive across it.
+    void start(Stream& s, WorkerState& ws, std::function<void()> done);
+    // Answers s.request (ws.path is the normalised target) with the body in s.response.buffer.
     void handle(Stream& s, WorkerState& ws);
 
     // One audit line: who (uid, gid, role), what, and the outcome.
@@ -43,6 +54,11 @@ public:
 private:
     void reply(Stream& s, int status, const json::Value& body);
     bool require(Stream& s, Role needed, std::string_view command);
+    void mutate(Stream& s, WorkerState& ws, std::string_view path);
+    void site_create(Stream& s, const json::Value& body, std::string_view reason);
+    void site_update(Stream& s, std::string_view name, const json::Value& body, std::string_view reason);
+    void site_toggle(Stream& s, std::string_view name, std::string_view action, std::string_view reason);
+    void audit_peer(const Stream& s, std::string_view what, std::string_view result);
 
     ErrorLog& log_;
     ControlBackend* backend_ = nullptr;
