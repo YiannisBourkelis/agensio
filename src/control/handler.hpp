@@ -1,0 +1,53 @@
+// The control API (phase F): HTTP/1.1 + JSON on the control socket, answered inline on
+// worker 0. Every command names the role it needs; the peer's role was decided at accept
+// from its credentials (control/roles.hpp) and travels in ConnectionInfo. Mutating
+// commands (F3) and refusals are written to the audit log, one line each.
+#pragma once
+
+#include <string_view>
+
+#include "control/roles.hpp"
+#include "core/stream.hpp"
+#include "core/worker_state.hpp"
+#include "services/json.hpp"
+#include "services/log.hpp"
+
+namespace agensio {
+
+// What the server answers with; the handler never touches server internals itself.
+struct ControlBackend {
+    virtual ~ControlBackend() = default;
+    virtual json::Value status() = 0;
+    virtual json::Value sites() = 0;
+    virtual json::Value site(std::string_view name, bool& found) = 0;
+    virtual json::Value validate() = 0;
+    virtual json::Value logs(std::string_view target) = 0;  // the request target with its query
+    virtual json::Value health() = 0;
+};
+
+class ControlHandler {
+public:
+    explicit ControlHandler(ErrorLog& log) : log_(log) {}
+    void attach(ControlBackend* backend, LogRegistry* logs, int audit_sink) noexcept {
+        backend_ = backend;
+        logs_ = logs;
+        audit_ = audit_sink;
+    }
+
+    // Answers s.request (ws.path is the normalised target). Synchronous.
+    void handle(Stream& s, WorkerState& ws);
+
+    // One audit line: who (uid, gid, role), what, and the outcome.
+    void audit(long uid, long gid, Role role, std::string_view what, std::string_view result);
+
+private:
+    void reply(Stream& s, int status, const json::Value& body);
+    bool require(Stream& s, Role needed, std::string_view command);
+
+    ErrorLog& log_;
+    ControlBackend* backend_ = nullptr;
+    LogRegistry* logs_ = nullptr;
+    int audit_ = -1;
+};
+
+}  // namespace agensio

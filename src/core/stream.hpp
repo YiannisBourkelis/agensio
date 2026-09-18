@@ -22,6 +22,10 @@ struct ConnectionInfo {
     std::string_view client_address;
     bool forwarded_https = false;
     bool trusted_peer = false;  // the peer is one of server.trusted_proxies
+    // Control socket only: the peer's credentials and role (control/roles.hpp), set at accept.
+    long peer_uid = -1;
+    long peer_gid = -1;
+    std::uint8_t role = 0;
 };
 
 struct Stream {

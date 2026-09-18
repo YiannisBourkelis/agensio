@@ -442,6 +442,34 @@ Small on purpose: the first real applications need forms, logins and uploads; th
 
 ### Phase F. Control API and agentic interface  `[ ]`
 Independent of the other phases and useful for all of them (inspect cache, reload config).
+
+**Pulled before the pre-alpha (decided 2026-09-18)**: the owner and early adopters set up
+and maintain VPS servers with a local LLM agent over SSH, so the guided setup is the
+deliverable, not a bare command set. Scope and rules agreed that day:
+- F4 (intent matcher) is dropped: the agent is the intent matcher. TCP, token and mTLS
+  transports are deferred to after the alpha; the alpha has the unix socket, peer
+  credentials, roles, the audit log and the stdio bridge spawned over SSH.
+- **The guidance lives in the tool schemas, not in dialogue code.** `site_create` refuses
+  to act until `user`, `https` and `php` are decided explicitly and answers with the
+  missing decisions and a suggestion for each (a username derived from the domain,
+  `https = "auto"`, the preset matching the files under the root); the agent turns that
+  into questions and the MCP host asks for confirmation before the mutation. A new site
+  defaults to HTTPS-only: `tls = "auto"` on 443 and `redirect = "https"` on 80; plain
+  HTTP needs an explicit `https = "none"`.
+- **Root-only work is never executed by agensio or the bridge.** Creating the OS user,
+  stopping or restarting the service, reloading php-fpm: the tool answers with the exact
+  commands to run as root and states that it waits for them; the agent shows them, the
+  administrator runs them, the agent continues. Nothing on the socket can spawn a
+  process, and the bridge exposes no tool that does.
+- `health_check` plus an MCP prompt give newcomers the greeting and the list of things
+  to look at on an existing server (certificates, missing port-80 redirect, sites
+  without a user, recent errors, settings waiting for a restart, pools needing a
+  php-fpm reload). `logs_query` answers "errors in the last 3 hours" for one site or all,
+  bounded in lines and bytes, read backwards from the end of the file; summarising is
+  the agent's job.
+- Order: F0+F1 (socket, credentials, roles, audit, one read command), F2 (read tools),
+  F3 (site_create/update/disable, reload, pools_apply, certificates), F5 (stdio bridge,
+  tested through `ssh localhost`) with F6 (CLI on the same client), F7 tests alongside.
 **Security is the first requirement here**: a compromised control interface owns the
 server and every site on it. The rules below are binding for every step in this phase.
 
@@ -493,10 +521,33 @@ Rules:
     socket is only as safe as that one user; per-site users (C3b) are what makes the
     control plane safe on a shared host. The warning names the offending site.
   - Same fuzzed HTTP/1.1 parser as the data plane; JSON parsing with size limits.
-- [ ] F1 Control socket: unix domain socket (`/run/agensio.sock`) speaking HTTP/1.1 + JSON
-      through the same core; optional loopback TCP listener with the token; remote only
-      with mTLS. One API, several transports, one permission model.
-- [ ] F2 Read-only commands, JSON and plain text (`Accept: text/plain` gives a human answer):
+- [x] F0/F1 (2026-09-18) Control socket: `[control]` table, unix domain socket
+      (`/run/agensio/control.sock`, directory created 0755 owned by the server, socket
+      0660 for a single admin group else 0666), HTTP/1.1 + JSON through the same core:
+      `Http1Connection<asio::local::stream_protocol::socket>` on worker 0 routed to a
+      synthetic site whose one location is `HandlerKind::control`. Peer credentials
+      (`SO_PEERCRED` / `getpeereid`) plus the account's groups decide the role at accept
+      (`control/roles.hpp`, pure); root and `server.user` are admin, `admins` /
+      `operators` / `viewers` groups map to the roles, anyone else is closed before a
+      byte is read and written to the audit log (`control.audit`, one line per refusal or
+      mutating command). First command `GET /v1/status` (viewer); `agensio ctl status`
+      client (`control/client.*`, also the bridge's transport). `tests/control.sh`
+      (root devbox, real accounts, 14 checks), integration checks, unit tests for the
+      role rule and the parsing. The server's own logs are handed to `server.user` at
+      start so rotation works after the drop. Deferred to after the alpha: loopback TCP
+      with the token, mTLS, the `-t` isolation warning (F0 last bullet).
+- [x] F2 (2026-09-18) Read commands (`src/control/commands.*`, pure functions over the
+      configuration and the files on disk, unit tested): `sites`, `site NAME` (effective
+      locations after presets, certificate state through `acme::certificate_info`),
+      `validate` (file on disk, hosting rules, restart-only diff), `logs` (error log and
+      access logs in combined or JSON form, parsed by a hand-written reader for the three
+      formats, read backwards from the end of each file with byte and line caps, `since`
+      in `3h` form or a local timestamp, level and status-class filters, a site's error
+      lines picked by name), `health` (findings with a fix per finding, the list in
+      `docs/configuration.md` 15). All GET, viewer role. Not done: `cache`,
+      `connections`, `metrics`/Prometheus and per-upstream pool state (per-worker, needs a
+      cross-worker collection step); they follow after the alpha.
+- [ ] F2b Read-only commands, remaining (`Accept: text/plain` gives a human answer):
       `status`, `cache` (count, bytes, hit ratio) and `cache/entries` (path, size, age,
       hits), `sites`, `config` (effective, with sources), `connections`, `metrics`
       (Prometheus text as well; per upstream and per certificate metrics from phases D/G,
@@ -510,9 +561,7 @@ Rules:
       config + listeners), `cache/purge` (all or by path), `sites/create` (writes
       `sites.d/<domain>.toml` from a preset: static, laravel, php, proxy; validates;
       reloads), `sites/disable`.
-- [ ] F4 Natural-language front: a small intent matcher for the questions in the brief
-      ("how many files are in cache?", "create a website in /var/www/x for x.com") mapping
-      to F2/C3 commands, answering in text. No model inside the server.
+- [-] F4 Natural-language front: dropped 2026-09-18, the agent is the intent matcher.
 - [ ] F5 MCP server (decided 2026-09-16, first-class feature): expose the same commands as
       **Model Context Protocol** tools so agentic OS tooling (e.g. Omarchy) and
       administrators' assistants can inspect and configure the server.

@@ -21,6 +21,8 @@
 #include "handlers/cgi.hpp"
 #include "handlers/proxy.hpp"
 #include "handlers/static.hpp"
+#include "control/handler.hpp"
+#include "control/roles.hpp"
 #include "services/acme.hpp"
 #include "services/log.hpp"
 #include "upstream/fcgi_client.hpp"
@@ -62,6 +64,8 @@ struct Listener {
 struct Generation {
     Config cfg;
     std::vector<Listener> listeners;
+    SiteConfig control_site;             // the control listener's synthetic site (stable address for its router)
+    std::unique_ptr<Listener> control;   // present when [control] is enabled
     const Listener* find(std::string_view address) const noexcept {
         for (const auto& l : listeners)
             if (l.address == address) return &l;
@@ -69,7 +73,7 @@ struct Generation {
     }
 };
 
-class Server {
+class Server : public ControlBackend {
 public:
     explicit Server(Config cfg);
     ~Server();
@@ -112,6 +116,14 @@ private:
     void write_pid_file();
     void remove_pid_file() noexcept;
     void prepare_acme(const Config& cfg);  // storage tree and placeholder certificates for tls = "auto" sites
+    void open_control();                   // the control socket (F0/F1), before the privilege drop
+    void start_accept_control();
+    json::Value status() override;
+    json::Value sites() override;
+    json::Value site(std::string_view name, bool& found) override;
+    json::Value validate() override;
+    json::Value logs(std::string_view target) override;
+    json::Value health() override;
 
 
     Config cfg_;                            // the boot configuration: workers, cache, sendfile, user; restart-only
@@ -124,6 +136,7 @@ private:
     FcgiHandler fcgi_handler_;
     ProxyHandler proxy_handler_;
     CgiHandler cgi_handler_;
+    ControlHandler control_handler_;
     Dispatcher dispatcher_;
     AcmeManager acme_{error_log_};
     std::vector<std::unique_ptr<Worker>> workers_;
@@ -133,6 +146,13 @@ private:
     std::atomic<unsigned> next_worker_{0};
     bool reuse_port_ = false;
     std::atomic<bool> stopping_{false};
+#ifdef ASIO_HAS_LOCAL_SOCKETS
+    std::unique_ptr<asio::local::stream_protocol::acceptor> control_acceptor_;
+#endif
+    RoleGroups control_groups_;
+    long server_uid_ = -1;
+    int audit_sink_ = -1;
+    std::chrono::system_clock::time_point started_ = std::chrono::system_clock::now();
 };
 
 }  // namespace agensio

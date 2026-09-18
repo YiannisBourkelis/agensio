@@ -1,4 +1,6 @@
 #include "server.hpp"
+#include "control/commands.hpp"
+#include "control/peer.hpp"
 #include "services/pools.hpp"
 
 #ifndef _WIN32
@@ -54,10 +56,13 @@ Server::Server(Config cfg)
       fcgi_handler_(cfg_, error_log_),
       proxy_handler_(cfg_, error_log_),
       cgi_handler_(cfg_, error_log_),
-      dispatcher_(handler_, fcgi_handler_, proxy_handler_, cgi_handler_) {
+      control_handler_(error_log_),
+      dispatcher_(handler_, fcgi_handler_, proxy_handler_, cgi_handler_, control_handler_) {
     auto gen = std::make_shared<Generation>();
     gen->cfg = std::move(cfg);
     open_logs();
+    if (cfg_.control.enabled) audit_sink_ = logs_.add(cfg_.control.audit);
+    control_handler_.attach(this, &logs_, audit_sink_);
     assign_log_sinks(gen->cfg);
     std::string err;
     if (!logs_.open_all(err)) throw std::runtime_error(err);
@@ -131,6 +136,14 @@ void Server::own_site_logs(const Config& cfg) {
         if (facts.user(cfg_.user, agensio_uid, primary)) agensio_gid = primary;
     }
     if (!cfg_.group.empty()) facts.group(cfg_.group, agensio_gid);
+    // The server's own files (error, default access, audit) were opened as root: hand them
+    // to the service user so SIGUSR1 can reopen them after the privilege drop.
+    if (::geteuid() == 0 && !cfg_.user.empty()) {
+        for (const std::string& path : {cfg.log.error, cfg.log.access, cfg.control.audit}) {
+            if (path.empty() || path == "stderr" || path == "off") continue;
+            if (::chown(path.c_str(), agensio_uid, agensio_gid) == 0) ::chmod(path.c_str(), 0640);
+        }
+    }
     for (const auto& site : cfg.sites) {
         if (site.user.empty() || site.access_log.empty()) continue;
         unsigned uid = 0, gid = 0;
@@ -220,6 +233,158 @@ void Server::build_listeners(Generation& gen) {
             l->site_names.push_back(site.server_names.front());
         }
     }
+    if (gen.cfg.control.enabled) {
+        gen.control_site = control_site();
+        gen.control = std::make_unique<Listener>();
+        gen.control->address = "unix:" + gen.cfg.control.socket;
+        gen.control->address_text = "unix";
+        gen.control->router.add_site(gen.control_site);
+    }
+}
+
+// ---- control socket (F0/F1) ----
+
+void Server::open_control() {
+    if (!cfg_.control.enabled) return;
+#ifdef ASIO_HAS_LOCAL_SOCKETS
+    const HostFacts facts = system_facts();
+    unsigned uid = 0, gid = 0;
+    const bool have_user = !cfg_.user.empty() && facts.user(cfg_.user, uid, gid);
+    if (!cfg_.group.empty()) facts.group(cfg_.group, gid);
+    server_uid_ = have_user ? static_cast<long>(uid) : static_cast<long>(::geteuid());
+    auto group_id = [&](const std::string& name, const char* key) -> long {
+        if (name.empty()) return -1;
+        unsigned g = 0;
+        if (facts.group(name, g)) return static_cast<long>(g);
+        error_log_.warn(std::string("control.") + key + ": group '" + name + "' does not exist; nobody gets that role");
+        return -1;
+    };
+    control_groups_.admins = group_id(cfg_.control.admins, "admins");
+    control_groups_.operators = group_id(cfg_.control.operators, "operators");
+    control_groups_.viewers = group_id(cfg_.control.viewers, "viewers");
+
+    // The directory is part of the boundary: owned by the server, never world-writable, so
+    // no site user can replace the socket path. The socket itself is 0660 for the admin
+    // group when that is the only group, otherwise 0666: every connection is gated by its
+    // peer credentials regardless, the file mode is the second line.
+    const std::filesystem::path path = cfg_.control.socket;
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    if (ec) throw std::runtime_error("control: cannot create " + path.parent_path().string() + ": " + ec.message());
+    ::chmod(path.parent_path().c_str(), 0755);
+    if (have_user && ::geteuid() == 0) ::chown(path.parent_path().c_str(), uid, gid) == 0 || (error_log_.warn("control: cannot chown " + path.parent_path().string()), true);
+    ::unlink(path.c_str());
+    control_acceptor_ = std::make_unique<asio::local::stream_protocol::acceptor>(workers_[0]->ctx);
+    control_acceptor_->open();
+    control_acceptor_->bind(asio::local::stream_protocol::endpoint(path.string()));
+    control_acceptor_->listen(64);
+    const bool one_group = control_groups_.admins >= 0 && control_groups_.operators < 0 && control_groups_.viewers < 0;
+    if (::geteuid() == 0) {
+        if (::chown(path.c_str(), have_user ? uid : 0, one_group ? static_cast<gid_t>(control_groups_.admins) : gid) != 0)
+            error_log_.warn("control: cannot chown " + path.string());
+    }
+    ::chmod(path.c_str(), one_group ? 0660 : 0666);
+    error_log_.info("control socket " + path.string() + (one_group ? " (0660, group " + cfg_.control.admins + ")" : " (0666, roles by peer credentials)"));
+    std::cout << "  control socket " << path.string() << "\n";
+#else
+    error_log_.warn("control socket: unix domain sockets are not available on this platform; [control] ignored");
+#endif
+}
+
+void Server::start_accept_control() {
+#ifdef ASIO_HAS_LOCAL_SOCKETS
+    if (!control_acceptor_) return;
+    Worker& w = *workers_[0];
+    control_acceptor_->async_accept(w.ctx, [this, &w](const asio::error_code& ec, asio::local::stream_protocol::socket sock) {
+        if (ec == asio::error::operation_aborted || stopping_) return;
+        if (!ec) {
+            long uid = -1, gid = -1;
+            Role role = Role::none;
+            if (peer_credentials(sock.native_handle(), uid, gid))
+                role = role_of(uid, gid, groups_of(uid), server_uid_, control_groups_);
+            std::shared_ptr<const Generation> gen = w.gen;
+            if (role == Role::none || !gen || !gen->control) {
+                control_handler_.audit(uid, gid, role, "connect", "refused");
+                asio::error_code ignored;
+                sock.close(ignored);
+            } else {
+                auto c = std::make_shared<Http1Connection<asio::local::stream_protocol::socket>>(
+                    std::move(sock), w, gen, gen->control.get(), cfg_, dispatcher_);
+                c->set_peer(uid, gid, static_cast<std::uint8_t>(role));
+                c->start();
+            }
+        }
+        start_accept_control();
+    });
+#endif
+}
+
+json::Value Server::sites() { return control::sites(gen_->cfg, std::time(nullptr)); }
+
+json::Value Server::site(std::string_view name, bool& found) {
+    const SiteConfig* s = control::find_site(gen_->cfg, name);
+    found = s != nullptr;
+    return s ? control::site(gen_->cfg, *s, std::time(nullptr)) : json::Value();
+}
+
+json::Value Server::validate() { return control::validate(cfg_.config_path, cfg_); }
+
+json::Value Server::logs(std::string_view target) {
+    control::LogQuery q;
+    const std::time_t now = std::time(nullptr);
+    q.site = control::query_value(target, "site");
+    const std::string since = control::query_value(target, "since");
+    if (since.empty() || !control::parse_since(since, now, q.since)) q.since = now - 3600;
+    const std::string level = control::query_value(target, "level");
+    if (level == "error" || level == "warn" || level == "info") q.level = level;
+    const std::string status = control::query_value(target, "status");
+    if (status == "all") q.status_min = 0;
+    else if (status == "4xx") q.status_min = 400;
+    else if (!status.empty() && std::isdigit(static_cast<unsigned char>(status[0]))) q.status_min = std::atoi(status.c_str());
+    const std::string limit = control::query_value(target, "limit");
+    if (!limit.empty()) q.limit = static_cast<std::size_t>(std::clamp(std::atol(limit.c_str()), 1L, 5000L));
+    return control::logs(gen_->cfg, q);
+}
+
+json::Value Server::health() {
+#ifdef _WIN32
+    const bool as_root = false;
+#else
+    const bool as_root = ::geteuid() == 0;
+#endif
+    return control::health(gen_->cfg, cfg_, as_root, std::time(nullptr));
+}
+
+json::Value Server::status() {
+    json::Value v = json::Value::object();
+    v.set("version", AGENSIO_VERSION);
+    v.set("pid", static_cast<double>(::getpid()));
+    v.set("uptime_s", static_cast<double>(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now() - started_).count()));
+    v.set("config", gen_->cfg.config_path.string());
+    v.set("workers", static_cast<double>(workers_.size()));
+    std::uint64_t conns = 0;
+    for (const auto& w : workers_) conns += w->connections.load(std::memory_order_relaxed);
+    v.set("connections", static_cast<double>(conns));
+    v.set("user", cfg_.user);
+    json::Value listeners = json::Value::array();
+    for (const auto& l : gen_->listeners)
+        listeners.push(json::Value::object().set("address", l.address).set("tls", l.tls).set("sites", static_cast<double>(l.site_names.size())));
+    v.set("listeners", std::move(listeners));
+    json::Value sites = json::Value::array();
+    for (const auto& s : gen_->cfg.sites) {
+        json::Value names = json::Value::array();
+        for (const auto& n : s.server_names) names.push(n);
+        json::Value listen = json::Value::array();
+        for (const auto& a : s.listen) listen.push(a);
+        json::Value site = json::Value::object().set("server_name", std::move(names)).set("listen", std::move(listen));
+        site.set("root", s.root).set("app", s.app).set("user", s.user);
+        site.set("tls", !s.tls ? "none" : s.tls->automatic ? "auto" : "manual");
+        if (!s.redirect.empty()) site.set("redirect", s.redirect);
+        sites.push(std::move(site));
+    }
+    v.set("sites", std::move(sites));
+    v.set("acme", gen_->cfg.acme.enabled);
+    return v;
 }
 
 void Server::build_workers() {
@@ -334,6 +499,7 @@ void Server::run() {
         for (const auto& l : gen_->listeners)
             open_acceptor(l, *workers_[0], false);
     }
+    open_control();
     write_pid_file();
     drop_privileges();  // ports are bound and logs open: nothing else needs root
     for (auto& w : workers_) w->gen = gen_;
@@ -354,6 +520,7 @@ void Server::run() {
     }
     for (std::size_t i = 0; i < acceptors_.size(); ++i)
         start_accept(i);
+    start_accept_control();
 
     asio::signal_set signals(workers_[0]->ctx, SIGINT, SIGTERM);
     signals.async_wait([this](const asio::error_code& ec, int) {
@@ -396,6 +563,13 @@ void Server::run() {
 void Server::stop() {
     if (stopping_.exchange(true)) return;
     acme_.stop();
+#ifdef ASIO_HAS_LOCAL_SOCKETS
+    if (control_acceptor_) {
+        asio::error_code ignored;
+        control_acceptor_->close(ignored);
+        ::unlink(cfg_.control.socket.c_str());
+    }
+#endif
     for (auto& w : workers_)
         w->ctx.stop();
 }

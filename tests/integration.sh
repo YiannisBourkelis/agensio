@@ -36,6 +36,7 @@ FPMCONF
   printf '<?php echo "hello ", $_SERVER["REQUEST_METHOD"], " ", $_GET["x"] ?? "-";\n' > bench/www/hello.php
 fi
 sed "s#@WORKERS@#0#g; s#@BENCH@#$ROOT/bench#g; s#@SENDFILE_MIN@#${SENDFILE_MIN:-48KB}#g; s#@ACCESS_LOG@#$ROOT/bench/tmp/access.log#; s#^tcp_nodelay = true#tcp_nodelay = true\ntrusted_proxies = [\"127.0.0.1\"]#" bench/agensio.toml > bench/tmp/agensio-test.toml
+printf '\n[control]\nsocket = "%s/bench/tmp/control.sock"\naudit = "%s/bench/tmp/audit.log"\n' "$ROOT" "$ROOT" >> bench/tmp/agensio-test.toml
 # Locations (A4) on the plain site: an SPA fallback, an aliased root, an exact match and a
 # try_files status. Inserted after the site's `default = true` line.
 python3 - bench/tmp/agensio-test.toml "$ROOT/bench/www" "$ROOT" <<'PY'
@@ -356,6 +357,23 @@ check "redirect: POST is redirected too, HEAD has no body" "301 301 0" "$(curl -
 check "redirect: HTTP/1.0 without Host uses the site's name" "https://redir.test/y" "$(printf 'GET /y HTTP/1.0\r\n\r\n' | ncq 127.0.0.1 8092 | tr -d '\r' | awk '/^Location:/{print $2}')"
 check "redirect: an unknown ACME token is redirected, not served" "301" "$(code -H 'Host: redir.test' "$R/.well-known/acme-challenge/nothing")"
 check "redirect: keep-alive survives" "301 1 301 0" "$(curl -sS -o /dev/null -o /dev/null -w '%{http_code} %{num_connects} ' -H 'Host: redir.test' "$R/1" "$R/2" | sed 's/ $//')"
+
+# ---- control socket (F0/F1): status as the server's own user, roles, JSON errors ----
+CS=bench/tmp/control.sock
+check "control: status answers JSON with our role" "yes" "$(curl -sS --unix-socket $CS http://control/v1/status | grep -q '"version":"' && curl -sS --unix-socket $CS http://control/v1/status | grep -q '"role":"admin"' && echo yes)"
+check "control: status lists the sites and listeners" "yes" "$(curl -sS --unix-socket $CS http://control/v1/status | grep -q '"listeners":\[{"address":"127.0.0.1:8080"' && echo yes)"
+check "control: unknown command is a JSON 404" '404 {"error":"unknown command","path":"/v1/nothing"}' "$(curl -sS -o /dev/null -w '%{http_code} ' --unix-socket $CS http://control/v1/nothing)$(curl -sS --unix-socket $CS http://control/v1/nothing | tr -d '\n')"
+check "control: POST to a read command is 405 with Allow" "405 GET, HEAD" "$(curl -sSi -X POST --unix-socket $CS http://control/v1/status | tr -d '\r' | awk 'NR==1{c=$2} /^Allow:/{a=$2" "$3} END{print c" "a}')"
+check "control: agensio ctl status uses the socket" "0 yes" "$("$BIN" ctl status --socket $CS > bench/tmp/ctl.out; echo -n "$? "; grep -q '"pid":' bench/tmp/ctl.out && echo yes)"
+check "control: sites lists every site with its tls mode" "yes" "$(curl -sS --unix-socket $CS http://control/v1/sites | grep -q '"server_name":\["laravel.test"\]' && echo yes)"
+check "control: site shows the preset's locations" "yes" "$(curl -sS --unix-socket $CS http://control/v1/sites/laravel.test | grep -q '"path":"/index.php".*"handler":"fastcgi".*"from":"preset:laravel"' && echo yes)"
+check "control: unknown site is a 404" "404" "$(curl -sS -o /dev/null -w '%{http_code}' --unix-socket $CS http://control/v1/sites/nope.test)"
+check "control: validate reads the file on disk" "yes" "$(curl -sS --unix-socket $CS http://control/v1/config/validate | grep -q '"ok":true' && echo yes)"
+curl -sS -o /dev/null http://127.0.0.1:8080/control-probe-404 >/dev/null; sleep 1.2
+check "control: logs finds the 404 just made" "yes" "$(curl -sS --unix-socket $CS 'http://control/v1/logs?since=1m&status=4xx' | grep -q 'control-probe-404' && echo yes)"
+check "control: health answers with findings" "yes" "$(curl -sS --unix-socket $CS http://control/v1/health | grep -q '"findings":\[' && echo yes)"
+check "control: ctl logs and health through the client" "0 0" "$("$BIN" ctl logs --since 5m --status all --socket $CS > /dev/null; echo -n "$? "; "$BIN" ctl health --socket $CS > /dev/null; echo $?)"
+check "control: socket file mode and no access-log line for it" "666 no" "$(stat -c %a $CS 2>/dev/null || stat -f %Lp $CS) $(grep -q 'v1/status' bench/tmp/access.log && echo yes || echo no)"
 
 # ---- request bodies (A3): decoded, limited, drained after the response ----
 check "body on GET: served, drained, pipelined request answered" "2" "$(printf 'GET / HTTP/1.1\r\nHost: l\r\nContent-Length: 5\r\n\r\nhelloGET /sub/ HTTP/1.1\r\nHost: l\r\nConnection: close\r\n\r\n' | ncq 127.0.0.1 8080 | grep -c 'HTTP/1.1 200')"

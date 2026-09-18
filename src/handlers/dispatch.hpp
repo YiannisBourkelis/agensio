@@ -12,15 +12,18 @@
 #include "handlers/fastcgi.hpp"
 #include "handlers/proxy.hpp"
 #include "handlers/static.hpp"
+#include "control/handler.hpp"
 #include "services/acme.hpp"
 
 namespace agensio {
 
 class Dispatcher {
 public:
-    Dispatcher(StaticHandler& static_handler, FcgiHandler& fcgi, ProxyHandler& proxy, CgiHandler& cgi)
-        : static_(static_handler), fcgi_(fcgi), proxy_(proxy), cgi_(cgi) {}
+    Dispatcher(StaticHandler& static_handler, FcgiHandler& fcgi, ProxyHandler& proxy, CgiHandler& cgi,
+               ControlHandler& control)
+        : static_(static_handler), fcgi_(fcgi), proxy_(proxy), cgi_(cgi), control_(control) {}
     CgiHandler& cgi() noexcept { return cgi_; }
+    ControlHandler& control() noexcept { return control_; }
     // HTTP-01: /.well-known/acme-challenge/<token> is answered from here before routing.
     void set_acme(AcmeChallenges* challenges) noexcept { acme_ = challenges; }
 
@@ -49,6 +52,7 @@ private:
     FcgiHandler& fcgi_;
     ProxyHandler& proxy_;
     CgiHandler& cgi_;
+    ControlHandler& control_;
     AcmeChallenges* acme_ = nullptr;
 };
 

@@ -16,7 +16,7 @@
 
 namespace agensio {
 
-enum class HandlerKind : std::uint8_t { static_, fastcgi, proxy, cgi };
+enum class HandlerKind : std::uint8_t { static_, fastcgi, proxy, cgi, control };
 
 struct TlsConfig {
     std::filesystem::path cert;
@@ -120,6 +120,18 @@ struct SiteConfig {
 };
 
 // [log]
+// [control] (phase F): the unix socket the control API and `agensio ctl` / `agensio mcp`
+// talk to. Off unless the table exists. root and server.user are always admin; the
+// groups give the roles to other accounts (control/roles.hpp).
+struct ControlConfig {
+    bool enabled = false;
+    std::string socket;     // default: /run/agensio/control.sock (macOS: /usr/local/var/run/agensio/control.sock)
+    std::string admins;     // group names, "" = nobody through that role
+    std::string operators;
+    std::string viewers;
+    std::string audit;      // one line per mutating command or refusal; default next to the error log
+};
+
 struct LogConfig {
     std::string access;     // default access log path for sites, "" = off; the loader defaults it to
                             // "logs/access.log" next to the configuration file (measured: 0.1-0.2 us/request)
@@ -161,6 +173,7 @@ struct Config {
                                 // set by the loader; "" disables it
 
     LogConfig log;
+    ControlConfig control;
 
     // [cache]
     std::size_t cache_max_file_size = 4u * 1024 * 1024;
@@ -188,6 +201,8 @@ std::vector<TryStep> parse_try_files(const std::vector<std::string>& items);
 // Appends the implicit "/" location from the site's own settings if none is configured
 // and sorts the locations for Router::location. The loader calls it; exposed for tests.
 void finalize_site(SiteConfig& site);
+// The synthetic site the control listener routes to: one location of kind `control`.
+SiteConfig control_site();
 
 // Prints the effective configuration after presets, one TOML-like block per site and
 // location, so nothing a preset did is hidden (`agensio -t --explain`).

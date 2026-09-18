@@ -661,46 +661,57 @@ bool renewal_due(Clock::time_point not_before, Clock::time_point not_after, Cloc
     return (not_after - now) * 3 < lifetime;
 }
 
-bool needs_renewal(const fs::path& cert_path, const std::vector<std::string>& names, Clock::time_point now,
-                   std::string& why) {
+bool certificate_info(const fs::path& cert_path, CertInfo& out, std::string& error) {
     std::string pem;
     if (!read_file(cert_path, pem)) {
-        why = "no certificate yet";
-        return true;
+        error = "no certificate file";
+        return false;
     }
     Bio bio(BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size())));
     Cert x(PEM_read_bio_X509(bio.get(), nullptr, nullptr, nullptr));
     if (!x) {
-        why = "unreadable certificate";
-        return true;
+        error = "not a PEM certificate";
+        return false;
     }
     char cn[128] = {};
     X509_NAME_get_text_by_NID(X509_get_issuer_name(x.get()), NID_commonName, cn, sizeof cn);
-    if (std::string_view(cn) == kPlaceholderName) {
-        why = "placeholder certificate";
-        return true;
-    }
-    std::vector<std::string> covered;
+    out.issuer = cn;
+    out.placeholder = std::string_view(cn) == kPlaceholderName;
+    out.names.clear();
     if (auto* sans = static_cast<GENERAL_NAMES*>(X509_get_ext_d2i(x.get(), NID_subject_alt_name, nullptr, nullptr))) {
         for (int i = 0; i < sk_GENERAL_NAME_num(sans); ++i) {
             const GENERAL_NAME* g = sk_GENERAL_NAME_value(sans, i);
             if (g->type == GEN_DNS)
-                covered.emplace_back(reinterpret_cast<const char*>(ASN1_STRING_get0_data(g->d.dNSName)),
-                                     static_cast<std::size_t>(ASN1_STRING_length(g->d.dNSName)));
+                out.names.emplace_back(reinterpret_cast<const char*>(ASN1_STRING_get0_data(g->d.dNSName)),
+                                       static_cast<std::size_t>(ASN1_STRING_length(g->d.dNSName)));
         }
         GENERAL_NAMES_free(sans);
     }
+    if (!asn1_time(X509_get0_notBefore(x.get()), out.not_before) || !asn1_time(X509_get0_notAfter(x.get()), out.not_after)) {
+        error = "unreadable validity";
+        return false;
+    }
+    return true;
+}
+
+bool needs_renewal(const fs::path& cert_path, const std::vector<std::string>& names, Clock::time_point now,
+                   std::string& why) {
+    CertInfo info;
+    std::string error;
+    if (!certificate_info(cert_path, info, error)) {
+        why = error == "no certificate file" ? "no certificate yet" : "unreadable certificate";
+        return true;
+    }
+    if (info.placeholder) {
+        why = "placeholder certificate";
+        return true;
+    }
     for (const auto& n : names)
-        if (std::find(covered.begin(), covered.end(), n) == covered.end()) {
+        if (std::find(info.names.begin(), info.names.end(), n) == info.names.end()) {
             why = "certificate does not cover " + n;
             return true;
         }
-    Clock::time_point nb, na;
-    if (!asn1_time(X509_get0_notBefore(x.get()), nb) || !asn1_time(X509_get0_notAfter(x.get()), na)) {
-        why = "unreadable validity";
-        return true;
-    }
-    if (renewal_due(nb, na, now)) {
+    if (renewal_due(info.not_before, info.not_after, now)) {
         why = "less than a third of the lifetime left";
         return true;
     }

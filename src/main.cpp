@@ -11,6 +11,7 @@
 #include <string>
 
 #include "config.hpp"
+#include "control/client.hpp"
 #include "server.hpp"
 #include "services/pools.hpp"
 #include "upstream/fcgi_client.hpp"
@@ -23,6 +24,7 @@ void usage() {
                  "usage: agensio [-c config.toml] [-t] [-v]\n"
                  "       agensio pools [-c config.toml] [--out DIR] [--dry-run]\n"
                  "       agensio reload [-c config.toml]\n"
+                 "       agensio ctl <command> [--socket PATH] [-c config.toml]\n"
                  "  -c, --config FILE   configuration file (default: ./agensio.toml, ./config/agensio.toml,\n"
                  "                      /etc/agensio/agensio.toml, /usr/local/etc/agensio/agensio.toml)\n"
                  "  -t, --test          check the configuration (and FastCGI upstreams) and exit\n"
@@ -30,6 +32,10 @@ void usage() {
                  "  -v, --version       print the version and exit\n"
                  "  reload              validate the configuration, then signal the running server\n"
                  "                      (server.pid_file, SIGHUP) to switch to it without a restart\n"
+                 "  ctl                 talk to the running server's control socket ([control]) as the\n"
+                 "                      invoking user: status | sites | site NAME | validate | health |\n"
+                 "                      logs [--site NAME] [--since 3h] [--level error|warn|info]\n"
+                 "                           [--status 5xx|4xx|all] [--limit N]\n"
                  "  pools               write the php-fpm pool of every site with `user` into the pool\n"
                  "                      directory (server.pools or the distro's); exit 3 when files changed\n"
                  "                      (reload php-fpm), 0 when up to date; --dry-run only reports\n";
@@ -62,6 +68,47 @@ int main(int argc, char** argv) {
         else if (a == "--explain") explain = true;
         else if (a == "pools" && i == 1) pools = true;
         else if (a == "reload" && i == 1) reload = true;
+        else if (a == "ctl" && i == 1) {
+            std::string command, socket_path, site_name, query;
+            for (int j = i + 1; j < argc; ++j) {
+                std::string b = argv[j];
+                auto value = [&](std::string& into) { if (j + 1 < argc) into = argv[++j]; };
+                if (b == "--socket") value(socket_path);
+                else if (b == "-c" || b == "--config") { std::string v; value(v); config_path = v; }
+                else if (b == "--site" || b == "--since" || b == "--level" || b == "--status" || b == "--limit") {
+                    std::string v;
+                    value(v);
+                    query += (query.empty() ? "?" : "&") + b.substr(2) + "=" + v;
+                } else if (command.empty()) command = b;
+                else if (command == "site" && site_name.empty()) site_name = b;
+                else { std::cerr << "ctl: unexpected argument " << b << "\n"; return 2; }
+            }
+            std::string path;
+            if (command == "status" || command == "sites" || command == "health") path = "/v1/" + command;
+            else if (command == "site" && !site_name.empty()) path = "/v1/sites/" + site_name;
+            else if (command == "validate") path = "/v1/config/validate";
+            else if (command == "logs") path = "/v1/logs" + query;
+            else {
+                std::cerr << "ctl: unknown command '" << command << "' (status, sites, site NAME, validate, health, logs)\n";
+                return 2;
+            }
+            if (socket_path.empty()) {
+                try {
+                    agensio::Config cfg = agensio::load_config(config_path.empty() ? default_config() : config_path);
+                    socket_path = cfg.control.enabled ? cfg.control.socket : agensio::default_control_socket();
+                } catch (const std::exception&) {
+                    socket_path = agensio::default_control_socket();  // the file may be unreadable for this user
+                }
+            }
+            agensio::ControlReply reply;
+            std::string error;
+            if (!agensio::control_request(socket_path, "GET", path, "", reply, error)) {
+                std::cerr << error << "\n";
+                return 1;
+            }
+            std::cout << reply.body;
+            return reply.status < 300 ? 0 : 1;
+        }
         else if (pools && a == "--out" && i + 1 < argc) pools_out = argv[++i];
         else if (pools && a == "--dry-run") dry_run = true;
         else if (a == "-v" || a == "--version") {

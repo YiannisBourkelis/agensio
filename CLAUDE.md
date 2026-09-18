@@ -306,6 +306,15 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   `Server::reload`, hourly renewal check on worker 0 (renew at a third of the lifetime
   left), the network work blocking on the manager's own thread. `tests/acme.sh` runs 17
   checks against Pebble (`bench/acme/docker-compose.yml`, `docker compose` needed).
+- **Control socket** (F0/F1, `src/control/`): `[control]` enables a unix socket served by
+  `Http1Connection<local socket>` on worker 0 through a synthetic site of kind `control`;
+  peer credentials and groups decide the role at accept (`roles.hpp`, root and
+  `server.user` admin; `admins`/`operators`/`viewers` groups), refusals and mutations go
+  to the audit log, `agensio ctl status` and the future MCP bridge use `control/client.*`.
+  `tests/control.sh` runs the role matrix as root in the devbox. Read commands (F2,
+  `control/commands.*`): `sites`, `site NAME`, `validate`, `logs` (three log formats parsed
+  by hand, files read backwards with caps), `health` (findings with a fix each); all GET,
+  viewer role, pure functions over the Config so the unit tests cover them.
 - **Not yet**: directory listing, TLS-ALPN-01 / DNS-01 (wildcards), OCSP stapling.
 
 ## Performance notes (measured, keep current)

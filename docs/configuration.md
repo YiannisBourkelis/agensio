@@ -746,3 +746,53 @@ Testing against a local CA: `tests/acme.sh build/agensio` starts Pebble (Let's E
 test server, `bench/acme/docker-compose.yml`), orders a certificate for
 `host.docker.internal` over port 5002, verifies the served chain against Pebble's root
 and checks that a restart keeps the certificate.
+
+## 15. Control socket
+
+```toml
+[control]
+socket = "/run/agensio/control.sock"   # default on Linux; macOS: /usr/local/var/run/agensio/control.sock
+admins = "agensio-admin"               # groups; root and server.user are always admin
+operators = "agensio-ops"
+viewers = "agensio-view"
+audit = "/var/log/agensio/audit.log"   # default: audit.log next to the error log
+```
+
+The control API is how `agensio ctl`, the MCP bridge (`agensio mcp`) and any local tool
+inspect and, in later steps, configure the running server. It exists only when the
+`[control]` table is present. It is a unix domain socket, never a port: nothing on the
+network can reach it, and a site listener can never route to it because it is a separate
+listener with its own code path.
+
+**Who may connect.** Every connection is checked by its peer credentials, the uid and
+gid the kernel reports for the process at the other end, whatever the file mode says.
+`root` and the account in `server.user` are admins. Members of the `admins` group are
+admins, members of `operators` may reload, purge and read logs, members of `viewers` may
+only read. Anyone else is disconnected at accept and the attempt goes to the audit log
+with its uid. The socket's directory is created by the server, owned by it and never
+writable by others, so a site user cannot replace the socket path. With only `admins`
+configured the socket file is `0660` for that group; with several groups it is `0666`
+and the credentials alone decide.
+
+**Audit.** One line per refused connection and, from F3 on, per mutating command: time,
+uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
+
+**Commands** (`agensio ctl <command>`, or HTTP/1.1 + JSON on the socket, `GET /v1/...`):
+
+| command | role | answer |
+|---|---|---|
+| `status` | viewer | version, pid, uptime, configuration path, workers, open connections, listeners, sites (names, listen, root, app, user, tls, redirect), whether ACME is on, and the caller's uid/gid/role |
+| `sites` | viewer | every site: names, listen, root, app, user, redirect, access log, and its certificate (mode, issuer, names, days left, whether it is still the placeholder) |
+| `site NAME` | viewer | one site in full: the above plus index, php socket and generated pool, upstreams, and every location after the preset expanded (path, match, handler, root/alias, upstream, added headers, which preset added it) |
+| `validate` | viewer | loads the file on disk again and runs the hosting rules: `ok`, `errors`, site count, and the restart-only settings that differ from the running server |
+| `logs` | viewer | `--site NAME` (default: all sites plus the error log), `--since 3h` (`m`, `h`, `d`, `w`, seconds, or a local `YYYY-MM-DDThh:mm:ss`; default 1h), `--level error|warn|info` for the error log (default warn = error+warn), `--status 5xx|4xx|all|NNN` for access logs (default 5xx), `--limit N` (default 200, newest). Reads at most 2 MB per file from the end; `truncated` says when that cut in |
+| `health` | viewer | findings with `severity`, `code`, `site`, `message`, `fix`: configuration on disk invalid or failing the hosting rules, restart-only settings changed, running as root, certificate unreadable / still the placeholder / expired / expiring within 14 days (manual), `tls = "auto"` without a plain port-80 site for the names, no http-to-https redirect, application sites sharing the server's account, generated pools out of date, errors in the last 24 hours. `ok` is true when nothing above info level was found |
+
+Unknown commands answer a JSON 404, a wrong method a 405 with `Allow`, a role that is too
+low a 403 naming the role needed. `curl --unix-socket /run/agensio/control.sock
+http://control/v1/status` is the same call by hand.
+
+`agensio -t` on a shared host warns when a php-fpm pool, proxy origin or CGI location
+runs as the server's own user or as a member of the admin group: with everything under
+one account the peer-credential check cannot tell sites apart. Per-site users (section
+11) are what makes the control socket safe on a shared host.

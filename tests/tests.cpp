@@ -18,6 +18,8 @@
 #include "upstream/http_head.hpp"
 #include "http1/range.hpp"
 #include "services/acme.hpp"
+#include "control/roles.hpp"
+#include "control/commands.hpp"
 #include "services/json.hpp"
 #include "handlers/proxy.hpp"
 #include "core/headers.hpp"
@@ -1464,6 +1466,119 @@ static void test_acme() {
 }
 #endif
 
+static void test_control() {
+    RoleGroups g;
+    g.admins = 100;
+    g.operators = 200;
+    g.viewers = 300;
+    CHECK(role_of(0, 0, {}, 33, g) == Role::admin);          // root
+    CHECK(role_of(33, 33, {}, 33, g) == Role::admin);        // the server's own user
+    CHECK(role_of(1000, 100, {}, 33, g) == Role::admin);     // primary group
+    CHECK(role_of(1000, 1000, {5, 200}, 33, g) == Role::operator_);
+    CHECK(role_of(1000, 1000, {300}, 33, g) == Role::viewer);
+    CHECK(role_of(1000, 1000, {100, 300}, 33, g) == Role::admin);  // the highest membership wins
+    CHECK(role_of(1000, 1000, {7}, 33, g) == Role::none);
+    CHECK(role_of(1000, 1000, {}, 33, RoleGroups{}) == Role::none);  // no groups configured: root and server only
+    CHECK(role_name(Role::operator_) == "operator" && role_name(Role::none) == "none");
+    CHECK(static_cast<std::uint8_t>(Role::admin) > static_cast<std::uint8_t>(Role::viewer));
+    // The synthetic control site routes everything to the control handler.
+    const SiteConfig site = control_site();
+    CHECK(site.locations.size() == 1 && site.locations[0].kind == HandlerKind::control && site.is_default);
+    CHECK(Router::location(site, "/v1/status").kind == HandlerKind::control);
+    // [control] parsing: defaults and the audit path next to the error log.
+    const auto dir = std::filesystem::temp_directory_path() / "agensio-control-test";
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir / "a.toml") << "[log]\nerror = \"" << dir.string() << "/logs/error.log\"\n[control]\nadmins = \"wheel\"\n[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:80\"]\nroot = \"" << dir.string() << "\"\n";
+    const Config cfg = load_config(dir / "a.toml");
+    CHECK(cfg.control.enabled && cfg.control.admins == "wheel" && cfg.control.operators.empty());
+    CHECK(cfg.control.socket.ends_with("/agensio/control.sock") && cfg.control.audit == dir.string() + "/logs/audit.log");
+    std::ofstream(dir / "b.toml") << "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:80\"]\nroot = \"" << dir.string() << "\"\n";
+    CHECK(!load_config(dir / "b.toml").control.enabled);
+    std::ofstream(dir / "c.toml") << "control = 1\n[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:80\"]\nroot = \"" << dir.string() << "\"\n";
+    bool refused = false;
+    try { load_config(dir / "c.toml"); } catch (const std::exception& e) { refused = std::string(e.what()).find("control must be a table") != std::string::npos; }
+    CHECK(refused);
+    std::filesystem::remove_all(dir);
+}
+
+static void test_control_commands() {
+    using namespace control;
+    LogLine l;
+    CHECK(parse_log_line("2026/09/18 21:44:39 [warn] reloaded x\n", l) && l.source == "error" && l.level == "warn" && l.time > 0);
+    CHECK(parse_log_line("127.0.0.1 - - [18/Sep/2026:21:44:39 +0300] \"GET /x?y HTTP/1.1\" 404 150 \"-\" \"curl\"", l));
+    CHECK(l.status == 404 && l.level.empty());
+    const std::time_t combined = l.time;
+    CHECK(parse_log_line(R"({"time":"2026-09-18T21:44:39+03:00","remote":"127.0.0.1","status":502,"bytes":1})", l));
+    CHECK(l.status == 502 && l.time == combined);  // the same instant in both formats
+    CHECK(parse_log_line(R"({"time":"2026-09-18T18:44:39+00:00","status":200})", l) && l.time == combined);  // zone applied
+    CHECK(!parse_log_line("garbage", l) && !parse_log_line("", l) && !parse_log_line("{\"time\":\"x\"}", l));
+    std::time_t t = 0;
+    const std::time_t now = 1000000;
+    CHECK(parse_since("3h", now, t) && t == now - 3 * 3600);
+    CHECK(parse_since("45m", now, t) && t == now - 2700 && parse_since("2d", now, t) && t == now - 2 * 86400);
+    CHECK(parse_since("90", now, t) && t == now - 90 && !parse_since("3x", now, t) && !parse_since("", now, t));
+    CHECK(parse_since("2026-09-18T10:00:00", now, t) && t > 1700000000);
+    CHECK(query_value("/v1/logs?site=a.test&since=3h&x=a%20b+c", "since") == "3h");
+    CHECK(query_value("/v1/logs?site=a.test&since=3h&x=a%20b+c", "x") == "a b c");
+    CHECK(query_value("/v1/logs?site=a.test", "nope").empty() && query_value("/v1/logs", "site").empty());
+    // Backward scan: newest lines first, then chronological; trailing newline; since bound; byte cap.
+    const auto dir = std::filesystem::temp_directory_path() / "agensio-ctl-test";
+    std::filesystem::create_directories(dir);
+    {
+        std::ofstream f(dir / "error.log");
+        f << "2026/09/18 10:00:00 [info] one\n2026/09/18 11:00:00 [error] two\n2026/09/18 12:00:00 [warn] three\n\n2026/09/18 13:00:00 [error] four\n";
+    }
+    LogQuery q;
+    std::vector<LogLine> out;
+    bool truncated = false;
+    scan_log(dir / "error.log", "error", q, out, truncated);
+    CHECK(out.size() == 3 && out[0].text.ends_with("two") && out[2].text.ends_with("four") && !truncated);
+    out.clear();
+    q.level = "error";
+    q.limit = 1;
+    scan_log(dir / "error.log", "error", q, out, truncated);
+    CHECK(out.size() == 1 && out[0].text.ends_with("four"));
+    out.clear();
+    q.limit = 100;
+    q.level = "info";
+    q.max_bytes = 60;  // only the tail: the partial first line is dropped
+    scan_log(dir / "error.log", "error", q, out, truncated);
+    CHECK(truncated && !out.empty() && out.size() < 4);
+    out.clear();
+    q.max_bytes = 1 << 20;
+    parse_log_line("2026/09/18 12:30:00 [info] x", l);
+    q.since = l.time;
+    scan_log(dir / "error.log", "error", q, out, truncated);
+    CHECK(out.size() == 1 && out[0].text.ends_with("four"));
+    // Health: a manual TLS site with a missing certificate, no redirect, two application sites without users.
+    {
+        std::ofstream(dir / "www.html") << "x";
+        std::ofstream(dir / "h.toml") << "[log]\nerror = \"" << (dir / "error.log").string() << "\"\n"
+            << "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:8443\"]\nroot = \"" << dir.string() << "\"\ntls = { cert = \"" << (dir / "www.html").string() << "\", key = \"" << (dir / "www.html").string() << "\" }\n"
+            << "[[site]]\nserver_name = [\"b.test\"]\nlisten = [\"127.0.0.1:8080\"]\nroot = \"" << dir.string() << "\"\nphp = { socket = \"127.0.0.1:9000\" }\n"
+            << "[[site]]\nserver_name = [\"c.test\"]\nlisten = [\"127.0.0.1:8080\"]\nroot = \"" << dir.string() << "\"\nphp = { socket = \"127.0.0.1:9000\" }\n";
+        const Config cfg = load_config(dir / "h.toml");
+        const auto f = health_findings(cfg, cfg, true, std::time(nullptr));
+        auto has = [&](std::string_view code) { return std::any_of(f.begin(), f.end(), [&](const Finding& x) { return x.code == code; }); };
+        CHECK(has("running_as_root") && has("certificate_unreadable") && has("no_http_redirect") && has("shared_account"));
+        CHECK(!has("config_invalid") && !has("restart_needed") && !has("acme_needs_port_80"));
+        // The recent-errors rule reads the error log written above (dates in 2026: within 24 h only if today).
+        Config changed = cfg;
+        changed.workers = cfg.workers + 3;
+        CHECK(restart_needed(changed, cfg) == std::vector<std::string>{"workers"});
+        const json::Value h = health(cfg, cfg, false, std::time(nullptr));
+        CHECK(!h["ok"].boolean() && h["findings"].items().size() == h["count"].num());
+        const json::Value s = sites(cfg, std::time(nullptr));
+        CHECK(s["count"].num() == 3 && s["sites"].items()[0]["tls"].get("mode") == "manual" && !s["sites"].items()[0]["tls"]["present"].boolean());
+        CHECK(find_site(cfg, "B.TEST") == &cfg.sites[1] && find_site(cfg, "z.test") == nullptr);
+        const json::Value v = validate(dir / "h.toml", cfg);
+        CHECK(v["ok"].boolean() && v["sites"].num() == 3);
+        std::ofstream(dir / "bad.toml") << "[[site]\n";
+        CHECK(!validate(dir / "bad.toml", cfg)["ok"].boolean());
+    }
+    std::filesystem::remove_all(dir);
+}
+
 int main() {
     test_path();
     test_parser();
@@ -1488,6 +1603,8 @@ int main() {
     test_proxy();
     test_range();
     test_json();
+    test_control();
+    test_control_commands();
 #ifdef AGENSIO_HAS_TLS
     test_acme();
 #endif

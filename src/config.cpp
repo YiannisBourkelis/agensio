@@ -1186,7 +1186,43 @@ Config load_config(const fs::path& path) {
                     if (la == lb && a.tls.has_value() != b.tls.has_value())
                         fail("listen address " + la + " is used by both a TLS and a plain site");
 
+    if (auto ct = root["control"].as_table()) {
+        cfg.control.enabled = true;
+        if (auto s = (*ct)["socket"].value<std::string>()) cfg.control.socket = resolve(base_dir, *s).string();
+        else {
+#ifdef __APPLE__
+            cfg.control.socket = "/usr/local/var/run/agensio/control.sock";
+#else
+            cfg.control.socket = "/run/agensio/control.sock";
+#endif
+        }
+        cfg.control.admins = account_name((*ct)["admins"], "control.admins");
+        cfg.control.operators = account_name((*ct)["operators"], "control.operators");
+        cfg.control.viewers = account_name((*ct)["viewers"], "control.viewers");
+        if (auto a = (*ct)["audit"].value<std::string>()) cfg.control.audit = resolve(base_dir, *a).string();
+        else if (cfg.log.error != "stderr") cfg.control.audit = (fs::path(cfg.log.error).parent_path() / "audit.log").string();
+        else cfg.control.audit = resolve(base_dir, "logs/audit.log").string();
+    } else if (root.contains("control")) {
+        fail("control must be a table: [control] with socket, admins, operators, viewers, audit");
+    }
     return cfg;
+}
+
+SiteConfig control_site() {
+    SiteConfig site;
+    site.server_names = {"*"};
+    site.is_default = true;
+    site.root = "/";
+    LocationConfig loc;
+    loc.path = "/";
+    loc.root = "/";
+    loc.handler = "control";
+    loc.kind = HandlerKind::control;
+    loc.methods = kStaticMethods | method_bit(Method::post);
+    loc.allow = "GET, HEAD, POST, OPTIONS";
+    site.locations.push_back(std::move(loc));
+    finalize_site(site);
+    return site;
 }
 
 }  // namespace agensio

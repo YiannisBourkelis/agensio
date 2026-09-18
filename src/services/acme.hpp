@@ -67,6 +67,16 @@ std::vector<AcmeSite> sites_of(const Config& cfg);
 // renewals still work after the privilege drop. Throws on failure.
 void prepare_storage(const Config& cfg, const std::vector<AcmeSite>& sites, int uid, int gid);
 
+// What a certificate file says: issuer, names, validity, whether it is our placeholder.
+struct CertInfo {
+    std::string issuer;
+    std::vector<std::string> names;
+    std::chrono::system_clock::time_point not_before;
+    std::chrono::system_clock::time_point not_after;
+    bool placeholder = false;
+};
+bool certificate_info(const std::filesystem::path& cert, CertInfo& out, std::string& error);
+
 // True when the certificate at `cert` should be (re)issued for `names`: missing, unreadable,
 // our placeholder, not covering every name, or less than a third of its lifetime left.
 // `why` says which.

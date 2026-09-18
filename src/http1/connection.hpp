@@ -39,6 +39,14 @@
 
 namespace agensio {
 
+#ifdef ASIO_HAS_LOCAL_SOCKETS
+template <class S>
+struct IsLocalSocket : std::is_same<S, asio::local::stream_protocol::socket> {};
+#else
+template <class S>
+struct IsLocalSocket : std::false_type {};
+#endif
+
 template <class Socket>
 class Http1Connection : public std::enable_shared_from_this<Http1Connection<Socket>> {
 public:
@@ -58,6 +66,13 @@ public:
           body_source_(*this),
           writer_(socket_, *this, worker.ctx, cfg) {
         worker_.connections.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // Control socket: the peer's credentials and role, decided at accept (F0).
+    void set_peer(long uid, long gid, std::uint8_t role) noexcept {
+        stream_.conn.peer_uid = uid;
+        stream_.conn.peer_gid = gid;
+        stream_.conn.role = role;
     }
 
     Http1Connection(const Http1Connection&) = delete;
@@ -255,9 +270,13 @@ private:
         if (!site) site = listener_->router.default_site();
         if (!site || site->access_log_sink < 0) return;
         if (remote_.empty()) {
-            asio::error_code ec;
-            const auto ep = lowest().remote_endpoint(ec);
-            remote_ = ec ? std::string("-") : ep.address().to_string();
+            if constexpr (IsLocalSocket<Socket>::value) {
+                remote_ = "local";
+            } else {
+                asio::error_code ec;
+                const auto ep = lowest().remote_endpoint(ec);
+                remote_ = ec ? std::string("-") : ep.address().to_string();
+            }
         }
         const Request& req = stream_.request;
         AccessRecord rec;
@@ -531,6 +550,11 @@ private:
         const LocationConfig* loc = dispatcher_.route(stream_, listener_->router, ws);
         int hops = 0;
         while (loc) {
+            if (loc->kind == HandlerKind::control) {  // the control socket's API: answered inline
+                fill_connection_info();
+                dispatcher_.control().handle(stream_, ws);
+                break;
+            }
             if (loc->kind != HandlerKind::static_) {  // FastCGI or proxy: completes asynchronously
                 fill_connection_info();
                 const unsigned gen = ++request_gen_;
@@ -582,11 +606,15 @@ private:
             stream_.conn.tls = IsTlsStream<Socket>::value;
         }
         if (remote_.empty()) {
-            asio::error_code ec;
-            const auto ep = lowest().remote_endpoint(ec);
-            remote_ = ec ? std::string("-") : ep.address().to_string();
-            remote_port_ = ec ? 0 : ep.port();
-            if (!ec) remote_addr_ = ep.address();
+            if constexpr (IsLocalSocket<Socket>::value) {
+                remote_ = "local";
+            } else {
+                asio::error_code ec;
+                const auto ep = lowest().remote_endpoint(ec);
+                remote_ = ec ? std::string("-") : ep.address().to_string();
+                remote_port_ = ec ? 0 : ep.port();
+                if (!ec) remote_addr_ = ep.address();
+            }
         }
         stream_.conn.remote_address = remote_;
         stream_.conn.remote_port = remote_port_;
