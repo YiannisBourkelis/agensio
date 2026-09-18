@@ -287,7 +287,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   off/on twice, plain 1 KB 2.0 -> 2.0-2.1 us, TLS 1 KB 2.8 -> 2.9-3.0 us, 100 KB rows
   within noise, i.e. 0.1-0.2 us per request, under the 1 us bar the roadmap set. Benchmark
   templates: off, like the nginx and Caddy bench configs.
-- **Not yet**: Range requests (no `Accept-Ranges` is sent), directory listing, reload.
+- **Range requests** (E1, `src/http1/range.hpp`): one `bytes=` range with If-Range; 206
+  as a slice of the cache entry or a `FileBody` with an offset (sendfile keeps the fast
+  path), 416 past the end, `Accept-Ranges: bytes` prebuilt into the entry block.
+- **Not yet**: directory listing, reload.
 
 ## Performance notes (measured, keep current)
 

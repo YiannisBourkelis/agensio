@@ -28,8 +28,9 @@ struct MemoryBody {
 
 struct FileBody {
     const File* file = nullptr;  // owned by Response::owned_file or by a cache entry (Response::entry)
-    std::uint64_t size = 0;
+    std::uint64_t size = 0;      // bytes to send
     std::uint64_t sent = 0;
+    std::uint64_t offset = 0;    // where in the file they start (a range)
 };
 
 // The HTTP/1 writer frames a StreamBody itself: Content-Length when length() is known,

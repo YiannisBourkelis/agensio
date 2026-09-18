@@ -181,6 +181,10 @@ ParseStatus parse_request(std::string_view buf, Request& out) noexcept {
             case 'i':
                 if (iequals(name, "if-none-match")) out.if_none_match = value;
                 else if (iequals(name, "if-modified-since")) out.if_modified_since = value;
+                else if (iequals(name, "if-range")) out.if_range = value;
+                break;
+            case 'r':
+                if (iequals(name, "range")) out.range = value;
                 break;
             case 't':
                 if (iequals(name, "transfer-encoding")) {

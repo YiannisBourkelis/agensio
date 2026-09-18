@@ -389,7 +389,17 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       MongoDB-backed setup is wanted.
 
 ### Phase E. Complete HTTP/1.1 and hardening  `[ ]`
-- [ ] E1 Range requests (single range, `206`, `416`, `If-Range`) on memory and file sources.
+- [x] E1 (2026-09-18) Range requests: `http1/range.hpp` parses one `bytes=` range
+      (first-last, first-, -suffix; lists and malformed values mean the whole body, 200)
+      and If-Range (strong ETag or exact Last-Modified); the static handler answers 206
+      with `Content-Range` and the slice as a memory view or a `FileBody` with an offset
+      (sendfile and the copy path honour it, also from a cached descriptor), 416 with
+      `Content-Range: bytes */size` past the end; 200 answers carry `Accept-Ranges:
+      bytes` in the entry's prebuilt block. One empty-view test on the plain path.
+      Integration: slices from the memory cache, the sendfile-from-descriptor path, a
+      streamed 10 MB file and over TLS, suffix and open ranges, 416, If-Range both ways,
+      several ranges, HEAD, keep-alive after a 206. Gate (`ab-20260917-213829.md`, 3
+      rounds): 1 KB rows 1.020 / 1.022, 100 KB 0.995, inside the 3 % noise band.
 - [ ] E2 Compression, off by default, per site/location: `compression = "precompressed"`
       serves `.br`/`.gz` siblings by `Accept-Encoding` (no CPU); `compression = "on-the-fly"`
       gzip/brotli for dynamic responses with level setting; measure and document the

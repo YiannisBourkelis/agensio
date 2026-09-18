@@ -28,6 +28,10 @@ public:
 
     // Fills s.response with a canned error page. `allow` adds an Allow header (405).
     void error(Stream& s, int status, bool keep_alive, std::string_view allow = {});
+
+    enum class RangeOutcome { whole, partial, done };
+    RangeOutcome apply_range(Stream& s, std::uint64_t size, std::string_view content_type, std::string_view etag,
+                             std::string_view last_modified, std::uint64_t& first, std::uint64_t& length);
     // 204 with an Allow header (OPTIONS).
     void no_content(Stream& s, std::string_view allow);
 

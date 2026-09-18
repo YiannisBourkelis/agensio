@@ -16,6 +16,7 @@
 #include "config.hpp"
 #include "services/pools.hpp"
 #include "upstream/http_head.hpp"
+#include "http1/range.hpp"
 #include "handlers/proxy.hpp"
 #include "core/headers.hpp"
 #include "core/result.hpp"
@@ -1330,6 +1331,35 @@ static void test_proxy() {
     fs::remove_all(dir);
 }
 
+// E1: the Range header parser and If-Range.
+static void test_range() {
+    std::uint64_t f = 0, l = 0;
+    CHECK(parse_range("bytes=0-99", 1000, f, l) == RangeStatus::single && f == 0 && l == 99);
+    CHECK(parse_range("bytes=500-", 1000, f, l) == RangeStatus::single && f == 500 && l == 999);
+    CHECK(parse_range("bytes=-100", 1000, f, l) == RangeStatus::single && f == 900 && l == 999);
+    CHECK(parse_range("bytes=-5000", 1000, f, l) == RangeStatus::single && f == 0 && l == 999);  // suffix longer than the file
+    CHECK(parse_range("bytes=990-2000", 1000, f, l) == RangeStatus::single && f == 990 && l == 999);  // clipped
+    CHECK(parse_range(" bytes = 1 - 2 ", 1000, f, l) == RangeStatus::none);  // "bytes=" must be exact
+    CHECK(parse_range("bytes= 1-2", 1000, f, l) == RangeStatus::single && f == 1 && l == 2);
+    CHECK(parse_range("bytes=1000-", 1000, f, l) == RangeStatus::unsatisfiable);
+    CHECK(parse_range("bytes=2000-3000", 1000, f, l) == RangeStatus::unsatisfiable);
+    CHECK(parse_range("bytes=-0", 1000, f, l) == RangeStatus::none);
+    CHECK(parse_range("bytes=5-2", 1000, f, l) == RangeStatus::none);
+    CHECK(parse_range("bytes=0-99,200-299", 1000, f, l) == RangeStatus::none);  // several ranges: the whole body
+    CHECK(parse_range("items=0-1", 1000, f, l) == RangeStatus::none);
+    CHECK(parse_range("bytes=abc", 1000, f, l) == RangeStatus::none);
+    CHECK(parse_range("bytes=-1", 0, f, l) == RangeStatus::unsatisfiable);
+    CHECK(parse_range("bytes=0-", 0, f, l) == RangeStatus::unsatisfiable);
+    CHECK(if_range_matches("", "\"abc\"", "Thu, 01 Jan 2026 00:00:00 GMT"));
+    CHECK(if_range_matches("\"abc\"", "\"abc\"", "x") && !if_range_matches("\"abd\"", "\"abc\"", "x"));
+    CHECK(!if_range_matches("W/\"abc\"", "W/\"abc\"", "x"));  // weak validators never permit a range
+    CHECK(if_range_matches("Thu, 01 Jan 2026 00:00:00 GMT", "\"abc\"", "Thu, 01 Jan 2026 00:00:00 GMT"));
+    CHECK(!if_range_matches("Fri, 02 Jan 2026 00:00:00 GMT", "\"abc\"", "Thu, 01 Jan 2026 00:00:00 GMT"));
+    Request rq;
+    CHECK(parse_request("GET / HTTP/1.1\r\nHost: h\r\nRange: bytes=1-2\r\nIf-Range: \"e\"\r\n\r\n", rq) == ParseStatus::complete &&
+          rq.range == "bytes=1-2" && rq.if_range == "\"e\"");
+}
+
 int main() {
     test_path();
     test_parser();
@@ -1352,6 +1382,7 @@ int main() {
     test_pools();
     test_hosting_rules();
     test_proxy();
+    test_range();
     if (failures) {
         std::printf("%d failure(s)\n", failures);
         return 1;

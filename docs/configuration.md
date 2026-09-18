@@ -27,7 +27,9 @@ root = "/var/www/example"
 
 Defaults you get without writing them: `index = ["index.html"]`, dotfiles and
 dot-directories hidden (404), symlinks followed, files up to 4 MB cached in memory and
-larger ones streamed with sendfile, access log on (see section 8).
+larger ones streamed with sendfile, access log on (see section 8), and Range requests
+(one range per request, `If-Range` honoured; video seeking, resumable downloads, PDF
+viewers) answered with 206 from the cache and from disk alike.
 
 A single-page application that routes on the client:
 

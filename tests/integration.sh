@@ -422,6 +422,23 @@ if [ -n "$FPM_PID" ]; then
   check "-t warns about the unreachable upstream" "yes" "$("$BIN" -t -c bench/tmp/agensio-test.toml 2>&1 >/dev/null | grep -q 'warning: fastcgi upstream' && echo yes)"
   check "php: 502 reason names the socket" "yes" "$(grep -q -E 'socket_missing|connect_refused' bench/tmp/error.log && echo yes)"
 fi
+# Range requests (E1) on a cached file (1 KB index, served from memory), a cached file above
+# the sendfile threshold (100 KB css, sent by the kernel from the entry's descriptor) and a
+# streamed file (10 MB): the slice bytes, Content-Range, 416, If-Range, suffix and open ranges.
+for f in index.html:/ style.css:/style.css big.bin:/big.bin; do
+  name=${f%%:*}; url=http://127.0.0.1:8080${f#*:}; size=$(stat -c %s bench/www/$name)
+  check "range: $name bytes 10-19" "206 bytes 10-19/$size $(dd if=bench/www/$name bs=1 skip=10 count=10 2>/dev/null | sum)" "$(curl -sS -r 10-19 -o bench/tmp/range.bin -w '%{http_code} ' $url)$(curl -sS -r 10-19 -D - -o /dev/null $url | tr -d '\r' | awk '/^Content-Range:/{print $2" "$3}') $(sum < bench/tmp/range.bin)"
+  check "range: $name last 7 bytes" "$(tail -c 7 bench/www/$name | sum)" "$(curl -sS -H 'Range: bytes=-7' $url | sum)"
+  check "range: $name open-ended from the middle" "$(tail -c +$((size/2 + 1)) bench/www/$name | sum)" "$(curl -sS -H "Range: bytes=$((size/2))-" $url | sum)"
+  check "range: $name past the end is 416 with the size" "416 bytes */$size" "$(curl -sS -H "Range: bytes=$size-" -D - -o /dev/null $url | tr -d '\r' | awk '/^HTTP/{c=$2} /^Content-Range:/{r=$2" "$3} END{print c, r}')"
+done
+check "range: 200 advertises Accept-Ranges" "Accept-Ranges: bytes" "$(curl -sSI http://127.0.0.1:8080/ | tr -d '\r' | grep '^Accept-Ranges')"
+check "range: If-Range with the current ETag gives the slice" "206" "$(ET=$(curl -sSI http://127.0.0.1:8080/ | tr -d '\r' | awk '/^ETag/{print $2}'); code -r 0-9 -H "If-Range: $ET" http://127.0.0.1:8080/)"
+check "range: If-Range with another ETag gives the whole body" "200" "$(code -r 0-9 -H 'If-Range: "nope"' http://127.0.0.1:8080/)"
+check "range: several ranges give the whole body" "200" "$(code -H 'Range: bytes=0-1,5-6' http://127.0.0.1:8080/)"
+check "range: HEAD with a range has the headers and no body" "206 0" "$(curl -sS -I -r 0-9 -o /dev/null -w '%{http_code} %{size_download}' http://127.0.0.1:8080/)"
+check "range: slice over TLS" "$(dd if=bench/www/big.bin bs=1 skip=5000000 count=100 2>/dev/null | sum)" "$(curl -sSk -r 5000000-5000099 https://127.0.0.1:8443/big.bin | sum)"
+check "range: keep-alive after a partial answer" "1 0" "$(curl -sS -r 0-9 -o /dev/null -o /dev/null -w '%{num_connects} ' http://127.0.0.1:8080/ http://127.0.0.1:8080/style.css | sed 's/ $//')"
 # Reverse proxy (D1) against the benchmark upstream: bodies of every framing, streaming,
 # forwarded request bodies (memory, spilled, chunked, streamed), errors, keep-alive reuse.
 if [ -n "$UP_PID" ]; then

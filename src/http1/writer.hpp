@@ -198,12 +198,14 @@ private:
             if (cfg_.sendfile && !sendfile_unsupported_ && !r.head) {
                 if (const auto* m = std::get_if<MemoryBody>(&r.body); m && r.entry && r.entry->fd.is_open()) {
                     // Cached entry with an open descriptor: let the kernel send it from the
-                    // page cache, headers attached to the same call where supported.
-                    begin_sendfile(&r.entry->fd, m->data.size());
+                    // page cache, headers attached to the same call where supported. A
+                    // range is a slice of the entry's bytes: its offset is the slice's.
+                    begin_sendfile(&r.entry->fd, m->data.size(),
+                                   static_cast<std::uint64_t>(m->data.data() - r.entry->data.data()));
                     return;
                 }
                 if (const auto* f = std::get_if<FileBody>(&r.body)) {
-                    begin_sendfile(f->file, f->size);
+                    begin_sendfile(f->file, f->size, f->offset);
                     return;
                 }
             }
@@ -267,7 +269,7 @@ private:
         if (chunk_.empty()) chunk_.resize(cfg_.stream_chunk_size);
         const std::uint64_t remaining = fb.size - fb.sent;
         const std::size_t want = static_cast<std::size_t>(std::min<std::uint64_t>(remaining, chunk_.size()));
-        const std::int64_t got = fb.file->read_at(chunk_.data(), want, fb.sent);
+        const std::int64_t got = fb.file->read_at(chunk_.data(), want, fb.offset + fb.sent);
         if (got <= 0) {  // file shrank or read error: the client sees a short body
             owner_.close();
             return;
@@ -334,9 +336,10 @@ private:
     // the same call on macOS/FreeBSD; on Linux it is written first with writev. sendfile
     // runs until the socket buffer is full, then waits for writability.
 
-    void begin_sendfile(const File* file, std::uint64_t size) {
+    void begin_sendfile(const File* file, std::uint64_t size, std::uint64_t offset = 0) {
         sf_file_ = file;
         sf_size_ = size;
+        sf_offset_ = offset;
         sf_sent_ = 0;
         body_sent_ = 0;
         hdr_sent_ = 0;
@@ -384,7 +387,7 @@ private:
             // lock against the receiver and the worker's loop for the whole transfer.
             const std::uint64_t count = std::min<std::uint64_t>(remaining, cfg_.sendfile_max_chunk);
             SendFileResult r =
-                send_file(static_cast<int>(lowest().native_handle()), *sf_file_, sf_sent_, count, iov, n);
+                send_file(static_cast<int>(lowest().native_handle()), *sf_file_, sf_offset_ + sf_sent_, count, iov, n);
             if (r.headers_unsupported) {
                 // Write the head with writev; on_write() comes back here for the file.
                 std::array<asio::const_buffer, 3> bufs;
@@ -455,7 +458,7 @@ private:
     ChunkSizeBuffer chunk_size_{};
     bool sendfile_unsupported_ = false;
     const File* sf_file_ = nullptr;  // sendfile in progress (entry fd or the response's owned file)
-    std::uint64_t sf_size_ = 0, sf_sent_ = 0;
+    std::uint64_t sf_size_ = 0, sf_sent_ = 0, sf_offset_ = 0;
     std::size_t hdr_total_ = 0, hdr_sent_ = 0;
 };
 

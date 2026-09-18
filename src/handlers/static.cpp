@@ -1,5 +1,7 @@
 #include "handlers/static.hpp"
 
+#include "http1/range.hpp"
+
 #include <charconv>
 #include <cstring>
 #include <ctime>
@@ -76,6 +78,45 @@ bool StaticHandler::not_modified(const Request& req, std::string_view etag, std:
     return false;
 }
 
+// A Range request on a file of known size: 206 with the slice, 416 when it lies past the
+// end, or nothing (the caller sends the whole body) when there is no usable single range
+// or If-Range says the file changed. Off the plain path: one test of an empty view.
+StaticHandler::RangeOutcome StaticHandler::apply_range(Stream& s, std::uint64_t size, std::string_view content_type,
+                                                       std::string_view etag, std::string_view last_modified,
+                                                       std::uint64_t& first, std::uint64_t& length) {
+    const Request& req = s.request;
+    if (req.range.empty() || !if_range_matches(req.if_range, etag, last_modified)) return RangeOutcome::whole;
+    std::uint64_t last = 0;
+    const RangeStatus st = parse_range(req.range, size, first, last);
+    if (st == RangeStatus::none) return RangeOutcome::whole;
+    Response& r = s.response;
+    if (st == RangeStatus::unsatisfiable) {
+        error(s, 416, req.keep_alive);
+        r.scratch.assign("bytes */");
+        append_number(r.scratch, size);
+        r.headers.add("Content-Range", r.scratch);
+        return RangeOutcome::done;
+    }
+    length = last - first + 1;
+    r.status = 206;
+    r.scratch.assign("Content-Type: ").append(content_type).append("\r\nContent-Range: bytes ");
+    append_number(r.scratch, first);
+    r.scratch.push_back('-');
+    append_number(r.scratch, last);
+    r.scratch.push_back('/');
+    append_number(r.scratch, size);
+    r.scratch.append("\r\nContent-Length: ");
+    append_number(r.scratch, length);
+    r.scratch.append("\r\nLast-Modified: ")
+        .append(last_modified)
+        .append("\r\nETag: ")
+        .append(etag)
+        .append("\r\nAccept-Ranges: bytes\r\n\r\n");
+    r.prebuilt_headers = r.scratch;
+    r.prebuilt_terminated = true;
+    return RangeOutcome::partial;
+}
+
 void StaticHandler::serve_entry(Stream& s, EntryPtr e) {
     Response& r = s.response;
     r.head = s.request.method == Method::head;
@@ -85,6 +126,16 @@ void StaticHandler::serve_entry(Stream& s, EntryPtr e) {
         r.headers.add("Last-Modified", e->last_modified);
         r.entry = std::move(e);  // keeps the views above alive
         return;
+    }
+    std::uint64_t first = 0, length = 0;
+    switch (apply_range(s, e->size, mime_for_path(e->file_path), e->etag, e->last_modified, first, length)) {
+        case RangeOutcome::done: return;
+        case RangeOutcome::partial:
+            if (e->descriptor_only) r.body = FileBody{&e->fd, length, 0, first};
+            else r.body = MemoryBody{std::string_view(e->data.data() + first, static_cast<std::size_t>(length))};
+            r.entry = std::move(e);
+            return;
+        case RangeOutcome::whole: break;
     }
     // Zero-concatenation path: the entry's prebuilt block already ends with the blank line.
     r.status = 200;
@@ -109,7 +160,7 @@ void StaticHandler::fill_entry(CacheEntry& entry, const FileInfo& fi, const Work
         .append(entry.last_modified)
         .append("\r\nETag: ")
         .append(entry.etag)
-        .append("\r\n\r\n");
+        .append("\r\nAccept-Ranges: bytes\r\n\r\n");
     entry.last_access.store(now, std::memory_order_relaxed);
     entry.last_validated.store(now, std::memory_order_relaxed);
 }
@@ -131,6 +182,16 @@ void StaticHandler::serve_file(Stream& s, File&& f, const FileInfo& fi, WorkerSt
         r.prebuilt_headers = r.scratch;
         return;
     }
+    std::uint64_t first = 0, length = 0;
+    switch (apply_range(s, fi.size, mime_for_path(ws.fs_path), etag, std::string_view(lm, kHttpDateLength), first,
+                        length)) {
+        case RangeOutcome::done: return;
+        case RangeOutcome::partial:
+            r.owned_file = std::move(f);
+            r.body = FileBody{&r.owned_file, length, 0, first};
+            return;
+        case RangeOutcome::whole: break;
+    }
     r.status = 200;
     r.scratch.assign("Content-Type: ").append(mime_for_path(ws.fs_path)).append("\r\nContent-Length: ");
     append_number(r.scratch, fi.size);
@@ -138,7 +199,7 @@ void StaticHandler::serve_file(Stream& s, File&& f, const FileInfo& fi, WorkerSt
         .append(lm, kHttpDateLength)
         .append("\r\nETag: ")
         .append(etag)
-        .append("\r\n\r\n");
+        .append("\r\nAccept-Ranges: bytes\r\n\r\n");
     r.prebuilt_headers = r.scratch;
     r.prebuilt_terminated = true;
     r.owned_file = std::move(f);
