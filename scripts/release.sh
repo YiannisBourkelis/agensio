@@ -3,15 +3,45 @@
 # section, build and run the unit tests, commit, tag and push. The release workflow on
 # GitHub then builds the packages and attaches them to the release.
 #
-# usage: scripts/release.sh 0.1.0-alpha.2 [--dry-run] [--no-push]
-#   version   X.Y.Z or X.Y.Z-<pre>.<n> (alpha.2, beta.1, rc.1); the tag is v<version>
+# usage: scripts/release.sh [version] [--dry-run] [--no-push]
+#   version   X.Y.Z or X.Y.Z-<pre>.<n> (alpha.2, beta.1, rc.1); the tag is v<version>.
+#             Without it the next version is suggested from the current one (alpha.1 ->
+#             alpha.2, 0.1.0 -> 0.1.1) and you can accept it with Enter or type another.
 #   --dry-run show what would change, touch nothing
 #   --no-push commit and tag, do not push
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")/.."
-version="${1:-}"; dry=0; push=1
-for a in "${@:2}"; do case "$a" in --dry-run) dry=1;; --no-push) push=0;; *) echo "unknown option $a"; exit 2;; esac; done
-[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]] || { echo "usage: $0 X.Y.Z[-alpha.N|-beta.N|-rc.N] [--dry-run] [--no-push]"; exit 2; }
+version=""; dry=0; push=1
+for a in "$@"; do
+    case "$a" in
+        --dry-run) dry=1;;
+        --no-push) push=0;;
+        -*) echo "unknown option $a"; exit 2;;
+        *) version="$a";;
+    esac
+done
+
+# The current version, from the source (what the last release set), and the next one.
+current=$(sed -n 's/^set(AGENSIO_VERSION_STRING "\([^"]*\)").*/\1/p' CMakeLists.txt)
+suggest() {
+    local cur="$1"
+    if [[ "$cur" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-(alpha|beta|rc)\.([0-9]+)$ ]]; then
+        echo "${BASH_REMATCH[1]}-${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))"
+    elif [[ "$cur" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+        echo "${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))"
+    fi
+}
+if [ -z "$version" ]; then
+    next=$(suggest "$current")
+    [ -n "$next" ] || { echo "cannot derive the next version from '$current'; pass one"; exit 2; }
+    if [ -t 0 ]; then
+        read -r -p "current version is $current; next version [$next]: " answer
+        version="${answer:-$next}"
+    else
+        version="$next"
+    fi
+fi
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]] || { echo "usage: $0 [X.Y.Z[-alpha.N|-beta.N|-rc.N]] [--dry-run] [--no-push]  (got '$version')"; exit 2; }
 base="${version%%-*}"                       # 0.1.0
 pre="${version#"$base"}"; pre="${pre#-}"     # alpha.2 or ""
 tag="v$version"
@@ -20,11 +50,25 @@ today=$(date +%Y-%m-%d)
 say() { printf '%s\n' "$*"; }
 fail() { say "error: $*"; exit 1; }
 
-# 1. The changelog must already describe the version.
-grep -q "^## $version " CHANGELOG.md || fail "CHANGELOG.md has no '## $version (date)' section; write it first"
+# 1. The changelog must already describe the version. Offer a stub to fill in.
+if ! grep -q "^## $version " CHANGELOG.md; then
+    say "CHANGELOG.md has no '## $version (date)' section."
+    if [ $dry = 0 ] && [ -t 0 ]; then
+        read -r -p "insert an empty section at the top for you to fill in, then stop? [Y/n] " answer
+        if [[ ! "$answer" =~ ^[Nn] ]]; then
+            sed -i "1a\\
+\\
+## $version ($today)\\
+\\
+- " CHANGELOG.md
+            say "added; write the notes, commit, and run $0 $version again"
+            exit 1
+        fi
+    fi
+    fail "write the changelog section first"
+fi
 
 # 2. What changes.
-current=$(sed -n 's/^set(AGENSIO_VERSION_STRING "\([^"]*\)").*/\1/p' CMakeLists.txt)
 say "release $tag  (current version string: $current)"
 say "  CMakeLists.txt           AGENSIO_VERSION_STRING -> $version"
 say "  packaging/arch/PKGBUILD  _tag -> $version, pkgver -> ${base}${pre//./}"
