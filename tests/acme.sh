@@ -45,7 +45,7 @@ tls = "auto"
 CFG
 }
 write_config
-check "-t --explain shows the resolved automatic certificate" "yes" "$("$BIN" -t --explain -c "$T/agensio.toml" 2>&1 | grep -q "tls = \"auto\"  # $T/certs/host.docker.internal/fullchain.pem" && echo yes)"
+check "-t --explain shows the resolved automatic certificate" "yes" "$({ "$BIN" -t --explain -c "$T/agensio.toml" 2>&1 || true; } | grep -q "tls = \"auto\"  # $T/certs/host.docker.internal/fullchain.pem" && echo yes)"
 printf '[[site]]\nserver_name = ["a.test"]\nlisten = ["127.0.0.1:8449"]\nroot = "%s"\ntls = "auto"\n' "$T/www" > "$T/noacme.toml"
 check "tls = \"auto\" without [server] acme is refused" "yes" "$({ "$BIN" -t -c "$T/noacme.toml" 2>&1 || true; } | grep -qF 'needs [server] acme' && echo yes)"
 printf '[server]\nacme = { email = "x@y.test" }\n[[site]]\nserver_name = ["*.a.test"]\nlisten = ["127.0.0.1:8449"]\nroot = "%s"\ntls = "auto"\n' "$T/www" > "$T/wild.toml"

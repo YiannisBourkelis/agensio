@@ -70,5 +70,17 @@ check "admin group member connects" "admin" "$(role_as alice)"
 check "outsider cannot even connect (file mode)" "" "$(role_as dave)"
 stop
 check "socket removed at shutdown" "gone" "$([ -S "$T/run/control.sock" ] && echo still || echo gone)"
+
+# Kill switch: no [control] table, no socket, `agensio ctl` says so.
+write_config ''
+sed -i '/^\[control\]/,/^$/d' "$T/agensio.toml"
+start
+check "without [control] no socket exists and ctl reports it" "gone 1" "$([ -S "$T/run/control.sock" ] && echo still || echo gone) $("$BIN" ctl status --socket "$T/run/control.sock" >/dev/null 2>&1; echo $?)"
+stop
+write_config 'admins = "ctladm"'
+start
+check "a 1 MB body is refused with 413" "413" "$(head -c 1048576 /dev/zero | tr '\0' 'a' | curl -sS -o /dev/null -w '%{http_code}' --unix-socket "$T/run/control.sock" -X POST -H 'Content-Type: application/json' --data-binary @- http://control/v1/reload)"
+check "a site name with a slash never reaches a file" "404" "$(curl -sS -o /dev/null -w '%{http_code}' --unix-socket "$T/run/control.sock" -X POST -d '{"confirm":true}' 'http://control/v1/sites/..%2F..%2Fetc/disable')"
+stop
 echo "control: $pass passed, $fail failed"
 [ $fail = 0 ]

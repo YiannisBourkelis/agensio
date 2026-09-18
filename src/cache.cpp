@@ -33,7 +33,7 @@ EntryPtr FileCache::insert(const CacheKeyView& key, EntryPtr entry) {
         evict_locked(bytes, files);
     total_.fetch_add(bytes, std::memory_order_relaxed);
     open_.fetch_add(files, std::memory_order_relaxed);
-    map_.emplace(CacheKey{key.site, std::string(key.path)}, entry);
+    map_.emplace(CacheKey{key.scope, std::string(key.path)}, entry);
     return entry;
 }
 

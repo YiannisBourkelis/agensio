@@ -407,14 +407,15 @@ void Server::build_workers() {
 std::size_t Server::open_acceptor(const Listener& listener, Worker& worker, bool reuse_port) {
     // A closed slot of the same worker is reused so the indexes captured by accept
     // handlers stay valid.
+    auto acc = std::make_unique<Acceptor>(worker.ctx, listener.address, &worker);
+    open_acceptor_socket(*acc, listener, reuse_port);  // throws before the table changes
     for (std::size_t i = 0; i < acceptors_.size(); ++i)
-        if (!acceptors_[i]->open && acceptors_[i]->owner == &worker) {
-            acceptors_[i] = std::make_unique<Acceptor>(worker.ctx, listener.address, &worker);
-            open_acceptor_socket(*acceptors_[i], listener, reuse_port);
+        if (!acceptors_[i]->open && acceptors_[i]->closed.load(std::memory_order_acquire) &&
+            acceptors_[i]->owner == &worker) {
+            acceptors_[i] = std::move(acc);
             return i;
         }
-    acceptors_.push_back(std::make_unique<Acceptor>(worker.ctx, listener.address, &worker));
-    open_acceptor_socket(*acceptors_.back(), listener, reuse_port);
+    acceptors_.push_back(std::move(acc));
     return acceptors_.size() - 1;
 }
 
@@ -626,10 +627,11 @@ bool Server::reload(std::string& error) {
                 opened.push_back(open_acceptor(l, *workers_[0], false));
         }
     } catch (const std::exception& e) {
-        for (std::size_t i : opened) {
+        for (std::size_t i : opened) {  // never accepted: nothing runs on them yet
             asio::error_code ignored;
             acceptors_[i]->socket.close(ignored);
             acceptors_[i]->open = false;
+            acceptors_[i]->closed.store(true, std::memory_order_release);
         }
         return refuse(e.what());
     }
@@ -645,10 +647,11 @@ bool Server::reload(std::string& error) {
         if (!a->open || gen->find(a->address)) continue;
         a->open = false;
         ++removed;
-        Acceptor* acc = a.get();
+        Acceptor* acc = a.get();  // stays alive: its slot is reused only after `closed` is set here
         asio::post(acc->owner->ctx, [acc] {
             asio::error_code ignored;
             acc->socket.close(ignored);
+            acc->closed.store(true, std::memory_order_release);
         });
     }
 #ifdef AGENSIO_HAS_TLS

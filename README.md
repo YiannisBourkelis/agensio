@@ -4,9 +4,18 @@ A very fast, small, cross-platform web server written in C++20 on top of standal
 [Asio](https://think-async.com/Asio/). No Qt, no Boost, no framework: an event loop per
 core, a zero-copy in-memory file cache, and a hand-written HTTP/1.1 parser.
 
-Phase 1 serves static files over HTTP and HTTPS and ships with a benchmark harness against
-nginx and Caddy. See [CLAUDE.md](CLAUDE.md) for the design and
-[docs/legacy-analysis.md](docs/legacy-analysis.md) for its 2018 ancestor.
+It serves static sites, PHP applications (Laravel, Statamic, WordPress, plain PHP) through
+FastCGI, and anything else through its reverse proxy (Node, Rails, Go, Java, WebSockets),
+obtains its own TLS certificates, reloads without dropping a connection, and can be
+configured by an AI agent through a built-in [MCP server](docs/mcp.md) over SSH.
+
+**Status: pre-alpha** (`0.1.0-alpha.1`). It runs real applications on Linux and macOS
+and beats nginx on CPU per request in every row of the benchmark harness, but it has
+had few users. See the known limitations below before putting it in front of anything
+that matters, and please report what you find.
+
+See [CLAUDE.md](CLAUDE.md) for the design and measurements, [docs/ROADMAP.md](docs/ROADMAP.md)
+for what comes next, and [docs/legacy-analysis.md](docs/legacy-analysis.md) for its 2018 ancestor.
 
 ## Build
 
@@ -74,10 +83,83 @@ php = { socket = "unix:/run/php/php8.4-fpm.sock" }
 # app = "php" runs any .php under the root instead; `agensio -t --explain` shows the expansion
 ```
 
-`agensio -t -c file.toml` validates a configuration without starting. Worked examples for
-static sites, plain PHP, Laravel, Statamic and WordPress, with what each `app = "..."`
-preset expands to and every option you can change, are in
-[docs/configuration.md](docs/configuration.md).
+`agensio -t -c file.toml` validates a configuration without starting; `-t --explain`
+prints what the presets expanded to. Worked examples for static sites, plain PHP,
+Laravel, Statamic, WordPress, Node, Rails and more, with every option you can change,
+are in [docs/configuration.md](docs/configuration.md) and [docs/examples/](docs/examples/).
+
+## First site on a server
+
+The short version of [docs/install.md](docs/install.md), which has the directory layout
+per platform, the service user, the systemd unit and log rotation:
+
+```sh
+sudo useradd --system --home /var/lib/agensio --shell /usr/sbin/nologin agensio
+sudo install -d -o root -g agensio -m 0750 /etc/agensio
+sudo install -d -o agensio -g agensio -m 0750 /etc/agensio/sites.d /var/log/agensio /var/lib/agensio
+```
+
+`/etc/agensio/agensio.toml`:
+
+```toml
+include = ["sites.d/*.toml"]
+
+[server]
+user = "agensio"
+acme = { email = "admin@example.com" }   # certificates from Let's Encrypt, renewed automatically
+
+[log]
+access = "/var/log/agensio/access.log"
+error = "/var/log/agensio/error.log"
+
+[control]                                 # `agensio ctl` and the MCP server; root and agensio are admins
+admins = "agensio-admin"
+```
+
+`/etc/agensio/sites.d/example.com.toml`, an HTTPS-only site:
+
+```toml
+[[site]]
+server_name = ["example.com", "www.example.com"]
+listen = ["0.0.0.0:80"]
+redirect = "https"
+
+[[site]]
+server_name = ["example.com", "www.example.com"]
+listen = ["0.0.0.0:443"]
+root = "/var/www/example.com/web"
+tls = "auto"
+```
+
+Then `sudo agensio -t`, start it as root (it binds, opens the logs and becomes `agensio`),
+and the certificate arrives within a minute. Change the file, `sudo agensio -t`,
+`sudo agensio reload`: no connection is dropped. `agensio ctl health` tells you what to
+look at; `agensio ctl logs --since 3h` shows recent errors.
+
+## Let an agent do it
+
+`agensio mcp` exposes the same commands as Model Context Protocol tools. From your
+laptop, with Claude Code or Claude Desktop, one entry per server:
+
+```json
+{ "mcpServers": { "vps1": { "command": "ssh", "args": ["admin@vps1.example.com", "agensio", "mcp"] } } }
+```
+
+The agent runs as your SSH account, sees only the tools your role allows, asks before
+every change, and hands anything that needs root back to you as commands. How it is
+wired and why it is safe: [docs/mcp.md](docs/mcp.md) and
+[docs/security-control-plane.md](docs/security-control-plane.md).
+
+## Known limitations (pre-alpha)
+
+- HTTP/1.1 only. HTTP/2 and HTTP/3 are phases G and I of the roadmap.
+- No response compression, no directory listing, no rate limiting yet.
+- Certificates: HTTP-01 only, so port 80 must be reachable; no wildcards (DNS-01), no
+  OCSP stapling.
+- The control API is a unix socket; use it locally or over SSH. No TCP transport yet.
+- Windows compiles but is untested; the macOS defaults for logs and state still point at
+  the Linux paths unless set in the configuration.
+- Single-machine benchmarks only so far. Numbers from your workload are welcome.
 
 ## Benchmark
 

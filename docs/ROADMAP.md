@@ -481,7 +481,7 @@ Threat model (what the interface must resist):
 - an attacker who obtained a token or a config file backup
 
 Rules:
-- [ ] F0 Security design, implemented before any command exists:
+- [x] F0 (2026-09-18, the alpha subset: socket, directory, credentials, roles, audit, kill switch, parser; the TCP-only rules and the isolation warning are deferred) Security design, implemented before any command exists:
   - **Off the data plane.** The control API is a separate listener with its own code path;
     no site listener can ever route to it, no shared port, no path-prefix trick.
   - **Unix socket by default**, mode `0600` owned by the server's user, optional admin
@@ -584,46 +584,20 @@ Rules:
       and Claude Desktop, tool table, a sample session. Tested in the integration suite
       (driven by a Python client) and per role in `tests/control.sh`; the `ssh localhost`
       check runs when an sshd is present (skipped on the dev box, which has none).
-- [ ] F5-old MCP server (decided 2026-09-16, first-class feature): expose the same commands as
-      **Model Context Protocol** tools so agentic OS tooling (e.g. Omarchy) and
-      administrators' assistants can inspect and configure the server.
-  - `agensio mcp` runs as a stdio MCP server that connects to the control socket **as the
-    invoking user**: it inherits the OS permission model and needs no secret of its own.
-  - MCP over streamable HTTP is available only on the loopback listener, with the token,
-    and validates `Origin` as the MCP spec requires.
-  - Tools carry the MCP annotations (`readOnlyHint`, `destructiveHint`) so agent hosts ask
-    the user before mutations; mutating tools additionally require `confirm: true` and a
-    short `reason` string that is written to the audit log.
-  - The tool set is the role's command set: a viewer's MCP session cannot see mutating
-    tools at all.
-  - The server never embeds a model and never fetches anything from the network on behalf
-    of an agent; it offers precise, auditable tools and nothing else.
-  - **The MCP server is not a listener** (agreed 2026-09-18): `agensio mcp` is spawned by
-    the agent host and talks on its own stdin/stdout, so nothing on the machine can
-    connect to it; the only thing that accepts connections is the control socket, guarded
-    by file mode, the directory, peer credentials and roles from F0. A local PHP or Node
-    site therefore has nothing to reach.
-  - **Remote administration goes through SSH first.** Servers live on remote VPSes; the
-    administrator's host spawns the bridge over the channel every VPS already has:
-    `{"command": "ssh", "args": ["admin@vps1", "agensio", "mcp"]}`. The bridge then
-    connects to the socket as the SSH user, so roles, audit and SSH's own keys and
-    fail2ban apply and no secret leaves the machine; one MCP server per VPS is the right
-    granularity. Requirements this puts on the bridge: stateless, starts in milliseconds,
-    works with no terminal, no environment and no home directory, exits cleanly when the
-    SSH session ends. The integration suite spawns it through `ssh localhost` so the
-    primary remote path is the one that is tested. The same bridge on the box serves an
-    agent run inside an SSH session.
-  - Direct network access (a panel or fleet controller without SSH) is the `remote =
-    { tls, client_ca }` case of F0 with MCP over streamable HTTP: mutual TLS only, never
-    a token alone, Origin validated, and it comes after the stdio path, opt-in, because it
-    widens the reachable set from "whoever has SSH" to "whoever has a certificate".
 - [x] F6 (2026-09-18, with F1-F3) CLI: `agensio ctl <command>` wrapping the socket
       (`control/client.*`, shared with the bridge): every read and change command, `--yes`
       and `--reason` for changes, exit 1 on any 4xx/5xx with the JSON answer printed.
-- [ ] F7 Security review of the phase: a written checklist against the threat model above,
-      tests for each rule (wrong uid refused, `Origin` refused, non-loopback bind refused,
-      token rate limit, symlink escape in `sites/create` refused, viewer cannot mutate),
-      and a fuzz target for the JSON command parser.
+- [x] F7 (2026-09-19) Security review: `docs/security-control-plane.md` maps the five
+      threats to 18 rules, each with the code that enforces it and the test that proves
+      it. Added for it: static checks (no process spawning, no TCP acceptor under
+      `src/control/`), the kill switch (no `[control]`, no socket), a 1 MB body refused
+      with 413, a site name with a slash never reaching a file, `fuzz_json`
+      (5.83 M runs in 121 s, no finding). Sanitizer run (`-fsanitize=address,undefined`)
+      of the unit, integration, root-role, reload and Pebble suites found one real bug:
+      `AcmeManager::stop()` cancelled its timer a second time from the destructor after
+      worker 0's io_context was gone (heap-use-after-free at every shutdown of a server
+      with `tls = "auto"`); fixed, all suites clean. The `Origin` / non-loopback / token
+      rules belong to the deferred TCP transport and come with it.
 - [ ] Checkpoint: control traffic measured to add zero cost to data-plane workers (runs on
       worker 0's loop but only when called); docs page with every command, every role and
       the threat model.
@@ -653,12 +627,20 @@ Rules:
       switch without reconnecting, a 1.5 s upstream request finishing through a reload
       that removed its location, and wrk at 750k req/s across six reloads with no error.
       Restart-only: workers, reuse_port, user/group, sendfile, cache sizes (warned).
-- [ ] H1a Flake in `tests/reload.sh` (seen 2026-09-18, about one run in three): right after
-      a reload added listener 8098, curl gets an answer from it but the next raw
-      connection to it waits 5 s for a response and times out (traceback at the python
-      block's line 7); the rest of that block then does not run. Not seen under wrk.
-      Suspect: the new SO_REUSEPORT acceptor group and the order in which the per-worker
-      acceptors start accepting. Reproduce with three consecutive runs; fix before the tag.
+- [x] H1a (2026-09-18) Stale document root after reloads, found through the reload test
+      flaking one run in three: the file cache keyed entries by the location's *pointer*
+      plus the path, and after a few reloads a new generation's `LocationConfig` landed
+      on the address of a freed one whose entries were still cached and still passing
+      revalidation (same size and second), so the old root's file was served. Entries
+      are now keyed by `LocationConfig::id`, unique for the process's life (assigned in
+      `finalize_site`); a reload therefore starts with a cold cache for the reloaded
+      locations, like nginx's new workers. Reproduced with `wrk` across six reloads in
+      1 of 8 rounds before, 0 of 40 after. Two acceptor bookkeeping bugs fixed on the
+      way: a listener that failed to bind stayed in the table as open, and a removed
+      acceptor's slot could be reused before its posted close had run (the close
+      lambda held a raw pointer). The other symptom seen once (a raw connection to a
+      new listener waiting 5 s) was not reproduced in 35 rounds of that sequence and
+      is left under watch.
 - [ ] H1b Certificates watched and reloaded when the files change (manual `tls = { cert,
       key }` sites; automatic ones already reload themselves); reload must not stall new
       QUIC connections (nginx's known weakness).

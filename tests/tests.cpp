@@ -253,26 +253,27 @@ static void test_cache() {
         return e;
     };
     int site = 0;
-    CHECK(cache.insert(CacheKeyView{&site, "/a"}, make(100, 1)) != nullptr);
-    CHECK(cache.insert(CacheKeyView{&site, "/b"}, make(100, 2)) != nullptr);
+    CHECK(cache.insert(CacheKeyView{7, "/a"}, make(100, 1)) != nullptr);
+    CHECK(cache.find(CacheKeyView{8, "/a"}) == nullptr);  // another location (another generation): no hit
+    CHECK(cache.insert(CacheKeyView{7, "/b"}, make(100, 2)) != nullptr);
     CHECK_EQ(cache.total_bytes(), 200u);
-    CHECK(cache.insert(CacheKeyView{&site, "/big"}, make(101, 3)) == nullptr);  // above max_file_size
-    auto a = cache.find(CacheKeyView{&site, "/a"});
+    CHECK(cache.insert(CacheKeyView{7, "/big"}, make(101, 3)) == nullptr);  // above max_file_size
+    auto a = cache.find(CacheKeyView{7, "/a"});
     CHECK(a != nullptr);
     // Third 100-byte entry does not fit: /a (oldest) must be evicted and marked stale.
-    CHECK(cache.insert(CacheKeyView{&site, "/c"}, make(100, 3)) != nullptr);
+    CHECK(cache.insert(CacheKeyView{7, "/c"}, make(100, 3)) != nullptr);
     CHECK(a->stale.load());
-    CHECK(cache.find(CacheKeyView{&site, "/a"}) == nullptr);
+    CHECK(cache.find(CacheKeyView{7, "/a"}) == nullptr);
     CHECK(cache.total_bytes() <= 250u);
     // Same key twice returns the existing entry.
-    auto c1 = cache.find(CacheKeyView{&site, "/c"});
-    auto c2 = cache.insert(CacheKeyView{&site, "/c"}, make(10, 9));
+    auto c1 = cache.find(CacheKeyView{7, "/c"});
+    auto c2 = cache.insert(CacheKeyView{7, "/c"}, make(10, 9));
     CHECK(c1 == c2);
     // erase only removes the expected pointer.
-    cache.erase(CacheKeyView{&site, "/c"}, a.get());
-    CHECK(cache.find(CacheKeyView{&site, "/c"}) != nullptr);
-    cache.erase(CacheKeyView{&site, "/c"}, c1.get());
-    CHECK(cache.find(CacheKeyView{&site, "/c"}) == nullptr);
+    cache.erase(CacheKeyView{7, "/c"}, a.get());
+    CHECK(cache.find(CacheKeyView{7, "/c"}) != nullptr);
+    cache.erase(CacheKeyView{7, "/c"}, c1.get());
+    CHECK(cache.find(CacheKeyView{7, "/c"}) == nullptr);
     CHECK(c1->stale.load());
 
     // Descriptor entries (streamed files, A1b): no bytes, counted against max_open_files (2 here).
@@ -284,45 +285,45 @@ static void test_cache() {
         return e;
     };
     const std::size_t bytes_before = cache.total_bytes();  // /b only
-    auto d1 = cache.insert(CacheKeyView{&site, "/d1"}, make_fd(1));
+    auto d1 = cache.insert(CacheKeyView{7, "/d1"}, make_fd(1));
     CHECK(d1 != nullptr);
-    CHECK(cache.insert(CacheKeyView{&site, "/d2"}, make_fd(5)) != nullptr);
+    CHECK(cache.insert(CacheKeyView{7, "/d2"}, make_fd(5)) != nullptr);
     CHECK_EQ(cache.open_files(), 2u);
     CHECK_EQ(cache.total_bytes(), bytes_before);
     // Third descriptor exceeds the budget: the oldest descriptor entry goes, memory entries stay.
-    auto d3 = cache.insert(CacheKeyView{&site, "/d3"}, make_fd(6));
+    auto d3 = cache.insert(CacheKeyView{7, "/d3"}, make_fd(6));
     CHECK(d3 != nullptr);
     CHECK(d1->stale.load());
-    CHECK(cache.find(CacheKeyView{&site, "/d1"}) == nullptr);
+    CHECK(cache.find(CacheKeyView{7, "/d1"}) == nullptr);
     CHECK(cache.open_files() <= 2u);
-    CHECK(cache.find(CacheKeyView{&site, "/b"}) != nullptr);
+    CHECK(cache.find(CacheKeyView{7, "/b"}) != nullptr);
     // Byte pressure evicts memory entries only: /b (access 2) is older than the descriptors but
     // the descriptors free no bytes, so they survive.
-    auto b = cache.find(CacheKeyView{&site, "/b"});
-    CHECK(cache.insert(CacheKeyView{&site, "/e"}, make(100, 7)) != nullptr);
-    CHECK(cache.insert(CacheKeyView{&site, "/f"}, make(100, 8)) != nullptr);
+    auto b = cache.find(CacheKeyView{7, "/b"});
+    CHECK(cache.insert(CacheKeyView{7, "/e"}, make(100, 7)) != nullptr);
+    CHECK(cache.insert(CacheKeyView{7, "/f"}, make(100, 8)) != nullptr);
     CHECK(b->stale.load());
     CHECK(!d3->stale.load());
-    CHECK(cache.find(CacheKeyView{&site, "/d3"}) != nullptr);
+    CHECK(cache.find(CacheKeyView{7, "/d3"}) != nullptr);
     CHECK_EQ(cache.open_files(), 2u);
     // erase releases the descriptor budget.
-    cache.erase(CacheKeyView{&site, "/d3"}, d3.get());
+    cache.erase(CacheKeyView{7, "/d3"}, d3.get());
     CHECK_EQ(cache.open_files(), 1u);
     // A zero-byte memory entry is not a descriptor entry.
-    CHECK(cache.insert(CacheKeyView{&site, "/empty"}, make(0, 9)) != nullptr);
+    CHECK(cache.insert(CacheKeyView{7, "/empty"}, make(0, 9)) != nullptr);
     CHECK_EQ(cache.open_files(), 1u);
     // max_open_files = 0 refuses descriptor entries; the handler then streams uncached.
     FileCache none(100, 250, 0.5, 0);
-    CHECK(none.insert(CacheKeyView{&site, "/d"}, make_fd(1)) == nullptr);
-    CHECK(none.insert(CacheKeyView{&site, "/m"}, make(10, 1)) != nullptr);
+    CHECK(none.insert(CacheKeyView{7, "/d"}, make_fd(1)) == nullptr);
+    CHECK(none.insert(CacheKeyView{7, "/m"}, make(10, 1)) != nullptr);
 
     LocalIndex local(2);
-    local.insert(CacheKeyView{&site, "/x"}, make(1, 0));
-    local.insert(CacheKeyView{&site, "/y"}, make(1, 0));
-    CHECK(local.find(CacheKeyView{&site, "/x"}) != nullptr);
-    local.insert(CacheKeyView{&site, "/z"}, make(1, 0));  // exceeds max: cleared, then inserted
-    CHECK(local.find(CacheKeyView{&site, "/x"}) == nullptr);
-    CHECK(local.find(CacheKeyView{&site, "/z"}) != nullptr);
+    local.insert(CacheKeyView{7, "/x"}, make(1, 0));
+    local.insert(CacheKeyView{7, "/y"}, make(1, 0));
+    CHECK(local.find(CacheKeyView{7, "/x"}) != nullptr);
+    local.insert(CacheKeyView{7, "/z"}, make(1, 0));  // exceeds max: cleared, then inserted
+    CHECK(local.find(CacheKeyView{7, "/x"}) == nullptr);
+    CHECK(local.find(CacheKeyView{7, "/z"}) != nullptr);
 }
 
 // Feeds `wire` to a fresh decoder in pieces of `step` bytes with an output buffer of

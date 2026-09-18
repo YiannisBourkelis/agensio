@@ -1,0 +1,30 @@
+2026/09/18 20:58:37 [warn] cannot write pid file /run/agensio.pid (set server.pid_file to a writable path for `agensio reload`)
+agensio 0.1.0 starting with 1 worker(s), SO_REUSEPORT per worker
+  listening on http://127.0.0.1:8080  sites: localhost
+  listening on https://127.0.0.1:8443  sites: localhost
+agensio stopped
+2026/09/18 20:58:47 [warn] cannot write pid file /run/agensio.pid (set server.pid_file to a writable path for `agensio reload`)
+agensio 0.1.0 starting with 1 worker(s), SO_REUSEPORT per worker
+  listening on http://127.0.0.1:8080  sites: localhost
+  listening on https://127.0.0.1:8443  sites: localhost
+agensio stopped
+2026/09/18 20:58:58 [warn] cannot write pid file /run/agensio.pid (set server.pid_file to a writable path for `agensio reload`)
+agensio 0.1.0 starting with 1 worker(s), SO_REUSEPORT per worker
+  listening on http://127.0.0.1:8080  sites: localhost
+  listening on https://127.0.0.1:8443  sites: localhost
+agensio stopped
+2026/09/18 20:59:08 [warn] cannot write pid file /run/agensio.pid (set server.pid_file to a writable path for `agensio reload`)
+agensio 0.1.0 starting with 1 worker(s), SO_REUSEPORT per worker
+  listening on http://127.0.0.1:8080  sites: localhost
+  listening on https://127.0.0.1:8443  sites: localhost
+agensio stopped
+2026/09/18 20:59:19 [warn] cannot write pid file /run/agensio.pid (set server.pid_file to a writable path for `agensio reload`)
+agensio 0.1.0 starting with 1 worker(s), SO_REUSEPORT per worker
+  listening on http://127.0.0.1:8080  sites: localhost
+  listening on https://127.0.0.1:8443  sites: localhost
+agensio stopped
+2026/09/18 20:59:30 [warn] cannot write pid file /run/agensio.pid (set server.pid_file to a writable path for `agensio reload`)
+agensio 0.1.0 starting with 1 worker(s), SO_REUSEPORT per worker
+  listening on http://127.0.0.1:8080  sites: localhost
+  listening on https://127.0.0.1:8443  sites: localhost
+agensio stopped

@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 project(agensio VERSION 0.1.0 LANGUAGES CXX)
+set(AGENSIO_VERSION_STRING "0.1.0-alpha.1")  # what `agensio -v`, the status command and the release tag say
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -97,7 +98,7 @@ add_library(agensio_core STATIC
 target_include_directories(agensio_core PUBLIC src)
 target_link_libraries(agensio_core PUBLIC asio tomlplusplus)
 target_compile_definitions(agensio_core PUBLIC
-  AGENSIO_VERSION="${PROJECT_VERSION}"
+  AGENSIO_VERSION="${AGENSIO_VERSION_STRING}"
   $<$<BOOL:${AGENSIO_HAS_TLS}>:AGENSIO_HAS_TLS=1>)
 if(AGENSIO_HAS_TLS)
   target_link_libraries(agensio_core PUBLIC OpenSSL::SSL OpenSSL::Crypto)
@@ -150,7 +151,7 @@ target_link_libraries(agensio_upstream PRIVATE asio Threads::Threads)
 
 # ---------------------------------------------------------------- fuzzers (parsers only, no asio)
 if(AGENSIO_FUZZ)
-  foreach(t parser path chunked fcgi http_head)
+  foreach(t parser path chunked fcgi http_head json)
     add_executable(fuzz_${t} tests/fuzz/fuzz_${t}.cpp src/http1/parser.cpp src/path.cpp)
     target_include_directories(fuzz_${t} PRIVATE src)
     target_compile_features(fuzz_${t} PRIVATE cxx_std_20)

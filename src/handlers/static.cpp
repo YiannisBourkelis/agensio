@@ -352,7 +352,7 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
         }
     }
     const std::time_t now = ws.now;
-    const CacheKeyView key{&loc, ws.path};
+    const CacheKeyView key{loc.id, ws.path};
 
     // 1. Worker-local index (no lock, no refcount traffic), then the shared store.
     //    `raw` is only dereferenced on this thread before any index mutation.

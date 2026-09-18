@@ -1,0 +1,42 @@
+# Changelog
+
+## 0.1.0-alpha.1 (2026-09-19)
+
+First pre-alpha. Everything below is implemented and tested on Linux (Debian 13) and
+macOS; Windows compiles but is not tested. Read `docs/install.md` before installing and
+`README.md` for the known limitations.
+
+### Serving
+- Static files over HTTP/1.1 and HTTPS with an in-memory cache, sendfile, Range requests,
+  conditional requests, per-site locations, `try_files`, path policies.
+- PHP through FastCGI with presets for Laravel, Statamic (`laravel`), WordPress and plain
+  PHP; per-site users with generated php-fpm pools and ownership rules checked by `-t`.
+- Reverse proxy with WebSockets, upstream groups with passive health checks, TLS to the
+  origin, header policy, CGI; presets and examples for Node, Rails, Rocket.Chat,
+  ThingsBoard.
+- Access log in combined or JSON format, error log, `SIGUSR1` reopen.
+
+### Operating
+- `agensio reload` (or `SIGHUP`): configuration switched between requests, nothing in
+  flight interrupted, a bad file refused with the old configuration kept.
+- `tls = "auto"`: built-in ACME client (HTTP-01) for Let's Encrypt or any RFC 8555 CA,
+  renewal at a third of the lifetime left, the new certificate picked up through the
+  reload path.
+- `redirect = "https"` or `redirect = "https://www.example.com"` for HTTPS-only and
+  canonical-host setups.
+- Start as root, bind, then drop to `server.user`; per-site logs owned for the customer.
+
+### Control plane
+- `[control]`: a unix socket with peer-credential roles (admin, operator, viewer) and an
+  audit log. Read commands: status, sites, site, validate, logs, health. Changes:
+  reload, logs-reopen, site-create/update/disable/enable/delete, cert-renew, every one
+  behind an explicit confirmation and a reason.
+- `agensio ctl` for shells and panels.
+- `agensio mcp`: a Model Context Protocol server on stdio for AI agent hosts, locally
+  or over SSH, with the same tools gated by role; a guided site creation that asks for
+  the decisions it needs and hands root work back as commands.
+- Security review of the control plane in `docs/security-control-plane.md`.
+
+### Performance
+Single worker on Linux against nginx: about 1.5x less CPU per plain request, 1.3-1.6x
+on TLS, proxying 13-46 % cheaper; numbers and method in `CLAUDE.md` and `bench/results/`.

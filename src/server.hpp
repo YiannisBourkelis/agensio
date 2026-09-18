@@ -102,7 +102,8 @@ private:
         asio::steady_timer backoff;  // pauses accepting when descriptors run out
         std::string address;         // the listener it serves, looked up in the worker's generation at accept
         Worker* owner;               // the worker whose io_context runs this acceptor
-        bool open = true;
+        bool open = true;            // accepting (written by the reload thread)
+        std::atomic<bool> closed{false};  // the posted close ran on the owner's loop: the slot may be reused
         Acceptor(asio::io_context& ctx, std::string a, Worker* w)
             : socket(ctx), backoff(ctx), address(std::move(a)), owner(w) {}
     };

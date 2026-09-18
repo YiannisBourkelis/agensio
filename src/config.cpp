@@ -5,6 +5,7 @@
 #include "services/pools.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <map>
 #include <ostream>
 #include <sstream>
@@ -974,6 +975,11 @@ void finalize_site(SiteConfig& site) {
         loc.symlinks_deny = site.symlinks_deny;
         site.locations.push_back(std::move(loc));
     }
+    // Every location gets an id no other location of this process ever had: the cache
+    // keys entries by it, so a reload never confuses two configurations.
+    static std::atomic<std::uint64_t> next_id{1};
+    for (auto& loc : site.locations)
+        if (loc.id == 0) loc.id = next_id.fetch_add(1, std::memory_order_relaxed);
     // Exact matches first, then suffixes, then prefixes; within a kind the longest first.
     auto rank = [](const LocationConfig& l) { return l.exact ? 0 : l.suffix ? 1 : 2; };
     std::stable_sort(site.locations.begin(), site.locations.end(),

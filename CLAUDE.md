@@ -10,8 +10,11 @@ same machine, with the benchmark harness checked in so anyone can reproduce the 
 
 ## Status
 
-Phase 1 implemented: static files over HTTP/HTTPS, in-memory cache, benchmark harness.
-Everything under "Architecture" below is what the code does now, not a proposal.
+Pre-alpha `0.1.0-alpha.1` (2026-09-19): phases A-D, E1/E9, F0-F7, H1, H3 done; see
+`CHANGELOG.md`. Everything under "Architecture" below is what the code does now, not a
+proposal. Before every tag: the suites (unit, integration, reload, pools, control, acme),
+the sanitizer and fuzz runs listed in `docs/security-control-plane.md`, and
+`bench/ab.sh` against the previous tag.
 
 ## Hard constraints
 

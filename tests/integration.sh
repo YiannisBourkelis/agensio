@@ -395,6 +395,10 @@ check "control: reload with a broken file on disk is refused, old configuration 
 rm -f bench/tmp/sites.d/broken.toml
 check "control: ctl site-create through the client reports the decisions" "1 yes" "$("$BIN" ctl site-create --domain cli.test --yes --socket $CS > bench/tmp/ctl.out 2>&1; echo -n "$? "; grep -q 'decisions needed' bench/tmp/ctl.out && echo yes)"
 check "control: audit has every mutation with its result" "yes" "$(grep -q 'sites (test): created' bench/tmp/audit.log && grep -q 'sites/created.test/delete: delete' bench/tmp/audit.log && grep -q 'reload: .*broken.toml' bench/tmp/audit.log && echo yes)"
+# Static rules of the control plane (F7): nothing there spawns a process or opens a port.
+check "control: no process spawning anywhere under src/control" "0" "$(grep -E 'system\(|popen\(|execv|execl|fork\(|posix_spawn' src/control/*.cpp src/control/*.hpp | wc -l | tr -d ' ')"
+check "control: no TCP listener in the control plane" "0" "$(grep -E 'ip::tcp::acceptor' src/control/*.cpp src/control/*.hpp | wc -l | tr -d ' ')"
+
 # The MCP bridge (F5): JSON-RPC on stdin/stdout, tools gated by role, calls forwarded to the socket.
 mcp=$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
 import json, subprocess, sys

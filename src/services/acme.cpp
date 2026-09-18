@@ -860,9 +860,15 @@ bool AcmeManager::renew_now(const std::filesystem::path& cert) {
     return true;
 }
 
+// Called from Server::stop() while worker 0's io_context is alive, and again from the
+// destructor after the workers are gone: the timer is released the first time so the
+// second call never touches a dead io_context (found by ASan at shutdown).
 void AcmeManager::stop() {
     stopped_ = true;
-    if (timer_) timer_->cancel();
+    if (timer_) {
+        timer_->cancel();
+        timer_.reset();
+    }
     if (worker_.joinable()) worker_.join();  // an order in flight finishes (bounded by its polls)
 }
 

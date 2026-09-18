@@ -49,13 +49,17 @@ struct CacheEntry {
     std::atomic<bool> stale{false};
 };
 
+// The scope is the location's id (`LocationConfig::id`, unique for the life of the
+// process), never a pointer: a reload frees the old configuration and a new location
+// can land on the same address while entries keyed by it are still cached (seen as a
+// stale document root served after a reload storm, 2026-09-18).
 struct CacheKey {
-    const void* site = nullptr;  // identifies the virtual host
-    std::string path;            // normalised request path
+    std::uint64_t scope = 0;  // the location the entry was cached for
+    std::string path;         // normalised request path
 };
 
 struct CacheKeyView {
-    const void* site = nullptr;
+    std::uint64_t scope = 0;
     std::string_view path;
 };
 
@@ -63,24 +67,24 @@ struct CacheKeyHash {
     using is_transparent = void;
     std::size_t operator()(const CacheKeyView& k) const noexcept {
         std::size_t h = std::hash<std::string_view>{}(k.path);
-        return h ^ (reinterpret_cast<std::size_t>(k.site) * 0x9E3779B97F4A7C15ull);
+        return h ^ static_cast<std::size_t>(k.scope * 0x9E3779B97F4A7C15ull);
     }
-    std::size_t operator()(const CacheKey& k) const noexcept { return (*this)(CacheKeyView{k.site, k.path}); }
+    std::size_t operator()(const CacheKey& k) const noexcept { return (*this)(CacheKeyView{k.scope, k.path}); }
 };
 
 struct CacheKeyEq {
     using is_transparent = void;
     bool operator()(const CacheKeyView& a, const CacheKeyView& b) const noexcept {
-        return a.site == b.site && a.path == b.path;
+        return a.scope == b.scope && a.path == b.path;
     }
     bool operator()(const CacheKey& a, const CacheKeyView& b) const noexcept {
-        return a.site == b.site && a.path == b.path;
+        return a.scope == b.scope && a.path == b.path;
     }
     bool operator()(const CacheKeyView& a, const CacheKey& b) const noexcept {
-        return a.site == b.site && a.path == b.path;
+        return a.scope == b.scope && a.path == b.path;
     }
     bool operator()(const CacheKey& a, const CacheKey& b) const noexcept {
-        return a.site == b.site && a.path == b.path;
+        return a.scope == b.scope && a.path == b.path;
     }
 };
 
@@ -137,7 +141,7 @@ public:
     }
     void insert(const CacheKeyView& key, EntryPtr entry) {
         if (map_.size() >= max_entries_) map_.clear();
-        map_.insert_or_assign(CacheKey{key.site, std::string(key.path)}, std::move(entry));
+        map_.insert_or_assign(CacheKey{key.scope, std::string(key.path)}, std::move(entry));
     }
     void erase(const CacheKeyView& key) noexcept {
         auto it = map_.find(key);

@@ -575,6 +575,10 @@ Under a 64-connection load the switch itself costs nothing measurable and no req
 fails (`tests/reload.sh`). Restart-only settings, logged as kept when the file changes
 them: `workers`, `reuse_port`, `user`, `group`, `sendfile` and the cache sizes.
 
+Note: the static file cache starts cold for every reloaded site (entries are keyed by
+the location the configuration created), so the first request for each file after a
+reload reads it from disk again.
+
 ## 13. CGI
 
 `handler = "cgi"` (or just a `cgi = { ... }` table) on a location runs the requested file

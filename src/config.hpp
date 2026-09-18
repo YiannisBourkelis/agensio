@@ -68,6 +68,7 @@ struct LocationConfig {
     UpstreamConfig proxy;                      // handler = "proxy": the origin (`upstream = "http://..."`) and options
     UpstreamConfig cgi;                        // handler = "cgi": a process per request (`cgi = { ... }`)
     bool priority = false;                     // may use the pool slots reserved by priority_reserve
+    std::uint64_t id = 0;  // unique for the process's life (cache key scope); set by finalize_site
     MethodSet methods = kStaticMethods;      // what the handler serves here (`methods = [...]` narrows it)
     std::string allow = "GET, HEAD, OPTIONS";  // Allow header for 405 and OPTIONS
 };
