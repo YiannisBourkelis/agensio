@@ -141,6 +141,9 @@ struct Config {
     std::string pools_run;  // defaulted by the loader per platform
     std::string state_dir = "/var/lib/agensio";
     bool strict_users = false;  // every site must name a user
+    std::string pid_file;       // written at start (before dropping privileges); `agensio reload` signals it.
+                                // Default: /run/agensio.pid (Linux), /usr/local/var/run/agensio.pid (macOS),
+                                // set by the loader; "" disables it
 
     LogConfig log;
 

@@ -534,7 +534,21 @@ Rules:
 - [ ] Checkpoint: h2spec passes; HTTP/1.1 numbers unchanged (no cost when h2 is idle).
 
 ### Phase H. Production hardening  `[ ]`
-- [ ] H1 Zero-downtime reload: new config applied by worker 0 atomically; listeners added
+- [x] H1 (2026-09-18) Zero-downtime reload: a `Generation` owns a loaded `Config` with
+      its routers and TLS contexts; workers hold the current one and connections the one
+      they started a request from (`refresh_generation`, one pointer compare per request),
+      so anything in flight keeps its configuration alive and keep-alive connections
+      switch at the next request boundary. `Server::reload` (SIGHUP, or `agensio reload`
+      which validates first and signals `server.pid_file`) loads, runs the hosting rules,
+      builds listeners and certificates, opens new log sinks, binds new addresses, then
+      posts the generation to every worker, starts the new acceptors and closes the
+      removed ones (their connections finish and get Connection: close). Any failure
+      before the switch refuses the reload with the old configuration untouched.
+      `tests/reload.sh`: 14 checks including a keep-alive connection served across the
+      switch without reconnecting, a 1.5 s upstream request finishing through a reload
+      that removed its location, and wrk at 750k req/s across six reloads with no error.
+      Restart-only: workers, reuse_port, user/group, sendfile, cache sizes (warned).
+- [ ] H1 (remaining) Zero-downtime reload: new config applied by worker 0 atomically; listeners added
       or removed; **TLS certificates watched and reloaded automatically when the files
       change** (the request nginx and Caddy users share most) as well as via `ctl reload`;
       reload must not stall new QUIC connections (nginx's known weakness).

@@ -8,6 +8,8 @@
 #endif
 
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <csignal>
 #include <iostream>
@@ -46,43 +48,53 @@ asio::ip::tcp::endpoint parse_endpoint(const std::string& address) {
 }  // namespace
 
 Server::Server(Config cfg)
-    : cfg_(std::move(cfg)),
+    : cfg_(cfg),
       cache_(cfg_.cache_max_file_size, cfg_.cache_max_size, cfg_.cache_evict_fraction, cfg_.cache_max_open_files),
       handler_(cfg_, cache_),
       fcgi_handler_(cfg_, error_log_),
       proxy_handler_(cfg_, error_log_),
       cgi_handler_(cfg_, error_log_),
       dispatcher_(handler_, fcgi_handler_, proxy_handler_, cgi_handler_) {
+    auto gen = std::make_shared<Generation>();
+    gen->cfg = std::move(cfg);
     open_logs();
+    assign_log_sinks(gen->cfg);
+    std::string err;
+    if (!logs_.open_all(err)) throw std::runtime_error(err);
+    own_site_logs(gen->cfg);
     warm_response_tables();
-    build_listeners();
+    build_listeners(*gen);
+    gen_ = std::move(gen);
     build_workers();
 }
 
 Server::~Server() {
     stop();
+    remove_pid_file();
 }
 
-// One sink per distinct path; the error log first so startup messages have somewhere to go.
+// The error log first so startup messages have somewhere to go.
 void Server::open_logs() {
     const int error_sink = logs_.add(cfg_.log.error);
-    for (auto& site : cfg_.sites) {
-        site.access_log_sink = logs_.add(site.access_log);
-        if (site.access_log_sink >= 0) access_logging_ = true;
-    }
-    std::string err;
-    if (!logs_.open_all(err)) throw std::runtime_error(err);
     LogLevel level = LogLevel::warn;
     parse_log_level(cfg_.log.level, level);
     error_log_.configure(&logs_, error_sink, level);
-    own_site_logs();
+}
+
+// One sink per distinct path, shared across generations (the registry keeps a path's
+// descriptor as long as the process runs).
+void Server::assign_log_sinks(Config& cfg) {
+    for (auto& site : cfg.sites) {
+        site.access_log_sink = logs_.add(site.access_log);
+        if (site.access_log_sink >= 0) access_logging_ = true;
+    }
 }
 
 // A site with `user` gets its access log as agensio:<site group> 0640: agensio writes it
 // as the owner (also after a SIGUSR1 reopen once privileges are dropped), the customer
 // reads it through the group, nobody else. Needs root (or CAP_CHOWN); otherwise one
 // warning per site and the file stays ours.
-void Server::own_site_logs() {
+void Server::own_site_logs(const Config& cfg) {
 #ifndef _WIN32
     const HostFacts facts = system_facts();
     unsigned agensio_uid = ::geteuid();
@@ -92,7 +104,7 @@ void Server::own_site_logs() {
         if (facts.user(cfg_.user, agensio_uid, primary)) agensio_gid = primary;
     }
     if (!cfg_.group.empty()) facts.group(cfg_.group, agensio_gid);
-    for (const auto& site : cfg_.sites) {
+    for (const auto& site : cfg.sites) {
         if (site.user.empty() || site.access_log.empty()) continue;
         unsigned uid = 0, gid = 0;
         if (!facts.user(site.user, uid, gid)) continue;  // check_hosting already refused this
@@ -142,18 +154,19 @@ void Server::arm_flush(Worker& w) {
     });
 }
 
-void Server::build_listeners() {
-    for (const auto& site : cfg_.sites) {
+void Server::build_listeners(Generation& gen) {
+    auto& listeners = gen.listeners;
+    for (const auto& site : gen.cfg.sites) {
         for (const auto& address : site.listen) {
             Listener* l = nullptr;
-            for (auto& existing : listeners_)
+            for (auto& existing : listeners)
                 if (existing.address == address) {
                     l = &existing;
                     break;
                 }
             if (!l) {
-                listeners_.emplace_back();
-                l = &listeners_.back();
+                listeners.emplace_back();
+                l = &listeners.back();
                 l->address = address;
                 l->endpoint = parse_endpoint(address);
                 l->address_text = l->endpoint.address().to_string();
@@ -199,9 +212,22 @@ void Server::build_workers() {
         error_log_.warn("SO_REUSEPORT is not available on this platform; using a shared acceptor");
 }
 
-void Server::open_acceptor(Listener& listener, Worker& worker, bool reuse_port) {
-    auto acc = std::make_unique<Acceptor>(worker.ctx, &listener, &worker);
-    auto& s = acc->socket;
+std::size_t Server::open_acceptor(const Listener& listener, Worker& worker, bool reuse_port) {
+    // A closed slot of the same worker is reused so the indexes captured by accept
+    // handlers stay valid.
+    for (std::size_t i = 0; i < acceptors_.size(); ++i)
+        if (!acceptors_[i]->open && acceptors_[i]->owner == &worker) {
+            acceptors_[i] = std::make_unique<Acceptor>(worker.ctx, listener.address, &worker);
+            open_acceptor_socket(*acceptors_[i], listener, reuse_port);
+            return i;
+        }
+    acceptors_.push_back(std::make_unique<Acceptor>(worker.ctx, listener.address, &worker));
+    open_acceptor_socket(*acceptors_.back(), listener, reuse_port);
+    return acceptors_.size() - 1;
+}
+
+void Server::open_acceptor_socket(Acceptor& acc, const Listener& listener, bool reuse_port) {
+    auto& s = acc.socket;
     s.open(listener.endpoint.protocol());
     s.set_option(asio::socket_base::reuse_address(true));
     if (reuse_port) s.set_option(reuse_port_option(true));
@@ -214,16 +240,16 @@ void Server::open_acceptor(Listener& listener, Worker& worker, bool reuse_port) 
     if (ec) throw std::runtime_error("cannot bind " + listener.address + ": " + ec.message());
     s.listen(4096, ec);
     if (ec) throw std::runtime_error("cannot listen on " + listener.address + ": " + ec.message());
-    acceptors_.push_back(std::move(acc));
 }
 
 void Server::start_accept(std::size_t index) {
     Acceptor& acc = *acceptors_[index];
+    if (!acc.open) return;
     Worker& target =
         reuse_port_ ? *acc.owner : *workers_[next_worker_.fetch_add(1, std::memory_order_relaxed) % workers_.size()];
     acc.socket.async_accept(
         target.ctx, [this, index, &acc, &target](const asio::error_code& ec, asio::ip::tcp::socket sock) {
-            if (ec == asio::error::operation_aborted || stopping_.load(std::memory_order_relaxed)) return;
+            if (ec == asio::error::operation_aborted || stopping_.load(std::memory_order_relaxed) || !acc.open) return;
             if (ec == asio::error::no_descriptors || ec == asio::error::no_buffer_space ||
                 ec == std::errc::too_many_files_open_in_system) {
                 // Out of descriptors: retrying immediately would spin at 100 % CPU while the
@@ -240,17 +266,22 @@ void Server::start_accept(std::size_t index) {
                     asio::error_code ignored;
                     sock.set_option(asio::ip::tcp::no_delay(true), ignored);
                 }
-                const Listener& l = *acc.listener;
-                if (l.tls) {
+                // This handler runs on `target`'s loop, so its generation is safe to read.
+                std::shared_ptr<const Generation> gen = target.gen;
+                const Listener* l = gen ? gen->find(acc.address) : nullptr;
+                if (!l) {  // the address left the configuration a moment ago: nothing to serve
+                    asio::error_code ignored;
+                    sock.close(ignored);
+                } else if (l->tls) {
 #ifdef AGENSIO_HAS_TLS
-                    auto c = std::make_shared<Http1Connection<TlsStream>>(TlsStream(std::move(sock), *l.ssl), target, l,
-                                                                     cfg_, dispatcher_);
+                    auto c = std::make_shared<Http1Connection<TlsStream>>(TlsStream(std::move(sock), *l->ssl), target,
+                                                                     std::move(gen), l, cfg_, dispatcher_);
                     if (&target == acc.owner) c->start();
                     else asio::post(target.ctx, [c] { c->start(); });
 #endif
                 } else {
-                    auto c = std::make_shared<Http1Connection<asio::ip::tcp::socket>>(std::move(sock), target, l,
-                                                                                       cfg_, dispatcher_);
+                    auto c = std::make_shared<Http1Connection<asio::ip::tcp::socket>>(std::move(sock), target,
+                                                                                       std::move(gen), l, cfg_, dispatcher_);
                     if (&target == acc.owner) c->start();
                     else asio::post(target.ctx, [c] { c->start(); });
                 }
@@ -269,14 +300,16 @@ void Server::run() {
     std::signal(SIGPIPE, SIG_IGN);
 #endif
     if (reuse_port_) {
-        for (auto& l : listeners_)
+        for (const auto& l : gen_->listeners)
             for (auto& w : workers_)
                 open_acceptor(l, *w, true);
     } else {
-        for (auto& l : listeners_)
+        for (const auto& l : gen_->listeners)
             open_acceptor(l, *workers_[0], false);
     }
+    write_pid_file();
     drop_privileges();  // ports are bound and logs open: nothing else needs root
+    for (auto& w : workers_) w->gen = gen_;
     for (auto& w : workers_) {
         guards_.push_back(
             std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(w->ctx.get_executor()));
@@ -292,6 +325,15 @@ void Server::run() {
         if (!ec) stop();
     });
 #ifndef _WIN32
+    // Reload: SIGHUP (also what `agensio reload` sends) loads the file again and switches.
+    asio::signal_set hup(workers_[0]->ctx, SIGHUP);
+    auto on_hup = std::make_shared<std::function<void(const asio::error_code&, int)>>();
+    *on_hup = [this, &hup, on_hup](const asio::error_code& ec, int) {
+        if (ec) return;
+        reload();
+        hup.async_wait(*on_hup);
+    };
+    hup.async_wait(*on_hup);
     // Log rotation: SIGUSR1 reopens every log file (logrotate's postrotate hook).
     asio::signal_set reopen(workers_[0]->ctx, SIGUSR1);
     auto on_reopen = std::make_shared<std::function<void(const asio::error_code&, int)>>();
@@ -320,6 +362,101 @@ void Server::stop() {
     if (stopping_.exchange(true)) return;
     for (auto& w : workers_)
         w->ctx.stop();
+}
+
+// ---- reload ----
+
+void Server::reload() {
+    Config fresh;
+    try {
+        fresh = load_config(cfg_.config_path);
+    } catch (const std::exception& e) {
+        error_log_.error(std::string("reload refused: ") + e.what());
+        return;
+    }
+    const auto hosting = check_hosting(fresh, system_facts());
+    if (!hosting.empty()) {
+        for (const auto& e : hosting) error_log_.error("reload refused: " + e);
+        return;
+    }
+    // Restart-only settings stay what they were; say so when the file changed them.
+    if (fresh.workers != cfg_.workers || fresh.reuse_port != cfg_.reuse_port || fresh.user != cfg_.user ||
+        fresh.group != cfg_.group || fresh.sendfile != cfg_.sendfile || fresh.cache_max_size != cfg_.cache_max_size ||
+        fresh.cache_max_file_size != cfg_.cache_max_file_size)
+        error_log_.warn("reload: workers, reuse_port, user, group, sendfile and cache sizes need a restart; kept");
+    auto gen = std::make_shared<Generation>();
+    gen->cfg = std::move(fresh);
+    try {
+        build_listeners(*gen);
+    } catch (const std::exception& e) {
+        error_log_.error(std::string("reload refused: ") + e.what());
+        return;
+    }
+    assign_log_sinks(gen->cfg);
+    std::string err;
+    if (!logs_.open_all(err)) {
+        error_log_.error("reload refused: " + err);
+        return;
+    }
+    own_site_logs(gen->cfg);
+
+    // New addresses are bound before anything switches, so a port that cannot be bound
+    // refuses the whole reload and nothing changed.
+    std::vector<std::size_t> opened;
+    try {
+        for (const auto& l : gen->listeners) {
+            bool bound = false;
+            for (const auto& a : acceptors_) bound = bound || (a->open && a->address == l.address);
+            if (bound) continue;
+            if (reuse_port_)
+                for (auto& w : workers_) opened.push_back(open_acceptor(l, *w, true));
+            else
+                opened.push_back(open_acceptor(l, *workers_[0], false));
+        }
+    } catch (const std::exception& e) {
+        for (std::size_t i : opened) {
+            asio::error_code ignored;
+            acceptors_[i]->socket.close(ignored);
+            acceptors_[i]->open = false;
+        }
+        error_log_.error(std::string("reload refused: ") + e.what());
+        return;
+    }
+    // Switch: every worker takes the generation on its own loop; connections pick it up at
+    // their next request, exchanges in flight keep the old one alive until they finish.
+    gen_ = gen;
+    for (auto& w : workers_) asio::post(w->ctx, [w = w.get(), gen] { w->gen = gen; });
+    for (std::size_t i : opened) asio::post(acceptors_[i]->owner->ctx, [this, i] { start_accept(i); });
+    // Addresses that left the configuration stop accepting; their open connections finish
+    // their current request and are told to close (Connection: close) on the next one.
+    std::size_t removed = 0;
+    for (auto& a : acceptors_) {
+        if (!a->open || gen->find(a->address)) continue;
+        a->open = false;
+        ++removed;
+        Acceptor* acc = a.get();
+        asio::post(acc->owner->ctx, [acc] {
+            asio::error_code ignored;
+            acc->socket.close(ignored);
+        });
+    }
+    error_log_.warn("reloaded " + cfg_.config_path.string() + ": " + std::to_string(gen->cfg.sites.size()) +
+                    " site(s), " + std::to_string(gen->listeners.size()) + " listener(s), " +
+                    std::to_string(opened.size()) + " bound, " + std::to_string(removed) + " closed");
+}
+
+void Server::write_pid_file() {
+    if (cfg_.pid_file.empty()) return;
+    std::ofstream f(cfg_.pid_file, std::ios::trunc);
+    f << ::getpid() << "\n";
+    if (!f)  // a development run as a user cannot write /run: `agensio reload` will say so
+        error_log_.warn("cannot write pid file " + cfg_.pid_file + " (set server.pid_file to a writable path for `agensio reload`)");
+}
+
+void Server::remove_pid_file() noexcept {
+    if (cfg_.pid_file.empty()) return;
+    std::error_code ec;
+    std::filesystem::remove(cfg_.pid_file, ec);
 }
 
 }  // namespace agensio

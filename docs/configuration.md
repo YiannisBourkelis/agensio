@@ -542,6 +542,39 @@ Not here on purpose: separate buffer-size knobs (nginx's `proxy_buffer_size`,
 switch, the three-directive Upgrade/Connection incantation for WebSockets, and
 `proxy_redirect` rules with regular expressions.
 
+## 12b. Reload without restart
+
+Edit the file, then:
+
+```sh
+agensio reload        # validates the file, then signals the running server
+```
+
+No path is needed on an installed machine: the file is looked for in the working
+directory, then `/etc/agensio/agensio.toml` (and the brew locations on macOS), the same
+search every command uses; `-c` points elsewhere. The server writes its pid to
+`server.pid_file`, `/run/agensio.pid` by default (`""` disables it), which is how the
+command finds it; `kill -HUP $(cat /run/agensio.pid)` does the same without the
+validation step. What
+happens in the server, in this order: the file is loaded and checked exactly as `-t`
+does, including the hosting rules; certificates are read and new listen addresses are
+bound; only then does every worker switch to the new configuration, between requests.
+Nothing is interrupted:
+
+- a request being served, an upstream exchange waiting on php-fpm or an origin, a CGI
+  process, a WebSocket tunnel: each finishes on the configuration it started with;
+- a keep-alive connection serves its next request from the new configuration on the
+  same connection;
+- a connection on a listen address that was removed serves its current request, then is
+  told `Connection: close`; the address stops accepting at once;
+- a broken file, a certificate that cannot be read or a port that cannot be bound refuses
+  the whole reload, with the reason in the error log, and the old configuration keeps
+  serving.
+
+Under a 64-connection load the switch itself costs nothing measurable and no request
+fails (`tests/reload.sh`). Restart-only settings, logged as kept when the file changes
+them: `workers`, `reuse_port`, `user`, `group`, `sendfile` and the cache sizes.
+
 ## 13. CGI
 
 `handler = "cgi"` (or just a `cgi = { ... }` table) on a location runs the requested file

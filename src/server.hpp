@@ -26,6 +26,8 @@
 
 namespace agensio {
 
+struct Generation;
+
 struct Worker {
     explicit Worker(unsigned id_) : id(id_) {}
     unsigned id;
@@ -34,6 +36,9 @@ struct Worker {
     asio::steady_timer flush_timer{ctx};  // access log buffers, once per second
     UpstreamPool upstream_pool{ctx};      // this worker's FastCGI and origin connections
     std::atomic<std::uint64_t> connections{0};
+    // The configuration this worker hands to new connections and to connections at their
+    // next request. Written only by a handler posted to this worker's loop (reload).
+    std::shared_ptr<const Generation> gen;
 };
 
 struct Listener {
@@ -49,6 +54,20 @@ struct Listener {
     std::vector<std::string> site_names;  // for the startup log
 };
 
+// One loaded configuration with everything derived from it: the routers (which point into
+// its sites), the TLS contexts, the log sink indexes. A reload builds a new one and
+// switches the workers to it; a connection keeps the generation it is serving a request
+// from alive through its shared_ptr, so nothing in flight ever sees a dangling pointer.
+struct Generation {
+    Config cfg;
+    std::vector<Listener> listeners;
+    const Listener* find(std::string_view address) const noexcept {
+        for (const auto& l : listeners)
+            if (l.address == address) return &l;
+        return nullptr;
+    }
+};
+
 class Server {
 public:
     explicit Server(Config cfg);
@@ -57,30 +76,44 @@ public:
     // Binds all listeners and runs until stop() or SIGINT/SIGTERM. Throws on bind errors.
     void run();
     void stop();
+    // SIGHUP / `agensio reload`: loads the configuration file again and, when it is valid
+    // and its new listeners bind, switches every worker to it between requests. Requests,
+    // upstream exchanges and tunnels in flight finish on the configuration they started
+    // with; keep-alive connections pick the new one up at their next request. A bad file
+    // or a port that cannot be bound is logged and the current configuration keeps serving.
+    void reload();
 
-    const std::vector<Listener>& listeners() const noexcept { return listeners_; }
+    const std::vector<Listener>& listeners() const noexcept { return gen_->listeners; }
     unsigned worker_count() const noexcept { return static_cast<unsigned>(workers_.size()); }
     bool reuse_port_enabled() const noexcept { return reuse_port_; }
 
 private:
-    void build_listeners();
-    void build_workers();
-    void open_acceptor(Listener& listener, Worker& worker, bool reuse_port);
-    void start_accept(std::size_t acceptor_index);
-    void open_logs();
-    void own_site_logs();     // per-site logs: agensio:<site group> 0640, when we can chown
-    void drop_privileges();   // server.user: after binding and opening logs
-    void arm_flush(Worker& w);
-
     struct Acceptor {
         asio::ip::tcp::acceptor socket;
         asio::steady_timer backoff;  // pauses accepting when descriptors run out
-        Listener* listener;
-        Worker* owner;  // the worker whose io_context runs this acceptor
-        Acceptor(asio::io_context& ctx, Listener* l, Worker* w) : socket(ctx), backoff(ctx), listener(l), owner(w) {}
+        std::string address;         // the listener it serves, looked up in the worker's generation at accept
+        Worker* owner;               // the worker whose io_context runs this acceptor
+        bool open = true;
+        Acceptor(asio::io_context& ctx, std::string a, Worker* w)
+            : socket(ctx), backoff(ctx), address(std::move(a)), owner(w) {}
     };
 
-    Config cfg_;
+    void build_listeners(Generation& gen);
+    void build_workers();
+    std::size_t open_acceptor(const Listener& listener, Worker& worker, bool reuse_port);
+    void open_acceptor_socket(Acceptor& acc, const Listener& listener, bool reuse_port);
+    void start_accept(std::size_t acceptor_index);
+    void open_logs();
+    void assign_log_sinks(Config& cfg);  // site access logs into the registry (opened by open_all)
+    void own_site_logs(const Config& cfg);  // per-site logs: agensio:<site group> 0640, when we can chown
+    void drop_privileges();   // server.user: after binding and opening logs
+    void arm_flush(Worker& w);
+    void write_pid_file();
+    void remove_pid_file() noexcept;
+
+
+    Config cfg_;                            // the boot configuration: workers, cache, sendfile, user; restart-only
+    std::shared_ptr<const Generation> gen_;  // the live one; the workers hold their own pointer
     LogRegistry logs_;
     ErrorLog error_log_;
     bool access_logging_ = false;
@@ -91,7 +124,6 @@ private:
     CgiHandler cgi_handler_;
     Dispatcher dispatcher_;
     std::vector<std::unique_ptr<Worker>> workers_;
-    std::vector<Listener> listeners_;
     std::vector<std::unique_ptr<Acceptor>> acceptors_;
     std::vector<std::unique_ptr<asio::executor_work_guard<asio::io_context::executor_type>>> guards_;
     std::vector<std::jthread> threads_;

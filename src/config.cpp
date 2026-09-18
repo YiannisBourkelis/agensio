@@ -1017,6 +1017,14 @@ Config load_config(const fs::path& path) {
     cfg.state_dir = server["state_dir"].value_or(cfg.state_dir);
     if (cfg.state_dir.empty() || cfg.state_dir[0] != '/') fail("server.state_dir must be an absolute path");
     cfg.strict_users = server["strict_users"].value_or(false);
+    if (auto pf = server["pid_file"].value<std::string>()) cfg.pid_file = pf->empty() ? std::string() : resolve(base_dir, *pf).string();
+    else {
+#ifdef __APPLE__
+        cfg.pid_file = "/usr/local/var/run/agensio.pid";
+#else
+        cfg.pid_file = "/run/agensio.pid";
+#endif
+    }
 
     auto cache = root["cache"];
     cfg.cache_max_file_size = size_node(cache["max_file_size"], cfg.cache_max_file_size, "cache.max_file_size");

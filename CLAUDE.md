@@ -294,7 +294,12 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
 - **Range requests** (E1, `src/http1/range.hpp`): one `bytes=` range with If-Range; 206
   as a slice of the cache entry or a `FileBody` with an offset (sendfile keeps the fast
   path), 416 past the end, `Accept-Ranges: bytes` prebuilt into the entry block.
-- **Not yet**: directory listing, reload.
+- **Reload** (H1): `Generation` = config + routers + TLS contexts; per-worker current
+  pointer, per-connection pointer refreshed at each request boundary (one compare);
+  `Server::reload` on SIGHUP validates, binds new listeners, then switches; in-flight
+  work keeps the old generation alive. `agensio reload` validates and signals
+  `server.pid_file`. `tests/reload.sh` proves no request fails across reloads.
+- **Not yet**: directory listing.
 
 ## Performance notes (measured, keep current)
 

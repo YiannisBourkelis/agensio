@@ -22,6 +22,7 @@ server_header = "agensio"
 # as: started as root it binds, opens the logs and then becomes that user.
 # user = "agensio"
 # group = "agensio"
+# pid_file = "/run/agensio.pid"       # default; `agensio reload` signals the server (or kill -HUP)
 # pools = "/etc/php/8.3/fpm/pool.d"   # default: detected per distro
 # pools_run = "/run/php"              # default: per distro
 # state_dir = "/var/lib/agensio"

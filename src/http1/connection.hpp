@@ -42,11 +42,13 @@ namespace agensio {
 template <class Socket>
 class Http1Connection : public std::enable_shared_from_this<Http1Connection<Socket>> {
 public:
-    Http1Connection(Socket&& socket, Worker& worker, const Listener& listener, const Config& cfg,
-                    Dispatcher& dispatcher)
+    Http1Connection(Socket&& socket, Worker& worker, std::shared_ptr<const Generation> gen, const Listener* listener,
+                    const Config& cfg, Dispatcher& dispatcher)
         : socket_(std::move(socket)),
           worker_(worker),
+          gen_(std::move(gen)),
           listener_(listener),
+          live_(&gen_->cfg),
           cfg_(cfg),
           dispatcher_(dispatcher),
           timer_(worker.ctx),
@@ -250,7 +252,7 @@ private:
     void log_request() {
         request_logged_ = true;
         const auto* site = static_cast<const SiteConfig*>(worker_.state.site);
-        if (!site) site = listener_.router.default_site();
+        if (!site) site = listener_->router.default_site();
         if (!site || site->access_log_sink < 0) return;
         if (remote_.empty()) {
             asio::error_code ec;
@@ -355,7 +357,22 @@ private:
         self->arm_read();
     }
 
+    // A reload switched the worker to a new generation: take it at this request boundary.
+    // One pointer compare per request when nothing changed.
+    void refresh_generation() {
+        if (gen_.get() == worker_.gen.get()) return;
+        const Listener* l = worker_.gen->find(listener_->address);
+        if (!l) {  // this address is gone: serve this request from the old generation, then close
+            retire_ = true;
+            return;
+        }
+        gen_ = worker_.gen;
+        listener_ = l;
+        live_ = &gen_->cfg;
+    }
+
     void process() {
+        refresh_generation();
         Request& req = stream_.request;
         switch (parse_request(std::string_view(in_.data(), in_len_), req)) {
             case ParseStatus::complete:
@@ -383,7 +400,7 @@ private:
         request_logged_ = false;
         worker_.state.site = nullptr;
         if (req.has_body) {
-            if (!req.chunked && req.content_length > cfg_.max_body_size) {
+            if (!req.chunked && req.content_length > live_->max_body_size) {
                 fail_request(413);  // refused before the handler runs; the client gets it while it may still be sending
                 return;
             }
@@ -397,7 +414,7 @@ private:
             req.body = &body_source_;
         }
         worker_.state.now = std::time(nullptr);
-        if (!cfg_.trusted_proxies.empty()) apply_forwarded();
+        if (!live_->trusted_proxies.empty()) apply_forwarded();
         dispatch();
     }
 
@@ -408,7 +425,7 @@ private:
         stream_.conn.forwarded_https = false;
         fill_connection_info();
         if (!trusted_checked_) {
-            trusted_peer_ = in_any(cfg_.trusted_proxies, remote_addr_);
+            trusted_peer_ = in_any(live_->trusted_proxies, remote_addr_);
             trusted_checked_ = true;
         }
         stream_.conn.trusted_peer = trusted_peer_;
@@ -427,7 +444,7 @@ private:
             if (ec) break;  // garbage: trust nothing further left
             client_addr_ = entry;
             stream_.conn.client_address = client_addr_;
-            if (!in_any(cfg_.trusted_proxies, a)) break;  // first hop that is not one of ours
+            if (!in_any(live_->trusted_proxies, a)) break;  // first hop that is not one of ours
         }
         const std::string_view proto = req.headers.get("x-forwarded-proto");
         stream_.conn.forwarded_https = Headers::iequals(proto, "https");
@@ -511,7 +528,7 @@ private:
     // Routes the request and runs its handler; static completes inline, FastCGI later.
     void dispatch() {
         WorkerState& ws = worker_.state;
-        const LocationConfig* loc = dispatcher_.route(stream_, listener_.router, ws);
+        const LocationConfig* loc = dispatcher_.route(stream_, listener_->router, ws);
         int hops = 0;
         while (loc) {
             if (loc->kind != HandlerKind::static_) {  // FastCGI or proxy: completes asynchronously
@@ -547,8 +564,9 @@ private:
     // The response is filled in: apply connection policy and hand it to the writer.
     void respond() {
         Response& r = stream_.response;
-        if (cfg_.max_requests_per_connection != 0 && ++requests_served_ >= cfg_.max_requests_per_connection)
+        if (live_->max_requests_per_connection != 0 && ++requests_served_ >= live_->max_requests_per_connection)
             r.keep_alive = false;  // cap reached: this is the last response
+        if (retire_) r.keep_alive = false;  // the listener left the configuration
         // A client waiting for "100 Continue" that gets a final answer instead will not send
         // the body, so there is nothing to drain: close after the response (RFC 9110 10.1.1).
         if (body_pending_ && expect_continue_ && !continue_sent_ && consumed_ >= in_len_) r.keep_alive = false;
@@ -559,8 +577,8 @@ private:
     // Client address and listener for handlers that need them (FastCGI params), once.
     void fill_connection_info() {
         if (!stream_.conn.local_port) {
-            stream_.conn.local_address = listener_.address_text;
-            stream_.conn.local_port = listener_.port;
+            stream_.conn.local_address = listener_->address_text;
+            stream_.conn.local_port = listener_->port;
             stream_.conn.tls = IsTlsStream<Socket>::value;
         }
         if (remote_.empty()) {
@@ -596,7 +614,7 @@ private:
                 ec = make_error_code(BodyError::malformed);
                 return false;
             }
-            if (body_read_ > cfg_.max_body_size) {
+            if (body_read_ > live_->max_body_size) {
                 ec = make_error_code(BodyError::too_large);
                 return false;
             }
@@ -655,8 +673,11 @@ private:
 
     Socket socket_;
     Worker& worker_;
-    const Listener& listener_;
-    const Config& cfg_;
+    std::shared_ptr<const Generation> gen_;  // the configuration this connection serves from (kept alive by it)
+    const Listener* listener_;               // in gen_
+    const Config* live_;                     // gen_->cfg: sites, limits, trusted proxies (reloadable)
+    bool retire_ = false;                    // the listener left the configuration: close after this response
+    const Config& cfg_;                      // the boot configuration (writer settings)
     Dispatcher& dispatcher_;
     asio::steady_timer timer_;
     std::chrono::steady_clock::duration idle_timeout_;

@@ -81,6 +81,7 @@ cmake --build build --target agensio_upstream && bench/proxy/run.sh   # D0: prox
 bench/ab.sh HEAD -P                                                   # the A/B gate with the proxy rows
 bench/proxy/run.sh -o node                                            # D7: a Node.js hello-world origin behind each proxy
 bench/proxy/ws.sh                                                     # D7: WebSocket-shaped echo through 64 tunnels
+tests/reload.sh build/agensio                                         # H1: reload without restart, 14 checks incl. wrk across reloads
 bench/redmine/setup.sh && tests/redmine.sh build/agensio              # D6: Redmine (Rails) behind the proxy preset, http://127.0.0.1:8075
 bench/uptime-kuma/setup.sh && tests/uptime-kuma.sh build/agensio      # D6: Uptime Kuma (Node, WebSockets), http://127.0.0.1:8076
 bench/statamic/.ddev/setup.sh   # same for Statamic: control panel http://127.0.0.1:8071/cp, admin@admin.com / 4444
