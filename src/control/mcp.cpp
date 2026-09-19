@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "config.hpp"
 #include "control/client.hpp"
 #include "control/roles.hpp"
 #include "services/json.hpp"
@@ -41,6 +42,17 @@ json::Value schema(std::vector<std::pair<std::string, json::Value>> props, std::
     return json::Value::object().set("type", "object").set("properties", std::move(p)).set("required", std::move(req));
 }
 
+// The `app` values come from the preset table, so a new preset is a tool option at once.
+json::Value app_enum() {
+    json::Value values = json::Value::array();
+    std::string text = "What runs there. A preset sets routing and PHP rules:";
+    for (const auto& a : app_presets()) {
+        values.push(a);
+        text += " " + a;
+    }
+    return json::Value::object().set("type", "string").set("enum", std::move(values)).set("description", text + ".");
+}
+
 json::Value name_arg() { return prop("string", "The site's host name (any of its server_name values)."); }
 json::Value reason_arg() { return prop("string", "One line saying why, written to the server's audit log."); }
 json::Value confirm_arg() {
@@ -56,7 +68,7 @@ std::vector<std::pair<std::string, json::Value>> site_fields() {
         {"hsts", prop("boolean", "Add Strict-Transport-Security on the https site (default false; only once https is known to work).")},
         {"user", json::Value::object().set("description", "A system account the site runs under (isolates it from other sites), or null for none. Ask the user; suggest a short name derived from the domain.")},
         {"group", prop("string", "The account's group (default: its primary group).")},
-        {"app", json::Value::object().set("type", "string").set("enum", json::Value::array().push("static").push("php").push("laravel").push("drupal").push("wordpress").push("proxy")).set("description", "What runs there. A preset sets routing and PHP rules.")},
+        {"app", app_enum()},
         {"root", prop("string", "Document root (Laravel: the project directory, its public/ is served; Drupal: the project directory, its web/ is served when present). Required unless app is proxy.")},
         {"upstream", prop("string", "app = proxy: where the application listens, e.g. http://127.0.0.1:3000.")},
         {"php_socket", prop("string", "PHP without a site user: the php-fpm socket to use (unix:/path or host:port).")},

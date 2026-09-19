@@ -3,6 +3,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cstring>
 #include <fstream>
@@ -193,14 +194,14 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
     if (spec.root.empty() && spec.app != "proxy")
         needs.push_back(Decision{"root", "Where are the site's files? (the document root; for Laravel the project directory)",
                                  (cfg.control.sites_root.empty() ? std::string("/var/www") : cfg.control.sites_root) + "/" + spec.domain + "/web", {}});
+    const std::vector<std::string> apps = app_presets();
     if (spec.app.empty()) {
         const std::string detected = spec.root.empty() ? std::string() : detect_app(spec.root);
         needs.push_back(Decision{"app", "What runs there? A preset sets the routing and PHP rules.",
-                                 detected.empty() ? "static" : detected + " (found under root)",
-                                 {"static", "php", "laravel", "drupal", "wordpress", "proxy"}});
-    } else if (spec.app != "static" && spec.app != "php" && spec.app != "laravel" && spec.app != "drupal" &&
-               spec.app != "wordpress" && spec.app != "proxy") {
-        error = "app must be static, php, laravel, drupal, wordpress or proxy";
+                                 detected.empty() ? "static" : detected + " (found under root)", apps});
+    } else if (std::find(apps.begin(), apps.end(), spec.app) == apps.end()) {
+        error = "app must be one of: ";
+        for (std::size_t i = 0; i < apps.size(); ++i) error += (i ? ", " : "") + apps[i];
         return needs;
     }
     if (spec.app == "proxy" && spec.upstream.empty())
@@ -208,7 +209,7 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
     if (!user_decided)
         needs.push_back(Decision{"user", "Run this site under its own system account? (isolates it from other sites; null for none)",
                                  suggest_user(spec.domain), {}});
-    const bool php = spec.app == "php" || spec.app == "laravel" || spec.app == "drupal" || spec.app == "wordpress";
+    const bool php = spec.app != "static" && spec.app != "proxy" && !spec.app.empty();
     if (php && spec.user.empty() && spec.php_socket.empty() && user_decided)
         needs.push_back(Decision{"php_socket", "Without a site user no pool is generated: which php-fpm socket serves this site?",
                                  "unix:/run/php/php-fpm.sock", {}});
@@ -235,7 +236,7 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
         if (!spec.user.empty()) s += "user = " + toml_string(spec.user) + "\n";
         if (!spec.group.empty()) s += "group = " + toml_string(spec.group) + "\n";
         if (!spec.user.empty() && !spec.access_log.empty()) s += "access_log = " + toml_string(spec.access_log) + "\n";
-        const bool php = spec.app == "php" || spec.app == "laravel" || spec.app == "drupal" || spec.app == "wordpress";
+        const bool php = spec.app != "static" && spec.app != "proxy" && !spec.app.empty();
         if (php) {
             if (!spec.php_socket.empty()) s += "php = { socket = " + toml_string(spec.php_socket) + " }\n";
             else if (spec.php_children || !spec.php_version.empty()) {
@@ -376,7 +377,7 @@ std::string php_fpm_reload_command(const Config& cfg, const std::string& version
 
 std::vector<std::string> next_steps(const SiteSpec& spec, const Config& cfg) {
     std::vector<std::string> cmds;
-    const bool php = spec.app == "php" || spec.app == "laravel" || spec.app == "drupal" || spec.app == "wordpress";
+    const bool php = spec.app != "static" && spec.app != "proxy" && !spec.app.empty();
     if (php && !spec.user.empty() && spec.php_socket.empty())
         cmds.push_back("agensio pools && " + php_fpm_reload_command(cfg, spec.php_version));
     if (spec.https == "auto") cmds.push_back("# make sure " + spec.domain + " resolves to this server and port 80 is reachable; the certificate follows within a minute");

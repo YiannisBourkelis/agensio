@@ -671,6 +671,12 @@ Rules:
       fixtures for Laravel (second entry point), Drupal (13 checks) and WordPress (4)
       assert on the absence of `<?php` in bodies, not only on status codes.
       Documented: `.htaccess` is never read (section 4c).
+- [x] C6 (2026-09-19) PHP presets as data: `kPhpPresets` rows (subdir, index, front
+      controller, any-php or front-only, refused suffixes, shields with cache headers,
+      404 files) and one expansion; the four existing presets expand identically (diffed
+      through `-t --explain`) except that WordPress shields now also refuse `.php8`.
+      Next rows, in this order, each with a fixture and a docs section: `symfony`,
+      `joomla`, `phpbb`, `nextcloud`, `mediawiki`; test beds for Joomla and Nextcloud.
 - [ ] H1b Certificates watched and reloaded when the files change (manual `tls = { cert,
       key }` sites; automatic ones already reload themselves); reload must not stall new
       QUIC connections (nginx's known weakness).

@@ -206,6 +206,9 @@ std::vector<TryStep> parse_try_files(const std::vector<std::string>& items);
 void finalize_site(SiteConfig& site);
 // The synthetic site the control listener routes to: one location of kind `control`.
 SiteConfig control_site();
+// Every value `app = "..."` accepts: "static", the PHP presets in table order, "proxy".
+// The control API and the MCP tool schema list these, so a new preset row is exposed at once.
+std::vector<std::string> app_presets();
 
 // Prints the effective configuration after presets, one TOML-like block per site and
 // location, so nothing a preset did is hidden (`agensio -t --explain`).

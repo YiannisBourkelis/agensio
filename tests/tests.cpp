@@ -801,7 +801,7 @@ static void test_presets() {
     CHECK(Router::location(w, "/wp-content/plugins/x/ajax.php").kind == HandlerKind::fastcgi);
     const LocationConfig& up = Router::location(w, "/wp-content/uploads/2026/shell.php");
     CHECK(up.path == "/wp-content/uploads/" && up.final && up.kind == HandlerKind::static_);
-    CHECK(up.deny_suffixes.size() == 6 && up.add_headers.size() == 1 && up.origin == "preset:wordpress");
+    CHECK(up.deny_suffixes.size() == 7 && up.add_headers.size() == 1 && up.origin == "preset:wordpress");
     CHECK(Router::location(w, "/wp-includes/js/x.js").final);
     CHECK(Router::location(w, "/wp-admin/").path == "/");
     CHECK(rejects("badfinal.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n"
@@ -1658,7 +1658,8 @@ static void test_control_sites() {
     CHECK(json::parse(R"({"user":"shop","app":"laravel","aliases":["www.shop.test"]})", body, err));
     needs = apply_request(body, cfg, spec, err);
     CHECK(err.empty() && needs.empty() && spec.user == "shop" && spec.app == "laravel");
-    CHECK(json::parse(R"({"app":"weird"})", body, err) && (apply_request(body, cfg, spec, err), err.find("app must be") != std::string::npos));
+    CHECK(json::parse(R"({"app":"weird"})", body, err) && (apply_request(body, cfg, spec, err), err.find("app must be one of: static, php, laravel, drupal, wordpress, proxy") != std::string::npos));
+    CHECK(app_presets().size() == 6 && app_presets().front() == "static" && app_presets().back() == "proxy");
     err.clear();
     CHECK(json::parse(R"({"aliases":["bad host"]})", body, err) && (apply_request(body, cfg, spec, err), err.find("alias") != std::string::npos));
     err.clear();
