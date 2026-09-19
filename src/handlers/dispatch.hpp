@@ -47,6 +47,7 @@ private:
     // handler then answers 405 only if the request resolves to an actual file.
     bool check_method(Stream& s, const LocationConfig& loc, WorkerState& ws);
     void redirect_https(Stream& s, const SiteConfig& site);
+    void misdirected(Stream& s);
 
     StaticHandler& static_;
     FcgiHandler& fcgi_;

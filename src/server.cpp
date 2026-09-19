@@ -197,6 +197,29 @@ void Server::arm_flush(Worker& w) {
     });
 }
 
+#ifdef AGENSIO_HAS_TLS
+// SNI: the certificate of the site that lists the requested name, or the listener's
+// catch-all's when the client sent no name; a name no site lists ends the handshake with
+// unrecognized_name, so no other site's certificate is ever shown (which would disclose
+// what else is hosted here) and no site serves a host it did not claim.
+static int select_certificate(SSL* ssl, int* alert, void* arg) {
+    const auto* listener = static_cast<const Listener*>(arg);
+    const char* name = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
+    const SiteConfig* site = listener->router.site(name ? std::string_view(name) : std::string_view());
+    if (!site || !site->tls) {
+        *alert = SSL_AD_UNRECOGNIZED_NAME;
+        return SSL_TLSEXT_ERR_ALERT_FATAL;
+    }
+    auto it = listener->tls_contexts.find(site->tls->cert.string());
+    if (it == listener->tls_contexts.end()) {
+        *alert = SSL_AD_INTERNAL_ERROR;
+        return SSL_TLSEXT_ERR_ALERT_FATAL;
+    }
+    if (SSL_get_SSL_CTX(ssl) != it->second->native_handle()) SSL_set_SSL_CTX(ssl, it->second->native_handle());
+    return SSL_TLSEXT_ERR_OK;
+}
+#endif
+
 void Server::build_listeners(Generation& gen) {
     auto& listeners = gen.listeners;
     for (const auto& site : gen.cfg.sites) {
@@ -215,27 +238,41 @@ void Server::build_listeners(Generation& gen) {
                 l->address_text = l->endpoint.address().to_string();
                 l->port = l->endpoint.port();
                 l->tls = site.tls.has_value();
-                if (l->tls) {
-#ifdef AGENSIO_HAS_TLS
-                    l->ssl = std::make_shared<asio::ssl::context>(asio::ssl::context::tls_server);
-                    l->ssl->set_options(asio::ssl::context::default_workarounds | asio::ssl::context::no_sslv2 |
-                                        asio::ssl::context::no_sslv3 | asio::ssl::context::no_tlsv1 |
-                                        asio::ssl::context::no_tlsv1_1 | asio::ssl::context::single_dh_use);
-                    l->ssl->use_certificate_chain_file(site.tls->cert.string());
-                    l->ssl->use_private_key_file(site.tls->key.string(), asio::ssl::context::pem);
-                    SSL_CTX_set_min_proto_version(l->ssl->native_handle(), TLS1_2_VERSION);
-                    // SSL_MODE_RELEASE_BUFFERS deliberately not set: it costs a malloc/free per record.
-                    SSL_CTX_set_options(l->ssl->native_handle(), SSL_OP_NO_COMPRESSION);
-#else
+#ifndef AGENSIO_HAS_TLS
+                if (l->tls)
                     throw std::runtime_error("site on " + address +
                                              " requires TLS but agensio was built without OpenSSL");
 #endif
-                }
             }
+#ifdef AGENSIO_HAS_TLS
+            // One context per certificate on the listener; the first one starts every
+            // handshake and the SNI callback switches to the site's own.
+            if (site.tls && !l->tls_contexts.contains(site.tls->cert.string())) {
+                auto ctx = std::make_shared<asio::ssl::context>(asio::ssl::context::tls_server);
+                ctx->set_options(asio::ssl::context::default_workarounds | asio::ssl::context::no_sslv2 |
+                                 asio::ssl::context::no_sslv3 | asio::ssl::context::no_tlsv1 |
+                                 asio::ssl::context::no_tlsv1_1 | asio::ssl::context::single_dh_use);
+                ctx->use_certificate_chain_file(site.tls->cert.string());
+                ctx->use_private_key_file(site.tls->key.string(), asio::ssl::context::pem);
+                SSL_CTX_set_min_proto_version(ctx->native_handle(), TLS1_2_VERSION);
+                // SSL_MODE_RELEASE_BUFFERS deliberately not set: it costs a malloc/free per record.
+                SSL_CTX_set_options(ctx->native_handle(), SSL_OP_NO_COMPRESSION);
+                if (!l->ssl) l->ssl = ctx;
+                l->tls_contexts.emplace(site.tls->cert.string(), std::move(ctx));
+            }
+#endif
             l->router.add_site(site);
             l->site_names.push_back(site.server_names.front());
         }
     }
+#ifdef AGENSIO_HAS_TLS
+    // The vector is complete: each listener's address is stable for the callback argument.
+    for (auto& l : listeners)
+        for (auto& [path, ctx] : l.tls_contexts) {
+            SSL_CTX_set_tlsext_servername_callback(ctx->native_handle(), select_certificate);
+            SSL_CTX_set_tlsext_servername_arg(ctx->native_handle(), &l);
+        }
+#endif
     if (gen.cfg.control.enabled) {
         gen.control_site = control_site();
         gen.control = std::make_unique<Listener>();
@@ -371,8 +408,12 @@ json::Value Server::status() {
     v.set("connections", static_cast<double>(conns));
     v.set("user", cfg_.user);
     json::Value listeners = json::Value::array();
-    for (const auto& l : gen_->listeners)
-        listeners.push(json::Value::object().set("address", l.address).set("tls", l.tls).set("sites", static_cast<double>(l.site_names.size())));
+    for (const auto& l : gen_->listeners) {
+        json::Value entry = json::Value::object().set("address", l.address).set("tls", l.tls).set("sites", static_cast<double>(l.site_names.size()));
+        const SiteConfig* all = l.router.default_site();
+        entry.set("catch_all", all ? json::Value(all->server_names.front()) : json::Value(nullptr));
+        listeners.push(std::move(entry));
+    }
     v.set("listeners", std::move(listeners));
     json::Value sites = json::Value::array();
     for (const auto& s : gen_->cfg.sites) {

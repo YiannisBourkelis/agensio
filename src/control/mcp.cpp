@@ -62,7 +62,7 @@ json::Value confirm_arg() {
 std::vector<std::pair<std::string, json::Value>> site_fields() {
     return {
         {"domain", prop("string", "The site's main host name, e.g. example.com.")},
-        {"aliases", json::Value::object().set("type", "array").set("items", prop("string", "host name")).set("description", "Other host names served by the same site, e.g. www.example.com.")},
+        {"aliases", json::Value::object().set("type", "array").set("items", prop("string", "host name")).set("description", "Other host names served by the same site, e.g. www.example.com. A site answers only the names it lists; \"*\" makes it the catch-all of its listener (every other Host, and requests by IP address).")},
         {"https", json::Value::object().set("description", "\"auto\" (certificate obtained and renewed automatically, needs port 80 reachable), \"none\" (plain HTTP only), or an object {\"cert\": path, \"key\": path} for a certificate you manage.")},
         {"redirect_http", prop("boolean", "With https: also redirect plain http to https (default true).")},
         {"hsts", prop("boolean", "Add Strict-Transport-Security on the https site (default false; only once https is known to work).")},
@@ -83,8 +83,8 @@ std::vector<std::pair<std::string, json::Value>> site_fields() {
 
 std::vector<Tool> tools() {
     std::vector<Tool> t;
-    t.push_back({"server_status", "Server status", "Version, pid, uptime, workers, open connections, listeners, sites and the caller's role.", "GET", "/v1/status", true, false, Role::viewer, schema({}, {})});
-    t.push_back({"sites_list", "List sites", "Every configured site with its listeners, root, app, user, redirect and certificate state (issuer, days left, whether it is still the placeholder).", "GET", "/v1/sites", true, false, Role::viewer, schema({}, {})});
+    t.push_back({"server_status", "Server status", "Version, pid, uptime, workers, open connections, listeners, sites and the caller's role. Each listener names its catch_all site (the one with server_name [\"*\"] or default = true) or null: a listener with none answers 421 Misdirected Request to any Host its sites do not list, including the IP address.", "GET", "/v1/status", true, false, Role::viewer, schema({}, {})});
+    t.push_back({"sites_list", "List sites", "Every configured site with its listeners, root, app, user, redirect, whether it is the catch_all of its listener, and certificate state (issuer, days left, whether it is still the placeholder). A site answers only the names it lists unless it is the catch-all.", "GET", "/v1/sites", true, false, Role::viewer, schema({}, {})});
     t.push_back({"site_show", "Show one site", "One site in full: effective locations after the preset expanded, PHP pool, upstreams, certificate.", "GET", "/v1/sites/{name}", true, false, Role::viewer, schema({{"name", name_arg()}}, {"name"})});
     t.push_back({"config_validate", "Validate configuration", "Loads the configuration file on disk again and runs the hosting rules; reports errors and the restart-only settings that differ from the running server.", "GET", "/v1/config/validate", true, false, Role::viewer, schema({}, {})});
     t.push_back({"logs_query", "Query logs", "Recent lines from the error log and the access logs. Use it for questions like 'any errors in the last 3 hours?'. Summarise for the user; do not paste hundreds of lines.", "GET", "/v1/logs", true, false, Role::viewer,
@@ -97,7 +97,7 @@ std::vector<Tool> tools() {
     t.push_back({"health_check", "Health check", "What an administrator should look at: certificates, missing redirects, port 80 for ACME, recent errors, settings waiting for a restart, root, shared accounts, stale pools. Each finding has a severity and a fix. Run this first on a server you do not know.", "GET", "/v1/health", true, false, Role::viewer, schema({}, {})});
     t.push_back({"reload", "Reload configuration", "Validate the configuration on disk and switch to it without dropping a connection. Refused with the reason when it does not validate; nothing changes then.", "POST", "/v1/reload", false, false, Role::operator_, schema({{"confirm", confirm_arg()}, {"reason", reason_arg()}}, {"confirm", "reason"})});
     t.push_back({"logs_reopen", "Reopen logs", "Reopen every log file after rotation.", "POST", "/v1/logs/reopen", false, false, Role::operator_, schema({{"confirm", confirm_arg()}, {"reason", reason_arg()}}, {"confirm", "reason"})});
-    t.push_back({"site_create", "Create a site", "Writes a new site file, validates and reloads. A new site is HTTPS-only with a redirect from http unless https is \"none\". Until https, root (or upstream), app and user are decided the server answers with the open questions and a suggestion each: ask the user each question, then call again with every field. If it answers with commands to run as root (missing account or directory), show them to the user, wait until they confirm they ran them, then call again with the same fields.", "POST", "/v1/sites", false, false, Role::admin, schema(site_fields(), {"domain", "confirm", "reason"})});
+    t.push_back({"site_create", "Create a site", "Writes a new site file, validates and reloads. A new site is HTTPS-only with a redirect from http unless https is \"none\". Until https, root (or upstream), app and user are decided the server answers with the open questions and a suggestion each: ask the user each question, then call again with every field. If it answers with commands to run as root (missing account or directory), show them to the user, wait until they confirm they ran them, then call again with the same fields. The success answer may carry warnings: tell the user each one (for example that the site answers only its own names and a monitor checking the IP address needs the hostname, or a catch-all site with server_name [\"*\"]).", "POST", "/v1/sites", false, false, Role::admin, schema(site_fields(), {"domain", "confirm", "reason"})});
     {
         auto fields = site_fields();
         fields.insert(fields.begin(), {"name", name_arg()});
@@ -118,7 +118,10 @@ const char* kInstructions =
     "at recent errors. Every change needs the user's explicit agreement first (confirm: true) "
     "and a one-line reason. When the server answers with commands to run as root, show them "
     "exactly, say that the server waits for them, and continue only when the user says they ran "
-    "them. Never invent settings: what a tool does not offer is not configurable here.";
+    "them. Never invent settings: what a tool does not offer is not configurable here. Host names are "
+    "strict: a site answers only the names in server_name, and a listener without a catch-all site "
+    "(server_name [\"*\"] or default = true) answers 421 to any other Host, including the IP address; "
+    "when a user reports 421, that is the cause.";
 
 const char* kGettingStarted =
     "Greet the administrator briefly. Run health_check and server_status. Summarise: how many "

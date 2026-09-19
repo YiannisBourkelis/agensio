@@ -38,6 +38,14 @@ void Dispatcher::redirect_https(Stream& s, const SiteConfig& site) {
     r.body = MemoryBody{page.body};
 }
 
+// 421 Misdirected Request (RFC 9110 15.5.22): this listener is not authoritative for the
+// name in Host. Constant body, never cacheable, so a proxy or an HTTP/2 client that
+// coalesced connections retries on a fresh connection instead of remembering a 404.
+void Dispatcher::misdirected(Stream& s) {
+    static_.error(s, 421, s.request.keep_alive);
+    s.response.headers.add("Cache-Control", "no-store");
+}
+
 const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerState& ws) {
     const Request& req = s.request;
     Response& r = s.response;
@@ -53,6 +61,10 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
     if (req.method == Method::options && req.target == "*") {  // server-wide OPTIONS
         const SiteConfig* site = router.site(req.host);
         ws.site = site;
+        if (!site) {
+            misdirected(s);
+            return nullptr;
+        }
         static_.no_content(s, Router::location(*site, "/").allow);
         return nullptr;
     }
@@ -80,6 +92,10 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
     }
     const SiteConfig* site = router.site(req.host);
     ws.site = site;
+    if (!site) {
+        misdirected(s);
+        return nullptr;
+    }
     if (!site->redirect.empty()) {
         redirect_https(s, *site);
         return nullptr;

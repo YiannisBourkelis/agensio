@@ -47,6 +47,32 @@ redirect, routed again through the locations; a `?$query_string` suffix is accep
 ignored for static files). Without `try_files` the rule is: file, directory index (403 if
 there is none), 301 to the slash form for a directory, else 404.
 
+## 1b. Which site answers a request
+
+A site answers the names in its `server_name`, compared case-insensitively and without
+the port. On each listen address exactly one site may be the **catch-all**: the one with
+`server_name = ["*"]`, or with `default = true`. It answers every other Host, requests
+by IP address, and HTTP/1.0 requests without a Host header.
+
+A listener **without** a catch-all is strict: a request whose Host no site on it lists
+answers `421 Misdirected Request` with `Cache-Control: no-store` and a constant body.
+Nothing reaches an application for a name it did not claim, so forged Host headers
+(the class Drupal's `trusted_host_patterns` and Laravel's `TrustedHosts` defend
+against) never get there, and an HTTP/2 client that coalesced connections retries on a
+fresh one rather than caching a 404. If you want the old behaviour of "the only site
+serves everything", say so with `server_name = ["*"]`, or add `default = true` to the
+site. Monitors that check the IP address need the hostname, or a catch-all.
+
+**TLS** follows the same rule at the handshake: the certificate is the one of the site
+that lists the name the client sent (SNI), each site on a listener may have its own
+certificate, and a name no site lists ends the handshake with `unrecognized_name`, so no
+other site's certificate is ever shown. A client that sends no name gets the catch-all's
+certificate, or is refused when the listener has none. An HTTP/1.1 request without a
+Host header stays a 400.
+
+`agensio ctl status` names each listener's catch-all or `null`; `sites` marks catch-all
+sites; `site-create` warns when it adds the first site to a listener without one.
+
 ## 2. Plain PHP: `app = "php"`
 
 Any `.php` file under the root runs; `index.php` or `index.html` serves directories.

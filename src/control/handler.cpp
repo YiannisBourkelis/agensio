@@ -288,8 +288,17 @@ void ControlHandler::site_create(Stream& s, const json::Value& body, std::string
         return;
     }
     audit_peer(s, what, "created " + file.string());
+    // A listener without a catch-all answers 421 to any other Host: say so once, here.
+    json::Value warnings = json::Value::array();
+    const Config& live = backend_->running();
+    for (const std::string& address : {spec.listen_plain, spec.listen_tls}) {
+        const bool used = address == spec.listen_plain ? (spec.https == "none" || spec.redirect_http) : spec.https != "none";
+        if (used && !control::listener_has_catch_all(live, address))
+            warnings.push("requests to " + address + " with a Host this site does not list answer 421 Misdirected Request "
+                          "(also by IP address); add a site with server_name = [\"*\"] on it for a catch-all");
+    }
     reply(s, 201, json::Value::object().set("ok", true).set("file", file.string()).set("spec", spec.to_json())
-                      .set("next_steps", strings(control::next_steps(spec, cfg))));
+                      .set("next_steps", strings(control::next_steps(spec, cfg))).set("warnings", std::move(warnings)));
 }
 
 void ControlHandler::site_update(Stream& s, std::string_view name, const json::Value& body, std::string_view what) {

@@ -1811,6 +1811,32 @@ static void test_server_account_and_rules() {
     CHECK(control::find_site(two, "A.TEST") == &two.sites[0]);
 }
 
+static void test_strict_hosts() {
+    // A named site answers its names only; adding sites never changes that; "*" or
+    // default = true is the only catch-all.
+    SiteConfig a; a.server_names = {"a.test"};
+    SiteConfig b; b.server_names = {"b.test", "www.b.test"};
+    SiteConfig any; any.server_names = {"*"};
+    SiteConfig def; def.server_names = {"d.test"}; def.is_default = true;
+    Router r;
+    r.add_site(a);
+    CHECK(r.site("a.test") == &a && r.site("A.TEST:8080") == &a && r.site("z.test") == nullptr && r.site("") == nullptr);
+    CHECK(r.default_site() == nullptr);
+    r.add_site(b);
+    CHECK(r.site("z.test") == nullptr && r.site("www.b.test") == &b && r.site("a.test") == &a);  // the second site changed nothing
+    r.add_site(any);
+    CHECK(r.site("z.test") == &any && r.site("") == &any && r.site("a.test") == &a && r.default_site() == &any);
+    Router r2;
+    r2.add_site(a);
+    r2.add_site(def);
+    CHECK(r2.site("z.test") == &def && r2.site("d.test") == &def && r2.default_site() == &def);
+    CHECK(control::is_catch_all(any) && control::is_catch_all(def) && !control::is_catch_all(a));
+    Config cfg;
+    a.listen = {"0.0.0.0:80"}; def.listen = {"0.0.0.0:443"};
+    cfg.sites = {a, def};
+    CHECK(!control::listener_has_catch_all(cfg, "0.0.0.0:80") && control::listener_has_catch_all(cfg, "0.0.0.0:443"));
+}
+
 int main() {
     test_path();
     test_parser();
@@ -1839,6 +1865,7 @@ int main() {
     test_control_commands();
     test_control_sites();
     test_server_account_and_rules();
+    test_strict_hosts();
 #ifdef AGENSIO_HAS_TLS
     test_acme();
 #endif

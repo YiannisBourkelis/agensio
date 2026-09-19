@@ -284,6 +284,16 @@ CertificateState certificate_state(const TlsConfig& tls, std::time_t now) {
 
 // Several sites may carry the name (the :80 redirect and the :443 site of an HTTPS-only
 // setup): the one that serves content wins, then the TLS one, then the first.
+bool is_catch_all(const SiteConfig& s) {
+    return s.is_default || std::find(s.server_names.begin(), s.server_names.end(), "*") != s.server_names.end();
+}
+
+bool listener_has_catch_all(const Config& cfg, const std::string& address) {
+    for (const auto& s : cfg.sites)
+        if (is_catch_all(s) && std::find(s.listen.begin(), s.listen.end(), address) != s.listen.end()) return true;
+    return false;
+}
+
 const SiteConfig* find_site(const Config& cfg, std::string_view name) {
     const std::string want = lower(name);
     const SiteConfig* best = nullptr;
@@ -325,6 +335,7 @@ json::Value site_summary(const SiteConfig& s, std::time_t now) {
     v.set("server_name", strings(s.server_names)).set("listen", strings(s.listen));
     v.set("root", s.root).set("app", s.app).set("user", s.user).set("group", s.group);
     if (!s.redirect.empty()) v.set("redirect", s.redirect);
+    v.set("catch_all", is_catch_all(s));
     v.set("access_log", s.access_log);
     v.set("tls", tls_json(s, now));
     return v;

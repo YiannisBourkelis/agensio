@@ -3,6 +3,7 @@
 # configuration, forwards 127.0.0.1:8093 to the benchmark upstream on 127.0.0.1:9100.
 [[site]]
 server_name = ["proxy-gate"]
+default = true   # wrk sends Host: 127.0.0.1: this site takes every name
 listen = ["127.0.0.1:8093"]
 root = "../www"
 

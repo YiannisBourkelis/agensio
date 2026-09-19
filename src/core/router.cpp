@@ -10,6 +10,11 @@ inline char lower(char c) noexcept {
 }
 }  // namespace
 
+// A site answers the names it lists. The catch-all for a listener is the site that says so
+// (`server_name = ["*"]` or `default = true`), never the first site that happened to be
+// added: until 2026-09-19 a listener with one named site served every Host, so forged
+// Host headers reached the application (the class Drupal's trusted_host_patterns and
+// Laravel's TrustedHosts exist for). Unmatched hosts get 421 from the dispatcher.
 void Router::add_site(const SiteConfig& site) {
     for (const auto& name : site.server_names) {
         if (name == "*") {
@@ -18,11 +23,11 @@ void Router::add_site(const SiteConfig& site) {
             by_name_.emplace(name, &site);
         }
     }
-    if (site.is_default || !default_site_) default_site_ = &site;
+    if (site.is_default && !default_site_) default_site_ = &site;
 }
 
 const SiteConfig* Router::site(std::string_view host) const noexcept {
-    if (host.empty() || by_name_.empty()) return default_site_;
+    if (host.empty()) return default_site_;
     // Strip the port: "example.com:8080", "[::1]:8080".
     if (host.front() == '[') {
         auto close = host.find(']');

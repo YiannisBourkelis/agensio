@@ -27,8 +27,8 @@ public:
     // the default site; failing both, the first site added is.
     void add_site(const SiteConfig& site);
 
-    // The site for a raw Host header value (may include a port); never null once a site
-    // has been added.
+    // The site for a raw Host header value (may include a port), or the catch-all, or
+    // null when the host matches nothing and the listener has no catch-all.
     const SiteConfig* site(std::string_view host) const noexcept;
 
     // The location serving `path` (normalised, starting with '/'). A site always has at
@@ -60,6 +60,8 @@ public:
         return false;
     }
 
+    // The listener's catch-all (`server_name = ["*"]` or `default = true`), or null: then a
+    // Host no site lists is answered 421 Misdirected Request.
     const SiteConfig* default_site() const noexcept { return default_site_; }
 
 private:

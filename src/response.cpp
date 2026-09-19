@@ -57,7 +57,7 @@ const std::string* status_lines() {
 }
 
 // Codes agensio answers with itself get a canned page.
-constexpr int kPageCodes[] = {301, 400, 403, 404, 405, 413, 417, 431, 500, 501, 502, 503, 504, 505};
+constexpr int kPageCodes[] = {301, 400, 403, 404, 405, 413, 417, 421, 431, 500, 501, 502, 503, 504, 505};
 
 const std::map<int, ErrorPage>& pages() {
     static const std::map<int, ErrorPage> m = [] {

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.0-alpha.7 (unreleased)
+
+**Breaking: strict host matching.** A site answers only the names in its `server_name`.
+A request with any other Host, including the server's IP address, answers `421
+Misdirected Request` unless the listener has a catch-all site (`server_name = ["*"]` or
+`default = true`). Before, the first site on a listener silently served everything. If
+your monitor checks the IP address, point it at the hostname or add a catch-all site.
+The packaged default site on port 80 is a catch-all; port 443 has none unless you add one.
+
+- TLS: each site on a listener gets its own certificate, selected by SNI (before, all
+  sites shared the first site's certificate). A name no site lists is refused at the
+  handshake; a client sending no name gets the catch-all's certificate or is refused.
+- `status` names each listener's catch-all; `sites` marks catch-all sites; `site-create`
+  warns when a listener has none.
+- A log file added by a reload received nothing (per-worker buffers); fixed.
+- `/var/lib/agensio` is 0751 so site users reach their own tmp/ and sessions/.
+- Refused endings (`deny_suffixes`) answer 404 like hidden files.
+- `agensio ctl --help`, and `--help` on every subcommand.
+
 ## 0.1.0-alpha.6 (2026-09-19)
 
 - feat: implement PHP presets as data structure and enhance application routing

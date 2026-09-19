@@ -2,6 +2,7 @@
 #pragma once
 
 #include <atomic>
+#include <map>
 #include <memory>
 #include <string>
 #include <thread>
@@ -52,7 +53,8 @@ struct Listener {
     Router router;  // site by Host, location by path
     bool tls = false;
 #ifdef AGENSIO_HAS_TLS
-    std::shared_ptr<asio::ssl::context> ssl;
+    std::shared_ptr<asio::ssl::context> ssl;  // the handshake starts here; SNI switches to the site's context
+    std::map<std::string, std::shared_ptr<asio::ssl::context>> tls_contexts;  // by certificate path
 #endif
     std::vector<std::string> site_names;  // for the startup log
 };

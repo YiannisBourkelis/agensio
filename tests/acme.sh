@@ -56,8 +56,9 @@ check "acme without email is refused" "yes" "$({ "$BIN" -t -c "$T/noemail.toml" 
 "$BIN" -c "$T/agensio.toml" > "$T/server.out" 2>&1 & SRV=$!
 for _ in $(seq 1 50); do nc -z 127.0.0.1 8449 2>/dev/null && break; sleep 0.1; done
 issuer() { echo | openssl s_client -connect 127.0.0.1:8449 -servername host.docker.internal 2>/dev/null | openssl x509 -noout -issuer 2>/dev/null; }
-check "plain site answers on the challenge port" "hello over acme" "$(curl -sS http://127.0.0.1:5002/)"
-check "an unknown token is a 404, not a hint" "404" "$(code http://127.0.0.1:5002/.well-known/acme-challenge/nothing-here)"
+check "plain site answers on the challenge port" "hello over acme" "$(curl -sS -H 'Host: host.docker.internal' http://127.0.0.1:5002/)"
+check "an unknown token is a 404, not a hint" "404" "$(code -H 'Host: host.docker.internal' http://127.0.0.1:5002/.well-known/acme-challenge/nothing-here)"
+check "a Host the listener does not serve is 421, even for a challenge path" "421" "$(code http://127.0.0.1:5002/.well-known/acme-challenge/nothing-here)"
 for _ in $(seq 1 150); do issuer | grep -q 'Pebble' && break; sleep 0.2; done
 check "the issued certificate is served within 30 s, picked up by a reload" "yes" "$(issuer | grep -q 'Pebble Intermediate' && echo yes)"
 check "reload logged after the issuance" "yes" "$(grep -q 'acme: certificate issued for host.docker.internal' "$T/logs/error.log" && grep -q 'reloaded ' "$T/logs/error.log" && echo yes)"

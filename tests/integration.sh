@@ -41,6 +41,8 @@ rm -rf bench/tmp/sites.d; mkdir -p bench/tmp/sites.d bench/tmp/sites/created.tes
 sed -i '1i include = ["sites.d/*.toml"]' bench/tmp/agensio-test.toml
 # Locations (A4) on the plain site: an SPA fallback, an aliased root, an exact match and a
 # try_files status. Inserted after the site's `default = true` line.
+mkdir -p bench/tmp/certs-b
+[ -f bench/tmp/certs-b/cert.pem ] || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout bench/tmp/certs-b/key.pem -out bench/tmp/certs-b/cert.pem -days 30 -subj "/CN=b.test" >/dev/null 2>&1
 python3 - bench/tmp/agensio-test.toml "$ROOT/bench/www" "$ROOT" <<'PY'
 import sys
 path, www, root = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -113,6 +115,7 @@ text = text.replace("[log]\n", f'[log]\nerror = "{root}/bench/tmp/error.log"\n',
 text += f"""
 [[site]]
 server_name = ["laravel.test"]
+default = true
 listen = ["127.0.0.1:8090"]
 root = "{root}/tests/laravel"
 app = "laravel"
@@ -123,6 +126,7 @@ php = {{ socket = "unix:{root}/bench/tmp/php/fpm.sock" }}
 text += f"""
 [[site]]
 server_name = ["drupal.test"]
+default = true
 listen = ["127.0.0.1:8095"]
 root = "{root}/tests/drupal"
 app = "drupal"
@@ -130,10 +134,37 @@ php = {{ socket = "unix:{root}/bench/tmp/php/fpm.sock" }}
 
 [[site]]
 server_name = ["wp.test"]
+default = true
 listen = ["127.0.0.1:8096"]
 root = "{root}/tests/wordpress"
 app = "wordpress"
 php = {{ socket = "unix:{root}/bench/tmp/php/fpm.sock" }}
+"""
+# Strict host matching (2026-09-19): a listener with a named site only, and a TLS listener
+# with two named sites and two certificates chosen by SNI (the second one made by the shell above).
+text += f"""
+[[site]]
+server_name = ["strict.test"]
+listen = ["127.0.0.1:8099"]
+root = "{root}/bench/www"
+
+[[site]]
+server_name = ["a.test"]
+listen = ["127.0.0.1:8446"]
+root = "{root}/bench/www"
+tls = {{ cert = "{root}/bench/certs/cert.pem", key = "{root}/bench/certs/key.pem" }}
+
+[[site]]
+server_name = ["b.test"]
+listen = ["127.0.0.1:8446"]
+root = "{root}/bench/www"
+tls = {{ cert = "{root}/bench/tmp/certs-b/cert.pem", key = "{root}/bench/tmp/certs-b/key.pem" }}
+
+[[site]]
+server_name = ["*"]
+listen = ["127.0.0.1:8448"]
+root = "{root}/bench/www"
+tls = {{ cert = "{root}/bench/tmp/certs-b/cert.pem", key = "{root}/bench/tmp/certs-b/key.pem" }}
 """
 # HTTPS-only sites (H3): the plain listener redirects, to the Host or to a fixed prefix.
 text += f"""
@@ -153,6 +184,7 @@ if os.path.exists(f"{root}/build/agensio_upstream"):
     text += f"""
 [[site]]
 server_name = ["proxy.test"]
+default = true
 listen = ["127.0.0.1:8091"]
 root = "{root}/bench/www"
 
@@ -271,6 +303,27 @@ for base in http://127.0.0.1:8080 https://127.0.0.1:8443; do
   check "$p keep-alive reuse"   "1 0" "$(curl -sSk -o /dev/null -o /dev/null -w '%{num_connects} ' $base/ $base/style.css | sed 's/ $//' | tr '\n' ' ' | sed 's/ $//')"
   check "$p 3 x 10MB one conn"  "$BIG $BIG $BIG" "$(curl -sSk $base/big.bin $base/big.bin $base/big.bin | (a=$(head -c 10485760 | sum); b=$(head -c 10485760 | sum); c=$(sum); echo "$a $b $c"))"
 done
+# ---- strict host matching: 421 for a Host no site lists, "*" / default = true is the only catch-all ----
+S=http://127.0.0.1:8099
+check "strict: the named site answers its own name" "200" "$(code -H 'Host: strict.test' $S/)"
+check "strict: a Host no site lists is 421 with no-store, not served" "421 no-store" "$(curl -sSi -H 'Host: evil.example.com' $S/ | tr -d '\r' | awk 'NR==1{c=$2} tolower($1)=="cache-control:"{h=$2} END{print c, h}')"
+check "strict: the IP address as Host is 421 too" "421" "$(code $S/)"
+check "strict: the 421 body is constant and says nothing about other sites" "yes" "$(a=$(curl -sS -H 'Host: x.invalid' $S/); b=$(curl -sS -H 'Host: y.invalid' $S/other); [ "$a" = "$b" ] && ! echo "$a" | grep -q 'strict\|laravel' && echo yes)"
+check "strict: HTTP/1.0 without Host on a listener without catch-all is 421, keep-alive unaffected" "421" "$(printf 'GET / HTTP/1.0\r\n\r\n' | ncq 127.0.0.1 8099 | head -1 | awk '{print $2}')"
+check "strict: HTTP/1.1 without Host stays 400" "400" "$(printf 'GET / HTTP/1.1\r\n\r\n' | ncq 127.0.0.1 8099 | head -1 | awk '{print $2}')"
+check "strict: a listener with a catch-all serves unknown Hosts as before" "200" "$(code -H 'Host: evil.example.com' http://127.0.0.1:8080/)"
+check "strict: OPTIONS * with an unknown Host is 421" "421" "$(printf 'OPTIONS * HTTP/1.1\r\nHost: nobody.invalid\r\n\r\n' | ncq 127.0.0.1 8099 | head -1 | awk '{print $2}')"
+sni() { echo | openssl s_client -connect 127.0.0.1:8446 "$@" 2>/dev/null | openssl x509 -noout -subject 2>/dev/null | sed 's/.*CN *= *//'; }
+check "sni: each site gets its own certificate" "localhost b.test" "$(sni -servername a.test) $(sni -servername b.test)"
+check "sni: a name no site lists is refused, no other site's certificate shown" "" "$(sni -servername c.test)"
+check "sni: no SNI on a listener without catch-all is refused" "" "$(sni -noservername)"
+check "sni: no SNI on a listener with a catch-all gets its certificate" "b.test" "$(echo | openssl s_client -connect 127.0.0.1:8448 -noservername 2>/dev/null | openssl x509 -noout -subject 2>/dev/null | sed 's/.*CN *= *//')"
+check "sni: the matched site serves over TLS" "200" "$(curl -sSk -o /dev/null -w '%{http_code}' --resolve b.test:8446:127.0.0.1 https://b.test:8446/)"
+check "sni: a Host that differs from the SNI name but lists a site on the listener is served" "200" "$(curl -sSk -o /dev/null -w '%{http_code}' --resolve b.test:8446:127.0.0.1 -H 'Host: a.test' https://b.test:8446/)"
+check "sni: a Host no site lists over a valid TLS connection is 421" "421" "$(curl -sSk -o /dev/null -w '%{http_code}' --resolve b.test:8446:127.0.0.1 -H 'Host: c.test' https://b.test:8446/)"
+echo "skip strict: HTTP/2 connection coalescing retry after 421 (HTTP/2 not implemented yet; a SAN certificate covering a.test and b.test with only a.test configured, curl --http2 with two --resolve entries must get 421 and succeed on a new connection)"
+check "control: status names each listener's catch-all or none" "8099=none 8080=localhost 8448=*" "$(curl -sS --unix-socket bench/tmp/control.sock http://control/v1/status | python3 -c 'import json,sys; d={l["address"]:l["catch_all"] for l in json.load(sys.stdin)["listeners"]}; print("8099=%s 8080=%s 8448=%s" % (d["127.0.0.1:8099"] or "none", d["127.0.0.1:8080"], d["127.0.0.1:8448"]))')"
+
 # ---- locations and try_files (A4) ----
 check "location: SPA fallback serves the app shell for a missing path" "app shell" "$(curl -sS http://127.0.0.1:8080/app/some/route | sed 's/<[^>]*>//g')"
 check "location: SPA fallback for the directory URI" "app shell" "$(curl -sS http://127.0.0.1:8080/app/ | sed 's/<[^>]*>//g')"
@@ -406,11 +459,12 @@ check "control: site-create asks for the open decisions" "422 https root app use
 check "control: site-create refuses a bad domain" "400" "$(cpost /v1/sites '{"domain":"Bad_Host","confirm":true}')"
 check "control: site-create names the root work still missing" "409 yes" "$(cpost /v1/sites "{\"domain\":\"created.test\",\"https\":\"none\",\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/bench/tmp/sites/nothere/web\",\"confirm\":true}") $(grep -q '"run_as_root":\["mkdir -p' bench/tmp/ctl-reply.json && echo yes)"
 check "control: site-create writes the file, reloads, the site answers" "201 created" "$(cpost /v1/sites "{\"domain\":\"created.test\",\"aliases\":[\"www.created.test\"],\"https\":\"none\",\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/bench/tmp/sites/created.test/web\",\"listen_plain\":\"127.0.0.1:8094\",\"confirm\":true,\"reason\":\"test\"}") $(curl -sS -H 'Host: www.created.test' http://127.0.0.1:8094/)"
+check "control: site-create warns that the new listener has no catch-all" "yes" "$(grep -q '"warnings":\["requests to 127.0.0.1:8094 with a Host this site does not list answer 421' bench/tmp/ctl-reply.json && echo yes)"
 check "control: the managed file carries its spec and is listed by sites" "yes yes" "$(head -1 bench/tmp/sites.d/created.test.toml | grep -q '^# agensio:managed {"domain":"created.test"' && echo yes) $(curl -sS --unix-socket $CS http://control/v1/sites | grep -q '"server_name":\["created.test","www.created.test"\]' && echo yes)"
 check "control: site-update adds an alias without re-asking decided fields" "200 created" "$(cpost /v1/sites/created.test '{"aliases":["www.created.test","m.created.test"],"confirm":true}') $(curl -sS -H 'Host: m.created.test' http://127.0.0.1:8094/)"
 check "control: a hand-written site cannot be updated" "409" "$(cpost /v1/sites/laravel.test '{"aliases":["x.test"],"confirm":true}')"
 check "control: site-disable stops serving, keeps the file" "200 000 yes" "$(cpost /v1/sites/created.test/disable '{"confirm":true}') $(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:8094/ 2>/dev/null) $([ -f bench/tmp/sites.d/created.test.toml.disabled ] && echo yes)"
-check "control: site-enable brings it back" "200 created" "$(cpost /v1/sites/created.test/enable '{"confirm":true}') $(curl -sS http://127.0.0.1:8094/)"
+check "control: site-enable brings it back" "200 created" "$(cpost /v1/sites/created.test/enable '{"confirm":true}') $(curl -sS -H 'Host: created.test' http://127.0.0.1:8094/)"
 check "control: cert-renew on a site without automatic TLS is refused" "409" "$(cpost /v1/sites/created.test/renew '{"confirm":true}')"
 check "control: site-delete keeps a .bak and reloads" "200 yes 000" "$(cpost /v1/sites/created.test/delete '{"confirm":true}') $([ -f bench/tmp/sites.d/created.test.toml.bak ] && [ ! -f bench/tmp/sites.d/created.test.toml ] && echo yes) $(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:8094/ 2>/dev/null)"
 printf '[[site]\n' > bench/tmp/sites.d/broken.toml

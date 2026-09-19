@@ -25,5 +25,6 @@ default = true
 [[site]]
 server_name = ["localhost", "127.0.0.1"]
 listen = ["127.0.0.1:8443"]
+default = true   # the benchmark clients send no SNI for an IP address: this site takes every name
 root = "@BENCH@/www"
 tls = { cert = "@BENCH@/certs/cert.pem", key = "@BENCH@/certs/key.pem" }

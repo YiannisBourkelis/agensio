@@ -691,6 +691,21 @@ Rules:
       JSON when a change lacks `--yes`. Not bugs: the WordPress preset already runs every
       `.php` (fixtures now list seven real entry points); the Drupal preset already exists
       (`site-update NAME --app drupal`).
+- [x] H2e (2026-09-19, fourth live report) **Strict host matching and SNI.** A listener's
+      first site had been its implicit catch-all, so a named site served every Host
+      (forged Host headers reached the application). Now only `server_name = ["*"]` or
+      `default = true` is a catch-all; a Host no site lists answers 421 Misdirected
+      Request (`Cache-Control: no-store`, constant body) on HTTP/1.1 already, so nothing
+      changes when HTTP/2 coalesces connections. Found on the way, and bigger: a TLS
+      listener had one OpenSSL context built from its first site and no SNI callback, so
+      two HTTPS sites on one address shared the first one's certificate. Each certificate
+      now has its own context on the listener and an SNI callback selects the site's;
+      a name no site lists is refused with `unrecognized_name`, no SNI gets the
+      catch-all's certificate or a refusal. Catch-all visible in `status` and `sites`,
+      `site-create` warns when a listener has none. **Breaking**: a single named site no
+      longer answers by IP address; the changelog says so. Integration: 15 checks
+      (strict listener, two-certificate listener, 8443 catch-all), unit test locks the
+      router rule; the HTTP/2 coalescing retry is written as a skipped check.
 - [ ] H1b Certificates watched and reloaded when the files change (manual `tls = { cert,
       key }` sites; automatic ones already reload themselves); reload must not stall new
       QUIC connections (nginx's known weakness).

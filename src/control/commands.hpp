@@ -60,6 +60,9 @@ CertificateState certificate_state(const TlsConfig& tls, std::time_t now);
 json::Value sites(const Config& cfg, std::time_t now);
 // The site whose server_name list contains `name` (case-insensitive), or null.
 const SiteConfig* find_site(const Config& cfg, std::string_view name);
+// `server_name = ["*"]` or `default = true`: answers every Host on its listener.
+bool is_catch_all(const SiteConfig& s);
+bool listener_has_catch_all(const Config& cfg, const std::string& address);
 json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now);
 
 // ---- validation and health ----

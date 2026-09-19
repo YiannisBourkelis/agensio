@@ -62,6 +62,13 @@ checklists to apply when writing, measuring and reviewing.
   with machine, OS, date, commit hash and the exact command.
 - Commit only when asked. Commit messages end with the attribution line the harness
   provides.
+- **The agent interface is part of every change.** Whenever behaviour, a configuration
+  key, a control command, a preset or an error answer is added, fixed or changed, check
+  whether the MCP tool descriptions, argument descriptions, server instructions and
+  prompts in `src/control/mcp.cpp` still describe the truth, and update them in the same
+  change; the JSON the tools relay is not enough, the agent acts on the text. The same
+  applies to `agensio ctl` help text and `docs/mcp.md`. Lists that come from tables
+  (`app_presets()`) need no edit; prose does.
 
 ## Dependencies
 
