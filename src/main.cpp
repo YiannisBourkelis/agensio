@@ -102,7 +102,7 @@ int main(int argc, char** argv) {
         else if (a == "ctl" && i == 1) {
             auto ctl_usage = [] {
                 std::cout << "usage: agensio ctl <command> [options] [--socket PATH] [-c config.toml]\n"
-                             "read:   status | sites | site NAME | validate | health |\n"
+                             "read:   status | sites | site NAME | validate | health | presets |\n"
                              "        logs [--site NAME] [--since 3h] [--level error|warn|info] [--status 5xx|4xx|all] [--limit N]\n"
                              "change (each needs --yes, takes --reason TEXT):\n"
                              "        reload | logs-reopen | site-disable NAME | site-enable NAME | site-delete NAME | cert-renew NAME\n"
@@ -167,7 +167,7 @@ int main(int argc, char** argv) {
             if (!aliases.items().empty()) body.set("aliases", aliases);
             std::string path, method = "GET";
             const bool mutation = command == "reload" || command == "logs-reopen" || command.starts_with("site-") || command == "cert-renew";
-            if (command == "status" || command == "sites" || command == "health") path = "/v1/" + command;
+            if (command == "status" || command == "sites" || command == "health" || command == "presets") path = "/v1/" + command;
             else if (command == "site" && !site_name.empty()) path = "/v1/sites/" + site_name;
             else if (command == "validate") path = "/v1/config/validate";
             else if (command == "logs") path = "/v1/logs" + query;

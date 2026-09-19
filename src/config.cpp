@@ -520,6 +520,7 @@ struct Shield {
 
 struct PhpPreset {
     const char* name;
+    const char* summary;        // one sentence for the catalogue (`agensio ctl presets`, the MCP tool)
     const char* subdir;         // served below the given root ("public", "web"), "" = the root itself
     bool subdir_required;       // the subdirectory must exist (Laravel); else used only when it holds index.php
     std::vector<std::string> index;
@@ -538,14 +539,17 @@ const std::vector<std::string> kDrupalSource = {".inc", ".install", ".module", "
 
 const std::vector<PhpPreset> kPhpPresets = {
     // Plain PHP: any script runs, missing paths are 404, no front controller.
-    {"php", "", false, {"index.php", "index.html"}, false, true, {}, {}, {}},
+    {"php", "Plain PHP: every .php under the root runs, missing paths are 404, no front controller.",
+     "", false, {"index.php", "index.html"}, false, true, {}, {}, {}},
     // Laravel (and Statamic): one entry point; any other .php is refused, never served as
     // source (2026-09-19); Vite's hashed build output cached for a year.
-    {"laravel", "public", true, {"index.php"}, true, false, {},
+    {"laravel", "Laravel and Statamic: the project directory is given, its public/ is served; only index.php ever runs, any other .php is refused; Vite's build/ is cached for a year.",
+     "public", true, {"index.php"}, true, false, {},
      {{"/build/", "public, max-age=31536000, immutable"}}, {}},
     // Drupal: many entry points (index.php, core/install.php, update.php); what its
     // .htaccess protects is refused natively, since .htaccess is never read.
-    {"drupal", "web", false, {"index.php"}, true, true, kDrupalSource,
+    {"drupal", "Drupal (and other PHP applications with several entry points): the project directory is given, its web/ is served when present; any .php runs, missing paths reach index.php, and what Drupal's .htaccess protects is refused natively.",
+     "web", false, {"index.php"}, true, true, kDrupalSource,
      {{"/core/lib/", nullptr}, {"/core/includes/", nullptr}, {"/vendor/", nullptr}, {"/node_modules/", nullptr},
       {"/sites/default/files/", nullptr}},
      {"/sites/default/settings.php", "/sites/default/settings.local.php", "/sites/default/default.settings.php",
@@ -555,7 +559,8 @@ const std::vector<PhpPreset> kPhpPresets = {
     // pretty permalinks fall back to index.php, nothing under uploads or wp-includes is
     // ever executed and their files are cacheable (modestly: WordPress versions assets by
     // query string). The credentials file is never an entry point.
-    {"wordpress", "", false, {"index.php"}, true, true, {},
+    {"wordpress", "WordPress: any .php runs, pretty permalinks reach index.php, nothing under wp-content/uploads or wp-includes ever executes, wp-config.php is never answered.",
+     "", false, {"index.php"}, true, true, {},
      {{"/wp-content/uploads/", "public, max-age=604800"}, {"/wp-includes/", "public, max-age=2592000"}},
      {"/wp-config.php", "/wp-config-sample.php"}},
 };
@@ -1304,6 +1309,33 @@ Config load_config(const fs::path& path) {
         fail("control must be a table: [control] with socket, admins, operators, viewers, audit");
     }
     return cfg;
+}
+
+json::Value preset_catalog() {
+    json::Value list = json::Value::array();
+    list.push(json::Value::object().set("app", "static").set("summary", "Static files only: the root's files with the site's index, try_files and caching; no PHP.")
+                  .set("root", "the document root").set("php", "none"));
+    for (const auto& p : kPhpPresets) {
+        json::Value v = json::Value::object().set("app", p.name).set("summary", p.summary);
+        v.set("root", *p.subdir ? std::string("the project directory; its ") + p.subdir + "/ is served" + (p.subdir_required ? "" : " when it holds index.php")
+                                 : std::string("the document root"));
+        v.set("php", p.any_php ? "every .php runs through FastCGI" : "only /index.php runs; any other .php is refused (404)");
+        v.set("front_controller", p.front_controller);
+        json::Value refused = json::Value::array();
+        for (const auto& s : p.refuse) refused.push(s);
+        v.set("refused_suffixes", std::move(refused));
+        json::Value shields = json::Value::array();
+        for (const auto& sh : p.shields) shields.push(sh.path);
+        v.set("no_php_under", std::move(shields));
+        json::Value never = json::Value::array();
+        for (const char* n : p.never) never.push(n);
+        v.set("never_served", std::move(never));
+        list.push(std::move(v));
+    }
+    list.push(json::Value::object().set("app", "proxy").set("summary", "Reverse proxy: every request goes to the site's upstream (Node, Rails, Go, Java, WebSockets); no root needed.")
+                  .set("root", "none").set("php", "none"));
+    return json::Value::object().set("presets", std::move(list))
+        .set("note", "agensio never reads .htaccess; a preset provides the refusals an application's .htaccess would. Hand-written [[site.location]] entries win over a preset's.");
 }
 
 std::vector<std::string> app_presets() {

@@ -1660,6 +1660,11 @@ static void test_control_sites() {
     CHECK(err.empty() && needs.empty() && spec.user == "shop" && spec.app == "laravel");
     CHECK(json::parse(R"({"app":"weird"})", body, err) && (apply_request(body, cfg, spec, err), err.find("app must be one of: static, php, laravel, drupal, wordpress, proxy") != std::string::npos));
     CHECK(app_presets().size() == 6 && app_presets().front() == "static" && app_presets().back() == "proxy");
+    const json::Value catalog = preset_catalog();
+    CHECK(catalog["presets"].items().size() == 6 && catalog["presets"].items()[0].get("app") == "static" && catalog["presets"].items()[5].get("app") == "proxy");
+    const json::Value& laravel_row = catalog["presets"].items()[2];
+    CHECK(laravel_row.get("app") == "laravel" && !laravel_row.get("summary").empty() && laravel_row.get("php").starts_with("only /index.php"));
+    CHECK(catalog["presets"].items()[3]["never_served"].items().size() == 9 && catalog["presets"].items()[3]["no_php_under"].items().size() == 5);
     err.clear();
     CHECK(json::parse(R"({"aliases":["bad host"]})", body, err) && (apply_request(body, cfg, spec, err), err.find("alias") != std::string::npos));
     err.clear();

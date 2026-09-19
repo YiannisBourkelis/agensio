@@ -69,6 +69,7 @@ takes `--socket PATH`.
 | `server_status` | viewer | version, pid, uptime, workers, connections, listeners, sites, the caller's role |
 | `sites_list`, `site_show` | viewer | sites with their certificate state; one site with its effective locations |
 | `config_validate` | viewer | the file on disk: errors and restart-only differences |
+| `presets_list` | viewer | what each `app` value does: served root, which `.php` runs, refusals; from the preset table, so a new preset appears at once |
 | `logs_query` | viewer | recent error-log and access-log lines, filtered by site, time, level and status |
 | `reload`, `logs_reopen` | operator | reload without dropping connections; reopen logs after rotation |
 | `cert_renew` | operator | order an automatic certificate again now |

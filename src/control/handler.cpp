@@ -98,7 +98,8 @@ void ControlHandler::handle(Stream& s, WorkerState& ws) {
     }
     // The read commands (F2): every one is a GET, every one needs the viewer role.
     const bool read_command = path == "/v1/status" || path == "/v1/sites" || path.starts_with("/v1/sites/") ||
-                              path == "/v1/config/validate" || path == "/v1/logs" || path == "/v1/health";
+                              path == "/v1/config/validate" || path == "/v1/logs" || path == "/v1/health" ||
+                              path == "/v1/presets";
     if (!read_command) {
         reply(s, 404, json::Value::object().set("error", "unknown command").set("path", std::string(path)));
         return;
@@ -131,6 +132,8 @@ void ControlHandler::handle(Stream& s, WorkerState& ws) {
         reply(s, 200, backend_->validate());
     } else if (path == "/v1/logs") {
         reply(s, 200, backend_->logs(req.target));
+    } else if (path == "/v1/presets") {
+        reply(s, 200, preset_catalog());
     } else {
         reply(s, 200, backend_->health());
     }
@@ -179,7 +182,7 @@ void ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path) {
             name = name.substr(0, slash);
         }
     }
-    if (path == "/v1/status" || path == "/v1/config/validate" || path == "/v1/logs" || path == "/v1/health") {
+    if (path == "/v1/status" || path == "/v1/config/validate" || path == "/v1/logs" || path == "/v1/health" || path == "/v1/presets") {
         s.response.headers.add("Allow", "GET, HEAD");
         reply(s, 405, json::Value::object().set("error", "method not allowed"));
         return;

@@ -449,6 +449,7 @@ check "control: unknown site is a 404" "404" "$(curl -sS -o /dev/null -w '%{http
 check "control: validate reads the file on disk" "yes" "$(curl -sS --unix-socket $CS http://control/v1/config/validate | grep -q '"ok":true' && echo yes)"
 curl -sS -o /dev/null http://127.0.0.1:8080/control-probe-404 >/dev/null; sleep 1.2
 check "control: logs finds the 404 just made" "yes" "$(curl -sS --unix-socket $CS 'http://control/v1/logs?since=1m&status=4xx' | grep -q 'control-probe-404' && echo yes)"
+check "control: presets catalogue comes from the preset table" "6 drupal yes" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; d=json.load(sys.stdin); p={x["app"]:x for x in d["presets"]}; print(len(p), "drupal" if "drupal" in p else "-", "yes" if "web/" in p["drupal"]["root"] and "/core/lib/" in p["drupal"]["no_php_under"] and p["laravel"]["php"].startswith("only /index.php") else "no")')"
 check "control: health answers with findings" "yes" "$(curl -sS --unix-socket $CS http://control/v1/health | grep -q '"findings":\[' && echo yes)"
 check "control: ctl logs and health through the client" "0 0" "$("$BIN" ctl logs --since 5m --status all --socket $CS > /dev/null; echo -n "$? "; "$BIN" ctl health --socket $CS > /dev/null; echo $?)"
 # Mutations (F3): confirm required, the decision form, create, update, disable, enable, delete, reload.
@@ -510,7 +511,7 @@ p.stdin.close(); p.wait()
 print(" ".join(out))
 PYT
 )
-check "mcp: initialize, tool list with annotations, calls, confirm, decisions, prompts" "agensio 14 True laravel 428 reloaded https,root,app,user -32601 2" "$mcp"
+check "mcp: initialize, tool list with annotations, calls, confirm, decisions, prompts" "agensio 15 True laravel 428 reloaded https,root,app,user -32601 2" "$mcp"
 check "mcp: the reload through the bridge is in the audit log" "yes" "$(grep -q 'reload (mcp): ok' bench/tmp/audit.log && echo yes)"
 if ssh -o BatchMode=yes -o ConnectTimeout=2 localhost true >/dev/null 2>&1; then
   check "mcp: over ssh localhost" "agensio" "$(printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n' | ssh -o BatchMode=yes localhost "$BIN" mcp --socket "$ROOT/bench/tmp/control.sock" | python3 -c 'import json,sys; print(json.loads(sys.stdin.readline())["result"]["serverInfo"]["name"])')"

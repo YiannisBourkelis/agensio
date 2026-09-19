@@ -12,6 +12,7 @@
 
 #include "core/request.hpp"
 #include "net/cidr.hpp"
+#include "services/json.hpp"
 #include "upstream/options.hpp"
 
 namespace agensio {
@@ -209,6 +210,9 @@ SiteConfig control_site();
 // Every value `app = "..."` accepts: "static", the PHP presets in table order, "proxy".
 // The control API and the MCP tool schema list these, so a new preset row is exposed at once.
 std::vector<std::string> app_presets();
+// What each `app` value does, for `agensio ctl presets` and the MCP tool: served root,
+// which .php runs, front controller, refused suffixes, shielded directories, files never served.
+json::Value preset_catalog();
 
 // Prints the effective configuration after presets, one TOML-like block per site and
 // location, so nothing a preset did is hidden (`agensio -t --explain`).
