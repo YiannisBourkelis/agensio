@@ -66,7 +66,7 @@ if ! grep -q "^## $version " CHANGELOG.md; then
         if [[ ! "$answer" =~ ^[Nn] ]]; then
             { printf '# Changelog\n\n## %s (%s)\n\n%s\n\n' "$version" "$today" "$draft"; tail -n +2 CHANGELOG.md | sed '1{/^$/d}'; } > CHANGELOG.md.new
             mv CHANGELOG.md.new CHANGELOG.md
-            say "inserted; edit the wording, commit, and run $0 $version again"
+            say "inserted; edit the wording (no commit needed, it goes into the release commit) and run $0 $version again"
             exit 1
         fi
     fi
@@ -81,14 +81,18 @@ if [ -n "$pre" ]; then rpm_release="0.1.$pre"; else rpm_release="1"; fi
 say "  packaging/rpm/agensio.spec  upstream_version -> $version, Version -> $base, Release -> $rpm_release, changelog entry"
 say "  CHANGELOG.md             date of the $version section -> $today"
 say "  git: commit 'Release $tag', annotated tag $tag$([ $push = 1 ] && echo ', push main and the tag')"
+# The release commit carries the version bump and the changelog: an edited CHANGELOG.md
+# may be pending, nothing else.
+pending=$(git status --porcelain | grep -v ' CHANGELOG.md$' || true)
 if [ $dry = 1 ]; then
-    [ -z "$(git status --porcelain)" ] || say "note: the tree is not clean; commit before the real run"
+    [ -z "$pending" ] || say "note: the tree has other changes; commit them before the real run"
     say "dry run: nothing changed"
     exit 0
 fi
 
-# 3. The tree must be committed: the release commit carries only the version bump.
-[ -z "$(git status --porcelain)" ] || fail "commit or stash your changes first (git status is not clean)"
+# 3. Only the changelog may be uncommitted.
+[ -z "$pending" ] || fail "commit or stash your other changes first:
+$pending"
 git rev-parse -q --verify "refs/tags/$tag" >/dev/null && fail "tag $tag already exists"
 [ "$(git rev-parse --abbrev-ref HEAD)" = main ] || fail "release from main (you are on $(git rev-parse --abbrev-ref HEAD))"
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.0-alpha.4 (2026-09-19)
+
+- feat: enhance release workflow to upload RPM artifacts and add Fedora smoke tests
+
 ## 0.1.0-alpha.3 (2026-09-19)
 
 - fix: update release workflow to use secrets for APT GPG key and enhance Arch package build process
