@@ -334,7 +334,8 @@ agensio generates. Nothing else is needed:
 
 ```toml
 [server]
-group = "agensio"            # the group agensio runs as; the pool socket grants it access
+user = "agensio"             # the account the server serves as; its group reads the sites and the pool sockets
+# group = "agensio"          # default: the user's primary group
 # pools = "/etc/php/8.3/fpm/pool.d"   # where `agensio pools` writes (default: detected)
 # pools_run = "/run/php"              # where generated pools listen (default: per distro)
 # state_dir = "/var/lib/agensio"      # per-user tmp and session directories
@@ -389,16 +390,25 @@ its owner and mode, and what was expected:
 - the user or group does not exist;
 - the root or an `open_basedir` entry is not owned by the user (or root), or is writable
   by other users;
+- the root (or the project above a Laravel `public/`) cannot be read by the server's
+  account: the fix it prints is `chown <user>:<server group> ROOT && chmod 2750 ROOT`,
+  the layout `site-create` prescribes;
 - a secret is readable by other users: `.env`, `config/`, `storage/` and `.git` for
   Laravel (in the project directory), `wp-config.php` for WordPress, `.env` and `.git`
   under the root otherwise (make them `0640 user:group`);
-- the pool socket is not owned by the user, not in agensio's group, or has mode bits for
-  others; or its directory is world-writable;
+- the pool socket is not owned by the user, not in the server's group (owner = site user,
+  group = server group, `0660`: the server connects through the group bit, nobody else
+  can), or has mode bits for others; or its directory is world-writable;
 - the access log is readable by other users, or its directory is writable by them;
 - two sites with different users share a root (or nest one inside the other), an access
   log or a state directory.
 
 Sites without `user` are not checked, so a single-tenant machine changes nothing.
+
+One rule set answers `agensio -t`, the server's own start, every reload and site change
+through the control socket, and the health check: a configuration that reloads is one
+that boots. The server's group in those rules is `server.group`, else the primary group
+of `server.user`, never the group of whoever runs the check.
 
 **Starting as root.** With `user` set on sites you normally want privileged ports and
 per-site logs too:

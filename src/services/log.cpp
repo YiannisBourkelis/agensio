@@ -27,7 +27,7 @@ int sys_open_append(const char* path) noexcept {
     _sopen_s(&fd, path, AGENSIO_OPEN_FLAGS, _SH_DENYNO, _S_IREAD | _S_IWRITE);
     return fd;
 #else
-    return ::open(path, AGENSIO_OPEN_FLAGS, 0644);
+    return ::open(path, AGENSIO_OPEN_FLAGS, 0640);  // logs are the server's and a site group's to read, nobody else's
 #endif
 }
 

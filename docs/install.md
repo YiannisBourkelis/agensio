@@ -105,13 +105,19 @@ system user per customer (or per site), agensio in the customer's group only whe
 needs to write.
 
 ```
-/var/www/example.com/
-├── web/          site user, 0750   the document root (`root`), or the project with public/ for Laravel
-├── log/          agensio:client8 0750   access.log, error.log for this site (agensio writes, customer reads)
-├── private/      site user, 0700   files the site reads but never serves (.env can live here, uploads to review)
-├── tmp/          site user, 0700   optional; the generated pool uses /var/lib/agensio/<user>/tmp by default
-└── ssl/          root 0700         only for certificates you manage yourself; automatic ones stay in /var/lib/agensio/acme
+/var/www/example.com/          web35:agensio 2750   the site user owns it, the server reads it through its group
+├── web/          web35:agensio 2750   the document root (`root`), or the project with public/ for Laravel;
+│                                      the setgid bit makes files PHP creates inherit the group
+├── log/          agensio:client8 0750  access.log for this site (agensio writes, customer reads)
+├── private/      web35:web35 0700     files the site reads but never serves (.env can live here, uploads to review)
+└── ssl/          root 0700            only for certificates you manage yourself; automatic ones stay in /var/lib/agensio/acme
 ```
+
+The account's home is its state directory, `/var/lib/agensio/web35` (created by
+`agensio pools`, holding the private `tmp/` and `sessions/`), never the document root:
+`useradd --system --no-create-home --home-dir /var/lib/agensio/web35 --shell /usr/sbin/nologin web35`.
+`agensio ctl site-create` prints exactly these commands when the account or the
+directories are missing.
 
 The matching site file, `/etc/agensio/sites.d/example.com.toml`:
 

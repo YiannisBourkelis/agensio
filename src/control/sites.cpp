@@ -59,6 +59,7 @@ json::Value SiteSpec::to_json() const {
     if (!php_socket.empty()) v.set("php_socket", php_socket);
     if (php_children) v.set("php_children", php_children);
     if (!php_version.empty()) v.set("php_version", php_version);
+    if (!access_log.empty()) v.set("access_log", access_log);
     v.set("listen_plain", listen_plain).set("listen_tls", listen_tls);
     return v;
 }
@@ -82,6 +83,7 @@ bool SiteSpec::from_json(const json::Value& v, SiteSpec& out) {
     out.php_socket = v.get("php_socket");
     out.php_children = static_cast<int>(v["php_children"].num());
     out.php_version = v.get("php_version");
+    out.access_log = v.get("access_log");
     if (has_key(v, "listen_plain")) out.listen_plain = v.get("listen_plain");
     if (has_key(v, "listen_tls")) out.listen_tls = v.get("listen_tls");
     return true;
@@ -157,6 +159,7 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
     if (has_key(body, "php_socket")) spec.php_socket = body.get("php_socket");
     if (has_key(body, "php_children")) spec.php_children = static_cast<int>(body["php_children"].num());
     if (has_key(body, "php_version")) spec.php_version = body.get("php_version");
+    if (has_key(body, "access_log")) spec.access_log = body.get("access_log");
     if (has_key(body, "listen_plain")) spec.listen_plain = body.get("listen_plain");
     if (has_key(body, "listen_tls")) spec.listen_tls = body.get("listen_tls");
     // "user": absent = undecided; null or "" = deliberately none.
@@ -167,6 +170,13 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
                 spec.user = m.second.is_string() ? m.second.str() : std::string();
             }
     const bool user_decided = spec.user_decided || !spec.user.empty();
+    // A site with its own user gets its own access log next to the server's: sites of
+    // different users never share a log (rule 5), and the file is made theirs to read.
+    if (!spec.user.empty() && spec.access_log.empty()) {
+        const fs::path base = (cfg.log.access.empty() || cfg.log.access == "off") ? fs::path("/var/log/agensio")
+                                                                                     : fs::path(cfg.log.access).parent_path();
+        spec.access_log = (base / "sites" / (spec.domain + ".log")).string();
+    }
 
     if (spec.https != "auto" && spec.https != "none" && spec.https != "manual") {
         Decision d{"https", "Should the site be served over HTTPS?", "", {"auto", "none", "{\"cert\": ..., \"key\": ...}"}};
@@ -222,6 +232,7 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
         }
         if (!spec.user.empty()) s += "user = " + toml_string(spec.user) + "\n";
         if (!spec.group.empty()) s += "group = " + toml_string(spec.group) + "\n";
+        if (!spec.user.empty() && !spec.access_log.empty()) s += "access_log = " + toml_string(spec.access_log) + "\n";
         const bool php = spec.app == "php" || spec.app == "laravel" || spec.app == "wordpress";
         if (php) {
             if (!spec.php_socket.empty()) s += "php = { socket = " + toml_string(spec.php_socket) + " }\n";
@@ -298,23 +309,48 @@ bool write_site_file(const fs::path& file, const std::string& text, std::string&
     return true;
 }
 
+// The layout the hosting rules accept and the server can serve: the site's directories are
+// owned by the site user with the server's group and 2750, so the server reads through the
+// group bit and files PHP creates inherit the group; the account's home is its state
+// directory, never the document root (useradd would fill it with dotfiles).
 std::vector<std::string> prerequisites(const SiteSpec& spec, const Config& cfg) {
     std::vector<std::string> cmds;
     const HostFacts facts = system_facts();
+    const ServerAccount server = server_account(cfg, facts);
+    const std::string server_group = server.known ? server.group : (cfg.group.empty() ? cfg.user : cfg.group);
     unsigned uid = 0, gid = 0;
     const bool have_user = !spec.user.empty() && facts.user(spec.user, uid, gid);
     if (!spec.user.empty() && !have_user)
-        cmds.push_back("useradd --system --create-home --home-dir /var/www/" + spec.domain + " --shell /usr/sbin/nologin " +
-                       spec.user);
+        cmds.push_back("useradd --system --no-create-home --home-dir " + cfg.state_dir + "/" + spec.user +
+                       " --shell /usr/sbin/nologin " + spec.user);
     if (!spec.group.empty()) {
         unsigned g = 0;
         if (!facts.group(spec.group, g)) cmds.push_back("groupadd " + spec.group + " && usermod -g " + spec.group + " " + spec.user);
     }
     std::error_code ec;
-    const std::string owner = spec.user.empty() ? (cfg.user.empty() ? "root" : cfg.user) : spec.user;
-    if (!spec.root.empty() && !fs::is_directory(spec.root, ec))
-        cmds.push_back("mkdir -p " + spec.root + " && chown -R " + owner + ":" + (spec.group.empty() ? owner : spec.group) + " " +
-                       spec.root + " && chmod 750 " + spec.root);
+    if (!spec.root.empty()) {
+        const std::string owner = spec.user.empty() ? (cfg.user.empty() ? "root" : cfg.user) : spec.user;
+        const std::string group = spec.user.empty() ? server_group : server_group;
+        FileFacts f;
+        const bool exists = facts.stat(spec.root, f) && f.is_dir;
+        bool readable = true;
+        if (exists && server.uid != 0) {
+            readable = f.uid == server.uid ? (f.mode & 0500) == 0500
+                       : (server.known && f.gid == server.gid) ? (f.mode & 0050) == 0050
+                                                                  : (f.mode & 0005) == 0005;
+        }
+        // The site's top directory (the domain directory when root is below it) gets the layout too.
+        std::string top = spec.root;
+        const std::string base = (cfg.control.sites_root.empty() ? std::string("/var/www") : cfg.control.sites_root) + "/" + spec.domain;
+        if (spec.root.starts_with(base + "/") || spec.root == base) top = base;
+        // Directories only: files keep their owner and group, so a secret such as .env stays
+        // the user's (0640 user:user) and is never readable by the server.
+        const std::string layout = "find " + top + " -type d -exec chown " + owner + ":" + group + " {} + -exec chmod 2750 {} +";
+        if (!exists)
+            cmds.push_back("mkdir -p " + spec.root + " && chown " + owner + ":" + group + " " + top + " && " + layout);
+        else if (!readable || (!spec.user.empty() && (f.uid != uid || !(server.known && f.gid == server.gid))))
+            cmds.push_back(layout + "   # the server reads the site's directories through its group");
+    }
     if (spec.https == "manual") {
         if (!fs::is_regular_file(spec.cert, ec)) cmds.push_back("# put the certificate chain at " + spec.cert);
         if (!fs::is_regular_file(spec.key, ec)) cmds.push_back("# put the private key at " + spec.key + " (mode 0600)");
@@ -322,11 +358,25 @@ std::vector<std::string> prerequisites(const SiteSpec& spec, const Config& cfg) 
     return cmds;
 }
 
+// The php-fpm unit that reads the pool directory `agensio pools` writes into: Debian's
+// php8.4-fpm, RHEL's php-fpm, brew's php service.
+std::string php_fpm_reload_command(const Config& cfg, const std::string& version) {
+    const fs::path dir = pools_dir(cfg, version);
+    const std::string d = dir.string();
+    if (d.empty()) return "systemctl reload php-fpm   # (pool directory not found: set server.pools)";
+    if (d.starts_with("/etc/php/")) {  // /etc/php/8.4/fpm/pool.d
+        const std::string v = d.substr(9, d.find('/', 9) - 9);
+        return "systemctl reload php" + v + "-fpm";
+    }
+    if (d.starts_with("/opt/homebrew/") || d.starts_with("/usr/local/")) return "brew services restart php";
+    return "systemctl reload php-fpm";
+}
+
 std::vector<std::string> next_steps(const SiteSpec& spec, const Config& cfg) {
     std::vector<std::string> cmds;
     const bool php = spec.app == "php" || spec.app == "laravel" || spec.app == "wordpress";
     if (php && !spec.user.empty() && spec.php_socket.empty())
-        cmds.push_back("agensio pools && systemctl reload php" + (spec.php_version.empty() ? std::string("*") : spec.php_version) + "-fpm");
+        cmds.push_back("agensio pools && " + php_fpm_reload_command(cfg, spec.php_version));
     if (spec.https == "auto") cmds.push_back("# make sure " + spec.domain + " resolves to this server and port 80 is reachable; the certificate follows within a minute");
     (void)cfg;
     return cmds;

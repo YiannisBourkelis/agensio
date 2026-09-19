@@ -49,8 +49,23 @@ struct HostFacts {
     std::function<bool(const std::string& path, FileFacts& out)> stat;   // false: does not exist
     std::function<bool(const std::string& name, unsigned& uid, unsigned& gid)> user;  // gid: primary group
     std::function<bool(const std::string& name, unsigned& gid)> group;
+    std::function<std::string(unsigned gid)> group_name;  // "" when unknown
 };
 HostFacts system_facts();
+
+// The account and group the server serves as, the one input every rule shares: `server.user`
+// / `server.group` when set, else the primary group of `server.user`, else the process's
+// own. Computed here and nowhere else, so `-t` run as root, the running server after its
+// privilege drop, `agensio pools` and the health check all agree (2026-09-19: they did not,
+// and no socket ownership satisfied all of them).
+struct ServerAccount {
+    std::string user;   // "" when server.user is not set (the process's own account)
+    std::string group;
+    unsigned uid = 0;
+    unsigned gid = 0;
+    bool known = false;  // the group resolved
+};
+ServerAccount server_account(const Config& cfg, const HostFacts& facts);
 
 // The rules of docs/design-per-site-users.md for every site with `user`: accounts exist;
 // roots and open_basedir entries owned by the user (or root) and not writable by others;

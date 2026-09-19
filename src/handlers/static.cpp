@@ -328,6 +328,12 @@ StaticHandler::Lookup StaticHandler::try_files_lookup(Stream& s, const LocationC
 
 StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationConfig& loc, WorkerState& ws) {
     const Request& req = s.request;
+    // A site without a document root (redirect, proxy) has nothing to serve here; never
+    // fall back to the filesystem root or the configuration directory.
+    if (loc.root.empty() && loc.alias.empty()) {
+        error(s, 404, req.keep_alive);
+        return Outcome::done;
+    }
     // Dotfiles and dot-directories (.env, .git, .htaccess) are never served unless the
     // location opts in. 404 rather than 403 so their existence is not disclosed.
     if (!loc.hidden_files && has_hidden_segment(ws.path)) {

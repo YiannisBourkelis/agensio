@@ -1669,15 +1669,109 @@ static void test_control_sites() {
         CHECK(write_site_file(site_file(cfg, "shop.test"), render_site(ok, "x"), err));
         const Config loaded = load_config(dir / "agensio.toml");
         CHECK(loaded.sites.size() == 2 && loaded.sites[0].redirect == "https" && loaded.sites[1].tls && loaded.sites[1].tls->automatic && loaded.sites[1].app == "laravel");
+        CHECK(loaded.sites[0].root.empty());  // a redirect site has no document root, never the configuration directory
         CHECK(prerequisites(ok, loaded).empty());
         SiteSpec missing = ok;
         missing.user = "no-such-user-zz";
         missing.root = (dir / "missing").string();
         const auto pre = prerequisites(missing, loaded);
-        CHECK(pre.size() == 2 && pre[0].starts_with("useradd") && pre[1].starts_with("mkdir -p"));
+        CHECK(pre.size() == 2 && pre[0].starts_with("useradd --system --no-create-home --home-dir /var/lib/agensio/no-such-user-zz") && pre[1].starts_with("mkdir -p"));
+        CHECK(pre[1].find("-type d -exec chown no-such-user-zz:") != std::string::npos && pre[1].find("chmod 2750") != std::string::npos && pre[0].find("/var/www") == std::string::npos);
         CHECK(next_steps(ok, loaded).size() == 1);  // the port-80 note for auto certificates
+        Config php_cfg = loaded;
+        php_cfg.pools_dir = "/etc/php/8.4/fpm/pool.d";
+        CHECK(php_fpm_reload_command(php_cfg, "") == "systemctl reload php8.4-fpm");
+        php_cfg.pools_dir = "/etc/php-fpm.d";
+        CHECK(php_fpm_reload_command(php_cfg, "") == "systemctl reload php-fpm");
+        // A site with a user renders its own access log; the redirect stub has no root.
+        SiteSpec u = ok;
+        u.user = "shop";
+        u.access_log.clear();
+        json::Value none;
+        std::string e2;
+        (void)apply_request(json::Value::object(), loaded, u, e2);
+        CHECK(u.access_log.ends_with("/sites/shop.test.log"));
+        const std::string rendered = render_site(u, "x");
+        CHECK(rendered.find("access_log = ") != std::string::npos && rendered.find("redirect = \"https\"\n") != std::string::npos);
+        CHECK(rendered.find("redirect = \"https\"\nroot") == std::string::npos);
     }
     std::filesystem::remove_all(dir);
+}
+
+static void test_server_account_and_rules() {
+    // One helper decides the server's account for every validator: server.group, else the
+    // primary group of server.user, never the group of the process running the check.
+    HostFacts facts;
+    facts.stat = [](const std::string&, FileFacts&) { return false; };
+    facts.user = [](const std::string& n, unsigned& uid, unsigned& gid) {
+        if (n == "agensio") { uid = 999; gid = 987; return true; }
+        if (n == "t1") { uid = 1001; gid = 1001; return true; }
+        return false;
+    };
+    facts.group = [](const std::string& n, unsigned& gid) {
+        if (n == "agensio") { gid = 987; return true; }
+        if (n == "t1") { gid = 1001; return true; }
+        if (n == "web") { gid = 500; return true; }
+        return false;
+    };
+    facts.group_name = [](unsigned gid) { return gid == 987 ? "agensio" : gid == 1001 ? "t1" : gid == 500 ? "web" : ""; };
+    Config cfg;
+    cfg.user = "agensio";
+    ServerAccount a = server_account(cfg, facts);
+    CHECK(a.known && a.uid == 999 && a.gid == 987 && a.group == "agensio");
+    cfg.group = "web";
+    a = server_account(cfg, facts);
+    CHECK(a.known && a.gid == 500 && a.group == "web");
+    cfg.user = "nobody-here";
+    cfg.group.clear();
+    CHECK(!server_account(cfg, facts).known);
+
+    // The rules on a site with its own user: the socket's group is the server's group,
+    // and the root must be readable by the server's account.
+    cfg.user = "agensio";
+    SiteConfig site;
+    site.server_names = {"t.test"};
+    site.user = "t1";
+    site.root = "/srv/t/web";
+    site.php.configured = true;
+    site.php.address.unix = true;
+    site.php.address.path = "/run/php/agensio-t1.sock";
+    cfg.sites = {site};
+    std::map<std::string, FileFacts> files;
+    facts.stat = [&](const std::string& p, FileFacts& out) {
+        auto it = files.find(p);
+        if (it == files.end()) return false;
+        out = it->second;
+        return true;
+    };
+    auto dir = [](unsigned uid, unsigned gid, unsigned mode) { FileFacts f; f.is_dir = true; f.uid = uid; f.gid = gid; f.mode = mode; return f; };
+    auto file = [](unsigned uid, unsigned gid, unsigned mode) { FileFacts f; f.uid = uid; f.gid = gid; f.mode = mode; return f; };
+    auto has = [&](const std::vector<std::string>& errs, std::string_view what) {
+        return std::any_of(errs.begin(), errs.end(), [&](const std::string& e) { return e.find(what) != std::string::npos; });
+    };
+    files["/srv/t/web"] = dir(1001, 987, 02750);            // t1:agensio 2750: the convention
+    files[site.php.address.path] = file(1001, 987, 0660);   // t1:agensio 0660
+    CHECK(check_hosting(cfg, facts).empty());
+    files["/srv/t/web"] = dir(1001, 1001, 0750);             // t1:t1: the server cannot enter
+    auto errs = check_hosting(cfg, facts);
+    CHECK(errs.size() == 1 && has(errs, "cannot read it") && has(errs, "chown t1:agensio /srv/t/web && chmod 2750"));
+    files["/srv/t/web"] = dir(1001, 987, 02750);
+    files[site.php.address.path] = file(1001, 0, 0660);      // t1:root: what the process group of `-t` as root once demanded
+    errs = check_hosting(cfg, facts);
+    CHECK(errs.size() == 1 && has(errs, "expected group agensio (gid 987), the server's group"));
+    // Without server.user the check applies to the process itself; as root everything is readable.
+    Config bare = cfg;
+    bare.user.clear();
+    files[site.php.address.path] = file(1001, 987, 0660);
+    (void)check_hosting(bare, facts);  // must not crash; the outcome depends on the running uid
+    // The lookup prefers the site that serves content over its redirect stub.
+    Config two;
+    SiteConfig r; r.server_names = {"a.test"}; r.redirect = "https";
+    SiteConfig t; t.server_names = {"a.test"}; t.tls = TlsConfig{}; t.app = "laravel";
+    two.sites = {r, t};
+    CHECK(control::find_site(two, "a.test") == &two.sites[1]);
+    two.sites = {t, r};
+    CHECK(control::find_site(two, "A.TEST") == &two.sites[0]);
 }
 
 int main() {
@@ -1707,6 +1801,7 @@ int main() {
     test_control();
     test_control_commands();
     test_control_sites();
+    test_server_account_and_rules();
 #ifdef AGENSIO_HAS_TLS
     test_acme();
 #endif

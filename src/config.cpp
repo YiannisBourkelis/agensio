@@ -120,7 +120,12 @@ fs::path resolve(const fs::path& base_dir, const std::string& p) {
 std::string resolve_root(const fs::path& base_dir, const std::string& root, const std::string& where) {
     fs::path root_path = resolve(base_dir, root);
     std::error_code ec;
-    if (!fs::is_directory(root_path, ec)) fail(where + ": root '" + root_path.string() + "' is not a directory");
+    if (!fs::is_directory(root_path, ec)) {
+        if (ec && ec != std::errc::no_such_file_or_directory)
+            fail(where + ": root '" + root_path.string() + "': " + ec.message() +
+                 " (this account cannot enter a directory on the way; the site root needs the server's group and 2750)");
+        fail(where + ": root '" + root_path.string() + "' is not a directory");
+    }
     std::string out = fs::canonical(root_path, ec).string();
     if (ec) fail(where + ": cannot resolve root '" + root_path.string() + "'");
     while (out.size() > 1 && out.back() == '/')
@@ -680,8 +685,10 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     }
     auto root = t["root"].value<std::string>();
     if (!root && site.app != "proxy" && site.redirect.empty()) fail(where + ": 'root' is required");
-    // A proxied application needs no document root; hand-written static locations bring their own.
-    site.root = root ? resolve_root(base_dir, *root, where) : base_dir.string();
+    if (root && !site.redirect.empty()) fail(where + ": a redirect site serves nothing; remove 'root'");
+    // A proxied or redirecting site needs no document root: it gets none (the static handler
+    // answers 404 for an empty root), never the configuration directory.
+    site.root = root ? resolve_root(base_dir, *root, where) : std::string();
     const std::string root_given = site.root;  // the project directory for app = "laravel"
     if (site.app == "laravel") {
         // The project directory is given; the web root is its public/ (never the project itself).

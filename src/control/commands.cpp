@@ -282,12 +282,22 @@ CertificateState certificate_state(const TlsConfig& tls, std::time_t now) {
     return st;
 }
 
+// Several sites may carry the name (the :80 redirect and the :443 site of an HTTPS-only
+// setup): the one that serves content wins, then the TLS one, then the first.
 const SiteConfig* find_site(const Config& cfg, std::string_view name) {
     const std::string want = lower(name);
+    const SiteConfig* best = nullptr;
+    int best_score = -1;
     for (const auto& s : cfg.sites)
         for (const auto& n : s.server_names)
-            if (n == want) return &s;
-    return nullptr;
+            if (n == want) {
+                const int score = (s.redirect.empty() ? 2 : 0) + (s.tls ? 1 : 0);
+                if (score > best_score) {
+                    best = &s;
+                    best_score = score;
+                }
+            }
+    return best;
 }
 
 namespace {

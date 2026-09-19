@@ -28,16 +28,15 @@ for u in web1 web2; do
   printf '<?php session_start(); echo json_encode(["user" => posix_getpwuid(posix_geteuid())["name"], "other" => @file_get_contents("%s/%s/site/public/.env") === false ? "denied" : "READ", "session" => ini_get("session.save_path")], JSON_UNESCAPED_SLASHES);' \
     $T "$([ $u = web1 ] && echo web2 || echo web1)" > $T/$u/site/public/index.php
   echo "SECRET=$u" > $T/$u/site/public/.env   # inside the docroot: hidden by agensio, a secret for the rules
-  chown -R $u:$u $T/$u; chmod 750 $T/$u $T/$u/site $T/$u/site/public; chmod 640 $T/$u/site/public/.env; chmod 644 $T/$u/site/public/index.php
-  # agensio must be able to read the docroot to serve static files and stat scripts
-  setfacl -m u:agensio:rx $T/$u $T/$u/site $T/$u/site/public 2>/dev/null || chmod o+rx $T/$u $T/$u/site $T/$u/site/public
+  # The layout the rules require: the site user owns it, the server's group reads it (2750).
+  chown -R $u:agensio $T/$u; chmod 2750 $T/$u $T/$u/site $T/$u/site/public; chmod 644 $T/$u/site/public/index.php
+  chown $u:$u $T/$u/site/public/.env; chmod 640 $T/$u/site/public/.env   # a secret keeps the user's own group
 done
 
 cat > $T/agensio.toml <<EOF
 [server]
 workers = 1
 user = "agensio"
-group = "agensio"
 pools_run = "$T/run"
 state_dir = "$T/state"
 [log]
@@ -83,6 +82,10 @@ chgrp web2 $T/run/agensio-web2.sock
 check "-t refuses a socket with the wrong group" "$(grep -c 'site two: socket .* expected group agensio' $T/t.out)" "1"
 chgrp agensio $T/run/agensio-web2.sock
 rc=0; "$BIN" -t -c $T/agensio.toml > $T/t2.out 2>&1 || rc=$?; check "-t passes again" "$rc $(grep -c 'configuration error' $T/t2.out || true)" "0 0"
+chown web1:web1 $T/web1/site/public
+"$BIN" -t -c $T/agensio.toml > $T/t.out 2>&1 || true
+check "-t refuses a root the server cannot read, names the fix" "$(grep -c 'site one: root .* cannot read it.*chown web1:agensio' $T/t.out)" "1"
+chown web1:agensio $T/web1/site/public
 
 # Start as root, drop to agensio, serve both sites through their own pools.
 "$BIN" -c $T/agensio.toml > $T/server.out 2>&1 &

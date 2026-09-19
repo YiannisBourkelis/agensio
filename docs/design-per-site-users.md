@@ -117,12 +117,22 @@ For every site with `user`:
 1. The user and group exist.
 2. The site root and everything `open_basedir` names are owned by the site user or
    root, and are not writable by other users (no group or world write bits unless the
-   group is the site's own group).
+   group is the site's own group). The root itself (and the project above a Laravel
+   `public/`) must also be readable by the server's account, which serves static files
+   and stats scripts as `server.user`: the convention is owner = site user, group = the
+   server's group, mode `2750`, so the server reads through the group bit and files PHP
+   creates inherit the group. The private `tmp/` and `sessions/` stay `0700` the user's.
 3. No path under the site root that the preset knows to be secret (`.env`, `config/`,
    `storage/` for Laravel; `wp-config.php` for WordPress; `.git/`) is world-readable or
    readable by a group that is not the site's own group.
-4. The pool socket (generated or given) has owner = site user, group = agensio's group,
-   mode 0660 or stricter, and its directory is not writable by other users.
+4. The pool socket (generated or given) has owner = site user, group = the server's
+   group, mode 0660 or stricter, and its directory is not writable by other users.
+   "The server's group" is one value everywhere (`server_account()` in
+   `services/pools.*`): `server.group` when set, else the primary group of
+   `server.user`, else the process's own group. It is never the group of whoever runs
+   `-t`: on 2026-09-19 that made `-t` as root demand `root`, the running server demand
+   `agensio`, and the pool generator write a third answer, so no socket satisfied all
+   of them and a site that reloaded fine could not boot.
 5. No two sites with different users name the same socket, root, state directory or log
    file.
 6. Log files and their directories: see below; a log file readable by a different site

@@ -147,12 +147,42 @@ HostFacts system_facts() {
         gid = gr->gr_gid;
         return true;
     };
+    f.group_name = [](unsigned gid) -> std::string {
+        const struct group* gr = ::getgrgid(gid);
+        return gr ? gr->gr_name : std::string();
+    };
 #else
     f.stat = [](const std::string&, FileFacts&) { return false; };
     f.user = [](const std::string&, unsigned&, unsigned&) { return false; };
     f.group = [](const std::string&, unsigned&) { return false; };
+    f.group_name = [](unsigned) { return std::string(); };
 #endif
     return f;
+}
+
+ServerAccount server_account(const Config& cfg, const HostFacts& facts) {
+    ServerAccount a;
+    a.user = cfg.user;
+    unsigned primary = 0;
+    bool user_ok = true;
+    if (!cfg.user.empty()) {
+        user_ok = facts.user(cfg.user, a.uid, primary);
+    } else {
+#ifndef _WIN32
+        a.uid = ::geteuid();
+        primary = ::getegid();
+#endif
+    }
+    if (!cfg.group.empty()) {
+        a.group = cfg.group;
+        a.known = facts.group(cfg.group, a.gid) && user_ok;
+        return a;
+    }
+    if (!user_ok) return a;  // the caller reports the missing account
+    a.gid = primary;
+    a.group = facts.group_name ? facts.group_name(primary) : std::string();
+    a.known = !a.group.empty();
+    return a;
 }
 
 namespace {
@@ -175,17 +205,26 @@ struct SiteFacts {
 std::vector<std::string> check_hosting(const Config& cfg, const HostFacts& facts) {
     std::vector<std::string> errors;
     std::vector<SiteFacts> sites;
-    unsigned agensio_gid = 0;
-    bool have_agensio_gid = false;
     bool any_user = false;
     for (const auto& site : cfg.sites) any_user = any_user || !site.user.empty();
     if (!any_user) return errors;
-    const std::string agensio_group = cfg.group.empty() ? current_group_name() : cfg.group;
-    if (agensio_group.empty() || !facts.group(agensio_group, agensio_gid)) {
-        errors.push_back("server.group: group '" + agensio_group + "' does not exist (the group agensio runs as)");
-    } else {
-        have_agensio_gid = true;
+    const ServerAccount server = server_account(cfg, facts);
+    const unsigned agensio_gid = server.gid;
+    const bool have_agensio_gid = server.known;
+    const std::string agensio_group = server.group.empty() ? std::string("?") : server.group;
+    if (!have_agensio_gid) {
+        if (!cfg.group.empty()) errors.push_back("server.group: group '" + cfg.group + "' does not exist (the group the server runs as)");
+        else if (!cfg.user.empty()) errors.push_back("server.user: user '" + cfg.user + "' does not exist");
+        else errors.push_back("server.group: cannot resolve the group the server runs as (set server.group)");
     }
+    // The server reads static files and stats scripts as server.user: a root it cannot
+    // enter serves nothing. Root sees everything, so the rule needs a configured user.
+    const bool server_reads = !cfg.user.empty() && server.known && server.uid != 0;
+    auto server_can_read = [&](const FileFacts& f) {
+        if (f.uid == server.uid) return (f.mode & 0500) == 0500;
+        if (have_agensio_gid && f.gid == agensio_gid) return (f.mode & 0050) == 0050;
+        return (f.mode & 0005) == 0005;
+    };
 
     // Rule 1: accounts exist.
     for (const auto& site : cfg.sites) {
@@ -210,7 +249,7 @@ std::vector<std::string> check_hosting(const Config& cfg, const HostFacts& facts
                                                      std::to_string(f.gid) + " mode " + octal(f.mode); };
     // Rule 2: a directory the user's PHP runs from is the user's (or root's) and nobody else
     // can write into it. Rule 3: a secret is readable by the user's own group at most.
-    auto check_root = [&](const SiteFacts& sf, const std::string& path, const char* what) {
+    auto check_root = [&](const SiteFacts& sf, const std::string& path, const char* what, bool server_must_read) {
         FileFacts f;
         if (!facts.stat(path, f)) return;  // state directories appear with `agensio pools`
         if (f.uid != sf.uid && f.uid != 0)
@@ -220,19 +259,27 @@ std::vector<std::string> check_hosting(const Config& cfg, const HostFacts& facts
             errors.push_back(sf.name + ": " + what + " " + path + " is writable by other users (" + describe(f) +
                              "); remove the write bit for others" +
                              ((f.mode & 0020) && f.gid != sf.gid ? " and for group " + std::to_string(f.gid) : ""));
+        // Rule 2b: the server's account must be able to enter what it serves from (static
+        // files, script stat); the user's private tmp/ and sessions/ are PHP's alone.
+        if (server_must_read && server_reads && f.is_dir && !server_can_read(f))
+            errors.push_back(sf.name + ": " + what + " " + path + " is " + describe(f) + "; the server (" +
+                             (server.user.empty() ? "uid " + std::to_string(server.uid) : server.user) + ", group " +
+                             agensio_group + ") cannot read it. Give it the server's group: chown " + sf.site->user + ":" +
+                             agensio_group + " " + path + " && chmod 2750 " + path);
     };
     auto check_secret = [&](const SiteFacts& sf, const std::string& path) {
         FileFacts f;
         if (!facts.stat(path, f)) return;
         if ((f.mode & 0004) || ((f.mode & 0040) && f.gid != sf.gid))
             errors.push_back(sf.name + ": " + path + " is readable by other users (" + describe(f) +
-                             "); make it 0640 " + sf.site->user + ":" + (sf.site->group.empty() ? sf.site->user : sf.site->group));
+                             "); make it 0600, or 0640 with the site's own group (" +
+                             (sf.site->group.empty() ? sf.site->user : sf.site->group) + "), never the server's");
     };
     for (const auto& sf : sites) {
         const SiteConfig& site = *sf.site;
-        check_root(sf, site.root, "root");
+        check_root(sf, site.root, "root", true);
         for (const auto& dir : site.pool.open_basedir)
-            if (dir != site.root) check_root(sf, dir, "open_basedir entry");
+            if (dir != site.root) check_root(sf, dir, "open_basedir entry", site.root.starts_with(dir + "/"));
         const std::string project = site.pool.open_basedir.empty() ? site.root : site.pool.open_basedir.front();
         check_secret(sf, site.root + "/.git");
         if (site.app == "laravel") {
@@ -253,7 +300,8 @@ std::vector<std::string> check_hosting(const Config& cfg, const HostFacts& facts
                 if (have_agensio_gid && f.gid != agensio_gid)
                     errors.push_back(sf.name + ": socket " + sock + " has gid " + std::to_string(f.gid) +
                                      "; expected group " + agensio_group + " (gid " + std::to_string(agensio_gid) +
-                                     ") so that only agensio can connect");
+                                     "), the server's group: the server connects through the group bit and nobody "
+                                     "else can (listen.group in the pool file, as `agensio pools` writes it)");
                 if (f.mode & 0007)
                     errors.push_back(sf.name + ": socket " + sock + " is mode " + octal(f.mode) +
                                      "; any user could connect, make it 0660");
@@ -303,9 +351,9 @@ int write_pools(const Config& cfg, const fs::path& out_dir, bool dry_run, std::o
     out << "error: generated php-fpm pools are not supported on Windows\n";
     return 1;
 #else
-    std::string agensio_group = cfg.group.empty() ? current_group_name() : cfg.group;
+    const std::string agensio_group = server_account(cfg, system_facts()).group;
     if (agensio_group.empty()) {
-        out << "error: cannot determine agensio's group; set server.group\n";
+        out << "error: cannot determine the group the server runs as; set server.user or server.group\n";
         return 1;
     }
     std::error_code ec;

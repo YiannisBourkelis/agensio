@@ -28,6 +28,7 @@ struct SiteSpec {
     std::string php_socket;  // php without a user: an existing pool
     int php_children = 0;    // generated pool sizing (with a user)
     std::string php_version;
+    std::string access_log;  // a site with a user gets its own (rule: nothing shared between users)
     std::string listen_plain = "0.0.0.0:80";
     std::string listen_tls = "0.0.0.0:443";
 
@@ -73,5 +74,7 @@ bool write_site_file(const std::filesystem::path& file, const std::string& text,
 std::vector<std::string> prerequisites(const SiteSpec& spec, const Config& cfg);
 // What to run after the site is live (generated pool files, php-fpm reload).
 std::vector<std::string> next_steps(const SiteSpec& spec, const Config& cfg);
+// "systemctl reload php8.4-fpm" for the pool directory in use (Debian), "php-fpm" (RHEL), brew.
+std::string php_fpm_reload_command(const Config& cfg, const std::string& version);
 
 }  // namespace agensio::control

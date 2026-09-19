@@ -641,6 +641,21 @@ Rules:
       lambda held a raw pointer). The other symptom seen once (a raw connection to a
       new listener waiting 5 s) was not reproduced in 35 rounds of that sequence and
       is left under watch.
+- [x] H2b (2026-09-19) Hosting rules made consistent, from a live VPS report: the
+      "server's group" every rule compares against came from the process running the
+      check, so `-t` as root, the dropped server and `agensio pools` disagreed and no
+      socket ownership satisfied all of them; a site could reload and then fail to boot
+      25 minutes later. Now one helper (`server_account`) derives it from `server.user` /
+      `server.group`. Added rule 2b (the server's account can read the root, fix printed),
+      the socket message says which side connects, EACCES on a root is reported as such,
+      log files are created 0640, a redirect or proxy site has no root at all (the
+      static handler answers 404 for an empty root; before, the configuration directory
+      was the root), `site NAME` returns the content site rather than its redirect stub,
+      `site-create` prescribes `useradd --no-create-home` with the home in the state
+      directory and `chown user:<server group> && chmod 2750`, names the real php-fpm
+      unit, and gives a user site its own access log. `tests/site-user.sh` (root devbox,
+      17 checks) runs the prescribed commands verbatim and asserts `-t`, a restart, a
+      clean health check, PHP and static content together.
 - [ ] H1b Certificates watched and reloaded when the files change (manual `tls = { cert,
       key }` sites; automatic ones already reload themselves); reload must not stall new
       QUIC connections (nginx's known weakness).
