@@ -9,6 +9,9 @@ permissions:
 jobs:
   packages:
     runs-on: ubuntu-22.04   # oldest glibc we build against: the .deb runs on Debian 12+, Ubuntu 22.04+
+    env:
+      # `secrets` cannot be read in a step's `if`; the job env carries the answer instead.
+      HAVE_APT_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
       # Ubuntu 22.04 ships CMake 3.22, GCC 11 and asio 1.18: too old for this project. A
@@ -56,7 +59,7 @@ jobs:
           fi
           gh release upload "$GITHUB_REF_NAME" build/*.deb build/*.rpm --clobber
       - name: build the APT repository
-        if: ${{ secrets.APT_GPG_PRIVATE_KEY != '' }}
+        if: ${{ env.HAVE_APT_KEY == 'true' }}
         env:
           APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
         run: |
@@ -77,7 +80,7 @@ jobs:
           cd ../..
           printf '<h1>agensio packages</h1><p>APT: see docs/install.md</p>' > site/index.html
       - name: publish the APT repository (GitHub Pages)
-        if: ${{ secrets.APT_GPG_PRIVATE_KEY != '' }}
+        if: ${{ env.HAVE_APT_KEY == 'true' }}
         env:
           APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
         uses: peaceiris/actions-gh-pages@v4
