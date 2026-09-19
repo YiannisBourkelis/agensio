@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.0-alpha.6 (2026-09-19)
+
+- feat: implement PHP presets as data structure and enhance application routing
+
 ## 0.1.0-alpha.5 (2026-09-19)
 
 - feat: enhance PHP presets for Laravel, Drupal, and WordPress
