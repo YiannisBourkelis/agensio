@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.1.0-alpha.7
+## 0.1.0-alpha.7 (2026-09-19)
+
+- chore: update changelog for version 0.1.0-alpha.7
+- feat!: strict host matching with 421, and SNI certificate selection per site
+- fix: log sinks added by a reload, state directory access, 404 for refused paths, ctl help
 
 **Breaking: strict host matching.** A site answers only the names in its `server_name`.
 A request with any other Host, including the server's IP address, answers `421
