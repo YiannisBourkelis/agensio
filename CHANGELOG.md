@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.8 (2026-09-19)
+## 0.1.0-alpha.8 (2026-09-20)
 
 - feat: add presets functionality and summary to the configuration and control APIs
 - feat: enhance user and group account validation, introduce no_user flag for site configuration
