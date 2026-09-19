@@ -31,6 +31,7 @@ struct ControlBackend {
     virtual bool renew_certificate(std::string_view site, std::string& error) = 0;
     virtual void reopen_logs() = 0;
     virtual const Config& running() = 0;
+    virtual bool privileged() = 0;  // still root (before the drop): a reload can bind any port
 };
 
 class ControlHandler {

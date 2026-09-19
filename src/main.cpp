@@ -109,7 +109,8 @@ int main(int argc, char** argv) {
                              "        site-create --domain D [--alias A]... [--https auto|none] [--cert F --key F] [--user U|--no-user]\n"
                              "                    [--group G] [--app NAME] [--root DIR] [--upstream URL] [--php-socket S]\n"
                              "                    [--php-children N] [--php-version V] [--no-redirect] [--hsts] [--listen-plain A] [--listen-tls A]\n"
-                             "        site-update NAME (same options as site-create)\n"
+                             "        site-update NAME (same options as site-create); --dry-run on either checks and shows the\n"
+                             "                    file without writing, listing every problem at once\n"
                              "Answers are the control API's JSON; exit 1 on any refusal. Without --yes a change is\n"
                              "refused (428) and nothing happens.\n";
             };
@@ -148,6 +149,7 @@ int main(int argc, char** argv) {
                     body.set("https", h);
                 } else if (b == "--user") field("user");
                 else if (b == "--no-user") body.set("no_user", true);
+                else if (b == "--dry-run") body.set("dry_run", true);
                 else if (b == "--group") field("group");
                 else if (b == "--app") field("app");
                 else if (b == "--root") field("root");

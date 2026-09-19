@@ -45,7 +45,7 @@ json::Value schema(std::vector<std::pair<std::string, json::Value>> props, std::
 // The `app` values come from the preset table, so a new preset is a tool option at once.
 json::Value app_enum() {
     json::Value values = json::Value::array();
-    std::string text = "What runs there. A preset sets routing and PHP rules:";
+    std::string text = "What runs there. A preset sets routing and PHP rules; call presets_list for what each value does:";
     for (const auto& a : app_presets()) {
         values.push(a);
         text += " " + a;
@@ -77,6 +77,7 @@ std::vector<std::pair<std::string, json::Value>> site_fields() {
         {"php_version", prop("string", "PHP version for the generated pool, e.g. \"8.3\" (default: newest installed).")},
         {"listen_plain", prop("string", "Plain listener address (default 0.0.0.0:80).")},
         {"listen_tls", prop("string", "TLS listener address (default 0.0.0.0:443).")},
+        {"dry_run", prop("boolean", "Check everything and show the file that would be written, without writing or reloading: the answer lists every problem at once (missing account, directory, certificate, a port that needs a restart) with the command for each.")},
         {"confirm", confirm_arg()},
         {"reason", reason_arg()},
     };

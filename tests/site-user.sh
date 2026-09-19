@@ -71,10 +71,14 @@ chown t1:agensio $T/www/t1.test/web/index.php $T/www/t1.test/web/s.txt; chmod 64
 # 3. What the report demanded: -t passes, a restart works, health is clean, PHP and static serve.
 rc=0; "$BIN" -t -c $T/agensio.toml > $T/t.out 2>&1 || rc=$?
 check "agensio -t exits 0 on the running configuration" "0" "$rc"; [ $rc = 0 ] || cat $T/t.out
+curl -sS -o /dev/null -H 'Host: t1.test' http://127.0.0.1:18098/s.txt; sleep 1.2
+check "health names the log the reload could not hand to the site user" "yes" "$("$BIN" ctl health --socket $T/run/control.sock | grep -q '"code":"log_not_readable_by_user","site":"t1.test"' && echo yes)"
+check "next steps are separate commands, the reload not hidden behind an exit code" "yes" "$(echo "$out" | grep -q '"next_steps":\["agensio pools","systemctl reload php' && echo yes)"
 stop; start
 check "the server restarts on that configuration" "yes" "$([ -S $T/run/control.sock ] && "$BIN" ctl status --socket $T/run/control.sock >/dev/null 2>&1 && echo yes)"
 health=$("$BIN" ctl health --socket $T/run/control.sock)
 check "health answers and has no error finding" "yes 0" "$(echo "$health" | grep -q '"ok":' && echo yes) $(echo "$health" | grep -o '"severity":"error"' | wc -l | tr -d ' ')"
+check "after the restart the log belongs to the site user's group and the finding is gone" "t1 no" "$(stat -c %G $T/logs/sites/t1.test.log) $(echo "$health" | grep -q 'log_not_readable_by_user' && echo yes || echo no)"
 check "PHP served through the user's pool as t1, its temp directory usable" "yes" "$(curl -sS -H 'Host: t1.test' http://127.0.0.1:18098/index.php | grep -q 'PHP 8.* uri=/index.php as=t1 tmp=ok' && echo yes)"
 check "the state directory parent lets the site user reach its own directory" "traversable yes" "$([ $(( 8#$(stat -c %a $T/state) & 1 )) = 1 ] && echo traversable) $(su -s /bin/sh t1 -c "test -w $T/state/t1/tmp" && echo yes)"
 check "static file served through the server's group" "200 static ok" "$(curl -sS -o /dev/null -w '%{http_code} ' -H 'Host: t1.test' http://127.0.0.1:18098/s.txt)$(curl -sS -H 'Host: t1.test' http://127.0.0.1:18098/s.txt)"

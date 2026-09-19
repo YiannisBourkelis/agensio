@@ -369,6 +369,7 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now) {
     for (const auto& l : s.locations) {
         json::Value loc = json::Value::object().set("path", l.path);
         loc.set("match", l.exact ? "exact" : l.suffix ? "suffix" : "prefix").set("handler", l.handler);
+        if (!l.deny_suffixes.empty()) loc.set("refuses", strings(l.deny_suffixes));  // endings answered 404 here
         if (!l.origin.empty()) loc.set("from", l.origin);
         if (!l.alias.empty()) loc.set("alias", l.alias);
         else if (l.root != s.root) loc.set("root", l.root);
@@ -485,6 +486,23 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
                 "add a [[site]] on port 80 with redirect = \"https\"");
     }
 
+    // A per-site log the site user cannot read (created by a reload after the privilege
+    // drop, which cannot chown): stands until a restart hands it over.
+    {
+        const HostFacts facts = system_facts();
+        for (const auto& s : running.sites) {
+            if (s.user.empty() || s.access_log.empty()) continue;
+            unsigned uid = 0, gid = 0;
+            if (!facts.user(s.user, uid, gid)) continue;
+            if (!s.group.empty()) facts.group(s.group, gid);
+            FileFacts f;
+            if (facts.stat(s.access_log, f) && f.gid != gid)
+                add("warn", "log_not_readable_by_user", s.server_names.front(),
+                    s.access_log + " is not owned by group " + (s.group.empty() ? s.user : s.group) + " (gid " + std::to_string(f.gid) +
+                        "), so " + s.user + " cannot read its own log",
+                    "restart the service: at start the server owns per-site logs agensio:<site group> 0640, or chown it as root");
+        }
+    }
     // Shared account: several application sites without a user.
     std::size_t apps = 0, without_user = 0;
     for (const auto& s : running.sites) {

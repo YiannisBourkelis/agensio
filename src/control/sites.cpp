@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -413,31 +414,36 @@ bool write_site_file(const fs::path& file, const std::string& text, std::string&
 // owned by the site user with the server's group and 2750, so the server reads through the
 // group bit and files PHP creates inherit the group; the account's home is its state
 // directory, never the document root (useradd would fill it with dotfiles).
-std::vector<std::string> prerequisites(const SiteSpec& spec, const Config& cfg) {
-    std::vector<std::string> cmds;
+std::vector<Problem> preflight(const SiteSpec& spec, const Config& cfg, bool privileged) {
+    std::vector<Problem> out;
     // Belt and braces: apply_request validated these; a command is never assembled from a
     // value that would not pass again.
     std::string why;
     if ((!spec.user.empty() && !valid_account(spec.user, why)) || (!spec.group.empty() && !valid_account(spec.group, why)) ||
         (!spec.root.empty() && !safe_path(spec.root, why)) || (!spec.cert.empty() && !safe_path(spec.cert, why)) ||
-        (!spec.key.empty() && !safe_path(spec.key, why)))
-        return {"# refused: " + why};
+        (!spec.key.empty() && !safe_path(spec.key, why))) {
+        out.push_back({"refused", why, "", true});
+        return out;
+    }
     const HostFacts facts = system_facts();
     const ServerAccount server = server_account(cfg, facts);
     const std::string server_group = server.known ? server.group : (cfg.group.empty() ? cfg.user : cfg.group);
     unsigned uid = 0, gid = 0;
     const bool have_user = !spec.user.empty() && facts.user(spec.user, uid, gid);
     if (!spec.user.empty() && !have_user)
-        cmds.push_back("useradd --system --no-create-home --home-dir " + cfg.state_dir + "/" + spec.user +
-                       " --shell /usr/sbin/nologin " + spec.user);
+        out.push_back({"missing_account", "the account " + spec.user + " does not exist",
+                       "useradd --system --no-create-home --home-dir " + cfg.state_dir + "/" + spec.user +
+                           " --shell /usr/sbin/nologin " + spec.user, true});
     if (!spec.group.empty()) {
         unsigned g = 0;
-        if (!facts.group(spec.group, g)) cmds.push_back("groupadd " + spec.group + " && usermod -g " + spec.group + " " + spec.user);
+        if (!facts.group(spec.group, g))
+            out.push_back({"missing_group", "the group " + spec.group + " does not exist",
+                           "groupadd " + spec.group + " && usermod -g " + spec.group + " " + spec.user, true});
     }
     std::error_code ec;
     if (!spec.root.empty()) {
         const std::string owner = spec.user.empty() ? (cfg.user.empty() ? "root" : cfg.user) : spec.user;
-        const std::string group = spec.user.empty() ? server_group : server_group;
+        const std::string group = server_group;
         FileFacts f;
         const bool exists = facts.stat(spec.root, f) && f.is_dir;
         bool readable = true;
@@ -454,14 +460,44 @@ std::vector<std::string> prerequisites(const SiteSpec& spec, const Config& cfg) 
         // the user's (0640 user:user) and is never readable by the server.
         const std::string layout = "find " + top + " -type d -exec chown " + owner + ":" + group + " {} + -exec chmod 2750 {} +";
         if (!exists)
-            cmds.push_back("mkdir -p " + spec.root + " && chown " + owner + ":" + group + " " + top + " && " + layout);
+            out.push_back({"root_missing", "the directory " + spec.root + " does not exist",
+                           "mkdir -p " + spec.root + " && chown " + owner + ":" + group + " " + top + " && " + layout, true});
         else if (!readable || (!spec.user.empty() && (f.uid != uid || !(server.known && f.gid == server.gid))))
-            cmds.push_back(layout + "   # the server reads the site's directories through its group");
+            out.push_back({"root_unreadable", spec.root + " is not owned " + owner + ":" + group + " with 2750, so the server cannot read it",
+                           layout + "   # the server reads the site's directories through its group", true});
     }
     if (spec.https == "manual") {
-        if (!fs::is_regular_file(spec.cert, ec)) cmds.push_back("# put the certificate chain at " + spec.cert);
-        if (!fs::is_regular_file(spec.key, ec)) cmds.push_back("# put the private key at " + spec.key + " (mode 0600)");
+        if (!fs::is_regular_file(spec.cert, ec))
+            out.push_back({"certificate_missing", "no certificate chain at " + spec.cert, "# put the certificate chain at " + spec.cert, true});
+        if (!fs::is_regular_file(spec.key, ec))
+            out.push_back({"certificate_missing", "no private key at " + spec.key, "# put the private key at " + spec.key + " (mode 0600)", true});
     }
+    // A listener the running server does not hold yet: a reload binds it, unless the port is
+    // privileged and the server has already dropped root. Then the file is written and the
+    // site is served after a restart; saying so here saves the caller a failed reload that
+    // looks like a permission problem.
+    if (!privileged) {
+        for (const std::string& address : {spec.listen_plain, spec.listen_tls}) {
+            const bool used = address == spec.listen_plain ? (spec.https == "none" || spec.redirect_http) : spec.https != "none";
+            if (!used) continue;
+            bool bound = false;
+            for (const auto& s : cfg.sites)
+                for (const auto& l : s.listen) bound = bound || l == address;
+            const std::size_t colon = address.rfind(':');
+            const int port = colon == std::string::npos ? 0 : std::atoi(address.c_str() + colon + 1);
+            if (!bound && port > 0 && port < 1024)
+                out.push_back({"needs_restart", "listener " + address + " is not bound yet and the server no longer runs as root, so this "
+                                                "port cannot be added by a reload; the site file is written and the site is served after a restart",
+                               "systemctl restart agensio", false});
+        }
+    }
+    return out;
+}
+
+std::vector<std::string> prerequisites(const SiteSpec& spec, const Config& cfg) {
+    std::vector<std::string> cmds;
+    for (const auto& p : preflight(spec, cfg, true))
+        if (p.blocks) cmds.push_back(p.run_as_root.empty() ? "# " + p.code + ": " + p.detail : p.run_as_root);
     return cmds;
 }
 
@@ -482,8 +518,12 @@ std::string php_fpm_reload_command(const Config& cfg, const std::string& version
 std::vector<std::string> next_steps(const SiteSpec& spec, const Config& cfg) {
     std::vector<std::string> cmds;
     const bool php = spec.app != "static" && spec.app != "proxy" && !spec.app.empty();
-    if (php && !spec.user.empty() && spec.php_socket.empty())
-        cmds.push_back("agensio pools && " + php_fpm_reload_command(cfg, spec.php_version));
+    // Two entries, not one `a && b`: `agensio pools` exits 3 when it wrote files, which is
+    // exactly when the reload matters (2026-09-20: the && skipped it).
+    if (php && !spec.user.empty() && spec.php_socket.empty()) {
+        cmds.push_back("agensio pools");
+        cmds.push_back(php_fpm_reload_command(cfg, spec.php_version));
+    }
     if (spec.https == "auto") cmds.push_back("# make sure " + spec.domain + " resolves to this server and port 80 is reachable; the certificate follows within a minute");
     (void)cfg;
     return cmds;

@@ -135,6 +135,13 @@ private:
     bool renew_certificate(std::string_view site, std::string& error) override;
     void reopen_logs() override { logs_.reopen_all(); }
     const Config& running() override { return gen_->cfg; }
+    bool privileged() override {
+#ifdef _WIN32
+        return true;
+#else
+        return ::geteuid() == 0;
+#endif
+    }
 
 
     Config cfg_;                            // the boot configuration: workers, cache, sendfile, user; restart-only

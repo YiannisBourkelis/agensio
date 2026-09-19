@@ -158,6 +158,24 @@ json::Value strings(const std::vector<std::string>& v) {
     return a;
 }
 
+json::Value problems_json(const std::vector<control::Problem>& problems) {
+    json::Value a = json::Value::array();
+    for (const auto& p : problems) {
+        json::Value v = json::Value::object().set("code", p.code).set("detail", p.detail);
+        if (!p.run_as_root.empty()) v.set("run_as_root", p.run_as_root);
+        v.set("blocks", p.blocks);
+        a.push(std::move(v));
+    }
+    return a;
+}
+
+json::Value commands_of(const std::vector<control::Problem>& problems, bool blocking_only) {
+    json::Value a = json::Value::array();
+    for (const auto& p : problems)
+        if (!p.run_as_root.empty() && (!blocking_only || p.blocks)) a.push(p.run_as_root);
+    return a;
+}
+
 json::Value decisions_json(const std::vector<control::Decision>& needs) {
     json::Value a = json::Value::array();
     for (const auto& d : needs) {
@@ -270,17 +288,58 @@ void ControlHandler::site_create(Stream& s, const json::Value& body, std::string
         reply(s, 409, json::Value::object().set("error", "a site already serves " + spec.domain).set("hint", "use site-update"));
         return;
     }
-    const auto pre = control::prerequisites(spec, cfg);
-    if (!pre.empty()) {
-        reply(s, 409, json::Value::object().set("error", "prerequisites missing").set("waiting", true)
-                          .set("hint", "show these commands to the user to run as root, then send the same command again")
-                          .set("run_as_root", strings(pre)).set("spec", spec.to_json()));
+    // Every problem at once, so the caller fixes all of them and retries once.
+    const auto problems = control::preflight(spec, cfg, backend_->privileged());
+    bool blocking = false, restart = false;
+    for (const auto& p : problems) {
+        blocking = blocking || p.blocks;
+        restart = restart || p.code == "needs_restart";
+    }
+    const bool dry_run = body["dry_run"].boolean();
+    const auto file = control::site_file(cfg, spec.domain);
+    const std::string rendered = control::render_site(spec, now_stamp());
+    // A listener without a catch-all answers 421 to any other Host: say so once, here.
+    json::Value warnings = json::Value::array();
+    for (const std::string& address : {spec.listen_plain, spec.listen_tls}) {
+        const bool used = address == spec.listen_plain ? (spec.https == "none" || spec.redirect_http) : spec.https != "none";
+        if (used && !control::listener_has_catch_all(cfg, address))
+            warnings.push("requests to " + address + " with a Host this site does not list answer 421 Misdirected Request "
+                          "(also by IP address); add a site with server_name = [\"*\"] on it for a catch-all");
+    }
+    if (dry_run) {
+        reply(s, 200, json::Value::object().set("ok", !blocking).set("dry_run", true).set("file", file.string())
+                          .set("would_write", rendered).set("problems", problems_json(problems))
+                          .set("run_as_root", commands_of(problems, false)).set("spec", spec.to_json())
+                          .set("next_steps", strings(control::next_steps(spec, cfg))).set("warnings", warnings));
         return;
     }
-    const auto file = control::site_file(cfg, spec.domain);
-    if (!control::write_site_file(file, control::render_site(spec, now_stamp()), error)) {
+    if (blocking) {
+        reply(s, 409, json::Value::object().set("error", "prerequisites missing").set("waiting", true)
+                          .set("hint", "show every command to the user to run as root, then send the same command again")
+                          .set("problems", problems_json(problems)).set("run_as_root", commands_of(problems, true))
+                          .set("spec", spec.to_json()));
+        return;
+    }
+    if (!control::write_site_file(file, rendered, error)) {
         audit_peer(s, what, error);
         reply(s, 500, json::Value::object().set("error", error));
+        return;
+    }
+    if (restart) {
+        // The file must still be a valid configuration; the listener is bound at the restart.
+        const json::Value check = backend_->validate();
+        if (!check["ok"].boolean()) {
+            std::error_code ec;
+            std::filesystem::remove(file, ec);
+            audit_peer(s, what, "refused: " + check["errors"].dump());
+            reply(s, 409, json::Value::object().set("error", "the new site did not validate; file removed").set("detail", check["errors"]));
+            return;
+        }
+        audit_peer(s, what, "created " + file.string() + " (restart needed for a privileged port)");
+        reply(s, 202, json::Value::object().set("ok", true).set("file", file.string()).set("needs_restart", true).set("waiting", true)
+                          .set("problems", problems_json(problems)).set("run_as_root", commands_of(problems, false))
+                          .set("hint", "the site file is written and valid; it is served once the service restarts")
+                          .set("spec", spec.to_json()).set("next_steps", strings(control::next_steps(spec, cfg))).set("warnings", warnings));
         return;
     }
     if (!backend_->reload_now(error)) {
@@ -291,17 +350,8 @@ void ControlHandler::site_create(Stream& s, const json::Value& body, std::string
         return;
     }
     audit_peer(s, what, "created " + file.string());
-    // A listener without a catch-all answers 421 to any other Host: say so once, here.
-    json::Value warnings = json::Value::array();
-    const Config& live = backend_->running();
-    for (const std::string& address : {spec.listen_plain, spec.listen_tls}) {
-        const bool used = address == spec.listen_plain ? (spec.https == "none" || spec.redirect_http) : spec.https != "none";
-        if (used && !control::listener_has_catch_all(live, address))
-            warnings.push("requests to " + address + " with a Host this site does not list answer 421 Misdirected Request "
-                          "(also by IP address); add a site with server_name = [\"*\"] on it for a catch-all");
-    }
     reply(s, 201, json::Value::object().set("ok", true).set("file", file.string()).set("spec", spec.to_json())
-                      .set("next_steps", strings(control::next_steps(spec, cfg))).set("warnings", std::move(warnings)));
+                      .set("next_steps", strings(control::next_steps(spec, cfg))).set("warnings", warnings));
 }
 
 void ControlHandler::site_update(Stream& s, std::string_view name, const json::Value& body, std::string_view what) {
@@ -328,9 +378,18 @@ void ControlHandler::site_update(Stream& s, std::string_view name, const json::V
         reply(s, 422, json::Value::object().set("error", "decisions needed").set("needs", decisions_json(needs)).set("spec", spec.to_json()));
         return;
     }
-    const auto pre = control::prerequisites(spec, cfg);
-    if (!pre.empty()) {
-        reply(s, 409, json::Value::object().set("error", "prerequisites missing").set("waiting", true).set("run_as_root", strings(pre)));
+    const auto problems = control::preflight(spec, cfg, backend_->privileged());
+    bool blocking = false;
+    for (const auto& p : problems) blocking = blocking || p.blocks;
+    if (body["dry_run"].boolean()) {
+        reply(s, 200, json::Value::object().set("ok", !blocking).set("dry_run", true).set("file", file.string())
+                          .set("would_write", control::render_site(spec, now_stamp())).set("problems", problems_json(problems))
+                          .set("run_as_root", commands_of(problems, false)).set("spec", spec.to_json()));
+        return;
+    }
+    if (blocking) {
+        reply(s, 409, json::Value::object().set("error", "prerequisites missing").set("waiting", true)
+                          .set("problems", problems_json(problems)).set("run_as_root", commands_of(problems, true)));
         return;
     }
     if (!control::write_site_file(file, control::render_site(spec, now_stamp()), error)) {

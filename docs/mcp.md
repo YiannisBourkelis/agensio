@@ -24,6 +24,10 @@ agent host  --stdin/stdout-->  agensio mcp  --unix socket-->  agensio (control A
   MCP annotations (`readOnlyHint: false`, `destructiveHint` on delete) so the host asks
   the user before running them, and they require `confirm: true` plus a one-line
   `reason` that the server writes to its audit log with the caller's uid.
+- `site_create` and `site_update` report every prerequisite at once, each with a code and
+  its command, so one round of root work suffices; `dry_run: true` runs the same checks and
+  shows the file that would be written without writing it. A privileged port the dropped
+  server cannot bind by a reload comes back as `needs_restart` with the restart command.
 - Every value that could end up in a root command (`user`, `group`, `root`, certificate
   paths) is validated first: account names must match `^[a-z_][a-z0-9_-]{0,31}$` and may
   not be a system account or a word for "none"; paths must be absolute and free of shell

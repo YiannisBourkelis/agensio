@@ -715,6 +715,15 @@ Rules:
       true` is the always-expressible way to say "no account" (JSON null still works,
       both together are refused), the MCP schema types `user` and `group` with the
       pattern, and the decision text names the boolean. Unit test feeds hostile values.
+- [x] H2g (2026-09-20, sixth report) `preflight` returns every problem at once with a code
+      (`missing_account`, `root_missing`, `root_unreadable`, `certificate_missing`,
+      `needs_restart`) and its command; `dry_run` on create/update; a privileged port the
+      dropped server cannot bind answers 202 `needs_restart` with the file written and
+      validated instead of a failed reload; `next_steps` split into separate commands
+      (`agensio pools && systemctl reload` skipped the reload on exit 3); refusals report
+      as handler `deny` and locations list what they `refuse`; `health` finds a per-site
+      log the site user cannot read (a restart hands it over); the MCP `app` enum was
+      already table-driven, now asserted equal to `presets_list` by a test.
 - [ ] H1b Certificates watched and reloaded when the files change (manual `tls = { cert,
       key }` sites; automatic ones already reload themselves); reload must not stall new
       QUIC connections (nginx's known weakness).

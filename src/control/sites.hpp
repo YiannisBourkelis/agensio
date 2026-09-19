@@ -77,8 +77,18 @@ bool sites_dir_included(const Config& cfg);
 // Atomic write with a .bak of anything overwritten; false with `error`.
 bool write_site_file(const std::filesystem::path& file, const std::string& text, std::string& error);
 
-// The commands an administrator must run as root before this site can work, empty when
-// nothing is missing: the account, the root directory and its owner.
+// One thing that stands between the specification and a working site, with the command
+// that fixes it (empty for a condition nothing but a restart resolves).
+struct Problem {
+    std::string code;         // missing_account, missing_group, root_missing, root_unreadable, certificate_missing, needs_restart
+    std::string detail;
+    std::string run_as_root;  // "" when there is no command to run
+    bool blocks = true;       // false: the site can be written now and served after the restart
+};
+// Every problem at once, so the caller fixes all of them and retries once. `privileged`
+// says whether the server still runs as root (before the drop it can bind any port).
+std::vector<Problem> preflight(const SiteSpec& spec, const Config& cfg, bool privileged);
+// The commands of the blocking problems (what the older callers and the tests use).
 std::vector<std::string> prerequisites(const SiteSpec& spec, const Config& cfg);
 // What to run after the site is live (generated pool files, php-fpm reload).
 std::vector<std::string> next_steps(const SiteSpec& spec, const Config& cfg);

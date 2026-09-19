@@ -1,9 +1,37 @@
 # Changelog
 
+## 0.1.0-alpha.9 (2026-09-20)
+
+Sixth live report, all five items, on the way from a bare server to a working Drupal site.
+
+- `site-create` and `site-update` report every prerequisite at once: `problems`, each
+  with a `code` (`missing_account`, `missing_group`, `root_missing`, `root_unreadable`,
+  `certificate_missing`) and its command, so one round of root work suffices.
+- `dry_run: true` (`--dry-run` on the CLI) runs every check and returns the file that
+  would be written, without writing or reloading.
+- A site that adds a privileged port to a server that has dropped root answers
+  `202 needs_restart`: the file is written and validated, `systemctl restart agensio`
+  serves it. Before, the reload failed with what looked like a permission error.
+- `next_steps` are separate commands: `agensio pools` exits 3 when it wrote files, and
+  the `&&` that followed skipped the php-fpm reload exactly when it mattered.
+- `site NAME` and `-t --explain` report a path answered 404 whatever exists on disk as
+  handler `deny`, and a location lists the endings it `refuses`. Before, `settings.php`
+  showed as `static`.
+- `health` reports `log_not_readable_by_user` while a per-site log created by a reload
+  is not owned by the site's group; a restart hands it over.
+- The MCP `site_create` `app` options are asserted equal to what `presets_list` returns,
+  so a new preset cannot ship unadvertised; the `app` description points at `presets_list`.
+
 ## 0.1.0-alpha.8 (2026-09-20)
 
-- feat: add presets functionality and summary to the configuration and control APIs
-- feat: enhance user and group account validation, introduce no_user flag for site configuration
+- `presets`: `agensio ctl presets`, `GET /v1/presets` and the MCP tool `presets_list`
+  describe every `app` value from the preset table (served root, which `.php` runs,
+  refusals, directories that never run PHP, files never served).
+- Every value that can reach a root command is validated first: account names must match
+  `^[a-z_][a-z0-9_-]{0,31}$` and may not be a system account or a word for "none"; paths
+  must be absolute and shell-safe. `user: "null"` is refused with the way to say "no
+  account": `no_user: true` (JSON `null` still works; both together are refused). The MCP
+  schema types `user` and `group`.
 
 ## 0.1.0-alpha.7 (2026-09-19)
 

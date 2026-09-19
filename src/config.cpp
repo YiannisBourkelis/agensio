@@ -677,6 +677,7 @@ void apply_preset(SiteConfig& site, const std::string& where) {
         if (has(path, true, false)) continue;
         LocationConfig loc = static_location(path, true, false, {});
         loc.try_files = parse_try_files({"=404"});
+        loc.handler = "deny";  // reported as such by -t --explain and site-show; the static handler answers the 404
         site.locations.push_back(std::move(loc));
     }
     // Locations the preset created inherit the site's try_files decided above.

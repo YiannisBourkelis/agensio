@@ -756,6 +756,7 @@ static void test_presets() {
     CHECK(Router::location(d, "/core/install.php").kind == HandlerKind::fastcgi);
     CHECK(Router::location(d, "/core/lib/Drupal.php").kind == HandlerKind::static_ && Router::location(d, "/core/lib/Drupal.php").final);
     CHECK(Router::location(d, "/sites/default/settings.php").exact && Router::location(d, "/sites/default/settings.php").try_files[0].status == 404);
+    CHECK(Router::location(d, "/sites/default/settings.php").handler == "deny" && Router::location(d, "/core/lib/x.inc").handler == "static");
     const LocationConfig& droot = Router::location(d, "/dump.sqlite");
     CHECK(droot.path == "/" && std::find(droot.deny_suffixes.begin(), droot.deny_suffixes.end(), ".sqlite") != droot.deny_suffixes.end() &&
           std::find(droot.deny_suffixes.begin(), droot.deny_suffixes.end(), ".inc") != droot.deny_suffixes.end());
@@ -1755,6 +1756,26 @@ static void test_control_sites() {
         missing.root = (dir / "missing").string();
         const auto pre = prerequisites(missing, loaded);
         CHECK(pre.size() == 2 && pre[0].starts_with("useradd --system --no-create-home --home-dir /var/lib/agensio/no-such-user-zz") && pre[1].starts_with("mkdir -p"));
+        // Every problem in one answer, with a code each; a privileged port on a dropped server is
+        // a non-blocking "needs_restart", and not a problem at all while the server is still root.
+        missing.listen_tls = "0.0.0.0:444";  // privileged and not bound by `loaded` (which holds :80 and :443)
+        missing.redirect_http = false;       // so only the TLS listener is used
+        const auto problems = preflight(missing, loaded, false);
+        CHECK(problems.size() == 3 && problems[0].code == "missing_account" && problems[1].code == "root_missing" && problems[2].code == "needs_restart");
+        CHECK(problems.size() == 3 && problems[0].blocks && problems[1].blocks && !problems[2].blocks && problems[2].run_as_root == "systemctl restart agensio");
+        CHECK(problems.size() == 3 && problems[2].detail.find("0.0.0.0:444") != std::string::npos && preflight(missing, loaded, true).size() == 2);
+        SiteSpec high = missing;
+        high.listen_tls = "0.0.0.0:8443";
+        CHECK(preflight(high, loaded, false).size() == 2);  // an unprivileged port is bound by the reload
+        // next steps are separate commands: `agensio pools` exits 3 when it wrote files.
+        SiteSpec pooled = ok;
+        pooled.user = "shop";
+        pooled.php_socket.clear();
+        Config pool_cfg = loaded;
+        pool_cfg.pools_dir = "/etc/php-fpm.d";
+        const auto steps = next_steps(pooled, pool_cfg);
+        CHECK(steps.size() >= 2 && steps[0] == "agensio pools" && steps[1] == "systemctl reload php-fpm");
+        for (const auto& st : steps) CHECK(st.find("&&") == std::string::npos);
         CHECK(pre[1].find("-type d -exec chown no-such-user-zz:") != std::string::npos && pre[1].find("chmod 2750") != std::string::npos && pre[0].find("/var/www") == std::string::npos);
         CHECK(next_steps(ok, loaded).size() == 1);  // the port-80 note for auto certificates
         Config php_cfg = loaded;

@@ -458,6 +458,8 @@ check "control: a mutation without confirm is 428" "428" "$(cpost /v1/reload '{}
 check "control: reload through the socket" "200 yes" "$(cpost /v1/reload '{"confirm":true,"reason":"test"}') $(grep -q 'role=admin reload (test): ok' bench/tmp/audit.log && echo yes)"
 check "control: site-create asks for the open decisions" "422 https root app user" "$(cpost /v1/sites '{"domain":"created.test","confirm":true}') $(grep -o '"field":"[a-z_]*"' bench/tmp/ctl-reply.json | cut -d'"' -f4 | tr '\n' ' ' | sed 's/ $//')"
 check "control: site-create refuses a bad domain" "400" "$(cpost /v1/sites '{"domain":"Bad_Host","confirm":true}')"
+check "control: dry_run lists every problem at once and writes nothing" "200 root_missing yes no" "$(cpost /v1/sites "{\"domain\":\"dry.test\",\"https\":\"none\",\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/bench/tmp/sites/nothere/web\",\"listen_plain\":\"127.0.0.1:8094\",\"dry_run\":true,\"confirm\":true}") $(python3 -c 'import json; d=json.load(open("bench/tmp/ctl-reply.json")); print(",".join(p["code"] for p in d["problems"]))') $(grep -q '"would_write":"# agensio:managed' bench/tmp/ctl-reply.json && echo yes) $([ -f bench/tmp/sites.d/dry.test.toml ] && echo yes || echo no)"
+check "control: prerequisites come with codes and are all listed in one answer" "409 missing_account,root_missing" "$(cpost /v1/sites "{\"domain\":\"dry.test\",\"https\":\"none\",\"user\":\"nosuchuser\",\"app\":\"static\",\"root\":\"$ROOT/bench/tmp/sites/nothere/web\",\"listen_plain\":\"127.0.0.1:8094\",\"confirm\":true}") $(python3 -c 'import json; d=json.load(open("bench/tmp/ctl-reply.json")); print(",".join(p["code"] for p in d["problems"]))')"
 check "control: the string \"null\" is not a user name; no command is generated" "400 yes no" "$(cpost /v1/sites '{"domain":"created.test","https":"none","app":"static","root":"/var/www/html","user":"null","confirm":true}') $(grep -q 'no_user: true' bench/tmp/ctl-reply.json && echo yes) $(grep -q 'useradd\|chown' bench/tmp/ctl-reply.json && echo yes || echo no)"
 check "control: a shell metacharacter in root is refused before any command" "400 no" "$(cpost /v1/sites '{"domain":"created.test","https":"none","app":"static","user":null,"root":"/var/www/x;id","confirm":true}') $(grep -q 'chown' bench/tmp/ctl-reply.json && echo yes || echo no)"
 check "control: no_user together with a user is refused" "400" "$(cpost /v1/sites '{"domain":"created.test","https":"none","app":"static","root":"/var/www/html","user":"web9","no_user":true,"confirm":true}')"
@@ -516,6 +518,18 @@ print(" ".join(out))
 PYT
 )
 check "mcp: initialize, tool list with annotations, calls, confirm, decisions, prompts" "agensio 15 True laravel 428 reloaded https,root,app,user -32601 2" "$mcp"
+check "mcp: the site_create app options are exactly the presets the server accepts" "same" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
+import json, subprocess, sys
+p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n"); p.stdin.flush()
+tools = json.loads(p.stdout.readline())["result"]["tools"]
+enum = set(next(t for t in tools if t["name"] == "site_create")["inputSchema"]["properties"]["app"]["enum"])
+p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "presets_list", "arguments": {}}}) + "\n"); p.stdin.flush()
+names = set(x["app"] for x in json.loads(p.stdout.readline())["result"]["structuredContent"]["presets"])
+p.stdin.close(); p.wait()
+print("same" if enum == names else "differ %s %s" % (sorted(enum), sorted(names)))
+PYT
+)"
 check "mcp: the reload through the bridge is in the audit log" "yes" "$(grep -q 'reload (mcp): ok' bench/tmp/audit.log && echo yes)"
 if ssh -o BatchMode=yes -o ConnectTimeout=2 localhost true >/dev/null 2>&1; then
   check "mcp: over ssh localhost" "agensio" "$(printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n' | ssh -o BatchMode=yes localhost "$BIN" mcp --socket "$ROOT/bench/tmp/control.sock" | python3 -c 'import json,sys; print(json.loads(sys.stdin.readline())["result"]["serverInfo"]["name"])')"
@@ -542,6 +556,19 @@ if [ -n "$FPM_PID" ]; then
   check "drupal: .ht.sqlite, .htaccess, .env, .git/config are 404" "404 404 404 404" "$(code $D/sites/default/files/.ht.sqlite) $(code $D/.htaccess) $(code $D/.env) $(code $D/.git/config)"
   check "drupal: a .sqlite dump and composer files are refused" "404 404" "$(code $D/data.sqlite) $(code $D/composer.json)"
   check "drupal: plain static files still serve" "public readme" "$(curl -sS $D/README.txt)"
+  # What site-show reports as "deny" answers 404; what it reports as "static" with no refusal serves the file.
+  check "drupal: every location reported as deny answers 404; the reported names are exact" "9 9 static" "$(curl -sS --unix-socket bench/tmp/control.sock http://control/v1/sites/drupal.test | python3 -c '
+import json,sys,urllib.request
+locs=json.load(sys.stdin)["locations"]
+deny=[l["path"] for l in locs if l["handler"]=="deny"]
+n404=0
+for p in deny:
+    try:
+        urllib.request.urlopen("http://127.0.0.1:8095"+p); 
+    except urllib.error.HTTPError as e:
+        n404+= e.code==404
+readme=[l for l in locs if l["path"]=="/" and l["handler"]=="static"]
+print(len(deny), n404, readme[0]["handler"] if readme else "-")')"
   check "drupal: a missing .php is a 404 before php-fpm" "404" "$(code $D/nothere.php)"
   W=http://127.0.0.1:8096
   check "wordpress: front controller and pretty permalink" "wordpress front / wordpress front /hello-world/" "$(curl -sS $W/) $(curl -sS $W/hello-world/)"
