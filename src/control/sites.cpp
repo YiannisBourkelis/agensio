@@ -54,7 +54,7 @@ json::Value SiteSpec::to_json() const {
     json::Value v = json::Value::object();
     v.set("domain", domain).set("aliases", strings(aliases)).set("https", https);
     if (https == "manual") v.set("cert", cert).set("key", key);
-    v.set("redirect_http", redirect_http).set("hsts", hsts).set("user", user).set("group", group);
+    v.set("redirect_http", redirect_http).set("hsts", hsts).set("user", user).set("no_user", user.empty()).set("group", group);
     v.set("app", app).set("root", root);
     if (!upstream.empty()) v.set("upstream", upstream);
     if (!php_socket.empty()) v.set("php_socket", php_socket);
@@ -77,6 +77,7 @@ bool SiteSpec::from_json(const json::Value& v, SiteSpec& out) {
     if (has_key(v, "hsts")) out.hsts = v["hsts"].boolean();
     out.user = v.get("user");
     out.user_decided = true;
+    out.no_user = out.user.empty();
     out.group = v.get("group");
     out.app = v.get("app");
     out.root = v.get("root");
@@ -105,6 +106,65 @@ bool valid_domain(std::string_view name) {
         if (++label > 63) return false;
     }
     return label > 0 && name[name.size() - 1] != '-' && name.find('.') != std::string_view::npos;
+}
+
+bool valid_account(std::string_view name, std::string& why) {
+    static const char* sentinels[] = {"null", "none", "nil", "undefined", "false", "true", "~", "nan", "n/a"};
+    static const char* reserved[] = {"root", "daemon", "bin", "sys", "sync", "games", "man", "lp", "mail", "news",
+                                     "uucp", "proxy", "www-data", "backup", "list", "irc", "nobody", "nogroup",
+                                     "systemd-network", "systemd-resolve", "messagebus", "sshd", "admin", "wheel", "sudo"};
+    if (name.empty()) {
+        why = "empty";
+        return false;
+    }
+    for (const char* s : sentinels)
+        if (name == s) {
+            why = "'" + std::string(name) + "' is a word for \"none\", not an account name; to run the site without its own account pass no_user: true (or --no-user)";
+            return false;
+        }
+    if (name.size() > 32) {
+        why = "longer than 32 characters";
+        return false;
+    }
+    for (std::size_t i = 0; i < name.size(); ++i) {
+        const char c = name[i];
+        const bool ok = (c >= 'a' && c <= 'z') || c == '_' || (i > 0 && ((c >= '0' && c <= '9') || c == '-'));
+        if (!ok) {
+            why = "'" + std::string(name) + "' is not a valid account name (lower-case letters, digits, _ and -, starting with a letter or _)";
+            return false;
+        }
+    }
+    for (const char* r : reserved)
+        if (name == r) {
+            why = "'" + std::string(name) + "' is a system account; a site needs its own";
+            return false;
+        }
+    return true;
+}
+
+bool safe_path(std::string_view path, std::string& why) {
+    if (path.empty() || path.front() != '/') {
+        why = "must be an absolute path";
+        return false;
+    }
+    if (path.size() > 512) {
+        why = "longer than 512 characters";
+        return false;
+    }
+    for (char c : path) {
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '/' ||
+                        c == '.' || c == '_' || c == '-';
+        if (!ok) {
+            why = "contains a character that is not a letter, digit, '.', '_', '-' or '/'";
+            return false;
+        }
+    }
+    if (path.find("/../") != std::string_view::npos || path.ends_with("/..") || path.find("//") != std::string_view::npos ||
+        (path.size() > 1 && path.back() == '/')) {
+        why = "must be normalised: no '..', no '//', no trailing '/'";
+        return false;
+    }
+    return true;
 }
 
 std::string suggest_user(std::string_view domain) {
@@ -164,13 +224,50 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
     if (has_key(body, "access_log")) spec.access_log = body.get("access_log");
     if (has_key(body, "listen_plain")) spec.listen_plain = body.get("listen_plain");
     if (has_key(body, "listen_tls")) spec.listen_tls = body.get("listen_tls");
-    // "user": absent = undecided; null or "" = deliberately none.
+    // "user": absent = undecided; JSON null or "" = deliberately none; `no_user: true` says
+    // the same in a way every client can send. Both given and disagreeing: refused.
+    bool user_given = false;
     if (body.is_object())
         for (const auto& m : body.members())
             if (m.first == "user") {
+                user_given = true;
                 spec.user_decided = true;
                 spec.user = m.second.is_string() ? m.second.str() : std::string();
+                spec.no_user = spec.user.empty();
             }
+    if (has_key(body, "no_user")) {
+        const bool none = body["no_user"].boolean();
+        if (none && user_given && !spec.user.empty()) {
+            error = "no_user is true but user is also given (" + spec.user + "); send one of them";
+            return needs;
+        }
+        if (none) {
+            spec.user.clear();
+            spec.no_user = true;
+            spec.user_decided = true;
+        } else if (!user_given && !spec.user_decided) {
+            spec.user_decided = false;  // no_user: false alone decides nothing
+        }
+    }
+    // Every value that ends up in a root command is checked here, before any command exists.
+    std::string why;
+    if (!spec.user.empty() && !valid_account(spec.user, why)) {
+        error = "user: " + why;
+        return needs;
+    }
+    if (!spec.group.empty() && !valid_account(spec.group, why)) {
+        error = "group: " + why;
+        return needs;
+    }
+    if (!spec.root.empty() && !safe_path(spec.root, why)) {
+        error = "root: " + why;
+        return needs;
+    }
+    for (const auto& f : {spec.cert, spec.key})
+        if (!f.empty() && !safe_path(f, why)) {
+            error = "https cert/key: " + why;
+            return needs;
+        }
     const bool user_decided = spec.user_decided || !spec.user.empty();
     // A site with its own user gets its own access log next to the server's: sites of
     // different users never share a log (rule 5), and the file is made theirs to read.
@@ -207,7 +304,7 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
     if (spec.app == "proxy" && spec.upstream.empty())
         needs.push_back(Decision{"upstream", "Where does the application listen? (http://host:port)", "http://127.0.0.1:3000", {}});
     if (!user_decided)
-        needs.push_back(Decision{"user", "Run this site under its own system account? (isolates it from other sites; null for none)",
+        needs.push_back(Decision{"user", "Run this site under its own system account? It isolates it from other sites. Answer with user: \"<name>\", or no_user: true for none.",
                                  suggest_user(spec.domain), {}});
     const bool php = spec.app != "static" && spec.app != "proxy" && !spec.app.empty();
     if (php && spec.user.empty() && spec.php_socket.empty() && user_decided)
@@ -318,6 +415,13 @@ bool write_site_file(const fs::path& file, const std::string& text, std::string&
 // directory, never the document root (useradd would fill it with dotfiles).
 std::vector<std::string> prerequisites(const SiteSpec& spec, const Config& cfg) {
     std::vector<std::string> cmds;
+    // Belt and braces: apply_request validated these; a command is never assembled from a
+    // value that would not pass again.
+    std::string why;
+    if ((!spec.user.empty() && !valid_account(spec.user, why)) || (!spec.group.empty() && !valid_account(spec.group, why)) ||
+        (!spec.root.empty() && !safe_path(spec.root, why)) || (!spec.cert.empty() && !safe_path(spec.cert, why)) ||
+        (!spec.key.empty() && !safe_path(spec.key, why)))
+        return {"# refused: " + why};
     const HostFacts facts = system_facts();
     const ServerAccount server = server_account(cfg, facts);
     const std::string server_group = server.known ? server.group : (cfg.group.empty() ? cfg.user : cfg.group);

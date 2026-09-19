@@ -22,6 +22,7 @@ struct SiteSpec {
     bool hsts = false;
     std::string user, group;
     bool user_decided = false;  // "user" was given (possibly as none); a managed file always has it
+    bool no_user = false;       // `no_user: true`: decided, and no account (the same as user null)
     std::string app;  // static | php | laravel | wordpress | proxy
     std::string root;
     std::string upstream;    // app = proxy
@@ -46,6 +47,13 @@ struct Decision {
 
 // Host names only: lower-case labels of letters, digits and hyphens, dots between.
 bool valid_domain(std::string_view name);
+// An account name we would put into `useradd` and `chown`: ^[a-z_][a-z0-9_-]{0,31}$, not a
+// word an agent may use for "none" (null, none, nil, undefined, false, true, ~), not a
+// system account (root, daemon, nobody, www-data, ...). `why` says what was wrong.
+bool valid_account(std::string_view name, std::string& why);
+// A path we would put into `mkdir` and a recursive `chown`: absolute, normalised, only
+// letters, digits and ._/- , no "..", no whitespace, nothing a shell would interpret.
+bool safe_path(std::string_view path, std::string& why);
 // A short account name derived from the domain ("www.example.com" -> "example").
 std::string suggest_user(std::string_view domain);
 // The application the files under `root` suggest: laravel, wordpress, php, proxy, static.

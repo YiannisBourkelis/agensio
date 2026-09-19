@@ -1668,6 +1668,42 @@ static void test_control_sites() {
     err.clear();
     CHECK(json::parse(R"({"aliases":["bad host"]})", body, err) && (apply_request(body, cfg, spec, err), err.find("alias") != std::string::npos));
     err.clear();
+    // Values that reach root commands are validated first; hostile or sentinel values are refused.
+    spec.app = "laravel";               // the probes above left "weird" and a bad alias behind
+    spec.aliases = {"www.shop.test"};
+    err.clear();
+    std::string why;
+    for (const char* bad : {"null", "none", "nil", "undefined", "false", "true", "~", "", "root", "nobody", "www-data",
+                            "Shop", "a b", "a;b", "$(id)", "../x", "web1;rm -rf /", "a\nb", "toolongtoolongtoolongtoolongtoolong"})
+        CHECK(!valid_account(bad, why));
+    CHECK(valid_account("web1", why) && valid_account("_svc", why) && valid_account("t1-shop", why));
+    CHECK(!valid_account("null", why) && why.find("no_user: true") != std::string::npos);
+    for (const char* bad : {"relative/x", "/a/../b", "/a b", "/a;b", "/a$(x)", "/a//b", "/a/", "/tmp/x\n", "/a/`id`"})
+        CHECK(!safe_path(bad, why));
+    CHECK(safe_path("/var/www/shop.test/web", why) && safe_path("/", why));
+    for (const char* payload : {R"({"user":"null"})", R"({"user":"a;b"})", R"({"group":"none"})", R"({"root":"/var/www/x;rm -rf /"})",
+                                R"({"https":{"cert":"/etc/x y.pem","key":"/etc/k.pem"}})"}) {
+        SiteSpec probe = spec;
+        std::string e;
+        CHECK(json::parse(payload, body, err) && (apply_request(body, cfg, probe, e), !e.empty()));
+        const auto cmds = prerequisites(probe, cfg);  // never a command built from a refused value
+        CHECK(cmds.empty() || cmds[0].starts_with("# refused"));
+    }
+    {
+        SiteSpec probe = spec;
+        std::string e;
+        CHECK(json::parse(R"({"user":"web1","no_user":true})", body, err) && (apply_request(body, cfg, probe, e), e.find("no_user is true but user") != std::string::npos));
+    }
+    // The two ways to say "no account" agree; the decision text names the boolean.
+    SiteSpec none_a = spec, none_b = spec;
+    none_a.php_socket = none_b.php_socket = "127.0.0.1:9000";  // a PHP site without an account needs an existing pool
+    CHECK(json::parse(R"({"no_user":true})", body, err) && apply_request(body, cfg, none_a, err).empty() && none_a.user.empty() && none_a.no_user);
+    CHECK(json::parse(R"({"user":null})", body, err) && apply_request(body, cfg, none_b, err).empty() && none_b.user.empty() && none_b.no_user);
+    SiteSpec undecided;
+    undecided.domain = "shop.test";
+    CHECK(json::parse(R"({"domain":"shop.test","https":"none","app":"static","root":"/var/www/x"})", body, err));
+    const auto asks = apply_request(body, cfg, undecided, err);
+    CHECK(asks.size() == 1 && asks[0].field == "user" && asks[0].question.find("no_user: true") != std::string::npos);
     spec.aliases = {"www.shop.test"};
     spec.app = "laravel";  // the "weird" probe left its value behind
     // Rendering: HTTPS-only with the redirect site, the managed header round-trips.
@@ -1679,6 +1715,7 @@ static void test_control_sites() {
     CHECK(text.find("user = \"shop\"") != std::string::npos && text.find("tls = \"auto\"") != std::string::npos);
     CHECK(text.find("Strict-Transport-Security") != std::string::npos && text.find("server_name = [\"shop.test\", \"www.shop.test\"]") != std::string::npos);
     std::filesystem::create_directories(dir / "sites.d");
+    err.clear();
     CHECK(write_site_file(site_file(cfg, "shop.test"), text, err) && err.empty());
     SiteSpec back;
     CHECK(read_managed(site_file(cfg, "shop.test"), back) && back.domain == "shop.test" && back.user == "shop" && back.user_decided && back.hsts && back.aliases.size() == 1);

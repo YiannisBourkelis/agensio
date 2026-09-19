@@ -147,7 +147,7 @@ int main(int argc, char** argv) {
                     h.set(b.substr(2), v);
                     body.set("https", h);
                 } else if (b == "--user") field("user");
-                else if (b == "--no-user") body.set("user", agensio::json::Value(nullptr));
+                else if (b == "--no-user") body.set("no_user", true);
                 else if (b == "--group") field("group");
                 else if (b == "--app") field("app");
                 else if (b == "--root") field("root");

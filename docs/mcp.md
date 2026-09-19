@@ -24,6 +24,11 @@ agent host  --stdin/stdout-->  agensio mcp  --unix socket-->  agensio (control A
   MCP annotations (`readOnlyHint: false`, `destructiveHint` on delete) so the host asks
   the user before running them, and they require `confirm: true` plus a one-line
   `reason` that the server writes to its audit log with the caller's uid.
+- Every value that could end up in a root command (`user`, `group`, `root`, certificate
+  paths) is validated first: account names must match `^[a-z_][a-z0-9_-]{0,31}$` and may
+  not be a system account or a word for "none"; paths must be absolute and free of shell
+  characters. A refused value never produces a `useradd` or `chown` line. "No account"
+  is `no_user: true` (or JSON `null`), never the string `"null"`.
 - Anything that needs root (creating a system account, making a directory, restarting
   the service, reloading php-fpm) is never executed: the server answers with the exact
   commands and waits. The agent shows them, you run them, the agent continues.

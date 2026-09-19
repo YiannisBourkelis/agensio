@@ -706,6 +706,15 @@ Rules:
       longer answers by IP address; the changelog says so. Integration: 15 checks
       (strict listener, two-certificate listener, 8443 catch-all), unit test locks the
       router rule; the HTTP/2 coalescing retry is written as a skipped check.
+- [x] H2f (2026-09-20, fifth report) `user: "null"` from an agent that could not send JSON
+      null was accepted as an account name and turned into `useradd null` and a recursive
+      `chown` of the supplied root. Now every value that reaches a root command is
+      validated before any command exists (`valid_account`: pattern, sentinel words,
+      system accounts; `safe_path`: absolute, normalised, shell-safe), `prerequisites`
+      refuses to assemble a command from a value that would not pass again, `no_user:
+      true` is the always-expressible way to say "no account" (JSON null still works,
+      both together are refused), the MCP schema types `user` and `group` with the
+      pattern, and the decision text names the boolean. Unit test feeds hostile values.
 - [ ] H1b Certificates watched and reloaded when the files change (manual `tls = { cert,
       key }` sites; automatic ones already reload themselves); reload must not stall new
       QUIC connections (nginx's known weakness).
