@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.0-alpha.5 (2026-09-19)
+
+- feat: enhance PHP presets for Laravel, Drupal, and WordPress
+- Add A/B benchmark results and acceptance test for site creation
+- docs: update installation instructions for Debian, Ubuntu, Fedora, and Arch
+
 ## 0.1.0-alpha.4 (2026-09-19)
 
 - feat: enhance release workflow to upload RPM artifacts and add Fedora smoke tests
