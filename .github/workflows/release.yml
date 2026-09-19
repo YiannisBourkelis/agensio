@@ -53,11 +53,11 @@ jobs:
           # The version's section of CHANGELOG.md becomes the release notes.
           awk -v v="$version" '$0 ~ "^## " v " " {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md
           [ -s notes.md ] || echo "See CHANGELOG.md." > notes.md
-          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+          if ! gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             pre=""; case "$version" in *-*) pre="--prerelease";; esac
-            gh release create "$GITHUB_REF_NAME" $pre --title "$version" --notes-file notes.md
+            gh release create "$GITHUB_REF_NAME" $pre --title "$version" --notes-file notes.md -R "$GITHUB_REPOSITORY"
           fi
-          gh release upload "$GITHUB_REF_NAME" build/*.deb build/*.rpm --clobber
+          gh release upload "$GITHUB_REF_NAME" build/*.deb build/*.rpm --clobber -R "$GITHUB_REPOSITORY"
       - name: build the APT repository
         if: ${{ env.HAVE_APT_KEY == 'true' }}
         env:
@@ -119,5 +119,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          for _ in 1 2 3 4 5 6; do gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 && break; sleep 20; done  # the packages job creates it
-          gh release upload "$GITHUB_REF_NAME" /home/build/arch/agensio-[0-9]*.pkg.tar.zst --clobber
+          # In the container the checkout belongs to another uid and git refuses to read it;
+          # naming the repository keeps gh away from git.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          for _ in 1 2 3 4 5 6; do gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 && break; sleep 20; done  # the packages job creates it
+          gh release upload "$GITHUB_REF_NAME" /home/build/arch/agensio-[0-9]*.pkg.tar.zst --clobber -R "$GITHUB_REPOSITORY"
