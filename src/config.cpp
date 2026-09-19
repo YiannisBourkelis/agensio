@@ -550,11 +550,41 @@ void apply_preset(SiteConfig& site, const std::string& where) {
     }
     if (!site.php.configured)
         fail(where + ": app = \"" + site.app + "\" needs php = { socket = \"...\" } on the site");
+    // A static location the preset adds: the site's root and policies plus what it refuses.
+    auto static_location = [&](std::string path, bool exact, bool final_prefix, std::vector<std::string> deny) {
+        LocationConfig loc;
+        loc.path = std::move(path);
+        loc.exact = exact;
+        loc.final = final_prefix;
+        loc.root = site.root;
+        loc.index = site.index;
+        loc.hidden_files = site.hidden_files;
+        loc.symlinks_deny = site.symlinks_deny;
+        loc.deny_suffixes = std::move(deny);
+        loc.origin = "preset:" + site.app;
+        return loc;
+    };
+    // PHP source in any spelling: refused by the static handler (403), never served as a download.
+    const std::vector<std::string> php_suffixes = {".php", ".phtml", ".phar", ".php5", ".php7", ".php8", ".phps"};
+    // A file that must answer 404 whatever exists on disk (credentials, lock files).
+    auto never = [&](const char* path) {
+        if (has(path, true, false)) return;
+        LocationConfig loc = static_location(path, true, false, {});
+        loc.try_files = parse_try_files({"=404"});
+        site.locations.push_back(std::move(loc));
+    };
     if (site.app == "laravel") {
-        // Front controller only: no other .php is ever executed, dotfiles stay hidden
-        // (site default), Vite's hashed build output is cached for a year.
+        // Front controller only: no other .php is ever executed, and none is ever served as
+        // source either (2026-09-19: an existing second .php under public/ fell through to
+        // the static handler and was downloaded); dotfiles stay hidden (site default),
+        // Vite's hashed build output is cached for a year.
         if (site.try_files.empty()) site.try_files = parse_try_files({"$uri", "$uri/", "/index.php?$query_string"});
         if (!has("/index.php", true, false)) site.locations.push_back(fcgi_location("/index.php", true, false));
+        if (!has("/", false, false)) {
+            LocationConfig root = static_location("/", false, false, php_suffixes);
+            root.try_files = site.try_files;
+            site.locations.push_back(std::move(root));
+        }
         if (!has("/build/", false, false)) {
             LocationConfig assets;
             assets.path = "/build/";
@@ -563,6 +593,7 @@ void apply_preset(SiteConfig& site, const std::string& where) {
             assets.try_files = parse_try_files({"$uri", "=404"});
             assets.hidden_files = site.hidden_files;
             assets.symlinks_deny = site.symlinks_deny;
+            assets.deny_suffixes = php_suffixes;  // build output never contains PHP; never serve it if it does
             assets.add_headers.emplace_back("Cache-Control", "public, max-age=31536000, immutable");
             assets.origin = "preset:laravel";
             site.locations.push_back(std::move(assets));
@@ -570,6 +601,36 @@ void apply_preset(SiteConfig& site, const std::string& where) {
     } else if (site.app == "php") {
         if (site.try_files.empty()) site.try_files = parse_try_files({"$uri", "$uri/", "=404"});
         if (!has(".php", false, true)) site.locations.push_back(fcgi_location(".php", false, true));
+    } else if (site.app == "drupal") {
+        // Many entry points (index.php, core/install.php, update.php, ...): any .php runs;
+        // pretty paths fall back to index.php. What Drupal's .htaccess protects is refused
+        // here natively, since .htaccess is never read: PHP source in its other spellings
+        // (.inc, .module, .install, .theme, .engine, .profile), templates, translations,
+        // dumps, editor backups, the settings and services files, composer files, and PHP
+        // under the library, vendor and upload directories.
+        if (site.try_files.empty()) site.try_files = parse_try_files({"$uri", "$uri/", "/index.php?$query_string"});
+        if (!has(".php", false, true)) site.locations.push_back(fcgi_location(".php", false, true));
+        std::vector<std::string> source = {".inc", ".install", ".module", ".theme", ".engine", ".profile", ".make",
+                                           ".po", ".sql", ".twig", ".yml", ".yaml", ".sqlite", ".sqlite3", ".db",
+                                           ".bak", ".orig", ".save", ".swp", ".swo", ".tpl", ".xtmpl"};
+        if (!has("/", false, false)) {
+            LocationConfig root = static_location("/", false, false, source);
+            root.try_files = site.try_files;
+            site.locations.push_back(std::move(root));
+        }
+        std::vector<std::string> no_php = php_suffixes;
+        no_php.insert(no_php.end(), source.begin(), source.end());
+        for (const char* dir : {"/core/lib/", "/core/includes/", "/vendor/", "/node_modules/", "/sites/default/files/"})
+            if (!has(dir, false, false)) {
+                LocationConfig loc = static_location(dir, false, true, no_php);
+                loc.try_files = parse_try_files({"$uri", "=404"});
+                site.locations.push_back(std::move(loc));
+            }
+        for (const char* f : {"/sites/default/settings.php", "/sites/default/settings.local.php",
+                              "/sites/default/default.settings.php", "/sites/default/services.yml",
+                              "/sites/default/default.services.yml", "/composer.json", "/composer.lock", "/web.config",
+                              "/update.php.bak"})
+            never(f);
     } else if (site.app == "wordpress") {
         // Any .php runs (wp-login.php, wp-admin/*, wp-cron.php, plugin endpoints); pretty
         // permalinks fall back to index.php; nothing under uploads or wp-includes is ever
@@ -594,6 +655,9 @@ void apply_preset(SiteConfig& site, const std::string& where) {
         };
         shielded("/wp-content/uploads/", "public, max-age=604800");
         shielded("/wp-includes/", "public, max-age=2592000");
+        // The credentials file is never an entry point; nor is its template.
+        never("/wp-config.php");
+        never("/wp-config-sample.php");
     }
     // Locations the preset created inherit the site's try_files decided above.
     for (auto& loc : site.locations)
@@ -672,8 +736,8 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
 
     site.app = to_lower(t["app"].value_or(std::string()));
     if (!site.app.empty() && site.app != "laravel" && site.app != "php" && site.app != "static" &&
-        site.app != "wordpress" && site.app != "proxy")
-        fail(where + ": app must be \"laravel\", \"wordpress\", \"php\", \"proxy\" or \"static\"");
+        site.app != "wordpress" && site.app != "proxy" && site.app != "drupal")
+        fail(where + ": app must be \"laravel\", \"drupal\", \"wordpress\", \"php\", \"proxy\" or \"static\"");
     if (auto r = t["redirect"].value<std::string>()) {
         if (*r != "https" && (!r->starts_with("https://") || r->size() <= 8 || r->find('/', 8) != std::string::npos))
             fail(where + ".redirect must be \"https\" or an \"https://host[:port]\" prefix");
@@ -689,10 +753,17 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     // A proxied or redirecting site needs no document root: it gets none (the static handler
     // answers 404 for an empty root), never the configuration directory.
     site.root = root ? resolve_root(base_dir, *root, where) : std::string();
-    const std::string root_given = site.root;  // the project directory for app = "laravel"
+    const std::string root_given = site.root;  // the project directory for app = "laravel" / "drupal"
     if (site.app == "laravel") {
         // The project directory is given; the web root is its public/ (never the project itself).
         site.root = resolve_root(base_dir, site.root + "/public", where + " (app = \"laravel\")");
+        site.index = {"index.php"};
+    } else if (site.app == "drupal") {
+        // A composer project serves its web/ (vendor/ stays above it); a plain tarball is
+        // its own document root.
+        std::error_code dec;
+        if (fs::is_regular_file(fs::path(site.root) / "web" / "index.php", dec))
+            site.root = resolve_root(base_dir, site.root + "/web", where + " (app = \"drupal\")");
         site.index = {"index.php"};
     } else if (site.app == "php") {
         site.index = {"index.php", "index.html"};

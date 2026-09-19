@@ -656,6 +656,21 @@ Rules:
       unit, and gives a user site its own access log. `tests/site-user.sh` (root devbox,
       17 checks) runs the prescribed commands verbatim and asserts `-t`, a restart, a
       clean health check, PHP and static content together.
+- [x] H2c (2026-09-19) **Security**: the Laravel preset let an existing second `.php` under
+      `public/` fall through to the static handler and served its source as a download
+      (found on a live server running Drupal under `app = "laravel"`: `core/install.php`,
+      `sites/default/default.settings.php` disclosed; `settings.php` with the database
+      password would have followed the install). The preset's "only index.php runs" rule
+      now refuses every other `.php` (403 from the static handler before any read), on
+      `/` and `/build/`. New `app = "drupal"` for multi-entry-point applications: any
+      `.php` runs, front controller for the rest, and Drupal's `.htaccess` protections
+      built in natively (source spellings `.inc/.module/.install/...`, dumps, backups,
+      library/vendor/upload directories, `settings.php` and friends as 404). WordPress:
+      `wp-config.php` answered 404. Unit test asserts that every PHP preset either runs
+      `.php` through FastCGI or refuses it on every location it creates; integration
+      fixtures for Laravel (second entry point), Drupal (13 checks) and WordPress (4)
+      assert on the absence of `<?php` in bodies, not only on status codes.
+      Documented: `.htaccess` is never read (section 4c).
 - [ ] H1b Certificates watched and reloaded when the files change (manual `tls = { cert,
       key }` sites; automatic ones already reload themselves); reload must not stall new
       QUIC connections (nginx's known weakness).

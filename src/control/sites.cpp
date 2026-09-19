@@ -121,6 +121,7 @@ std::string detect_app(const fs::path& root) {
     std::error_code ec;
     if (!fs::is_directory(root, ec)) return {};
     if (fs::exists(root / "artisan", ec) || fs::exists(root.parent_path() / "artisan", ec)) return "laravel";
+    if (fs::exists(root / "core" / "lib" / "Drupal.php", ec) || fs::exists(root / "web" / "core" / "lib" / "Drupal.php", ec)) return "drupal";
     if (fs::exists(root / "wp-config.php", ec) || fs::is_directory(root / "wp-includes", ec)) return "wordpress";
     if (fs::exists(root / "index.php", ec)) return "php";
     if (fs::exists(root / "package.json", ec) || fs::exists(root / "Gemfile", ec)) return "proxy";
@@ -196,9 +197,10 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
         const std::string detected = spec.root.empty() ? std::string() : detect_app(spec.root);
         needs.push_back(Decision{"app", "What runs there? A preset sets the routing and PHP rules.",
                                  detected.empty() ? "static" : detected + " (found under root)",
-                                 {"static", "php", "laravel", "wordpress", "proxy"}});
-    } else if (spec.app != "static" && spec.app != "php" && spec.app != "laravel" && spec.app != "wordpress" && spec.app != "proxy") {
-        error = "app must be static, php, laravel, wordpress or proxy";
+                                 {"static", "php", "laravel", "drupal", "wordpress", "proxy"}});
+    } else if (spec.app != "static" && spec.app != "php" && spec.app != "laravel" && spec.app != "drupal" &&
+               spec.app != "wordpress" && spec.app != "proxy") {
+        error = "app must be static, php, laravel, drupal, wordpress or proxy";
         return needs;
     }
     if (spec.app == "proxy" && spec.upstream.empty())
@@ -206,7 +208,7 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
     if (!user_decided)
         needs.push_back(Decision{"user", "Run this site under its own system account? (isolates it from other sites; null for none)",
                                  suggest_user(spec.domain), {}});
-    const bool php = spec.app == "php" || spec.app == "laravel" || spec.app == "wordpress";
+    const bool php = spec.app == "php" || spec.app == "laravel" || spec.app == "drupal" || spec.app == "wordpress";
     if (php && spec.user.empty() && spec.php_socket.empty() && user_decided)
         needs.push_back(Decision{"php_socket", "Without a site user no pool is generated: which php-fpm socket serves this site?",
                                  "unix:/run/php/php-fpm.sock", {}});
@@ -233,7 +235,7 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
         if (!spec.user.empty()) s += "user = " + toml_string(spec.user) + "\n";
         if (!spec.group.empty()) s += "group = " + toml_string(spec.group) + "\n";
         if (!spec.user.empty() && !spec.access_log.empty()) s += "access_log = " + toml_string(spec.access_log) + "\n";
-        const bool php = spec.app == "php" || spec.app == "laravel" || spec.app == "wordpress";
+        const bool php = spec.app == "php" || spec.app == "laravel" || spec.app == "drupal" || spec.app == "wordpress";
         if (php) {
             if (!spec.php_socket.empty()) s += "php = { socket = " + toml_string(spec.php_socket) + " }\n";
             else if (spec.php_children || !spec.php_version.empty()) {
@@ -374,7 +376,7 @@ std::string php_fpm_reload_command(const Config& cfg, const std::string& version
 
 std::vector<std::string> next_steps(const SiteSpec& spec, const Config& cfg) {
     std::vector<std::string> cmds;
-    const bool php = spec.app == "php" || spec.app == "laravel" || spec.app == "wordpress";
+    const bool php = spec.app == "php" || spec.app == "laravel" || spec.app == "drupal" || spec.app == "wordpress";
     if (php && !spec.user.empty() && spec.php_socket.empty())
         cmds.push_back("agensio pools && " + php_fpm_reload_command(cfg, spec.php_version));
     if (spec.https == "auto") cmds.push_back("# make sure " + spec.domain + " resolves to this server and port 80 is reachable; the certificate follows within a minute");

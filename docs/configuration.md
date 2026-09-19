@@ -106,16 +106,24 @@ path = "/index.php"
 match = "exact"
 handler = "fastcgi"
 
+[[site.location]]        # everything else: static files, or the front controller; PHP in
+path = "/"               # any spelling is refused (403), never executed, never served as source
+deny_suffixes = [".php", ".phtml", ".phar", ".php5", ".php7", ".php8", ".phps"]
+
 [[site.location]]        # Vite output is content-hashed: cache it for a year
 path = "/build/"
 try_files = ["$uri", "=404"]
+deny_suffixes = [".php", ".phtml", ".phar", ".php5", ".php7", ".php8", ".phps"]
 add_headers = { "Cache-Control" = "public, max-age=31536000, immutable" }
 ```
 
-Why it is shaped like this: a request for `/anything.php` does not execute that file, it
-falls through `try_files` to `/index.php` and Laravel's router answers, so a stray or
-uploaded `.php` file under `public/` is never a code-execution path. Dotfiles (`.env`)
-stay hidden by the site default. `public/storage` is a symlink into the project, which is
+Why it is shaped like this: a Laravel application has exactly one entry point. A
+request for any other `.php` under `public/`, existing or not, answers 403 from the
+static handler before anything is read from disk, so a stray or uploaded `.php` file is
+neither a code-execution path nor a download of its source (2026-09-19: before this
+rule an existing second `.php` was served as a file). An application with several
+entry points is not Laravel; use `app = "drupal"` (section 4c) or `app = "php"`.
+Dotfiles (`.env`) stay hidden by the site default. `public/storage` is a symlink into the project, which is
 why `symlinks = "allow"` is the default; set `symlinks = "deny"` on sites that have no
 such link.
 
@@ -169,8 +177,64 @@ add_headers = { "Cache-Control" = "public, max-age=2592000" }
 ```
 
 `wp-content/plugins` is deliberately not shielded: some plugins expose PHP endpoints
-there. `wp-config.php` is under the root and would be executed by PHP (it prints
-nothing), exactly as with nginx; `.htaccess` and `.user.ini` are dotfiles and hidden.
+there. `wp-config.php` and `wp-config-sample.php` are answered 404 by exact locations the
+preset adds (`try_files = ["=404"]`): the credentials file is never executed nor shown,
+whereas nginx recipes usually execute it (it prints nothing). `.htaccess` and
+`.user.ini` are dotfiles and hidden. agensio never reads `.htaccess`; see section 4c.
+
+## 4c. Drupal and other multi-entry-point PHP applications: `app = "drupal"`
+
+```toml
+[[site]]
+server_name = ["drupal.example.com"]
+listen = ["0.0.0.0:80"]
+root = "/var/www/drupal"            # the composer project; its web/ is served (a tarball without web/ is served as is)
+app = "drupal"
+php = { socket = "unix:/run/php/php8.4-fpm.sock" }
+```
+
+expands to:
+
+```toml
+root = "/var/www/drupal/web"
+index = ["index.php"]
+try_files = ["$uri", "$uri/", "/index.php?$query_string"]   # pretty paths reach the front controller
+
+[[site.location]]        # any .php runs: index.php, core/install.php, update.php, core/rebuild.php
+path = ".php"
+match = "suffix"
+handler = "fastcgi"
+
+[[site.location]]        # what Drupal's .htaccess protects, refused natively (403): PHP source in its
+path = "/"               # other spellings, templates, translations, dumps, editor backups
+deny_suffixes = [".inc", ".install", ".module", ".theme", ".engine", ".profile", ".make", ".po", ".sql",
+                 ".twig", ".yml", ".yaml", ".sqlite", ".sqlite3", ".db", ".bak", ".orig", ".save", ".swp", ".swo", ".tpl", ".xtmpl"]
+
+# final prefixes (nginx ^~): nothing PHP-like under library, vendor and upload directories
+[[site.location]]  path = "/core/lib/"             final = true  try_files = ["$uri", "=404"]  deny_suffixes = [...php and the list above...]
+[[site.location]]  path = "/core/includes/"        final = true  (same)
+[[site.location]]  path = "/vendor/"               final = true  (same)
+[[site.location]]  path = "/node_modules/"         final = true  (same)
+[[site.location]]  path = "/sites/default/files/"  final = true  (same)
+
+# never answered, whatever is on disk (404, existence not disclosed)
+[[site.location]]  path = "/sites/default/settings.php"  match = "exact"  try_files = ["=404"]
+# likewise settings.local.php, default.settings.php, services.yml, default.services.yml,
+# composer.json, composer.lock, web.config
+```
+
+`.htaccess`, `.ht.sqlite` (Drupal's SQLite database), `.env` and `.git/` are dotfiles and
+stay hidden by the site default. A `.php` that does not exist answers 404 before php-fpm.
+
+**agensio never reads `.htaccess`.** Applications that ship one (Drupal, WordPress,
+Joomla, most PHP software) rely on it for exactly these refusals under Apache; under
+agensio the preset provides them, and a hand-written site for such an application must
+provide its own. The list above is the subset of Drupal's `.htaccess` that matters:
+source disclosure and execution of files that are not entry points. Drupal's other
+rules (canonical redirects, caching headers) are optional and can be added as locations.
+
+The preset fits any application with a front controller *and* several real `.php` entry
+points; the deny list is Drupal's, harmless elsewhere.
 
 ## 4b. Proxied applications: `app = "proxy"`
 

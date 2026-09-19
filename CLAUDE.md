@@ -238,9 +238,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   server_name, ca }`. CGI (D5, `src/upstream/cgi_client.*`, `src/handlers/cgi.*`): the
   exchange's connect step forks the script with a socketpair as stdin/stdout, so the
   shared exchange code does the rest; processes capped and reaped per worker pool.
-- **Presets** (C3): `app = "laravel" | "wordpress" | "php" | "static"` on a site expands
+- **Presets** (C3): `app = "laravel" | "drupal" | "wordpress" | "php" | "static"` on a site expands
   at load into root, index, try_files and locations (Laravel: only `/index.php` is ever
-  executed, `/build/` gets an immutable Cache-Control via `add_headers`; WordPress: any
+  executed and any other `.php` is refused with 403, never served as source; Drupal: any
+  `.php` runs, front controller for the rest, Drupal's `.htaccess` refusals built in; `/build/` gets an immutable Cache-Control via `add_headers`; WordPress: any
   `.php` runs, `wp-content/uploads` and `wp-includes` are `final` prefix locations, nginx
   `^~`, with `deny_suffixes` so PHP there is 403 and never executed); hand-written
   locations win over the preset's. `agensio -t --explain` prints the effective configuration;

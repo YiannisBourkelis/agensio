@@ -721,7 +721,10 @@ static void test_presets() {
           s.try_files[2].target == "/index.php");
     const LocationConfig& fc = Router::location(s, "/index.php");
     CHECK(fc.exact && fc.kind == HandlerKind::fastcgi && fc.origin == "preset:laravel" && fc.try_files.size() == 3);
-    CHECK(Router::location(s, "/other.php").kind == HandlerKind::static_);  // only the front controller runs
+    // Only the front controller runs; any other .php is refused by the static handler, so
+    // it is neither executed nor served as source (2026-09-19).
+    const LocationConfig& other = Router::location(s, "/other.php");
+    CHECK(other.kind == HandlerKind::static_ && std::find(other.deny_suffixes.begin(), other.deny_suffixes.end(), ".php") != other.deny_suffixes.end());
     const LocationConfig& build = Router::location(s, "/build/app.js");
     // The hand-written /build/ location wins over the preset's.
     CHECK(build.origin.empty() && build.add_headers.size() == 1 && build.add_headers[0].second == "no-store");
@@ -740,6 +743,39 @@ static void test_presets() {
     const SiteConfig& p = pcfg.sites[0];
     CHECK(p.index.size() == 2 && Router::location(p, "/a/b.php").kind == HandlerKind::fastcgi);
     CHECK(Router::location(p, "/a/b.php").suffix && p.try_files.size() == 3 && p.try_files[2].status == 404);
+
+    // Drupal: web/ is served, any .php runs, the front controller catches the rest, and what
+    // Drupal's .htaccess protects is refused natively.
+    fs::create_directories(dir / "drupal" / "web" / "sites" / "default" / "files");
+    std::ofstream(dir / "drupal" / "web" / "index.php") << "<?php";
+    write("drupal.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"drupal\"\napp = \"drupal\"\n"
+                         "php = { socket = \"unix:/run/php/fpm.sock\" }\n");
+    Config dcfg = load_config(dir / "drupal.toml");
+    const SiteConfig& d = dcfg.sites[0];
+    CHECK(d.root == fs::canonical(dir / "drupal" / "web").string() && d.try_files.size() == 3 && d.try_files[2].target == "/index.php");
+    CHECK(Router::location(d, "/core/install.php").kind == HandlerKind::fastcgi);
+    CHECK(Router::location(d, "/core/lib/Drupal.php").kind == HandlerKind::static_ && Router::location(d, "/core/lib/Drupal.php").final);
+    CHECK(Router::location(d, "/sites/default/settings.php").exact && Router::location(d, "/sites/default/settings.php").try_files[0].status == 404);
+    const LocationConfig& droot = Router::location(d, "/dump.sqlite");
+    CHECK(droot.path == "/" && std::find(droot.deny_suffixes.begin(), droot.deny_suffixes.end(), ".sqlite") != droot.deny_suffixes.end() &&
+          std::find(droot.deny_suffixes.begin(), droot.deny_suffixes.end(), ".inc") != droot.deny_suffixes.end());
+    // WordPress: wp-config.php is never an entry point.
+    fs::create_directories(dir / "wp2");
+    write("wp2.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"wp2\"\napp = \"wordpress\"\nphp = { socket = \"unix:/run/php/fpm.sock\" }\n");
+    Config wcfg2 = load_config(dir / "wp2.toml");
+    CHECK(Router::location(wcfg2.sites[0], "/wp-config.php").try_files[0].status == 404 && Router::location(wcfg2.sites[0], "/wp-login.php").kind == HandlerKind::fastcgi);
+    // Every PHP preset either runs .php through FastCGI or refuses it on every static
+    // location: a preset that lets a .php reach the static handler cannot ship.
+    for (const Config* c : {&cfg, &pcfg, &dcfg, &wcfg2}) {
+        const SiteConfig& site = c->sites[0];
+        const bool runs_php = Router::location(site, "/x/y.php").kind == HandlerKind::fastcgi;
+        bool refused_everywhere = true;
+        for (const auto& l : site.locations)  // the preset's locations; a hand-written one is the administrator's
+            if (l.kind == HandlerKind::static_ && !l.exact && l.origin.starts_with("preset:") &&
+                std::find(l.deny_suffixes.begin(), l.deny_suffixes.end(), ".php") == l.deny_suffixes.end())
+                refused_everywhere = false;
+        CHECK(runs_php || refused_everywhere);
+    }
 
     auto rejects = [&](const char* name, const std::string& text) {
         write(name, text);
