@@ -33,6 +33,11 @@ jobs:
           [ "$tag" = "$ver" ] || { echo "tag $tag but binary says $ver: set AGENSIO_VERSION_STRING"; exit 1; }
       - name: packages
         run: cd build && cpack -G DEB && cpack -G RPM && ls -la *.deb *.rpm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm
+          path: build/*.rpm
+          retention-days: 3
       - name: smoke-install the .deb
         run: |
           sudo dpkg -i build/agensio_*.deb
@@ -124,3 +129,24 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           for _ in 1 2 3 4 5 6; do gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 && break; sleep 20; done  # the packages job creates it
           gh release upload "$GITHUB_REF_NAME" /home/build/arch/agensio-[0-9]*.pkg.tar.zst --clobber -R "$GITHUB_REPOSITORY"
+
+  fedora:
+    # The RPM built by the packages job, installed on a current Fedora: account, files,
+    # unit, the packaged configuration accepted. Nothing is uploaded from here.
+    needs: packages
+    runs-on: ubuntu-24.04
+    container: fedora:latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: rpm
+          path: rpm
+      - name: smoke-install
+        run: |
+          dnf install -y rpm/agensio-*.rpm
+          id agensio
+          test -f /etc/agensio/agensio.toml && test -f /etc/agensio/sites.d/default.toml
+          test -f /usr/lib/systemd/system/agensio.service && test -f /etc/logrotate.d/agensio
+          /usr/sbin/agensio -t -c /etc/agensio/agensio.toml
+          /usr/sbin/agensio -v
+          rpm -qi agensio | grep -E '^(Version|Release)'

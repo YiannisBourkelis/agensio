@@ -702,9 +702,16 @@ Rules:
       packages on every `v*` tag, checks the binary's version against the tag,
       smoke-installs the `.deb`, attaches both to the release, and publishes a signed
       APT repository to GitHub Pages when the `APT_GPG_PRIVATE_KEY` secret exists;
-      `ci.yml` builds and tests on Ubuntu and macOS for every push. Remaining: the GPG
-      key and Pages setup, the COPR project and the AUR submission (need accounts),
-      Docker image, Homebrew formula, aarch64 builds.
+      `ci.yml` builds and tests on Ubuntu and macOS for every push (release commits
+      skipped, the release job tests them). An `arch` job builds the binary pacman package
+      from the `PKGBUILD` in an Arch container and attaches it too (`pacman -U`). First
+      release with all three packages: `v0.1.0-alpha.3` (2026-09-19). Lessons from the
+      runners: Ubuntu 22.04 needs CMake from an action, GCC 12 and a fetched asio; the
+      `runner` account cannot read `/etc/agensio` (0750) and has no `/usr/sbin` on PATH;
+      `secrets` is not readable in a step `if`; `gh` inside a container must be told the
+      repository because the checkout belongs to another uid; libc++ has no `std::jthread`.
+      Remaining: the GPG key and Pages setup for the APT repository, the COPR project and
+      the AUR submission (need accounts), Docker image, Homebrew formula, aarch64 builds.
 - [ ] H7b CI additions: ASan/UBSan builds and the fuzzers on a schedule; Docker image;
       Homebrew formula; aarch64 packages.
 - [ ] Checkpoint: runs a real site for a week; documented ops guide.
