@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.0-alpha.3 (2026-09-19)
+
+- fix: update release workflow to use secrets for APT GPG key and enhance Arch package build process
+
 ## 0.1.0-alpha.2 (2026-09-19)
 
 Packages and release automation; no change to the server itself.
