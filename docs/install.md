@@ -172,7 +172,9 @@ rollback.
    echo "deb [signed-by=/usr/share/keyrings/agensio.gpg] https://yiannisbourkelis.github.io/agensio/apt stable main" | sudo tee /etc/apt/sources.list.d/agensio.list
    sudo apt update && sudo apt install agensio
    # Fedora, RHEL 9+ (COPR, once enabled):  sudo dnf copr enable yiannis/agensio && sudo dnf install agensio
-   # Arch (AUR, once published):            yay -S agensio     # packaging/arch/PKGBUILD
+   # Arch, Omarchy, Manjaro: the binary package from the release page
+   sudo pacman -U ./agensio-0.1.0alpha2-1-x86_64.pkg.tar.zst
+   # or, once published in the AUR: yay -S agensio           # packaging/arch/PKGBUILD
    ```
 
    Upgrades keep your edits to `/etc/agensio` (conffiles); removing the package keeps

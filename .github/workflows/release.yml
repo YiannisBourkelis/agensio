@@ -56,7 +56,7 @@ jobs:
           fi
           gh release upload "$GITHUB_REF_NAME" build/*.deb build/*.rpm --clobber
       - name: build the APT repository
-        if: ${{ env.APT_GPG_PRIVATE_KEY != '' }}
+        if: ${{ secrets.APT_GPG_PRIVATE_KEY != '' }}
         env:
           APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
         run: |
@@ -77,7 +77,7 @@ jobs:
           cd ../..
           printf '<h1>agensio packages</h1><p>APT: see docs/install.md</p>' > site/index.html
       - name: publish the APT repository (GitHub Pages)
-        if: ${{ env.APT_GPG_PRIVATE_KEY != '' }}
+        if: ${{ secrets.APT_GPG_PRIVATE_KEY != '' }}
         env:
           APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
         uses: peaceiris/actions-gh-pages@v4
@@ -85,3 +85,36 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./site
           keep_files: true
+
+  arch:
+    # A binary pacman package from packaging/arch/PKGBUILD, built in an Arch container and
+    # attached to the release: `sudo pacman -U ./agensio-*.pkg.tar.zst` on Arch, Omarchy,
+    # Manjaro, EndeavourOS. The AUR entry, when it exists, is the update path.
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    steps:
+      - name: dependencies
+        run: pacman -Syu --noconfirm --needed base-devel git cmake ninja asio openssl github-cli sudo
+      - uses: actions/checkout@v4
+      - name: build the package (makepkg refuses to run as root, so a build user does it)
+        run: |
+          useradd -m build && echo 'build ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/build
+          cp -r packaging/arch /home/build/arch && chown -R build /home/build/arch
+          cd /home/build/arch
+          sudo -u build makepkg -s --noconfirm
+          ls -la *.pkg.tar.zst
+      - name: version matches the tag
+        run: |
+          tag="${GITHUB_REF_NAME#v}"; grep -q "^_tag=$tag$" packaging/arch/PKGBUILD || { echo "PKGBUILD _tag is not $tag"; exit 1; }
+      - name: smoke-install
+        run: |
+          pacman -U --noconfirm /home/build/arch/agensio-[0-9]*.pkg.tar.zst   # not the -debug package
+          id agensio && test -f /etc/agensio/agensio.toml && test -f /usr/lib/systemd/system/agensio.service
+          grep -q '/usr/bin/agensio' /usr/lib/systemd/system/agensio.service
+          /usr/bin/agensio -t -c /etc/agensio/agensio.toml && /usr/bin/agensio -v
+      - name: attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for _ in 1 2 3 4 5 6; do gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 && break; sleep 20; done  # the packages job creates it
+          gh release upload "$GITHUB_REF_NAME" /home/build/arch/agensio-[0-9]*.pkg.tar.zst --clobber

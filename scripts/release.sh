@@ -50,22 +50,27 @@ today=$(date +%Y-%m-%d)
 say() { printf '%s\n' "$*"; }
 fail() { say "error: $*"; exit 1; }
 
-# 1. The changelog must already describe the version. Offer a stub to fill in.
+# 1. The changelog must describe the version. When it does not, a draft is inserted from
+#    the commit subjects since the previous tag (merges and release commits left out),
+#    for you to edit; the script stops so the notes are reviewed before anything is tagged.
 if ! grep -q "^## $version " CHANGELOG.md; then
     say "CHANGELOG.md has no '## $version (date)' section."
+    last=$(git describe --tags --abbrev=0 2>/dev/null || true)
+    range=${last:+$last..HEAD}
+    draft=$(git log --no-merges --pretty='- %s' $range | grep -v '^- Release v' || true)
+    [ -n "$draft" ] || draft="- "
     if [ $dry = 0 ] && [ -t 0 ]; then
-        read -r -p "insert an empty section at the top for you to fill in, then stop? [Y/n] " answer
+        say "draft from the $(git rev-list --count --no-merges ${range:-HEAD}) commit(s) since ${last:-the beginning}:"
+        say "$draft"
+        read -r -p "insert this as the section at the top for you to edit, then stop? [Y/n] " answer
         if [[ ! "$answer" =~ ^[Nn] ]]; then
-            sed -i "1a\\
-\\
-## $version ($today)\\
-\\
-- " CHANGELOG.md
-            say "added; write the notes, commit, and run $0 $version again"
+            { printf '# Changelog\n\n## %s (%s)\n\n%s\n\n' "$version" "$today" "$draft"; tail -n +2 CHANGELOG.md | sed '1{/^$/d}'; } > CHANGELOG.md.new
+            mv CHANGELOG.md.new CHANGELOG.md
+            say "inserted; edit the wording, commit, and run $0 $version again"
             exit 1
         fi
     fi
-    fail "write the changelog section first"
+    fail "write the changelog section first (a draft: git log --no-merges --pretty='- %s' ${range:-HEAD})"
 fi
 
 # 2. What changes.
