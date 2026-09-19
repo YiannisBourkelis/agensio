@@ -33,8 +33,11 @@ jobs:
       - name: smoke-install the .deb
         run: |
           sudo dpkg -i build/agensio_*.deb
-          # /usr/sbin is not on a non-root runner's PATH: name the binary in full.
-          id agensio && test -f /etc/agensio/agensio.toml
+          # /usr/sbin is not on the runner's PATH, and /etc/agensio is 0750 root:agensio, so
+          # everything that looks inside it runs through sudo.
+          id agensio
+          sudo test -f /etc/agensio/agensio.toml
+          sudo test -f /etc/agensio/sites.d/default.toml
           sudo /usr/sbin/agensio -t -c /etc/agensio/agensio.toml
           /usr/sbin/agensio -v
           systemctl --no-pager status agensio || true
