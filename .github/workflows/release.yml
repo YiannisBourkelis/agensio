@@ -42,10 +42,19 @@ jobs:
           /usr/sbin/agensio -v
           systemctl --no-pager status agensio || true
           sudo systemctl stop agensio || true
-      - name: attach to the release
+      - name: create the release if the tag has none, then attach the packages
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$GITHUB_REF_NAME" build/*.deb build/*.rpm --clobber
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # The version's section of CHANGELOG.md becomes the release notes.
+          awk -v v="$version" '$0 ~ "^## " v " " {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md
+          [ -s notes.md ] || echo "See CHANGELOG.md." > notes.md
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            pre=""; case "$version" in *-*) pre="--prerelease";; esac
+            gh release create "$GITHUB_REF_NAME" $pre --title "$version" --notes-file notes.md
+          fi
+          gh release upload "$GITHUB_REF_NAME" build/*.deb build/*.rpm --clobber
       - name: build the APT repository
         if: ${{ env.APT_GPG_PRIVATE_KEY != '' }}
         env:

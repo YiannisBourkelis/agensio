@@ -208,6 +208,7 @@ else()
   set(CPACK_RPM_PACKAGE_RELEASE 1)
 endif()
 set(CPACK_RPM_FILE_NAME RPM-DEFAULT)
+set(CPACK_RPM_PACKAGE_RELOCATABLE OFF)  # a system package: /etc and /usr/lib are not relocatable
 set(CPACK_RPM_PACKAGE_LICENSE MIT)
 set(CPACK_RPM_PACKAGE_GROUP "System Environment/Daemons")
 set(CPACK_RPM_PACKAGE_REQUIRES "openssl-libs, shadow-utils")
