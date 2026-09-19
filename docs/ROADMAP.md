@@ -677,6 +677,20 @@ Rules:
       through `-t --explain`) except that WordPress shields now also refuse `.php8`.
       Next rows, in this order, each with a fixture and a docs section: `symfony`,
       `joomla`, `phpbb`, `nextcloud`, `mediawiki`; test beds for Joomla and Nextcloud.
+- [x] H2d (2026-09-19, third live report) A log file added by a reload received nothing:
+      every worker sized its per-sink buffers at start and dropped lines for sinks added
+      later (silent for five hours on the reporting server; the file existed at 0 bytes and
+      health saw nothing). Buffers now grow per worker, the flush timer always runs, and
+      `tests/reload.sh` asserts a reload-added log receives the next request. State
+      directory parent `/var/lib/agensio` is 0751 (packages, `agensio pools`, install
+      guide) with a hosting rule that names the fix, since at 0750 the site user could not
+      reach its own tmp/ and PHP reported a misleading open_basedir error; the site-user
+      test now writes to `sys_get_temp_dir()` as the pool user. Refused endings answer
+      404 like hidden files (one policy, existence never confirmed). `agensio ctl` has a
+      help page, `--help` on any subcommand, and a CLI-shaped hint instead of the API's
+      JSON when a change lacks `--yes`. Not bugs: the WordPress preset already runs every
+      `.php` (fixtures now list seven real entry points); the Drupal preset already exists
+      (`site-update NAME --app drupal`).
 - [ ] H1b Certificates watched and reloaded when the files change (manual `tls = { cert,
       key }` sites; automatic ones already reload themselves); reload must not stall new
       QUIC connections (nginx's known weakness).

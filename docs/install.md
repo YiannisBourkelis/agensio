@@ -47,7 +47,7 @@ are separate accounts (section 3).
 | pid file | `/run/agensio.pid` | root 0644 | today |
 | php-fpm pool sockets | `/run/php/agensio-<user>.sock` (Debian, Ubuntu, Alpine), `/run/php-fpm/agensio-<user>.sock` (RHEL, Fedora) | <user>:agensio 0660 | today (`server.pools_run`) |
 | generated php-fpm pool files | `/etc/php/<version>/fpm/pool.d/agensio-<user>.conf` (Debian), `/etc/php-fpm.d/agensio-<user>.conf` (RHEL) | root 0644 | today (`agensio pools`, `server.pools`) |
-| persistent state | `/var/lib/agensio/` | agensio 0750 | today (`server.state_dir`) |
+| persistent state | `/var/lib/agensio/` | agensio 0751 (site users traverse to their own directory, cannot list others) | today (`server.state_dir`) |
 | certificates (automatic) | `/var/lib/agensio/acme/account.key`, `/var/lib/agensio/acme/<domain>/key.pem` (0600), `fullchain.pem` | agensio 0700 dir | today (`server.acme.storage`) |
 | per-user PHP state | `/var/lib/agensio/<user>/tmp/`, `/var/lib/agensio/<user>/sessions/` | <user> 0700 | today (`agensio pools`) |
 | temporary spill files | the system temp directory, unlinked immediately (large upstream bodies and request bodies) | agensio | today |
@@ -225,7 +225,8 @@ rollback.
    sudo useradd --system --home /var/lib/agensio --shell /usr/sbin/nologin agensio
    sudo install -d -o root    -g agensio -m 0750 /etc/agensio
    sudo install -d -o agensio -g agensio -m 0750 /etc/agensio/sites.d   # the control API writes site files here
-   sudo install -d -o agensio -g agensio -m 0750 /var/log/agensio /var/lib/agensio
+   sudo install -d -o agensio -g agensio -m 0750 /var/log/agensio
+   sudo install -d -o agensio -g agensio -m 0751 /var/lib/agensio   # site users traverse to their own state directory
    sudo install -d -o root    -g root    -m 0755 /var/www
    ```
 

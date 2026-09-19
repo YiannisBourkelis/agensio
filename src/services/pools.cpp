@@ -312,6 +312,14 @@ std::vector<std::string> check_hosting(const Config& cfg, const HostFacts& facts
                 errors.push_back(sf.name + ": socket directory " + dir + " is world-writable (" + describe(d) +
                                  "); another user could replace the socket");
         }
+        // Rule 2c: the user reaches its own state directory: the parent lets others traverse.
+        if (site.pool.generated) {
+            FileFacts parent;
+            if (facts.stat(cfg.state_dir, parent) && !(parent.mode & 0001) && parent.gid != sf.gid && parent.uid != sf.uid)
+                errors.push_back(sf.name + ": state directory parent " + cfg.state_dir + " is " + describe(parent) +
+                                 "; " + site.user + " cannot reach " + site.pool.state_dir + " (PHP's tmp and sessions). chmod 751 " +
+                                 cfg.state_dir);
+        }
         // Rule 6: the access log is the site's to read, nobody else's.
         if (!site.access_log.empty()) {
             FileFacts f;
@@ -371,6 +379,15 @@ int write_pools(const Config& cfg, const fs::path& out_dir, bool dry_run, std::o
         const struct passwd* pw = ::getpwnam(p.user.c_str());
         const struct group* gr = ::getgrnam(p.group.c_str());
         bool own_warned = false;
+        // The parent (state_dir) is ours and 0751: a site user reaches its own directory by
+        // name without listing the others (2026-09-19: at 0750 PHP's open_basedir realpath
+        // failed with EACCES and Composer's temp directory was unusable).
+        if (!dry_run) {
+            fs::create_directories(cfg.state_dir, ec);
+            struct stat st {};
+            if (::stat(cfg.state_dir.c_str(), &st) == 0 && st.st_uid == ::geteuid() && (st.st_mode & 0001) == 0)
+                ::chmod(cfg.state_dir.c_str(), (st.st_mode & 07777) | 0001);
+        }
         for (const char* sub : {"", "/tmp", "/sessions"}) {
             const fs::path d = p.state_dir + sub;
             if (fs::is_directory(d, ec)) continue;

@@ -521,7 +521,7 @@ void Server::run() {
             std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(w->ctx.get_executor()));
         w->state.logs.attach(&logs_,
                              cfg_.log.json ? AccessLogFormat::json : AccessLogFormat::combined);
-        if (access_logging_) arm_flush(*w);
+        arm_flush(*w);  // always: a reload may add the first access log later
     }
     for (std::size_t i = 0; i < acceptors_.size(); ++i)
         start_accept(i);

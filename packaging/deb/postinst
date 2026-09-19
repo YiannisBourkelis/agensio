@@ -7,7 +7,8 @@ if [ "$1" = "configure" ]; then
     getent passwd agensio >/dev/null || \
         useradd --system --gid agensio --home-dir /var/lib/agensio --no-create-home --shell /usr/sbin/nologin agensio
     install -d -o root    -g agensio -m 0750 /etc/agensio
-    install -d -o agensio -g agensio -m 0750 /etc/agensio/sites.d /var/log/agensio /var/lib/agensio
+    install -d -o agensio -g agensio -m 0750 /etc/agensio/sites.d /var/log/agensio
+    install -d -o agensio -g agensio -m 0751 /var/lib/agensio   # site users traverse to their own state directory
     install -d -o root    -g root    -m 0755 /var/www
     if [ ! -d /var/www/html ]; then
         install -d -o root -g root -m 0755 /var/www/html

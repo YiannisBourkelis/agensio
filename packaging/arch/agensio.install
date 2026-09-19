@@ -3,7 +3,8 @@ post_install() {
   getent group agensio-admin >/dev/null || groupadd --system agensio-admin
   getent passwd agensio >/dev/null || useradd --system --gid agensio --home-dir /var/lib/agensio --no-create-home --shell /usr/bin/nologin agensio
   install -d -o root -g agensio -m 0750 /etc/agensio
-  install -d -o agensio -g agensio -m 0750 /etc/agensio/sites.d /var/log/agensio /var/lib/agensio
+  install -d -o agensio -g agensio -m 0750 /etc/agensio/sites.d /var/log/agensio
+  install -d -o agensio -g agensio -m 0751 /var/lib/agensio
   install -d -m 0755 /var/www/html
   [ -e /var/www/html/index.html ] || [ -n "$(ls -A /var/www/html)" ] || install -m 0644 /usr/share/agensio/www/index.html /var/www/html/index.html
   chown root:agensio /etc/agensio/agensio.toml; chmod 0640 /etc/agensio/agensio.toml

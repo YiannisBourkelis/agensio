@@ -107,7 +107,7 @@ match = "exact"
 handler = "fastcgi"
 
 [[site.location]]        # everything else: static files, or the front controller; PHP in
-path = "/"               # any spelling is refused (403), never executed, never served as source
+path = "/"               # any spelling is refused (404), never executed, never served as source
 deny_suffixes = [".php", ".phtml", ".phar", ".php5", ".php7", ".php8", ".phps"]
 
 [[site.location]]        # Vite output is content-hashed: cache it for a year
@@ -118,7 +118,7 @@ add_headers = { "Cache-Control" = "public, max-age=31536000, immutable" }
 ```
 
 Why it is shaped like this: a Laravel application has exactly one entry point. A
-request for any other `.php` under `public/`, existing or not, answers 403 from the
+request for any other `.php` under `public/`, existing or not, answers 404 from the
 static handler before anything is read from disk, so a stray or uploaded `.php` file is
 neither a code-execution path nor a download of its source (2026-09-19: before this
 rule an existing second `.php` was served as a file). An application with several
@@ -205,7 +205,7 @@ path = ".php"
 match = "suffix"
 handler = "fastcgi"
 
-[[site.location]]        # what Drupal's .htaccess protects, refused natively (403): PHP source in its
+[[site.location]]        # what Drupal's .htaccess protects, refused natively (404): PHP source in its
 path = "/"               # other spellings, templates, translations, dumps, editor backups
 deny_suffixes = [".inc", ".install", ".module", ".theme", ".engine", ".profile", ".make", ".po", ".sql",
                  ".twig", ".yml", ".yaml", ".sqlite", ".sqlite3", ".db", ".bak", ".orig", ".save", ".swp", ".swo", ".tpl", ".xtmpl"]
@@ -309,7 +309,7 @@ matched at the end of the path or before a `/`), then the longest `prefix`; an i
 | `fastcgi = { ... }` | overrides the site's `php = { ... }` for this location (section 7) |
 | `methods` | narrows what the handler serves, e.g. `["GET", "HEAD"]`; the rest get 405 with `Allow` |
 | `final` | prefix only: nginx `^~` |
-| `deny_suffixes` | endings answered with 403, e.g. `[".php"]` under an uploads directory |
+| `deny_suffixes` | endings answered with 404 (like hidden files: a refusal never confirms a file exists), e.g. `[".php"]` under an uploads directory |
 | `add_headers` | response fields added on 200 and 304, e.g. `{ "Cache-Control" = "..." }` |
 | `priority` | may use the FastCGI pool slots reserved by `priority_reserve` |
 

@@ -240,14 +240,14 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   shared exchange code does the rest; processes capped and reaped per worker pool.
 - **Presets** (C3): `app = "laravel" | "drupal" | "wordpress" | "php" | "static"` on a site expands
   at load into root, index, try_files and locations (Laravel: only `/index.php` is ever
-  executed and any other `.php` is refused with 403, never served as source; Drupal: any
+  executed and any other `.php` is refused with 404, never served as source; Drupal: any
   `.php` runs, front controller for the rest, Drupal's `.htaccess` refusals built in;
   the PHP presets are rows of `kPhpPresets` in `config.cpp` (served subdirectory, index,
   front controller, any `.php` or only one, refused suffixes, shielded directories,
   files answered 404) expanded by one shared routine, so a new application is a row, a
   fixture and a docs section; `/build/` gets an immutable Cache-Control via `add_headers`; WordPress: any
   `.php` runs, `wp-content/uploads` and `wp-includes` are `final` prefix locations, nginx
-  `^~`, with `deny_suffixes` so PHP there is 403 and never executed); hand-written
+  `^~`, with `deny_suffixes` so PHP there is 404 and never executed); hand-written
   locations win over the preset's. `agensio -t --explain` prints the effective configuration;
   `docs/configuration.md` documents each preset's expansion and every option (keep it
   current when a key or preset changes);

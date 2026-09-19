@@ -282,7 +282,7 @@ check "location: directory index is routed to the location owning it" "exact" "$
 check "location: exact does not prefix-match" "404" "$(code http://127.0.0.1:8080/sub/index.htmlx)"
 check "location: root prefix still serves the site" "$IDX" "$(curl -sS http://127.0.0.1:8080/ | sum)"
 check "location: try_files =403" "403" "$(code http://127.0.0.1:8080/private/anything)"
-check "location: final prefix keeps .php out of the suffix location, deny_suffixes gives 403" "403" "$(code http://127.0.0.1:8080/uploads/index.php)"
+check "location: final prefix keeps .php out of the suffix location, deny_suffixes gives 404" "404" "$(code http://127.0.0.1:8080/uploads/index.php)"
 check "location: fallback result served again (cache hit on the target)" "app shell" "$(curl -sS http://127.0.0.1:8080/app/some/route | sed 's/<[^>]*>//g')"
 check "dotfile hidden (404)" "404" "$(code http://127.0.0.1:8080/.env)"
 check "dot-directory hidden (404)" "404" "$(code http://127.0.0.1:8080/.git/config)"
@@ -366,9 +366,9 @@ check "laravel: root goes to index.php" "laravel / /index.php -" "$(curl -sS htt
 check "laravel: static asset served from public/ with immutable caching" "console.log(\"app\"); public, max-age=31536000, immutable" "$(curl -sS http://127.0.0.1:8090/build/app.js | tr -d '\n') $(curl -sSI http://127.0.0.1:8090/build/app.js | tr -d '\r' | awk '/^Cache-Control:/{sub(/^Cache-Control: /,""); print}')"
 check "laravel: dotfiles in public/ hidden" "404" "$(code http://127.0.0.1:8090/.env)"
 check "laravel: project files outside public/ unreachable" "400" "$(code --path-as-is 'http://127.0.0.1:8090/../.env')"
-check "laravel: a .php that does not exist is refused, not routed" "403" "$(code http://127.0.0.1:8090/anything.php)"
+check "laravel: a .php that does not exist is refused, not routed" "404" "$(code http://127.0.0.1:8090/anything.php)"
 # The regression: a second .php under public/ was served as a download with its source.
-check "laravel: an existing second .php is refused (403), never executed, never disclosed" "403 no-source" "$(code http://127.0.0.1:8090/admin.php) $(curl -sS http://127.0.0.1:8090/admin.php | grep -q '<?php\|hunter2\|second-entry' && echo LEAK || echo no-source)"
+check "laravel: an existing second .php is refused (404), never executed, never disclosed" "404 no-source" "$(code http://127.0.0.1:8090/admin.php) $(curl -sS http://127.0.0.1:8090/admin.php | grep -q '<?php\|hunter2\|second-entry' && echo LEAK || echo no-source)"
 check "laravel: /index.php/extra also lands in the front controller" "laravel /index.php/extra /index.php -" "$(curl -sS 'http://127.0.0.1:8090/index.php/extra')"
 fi
 "$BIN" -t --explain -c bench/tmp/agensio-test.toml > bench/tmp/explain.out 2>bench/tmp/explain.err
@@ -463,6 +463,9 @@ if ssh -o BatchMode=yes -o ConnectTimeout=2 localhost true >/dev/null 2>&1; then
 else
   echo "skip mcp: over ssh localhost (no sshd on this host)"
 fi
+check "ctl: --help on a change command prints usage, exit 0, no confirm needed" "0 yes" "$("$BIN" ctl site-update --help > bench/tmp/ctl-help.out 2>&1; echo -n "$? "; grep -q '^usage: agensio ctl' bench/tmp/ctl-help.out && echo yes)"
+check "ctl: bare ctl and ctl --help print the command list" "yes yes" "$({ "$BIN" ctl 2>&1 || true; } | grep -q 'site-create' && echo yes) $({ "$BIN" ctl --help 2>&1 || true; } | grep -q 'site-create' && echo yes)"
+check "ctl: a change without --yes says how to confirm" "yes" "$({ "$BIN" ctl reload --socket $CS 2>&1 >/dev/null || true; } | grep -q 'add --yes' && echo yes)"
 check "control: socket file mode and no access-log line for it" "666 no" "$(stat -c %a $CS 2>/dev/null || stat -f %Lp $CS) $(grep -q 'v1/status' bench/tmp/access.log && echo yes || echo no)"
 
 # ---- presets: Drupal (many entry points) and WordPress, what executes and what is refused ----
@@ -474,18 +477,19 @@ if [ -n "$FPM_PID" ]; then
   check "drupal: a missing path goes to the front controller" "drupal front /node/1" "$(curl -sS $D/node/1)"
   check "drupal: a second .php entry point executes, no source, text/html" "drupal second entry point ok no-source text/html" "$(curl -sS $D/admin.php) $(no_source $D/admin.php) $(curl -sSI $D/admin.php | tr -d '\r' | awk 'tolower($1)=="content-type:"{print $2}' | cut -d';' -f1)"
   check "drupal: core/install.php is an entry point and executes" "drupal install entry point ok" "$(curl -sS $D/core/install.php)"
-  check "drupal: library PHP under core/lib is refused" "403 no-source" "$(code $D/core/lib/Drupal.php) $(no_source $D/core/lib/Drupal.php)"
+  check "drupal: library PHP under core/lib is refused" "404 no-source" "$(code $D/core/lib/Drupal.php) $(no_source $D/core/lib/Drupal.php)"
   check "drupal: settings.php is a 404, never executed or shown" "404 no-source" "$(code $D/sites/default/settings.php) $(no_source $D/sites/default/settings.php)"
-  check "drupal: PHP under files/ is refused" "403" "$(code $D/sites/default/files/x.php)"
+  check "drupal: PHP under files/ is refused" "404" "$(code $D/sites/default/files/x.php)"
   check "drupal: .ht.sqlite, .htaccess, .env, .git/config are 404" "404 404 404 404" "$(code $D/sites/default/files/.ht.sqlite) $(code $D/.htaccess) $(code $D/.env) $(code $D/.git/config)"
-  check "drupal: a .sqlite dump and composer files are refused" "403 404" "$(code $D/data.sqlite) $(code $D/composer.json)"
+  check "drupal: a .sqlite dump and composer files are refused" "404 404" "$(code $D/data.sqlite) $(code $D/composer.json)"
   check "drupal: plain static files still serve" "public readme" "$(curl -sS $D/README.txt)"
   check "drupal: a missing .php is a 404 before php-fpm" "404" "$(code $D/nothere.php)"
   W=http://127.0.0.1:8096
   check "wordpress: front controller and pretty permalink" "wordpress front / wordpress front /hello-world/" "$(curl -sS $W/) $(curl -sS $W/hello-world/)"
   check "wordpress: wp-login.php executes, no source" "wp-login ok no-source" "$(curl -sS $W/wp-login.php) $(no_source $W/wp-login.php)"
+  check "wordpress: every real entry point executes (xmlrpc, cron, admin-ajax, comments, signup, activate, trackback)" "7 0" "$(for f in xmlrpc.php wp-cron.php wp-admin/admin-ajax.php wp-comments-post.php wp-signup.php wp-activate.php wp-trackback.php; do curl -sS $W/$f; echo; done | grep -c 'entry ok') $(for f in xmlrpc.php wp-cron.php wp-admin/admin-ajax.php wp-comments-post.php wp-signup.php wp-activate.php wp-trackback.php; do curl -sS $W/$f; done | grep -c '<?php')"
   check "wordpress: wp-config.php is a 404, never shown" "404 no-source" "$(code $W/wp-config.php) $(no_source $W/wp-config.php)"
-  check "wordpress: PHP under uploads and wp-includes refused, assets served" "403 403 200" "$(code $W/wp-content/uploads/shell.php) $(code $W/wp-includes/x.php) $(code $W/wp-includes/wp.js)"
+  check "wordpress: PHP under uploads and wp-includes refused, assets served" "404 404 200" "$(code $W/wp-content/uploads/shell.php) $(code $W/wp-includes/x.php) $(code $W/wp-includes/wp.js)"
   rm -rf tests/drupal/web/.git tests/drupal/web/.env tests/drupal/web/sites/default/files/.ht.sqlite
 fi
 

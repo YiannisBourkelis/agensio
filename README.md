@@ -96,7 +96,8 @@ per platform, the service user, the systemd unit and log rotation:
 ```sh
 sudo useradd --system --home /var/lib/agensio --shell /usr/sbin/nologin agensio
 sudo install -d -o root -g agensio -m 0750 /etc/agensio
-sudo install -d -o agensio -g agensio -m 0750 /etc/agensio/sites.d /var/log/agensio /var/lib/agensio
+sudo install -d -o agensio -g agensio -m 0750 /etc/agensio/sites.d /var/log/agensio
+sudo install -d -o agensio -g agensio -m 0751 /var/lib/agensio
 ```
 
 `/etc/agensio/agensio.toml`:

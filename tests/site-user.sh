@@ -64,7 +64,7 @@ check "agensio pools writes the pool (exit 3) with listen.group = agensio" "3 ye
 printf '[global]\npid = %s/fpm.pid\nerror_log = %s/fpm.log\ninclude = %s/agensio-t1.conf\n' $T $T $POOLD > $T/fpm.conf
 $FPM -y $T/fpm.conf -D; for _ in $(seq 1 50); do [ -S $T/run/agensio-t1.sock ] && break; sleep 0.1; done
 check "socket t1:agensio 0660" "t1 agensio 660" "$(stat -c '%U %G %a' $T/run/agensio-t1.sock)"
-printf '<?php echo "PHP ", PHP_VERSION, " uri=", $_SERVER["REQUEST_URI"], " as=", posix_getpwuid(posix_geteuid())["name"];' > $T/www/t1.test/web/index.php
+printf '<?php $f = @tempnam(sys_get_temp_dir(), "probe"); echo "PHP ", PHP_VERSION, " uri=", $_SERVER["REQUEST_URI"], " as=", posix_getpwuid(posix_geteuid())["name"], " tmp=", ($f !== false && is_file($f)) ? "ok" : "FAIL";' > $T/www/t1.test/web/index.php
 echo "static ok" > $T/www/t1.test/web/s.txt
 chown t1:agensio $T/www/t1.test/web/index.php $T/www/t1.test/web/s.txt; chmod 640 $T/www/t1.test/web/index.php $T/www/t1.test/web/s.txt
 
@@ -75,7 +75,8 @@ stop; start
 check "the server restarts on that configuration" "yes" "$([ -S $T/run/control.sock ] && "$BIN" ctl status --socket $T/run/control.sock >/dev/null 2>&1 && echo yes)"
 health=$("$BIN" ctl health --socket $T/run/control.sock)
 check "health answers and has no error finding" "yes 0" "$(echo "$health" | grep -q '"ok":' && echo yes) $(echo "$health" | grep -o '"severity":"error"' | wc -l | tr -d ' ')"
-check "PHP served through the user's pool as t1" "yes" "$(curl -sS -H 'Host: t1.test' http://127.0.0.1:18098/index.php | grep -q 'PHP 8.* uri=/index.php as=t1' && echo yes)"
+check "PHP served through the user's pool as t1, its temp directory usable" "yes" "$(curl -sS -H 'Host: t1.test' http://127.0.0.1:18098/index.php | grep -q 'PHP 8.* uri=/index.php as=t1 tmp=ok' && echo yes)"
+check "the state directory parent lets the site user reach its own directory" "traversable yes" "$([ $(( 8#$(stat -c %a $T/state) & 1 )) = 1 ] && echo traversable) $(su -s /bin/sh t1 -c "test -w $T/state/t1/tmp" && echo yes)"
 check "static file served through the server's group" "200 static ok" "$(curl -sS -o /dev/null -w '%{http_code} ' -H 'Host: t1.test' http://127.0.0.1:18098/s.txt)$(curl -sS -H 'Host: t1.test' http://127.0.0.1:18098/s.txt)"
 sleep 1.2
 check "the site's own log exists, agensio:t1 0640" "agensio t1 640" "$(stat -c '%U %G %a' $T/logs/sites/t1.test.log 2>/dev/null)"

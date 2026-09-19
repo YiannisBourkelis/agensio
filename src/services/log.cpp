@@ -190,7 +190,10 @@ void WorkerLogs::refresh_time(std::time_t now) {
 }
 
 void WorkerLogs::log(int sink, std::time_t now, const AccessRecord& r) {
-    if (sink < 0 || static_cast<std::size_t>(sink) >= buffers_.size()) return;
+    if (sink < 0 || !registry_) return;
+    // A reload may add sinks after attach(): grow this worker's buffers to match (own
+    // thread, no lock). Before 2026-09-19 lines for a new sink were silently dropped.
+    if (static_cast<std::size_t>(sink) >= buffers_.size()) buffers_.resize(static_cast<std::size_t>(sink) + 1);
     refresh_time(now);
     std::string& buf = buffers_[static_cast<std::size_t>(sink)];
     if (format_ == AccessLogFormat::json) format_json(buf, time_iso_, r);

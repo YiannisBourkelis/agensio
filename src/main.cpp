@@ -100,6 +100,28 @@ int main(int argc, char** argv) {
             return agensio::run_mcp(socket_path, std::cin, std::cout);
         }
         else if (a == "ctl" && i == 1) {
+            auto ctl_usage = [] {
+                std::cout << "usage: agensio ctl <command> [options] [--socket PATH] [-c config.toml]\n"
+                             "read:   status | sites | site NAME | validate | health |\n"
+                             "        logs [--site NAME] [--since 3h] [--level error|warn|info] [--status 5xx|4xx|all] [--limit N]\n"
+                             "change (each needs --yes, takes --reason TEXT):\n"
+                             "        reload | logs-reopen | site-disable NAME | site-enable NAME | site-delete NAME | cert-renew NAME\n"
+                             "        site-create --domain D [--alias A]... [--https auto|none] [--cert F --key F] [--user U|--no-user]\n"
+                             "                    [--group G] [--app NAME] [--root DIR] [--upstream URL] [--php-socket S]\n"
+                             "                    [--php-children N] [--php-version V] [--no-redirect] [--hsts] [--listen-plain A] [--listen-tls A]\n"
+                             "        site-update NAME (same options as site-create)\n"
+                             "Answers are the control API's JSON; exit 1 on any refusal. Without --yes a change is\n"
+                             "refused (428) and nothing happens.\n";
+            };
+            if (i + 1 >= argc) {
+                ctl_usage();
+                return 2;
+            }
+            for (int j = i + 1; j < argc; ++j)
+                if (std::string(argv[j]) == "--help" || std::string(argv[j]) == "-h") {
+                    ctl_usage();
+                    return 0;
+                }
             std::string command, socket_path, site_name, query;
             agensio::json::Value body = agensio::json::Value::object();
             agensio::json::Value aliases = agensio::json::Value::array();
@@ -176,6 +198,10 @@ int main(int argc, char** argv) {
             std::string error;
             if (!agensio::control_request(socket_path, method, path, mutation ? body.dump() : std::string(), reply, error)) {
                 std::cerr << error << "\n";
+                return 1;
+            }
+            if (reply.status == 428 && !yes) {
+                std::cerr << "this command changes the server: add --yes (and --reason \"why\") to confirm\n";
                 return 1;
             }
             std::cout << reply.body;

@@ -48,7 +48,8 @@ upstream = \"http://127.0.0.1:9110/\"
 [[site]]
 server_name = [\"*\"]
 listen = [\"127.0.0.1:8098\"]
-root = \"$T/v2\""
+root = \"$T/v2\"
+access_log = \"$T/logs/site8098.log\""
 ka=$(python3 - <<PYT
 import socket, subprocess, time
 s = socket.create_connection(("127.0.0.1", 8097)); s.settimeout(5)
@@ -69,6 +70,8 @@ PYT
 )
 check "keep-alive connection serves v2 after the reload, no close" "version one | version two | kept | 0" "$ka"
 check "new listener 8098 answers" "version two" "$(curl -sS http://127.0.0.1:8098/)"
+curl -sS -o /dev/null "http://127.0.0.1:8098/?marker=reload-added-log"; sleep 1.3
+check "a log file the reload added receives the requests (no silent drop)" "1" "$(grep -c 'marker=reload-added-log' "$T/logs/site8098.log" 2>/dev/null)"
 check "reload with no arguments finds ./agensio.toml" "0" "$(cd "$T" && "$BIN" reload > /dev/null 2>&1; echo $?)"
 check "new proxy location works" '{"ok":true,"service":"upstream"}' "$(curl -sS $B/slow/json)"
 check "reload logged" "yes" "$(grep -q 'reloaded .*2 site(s), 2 listener(s), 2 bound, 0 closed' "$T/logs/error.log" && echo yes)"

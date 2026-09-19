@@ -57,7 +57,7 @@ exit 0
 %dir %attr(0750,root,agensio) %{_sysconfdir}/agensio
 %dir %attr(0750,agensio,agensio) %{_sysconfdir}/agensio/sites.d
 %dir %attr(0750,agensio,agensio) /var/log/agensio
-%dir %attr(0750,agensio,agensio) /var/lib/agensio
+%dir %attr(0751,agensio,agensio) /var/lib/agensio
 %dir /var/www/html
 
 %changelog
