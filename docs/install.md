@@ -164,22 +164,43 @@ rollback.
    the `agensio` account and the `agensio-admin` group, and start the service when port
    80 is free. Steps 2 and 5 below are then already done.
 
+   **Debian 12+, Ubuntu 22.04+, from the release page.** Pick the `.deb` of the release
+   at https://github.com/YiannisBourkelis/agensio/releases (GitHub shows the version's
+   tilde as a dot in the file name; the package inside is unaffected) and let `apt`
+   install it, which also pulls the dependencies:
+
+   ```sh
+   wget https://github.com/YiannisBourkelis/agensio/releases/download/v0.1.0-alpha.3/agensio_0.1.0.alpha.3_amd64.deb
+   sudo apt install ./agensio_0.1.0.alpha.3_amd64.deb
+   systemctl status agensio         # started if port 80 was free
+   curl -s http://127.0.0.1/ | head -3
    ```
-   # Debian 12+, Ubuntu 22.04+: from the release page
-   sudo apt install ./agensio_0.1.0~alpha.1_amd64.deb
-   # or the APT repository (published once the release signing key is set up):
+
+   Upgrading is the same two commands with the next release's file: `apt` sees the newer
+   version, keeps your edits under `/etc/agensio`, and restarts the service. Removing:
+   `sudo apt remove agensio` keeps configuration, logs, certificates and content;
+   `sudo apt purge agensio` also removes `/etc/agensio` and `/var/log/agensio`.
+
+   **Debian, Ubuntu, from the APT repository** (available once the release signing key is
+   set up, then `apt update` follows new releases by itself):
+
+   ```sh
    curl -fsSL https://yiannisbourkelis.github.io/agensio/agensio.gpg | sudo tee /usr/share/keyrings/agensio.gpg >/dev/null
    echo "deb [signed-by=/usr/share/keyrings/agensio.gpg] https://yiannisbourkelis.github.io/agensio/apt stable main" | sudo tee /etc/apt/sources.list.d/agensio.list
    sudo apt update && sudo apt install agensio
-   # Fedora, RHEL 9+ (COPR, once enabled):  sudo dnf copr enable yiannis/agensio && sudo dnf install agensio
-   # Arch, Omarchy, Manjaro: the binary package from the release page
-   sudo pacman -U ./agensio-0.1.0alpha2-1-x86_64.pkg.tar.zst
-   # or, once published in the AUR: yay -S agensio           # packaging/arch/PKGBUILD
    ```
 
-   Upgrades keep your edits to `/etc/agensio` (conffiles); removing the package keeps
-   the configuration, logs, certificates and content; purging removes the configuration
-   and logs and keeps `/var/lib/agensio` (certificates) and `/var/www`.
+   **Fedora, RHEL 9+.** The `.rpm` from the release page (`sudo dnf install ./agensio-0.1.0-0.1.alpha3.x86_64.rpm`),
+   or COPR once enabled: `sudo dnf copr enable yiannis/agensio && sudo dnf install agensio`.
+
+   **Arch, Omarchy, Manjaro.** The binary package from the release page:
+
+   ```sh
+   wget https://github.com/YiannisBourkelis/agensio/releases/download/v0.1.0-alpha.3/agensio-0.1.0alpha3-1-x86_64.pkg.tar.zst
+   sudo pacman -U ./agensio-0.1.0alpha3-1-x86_64.pkg.tar.zst
+   ```
+
+   or, once published in the AUR, `yay -S agensio` (`packaging/arch/PKGBUILD`).
 
 1. **Binary.** `.deb` and `.rpm` packages, a static tarball, or a source build:
 
