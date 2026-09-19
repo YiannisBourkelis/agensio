@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.7 (unreleased)
+## 0.1.0-alpha.7
 
 **Breaking: strict host matching.** A site answers only the names in its `server_name`.
 A request with any other Host, including the server's IP address, answers `421
