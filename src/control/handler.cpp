@@ -730,9 +730,16 @@ void ControlHandler::site_create(Stream& s, const json::Value& body, std::string
     // php-fpm pool written and reloaded. next_steps then holds only what remains.
     std::vector<std::string> steps = control::next_steps(spec, cfg);
     if (backend_->provision_available() && !spec.user.empty() && !spec.access_log.empty()) {
-        const json::Value r = backend_->provision(json::Value::object().set("op", "log_own").set("file", spec.access_log)
-                                                      .set("group", spec.group.empty() ? spec.user : spec.group));
-        if (r["ok"].boolean()) done.push("log " + spec.access_log + " readable by " + spec.user);
+        const std::string group = spec.group.empty() ? spec.user : spec.group;
+        const json::Value r = backend_->provision(json::Value::object().set("op", "log_own").set("file", spec.access_log).set("group", group));
+        // What is claimed under done was seen on disk, not inferred from the helper's reply.
+        const HostFacts facts = system_facts();
+        FileFacts f;
+        unsigned gid = 0;
+        const bool handed = r["ok"].boolean() && facts.stat(spec.access_log, f) && facts.group(group, gid) && f.gid == gid && (f.mode & 0040);
+        if (handed) done.push("log " + spec.access_log + " readable by " + spec.user + " (group " + group + ", 0640)");
+        else warnings.push("the site's log " + spec.access_log + " is not readable by " + spec.user + (r["ok"].boolean() ? "" : " (the helper refused: " + std::string(r.get("error")) + ")") +
+                           "; as root: chown " + std::string(cfg.user.empty() ? "agensio" : cfg.user) + ":" + group + " " + spec.access_log + " && chmod 0640 " + spec.access_log);
     }
     finish_pool(s, spec, cfg, what, done, steps);
     reply(s, 201, json::Value::object().set("ok", true).set("file", file.string()).set("spec", spec.to_json())

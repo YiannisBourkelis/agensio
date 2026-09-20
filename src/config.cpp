@@ -516,6 +516,7 @@ const std::vector<std::string> kPhpSuffixes = {".php", ".phtml", ".phar", ".php5
 struct Shield {
     const char* path;   // a `final` prefix (nginx ^~): files served, nothing PHP-like ever runs
     const char* cache;  // Cache-Control added, or nullptr
+    bool fallback = false;  // a missing file goes to the front controller (Drupal makes image styles and aggregates on request)
 };
 
 struct PhpPreset {
@@ -552,10 +553,10 @@ const std::vector<PhpPreset> kPhpPresets = {
      {{"/build/", "public, max-age=31536000, immutable"}}, {}, "", "", {}, "/storage"},
     // Drupal: many entry points (index.php, core/install.php, update.php); what its
     // .htaccess protects is refused natively, since .htaccess is never read.
-    {"drupal", "Drupal (and other PHP applications with several entry points): the project directory is given, its web/ is served when present; any .php runs, missing paths reach index.php, and what Drupal's .htaccess protects is refused natively.",
+    {"drupal", "Drupal (and other PHP applications with several entry points): the project directory is given, its web/ is served when present; any .php runs, missing paths reach index.php (also below sites/default/files, where Drupal makes image-style derivatives and aggregated css/js on first request), and what Drupal's .htaccess protects is refused natively.",
      "web", false, {"index.php"}, true, true, kDrupalSource,
      {{"/core/lib/", nullptr}, {"/core/includes/", nullptr}, {"/vendor/", nullptr}, {"/node_modules/", nullptr},
-      {"/sites/default/files/", nullptr}},
+      {"/sites/default/files/", nullptr, true}},
      {"/sites/default/settings.php", "/sites/default/settings.local.php", "/sites/default/default.settings.php",
       "/sites/default/services.yml", "/sites/default/default.services.yml", "/composer.json", "/composer.lock",
       "/web.config", "/update.php.bak"},
@@ -681,7 +682,12 @@ void apply_preset(SiteConfig& site, const std::string& where) {
     for (const Shield& sh : preset.shields) {
         if (has(sh.path, false, false)) continue;
         LocationConfig loc = static_location(sh.path, false, true, shield_deny);
-        loc.try_files = parse_try_files({"$uri", "=404"});
+        // A shield that falls back: the file when it exists (fast, static), else the front
+        // controller with the query string, which is what generates it (Drupal's image
+        // styles with their itok, aggregated css/js after a cache rebuild; 2026-09-20: a
+        // deleted derivative was a 404 from us for ever). PHP-like endings stay refused.
+        loc.try_files = parse_try_files(sh.fallback && preset.front_controller ? std::vector<std::string>{"$uri", "/index.php?$query_string"}
+                                                                                : std::vector<std::string>{"$uri", "=404"});
         if (sh.cache) loc.add_headers.emplace_back("Cache-Control", sh.cache);
         site.locations.push_back(std::move(loc));
     }
@@ -1363,9 +1369,13 @@ json::Value preset_catalog() {
         json::Value refused = json::Value::array();
         for (const auto& s : p.refuse) refused.push(s);
         v.set("refused_suffixes", std::move(refused));
-        json::Value shields = json::Value::array();
-        for (const auto& sh : p.shields) shields.push(sh.path);
+        json::Value shields = json::Value::array(), regenerated = json::Value::array();
+        for (const auto& sh : p.shields) {
+            shields.push(sh.path);
+            if (sh.fallback) regenerated.push(sh.path);
+        }
         v.set("no_php_under", std::move(shields));
+        v.set("missing_reaches_front_controller", std::move(regenerated));
         json::Value never = json::Value::array();
         for (const char* n : p.never) never.push(n);
         v.set("never_served", std::move(never));

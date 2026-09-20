@@ -768,6 +768,14 @@ static void test_presets() {
     CHECK(Router::location(d, "/core/install.php").kind == HandlerKind::fastcgi);
     CHECK(Router::location(d, "/core/lib/Drupal.php").kind == HandlerKind::static_ && Router::location(d, "/core/lib/Drupal.php").final);
     CHECK(Router::location(d, "/sites/default/settings.php").exact && Router::location(d, "/sites/default/settings.php").try_files[0].status == 404);
+    {
+        // files/: a miss goes to the front controller (image styles, aggregates); core/lib does not.
+        const LocationConfig& files = Router::location(d, "/sites/default/files/styles/thumb/x.jpg");
+        const LocationConfig& lib = Router::location(d, "/core/lib/x.txt");
+        CHECK(files.path == "/sites/default/files/" && files.try_files.size() == 2 && files.try_files[1].kind == TryStep::Kind::fallback && files.try_files[1].target == "/index.php");
+        CHECK(lib.path == "/core/lib/" && lib.try_files.size() == 2 && lib.try_files[1].status == 404);
+        CHECK(std::find(files.deny_suffixes.begin(), files.deny_suffixes.end(), ".php") != files.deny_suffixes.end());
+    }
     CHECK(Router::location(d, "/sites/default/settings.php").handler == "deny" && Router::location(d, "/core/lib/x.inc").handler == "static");
     const LocationConfig& droot = Router::location(d, "/dump.sqlite");
     CHECK(droot.path == "/" && std::find(droot.deny_suffixes.begin(), droot.deny_suffixes.end(), ".sqlite") != droot.deny_suffixes.end() &&

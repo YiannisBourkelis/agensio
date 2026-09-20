@@ -764,6 +764,19 @@ if [ -n "$FPM_PID" ]; then
   check "drupal: library PHP under core/lib is refused" "404 no-source" "$(code $D/core/lib/Drupal.php) $(no_source $D/core/lib/Drupal.php)"
   check "drupal: settings.php is a 404, never executed or shown" "404 no-source" "$(code $D/sites/default/settings.php) $(no_source $D/sites/default/settings.php)"
   check "drupal: PHP under files/ is refused" "404" "$(code $D/sites/default/files/x.php)"
+  # An image-style derivative or an aggregate that exists serves statically; once deleted, the
+  # same URL, query string included, reaches index.php, which is what regenerates it
+  # (2026-09-20 report: a deleted derivative was a 404 from us for ever). A missing PHP-like
+  # file below files/ stays a 404 that never reaches PHP.
+  DF=tests/drupal/web/sites/default/files
+  check "drupal: an existing image-style derivative and aggregate serve statically" "200 image/jpeg JPEGDATA 200 text/css" "$(curl -sSi "$D/sites/default/files/styles/thumb/pic.jpg?itok=S02fzuls" | tr -d '\r' | awk 'NR==1{c=$2} tolower($1)=="content-type:"{t=$2} END{printf "%s %s ", c, t}'; curl -sS "$D/sites/default/files/styles/thumb/pic.jpg?itok=S02fzuls"; echo -n " "; curl -sSi $D/sites/default/files/css/agg.css | tr -d '\r' | awk 'NR==1{c=$2} tolower($1)=="content-type:"{t=$2} END{printf "%s %s", c, t}' | tr -d ';')"
+  # Deleted on disk; the cache revalidates an entry at most once a second, so wait that out.
+  mv $DF/styles/thumb/pic.jpg bench/tmp/pic.jpg.away; mv $DF/css/agg.css bench/tmp/agg.css.away; sleep 1.2
+  check "drupal: a deleted derivative and aggregate reach the front controller with the query string (itok) intact" "drupal front /sites/default/files/styles/thumb/pic.jpg?itok=S02fzuls | drupal front /sites/default/files/css/css_abc.css?delta=0" "$(curl -sS "$D/sites/default/files/styles/thumb/pic.jpg?itok=S02fzuls"; echo -n " | "; curl -sS "$D/sites/default/files/css/css_abc.css?delta=0")"
+  check "drupal: a missing PHP-like file below files/ is still a 404 that never reaches PHP" "404 404" "$(code $D/sites/default/files/styles/evil.php) $(code $D/sites/default/files/css/x.phtml)"
+  mv bench/tmp/pic.jpg.away $DF/styles/thumb/pic.jpg; mv bench/tmp/agg.css.away $DF/css/agg.css
+  check "drupal: restored, the derivative serves statically again" "200 JPEGDATA" "$(curl -sS -o /dev/null -w '%{http_code} ' "$D/sites/default/files/styles/thumb/pic.jpg?itok=S02fzuls"; curl -sS "$D/sites/default/files/styles/thumb/pic.jpg?itok=S02fzuls")"
+  check "drupal: the presets catalogue says which directory regenerates on a miss" "/sites/default/files/" "$(curl -sS --unix-socket bench/tmp/control.sock http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["drupal"]["missing_reaches_front_controller"][0], end=""); assert p["wordpress"]["missing_reaches_front_controller"] == []')"
   check "drupal: .ht.sqlite, .htaccess, .env, .git/config are 404" "404 404 404 404" "$(code $D/sites/default/files/.ht.sqlite) $(code $D/.htaccess) $(code $D/.env) $(code $D/.git/config)"
   check "drupal: a .sqlite dump and composer files are refused" "404 404" "$(code $D/data.sqlite) $(code $D/composer.json)"
   check "drupal: plain static files still serve" "public readme" "$(curl -sS $D/README.txt)"

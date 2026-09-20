@@ -158,6 +158,14 @@ HostFacts system_facts() {
     f.group = [](const std::string&, unsigned&) { return false; };
     f.group_name = [](unsigned) { return std::string(); };
 #endif
+#ifndef _WIN32
+    f.user_name = [](unsigned uid) {
+        const struct passwd* pw = ::getpwuid(static_cast<uid_t>(uid));
+        return pw ? std::string(pw->pw_name) : std::string();
+    };
+#else
+    f.user_name = [](unsigned) { return std::string(); };
+#endif
     return f;
 }
 

@@ -641,7 +641,9 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
             const FileFacts& f = u.example_facts;
             char mode[8];
             std::snprintf(mode, sizeof mode, "%04o", f.mode & 07777);
-            const std::string owner = std::to_string(f.uid) + ":" + std::to_string(f.gid) + " " + mode;
+            const HostFacts facts = system_facts();
+            std::string user = facts.user_name ? facts.user_name(f.uid) : "", group = facts.group_name ? facts.group_name(f.gid) : "";
+            const std::string owner = (user.empty() ? std::to_string(f.uid) : user) + ":" + (group.empty() ? std::to_string(f.gid) : group) + " " + mode;
             add("error", "files_unreadable", s.server_names.front(),
                 std::to_string(u.unreadable) + " of " + std::to_string(u.seen) + " sampled files under " + s.root + " cannot be read by the server's account (" +
                     (server.user.empty() ? "uid " + std::to_string(server.uid) : server.user) + ") and answer 404 with no log line; for example " + u.example + " (" + owner + ")",

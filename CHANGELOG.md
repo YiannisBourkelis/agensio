@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.0-alpha.15 (2026-09-20)
+
+- **Fixed, drupal preset: a missing file below `sites/default/files/` now reaches
+  `index.php`** with its query string, so Drupal generates image-style derivatives
+  (`?itok=`) and rebuilds aggregated css/js on first request; an existing file still
+  serves statically, and PHP-like endings below `files/` stay refused (live report: a
+  deleted derivative was a 404 from the server for ever, and every newly uploaded image
+  would have been). The preset table's shield gained a fallback flag; `presets` lists
+  the directory under `missing_reaches_front_controller`. The regression test deletes a
+  derivative and an aggregate and asserts the front controller gets the URL.
+- `site-create`: the log hand-over under `done` is now verified on disk (group and
+  mode) and otherwise reported under `warnings` with the command; the server no longer
+  logs "cannot chown" on every reload for a log that already has the right group, nor
+  when the helper is the one handing it over (live report: a claimed step next to a
+  warning that it failed).
+- `health` `files_unreadable` names the owner and group instead of numeric ids.
+
 ## 0.1.0-alpha.14 (2026-09-20)
 
 - **Fixed: uploaded files were unservable on every site with a site user** (live report:

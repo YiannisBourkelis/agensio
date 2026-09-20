@@ -50,6 +50,7 @@ struct HostFacts {
     std::function<bool(const std::string& name, unsigned& uid, unsigned& gid)> user;  // gid: primary group
     std::function<bool(const std::string& name, unsigned& gid)> group;
     std::function<std::string(unsigned gid)> group_name;  // "" when unknown
+    std::function<std::string(unsigned uid)> user_name;   // "" when unknown (may be unset in tests)
 };
 HostFacts system_facts();
 

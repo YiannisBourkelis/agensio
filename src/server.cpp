@@ -159,7 +159,13 @@ void Server::own_site_logs(const Config& cfg) {
         unsigned uid = 0, gid = 0;
         if (!facts.user(site.user, uid, gid)) continue;  // check_hosting already refused this
         if (!site.group.empty()) facts.group(site.group, gid);
+        // Already the site's group: nothing to do (a non-root chown to the same owner still
+        // fails with EPERM, which warned on every reload before 2026-09-20). Otherwise the
+        // helper hands it over at creation; only without one is there something to warn about.
+        struct stat st {};
+        if (::stat(site.access_log.c_str(), &st) == 0 && st.st_gid == gid && (st.st_mode & 0040)) continue;
         if (::chown(site.access_log.c_str(), agensio_uid, gid) != 0) {
+            if (provisioner_.available()) continue;  // site-create's log_own does it and verifies it
             error_log_.warn("cannot chown " + site.access_log + " to " + std::to_string(agensio_uid) + ":" +
                             (site.group.empty() ? site.user : site.group) + " (not root); " + site.user +
                             " cannot read its log");

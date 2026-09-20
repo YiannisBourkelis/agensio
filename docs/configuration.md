@@ -280,6 +280,15 @@ rules (canonical redirects, caching headers) are optional and can be added as lo
 The preset fits any application with a front controller *and* several real `.php` entry
 points; the deny list is Drupal's, harmless elsewhere.
 
+A file below `sites/default/files/` that exists is served statically, cached like any
+asset; one that does **not** exist reaches `index.php` with its query string, because
+that is how Drupal makes image-style derivatives (`styles/<style>/public/...?itok=...`)
+and rebuilds aggregated `css/` and `js/` after a cache rebuild: Drupal's own `.htaccess`
+does the same. PHP-like endings below `files/` stay refused with 404 and never reach
+PHP, whether the file exists or not. (2026-09-20: a deleted derivative was answered 404
+by the server for ever; the other shields, `core/lib/`, `vendor/`, keep answering 404
+for a miss.)
+
 ## 4b. Proxied applications: `app = "proxy"`
 
 Node, Rails, Go, Java, Python: anything that speaks HTTP on a local port. `root` is not
