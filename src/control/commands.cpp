@@ -558,6 +558,25 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
                 add("warn", "pools_stale", "", "generated php-fpm pool files differ from the configuration",
                     "run agensio pools, then reload php-fpm");
         }
+        // PHP writes every upload to the pool's upload_tmp_dir and every session to its
+        // save_path (tmp/ and sessions/ below the user's state directory) before an
+        // application sees them; a missing or foreign directory fails both silently inside
+        // PHP (no 413, no 502, nothing in our logs; 2026-09-20 report). The user's directory
+        // is 0700, so the server can judge that directory, not what is inside it.
+        const HostFacts facts = system_facts();
+        for (const auto& s : running.sites) {
+            if (!s.pool.generated) continue;
+            unsigned uid = 0, gid = 0;
+            const bool known = facts.user(s.user, uid, gid);
+            const std::string d = s.pool.state_dir;
+            FileFacts f;
+            if (!facts.stat(d, f))
+                add("error", "php_tmp_missing", s.server_names.front(), "PHP's private directory " + d + " (upload_tmp_dir and session.save_path live below it) does not exist: uploads and sessions fail inside PHP with no error from the server",
+                    "agensio pools (creates it as " + s.user + " with tmp/ and sessions/)");
+            else if (known && (f.uid != uid || !f.is_dir))
+                add("error", "php_tmp_not_owned", s.server_names.front(), "PHP's private directory " + d + " is owned by uid " + std::to_string(f.uid) + ", not by " + s.user + ": PHP cannot write uploads or sessions there",
+                    "chown -R " + s.user + " " + d + " && chmod 0700 " + d + " " + d + "/tmp " + d + "/sessions");
+        }
         std::string conf;
         if (php_fpm_hard_reload(running, conf))
             add("info", "php_fpm_hard_reload", "", "php-fpm.conf does not set process_control_timeout, so a php-fpm reload (site-create writing a pool, agensio pools) kills PHP requests in flight on every site",

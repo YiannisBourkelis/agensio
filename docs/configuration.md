@@ -469,7 +469,11 @@ systemctl reload php8.3-fpm
 What the pool gets: `user`/`group` of the site, socket `0660 web1:agensio`, `pm` and
 `children`, `pm.max_requests`, a private `tmp/` and `sessions/` under
 `state_dir/web1` (0700, owned by the user), `open_basedir` at the project directory
-plus those two, `memory_limit`, `max_execution_time`, upload limits from
+plus those two (`upload_tmp_dir` and `sys_temp_dir` at `<state_dir>/<user>/tmp`,
+`session.save_path` at `<state_dir>/<user>/sessions`, both created by `agensio pools` as
+the user, 0700, and listed in `open_basedir`, so PHP's uploads and temp files land in the
+user's private space and never in `/tmp`; `health` reports `php_tmp_missing` when one of
+them is gone), `memory_limit`, `max_execution_time`, upload limits from
 `max_body_size`, `clear_env`, `expose_php = off`. `agensio -t --explain` prints the
 whole file. agensio's own FastCGI options for a generated pool default to
 `keep_conn = true` with `max_connections = children / workers`, so kept connections can
@@ -661,7 +665,9 @@ on a location.
 | `tls` | verify on, system store | `{ verify, server_name, ca }` for `https://` origins |
 
 The pool is per worker, so an origin sees at most workers x `max_connections` connections
-and workers x `max_idle` idle ones. A GET or HEAD whose kept connection turns out dead is
+and workers x `max_idle` idle ones. Before a kept idle connection is reused it is peeked
+once without blocking: a peer that closed it (php-fpm reloaded, an origin's idle timeout)
+is dropped for a fresh connection, so a POST or an upload never meets a dead one. A GET or HEAD whose kept connection turns out dead is
 retried once on a fresh one. An origin that is down gives 502, a timeout 504, a full
 queue 503; each is logged with the reason and appears in the JSON access log as
 `upstream`. `agensio -t` connects to every origin once and warns when it cannot, and

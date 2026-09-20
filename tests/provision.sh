@@ -56,6 +56,39 @@ printf '[global]\npid = %s/fpm.pid\nerror_log = %s/fpm.log\ninclude = %s/agensio
 $FPM -y $T/fpm.conf -D; for _ in $(seq 1 50); do [ -S $T/run/agensio-t9.sock ] && break; sleep 0.1; done
 printf '<?php echo "as=", posix_getpwuid(posix_geteuid())["name"];' > $T/www/t9.test/web/index.php; chown t9:agensio $T/www/t9.test/web/index.php; chmod 640 $T/www/t9.test/web/index.php
 check "PHP runs as t9 through the pool the helper wrote" "as=t9" "$(curl -sS -H 'Host: t9.test' http://127.0.0.1:18198/index.php)"
+# A file upload through the generated pool (2026-09-20 report): the body limit accepting a
+# body is not the upload working. PHP must land the file in the pool's private tmp, inside
+# open_basedir, and the response after a large multipart body must arrive complete.
+cat > $T/www/t9.test/web/upload.php <<'PHP'
+<?php
+$f = $_FILES['f'] ?? null;
+echo json_encode(['error' => $f['error'] ?? 'none', 'size' => $f ? filesize($f['tmp_name']) : 0, 'tmp' => $f['tmp_name'] ?? '',
+                  'upload_tmp_dir' => ini_get('upload_tmp_dir'), 'sys' => sys_get_temp_dir(), 'open_basedir' => ini_get('open_basedir'),
+                  'moved' => $f ? move_uploaded_file($f['tmp_name'], dirname(__DIR__) . '/../t9.test/web/moved.bin') : false]), "\n";
+echo str_repeat('x', 300000);
+PHP
+chown t9:agensio $T/www/t9.test/web/upload.php; chmod 640 $T/www/t9.test/web/upload.php
+head -c 102400 /dev/urandom > $T/small.bin; head -c 1572864 /dev/urandom > $T/large.bin
+upl() { curl -sS -o $T/upl.out -w '%{http_code} %{size_download}' -H 'Host: t9.test' -F "f=@$1" http://127.0.0.1:18198/upload.php; }
+upl_report() {  # "<code> <complete?> <error> <size> <tmp ok?> <moved?>" from the last upl
+  local r=$1 code size; code=${r%% *}; size=${r##* }
+  local want=$(( $(head -1 $T/upl.out | wc -c) + 300000 ))
+  printf '%s %s ' "$code" "$([ "$size" = "$want" ] && echo yes || echo "short:$size/$want")"
+  head -1 $T/upl.out | python3 -c 'import json,sys
+try:
+    d=json.load(sys.stdin)
+    print(d["error"], d["size"], "yes" if d["tmp"].startswith("'$T'/state/t9/tmp/") and d["upload_tmp_dir"]=="'$T'/state/t9/tmp" and "'$T'/state/t9/tmp" in d["open_basedir"] else d, "yes" if d["moved"] else "no", end="")
+except Exception as e:
+    print("unparsable:", sys.stdin.read()[:120], end="")'
+}
+check "upload: a 100 KB file (in-memory body) lands in PHP's private tmp inside open_basedir, moved into the site; response complete" "200 yes 0 102400 yes yes" "$(upl_report "$(upl $T/small.bin)")"
+check "upload: 1.5 MB is refused up front while the site's limit is the server's 1 MB" "413" "$(upl $T/large.bin | cut -d' ' -f1)"
+out=$("$BIN" ctl site-update t9.test --set max_body_size=4MB --yes --reason uploads --socket $T/run/control.sock)
+kill "$(cat $T/fpm.pid)"; sleep 0.5; rm -f $T/run/agensio-t9.sock; $FPM -y $T/fpm.conf -D; for _ in $(seq 1 50); do [ -S $T/run/agensio-t9.sock ] && break; sleep 0.1; done; sleep 0.3
+check "upload: after site-update max_body_size the pool carries 4M and a 1.5 MB file (spilled body) arrives intact, response complete" "yes 200 yes 0 1572864 yes yes" "$(grep -q 'upload_max_filesize\] = 4M' $POOLD/agensio-t9.conf && echo -n "yes "; upl_report "$(upl $T/large.bin)")"
+check "upload: the same 1.5 MB upload again (php-fpm warm) and a 600 KB one" "200 0 1572864 | 200 0 614400" "$(r=$(upl $T/large.bin); echo -n "${r%% *} "; head -1 $T/upl.out | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["error"], d["size"], end="")' 2>/dev/null; head -c 614400 /dev/urandom > $T/mid.bin; r=$(upl $T/mid.bin); echo -n " | ${r%% *} "; head -1 $T/upl.out | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["error"], d["size"], end="")' 2>/dev/null)"
+check "upload: the moved file is byte-identical to what was sent last" "yes" "$(cmp -s $T/mid.bin $T/www/t9.test/web/moved.bin && echo yes)"
+check "health: a missing PHP private directory is an error finding with the fix; restored, it is gone" "php_tmp_missing 0" "$(mv $T/state/t9 $T/state/t9.away; "$BIN" ctl health --socket $T/run/control.sock | grep -o '"code":"php_tmp_missing"' | head -1 | cut -d'"' -f4 | tr -d '\n'; mv $T/state/t9.away $T/state/t9; echo " $("$BIN" ctl health --socket $T/run/control.sock | grep -c php_tmp)")"
 sleep 1.3
 check "the site's log is readable by t9 without a restart" "agensio t9 640" "$(stat -c '%U %G %a' $T/logs/sites/t9.test.log)"
 h=$("$BIN" ctl health --socket $T/run/control.sock)
@@ -72,5 +105,5 @@ out=$("$BIN" ctl site-create --domain root.test --app static --root "$T/www/root
 check "a system account name is refused before the helper is asked" "yes no" "$(echo "$out" | grep -q 'system account' && echo yes) $(grep -q 'account_add.*root' $T/logs/audit.log && echo yes || echo no)"
 check "the helper answers only the server: the socketpair has no path" "0" "$(ls $T/run | grep -c helper)"
 echo "provision: $pass passed, $fail failed"
-[ $fail = 0 ] || { echo "--- error.log"; cat $T/logs/error.log; echo "--- audit"; cat $T/logs/audit.log; echo "--- last reply"; echo "$out"; }
+[ $fail = 0 ] || { echo "--- error.log"; cat $T/logs/error.log; echo "--- audit"; cat $T/logs/audit.log; echo "--- last reply"; echo "$out"; echo "--- health"; "$BIN" ctl health --socket $T/run/control.sock; echo; echo "--- upload answer"; head -c 300 $T/upl.out; echo; echo "--- fpm.log"; cat $T/fpm.log 2>/dev/null | tail -20; }
 [ $fail = 0 ]

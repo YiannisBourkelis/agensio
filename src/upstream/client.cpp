@@ -190,16 +190,36 @@ void UpstreamPool::acquire(const std::string& key, const UpstreamOptions& opts, 
     u.queue.push_back(Waiter{std::move(req), priority});
 }
 
+// A kept connection whose peer went away (php-fpm reloaded, an origin closed its idle
+// side) is found out before a request is written to it, with one non-blocking peek: a
+// closed peer reads as 0, an alive one as EAGAIN, and pending bytes on an idle connection
+// are a protocol violation either way. Without this a non-idempotent request (a POST, an
+// upload) on such a connection got 502 closed_early, the retry being for GET/HEAD only;
+// live on 2026-09-20 right after a settings change had reloaded php-fpm.
+static bool idle_alive(UpstreamConnection& c) noexcept {
+#ifdef _WIN32
+    (void)c;
+    return true;
+#else
+    char byte;
+    const ssize_t n = ::recv(static_cast<int>(c.sock().native_handle()), &byte, 1, MSG_PEEK | MSG_DONTWAIT);
+    return n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK);
+#endif
+}
+
 void UpstreamPool::grant(Upstream& u, Waiter w) {
     ++u.active;
     std::unique_ptr<UpstreamConnection> c;
-    if (!u.idle.empty()) {
+    while (!u.idle.empty()) {
         c = std::move(u.idle.back());
         u.idle.pop_back();
-        c->reused = true;
-    } else {
-        c = fresh();
+        if (idle_alive(*c)) {
+            c->reused = true;
+            break;
+        }
+        c.reset();  // dead: closed with the object, the next idle one is tried
     }
+    if (!c) c = fresh();
     w.req->on_slot(std::move(c));
 }
 

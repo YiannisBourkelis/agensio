@@ -2,6 +2,20 @@
 
 ## 0.1.0-alpha.14 (2026-09-20)
 
+- **Fixed: the first POST after a php-fpm reload on a kept connection answered 502**
+  (`closed_early`; a GET was retried on a fresh connection, a POST or an upload was not).
+  A kept idle connection is now checked with one non-blocking peek before a request is
+  written to it, and a dead one is dropped for a fresh connection. Found by the new
+  upload test in the root suite: the first upload after the pool was rewritten and
+  php-fpm restarted failed exactly as the live report's upload did minutes after a
+  settings change had reloaded php-fpm.
+- `health`: `php_tmp_missing` / `php_tmp_not_owned` when a generated pool's private
+  `tmp` or `sessions` directory is absent or not the user's: PHP then fails every upload
+  and session silently, with nothing in the server's logs (live report). The root suite
+  now uploads real files through a generated pool, in-memory and spilled bodies, and
+  asserts `$_FILES` lands in the private tmp inside `open_basedir`, the moved file is
+  byte-identical and the response after a large multipart body is complete; the docs say
+  which directories the pool gives PHP.
 - **Fixed: a request after a slow exchange could be parsed from stale bytes** (live
   report: one Firefox asset request logged as `GETGET /wp-admin/js/...` and answered
   405). The client-abort watch of a slow FastCGI or proxy exchange (E9) arms a read at
