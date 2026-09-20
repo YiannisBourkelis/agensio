@@ -16,7 +16,10 @@
 namespace agensio::install {
 
 struct Request {
-    std::string target;       // absolute path of an existing, empty directory owned by the executing account
+    std::string site_root;    // the site's directory, owned by the executing account: the walk to the target starts here
+    std::string target;       // site_root itself or a directory below it: must be empty, or missing with create_path
+    bool create_path = false; // create the missing directories from site_root down to the target, as the executing account
+    bool dry_run = false;     // run every check, create nothing, download nothing; report would_create
     std::string url;          // https source, or ""
     int upload_fd = -1;       // an open descriptor of the uploaded archive, or -1
     std::string upload_name;  // for messages
@@ -27,7 +30,11 @@ struct Request {
     std::string ca_file;
 };
 
-// {"ok": bool, "error"?, "files", "directories", "bytes", "downloaded", "sha256", "unwrapped"?}
+// {"ok": bool, "error"?, "as", "files", "directories", "bytes", "downloaded", "sha256", "unwrapped"?,
+//  "created": [{"path", "owner", "mode"}]} ; a dry run answers {"ok", "dry_run": true, "as", "would_create": [...]}.
+// The walk from site_root to the target opens every component without following symlinks
+// and requires each existing one to belong to the executing account; a refusal at any
+// point removes what this call created.
 json::Value execute(const Request& req);
 
 // One path segment: letters, digits, ".", "_", "-", not starting with a dot, at most 128 bytes.

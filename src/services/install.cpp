@@ -1,6 +1,7 @@
 #include "services/install.hpp"
 
 #include <cctype>
+#include <cstdio>
 #include <cstring>
 #include <string_view>
 #include <vector>
@@ -8,6 +9,8 @@
 #ifndef _WIN32
 #include <dirent.h>
 #include <fcntl.h>
+#include <grp.h>
+#include <pwd.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -168,37 +171,144 @@ bool unwrap(int dir_fd, const std::string& top, std::string& error) {
     return true;
 }
 
+// The name of the executing account, for the answer.
+std::string account_name() {
+    if (const struct passwd* pw = ::getpwuid(::geteuid())) return pw->pw_name;
+    return "uid " + std::to_string(::geteuid());
+}
+
+std::string mode_text(mode_t mode) {
+    char buf[8];
+    std::snprintf(buf, sizeof buf, "%04o", static_cast<unsigned>(mode & 07777));
+    return buf;
+}
+
+std::string group_name(gid_t gid) {
+    if (const struct group* gr = ::getgrgid(gid)) return gr->gr_name;
+    return std::to_string(gid);
+}
+
+// Removes the directories a call created, deepest first; they are empty or were emptied.
+void remove_created(const std::vector<std::string>& created) {
+    for (auto it = created.rbegin(); it != created.rend(); ++it) ::rmdir(it->c_str());
+}
+
+// Why an openat(O_DIRECTORY | O_NOFOLLOW) failed, in words: a symlink is named as such.
+std::string open_failure(int parent_fd, const std::string& name, const std::string& path) {
+    const int e = errno;
+    struct stat ls {};
+    if ((e == ELOOP || e == ENOTDIR) && ::fstatat(parent_fd, name.c_str(), &ls, AT_SYMLINK_NOFOLLOW) == 0 && S_ISLNK(ls.st_mode))
+        return path + " is a symlink; refused";
+    return path + ": " + std::strerror(e);
+}
+
 }  // namespace
 
 json::Value execute(const Request& req) {
     if (req.url.empty() == (req.upload_fd < 0)) return failure("give exactly one source: a url or an uploaded file");
     if (!req.sha256.empty() && !valid_sha256(req.sha256)) return failure("sha256 must be 64 hex digits");
-    const int dir_fd = ::open(req.target.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    if (dir_fd < 0) {
-        // O_NOFOLLOW on a symlink is ELOOP, or ENOTDIR when O_DIRECTORY is set as well (Linux).
-        struct stat ls {};
-        const bool link = (errno == ELOOP || errno == ENOTDIR) && ::lstat(req.target.c_str(), &ls) == 0 && S_ISLNK(ls.st_mode);
-        return failure("target " + req.target + ": " + (link ? "is a symlink; refused" : std::strerror(errno)));
-    }
+    if (req.site_root.empty() || req.site_root.front() != '/') return failure("no site directory");
+    if (!(req.target == req.site_root || (req.target.size() > req.site_root.size() && req.target.compare(0, req.site_root.size(), req.site_root) == 0 &&
+                                          req.target[req.site_root.size()] == '/')))
+        return failure("target " + req.target + " is not below the site's directory " + req.site_root);
+    const uid_t me = ::geteuid();
+    // The walk: the site's directory first, then every component of the target below it,
+    // each opened without following symlinks and owned by this account. A missing one is
+    // created with create_path (as this account, the parent's permission bits, the
+    // set-gid bit and group handed down by the kernel) or ends the call.
+    int cur = ::open(req.site_root.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (cur < 0) return failure("site directory " + open_failure(AT_FDCWD, req.site_root, req.site_root));
     struct stat st {};
-    if (::fstat(dir_fd, &st) != 0) {
-        ::close(dir_fd);
-        return failure("target " + req.target + ": " + std::strerror(errno));
+    if (::fstat(cur, &st) != 0 || st.st_uid != me) {
+        const std::string why = st.st_uid != me ? "belongs to uid " + std::to_string(st.st_uid) + ", not to the account installing (" + account_name() + "); refused" : std::strerror(errno);
+        ::close(cur);
+        return failure("site directory " + req.site_root + " " + why);
     }
-    if (st.st_uid != ::geteuid()) {
-        ::close(dir_fd);
-        return failure("target " + req.target + " belongs to uid " + std::to_string(st.st_uid) + ", not to the account installing (uid " +
-                       std::to_string(::geteuid()) + "); refused");
+    std::vector<std::string> created, would_create;
+    std::string so_far = req.site_root;
+    std::string rel = req.target.size() > req.site_root.size() ? req.target.substr(req.site_root.size() + 1) : "";
+    auto fail_walk = [&](const std::string& what) {
+        ::close(cur);
+        remove_created(created);
+        return failure(what);
+    };
+    std::size_t pos = 0;
+    while (pos < rel.size()) {
+        const std::size_t slash = rel.find('/', pos);
+        const std::string part = rel.substr(pos, slash == std::string::npos ? std::string::npos : slash - pos);
+        pos = slash == std::string::npos ? rel.size() : slash + 1;
+        if (part.empty() || part == "." || part == "..") return fail_walk("target " + req.target + ": '" + part + "' in the path; refused");
+        const std::string path = so_far + "/" + part;
+        if (!would_create.empty()) {  // a dry run past the first missing component: the rest would be created too
+            would_create.push_back(path);
+            so_far = path;
+            continue;
+        }
+        int child = ::openat(cur, part.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (child < 0 && errno == ENOENT) {
+            if (!req.create_path)
+                return fail_walk("target " + path + " does not exist; send create_path: true to create it (as " + account_name() + ", below " + req.site_root + ")");
+            if (req.dry_run) {
+                would_create.push_back(path);
+                so_far = path;
+                continue;
+            }
+            struct stat parent {};
+            ::fstat(cur, &parent);
+            if (::mkdirat(cur, part.c_str(), parent.st_mode & 0777) != 0)
+                return fail_walk(path + (errno == EEXIST ? " appeared meanwhile; refused (send the command again)" : std::string(": ") + std::strerror(errno)));
+            created.push_back(path);
+            child = ::openat(cur, part.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (child < 0) return fail_walk(open_failure(cur, part, path));
+            struct stat made {};
+            if (::fstat(child, &made) != 0 || made.st_uid != me) {
+                ::close(child);
+                return fail_walk(path + " was not created by this account; refused");
+            }
+            if ((made.st_mode & 0777) != (parent.st_mode & 0777) && ::fchmod(child, (parent.st_mode & 0777) | (made.st_mode & 02000)) != 0) {
+                ::close(child);
+                return fail_walk(path + ": chmod: " + std::strerror(errno));
+            }
+        } else if (child < 0) {
+            return fail_walk(open_failure(cur, part, path));
+        } else {
+            struct stat cs {};
+            if (::fstat(child, &cs) != 0 || cs.st_uid != me) {
+                const std::string why = cs.st_uid != me ? " belongs to uid " + std::to_string(cs.st_uid) + ", another account; refused" : std::string(": ") + std::strerror(errno);
+                ::close(child);
+                return fail_walk(path + why);
+            }
+        }
+        ::close(cur);
+        cur = child;
+        so_far = path;
     }
-    bool empty = false;
-    if (!directory_empty(dir_fd, empty)) {
-        ::close(dir_fd);
-        return failure("target " + req.target + ": cannot list it");
+    const int dir_fd = cur;
+    if (would_create.empty()) {
+        if (::fstat(dir_fd, &st) != 0) return fail_walk("target " + req.target + ": " + std::strerror(errno));
+        bool empty = false;
+        if (!directory_empty(dir_fd, empty)) return fail_walk("target " + req.target + ": cannot list it");
+        if (!empty) return fail_walk("target " + req.target + " is not empty; an application is installed only into an empty directory");
     }
-    if (!empty) {
-        ::close(dir_fd);
-        return failure("target " + req.target + " is not empty; an application is installed only into an empty directory");
+    json::Value created_json = json::Value::array();
+    for (const auto& c : created) {
+        struct stat cs {};
+        ::stat(c.c_str(), &cs);
+        created_json.push(json::Value::object().set("path", c).set("owner", account_name() + ":" + group_name(cs.st_gid)).set("mode", mode_text(cs.st_mode)));
     }
+    if (req.dry_run) {
+        ::close(dir_fd);
+        json::Value wc = json::Value::array();
+        for (const auto& w : would_create) wc.push(w);
+        return json::Value::object().set("ok", true).set("dry_run", true).set("target", req.target).set("as", account_name()).set("would_create", wc);
+    }
+    // From here on, a failure empties the target and removes what was created.
+    auto fail_install = [&](const std::string& what) {
+        clear_directory(dir_fd);
+        ::close(dir_fd);
+        remove_created(created);
+        return failure(what);
+    };
     // The archive: the upload as given, or a download into an unlinked temporary file in
     // the target itself (same filesystem, the account's own space, gone with the descriptor).
     int archive_fd = req.upload_fd;
@@ -206,11 +316,7 @@ json::Value execute(const Request& req) {
     std::string final_url;
     if (!req.url.empty()) {
         archive_fd = ::openat(dir_fd, ".agensio-download", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
-        if (archive_fd < 0) {
-            const std::string why = std::strerror(errno);
-            ::close(dir_fd);
-            return failure("cannot create a temporary file in " + req.target + ": " + why);
-        }
+        if (archive_fd < 0) return fail_install("cannot create a temporary file in " + req.target + ": " + std::strerror(errno));
         ::unlinkat(dir_fd, ".agensio-download", 0);
         fetch::Options opts;
         opts.max_bytes = req.max_download;
@@ -233,8 +339,7 @@ json::Value execute(const Request& req) {
         }, r, error);
         if (!ok) {
             ::close(archive_fd);
-            ::close(dir_fd);
-            return failure("download: " + error);
+            return fail_install("download: " + error);
         }
         downloaded = r.bytes;
         final_url = r.final_url;
@@ -245,13 +350,11 @@ json::Value execute(const Request& req) {
         for (auto& c : want) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         if (digest.empty()) {
             if (archive_fd != req.upload_fd) ::close(archive_fd);
-            ::close(dir_fd);
-            return failure("this build cannot compute sha256 (no OpenSSL); drop the check or use a build with TLS");
+            return fail_install("this build cannot compute sha256 (no OpenSSL); drop the check or use a build with TLS");
         }
         if (digest != want) {
             if (archive_fd != req.upload_fd) ::close(archive_fd);
-            ::close(dir_fd);
-            return failure("sha256 mismatch: the archive is " + digest + ", expected " + want + "; nothing installed");
+            return fail_install("sha256 mismatch: the archive is " + digest + ", expected " + want + "; nothing installed");
         }
     }
     archive::FdSource source(archive_fd);
@@ -261,12 +364,8 @@ json::Value execute(const Request& req) {
     std::string error;
     const bool ok = archive::extract(source, sink, limits, summary, error);
     if (archive_fd != req.upload_fd) ::close(archive_fd);
-    if (!ok) {
-        clear_directory(dir_fd);
-        ::close(dir_fd);
-        return failure("archive refused: " + error + "; the directory is empty again");
-    }
-    json::Value result = json::Value::object().set("ok", true)
+    if (!ok) return fail_install("archive refused: " + error + "; " + (created.empty() ? "the directory is empty again" : "the directories created for it are gone again"));
+    json::Value result = json::Value::object().set("ok", true).set("as", account_name()).set("target", req.target).set("created", created_json)
                              .set("files", static_cast<double>(summary.files))
                              .set("directories", static_cast<double>(summary.directories))
                              .set("bytes", static_cast<double>(summary.bytes))

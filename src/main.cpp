@@ -48,7 +48,7 @@ void usage() {
                  "                      site-update NAME (same flags) | site-disable NAME | site-enable NAME |\n"
                  "                      site-delete NAME | cert-renew NAME |\n"
                  "                      site-install NAME [--url https://... | --file UPLOAD | --version V] [--sha256 H]\n"
-                 "                           [--path SUB] [--strip 0|1] [--dry-run]\n"
+                 "                           [--path SUB] [--create-path] [--strip 0|1] [--dry-run]\n"
                  "                      Uploads: upload NAME [FILE] (stdin by default) | uploads | uploads-delete NAME\n"
                  "  mcp                 Model Context Protocol server on stdin/stdout for an AI agent host,\n"
                  "                      exposing the control commands as tools as the invoking user\n"
@@ -116,8 +116,10 @@ int main(int argc, char** argv) {
                              "        site-update NAME (same options as site-create); --dry-run on either checks and shows the\n"
                              "                    file without writing, listing every problem at once\n"
                              "        site-install NAME [--url https://host/app.tar.gz | --file UPLOAD | --version V] [--sha256 HEX]\n"
-                             "                    [--path SUB] [--strip 0|1] [--dry-run]: puts an application's files into the site's\n"
-                             "                    (empty) directory as the site's account; no source = the preset's official archive\n"
+                             "                    [--path SUB] [--create-path] [--strip 0|1] [--dry-run]: puts an application's files\n"
+                             "                    into the site's (empty) directory as the site's account; no source = the preset's\n"
+                             "                    official archive. A plugin or theme: --path wp-content/plugins/NAME --create-path\n"
+                             "                    makes the missing directories (as the site's account, below the site's directory)\n"
                              "        uploads-delete NAME\n"
                              "upload: upload NAME [FILE]   stores FILE (or stdin) on the server for site-install --file NAME;\n"
                              "                    needs the operator role, no --yes\n"
@@ -177,6 +179,7 @@ int main(int argc, char** argv) {
                 else if (b == "--sha256") field("sha256");
                 else if (b == "--path") field("path");
                 else if (b == "--strip") { std::string v; value(v); body.set("strip", std::atoi(v.c_str())); }
+                else if (b == "--create-path") body.set("create_path", true);
                 else if (command.empty()) command = b;
                 else if (site_name.empty() && command.starts_with("site") && command != "sites") site_name = b;
                 else if (site_name.empty() && (command == "cert-renew" || command == "upload" || command == "uploads-delete")) site_name = b;

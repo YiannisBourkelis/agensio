@@ -65,6 +65,9 @@ check "site-install from the upload succeeds through the helper" "0 wordpress" "
 check "every file belongs to t7 with the server's group and the layout's modes (0640 / 2750)" "t7 agensio 640 | t7 agensio 2750" "$(stat -c '%U %G %a' $T/www/t7.test/index.php) | $(stat -c '%U %G %a' $T/www/t7.test/wp-admin)"
 check "the server's account can read the installed files through the group" "yes" "$(su -s /bin/sh agensio -c "cat $T/www/t7.test/index.php" >/dev/null 2>&1 && echo yes)"
 check "the audit log names the install with the sha256" "yes" "$(grep -q "sites/t7.test/install (install): installed .* (sha256 $SHA)" $T/logs/audit.log && echo yes)"
+check "a plugin: create_path makes the missing directories as t7 with the layout's pattern, files inside" "0 t7 agensio 2750 t7 agensio 640" "$(ctl site-install t7.test --file wp.tgz --path wp-content/plugins/demo --create-path --yes --reason plugin > $T/out; echo -n "$? "; stat -c '%U %G %a' $T/www/t7.test/wp-content/plugins/demo | tr -d '\n'; echo -n " "; stat -c '%U %G %a' $T/www/t7.test/wp-content/plugins/demo/index.php)"
+mkdir -p $T/www/t7.test/wp-content/other; chown agensio:agensio $T/www/t7.test/wp-content/other
+check "a component owned by another account is refused, nothing created below it" "1 yes no" "$(ctl site-install t7.test --file wp.tgz --path wp-content/other/x --create-path --yes --reason plugin > $T/out; echo -n "$? "; grep -q 'another account' $T/out && echo -n yes; echo " $([ -e $T/www/t7.test/wp-content/other/x ] && echo yes || echo no)")"
 rm -rf $T/www/t7.test/*
 check "an archive with a symlink is refused, the directory stays empty" "1 yes 0" "$(ctl upload evil.tgz $T/pub/evil.tgz > /dev/null; ctl site-install t7.test --file evil.tgz --yes --reason evil > $T/out; echo -n "$? "; grep -q 'symbolic link' $T/out && echo -n yes; echo " $(ls -A $T/www/t7.test | wc -l | tr -d ' ')")"
 check "a tarball made with 'tar -C dir .' installs (its ./ root entry is nothing to create)" "0 15" "$(ctl upload dot.tgz $T/pub/dot.tgz > /dev/null; ctl site-install t7.test --file dot.tgz --yes --reason dot > /dev/null; echo -n "$? "; find $T/www/t7.test -type f | wc -l | tr -d ' ')"
@@ -85,7 +88,7 @@ check "a URL that answers 404 is reported, nothing installed" "1 yes" "$(ctl sit
 # The account rule: a target owned by root is refused; one owned by the server's account runs as it.
 mkdir -p $T/www/t6.test/web
 ctl site-create --domain t6.test --app static --root "$T/www/t6.test/web" --no-user --https none --listen-plain 127.0.0.1:18299 --yes --reason t6 > /dev/null
-check "a root-owned target is refused with the fix" "1 yes 0" "$(ctl site-install t6.test --file wp.tgz --yes --reason t6 > $T/out; echo -n "$? "; grep -q 'belongs to root' $T/out && echo -n yes; echo " $(ls -A $T/www/t6.test/web | wc -l | tr -d ' ')")"
+check "a root-owned site directory is refused with the fix" "1 yes 0" "$(ctl site-install t6.test --file wp.tgz --yes --reason t6 > $T/out; echo -n "$? "; grep -q 'belongs to root' $T/out && echo -n yes; echo " $(ls -A $T/www/t6.test/web | wc -l | tr -d ' ')")"
 chown agensio:agensio $T/www/t6.test/web
 check "a target owned by the server's account installs as that account" "0 agensio" "$(ctl site-install t6.test --file wp.tgz --yes --reason t6 > /dev/null; echo -n "$? "; stat -c %U $T/www/t6.test/web/index.php)"
 useradd -M -s /bin/sh t6login 2>/dev/null; mkdir -p $T/www/t5.test/web; chown t6login $T/www/t5.test/web

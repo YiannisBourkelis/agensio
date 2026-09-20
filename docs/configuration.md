@@ -917,13 +917,22 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 | `cert-renew NAME` | operator | orders the site's automatic certificate again now |
 | `upload NAME [FILE]` | operator | stores FILE (stdin by default) as `<state_dir>/uploads/NAME`, the server's own directory (0700); `PUT /v1/uploads/NAME` with the raw bytes on the socket; no `--yes`; at most `upload_max`; names are plain file names (letters, digits, `.`, `_`, `-`, no leading dot); a partial transfer leaves nothing |
 | `uploads-delete NAME` | operator | removes a stored upload |
-| `site-install NAME` | admin | puts an application's files into the site's directory (the `root` as given, above a preset's `public/` or `web/`; `--path SUB` for a subdirectory) **as the site's account**, from one source: `--url https://...` (a `.tar.gz`, `.tar` or `.zip`), `--file UPLOAD` (a stored upload), or nothing, which takes the preset's official archive (`presets` lists it under `source`; `--version V` picks a release, default the newest; WordPress and Drupal have one, Laravel is made with composer). `--sha256 HEX` refuses an archive whose digest differs. `--strip 0|1` keeps or unwraps a single top directory (default: unwrap when there is exactly one). `--dry-run` shows the target, the account and the source. Answers 201 with `files`, `bytes`, `sha256`, `unwrapped`, `next_steps`; 409 with the reason and nothing left behind; 403 when `install = false` and a URL was given; 422 when no source can be found |
+| `site-install NAME` | admin | puts an application's files into the site's directory (the `root` as given, above a preset's `public/` or `web/`; `--path SUB` for a subdirectory such as `wp-content/plugins/NAME`, with `--create-path` when it does not exist yet) **as the site's account**, from one source: `--url https://...` (a `.tar.gz`, `.tar` or `.zip`), `--file UPLOAD` (a stored upload), or nothing, which takes the preset's official archive (`presets` lists it under `source`; `--version V` picks a release, default the newest; WordPress and Drupal have one, Laravel is made with composer). `--sha256 HEX` refuses an archive whose digest differs. `--strip 0|1` keeps or unwraps a single top directory (default: unwrap when there is exactly one). `--dry-run` takes the same walk as the real call, as the same account, and answers with the target, the account and `would_create`, or with the refusal the real call would meet; nothing is downloaded or written. Answers 201 with `files`, `bytes`, `sha256`, `unwrapped`, `created` (each directory made, with owner and mode), `next_steps`; 409 with the reason and nothing left behind; 403 when `install = false` and a URL was given; 422 when no source can be found |
 
-**What `site-install` enforces.** The directory must exist, be empty and belong to the
-account that installs: the site's `user`, or for a site without one the directory's
-owner, which must be a site account (`nologin`, home in the state directory) or the
-server's own account; root, a login account and another site's account are refused, so
-an install can never write as anyone else. Downloads are `https://` only, with the
+**What `site-install` enforces.** The account that installs is the site's `user`, or for
+a site without one the owner of the site's directory, which must be a site account
+(`nologin`, home in the state directory) or the server's own account; root, a login
+account and another site's account are refused, so an install can never write as anyone
+else. The target is the site's directory or `--path` below it (normalised, `..` refused),
+reached by a walk that opens every component without following symlinks and requires
+each existing one to belong to that account. The leaf must be empty: a whole application
+goes into the fresh site directory, a plugin or theme into its own new directory. A
+missing directory is refused unless `--create-path` is given, which creates the missing
+levels as the account with the parent's permission bits (the set-gid bit and group come
+down from the parent, as for extracted files); an existing directory is never emptied.
+A refusal at any point, a symlink on the way, another account's directory, a bad
+archive, a wrong digest, removes every directory the call created, so the tree is as it
+was. Downloads are `https://` only, with the
 certificate and host name verified (the system store, or `install_ca`); every address of
 every hop, redirects included, is checked against the private-address fence (loopback,
 link-local, RFC 1918, ULA, shared 100.64/10, multicast, the IPv4-mapped forms) unless

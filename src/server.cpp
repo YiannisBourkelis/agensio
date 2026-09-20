@@ -653,7 +653,10 @@ void Server::install_async(const json::Value& req, std::function<void(json::Valu
         } else {
 #ifndef _WIN32
             install::Request ir;
+            ir.site_root = std::string(req.get("site_root"));
             ir.target = std::string(req.get("target"));
+            ir.create_path = req["create_path"].boolean();
+            ir.dry_run = req["dry_run"].boolean();
             ir.url = std::string(req.get("url"));
             ir.upload_name = std::string(req.get("upload"));
             ir.sha256 = std::string(req.get("sha256"));

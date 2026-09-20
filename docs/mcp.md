@@ -96,7 +96,7 @@ takes `--socket PATH`.
 | `cert_renew` | operator | order an automatic certificate again now |
 | `site_create`, `site_update` | admin | write or change a managed site file, validate, reload; answer with open decisions or root commands first |
 | `site_disable`, `site_enable`, `site_delete` | admin | rename the file away and back; delete it (a `.bak` stays) |
-| `site_install` | admin | put an application's files into a site's empty directory as the site's account: the preset's official archive (`version` optional), any https `url`, or a stored upload (`file`); `sha256`, `path`, `strip`, `dry_run`; the server enforces the fences and reports the source and digest |
+| `site_install` | admin | put an application's files into a site's empty directory as the site's account: the preset's official archive (`version` optional), any https `url`, or a stored upload (`file`); a plugin or theme goes into `path` with `create_path: true`; `sha256`, `strip`, `dry_run`; the server enforces the fences and reports the source, digest and what it created |
 | `uploads_list` | viewer | archives stored with `agensio ctl upload`, for `site_install` |
 | `upload_delete` | operator | remove a stored upload |
 

@@ -2081,9 +2081,12 @@ static void test_install() {
         const std::string t2 = tar_entry("app/", "", '5') + tar_entry("app/a.txt", "a", '0') + tar_entry("app/bin/run", "r", '0', 0755) + tar_end();
         auto write_file = [&](const fs::path& p, const std::string& bytes) { std::ofstream o(p, std::ios::binary); o << bytes; };
         write_file(dir / "app.tar", t2);
-        auto run = [&](const std::string& archive, const std::string& sha = "", int strip = -1) {
+        auto run = [&](const std::string& archive, const std::string& sha = "", int strip = -1, const std::string& sub = "", bool create = false, bool dry = false) {
             install::Request r;
-            r.target = (dir / "target").string();
+            r.site_root = (dir / "target").string();
+            r.target = sub.empty() ? r.site_root : r.site_root + "/" + sub;
+            r.create_path = create;
+            r.dry_run = dry;
             r.upload_fd = ::open((dir / archive).c_str(), O_RDONLY);
             r.upload_name = archive;
             r.sha256 = sha;
@@ -2130,14 +2133,52 @@ static void test_install() {
         write_file(dir / "evil.tar", tar_entry("good.txt", "g", '0') + tar_entry("link", "", '2', 0777, "/etc") + tar_end());
         v = run("evil.tar");
         CHECK(!v["ok"].boolean() && std::string(v.get("error")).find("symbolic link") != std::string::npos && fs::is_empty(dir / "target"));
-        // A target that is a symlink, or owned by someone else, is refused (the latter only testable as root).
+        // A site directory that is a symlink is refused (owned by someone else: only testable as root).
         fs::create_directory_symlink(dir / "target", dir / "link");
         install::Request r;
-        r.target = (dir / "link").string();
+        r.site_root = r.target = (dir / "link").string();
         r.upload_fd = ::open((dir / "app.tar").c_str(), O_RDONLY);
         v = install::execute(r);
         ::close(r.upload_fd);
         CHECK(!v["ok"].boolean() && std::string(v.get("error")).find("symlink") != std::string::npos);
+        // A plugin below an installed application (create_path): the site directory is not
+        // empty, the plugin's own directory does not exist yet.
+        ::chmod((dir / "target").c_str(), 0750);
+        v = run("app.tar");
+        CHECK(v["ok"].boolean() && v["created"].items().empty());
+        v = run("app.tar", "", -1, "plugins/demo");
+        CHECK(!v["ok"].boolean() && std::string(v.get("error")).find("does not exist; send create_path") != std::string::npos && !fs::exists(dir / "target" / "plugins"));
+        v = run("app.tar", "", -1, "plugins/demo", true, true);  // dry run: the same walk, nothing made
+        CHECK(v["ok"].boolean() && v["dry_run"].boolean() && v["would_create"].items().size() == 2 && !fs::exists(dir / "target" / "plugins"));
+        CHECK(v["would_create"].items()[1].str() == (dir / "target" / "plugins" / "demo").string());
+        v = run("app.tar", "", -1, "plugins/demo", false, true);  // dry run without create_path: the refusal
+        CHECK(!v["ok"].boolean() && std::string(v.get("error")).find("create_path") != std::string::npos);
+        v = run("app.tar", "", -1, "plugins/demo", true);
+        CHECK(v["ok"].boolean() && v["created"].items().size() == 2 && v.get("unwrapped") == "app" && fs::exists(dir / "target" / "plugins" / "demo" / "a.txt"));
+        CHECK(v["created"].items()[0].get("mode") == "0750" && ::stat((dir / "target" / "plugins" / "demo").c_str(), &st) == 0 && (st.st_mode & 0777) == 0750);
+        // The same leaf again: it exists and is not empty (unchanged rule); an existing empty leaf works.
+        v = run("app.tar", "", -1, "plugins/demo", true);
+        CHECK(!v["ok"].boolean() && std::string(v.get("error")).find("not empty") != std::string::npos);
+        fs::create_directories(dir / "target" / "plugins" / "empty");
+        v = run("app.tar", "", -1, "plugins/empty");
+        CHECK(v["ok"].boolean() && v["created"].items().empty());
+        // A refusal in the middle of a two-level creation leaves no directory behind.
+        v = run("evil.tar", "", -1, "themes/contrib/bad", true);
+        CHECK(!v["ok"].boolean() && std::string(v.get("error")).find("symbolic link") != std::string::npos && !fs::exists(dir / "target" / "themes"));
+        v = run("app.tar", std::string(64, '0'), -1, "themes/contrib/bad", true);
+        CHECK(!v["ok"].boolean() && !fs::exists(dir / "target" / "themes"));
+        // A symlinked component on the way, '..', and a target outside the site: refused.
+        fs::create_directory_symlink(dir, dir / "target" / "out");
+        v = run("app.tar", "", -1, "out/x", true);
+        CHECK(!v["ok"].boolean() && std::string(v.get("error")).find("symlink") != std::string::npos && !fs::exists(dir / "x"));
+        v = run("app.tar", "", -1, "plugins/../../x", true);
+        CHECK(!v["ok"].boolean() && std::string(v.get("error")).find("'..'") != std::string::npos);
+        r.site_root = (dir / "target").string();
+        r.target = dir.string();
+        r.upload_fd = ::open((dir / "app.tar").c_str(), O_RDONLY);
+        v = install::execute(r);
+        ::close(r.upload_fd);
+        CHECK(!v["ok"].boolean() && std::string(v.get("error")).find("not below") != std::string::npos);
         fs::remove_all(dir);
     }
 #endif
@@ -2167,8 +2208,12 @@ static void test_install() {
         c.control.sites_root = "/srv/sites";
         c.state_dir = "/var/lib/agensio";
         auto v = [&](const char* text) { json::Value r; std::string e2; json::parse(text, r, e2); return provision::validate(r, c); };
-        CHECK(v(R"({"op":"app_install","target":"/srv/sites/a.test/web","user":"shop","url":"https://wordpress.org/latest.tar.gz"})").empty());
-        CHECK(v(R"({"op":"app_install","target":"/srv/sites/a.test/web","upload":"wp.tgz","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","strip":1})").empty());
+        CHECK(v(R"({"op":"app_install","site_root":"/srv/sites/a.test","target":"/srv/sites/a.test/web","user":"shop","url":"https://wordpress.org/latest.tar.gz"})").empty());
+        CHECK(v(R"({"op":"app_install","site_root":"/srv/sites/a.test","target":"/srv/sites/a.test","upload":"wp.tgz","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","strip":1,"create_path":true,"dry_run":false})").empty());
+        CHECK(!v(R"({"op":"app_install","target":"/srv/sites/a.test/web","upload":"wp.tgz"})").empty());  // no site_root
+        CHECK(!v(R"({"op":"app_install","site_root":"/srv/sites","target":"/srv/sites/a/web","upload":"wp.tgz"})").empty());  // sites_root itself
+        CHECK(!v(R"({"op":"app_install","site_root":"/srv/sites/a.test","target":"/srv/sites/b.test/web","upload":"wp.tgz"})").empty());  // target outside
+        CHECK(!v(R"({"op":"app_install","site_root":"/srv/sites/a.test","target":"/srv/sites/a.test/web","upload":"wp.tgz","create_path":"yes"})").empty());
         CHECK(!v(R"({"op":"app_install","target":"/etc","upload":"wp.tgz"})").empty());
         CHECK(!v(R"({"op":"app_install","target":"/srv/sites/a/web","url":"http://x/y"})").empty());
         CHECK(!v(R"({"op":"app_install","target":"/srv/sites/a/web","url":"https://x/y","upload":"z"})").empty());
@@ -2177,7 +2222,7 @@ static void test_install() {
         CHECK(!v(R"({"op":"app_install","target":"/srv/sites/a/web","upload":"wp.tgz","sha256":"xyz"})").empty());
         CHECK(!v(R"({"op":"app_install","target":"/srv/sites/a/web","upload":"wp.tgz","strip":2})").empty());
         c.control.install = false;
-        CHECK(!v(R"({"op":"app_install","target":"/srv/sites/a/web","url":"https://x/y"})").empty() && v(R"({"op":"app_install","target":"/srv/sites/a/web","upload":"wp.tgz"})").empty());
+        CHECK(!v(R"({"op":"app_install","site_root":"/srv/sites/a","target":"/srv/sites/a/web","url":"https://x/y"})").empty() && v(R"({"op":"app_install","site_root":"/srv/sites/a","target":"/srv/sites/a/web","upload":"wp.tgz"})").empty());
         CHECK(provision::uploads_dir(c) == "/var/lib/agensio/uploads");
     }
     // The configuration keys.

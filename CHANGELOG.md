@@ -2,6 +2,13 @@
 
 ## 0.1.0-alpha.11 (2026-09-20)
 
+- `site-install --path SUB --create-path` (MCP `create_path: true`): a plugin, theme or
+  module goes into its own new directory below the site (`wp-content/plugins/NAME`,
+  `web/modules/contrib/NAME`), created as the site's account with the parent's pattern,
+  reached by a walk that refuses symlinks, `..` and another account's directories; a
+  refusal removes what the call created; the answer lists `created`. `dry_run` now takes
+  the same walk and reports `would_create` or the refusal instead of an unconditional ok
+  (live report: the first plugin after a one-call site).
 - WordPress preset: `readme.html` and `license.txt`, which name the installed version,
   are answered 404 like `wp-config.php` (from a live report: the first thing a
   vulnerability scanner reads).
@@ -22,7 +29,7 @@
   `upload_max` caps uploads (512 MB). The helper gained `app_install` (the child drops to
   the site's account before it reads a byte); without the helper the server installs as
   its own account into directories it owns. New dependency: zlib. Tests:
-  `tests/install.sh` (root devbox, 20 checks), unit tests of the extractor and the fence,
+  `tests/install.sh` (root devbox, 22 checks), unit tests of the extractor and the fence,
   `fuzz_archive`, 17 integration checks.
 - **Provisioning helper** (`[control] provision = true`, the default): a server started
   as root forks a small root helper before the privilege drop, and `site-create` then

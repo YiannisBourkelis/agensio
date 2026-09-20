@@ -21,6 +21,7 @@
 #include "control/commands.hpp"
 #include "control/sites.hpp"
 #include "core/body.hpp"
+#include "services/archive.hpp"
 #include "services/install.hpp"
 
 namespace agensio {
@@ -501,47 +502,53 @@ void ControlHandler::site_install(Stream& s, std::string_view name, const json::
         return;
     }
     // Where: the site's project directory (the configured root, above the served
-    // subdirectory of a preset), or `path` below it.
-    std::string target = site->project_root.empty() ? site->root : site->project_root;
+    // subdirectory of a preset), or `path` below it (a plugin or theme directory;
+    // create_path makes the missing levels as the site's account).
+    const std::string site_root = site->project_root.empty() ? site->root : site->project_root;
+    std::string target = site_root;
     const std::string sub(body.get("path"));
     if (!sub.empty()) {
-        std::string why;
-        if (sub.front() == '/' || sub.find("..") != std::string::npos) {
-            reply(s, 400, json::Value::object().set("error", "path must be relative, below the site's directory, without '..'"));
+        std::string clean, why;
+        if (!archive::clean_path(sub, clean, why)) {
+            reply(s, 400, json::Value::object().set("error", "path must be relative, below the site's directory, without '..': " + why));
             done();
             return;
         }
-        target += "/" + sub;
+        target += "/" + clean;
     }
     std::string why;
-    if (target.empty() || !control::safe_path(target, why)) {
+    if (site_root.empty() || !control::safe_path(site_root, why) || !control::safe_path(target, why)) {
         reply(s, 409, json::Value::object().set("error", "the site's directory is not a path an install can use: " + why).set("target", target));
         done();
         return;
     }
-    json::Value req = json::Value::object().set("target", target);
+    const bool create_path = body["create_path"].boolean();
+    const bool dry_run = body["dry_run"].boolean();
+    json::Value req = json::Value::object().set("site_root", site_root).set("target", target).set("create_path", create_path).set("dry_run", dry_run);
     if (!site->user.empty()) req.set("user", site->user);
     if (!url.empty()) req.set("url", url);
     if (!file.empty()) req.set("upload", file);
     if (!sha.empty()) req.set("sha256", sha);
     if (!body["strip"].is_null()) req.set("strip", body["strip"]);
-    const bool dry_run = body["dry_run"].boolean();
-    if (dry_run) {
-        reply(s, 200, json::Value::object().set("ok", true).set("dry_run", true).set("target", target).set("as", site->user.empty() ? "the directory's owner" : site->user)
-                          .set("source", url.empty() ? "upload " + file : url).set("request", req)
-                          .set("hint", "the directory must exist, be empty and belong to that account; a download is fenced to public https addresses"));
-        done();
-        return;
-    }
-    audit_peer(s, what, "installing " + (url.empty() ? "upload " + file : url) + " into " + target);
-    backend_->install_async(req, [this, &s, what = std::string(what), target, url, file, done](json::Value r) {
+    const std::string source = url.empty() ? "upload " + file : url;
+    if (!dry_run) audit_peer(s, what, "installing " + source + " into " + target + (create_path ? " (create_path)" : ""));
+    // A dry run takes the same walk as the real call (as the same account) and reports
+    // the refusal it would meet or the directories it would create; nothing is written.
+    backend_->install_async(req, [this, &s, what = std::string(what), target, url, file, source, dry_run, done](json::Value r) {
         const bool ok = r["ok"].boolean();
-        audit_peer(s, what, ok ? "installed " + std::to_string(static_cast<long>(r["files"].num())) + " files into " + target + " (sha256 " + std::string(r.get("sha256")) + ")"
+        if (dry_run) {
+            if (ok) reply(s, 200, r.set("source", source).set("hint", "nothing was written; the same call without dry_run installs"));
+            else reply(s, 409, json::Value::object().set("ok", false).set("dry_run", true).set("error", r.get("error")).set("target", target));
+            done();
+            return;
+        }
+        std::string made;
+        for (const auto& c : r["created"].items()) made += " created " + std::string(c.get("path")) + " (" + std::string(c.get("owner")) + " " + std::string(c.get("mode")) + ")";
+        audit_peer(s, what, ok ? "installed " + std::to_string(static_cast<long>(r["files"].num())) + " files into " + target + " (sha256 " + std::string(r.get("sha256")) + ")" + made
                               : "failed: " + std::string(r.get("error")));
         if (!ok) {
             reply(s, 409, json::Value::object().set("ok", false).set("error", r.get("error")).set("target", target));
         } else {
-            r.set("target", target);
             json::Value steps = json::Value::array();
             if (!url.empty()) steps.push("the files came from " + std::string(r.get("url").empty() ? url : std::string(r.get("url"))) + "; sha256 " + std::string(r.get("sha256")));
             steps.push("open the site in a browser to finish the application's own setup (database, admin account)");

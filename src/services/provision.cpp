@@ -67,8 +67,13 @@ std::string validate(const json::Value& req, const Config& cfg) {
     }
     if (op == "app_install") {
         const std::string target(req.get("target")), user(req.get("user")), url(req.get("url")), upload(req.get("upload"));
+        const std::string site_root(req.get("site_root"));
         if (!control::safe_path(target, why)) return "app_install: target " + why;
-        if (!under(target, sites_root(cfg)) || target == sites_root(cfg)) return "app_install: " + target + " is not below " + sites_root(cfg);
+        if (!control::safe_path(site_root, why)) return "app_install: site_root " + why;
+        if (!under(site_root, sites_root(cfg)) || site_root == sites_root(cfg)) return "app_install: " + site_root + " is not below " + sites_root(cfg);
+        if (!under(target, site_root)) return "app_install: " + target + " is not below the site's directory " + site_root;
+        for (const char* flag : {"create_path", "dry_run"})
+            if (!req[flag].is_null() && req[flag].type() != json::Value::Type::boolean) return std::string("app_install: ") + flag + " must be a boolean";
         if (!user.empty() && !control::valid_account(user, why)) return "app_install: user " + why;
         if (url.empty() == upload.empty()) return "app_install: exactly one of url and upload";
         std::string h, p, path;
@@ -219,33 +224,35 @@ bool lay_out(const Config& cfg, const std::string& dir, uid_t owner, gid_t group
 }
 
 // Which account installs: the site's user when the site has one, else the owner of the
-// target directory, and in both cases only a site account or the server's own account.
-// Root, a login account or another site's account is refused before anything runs.
-bool install_account(const Config& cfg, const std::string& target, const std::string& user, uid_t& uid, gid_t& gid, std::string& why) {
+// site's directory, and in both cases only a site account or the server's own account.
+// Root, a login account or another site's account is refused before anything runs. The
+// site's directory is what is looked at, not the target: a plugin's directory may not
+// exist yet (create_path), and the child checks every component on its own walk.
+bool install_account(const Config& cfg, const std::string& site_root, const std::string& user, uid_t& uid, gid_t& gid, std::string& why) {
     struct stat st {};
-    if (::lstat(target.c_str(), &st) != 0) {
-        why = "target " + target + ": " + std::strerror(errno);
+    if (::lstat(site_root.c_str(), &st) != 0) {
+        why = "site directory " + site_root + ": " + std::strerror(errno);
         return false;
     }
     if (!S_ISDIR(st.st_mode)) {
-        why = "target " + target + " is not a directory (or is a symlink); refused";
+        why = "site directory " + site_root + " is not a directory (or is a symlink); refused";
         return false;
     }
     if (!user.empty()) {
         if (!site_account(cfg, user, uid, gid, why)) return false;
         if (st.st_uid != uid) {
-            why = "target " + target + " belongs to uid " + std::to_string(st.st_uid) + ", not to " + user + "; refused";
+            why = "site directory " + site_root + " belongs to uid " + std::to_string(st.st_uid) + ", not to " + user + "; refused";
             return false;
         }
         return true;
     }
     if (st.st_uid == 0) {
-        why = "target " + target + " belongs to root; give it to a site account (or the server's account) first";
+        why = "site directory " + site_root + " belongs to root; give it to a site account (or the server's account) first";
         return false;
     }
     const struct passwd* pw = ::getpwuid(st.st_uid);
     if (!pw) {
-        why = "target " + target + " belongs to unknown uid " + std::to_string(st.st_uid);
+        why = "site directory " + site_root + " belongs to unknown uid " + std::to_string(st.st_uid);
         return false;
     }
     const std::string owner = pw->pw_name;
@@ -261,11 +268,11 @@ bool install_account(const Config& cfg, const std::string& target, const std::st
 // comes back through a pipe as one JSON line. Bounded by a deadline.
 json::Value app_install(const json::Value& req, const Config& cfg, int helper_fd) {
     json::Value reply = json::Value::object();
-    const std::string target(req.get("target")), user(req.get("user")), upload(req.get("upload"));
+    const std::string target(req.get("target")), user(req.get("user")), upload(req.get("upload")), site_root(req.get("site_root"));
     uid_t uid = 0;
     gid_t gid = 0;
     std::string why;
-    if (!install_account(cfg, target, user, uid, gid, why)) return reply.set("ok", false).set("error", why);
+    if (!install_account(cfg, site_root, user, uid, gid, why)) return reply.set("ok", false).set("error", why);
     if (uid == 0) return reply.set("ok", false).set("error", "refusing to install as root");
     int upload_fd = -1;
     if (!upload.empty()) {
@@ -294,7 +301,10 @@ json::Value app_install(const json::Value& req, const Config& cfg, int helper_fd
             out.set("ok", false).set("error", std::string("cannot become uid ") + std::to_string(uid) + ": " + std::strerror(errno));
         } else {
             install::Request r;
+            r.site_root = std::string(req.get("site_root"));
             r.target = target;
+            r.create_path = req["create_path"].boolean();
+            r.dry_run = req["dry_run"].boolean();
             r.url = std::string(req.get("url"));
             r.upload_fd = upload_fd;
             r.upload_name = upload;
