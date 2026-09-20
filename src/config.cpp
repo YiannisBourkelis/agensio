@@ -563,11 +563,14 @@ const std::vector<PhpPreset> kPhpPresets = {
     // ever executed and their files are cacheable (modestly: WordPress versions assets by
     // query string). The credentials file is never an entry point; readme.html and
     // license.txt, which name the installed version, are not served either (the first
-    // thing a vulnerability scanner reads; every hardening guide blocks them).
-    {"wordpress", "WordPress: any .php runs, pretty permalinks reach index.php, nothing under wp-content/uploads or wp-includes ever executes; wp-config.php, readme.html and license.txt (the version fingerprint) are never answered.",
+    // thing a vulnerability scanner reads; every hardening guide blocks them); the
+    // wp-content drop-ins (db.php, advanced-cache.php, object-cache.php) only make sense
+    // inside WordPress's own bootstrap and are never fetched over HTTP.
+    {"wordpress", "WordPress: any .php runs, pretty permalinks reach index.php, nothing under wp-content/uploads or wp-includes ever executes; wp-config.php, readme.html and license.txt (the version fingerprint) and the wp-content drop-ins (db.php, advanced-cache.php, object-cache.php) are never answered.",
      "", false, {"index.php"}, true, true, {},
      {{"/wp-content/uploads/", "public, max-age=604800"}, {"/wp-includes/", "public, max-age=2592000"}},
-     {"/wp-config.php", "/wp-config-sample.php", "/readme.html", "/license.txt"},
+     {"/wp-config.php", "/wp-config-sample.php", "/readme.html", "/license.txt",
+      "/wp-content/db.php", "/wp-content/advanced-cache.php", "/wp-content/object-cache.php"},
      "https://wordpress.org/latest.tar.gz", "https://wordpress.org/wordpress-{version}.tar.gz"},
 };
 

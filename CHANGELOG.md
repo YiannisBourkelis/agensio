@@ -1,5 +1,12 @@
 # Changelog
 
+
+## 0.1.0-alpha.13 (2026-09-20)
+
+- WordPress preset: the `wp-content` drop-ins `db.php`, `advanced-cache.php` and
+  `object-cache.php` are answered 404 like `wp-config.php`; they run only inside
+  WordPress's bootstrap and answered 500 when fetched directly (live report).
+
 ## 0.1.0-alpha.12 (2026-09-20)
 
 - `site-copy NAME --from SUB --to SUB [--overwrite]` (MCP `site_copy`, `POST
