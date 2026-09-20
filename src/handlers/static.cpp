@@ -347,6 +347,12 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
         error(s, 404, req.keep_alive);
         return Outcome::done;
     }
+    // Backup spellings of the names the site never serves (wp-config.php.bak, .wp-config.php.swp):
+    // the same 404 as the name, whatever the ending and whatever hidden_files says.
+    if (!loc.protects.empty() && backup_of_protected(ws.path, loc.protects)) {
+        error(s, 404, req.keep_alive);
+        return Outcome::done;
+    }
     // A method this handler does not serve (POST to a Laravel route): only try_files can
     // rescue it by redirecting to an application location; a real file means 405.
     if (!ws.method_allowed) {

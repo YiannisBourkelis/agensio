@@ -98,7 +98,7 @@ takes `--socket PATH`.
 | `config_validate` | viewer | the file on disk: errors and restart-only differences |
 | `config_reference` | viewer | every configuration key with type, default, meaning, reload or restart, who changes it (root in the main file, a site file, `site_create`, `settings`), the reference section, and the running value of server-level keys; the agent answers "how do I change X" from it, handing root's edits back as the exact line plus the reload or restart command |
 | `site_settings_list` | viewer | the per-site limits `site_update` accepts under `settings`, with type, unit, default, minimum, the ceiling root set, what a change costs and derives; with `name`, each key's current value and source. The schema of `settings` is generated from the same table |
-| `presets_list` | viewer | what each `app` value does: served root, which `.php` runs, refusals; from the preset table, so a new preset appears at once |
+| `presets_list` | viewer | what each `app` value does: served root, which `.php` runs, refusals, the files never served (also refused in every backup spelling: `wp-config.php.bak`, `~`, `.swp`, `wp-config.txt`); from the preset table, so a new preset appears at once |
 | `logs_query` | viewer | recent error-log and access-log lines, filtered by site, time, level and status |
 | `reload`, `logs_reopen` | operator | reload without dropping connections; reopen logs after rotation |
 | `cert_renew` | operator | order an automatic certificate again now |

@@ -298,6 +298,27 @@ check() {  # name expected actual
   - $1"; fi
 }
 code() { curl -sS -o /dev/null -w '%{http_code}' "$@"; }
+# One table of PHP-source and backup spellings planted under every preset's shield and root
+# and asserted refused on each (2026-09-20 report: testing each preset against its own list
+# let wordpress fall behind drupal: .inc and .php~ under uploads were served as source).
+SPELL="ag.PHP ag.PhP ag.php. ag.pht ag.phtm ag.php3 ag.php7 ag.PHTML ag.phar ag.php~ ag.inc ag.INC ag.inc~ ag.php.bak ag.php.orig ag.php.save ag.php.swp ag.php.swo ag.inc.bak"
+shield_check() {  # label url-prefix directory
+  for n in $SPELL; do printf '<?php echo "LEAK";' > "$3/$n"; done
+  check "$1: PHP source and backups are refused in every spelling ($(echo $SPELL | wc -w | tr -d ' ') planted)" "$(for n in $SPELL; do echo -n '404 '; done)" "$(for n in $SPELL; do code "$2/$n"; echo -n ' '; done)"
+  check "$1: none of those reached PHP or leaked a byte" "0" "$(for n in $SPELL; do curl -sS "$2/$n"; done | grep -c 'LEAK\|front\|laravel /')"
+  for n in $SPELL; do rm -f "$3/$n"; done
+}
+# Backups of a name the preset never serves, planted in its directory with a canary, each
+# fetched and classified (2026-09-20 report: wp-config.php~, .bak, .save, .orig and .txt were
+# served with the database password; the exact name was 404). "#" is sent percent-encoded.
+BACKUPS="NAME~ NAME.bak NAME.save NAME.orig NAME.txt NAME.old NAME.dist NAME.1 NAME-old NAME_bak .NAME.swp #NAME# STEM.bak STEM.txt STEM.old"
+backup_check() {  # label url-prefix-of-the-directory directory name-with-extension
+  local stem="${4%.*}" names="" n
+  for n in $BACKUPS; do n="${n//NAME/$4}"; n="${n//STEM/$stem}"; names="$names $n"; printf '<?php define("DB_PASSWORD","AGENSIO-CANARY-9931");' > "$3/$n"; done
+  check "$1: backups of $4 are refused in every spelling ($(echo $names | wc -w | tr -d ' ') planted)" "$(for n in $names; do echo -n '404 '; done)" "$(for n in $names; do code "$2/${n//#/%23}"; echo -n ' '; done)"
+  check "$1: none of those backups gave the canary away" "0" "$(for n in $names; do curl -sS "$2/${n//#/%23}"; done | grep -c 'CANARY')"
+  for n in $names; do rm -f "$3/$n"; done
+}
 if command -v sha256sum >/dev/null; then sum() { sha256sum | cut -c1-16; }; else sum() { shasum -a 256 | cut -c1-16; }; fi
 # Debian's netcat-openbsd needs -q to exit after stdin EOF; macOS nc has no -q.
 if nc -h 2>&1 | grep -q -- '-q'; then ncq() { nc -q 1 "$@"; }; else ncq() { nc "$@"; }; fi
@@ -482,6 +503,8 @@ check "laravel: a .php that does not exist is refused, not routed" "404" "$(code
 # The regression: a second .php under public/ was served as a download with its source.
 check "laravel: an existing second .php is refused (404), never executed, never disclosed" "404 no-source" "$(code http://127.0.0.1:8090/admin.php) $(curl -sS http://127.0.0.1:8090/admin.php | grep -q '<?php\|hunter2\|second-entry' && echo LEAK || echo no-source)"
 check "laravel: /index.php/extra also lands in the front controller" "laravel /index.php/extra /index.php -" "$(curl -sS 'http://127.0.0.1:8090/index.php/extra')"
+shield_check "laravel build/" http://127.0.0.1:8090/build tests/laravel/public/build
+shield_check "laravel root" http://127.0.0.1:8090 tests/laravel/public
 fi
 "$BIN" -t --explain -c bench/tmp/agensio-test.toml > bench/tmp/explain.out 2>bench/tmp/explain.err
 check "explain: preset expansion is printed" "yes" "$(grep -q '# from preset:laravel' bench/tmp/explain.out && echo yes)"
@@ -777,10 +800,13 @@ if [ -n "$FPM_PID" ]; then
   check "drupal: a missing PHP-like file below files/ is still a 404 that never reaches PHP" "404 404" "$(code $D/sites/default/files/styles/evil.php) $(code $D/sites/default/files/css/x.phtml)"
   # Uploaded PHP source in every spelling: refused whatever the case, a trailing dot, an
   # editor backup; a .php.jpg is a jpg (2026-09-20 report: .PHP, .PhP and .php. were served).
-  for n in ag.PHP ag.PhP ag.php. ag.pht ag.phtm ag.php3 ag.PHTML ag.php~ ag.inc.bak ag.php.jpg; do printf '<?php echo "LEAK";' > "$DF/$n"; done
-  check "drupal: PHP source below files/ is refused in every spelling; .php.jpg is a jpg" "404 404 404 404 404 404 404 404 404 200 image/jpeg" "$(for n in ag.PHP ag.PhP ag.php. ag.pht ag.phtm ag.php3 ag.PHTML ag.php~ ag.inc.bak; do code "$D/sites/default/files/$n"; echo -n ' '; done; curl -sSi $D/sites/default/files/ag.php.jpg | tr -d '\r' | awk 'NR==1{c=$2} tolower($1)=="content-type:"{t=$2} END{printf "%s %s", c, t}')"
-  check "drupal: none of those refusals reached PHP or leaked a byte" "0" "$(for n in ag.PHP ag.PhP ag.php. ag.pht ag.phtm ag.php3 ag.PHTML ag.php~ ag.inc.bak; do curl -sS "$D/sites/default/files/$n"; done | grep -c 'LEAK\|drupal front')"
-  rm -f $DF/ag.PHP $DF/ag.PhP "$DF/ag.php." $DF/ag.pht $DF/ag.phtm $DF/ag.php3 $DF/ag.PHTML "$DF/ag.php~" $DF/ag.inc.bak $DF/ag.php.jpg
+  shield_check "drupal files/" $D/sites/default/files $DF
+  shield_check "drupal root" $D tests/drupal/web
+  printf '<?php echo "LEAK";' > $DF/ag.php.jpg
+  check "drupal: a .php.jpg below files/ is a jpg" "200 image/jpeg" "$(curl -sSi $D/sites/default/files/ag.php.jpg | tr -d '\r' | awk 'NR==1{c=$2} tolower($1)=="content-type:"{t=$2} END{printf "%s %s", c, t}')"
+  rm -f $DF/ag.php.jpg
+  backup_check "drupal" $D/sites/default tests/drupal/web/sites/default settings.php
+  check "drupal: a backup of settings.php in another directory is not what the rule protects; the .bak ending refuses it anyway" "404" "$(printf 'x' > $DF/settings.php.bak; code $D/sites/default/files/settings.php.bak; rm -f $DF/settings.php.bak)"
   mv bench/tmp/pic.jpg.away $DF/styles/thumb/pic.jpg; mv bench/tmp/agg.css.away $DF/css/agg.css
   check "drupal: restored, the derivative serves statically again" "200 JPEGDATA" "$(curl -sS -o /dev/null -w '%{http_code} ' "$D/sites/default/files/styles/thumb/pic.jpg?itok=S02fzuls"; curl -sS "$D/sites/default/files/styles/thumb/pic.jpg?itok=S02fzuls")"
   check "drupal: the presets catalogue says which directory regenerates on a miss" "/sites/default/files/" "$(curl -sS --unix-socket bench/tmp/control.sock http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["drupal"]["missing_reaches_front_controller"][0], end=""); assert p["wordpress"]["missing_reaches_front_controller"] == []')"
@@ -809,9 +835,14 @@ print(len(deny), n404, readme[0]["handler"] if readme else "-")')"
   check "wordpress: readme.html and license.txt (the version fingerprint) are 404 although present" "404 404 yes" "$(code $W/readme.html) $(code $W/license.txt) $([ -f tests/wordpress/readme.html ] && echo yes)"
   check "wordpress: the wp-content drop-ins (db.php, advanced-cache.php, object-cache.php) are 404, never executed; the SQLite file is hidden" "404 404 404 404 no" "$(code $W/wp-content/db.php) $(code $W/wp-content/advanced-cache.php) $(code $W/wp-content/object-cache.php) $(code $W/wp-content/database/.ht.sqlite) $(curl -sS $W/wp-content/db.php | grep -q 'drop-in ran' && echo yes || echo no)"
   check "wordpress: PHP under uploads and wp-includes refused, assets served" "404 404 200" "$(code $W/wp-content/uploads/shell.php) $(code $W/wp-includes/x.php) $(code $W/wp-includes/wp.js)"
-  for n in up.PHP up.PhP up.php. up.phtml up.php7; do printf '<?php echo "LEAK";' > "tests/wordpress/wp-content/uploads/$n"; done
-  check "wordpress: PHP source under uploads is refused in every spelling, nothing leaks" "404 404 404 404 404 0" "$(for n in up.PHP up.PhP up.php. up.phtml up.php7; do code "$W/wp-content/uploads/$n"; echo -n ' '; done; for n in up.PHP up.PhP up.php. up.phtml up.php7; do curl -sS "$W/wp-content/uploads/$n"; done | grep -c LEAK)"
-  rm -f tests/wordpress/wp-content/uploads/up.PHP tests/wordpress/wp-content/uploads/up.PhP "tests/wordpress/wp-content/uploads/up.php." tests/wordpress/wp-content/uploads/up.phtml tests/wordpress/wp-content/uploads/up.php7
+  shield_check "wordpress uploads/" $W/wp-content/uploads tests/wordpress/wp-content/uploads
+  shield_check "wordpress wp-includes/" $W/wp-includes tests/wordpress/wp-includes
+  shield_check "wordpress root" $W tests/wordpress
+  backup_check "wordpress" $W tests/wordpress wp-config.php
+  backup_check "wordpress" $W/wp-content tests/wordpress/wp-content db.php
+  check "wordpress: readme.html.bak and license.txt~ are refused; /readme and /license stay permalinks" "404 404 wordpress front /readme/ wordpress front /license-agreement/" "$(printf 'v' > tests/wordpress/readme.html.bak; printf 'v' > 'tests/wordpress/license.txt~'; code $W/readme.html.bak; echo -n ' '; code "$W/license.txt~"; rm -f tests/wordpress/readme.html.bak 'tests/wordpress/license.txt~'; echo -n ' '; curl -sS $W/readme/; echo -n ' '; curl -sS $W/license-agreement/)"
+  check "wordpress: a backup of wp-config.php upper-cased is refused too" "404 404" "$(printf 'x' > tests/wordpress/WP-CONFIG.PHP.BAK; code $W/WP-CONFIG.PHP.BAK; echo -n ' '; code $W/Wp-Config.Txt; rm -f tests/wordpress/WP-CONFIG.PHP.BAK)"
+  check "wordpress: the presets catalogue states the backup rule" "yes" "$(curl -sS --unix-socket bench/tmp/control.sock http://control/v1/presets | grep -q 'backup spelling' && echo yes)"
   rm -rf tests/drupal/web/.git tests/drupal/web/.env tests/drupal/web/sites/default/files/.ht.sqlite
 fi
 

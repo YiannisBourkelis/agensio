@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.0-alpha.18 (2026-09-20)
+
+- **Fixed, wordpress preset: backups of `wp-config.php` were served** (live report:
+  `wp-config.php~`, `.bak`, `.save`, `.orig` and `.txt` answered 200 with the database
+  password and the salts; the exact name was 404). Every name a preset never serves is
+  now refused in every backup spelling within its directory, anchored on the name rather
+  than on an ending: `name.bak`, `name~`, `name.txt`, `name-old`, `stem.bak`
+  (`wp-config.bak`), `.name.swp`, `#name#`, in any case, whatever `hidden_files` says;
+  `ads.txt` and the `/readme`, `/license` permalinks are untouched. `agensio -t
+  --explain` and the presets catalogue state the rule; the MCP `presets_list` text too.
+- **Fixed, every PHP preset: one shared refusal list.** WordPress's shields lacked `.inc`
+  and the `~` backup form Drupal's had (live report: `x.inc`, `x.php~` under
+  `wp-content/uploads` served as source). Every preset's root and shields now refuse
+  `.inc` and editor backups (`.bak`, `.orig`, `.save`, `.swp`, `.swo`, `~`), and the
+  root refuses the PHP spellings the `.php` suffix location does not take (`x.PHP`,
+  `x.phtml` were served as source at a drupal or wordpress root; `x.php` still runs).
+  The integration suite plants one table of spellings under every preset's shields and
+  roots, and the backups of `wp-config.php`, `db.php` and `settings.php` in their
+  directories, and asserts each is refused without a byte leaking.
+
 ## 0.1.0-alpha.17 (2026-09-20)
 
 - MCP instructions: rule one, stated first: whatever a tool can do is done through the

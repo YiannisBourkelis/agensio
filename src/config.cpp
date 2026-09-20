@@ -539,20 +539,45 @@ struct PhpPreset {
     const char* uploads;              // where the application puts what users upload, relative to the served root ("" = unknown); health looks there first
 };
 
+// What every PHP preset refuses besides PHP itself, on its root and under its shields: the
+// include suffix PHP code ships as (.inc, served as text by a bare Apache, which is why
+// every hardening guide denies it) and editor or copy backups of anything (a backup of
+// PHP source is source; nothing public is spelled so). One list for all presets, since
+// testing each against its own let wordpress fall behind drupal (2026-09-20 report:
+// x.inc and x.php~ under wp-content/uploads were served as source).
+const std::vector<std::string> kSourceBackups = {".inc", ".bak", ".orig", ".save", ".swp", ".swo", "~"};
+
 // Drupal's .htaccess, the part that matters: PHP source in its other spellings, templates,
-// translations, dumps, editor backups.
+// translations, dumps, and the shared list above.
 const std::vector<std::string> kDrupalSource = {".inc", ".install", ".module", ".theme", ".engine", ".profile", ".make",
                                                 ".po", ".sql", ".twig", ".yml", ".yaml", ".sqlite", ".sqlite3", ".db",
                                                 ".bak", ".orig", ".save", ".swp", ".swo", ".tpl", ".xtmpl", "~"};
 
+// "/wp-content/db.php" -> {"/wp-content/db", ".php", 12}: the form backup_of_protected
+// (handlers/static.hpp) matches request paths against. Lower case; a name without a dot
+// after its directory has no extension.
+ProtectedName protected_name(std::string path) {
+    for (char& c : path) c = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
+    ProtectedName n;
+    n.dir_len = path.rfind('/') + 1;
+    const std::size_t dot = path.rfind('.');
+    if (dot != std::string::npos && dot > n.dir_len) {
+        n.dir_stem = path.substr(0, dot);
+        n.ext = path.substr(dot);
+    } else {
+        n.dir_stem = std::move(path);
+    }
+    return n;
+}
+
 const std::vector<PhpPreset> kPhpPresets = {
     // Plain PHP: any script runs, missing paths are 404, no front controller.
-    {"php", "Plain PHP: every .php under the root runs, missing paths are 404, no front controller.",
-     "", false, {"index.php", "index.html"}, false, true, {}, {}, {}, "", "", {}, ""},
+    {"php", "Plain PHP: every .php under the root runs, missing paths are 404, no front controller; .inc and editor backups are refused.",
+     "", false, {"index.php", "index.html"}, false, true, kSourceBackups, {}, {}, "", "", {}, ""},
     // Laravel (and Statamic): one entry point; any other .php is refused, never served as
     // source (2026-09-19); Vite's hashed build output cached for a year.
     {"laravel", "Laravel and Statamic: the project directory is given, its public/ is served; only index.php ever runs, any other .php is refused; Vite's build/ is cached for a year.",
-     "public", true, {"index.php"}, true, false, {},
+     "public", true, {"index.php"}, true, false, kSourceBackups,
      {{"/build/", "public, max-age=31536000, immutable"}}, {}, "", "", {}, "/storage"},
     // Drupal: many entry points (index.php, core/install.php, update.php); what its
     // .htaccess protects is refused natively, since .htaccess is never read.
@@ -572,9 +597,11 @@ const std::vector<PhpPreset> kPhpPresets = {
     // license.txt, which name the installed version, are not served either (the first
     // thing a vulnerability scanner reads; every hardening guide blocks them); the
     // wp-content drop-ins (db.php, advanced-cache.php, object-cache.php) only make sense
-    // inside WordPress's own bootstrap and are never fetched over HTTP.
-    {"wordpress", "WordPress: any .php runs, pretty permalinks reach index.php, nothing under wp-content/uploads or wp-includes ever executes; wp-config.php, readme.html and license.txt (the version fingerprint) and the wp-content drop-ins (db.php, advanced-cache.php, object-cache.php) are never answered.",
-     "", false, {"index.php"}, true, true, {},
+    // inside WordPress's own bootstrap and are never fetched over HTTP. Backups of any of
+    // these (wp-config.php~, .bak, .txt, .wp-config.php.swp) are the same 404: `never`
+    // names are protected in every backup spelling (backup_of_protected).
+    {"wordpress", "WordPress: any .php runs, pretty permalinks reach index.php, nothing under wp-content/uploads or wp-includes ever executes; wp-config.php, readme.html and license.txt (the version fingerprint) and the wp-content drop-ins (db.php, advanced-cache.php, object-cache.php) are never answered, in any backup spelling.",
+     "", false, {"index.php"}, true, true, kSourceBackups,
      {{"/wp-content/uploads/", "public, max-age=604800"}, {"/wp-includes/", "public, max-age=2592000"}},
      {"/wp-config.php", "/wp-config-sample.php", "/readme.html", "/license.txt",
       "/wp-content/db.php", "/wp-content/advanced-cache.php", "/wp-content/object-cache.php"},
@@ -670,11 +697,14 @@ void apply_preset(SiteConfig& site, const std::string& where) {
     } else if (!has("/index.php", true, false)) {
         site.locations.push_back(fcgi_location("/index.php", true, false));
     }
-    // What is refused on the root: PHP when only the front controller runs, plus the
-    // preset's own list. Nothing to refuse: the implicit "/" location does.
-    std::vector<std::string> root_deny = preset.refuse;
-    if (!preset.any_php) root_deny.insert(root_deny.begin(), kPhpSuffixes.begin(), kPhpSuffixes.end());
-    if (!root_deny.empty() && !has("/", false, false)) {
+    // What is refused on the root: PHP in every spelling, plus the preset's own list. When
+    // every .php runs, the suffix location takes the exact spelling before the root is
+    // consulted, so what reaches the root is the other spellings (x.PHP, x.phtml, x.php7),
+    // which no handler runs and which would otherwise be served as source; when only the
+    // front controller runs, every spelling is refused here. The implicit "/" refuses nothing.
+    std::vector<std::string> root_deny = kPhpSuffixes;
+    root_deny.insert(root_deny.end(), preset.refuse.begin(), preset.refuse.end());
+    if (!has("/", false, false)) {
         LocationConfig root = static_location("/", false, false, root_deny);
         root.try_files = site.try_files;
         site.locations.push_back(std::move(root));
@@ -702,6 +732,14 @@ void apply_preset(SiteConfig& site, const std::string& where) {
         loc.handler = "deny";  // reported as such by -t --explain and site-show; the static handler answers the 404
         site.locations.push_back(std::move(loc));
     }
+    // The same names in every backup spelling (wp-config.php.bak, wp-config.txt,
+    // .wp-config.php.swp; 2026-09-20: served with the database password in them): every
+    // static location of the site, hand-written ones included, refuses them, since the
+    // backup's ending is unknown and an exact location cannot name it.
+    std::vector<ProtectedName> protects;
+    for (const char* path : preset.never) protects.push_back(protected_name(path));
+    for (auto& loc : site.locations)
+        if (loc.kind == HandlerKind::static_ && loc.protects.empty()) loc.protects = protects;
     // Locations the preset created inherit the site's try_files decided above.
     for (auto& loc : site.locations)
         if (loc.origin == "preset:" + site.app && loc.kind == HandlerKind::fastcgi && loc.try_files.empty())
@@ -1023,6 +1061,12 @@ void explain_config(const Config& cfg, std::ostream& out) {
         out << "hidden_files = " << (site.hidden_files ? "true" : "false") << "\nsymlinks = \""
             << (site.symlinks_deny ? "deny" : "allow") << "\"\n";
         out << "access_log = \"" << (site.access_log.empty() ? "off" : site.access_log) << "\"\n";
+        for (const auto& loc : site.locations)
+            if (!loc.protects.empty()) {
+                out << "# the names the deny locations below never serve are refused in every backup spelling too\n"
+                       "# (name.bak, name~, name.txt, stem.bak, .name.swp, #name#), whatever hidden_files says\n";
+                break;
+            }
         for (const auto& loc : site.locations) {
             out << "\n[[site.location]]";
             if (!loc.origin.empty()) out << "  # from " << loc.origin;
@@ -1392,7 +1436,7 @@ json::Value preset_catalog() {
     list.push(json::Value::object().set("app", "proxy").set("summary", "Reverse proxy: every request goes to the site's upstream (Node, Rails, Go, Java, WebSockets); no root needed.")
                   .set("root", "none").set("php", "none"));
     return json::Value::object().set("presets", std::move(list))
-        .set("note", "agensio never reads .htaccess; a preset provides the refusals an application's .htaccess would. Hand-written [[site.location]] entries win over a preset's.");
+        .set("note", "agensio never reads .htaccess; a preset provides the refusals an application's .htaccess would. Hand-written [[site.location]] entries win over a preset's. Every never_served name is refused in any backup spelling too, in its directory, whatever the case: name.bak, name~, name.txt, name-old, stem.bak (wp-config.bak), .name.swp, #name#; nothing to configure, and the bare stem (/readme, /license) stays a permalink.");
 }
 
 std::vector<std::string> preset_secrets(const std::string& app) {

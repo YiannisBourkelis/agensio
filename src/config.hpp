@@ -47,6 +47,16 @@ struct TryStep {
     int status = 0;      // status: 403 or 404
 };
 
+// A file a preset never serves, in the form the static handler matches its backup
+// spellings against (handlers/static.hpp, backup_of_protected): "/wp-config.php" is
+// dir_len 1, dir_stem "/wp-config", ext ".php"; "/wp-content/db.php" is 12, "/wp-content/db",
+// ".php". Lower case, built once at load (config.cpp, protected_name).
+struct ProtectedName {
+    std::string dir_stem;   // the directory with its slash, then the name without its extension
+    std::string ext;        // ".php", ".txt", "" for a name without one
+    std::size_t dir_len = 0;
+};
+
 // A [[site.location]] block, fully resolved: every field has the site's value unless the
 // block set its own. The site always ends with an implicit "/" prefix location.
 struct LocationConfig {
@@ -54,7 +64,8 @@ struct LocationConfig {
     bool exact = false;
     bool suffix = false;
     bool final = false;  // prefix only (nginx ^~): when it is the longest prefix match, suffix locations are skipped
-    std::vector<std::string> deny_suffixes;  // request paths ending with one of these get 403 (".php" under uploads)
+    std::vector<std::string> deny_suffixes;  // request paths ending with one of these get 404 (".php" under uploads)
+    std::vector<ProtectedName> protects;     // names the site never serves: any backup spelling of them gets 404 here (preset `never`)
     std::string root;   // absolute, canonical, no trailing slash; the file is root + path
     std::string alias;  // nginx alias: the file is alias + (path minus the location prefix); empty = use root
     std::vector<std::string> index;

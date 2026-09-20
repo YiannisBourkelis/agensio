@@ -259,8 +259,12 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   `.php` runs, front controller for the rest, Drupal's `.htaccess` refusals built in;
   the PHP presets are rows of `kPhpPresets` in `config.cpp` (served subdirectory, index,
   front controller, any `.php` or only one, refused suffixes, shielded directories,
-  files answered 404) expanded by one shared routine, so a new application is a row, a
-  fixture and a docs section; `/build/` gets an immutable Cache-Control via `add_headers`; WordPress: any
+  files answered 404, which are also refused in every backup spelling: `name.bak`,
+  `name~`, `stem.txt`, `.name.swp`, `handlers/static.hpp` `backup_of_protected`) expanded
+  by one shared routine, so a new application is a row, a fixture and a docs section;
+  every PHP preset's root and shields refuse the PHP spellings, `.inc` and editor backups
+  (`kSourceBackups`), and the integration suite plants one spelling table under every
+  preset; `/build/` gets an immutable Cache-Control via `add_headers`; WordPress: any
   `.php` runs, `wp-content/uploads` and `wp-includes` are `final` prefix locations, nginx
   `^~`, with `deny_suffixes` so PHP there is 404 and never executed); hand-written
   locations win over the preset's. `agensio -t --explain` prints the effective configuration;

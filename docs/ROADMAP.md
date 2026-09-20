@@ -750,6 +750,17 @@ Rules:
       `ctl reference`, `GET /v1/config/reference`, MCP `config_reference`, `docs/keys.md`
       generated and diffed by the integration suite, unit test against the parser's keys
       and the reference's headings, instructions for the hand-back of root's edits.
+- [x] H2j (2026-09-20, live report) Backups of never-served names: `wp-config.php~`,
+      `.bak`, `.save`, `.orig`, `.txt` were served with the credentials in them.
+      `ProtectedName` built from each preset's `never` list at load, carried by every
+      static location of the site, `backup_of_protected` (`handlers/static.hpp`) refuses
+      any backup spelling of the name within its directory (`name.bak`, `name~`,
+      `stem.bak`, `.name.swp`, `#name#`, any case, whatever `hidden_files` says), the
+      bare stem stays a permalink. One shared list (`kSourceBackups`: `.inc`, `.bak`,
+      `.orig`, `.save`, `.swp`, `.swo`, `~`) on every PHP preset's root and shields, and
+      every root refuses the PHP spellings the suffix location does not take. The
+      integration suite plants one spelling table under every preset and the backups of
+      each credential file; unit test of the rule on the real expansions.
 - [x] H2i (2026-09-20, live reports) Uploads on sites with a user: the pool's `tmp/` is
       `2750 user:<server group>` so `move_uploaded_file` (a rename, which keeps the
       group) delivers a file the server can read; `agensio pools` repairs an older

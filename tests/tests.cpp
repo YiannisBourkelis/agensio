@@ -827,7 +827,7 @@ static void test_presets() {
     CHECK(Router::location(w, "/wp-content/plugins/x/ajax.php").kind == HandlerKind::fastcgi);
     const LocationConfig& up = Router::location(w, "/wp-content/uploads/2026/shell.php");
     CHECK(up.path == "/wp-content/uploads/" && up.final && up.kind == HandlerKind::static_);
-    CHECK(up.deny_suffixes.size() == 12 && up.add_headers.size() == 1 && up.origin == "preset:wordpress");
+    CHECK(up.deny_suffixes.size() == 19 && up.add_headers.size() == 1 && up.origin == "preset:wordpress");
     CHECK(Router::location(w, "/wp-includes/js/x.js").final);
     CHECK(Router::location(w, "/wp-admin/").path == "/");
     CHECK(rejects("badfinal.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n"
@@ -2640,6 +2640,65 @@ static void test_refused_suffix() {
     CHECK(!refused_suffix("/files/x.php", {}));
 }
 
+// The protected-names rule: every backup spelling of a name a preset never serves, on
+// the real WordPress expansion, hand-written locations included.
+static void test_backup_of_protected() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "agensio-protect";
+    fs::remove_all(dir);
+    fs::create_directories(dir / "wp" / "wp-content" / "uploads");
+    auto write = [&](const char* name, const std::string& text) {
+        std::ofstream(dir / name) << text;
+    };
+    write("wp.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"wp\"\napp = \"wordpress\"\nphp = { socket = \"unix:/run/php/fpm.sock\" }\n"
+                     "[[site.location]]\npath = \"/wp-content/uploads/\"\nfinal = true\ndeny_suffixes = [\".php\"]\n");
+    Config cfg = load_config(dir / "wp.toml");
+    const SiteConfig& site = cfg.sites[0];
+    const LocationConfig& root = Router::location(site, "/wp-config.php.bak");
+    CHECK(root.path == "/" && root.protects.size() == 7 && root.protects[0].dir_stem == "/wp-config" && root.protects[0].ext == ".php" && root.protects[0].dir_len == 1);
+    const LocationConfig& uploads = Router::location(site, "/wp-content/uploads/x.txt");
+    CHECK(uploads.origin.empty() && uploads.protects.size() == 7);  // the hand-written shield protects the names too
+    CHECK(std::find(root.deny_suffixes.begin(), root.deny_suffixes.end(), ".inc") != root.deny_suffixes.end() &&
+          std::find(root.deny_suffixes.begin(), root.deny_suffixes.end(), "~") != root.deny_suffixes.end());
+    const auto& names = root.protects;
+    for (const char* p : {"/wp-config.php~", "/wp-config.php.bak", "/wp-config.php.save", "/wp-config.php.orig", "/wp-config.php.txt",
+                          "/wp-config.php.old", "/wp-config.php.dist", "/wp-config.php.1", "/wp-config.php.2024-01-01", "/wp-config.phps",
+                          "/wp-config.bak", "/wp-config.txt", "/wp-config.old", "/WP-CONFIG.PHP", "/WP-CONFIG.PHP.BAK", "/Wp-Config.Bak",
+                          "/.wp-config.php.swp", "/.wp-config.php.swo", "/#wp-config.php#", "/.wp-config.php", "/.wp-config",
+                          "/wp-config.php-old", "/wp-config.php_bak", "/wp-config.php#", "/wp-config.php.bak~",
+                          "/wp-content/db.php.bak", "/wp-content/.db.php.swp", "/wp-content/db.php~", "/readme.html.bak", "/license.txt~", "/license.bak"})
+        CHECK(backup_of_protected(p, names));
+    for (const char* p : {"/wp-config", "/readme", "/license", "/license-agreement", "/readme_first", "/wp-configx.php", "/wp-config.php/x",
+                          "/sub/wp-config.php.bak", "/wp-content/uploads/db.php.bak", "/wp-content/db-error.php", "/wp-content/dbx.php",
+                          "/", "/index.php", "/wp-login.php", "/wp-content/uploads/2026/09/photo.jpg", "/x/wp-config", "/wp-conf.php"})
+        CHECK(!backup_of_protected(p, names));
+    CHECK(!backup_of_protected("/wp-config.php.bak", {}));
+    // A name without an extension and one deeper down.
+    const std::vector<ProtectedName> other = {{"/sub/dir/secret", "", 9}, {"/license", "", 1}};
+    CHECK(backup_of_protected("/sub/dir/secret~", other) && backup_of_protected("/sub/dir/SECRET.bak", other) && backup_of_protected("/license~", other) &&
+          backup_of_protected("/license.old", other) && !backup_of_protected("/sub/dir/secrets", other) && !backup_of_protected("/sub/secret~", other) &&
+          !backup_of_protected("/license", other));
+    // Every preset's never-served names come out as valid protected names; a static preset has none.
+    write("d.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"wp\"\napp = \"drupal\"\nphp = { socket = \"unix:/run/php/fpm.sock\" }\n[[site]]\nlisten = [\"127.0.0.1:18081\"]\nroot = \"wp\"\n");
+    Config dcfg = load_config(dir / "d.toml");
+    const LocationConfig& droot = Router::location(dcfg.sites[0], "/x.txt");
+    CHECK(droot.protects.size() == 9 && backup_of_protected("/sites/default/settings.php.bak", droot.protects) && backup_of_protected("/sites/default/settings.bak", droot.protects) &&
+          backup_of_protected("/composer.json~", droot.protects) && backup_of_protected("/web.config.old", droot.protects) && !backup_of_protected("/sites/default/files/settings.php.bak", droot.protects));
+    CHECK(Router::location(dcfg.sites[1], "/x.txt").protects.empty());
+    // Every PHP preset's root refuses PHP in the spellings the suffix location does not take
+    // (x.PHP, x.phtml would be served as source) and the shared backup list; the plain php
+    // preset too.
+    write("p.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"wp\"\napp = \"php\"\nphp = { socket = \"unix:/run/php/fpm.sock\" }\n");
+    Config pcfg = load_config(dir / "p.toml");
+    for (const SiteConfig* sc : std::initializer_list<const SiteConfig*>{&site, &dcfg.sites[0], &pcfg.sites[0]}) {
+        const LocationConfig& r = Router::location(*sc, "/x.txt");
+        CHECK(r.path == "/" && r.origin == "preset:" + sc->app && refused_suffix("/x.PHP", r.deny_suffixes) && refused_suffix("/x.phtml", r.deny_suffixes) &&
+              refused_suffix("/x.php.bak", r.deny_suffixes) && refused_suffix("/x.inc", r.deny_suffixes) && refused_suffix("/x.php~", r.deny_suffixes) && !refused_suffix("/x.txt", r.deny_suffixes));
+        CHECK(Router::location(*sc, "/x.php").kind == HandlerKind::fastcgi);  // the exact spelling still runs
+    }
+    fs::remove_all(dir);
+}
+
 static void test_parser_prefixes() {
     const std::string text = "GET /wp-admin/js/plugin-install.min.js?ver=7.1.1 HTTP/1.1\r\nHost: ag2.example\r\nReferer: https://ag2.example/wp-admin/plugins.php\r\nUser-Agent: Firefox\r\n\r\nGET /next HTTP/1.1\r\n";
     const std::size_t head = text.find("\r\n\r\n") + 4;
@@ -2734,6 +2793,7 @@ int main() {
     test_strict_hosts();
     test_parser_prefixes();
     test_refused_suffix();
+    test_backup_of_protected();
     test_config_reference();
     test_install();
 #ifdef AGENSIO_HAS_TLS

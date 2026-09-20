@@ -150,13 +150,14 @@ match = "exact"
 handler = "fastcgi"
 
 [[site.location]]        # everything else: static files, or the front controller; PHP in
-path = "/"               # any spelling is refused (404), never executed, never served as source
-deny_suffixes = [".php", ".phtml", ".phar", ".php5", ".php7", ".php8", ".phps"]
+path = "/"               # any spelling is refused (404), never executed, never served as source,
+deny_suffixes = [".php", ".phtml", ".phar", ".pht", ".phtm", ".php3", ".php4", ".php5", ".php6", ".php7", ".php8", ".phps",
+                 ".inc", ".bak", ".orig", ".save", ".swp", ".swo", "~"]   # and .inc and editor backups too
 
 [[site.location]]        # Vite output is content-hashed: cache it for a year
 path = "/build/"
 try_files = ["$uri", "=404"]
-deny_suffixes = [".php", ".phtml", ".phar", ".php5", ".php7", ".php8", ".phps"]
+deny_suffixes = [...the same list...]
 add_headers = { "Cache-Control" = "public, max-age=31536000, immutable" }
 ```
 
@@ -204,17 +205,22 @@ path = ".php"
 match = "suffix"
 handler = "fastcgi"
 
+[[site.location]]        # everything else: static files or the front controller; PHP in a spelling
+path = "/"               # the suffix location does not take (x.PHP, x.phtml), .inc and editor backups
+deny_suffixes = [".php", ".phtml", ".phar", ".pht", ".phtm", ".php3", ".php4", ".php5", ".php6", ".php7", ".php8", ".phps",
+                 ".inc", ".bak", ".orig", ".save", ".swp", ".swo", "~"]
+
 [[site.location]]        # nothing under uploads is ever executed; files are cacheable
 path = "/wp-content/uploads/"
 final = true             # nginx ^~: the .php suffix location is not consulted here
-deny_suffixes = [".php", ".phtml", ".phar", ".php5", ".php7", ".phps"]
+deny_suffixes = [...the same list...]
 try_files = ["$uri", "=404"]
 add_headers = { "Cache-Control" = "public, max-age=604800" }
 
 [[site.location]]        # core assets: same shield, longer cache
 path = "/wp-includes/"
 final = true
-deny_suffixes = [".php", ".phtml", ".phar", ".php5", ".php7", ".phps"]
+deny_suffixes = [...the same list...]
 try_files = ["$uri", "=404"]
 add_headers = { "Cache-Control" = "public, max-age=2592000" }
 ```
@@ -229,6 +235,17 @@ vulnerability scanner reads, and cost nothing to withhold; the drop-ins run only
 WordPress's own bootstrap and answer 500 when fetched directly. `.htaccess`, `.user.ini`
 and the SQLite plugin's `wp-content/database/.ht.sqlite` are dotfiles and hidden. agensio
 never reads `.htaccess`; see section 4c.
+
+**Backups of those names are the same 404.** `wp-config.php~`, `wp-config.php.bak`,
+`.save`, `.orig`, `.txt`, `.old`, `.dist`, `wp-config.bak`, `wp-config.txt`,
+`.wp-config.php.swp` (vim), `#wp-config.php#` (emacs), `wp-config.php-old`, in any case:
+every name a preset never serves is protected in every backup spelling within its
+directory, without configuration and whatever `hidden_files` says. The rule is anchored
+on the name, not on an ending, so `ads.txt`, `security.txt` and every other public file
+are untouched, and `/readme`, `/license` and `/license-agreement` stay permalinks
+(2026-09-20: a live host served `wp-config.php~` and four other backups with the database
+password and the salts in them; the exact name was 404). The presets catalogue
+(`agensio ctl presets`, MCP `presets_list`) states the rule.
 
 ## 4c. Drupal and other multi-entry-point PHP applications: `app = "drupal"`
 
@@ -296,6 +313,19 @@ PHP, whether the file exists or not; the refusal ignores case and trailing dots
 trailing-dot spellings were served as source). (2026-09-20: a deleted derivative was answered 404
 by the server for ever; the other shields, `core/lib/`, `vendor/`, keep answering 404
 for a miss.)
+
+**One list for every PHP preset.** Besides the PHP spellings, every preset's root and
+every shield refuse `.inc` (the include suffix PHP code ships as; a bare Apache serves it
+as text) and editor or copy backups of anything: `.bak`, `.orig`, `.save`, `.swp`,
+`.swo`, `~`. Drupal's list is that plus its own spellings. The root refuses the PHP
+spellings too, on every preset: when every `.php` runs, the suffix location takes the
+exact spelling first, so what reaches the root is `x.PHP` or `x.phtml`, which nothing
+runs and which would otherwise be served as source. The integration suite plants one
+table of spellings under every preset's shields and roots and asserts each is refused
+(2026-09-20: testing each preset against its own list had let WordPress fall behind
+Drupal, and `x.inc`, `x.php~` under `wp-content/uploads` were served as source). And
+every name a preset never serves (section 4, WordPress) is refused in every backup
+spelling: `settings.php~`, `settings.php.bak`, `settings.bak`, `.settings.php.swp`.
 
 ## 4b. Proxied applications: `app = "proxy"`
 

@@ -37,6 +37,50 @@ inline bool refused_suffix(std::string_view path, const std::vector<std::string>
     return false;
 }
 
+// The protected-names rule (2026-09-20 live report: wp-config.php~, .bak, .save, .orig and
+// .txt were served with the database password and the salts in them; the exact name was
+// 404). A request in the directory of a name the site never serves is refused when, after
+// an optional leading "." or "#" (vim's .name.swp, emacs's #name#), its basename is the
+// name's stem followed by "." and anything (name.bak, name~ is below, stem.bak, stem.txt,
+// the name itself in another case), or the whole name followed by "~", "#", "-" or "_"
+// and anything (name~, name-old, name_bak). Case-insensitive, so a case-insensitive
+// filesystem cannot serve WP-CONFIG.PHP either, and independent of hidden_files. The
+// bare stem alone ("/readme", "/license") is not touched: a WordPress permalink. Pure,
+// unit tested; the integration suite plants every spelling on both presets.
+inline bool backup_of_protected(std::string_view path, const std::vector<ProtectedName>& names) noexcept {
+    auto lower = [](char c) noexcept { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c; };
+    for (const ProtectedName& n : names) {
+        if (path.size() <= n.dir_len) continue;
+        std::size_t i = 0;
+        while (i < n.dir_len && lower(path[i]) == n.dir_stem[i]) ++i;
+        if (i < n.dir_len) continue;
+        std::string_view base = path.substr(n.dir_len);
+        if (base.find('/') != std::string_view::npos) continue;  // a deeper path, another directory
+        const bool marked = base.front() == '.' || base.front() == '#';
+        if (marked) base.remove_prefix(1);
+        const std::string_view stem = std::string_view(n.dir_stem).substr(n.dir_len);
+        if (base.size() < stem.size()) continue;
+        std::size_t j = 0;
+        while (j < stem.size() && lower(base[j]) == stem[j]) ++j;
+        if (j < stem.size()) continue;
+        const std::string_view rest = base.substr(stem.size());
+        if (rest.empty()) {
+            if (marked) return true;  // ".wp-config" or "#wp-config": nothing public is spelled so
+            continue;
+        }
+        if (rest.front() == '.') return true;  // stem.anything: the name, its case variants and every suffix behind it
+        if (rest.size() > n.ext.size()) {      // name followed by a marker: name~, name#, name-old, name_bak
+            std::size_t k = 0;
+            while (k < n.ext.size() && lower(rest[k]) == n.ext[k]) ++k;
+            if (k == n.ext.size()) {
+                const char c = rest[k];
+                if (c == '~' || c == '#' || c == '-' || c == '_') return true;
+            }
+        }
+    }
+    return false;
+}
+
 class StaticHandler {
 public:
     StaticHandler(const Config& cfg, FileCache& cache);
