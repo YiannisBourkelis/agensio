@@ -2556,6 +2556,28 @@ static void test_server_account_and_rules() {
     CHECK(control::find_site(two, "A.TEST") == &two.sites[0]);
 }
 
+// The request parser is stateless over its buffer: every prefix of a request is
+// incomplete until the head is whole, and the whole parses to the same fields whether or
+// not shorter prefixes were tried first (a live "GETGET" line, 2026-09-20, was a buffer
+// bug in the connection, not here; this pins the parser's half of the invariant).
+static void test_parser_prefixes() {
+    const std::string text = "GET /wp-admin/js/plugin-install.min.js?ver=7.1.1 HTTP/1.1\r\nHost: ag2.example\r\nReferer: https://ag2.example/wp-admin/plugins.php\r\nUser-Agent: Firefox\r\n\r\nGET /next HTTP/1.1\r\n";
+    const std::size_t head = text.find("\r\n\r\n") + 4;
+    Request r;
+    for (std::size_t i = 0; i < head; ++i) {
+        const auto st = parse_request(std::string_view(text).substr(0, i), r);
+        CHECK(st == ParseStatus::incomplete);
+    }
+    for (std::size_t i = head; i <= text.size(); ++i) {
+        const auto st = parse_request(std::string_view(text).substr(0, i), r);
+        CHECK(st == ParseStatus::complete && r.length == head && r.method == Method::get && r.method_name == "GET");
+        CHECK(r.target == "/wp-admin/js/plugin-install.min.js?ver=7.1.1" && r.host == "ag2.example");
+    }
+    // A duplicated method token is a valid token: 405 territory, and now logged.
+    CHECK(parse_request("GETGET /a HTTP/1.1\r\nHost: h\r\n\r\n", r) == ParseStatus::complete && r.method == Method::other && r.method_name == "GETGET");
+    CHECK(parse_request("GET GET /a HTTP/1.1\r\nHost: h\r\n\r\n", r) == ParseStatus::bad_request);
+}
+
 static void test_strict_hosts() {
     // The authority of a TLS connection: the names of the certificate it presented
     // (RFC 6125 matching), against a raw Host header value.
@@ -2630,6 +2652,7 @@ int main() {
     test_control_sites();
     test_server_account_and_rules();
     test_strict_hosts();
+    test_parser_prefixes();
     test_install();
 #ifdef AGENSIO_HAS_TLS
     test_acme();

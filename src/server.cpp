@@ -82,6 +82,7 @@ Server::Server(Config cfg)
     gen_ = std::move(gen);
     build_workers();
     dispatcher_.set_acme(&acme_.challenges());
+    dispatcher_.set_error_log(&error_log_);
 }
 
 // The ACME storage tree, owned by server.user when we start as root so the manager can

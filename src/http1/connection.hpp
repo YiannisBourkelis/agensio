@@ -15,6 +15,8 @@
 #pragma once
 
 #include <algorithm>
+#include <cassert>
+#include <cstdio>
 #include <chrono>
 #include <cstring>
 #include <ctime>
@@ -345,9 +347,25 @@ private:
     // client side. on_read() routes the completion by state.
     void arm_read() {
         read_pending_ = true;
+        read_at_ = in_len_;
         auto self = this->shared_from_this();
         socket_.async_read_some(asio::buffer(in_.data() + in_len_, in_.size() - in_len_),
                                 immediate([self](const asio::error_code& ec, std::size_t n) { self->on_read(ec, n); }));
+    }
+
+    // The bytes a read delivered sit where the read was armed (read_at_). The buffer may
+    // have been compacted meanwhile: the abort watch of a slow exchange (E9) is armed at
+    // the end of the request being served, and the response's compact() then moves the
+    // buffer's start below it. Before 2026-09-20 the count was added to the new in_len_
+    // while the bytes stayed at the old offset, so the parser read the previous request's
+    // stale bytes first (a replayed request) and the tail of the new one after: a live
+    // WordPress session logged "GETGET /wp-admin/js/plugin-install.min.js". The bytes are
+    // moved down to where the buffer now ends; the invariant is asserted in debug builds.
+    void settle_read(std::size_t n) noexcept {
+        assert(read_at_ >= in_len_);
+        if (n && read_at_ != in_len_) std::memmove(in_.data() + in_len_, in_.data() + read_at_, n);
+        in_len_ += n;
+        read_at_ = in_len_;
     }
 
     void on_read(const asio::error_code& ec, std::size_t n) {
@@ -355,7 +373,7 @@ private:
         if (tunnel_) {
             if (ec) return tunnel_client_eof();
             last_activity_ = std::chrono::steady_clock::now();
-            in_len_ += n;
+            settle_read(n);
             tunnel_write_peer(in_len_);
             return;
         }
@@ -363,7 +381,7 @@ private:
             close();  // also cancels an exchange in flight: the client is gone (E9)
             return;
         }
-        in_len_ += n;
+        settle_read(n);
         // Bytes that arrive during an exchange or while the response goes out belong to a
         // pipelined next request: kept, parsed once this response is done.
         if (upstream_ || responding_) return;
@@ -405,6 +423,7 @@ private:
                 do_read();
                 return;
             case ParseStatus::bad_request:
+                log_bad_request_line();
                 fail_request(400);
                 return;
             case ParseStatus::version_not_supported:
@@ -632,6 +651,27 @@ private:
     }
 
     // Protocol-level error: answer, drop whatever is buffered, close.
+    // The first line of a request that did not parse, hex-escaped and capped, so a
+    // corrupted line is told apart from a client's odd choice (and a bug like the one
+    // settle_read fixes is diagnosed from the log rather than suspected).
+    void log_bad_request_line() {
+        if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::warn)) {
+            fill_connection_info();
+            log->warn("request line did not parse from " + remote_ + ": " + escape_line(std::string_view(in_.data(), in_len_)));
+        }
+    }
+    static std::string escape_line(std::string_view bytes) {
+        std::string out;
+        std::size_t shown = 0;
+        for (unsigned char c : bytes) {
+            if (c == '\r' || c == '\n') break;
+            if (++shown > 200) { out += "..."; break; }
+            if (c >= 0x20 && c < 0x7f && c != '\\') out.push_back(static_cast<char>(c));
+            else { char h[5]; std::snprintf(h, sizeof h, "\\x%02x", c); out += h; }
+        }
+        return out;
+    }
+
     void fail_request(int status) {
         worker_.state.now = std::time(nullptr);
         request_logged_ = false;
@@ -685,10 +725,12 @@ private:
 
     // Drops the consumed prefix of the receive buffer (head and body bytes already used).
     void compact() noexcept {
+        assert(consumed_ <= in_len_);
         if (consumed_ == 0) return;
         if (consumed_ < in_len_) std::memmove(in_.data(), in_.data() + consumed_, in_len_ - consumed_);
         in_len_ -= consumed_;
         consumed_ = 0;
+        assert(!read_pending_ || read_at_ >= in_len_);  // a pending read lands at or past the end; settle_read moves it
     }
 
     void after_response() {
@@ -746,6 +788,7 @@ private:
     BodySource body_source_;
     bool body_pending_ = false;  // a body exists and has not been fully read
     bool read_pending_ = false;  // one client read in flight (head, abort watch or tunnel)
+    std::size_t read_at_ = 0;    // where that read delivers (in_len_ when it was armed; settle_read reconciles)
     bool responding_ = false;    // the writer is sending the response
     bool body_chunked_ = false;
     bool expect_continue_ = false;

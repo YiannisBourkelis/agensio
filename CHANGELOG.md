@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.0-alpha.14 (2026-09-20)
+
+- **Fixed: a request after a slow exchange could be parsed from stale bytes** (live
+  report: one Firefox asset request logged as `GETGET /wp-admin/js/...` and answered
+  405). The client-abort watch of a slow FastCGI or proxy exchange (E9) arms a read at
+  the end of the request being served; the response then compacts the receive buffer,
+  and when that read completed with the next request its bytes sat past the old offset
+  while the count was added at the new one, so the parser saw the previous request's
+  bytes first (a silent replay of a GET) and the new request's tail after. The read's
+  landing offset is now tracked and its bytes moved to the buffer's end, with the
+  invariant asserted in debug builds. Diagnostics: an unrecognised method token and a
+  request line that does not parse are logged at warn level, hex-escaped. Tests: every
+  split point of a request line on plain and TLS, 240 varied requests on one connection,
+  two requests in one write, the exact trigger, a parser prefix test, the line in the
+  fuzz corpus.
 
 ## 0.1.0-alpha.13 (2026-09-20)
 

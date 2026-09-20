@@ -1,5 +1,7 @@
 #include "handlers/dispatch.hpp"
 
+#include <cstdio>
+
 #include "response.hpp"
 
 #include "path.hpp"
@@ -128,6 +130,16 @@ bool Dispatcher::check_method(Stream& s, const LocationConfig& loc, WorkerState&
     for (const TryStep& step : loc.try_files)
         if (step.kind == TryStep::Kind::fallback) has_fallback = true;
     if (loc.kind == HandlerKind::static_ && application_method && has_fallback) return true;
+    // A method token nobody knows is syntactically valid, so it is a 405; but it is also
+    // what a corrupted request line looks like, so the line is logged, escaped.
+    if (req.method == Method::other && log_ && log_->enabled(LogLevel::warn)) {
+        std::string line;
+        for (unsigned char c : req.method_name) {
+            if (c >= 0x20 && c < 0x7f && c != '\\') line.push_back(static_cast<char>(c));
+            else { char h[5]; std::snprintf(h, sizeof h, "\\x%02x", c); line += h; }
+        }
+        log_->warn("unrecognised method '" + line + "' for " + std::string(req.target) + " from " + std::string(s.conn.remote_address) + " (405)");
+    }
     static_.error(s, 405, req.keep_alive, loc.allow);
     return false;
 }

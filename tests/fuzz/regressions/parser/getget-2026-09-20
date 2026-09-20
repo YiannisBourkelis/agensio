@@ -1,0 +1,3 @@
+GETGET /wp-admin/js/plugin-install.min.js?ver=7.1.1 HTTP/1.1
+Host: ag2.example
+

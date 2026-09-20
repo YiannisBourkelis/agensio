@@ -608,6 +608,80 @@ check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$(
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
 cpost /v1/sites/inst.test/delete '{"confirm":true}' > /dev/null; cpost /v1/sites/wpinst.test/delete '{"confirm":true}' > /dev/null
 
+# ---- read boundaries (2026-09-20, the "GETGET" report): every split of a request line,
+# hundreds of requests on one connection, two requests in one write, and the exact
+# trigger: a request answered after the abort watch of a slow exchange was armed. ----
+boundary=$(python3 - "$ROOT" <<'PYT'
+import os, socket, ssl, sys, time
+root = sys.argv[1]
+INDEX = os.path.getsize(root + "/bench/www/index.html"); CSS = os.path.getsize(root + "/bench/www/style.css")
+ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+def read_response(conn):
+    data = b""
+    while b"\r\n\r\n" not in data:
+        chunk = conn.recv(65536)
+        if not chunk: return None, b""
+        data += chunk
+    head, body = data.split(b"\r\n\r\n", 1)
+    length = int([l for l in head.decode().split("\r\n") if l.lower().startswith("content-length")][0].split(":")[1])
+    while len(body) < length: body += conn.recv(65536)
+    return head.split(b"\r\n")[0].decode(), body
+def plain(): return socket.create_connection(("127.0.0.1", 8080))
+def tls(): return ctx.wrap_socket(socket.create_connection(("127.0.0.1", 8443)), server_hostname="localhost")
+out = []
+req = b"GET /index.html HTTP/1.1\r\nHost: localhost\r\n\r\n"
+# A: every split point of the request, plain and TLS, one connection each.
+for name, connect in (("plain", plain), ("tls", tls)):
+    bad = []
+    for i in range(1, len(req)):
+        c = connect(); c.settimeout(5)
+        c.sendall(req[:i]); time.sleep(0.02); c.sendall(req[i:])
+        status, body = read_response(c)
+        c.close()
+        if status != "HTTP/1.1 200 OK" or len(body) != INDEX: bad.append(i)
+    out.append("%s-splits=%s" % (name, "ok" if not bad else "bad@%s" % bad[:5]))
+# B: 240 requests down one keep-alive connection, varied method, path length and headers.
+c = plain(); c.settimeout(5); wrong = 0
+for i in range(240):
+    path = "/index.html" if i % 3 else "/style.css"
+    extra = "".join("X-H%d: %s\r\n" % (k, "v" * (i % 17)) for k in range(i % 7))
+    q = "?" + "a" * (i % 53)
+    c.sendall(("HEAD" if i % 5 == 4 else "GET").encode() + b" " + (path + q).encode() + b" HTTP/1.1\r\nHost: localhost\r\n" + extra.encode() + b"\r\n")
+    data = b""
+    while b"\r\n\r\n" not in data: data += c.recv(65536)
+    head, body = data.split(b"\r\n\r\n", 1)
+    length = int([l for l in head.decode().split("\r\n") if l.lower().startswith("content-length")][0].split(":")[1])
+    if i % 5 != 4:
+        while len(body) < length: body += c.recv(65536)
+    want = INDEX if path == "/index.html" else CSS
+    if not head.startswith(b"HTTP/1.1 200") or length != want: wrong += 1
+c.close(); out.append("keepalive-wrong=%d" % wrong)
+# C: two requests in one write, answered in order.
+c = plain(); c.settimeout(5)
+c.sendall(b"GET /index.html HTTP/1.1\r\nHost: localhost\r\n\r\nGET /style.css HTTP/1.1\r\nHost: localhost\r\n\r\n")
+s1, b1 = read_response(c); s2, b2 = read_response(c); c.close()
+out.append("pipelined=%s" % ("ok" if s1 == s2 == "HTTP/1.1 200 OK" and len(b1) == INDEX and len(b2) == CSS else "bad %s %d %s %d" % (s1, len(b1), s2, len(b2))))
+# D: the trigger. A proxied request slow enough for the abort watch (one pool tick), then,
+# only after its answer, a request of a different length on the same connection.
+def proxied(path, extra=b""):
+    c = socket.create_connection(("127.0.0.1", 8091)); c.settimeout(10)
+    c.sendall(b"GET " + path + b" HTTP/1.1\r\nHost: proxy.test\r\n" + extra + b"\r\n")
+    r = read_response(c); c.close(); return r
+JSON = proxied(b"/api/json"); BIG = proxied(b"/api/big")
+c = socket.create_connection(("127.0.0.1", 8091)); c.settimeout(10)
+c.sendall(b"GET /api/slow?ms=600 HTTP/1.1\r\nHost: proxy.test\r\n\r\n")
+s1, b1 = read_response(c)
+c.sendall(b"GET /api/json HTTP/1.1\r\nHost: proxy.test\r\nX-Pad: abc\r\n\r\n")  # a different length from the slow request
+s2, b2 = read_response(c)
+c.sendall(b"GET /api/big HTTP/1.1\r\nHost: proxy.test\r\n\r\n")
+s3, b3 = read_response(c); c.close()
+out.append("after-slow=%s" % ("ok" if s1 == "HTTP/1.1 200 OK" and (s2, b2) == JSON and (s3, b3) == BIG else "bad %s %s %d %s %d" % (s1, s2, len(b2), s3, len(b3))))
+print(" ".join(out))
+PYT
+)
+check "boundaries: every split of the request line on plain and TLS, 240 keep-alive requests, two in one write, a request after a slow exchange" "plain-splits=ok tls-splits=ok keepalive-wrong=0 pipelined=ok after-slow=ok" "$boundary"
+check "boundaries: an unrecognised method is 405 and the line is logged, escaped; a malformed line is 400 and logged" "405 400 yes yes" "$(printf 'GETGET /x HTTP/1.1\r\nHost: localhost\r\n\r\n' | ncq 127.0.0.1 8080 | head -1 | awk '{print $2}') $(printf 'GET\x01 /x HTTP/1.1\r\nHost: localhost\r\n\r\n' | ncq 127.0.0.1 8080 | head -1 | awk '{print $2}') $(grep -q "unrecognised method 'GETGET' for /x from 127.0.0.1 (405)" bench/tmp/error.log && echo yes) $(grep -q 'request line did not parse from 127.0.0.1: GET\\x01 /x HTTP/1.1' bench/tmp/error.log && echo yes)"
+
 # Static rules of the control plane (F7): nothing there spawns a process or opens a port.
 check "control: no process spawning anywhere under src/control" "0" "$(grep -E 'system\(|popen\(|execv|execl|fork\(|posix_spawn' src/control/*.cpp src/control/*.hpp | wc -l | tr -d ' ')"
 check "control: no TCP listener in the control plane" "0" "$(grep -E 'ip::tcp::acceptor' src/control/*.cpp src/control/*.hpp | wc -l | tr -d ' ')"

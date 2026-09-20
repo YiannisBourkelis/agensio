@@ -12,6 +12,7 @@
 #include "handlers/fastcgi.hpp"
 #include "handlers/proxy.hpp"
 #include "handlers/static.hpp"
+#include "services/log.hpp"
 #include "control/handler.hpp"
 #include "services/acme.hpp"
 
@@ -26,6 +27,8 @@ public:
     ControlHandler& control() noexcept { return control_; }
     // HTTP-01: /.well-known/acme-challenge/<token> is answered from here before routing.
     void set_acme(AcmeChallenges* challenges) noexcept { acme_ = challenges; }
+    void set_error_log(ErrorLog* log) noexcept { log_ = log; }
+    ErrorLog* error_log() const noexcept { return log_; }
 
     StaticHandler& static_handler() noexcept { return static_; }
     FcgiHandler& fcgi() noexcept { return fcgi_; }
@@ -55,6 +58,7 @@ private:
     CgiHandler& cgi_;
     ControlHandler& control_;
     AcmeChallenges* acme_ = nullptr;
+    ErrorLog* log_ = nullptr;
 };
 
 }  // namespace agensio
