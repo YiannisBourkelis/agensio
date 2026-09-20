@@ -53,8 +53,13 @@ fail() { say "error: $*"; exit 1; }
 # 1. The changelog must describe the version. When it does not, a draft is inserted from
 #    the commit subjects since the previous tag (merges and release commits left out),
 #    for you to edit; the script stops so the notes are reviewed before anything is tagged.
-if ! grep -q "^## $version " CHANGELOG.md; then
-    say "CHANGELOG.md has no '## $version (date)' section."
+# A section written by hand counts whatever its heading says after the version:
+# "## 0.1.0-alpha.10", "## 0.1.0-alpha.10 (unreleased)" or "## 0.1.0-alpha.10 (2026-09-20)";
+# the date is stamped in below.
+if grep -qE "^## $version( \(.*\))?\s*$" CHANGELOG.md; then
+    say "CHANGELOG.md has a $version section: using it as written (its date becomes $today)"
+else
+    say "CHANGELOG.md has no '## $version' section."
     last=$(git describe --tags --abbrev=0 2>/dev/null || true)
     range=${last:+$last..HEAD}
     draft=$(git log --no-merges --pretty='- %s' $range | grep -v '^- Release v' || true)
@@ -102,7 +107,7 @@ sed -i "s/^_tag=.*/_tag=$version/; s/^pkgver=.*/pkgver=${base}${pre//./}/; s/^pk
 sed -i "s/^%global upstream_version .*/%global upstream_version $version/; s/^Version:        .*/Version:        $base/; s/^Release:        .*/Release:        ${rpm_release}%{?dist}/" packaging/rpm/agensio.spec
 entry="* $(LC_ALL=C date '+%a %b %d %Y') Yiannis Bourkelis - $base-$rpm_release\n- Release $version, see CHANGELOG.md."
 sed -i "s/^%changelog$/%changelog\n$entry\n/" packaging/rpm/agensio.spec
-sed -i "s/^## $version (.*)$/## $version ($today)/" CHANGELOG.md
+sed -i -E "s/^## $version( \(.*\))?\s*$/## $version ($today)/" CHANGELOG.md
 
 # 5. Build and test with the new version string.
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release > /dev/null

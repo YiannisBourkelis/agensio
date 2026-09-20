@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.10
+## 0.1.0-alpha.10 (2026-09-20)
 
 - **`site-install`** (F9): puts an application's files into a site's empty directory as
   the site's own account, from the preset's official archive (WordPress, Drupal;
