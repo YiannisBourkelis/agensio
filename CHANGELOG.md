@@ -4,8 +4,10 @@
 
 - **Fixed: the first POST after a php-fpm reload on a kept connection answered 502**
   (`closed_early`; a GET was retried on a fresh connection, a POST or an upload was not).
-  A kept idle connection is now checked with one non-blocking peek before a request is
-  written to it, and a dead one is dropped for a fresh connection. Found by the new
+  A kept connection idle for longer than a pool tick (250 ms) is now checked with one
+  non-blocking peek before a request is written to it, and a dead one is dropped for a
+  fresh connection; a connection reused at once is not peeked, so the benchmark path pays
+  nothing. Found by the new
   upload test in the root suite: the first upload after the pool was rewritten and
   php-fpm restarted failed exactly as the live report's upload did minutes after a
   settings change had reloaded php-fpm.

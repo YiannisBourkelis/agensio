@@ -665,8 +665,8 @@ on a location.
 | `tls` | verify on, system store | `{ verify, server_name, ca }` for `https://` origins |
 
 The pool is per worker, so an origin sees at most workers x `max_connections` connections
-and workers x `max_idle` idle ones. Before a kept idle connection is reused it is peeked
-once without blocking: a peer that closed it (php-fpm reloaded, an origin's idle timeout)
+and workers x `max_idle` idle ones. Before a kept connection that has been idle for longer
+than a pool tick (250 ms) is reused it is peeked once without blocking: a peer that closed it (php-fpm reloaded, an origin's idle timeout)
 is dropped for a fresh connection, so a POST or an upload never meets a dead one. A GET or HEAD whose kept connection turns out dead is
 retried once on a fresh one. An origin that is down gives 502, a timeout 504, a full
 queue 503; each is logged with the reason and appears in the JSON access log as

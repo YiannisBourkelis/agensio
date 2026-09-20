@@ -195,7 +195,9 @@ void UpstreamPool::acquire(const std::string& key, const UpstreamOptions& opts, 
 // closed peer reads as 0, an alive one as EAGAIN, and pending bytes on an idle connection
 // are a protocol violation either way. Without this a non-idempotent request (a POST, an
 // upload) on such a connection got 502 closed_early, the retry being for GET/HEAD only;
-// live on 2026-09-20 right after a settings change had reloaded php-fpm.
+// live on 2026-09-20 right after a settings change had reloaded php-fpm. Only a
+// connection idle for longer than a pool tick is peeked: one reused at once cannot have
+// met a reload, and the syscall would cost 5 % on the proxy benchmark (A/B 2026-09-20).
 static bool idle_alive(UpstreamConnection& c) noexcept {
 #ifdef _WIN32
     (void)c;
@@ -210,10 +212,11 @@ static bool idle_alive(UpstreamConnection& c) noexcept {
 void UpstreamPool::grant(Upstream& u, Waiter w) {
     ++u.active;
     std::unique_ptr<UpstreamConnection> c;
+    const auto now = u.idle.empty() ? std::chrono::steady_clock::time_point{} : std::chrono::steady_clock::now();
     while (!u.idle.empty()) {
         c = std::move(u.idle.back());
         u.idle.pop_back();
-        if (idle_alive(*c)) {
+        if (now - c->released_at <= kTick || idle_alive(*c)) {
             c->reused = true;
             break;
         }
@@ -229,6 +232,7 @@ void UpstreamPool::release(const std::string& key, const UpstreamOptions& opts, 
     if (conn && conn->sock().is_open() && u.idle.size() < opts.max_idle) {
         conn->reused = false;
         conn->in_len = 0;
+        conn->released_at = std::chrono::steady_clock::now();
         u.idle.push_back(std::move(conn));
     }
     // Next in line: a priority waiter first, else the oldest one the limit allows.

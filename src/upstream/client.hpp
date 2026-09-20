@@ -74,6 +74,7 @@ struct UpstreamConnection {
     std::vector<char> in;  // bytes read from the upstream, not yet consumed
     std::size_t in_len = 0;
     bool reused = false;   // came from the idle list (retry candidate on reset)
+    std::chrono::steady_clock::time_point released_at{};  // when it went idle; a long-idle one is peeked before reuse
 };
 
 class UpstreamRequest;

@@ -1,22 +1,22 @@
-2026/09/20 14:18:05 [warn] cannot write pid file /run/agensio.pid (set server.pid_file to a writable path for `agensio reload`)
+2026/09/20 14:22:32 [warn] cannot write pid file /run/agensio.pid (set server.pid_file to a writable path for `agensio reload`)
 agensio 0.1.0-alpha.13 starting with 1 worker(s), SO_REUSEPORT per worker
   listening on http://127.0.0.1:8080  sites: localhost
   listening on https://127.0.0.1:8443  sites: localhost
   listening on http://127.0.0.1:8093  sites: proxy-gate
 agensio stopped
-2026/09/20 14:18:51 [warn] cannot write pid file /run/agensio.pid (set server.pid_file to a writable path for `agensio reload`)
+2026/09/20 14:23:18 [warn] cannot write pid file /run/agensio.pid (set server.pid_file to a writable path for `agensio reload`)
 agensio 0.1.0-alpha.13 starting with 1 worker(s), SO_REUSEPORT per worker
   listening on http://127.0.0.1:8080  sites: localhost
   listening on https://127.0.0.1:8443  sites: localhost
   listening on http://127.0.0.1:8093  sites: proxy-gate
 agensio stopped
-2026/09/20 14:19:37 [warn] cannot write pid file /run/agensio.pid (set server.pid_file to a writable path for `agensio reload`)
+2026/09/20 14:24:04 [warn] cannot write pid file /run/agensio.pid (set server.pid_file to a writable path for `agensio reload`)
 agensio 0.1.0-alpha.13 starting with 1 worker(s), SO_REUSEPORT per worker
   listening on http://127.0.0.1:8080  sites: localhost
   listening on https://127.0.0.1:8443  sites: localhost
   listening on http://127.0.0.1:8093  sites: proxy-gate
 agensio stopped
-2026/09/20 14:20:24 [warn] cannot write pid file /run/agensio.pid (set server.pid_file to a writable path for `agensio reload`)
+2026/09/20 14:24:50 [warn] cannot write pid file /run/agensio.pid (set server.pid_file to a writable path for `agensio reload`)
 agensio 0.1.0-alpha.13 starting with 1 worker(s), SO_REUSEPORT per worker
   listening on http://127.0.0.1:8080  sites: localhost
   listening on https://127.0.0.1:8443  sites: localhost
