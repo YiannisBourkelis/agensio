@@ -3,6 +3,17 @@
 
 ## 0.1.0-alpha.13 (2026-09-20)
 
+- **A TLS connection serves only the names its certificate covers** (live report: with
+  three sites and three certificates on one listener, a connection made with site B's
+  certificate served site A's pages for `Host: A`). Host matching on a TLS connection is
+  now bounded by the certificate presented at the handshake (CN, SAN DNS and IP entries,
+  RFC 6125 wildcards): a Host outside it answers `421` with `Cache-Control: no-store`
+  exactly like an unknown Host, a SAN or wildcard certificate covering several sites
+  keeps them all reachable on one connection (the HTTP/2 coalescing case), a catch-all
+  on TLS is bounded the same way, and a renewal or reload never changes what an open
+  connection may serve. Plain listeners, unknown Hosts, missing Host and HTTP/1.0
+  without Host are unchanged. Twelve integration checks, including the renewal-during-
+  a-connection case; the HTTP/2 coalescing retry stays a written, skipped check.
 - **Credential files are `0600` on every write path, and a writer validates before it
   answers** (live report: five ok answers produced a server `agensio -t` refused to start,
   because a `2750` site directory hands the server's group to every file, including the

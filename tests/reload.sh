@@ -121,8 +121,12 @@ check "server refuses a broken file on SIGHUP, keeps serving" "version two yes" 
 # bind: both sides set SO_REUSEPORT).
 printf '[[site]]\nlisten = ["127.0.0.1:8097"]\nroot = "%s"\n[[site]]\nlisten = ["127.0.0.1:80"]\nroot = "%s"\n' "$T/v2" "$T/v2" > "$T/agensio.toml"
 kill -HUP $SRV; sleep 0.3
-if [ "$(id -u)" != 0 ]; then
+# Only where port 80 is privileged: a container (Docker sets ip_unprivileged_port_start = 0)
+# lets anyone bind it, and the reload then succeeds, which is not what is under test.
+if [ "$(id -u)" != 0 ] && [ "$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start 2>/dev/null || echo 1024)" -gt 80 ]; then
 check "a listener that cannot bind refuses the reload, nothing changed" "version two yes" "$(curl -sS $B/) $(grep -q 'reload refused: cannot bind 127.0.0.1:80' "$T/logs/error.log" && echo yes)"
+else
+echo "skip a listener that cannot bind refuses the reload (port 80 is not privileged here)"
 fi
 
 # Load across reloads: wrk hammers 8097 while the configuration flips between v1 and v2

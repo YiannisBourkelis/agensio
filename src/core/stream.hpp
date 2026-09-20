@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <string_view>
 
+#include "core/host.hpp"
 #include "core/request.hpp"
 #include "core/response.hpp"
 
@@ -22,6 +23,10 @@ struct ConnectionInfo {
     std::string_view client_address;
     bool forwarded_https = false;
     bool trusted_peer = false;  // the peer is one of server.trusted_proxies
+    // TLS: the names of the certificate this connection presented at its handshake (null on
+    // plain listeners). A request whose Host it does not cover is 421: the connection is
+    // not authoritative for that name, whatever sites the listener holds.
+    const CertNames* cert = nullptr;
     // Control socket only: the peer's credentials and role (control/roles.hpp), set at accept.
     long peer_uid = -1;
     long peer_gid = -1;

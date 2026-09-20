@@ -89,6 +89,11 @@ public:
                     self->close();
                     return;
                 }
+                // What this connection is authoritative for: the certificate the handshake
+                // ended with (the SNI callback chose it from this listener's contexts).
+#ifdef AGENSIO_HAS_TLS
+                self->cert_names_ = self->listener_->names_for(SSL_get_SSL_CTX(self->socket_.native_handle()));
+#endif
                 self->last_activity_ = std::chrono::steady_clock::now();
                 self->do_read();
             });
@@ -608,6 +613,7 @@ private:
             stream_.conn.local_address = listener_->address_text;
             stream_.conn.local_port = listener_->port;
             stream_.conn.tls = IsTlsStream<Socket>::value;
+            stream_.conn.cert = cert_names_.get();
         }
         if (remote_.empty()) {
             if constexpr (IsLocalSocket<Socket>::value) {
@@ -707,6 +713,7 @@ private:
     Worker& worker_;
     std::shared_ptr<const Generation> gen_;  // the configuration this connection serves from (kept alive by it)
     const Listener* listener_;               // in gen_
+    std::shared_ptr<const CertNames> cert_names_;  // TLS: the certificate presented at the handshake, for the connection's life
     // The control socket carries uploads ([control] upload_max); sites keep server.max_body_size.
     std::size_t body_limit() const noexcept {
         if constexpr (IsLocalSocket<Socket>::value) return live_->control.upload_max;

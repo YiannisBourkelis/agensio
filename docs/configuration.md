@@ -70,6 +70,19 @@ other site's certificate is ever shown. A client that sends no name gets the cat
 certificate, or is refused when the listener has none. An HTTP/1.1 request without a
 Host header stays a 400.
 
+**A TLS connection is authoritative only for the names its certificate covers** (RFC 9110
+section 7.4, RFC 6125 matching: the subject CN, the DNS and IP entries of the
+subjectAltName, a wildcard for exactly one leftmost label). Whatever sites the listener
+holds, a request whose Host the presented certificate does not name answers `421`, the
+same constant answer as an unknown Host: a connection opened with `b.example`'s
+certificate never serves `a.example`, and a catch-all site on a TLS listener is bounded
+the same way. A certificate covering several names (a SAN or wildcard certificate) makes
+every site it names reachable on one connection, which is what an HTTP/2 client's
+connection coalescing relies on. The decision uses the certificate presented at the
+handshake, so a renewal or reload never changes what an established connection may
+serve. Plain listeners have no certificate and keep the listener rule; a request without
+a Host (HTTP/1.0) claims no name and reaches the catch-all as before.
+
 `agensio ctl status` names each listener's catch-all or `null`; `sites` marks catch-all
 sites; `site-create` warns when it adds the first site to a listener without one.
 

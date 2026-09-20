@@ -14,6 +14,7 @@
 
 #include <chrono>
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
@@ -30,6 +31,7 @@
 
 #ifdef AGENSIO_HAS_TLS
 #include <openssl/ssl.h>
+#include <openssl/x509v3.h>
 #endif
 
 namespace agensio {
@@ -202,6 +204,36 @@ void Server::arm_flush(Worker& w) {
 }
 
 #ifdef AGENSIO_HAS_TLS
+// The names a context's certificate covers: the subject CN and every DNS and IP entry of
+// the subjectAltName, parsed once at load; what a connection is authoritative for.
+static CertNames certificate_names(SSL_CTX* ctx) {
+    CertNames names;
+    X509* x = SSL_CTX_get0_certificate(ctx);
+    if (!x) return names;
+    char cn[256] = {};
+    if (X509_NAME_get_text_by_NID(X509_get_subject_name(x), NID_commonName, cn, sizeof cn) > 0) names.add(cn);
+    if (auto* sans = static_cast<GENERAL_NAMES*>(X509_get_ext_d2i(x, NID_subject_alt_name, nullptr, nullptr))) {
+        for (int i = 0; i < sk_GENERAL_NAME_num(sans); ++i) {
+            const GENERAL_NAME* g = sk_GENERAL_NAME_value(sans, i);
+            if (g->type == GEN_DNS) {
+                names.add(std::string_view(reinterpret_cast<const char*>(ASN1_STRING_get0_data(g->d.dNSName)),
+                                           static_cast<std::size_t>(ASN1_STRING_length(g->d.dNSName))));
+            } else if (g->type == GEN_IPADD) {
+                const unsigned char* b = ASN1_STRING_get0_data(g->d.iPAddress);
+                const int len = ASN1_STRING_length(g->d.iPAddress);
+                if (len == 4) names.add(asio::ip::address_v4(std::array<unsigned char, 4>{b[0], b[1], b[2], b[3]}).to_string());
+                else if (len == 16) {
+                    std::array<unsigned char, 16> v6{};
+                    std::copy(b, b + 16, v6.begin());
+                    names.add(asio::ip::address_v6(v6).to_string());
+                }
+            }
+        }
+        GENERAL_NAMES_free(sans);
+    }
+    return names;
+}
+
 // SNI: the certificate of the site that lists the requested name, or the listener's
 // catch-all's when the client sent no name; a name no site lists ends the handshake with
 // unrecognized_name, so no other site's certificate is ever shown (which would disclose
@@ -262,6 +294,7 @@ void Server::build_listeners(Generation& gen) {
                 // SSL_MODE_RELEASE_BUFFERS deliberately not set: it costs a malloc/free per record.
                 SSL_CTX_set_options(ctx->native_handle(), SSL_OP_NO_COMPRESSION);
                 if (!l->ssl) l->ssl = ctx;
+                l->cert_names.emplace(ctx->native_handle(), std::make_shared<const CertNames>(certificate_names(ctx->native_handle())));
                 l->tls_contexts.emplace(site.tls->cert.string(), std::move(ctx));
             }
 #endif

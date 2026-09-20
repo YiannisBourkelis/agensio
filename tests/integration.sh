@@ -45,6 +45,12 @@ sed -i '1i include = ["sites.d/*.toml"]' bench/tmp/agensio-test.toml
 # try_files status. Inserted after the site's `default = true` line.
 mkdir -p bench/tmp/certs-b
 [ -f bench/tmp/certs-b/cert.pem ] || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout bench/tmp/certs-b/key.pem -out bench/tmp/certs-b/cert.pem -days 30 -subj "/CN=b.test" >/dev/null 2>&1
+# A SAN certificate covering a.test and b.test (connection coalescing), a wildcard one, and
+# a copy of b's to swap back after the renewal-during-a-connection check.
+mkdir -p bench/tmp/certs-ab bench/tmp/certs-wild bench/tmp/certs-live
+[ -f bench/tmp/certs-ab/cert.pem ] || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout bench/tmp/certs-ab/key.pem -out bench/tmp/certs-ab/cert.pem -days 30 -subj "/CN=a.test" -addext "subjectAltName=DNS:a.test,DNS:b.test" >/dev/null 2>&1
+[ -f bench/tmp/certs-wild/cert.pem ] || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout bench/tmp/certs-wild/key.pem -out bench/tmp/certs-wild/cert.pem -days 30 -subj "/CN=*.wild.test" -addext "subjectAltName=DNS:*.wild.test" >/dev/null 2>&1
+cp bench/tmp/certs-b/cert.pem bench/tmp/certs-b/key.pem bench/tmp/certs-live/
 python3 - bench/tmp/agensio-test.toml "$ROOT/bench/www" "$ROOT" <<'PY'
 import sys
 path, www, root = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -154,13 +160,25 @@ root = "{root}/bench/www"
 server_name = ["a.test"]
 listen = ["127.0.0.1:8446"]
 root = "{root}/bench/www"
-tls = {{ cert = "{root}/bench/certs/cert.pem", key = "{root}/bench/certs/key.pem" }}
+tls = {{ cert = "{root}/bench/tmp/certs-ab/cert.pem", key = "{root}/bench/tmp/certs-ab/key.pem" }}
 
 [[site]]
 server_name = ["b.test"]
 listen = ["127.0.0.1:8446"]
 root = "{root}/bench/www"
-tls = {{ cert = "{root}/bench/tmp/certs-b/cert.pem", key = "{root}/bench/tmp/certs-b/key.pem" }}
+tls = {{ cert = "{root}/bench/tmp/certs-live/cert.pem", key = "{root}/bench/tmp/certs-live/key.pem" }}
+
+[[site]]
+server_name = ["x.wild.test"]
+listen = ["127.0.0.1:8449"]
+root = "{root}/bench/www"
+tls = {{ cert = "{root}/bench/tmp/certs-wild/cert.pem", key = "{root}/bench/tmp/certs-wild/key.pem" }}
+
+[[site]]
+server_name = ["y.wild.test"]
+listen = ["127.0.0.1:8449"]
+root = "{root}/bench/www"
+tls = {{ cert = "{root}/bench/tmp/certs-wild/cert.pem", key = "{root}/bench/tmp/certs-wild/key.pem" }}
 
 [[site]]
 server_name = ["*"]
@@ -316,14 +334,53 @@ check "strict: HTTP/1.1 without Host stays 400" "400" "$(printf 'GET / HTTP/1.1\
 check "strict: a listener with a catch-all serves unknown Hosts as before" "200" "$(code -H 'Host: evil.example.com' http://127.0.0.1:8080/)"
 check "strict: OPTIONS * with an unknown Host is 421" "421" "$(printf 'OPTIONS * HTTP/1.1\r\nHost: nobody.invalid\r\n\r\n' | ncq 127.0.0.1 8099 | head -1 | awk '{print $2}')"
 sni() { echo | openssl s_client -connect 127.0.0.1:8446 "$@" 2>/dev/null | openssl x509 -noout -subject 2>/dev/null | sed 's/.*CN *= *//'; }
-check "sni: each site gets its own certificate" "localhost b.test" "$(sni -servername a.test) $(sni -servername b.test)"
+check "sni: each site gets its own certificate" "a.test b.test" "$(sni -servername a.test) $(sni -servername b.test)"
 check "sni: a name no site lists is refused, no other site's certificate shown" "" "$(sni -servername c.test)"
 check "sni: no SNI on a listener without catch-all is refused" "" "$(sni -noservername)"
 check "sni: no SNI on a listener with a catch-all gets its certificate" "b.test" "$(echo | openssl s_client -connect 127.0.0.1:8448 -noservername 2>/dev/null | openssl x509 -noout -subject 2>/dev/null | sed 's/.*CN *= *//')"
 check "sni: the matched site serves over TLS" "200" "$(curl -sSk -o /dev/null -w '%{http_code}' --resolve b.test:8446:127.0.0.1 https://b.test:8446/)"
-check "sni: a Host that differs from the SNI name but lists a site on the listener is served" "200" "$(curl -sSk -o /dev/null -w '%{http_code}' --resolve b.test:8446:127.0.0.1 -H 'Host: a.test' https://b.test:8446/)"
-check "sni: a Host no site lists over a valid TLS connection is 421" "421" "$(curl -sSk -o /dev/null -w '%{http_code}' --resolve b.test:8446:127.0.0.1 -H 'Host: c.test' https://b.test:8446/)"
-echo "skip strict: HTTP/2 connection coalescing retry after 421 (HTTP/2 not implemented yet; a SAN certificate covering a.test and b.test with only a.test configured, curl --http2 with two --resolve entries must get 421 and succeed on a new connection)"
+# Authority (2026-09-20): on TLS a connection answers only names the certificate it presented
+# covers, whatever sites the listener holds (RFC 9110 7.4, RFC 6125).
+hostcode() { curl -sSk -o /dev/null -w '%{http_code}' --resolve "$1:$3:127.0.0.1" -H "Host: $2" "https://$1:$3/"; }
+check "authority: SNI b, Host a: b's certificate does not cover a.test, so 421 although the listener holds a.test" "421 no-store" "$(curl -sSik --resolve b.test:8446:127.0.0.1 -H 'Host: a.test' https://b.test:8446/ | tr -d '\r' | awk 'NR==1{c=$2} tolower($1)=="cache-control:"{h=$2} END{print c, h}')"
+check "authority: the 421 body is the constant one, nothing about either site" "yes" "$(a=$(curl -sSk --resolve b.test:8446:127.0.0.1 -H 'Host: a.test' https://b.test:8446/); b=$(curl -sS -H 'Host: nobody.test' http://127.0.0.1:8099/); [ "$a" = "$b" ] && ! echo "$a" | grep -qi 'a.test\|b.test' && echo yes)"
+check "authority: SNI a, Host b: a's SAN certificate covers both, so served (the coalescing case)" "200" "$(hostcode a.test b.test 8446)"
+check "authority: a wildcard certificate covers the sibling site" "200 200" "$(hostcode x.wild.test y.wild.test 8449) $(hostcode y.wild.test x.wild.test 8449)"
+check "authority: the bare domain is not covered by the wildcard (no site either)" "421" "$(hostcode x.wild.test wild.test 8449)"
+check "authority: a Host no site lists over a valid TLS connection is still 421" "421" "$(hostcode b.test c.test 8446)"
+check "authority: case, a trailing dot and a port in Host match as before" "200 200 200" "$(hostcode b.test B.TEST 8446) $(hostcode b.test b.test. 8446) $(hostcode b.test b.test:8446 8446)"
+check "authority: no SNI, the catch-all's certificate is presented: a Host it covers is served, another is 421" "200 421" "$(curl -sSk -o /dev/null -w '%{http_code}' -H 'Host: b.test' https://127.0.0.1:8448/) $(curl -sSk -o /dev/null -w '%{http_code}' -H 'Host: other.test' https://127.0.0.1:8448/)"
+check "authority: HTTP/1.0 without Host over TLS still reaches the catch-all (no name claimed); HTTP/1.1 without Host stays 400" "200 400" "$(printf 'GET / HTTP/1.0\r\n\r\n' | openssl s_client -quiet -connect 127.0.0.1:8448 -noservername 2>/dev/null | head -1 | awk '{print $2}') $(printf 'GET / HTTP/1.1\r\n\r\n' | openssl s_client -quiet -connect 127.0.0.1:8448 -noservername 2>/dev/null | head -1 | awk '{print $2}')"
+check "authority: plain HTTP is unchanged: any site on the listener, 421 for none" "200 421" "$(code -H 'Host: strict.test' $S/) $(code -H 'Host: a.test' $S/)"
+check "authority: a certificate renewed during an open connection: the connection keeps the one it presented, a new connection gets the new one" "200 421 421 200" "$(python3 - "$ROOT" "$BIN" <<'PYT'
+import socket, ssl, subprocess, shutil, sys
+root, binary = sys.argv[1], sys.argv[2]
+ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+def get(conn, host):
+    conn.sendall(("GET / HTTP/1.1\r\nHost: %s\r\n\r\n" % host).encode())
+    data = b""
+    while b"\r\n\r\n" not in data: data += conn.recv(65536)
+    head, body = data.split(b"\r\n\r\n", 1)
+    length = int([l for l in head.decode().split("\r\n") if l.lower().startswith("content-length")][0].split(":")[1])
+    while len(body) < length: body += conn.recv(65536)
+    return head.split(b" ")[1].decode()
+def connect():
+    return ctx.wrap_socket(socket.create_connection(("127.0.0.1", 8446)), server_hostname="b.test")
+kept = connect()
+out = [get(kept, "b.test"), get(kept, "a.test")]
+# b.test's certificate is renewed as one that also covers a.test; the running server reloads.
+for f in ("cert.pem", "key.pem"): shutil.copy(root + "/bench/tmp/certs-ab/" + f, root + "/bench/tmp/certs-live/" + f)
+subprocess.run([binary, "ctl", "reload", "--yes", "--reason", "renewal", "--socket", root + "/bench/tmp/control.sock"], capture_output=True)
+out.append(get(kept, "a.test"))          # the kept connection presented the old certificate: still 421
+fresh = connect()
+out.append(get(fresh, "a.test"))         # a new handshake presents the renewed one: served
+kept.close(); fresh.close()
+for f in ("cert.pem", "key.pem"): shutil.copy(root + "/bench/tmp/certs-b/" + f, root + "/bench/tmp/certs-live/" + f)
+subprocess.run([binary, "ctl", "reload", "--yes", "--reason", "renewal-back", "--socket", root + "/bench/tmp/control.sock"], capture_output=True)
+print(" ".join(out))
+PYT
+)"
+echo "skip authority: HTTP/2 connection coalescing retry after 421 (HTTP/2 not implemented yet: a client that reuses the 8446 a.test connection for b.test, which a.test's SAN certificate covers, is served; one that reuses a connection whose certificate does not cover the origin gets 421 and must succeed on a new connection)"
 check "control: status names each listener's catch-all or none" "8099=none 8080=localhost 8448=*" "$(curl -sS --unix-socket bench/tmp/control.sock http://control/v1/status | python3 -c 'import json,sys; d={l["address"]:l["catch_all"] for l in json.load(sys.stdin)["listeners"]}; print("8099=%s 8080=%s 8448=%s" % (d["127.0.0.1:8099"] or "none", d["127.0.0.1:8080"], d["127.0.0.1:8448"]))')"
 
 # ---- locations and try_files (A4) ----

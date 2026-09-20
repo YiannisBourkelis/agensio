@@ -745,6 +745,14 @@ Rules:
       `[control] install`, `install_private`, `install_ca`, `upload_max`. zlib added as a
       dependency. `tests/install.sh` (root devbox), unit, fuzz and integration checks;
       security page rows 19-22.
+- [x] H2h (2026-09-20, live report) TLS authority: `core/host.hpp` (`normalize_host`,
+      `CertNames::covers` per RFC 6125), the names of every certificate parsed once at
+      load into `Listener::cert_names`, the connection keeps the entry of the context its
+      handshake ended with (`cert_names_`, shared, so reloads do not move it),
+      `ConnectionInfo::cert`, and the dispatcher's Host match adds one predicate on TLS:
+      a Host the presented certificate does not cover is 421. Plain listeners unchanged.
+      Integration: SNI/Host cross cases, SAN and wildcard coalescing, no-SNI catch-all
+      bounded, renewal during an open connection; the HTTP/2 retry check stays skipped.
 - [x] F9b (2026-09-20) `site-copy`: `install::copy_file`, helper op `file_copy` through
       the shared `run_as_account` child; one regular file to another path of the same
       site, the walk of F9, temporary name plus `linkat`/`renameat`, `overwrite` reported,

@@ -25,6 +25,7 @@
 #include "control/handler.hpp"
 #include "control/roles.hpp"
 #include "services/acme.hpp"
+#include "core/host.hpp"
 #include "services/provision.hpp"
 #include "services/log.hpp"
 #include "upstream/fcgi_client.hpp"
@@ -56,6 +57,14 @@ struct Listener {
 #ifdef AGENSIO_HAS_TLS
     std::shared_ptr<asio::ssl::context> ssl;  // the handshake starts here; SNI switches to the site's context
     std::map<std::string, std::shared_ptr<asio::ssl::context>> tls_contexts;  // by certificate path
+    // The names each certificate covers, by the context that presents it: a connection takes
+    // the entry of the context its handshake ended with and keeps it (shared) for its life,
+    // so a renewal or reload never changes what an established connection is authoritative for.
+    std::map<const SSL_CTX*, std::shared_ptr<const CertNames>> cert_names;
+    std::shared_ptr<const CertNames> names_for(const SSL_CTX* ctx) const {
+        const auto it = cert_names.find(ctx);
+        return it == cert_names.end() ? nullptr : it->second;
+    }
 #endif
     std::vector<std::string> site_names;  // for the startup log
 };

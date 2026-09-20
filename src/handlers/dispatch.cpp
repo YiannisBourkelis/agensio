@@ -38,7 +38,8 @@ void Dispatcher::redirect_https(Stream& s, const SiteConfig& site) {
     r.body = MemoryBody{page.body};
 }
 
-// 421 Misdirected Request (RFC 9110 15.5.22): this listener is not authoritative for the
+// 421 Misdirected Request (RFC 9110 15.5.22): this listener, or on TLS this connection's
+// certificate, is not authoritative for the
 // name in Host. Constant body, never cacheable, so a proxy or an HTTP/2 client that
 // coalesced connections retries on a fresh connection instead of remembering a 404.
 void Dispatcher::misdirected(Stream& s) {
@@ -58,10 +59,15 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
         static_.error(s, 400, false);
         return nullptr;
     }
+    // On TLS the connection is authoritative only for the names of the certificate it
+    // presented (RFC 9110 7.4, RFC 6125): a Host outside them is 421 whichever sites the
+    // listener holds. A request without a Host (HTTP/1.0) claims no name and goes to the
+    // catch-all as before. Plain listeners have no certificate and keep the listener rule.
+    const bool unauthoritative = s.conn.cert && !req.host.empty() && !s.conn.cert->covers(req.host);
     if (req.method == Method::options && req.target == "*") {  // server-wide OPTIONS
         const SiteConfig* site = router.site(req.host);
         ws.site = site;
-        if (!site) {
+        if (!site || unauthoritative) {
             misdirected(s);
             return nullptr;
         }
@@ -92,7 +98,7 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
     }
     const SiteConfig* site = router.site(req.host);
     ws.site = site;
-    if (!site) {
+    if (!site || unauthoritative) {
         misdirected(s);
         return nullptr;
     }

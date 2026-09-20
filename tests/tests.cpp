@@ -35,6 +35,7 @@
 #include "handlers/proxy.hpp"
 #include "core/headers.hpp"
 #include "core/result.hpp"
+#include "core/host.hpp"
 #include "core/router.hpp"
 #include "handlers/fastcgi.hpp"
 #include "handlers/static.hpp"
@@ -2482,6 +2483,25 @@ static void test_server_account_and_rules() {
 }
 
 static void test_strict_hosts() {
+    // The authority of a TLS connection: the names of the certificate it presented
+    // (RFC 6125 matching), against a raw Host header value.
+    {
+        char buf[256];
+        CHECK(normalize_host("Example.COM.:8443", buf) == "example.com" && normalize_host("[::1]:8443", buf) == "::1" && normalize_host("a.test", buf) == "a.test");
+        CHECK(normalize_host("", buf).empty() && normalize_host(std::string(300, 'a'), buf).empty() && normalize_host(":8080", buf).empty());
+        CertNames c;
+        c.add("Example.com");
+        c.add("*.wild.test");
+        c.add("127.0.0.1");
+        c.add("*");        // not a name
+        c.add("a.*.b");    // not a wildcard anyone matches
+        CHECK(c.exact.size() == 2 && c.wildcard.size() == 1 && c.wildcard[0] == ".wild.test");
+        CHECK(c.covers("example.com") && c.covers("EXAMPLE.COM:443") && c.covers("example.com.") && c.covers("127.0.0.1:8443"));
+        CHECK(c.covers("x.wild.test") && c.covers("X.Wild.Test:8446") && !c.covers("wild.test") && !c.covers("a.b.wild.test") && !c.covers(".wild.test"));
+        CHECK(!c.covers("other.com") && !c.covers("") && !c.covers("sub.example.com") && !c.covers("[::1]"));
+        CertNames none;
+        CHECK(none.empty() && !none.covers("example.com"));
+    }
     // A named site answers its names only; adding sites never changes that; "*" or
     // default = true is the only catch-all.
     SiteConfig a; a.server_names = {"a.test"};
