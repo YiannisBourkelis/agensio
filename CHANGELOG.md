@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.12
+## 0.1.0-alpha.12 (2026-09-20)
 
 - `site-copy NAME --from SUB --to SUB [--overwrite]` (MCP `site_copy`, `POST
   /v1/sites/NAME/copy`): one regular file of a site copied to another path of the same
