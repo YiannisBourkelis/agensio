@@ -49,7 +49,7 @@ are separate accounts (section 3).
 | generated php-fpm pool files | `/etc/php/<version>/fpm/pool.d/agensio-<user>.conf` (Debian), `/etc/php-fpm.d/agensio-<user>.conf` (RHEL) | root 0644 | today (`agensio pools`, `server.pools`) |
 | persistent state | `/var/lib/agensio/` | agensio 0751 (site users traverse to their own directory, cannot list others) | today (`server.state_dir`) |
 | certificates (automatic) | `/var/lib/agensio/acme/account.key`, `/var/lib/agensio/acme/<domain>/key.pem` (0600), `fullchain.pem` | agensio 0700 dir | today (`server.acme.storage`) |
-| per-user PHP state | `/var/lib/agensio/<user>/tmp/`, `/var/lib/agensio/<user>/sessions/` | <user> 0700 | today (`agensio pools`) |
+| per-user PHP state | `/var/lib/agensio/<user>/tmp/` (uploads are created here and renamed into the site, so it carries the server's group), `/var/lib/agensio/<user>/sessions/` | `tmp/` 2750 <user>:agensio, `sessions/` 0700 <user> | today (`agensio pools`) |
 | uploaded archives | `/var/lib/agensio/uploads/` (`agensio ctl upload NAME`, consumed by `site-install --file`) | agensio 0700 | today |
 | temporary spill files | the system temp directory, unlinked immediately (large upstream bodies and request bodies) | agensio | today |
 | site content | `/var/www/<domain>/` (section 3) | site user | convention |

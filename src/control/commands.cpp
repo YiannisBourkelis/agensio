@@ -449,6 +449,53 @@ bool php_fpm_hard_reload(const Config& cfg, std::string& file) {
     return false;
 }
 
+// Files under a site's document root that the server's own account cannot open: they
+// answer 404 with nothing in any log. Sampled with a budget, the application's upload
+// directory first (the preset knows it), hidden entries and the preset's credential files
+// left out (never served, 0600 by design). Runs as whoever the server runs as, so the
+// answer is what a request would meet.
+struct UnreadableFiles {
+    std::size_t seen = 0, unreadable = 0;
+    std::string example;
+    FileFacts example_facts;
+};
+
+UnreadableFiles unreadable_files(const SiteConfig& site, const std::vector<std::string>& secrets, std::size_t budget) {
+    UnreadableFiles r;
+    if (site.root.empty()) return r;
+    std::vector<fs::path> starts;
+    const std::string up = preset_uploads(site.app);
+    if (!up.empty()) starts.push_back(site.root + up);
+    starts.push_back(site.root);
+    std::error_code ec;
+    for (const auto& start : starts) {
+        if (!fs::is_directory(start, ec)) continue;
+        for (fs::recursive_directory_iterator it(start, fs::directory_options::skip_permission_denied, ec), end; it != end && r.seen < budget; it.increment(ec)) {
+            if (ec) break;
+            const std::string name = it->path().filename().string();
+            if (!name.empty() && name[0] == '.') {  // hidden: never served, so never a finding
+                if (it->is_directory(ec)) it.disable_recursion_pending();
+                continue;
+            }
+            if (it.depth() >= 8) it.disable_recursion_pending();
+            if (!it->is_regular_file(ec)) continue;
+            ++r.seen;
+            const std::string path = it->path().string();
+            if (std::find(secrets.begin(), secrets.end(), path) != secrets.end()) continue;
+#ifndef _WIN32
+            if (::access(path.c_str(), R_OK) == 0) continue;
+#else
+            continue;
+#endif
+            if (r.unreadable++ == 0) {
+                r.example = path;
+                system_facts().stat(path, r.example_facts);
+            }
+        }
+    }
+    return r;
+}
+
 std::vector<Finding> health_findings(const Config& running, const Config& boot, bool as_root, std::time_t now) {
     std::vector<Finding> out;
     auto add = [&](std::string sev, std::string code, std::string site, std::string msg, std::string fix = "") {
@@ -581,6 +628,26 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
         if (php_fpm_hard_reload(running, conf))
             add("info", "php_fpm_hard_reload", "", "php-fpm.conf does not set process_control_timeout, so a php-fpm reload (site-create writing a pool, agensio pools) kills PHP requests in flight on every site",
                 "set process_control_timeout = 10s in " + conf + " and reload php-fpm once");
+    }
+
+    // Files the server cannot read under a document root (2026-09-20: every upload of every
+    // site with a user was 0640 user:user after move_uploaded_file, 404 with no log line).
+    {
+        const ServerAccount server = server_account(running, system_facts());
+        for (const auto& s : running.sites) {
+            if (s.root.empty() || !s.redirect.empty()) continue;
+            const UnreadableFiles u = unreadable_files(s, secret_paths(s), 2000);
+            if (u.unreadable == 0) continue;
+            const FileFacts& f = u.example_facts;
+            char mode[8];
+            std::snprintf(mode, sizeof mode, "%04o", f.mode & 07777);
+            const std::string owner = std::to_string(f.uid) + ":" + std::to_string(f.gid) + " " + mode;
+            add("error", "files_unreadable", s.server_names.front(),
+                std::to_string(u.unreadable) + " of " + std::to_string(u.seen) + " sampled files under " + s.root + " cannot be read by the server's account (" +
+                    (server.user.empty() ? "uid " + std::to_string(server.uid) : server.user) + ") and answer 404 with no log line; for example " + u.example + " (" + owner + ")",
+                "give them the server's group: chgrp -R " + (server.group.empty() ? std::to_string(server.gid) : server.group) + " " + fs::path(u.example).parent_path().string() +
+                    " (and chmod g+r); uploads made after agensio pools ran on this build carry it already");
+        }
     }
 
     // Recent errors.

@@ -2,6 +2,19 @@
 
 ## 0.1.0-alpha.14 (2026-09-20)
 
+- **Fixed: uploaded files were unservable on every site with a site user** (live report:
+  a WordPress video answered 404, no log line, no finding). PHP creates an upload in the
+  pool's `tmp/`, which was `0700 user:user`, and `move_uploaded_file()` renames it into
+  the document root; rename keeps the group, and a set-gid directory stamps only files
+  created in it, so every upload arrived `0640 user:user`, unreadable by the server.
+  `tmp/` is now `2750 user:<server group>`, like the document root, so an upload is born
+  with the server's group. `agensio pools` (and the helper's pool apply) repairs an
+  existing `tmp/` when run as root. **Existing uploads need one command per site**,
+  e.g. `chgrp -R agensio /var/www/example.com/wp-content/uploads` (Drupal:
+  `sites/default/files`); `health` now reports them as `files_unreadable` with that
+  fix until it is done, sampling the preset's upload directory first. The root suite
+  uploads through the php, wordpress and drupal presets and asserts the moved file's
+  group and that it is served.
 - **Fixed: the first POST after a php-fpm reload on a kept connection answered 502**
   (`closed_early`; a GET was retried on a fresh connection, a POST or an upload was not).
   A kept connection idle for longer than a pool tick (250 ms) is now checked with one

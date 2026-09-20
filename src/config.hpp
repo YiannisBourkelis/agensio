@@ -242,6 +242,9 @@ std::string preset_source(const std::string& app, const std::string& version);
 // hosting rules require to be unreadable by the server's group and what every write path
 // creates 0600. A subset of the preset's never-served list. Empty for presets without one.
 std::vector<std::string> preset_secrets(const std::string& app);
+// Where the preset's application keeps what users upload, relative to the served root
+// ("/wp-content/uploads"); "" when the preset has no such place.
+std::string preset_uploads(const std::string& app);
 
 // Prints the effective configuration after presets, one TOML-like block per site and
 // location, so nothing a preset did is hidden (`agensio -t --explain`).

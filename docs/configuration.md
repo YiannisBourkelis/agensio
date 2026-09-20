@@ -468,12 +468,20 @@ systemctl reload php8.3-fpm
 
 What the pool gets: `user`/`group` of the site, socket `0660 web1:agensio`, `pm` and
 `children`, `pm.max_requests`, a private `tmp/` and `sessions/` under
-`state_dir/web1` (0700, owned by the user), `open_basedir` at the project directory
+`state_dir/web1` (`tmp/` is `2750 web1:<server group>`, `sessions/` `0700 web1:web1`, see
+below), `open_basedir` at the project directory
 plus those two (`upload_tmp_dir` and `sys_temp_dir` at `<state_dir>/<user>/tmp`,
 `session.save_path` at `<state_dir>/<user>/sessions`, both created by `agensio pools` as
-the user, 0700, and listed in `open_basedir`, so PHP's uploads and temp files land in the
-user's private space and never in `/tmp`; `health` reports `php_tmp_missing` when one of
-them is gone), `memory_limit`, `max_execution_time`, upload limits from
+the user and listed in `open_basedir`, so PHP's uploads and temp files land in the user's
+private space and never in `/tmp`. `tmp/` is `2750 <user>:<server group>`, like the
+document root: an uploaded file is created there, so it is born with the server's group,
+and `move_uploaded_file()` renames it into the document root with that group kept, where
+the server can read it; a set-gid document root alone would not do that, since rename
+keeps a file's group (2026-09-20: every upload was `0640 user:user` and answered 404).
+`sessions/` stays `0700 <user>:<user>`, nothing leaves it. `agensio pools` repairs a
+`tmp/` from an earlier layout when run as root; files uploaded before that need `chgrp
+-R <server group>` on the application's upload directory, and `health` reports them
+as `files_unreadable` until then, with `php_tmp_missing` when the directory is gone), `memory_limit`, `max_execution_time`, upload limits from
 `max_body_size`, `clear_env`, `expose_php = off`. `agensio -t --explain` prints the
 whole file. agensio's own FastCGI options for a generated pool default to
 `keep_conn = true` with `max_connections = children / workers`, so kept connections can
@@ -937,7 +945,7 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 | `logs` | viewer | `--site NAME` (default: all sites plus the error log), `--since 3h` (`m`, `h`, `d`, `w`, seconds, or a local `YYYY-MM-DDThh:mm:ss`; default 1h), `--level error|warn|info` for the error log (default warn = error+warn), `--status 5xx|4xx|all|NNN` for access logs (default 5xx), `--limit N` (default 200, newest). Reads at most 2 MB per file from the end; `truncated` says when that cut in |
 | `uploads` | viewer | the archives stored with `upload` (`file`, `bytes`, `uploaded`), ready for `site-install --file` |
 | `settings [NAME]` | viewer | the per-site limits `site-create` and `site-update` accept under `settings`: for each key its type, unit and spellings, meaning, default and its origin, minimum, the ceiling from `[control] site_limits`, what changing it costs (agensio reload, php-fpm reload) and what it derives; with a site, the current value and whether it comes from the site, the server or a built-in default. `site NAME` reports the same `settings` |
-| `health` | viewer | findings with `severity`, `code`, `site`, `message`, `fix`: configuration on disk invalid or failing the hosting rules, restart-only settings changed, running as root, certificate unreadable / still the placeholder / expired / expiring within 14 days (manual), `tls = "auto"` without a plain port-80 site for the names, no http-to-https redirect, application sites sharing the server's account, generated pools out of date, errors in the last 24 hours. `ok` is true when nothing above info level was found |
+| `health` | viewer | findings with `severity`, `code`, `site`, `message`, `fix` (also `files_unreadable`: files under a document root, the preset's upload directory first, that the server's account cannot open and that answer 404 with no log line; `php_tmp_missing`; `php_fpm_hard_reload`): configuration on disk invalid or failing the hosting rules, restart-only settings changed, running as root, certificate unreadable / still the placeholder / expired / expiring within 14 days (manual), `tls = "auto"` without a plain port-80 site for the names, no http-to-https redirect, application sites sharing the server's account, generated pools out of date, errors in the last 24 hours. `ok` is true when nothing above info level was found |
 
 **Changes** (`POST` with a JSON body; every one needs `"confirm": true`, takes a
 `"reason"` that goes to the audit log, and answers 428 without the confirmation):

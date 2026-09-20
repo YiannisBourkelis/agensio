@@ -13,7 +13,7 @@ PHPV=$(basename "$FPM" | sed 's/php-fpm//'); POOLD=/etc/php/$PHPV/fpm/pool.d
 T=$(mktemp -d /tmp/agensio-provision.XXXXXX); chmod 755 "$T"
 pass=0; fail=0
 check() { if [ "$3" = "$2" ]; then echo "ok   $1"; pass=$((pass+1)); else echo "FAIL $1: expected [$2] got [$3]"; fail=$((fail+1)); fi; }
-cleanup() { [ -f "$T/agensio.pid" ] && kill "$(cat "$T/agensio.pid")" 2>/dev/null; [ -f "$T/fpm.pid" ] && kill "$(cat "$T/fpm.pid")" 2>/dev/null; rm -f $POOLD/agensio-t9.conf; for u in t9 t8; do userdel $u 2>/dev/null; done; rm -rf "$T"; }
+cleanup() { [ -f "$T/agensio.pid" ] && kill "$(cat "$T/agensio.pid")" 2>/dev/null; [ -f "$T/fpm.pid" ] && kill "$(cat "$T/fpm.pid")" 2>/dev/null; rm -f $POOLD/agensio-t9.conf $POOLD/agensio-t7.conf $POOLD/agensio-t6.conf; for u in t9 t8 t7 t6; do userdel $u 2>/dev/null; done; rm -rf "$T"; }
 trap cleanup EXIT
 id -u agensio >/dev/null 2>&1 || useradd -r -M -s /usr/sbin/nologin agensio
 mkdir -p $T/sites.d $T/logs $T/run $T/state $T/www; chown agensio:agensio $T/sites.d $T/logs $T/state; chmod 751 $T/state
@@ -64,7 +64,7 @@ cat > $T/www/t9.test/web/upload.php <<'PHP'
 $f = $_FILES['f'] ?? null;
 echo json_encode(['error' => $f['error'] ?? 'none', 'size' => $f ? filesize($f['tmp_name']) : 0, 'tmp' => $f['tmp_name'] ?? '',
                   'upload_tmp_dir' => ini_get('upload_tmp_dir'), 'sys' => sys_get_temp_dir(), 'open_basedir' => ini_get('open_basedir'),
-                  'moved' => $f ? move_uploaded_file($f['tmp_name'], dirname(__DIR__) . '/../t9.test/web/moved.bin') : false]), "\n";
+                  'moved' => $f ? move_uploaded_file($f['tmp_name'], __DIR__ . '/moved.bin') : false]), "\n";
 echo str_repeat('x', 300000);
 PHP
 chown t9:agensio $T/www/t9.test/web/upload.php; chmod 640 $T/www/t9.test/web/upload.php
@@ -88,6 +88,20 @@ kill "$(cat $T/fpm.pid)"; sleep 0.5; rm -f $T/run/agensio-t9.sock; $FPM -y $T/fp
 check "upload: after site-update max_body_size the pool carries 4M and a 1.5 MB file (spilled body) arrives intact, response complete" "yes 200 yes 0 1572864 yes yes" "$(grep -q 'upload_max_filesize\] = 4M' $POOLD/agensio-t9.conf && echo -n "yes "; upl_report "$(upl $T/large.bin)")"
 check "upload: the same 1.5 MB upload again (php-fpm warm) and a 600 KB one" "200 0 1572864 | 200 0 614400" "$(r=$(upl $T/large.bin); echo -n "${r%% *} "; head -1 $T/upl.out | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["error"], d["size"], end="")' 2>/dev/null; head -c 614400 /dev/urandom > $T/mid.bin; r=$(upl $T/mid.bin); echo -n " | ${r%% *} "; head -1 $T/upl.out | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["error"], d["size"], end="")' 2>/dev/null)"
 check "upload: the moved file is byte-identical to what was sent last" "yes" "$(cmp -s $T/mid.bin $T/www/t9.test/web/moved.bin && echo yes)"
+check "upload: PHP's tmp is 2750 t9:agensio, so a moved upload carries the server's group and is served (2026-09-20 report)" "t9 agensio 2750 | agensio | 200 614400" "$(stat -c '%U %G %a' $T/state/t9/tmp) | $(stat -c %G $T/www/t9.test/web/moved.bin) | $(curl -sS -o /dev/null -w '%{http_code} %{size_download}' -H 'Host: t9.test' http://127.0.0.1:18198/moved.bin)"
+# The same on the wordpress and drupal presets, each with its own user and pool.
+for pair in "t7 wordpress" "t6 drupal"; do set -- $pair; u=$1; app=$2
+  "$BIN" ctl site-create --domain $u.test --app $app --root "$T/www/$u.test" --user $u --https none --php-children 2 --listen-plain 127.0.0.1:18198 --yes --reason upload --socket $T/run/control.sock > /dev/null
+  cp $T/www/t9.test/web/upload.php $T/www/$u.test/upload.php; chown $u:agensio $T/www/$u.test/upload.php; chmod 640 $T/www/$u.test/upload.php
+  "$BIN" ctl site-update $u.test --set max_body_size=4MB --yes --reason uploads --socket $T/run/control.sock > /dev/null
+done
+sed -i "s#^include = .*#include = $POOLD/agensio-t9.conf\ninclude = $POOLD/agensio-t7.conf\ninclude = $POOLD/agensio-t6.conf#" $T/fpm.conf
+kill "$(cat $T/fpm.pid)"; sleep 0.5; rm -f $T/run/agensio-t*.sock; $FPM -y $T/fpm.conf -D; for _ in $(seq 1 50); do [ -S $T/run/agensio-t6.sock ] && break; sleep 0.1; done; sleep 0.3
+for pair in "t7 wordpress" "t6 drupal"; do set -- $pair; u=$1; app=$2
+  check "upload ($app preset, user $u): the moved upload has the server's group and is served" "200 0 614400 | agensio | 200 614400" "$(r=$(curl -sS -o $T/upl.out -w '%{http_code}' -H "Host: $u.test" -F "f=@$T/mid.bin" http://127.0.0.1:18198/upload.php); echo -n "$r "; head -1 $T/upl.out | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["error"], d["size"], end="")' 2>/dev/null; echo -n " | $(stat -c %G $T/www/$u.test/moved.bin 2>/dev/null) | "; curl -sS -o /dev/null -w '%{http_code} %{size_download}' -H "Host: $u.test" http://127.0.0.1:18198/moved.bin)"
+done
+check "health: a file under a root the server cannot read is an error finding naming it; fixed, it is gone" "files_unreadable yes 0" "$(chgrp t9 $T/www/t9.test/web/moved.bin; chmod 0640 $T/www/t9.test/web/moved.bin; h=$("$BIN" ctl health --socket $T/run/control.sock); echo -n "$(echo "$h" | grep -o '"code":"files_unreadable"' | head -1 | cut -d'"' -f4) "; echo "$h" | grep -q "moved.bin" && echo -n yes; chgrp agensio $T/www/t9.test/web/moved.bin; echo " $("$BIN" ctl health --socket $T/run/control.sock | grep -c files_unreadable)")"
+check "pools: an older tmp directory (0700 user:user) is repaired by agensio pools" "yes t9 agensio 2750" "$(chown t9:t9 $T/state/t9/tmp; chmod 0700 $T/state/t9/tmp; "$BIN" pools -c $T/agensio.toml 2>/dev/null | grep -q 'repaired .*state/t9/tmp to 2750' && echo -n yes; echo " $(stat -c '%U %G %a' $T/state/t9/tmp)")"
 check "health: a missing PHP private directory is an error finding with the fix; restored, it is gone" "php_tmp_missing 0" "$(mv $T/state/t9 $T/state/t9.away; "$BIN" ctl health --socket $T/run/control.sock | grep -o '"code":"php_tmp_missing"' | head -1 | cut -d'"' -f4 | tr -d '\n'; mv $T/state/t9.away $T/state/t9; echo " $("$BIN" ctl health --socket $T/run/control.sock | grep -c php_tmp)")"
 sleep 1.3
 check "the site's log is readable by t9 without a restart" "agensio t9 640" "$(stat -c '%U %G %a' $T/logs/sites/t9.test.log)"

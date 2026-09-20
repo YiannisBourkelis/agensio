@@ -395,9 +395,28 @@ int write_pools(const Config& cfg, const fs::path& out_dir, bool dry_run, std::o
             if (::stat(cfg.state_dir.c_str(), &st) == 0 && st.st_uid == ::geteuid() && (st.st_mode & 0001) == 0)
                 ::chmod(cfg.state_dir.c_str(), (st.st_mode & 07777) | 0001);
         }
+        // tmp/ is where PHP creates every uploaded file before the application renames it
+        // into the document root; rename keeps the group, and a set-gid directory only
+        // stamps files created in it. So tmp/ gets the server's group and the set-gid bit,
+        // like the document root: an upload is born with the group the server reads by
+        // (2026-09-20: every upload on every site with a user was 0640 user:user, unservable).
+        // sessions/ stays the user's alone: nothing leaves it.
+        const struct group* srv = ::getgrnam(agensio_group.c_str());
         for (const char* sub : {"", "/tmp", "/sessions"}) {
             const fs::path d = p.state_dir + sub;
-            if (fs::is_directory(d, ec)) continue;
+            const bool tmp = std::string_view(sub) == "/tmp";
+            const mode_t mode = tmp ? 02750 : 0700;
+            const gid_t gid = tmp && srv ? srv->gr_gid : (gr ? gr->gr_gid : 0);
+            struct stat st {};
+            if (fs::is_directory(d, ec)) {
+                // An existing tmp/ from an earlier layout (0700 user:user) is repaired here.
+                if (tmp && pw && srv && ::stat(d.c_str(), &st) == 0 && ((st.st_mode & 07777) != mode || st.st_gid != gid) && ::geteuid() == 0) {
+                    if (dry_run) out << "would repair " << d.string() << " to 2750 " << p.user << ":" << agensio_group << "\n";
+                    else if (::chown(d.c_str(), pw->pw_uid, gid) == 0 && ::chmod(d.c_str(), mode) == 0)
+                        out << "repaired " << d.string() << " to 2750 " << p.user << ":" << agensio_group << " (uploads created there carry the server's group)\n";
+                }
+                continue;
+            }
             if (dry_run) {
                 out << "would create " << d.string() << "\n";
                 continue;
@@ -406,8 +425,8 @@ int write_pools(const Config& cfg, const fs::path& out_dir, bool dry_run, std::o
                 out << "error: cannot create " << d.string() << ": " << ec.message() << "\n";
                 return 1;
             }
-            ::chmod(d.c_str(), 0700);
-            const bool owned = pw && gr && ::chown(d.c_str(), pw->pw_uid, gr->gr_gid) == 0;
+            const bool owned = pw && gr && (!tmp || srv) && ::chown(d.c_str(), pw->pw_uid, gid) == 0;
+            ::chmod(d.c_str(), mode);
             if (!owned && !own_warned) {
                 own_warned = true;
                 if (!pw || !gr) out << "warning: user " << p.user << " or group " << p.group << " does not exist; ";

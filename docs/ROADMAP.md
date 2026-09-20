@@ -745,6 +745,14 @@ Rules:
       `[control] install`, `install_private`, `install_ca`, `upload_max`. zlib added as a
       dependency. `tests/install.sh` (root devbox), unit, fuzz and integration checks;
       security page rows 19-22.
+- [x] H2i (2026-09-20, live reports) Uploads on sites with a user: the pool's `tmp/` is
+      `2750 user:<server group>` so `move_uploaded_file` (a rename, which keeps the
+      group) delivers a file the server can read; `agensio pools` repairs an older
+      `tmp/`; `health` `files_unreadable` samples each root (the preset's `uploads`
+      directory first) as the server's account, `php_tmp_missing` / `php_tmp_not_owned`
+      for the private directory; a kept upstream connection idle across a tick is peeked
+      before reuse (the first POST after a php-fpm reload was a 502); the root suite
+      uploads through the php, wordpress and drupal presets and serves the result.
 - [x] F10 (2026-09-20) Per-site settings: `control/settings.*` (the allowlist table,
       `apply_settings` against `[control] site_limits`, `settings_catalog`,
       `effective_settings`), `SiteConfig::max_body_size` and `PhpPool::max_input_time`,
