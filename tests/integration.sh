@@ -603,6 +603,7 @@ print("same" if schema == catalogue else "schema!=catalogue", "same" if accepted
 PYT
 )"
 "$BIN" ctl site-update inst.test --set max_body_size=1MB --yes --reason back --socket $CS > /dev/null
+check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 144 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
 check "secrets: the presets catalogue lists each preset's credential files" "/wp-config.php /sites/default/settings.php" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["wordpress"]["secrets"][0], p["drupal"]["secrets"][0])')"
 check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$("$BIN" ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; "$BIN" ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
@@ -716,7 +717,7 @@ p.stdin.close(); p.wait()
 print(" ".join(out))
 PYT
 )
-check "mcp: initialize, tool list with annotations, calls, confirm, decisions, prompts" "agensio 20 True laravel 428 reloaded https,root,app,user -32601 2" "$mcp"
+check "mcp: initialize, tool list with annotations, calls, confirm, decisions, prompts" "agensio 21 True laravel 428 reloaded https,root,app,user -32601 2" "$mcp"
 check "mcp: site_install and the upload tools are exposed with their arguments" "file url,file,version,sha256 True" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
 import json, subprocess, sys
 p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)

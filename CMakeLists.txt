@@ -95,6 +95,7 @@ add_library(agensio_core STATIC
   src/control/commands.cpp
   src/control/sites.cpp
   src/control/settings.cpp
+  src/control/reference.cpp
   src/control/mcp.cpp
   src/control/client.cpp
   src/response.cpp
@@ -153,7 +154,8 @@ if(AGENSIO_TESTS)
   enable_testing()
   add_executable(agensio_tests tests/tests.cpp)
   target_link_libraries(agensio_tests PRIVATE agensio_core)
-  target_compile_definitions(agensio_tests PRIVATE AGENSIO_REGRESSIONS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/regressions")
+  target_compile_definitions(agensio_tests PRIVATE AGENSIO_REGRESSIONS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/regressions"
+                                                   AGENSIO_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
   add_test(NAME unit COMMAND agensio_tests)
 endif()
 
@@ -191,7 +193,7 @@ install(FILES packaging/etc/sites.d/default.toml DESTINATION /etc/agensio/sites.
 install(FILES packaging/agensio.logrotate DESTINATION /etc/logrotate.d RENAME agensio)
 install(FILES packaging/agensio.service DESTINATION /usr/lib/systemd/system)
 install(FILES packaging/www/index.html DESTINATION ${CMAKE_INSTALL_DATADIR}/agensio/www)
-install(FILES README.md CHANGELOG.md LICENSE docs/configuration.md docs/install.md docs/mcp.md
+install(FILES README.md CHANGELOG.md LICENSE docs/configuration.md docs/keys.md docs/install.md docs/mcp.md
               docs/security-control-plane.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
 install(DIRECTORY docs/examples DESTINATION ${CMAKE_INSTALL_DOCDIR})
 

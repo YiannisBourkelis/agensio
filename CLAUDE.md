@@ -62,6 +62,12 @@ checklists to apply when writing, measuring and reviewing.
   with machine, OS, date, commit hash and the exact command.
 - Commit only when asked. Commit messages end with the attribution line the harness
   provides.
+- **Every configuration key is a row of the reference table** (`src/control/reference.cpp`):
+  a key added, renamed or changed in `config.cpp` gets its row (type, default, meaning,
+  reload or restart, who changes it, the section of `docs/configuration.md`) in the same
+  change, and `docs/keys.md` is regenerated with `build/agensio keys --markdown >
+  docs/keys.md`. The unit test holds the table to the parser and to the section
+  headings; the integration suite holds `docs/keys.md` to the binary.
 - **The agent interface is part of every change.** Whenever behaviour, a configuration
   key, a control command, a preset or an error answer is added, fixed or changed, check
   whether the MCP tool descriptions, argument descriptions, server instructions and

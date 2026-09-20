@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.0-alpha.17 (2026-09-20)
+
+- MCP instructions: rule one, stated first: whatever a tool can do is done through the
+  tool over the connection; a terminal command or a file edit is offered only when no tool
+  covers the change (root's main file, a hand-written site file, root work handed back
+  without the helper), with the reason and what follows. `config_reference`'s `via` is
+  read as which tool does it.
+- **Configuration reference for agents and administrators** (F11; live: the agent could
+  not say how to change `workers`): one table of every key agensio reads, with type,
+  default, meaning, whether a change applies on reload or needs a restart, who changes it
+  (root in the main file, a site file, `site-create`, `settings`) and the section that
+  explains it; `agensio keys [--markdown]`, `agensio ctl reference`, `GET
+  /v1/config/reference` (with running values and the file they come from), MCP
+  `config_reference`. `docs/keys.md` is generated from it and the integration suite
+  fails when the file and the binary differ; the unit test fails when the parser reads a
+  key the table lacks or a row names a section that does not exist. The bridge's
+  instructions tell the agent to hand root's edits back as the exact line plus the
+  reload or restart command, never claiming to have made them.
+
 ## 0.1.0-alpha.16 (2026-09-20)
 
 - **Fixed: refused endings were matched case-sensitively and a trailing dot escaped

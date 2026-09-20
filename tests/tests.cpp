@@ -7,6 +7,7 @@
 #include <iterator>
 #include <string>
 #include <map>
+#include <set>
 #include <sstream>
 #include <thread>
 #include <string_view>
@@ -21,6 +22,7 @@
 #include "services/acme.hpp"
 #include "control/roles.hpp"
 #include "control/commands.hpp"
+#include "control/reference.hpp"
 #include "control/settings.hpp"
 #include "control/sites.hpp"
 #include "services/provision.hpp"
@@ -2568,6 +2570,66 @@ static void test_server_account_and_rules() {
 // incomplete until the head is whole, and the whole parses to the same fields whether or
 // not shorter prefixes were tried first (a live "GETGET" line, 2026-09-20, was a buffer
 // bug in the connection, not here; this pins the parser's half of the invariant).
+// The configuration reference (F11) is held to the parser and to the reference document:
+// every key the parser reads is a row, every row's section exists, docs/keys.md is what the
+// binary prints (the integration suite diffs it), and the JSON carries running values.
+static void test_config_reference() {
+    namespace fs = std::filesystem;
+    using namespace control;
+    std::set<std::string> rows;
+    for (const auto& d : key_defs()) {
+        CHECK(*d.key && *d.type && *d.def && *d.meaning && *d.applies && *d.via && *d.doc);
+        rows.insert(d.key);
+    }
+    // Every quoted lower-case identifier the parser reads as a key (config.cpp, the parse
+    // functions) must be a row. Values ("static", "auto", ...) are listed apart.
+    std::ifstream in(std::string(AGENSIO_SOURCE_DIR) + "/src/config.cpp");
+    const std::string src((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    CHECK(!src.empty());
+    const std::set<std::string> values = {"static", "dynamic", "ondemand", "auto", "off", "on", "json", "combined", "info", "warn", "error", "stderr",
+                                          "exact", "prefix", "suffix", "value", "agensio", "https", "http", "none", "allow", "deny", "append", "replace",
+                                          "rfc7239", "rewrite", "pass", "fastcgi", "proxy", "cgi", "control", "php", "laravel", "wordpress", "drupal",
+                                          "linux", "darwin", "unix", "tcp", "get", "head", "post", "put", "delete", "patch", "options", "trace", "connect",
+                                          "server", "cache", "log", "site", "acme"};  // table names, not keys
+    std::set<std::string> missing;
+    const std::size_t begin = src.find("void parse_proxy_policy"), end = src.find("json::Value preset_catalog");
+    CHECK(begin != std::string::npos && end != std::string::npos && begin < end);
+    for (std::size_t i = begin; i < end;) {
+        const std::size_t q = src.find('"', i);
+        if (q == std::string::npos || q >= end) break;
+        const std::size_t e = src.find('"', q + 1);
+        if (e == std::string::npos) break;
+        const std::string word = src.substr(q + 1, e - q - 1);
+        i = e + 1;
+        bool ident = !word.empty();
+        for (unsigned char c : word) ident = ident && ((c >= 'a' && c <= 'z') || c == '_' || (c >= '0' && c <= '9'));
+        if (!ident || (src[q - 1] != '[' && src.compare(q - 6, 6, "count(") != 0)) continue;  // only n["key"] and count("key") reads
+        if (!rows.count(word) && !values.count(word)) missing.insert(word);
+    }
+    if (!missing.empty()) {
+        std::string list;
+        for (const auto& m : missing) list += " " + m;
+        std::printf("config keys read by the parser but missing from the reference table:%s\n", list.c_str());
+    }
+    CHECK(missing.empty());
+    // Every doc section a row names is a heading of docs/configuration.md.
+    std::ifstream din(std::string(AGENSIO_SOURCE_DIR) + "/docs/configuration.md");
+    const std::string doc((std::istreambuf_iterator<char>(din)), std::istreambuf_iterator<char>());
+    for (const auto& d : key_defs()) CHECK(doc.find("\n## " + std::string(d.doc) + ". ") != std::string::npos);
+    // The JSON: the running values of a loaded configuration, and the file they come from.
+    const fs::path dir = fs::temp_directory_path() / ("agensio-ref-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "www");
+    std::ofstream(dir / "a.toml") << "[server]\nworkers = 3\n[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n";
+    const Config cfg = load_config(dir / "a.toml");
+    const json::Value ref = config_reference(&cfg);
+    bool workers = false;
+    for (const auto& k : ref["keys"].items())
+        if (k.get("key") == "workers" && k.get("table") == "[server]") workers = k["running"].num() == 3 && k.get("applies") == "restart" && k.get("via") == "file" && k.get("file") == (dir / "a.toml").string();
+    CHECK(workers && !ref["how_to_change"].get("file").empty());
+    CHECK(reference_markdown().find("| `workers` |") != std::string::npos);
+    fs::remove_all(dir);
+}
+
 // The refused-endings rule, with the spellings a live host served as source.
 static void test_refused_suffix() {
     const std::vector<std::string> deny = {".php", ".phtml", ".inc", "~"};
@@ -2672,6 +2734,7 @@ int main() {
     test_strict_hosts();
     test_parser_prefixes();
     test_refused_suffix();
+    test_config_reference();
     test_install();
 #ifdef AGENSIO_HAS_TLS
     test_acme();

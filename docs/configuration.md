@@ -16,6 +16,10 @@ agensio -t --explain -c agensio.toml  # print the effective configuration after 
 site and location as agensio sees it, marking the blocks a preset generated with
 `# from preset:<name>`. The hand-written equivalents below were taken from that output.
 
+Every key, with its type, default, whether a change needs a reload or a restart, and who
+may change it, is listed in `docs/keys.md`, generated from the same table that the MCP
+tool `config_reference` and `agensio keys` serve; the sections below explain them.
+
 ## 1. Static site
 
 ```toml

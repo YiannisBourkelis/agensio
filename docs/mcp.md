@@ -10,6 +10,12 @@ application archive for `site_install`, is fenced (https only, public addresses 
 size caps, verified certificate, optional sha256) and audited. It offers precise,
 audited tools and nothing else.
 
+The rule the bridge gives every agent, first: whatever a tool can do is done through the
+tool, over this connection; a terminal command or a file edit is offered only when no tool
+covers the change, which is the root-owned main configuration file, a hand-written site
+file, and, on a server without the provisioning helper, the root work `site_create` hands
+back. Then the agent gives the exact command or line and says why no tool can do it.
+
 ## How it is wired
 
 ```
@@ -90,6 +96,7 @@ takes `--socket PATH`.
 | `server_status` | viewer | version, pid, uptime, workers, connections, listeners, sites, the caller's role |
 | `sites_list`, `site_show` | viewer | sites with their certificate state; one site with its effective locations |
 | `config_validate` | viewer | the file on disk: errors and restart-only differences |
+| `config_reference` | viewer | every configuration key with type, default, meaning, reload or restart, who changes it (root in the main file, a site file, `site_create`, `settings`), the reference section, and the running value of server-level keys; the agent answers "how do I change X" from it, handing root's edits back as the exact line plus the reload or restart command |
 | `site_settings_list` | viewer | the per-site limits `site_update` accepts under `settings`, with type, unit, default, minimum, the ceiling root set, what a change costs and derives; with `name`, each key's current value and source. The schema of `settings` is generated from the same table |
 | `presets_list` | viewer | what each `app` value does: served root, which `.php` runs, refusals; from the preset table, so a new preset appears at once |
 | `logs_query` | viewer | recent error-log and access-log lines, filtered by site, time, level and status |
@@ -143,8 +150,10 @@ Every step is one line in the audit log with your uid and the reason the agent g
 
 ## What it cannot do
 
-Install packages, edit hand-written site files, run anything as root, reach other
-machines except to download an archive you named into a site (and never a private
-address), carry files itself. Those are yours, on purpose. On a server with the helper
+Install packages, edit hand-written site files or the main configuration file (root's:
+for a `[server]`, `[cache]`, `[log]` or `[control]` key the agent tells you the exact line
+and whether a reload or a restart follows, from `config_reference`), run anything as
+root, reach other machines except to download an archive you named into a site (and
+never a private address), carry files itself. Those are yours, on purpose. On a server with the helper
 it creates site accounts, restarts the service after a change that needs it and installs
 applications as the site's account; without the helper it hands the commands back.

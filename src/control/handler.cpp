@@ -19,6 +19,7 @@
 #endif
 
 #include "control/commands.hpp"
+#include "control/reference.hpp"
 #include "control/settings.hpp"
 #include "control/sites.hpp"
 #include "core/body.hpp"
@@ -129,7 +130,7 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
     // The read commands (F2): every one is a GET, every one needs the viewer role.
     const bool read_command = path == "/v1/status" || path == "/v1/sites" || path.starts_with("/v1/sites/") ||
                               path == "/v1/config/validate" || path == "/v1/logs" || path == "/v1/health" ||
-                              path == "/v1/presets" || path == "/v1/uploads" || path == "/v1/settings";
+                              path == "/v1/presets" || path == "/v1/uploads" || path == "/v1/settings" || path == "/v1/config/reference";
     if (!read_command) {
         reply(s, 404, json::Value::object().set("error", "unknown command").set("path", std::string(path)));
         return false;
@@ -155,6 +156,8 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
         reply(s, 200, backend_->sites());
     } else if (path == "/v1/settings") {
         reply(s, 200, control::settings_catalog(backend_->running(), nullptr));
+    } else if (path == "/v1/config/reference") {
+        reply(s, 200, control::config_reference(&backend_->running()));
     } else if (path.starts_with("/v1/sites/") && path.ends_with("/settings")) {
         const std::string_view name = path.substr(10, path.size() - 10 - 9);
         const SiteConfig* site = control::find_site(backend_->running(), name);
@@ -271,7 +274,7 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
         }
     }
     if (path == "/v1/status" || path == "/v1/config/validate" || path == "/v1/logs" || path == "/v1/health" || path == "/v1/presets" ||
-        path == "/v1/uploads" || path == "/v1/settings" || (site_path && action == "settings")) {
+        path == "/v1/uploads" || path == "/v1/settings" || path == "/v1/config/reference" || (site_path && action == "settings")) {
         s.response.headers.add("Allow", "GET, HEAD");
         reply(s, 405, json::Value::object().set("error", "method not allowed"));
         return false;

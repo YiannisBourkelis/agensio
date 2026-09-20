@@ -745,6 +745,11 @@ Rules:
       `[control] install`, `install_private`, `install_ca`, `upload_max`. zlib added as a
       dependency. `tests/install.sh` (root devbox), unit, fuzz and integration checks;
       security page rows 19-22.
+- [x] F11 (2026-09-20) Configuration reference: `control/reference.*` (the key table,
+      `config_reference` JSON with running values, `reference_markdown`), `agensio keys`,
+      `ctl reference`, `GET /v1/config/reference`, MCP `config_reference`, `docs/keys.md`
+      generated and diffed by the integration suite, unit test against the parser's keys
+      and the reference's headings, instructions for the hand-back of root's edits.
 - [x] H2i (2026-09-20, live reports) Uploads on sites with a user: the pool's `tmp/` is
       `2750 user:<server group>` so `move_uploaded_file` (a rename, which keeps the
       group) delivers a file the server can read; `agensio pools` repairs an older

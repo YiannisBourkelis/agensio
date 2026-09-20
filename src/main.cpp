@@ -14,6 +14,7 @@
 #include "config.hpp"
 #include "control/client.hpp"
 #include "control/mcp.hpp"
+#include "control/reference.hpp"
 #include "services/json.hpp"
 #include "server.hpp"
 #include "services/pools.hpp"
@@ -27,6 +28,8 @@ void usage() {
                  "usage: agensio [-c config.toml] [-t] [-v]\n"
                  "       agensio pools [-c config.toml] [--out DIR] [--dry-run]\n"
                  "       agensio reload [-c config.toml]\n"
+                 "       agensio keys [--markdown]      every configuration key with type, default, meaning, reload or restart,\n"
+                 "                                      and who may change it (docs/keys.md is this output)\n"
                  "       agensio ctl <command> [--socket PATH] [-c config.toml]\n"
                  "       agensio mcp [--socket PATH] [-c config.toml]\n"
                  "  -c, --config FILE   configuration file (default: ./agensio.toml, ./config/agensio.toml,\n"
@@ -87,6 +90,12 @@ int main(int argc, char** argv) {
         else if (a == "--explain") explain = true;
         else if (a == "pools" && i == 1) pools = true;
         else if (a == "reload" && i == 1) reload = true;
+        else if (a == "keys" && i == 1) {  // the configuration reference, no server needed
+            const bool markdown = i + 1 < argc && std::string(argv[i + 1]) == "--markdown";
+            if (markdown) std::cout << agensio::control::reference_markdown();
+            else std::cout << agensio::control::config_reference(nullptr).dump() << "\n";
+            return 0;
+        }
         else if (a == "mcp" && i == 1) {
             std::string socket_path;
             for (int j = i + 1; j < argc; ++j) {
@@ -108,7 +117,7 @@ int main(int argc, char** argv) {
         else if (a == "ctl" && i == 1) {
             auto ctl_usage = [] {
                 std::cout << "usage: agensio ctl <command> [options] [--socket PATH] [-c config.toml]\n"
-                             "read:   status | sites | site NAME | validate | health | presets | uploads | settings [NAME] |\n"
+                             "read:   status | sites | site NAME | validate | health | presets | uploads | settings [NAME] | reference |\n"
                              "        logs [--site NAME] [--since 3h] [--level error|warn|info] [--status 5xx|4xx|all] [--limit N]\n"
                              "change (each needs --yes, takes --reason TEXT):\n"
                              "        reload | logs-reopen | site-disable NAME | site-enable NAME | site-delete NAME | cert-renew NAME\n"
@@ -212,6 +221,7 @@ int main(int argc, char** argv) {
             const bool upload = command == "upload";
             if (command == "status" || command == "sites" || command == "health" || command == "presets" || command == "uploads") path = "/v1/" + command;
             else if (command == "settings") path = site_name.empty() ? "/v1/settings" : "/v1/sites/" + site_name + "/settings";
+            else if (command == "reference") path = "/v1/config/reference";
             else if (command == "site" && !site_name.empty()) path = "/v1/sites/" + site_name;
             else if (command == "validate") path = "/v1/config/validate";
             else if (command == "logs") path = "/v1/logs" + query;

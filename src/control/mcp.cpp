@@ -126,6 +126,7 @@ std::vector<Tool> tools() {
                          {"status", prop("string", "Access-log filter: 5xx (default), 4xx, all, or a number for that status and above.")},
                          {"limit", prop("integer", "Newest lines to return (default 200, max 5000).")}},
                         {})});
+    t.push_back({"config_reference", "Configuration reference", "Every configuration key agensio reads, in one table: its table ([server], [cache], [log], [control], [[site]], php = {}, proxy = {}, [[site.location]]), type, default, meaning, whether a change applies on reload or needs a restart, who changes it (via: file = root in the main configuration file; site file; site-create = a field of site_create/site_update; settings = site_update's settings), the section of docs/configuration.md that explains it, and for server-level keys the running value and the file it comes from. Use it to answer 'how do I change X' and 'what is X set to'. Read via as which tool does it: settings and site-create mean site_update (or site_create), and you do it here; only via = file (root's main configuration) and via = site file (a hand-written site file) have no tool, and only then give the user the exact TOML line, the file, and `agensio reload` or `systemctl restart agensio` as applies says, stating that agensio does not edit that file itself. A key that is not listed does not exist.", "GET", "/v1/config/reference", true, false, Role::viewer, schema({}, {})});
     t.push_back({"site_settings_list", "Site settings", "The per-site limits site_create and site_update accept under settings, from the same table as the schema: for each key its type, unit and accepted spellings, meaning, default and where it comes from, minimum, the ceiling [control] site_limits sets (root raises it in the configuration file), what changing it costs (agensio reload, php-fpm reload) and what it derives (max_body_size drives the pool's upload_max_filesize and post_max_size). With name, also each key's current effective value and its source (site, server, default). Use it before changing a limit, and to answer 'what is this site's upload limit'.", "GET", "/v1/settings", true, false, Role::viewer,
                  schema({{"name", prop("string", "A site's host name: adds the current values. Omit for the table alone.")}}, {})});
     t.push_back({"presets_list", "Application presets", "What each `app` value does: which directory is served, whether every .php runs or only the front controller, what is refused, which directories never run PHP, which files are never served, and `source`: the official archive site_install takes when it has one (wordpress, drupal). Use it to answer 'which applications are supported', to pick app for site_create and to know whether site_install can fetch the application itself; the site_show tool shows the expanded locations of a real site.", "GET", "/v1/presets", true, false, Role::viewer, schema({}, {})});
@@ -171,7 +172,15 @@ std::vector<Tool> tools() {
 
 const char* kInstructions =
     "You are connected to an agensio web server through its control socket, as the account that "
-    "started this bridge. Start a session on a server you do not know with health_check and "
+    "started this bridge. RULE ONE: whenever a tool here can do the job, do it through the tool, over this "
+    "connection, and never send the user to a terminal for it. Creating and changing sites, their "
+    "HTTPS, their user, their limits (settings), installing an application or a plugin, copying a drop-in, "
+    "reloading, renewing a certificate, reading logs and health: all of that is tools. A terminal command "
+    "or a file edit is offered only when no tool covers the change: when the server itself answers with "
+    "run_as_root commands (no provisioning helper), or when config_reference says via = file (the "
+    "root-owned main configuration) or via = site file (a hand-written site file). Then give the exact "
+    "command or line, say why no tool can do it, and say what follows (agensio reload or a restart). "
+    "Start a session on a server you do not know with health_check and "
     "server_status, then explain the findings in plain words and offer the usual jobs: create a "
     "site (HTTPS by default, ask about the site user and what runs there; writing its php-fpm pool reloads "
     "php-fpm, which briefly affects every PHP site on the host unless process_control_timeout is set, see "
@@ -192,6 +201,11 @@ const char* kInstructions =
     "settings.php) is put in place with site_copy, which copies one file within the same site and nothing else. "
     "Per-site limits (upload size, PHP memory, execution time, pool size) are changed with site_update's settings "
     "object; call site_settings_list first for the keys, units, current values and the ceilings root set. "
+    "For any other key (workers, cache sizes, log level, timeouts, the control plane's own keys) call "
+    "config_reference: it says what the key does, its running value, whether the change needs a reload or a "
+    "restart, and which tool changes it. Only when via is file is there no tool: the main configuration file "
+    "is root's and agensio never edits it, so answer with the exact line to set, the file, and the reload or "
+    "restart command, exactly like the root commands protocol; never claim to have changed it. "
     "Never invent settings: what a tool does not offer is not configurable here. Host names are "
     "strict: a site answers only the names in server_name, and a listener without a catch-all site "
     "(server_name [\"*\"] or default = true) answers 421 to any other Host, including the IP address; and on "
@@ -199,7 +213,8 @@ const char* kInstructions =
     "certificate with another site's Host is 421 too. When a user reports 421, one of those is the cause.";
 
 const char* kGettingStarted =
-    "Greet the administrator briefly. Run health_check and server_status. Summarise: how many "
+    "Greet the administrator briefly. Remember rule one: what a tool can do is done here, through the tool; "
+    "a terminal is for what no tool covers. Run health_check and server_status. Summarise: how many "
     "sites, which have certificates and their state, anything the health check flagged (with its "
     "fix), whether the server runs under a service user. Then offer the next jobs: add a site, "
     "check a site's logs for errors, renew a certificate, reload after a manual edit. Keep it "
