@@ -614,6 +614,7 @@ print(len(deny), n404, readme[0]["handler"] if readme else "-")')"
   check "wordpress: wp-login.php executes, no source" "wp-login ok no-source" "$(curl -sS $W/wp-login.php) $(no_source $W/wp-login.php)"
   check "wordpress: every real entry point executes (xmlrpc, cron, admin-ajax, comments, signup, activate, trackback)" "7 0" "$(for f in xmlrpc.php wp-cron.php wp-admin/admin-ajax.php wp-comments-post.php wp-signup.php wp-activate.php wp-trackback.php; do curl -sS $W/$f; echo; done | grep -c 'entry ok') $(for f in xmlrpc.php wp-cron.php wp-admin/admin-ajax.php wp-comments-post.php wp-signup.php wp-activate.php wp-trackback.php; do curl -sS $W/$f; done | grep -c '<?php')"
   check "wordpress: wp-config.php is a 404, never shown" "404 no-source" "$(code $W/wp-config.php) $(no_source $W/wp-config.php)"
+  check "wordpress: readme.html and license.txt (the version fingerprint) are 404 although present" "404 404 yes" "$(code $W/readme.html) $(code $W/license.txt) $([ -f tests/wordpress/readme.html ] && echo yes)"
   check "wordpress: PHP under uploads and wp-includes refused, assets served" "404 404 200" "$(code $W/wp-content/uploads/shell.php) $(code $W/wp-includes/x.php) $(code $W/wp-includes/wp.js)"
   rm -rf tests/drupal/web/.git tests/drupal/web/.env tests/drupal/web/sites/default/files/.ht.sqlite
 fi

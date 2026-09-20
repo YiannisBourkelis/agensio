@@ -203,10 +203,12 @@ add_headers = { "Cache-Control" = "public, max-age=2592000" }
 ```
 
 `wp-content/plugins` is deliberately not shielded: some plugins expose PHP endpoints
-there. `wp-config.php` and `wp-config-sample.php` are answered 404 by exact locations the
-preset adds (`try_files = ["=404"]`): the credentials file is never executed nor shown,
-whereas nginx recipes usually execute it (it prints nothing). `.htaccess` and
-`.user.ini` are dotfiles and hidden. agensio never reads `.htaccess`; see section 4c.
+there. `wp-config.php`, `wp-config-sample.php`, `readme.html` and `license.txt` are
+answered 404 by exact locations the preset adds (`try_files = ["=404"]`): the credentials
+file is never executed nor shown, whereas nginx recipes usually execute it (it prints
+nothing); the readme and the licence name the installed WordPress version, the first thing
+a vulnerability scanner reads, and cost nothing to withhold. `.htaccess` and `.user.ini`
+are dotfiles and hidden. agensio never reads `.htaccess`; see section 4c.
 
 ## 4c. Drupal and other multi-entry-point PHP applications: `app = "drupal"`
 

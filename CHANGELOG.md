@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.0-alpha.11 (2026-09-20)
+
+- WordPress preset: `readme.html` and `license.txt`, which name the installed version,
+  are answered 404 like `wp-config.php` (from a live report: the first thing a
+  vulnerability scanner reads).
+
 ## 0.1.0-alpha.10 (2026-09-20)
 
 - **`site-install`** (F9): puts an application's files into a site's empty directory as

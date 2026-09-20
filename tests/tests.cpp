@@ -775,6 +775,7 @@ static void test_presets() {
     write("wp2.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"wp2\"\napp = \"wordpress\"\nphp = { socket = \"unix:/run/php/fpm.sock\" }\n");
     Config wcfg2 = load_config(dir / "wp2.toml");
     CHECK(Router::location(wcfg2.sites[0], "/wp-config.php").try_files[0].status == 404 && Router::location(wcfg2.sites[0], "/wp-login.php").kind == HandlerKind::fastcgi);
+    CHECK(Router::location(wcfg2.sites[0], "/readme.html").try_files[0].status == 404 && Router::location(wcfg2.sites[0], "/license.txt").try_files[0].status == 404);
     // Every PHP preset either runs .php through FastCGI or refuses it on every static
     // location: a preset that lets a .php reach the static handler cannot ship.
     for (const Config* c : {&cfg, &pcfg, &dcfg, &wcfg2}) {

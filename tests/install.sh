@@ -67,7 +67,7 @@ check "the server's account can read the installed files through the group" "yes
 check "the audit log names the install with the sha256" "yes" "$(grep -q "sites/t7.test/install (install): installed .* (sha256 $SHA)" $T/logs/audit.log && echo yes)"
 rm -rf $T/www/t7.test/*
 check "an archive with a symlink is refused, the directory stays empty" "1 yes 0" "$(ctl upload evil.tgz $T/pub/evil.tgz > /dev/null; ctl site-install t7.test --file evil.tgz --yes --reason evil > $T/out; echo -n "$? "; grep -q 'symbolic link' $T/out && echo -n yes; echo " $(ls -A $T/www/t7.test | wc -l | tr -d ' ')")"
-check "a tarball made with 'tar -C dir .' installs (its ./ root entry is nothing to create)" "0 13" "$(ctl upload dot.tgz $T/pub/dot.tgz > /dev/null; ctl site-install t7.test --file dot.tgz --yes --reason dot > /dev/null; echo -n "$? "; find $T/www/t7.test -type f | wc -l | tr -d ' ')"
+check "a tarball made with 'tar -C dir .' installs (its ./ root entry is nothing to create)" "0 15" "$(ctl upload dot.tgz $T/pub/dot.tgz > /dev/null; ctl site-install t7.test --file dot.tgz --yes --reason dot > /dev/null; echo -n "$? "; find $T/www/t7.test -type f | wc -l | tr -d ' ')"
 rm -rf $T/www/t7.test/*
 
 # Downloads: fenced by address unless install_private, verified by sha256, https only.
