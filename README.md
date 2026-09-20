@@ -4,12 +4,12 @@ A very fast, small, cross-platform web server written in C++20 on top of standal
 [Asio](https://think-async.com/Asio/). No Qt, no Boost, no framework: an event loop per
 core, a zero-copy in-memory file cache, and a hand-written HTTP/1.1 parser.
 
-It serves static sites, PHP applications (Laravel, Statamic, WordPress, plain PHP) through
+It serves static sites, PHP applications (Laravel, Statamic, WordPress, Drupal, plain PHP) through
 FastCGI, and anything else through its reverse proxy (Node, Rails, Go, Java, WebSockets),
 obtains its own TLS certificates, reloads without dropping a connection, and can be
 configured by an AI agent through a built-in [MCP server](docs/mcp.md) over SSH.
 
-**Status: pre-alpha** (`0.1.0-alpha.1`). It runs real applications on Linux and macOS
+**Status: pre-alpha** (`0.1.0-alpha.17`). It runs real applications on Linux and macOS
 and beats nginx on CPU per request in every row of the benchmark harness, but it has
 had few users. See the known limitations below before putting it in front of anything
 that matters, and please report what you find.
@@ -152,6 +152,16 @@ wired and why it is safe: [docs/mcp.md](docs/mcp.md) and
 [docs/security-control-plane.md](docs/security-control-plane.md).
 
 ## Known limitations (pre-alpha)
+
+**Alpha software, use at your own risk.** agensio is a few weeks old and has been run by
+a handful of people. It has been careful about the things a web server must get right
+(request framing, paths, credentials files, privilege drop, what PHP may execute), and
+every problem found on a live host so far has become a test the same day, but there will
+be bugs nobody has hit yet, some of them security bugs. Until a stable release: keep it
+off anything you cannot afford to have exposed or down, keep backups, watch the error log
+and `agensio ctl health`, upgrade on every alpha (each one fixes something found live),
+and read the changelog before you do. There is no warranty of any kind (see the licence).
+Reports are the most useful thing you can send.
 
 - HTTP/1.1 only. HTTP/2 and HTTP/3 are phases G and I of the roadmap.
 - No response compression, no directory listing, no rate limiting yet.
