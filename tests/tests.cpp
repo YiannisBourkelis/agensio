@@ -825,7 +825,7 @@ static void test_presets() {
     CHECK(Router::location(w, "/wp-content/plugins/x/ajax.php").kind == HandlerKind::fastcgi);
     const LocationConfig& up = Router::location(w, "/wp-content/uploads/2026/shell.php");
     CHECK(up.path == "/wp-content/uploads/" && up.final && up.kind == HandlerKind::static_);
-    CHECK(up.deny_suffixes.size() == 7 && up.add_headers.size() == 1 && up.origin == "preset:wordpress");
+    CHECK(up.deny_suffixes.size() == 12 && up.add_headers.size() == 1 && up.origin == "preset:wordpress");
     CHECK(Router::location(w, "/wp-includes/js/x.js").final);
     CHECK(Router::location(w, "/wp-admin/").path == "/");
     CHECK(rejects("badfinal.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n"
@@ -2568,6 +2568,16 @@ static void test_server_account_and_rules() {
 // incomplete until the head is whole, and the whole parses to the same fields whether or
 // not shorter prefixes were tried first (a live "GETGET" line, 2026-09-20, was a buffer
 // bug in the connection, not here; this pins the parser's half of the invariant).
+// The refused-endings rule, with the spellings a live host served as source.
+static void test_refused_suffix() {
+    const std::vector<std::string> deny = {".php", ".phtml", ".inc", "~"};
+    for (const char* p : {"/files/x.php", "/files/x.PHP", "/files/x.PhP", "/files/x.php.", "/files/x.PHP..", "/files/x.phtml", "/files/x.INC", "/files/x.php~", "/files/x.jpg.php", "/x.php"})
+        CHECK(refused_suffix(p, deny));
+    for (const char* p : {"/files/x.php.jpg", "/files/x.jpg", "/files/php", "/files/x.ph", "/files/xphp", "/", ""})
+        CHECK(!refused_suffix(p, deny));
+    CHECK(!refused_suffix("/files/x.php", {}));
+}
+
 static void test_parser_prefixes() {
     const std::string text = "GET /wp-admin/js/plugin-install.min.js?ver=7.1.1 HTTP/1.1\r\nHost: ag2.example\r\nReferer: https://ag2.example/wp-admin/plugins.php\r\nUser-Agent: Firefox\r\n\r\nGET /next HTTP/1.1\r\n";
     const std::size_t head = text.find("\r\n\r\n") + 4;
@@ -2661,6 +2671,7 @@ int main() {
     test_server_account_and_rules();
     test_strict_hosts();
     test_parser_prefixes();
+    test_refused_suffix();
     test_install();
 #ifdef AGENSIO_HAS_TLS
     test_acme();

@@ -644,11 +644,19 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
             const HostFacts facts = system_facts();
             std::string user = facts.user_name ? facts.user_name(f.uid) : "", group = facts.group_name ? facts.group_name(f.gid) : "";
             const std::string owner = (user.empty() ? std::to_string(f.uid) : user) + ":" + (group.empty() ? std::to_string(f.gid) : group) + " " + mode;
+            // The remedy from the example's actual defect: the group, the group-read bit, or both.
+            const std::string dir = fs::path(u.example).parent_path().string();
+            const std::string sgroup = server.group.empty() ? std::to_string(server.gid) : server.group;
+            const bool group_wrong = server.known && f.gid != server.gid, mode_wrong = !(f.mode & 0040);
+            std::string fix;
+            if (group_wrong && mode_wrong) fix = "chgrp -R " + sgroup + " " + dir + " && chmod -R g+r " + dir;
+            else if (group_wrong) fix = "give them the server's group: chgrp -R " + sgroup + " " + dir;
+            else if (mode_wrong) fix = "the group is right, the mode is not: chmod -R g+r " + dir;
+            else fix = "make " + dir + " readable by " + (server.user.empty() ? "uid " + std::to_string(server.uid) : server.user) + " (a parent directory may lack the execute bit)";
             add("error", "files_unreadable", s.server_names.front(),
                 std::to_string(u.unreadable) + " of " + std::to_string(u.seen) + " sampled files under " + s.root + " cannot be read by the server's account (" +
                     (server.user.empty() ? "uid " + std::to_string(server.uid) : server.user) + ") and answer 404 with no log line; for example " + u.example + " (" + owner + ")",
-                "give them the server's group: chgrp -R " + (server.group.empty() ? std::to_string(server.gid) : server.group) + " " + fs::path(u.example).parent_path().string() +
-                    " (and chmod g+r); uploads made after agensio pools ran on this build carry it already");
+                fix + "; uploads made after agensio pools ran on this build carry the server's group already");
         }
     }
 

@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "cache.hpp"
 #include "config.hpp"
@@ -16,6 +17,25 @@
 #include "file.hpp"
 
 namespace agensio {
+
+// The refused-endings rule: a path ends with one of `deny` when its last characters match
+// case-insensitively, trailing dots ignored (`x.PHP`, `x.PhP`, `x.php.` are all `x.php`;
+// Drupal's .htaccess spells the same rule). `x.php.jpg` is a .jpg and passes. Pure, so
+// it is unit tested with the spellings a live report found served as source (2026-09-20).
+inline bool refused_suffix(std::string_view path, const std::vector<std::string>& deny) noexcept {
+    while (!path.empty() && path.back() == '.') path.remove_suffix(1);
+    for (const std::string& d : deny) {
+        if (d.size() > path.size()) continue;
+        const std::string_view tail = path.substr(path.size() - d.size());
+        bool same = true;
+        for (std::size_t i = 0; i < d.size() && same; ++i) {
+            const unsigned char a = static_cast<unsigned char>(tail[i]), b = static_cast<unsigned char>(d[i]);
+            same = a == b || ((a | 0x20) == (b | 0x20) && ((a | 0x20) >= 'a' && (a | 0x20) <= 'z'));
+        }
+        if (same) return true;
+    }
+    return false;
+}
 
 class StaticHandler {
 public:

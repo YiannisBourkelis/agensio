@@ -511,7 +511,10 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
 namespace {
 
 // PHP source in any spelling: refused by the static handler (403), never served as a download.
-const std::vector<std::string> kPhpSuffixes = {".php", ".phtml", ".phar", ".php5", ".php7", ".php8", ".phps"};
+// Every spelling php-fpm or a misconfigured handler might run, and the ones that leak
+// source: Drupal's .htaccess list (php|phar|pht|phtm|phtml|php[0-9]). Matched without
+// regard to case and to trailing dots (handlers/static.hpp, refused_suffix).
+const std::vector<std::string> kPhpSuffixes = {".php", ".phtml", ".phar", ".pht", ".phtm", ".php3", ".php4", ".php5", ".php6", ".php7", ".php8", ".phps"};
 
 struct Shield {
     const char* path;   // a `final` prefix (nginx ^~): files served, nothing PHP-like ever runs
@@ -540,7 +543,7 @@ struct PhpPreset {
 // translations, dumps, editor backups.
 const std::vector<std::string> kDrupalSource = {".inc", ".install", ".module", ".theme", ".engine", ".profile", ".make",
                                                 ".po", ".sql", ".twig", ".yml", ".yaml", ".sqlite", ".sqlite3", ".db",
-                                                ".bak", ".orig", ".save", ".swp", ".swo", ".tpl", ".xtmpl"};
+                                                ".bak", ".orig", ".save", ".swp", ".swo", ".tpl", ".xtmpl", "~"};
 
 const std::vector<PhpPreset> kPhpPresets = {
     // Plain PHP: any script runs, missing paths are 404, no front controller.

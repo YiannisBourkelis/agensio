@@ -774,6 +774,12 @@ if [ -n "$FPM_PID" ]; then
   mv $DF/styles/thumb/pic.jpg bench/tmp/pic.jpg.away; mv $DF/css/agg.css bench/tmp/agg.css.away; sleep 1.2
   check "drupal: a deleted derivative and aggregate reach the front controller with the query string (itok) intact" "drupal front /sites/default/files/styles/thumb/pic.jpg?itok=S02fzuls | drupal front /sites/default/files/css/css_abc.css?delta=0" "$(curl -sS "$D/sites/default/files/styles/thumb/pic.jpg?itok=S02fzuls"; echo -n " | "; curl -sS "$D/sites/default/files/css/css_abc.css?delta=0")"
   check "drupal: a missing PHP-like file below files/ is still a 404 that never reaches PHP" "404 404" "$(code $D/sites/default/files/styles/evil.php) $(code $D/sites/default/files/css/x.phtml)"
+  # Uploaded PHP source in every spelling: refused whatever the case, a trailing dot, an
+  # editor backup; a .php.jpg is a jpg (2026-09-20 report: .PHP, .PhP and .php. were served).
+  for n in ag.PHP ag.PhP ag.php. ag.pht ag.phtm ag.php3 ag.PHTML ag.php~ ag.inc.bak ag.php.jpg; do printf '<?php echo "LEAK";' > "$DF/$n"; done
+  check "drupal: PHP source below files/ is refused in every spelling; .php.jpg is a jpg" "404 404 404 404 404 404 404 404 404 200 image/jpeg" "$(for n in ag.PHP ag.PhP ag.php. ag.pht ag.phtm ag.php3 ag.PHTML ag.php~ ag.inc.bak; do code "$D/sites/default/files/$n"; echo -n ' '; done; curl -sSi $D/sites/default/files/ag.php.jpg | tr -d '\r' | awk 'NR==1{c=$2} tolower($1)=="content-type:"{t=$2} END{printf "%s %s", c, t}')"
+  check "drupal: none of those refusals reached PHP or leaked a byte" "0" "$(for n in ag.PHP ag.PhP ag.php. ag.pht ag.phtm ag.php3 ag.PHTML ag.php~ ag.inc.bak; do curl -sS "$D/sites/default/files/$n"; done | grep -c 'LEAK\|drupal front')"
+  rm -f $DF/ag.PHP $DF/ag.PhP "$DF/ag.php." $DF/ag.pht $DF/ag.phtm $DF/ag.php3 $DF/ag.PHTML "$DF/ag.php~" $DF/ag.inc.bak $DF/ag.php.jpg
   mv bench/tmp/pic.jpg.away $DF/styles/thumb/pic.jpg; mv bench/tmp/agg.css.away $DF/css/agg.css
   check "drupal: restored, the derivative serves statically again" "200 JPEGDATA" "$(curl -sS -o /dev/null -w '%{http_code} ' "$D/sites/default/files/styles/thumb/pic.jpg?itok=S02fzuls"; curl -sS "$D/sites/default/files/styles/thumb/pic.jpg?itok=S02fzuls")"
   check "drupal: the presets catalogue says which directory regenerates on a miss" "/sites/default/files/" "$(curl -sS --unix-socket bench/tmp/control.sock http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["drupal"]["missing_reaches_front_controller"][0], end=""); assert p["wordpress"]["missing_reaches_front_controller"] == []')"
@@ -802,6 +808,9 @@ print(len(deny), n404, readme[0]["handler"] if readme else "-")')"
   check "wordpress: readme.html and license.txt (the version fingerprint) are 404 although present" "404 404 yes" "$(code $W/readme.html) $(code $W/license.txt) $([ -f tests/wordpress/readme.html ] && echo yes)"
   check "wordpress: the wp-content drop-ins (db.php, advanced-cache.php, object-cache.php) are 404, never executed; the SQLite file is hidden" "404 404 404 404 no" "$(code $W/wp-content/db.php) $(code $W/wp-content/advanced-cache.php) $(code $W/wp-content/object-cache.php) $(code $W/wp-content/database/.ht.sqlite) $(curl -sS $W/wp-content/db.php | grep -q 'drop-in ran' && echo yes || echo no)"
   check "wordpress: PHP under uploads and wp-includes refused, assets served" "404 404 200" "$(code $W/wp-content/uploads/shell.php) $(code $W/wp-includes/x.php) $(code $W/wp-includes/wp.js)"
+  for n in up.PHP up.PhP up.php. up.phtml up.php7; do printf '<?php echo "LEAK";' > "tests/wordpress/wp-content/uploads/$n"; done
+  check "wordpress: PHP source under uploads is refused in every spelling, nothing leaks" "404 404 404 404 404 0" "$(for n in up.PHP up.PhP up.php. up.phtml up.php7; do code "$W/wp-content/uploads/$n"; echo -n ' '; done; for n in up.PHP up.PhP up.php. up.phtml up.php7; do curl -sS "$W/wp-content/uploads/$n"; done | grep -c LEAK)"
+  rm -f tests/wordpress/wp-content/uploads/up.PHP tests/wordpress/wp-content/uploads/up.PhP "tests/wordpress/wp-content/uploads/up.php." tests/wordpress/wp-content/uploads/up.phtml tests/wordpress/wp-content/uploads/up.php7
   rm -rf tests/drupal/web/.git tests/drupal/web/.env tests/drupal/web/sites/default/files/.ht.sqlite
 fi
 

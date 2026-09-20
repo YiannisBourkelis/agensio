@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.0-alpha.16 (2026-09-20)
+
+- **Fixed: refused endings were matched case-sensitively and a trailing dot escaped
+  them**, so `x.PHP`, `x.PhP` and `x.php.` under a shielded directory (Drupal's
+  `files/`, WordPress's `uploads/`) were served as source (live report; nothing
+  executed). The rule now ignores case and trailing dots on every shield and root, the
+  PHP spellings gained `.pht`, `.phtm`, `.php3`, `.php4`, `.php6`, and the drupal preset
+  refuses `~` backups too. Unit test of the rule and integration checks that plant every
+  spelling under both presets and assert not a byte leaks.
+- `health` `files_unreadable` picks its remedy from the example's defect: `chgrp` for a
+  wrong group, `chmod -R g+r` for a right group without group read, both when both.
+
 ## 0.1.0-alpha.15 (2026-09-20)
 
 - **Fixed, drupal preset: a missing file below `sites/default/files/` now reaches

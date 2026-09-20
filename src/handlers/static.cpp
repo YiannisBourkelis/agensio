@@ -343,11 +343,10 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
     // Endings this location refuses outright (PHP sources under an uploads directory).
     // Refused endings answer 404 like hidden files, so a refusal never confirms that a
     // file exists (one policy for dotfiles, credentials files and PHP where it may not run).
-    for (const std::string& d : loc.deny_suffixes)
-        if (std::string_view(ws.path).ends_with(d)) {
-            error(s, 404, req.keep_alive);
-            return Outcome::done;
-        }
+    if (!loc.deny_suffixes.empty() && refused_suffix(ws.path, loc.deny_suffixes)) {
+        error(s, 404, req.keep_alive);
+        return Outcome::done;
+    }
     // A method this handler does not serve (POST to a Laravel route): only try_files can
     // rescue it by redirecting to an application location; a real file means 405.
     if (!ws.method_allowed) {

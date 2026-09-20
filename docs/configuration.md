@@ -285,7 +285,11 @@ asset; one that does **not** exist reaches `index.php` with its query string, be
 that is how Drupal makes image-style derivatives (`styles/<style>/public/...?itok=...`)
 and rebuilds aggregated `css/` and `js/` after a cache rebuild: Drupal's own `.htaccess`
 does the same. PHP-like endings below `files/` stay refused with 404 and never reach
-PHP, whether the file exists or not. (2026-09-20: a deleted derivative was answered 404
+PHP, whether the file exists or not; the refusal ignores case and trailing dots
+(`x.PHP`, `x.PhP`, `x.php.`), covers `.php`, `.phtml`, `.phar`, `.pht`, `.phtm`,
+`.php3` to `.php8`, `.phps`, Drupal's source spellings and editor backups (`~`, `.bak`,
+`.orig`, `.save`, `.swp`), and a `.php.jpg` is a jpg (2026-09-20: upper-case and
+trailing-dot spellings were served as source). (2026-09-20: a deleted derivative was answered 404
 by the server for ever; the other shields, `core/lib/`, `vendor/`, keep answering 404
 for a miss.)
 
