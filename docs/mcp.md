@@ -97,6 +97,7 @@ takes `--socket PATH`.
 | `site_create`, `site_update` | admin | write or change a managed site file, validate, reload; answer with open decisions or root commands first |
 | `site_disable`, `site_enable`, `site_delete` | admin | rename the file away and back; delete it (a `.bak` stays) |
 | `site_install` | admin | put an application's files into a site's empty directory as the site's account: the preset's official archive (`version` optional), any https `url`, or a stored upload (`file`); a plugin or theme goes into `path` with `create_path: true`; `sha256`, `strip`, `dry_run`; the server enforces the fences and reports the source, digest and what it created |
+| `site_copy` | admin | copy one regular file of a site to another path of the same site, as the site's account: the drop-ins applications ship as templates (WordPress's `wp-content/db.php` from the SQLite plugin, Drupal's `settings.php`); `overwrite`, `dry_run`; never across sites, never caller content, never a directory |
 | `uploads_list` | viewer | archives stored with `agensio ctl upload`, for `site_install` |
 | `upload_delete` | operator | remove a stored upload |
 
@@ -128,8 +129,14 @@ there, where the files are).
 >
 > **Agent:** calls `site_install`. The server downloads `wordpress.org/latest.tar.gz` as
 > the site's account, verifies the archive, unpacks it into the site's directory and
-> answers with the file count and the sha256. The agent reports both and tells you to
-> open the site to finish WordPress's own setup.
+> answers with the file count and the sha256. The agent reports both.
+>
+> **You:** no database server here; use SQLite.
+>
+> **Agent:** calls `site_install` with the SQLite plugin's URL, `path:
+> wp-content/plugins/sqlite-database-integration` and `create_path: true`, then
+> `site_copy` from that plugin's `db.copy` to `wp-content/db.php`, and tells you to open
+> the site to finish WordPress's own setup. Zero terminal commands from start to end.
 
 Every step is one line in the audit log with your uid and the reason the agent gave.
 

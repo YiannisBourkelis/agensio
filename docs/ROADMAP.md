@@ -745,6 +745,12 @@ Rules:
       `[control] install`, `install_private`, `install_ca`, `upload_max`. zlib added as a
       dependency. `tests/install.sh` (root devbox), unit, fuzz and integration checks;
       security page rows 19-22.
+- [x] F9b (2026-09-20) `site-copy`: `install::copy_file`, helper op `file_copy` through
+      the shared `run_as_account` child; one regular file to another path of the same
+      site, the walk of F9, temporary name plus `linkat`/`renameat`, `overwrite` reported,
+      `dry_run` on the same path; MCP `site_copy`; security page row 23. Unit tests of
+      every refusal, integration and root-suite checks. Closed the last terminal step of
+      WordPress on SQLite (site, install, plugin with `create_path`, drop-in copy).
 - [ ] H1b Certificates watched and reloaded when the files change (manual `tls = { cert,
       key }` sites; automatic ones already reload themselves); reload must not stall new
       QUIC connections (nginx's known weakness).

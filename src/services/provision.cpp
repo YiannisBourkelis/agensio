@@ -13,11 +13,13 @@
 #endif
 
 #include <chrono>
+#include <functional>
 #include <cstring>
 #include <filesystem>
 #include <sstream>
 
 #include "control/sites.hpp"
+#include "services/archive.hpp"
 #include "services/fetch.hpp"
 #include "services/install.hpp"
 #include "services/pools.hpp"
@@ -84,6 +86,21 @@ std::string validate(const json::Value& req, const Config& cfg) {
         const json::Value& strip = req["strip"];
         if (!strip.is_null() && (strip.type() != json::Value::Type::number || (strip.num() != -1 && strip.num() != 0 && strip.num() != 1)))
             return "app_install: strip must be -1, 0 or 1";
+        return "";
+    }
+    if (op == "file_copy") {
+        const std::string site_root(req.get("site_root")), user(req.get("user")), from(req.get("from")), to(req.get("to"));
+        if (!control::safe_path(site_root, why)) return "file_copy: site_root " + why;
+        if (!under(site_root, sites_root(cfg)) || site_root == sites_root(cfg)) return "file_copy: " + site_root + " is not below " + sites_root(cfg);
+        if (!user.empty() && !control::valid_account(user, why)) return "file_copy: user " + why;
+        std::string clean;
+        for (const auto* which : {"from", "to"}) {
+            const std::string v(req.get(which));
+            if (!archive::clean_path(v, clean, why) || clean != v) return std::string("file_copy: ") + which + " must be a clean relative path below the site: " + (why.empty() ? "not normalised" : why);
+        }
+        if (from == to) return "file_copy: from and to are the same path";
+        for (const char* flag : {"overwrite", "dry_run"})
+            if (!req[flag].is_null() && req[flag].type() != json::Value::Type::boolean) return std::string("file_copy: ") + flag + " must be a boolean";
         return "";
     }
     if (op == "pools_apply" || op == "service_restart" || op == "ping") return "";
@@ -264,30 +281,19 @@ bool install_account(const Config& cfg, const std::string& site_root, const std:
     return site_account(cfg, owner, uid, gid, why);
 }
 
-// Runs install::execute in a child that has become the installing account; the reply
-// comes back through a pipe as one JSON line. Bounded by a deadline.
-json::Value app_install(const json::Value& req, const Config& cfg, int helper_fd) {
+// Runs `work` in a child that has become the given account (setgroups, setgid, setuid,
+// root not regainable); the reply comes back through a pipe as one JSON line. Bounded
+// by a deadline. `extra_fd` (an upload) is closed in the parent afterwards.
+json::Value run_as_account(uid_t uid, gid_t gid, int helper_fd, int extra_fd, const std::function<json::Value()>& work) {
     json::Value reply = json::Value::object();
-    const std::string target(req.get("target")), user(req.get("user")), upload(req.get("upload")), site_root(req.get("site_root"));
-    uid_t uid = 0;
-    gid_t gid = 0;
-    std::string why;
-    if (!install_account(cfg, site_root, user, uid, gid, why)) return reply.set("ok", false).set("error", why);
-    if (uid == 0) return reply.set("ok", false).set("error", "refusing to install as root");
-    int upload_fd = -1;
-    if (!upload.empty()) {
-        const std::string path = provision::uploads_dir(cfg) + "/" + upload;
-        upload_fd = ::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-        if (upload_fd < 0) return reply.set("ok", false).set("error", "upload " + upload + ": " + std::strerror(errno));
-    }
     int pipefd[2];
     if (::pipe(pipefd) != 0) {
-        if (upload_fd >= 0) ::close(upload_fd);
+        if (extra_fd >= 0) ::close(extra_fd);
         return reply.set("ok", false).set("error", std::string("pipe: ") + std::strerror(errno));
     }
     const pid_t pid = ::fork();
     if (pid < 0) {
-        if (upload_fd >= 0) ::close(upload_fd);
+        if (extra_fd >= 0) ::close(extra_fd);
         ::close(pipefd[0]);
         ::close(pipefd[1]);
         return reply.set("ok", false).set("error", std::string("fork: ") + std::strerror(errno));
@@ -295,31 +301,18 @@ json::Value app_install(const json::Value& req, const Config& cfg, int helper_fd
     if (pid == 0) {
         ::close(helper_fd);
         ::close(pipefd[0]);
-        ::umask(0);  // the extractor sets exact modes; nothing else is created here
+        ::umask(0);  // the extractor and the copy set exact modes; nothing else is created here
         json::Value out = json::Value::object();
-        if (::setgroups(0, nullptr) != 0 || ::setgid(gid) != 0 || ::setuid(uid) != 0 || ::setuid(0) == 0 || ::geteuid() != uid) {
+        if (::setgroups(0, nullptr) != 0 || ::setgid(gid) != 0 || ::setuid(uid) != 0 || ::setuid(0) == 0 || ::geteuid() != uid)
             out.set("ok", false).set("error", std::string("cannot become uid ") + std::to_string(uid) + ": " + std::strerror(errno));
-        } else {
-            install::Request r;
-            r.site_root = std::string(req.get("site_root"));
-            r.target = target;
-            r.create_path = req["create_path"].boolean();
-            r.dry_run = req["dry_run"].boolean();
-            r.url = std::string(req.get("url"));
-            r.upload_fd = upload_fd;
-            r.upload_name = upload;
-            r.sha256 = std::string(req.get("sha256"));
-            r.strip = req["strip"].is_null() ? -1 : static_cast<int>(req["strip"].num());
-            r.allow_private = cfg.control.install_private;
-            r.ca_file = cfg.control.install_ca;
-            out = install::execute(r);
-        }
+        else
+            out = work();
         const std::string text = out.dump() + "\n";
         (void)!::write(pipefd[1], text.data(), text.size());
         ::_exit(0);
     }
     ::close(pipefd[1]);
-    if (upload_fd >= 0) ::close(upload_fd);
+    if (extra_fd >= 0) ::close(extra_fd);
     std::string in;
     char buf[4096];
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(20);
@@ -327,7 +320,7 @@ json::Value app_install(const json::Value& req, const Config& cfg, int helper_fd
         const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
         if (left <= 0) {
             ::kill(pid, SIGKILL);
-            reply.set("ok", false).set("error", "the installation did not finish within 20 minutes; stopped");
+            reply.set("ok", false).set("error", "the operation did not finish within 20 minutes; stopped");
             break;
         }
         struct pollfd pfd {pipefd[0], POLLIN, 0};
@@ -346,9 +339,63 @@ json::Value app_install(const json::Value& req, const Config& cfg, int helper_fd
         std::string err;
         const std::size_t nl = in.find('\n');
         if (nl == std::string::npos || !json::parse(in.substr(0, nl), reply, err))
-            reply = json::Value::object().set("ok", false).set("error", "the install process ended without a result" + (WIFSIGNALED(status) ? std::string(" (signal ") + std::to_string(WTERMSIG(status)) + ")" : ""));
+            reply = json::Value::object().set("ok", false).set("error", "the process ended without a result" + (WIFSIGNALED(status) ? std::string(" (signal ") + std::to_string(WTERMSIG(status)) + ")" : ""));
     }
     return reply;
+}
+
+// app_install: the site's account installs an archive (install::execute) in a child.
+json::Value app_install(const json::Value& req, const Config& cfg, int helper_fd) {
+    json::Value reply = json::Value::object();
+    const std::string target(req.get("target")), user(req.get("user")), upload(req.get("upload")), site_root(req.get("site_root"));
+    uid_t uid = 0;
+    gid_t gid = 0;
+    std::string why;
+    if (!install_account(cfg, site_root, user, uid, gid, why)) return reply.set("ok", false).set("error", why);
+    if (uid == 0) return reply.set("ok", false).set("error", "refusing to install as root");
+    int upload_fd = -1;
+    if (!upload.empty()) {
+        const std::string path = provision::uploads_dir(cfg) + "/" + upload;
+        upload_fd = ::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        if (upload_fd < 0) return reply.set("ok", false).set("error", "upload " + upload + ": " + std::strerror(errno));
+    }
+    return run_as_account(uid, gid, helper_fd, upload_fd, [&] {
+        install::Request r;
+        r.site_root = site_root;
+        r.target = target;
+        r.create_path = req["create_path"].boolean();
+        r.dry_run = req["dry_run"].boolean();
+        r.url = std::string(req.get("url"));
+        r.upload_fd = upload_fd;
+        r.upload_name = upload;
+        r.sha256 = std::string(req.get("sha256"));
+        r.strip = req["strip"].is_null() ? -1 : static_cast<int>(req["strip"].num());
+        r.allow_private = cfg.control.install_private;
+        r.ca_file = cfg.control.install_ca;
+        return install::execute(r);
+    });
+}
+
+// file_copy (F9b): the site's account copies one of the site's files to another path of
+// the same site (install::copy_file) in a child; narrower than app_install in every way.
+json::Value file_copy(const json::Value& req, const Config& cfg, int helper_fd) {
+    json::Value reply = json::Value::object();
+    const std::string site_root(req.get("site_root")), user(req.get("user"));
+    uid_t uid = 0;
+    gid_t gid = 0;
+    std::string why;
+    if (!install_account(cfg, site_root, user, uid, gid, why)) return reply.set("ok", false).set("error", why);
+    if (uid == 0) return reply.set("ok", false).set("error", "refusing to copy as root");
+    return run_as_account(uid, gid, helper_fd, -1, [&] {
+        install::CopyRequest r;
+        r.site_root = site_root;
+        r.from = std::string(req.get("from"));
+        r.to = std::string(req.get("to"));
+        r.overwrite = req["overwrite"].boolean();
+        r.dry_run = req["dry_run"].boolean();
+        r.max_bytes = cfg.control.upload_max;
+        return install::copy_file(r);
+    });
 }
 
 // The helper's loop: one JSON line in, one out, until the server closes its end.
@@ -460,6 +507,8 @@ void helper_loop(int fd, const Config& cfg) {
                     }
                 } else if (op == "app_install") {
                     reply = app_install(req, cfg, fd);
+                } else if (op == "file_copy") {
+                    reply = file_copy(req, cfg, fd);
                 } else if (op == "service_restart") {
                     const auto now = std::chrono::steady_clock::now();
                     if (now - last_restart < std::chrono::seconds(60)) {

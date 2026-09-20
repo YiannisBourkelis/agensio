@@ -37,9 +37,10 @@ struct ControlBackend {
     virtual bool provision_available() = 0;
     virtual json::Value provision(const json::Value& req) = 0;
     virtual void restart_later() = 0;  // after the current reply went out
-    // site-install (F9): runs off the worker (a download can take minutes) and calls `done`
-    // on worker 0 with the install result. Through the helper as the site's account when
-    // there is one, else on a thread of this process as its own account.
+    // site-install and site-copy (F9): run off the worker (a download can take minutes) and
+    // call `done` on worker 0 with the result. Through the helper as the site's account
+    // when there is one, else on a thread of this process as its own account. `req.op`
+    // "file_copy" selects the copy; anything else is an install.
     virtual void install_async(const json::Value& req, std::function<void(json::Value)> done) = 0;
     virtual std::string uploads_dir() = 0;  // "" when uploads are not possible (no state directory)
 };
@@ -74,6 +75,7 @@ private:
     void site_update(Stream& s, std::string_view name, const json::Value& body, std::string_view reason);
     void site_toggle(Stream& s, std::string_view name, std::string_view action, std::string_view reason);
     void site_install(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> done);
+    void site_copy(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> done);
     void upload_receive(Stream& s, std::string_view name, std::function<void()> done);
     json::Value uploads_list();
     void upload_delete(Stream& s, std::string_view name, std::string_view reason);

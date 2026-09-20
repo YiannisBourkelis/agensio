@@ -37,6 +37,25 @@ struct Request {
 // point removes what this call created.
 json::Value execute(const Request& req);
 
+// site-copy (F9b): one regular file of a site copied to another path of the same site, as
+// the executing account. `from` and `to` are cleaned relative paths (archive::clean_path)
+// below site_root; both are reached by the same walk as an install (no symlink on any
+// component, every component the account's). The destination's parent must exist, the
+// destination must not, unless `overwrite`; the new file gets the parent's pattern
+// (a 2750 directory gives 0640, the execute bits when the source has them). Written to a
+// temporary name and linked or renamed into place, so a failure leaves nothing.
+struct CopyRequest {
+    std::string site_root;
+    std::string from, to;
+    bool overwrite = false;
+    bool dry_run = false;
+    std::uint64_t max_bytes = 512ull << 20;
+};
+
+// {"ok", "error"?, "as", "from", "to", "bytes", "mode", "replaced"?: {"bytes", "mtime"}};
+// a dry run answers {"ok", "dry_run": true, "as", "from", "to", "would_replace"?}.
+json::Value copy_file(const CopyRequest& req);
+
 // One path segment: letters, digits, ".", "_", "-", not starting with a dot, at most 128 bytes.
 bool valid_upload_name(std::string_view name) noexcept;
 // 64 hex digits (any case).

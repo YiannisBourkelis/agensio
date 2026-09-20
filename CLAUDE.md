@@ -352,10 +352,13 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   directory as the site's account from an https archive, an upload (`agensio ctl upload`)
   or the preset's official source; own extractor (tar, tar.gz, zip; every hostile entry
   refused, fuzzed), private-address fence on downloads, sha256, modes from the target.
-  Through the helper's `app_install` when started as root, else on a server thread as its
-  own account. `[control] install`, `install_private`, `install_ca`, `upload_max`;
-  `tests/install.sh` (root devbox). Rule for every change here: the security page rows
-  19-22 and the MCP texts move with it.
+  `--path SUB --create-path` puts a plugin or theme into its own new directory; `agensio
+  ctl site-copy NAME --from SUB --to SUB` (F9b) copies one of the site's files to another
+  path of the same site (drop-ins such as WordPress's `db.php`), never across sites.
+  Through the helper's `app_install` / `file_copy` when started as root, else on a server
+  thread as its own account. `[control] install`, `install_private`, `install_ca`,
+  `upload_max`; `tests/install.sh` (root devbox). Rule for every change here: the
+  security page rows 19-23 and the MCP texts move with it.
 - **Not yet**: directory listing, TLS-ALPN-01 / DNS-01 (wildcards), OCSP stapling.
 
 ## Performance notes (measured, keep current)

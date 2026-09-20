@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.0-alpha.12
+
+- `site-copy NAME --from SUB --to SUB [--overwrite]` (MCP `site_copy`, `POST
+  /v1/sites/NAME/copy`): one regular file of a site copied to another path of the same
+  site as the site's account, for the drop-ins applications ship as templates
+  (WordPress's `wp-content/db.php` from the SQLite plugin's `db.copy`, caching plugins'
+  `advanced-cache.php`, Drupal's `settings.php`). Both paths take the install's walk
+  (no `..`, no symlink on the way, no other account's directory); the destination's
+  directory must exist; an existing destination needs `--overwrite` and its old size and
+  mtime are reported; the new file gets the directory's pattern; written under a
+  temporary name, so a refusal leaves nothing. Never across sites, never caller content,
+  never a directory, no chmod or chown, and no option to relax any of that. With
+  `site-create`, `site-install` and `--create-path` the WordPress-on-SQLite path now
+  completes with zero terminal commands (the request that prompted it).
+
 ## 0.1.0-alpha.11 (2026-09-20)
 
 - `site-install --path SUB --create-path` (MCP `create_path: true`): a plugin, theme or

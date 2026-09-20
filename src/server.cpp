@@ -646,10 +646,24 @@ void Server::install_async(const json::Value& req, std::function<void(json::Valu
     // connection lives.
     std::thread([this, req, done = std::move(done)] {
         json::Value r;
+        const bool copy = req.get("op") == "file_copy";
         if (provisioner_.available()) {
             json::Value h = req;
-            h.set("op", "app_install");
+            if (!copy) h.set("op", "app_install");
             r = provisioner_.request(h);
+        } else if (copy) {
+#ifndef _WIN32
+            install::CopyRequest cr;
+            cr.site_root = std::string(req.get("site_root"));
+            cr.from = std::string(req.get("from"));
+            cr.to = std::string(req.get("to"));
+            cr.overwrite = req["overwrite"].boolean();
+            cr.dry_run = req["dry_run"].boolean();
+            cr.max_bytes = cfg_.control.upload_max;
+            r = install::copy_file(cr);
+#else
+            r = json::Value::object().set("ok", false).set("error", "not available on this platform");
+#endif
         } else {
 #ifndef _WIN32
             install::Request ir;

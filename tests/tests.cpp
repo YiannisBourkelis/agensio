@@ -2179,6 +2179,71 @@ static void test_install() {
         v = install::execute(r);
         ::close(r.upload_fd);
         CHECK(!v["ok"].boolean() && std::string(v.get("error")).find("not below") != std::string::npos);
+        // site-copy (F9b): one file to another path of the same site, every refusal of the report.
+        const fs::path site = dir / "target";
+        auto copy = [&](const std::string& from, const std::string& to, bool overwrite = false, bool dry = false, std::uint64_t cap = 512u << 20) {
+            install::CopyRequest c;
+            c.site_root = site.string();
+            c.from = from;
+            c.to = to;
+            c.overwrite = overwrite;
+            c.dry_run = dry;
+            c.max_bytes = cap;
+            return install::copy_file(c);
+        };
+        auto refused_with = [&](const json::Value& res, const char* fragment) {
+            const bool hit = !res["ok"].boolean() && std::string(res.get("error")).find(fragment) != std::string::npos;
+            if (!hit) std::printf("copy: expected '%s', got %s\n", fragment, res.dump().c_str());
+            return hit;
+        };
+        write_file(site / "plugins" / "demo" / "db.copy", "<?php // drop-in\n");
+        ::chmod((site / "plugins" / "demo" / "db.copy").c_str(), 0640);
+        fs::create_directories(site / "wp-content");
+        ::chmod((site / "wp-content").c_str(), 0750);
+        v = copy("plugins/demo/db.copy", "wp-content/db.php", false, true);  // dry run first
+        CHECK(v["ok"].boolean() && v["dry_run"].boolean() && v.get("to") == (site / "wp-content" / "db.php").string() && v.get("mode") == "0640" && !fs::exists(site / "wp-content" / "db.php"));
+        v = copy("plugins/demo/db.copy", "wp-content/db.php");
+        CHECK(v["ok"].boolean() && v["bytes"].num() == 17 && v.get("mode") == "0640" && v["replaced"].is_null());
+        CHECK(::stat((site / "wp-content" / "db.php").c_str(), &st) == 0 && (st.st_mode & 0777) == 0640 && st.st_size == 17);
+        CHECK(!fs::exists(site / "wp-content" / (".agensio-copy." + std::to_string(::getpid()))));
+        v = copy("plugins/demo/db.copy", "wp-content/db.php");  // exists: refused without overwrite
+        CHECK(refused_with(v, "exists; send overwrite"));
+        v = copy("plugins/demo/db.copy", "wp-content/db.php", false, true);  // and the dry run says the same
+        CHECK(refused_with(v, "exists; send overwrite"));
+        write_file(site / "plugins" / "demo" / "db.copy", "<?php // drop-in, second edition\n");
+        v = copy("plugins/demo/db.copy", "wp-content/db.php", true, true);
+        CHECK(v["ok"].boolean() && !v["would_replace"].is_null() && v["would_replace"]["bytes"].num() == 17);
+        v = copy("plugins/demo/db.copy", "wp-content/db.php", true);
+        CHECK(v["ok"].boolean() && v["replaced"]["bytes"].num() == 17 && !v["replaced"].get("mtime").empty() && v["bytes"].num() == 33);
+        // The executable bits follow the source when the directory grants them.
+        ::chmod((site / "plugins" / "demo" / "db.copy").c_str(), 0750);
+        v = copy("plugins/demo/db.copy", "wp-content/run.php");
+        CHECK(v["ok"].boolean() && v.get("mode") == "0750");
+        // Refusals: '..' on either side, absolute, same path, missing source, a directory,
+        // a symlinked source, a symlinked component, a missing destination directory, a
+        // destination that is a directory or a symlink, above the cap.
+        CHECK(refused_with(copy("../app.tar", "wp-content/x"), "'..'") && refused_with(copy("plugins/demo/db.copy", "../x"), "'..'"));
+        CHECK(refused_with(copy("/etc/passwd", "wp-content/x"), "absolute") && refused_with(copy("plugins/demo/db.copy", "plugins/demo/db.copy"), "same path"));
+        CHECK(refused_with(copy("plugins/demo/nothere", "wp-content/x"), "does not exist"));
+        CHECK(refused_with(copy("plugins/demo", "wp-content/x"), "is a directory"));
+        fs::create_symlink(site / "plugins" / "demo" / "db.copy", site / "plugins" / "demo" / "link.copy");
+        CHECK(refused_with(copy("plugins/demo/link.copy", "wp-content/x"), "symlink"));
+        CHECK(refused_with(copy("out/passwd", "wp-content/x"), "symlink") && refused_with(copy("plugins/demo/db.copy", "out/x"), "symlink"));  // `out` -> outside, from the create_path test
+        CHECK(refused_with(copy("plugins/demo/db.copy", "wp-content/cache/x"), "create-path"));
+        CHECK(refused_with(copy("plugins/demo/db.copy", "wp-content"), "is a directory"));
+        fs::create_symlink(site / "wp-content" / "db.php", site / "wp-content" / "alias.php");
+        CHECK(refused_with(copy("plugins/demo/db.copy", "wp-content/alias.php", true), "symlink"));
+        CHECK(refused_with(copy("plugins/demo/db.copy", "wp-content/big.php", false, false, 10), "above the limit") && !fs::exists(site / "wp-content" / "big.php"));
+        // Nothing outside the site can be named: the site's own parent, through a path that
+        // normalises inside, and a symlink placed inside pointing out are all refused above;
+        // an absolute site root that is itself a symlink is refused too.
+        install::CopyRequest c;
+        c.site_root = (dir / "link").string();
+        c.from = "plugins/demo/db.copy";
+        c.to = "wp-content/y";
+        v = install::copy_file(c);
+        CHECK(refused_with(v, "symlink"));
+        CHECK(!fs::exists(dir / "x") && !fs::exists(dir / "y") && !fs::exists(site / "wp-content" / "x"));
         fs::remove_all(dir);
     }
 #endif
@@ -2221,6 +2286,10 @@ static void test_install() {
         CHECK(!v(R"({"op":"app_install","target":"/srv/sites/a/web","upload":"wp.tgz","user":"root"})").empty());
         CHECK(!v(R"({"op":"app_install","target":"/srv/sites/a/web","upload":"wp.tgz","sha256":"xyz"})").empty());
         CHECK(!v(R"({"op":"app_install","target":"/srv/sites/a/web","upload":"wp.tgz","strip":2})").empty());
+        CHECK(v(R"({"op":"file_copy","site_root":"/srv/sites/a.test","user":"shop","from":"wp-content/plugins/x/db.copy","to":"wp-content/db.php","overwrite":true})").empty());
+        CHECK(!v(R"({"op":"file_copy","site_root":"/srv/sites","from":"a","to":"b"})").empty() && !v(R"({"op":"file_copy","site_root":"/srv/sites/a.test","from":"../b/x","to":"y"})").empty());
+        CHECK(!v(R"({"op":"file_copy","site_root":"/srv/sites/a.test","from":"/etc/passwd","to":"y"})").empty() && !v(R"({"op":"file_copy","site_root":"/srv/sites/a.test","from":"x","to":"x"})").empty());
+        CHECK(!v(R"({"op":"file_copy","site_root":"/srv/sites/a.test","from":"x","to":"y","overwrite":"yes"})").empty() && !v(R"({"op":"file_copy","site_root":"/srv/sites/a.test","from":"","to":"y"})").empty());
         c.control.install = false;
         CHECK(!v(R"({"op":"app_install","site_root":"/srv/sites/a","target":"/srv/sites/a/web","url":"https://x/y"})").empty() && v(R"({"op":"app_install","site_root":"/srv/sites/a","target":"/srv/sites/a/web","upload":"wp.tgz"})").empty());
         CHECK(provision::uploads_dir(c) == "/var/lib/agensio/uploads");

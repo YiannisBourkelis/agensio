@@ -240,7 +240,7 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
     }
     const bool known = path == "/v1/reload" || path == "/v1/sites" || path == "/v1/logs/reopen" ||
                        (site_path && !name.empty() && (action.empty() || action == "disable" || action == "enable" ||
-                                                       action == "delete" || action == "renew" || action == "install")) ||
+                                                       action == "delete" || action == "renew" || action == "install" || action == "copy")) ||
                        (upload_path && !name.empty() && action == "delete");
     if (!known) {
         reply(s, 404, json::Value::object().set("error", "unknown command").set("path", std::string(path)));
@@ -299,12 +299,13 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
         else reply(s, 409, json::Value::object().set("ok", false).set("error", error));
         return false;
     }
-    if (action == "install") {
+    if (action == "install" || action == "copy") {
         if (!done) {  // no way to defer: answered synchronously as a refusal
-            reply(s, 503, json::Value::object().set("error", "install needs an asynchronous caller"));
+            reply(s, 503, json::Value::object().set("error", "install and copy need an asynchronous caller"));
             return false;
         }
-        site_install(s, name, body, what, std::move(done));
+        if (action == "copy") site_copy(s, name, body, what, std::move(done));
+        else site_install(s, name, body, what, std::move(done));
         return true;
     }
     site_toggle(s, name, action, what);
@@ -822,6 +823,62 @@ void ControlHandler::site_toggle(Stream& s, std::string_view name, std::string_v
     }
     audit_peer(s, what, std::string(action) + " " + file.string());
     reply(s, 200, json::Value::object().set("ok", true).set("file", file.string()).set("action", std::string(action)));
+}
+
+// One of the site's files copied to another path of the same site (F9b): the drop-in
+// files applications ship as templates (wp-content/db.php from a plugin's db.copy,
+// Drupal's settings.php from default.settings.php). Never across sites, never content
+// from the caller, never a directory: the smallest primitive that covers those cases.
+void ControlHandler::site_copy(Stream& s, std::string_view name, const json::Value& body, std::string_view what, std::function<void()> done) {
+    const Config& cfg = backend_->running();
+    const SiteConfig* site = control::find_site(cfg, name);
+    if (!site) {
+        reply(s, 404, json::Value::object().set("error", "no such site").set("site", std::string(name)));
+        done();
+        return;
+    }
+    const std::string site_root = site->project_root.empty() ? site->root : site->project_root;
+    std::string from, to, why;
+    if (!archive::clean_path(body.get("from"), from, why)) {
+        reply(s, 400, json::Value::object().set("error", "from must be a relative path below the site's directory, without '..': " + why));
+        done();
+        return;
+    }
+    if (!archive::clean_path(body.get("to"), to, why)) {
+        reply(s, 400, json::Value::object().set("error", "to must be a relative path below the site's directory, without '..': " + why));
+        done();
+        return;
+    }
+    if (from == to) {
+        reply(s, 400, json::Value::object().set("error", "from and to are the same path"));
+        done();
+        return;
+    }
+    if (site_root.empty() || !control::safe_path(site_root, why)) {
+        reply(s, 409, json::Value::object().set("error", "the site's directory is not a path a copy can use: " + why));
+        done();
+        return;
+    }
+    const bool overwrite = body["overwrite"].boolean(), dry_run = body["dry_run"].boolean();
+    json::Value req = json::Value::object().set("op", "file_copy").set("site_root", site_root).set("from", from).set("to", to)
+                          .set("overwrite", overwrite).set("dry_run", dry_run);
+    if (!site->user.empty()) req.set("user", site->user);
+    if (!dry_run) audit_peer(s, what, "copying " + from + " to " + to + " in " + site_root + (overwrite ? " (overwrite)" : ""));
+    backend_->install_async(req, [this, &s, what = std::string(what), dry_run, done](json::Value r) {
+        const bool ok = r["ok"].boolean();
+        if (dry_run) {
+            if (ok) reply(s, 200, r.set("hint", "nothing was written; the same call without dry_run copies"));
+            else reply(s, 409, json::Value::object().set("ok", false).set("dry_run", true).set("error", r.get("error")));
+            done();
+            return;
+        }
+        const bool replaced = !r["replaced"].is_null();
+        audit_peer(s, what, ok ? (replaced ? "replaced " : "wrote ") + std::string(r.get("to")) + " from " + std::string(r.get("from")) + " (" + std::string(r.get("as")) + " " + std::string(r.get("mode")) + ", " + std::to_string(static_cast<long>(r["bytes"].num())) + " bytes)"
+                              : "failed: " + std::string(r.get("error")));
+        if (!ok) reply(s, 409, json::Value::object().set("ok", false).set("error", r.get("error")));
+        else reply(s, replaced ? 200 : 201, r);
+        done();
+    });
 }
 
 }  // namespace agensio

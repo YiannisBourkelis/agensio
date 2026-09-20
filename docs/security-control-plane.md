@@ -40,6 +40,7 @@ under `src/control/` updates the row it touches.
 | 19 | An application install writes only as the site's account into an empty directory that account owns: the site's `user`, or the owner of the site's directory when it is a site account or the server's; root and login accounts are refused; the helper's child drops privileges before it reads a byte. The target is reached from the site's directory by a walk that never follows a symlink and requires every existing component to be the account's; `create_path` makes missing levels as that account with the parent's pattern, and a refusal removes what the call created | `provision.cpp` `install_account`, `app_install`; `install::execute` (the walk, `create_path`, cleanup) checks the owner against its own euid again | `tests/install.sh`: files and created directories owned by the site user, root-owned, login-owned and other-account components refused; unit tests of the walk (symlink, `..`, outside, two-level creation and its cleanup, dry run) |
 | 20 | Downloads are https only, certificate and host verified, every address of every hop checked against the private-address fence (loopback, link-local, RFC 1918, ULA, 100.64/10, multicast, IPv4-mapped), 5 redirects, 1 GB, 15 minutes; `install = false` turns downloads off and leaves uploads; `install_private` opens the fence knowingly | `services/fetch.*` | unit test of `is_private_address` and `split_url`; `tests/integration.sh` "a private https address is fenced", "install = false"; `tests/install.sh` download as the site user with `install_private` |
 | 21 | Archives are unpacked by agensio's own bounded extractor: symlinks, hard links, devices, fifos, absolute paths, `..`, backslashes, control characters, encrypted and zip64 entries, checksum and CRC mismatches, entry, size, depth and path caps all end the install with the reason and an emptied directory; files are created `O_EXCL | O_NOFOLLOW` with modes from the target's own; an optional sha256 gates the whole thing | `services/archive.*`, `services/install.*`, `tests/fuzz/fuzz_archive.cpp` | unit tests of every refusal on in-memory tar and zip; `tests/install.sh` "symlink refused, directory empty"; fuzz run recorded below |
+| 23 | `site-copy` moves bytes the site already has to another path of the same site and nothing else: both paths reached by the walk of row 19 from the site's directory, so no path can name another site or anything outside (through `..`, an absolute path or a symlink placed inside); the source must be a regular file; the destination's directory must exist; an existing destination needs `overwrite` and is reported; the file is written under a temporary name and linked (no overwrite: EEXIST is the race) or renamed into place; no caller content, no directory, no chmod, no chown, no move, no delete, and no configuration option relaxes any of it | `install::copy_file`, helper op `file_copy` (`provision::validate`), `ControlHandler::site_copy` | unit tests of every refusal and of the outside-the-site cases; `tests/integration.sh` copy checks; `tests/install.sh`: the file owned by the site user with the layout's pattern, another account's directory refused |
 | 22 | Uploads land in `<state_dir>/uploads`, the server's own directory (0700), by name only (no path), capped by `upload_max` (413 before a byte is stored), a partial transfer leaves nothing, and are readable by no site account; the helper opens them as root for the install child | `ControlHandler::upload_receive`, `Server::prepare_uploads`, `body_limit()` on the local socket | `tests/integration.sh` upload checks; `tests/install.sh` "unreadable by the site account" |
 
 Threat 2 (browsers) is answered by rule 2: there is no TCP transport, so no browser can
@@ -57,7 +58,7 @@ changes the trust model, so here is exactly what it is:
 - **Reachability.** The helper holds one end of a socketpair; there is no path and no
   port. Only the server process can talk to it. A site user, a PHP application or a
   network peer has nothing to connect to.
-- **Vocabulary.** Six requests, each validated again inside the helper against the
+- **Vocabulary.** Seven requests, each validated again inside the helper against the
   configuration it started with (`provision::validate`, unit tested): `account_add`
   (name by the account rule, no system accounts, no words for "none"; `useradd --system
   --no-create-home`, home in `state_dir`, `nologin`), `site_layout` (a normalised
@@ -72,7 +73,9 @@ changes the trust model, so here is exactly what it is:
   account rule of row 19; a forked child becomes that account with `setgroups`,
   `setgid`, `setuid` and a check that root cannot be regained, then downloads or reads
   the upload, verifies the digest and unpacks with the fences of rows 20 and 21; the
-  helper waits with a 20-minute deadline).
+  helper waits with a 20-minute deadline), and `file_copy` (F9b: the same account rule
+  and child, one regular file of the site to another path of the same site, row 23;
+  narrower than `app_install` in every way).
 - **Execution.** `useradd`, `groupadd` and `systemctl` by absolute path, fixed argument
   list, empty environment. No shell, ever. Nothing the server sends can name a program.
 - **Audit.** Every request and every refusal is written to the audit log with the
@@ -80,10 +83,11 @@ changes the trust model, so here is exactly what it is:
 
 What a fully compromised server process gains: it can create `nologin` system accounts
 without a home, lay out directories under `sites_root` for such accounts, regenerate pool
-files the hosting rules accept, restart the service (rate-limited), and have an archive
+files the hosting rules accept, restart the service (rate-limited), have an archive
 of its choosing unpacked, as a site account, into an empty directory that account owns
 under `sites_root` (regular files and directories only, no symlinks, no set-uid, no
-program run). What it cannot do: obtain a shell or run any other program, read or write
+program run), and have one of a site's files copied to another path of the same site as
+that account. What it cannot do: obtain a shell or run any other program, read or write
 outside `sites_root`, `state_dir`, the pool directory and the log directory, take over a
 directory of another site, write as root or as any login account, or touch an account
 that has a login shell. That exposure is smaller than php-fpm's root master on the same

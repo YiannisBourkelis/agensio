@@ -3,6 +3,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <string_view>
 #include <vector>
 
@@ -384,8 +385,204 @@ json::Value execute(const Request& req) {
     return result;
 }
 
+namespace {
+
+// Opens the directory `rel` (cleaned, "" for the root itself) below an open site root,
+// component by component, never through a symlink, every component the account's.
+// -1 with `error`; `missing` says the failure was a component that does not exist.
+int walk_dirs(int root_fd, const std::string& root_path, const std::string& rel, std::string& error, bool& missing) {
+    missing = false;
+    int cur = ::dup(root_fd);
+    if (cur < 0) {
+        error = std::strerror(errno);
+        return -1;
+    }
+    std::string so_far = root_path;
+    std::size_t pos = 0;
+    while (pos < rel.size()) {
+        const std::size_t slash = rel.find('/', pos);
+        const std::string part = rel.substr(pos, slash == std::string::npos ? std::string::npos : slash - pos);
+        pos = slash == std::string::npos ? rel.size() : slash + 1;
+        if (part.empty()) continue;
+        const std::string path = so_far + "/" + part;
+        const int child = ::openat(cur, part.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (child < 0) {
+            missing = errno == ENOENT;
+            error = missing ? path + " does not exist" : open_failure(cur, part, path);
+            ::close(cur);
+            return -1;
+        }
+        struct stat st {};
+        if (::fstat(child, &st) != 0 || st.st_uid != ::geteuid()) {
+            error = st.st_uid != ::geteuid() ? path + " belongs to uid " + std::to_string(st.st_uid) + ", another account; refused" : path + ": " + std::strerror(errno);
+            ::close(child);
+            ::close(cur);
+            return -1;
+        }
+        ::close(cur);
+        cur = child;
+        so_far = path;
+    }
+    return cur;
+}
+
+void split_leaf(const std::string& rel, std::string& dir, std::string& leaf) {
+    const std::size_t slash = rel.rfind('/');
+    dir = slash == std::string::npos ? "" : rel.substr(0, slash);
+    leaf = slash == std::string::npos ? rel : rel.substr(slash + 1);
+}
+
+}  // namespace
+
+json::Value copy_file(const CopyRequest& req) {
+    std::string cf, ct, why;
+    if (!archive::clean_path(req.from, cf, why) || cf != req.from) return failure("from: " + (why.empty() ? "not a clean relative path" : why));
+    if (!archive::clean_path(req.to, ct, why) || ct != req.to) return failure("to: " + (why.empty() ? "not a clean relative path" : why));
+    if (cf == ct) return failure("from and to are the same path");
+    if (req.site_root.empty() || req.site_root.front() != '/') return failure("no site directory");
+    const uid_t me = ::geteuid();
+    const int root_fd = ::open(req.site_root.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (root_fd < 0) return failure("site directory " + open_failure(AT_FDCWD, req.site_root, req.site_root));
+    struct stat rs {};
+    if (::fstat(root_fd, &rs) != 0 || rs.st_uid != me) {
+        ::close(root_fd);
+        return failure("site directory " + req.site_root + " belongs to uid " + std::to_string(rs.st_uid) + ", not to the account copying (" + account_name() + "); refused");
+    }
+    const std::string from_abs = req.site_root + "/" + cf, to_abs = req.site_root + "/" + ct;
+    // The source: a regular file reached without following a symlink.
+    std::string fdir, fleaf, tdir, tleaf, error;
+    split_leaf(cf, fdir, fleaf);
+    split_leaf(ct, tdir, tleaf);
+    bool missing = false;
+    const int from_dir = walk_dirs(root_fd, req.site_root, fdir, error, missing);
+    if (from_dir < 0) {
+        ::close(root_fd);
+        return failure("from: " + error);
+    }
+    const int src = ::openat(from_dir, fleaf.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (src < 0) {
+        const std::string what = errno == ENOENT ? from_abs + " does not exist" : open_failure(from_dir, fleaf, from_abs);
+        ::close(from_dir);
+        ::close(root_fd);
+        return failure("from: " + what);
+    }
+    ::close(from_dir);
+    struct stat ss {};
+    if (::fstat(src, &ss) != 0 || !S_ISREG(ss.st_mode)) {
+        ::close(src);
+        ::close(root_fd);
+        return failure("from: " + from_abs + (S_ISDIR(ss.st_mode) ? " is a directory; only a single regular file is copied" : " is not a regular file; refused"));
+    }
+    if (static_cast<std::uint64_t>(ss.st_size) > req.max_bytes) {
+        ::close(src);
+        ::close(root_fd);
+        return failure("from: " + from_abs + " is " + std::to_string(ss.st_size) + " bytes, above the limit of " + std::to_string(req.max_bytes));
+    }
+    // The destination: its parent must exist (create_path is site-install's job), the
+    // leaf must not, unless overwrite; a symlink or a directory there is refused outright.
+    const int to_dir = walk_dirs(root_fd, req.site_root, tdir, error, missing);
+    ::close(root_fd);
+    if (to_dir < 0) {
+        ::close(src);
+        return failure("to: " + error + (missing ? " (create it first with site-install --create-path)" : ""));
+    }
+    struct stat ds {}, es {};
+    ::fstat(to_dir, &ds);
+    json::Value replaced;
+    if (::fstatat(to_dir, tleaf.c_str(), &es, AT_SYMLINK_NOFOLLOW) == 0) {
+        std::string what;
+        if (S_ISLNK(es.st_mode)) what = to_abs + " is a symlink; refused";
+        else if (S_ISDIR(es.st_mode)) what = to_abs + " is a directory; refused";
+        else if (!S_ISREG(es.st_mode)) what = to_abs + " is not a regular file; refused";
+        else if (es.st_dev == ss.st_dev && es.st_ino == ss.st_ino) what = to_abs + " is the same file as the source";
+        else if (!req.overwrite) what = to_abs + " exists; send overwrite: true to replace it";
+        if (!what.empty()) {
+            ::close(to_dir);
+            ::close(src);
+            return failure("to: " + what);
+        }
+        char stamp[32];
+        std::tm tm{};
+        ::localtime_r(&es.st_mtime, &tm);
+        std::strftime(stamp, sizeof stamp, "%Y-%m-%dT%H:%M:%S", &tm);
+        replaced = json::Value::object().set("bytes", static_cast<double>(es.st_size)).set("mtime", stamp);
+    } else if (errno != ENOENT) {
+        const std::string what = std::strerror(errno);
+        ::close(to_dir);
+        ::close(src);
+        return failure("to: " + to_abs + ": " + what);
+    }
+    const unsigned mode = (ds.st_mode & 0666) | ((ss.st_mode & 0111) ? (ds.st_mode & 0111) : 0);
+    if (req.dry_run) {
+        ::close(to_dir);
+        ::close(src);
+        json::Value v = json::Value::object().set("ok", true).set("dry_run", true).set("as", account_name()).set("from", from_abs).set("to", to_abs)
+                            .set("bytes", static_cast<double>(ss.st_size)).set("mode", mode_text(mode));
+        if (!replaced.is_null()) v.set("would_replace", replaced);
+        return v;
+    }
+    // Written under a temporary name, then linked (no overwrite: an EEXIST here is the
+    // race the check could not see) or renamed (overwrite) into place.
+    const std::string tmp = ".agensio-copy." + std::to_string(::getpid());
+    const int dst = ::openat(to_dir, tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (dst < 0) {
+        const std::string what = std::strerror(errno);
+        ::close(to_dir);
+        ::close(src);
+        return failure("to: cannot create a temporary file next to " + to_abs + ": " + what);
+    }
+    auto abort_copy = [&](const std::string& what) {
+        ::close(dst);
+        ::unlinkat(to_dir, tmp.c_str(), 0);
+        ::close(to_dir);
+        ::close(src);
+        return failure(what);
+    };
+    std::vector<char> buf(64 * 1024);
+    std::uint64_t copied = 0;
+    for (;;) {
+        const ssize_t n = ::read(src, buf.data(), buf.size());
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return abort_copy("reading " + from_abs + ": " + std::strerror(errno));
+        }
+        if (n == 0) break;
+        copied += static_cast<std::uint64_t>(n);
+        if (copied > req.max_bytes) return abort_copy(from_abs + " grew past the limit while copying");
+        const char* p = buf.data();
+        std::size_t left = static_cast<std::size_t>(n);
+        while (left > 0) {
+            const ssize_t w = ::write(dst, p, left);
+            if (w < 0) {
+                if (errno == EINTR) continue;
+                return abort_copy("writing " + to_abs + ": " + std::strerror(errno));
+            }
+            p += w;
+            left -= static_cast<std::size_t>(w);
+        }
+    }
+    if (::fchmod(dst, mode) != 0 || ::fsync(dst) != 0) return abort_copy(to_abs + ": " + std::strerror(errno));
+    ::close(dst);
+    const bool placed = replaced.is_null() ? ::linkat(to_dir, tmp.c_str(), to_dir, tleaf.c_str(), 0) == 0 : ::renameat(to_dir, tmp.c_str(), to_dir, tleaf.c_str()) == 0;
+    if (!placed) {
+        const std::string what = errno == EEXIST ? to_abs + " appeared meanwhile; refused (send overwrite: true to replace it)" : to_abs + ": " + std::strerror(errno);
+        ::unlinkat(to_dir, tmp.c_str(), 0);
+        ::close(to_dir);
+        ::close(src);
+        return failure("to: " + what);
+    }
+    if (replaced.is_null()) ::unlinkat(to_dir, tmp.c_str(), 0);
+    ::close(to_dir);
+    ::close(src);
+    json::Value v = json::Value::object().set("ok", true).set("as", account_name()).set("from", from_abs).set("to", to_abs)
+                        .set("bytes", static_cast<double>(copied)).set("mode", mode_text(mode));
+    if (!replaced.is_null()) v.set("replaced", replaced);
+    return v;
+}
+
 #else
 json::Value execute(const Request&) { return json::Value::object().set("ok", false).set("error", "not available on this platform"); }
+json::Value copy_file(const CopyRequest&) { return json::Value::object().set("ok", false).set("error", "not available on this platform"); }
 #endif
 
 }  // namespace agensio::install

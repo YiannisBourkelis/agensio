@@ -49,6 +49,7 @@ void usage() {
                  "                      site-delete NAME | cert-renew NAME |\n"
                  "                      site-install NAME [--url https://... | --file UPLOAD | --version V] [--sha256 H]\n"
                  "                           [--path SUB] [--create-path] [--strip 0|1] [--dry-run]\n"
+                 "                      site-copy NAME --from SUB --to SUB [--overwrite] [--dry-run]\n"
                  "                      Uploads: upload NAME [FILE] (stdin by default) | uploads | uploads-delete NAME\n"
                  "  mcp                 Model Context Protocol server on stdin/stdout for an AI agent host,\n"
                  "                      exposing the control commands as tools as the invoking user\n"
@@ -120,6 +121,9 @@ int main(int argc, char** argv) {
                              "                    into the site's (empty) directory as the site's account; no source = the preset's\n"
                              "                    official archive. A plugin or theme: --path wp-content/plugins/NAME --create-path\n"
                              "                    makes the missing directories (as the site's account, below the site's directory)\n"
+                             "        site-copy NAME --from SUB --to SUB [--overwrite] [--dry-run]: copies one of the site's files\n"
+                             "                    to another path of the same site, as the site's account (drop-ins such as\n"
+                             "                    wp-content/db.php from a plugin's db.copy); the destination's directory must exist\n"
                              "        uploads-delete NAME\n"
                              "upload: upload NAME [FILE]   stores FILE (or stdin) on the server for site-install --file NAME;\n"
                              "                    needs the operator role, no --yes\n"
@@ -180,6 +184,9 @@ int main(int argc, char** argv) {
                 else if (b == "--path") field("path");
                 else if (b == "--strip") { std::string v; value(v); body.set("strip", std::atoi(v.c_str())); }
                 else if (b == "--create-path") body.set("create_path", true);
+                else if (b == "--from") field("from");
+                else if (b == "--to") field("to");
+                else if (b == "--overwrite") body.set("overwrite", true);
                 else if (command.empty()) command = b;
                 else if (site_name.empty() && command.starts_with("site") && command != "sites") site_name = b;
                 else if (site_name.empty() && (command == "cert-renew" || command == "upload" || command == "uploads-delete")) site_name = b;
@@ -203,6 +210,7 @@ int main(int argc, char** argv) {
                 path = "/v1/sites/" + site_name + "/" + command.substr(5);
             else if (command == "cert-renew" && !site_name.empty()) path = "/v1/sites/" + site_name + "/renew";
             else if (command == "site-install" && !site_name.empty()) path = "/v1/sites/" + site_name + "/install";
+            else if (command == "site-copy" && !site_name.empty()) path = "/v1/sites/" + site_name + "/copy";
             else if (command == "uploads-delete" && !site_name.empty()) path = "/v1/uploads/" + site_name + "/delete";
             else if (upload && !site_name.empty()) path = "/v1/uploads/" + site_name;
             else {

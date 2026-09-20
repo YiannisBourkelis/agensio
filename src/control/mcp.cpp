@@ -125,6 +125,15 @@ std::vector<Tool> tools() {
                          {"confirm", confirm_arg()},
                          {"reason", reason_arg()}},
                         {"name", "confirm", "reason"})});
+    t.push_back({"site_copy", "Copy a file within a site", "Copies one regular file of the site to another path of the same site, as the site's account: the drop-in files applications ship as templates, e.g. WordPress's wp-content/db.php from wp-content/plugins/sqlite-database-integration/db.copy (the SQLite plugin does not work until that copy exists), advanced-cache.php or object-cache.php from a caching plugin, Drupal's sites/default/settings.php from default.settings.php. Both paths are relative to the site's directory and must stay inside it (no '..', no symlink on the way, no other account's directory); from must be an existing regular file; the destination's directory must already exist (site_install with create_path makes one); an existing destination is refused unless overwrite: true, and then the answer reports what was replaced. The new file gets the directory's pattern (0640 in a 2750 directory). Nothing can be copied across sites, no content can be supplied, no directory copied, no chmod or chown: those are not offered on purpose. dry_run: true runs the same checks and reports what would happen.", "POST", "/v1/sites/{name}/copy", false, false, Role::admin,
+                 schema({{"name", name_arg()},
+                         {"from", prop("string", "The existing file, relative to the site's directory, e.g. wp-content/plugins/sqlite-database-integration/db.copy.")},
+                         {"to", prop("string", "The destination file, relative to the site's directory, e.g. wp-content/db.php. Its directory must exist.")},
+                         {"overwrite", prop("boolean", "Replace an existing destination file (default false: an existing file is refused).")},
+                         {"dry_run", prop("boolean", "Run the same checks without writing; the answer shows the resolved paths, the account and the mode, or the refusal.")},
+                         {"confirm", confirm_arg()},
+                         {"reason", reason_arg()}},
+                        {"name", "from", "to", "confirm", "reason"})});
     return t;
 }
 
@@ -142,6 +151,9 @@ const char* kInstructions =
     "give the user that command when the archive is on their machine, and also when the server refuses a download by its "
     "rules). The install runs as the site's account into an empty directory and refuses symlinks, private addresses and "
     "oversize archives, leaving nothing behind on a refusal; report the source and sha256 it answers with. "
+    "A plugin or theme goes into its own directory with site_install's path and create_path; a drop-in file an "
+    "application ships as a template (WordPress's wp-content/db.php from the SQLite plugin's db.copy, Drupal's "
+    "settings.php) is put in place with site_copy, which copies one file within the same site and nothing else. "
     "Never invent settings: what a tool does not offer is not configurable here. Host names are "
     "strict: a site answers only the names in server_name, and a listener without a catch-all site "
     "(server_name [\"*\"] or default = true) answers 421 to any other Host, including the IP address; "
