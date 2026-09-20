@@ -706,7 +706,7 @@ void parse_pool(const toml::table* php, const fs::path& base_dir, const Config& 
                 const std::string& project_root, const std::string& where) {
     PhpPool& pool = site.pool;
     static constexpr const char* kKeys[] = {"children", "version", "max_requests", "memory_limit",
-                                            "max_execution_time", "pm", "open_basedir", "extra"};
+                                            "max_execution_time", "max_input_time", "pm", "open_basedir", "extra"};
     bool any = false;
     if (php)
         for (const char* k : kKeys) any = any || php->contains(k);
@@ -725,6 +725,7 @@ void parse_pool(const toml::table* php, const fs::path& base_dir, const Config& 
         count("children", pool.children, 1, 10000);
         count("max_requests", pool.max_requests, 0, 1000000);
         count("max_execution_time", pool.max_execution_time, 0, 86400);
+        count("max_input_time", pool.max_input_time, 0, 86400);
         pool.version = (*php)["version"].value_or(std::string());
         pool.memory_limit = (*php)["memory_limit"].value_or(pool.memory_limit);
         pool.pm = to_lower((*php)["pm"].value_or(pool.pm));
@@ -786,6 +787,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     // A proxied or redirecting site needs no document root: it gets none (the static handler
     // answers 404 for an empty root), never the configuration directory.
     site.root = root ? resolve_root(base_dir, *root, where) : std::string();
+    site.max_body_size = size_node(t["max_body_size"], 0, (where + ".max_body_size").c_str());
     const std::string root_given = site.root;  // the project directory (open_basedir starts there)
     site.project_root = root_given;
     if (const PhpPreset* preset = php_preset(site.app)) {
@@ -1321,6 +1323,23 @@ Config load_config(const fs::path& path) {
         cfg.control.install_private = (*ct)["install_private"].value_or(false);
         if (auto ca = (*ct)["install_ca"].value<std::string>()) cfg.control.install_ca = resolve(base_dir, *ca).string();
         cfg.control.upload_max = size_node((*ct)["upload_max"], cfg.control.upload_max, "control.upload_max");
+        if (auto sl = (*ct)["site_limits"].as_table()) {
+            auto& lim = cfg.control.site_limits;
+            lim.max_body_size = size_node((*sl)["max_body_size"], lim.max_body_size, "control.site_limits.max_body_size");
+            lim.memory_limit = size_node((*sl)["memory_limit"], lim.memory_limit, "control.site_limits.memory_limit");
+            auto count = [&](const char* key, unsigned& target) {
+                if (auto v = (*sl)[key].value<std::int64_t>()) {
+                    if (*v < 1 || *v > 100000000) fail(std::string("control.site_limits.") + key + " out of range");
+                    target = static_cast<unsigned>(*v);
+                }
+            };
+            count("max_execution_time", lim.max_execution_time);
+            count("max_input_time", lim.max_input_time);
+            count("children", lim.children);
+            count("max_requests", lim.max_requests);
+        } else if ((*ct).contains("site_limits")) {
+            fail("control.site_limits must be a table: { max_body_size = \"512MB\", memory_limit = \"512M\", max_execution_time = 300, max_input_time = 300, children = 32, max_requests = 1000000 }");
+        }
         if (auto a = (*ct)["audit"].value<std::string>()) cfg.control.audit = resolve(base_dir, *a).string();
         else if (cfg.log.error != "stderr") cfg.control.audit = (fs::path(cfg.log.error).parent_path() / "audit.log").string();
         else cfg.control.audit = resolve(base_dir, "logs/audit.log").string();

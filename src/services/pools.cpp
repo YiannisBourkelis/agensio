@@ -67,8 +67,9 @@ std::string render_pool(const Config& cfg, const SiteConfig& site, const std::st
     o << "php_admin_value[session.save_path] = " << p.state_dir << "/sessions\n";
     o << "php_admin_value[memory_limit] = " << p.memory_limit << "\n";
     o << "php_admin_value[max_execution_time] = " << p.max_execution_time << "\n";
-    o << "php_admin_value[upload_max_filesize] = " << ini_size(cfg.max_body_size) << "\n";
-    o << "php_admin_value[post_max_size] = " << ini_size(cfg.max_body_size) << "\n";
+    o << "php_admin_value[max_input_time] = " << p.max_input_time << "\n";
+    o << "php_admin_value[upload_max_filesize] = " << ini_size(body_limit_of(site, cfg)) << "\n";
+    o << "php_admin_value[post_max_size] = " << ini_size(body_limit_of(site, cfg)) << "\n";
     o << "php_admin_flag[expose_php] = off\n";
     for (const auto& [k, v] : p.extra) o << "php_admin_value[" << k << "] = " << v << "\n";
     return o.str();

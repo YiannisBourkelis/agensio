@@ -10,6 +10,7 @@
 #include "config.hpp"
 #include "control/client.hpp"
 #include "control/roles.hpp"
+#include "control/settings.hpp"
 #include "services/json.hpp"
 
 namespace agensio {
@@ -53,6 +54,34 @@ json::Value app_enum() {
     return json::Value::object().set("type", "string").set("enum", std::move(values)).set("description", text + ".");
 }
 
+// The per-site settings object, generated from the settings table so the schema can never
+// advertise a key the server refuses or hide one it accepts.
+json::Value settings_schema() {
+    json::Value props = json::Value::object();
+    for (const auto& d : control::setting_defs()) {
+        json::Value p = json::Value::object();
+        const std::string_view type = d.type;
+        std::string text = d.meaning;
+        if (type == "size") {
+            p.set("type", json::Value::array().push("string").push("integer"));
+            text += " A size: \"200MB\", \"512M\", \"1GB\" or bytes.";
+        } else if (type == "enum") {
+            json::Value opts = json::Value::array();
+            for (const char* o : d.options) opts.push(o);
+            p.set("type", "string").set("enum", opts);
+        } else {
+            p.set("type", "integer").set("minimum", 0);
+            text += std::string(" In ") + d.unit + ".";
+        }
+        text += std::string(" Changing it costs: ") + d.applies + ".";
+        if (*d.derives) text += std::string(" Derives: ") + d.derives + ".";
+        if (d.pool) text += " Needs a site with its own user (a generated pool).";
+        props.set(d.key, p.set("description", text));
+    }
+    return json::Value::object().set("type", "object").set("properties", props).set("additionalProperties", false)
+        .set("description", "Per-site limits, each within the ceiling [control] site_limits sets; site_settings_list shows units, defaults, current values and ceilings. A value above the ceiling is refused naming it. No other PHP ini key can be set here: extra, open_basedir and the like stay in the configuration file, root's.");
+}
+
 json::Value name_arg() { return prop("string", "The site's host name (any of its server_name values)."); }
 json::Value reason_arg() { return prop("string", "One line saying why, written to the server's audit log."); }
 json::Value confirm_arg() {
@@ -73,7 +102,8 @@ std::vector<std::pair<std::string, json::Value>> site_fields() {
         {"root", prop("string", "Document root (Laravel: the project directory, its public/ is served; Drupal: the project directory, its web/ is served when present). Required unless app is proxy.")},
         {"upstream", prop("string", "app = proxy: where the application listens, e.g. http://127.0.0.1:3000.")},
         {"php_socket", prop("string", "PHP without a site user: the php-fpm socket to use (unix:/path or host:port).")},
-        {"php_children", prop("integer", "PHP with a site user: pool size of the generated pool (default 8).")},
+        {"php_children", prop("integer", "PHP with a site user: pool size of the generated pool (default 8); the same as settings.children.")},
+        {"settings", settings_schema()},
         {"php_version", prop("string", "PHP version for the generated pool, e.g. \"8.3\" (default: newest installed).")},
         {"listen_plain", prop("string", "Plain listener address (default 0.0.0.0:80).")},
         {"listen_tls", prop("string", "TLS listener address (default 0.0.0.0:443).")},
@@ -96,6 +126,8 @@ std::vector<Tool> tools() {
                          {"status", prop("string", "Access-log filter: 5xx (default), 4xx, all, or a number for that status and above.")},
                          {"limit", prop("integer", "Newest lines to return (default 200, max 5000).")}},
                         {})});
+    t.push_back({"site_settings_list", "Site settings", "The per-site limits site_create and site_update accept under settings, from the same table as the schema: for each key its type, unit and accepted spellings, meaning, default and where it comes from, minimum, the ceiling [control] site_limits sets (root raises it in the configuration file), what changing it costs (agensio reload, php-fpm reload) and what it derives (max_body_size drives the pool's upload_max_filesize and post_max_size). With name, also each key's current effective value and its source (site, server, default). Use it before changing a limit, and to answer 'what is this site's upload limit'.", "GET", "/v1/settings", true, false, Role::viewer,
+                 schema({{"name", prop("string", "A site's host name: adds the current values. Omit for the table alone.")}}, {})});
     t.push_back({"presets_list", "Application presets", "What each `app` value does: which directory is served, whether every .php runs or only the front controller, what is refused, which directories never run PHP, which files are never served, and `source`: the official archive site_install takes when it has one (wordpress, drupal). Use it to answer 'which applications are supported', to pick app for site_create and to know whether site_install can fetch the application itself; the site_show tool shows the expanded locations of a real site.", "GET", "/v1/presets", true, false, Role::viewer, schema({}, {})});
     t.push_back({"health_check", "Health check", "What an administrator should look at: certificates, missing redirects, port 80 for ACME, recent errors, settings waiting for a restart, root, shared accounts, stale pools, php-fpm reloading without process_control_timeout (which cuts PHP requests on every site whenever a pool is written). Each finding has a severity and a fix. Run this first on a server you do not know.", "GET", "/v1/health", true, false, Role::viewer, schema({}, {})});
     t.push_back({"reload", "Reload configuration", "Validate the configuration on disk and switch to it without dropping a connection. Refused with the reason when it does not validate; nothing changes then.", "POST", "/v1/reload", false, false, Role::operator_, schema({{"confirm", confirm_arg()}, {"reason", reason_arg()}}, {"confirm", "reason"})});
@@ -104,7 +136,7 @@ std::vector<Tool> tools() {
     {
         auto fields = site_fields();
         fields.insert(fields.begin(), {"name", name_arg()});
-        t.push_back({"site_update", "Update a site", "Changes fields of a site that site_create wrote (aliases, https, user, app, root, upstream, PHP settings). Hand-written site files are refused; tell the user to edit those directly.", "POST", "/v1/sites/{name}", false, false, Role::admin, schema(fields, {"name", "confirm", "reason"})});
+        t.push_back({"site_update", "Update a site", "Changes fields of a site that site_create wrote (aliases, https, user, app, root, upstream, PHP pool, and the per-site limits under settings: raising a WordPress site's upload limit is settings: {max_body_size: \"200MB\"}). The answer lists under done what was written and reloaded (the site file and agensio; the php-fpm pool and php-fpm, which briefly affects every PHP site unless process_control_timeout is set). Hand-written site files are refused; tell the user to edit those directly.", "POST", "/v1/sites/{name}", false, false, Role::admin, schema(fields, {"name", "confirm", "reason"})});
     }
     t.push_back({"site_disable", "Disable a site", "Stops serving the site (its file is renamed to .disabled) and reloads. Reversible with site_enable.", "POST", "/v1/sites/{name}/disable", false, false, Role::admin, schema({{"name", name_arg()}, {"confirm", confirm_arg()}, {"reason", reason_arg()}}, {"name", "confirm", "reason"})});
     t.push_back({"site_enable", "Enable a site", "Brings a disabled site back and reloads.", "POST", "/v1/sites/{name}/enable", false, false, Role::admin, schema({{"name", name_arg()}, {"confirm", confirm_arg()}, {"reason", reason_arg()}}, {"name", "confirm", "reason"})});
@@ -158,6 +190,8 @@ const char* kInstructions =
     "A plugin or theme goes into its own directory with site_install's path and create_path; a drop-in file an "
     "application ships as a template (WordPress's wp-content/db.php from the SQLite plugin's db.copy, Drupal's "
     "settings.php) is put in place with site_copy, which copies one file within the same site and nothing else. "
+    "Per-site limits (upload size, PHP memory, execution time, pool size) are changed with site_update's settings "
+    "object; call site_settings_list first for the keys, units, current values and the ceilings root set. "
     "Never invent settings: what a tool does not offer is not configurable here. Host names are "
     "strict: a site answers only the names in server_name, and a listener without a catch-all site "
     "(server_name [\"*\"] or default = true) answers 421 to any other Host, including the IP address; and on "
@@ -271,6 +305,14 @@ private:
         }
         std::string path = tool->path;
         std::string path_arg;  // the argument that fills the path: a site name or an upload name
+        if (name == "site_settings_list" && !args.get("name").empty()) {
+            const std::string site(args.get("name"));
+            if (site.find('/') != std::string::npos) {
+                tool_error(id, "the 'name' argument must be a site's host name");
+                return;
+            }
+            path = "/v1/sites/" + site + "/settings";
+        }
         for (const char* key : {"name", "file"}) {
             const std::string token = std::string("{") + key + "}";
             const std::size_t brace = path.find(token);

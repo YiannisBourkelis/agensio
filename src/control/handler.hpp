@@ -10,6 +10,7 @@
 
 #include "config.hpp"
 #include "control/roles.hpp"
+#include "control/sites.hpp"
 #include "core/stream.hpp"
 #include "core/worker_state.hpp"
 #include "services/json.hpp"
@@ -78,6 +79,9 @@ private:
     void site_copy(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> done);
     void upload_receive(Stream& s, std::string_view name, std::function<void()> done);
     json::Value uploads_list();
+    // The php-fpm pool after a site file changed: through the helper when there is one
+    // (reported under `done`), else as next steps. Shared by create and update.
+    void finish_pool(Stream& s, const control::SiteSpec& spec, const Config& cfg, std::string_view what, json::Value& done, std::vector<std::string>& steps);
     void upload_delete(Stream& s, std::string_view name, std::string_view reason);
     void audit_peer(const Stream& s, std::string_view what, std::string_view result);
 

@@ -484,9 +484,18 @@ Pool keys in `php = { ... }`, all optional:
 | `max_requests` | 500 | `pm.max_requests`; 0 = unlimited |
 | `memory_limit` | `"256M"` | `memory_limit` |
 | `max_execution_time` | 60 | seconds |
+| `max_input_time` | 60 | seconds, how long a request body may take to arrive |
 | `version` | newest installed | php version whose pool directory `agensio pools` writes to |
 | `open_basedir` | project, tmp, sessions | replaces the default list |
 | `extra` | none | `{ "date.timezone" = "Europe/Athens" }` becomes `php_admin_value[...]` lines |
+
+A site's own `max_body_size = "200MB"` (a site key, next to `root`) bounds its request
+bodies (413 above) and sets the pool's `upload_max_filesize` and `post_max_size`; without
+it the site takes `[server] max_body_size`. The keys `children`, `pm`, `max_requests`,
+`memory_limit`, `max_execution_time`, `max_input_time` and the site's `max_body_size` are
+also settable through the control plane (`site-create` / `site-update` with `settings`,
+section 15), within the ceilings `[control] site_limits` sets. `open_basedir` and `extra`
+are not: they change what a site may reach or run, and stay in this file, root's.
 
 Rules: two sites with the same `user` share one pool and must agree on these keys;
 sites with different users may never name the same socket; a site with `user` and an
@@ -887,6 +896,8 @@ install = true                         # site-install may download from https UR
 install_private = false                # true: site-install may fetch from loopback, private and link-local addresses (internal mirrors, test beds)
 install_ca = "/etc/ssl/mirror-ca.pem"  # PEM bundle site-install trusts instead of the system store (private mirrors); default: the system store
 upload_max = "512M"                    # the largest archive `agensio ctl upload` may store
+site_limits = { max_body_size = "512MB", memory_limit = "512M", max_execution_time = 300, max_input_time = 300, children = 32, max_requests = 1000000 }
+                                       # the ceilings site-create / site-update may raise a site's limits to (these are the defaults)
 ```
 
 The control API is how `agensio ctl`, the MCP bridge (`agensio mcp`) and any local tool
@@ -919,6 +930,7 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 | `validate` | viewer | loads the file on disk again and runs the hosting rules: `ok`, `errors`, site count, and the restart-only settings that differ from the running server |
 | `logs` | viewer | `--site NAME` (default: all sites plus the error log), `--since 3h` (`m`, `h`, `d`, `w`, seconds, or a local `YYYY-MM-DDThh:mm:ss`; default 1h), `--level error|warn|info` for the error log (default warn = error+warn), `--status 5xx|4xx|all|NNN` for access logs (default 5xx), `--limit N` (default 200, newest). Reads at most 2 MB per file from the end; `truncated` says when that cut in |
 | `uploads` | viewer | the archives stored with `upload` (`file`, `bytes`, `uploaded`), ready for `site-install --file` |
+| `settings [NAME]` | viewer | the per-site limits `site-create` and `site-update` accept under `settings`: for each key its type, unit and spellings, meaning, default and its origin, minimum, the ceiling from `[control] site_limits`, what changing it costs (agensio reload, php-fpm reload) and what it derives; with a site, the current value and whether it comes from the site, the server or a built-in default. `site NAME` reports the same `settings` |
 | `health` | viewer | findings with `severity`, `code`, `site`, `message`, `fix`: configuration on disk invalid or failing the hosting rules, restart-only settings changed, running as root, certificate unreadable / still the placeholder / expired / expiring within 14 days (manual), `tls = "auto"` without a plain port-80 site for the names, no http-to-https redirect, application sites sharing the server's account, generated pools out of date, errors in the last 24 hours. `ok` is true when nothing above info level was found |
 
 **Changes** (`POST` with a JSON body; every one needs `"confirm": true`, takes a
@@ -930,7 +942,7 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 | `logs-reopen` | operator | reopen every log file (what `SIGUSR1` does) |
 | `site-create` | admin | writes `sites.d/<domain>.toml`, validates, reloads. Fields: `domain`, `aliases`, `https` (`auto`, `none`, or `{cert, key}`), `redirect_http` (default true), `hsts`, `user` (an account name; `no_user: true` or JSON `null` for none; the words null, none, nil and system accounts are refused, never turned into commands), `group`, `app`, `root`, `upstream`, `php_socket`, `php_children`, `php_version`, `listen_plain`, `listen_tls`. Until `https`, `root` (or `upstream`), `app` and `user` are decided it answers 422 with the open questions and a suggestion each (a user name from the domain, the app the files under root suggest); when the account or the root directory does not exist it answers 409 with the commands to run as root and waits for the same command again. A new site is HTTPS-only: the plain site redirects. |
 | `site-create` answers | | 422 with `needs` while decisions are open; 409 `prerequisites missing` with `problems` (every one at once, each with a `code`, a `detail` and its `run_as_root` command: `missing_account`, `missing_group`, `root_missing`, `root_unreadable`, `certificate_missing`) plus the flat `run_as_root` list; 202 `needs_restart` when the site adds a privileged port the dropped server cannot bind by a reload (the file is written and valid, `systemctl restart agensio` serves it); 201 with `next_steps` (separate commands: `agensio pools`, then the php-fpm reload) and `warnings`. `dry_run: true` runs every check and returns the file that would be written without writing or reloading |
-| `site-update NAME` | admin | the same fields on a site `site-create` wrote (the file carries its spec on its first line); a hand-written file is refused with 409, edit it yourself |
+| `site-update NAME` | admin | the same fields on a site `site-create` wrote (the file carries its spec on its first line); a hand-written file is refused with 409, edit it yourself. `settings = {key: value}` (CLI `--set KEY=VALUE`, repeatable) sets the per-site limits: `max_body_size` (any site), and for a site with its own user `memory_limit`, `max_execution_time`, `max_input_time`, `children`, `pm`, `max_requests`. Each value is checked against `[control] site_limits` and refused above it naming the key, the value and the ceiling; a key outside that list (`extra`, `open_basedir`, any ini name) is refused as unknown, whatever it is. The answer's `done` lists what was written and reloaded: the site file and agensio, and the php-fpm pool and php-fpm when a pool key changed (a php-fpm reload briefly affects every PHP site unless `process_control_timeout` is set) |
 | `site-disable NAME`, `site-enable NAME` | admin | renames the file to `.disabled` and back, reloads |
 | `site-delete NAME` | admin | removes the file (a `.bak` stays), reloads; never touches the root or the account |
 | `cert-renew NAME` | operator | orders the site's automatic certificate again now |

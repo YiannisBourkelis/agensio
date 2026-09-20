@@ -27,8 +27,9 @@ struct SiteSpec {
     std::string root;
     std::string upstream;    // app = proxy
     std::string php_socket;  // php without a user: an existing pool
-    int php_children = 0;    // generated pool sizing (with a user)
+    int php_children = 0;    // generated pool sizing (with a user); the same as settings.children
     std::string php_version;
+    json::Value settings;    // the allowlisted per-site limits (control/settings.hpp), normalised: {key: value}
     std::string access_log;  // a site with a user gets its own (rule: nothing shared between users)
     std::string listen_plain = "0.0.0.0:80";
     std::string listen_tls = "0.0.0.0:443";

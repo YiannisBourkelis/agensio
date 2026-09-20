@@ -3,6 +3,22 @@
 
 ## 0.1.0-alpha.13 (2026-09-20)
 
+- **Per-site limits through the control plane** (F10, live request: "raise the WordPress
+  upload limit to 200 MB" could not be done without a terminal): `site-create` and
+  `site-update` take `settings = {key: value}` (CLI `--set KEY=VALUE`, MCP `settings`)
+  for `max_body_size` (now a site key too, driving the pool's `upload_max_filesize` and
+  `post_max_size`; `[server] max_body_size` stays the default), `memory_limit`,
+  `max_execution_time`, `max_input_time` (new pool key), `children`, `pm` and
+  `max_requests`. Every value moves within the ceilings `[control] site_limits` sets
+  (defaults 512MB, 512M, 300 s, 300 s, 32 children) and is refused above them naming the
+  key, the value and the ceiling; every other ini name is refused as unknown, so
+  `extra`, `open_basedir`, `sendmail_path` and the like stay in the file. `agensio ctl
+  settings [NAME]`, `GET /v1/settings`, MCP `site_settings_list` publish the table with
+  units, defaults, minimum, ceiling, cost and derivations, plus current values per site;
+  `site NAME` reports each setting's value and source; the MCP `settings` schema is
+  generated from the same table and a test asserts the three cannot drift. Answers list
+  under `done` what was written and reloaded; `site-update` now applies the pool through
+  the helper like `site-create` does.
 - **A TLS connection serves only the names its certificate covers** (live report: with
   three sites and three certificates on one listener, a connection made with site B's
   certificate served site A's pages for `Host: A`). Host matching on a TLS connection is

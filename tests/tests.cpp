@@ -21,6 +21,7 @@
 #include "services/acme.hpp"
 #include "control/roles.hpp"
 #include "control/commands.hpp"
+#include "control/settings.hpp"
 #include "control/sites.hpp"
 #include "services/provision.hpp"
 #include "services/archive.hpp"
@@ -1793,6 +1794,79 @@ static void test_control_sites() {
         CHECK(write_site_file(site_file(cfg, "shop.test"), render_site(ok, "x"), err));
         const Config loaded = load_config(dir / "agensio.toml");
         CHECK(loaded.sites.size() == 2 && loaded.sites[0].redirect == "https" && loaded.sites[1].tls && loaded.sites[1].tls->automatic && loaded.sites[1].app == "laravel");
+        // Per-site settings (F10): the allowlist, the ceilings, the refusals, the rendering.
+        {
+            json::Value out, given;
+            std::string e2;
+            json::parse(R"({"max_body_size":"200MB","memory_limit":"512M","max_execution_time":120,"children":"4","pm":"Dynamic","max_requests":0})", given, e2);
+            CHECK(apply_settings(given, loaded, true, out).empty());
+            CHECK(out.get("max_body_size") == "200MB" && out.get("memory_limit") == "512MB" && out["max_execution_time"].num() == 120 && out["children"].num() == 4 && out.get("pm") == "dynamic" && out["max_requests"].num() == 0);
+            auto refused = [&](const char* text, bool user, const char* fragment) {
+                json::Value g, o;
+                json::parse(text, g, e2);
+                const std::string r = apply_settings(g, loaded, user, o);
+                const bool hit = r.find(fragment) != std::string::npos;
+                if (!hit) std::printf("settings: expected '%s', got '%s'\n", fragment, r.c_str());
+                return hit;
+            };
+            // Ceilings: root's; above them refused naming the key, the value and the ceiling.
+            CHECK(refused(R"({"max_body_size":"10GB"})", true, "max_body_size: 10GB is above the ceiling 512MB"));
+            CHECK(refused(R"({"memory_limit":"8G"})", true, "memory_limit: 8GB is above the ceiling 512MB"));
+            CHECK(refused(R"({"children":1000})", true, "children: 1000 is above the ceiling 32"));
+            CHECK(refused(R"({"max_execution_time":301})", true, "above the ceiling 300") && refused(R"({"children":0})", true, "below the minimum 1"));
+            CHECK(refused(R"({"pm":"forever"})", true, "not one of static, dynamic, ondemand") && refused(R"({"children":"many"})", true, "whole number") && refused(R"({"max_body_size":"big"})", true, "not a size"));
+            // Nothing outside the allowlist, whatever it is called: the ini keys that mean code
+            // execution or the end of the sandbox are refused by name, as unknown.
+            for (const char* key : {"sendmail_path", "auto_prepend_file", "extension", "zend_extension", "disable_functions", "open_basedir", "extra", "error_log", "session.save_path", "php_admin_value[x]"})
+                CHECK(refused((std::string("{\"") + key + "\":\"/bin/sh\"}").c_str(), true, "unknown setting"));
+            // Pool keys need a site with its own user; max_body_size does not.
+            CHECK(refused(R"({"memory_limit":"64M"})", false, "needs a site with its own user"));
+            json::Value o2, g2;
+            json::parse(R"({"max_body_size":"4MB"})", g2, e2);
+            CHECK(apply_settings(g2, loaded, false, o2).empty() && o2.get("max_body_size") == "4MB");
+            // The catalogue and the table agree, and the site file round-trips through the loader.
+            const json::Value cat = settings_catalog(loaded, nullptr);
+            CHECK(cat["settings"].items().size() == setting_defs().size());
+            for (std::size_t i = 0; i < setting_defs().size(); ++i) {
+                const json::Value& row = cat["settings"].items()[i];
+                CHECK(row.get("key") == setting_defs()[i].key && !row.get("applies").empty() && !row["default"].is_null());
+            }
+            SiteSpec tuned = ok;
+            tuned.user = "shop";
+            tuned.php_socket.clear();
+            tuned.settings = out;
+            const std::string rendered = render_site(tuned, "x");
+            CHECK(rendered.find("max_body_size = \"200MB\"") != std::string::npos && rendered.find("memory_limit = \"512MB\"") != std::string::npos && rendered.find("children = 4") != std::string::npos && rendered.find("pm = \"dynamic\"") != std::string::npos);
+            SiteSpec back;
+            CHECK(SiteSpec::from_json(tuned.to_json(), back) && back.settings.get("max_body_size") == "200MB" && back.php_children == 4);
+            std::ofstream(dir / "sites.d" / "tuned.toml") << rendered;
+            Config tcfg;
+            bool loads = true;
+            try { tcfg = load_config(dir / "agensio.toml"); } catch (const std::exception& ex) { loads = false; std::printf("tuned: %s\n", ex.what()); }
+            CHECK(loads);
+            if (loads) {
+                const SiteConfig* tsite = nullptr;
+                for (const auto& st : tcfg.sites) if (st.user == "shop" && !st.redirect.empty() == false && st.tls) tsite = &st;
+                CHECK(tsite && tsite->max_body_size == 200u * 1024 * 1024 && tsite->pool.memory_limit == "512MB" && tsite->pool.children == 4 && tsite->pool.pm == "dynamic" && tsite->pool.max_execution_time == 120);
+                if (tsite) {
+                    const json::Value eff = effective_settings(*tsite, tcfg);
+                    CHECK(eff["max_body_size"].get("value") == "200MB" && eff["max_body_size"].get("source") == "site" && eff["max_input_time"].get("source") == "default" && eff["children"]["value"].num() == 4);
+                    CHECK(body_limit_of(*tsite, tcfg) == 200u * 1024 * 1024 && body_limit_of(loaded.sites[1], loaded) == loaded.max_body_size);
+                    const std::string pool = render_pool(tcfg, *tsite, "agensio");
+                    CHECK(pool.find("php_admin_value[upload_max_filesize] = 200M") != std::string::npos && pool.find("php_admin_value[post_max_size] = 200M") != std::string::npos && pool.find("php_admin_value[max_input_time] = 60") != std::string::npos && pool.find("memory_limit] = 512MB") != std::string::npos);
+                }
+            }
+            std::filesystem::remove(dir / "sites.d" / "tuned.toml");
+            // [control] site_limits from the file, and a site-level max_body_size.
+            std::ofstream(dir / "lim.toml") << "[control]\nsite_limits = { max_body_size = \"64MB\", children = 4 }\n[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\nmax_body_size = \"3MB\"\n";
+            const Config lim = load_config(dir / "lim.toml");
+            CHECK(lim.control.site_limits.max_body_size == 64u * 1024 * 1024 && lim.control.site_limits.children == 4 && lim.control.site_limits.memory_limit == 512u * 1024 * 1024 && lim.sites[0].max_body_size == 3u * 1024 * 1024);
+            json::Value o3;
+            CHECK(apply_settings(g2, lim, false, o3).empty());  // 4MB is under 64MB
+            json::Value g4;
+            json::parse(R"({"max_body_size":"65MB"})", g4, e2);
+            CHECK(!apply_settings(g4, lim, false, o3).empty());
+        }
         CHECK(loaded.sites[0].root.empty());  // a redirect site has no document root, never the configuration directory
         CHECK(prerequisites(ok, loaded).empty());
         SiteSpec missing = ok;

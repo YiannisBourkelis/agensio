@@ -91,6 +91,7 @@ struct PhpPool {
     unsigned max_requests = 500;
     std::string memory_limit = "256M";
     unsigned max_execution_time = 60;
+    unsigned max_input_time = 60;
     std::vector<std::string> open_basedir;                      // default: project root, tmp, sessions
     std::vector<std::pair<std::string, std::string>> extra;    // php_admin_value passthrough
 };
@@ -108,6 +109,7 @@ struct SiteConfig {
     std::string redirect;
     std::string root;                       // absolute document root, no trailing slash
     std::string project_root;               // the root as given, before a preset appended its public/ or web/ (site-install's target)
+    std::size_t max_body_size = 0;          // this site's request-body limit (413 above; drives the pool's upload sizes); 0 = [server] max_body_size
     std::vector<std::string> index{"index.html"};
     std::vector<TryStep> try_files;  // default for locations that do not set their own
     FcgiConfig php;                  // `php = { socket = ... }`: default upstream for fastcgi locations
@@ -139,6 +141,16 @@ struct ControlConfig {
     bool install_private = false;  // let site-install fetch from loopback, private and link-local addresses (test beds, internal mirrors)
     std::string install_ca;        // PEM bundle site-install trusts instead of the system store (private mirrors, test beds)
     std::size_t upload_max = 512u * 1024 * 1024;  // `agensio ctl upload` body limit (PUT /v1/uploads/NAME)
+    // The ceilings a site setting may be raised to through the control plane ([control]
+    // site_limits): root owns the range, site-create/site-update move within it.
+    struct SiteLimits {
+        std::size_t max_body_size = 512u * 1024 * 1024;
+        std::size_t memory_limit = 512u * 1024 * 1024;
+        unsigned max_execution_time = 300;
+        unsigned max_input_time = 300;
+        unsigned children = 32;
+        unsigned max_requests = 1000000;
+    } site_limits;
 };
 
 struct LogConfig {
@@ -203,6 +215,10 @@ struct Config {
 
 // Parses "4MB", "256k", "1G", "65536". Throws std::invalid_argument.
 std::size_t parse_size(std::string_view text);
+// The request-body limit of a site: its own max_body_size, else the server's.
+inline std::size_t body_limit_of(const SiteConfig& site, const Config& cfg) noexcept {
+    return site.max_body_size ? site.max_body_size : cfg.max_body_size;
+}
 
 // Parses a try_files list: "$uri", "$uri/", "=403"/"=404", or "/path" (last element only
 // for the latter two). Throws std::invalid_argument.

@@ -1,5 +1,7 @@
 #include "control/commands.hpp"
 
+#include "control/settings.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -359,6 +361,7 @@ json::Value sites(const Config& cfg, std::time_t now) {
 json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now) {
     json::Value v = site_summary(s, now);
     v.set("index", strings(s.index));
+    v.set("settings", effective_settings(s, cfg));  // each with its value and where it comes from
     if (s.php.configured) {
         json::Value php = json::Value::object().set("socket", s.php.address.key);
         if (s.pool.generated) php.set("pool", s.pool.name).set("state_dir", s.pool.state_dir);

@@ -577,6 +577,32 @@ check "install: with [control] install = false a download is refused and the upl
 sed -i '/^install = false$/d' bench/tmp/agensio-test.toml; cpost /v1/reload '{"confirm":true}' > /dev/null
 check "secrets: installing WordPress makes wp-config.php 0600 (reported under secured), the configuration validates" "201 yes 600 true" "$(cpost /v1/sites/wpinst.test/install '{"file":"wp.tgz","confirm":true,"reason":"wp"}') $(grep -q "\"secured\":\[\"$ROOT/bench/tmp/sites/wpinst.test/wp-config.php\"\]" bench/tmp/ctl-reply.json && echo yes) $(stat -c %a bench/tmp/sites/wpinst.test/wp-config.php 2>/dev/null || stat -f %Lp bench/tmp/sites/wpinst.test/wp-config.php) $(curl -sS --unix-socket $CS http://control/v1/config/validate | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["ok"]).lower())')"
 check "secrets: a copy onto wp-config.php is 0600 whatever the directory's pattern; health has no hosting finding" "200 0600 true 600 0" "$(cpost /v1/sites/wpinst.test/copy '{"from":"index.php","to":"wp-config.php","overwrite":true,"confirm":true,"reason":"cfg"}') $(python3 -c 'import json; d=json.load(open("bench/tmp/ctl-reply.json")); print(d["mode"], str(d["secured"]).lower())') $(stat -c %a bench/tmp/sites/wpinst.test/wp-config.php 2>/dev/null || stat -f %Lp bench/tmp/sites/wpinst.test/wp-config.php) $(curl -sS --unix-socket $CS http://control/v1/health | grep -o '"code":"hosting_rule"' | wc -l | tr -d ' ')"
+# Per-site settings (F10): an allowlist within root's ceilings, discoverable, per site.
+head -c 3145728 /dev/zero > bench/tmp/inst/3mb.bin; head -c 1572864 /dev/zero > bench/tmp/inst/1.5mb.bin
+check "settings: the catalogue lists every key with unit, default, ceiling and cost" "max_body_size,memory_limit,max_execution_time,max_input_time,children,pm,max_requests 512MB 1MB yes" "$(curl -sS --unix-socket $CS http://control/v1/settings | python3 -c 'import json,sys; d=json.load(sys.stdin)["settings"]; m=[x for x in d if x["key"]=="max_body_size"][0]; print(",".join(x["key"] for x in d), m["maximum"], m["default"], "yes" if all(x["applies"] and x["meaning"] and x["type"] for x in d) else "no")')"
+check "settings: site-update raises one site's max_body_size; the other site keeps the server's 1 MB" "200 413 405 413" "$("$BIN" ctl site-update inst.test --set max_body_size=2MB --yes --reason limit --socket $CS > bench/tmp/ctl.out; echo -n "$? " | sed 's/^0 /200 /'; curl -sS -o /dev/null -w '%{http_code} ' -H 'Host: inst.test' --data-binary @bench/tmp/inst/3mb.bin http://127.0.0.1:8096/; curl -sS -o /dev/null -w '%{http_code} ' -H 'Host: inst.test' --data-binary @bench/tmp/inst/1.5mb.bin http://127.0.0.1:8096/; curl -sS -o /dev/null -w '%{http_code}' --data-binary @bench/tmp/inst/1.5mb.bin http://127.0.0.1:8080/)"
+check "settings: the answer says what was written and reloaded; site NAME shows the value and its source" "yes 2MB site 1MB server" "$(grep -q '"done":\["site file .*written, agensio reloaded"' bench/tmp/ctl.out && echo yes) $(curl -sS --unix-socket $CS http://control/v1/sites/inst.test | python3 -c 'import json,sys; d=json.load(sys.stdin)["settings"]["max_body_size"]; print(d["value"], d["source"])') $(curl -sS --unix-socket $CS http://control/v1/sites/strict.test | python3 -c 'import json,sys; d=json.load(sys.stdin)["settings"]["max_body_size"]; print(d["value"], d["source"])')"
+check "settings: a value above the ceiling is refused naming key, value and ceiling; nothing written" "400 yes 2MB" "$(cpost /v1/sites/inst.test '{"settings":{"max_body_size":"10GB"},"confirm":true}') $(grep -q 'max_body_size: 10GB is above the ceiling 512MB' bench/tmp/ctl-reply.json && echo yes) $(grep -o 'max_body_size = .*' bench/tmp/sites.d/inst.test.toml | head -1 | cut -d= -f2 | tr -d ' \"')"
+check "settings: every ini key outside the allowlist is refused as unknown, through settings" "400 400 400 400 400 400 yes" "$(for k in sendmail_path auto_prepend_file extension disable_functions open_basedir extra; do cpost /v1/sites/inst.test "{\"settings\":{\"$k\":\"/bin/sh\"},\"confirm\":true}"; echo -n ' '; done; grep -q 'unknown setting' bench/tmp/ctl-reply.json && echo yes)"
+check "settings: pool keys need a site with its own user; the refusal says so" "400 yes" "$(cpost /v1/sites/inst.test '{"settings":{"memory_limit":"512M"},"confirm":true}') $(grep -q 'needs a site with its own user' bench/tmp/ctl-reply.json && echo yes)"
+check "settings: the MCP schema, the catalogue and what site_update accepts are one set" "same same" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
+import json, subprocess, sys, urllib.request
+p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n"); p.stdin.flush()
+tools = {t["name"]: t for t in json.loads(p.stdout.readline())["result"]["tools"]}
+schema = set(tools["site_update"]["inputSchema"]["properties"]["settings"]["properties"])
+p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "site_settings_list", "arguments": {}}}) + "\n"); p.stdin.flush()
+catalogue = set(x["key"] for x in json.loads(p.stdout.readline())["result"]["structuredContent"]["settings"])
+accepted = set()
+for k in schema | catalogue | {"bogus_key"}:
+    p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "site_update", "arguments": {"name": "inst.test", "settings": {k: 1}, "confirm": True, "reason": "drift"}}}) + "\n"); p.stdin.flush()
+    text = json.loads(p.stdout.readline())["result"]["content"][0]["text"]
+    if "unknown setting" not in text: accepted.add(k)
+p.stdin.close(); p.wait()
+print("same" if schema == catalogue else "schema!=catalogue", "same" if accepted == catalogue else "accepted!=catalogue %s" % sorted(accepted ^ catalogue))
+PYT
+)"
+"$BIN" ctl site-update inst.test --set max_body_size=1MB --yes --reason back --socket $CS > /dev/null
 check "secrets: the presets catalogue lists each preset's credential files" "/wp-config.php /sites/default/settings.php" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["wordpress"]["secrets"][0], p["drupal"]["secrets"][0])')"
 check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$("$BIN" ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; "$BIN" ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
@@ -616,7 +642,7 @@ p.stdin.close(); p.wait()
 print(" ".join(out))
 PYT
 )
-check "mcp: initialize, tool list with annotations, calls, confirm, decisions, prompts" "agensio 19 True laravel 428 reloaded https,root,app,user -32601 2" "$mcp"
+check "mcp: initialize, tool list with annotations, calls, confirm, decisions, prompts" "agensio 20 True laravel 428 reloaded https,root,app,user -32601 2" "$mcp"
 check "mcp: site_install and the upload tools are exposed with their arguments" "file url,file,version,sha256 True" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
 import json, subprocess, sys
 p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)

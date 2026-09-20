@@ -745,6 +745,14 @@ Rules:
       `[control] install`, `install_private`, `install_ca`, `upload_max`. zlib added as a
       dependency. `tests/install.sh` (root devbox), unit, fuzz and integration checks;
       security page rows 19-22.
+- [x] F10 (2026-09-20) Per-site settings: `control/settings.*` (the allowlist table,
+      `apply_settings` against `[control] site_limits`, `settings_catalog`,
+      `effective_settings`), `SiteConfig::max_body_size` and `PhpPool::max_input_time`,
+      the connection's body limit looked up per site only when a body is announced,
+      `settings` in `SiteSpec` rendered into the site file, `GET /v1/settings[/site]`,
+      `agensio ctl settings`, `--set`, MCP `site_settings_list` and a schema generated from
+      the table, `done` reporting on update, `finish_pool` shared by create and update.
+      Security page row 25.
 - [x] H2h (2026-09-20, live report) TLS authority: `core/host.hpp` (`normalize_host`,
       `CertNames::covers` per RFC 6125), the names of every certificate parsed once at
       load into `Listener::cert_names`, the connection keeps the entry of the context its

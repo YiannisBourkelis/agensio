@@ -90,11 +90,12 @@ takes `--socket PATH`.
 | `server_status` | viewer | version, pid, uptime, workers, connections, listeners, sites, the caller's role |
 | `sites_list`, `site_show` | viewer | sites with their certificate state; one site with its effective locations |
 | `config_validate` | viewer | the file on disk: errors and restart-only differences |
+| `site_settings_list` | viewer | the per-site limits `site_update` accepts under `settings`, with type, unit, default, minimum, the ceiling root set, what a change costs and derives; with `name`, each key's current value and source. The schema of `settings` is generated from the same table |
 | `presets_list` | viewer | what each `app` value does: served root, which `.php` runs, refusals; from the preset table, so a new preset appears at once |
 | `logs_query` | viewer | recent error-log and access-log lines, filtered by site, time, level and status |
 | `reload`, `logs_reopen` | operator | reload without dropping connections; reopen logs after rotation |
 | `cert_renew` | operator | order an automatic certificate again now |
-| `site_create`, `site_update` | admin | write or change a managed site file, validate, reload; answer with open decisions or root commands first |
+| `site_create`, `site_update` | admin | write or change a managed site file, validate, reload; answer with open decisions or root commands first; `settings` changes a site's limits within `[control] site_limits` and the answer lists under `done` what was written and reloaded |
 | `site_disable`, `site_enable`, `site_delete` | admin | rename the file away and back; delete it (a `.bak` stays) |
 | `site_install` | admin | put an application's files into a site's empty directory as the site's account: the preset's official archive (`version` optional), any https `url`, or a stored upload (`file`); a plugin or theme goes into `path` with `create_path: true`; `sha256`, `strip`, `dry_run`; the server enforces the fences and reports the source, digest and what it created |
 | `site_copy` | admin | copy one regular file of a site to another path of the same site, as the site's account: the drop-ins applications ship as templates (WordPress's `wp-content/db.php` from the SQLite plugin, Drupal's `settings.php`); `overwrite`, `dry_run`; never across sites, never caller content, never a directory. Like `site_install`, credential files come out `0600` and the configuration is validated before the answer |

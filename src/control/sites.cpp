@@ -1,5 +1,7 @@
 #include "control/sites.hpp"
 
+#include "control/settings.hpp"
+
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -61,6 +63,7 @@ json::Value SiteSpec::to_json() const {
     if (!php_socket.empty()) v.set("php_socket", php_socket);
     if (php_children) v.set("php_children", php_children);
     if (!php_version.empty()) v.set("php_version", php_version);
+    if (settings.is_object() && !settings.members().empty()) v.set("settings", settings);
     if (!access_log.empty()) v.set("access_log", access_log);
     v.set("listen_plain", listen_plain).set("listen_tls", listen_tls);
     return v;
@@ -86,6 +89,8 @@ bool SiteSpec::from_json(const json::Value& v, SiteSpec& out) {
     out.php_socket = v.get("php_socket");
     out.php_children = static_cast<int>(v["php_children"].num());
     out.php_version = v.get("php_version");
+    if (v["settings"].is_object()) out.settings = v["settings"];
+    if (out.settings["children"].type() == json::Value::Type::number) out.php_children = static_cast<int>(out.settings["children"].num());
     out.access_log = v.get("access_log");
     if (has_key(v, "listen_plain")) out.listen_plain = v.get("listen_plain");
     if (has_key(v, "listen_tls")) out.listen_tls = v.get("listen_tls");
@@ -222,6 +227,27 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
     if (has_key(body, "php_socket")) spec.php_socket = body.get("php_socket");
     if (has_key(body, "php_children")) spec.php_children = static_cast<int>(body["php_children"].num());
     if (has_key(body, "php_version")) spec.php_version = body.get("php_version");
+    // The allowlisted limits (control/settings.hpp): merged into what the site has,
+    // each value checked against the ceiling; a key not in the table is refused by name.
+    if (has_key(body, "settings")) {
+        json::Value given = body["settings"];
+        if (spec.php_children && given.is_object() && given["children"].is_null()) given.set("children", static_cast<double>(spec.php_children));
+        json::Value normalised;
+        const bool will_have_user = has_key(body, "no_user") ? !body["no_user"].boolean()
+                                    : has_key(body, "user") ? body["user"].is_string() && !body["user"].str().empty()
+                                                            : !spec.user.empty();
+        const std::string bad = apply_settings(given, cfg, will_have_user && spec.php_socket.empty() && body.get("php_socket").empty(), normalised);
+        if (!bad.empty()) {
+            error = bad;
+            return needs;
+        }
+        if (!spec.settings.is_object()) spec.settings = json::Value::object();
+        for (const auto& m : normalised.members()) spec.settings.set(m.first, m.second);
+        if (!spec.settings["children"].is_null()) spec.php_children = static_cast<int>(spec.settings["children"].num());
+    } else if (has_key(body, "php_children") && spec.php_children) {
+        if (!spec.settings.is_object()) spec.settings = json::Value::object();
+        spec.settings.set("children", static_cast<double>(spec.php_children));
+    }
     if (has_key(body, "access_log")) spec.access_log = body.get("access_log");
     if (has_key(body, "listen_plain")) spec.listen_plain = body.get("listen_plain");
     if (has_key(body, "listen_tls")) spec.listen_tls = body.get("listen_tls");
@@ -335,12 +361,21 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
         if (!spec.group.empty()) s += "group = " + toml_string(spec.group) + "\n";
         if (!spec.user.empty() && !spec.access_log.empty()) s += "access_log = " + toml_string(spec.access_log) + "\n";
         const bool php = spec.app != "static" && spec.app != "proxy" && !spec.app.empty();
+        if (spec.settings.is_object() && spec.settings["max_body_size"].is_string()) s += "max_body_size = " + toml_string(spec.settings.get("max_body_size")) + "\n";
         if (php) {
             if (!spec.php_socket.empty()) s += "php = { socket = " + toml_string(spec.php_socket) + " }\n";
-            else if (spec.php_children || !spec.php_version.empty()) {
-                s += "php = { ";
-                if (spec.php_children) s += "children = " + std::to_string(spec.php_children);
-                if (!spec.php_version.empty()) s += std::string(spec.php_children ? ", " : "") + "version = " + toml_string(spec.php_version);
+            else if (spec.php_children || !spec.php_version.empty() || (spec.settings.is_object() && !spec.settings.members().empty())) {
+                std::string keys;
+                auto add = [&](const std::string& text) { keys += (keys.empty() ? "" : ", ") + text; };
+                const int children = spec.php_children ? spec.php_children
+                                     : spec.settings.is_object() && spec.settings["children"].type() == json::Value::Type::number ? static_cast<int>(spec.settings["children"].num()) : 0;
+                if (children) add("children = " + std::to_string(children));
+                if (!spec.php_version.empty()) add("version = " + toml_string(spec.php_version));
+                for (const auto& m : spec.settings.members()) {
+                    if (m.first == "max_body_size" || m.first == "children") continue;  // written above / as children
+                    add(m.first + " = " + (m.second.is_string() ? toml_string(m.second.str()) : std::to_string(static_cast<long long>(m.second.num()))));
+                }
+                s += "php = { " + keys;
                 s += " }\n";
             }
         }

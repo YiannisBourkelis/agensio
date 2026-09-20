@@ -424,7 +424,8 @@ private:
         request_logged_ = false;
         worker_.state.site = nullptr;
         if (req.has_body) {
-            if (!req.chunked && req.content_length > body_limit()) {
+            body_limit_ = body_limit(req.host);  // the site's own limit, looked up only for requests with a body
+            if (!req.chunked && req.content_length > body_limit_) {
                 fail_request(413);  // refused before the handler runs; the client gets it while it may still be sending
                 return;
             }
@@ -652,7 +653,7 @@ private:
                 ec = make_error_code(BodyError::malformed);
                 return false;
             }
-            if (body_read_ > body_limit()) {
+            if (body_read_ > body_limit_) {
                 ec = make_error_code(BodyError::too_large);
                 return false;
             }
@@ -714,11 +715,17 @@ private:
     std::shared_ptr<const Generation> gen_;  // the configuration this connection serves from (kept alive by it)
     const Listener* listener_;               // in gen_
     std::shared_ptr<const CertNames> cert_names_;  // TLS: the certificate presented at the handshake, for the connection's life
-    // The control socket carries uploads ([control] upload_max); sites keep server.max_body_size.
-    std::size_t body_limit() const noexcept {
-        if constexpr (IsLocalSocket<Socket>::value) return live_->control.upload_max;
-        else return live_->max_body_size;
+    // The control socket carries uploads ([control] upload_max); a site has its own
+    // max_body_size or the server's. One router lookup by Host, only when a body is announced.
+    std::size_t body_limit(std::string_view host) const noexcept {
+        if constexpr (IsLocalSocket<Socket>::value) {
+            return live_->control.upload_max;
+        } else {
+            const SiteConfig* site = listener_->router.site(host);
+            return site ? body_limit_of(*site, *live_) : live_->max_body_size;
+        }
     }
+    std::size_t body_limit_ = 0;
 
     const Config* live_;                     // gen_->cfg: sites, limits, trusted proxies (reloadable)
     bool retire_ = false;                    // the listener left the configuration: close after this response

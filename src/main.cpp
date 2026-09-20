@@ -50,6 +50,7 @@ void usage() {
                  "                      site-install NAME [--url https://... | --file UPLOAD | --version V] [--sha256 H]\n"
                  "                           [--path SUB] [--create-path] [--strip 0|1] [--dry-run]\n"
                  "                      site-copy NAME --from SUB --to SUB [--overwrite] [--dry-run]\n"
+                 "                      site-update NAME --set KEY=VALUE ... (settings [NAME] lists the keys and ceilings)\n"
                  "                      Uploads: upload NAME [FILE] (stdin by default) | uploads | uploads-delete NAME\n"
                  "  mcp                 Model Context Protocol server on stdin/stdout for an AI agent host,\n"
                  "                      exposing the control commands as tools as the invoking user\n"
@@ -107,7 +108,7 @@ int main(int argc, char** argv) {
         else if (a == "ctl" && i == 1) {
             auto ctl_usage = [] {
                 std::cout << "usage: agensio ctl <command> [options] [--socket PATH] [-c config.toml]\n"
-                             "read:   status | sites | site NAME | validate | health | presets | uploads |\n"
+                             "read:   status | sites | site NAME | validate | health | presets | uploads | settings [NAME] |\n"
                              "        logs [--site NAME] [--since 3h] [--level error|warn|info] [--status 5xx|4xx|all] [--limit N]\n"
                              "change (each needs --yes, takes --reason TEXT):\n"
                              "        reload | logs-reopen | site-disable NAME | site-enable NAME | site-delete NAME | cert-renew NAME\n"
@@ -116,6 +117,9 @@ int main(int argc, char** argv) {
                              "                    [--php-children N] [--php-version V] [--no-redirect] [--hsts] [--listen-plain A] [--listen-tls A]\n"
                              "        site-update NAME (same options as site-create); --dry-run on either checks and shows the\n"
                              "                    file without writing, listing every problem at once\n"
+                             "        --set KEY=VALUE (site-create and site-update, repeatable): a per-site limit, e.g.\n"
+                             "                    --set max_body_size=200MB --set memory_limit=512M; `settings NAME` lists the keys,\n"
+                             "                    their units, the current value and the ceiling [control] site_limits allows\n"
                              "        site-install NAME [--url https://host/app.tar.gz | --file UPLOAD | --version V] [--sha256 HEX]\n"
                              "                    [--path SUB] [--create-path] [--strip 0|1] [--dry-run]: puts an application's files\n"
                              "                    into the site's (empty) directory as the site's account; no source = the preset's\n"
@@ -187,9 +191,17 @@ int main(int argc, char** argv) {
                 else if (b == "--from") field("from");
                 else if (b == "--to") field("to");
                 else if (b == "--overwrite") body.set("overwrite", true);
+                else if (b == "--set") {
+                    std::string v; value(v);
+                    const std::size_t eq = v.find('=');
+                    if (eq == std::string::npos || eq == 0) { std::cerr << "ctl: --set needs KEY=VALUE\n"; return 2; }
+                    agensio::json::Value st = body["settings"].is_object() ? body["settings"] : agensio::json::Value::object();
+                    st.set(v.substr(0, eq), v.substr(eq + 1));
+                    body.set("settings", st);
+                }
                 else if (command.empty()) command = b;
                 else if (site_name.empty() && command.starts_with("site") && command != "sites") site_name = b;
-                else if (site_name.empty() && (command == "cert-renew" || command == "upload" || command == "uploads-delete")) site_name = b;
+                else if (site_name.empty() && (command == "cert-renew" || command == "upload" || command == "uploads-delete" || command == "settings")) site_name = b;
                 else if (command == "upload" && upload_file.empty()) upload_file = b;
                 else { std::cerr << "ctl: unexpected argument " << b << "\n"; return 2; }
             }
@@ -199,6 +211,7 @@ int main(int argc, char** argv) {
                                   command == "uploads-delete";
             const bool upload = command == "upload";
             if (command == "status" || command == "sites" || command == "health" || command == "presets" || command == "uploads") path = "/v1/" + command;
+            else if (command == "settings") path = site_name.empty() ? "/v1/settings" : "/v1/sites/" + site_name + "/settings";
             else if (command == "site" && !site_name.empty()) path = "/v1/sites/" + site_name;
             else if (command == "validate") path = "/v1/config/validate";
             else if (command == "logs") path = "/v1/logs" + query;

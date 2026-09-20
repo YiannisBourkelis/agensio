@@ -19,6 +19,7 @@
 #endif
 
 #include "control/commands.hpp"
+#include "control/settings.hpp"
 #include "control/sites.hpp"
 #include "core/body.hpp"
 #include "services/archive.hpp"
@@ -128,7 +129,7 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
     // The read commands (F2): every one is a GET, every one needs the viewer role.
     const bool read_command = path == "/v1/status" || path == "/v1/sites" || path.starts_with("/v1/sites/") ||
                               path == "/v1/config/validate" || path == "/v1/logs" || path == "/v1/health" ||
-                              path == "/v1/presets" || path == "/v1/uploads";
+                              path == "/v1/presets" || path == "/v1/uploads" || path == "/v1/settings";
     if (!read_command) {
         reply(s, 404, json::Value::object().set("error", "unknown command").set("path", std::string(path)));
         return false;
@@ -152,6 +153,13 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
         reply(s, 200, body);
     } else if (path == "/v1/sites") {
         reply(s, 200, backend_->sites());
+    } else if (path == "/v1/settings") {
+        reply(s, 200, control::settings_catalog(backend_->running(), nullptr));
+    } else if (path.starts_with("/v1/sites/") && path.ends_with("/settings")) {
+        const std::string_view name = path.substr(10, path.size() - 10 - 9);
+        const SiteConfig* site = control::find_site(backend_->running(), name);
+        if (site) reply(s, 200, control::settings_catalog(backend_->running(), site));
+        else reply(s, 404, json::Value::object().set("error", "no such site").set("site", std::string(name)));
     } else if (path.starts_with("/v1/sites/")) {
         bool found = false;
         json::Value body = backend_->site(path.substr(10), found);
@@ -263,7 +271,7 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
         }
     }
     if (path == "/v1/status" || path == "/v1/config/validate" || path == "/v1/logs" || path == "/v1/health" || path == "/v1/presets" ||
-        path == "/v1/uploads") {
+        path == "/v1/uploads" || path == "/v1/settings" || (site_path && action == "settings")) {
         s.response.headers.add("Allow", "GET, HEAD");
         reply(s, 405, json::Value::object().set("error", "method not allowed"));
         return false;
@@ -717,33 +725,38 @@ void ControlHandler::site_create(Stream& s, const json::Value& body, std::string
         return;
     }
     audit_peer(s, what, "created " + file.string());
+    done.push("site file " + file.string() + " written, agensio reloaded");
     // The rest of the root work, when the helper is there: the site's log to its group, the
     // php-fpm pool written and reloaded. next_steps then holds only what remains.
     std::vector<std::string> steps = control::next_steps(spec, cfg);
-    if (backend_->provision_available()) {
-        const Config& live = backend_->running();
-        if (!spec.user.empty() && !spec.access_log.empty()) {
-            const json::Value r = backend_->provision(json::Value::object().set("op", "log_own").set("file", spec.access_log)
-                                                          .set("group", spec.group.empty() ? spec.user : spec.group));
-            if (r["ok"].boolean()) done.push("log " + spec.access_log + " readable by " + spec.user);
-        }
-        const bool php = spec.app != "static" && spec.app != "proxy";
-        if (php && !spec.user.empty() && spec.php_socket.empty()) {
-            const json::Value r = backend_->provision(json::Value::object().set("op", "pools_apply"));
-            if (r["ok"].boolean()) {
-                done.push("php-fpm pool: " + std::string(r.get("output")));
-                std::vector<std::string> rest;
-                for (const auto& st : steps)
-                    if (st != "agensio pools" && !st.starts_with("systemctl reload php") && !st.starts_with("brew services")) rest.push_back(st);
-                steps = rest;
-            } else {
-                steps.insert(steps.begin(), "# the helper could not apply the pool (" + std::string(r.get("error")) + "); run: agensio pools");
-            }
-        }
-        (void)live;
+    if (backend_->provision_available() && !spec.user.empty() && !spec.access_log.empty()) {
+        const json::Value r = backend_->provision(json::Value::object().set("op", "log_own").set("file", spec.access_log)
+                                                      .set("group", spec.group.empty() ? spec.user : spec.group));
+        if (r["ok"].boolean()) done.push("log " + spec.access_log + " readable by " + spec.user);
     }
+    finish_pool(s, spec, cfg, what, done, steps);
     reply(s, 201, json::Value::object().set("ok", true).set("file", file.string()).set("spec", spec.to_json())
                       .set("done", done).set("next_steps", strings(steps)).set("warnings", warnings));
+}
+
+void ControlHandler::finish_pool(Stream& s, const control::SiteSpec& spec, const Config& cfg, std::string_view what, json::Value& done, std::vector<std::string>& steps) {
+    const bool php = spec.app != "static" && spec.app != "proxy" && !spec.app.empty();
+    if (!(php && !spec.user.empty() && spec.php_socket.empty())) return;
+    if (!backend_->provision_available()) return;  // next_steps already name agensio pools and the reload
+    const json::Value r = backend_->provision(json::Value::object().set("op", "pools_apply"));
+    if (r["ok"].boolean()) {
+        std::string text(r.get("output"));
+        while (!text.empty() && (text.back() == '\n' || text.back() == ' ')) text.pop_back();
+        done.push("php-fpm pool agensio-" + spec.user + ": " + text);
+        audit_peer(s, what, "pool applied: " + text);
+        std::vector<std::string> rest;
+        for (const auto& st : steps)
+            if (st != "agensio pools" && !st.starts_with("systemctl reload php") && !st.starts_with("brew services")) rest.push_back(st);
+        steps = rest;
+    } else {
+        steps.insert(steps.begin(), "# the helper could not apply the pool (" + std::string(r.get("error")) + "); run: agensio pools");
+    }
+    (void)cfg;
 }
 
 void ControlHandler::site_update(Stream& s, std::string_view name, const json::Value& body, std::string_view what) {
@@ -819,8 +832,12 @@ void ControlHandler::site_update(Stream& s, std::string_view name, const json::V
         return;
     }
     audit_peer(s, what, "updated " + file.string());
+    json::Value done_now = done;
+    done_now.push("site file " + file.string() + " written, agensio reloaded");
+    std::vector<std::string> steps = control::next_steps(spec, cfg);
+    finish_pool(s, spec, cfg, what, done_now, steps);
     reply(s, 200, json::Value::object().set("ok", true).set("file", file.string()).set("spec", spec.to_json())
-                      .set("next_steps", strings(control::next_steps(spec, cfg))));
+                      .set("done", done_now).set("next_steps", strings(steps)));
 }
 
 void ControlHandler::site_toggle(Stream& s, std::string_view name, std::string_view action, std::string_view what) {

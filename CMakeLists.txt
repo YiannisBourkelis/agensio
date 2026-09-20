@@ -94,6 +94,7 @@ add_library(agensio_core STATIC
   src/control/handler.cpp
   src/control/commands.cpp
   src/control/sites.cpp
+  src/control/settings.cpp
   src/control/mcp.cpp
   src/control/client.cpp
   src/response.cpp
