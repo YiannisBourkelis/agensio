@@ -202,6 +202,20 @@ struct SiteFacts {
 
 }  // namespace
 
+std::vector<std::string> secret_paths(const SiteConfig& site) {
+    std::vector<std::string> out;
+    if (site.root.empty()) return out;
+    const std::string project = site.pool.open_basedir.empty() ? (site.project_root.empty() ? site.root : site.project_root) : site.pool.open_basedir.front();
+    out.push_back(site.root + "/.git");
+    if (site.app == "laravel") {
+        for (const char* rel : {"/.env", "/config", "/storage", "/.git"}) out.push_back(project + rel);
+    } else {
+        out.push_back(site.root + "/.env");
+    }
+    for (const auto& rel : preset_secrets(site.app)) out.push_back(site.root + rel);
+    return out;
+}
+
 std::vector<std::string> check_hosting(const Config& cfg, const HostFacts& facts) {
     std::vector<std::string> errors;
     std::vector<SiteFacts> sites;
@@ -270,7 +284,7 @@ std::vector<std::string> check_hosting(const Config& cfg, const HostFacts& facts
     auto check_secret = [&](const SiteFacts& sf, const std::string& path) {
         FileFacts f;
         if (!facts.stat(path, f)) return;
-        if ((f.mode & 0004) || ((f.mode & 0040) && f.gid != sf.gid))
+        if (secret_exposed(f.mode, f.gid, sf.gid))
             errors.push_back(sf.name + ": " + path + " is readable by other users (" + describe(f) +
                              "); make it 0600, or 0640 with the site's own group (" +
                              (sf.site->group.empty() ? sf.site->user : sf.site->group) + "), never the server's");
@@ -280,15 +294,7 @@ std::vector<std::string> check_hosting(const Config& cfg, const HostFacts& facts
         check_root(sf, site.root, "root", true);
         for (const auto& dir : site.pool.open_basedir)
             if (dir != site.root) check_root(sf, dir, "open_basedir entry", site.root.starts_with(dir + "/"));
-        const std::string project = site.pool.open_basedir.empty() ? site.root : site.pool.open_basedir.front();
-        check_secret(sf, site.root + "/.git");
-        if (site.app == "laravel") {
-            for (const char* rel : {"/.env", "/config", "/storage", "/.git"}) check_secret(sf, project + rel);
-        } else if (site.app == "wordpress") {
-            check_secret(sf, site.root + "/wp-config.php");
-        } else {
-            check_secret(sf, site.root + "/.env");
-        }
+        for (const auto& path : secret_paths(site)) check_secret(sf, path);
         // Rule 4: the pool socket is the user's, and only agensio's group may connect.
         if (site.php.configured && site.php.address.unix) {
             FileFacts f;

@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "services/json.hpp"
 
@@ -20,6 +21,7 @@ struct Request {
     std::string target;       // site_root itself or a directory below it: must be empty, or missing with create_path
     bool create_path = false; // create the missing directories from site_root down to the target, as the executing account
     bool dry_run = false;     // run every check, create nothing, download nothing; report would_create
+    std::vector<std::string> secrets;  // credential files relative to site_root (secret_paths): made 0600 after extraction, self-checked
     std::string url;          // https source, or ""
     int upload_fd = -1;       // an open descriptor of the uploaded archive, or -1
     std::string upload_name;  // for messages
@@ -31,7 +33,7 @@ struct Request {
 };
 
 // {"ok": bool, "error"?, "as", "files", "directories", "bytes", "downloaded", "sha256", "unwrapped"?,
-//  "created": [{"path", "owner", "mode"}]} ; a dry run answers {"ok", "dry_run": true, "as", "would_create": [...]}.
+//  "created": [{"path", "owner", "mode"}], "secured": [paths made 0600]} ; a dry run answers {"ok", "dry_run": true, "as", "would_create": [...]}.
 // The walk from site_root to the target opens every component without following symlinks
 // and requires each existing one to belong to the executing account; a refusal at any
 // point removes what this call created.
@@ -49,6 +51,7 @@ struct CopyRequest {
     std::string from, to;
     bool overwrite = false;
     bool dry_run = false;
+    std::vector<std::string> secrets;  // as in Request: a destination among them is created 0600
     std::uint64_t max_bytes = 512ull << 20;
 };
 

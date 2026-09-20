@@ -75,6 +75,17 @@ ServerAccount server_account(const Config& cfg, const HostFacts& facts);
 // with the path and what was expected; empty when everything is in order.
 std::vector<std::string> check_hosting(const Config& cfg, const HostFacts& facts);
 
+// The files and directories of a site that hold credentials, absolute: the preset's
+// secrets (`preset_secrets`) under the served root, `.env` and `.git`, and for Laravel
+// the project's .env, config/, storage/ and .git. One list for the hosting rule and for
+// the writers (site-install, site-copy), so the two can never disagree about a file.
+std::vector<std::string> secret_paths(const SiteConfig& site);
+// The rule itself: a secret may be read by its owner and by the site's own group, never
+// by others or by another group (the server's). Pure.
+inline bool secret_exposed(unsigned mode, unsigned gid, unsigned site_gid) noexcept {
+    return (mode & 0004) || ((mode & 0040) && gid != site_gid);
+}
+
 // Writes the pool files into `out_dir`, creates each user's state directories, removes
 // generated files whose user is gone, and prints what it did. Returns 0 when nothing
 // changed, 3 when files were written or removed (reload php-fpm), 1 on error.

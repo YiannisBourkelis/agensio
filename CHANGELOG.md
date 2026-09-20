@@ -3,6 +3,20 @@
 
 ## 0.1.0-alpha.13 (2026-09-20)
 
+- **Credential files are `0600` on every write path, and a writer validates before it
+  answers** (live report: five ok answers produced a server `agensio -t` refused to start,
+  because a `2750` site directory hands the server's group to every file, including the
+  `wp-config.php` a `site-copy` had just written). The preset table now names each
+  preset's `secrets` (`wp-config.php`; Drupal's `settings.php`, `settings.local.php`,
+  `services.yml`), the hosting rule reads that list (Drupal was not covered before),
+  `site-install` and `site-copy` create those files `0600` and report them under
+  `secured`, check the rule on what they wrote, and compare the configuration's
+  validation before and after: a new error answers `409` with `written: true` and the
+  validator's message instead of ok. `presets` shows `secrets`.
+- `health`: `php_fpm_hard_reload` when php-fpm.conf sets no `process_control_timeout`:
+  the reload `site-create` and `agensio pools` trigger then kills PHP requests in flight
+  on every site (live report: 502s on another site while a site was created); the fix
+  is one line in php-fpm.conf, and `site-create`'s `done` entry says so.
 - WordPress preset: the `wp-content` drop-ins `db.php`, `advanced-cache.php` and
   `object-cache.php` are answered 404 like `wp-config.php`; they run only inside
   WordPress's bootstrap and answered 500 when fetched directly (live report).

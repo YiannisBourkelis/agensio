@@ -1,5 +1,6 @@
 #include "services/install.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
@@ -22,6 +23,7 @@
 
 #include "services/archive.hpp"
 #include "services/fetch.hpp"
+#include "services/pools.hpp"
 
 namespace agensio::install {
 
@@ -381,6 +383,26 @@ json::Value execute(const Request& req) {
     } else if (req.strip == 1) {
         result.set("warning", "strip requested but the archive has no single top directory; kept as is");
     }
+    // The credential files of the preset (wp-config.php, Drupal's settings.php) are the
+    // site's alone whatever the directory's pattern gave them: 0600, then checked with
+    // the hosting rule itself, so the answer is never an ok the validator would refuse.
+    json::Value secured = json::Value::array();
+    const std::string sub = req.target.size() > req.site_root.size() ? req.target.substr(req.site_root.size() + 1) + "/" : "";
+    for (const auto& secret : req.secrets) {
+        std::string rel;
+        if (sub.empty()) rel = secret;
+        else if (secret.starts_with(sub)) rel = secret.substr(sub.size());
+        else continue;
+        const int f = ::openat(dir_fd, rel.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        if (f < 0) continue;
+        struct stat fs {};
+        bool ok_mode = ::fstat(f, &fs) == 0 && S_ISREG(fs.st_mode) && ::fchmod(f, 0600) == 0 && ::fstat(f, &fs) == 0 &&
+                       !secret_exposed(fs.st_mode & 07777, fs.st_gid, ::getegid());
+        ::close(f);
+        if (!ok_mode) return fail_install(req.target + "/" + rel + " holds credentials and could not be made 0600 (owner " + std::to_string(fs.st_uid) + "); nothing installed");
+        secured.push(req.target + "/" + rel);
+    }
+    result.set("secured", secured);
     ::close(dir_fd);
     return result;
 }
@@ -512,12 +534,13 @@ json::Value copy_file(const CopyRequest& req) {
         ::close(src);
         return failure("to: " + to_abs + ": " + what);
     }
-    const unsigned mode = (ds.st_mode & 0666) | ((ss.st_mode & 0111) ? (ds.st_mode & 0111) : 0);
+    const bool secret = std::find(req.secrets.begin(), req.secrets.end(), ct) != req.secrets.end();
+    const unsigned mode = secret ? 0600u : (ds.st_mode & 0666) | ((ss.st_mode & 0111) ? (ds.st_mode & 0111) : 0);
     if (req.dry_run) {
         ::close(to_dir);
         ::close(src);
         json::Value v = json::Value::object().set("ok", true).set("dry_run", true).set("as", account_name()).set("from", from_abs).set("to", to_abs)
-                            .set("bytes", static_cast<double>(ss.st_size)).set("mode", mode_text(mode));
+                            .set("bytes", static_cast<double>(ss.st_size)).set("mode", mode_text(mode)).set("secured", secret);
         if (!replaced.is_null()) v.set("would_replace", replaced);
         return v;
     }
@@ -562,6 +585,11 @@ json::Value copy_file(const CopyRequest& req) {
         }
     }
     if (::fchmod(dst, mode) != 0 || ::fsync(dst) != 0) return abort_copy(to_abs + ": " + std::strerror(errno));
+    if (secret) {  // the hosting rule on what was just written, before it is placed
+        struct stat ws {};
+        if (::fstat(dst, &ws) != 0 || secret_exposed(ws.st_mode & 07777, ws.st_gid, ::getegid()))
+            return abort_copy(to_abs + " holds credentials and would be readable by others; refused");
+    }
     ::close(dst);
     const bool placed = replaced.is_null() ? ::linkat(to_dir, tmp.c_str(), to_dir, tleaf.c_str(), 0) == 0 : ::renameat(to_dir, tmp.c_str(), to_dir, tleaf.c_str()) == 0;
     if (!placed) {
@@ -575,7 +603,7 @@ json::Value copy_file(const CopyRequest& req) {
     ::close(to_dir);
     ::close(src);
     json::Value v = json::Value::object().set("ok", true).set("as", account_name()).set("from", from_abs).set("to", to_abs)
-                        .set("bytes", static_cast<double>(copied)).set("mode", mode_text(mode));
+                        .set("bytes", static_cast<double>(copied)).set("mode", mode_text(mode)).set("secured", secret);
     if (!replaced.is_null()) v.set("replaced", replaced);
     return v;
 }

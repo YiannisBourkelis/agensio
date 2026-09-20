@@ -71,6 +71,11 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now);
 json::Value validate(const std::filesystem::path& path, const Config& running);
 // The restart-only settings that differ between the file on disk and the running server.
 std::vector<std::string> restart_needed(const Config& fresh, const Config& running);
+// php-fpm's global file next to the pool directory (Debian: fpm/php-fpm.conf; RHEL:
+// /etc/php-fpm.conf), and whether it sets process_control_timeout, without which a
+// reload kills children mid-request (`site-create` and `agensio pools` reload). True
+// when the file exists and the setting is absent or 0; `file` names it.
+bool php_fpm_hard_reload(const Config& cfg, std::string& file);
 
 struct Finding {
     std::string severity;  // error | warn | info

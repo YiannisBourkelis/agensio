@@ -660,6 +660,7 @@ void Server::install_async(const json::Value& req, std::function<void(json::Valu
             cr.overwrite = req["overwrite"].boolean();
             cr.dry_run = req["dry_run"].boolean();
             cr.max_bytes = cfg_.control.upload_max;
+            for (const auto& sec : req["secrets"].items()) cr.secrets.push_back(sec.str());
             r = install::copy_file(cr);
 #else
             r = json::Value::object().set("ok", false).set("error", "not available on this platform");
@@ -677,6 +678,7 @@ void Server::install_async(const json::Value& req, std::function<void(json::Valu
             ir.strip = req["strip"].is_null() ? -1 : static_cast<int>(req["strip"].num());
             ir.allow_private = cfg_.control.install_private;
             ir.ca_file = cfg_.control.install_ca;
+            for (const auto& sec : req["secrets"].items()) ir.secrets.push_back(sec.str());
             if (!ir.url.empty() && !cfg_.control.install) {
                 r = json::Value::object().set("ok", false).set("error", "downloads are off ([control] install = false); upload the archive instead");
             } else {

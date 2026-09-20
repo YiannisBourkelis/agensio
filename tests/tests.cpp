@@ -1135,10 +1135,13 @@ static void test_hosting_rules() {
     const std::string server = "[server]\nworkers = 1\ngroup = \"agensio\"\npools_run = \"/run/php\"\nstate_dir = \"/var/lib/agensio\"\n[log]\naccess = \"/var/log/agensio/access.log\"\n";
     write("h.toml", server +
           "[[site]]\nserver_name = [\"shop\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"app\"\nuser = \"web1\"\napp = \"laravel\"\naccess_log = \"/var/log/agensio/shop.log\"\n"
-          "[[site]]\nserver_name = [\"blog\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"blog\"\nuser = \"web2\"\napp = \"wordpress\"\naccess_log = \"/var/log/agensio/blog.log\"\n");
+          "[[site]]\nserver_name = [\"blog\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"blog\"\nuser = \"web2\"\napp = \"wordpress\"\naccess_log = \"/var/log/agensio/blog.log\"\n"
+          "[[site]]\nserver_name = [\"docs\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"docs\"\nuser = \"web2\"\napp = \"drupal\"\naccess_log = \"/var/log/agensio/blog.log\"\n");
+    fs::create_directories(dir / "docs");
     Config cfg = load_config(dir / "h.toml");
     const std::string app = fs::canonical(dir / "app").string();
     const std::string blog = fs::canonical(dir / "blog").string();
+    const std::string docs = fs::canonical(dir / "docs").string();
     // The machine: users web1 (1001:1001) and web2 (1002:1002), agensio group 33.
     std::map<std::string, FileFacts> files;
     HostFacts facts;
@@ -1170,6 +1173,8 @@ static void test_hosting_rules() {
     files[app + "/.env"] = file(1001, 1001, 0640);
     files[blog] = file(1002, 1002, 0755, true);
     files[blog + "/wp-config.php"] = file(1002, 1002, 0640);
+    files[docs] = file(1002, 1002, 0755, true);
+    files[docs + "/sites/default/settings.php"] = file(1002, 1002, 0600);
     files["/run/php/agensio-web1.sock"] = file(1001, 33, 0660);
     files["/run/php"] = file(0, 0, 0755, true);
     files["/var/log/agensio"] = file(33, 33, 0750, true);
@@ -1187,6 +1192,31 @@ static void test_hosting_rules() {
     files[blog + "/wp-config.php"] = file(1002, 33, 0640);  // readable by a group that is not web2's
     CHECK(count_with("wp-config.php is readable") == 1);
     files[blog + "/wp-config.php"] = file(1002, 1002, 0640);
+    // The same rule reads the preset table: Drupal's settings.php and services.yml are covered too.
+    files[docs + "/sites/default/settings.php"] = file(1002, 33, 0640);
+    files[docs + "/sites/default/services.yml"] = file(1002, 1002, 0644);
+    CHECK(count_with("settings.php is readable") == 1 && count_with("services.yml is readable") == 1);
+    files[docs + "/sites/default/settings.php"] = file(1002, 1002, 0600);
+    files.erase(docs + "/sites/default/services.yml");
+    CHECK(secret_exposed(0644, 1002, 1002) && secret_exposed(0640, 33, 1002) && !secret_exposed(0640, 1002, 1002) && !secret_exposed(0600, 33, 1002));
+    {
+        // secret_paths: one list for the rule and for the writers, from the preset table.
+        const auto wp = secret_paths(cfg.sites[1]);
+        const auto dr = secret_paths(cfg.sites[2]);
+        CHECK(std::find(wp.begin(), wp.end(), blog + "/wp-config.php") != wp.end() && std::find(wp.begin(), wp.end(), blog + "/.git") != wp.end());
+        CHECK(std::find(dr.begin(), dr.end(), docs + "/sites/default/settings.php") != dr.end() && std::find(dr.begin(), dr.end(), docs + "/sites/default/services.yml") != dr.end());
+        const auto lv = secret_paths(cfg.sites[0]);
+        CHECK(std::find(lv.begin(), lv.end(), app + "/.env") != lv.end() && std::find(lv.begin(), lv.end(), app + "/storage") != lv.end());
+        // Every preset's secrets are among what it never serves (a secret that is served is a contradiction).
+        const json::Value catalog = preset_catalog();
+        for (const auto& pr : catalog["presets"].items()) {
+            const auto& never = pr["never_served"].items();
+            for (const auto& sec : pr["secrets"].items())
+                CHECK(std::find_if(never.begin(), never.end(), [&](const json::Value& n) { return n.str() == sec.str(); }) != never.end());
+            CHECK(preset_secrets(std::string(pr.get("app"))).size() == pr["secrets"].items().size());
+        }
+        CHECK(preset_secrets("wordpress") == std::vector<std::string>{"/wp-config.php"} && preset_secrets("drupal").size() == 3 && preset_secrets("static").empty());
+    }
     files["/run/php/agensio-web1.sock"] = file(1001, 1001, 0666);
     CHECK(count_with("expected group agensio") == 1 && count_with("any user could connect") == 1);
     files["/run/php/agensio-web1.sock"] = file(1002, 33, 0660);
@@ -1196,7 +1226,7 @@ static void test_hosting_rules() {
     CHECK(count_with("access log /var/log/agensio/shop.log is readable") == 1);
     files["/var/log/agensio/shop.log"] = file(33, 1001, 0640);
     files["/var/log/agensio"] = file(33, 1001, 0770, true);
-    CHECK(count_with("log directory /var/log/agensio is writable") == 2);  // both sites log there
+    CHECK(count_with("log directory /var/log/agensio is writable") == 3);  // all three sites log there
     files["/var/log/agensio"] = file(33, 33, 0750, true);
     CHECK(check_hosting(cfg, facts).empty());
     // Accounts and sharing.
@@ -2181,6 +2211,65 @@ static void test_install() {
         v = install::execute(r);
         ::close(r.upload_fd);
         CHECK(!v["ok"].boolean() && std::string(v.get("error")).find("not below") != std::string::npos);
+        // The credential files of the preset are 0600 whatever the directory's pattern, in
+        // an install (after the unwrap) and in a copy, and reported under secured.
+        fs::remove_all(dir / "target");
+        fs::create_directories(dir / "target");
+        ::chmod((dir / "target").c_str(), 0750);
+        write_file(dir / "wp.tar", tar_entry("wordpress/", "", '5') + tar_entry("wordpress/index.php", "i", '0') + tar_entry("wordpress/wp-config.php", "<?php // db password", '0', 0644) + tar_end());
+        {
+            install::Request r2;
+            r2.site_root = r2.target = (dir / "target").string();
+            r2.secrets = {"wp-config.php", "wp-content/db.php"};
+            r2.upload_fd = ::open((dir / "wp.tar").c_str(), O_RDONLY);
+            v = install::execute(r2);
+            ::close(r2.upload_fd);
+            CHECK(v["ok"].boolean() && v.get("unwrapped") == "wordpress" && v["secured"].items().size() == 1 && v["secured"].items()[0].str() == (dir / "target" / "wp-config.php").string());
+            CHECK(::stat((dir / "target" / "wp-config.php").c_str(), &st) == 0 && (st.st_mode & 0777) == 0600);
+            CHECK(::stat((dir / "target" / "index.php").c_str(), &st) == 0 && (st.st_mode & 0777) == 0640);
+            // A secret below an install path (a plugin that ships its own credentials file).
+            r2.target = (dir / "target").string() + "/plugins/demo";
+            r2.create_path = true;
+            r2.secrets = {"plugins/demo/wp-config.php"};
+            r2.upload_fd = ::open((dir / "wp.tar").c_str(), O_RDONLY);
+            v = install::execute(r2);
+            ::close(r2.upload_fd);
+            CHECK(v["ok"].boolean() && v["secured"].items().size() == 1 && ::stat((dir / "target" / "plugins" / "demo" / "wp-config.php").c_str(), &st) == 0 && (st.st_mode & 0777) == 0600);
+        }
+        {
+            install::CopyRequest c;
+            c.site_root = (dir / "target").string();
+            c.from = "index.php";
+            c.to = "wp-config.php";
+            c.overwrite = true;
+            c.secrets = {"wp-config.php"};
+            const json::Value d = install::copy_file([&] { auto x = c; x.dry_run = true; return x; }());
+            CHECK(d["ok"].boolean() && d.get("mode") == "0600" && d["secured"].boolean());
+            v = install::copy_file(c);
+            CHECK(v["ok"].boolean() && v.get("mode") == "0600" && v["secured"].boolean() && ::stat((dir / "target" / "wp-config.php").c_str(), &st) == 0 && (st.st_mode & 0777) == 0600);
+            c.to = "other.php";
+            v = install::copy_file(c);
+            CHECK(v["ok"].boolean() && v.get("mode") == "0640" && !v["secured"].boolean());
+        }
+        fs::remove_all(dir / "target");
+        fs::create_directories(dir / "target" / "plugins" / "demo");
+        ::chmod((dir / "target").c_str(), 0750);
+        fs::create_directory_symlink(dir, dir / "target" / "out");  // a symlink pointing outside, for the copy refusals
+        write_file(dir / "app.tar", t2);
+        // php-fpm's reload without process_control_timeout is a health finding.
+        {
+            fs::create_directories(dir / "fpm" / "pool.d");
+            Config pc;
+            pc.pools_dir = (dir / "fpm" / "pool.d").string();
+            std::string conf;
+            CHECK(!control::php_fpm_hard_reload(pc, conf));  // no php-fpm.conf: nothing to say
+            write_file(dir / "fpm" / "php-fpm.conf", "[global]\npid = /run/php/php-fpm.pid\n;process_control_timeout = 10s\n");
+            CHECK(control::php_fpm_hard_reload(pc, conf) && conf == (dir / "fpm" / "php-fpm.conf").string());
+            write_file(dir / "fpm" / "php-fpm.conf", "[global]\nprocess_control_timeout = 0\n");
+            CHECK(control::php_fpm_hard_reload(pc, conf));
+            write_file(dir / "fpm" / "php-fpm.conf", "[global]\n process_control_timeout = 10s ; graceful\n");
+            CHECK(!control::php_fpm_hard_reload(pc, conf));
+        }
         // site-copy (F9b): one file to another path of the same site, every refusal of the report.
         const fs::path site = dir / "target";
         auto copy = [&](const std::string& from, const std::string& to, bool overwrite = false, bool dry = false, std::uint64_t cap = 512u << 20) {

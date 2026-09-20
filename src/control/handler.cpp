@@ -23,6 +23,7 @@
 #include "core/body.hpp"
 #include "services/archive.hpp"
 #include "services/install.hpp"
+#include "services/pools.hpp"
 
 namespace agensio {
 
@@ -204,6 +205,35 @@ json::Value commands_of(const std::vector<control::Problem>& problems, bool bloc
     json::Value a = json::Value::array();
     for (const auto& p : problems)
         if (!p.run_as_root.empty() && (!blocking_only || p.blocks)) a.push(p.run_as_root);
+    return a;
+}
+
+// The credential files of a site, relative to its directory, for the writers: what the
+// hosting rule checks (secret_paths), restricted to what lies below the site's directory.
+json::Value site_secrets(const SiteConfig& site, const std::string& site_root) {
+    json::Value a = json::Value::array();
+    for (const auto& abs : secret_paths(site))
+        if (abs.size() > site_root.size() + 1 && abs.compare(0, site_root.size(), site_root) == 0 && abs[site_root.size()] == '/')
+            a.push(abs.substr(site_root.size() + 1));
+    return a;
+}
+
+// The hosting-rule errors of the configuration on disk, as a set: a writer compares the
+// state before and after what it wrote, so its answer never says ok to a state the
+// validator refuses, and a problem that was there before is not blamed on the call.
+std::vector<std::string> validation_errors(ControlBackend& backend) {
+    std::vector<std::string> out;
+    const json::Value v = backend.validate();
+    for (const auto& e : v["errors"].items())
+        if (e.is_string()) out.push_back(e.str());
+    return out;
+}
+
+// Errors in `after` that were not in `before`.
+json::Value new_errors(const std::vector<std::string>& before, const std::vector<std::string>& after) {
+    json::Value a = json::Value::array();
+    for (const auto& e : after)
+        if (std::find(before.begin(), before.end(), e) == before.end()) a.push(e);
     return a;
 }
 
@@ -525,7 +555,8 @@ void ControlHandler::site_install(Stream& s, std::string_view name, const json::
     }
     const bool create_path = body["create_path"].boolean();
     const bool dry_run = body["dry_run"].boolean();
-    json::Value req = json::Value::object().set("site_root", site_root).set("target", target).set("create_path", create_path).set("dry_run", dry_run);
+    json::Value req = json::Value::object().set("site_root", site_root).set("target", target).set("create_path", create_path).set("dry_run", dry_run)
+                          .set("secrets", site_secrets(*site, site_root));
     if (!site->user.empty()) req.set("user", site->user);
     if (!url.empty()) req.set("url", url);
     if (!file.empty()) req.set("upload", file);
@@ -533,9 +564,10 @@ void ControlHandler::site_install(Stream& s, std::string_view name, const json::
     if (!body["strip"].is_null()) req.set("strip", body["strip"]);
     const std::string source = url.empty() ? "upload " + file : url;
     if (!dry_run) audit_peer(s, what, "installing " + source + " into " + target + (create_path ? " (create_path)" : ""));
+    const std::vector<std::string> before = dry_run ? std::vector<std::string>{} : validation_errors(*backend_);
     // A dry run takes the same walk as the real call (as the same account) and reports
     // the refusal it would meet or the directories it would create; nothing is written.
-    backend_->install_async(req, [this, &s, what = std::string(what), target, url, file, source, dry_run, done](json::Value r) {
+    backend_->install_async(req, [this, &s, what = std::string(what), target, url, file, source, dry_run, before, done](json::Value r) {
         const bool ok = r["ok"].boolean();
         if (dry_run) {
             if (ok) reply(s, 200, r.set("source", source).set("hint", "nothing was written; the same call without dry_run installs"));
@@ -545,11 +577,19 @@ void ControlHandler::site_install(Stream& s, std::string_view name, const json::
         }
         std::string made;
         for (const auto& c : r["created"].items()) made += " created " + std::string(c.get("path")) + " (" + std::string(c.get("owner")) + " " + std::string(c.get("mode")) + ")";
+        for (const auto& c : r["secured"].items()) made += " secured " + std::string(c.str()) + " (0600)";
         audit_peer(s, what, ok ? "installed " + std::to_string(static_cast<long>(r["files"].num())) + " files into " + target + " (sha256 " + std::string(r.get("sha256")) + ")" + made
                               : "failed: " + std::string(r.get("error")));
         if (!ok) {
             reply(s, 409, json::Value::object().set("ok", false).set("error", r.get("error")).set("target", target));
+        } else if (const json::Value fresh = new_errors(before, validation_errors(*backend_)); !fresh.items().empty()) {
+            // The state written passes the writer's own checks but not the whole
+            // configuration's: say so instead of ok, with the validator's words.
+            audit_peer(s, what, "written, but the configuration no longer validates: " + fresh.dump());
+            reply(s, 409, r.set("ok", false).set("written", true).set("error", "the files are installed, but the configuration no longer validates; agensio -t and a restart would refuse it")
+                              .set("errors", fresh).set("hint", "fix what the errors name (health lists them with a fix each), then config_validate"));
         } else {
+            if (!before.empty()) r.set("warnings", json::Value::array().push("the configuration already failed validation before this call (health lists the findings); the install itself is fine"));
             json::Value steps = json::Value::array();
             if (!url.empty()) steps.push("the files came from " + std::string(r.get("url").empty() ? url : std::string(r.get("url"))) + "; sha256 " + std::string(r.get("sha256")));
             steps.push("open the site in a browser to finish the application's own setup (database, admin account)");
@@ -861,10 +901,11 @@ void ControlHandler::site_copy(Stream& s, std::string_view name, const json::Val
     }
     const bool overwrite = body["overwrite"].boolean(), dry_run = body["dry_run"].boolean();
     json::Value req = json::Value::object().set("op", "file_copy").set("site_root", site_root).set("from", from).set("to", to)
-                          .set("overwrite", overwrite).set("dry_run", dry_run);
+                          .set("overwrite", overwrite).set("dry_run", dry_run).set("secrets", site_secrets(*site, site_root));
     if (!site->user.empty()) req.set("user", site->user);
     if (!dry_run) audit_peer(s, what, "copying " + from + " to " + to + " in " + site_root + (overwrite ? " (overwrite)" : ""));
-    backend_->install_async(req, [this, &s, what = std::string(what), dry_run, done](json::Value r) {
+    const std::vector<std::string> before = dry_run ? std::vector<std::string>{} : validation_errors(*backend_);
+    backend_->install_async(req, [this, &s, what = std::string(what), dry_run, before, done](json::Value r) {
         const bool ok = r["ok"].boolean();
         if (dry_run) {
             if (ok) reply(s, 200, r.set("hint", "nothing was written; the same call without dry_run copies"));
@@ -873,10 +914,18 @@ void ControlHandler::site_copy(Stream& s, std::string_view name, const json::Val
             return;
         }
         const bool replaced = !r["replaced"].is_null();
-        audit_peer(s, what, ok ? (replaced ? "replaced " : "wrote ") + std::string(r.get("to")) + " from " + std::string(r.get("from")) + " (" + std::string(r.get("as")) + " " + std::string(r.get("mode")) + ", " + std::to_string(static_cast<long>(r["bytes"].num())) + " bytes)"
+        audit_peer(s, what, ok ? (replaced ? "replaced " : "wrote ") + std::string(r.get("to")) + " from " + std::string(r.get("from")) + " (" + std::string(r.get("as")) + " " + std::string(r.get("mode")) + (r["secured"].boolean() ? ", credentials" : "") + ", " + std::to_string(static_cast<long>(r["bytes"].num())) + " bytes)"
                               : "failed: " + std::string(r.get("error")));
-        if (!ok) reply(s, 409, json::Value::object().set("ok", false).set("error", r.get("error")));
-        else reply(s, replaced ? 200 : 201, r);
+        if (!ok) {
+            reply(s, 409, json::Value::object().set("ok", false).set("error", r.get("error")));
+        } else if (const json::Value fresh = new_errors(before, validation_errors(*backend_)); !fresh.items().empty()) {
+            audit_peer(s, what, "written, but the configuration no longer validates: " + fresh.dump());
+            reply(s, 409, r.set("ok", false).set("written", true).set("error", "the file is written, but the configuration no longer validates; agensio -t and a restart would refuse it")
+                              .set("errors", fresh).set("hint", "fix what the errors name (health lists them with a fix each), then config_validate"));
+        } else {
+            if (!before.empty()) r.set("warnings", json::Value::array().push("the configuration already failed validation before this call (health lists the findings); the copy itself is fine"));
+            reply(s, replaced ? 200 : 201, r);
+        }
         done();
     });
 }

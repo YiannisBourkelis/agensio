@@ -531,6 +531,7 @@ struct PhpPreset {
     std::vector<const char*> never;   // exact paths answered 404 (credentials, lock files)
     const char* source;               // official archive of the newest release ("" = none; site-install needs a URL or an upload)
     const char* source_versioned;     // the same with {version} in it ("" = only the newest)
+    std::vector<const char*> secrets; // the credential files among `never`: created 0600 by every write path, checked by the hosting rules
 };
 
 // Drupal's .htaccess, the part that matters: PHP source in its other spellings, templates,
@@ -542,12 +543,12 @@ const std::vector<std::string> kDrupalSource = {".inc", ".install", ".module", "
 const std::vector<PhpPreset> kPhpPresets = {
     // Plain PHP: any script runs, missing paths are 404, no front controller.
     {"php", "Plain PHP: every .php under the root runs, missing paths are 404, no front controller.",
-     "", false, {"index.php", "index.html"}, false, true, {}, {}, {}, "", ""},
+     "", false, {"index.php", "index.html"}, false, true, {}, {}, {}, "", "", {}},
     // Laravel (and Statamic): one entry point; any other .php is refused, never served as
     // source (2026-09-19); Vite's hashed build output cached for a year.
     {"laravel", "Laravel and Statamic: the project directory is given, its public/ is served; only index.php ever runs, any other .php is refused; Vite's build/ is cached for a year.",
      "public", true, {"index.php"}, true, false, {},
-     {{"/build/", "public, max-age=31536000, immutable"}}, {}, "", ""},
+     {{"/build/", "public, max-age=31536000, immutable"}}, {}, "", "", {}},
     // Drupal: many entry points (index.php, core/install.php, update.php); what its
     // .htaccess protects is refused natively, since .htaccess is never read.
     {"drupal", "Drupal (and other PHP applications with several entry points): the project directory is given, its web/ is served when present; any .php runs, missing paths reach index.php, and what Drupal's .htaccess protects is refused natively.",
@@ -557,7 +558,8 @@ const std::vector<PhpPreset> kPhpPresets = {
      {"/sites/default/settings.php", "/sites/default/settings.local.php", "/sites/default/default.settings.php",
       "/sites/default/services.yml", "/sites/default/default.services.yml", "/composer.json", "/composer.lock",
       "/web.config", "/update.php.bak"},
-     "https://www.drupal.org/download-latest/tar.gz", "https://ftp.drupal.org/files/projects/drupal-{version}.tar.gz"},
+     "https://www.drupal.org/download-latest/tar.gz", "https://ftp.drupal.org/files/projects/drupal-{version}.tar.gz",
+     {"/sites/default/settings.php", "/sites/default/settings.local.php", "/sites/default/services.yml"}},
     // WordPress: any .php runs (wp-login.php, wp-admin/*, wp-cron.php, plugin endpoints),
     // pretty permalinks fall back to index.php, nothing under uploads or wp-includes is
     // ever executed and their files are cacheable (modestly: WordPress versions assets by
@@ -571,7 +573,8 @@ const std::vector<PhpPreset> kPhpPresets = {
      {{"/wp-content/uploads/", "public, max-age=604800"}, {"/wp-includes/", "public, max-age=2592000"}},
      {"/wp-config.php", "/wp-config-sample.php", "/readme.html", "/license.txt",
       "/wp-content/db.php", "/wp-content/advanced-cache.php", "/wp-content/object-cache.php"},
-     "https://wordpress.org/latest.tar.gz", "https://wordpress.org/wordpress-{version}.tar.gz"},
+     "https://wordpress.org/latest.tar.gz", "https://wordpress.org/wordpress-{version}.tar.gz",
+     {"/wp-config.php"}},
 };
 
 const PhpPreset* php_preset(const std::string& app) {
@@ -1346,6 +1349,9 @@ json::Value preset_catalog() {
         json::Value never = json::Value::array();
         for (const char* n : p.never) never.push(n);
         v.set("never_served", std::move(never));
+        json::Value secrets = json::Value::array();
+        for (const char* n : p.secrets) secrets.push(n);
+        v.set("secrets", std::move(secrets));
         v.set("source", *p.source ? json::Value(p.source) : json::Value(nullptr));
         list.push(std::move(v));
     }
@@ -1353,6 +1359,13 @@ json::Value preset_catalog() {
                   .set("root", "none").set("php", "none"));
     return json::Value::object().set("presets", std::move(list))
         .set("note", "agensio never reads .htaccess; a preset provides the refusals an application's .htaccess would. Hand-written [[site.location]] entries win over a preset's.");
+}
+
+std::vector<std::string> preset_secrets(const std::string& app) {
+    std::vector<std::string> out;
+    if (const PhpPreset* p = php_preset(app))
+        for (const char* n : p->secrets) out.emplace_back(n);
+    return out;
 }
 
 std::string preset_source(const std::string& app, const std::string& version) {

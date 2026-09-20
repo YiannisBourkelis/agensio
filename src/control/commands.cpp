@@ -420,6 +420,32 @@ json::Value validate(const fs::path& path, const Config& running) {
     return v;
 }
 
+bool php_fpm_hard_reload(const Config& cfg, std::string& file) {
+    const fs::path dir = pools_dir(cfg, "");
+    if (dir.empty()) return false;
+    std::error_code ec;
+    for (const fs::path candidate : {dir.parent_path() / "php-fpm.conf", dir.parent_path().parent_path() / "php-fpm.conf"}) {
+        if (!fs::is_regular_file(candidate, ec)) continue;
+        file = candidate.string();
+        std::ifstream in(candidate);
+        std::string line;
+        while (std::getline(in, line)) {
+            const std::size_t start = line.find_first_not_of(" \t");
+            if (start == std::string::npos || line[start] == ';' || line[start] == '#') continue;
+            if (line.compare(start, 23, "process_control_timeout") != 0) continue;
+            const std::size_t eq = line.find('=', start);
+            if (eq == std::string::npos) continue;
+            std::string value = line.substr(eq + 1);
+            value.erase(0, value.find_first_not_of(" \t"));
+            const std::size_t end = value.find_first_of(" \t;#\r");
+            if (end != std::string::npos) value.erase(end);
+            return value.empty() || value == "0" || value == "0s";
+        }
+        return true;  // the file exists and never sets it: php-fpm's default of 0
+    }
+    return false;
+}
+
 std::vector<Finding> health_findings(const Config& running, const Config& boot, bool as_root, std::time_t now) {
     std::vector<Finding> out;
     auto add = [&](std::string sev, std::string code, std::string site, std::string msg, std::string fix = "") {
@@ -529,6 +555,10 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
                 add("warn", "pools_stale", "", "generated php-fpm pool files differ from the configuration",
                     "run agensio pools, then reload php-fpm");
         }
+        std::string conf;
+        if (php_fpm_hard_reload(running, conf))
+            add("info", "php_fpm_hard_reload", "", "php-fpm.conf does not set process_control_timeout, so a php-fpm reload (site-create writing a pool, agensio pools) kills PHP requests in flight on every site",
+                "set process_control_timeout = 10s in " + conf + " and reload php-fpm once");
     }
 
     // Recent errors.

@@ -488,9 +488,12 @@ its owner and mode, and what was expected:
 - the root (or the project above a Laravel `public/`) cannot be read by the server's
   account: the fix it prints is `chown <user>:<server group> ROOT && chmod 2750 ROOT`,
   the layout `site-create` prescribes;
-- a secret is readable by other users: `.env`, `config/`, `storage/` and `.git` for
-  Laravel (in the project directory), `wp-config.php` for WordPress, `.env` and `.git`
-  under the root otherwise (make them `0640 user:group`);
+- a secret is readable by other users: the preset's credential files (`presets` lists
+  them under `secrets`: `wp-config.php` for WordPress; `settings.php`,
+  `settings.local.php` and `services.yml` for Drupal), `.env` and `.git` under the root,
+  and for Laravel the project's `.env`, `config/`, `storage/` and `.git` (make them
+  `0600`, or `0640 user:<the site's own group>`; `site-install` and `site-copy` create
+  them `0600`, the same list, so what they write always passes);
 - the pool socket is not owned by the user, not in the server's group (owner = site user,
   group = server group, `0660`: the server connects through the group bit, nobody else
   can), or has mode bits for others; or its directory is world-writable;
@@ -899,7 +902,7 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 | `status` | viewer | version, pid, uptime, configuration path, workers, open connections, listeners, sites (names, listen, root, app, user, tls, redirect), whether ACME is on, and the caller's uid/gid/role |
 | `sites` | viewer | every site: names, listen, root, app, user, redirect, access log, and its certificate (mode, issuer, names, days left, whether it is still the placeholder) |
 | `site NAME` | viewer | one site in full (`handler` is `deny` for a path answered 404 whatever exists, and a location lists the endings it `refuses`): the above plus index, php socket and generated pool, upstreams, and every location after the preset expanded (path, match, handler, root/alias, upstream, added headers, which preset added it) |
-| `presets` | viewer | the application presets: for each `app` value the served root, whether every `.php` runs or only the front controller, refused suffixes, directories that never run PHP, files never served, and `source`, the official archive `site-install` takes when the preset has one |
+| `presets` | viewer | the application presets: for each `app` value the served root, whether every `.php` runs or only the front controller, refused suffixes, directories that never run PHP, files never served, `secrets` (the credential files among them: what the hosting rules check and every write path creates `0600`), and `source`, the official archive `site-install` takes when the preset has one |
 | `validate` | viewer | loads the file on disk again and runs the hosting rules: `ok`, `errors`, site count, and the restart-only settings that differ from the running server |
 | `logs` | viewer | `--site NAME` (default: all sites plus the error log), `--since 3h` (`m`, `h`, `d`, `w`, seconds, or a local `YYYY-MM-DDThh:mm:ss`; default 1h), `--level error|warn|info` for the error log (default warn = error+warn), `--status 5xx|4xx|all|NNN` for access logs (default 5xx), `--limit N` (default 200, newest). Reads at most 2 MB per file from the end; `truncated` says when that cut in |
 | `uploads` | viewer | the archives stored with `upload` (`file`, `bytes`, `uploaded`), ready for `site-install --file` |
@@ -922,7 +925,7 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 | `uploads-delete NAME` | operator | removes a stored upload |
 | `site-install NAME` | admin | puts an application's files into the site's directory (the `root` as given, above a preset's `public/` or `web/`; `--path SUB` for a subdirectory such as `wp-content/plugins/NAME`, with `--create-path` when it does not exist yet) **as the site's account**, from one source: `--url https://...` (a `.tar.gz`, `.tar` or `.zip`), `--file UPLOAD` (a stored upload), or nothing, which takes the preset's official archive (`presets` lists it under `source`; `--version V` picks a release, default the newest; WordPress and Drupal have one, Laravel is made with composer). `--sha256 HEX` refuses an archive whose digest differs. `--strip 0|1` keeps or unwraps a single top directory (default: unwrap when there is exactly one). `--dry-run` takes the same walk as the real call, as the same account, and answers with the target, the account and `would_create`, or with the refusal the real call would meet; nothing is downloaded or written. Answers 201 with `files`, `bytes`, `sha256`, `unwrapped`, `created` (each directory made, with owner and mode), `next_steps`; 409 with the reason and nothing left behind; 403 when `install = false` and a URL was given; 422 when no source can be found |
 
-| `site-copy NAME --from SUB --to SUB` | admin | copies one regular file of the site to another path of the same site **as the site's account**: the drop-in files applications ship as templates (`wp-content/db.php` from the SQLite plugin's `db.copy`, `advanced-cache.php` or `object-cache.php` from a caching plugin, Drupal's `sites/default/settings.php` from `default.settings.php`). Both paths are relative to the site's directory and reached by the same walk as an install; `from` must be an existing regular file (no directory, no symlink); the destination's directory must exist (`site-install --create-path` makes one); an existing destination is refused unless `--overwrite`, and the answer then reports the replaced file's size and mtime. The new file gets the directory's pattern (`0640` in a `2750` directory, the execute bits when the source has them); written under a temporary name and linked or renamed into place, so a refusal leaves nothing. Never across sites, never content from the caller, never a directory, no chmod or chown. `--dry-run` runs the same checks. Answers 201 (200 when replaced) with `from`, `to`, `as`, `bytes`, `mode`, `replaced`; 409 with the reason |
+| `site-copy NAME --from SUB --to SUB` | admin | copies one regular file of the site to another path of the same site **as the site's account**: the drop-in files applications ship as templates (`wp-content/db.php` from the SQLite plugin's `db.copy`, `advanced-cache.php` or `object-cache.php` from a caching plugin, Drupal's `sites/default/settings.php` from `default.settings.php`). Both paths are relative to the site's directory and reached by the same walk as an install; `from` must be an existing regular file (no directory, no symlink); the destination's directory must exist (`site-install --create-path` makes one); an existing destination is refused unless `--overwrite`, and the answer then reports the replaced file's size and mtime. The new file gets the directory's pattern (`0640` in a `2750` directory, the execute bits when the source has them), or `0600` when it is one of the preset's credential files (`secured: true`); written under a temporary name and linked or renamed into place, so a refusal leaves nothing; the configuration is validated afterwards (see below). Never across sites, never content from the caller, never a directory, no chmod or chown. `--dry-run` runs the same checks. Answers 201 (200 when replaced) with `from`, `to`, `as`, `bytes`, `mode`, `replaced`; 409 with the reason |
 
 **What `site-install` enforces.** The account that installs is the site's `user`, or for
 a site without one the owner of the site's directory, which must be a site account
@@ -937,7 +940,29 @@ levels as the account with the parent's permission bits (the set-gid bit and gro
 down from the parent, as for extracted files); an existing directory is never emptied.
 A refusal at any point, a symlink on the way, another account's directory, a bad
 archive, a wrong digest, removes every directory the call created, so the tree is as it
-was. Downloads are `https://` only, with the
+was.
+
+**Credential files and validation.** A site directory is `2750` with the server's group,
+so everything created under it is readable by the server, which is what serving needs
+and exactly what hosting rule 3 forbids for a credential file. The two are reconciled by
+the preset table: each preset names its `secrets` (`wp-config.php`; Drupal's
+`settings.php`, `settings.local.php`, `services.yml`; `presets` shows them), the hosting
+rule checks precisely those files plus `.env` and `.git` (Laravel: the project's `.env`,
+`config/`, `storage/`), and `site-install` and `site-copy` create precisely those files
+`0600` whatever the directory's pattern gives the rest, listing them under `secured`.
+Each call then checks the hosting rule on what it wrote and validates the whole
+configuration before answering: when the result would be refused by `agensio -t`, the
+answer is `409` with `written: true` and the validator's `errors`, never a bare ok. A
+file the application writes itself (WordPress's own setup writing `wp-config.php`)
+follows php-fpm's umask, not agensio's; `health` reports it as `hosting_rule` with the
+fix.
+
+**php-fpm reloads.** Writing a pool (`site-create` with a user, `agensio pools`) reloads
+php-fpm. Unless the global `php-fpm.conf` sets `process_control_timeout` (php-fpm's
+default is 0), the master kills its children at once and every PHP request in flight on
+every site of that php-fpm answers 502. `health` reports `php_fpm_hard_reload` with the
+one-line fix (`process_control_timeout = 10s`), and `site-create`'s `done` entry says
+the reload happened. Downloads are `https://` only, with the
 certificate and host name verified (the system store, or `install_ca`); every address of
 every hop, redirects included, is checked against the private-address fence (loopback,
 link-local, RFC 1918, ULA, shared 100.64/10, multicast, the IPv4-mapped forms) unless

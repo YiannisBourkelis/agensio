@@ -86,6 +86,9 @@ std::string validate(const json::Value& req, const Config& cfg) {
         const json::Value& strip = req["strip"];
         if (!strip.is_null() && (strip.type() != json::Value::Type::number || (strip.num() != -1 && strip.num() != 0 && strip.num() != 1)))
             return "app_install: strip must be -1, 0 or 1";
+        std::string clean;
+        for (const auto& sec : req["secrets"].items())
+            if (!sec.is_string() || !archive::clean_path(sec.str(), clean, why) || clean != sec.str()) return "app_install: secrets must be clean relative paths";
         return "";
     }
     if (op == "file_copy") {
@@ -101,6 +104,8 @@ std::string validate(const json::Value& req, const Config& cfg) {
         if (from == to) return "file_copy: from and to are the same path";
         for (const char* flag : {"overwrite", "dry_run"})
             if (!req[flag].is_null() && req[flag].type() != json::Value::Type::boolean) return std::string("file_copy: ") + flag + " must be a boolean";
+        for (const auto& sec : req["secrets"].items())
+            if (!sec.is_string() || !archive::clean_path(sec.str(), clean, why) || clean != sec.str()) return "file_copy: secrets must be clean relative paths";
         return "";
     }
     if (op == "pools_apply" || op == "service_restart" || op == "ping") return "";
@@ -372,6 +377,7 @@ json::Value app_install(const json::Value& req, const Config& cfg, int helper_fd
         r.strip = req["strip"].is_null() ? -1 : static_cast<int>(req["strip"].num());
         r.allow_private = cfg.control.install_private;
         r.ca_file = cfg.control.install_ca;
+        for (const auto& sec : req["secrets"].items()) r.secrets.push_back(sec.str());
         return install::execute(r);
     });
 }
@@ -394,6 +400,7 @@ json::Value file_copy(const json::Value& req, const Config& cfg, int helper_fd) 
         r.overwrite = req["overwrite"].boolean();
         r.dry_run = req["dry_run"].boolean();
         r.max_bytes = cfg.control.upload_max;
+        for (const auto& sec : req["secrets"].items()) r.secrets.push_back(sec.str());
         return install::copy_file(r);
     });
 }
@@ -494,7 +501,8 @@ void helper_loop(int fd, const Config& cfg) {
                                 if (const char* systemctl = find_binary({"/usr/bin/systemctl", "/bin/systemctl"}); systemctl && !unit.empty()) {
                                     std::string o;
                                     const int r = run(systemctl, {"reload", unit}, o);
-                                    text += (r == 0 ? "reloaded " + unit : "could not reload " + unit + " (" + o + ")") + "\n";
+                                    text += (r == 0 ? "reloaded " + unit + " (a php-fpm reload cuts PHP requests in flight on every site unless php-fpm.conf sets process_control_timeout; health reports it)"
+                                                    : "could not reload " + unit + " (" + o + ")") + "\n";
                                 } else {
                                     text += "systemctl not available: reload php-fpm by hand\n";
                                 }
