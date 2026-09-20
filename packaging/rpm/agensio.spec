@@ -8,8 +8,8 @@ Summary:        Fast web server with PHP, reverse proxy, automatic TLS and an MC
 License:        MIT
 URL:            https://github.com/YiannisBourkelis/agensio
 Source0:        %{url}/archive/refs/tags/v%{upstream_version}.tar.gz
-BuildRequires:  cmake >= 3.24, ninja-build, gcc-c++ >= 12, asio-devel, openssl-devel, systemd-rpm-macros
-Requires:       openssl-libs
+BuildRequires:  cmake >= 3.24, ninja-build, gcc-c++ >= 12, asio-devel, openssl-devel, zlib-devel, systemd-rpm-macros
+Requires:       openssl-libs, zlib
 Requires(pre):  shadow-utils
 %{?systemd_requires}
 

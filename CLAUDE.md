@@ -77,6 +77,7 @@ checklists to apply when writing, measuring and reviewing.
 | asio (standalone, 1.38+) | The async I/O core | `brew install asio` on macOS; `libasio-dev` on Debian/Ubuntu; or vendored in `third_party/asio` |
 | OpenSSL 3 | TLS (later phase) | optional, `-DAGENSIO_TLS=ON` |
 | toml++ 3.4.0 | Config parsing | vendored single header in `third_party/tomlplusplus` (MIT) |
+| zlib | gzip and deflate for the archive extractor behind `site-install` (`.tar.gz`, `.zip`); on every system already | optional at build time (`find_package(ZLIB)`); without it only plain `.tar` installs |
 
 ## Planned layout
 
@@ -93,7 +94,8 @@ third_party/    vendored header-only libraries with licenses
 
 ## Build and run
 
-Tooling on macOS: `brew install cmake ninja asio openssl@3`. Benchmark: `brew install wrk nginx caddy`.
+Tooling on macOS: `brew install cmake ninja asio openssl@3` (zlib comes with the SDK). Debian: add
+`zlib1g-dev`. Benchmark: `brew install wrk nginx caddy`.
 
 ```
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -345,6 +347,15 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   `agensio mcp` (F5, `control/mcp.*`): stdio JSON-RPC MCP server, 15 tools with
   annotations gated by the caller's role, prompts, meant to be spawned over SSH by the
   agent host (`docs/mcp.md`). `agensio ctl` (F6) is the same client for shells.
+- **Application install** (F9, `src/services/archive.*`, `fetch.*`, `install.*`):
+  `agensio ctl site-install NAME [--url | --file | --version]` fills a site's empty
+  directory as the site's account from an https archive, an upload (`agensio ctl upload`)
+  or the preset's official source; own extractor (tar, tar.gz, zip; every hostile entry
+  refused, fuzzed), private-address fence on downloads, sha256, modes from the target.
+  Through the helper's `app_install` when started as root, else on a server thread as its
+  own account. `[control] install`, `install_private`, `install_ca`, `upload_max`;
+  `tests/install.sh` (root devbox). Rule for every change here: the security page rows
+  19-22 and the MCP texts move with it.
 - **Not yet**: directory listing, TLS-ALPN-01 / DNS-01 (wildcards), OCSP stapling.
 
 ## Performance notes (measured, keep current)

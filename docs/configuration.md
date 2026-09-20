@@ -861,7 +861,11 @@ operators = "agensio-ops"
 viewers = "agensio-view"
 audit = "/var/log/agensio/audit.log"   # default: audit.log next to the error log
 sites_root = "/var/www"                # where site-create suggests document roots
-provision = true                       # the root helper: accounts, layout, pools, restart on request (false: commands are handed back)
+provision = true                       # the root helper: accounts, layout, pools, restart, installs on request (false: commands are handed back)
+install = true                         # site-install may download from https URLs (false: only uploaded archives are installed)
+install_private = false                # true: site-install may fetch from loopback, private and link-local addresses (internal mirrors, test beds)
+install_ca = "/etc/ssl/mirror-ca.pem"  # PEM bundle site-install trusts instead of the system store (private mirrors); default: the system store
+upload_max = "512M"                    # the largest archive `agensio ctl upload` may store
 ```
 
 The control API is how `agensio ctl`, the MCP bridge (`agensio mcp`) and any local tool
@@ -890,9 +894,10 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 | `status` | viewer | version, pid, uptime, configuration path, workers, open connections, listeners, sites (names, listen, root, app, user, tls, redirect), whether ACME is on, and the caller's uid/gid/role |
 | `sites` | viewer | every site: names, listen, root, app, user, redirect, access log, and its certificate (mode, issuer, names, days left, whether it is still the placeholder) |
 | `site NAME` | viewer | one site in full (`handler` is `deny` for a path answered 404 whatever exists, and a location lists the endings it `refuses`): the above plus index, php socket and generated pool, upstreams, and every location after the preset expanded (path, match, handler, root/alias, upstream, added headers, which preset added it) |
-| `presets` | viewer | the application presets: for each `app` value the served root, whether every `.php` runs or only the front controller, refused suffixes, directories that never run PHP, files never served |
+| `presets` | viewer | the application presets: for each `app` value the served root, whether every `.php` runs or only the front controller, refused suffixes, directories that never run PHP, files never served, and `source`, the official archive `site-install` takes when the preset has one |
 | `validate` | viewer | loads the file on disk again and runs the hosting rules: `ok`, `errors`, site count, and the restart-only settings that differ from the running server |
 | `logs` | viewer | `--site NAME` (default: all sites plus the error log), `--since 3h` (`m`, `h`, `d`, `w`, seconds, or a local `YYYY-MM-DDThh:mm:ss`; default 1h), `--level error|warn|info` for the error log (default warn = error+warn), `--status 5xx|4xx|all|NNN` for access logs (default 5xx), `--limit N` (default 200, newest). Reads at most 2 MB per file from the end; `truncated` says when that cut in |
+| `uploads` | viewer | the archives stored with `upload` (`file`, `bytes`, `uploaded`), ready for `site-install --file` |
 | `health` | viewer | findings with `severity`, `code`, `site`, `message`, `fix`: configuration on disk invalid or failing the hosting rules, restart-only settings changed, running as root, certificate unreadable / still the placeholder / expired / expiring within 14 days (manual), `tls = "auto"` without a plain port-80 site for the names, no http-to-https redirect, application sites sharing the server's account, generated pools out of date, errors in the last 24 hours. `ok` is true when nothing above info level was found |
 
 **Changes** (`POST` with a JSON body; every one needs `"confirm": true`, takes a
@@ -908,23 +913,48 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 | `site-disable NAME`, `site-enable NAME` | admin | renames the file to `.disabled` and back, reloads |
 | `site-delete NAME` | admin | removes the file (a `.bak` stays), reloads; never touches the root or the account |
 | `cert-renew NAME` | operator | orders the site's automatic certificate again now |
+| `upload NAME [FILE]` | operator | stores FILE (stdin by default) as `<state_dir>/uploads/NAME`, the server's own directory (0700); `PUT /v1/uploads/NAME` with the raw bytes on the socket; no `--yes`; at most `upload_max`; names are plain file names (letters, digits, `.`, `_`, `-`, no leading dot); a partial transfer leaves nothing |
+| `uploads-delete NAME` | operator | removes a stored upload |
+| `site-install NAME` | admin | puts an application's files into the site's directory (the `root` as given, above a preset's `public/` or `web/`; `--path SUB` for a subdirectory) **as the site's account**, from one source: `--url https://...` (a `.tar.gz`, `.tar` or `.zip`), `--file UPLOAD` (a stored upload), or nothing, which takes the preset's official archive (`presets` lists it under `source`; `--version V` picks a release, default the newest; WordPress and Drupal have one, Laravel is made with composer). `--sha256 HEX` refuses an archive whose digest differs. `--strip 0|1` keeps or unwraps a single top directory (default: unwrap when there is exactly one). `--dry-run` shows the target, the account and the source. Answers 201 with `files`, `bytes`, `sha256`, `unwrapped`, `next_steps`; 409 with the reason and nothing left behind; 403 when `install = false` and a URL was given; 422 when no source can be found |
+
+**What `site-install` enforces.** The directory must exist, be empty and belong to the
+account that installs: the site's `user`, or for a site without one the directory's
+owner, which must be a site account (`nologin`, home in the state directory) or the
+server's own account; root, a login account and another site's account are refused, so
+an install can never write as anyone else. Downloads are `https://` only, with the
+certificate and host name verified (the system store, or `install_ca`); every address of
+every hop, redirects included, is checked against the private-address fence (loopback,
+link-local, RFC 1918, ULA, shared 100.64/10, multicast, the IPv4-mapped forms) unless
+`install_private = true`; at most 5 redirects, 1 GB, 15 minutes. Archives are unpacked by
+agensio's own extractor: an entry that is a symbolic link, hard link, device or fifo, an
+absolute path, a `..` segment, a backslash, a control character, an encrypted or zip64
+entry, a tar checksum or zip CRC that does not match, more than 200 000 entries or 4 GB,
+each ends the install with the reason, and the directory is emptied again. Files are
+created `O_EXCL | O_NOFOLLOW`, never through a symlink, with modes derived from the
+directory's own (a `2750` site directory gets `0640` files and `2750` directories; a
+`0755` one gets `0644` and `0755`); set-uid bits are never kept. A download is written
+to an unlinked temporary file inside the target and is gone with the process. The audit
+log carries the source and the sha256 of what was installed.
 
 A change that does not validate is undone before the answer: the file is removed or the
 previous one restored, and the old configuration keeps serving.
 
 **Root work.** With `provision = true` (the default) a server started as root forks a
 small helper before it drops privileges. It holds the other end of a socketpair, never a
-path, and does five things and nothing else: create a site account (`useradd --system`,
+path, and does six things and nothing else: create a site account (`useradd --system`,
 `nologin`, home in the state directory), lay out a site's directories under `sites_root`
 (`owner:<server group> 2750`, walked without following symlinks, refused when a directory
 belongs to another site), hand a per-site log to the site's group, write the php-fpm
-pools and reload php-fpm, restart the service after a change that needs one. Programs
+pools and reload php-fpm, restart the service after a change that needs one, and run a
+`site-install` in a child that has become the site's account (the helper opens an
+upload as root, the child drops to the account before reading a byte). Programs
 run by absolute path with a fixed argument list and no shell; every argument is checked
 again inside the helper with the same rules; every action is audited. `site-create` then
 does the whole job in one call and lists what it did under `done`. With `provision =
 false`, or a server not started as root, what needs root comes back as commands, as
-before. `docs/security-control-plane.md` states what a compromised server could and
-could not do through the helper.
+before, and `site-install` runs on a thread of the server as its own account, so it can
+only fill directories that account owns. `docs/security-control-plane.md` states what a
+compromised server could and could not do through the helper.
 
 Unknown commands answer a JSON 404, a wrong method a 405 with `Allow`, a role that is too
 low a 403 naming the role needed. `curl --unix-socket /run/agensio/control.sock

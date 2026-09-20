@@ -36,7 +36,9 @@ FPMCONF
   printf '<?php echo "hello ", $_SERVER["REQUEST_METHOD"], " ", $_GET["x"] ?? "-";\n' > bench/www/hello.php
 fi
 sed "s#@WORKERS@#0#g; s#@BENCH@#$ROOT/bench#g; s#@SENDFILE_MIN@#${SENDFILE_MIN:-48KB}#g; s#@ACCESS_LOG@#$ROOT/bench/tmp/access.log#; s#^tcp_nodelay = true#tcp_nodelay = true\ntrusted_proxies = [\"127.0.0.1\"]#" bench/agensio.toml > bench/tmp/agensio-test.toml
-printf '\n[control]\nsocket = "%s/bench/tmp/control.sock"\naudit = "%s/bench/tmp/audit.log"\n' "$ROOT" "$ROOT" >> bench/tmp/agensio-test.toml
+printf '\n[control]\nsocket = "%s/bench/tmp/control.sock"\naudit = "%s/bench/tmp/audit.log"\nupload_max = "1M"\n' "$ROOT" "$ROOT" >> bench/tmp/agensio-test.toml
+sed -i "s#^\[server\]#[server]\nstate_dir = \"$ROOT/bench/tmp/state\"#" bench/tmp/agensio-test.toml
+rm -rf bench/tmp/state bench/tmp/inst; mkdir -p bench/tmp/state bench/tmp/inst
 rm -rf bench/tmp/sites.d; mkdir -p bench/tmp/sites.d bench/tmp/sites/created.test/web; echo created > bench/tmp/sites/created.test/web/index.html
 sed -i '1i include = ["sites.d/*.toml"]' bench/tmp/agensio-test.toml
 # Locations (A4) on the plain site: an SPA fallback, an aliased root, an exact match and a
@@ -483,6 +485,31 @@ check "control: audit has every mutation with its result" "yes" "$(grep -q 'site
 # services/pools.* only; a second implementation anywhere else fails this check.
 check "hosting rules: one implementation, the server's account derived in one place" "1 1" "$(grep -l 'expected group\|readable by other users' src/*.cpp src/*/*.cpp | wc -l | tr -d ' ') $(grep -l 'current_group_name()' src/*.cpp src/*/*.cpp | wc -l | tr -d ' ')"
 
+# ---- uploads and site-install (F9): as the server's own account (no helper here) ----
+tar czf bench/tmp/inst/wp.tgz -C tests wordpress
+head -c 2097152 /dev/zero > bench/tmp/inst/big.bin
+rm -rf bench/tmp/sites/inst.test bench/tmp/sites/wpinst.test; mkdir -p bench/tmp/sites/inst.test/web bench/tmp/sites/wpinst.test
+check "install: an upload is stored under the state directory, 0600, and listed" "0 yes 600 yes" "$("$BIN" ctl upload wp.tgz bench/tmp/inst/wp.tgz --socket $CS > bench/tmp/ctl.out; echo -n "$? "; grep -q '"file":"wp.tgz"' bench/tmp/ctl.out && echo -n yes; echo -n " $(stat -c %a bench/tmp/state/uploads/wp.tgz 2>/dev/null || stat -f %Lp bench/tmp/state/uploads/wp.tgz) "; "$BIN" ctl uploads --socket $CS | grep -q '"file":"wp.tgz","bytes":' && echo yes)"
+check "install: the uploads directory is the server's own, 0700" "700" "$(stat -c %a bench/tmp/state/uploads 2>/dev/null || stat -f %Lp bench/tmp/state/uploads)"
+check "install: an upload above upload_max is refused with 413 before it is stored" "413 no" "$(curl -sS -o /dev/null -w '%{http_code}' --unix-socket $CS -X PUT --data-binary @bench/tmp/inst/big.bin http://control/v1/uploads/big.bin 2>/dev/null) $([ -e bench/tmp/state/uploads/big.bin ] && echo yes || echo no)"
+check "install: an upload name with a slash or a leading dot is refused" "400 400" "$(curl -sS -o /dev/null -w '%{http_code}' --unix-socket $CS -X PUT --data-binary @bench/tmp/inst/wp.tgz http://control/v1/uploads/.hidden) $(curl -sS -o /dev/null -w '%{http_code}' --unix-socket $CS -X PUT --data-binary @bench/tmp/inst/wp.tgz 'http://control/v1/uploads/')"
+cpost /v1/sites "{\"domain\":\"inst.test\",\"https\":\"none\",\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/bench/tmp/sites/inst.test/web\",\"listen_plain\":\"127.0.0.1:8096\",\"confirm\":true,\"reason\":\"install\"}" > /dev/null
+check "install: site-install without a source on a static site asks for one" "422" "$(cpost /v1/sites/inst.test/install '{"confirm":true,"reason":"t"}')"
+check "install: a plain http url is refused, a private https address is fenced" "400 409 yes" "$(cpost /v1/sites/inst.test/install '{"url":"http://127.0.0.1/x.tgz","confirm":true}') $(cpost /v1/sites/inst.test/install '{"url":"https://127.0.0.1:8443/wp.tgz","confirm":true}') $(grep -q 'private or local address' bench/tmp/ctl-reply.json && echo yes)"
+check "install: dry_run names the target, the account and the source without installing" "200 yes yes" "$(cpost /v1/sites/inst.test/install '{"file":"wp.tgz","dry_run":true,"confirm":true}') $(grep -q "\"target\":\"$ROOT/bench/tmp/sites/inst.test/web\"" bench/tmp/ctl-reply.json && echo yes) $([ -z "$(ls -A bench/tmp/sites/inst.test/web)" ] && echo yes)"
+check "install: from the upload: files land in the site, the top directory unwrapped, next steps given" "201 wordpress 644 yes" "$("$BIN" ctl site-install inst.test --file wp.tgz --yes --reason t --socket $CS > bench/tmp/ctl.out; python3 -c 'import json; d=json.load(open("bench/tmp/ctl.out")); print(201 if d["ok"] else d, d.get("unwrapped"))' | tr -d '\n') $(stat -c %a bench/tmp/sites/inst.test/web/index.php 2>/dev/null || stat -f %Lp bench/tmp/sites/inst.test/web/index.php) $(grep -q '"next_steps":\[' bench/tmp/ctl.out && echo yes)"
+check "install: the site serves what was installed" "200" "$(code -H 'Host: inst.test' http://127.0.0.1:8096/wp-login.php)"
+check "install: a second install into the same directory is refused" "409 yes" "$(cpost /v1/sites/inst.test/install '{"file":"wp.tgz","confirm":true}') $(grep -q 'not empty' bench/tmp/ctl-reply.json && echo yes)"
+check "install: a wrong sha256 is refused and leaves nothing behind" "409 yes yes" "$(rm -rf bench/tmp/sites/inst.test/web/*; cpost /v1/sites/inst.test/install "{\"file\":\"wp.tgz\",\"sha256\":\"$(printf '0%.0s' $(seq 1 64))\",\"confirm\":true}") $(grep -q 'sha256 mismatch' bench/tmp/ctl-reply.json && echo yes) $([ -z "$(ls -A bench/tmp/sites/inst.test/web)" ] && echo yes)"
+check "install: the right sha256 passes" "201" "$(cpost /v1/sites/inst.test/install "{\"file\":\"wp.tgz\",\"sha256\":\"$(sha256sum bench/tmp/inst/wp.tgz | cut -c1-64)\",\"confirm\":true}")"
+check "install: a wordpress site picks the preset's official archive by itself (dry run)" "201 200 https://wordpress.org/wordpress-6.7.1.tar.gz" "$(cpost /v1/sites "{\"domain\":\"wpinst.test\",\"https\":\"none\",\"user\":null,\"app\":\"wordpress\",\"root\":\"$ROOT/bench/tmp/sites/wpinst.test\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"listen_plain\":\"127.0.0.1:8096\",\"confirm\":true}")$(grep -q '"ok":true' bench/tmp/ctl-reply.json || cat bench/tmp/ctl-reply.json) $(cpost /v1/sites/wpinst.test/install '{"version":"6.7.1","dry_run":true,"confirm":true}') $(python3 -c 'import json; print(json.load(open("bench/tmp/ctl-reply.json"))["source"])')"
+sed -i 's/^\[control\]$/[control]\ninstall = false/' bench/tmp/agensio-test.toml; cpost /v1/reload '{"confirm":true}' > /dev/null
+check "install: with [control] install = false a download is refused and the upload path is offered" "403 yes 200" "$(cpost /v1/sites/wpinst.test/install '{"url":"https://wordpress.org/latest.tar.gz","confirm":true}') $(grep -q 'upload the archive' bench/tmp/ctl-reply.json && echo yes) $(cpost /v1/sites/wpinst.test/install '{"file":"wp.tgz","dry_run":true,"confirm":true}')"
+sed -i '/^install = false$/d' bench/tmp/agensio-test.toml; cpost /v1/reload '{"confirm":true}' > /dev/null
+check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$("$BIN" ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; "$BIN" ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
+check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
+cpost /v1/sites/inst.test/delete '{"confirm":true}' > /dev/null; cpost /v1/sites/wpinst.test/delete '{"confirm":true}' > /dev/null
+
 # Static rules of the control plane (F7): nothing there spawns a process or opens a port.
 check "control: no process spawning anywhere under src/control" "0" "$(grep -E 'system\(|popen\(|execv|execl|fork\(|posix_spawn' src/control/*.cpp src/control/*.hpp | wc -l | tr -d ' ')"
 check "control: no TCP listener in the control plane" "0" "$(grep -E 'ip::tcp::acceptor' src/control/*.cpp src/control/*.hpp | wc -l | tr -d ' ')"
@@ -517,7 +544,19 @@ p.stdin.close(); p.wait()
 print(" ".join(out))
 PYT
 )
-check "mcp: initialize, tool list with annotations, calls, confirm, decisions, prompts" "agensio 15 True laravel 428 reloaded https,root,app,user -32601 2" "$mcp"
+check "mcp: initialize, tool list with annotations, calls, confirm, decisions, prompts" "agensio 18 True laravel 428 reloaded https,root,app,user -32601 2" "$mcp"
+check "mcp: site_install and the upload tools are exposed with their arguments" "file url,file,version,sha256 True" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
+import json, subprocess, sys
+p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n"); p.stdin.flush()
+tools = {t["name"]: t for t in json.loads(p.stdout.readline())["result"]["tools"]}
+props = tools["site_install"]["inputSchema"]["properties"]
+out = [",".join(tools["upload_delete"]["inputSchema"]["required"][:1]), ",".join(k for k in ["url", "file", "version", "sha256"] if k in props)]
+out.append(str(tools["upload_delete"]["annotations"]["destructiveHint"]))
+p.stdin.close(); p.wait()
+print(" ".join(out))
+PYT
+)"
 check "mcp: the site_create app options are exactly the presets the server accepts" "same" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
 import json, subprocess, sys
 p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)

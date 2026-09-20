@@ -1,5 +1,6 @@
 // Minimal self-contained unit tests (no framework dependency).
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -22,7 +23,15 @@
 #include "control/commands.hpp"
 #include "control/sites.hpp"
 #include "services/provision.hpp"
+#include "services/archive.hpp"
+#include "services/fetch.hpp"
+#include "services/install.hpp"
 #include "services/json.hpp"
+#ifdef AGENSIO_HAS_ZLIB
+#include <zlib.h>
+#endif
+#include <sys/stat.h>
+#include <fcntl.h>
 #include "handlers/proxy.hpp"
 #include "core/headers.hpp"
 #include "core/result.hpp"
@@ -1820,6 +1829,376 @@ static void test_control_sites() {
     std::filesystem::remove_all(dir);
 }
 
+// ---- site-install (F9): the archive extractor, the address fence, the validators ----
+
+// A ustar entry: header (with a valid checksum) followed by the padded data.
+static std::string tar_entry(const std::string& name, const std::string& data, char type = '0', unsigned mode = 0644,
+                             const std::string& link = "", const std::string& prefix = "") {
+    std::string h(512, '\0');
+    auto put = [&](std::size_t at, const std::string& v, std::size_t len) { std::memcpy(&h[at], v.data(), std::min(v.size(), len)); };
+    put(0, name, 100);
+    char num[16];
+    std::snprintf(num, sizeof num, "%07o", mode); put(100, num, 8);
+    put(108, "0000000", 8); put(116, "0000000", 8);
+    std::snprintf(num, sizeof num, "%011o", static_cast<unsigned>(data.size())); put(124, num, 12);
+    put(136, "00000000000", 12);
+    h[156] = type;
+    put(157, link, 100);
+    put(257, "ustar", 6); put(263, "00", 2);
+    put(345, prefix, 155);
+    std::memset(&h[148], ' ', 8);
+    unsigned sum = 0;
+    for (unsigned char c : h) sum += c;
+    std::snprintf(num, sizeof num, "%06o", sum); put(148, num, 6); h[154] = '\0'; h[155] = ' ';
+    std::string out = h + data;
+    if (data.size() % 512) out.append(512 - data.size() % 512, '\0');
+    return out;
+}
+static std::string tar_end() { return std::string(1024, '\0'); }
+
+static std::string gzip_of(const std::string& in) {
+#ifdef AGENSIO_HAS_ZLIB
+    z_stream z{};
+    deflateInit2(&z, 6, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY);
+    std::string out(deflateBound(&z, static_cast<uLong>(in.size())), '\0');
+    z.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(in.data())); z.avail_in = static_cast<uInt>(in.size());
+    z.next_out = reinterpret_cast<Bytef*>(out.data()); z.avail_out = static_cast<uInt>(out.size());
+    deflate(&z, Z_FINISH);
+    out.resize(out.size() - z.avail_out);
+    deflateEnd(&z);
+    return out;
+#else
+    return in;
+#endif
+}
+
+// A zip with stored (and, with zlib, deflated) entries and a central directory.
+struct ZipBuilder {
+    std::string body, cd;
+    unsigned entries = 0;
+    static void le16(std::string& s, unsigned v) { s.push_back(static_cast<char>(v & 0xff)); s.push_back(static_cast<char>((v >> 8) & 0xff)); }
+    static void le32(std::string& s, std::uint32_t v) { le16(s, v & 0xffff); le16(s, (v >> 16) & 0xffff); }
+    void add(const std::string& name, const std::string& data, bool compress = false, unsigned unix_mode = 0100644, std::uint32_t crc_override = 0, bool encrypted = false) {
+        std::string stored = data;
+        unsigned method = 0;
+#ifdef AGENSIO_HAS_ZLIB
+        std::uint32_t crc = static_cast<std::uint32_t>(crc32(0L, reinterpret_cast<const Bytef*>(data.data()), static_cast<uInt>(data.size())));
+        if (compress) {
+            z_stream z{};
+            deflateInit2(&z, 6, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY);
+            std::string out(deflateBound(&z, static_cast<uLong>(data.size())) + 16, '\0');
+            z.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(data.data())); z.avail_in = static_cast<uInt>(data.size());
+            z.next_out = reinterpret_cast<Bytef*>(out.data()); z.avail_out = static_cast<uInt>(out.size());
+            deflate(&z, Z_FINISH);
+            out.resize(out.size() - z.avail_out);
+            deflateEnd(&z);
+            stored = out;
+            method = 8;
+        }
+#else
+        std::uint32_t crc = 0;
+#endif
+        if (crc_override) crc = crc_override;
+        const std::uint32_t off = static_cast<std::uint32_t>(body.size());
+        std::string lh = "PK\x03\x04";
+        le16(lh, 20); le16(lh, encrypted ? 1 : 0); le16(lh, method); le16(lh, 0); le16(lh, 0);
+        le32(lh, crc); le32(lh, static_cast<std::uint32_t>(stored.size())); le32(lh, static_cast<std::uint32_t>(data.size()));
+        le16(lh, static_cast<unsigned>(name.size())); le16(lh, 0);
+        body += lh + name + stored;
+        std::string c = "PK\x01\x02";
+        le16(c, 3 << 8 | 20); le16(c, 20); le16(c, encrypted ? 1 : 0); le16(c, method); le16(c, 0); le16(c, 0);
+        le32(c, crc); le32(c, static_cast<std::uint32_t>(stored.size())); le32(c, static_cast<std::uint32_t>(data.size()));
+        le16(c, static_cast<unsigned>(name.size())); le16(c, 0); le16(c, 0); le16(c, 0); le16(c, 0);
+        le32(c, unix_mode << 16); le32(c, off);
+        cd += c + name;
+        ++entries;
+    }
+    std::string build(bool zip64_marker = false) const {
+        std::string e = "PK\x05\x06";
+        le16(e, 0); le16(e, 0); le16(e, zip64_marker ? 0xffff : entries); le16(e, zip64_marker ? 0xffff : entries);
+        le32(e, static_cast<std::uint32_t>(cd.size())); le32(e, static_cast<std::uint32_t>(body.size())); le16(e, 0);
+        return body + cd + e;
+    }
+};
+
+static void test_install() {
+    namespace fs = std::filesystem;
+    using namespace archive;
+    // The path rule.
+    std::string out, why;
+    CHECK(clean_path("./wordpress//index.php", out, why) && out == "wordpress/index.php");
+    CHECK(clean_path("a/b/", out, why) && out == "a/b");
+    CHECK(!clean_path("/etc/passwd", out, why) && why == "absolute path");
+    CHECK(!clean_path("a/../../etc", out, why) && why == "'..' in name");
+    CHECK(!clean_path("a\\b", out, why) && !clean_path("a\nb", out, why) && !clean_path("./", out, why) && !clean_path("", out, why));
+    CHECK(sniff("\x1f\x8b\x08") == Format::gzip && sniff("PK\x03\x04") == Format::zip && sniff("PK\x05\x06") == Format::zip && sniff("hello") == Format::unknown);
+    // A tar: one top directory, files, an executable, a GNU long name, a pax path.
+    const std::string longname(150, 'n');
+    std::string tar = tar_entry("wordpress/", "", '5', 0755) + tar_entry("wordpress/index.php", "<?php echo 1;", '0', 0644) +
+                      tar_entry("wordpress/bin/run", "#!/bin/sh", '0', 0755) + tar_entry("././@LongLink", longname + "\0", 'L') +
+                      tar_entry("ignored", "long", '0') + tar_entry("pax", "30 path=wordpress/pax/named.txt\n", 'x') +
+                      tar_entry("ignored2", "paxdata", '0') + tar_entry("wordpress/sub/deep.txt", "d", '0', 0644, "", "") + tar_end();
+    CHECK(sniff(tar) == Format::tar);
+    {
+        MemorySource src(tar);
+        CountingSink sink;
+        Limits limits;
+        Summary sum;
+        std::string err;
+        const bool ok = extract(src, sink, limits, sum, err);
+        CHECK(ok);
+        if (!ok) std::printf("tar: %s\n", err.c_str());
+        CHECK(sink.files == 5 && sink.directories == 1 && sink.executables == 1 && sink.bytes == 13 + 9 + 4 + 7 + 1);
+        CHECK(sum.top == "wordpress" && !sum.single_top);  // the long-named file sits at the top level
+    }
+    {
+        // Every entry below one directory: single_top, ready to unwrap.
+        const std::string t2 = tar_entry("app/", "", '5') + tar_entry("app/a.txt", "a", '0') + tar_entry("app/b/c.txt", "cc", '0') + tar_end();
+        MemorySource src(t2);
+        CountingSink sink;
+        Summary sum;
+        std::string err;
+        CHECK(extract(src, sink, Limits{}, sum, err) && sum.single_top && sum.top == "app" && sum.files == 2);
+        // gzip of the same: the same result.
+#ifdef AGENSIO_HAS_ZLIB
+        const std::string gz = gzip_of(t2);
+        MemorySource gsrc(gz);
+        CountingSink gsink;
+        Summary gsum;
+        CHECK(sniff(gz) == Format::gzip && extract(gsrc, gsink, Limits{}, gsum, err) && gsink.files == 2 && gsink.bytes == 3 && gsum.single_top);
+        // A truncated gzip is an error, not a silent partial extraction.
+        MemorySource tsrc(std::string_view(gz).substr(0, gz.size() / 2));
+        CountingSink tsink;
+        CHECK(!extract(tsrc, tsink, Limits{}, gsum, err) && !err.empty());
+#endif
+    }
+    auto refused = [&](const std::string& bytes, const char* fragment) {
+        MemorySource src(bytes);
+        CountingSink sink;
+        Summary sum;
+        std::string err;
+        const bool ok = extract(src, sink, Limits{}, sum, err);
+        const bool hit = !ok && err.find(fragment) != std::string::npos;
+        if (!hit) std::printf("expected refusal '%s', got ok=%d err='%s'\n", fragment, ok, err.c_str());
+        return hit;
+    };
+    {
+        // `tar -C dir .` starts with "./": the root itself, nothing to create; "./x" is x.
+        const std::string dot = tar_entry("./", "", '5') + tar_entry("./x.txt", "x", '0') + tar_entry("./d/", "", '5') + tar_end();
+        MemorySource src(dot);
+        CountingSink sink;
+        Summary sum;
+        std::string err;
+        CHECK(extract(src, sink, Limits{}, sum, err) && sink.files == 1 && sink.directories == 1 && !sum.single_top);
+        CHECK(refused(tar_entry(".", "data", '0') + tar_end(), "empty name"));  // a file with no name is still refused
+    }
+    CHECK(refused(tar_entry("link", "", '2', 0777, "/etc/passwd") + tar_end(), "symbolic link"));
+    CHECK(refused(tar_entry("hard", "", '1', 0644, "other") + tar_end(), "hard link"));
+    CHECK(refused(tar_entry("dev", "", '3', 0644) + tar_end(), "device"));
+    CHECK(refused(tar_entry("fifo", "", '6', 0644) + tar_end(), "fifo"));
+    CHECK(refused(tar_entry("../escape.txt", "x", '0') + tar_end(), "'..'"));
+    CHECK(refused(tar_entry("/abs.txt", "x", '0') + tar_end(), "absolute"));
+    CHECK(refused(tar_entry("ok/../../x", "x", '0', 0644, "", "pre") + tar_end(), "'..'"));
+    {
+        std::string bad = tar_entry("f.txt", "x", '0') + tar_end();
+        bad[0] = 'z';  // breaks the checksum
+        CHECK(refused(bad, "checksum"));
+        CHECK(refused(tar_entry("f.txt", std::string(600, 'x'), '0').substr(0, 700), "ends inside"));
+        std::string sparse = tar_entry("s", "", 'S');
+        CHECK(refused(sparse + tar_end(), "unsupported"));
+    }
+    {
+        // Limits: entry count and total bytes.
+        std::string many;
+        for (int i = 0; i < 5; ++i) many += tar_entry("f" + std::to_string(i), "x", '0');
+        many += tar_end();
+        MemorySource src(many);
+        CountingSink sink;
+        Summary sum;
+        std::string err;
+        Limits l;
+        l.max_entries = 3;
+        CHECK(!extract(src, sink, l, sum, err) && err.find("more than 3 entries") != std::string::npos);
+        Limits b;
+        b.max_bytes = 3;
+        MemorySource src2(many);
+        CountingSink sink2;
+        CHECK(!extract(src2, sink2, b, sum, err) && err.find("more than 3 bytes") != std::string::npos);
+        Limits d;
+        d.max_depth = 2;
+        const std::string deep = tar_entry("a/b/c/d.txt", "x", '0') + tar_end();
+        MemorySource src3(deep);
+        CountingSink sink3;
+        CHECK(!extract(src3, sink3, d, sum, err) && err.find("deeper") != std::string::npos);
+    }
+    // Zip: stored and deflated entries, directories, a symlink refused, CRC checked, zip64 refused.
+    {
+        ZipBuilder z;
+        z.add("site/", "", false, 0040755);
+        z.add("site/index.html", "<h1>hi</h1>", false);
+        z.add("site/app.js", std::string(3000, 'j'), true, 0100755);
+        const std::string bytes = z.build();
+        CHECK(sniff(bytes) == Format::zip);
+        MemorySource src(bytes);
+        CountingSink sink;
+        Summary sum;
+        std::string err;
+        const bool ok = extract(src, sink, Limits{}, sum, err);
+        CHECK(ok);
+        if (!ok) std::printf("zip: %s\n", err.c_str());
+#ifdef AGENSIO_HAS_ZLIB
+        CHECK(sink.files == 2 && sink.directories == 1 && sink.bytes == 11 + 3000 && sink.executables == 1 && sum.single_top && sum.top == "site");
+#endif
+        ZipBuilder sl;
+        sl.add("evil", "/etc/passwd", false, 0120777);
+        CHECK(refused(sl.build(), "symbolic link"));
+        ZipBuilder tr;
+        tr.add("../up.txt", "x");
+        CHECK(refused(tr.build(), "'..'"));
+        ZipBuilder enc;
+        enc.add("secret.txt", "x", false, 0100644, 0, true);
+        CHECK(refused(enc.build(), "encrypted"));
+#ifdef AGENSIO_HAS_ZLIB
+        ZipBuilder bad;
+        bad.add("f.txt", "hello", true, 0100644, 0x12345678);
+        CHECK(refused(bad.build(), "CRC"));
+#endif
+        ZipBuilder big;
+        big.add("f.txt", "x");
+        CHECK(refused(big.build(true), "zip64"));
+        CHECK(refused("PK\x03\x04 not really a zip, just bytes that start like one and go on for a while", "end-of-central-directory"));
+        CHECK(refused("plain text, no archive at all, long enough to be looked at ......................", "not a tar"));
+    }
+#ifndef _WIN32
+    // DirectorySink and install::execute on a real directory: modes follow the target's,
+    // a failure leaves the directory empty, a single top directory is unwrapped.
+    {
+        const fs::path dir = fs::temp_directory_path() / ("agensio-install-" + std::to_string(::getpid()));
+        fs::remove_all(dir);
+        fs::create_directories(dir / "target");
+        ::chmod((dir / "target").c_str(), 0750);
+        const std::string t2 = tar_entry("app/", "", '5') + tar_entry("app/a.txt", "a", '0') + tar_entry("app/bin/run", "r", '0', 0755) + tar_end();
+        auto write_file = [&](const fs::path& p, const std::string& bytes) { std::ofstream o(p, std::ios::binary); o << bytes; };
+        write_file(dir / "app.tar", t2);
+        auto run = [&](const std::string& archive, const std::string& sha = "", int strip = -1) {
+            install::Request r;
+            r.target = (dir / "target").string();
+            r.upload_fd = ::open((dir / archive).c_str(), O_RDONLY);
+            r.upload_name = archive;
+            r.sha256 = sha;
+            r.strip = strip;
+            const json::Value v = install::execute(r);
+            ::close(r.upload_fd);
+            return v;
+        };
+        json::Value v = run("app.tar");
+        CHECK(v["ok"].boolean() && v.get("unwrapped") == "app" && v["files"].num() == 2);
+        if (!v["ok"].boolean()) std::printf("install: %s\n", std::string(v.get("error")).c_str());
+        struct stat st {};
+        CHECK(::stat((dir / "target" / "a.txt").c_str(), &st) == 0 && (st.st_mode & 0777) == 0640);
+        CHECK(::stat((dir / "target" / "bin").c_str(), &st) == 0 && (st.st_mode & 0777) == 0750);
+        CHECK(::stat((dir / "target" / "bin" / "run").c_str(), &st) == 0 && (st.st_mode & 0777) == 0750);
+        CHECK(!fs::exists(dir / "target" / "app"));
+        CHECK(!v.get("sha256").empty() || !std::string(AGENSIO_VERSION).empty());
+        // Not empty now: refused.
+        v = run("app.tar");
+        CHECK(!v["ok"].boolean() && std::string(v.get("error")).find("not empty") != std::string::npos);
+        fs::remove_all(dir / "target");
+        fs::create_directories(dir / "target");
+        // A set-gid target: directories below keep the bit (the group stays the server's), files never get it.
+        fs::remove_all(dir / "target");
+        fs::create_directories(dir / "target");
+        ::chmod((dir / "target").c_str(), 02750);
+        v = run("app.tar");
+        CHECK(v["ok"].boolean() && ::stat((dir / "target" / "bin").c_str(), &st) == 0 && (st.st_mode & 07777) == 02750);
+        CHECK(::stat((dir / "target" / "bin" / "run").c_str(), &st) == 0 && (st.st_mode & 07777) == 0750);
+        fs::remove_all(dir / "target");
+        fs::create_directories(dir / "target");
+        ::chmod((dir / "target").c_str(), 0750);
+        // A wrong digest: refused before anything is written.
+        v = run("app.tar", std::string(64, '0'));
+        CHECK(!v["ok"].boolean() && std::string(v.get("error")).find("sha256 mismatch") != std::string::npos && fs::is_empty(dir / "target"));
+#ifdef AGENSIO_HAS_TLS
+        const std::string digest(v.get("error").substr(std::string(v.get("error")).find("archive is ") + 11, 64));
+        v = run("app.tar", digest, 0);
+        CHECK(v["ok"].boolean() && v.get("unwrapped").empty() && fs::exists(dir / "target" / "app" / "a.txt"));
+        fs::remove_all(dir / "target");
+        fs::create_directories(dir / "target");
+#endif
+        // A symlink in the middle of an archive: refused, and what came before it is gone.
+        write_file(dir / "evil.tar", tar_entry("good.txt", "g", '0') + tar_entry("link", "", '2', 0777, "/etc") + tar_end());
+        v = run("evil.tar");
+        CHECK(!v["ok"].boolean() && std::string(v.get("error")).find("symbolic link") != std::string::npos && fs::is_empty(dir / "target"));
+        // A target that is a symlink, or owned by someone else, is refused (the latter only testable as root).
+        fs::create_directory_symlink(dir / "target", dir / "link");
+        install::Request r;
+        r.target = (dir / "link").string();
+        r.upload_fd = ::open((dir / "app.tar").c_str(), O_RDONLY);
+        v = install::execute(r);
+        ::close(r.upload_fd);
+        CHECK(!v["ok"].boolean() && std::string(v.get("error")).find("symlink") != std::string::npos);
+        fs::remove_all(dir);
+    }
+#endif
+    // The downloader's fence and URL rule.
+    auto priv = [](const char* a) { return fetch::is_private_address(asio::ip::make_address(a)); };
+    CHECK(priv("127.0.0.1") && priv("10.1.2.3") && priv("172.16.0.1") && priv("172.31.255.255") && priv("192.168.1.1") && priv("169.254.169.254"));
+    CHECK(priv("100.64.0.1") && priv("0.0.0.0") && priv("224.0.0.1") && priv("255.255.255.255"));
+    CHECK(!priv("172.32.0.1") && !priv("8.8.8.8") && !priv("198.143.164.252") && !priv("100.128.0.1"));
+    CHECK(priv("::1") && priv("::") && priv("fe80::1") && priv("fc00::1") && priv("fd12::1") && priv("ff02::1") && priv("::ffff:127.0.0.1") && priv("::ffff:10.0.0.1") && priv("2002:7f00:0001::1"));
+    CHECK(!priv("2606:4700::1111") && !priv("::ffff:8.8.8.8"));
+    std::string host, port, path;
+    CHECK(fetch::split_url("https://wordpress.org/latest.tar.gz", host, port, path) && host == "wordpress.org" && port == "443" && path == "/latest.tar.gz");
+    CHECK(fetch::split_url("https://mirror.example:8443/a/b.zip?x=1#frag", host, port, path) && port == "8443" && path == "/a/b.zip?x=1");
+    CHECK(fetch::split_url("https://[2606:4700::1111]/x", host, port, path) && host == "2606:4700::1111");
+    CHECK(!fetch::split_url("http://wordpress.org/latest.tar.gz", host, port, path));
+    CHECK(!fetch::split_url("https://user:pw@host/x", host, port, path) && !fetch::split_url("https:///x", host, port, path));
+    CHECK(!fetch::split_url("https://host/a b", host, port, path) && !fetch::split_url("https://ho st/a", host, port, path));
+    // Validators.
+    CHECK(install::valid_upload_name("wordpress-6.7.tar.gz") && install::valid_upload_name("a_b-c.zip"));
+    CHECK(!install::valid_upload_name(".hidden") && !install::valid_upload_name("a/b") && !install::valid_upload_name("") && !install::valid_upload_name("a b") && !install::valid_upload_name(std::string(129, 'a')));
+    CHECK(install::valid_sha256(std::string(64, 'a')) && install::valid_sha256(std::string(64, 'F')) && !install::valid_sha256(std::string(63, 'a')) && !install::valid_sha256(std::string(64, 'g')));
+    // The preset sources and the helper's validation of app_install.
+    CHECK(preset_source("wordpress", "") == "https://wordpress.org/latest.tar.gz" && preset_source("wordpress", "6.7.1") == "https://wordpress.org/wordpress-6.7.1.tar.gz");
+    CHECK(preset_source("drupal", "").starts_with("https://") && preset_source("laravel", "").empty() && preset_source("php", "1").empty() && preset_source("static", "").empty());
+    {
+        Config c;
+        c.control.sites_root = "/srv/sites";
+        c.state_dir = "/var/lib/agensio";
+        auto v = [&](const char* text) { json::Value r; std::string e2; json::parse(text, r, e2); return provision::validate(r, c); };
+        CHECK(v(R"({"op":"app_install","target":"/srv/sites/a.test/web","user":"shop","url":"https://wordpress.org/latest.tar.gz"})").empty());
+        CHECK(v(R"({"op":"app_install","target":"/srv/sites/a.test/web","upload":"wp.tgz","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","strip":1})").empty());
+        CHECK(!v(R"({"op":"app_install","target":"/etc","upload":"wp.tgz"})").empty());
+        CHECK(!v(R"({"op":"app_install","target":"/srv/sites/a/web","url":"http://x/y"})").empty());
+        CHECK(!v(R"({"op":"app_install","target":"/srv/sites/a/web","url":"https://x/y","upload":"z"})").empty());
+        CHECK(!v(R"({"op":"app_install","target":"/srv/sites/a/web","upload":"../etc/passwd"})").empty());
+        CHECK(!v(R"({"op":"app_install","target":"/srv/sites/a/web","upload":"wp.tgz","user":"root"})").empty());
+        CHECK(!v(R"({"op":"app_install","target":"/srv/sites/a/web","upload":"wp.tgz","sha256":"xyz"})").empty());
+        CHECK(!v(R"({"op":"app_install","target":"/srv/sites/a/web","upload":"wp.tgz","strip":2})").empty());
+        c.control.install = false;
+        CHECK(!v(R"({"op":"app_install","target":"/srv/sites/a/web","url":"https://x/y"})").empty() && v(R"({"op":"app_install","target":"/srv/sites/a/web","upload":"wp.tgz"})").empty());
+        CHECK(provision::uploads_dir(c) == "/var/lib/agensio/uploads");
+    }
+    // The configuration keys.
+    {
+        const fs::path dir = fs::temp_directory_path() / ("agensio-installcfg-" + std::to_string(::getpid()));
+        fs::create_directories(dir / "www");
+        std::ofstream(dir / "a.toml") << "[control]\ninstall = false\ninstall_private = true\nupload_max = \"64M\"\ninstall_ca = \"ca.pem\"\n[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n";
+        const Config c = load_config(dir / "a.toml");
+        CHECK(!c.control.install && c.control.install_private && c.control.upload_max == 64u * 1024 * 1024 && c.control.install_ca == (dir / "ca.pem").string());
+        std::ofstream(dir / "b.toml") << "[control]\n[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n";
+        const Config d = load_config(dir / "b.toml");
+        CHECK(d.control.install && !d.control.install_private && d.control.upload_max == 512u * 1024 * 1024);
+        const json::Value catalog = preset_catalog();
+        CHECK(catalog["presets"].items()[0].get("app") == "static");
+        bool wp_source = false;
+        for (const auto& p : catalog["presets"].items())
+            if (p.get("app") == "wordpress") wp_source = p.get("source") == "https://wordpress.org/latest.tar.gz";
+        CHECK(wp_source);
+        fs::remove_all(dir);
+    }
+}
+
 static void test_server_account_and_rules() {
     // One helper decides the server's account for every validator: server.group, else the
     // primary group of server.user, never the group of the process running the check.
@@ -1951,6 +2330,7 @@ int main() {
     test_control_sites();
     test_server_account_and_rules();
     test_strict_hosts();
+    test_install();
 #ifdef AGENSIO_HAS_TLS
     test_acme();
 #endif

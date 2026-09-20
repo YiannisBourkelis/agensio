@@ -26,7 +26,7 @@ Asio headers (fetched automatically if not installed), OpenSSL 3 for TLS (option
 # macOS
 brew install cmake ninja asio openssl@3
 # Debian / Ubuntu
-sudo apt install cmake ninja-build libasio-dev libssl-dev
+sudo apt install cmake ninja-build libasio-dev libssl-dev zlib1g-dev
 # Arch
 sudo pacman -S cmake ninja asio openssl
 

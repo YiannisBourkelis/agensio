@@ -19,7 +19,7 @@ jobs:
       # fetched by CMake (asio-1-38-2) because no libasio-dev is installed.
       - uses: lukka/get-cmake@latest
       - name: dependencies
-        run: sudo apt-get update && sudo apt-get install -y ninja-build g++-12 libssl-dev rpm dpkg-dev file
+        run: sudo apt-get update && sudo apt-get install -y ninja-build g++-12 libssl-dev zlib1g-dev rpm dpkg-dev file
       - name: configure and build
         env:
           CC: gcc-12
@@ -102,7 +102,7 @@ jobs:
     container: archlinux:latest
     steps:
       - name: dependencies
-        run: pacman -Syu --noconfirm --needed base-devel git cmake ninja asio openssl github-cli sudo
+        run: pacman -Syu --noconfirm --needed base-devel git cmake ninja asio openssl zlib github-cli sudo
       - uses: actions/checkout@v4
       - name: build the package (makepkg refuses to run as root, so a build user does it)
         run: |

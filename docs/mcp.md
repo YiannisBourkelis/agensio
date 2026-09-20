@@ -4,9 +4,11 @@ agensio ships a [Model Context Protocol](https://modelcontextprotocol.io) server
 `agensio mcp`. An agent host such as Claude Code, Claude Desktop, Cursor or any MCP
 client spawns it, and the agent can then inspect and configure the web server through
 a fixed set of tools: check its health, list sites, read recent errors, create or change
-a site, reload, renew a certificate. The server never embeds a model and never reaches
-out to the network on behalf of an agent; it offers precise, audited tools and nothing
-else.
+a site, install an application into it, reload, renew a certificate. The server never
+embeds a model; the one network action it takes on an agent's behalf, downloading an
+application archive for `site_install`, is fenced (https only, public addresses only,
+size caps, verified certificate, optional sha256) and audited. It offers precise,
+audited tools and nothing else.
 
 ## How it is wired
 
@@ -36,8 +38,13 @@ agent host  --stdin/stdout-->  agensio mcp  --unix socket-->  agensio (control A
 - On a server started as root with `[control] provision = true` (the default), a small
   root helper forked before the privilege drop does the root work of a site on the
   server's behalf: the account, the directory layout, the site's log, the php-fpm pool,
-  a restart. `site_create` is then one call and reports what it did under `done`. The
-  helper does those five things and nothing else; `docs/security-control-plane.md`.
+  a restart, and an application install as the site's account. `site_create` is then one
+  call and reports what it did under `done`. The helper does those six things and nothing
+  else; `docs/security-control-plane.md`.
+- **Files cannot travel through the bridge**: a tool argument is JSON inside the model's
+  context, so an archive on your machine reaches the server by `ssh admin@host agensio
+  ctl upload NAME < file` (the same SSH session the bridge uses), and the agent then
+  installs it with `site_install` and `file: NAME`. `uploads_list` shows what is stored.
 - Otherwise, anything that needs root (creating a system account, making a directory, restarting
   the service, reloading php-fpm) is never executed: the server answers with the exact
   commands and waits. The agent shows them, you run them, the agent continues.
@@ -89,6 +96,9 @@ takes `--socket PATH`.
 | `cert_renew` | operator | order an automatic certificate again now |
 | `site_create`, `site_update` | admin | write or change a managed site file, validate, reload; answer with open decisions or root commands first |
 | `site_disable`, `site_enable`, `site_delete` | admin | rename the file away and back; delete it (a `.bak` stays) |
+| `site_install` | admin | put an application's files into a site's empty directory as the site's account: the preset's official archive (`version` optional), any https `url`, or a stored upload (`file`); `sha256`, `path`, `strip`, `dry_run`; the server enforces the fences and reports the source and digest |
+| `uploads_list` | viewer | archives stored with `agensio ctl upload`, for `site_install` |
+| `upload_delete` | operator | remove a stored upload |
 
 Two prompts help a newcomer: `getting_started` (greet, run the health check, offer the
 usual jobs) and `new_site` (walk through a new website: HTTPS, its own user, what runs
@@ -112,11 +122,21 @@ there, where the files are).
 >
 > **Agent:** calls `site_create` once more. The file `sites.d/www.example.com.toml` is
 > written, validated and live; the certificate arrives within a minute; `site_show`
-> confirms it.
+> confirms it. Since the site is `app = "wordpress"`, the agent offers to install it.
+>
+> **You:** yes, the newest.
+>
+> **Agent:** calls `site_install`. The server downloads `wordpress.org/latest.tar.gz` as
+> the site's account, verifies the archive, unpacks it into the site's directory and
+> answers with the file count and the sha256. The agent reports both and tells you to
+> open the site to finish WordPress's own setup.
 
 Every step is one line in the audit log with your uid and the reason the agent gave.
 
 ## What it cannot do
 
-Stop or restart the server, create accounts, install packages, edit hand-written site
-files, run anything as root, reach other machines. Those are yours, on purpose.
+Install packages, edit hand-written site files, run anything as root, reach other
+machines except to download an archive you named into a site (and never a private
+address), carry files itself. Those are yours, on purpose. On a server with the helper
+it creates site accounts, restarts the service after a change that needs it and installs
+applications as the site's account; without the helper it hands the commands back.

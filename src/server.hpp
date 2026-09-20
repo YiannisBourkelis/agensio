@@ -139,6 +139,9 @@ private:
     bool provision_available() override { return provisioner_.available(); }
     json::Value provision(const json::Value& req) override { return provisioner_.request(req); }
     void restart_later() override;
+    void install_async(const json::Value& req, std::function<void(json::Value)> done) override;
+    std::string uploads_dir() override { return uploads_dir_; }
+    void prepare_uploads();  // <state_dir>/uploads, the server's own, before the privilege drop
     bool privileged() override {
 #ifdef _WIN32
         return true;
@@ -162,6 +165,7 @@ private:
     Dispatcher dispatcher_;
     AcmeManager acme_{error_log_};
     Provisioner provisioner_;
+    std::string uploads_dir_;
     std::unique_ptr<asio::steady_timer> restart_timer_;
     std::vector<std::unique_ptr<Worker>> workers_;
     std::vector<std::unique_ptr<Acceptor>> acceptors_;

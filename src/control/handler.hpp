@@ -37,6 +37,11 @@ struct ControlBackend {
     virtual bool provision_available() = 0;
     virtual json::Value provision(const json::Value& req) = 0;
     virtual void restart_later() = 0;  // after the current reply went out
+    // site-install (F9): runs off the worker (a download can take minutes) and calls `done`
+    // on worker 0 with the install result. Through the helper as the site's account when
+    // there is one, else on a thread of this process as its own account.
+    virtual void install_async(const json::Value& req, std::function<void(json::Value)> done) = 0;
+    virtual std::string uploads_dir() = 0;  // "" when uploads are not possible (no state directory)
 };
 
 class ControlHandler {
@@ -49,10 +54,14 @@ public:
     }
 
     // Reads the request body when there is one, answers, then runs `done` (inline when
-    // nothing had to be read). The connection keeps itself alive across it.
+    // nothing had to be read). The connection keeps itself alive across it. A PUT to
+    // /v1/uploads/NAME streams its body to a file instead of memory; a site install
+    // finishes later, on the callback the backend runs.
     void start(Stream& s, WorkerState& ws, std::function<void()> done);
     // Answers s.request (ws.path is the normalised target) with the body in s.response.buffer.
     void handle(Stream& s, WorkerState& ws);
+    // True when the reply is deferred and `done` will be run later (site install).
+    bool handle_deferred(Stream& s, WorkerState& ws, std::function<void()>& done);
 
     // One audit line: who (uid, gid, role), what, and the outcome.
     void audit(long uid, long gid, Role role, std::string_view what, std::string_view result);
@@ -60,10 +69,14 @@ public:
 private:
     void reply(Stream& s, int status, const json::Value& body);
     bool require(Stream& s, Role needed, std::string_view command);
-    void mutate(Stream& s, WorkerState& ws, std::string_view path);
+    bool mutate(Stream& s, WorkerState& ws, std::string_view path, std::function<void()>& done);
     void site_create(Stream& s, const json::Value& body, std::string_view reason);
     void site_update(Stream& s, std::string_view name, const json::Value& body, std::string_view reason);
     void site_toggle(Stream& s, std::string_view name, std::string_view action, std::string_view reason);
+    void site_install(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> done);
+    void upload_receive(Stream& s, std::string_view name, std::function<void()> done);
+    json::Value uploads_list();
+    void upload_delete(Stream& s, std::string_view name, std::string_view reason);
     void audit_peer(const Stream& s, std::string_view what, std::string_view result);
 
     ErrorLog& log_;

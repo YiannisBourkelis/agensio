@@ -65,6 +65,15 @@ if(AGENSIO_TLS)
   endif()
 endif()
 
+# ---------------------------------------------------------------- zlib (optional: site-install archives)
+# gzip and deflate for the archive extractor behind `site-install` (.tar.gz and .zip);
+# present on every Linux, macOS and BSD system. Without it plain .tar still works.
+find_package(ZLIB)
+set(AGENSIO_HAS_ZLIB ${ZLIB_FOUND})
+if(NOT ZLIB_FOUND)
+  message(WARNING "zlib not found; site-install handles only plain .tar archives")
+endif()
+
 # ---------------------------------------------------------------- core library
 add_library(agensio_core STATIC
   src/config.cpp
@@ -79,6 +88,9 @@ add_library(agensio_core STATIC
   src/services/pools.cpp
   src/services/acme.cpp
   src/services/provision.cpp
+  src/services/archive.cpp
+  src/services/fetch.cpp
+  src/services/install.cpp
   src/control/handler.cpp
   src/control/commands.cpp
   src/control/sites.cpp
@@ -100,9 +112,13 @@ target_include_directories(agensio_core PUBLIC src)
 target_link_libraries(agensio_core PUBLIC asio tomlplusplus)
 target_compile_definitions(agensio_core PUBLIC
   AGENSIO_VERSION="${AGENSIO_VERSION_STRING}"
-  $<$<BOOL:${AGENSIO_HAS_TLS}>:AGENSIO_HAS_TLS=1>)
+  $<$<BOOL:${AGENSIO_HAS_TLS}>:AGENSIO_HAS_TLS=1>
+  $<$<BOOL:${AGENSIO_HAS_ZLIB}>:AGENSIO_HAS_ZLIB=1>)
 if(AGENSIO_HAS_TLS)
   target_link_libraries(agensio_core PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+endif()
+if(AGENSIO_HAS_ZLIB)
+  target_link_libraries(agensio_core PUBLIC ZLIB::ZLIB)
 endif()
 if(MSVC)
   target_compile_options(agensio_core PUBLIC /W4 /permissive- $<$<BOOL:${AGENSIO_HARDEN}>:/GS /guard:cf /sdl>)
@@ -152,12 +168,16 @@ target_link_libraries(agensio_upstream PRIVATE asio Threads::Threads)
 
 # ---------------------------------------------------------------- fuzzers (parsers only, no asio)
 if(AGENSIO_FUZZ)
-  foreach(t parser path chunked fcgi http_head json)
-    add_executable(fuzz_${t} tests/fuzz/fuzz_${t}.cpp src/http1/parser.cpp src/path.cpp)
+  foreach(t parser path chunked fcgi http_head json archive)
+    add_executable(fuzz_${t} tests/fuzz/fuzz_${t}.cpp src/http1/parser.cpp src/path.cpp src/services/archive.cpp)
     target_include_directories(fuzz_${t} PRIVATE src)
     target_compile_features(fuzz_${t} PRIVATE cxx_std_20)
+    target_compile_definitions(fuzz_${t} PRIVATE $<$<BOOL:${AGENSIO_HAS_ZLIB}>:AGENSIO_HAS_ZLIB=1>)
     target_compile_options(fuzz_${t} PRIVATE -fsanitize=fuzzer,address,undefined -g -O1 -fno-omit-frame-pointer)
     target_link_options(fuzz_${t} PRIVATE -fsanitize=fuzzer,address,undefined)
+    if(AGENSIO_HAS_ZLIB)
+      target_link_libraries(fuzz_${t} PRIVATE ZLIB::ZLIB)
+    endif()
   endforeach()
 endif()
 
@@ -212,7 +232,7 @@ set(CPACK_RPM_FILE_NAME RPM-DEFAULT)
 set(CPACK_RPM_PACKAGE_RELOCATABLE OFF)  # a system package: /etc and /usr/lib are not relocatable
 set(CPACK_RPM_PACKAGE_LICENSE MIT)
 set(CPACK_RPM_PACKAGE_GROUP "System Environment/Daemons")
-set(CPACK_RPM_PACKAGE_REQUIRES "openssl-libs, shadow-utils")
+set(CPACK_RPM_PACKAGE_REQUIRES "openssl-libs, zlib, shadow-utils")
 set(CPACK_RPM_PRE_INSTALL_SCRIPT_FILE ${CMAKE_CURRENT_SOURCE_DIR}/packaging/rpm/pre)
 set(CPACK_RPM_POST_INSTALL_SCRIPT_FILE ${CMAKE_CURRENT_SOURCE_DIR}/packaging/rpm/post)
 set(CPACK_RPM_PRE_UNINSTALL_SCRIPT_FILE ${CMAKE_CURRENT_SOURCE_DIR}/packaging/rpm/preun)

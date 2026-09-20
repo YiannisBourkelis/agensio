@@ -733,6 +733,18 @@ Rules:
       pool and the log follow, `needs_restart` restarts after the reply. Default on
       (`[control] provision = false` to opt out). `tests/provision.sh` (root devbox): the
       one-call path and the refusals. Security page section written.
+- [x] F9 (2026-09-20) `site-install`: `services/archive.*` (own tar/tar.gz/zip extractor,
+      Source/Sink, fenced and fuzzed), `services/fetch.*` (blocking https GET with the
+      private-address fence on every hop, verified certificate, caps), `services/install.*`
+      (target owned by the executing account and empty, download to an unlinked temp file,
+      sha256, extract with modes from the target, unwrap a single top directory, empty the
+      directory on any failure); helper op `app_install` (child becomes the site account),
+      server-side thread when there is no helper; `PUT /v1/uploads/NAME` streamed to
+      `<state_dir>/uploads` (0700, `upload_max`), `uploads`, `uploads-delete`; presets carry
+      their official `source`; MCP `site_install`, `uploads_list`, `upload_delete`.
+      `[control] install`, `install_private`, `install_ca`, `upload_max`. zlib added as a
+      dependency. `tests/install.sh` (root devbox), unit, fuzz and integration checks;
+      security page rows 19-22.
 - [ ] H1b Certificates watched and reloaded when the files change (manual `tls = { cert,
       key }` sites; automatic ones already reload themselves); reload must not stall new
       QUIC connections (nginx's known weakness).

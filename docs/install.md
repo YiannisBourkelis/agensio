@@ -50,6 +50,7 @@ are separate accounts (section 3).
 | persistent state | `/var/lib/agensio/` | agensio 0751 (site users traverse to their own directory, cannot list others) | today (`server.state_dir`) |
 | certificates (automatic) | `/var/lib/agensio/acme/account.key`, `/var/lib/agensio/acme/<domain>/key.pem` (0600), `fullchain.pem` | agensio 0700 dir | today (`server.acme.storage`) |
 | per-user PHP state | `/var/lib/agensio/<user>/tmp/`, `/var/lib/agensio/<user>/sessions/` | <user> 0700 | today (`agensio pools`) |
+| uploaded archives | `/var/lib/agensio/uploads/` (`agensio ctl upload NAME`, consumed by `site-install --file`) | agensio 0700 | today |
 | temporary spill files | the system temp directory, unlinked immediately (large upstream bodies and request bodies) | agensio | today |
 | site content | `/var/www/<domain>/` (section 3) | site user | convention |
 | systemd unit | `/usr/lib/systemd/system/agensio.service` (package) or `/etc/systemd/system/agensio.service` | root 0644 | today (package, `packaging/agensio.service`) |
@@ -217,7 +218,7 @@ rollback.
    ```
 
    Dependencies for a source build: a C++20 compiler (GCC 12+, Clang 16+), CMake 3.20+,
-   Ninja, Asio headers (`libasio-dev`) and OpenSSL 3 (`libssl-dev`).
+   Ninja, Asio headers (`libasio-dev`), OpenSSL 3 (`libssl-dev`) and zlib (`zlib1g-dev`).
 
 2. **Service user and directories** (the packages do this in their post-install step):
 

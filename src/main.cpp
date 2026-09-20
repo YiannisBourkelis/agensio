@@ -8,6 +8,7 @@
 #include <sys/types.h>
 #endif
 #include <iostream>
+#include <iterator>
 #include <string>
 
 #include "config.hpp"
@@ -45,7 +46,10 @@ void usage() {
                  "                           [--root DIR] [--upstream URL] [--php-socket S] [--php-children N]\n"
                  "                           [--no-redirect] [--hsts] [--listen-plain A] [--listen-tls A]\n"
                  "                      site-update NAME (same flags) | site-disable NAME | site-enable NAME |\n"
-                 "                      site-delete NAME | cert-renew NAME\n"
+                 "                      site-delete NAME | cert-renew NAME |\n"
+                 "                      site-install NAME [--url https://... | --file UPLOAD | --version V] [--sha256 H]\n"
+                 "                           [--path SUB] [--strip 0|1] [--dry-run]\n"
+                 "                      Uploads: upload NAME [FILE] (stdin by default) | uploads | uploads-delete NAME\n"
                  "  mcp                 Model Context Protocol server on stdin/stdout for an AI agent host,\n"
                  "                      exposing the control commands as tools as the invoking user\n"
                  "                      (spawn it locally or over SSH: ssh admin@host agensio mcp)\n"
@@ -102,7 +106,7 @@ int main(int argc, char** argv) {
         else if (a == "ctl" && i == 1) {
             auto ctl_usage = [] {
                 std::cout << "usage: agensio ctl <command> [options] [--socket PATH] [-c config.toml]\n"
-                             "read:   status | sites | site NAME | validate | health | presets |\n"
+                             "read:   status | sites | site NAME | validate | health | presets | uploads |\n"
                              "        logs [--site NAME] [--since 3h] [--level error|warn|info] [--status 5xx|4xx|all] [--limit N]\n"
                              "change (each needs --yes, takes --reason TEXT):\n"
                              "        reload | logs-reopen | site-disable NAME | site-enable NAME | site-delete NAME | cert-renew NAME\n"
@@ -111,6 +115,12 @@ int main(int argc, char** argv) {
                              "                    [--php-children N] [--php-version V] [--no-redirect] [--hsts] [--listen-plain A] [--listen-tls A]\n"
                              "        site-update NAME (same options as site-create); --dry-run on either checks and shows the\n"
                              "                    file without writing, listing every problem at once\n"
+                             "        site-install NAME [--url https://host/app.tar.gz | --file UPLOAD | --version V] [--sha256 HEX]\n"
+                             "                    [--path SUB] [--strip 0|1] [--dry-run]: puts an application's files into the site's\n"
+                             "                    (empty) directory as the site's account; no source = the preset's official archive\n"
+                             "        uploads-delete NAME\n"
+                             "upload: upload NAME [FILE]   stores FILE (or stdin) on the server for site-install --file NAME;\n"
+                             "                    needs the operator role, no --yes\n"
                              "Answers are the control API's JSON; exit 1 on any refusal. Without --yes a change is\n"
                              "refused (428) and nothing happens.\n";
             };
@@ -123,7 +133,7 @@ int main(int argc, char** argv) {
                     ctl_usage();
                     return 0;
                 }
-            std::string command, socket_path, site_name, query;
+            std::string command, socket_path, site_name, query, upload_file;
             agensio::json::Value body = agensio::json::Value::object();
             agensio::json::Value aliases = agensio::json::Value::array();
             bool yes = false;
@@ -161,15 +171,24 @@ int main(int argc, char** argv) {
                 else if (b == "--hsts") body.set("hsts", true);
                 else if (b == "--listen-plain") field("listen_plain");
                 else if (b == "--listen-tls") field("listen_tls");
+                else if (b == "--url") field("url");
+                else if (b == "--file") field("file");
+                else if (b == "--version") field("version");
+                else if (b == "--sha256") field("sha256");
+                else if (b == "--path") field("path");
+                else if (b == "--strip") { std::string v; value(v); body.set("strip", std::atoi(v.c_str())); }
                 else if (command.empty()) command = b;
                 else if (site_name.empty() && command.starts_with("site") && command != "sites") site_name = b;
-                else if (site_name.empty() && command == "cert-renew") site_name = b;
+                else if (site_name.empty() && (command == "cert-renew" || command == "upload" || command == "uploads-delete")) site_name = b;
+                else if (command == "upload" && upload_file.empty()) upload_file = b;
                 else { std::cerr << "ctl: unexpected argument " << b << "\n"; return 2; }
             }
             if (!aliases.items().empty()) body.set("aliases", aliases);
             std::string path, method = "GET";
-            const bool mutation = command == "reload" || command == "logs-reopen" || command.starts_with("site-") || command == "cert-renew";
-            if (command == "status" || command == "sites" || command == "health" || command == "presets") path = "/v1/" + command;
+            const bool mutation = command == "reload" || command == "logs-reopen" || command.starts_with("site-") || command == "cert-renew" ||
+                                  command == "uploads-delete";
+            const bool upload = command == "upload";
+            if (command == "status" || command == "sites" || command == "health" || command == "presets" || command == "uploads") path = "/v1/" + command;
             else if (command == "site" && !site_name.empty()) path = "/v1/sites/" + site_name;
             else if (command == "validate") path = "/v1/config/validate";
             else if (command == "logs") path = "/v1/logs" + query;
@@ -180,6 +199,9 @@ int main(int argc, char** argv) {
             else if ((command == "site-disable" || command == "site-enable" || command == "site-delete") && !site_name.empty())
                 path = "/v1/sites/" + site_name + "/" + command.substr(5);
             else if (command == "cert-renew" && !site_name.empty()) path = "/v1/sites/" + site_name + "/renew";
+            else if (command == "site-install" && !site_name.empty()) path = "/v1/sites/" + site_name + "/install";
+            else if (command == "uploads-delete" && !site_name.empty()) path = "/v1/uploads/" + site_name + "/delete";
+            else if (upload && !site_name.empty()) path = "/v1/uploads/" + site_name;
             else {
                 std::cerr << "ctl: unknown or incomplete command '" << command << "' (see agensio --help)\n";
                 return 2;
@@ -187,6 +209,25 @@ int main(int argc, char** argv) {
             if (mutation) {
                 method = "POST";
                 if (yes) body.set("confirm", true);
+            }
+            std::string upload_bytes;
+            if (upload) {
+                method = "PUT";
+                std::istream* in = &std::cin;
+                std::ifstream f;
+                if (!upload_file.empty()) {
+                    f.open(upload_file, std::ios::binary);
+                    if (!f) {
+                        std::cerr << "upload: cannot read " << upload_file << "\n";
+                        return 1;
+                    }
+                    in = &f;
+                }
+                upload_bytes.assign(std::istreambuf_iterator<char>(*in), std::istreambuf_iterator<char>());
+                if (upload_bytes.empty()) {
+                    std::cerr << "upload: nothing to send (give a file, or pipe the archive on stdin)\n";
+                    return 1;
+                }
             }
             if (socket_path.empty()) {
                 try {
@@ -198,7 +239,7 @@ int main(int argc, char** argv) {
             }
             agensio::ControlReply reply;
             std::string error;
-            if (!agensio::control_request(socket_path, method, path, mutation ? body.dump() : std::string(), reply, error)) {
+            if (!agensio::control_request(socket_path, method, path, upload ? upload_bytes : mutation ? body.dump() : std::string(), reply, error)) {
                 std::cerr << error << "\n";
                 return 1;
             }

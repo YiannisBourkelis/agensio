@@ -5,9 +5,23 @@
 #include <chrono>
 #include <cstdio>
 
+#include <algorithm>
+#include <cerrno>
+#include <vector>
+#include <memory>
+#include <cstring>
+#include <filesystem>
+
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 #include "control/commands.hpp"
 #include "control/sites.hpp"
 #include "core/body.hpp"
+#include "services/install.hpp"
 
 namespace agensio {
 
@@ -56,10 +70,21 @@ struct BodyRead {
 }  // namespace
 
 void ControlHandler::start(Stream& s, WorkerState& ws, std::function<void()> done) {
+    if (s.request.method == Method::put) {
+        const std::string_view path = ws.path;
+        if (path.starts_with("/v1/uploads/") && path.size() > 12) {
+            upload_receive(s, path.substr(12), std::move(done));
+        } else {
+            s.response.headers.add("Allow", "GET, HEAD, POST");
+            reply(s, path.starts_with("/v1/uploads/") ? 400 : 405,
+                  json::Value::object().set("error", path.starts_with("/v1/uploads/") ? "PUT /v1/uploads/NAME needs a file name" : "method not allowed"));
+            done();
+        }
+        return;
+    }
     if (!s.request.has_body || !s.request.body) {
         s.response.buffer.clear();
-        handle(s, ws);
-        done();
+        if (!handle_deferred(s, ws, done)) done();
         return;
     }
     auto state = std::make_shared<BodyRead>();
@@ -69,8 +94,8 @@ void ControlHandler::start(Stream& s, WorkerState& ws, std::function<void()> don
             if (ec) return;  // the connection handles a vanished client
             if (n == 0) {
                 s.response.buffer = std::move(state->data);
-                handle(s, ws);
-                done();
+                std::function<void()> d = done;
+                if (!handle_deferred(s, ws, d)) d();
                 return;
             }
             state->data.append(state->chunk, n);
@@ -90,29 +115,31 @@ void ControlHandler::audit_peer(const Stream& s, std::string_view what, std::str
 }
 
 void ControlHandler::handle(Stream& s, WorkerState& ws) {
+    std::function<void()> none;
+    handle_deferred(s, ws, none);
+}
+
+bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<void()>& done) {
     const Request& req = s.request;
     const std::string_view path = ws.path;
-    if (req.method == Method::post) {
-        mutate(s, ws, path);
-        return;
-    }
+    if (req.method == Method::post) return mutate(s, ws, path, done);
     // The read commands (F2): every one is a GET, every one needs the viewer role.
     const bool read_command = path == "/v1/status" || path == "/v1/sites" || path.starts_with("/v1/sites/") ||
                               path == "/v1/config/validate" || path == "/v1/logs" || path == "/v1/health" ||
-                              path == "/v1/presets";
+                              path == "/v1/presets" || path == "/v1/uploads";
     if (!read_command) {
         reply(s, 404, json::Value::object().set("error", "unknown command").set("path", std::string(path)));
-        return;
+        return false;
     }
     if (req.method != Method::get && req.method != Method::head) {
         s.response.headers.add("Allow", "GET, HEAD");
         reply(s, 405, json::Value::object().set("error", "method not allowed"));
-        return;
+        return false;
     }
-    if (!require(s, Role::viewer, path.substr(4))) return;
+    if (!require(s, Role::viewer, path.substr(4))) return false;
     if (!backend_) {
         reply(s, 503, json::Value::object().set("error", "no backend"));
-        return;
+        return false;
     }
     if (path == "/v1/status") {
         json::Value body = backend_->status();
@@ -134,9 +161,12 @@ void ControlHandler::handle(Stream& s, WorkerState& ws) {
         reply(s, 200, backend_->logs(req.target));
     } else if (path == "/v1/presets") {
         reply(s, 200, preset_catalog());
+    } else if (path == "/v1/uploads") {
+        reply(s, 200, uploads_list());
     } else {
         reply(s, 200, backend_->health());
     }
+    return false;
 }
 
 // ---- mutations (F3) ----
@@ -188,48 +218,51 @@ json::Value decisions_json(const std::vector<control::Decision>& needs) {
 
 }  // namespace
 
-void ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path) {
+bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, std::function<void()>& done) {
     (void)ws;
     const bool site_path = path.starts_with("/v1/sites/");
+    const bool upload_path = path.starts_with("/v1/uploads/");
     std::string_view name, action;
-    if (site_path) {
-        name = path.substr(10);
+    if (site_path || upload_path) {
+        name = path.substr(site_path ? 10 : 12);
         const std::size_t slash = name.find('/');
         if (slash != std::string_view::npos) {
             action = name.substr(slash + 1);
             name = name.substr(0, slash);
         }
     }
-    if (path == "/v1/status" || path == "/v1/config/validate" || path == "/v1/logs" || path == "/v1/health" || path == "/v1/presets") {
+    if (path == "/v1/status" || path == "/v1/config/validate" || path == "/v1/logs" || path == "/v1/health" || path == "/v1/presets" ||
+        path == "/v1/uploads") {
         s.response.headers.add("Allow", "GET, HEAD");
         reply(s, 405, json::Value::object().set("error", "method not allowed"));
-        return;
+        return false;
     }
     const bool known = path == "/v1/reload" || path == "/v1/sites" || path == "/v1/logs/reopen" ||
                        (site_path && !name.empty() && (action.empty() || action == "disable" || action == "enable" ||
-                                                       action == "delete" || action == "renew"));
+                                                       action == "delete" || action == "renew" || action == "install")) ||
+                       (upload_path && !name.empty() && action == "delete");
     if (!known) {
         reply(s, 404, json::Value::object().set("error", "unknown command").set("path", std::string(path)));
-        return;
+        return false;
     }
-    const Role needed = (path == "/v1/reload" || path == "/v1/logs/reopen" || action == "renew") ? Role::operator_ : Role::admin;
-    if (!require(s, needed, path.substr(4))) return;
+    const Role needed = (path == "/v1/reload" || path == "/v1/logs/reopen" || action == "renew" || upload_path) ? Role::operator_ : Role::admin;
+    if (!require(s, needed, path.substr(4))) return false;
     json::Value body = json::Value::object();
     std::string err;
     if (!s.response.buffer.empty() && (!json::parse(s.response.buffer, body, err) || !body.is_object())) {
         reply(s, 400, json::Value::object().set("error", "body must be a JSON object: " + err));
-        return;
+        return false;
     }
     if (!body["confirm"].boolean()) {
         reply(s, 428, json::Value::object().set("error", "confirm required")
                           .set("hint", "this command changes the server; send {\"confirm\": true, \"reason\": \"...\"} once the user agreed"));
-        return;
+        return false;
     }
     const std::string reason(body.get("reason"));
     const std::string what = std::string(path.substr(4)) + (reason.empty() ? "" : " (" + reason + ")");
     if (!backend_) {
         reply(s, 503, json::Value::object().set("error", "no backend"));
-        return;
+        return false;
     }
     if (path == "/v1/reload") {
         std::string error;
@@ -237,21 +270,25 @@ void ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path) {
         audit_peer(s, what, ok ? "ok" : error);
         if (ok) reply(s, 200, json::Value::object().set("ok", true).set("message", "configuration reloaded"));
         else reply(s, 409, json::Value::object().set("ok", false).set("error", error));
-        return;
+        return false;
     }
     if (path == "/v1/logs/reopen") {
         backend_->reopen_logs();
         audit_peer(s, what, "ok");
         reply(s, 200, json::Value::object().set("ok", true));
-        return;
+        return false;
     }
     if (path == "/v1/sites") {
         site_create(s, body, what);
-        return;
+        return false;
+    }
+    if (upload_path) {
+        upload_delete(s, name, what);
+        return false;
     }
     if (action.empty()) {
         site_update(s, name, body, what);
-        return;
+        return false;
     }
     if (action == "renew") {
         std::string error;
@@ -259,9 +296,261 @@ void ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path) {
         audit_peer(s, what, ok ? "ordering" : error);
         if (ok) reply(s, 202, json::Value::object().set("ok", true).set("message", "order started; watch `site " + std::string(name) + "` and the error log"));
         else reply(s, 409, json::Value::object().set("ok", false).set("error", error));
-        return;
+        return false;
+    }
+    if (action == "install") {
+        if (!done) {  // no way to defer: answered synchronously as a refusal
+            reply(s, 503, json::Value::object().set("error", "install needs an asynchronous caller"));
+            return false;
+        }
+        site_install(s, name, body, what, std::move(done));
+        return true;
     }
     site_toggle(s, name, action, what);
+    return false;
+}
+
+// ---- uploads and installs (F9) ----
+
+namespace {
+
+struct UploadState {
+    int fd = -1;
+    std::string path, final_path, name;
+    std::uint64_t bytes = 0;
+    char chunk[64 * 1024];
+    ~UploadState() {
+        if (fd >= 0) {
+            ::close(fd);
+            std::error_code ec;
+            std::filesystem::remove(path, ec);  // an upload that did not complete leaves nothing
+        }
+    }
+};
+
+}  // namespace
+
+void ControlHandler::upload_receive(Stream& s, std::string_view name, std::function<void()> done) {
+    if (!require(s, Role::operator_, "uploads/" + std::string(name))) {
+        done();
+        return;
+    }
+    if (!install::valid_upload_name(name)) {
+        reply(s, 400, json::Value::object().set("error", "the upload name must be a plain file name: letters, digits, '.', '_', '-', not starting with a dot"));
+        done();
+        return;
+    }
+    const std::string dir = backend_ ? backend_->uploads_dir() : "";
+    if (dir.empty()) {
+        reply(s, 503, json::Value::object().set("error", "uploads are off: the server has no writable state directory (see the error log at start)"));
+        done();
+        return;
+    }
+    if (!s.request.has_body || !s.request.body) {
+        reply(s, 400, json::Value::object().set("error", "an upload needs a body"));
+        done();
+        return;
+    }
+    auto st = std::make_shared<UploadState>();
+    st->name = std::string(name);
+    st->final_path = dir + "/" + st->name;
+    st->path = st->final_path + ".part";
+    st->fd = ::open(st->path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (st->fd < 0) {
+        reply(s, 500, json::Value::object().set("error", "cannot create " + st->path + ": " + std::strerror(errno)));
+        done();
+        return;
+    }
+    audit_peer(s, "uploads/" + st->name, "receiving");
+    auto step = std::make_shared<std::function<void()>>();
+    *step = [this, &s, st, step, done]() {
+        s.request.body->async_read(st->chunk, sizeof st->chunk, [this, &s, st, step, done](std::error_code ec, std::size_t n) {
+            if (ec) {
+                audit_peer(s, "uploads/" + st->name, "aborted: " + ec.message());
+                return;  // the connection handles a vanished client; the .part file goes with the state
+            }
+            if (n == 0) {
+                std::error_code fec;
+                bool ok = ::fsync(st->fd) == 0;
+                ::close(st->fd);
+                st->fd = -1;
+                if (ok) {
+                    std::filesystem::rename(st->path, st->final_path, fec);
+                    ok = !fec;
+                }
+                if (!ok) {
+                    std::filesystem::remove(st->path, fec);
+                    audit_peer(s, "uploads/" + st->name, "failed to store");
+                    reply(s, 500, json::Value::object().set("error", "cannot store the upload"));
+                } else {
+                    audit_peer(s, "uploads/" + st->name, "stored " + std::to_string(st->bytes) + " bytes");
+                    reply(s, 201, json::Value::object().set("ok", true).set("file", st->name).set("bytes", static_cast<double>(st->bytes))
+                                      .set("hint", "install it with site-install NAME --file " + st->name));
+                }
+                done();
+                return;
+            }
+            const char* p = st->chunk;
+            std::size_t left = n;
+            while (left > 0) {
+                const ssize_t w = ::write(st->fd, p, left);
+                if (w < 0) {
+                    if (errno == EINTR) continue;
+                    reply(s, 507, json::Value::object().set("error", std::string("writing the upload: ") + std::strerror(errno)));
+                    audit_peer(s, "uploads/" + st->name, std::string("write failed: ") + std::strerror(errno));
+                    done();
+                    return;
+                }
+                p += w;
+                left -= static_cast<std::size_t>(w);
+            }
+            st->bytes += n;
+            (*step)();
+        });
+    };
+    (*step)();
+}
+
+json::Value ControlHandler::uploads_list() {
+    json::Value list = json::Value::array();
+    const std::string dir = backend_ ? backend_->uploads_dir() : "";
+    if (!dir.empty()) {
+        std::error_code ec;
+        std::vector<std::filesystem::directory_entry> entries;
+        for (const auto& e : std::filesystem::directory_iterator(dir, ec)) entries.push_back(e);
+        std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) { return a.path().filename() < b.path().filename(); });
+        for (const auto& e : entries) {
+            const std::string name = e.path().filename().string();
+            if (!install::valid_upload_name(name) || !e.is_regular_file(ec)) continue;  // .part files and strangers are not offered
+            struct stat st {};
+            ::stat(e.path().c_str(), &st);
+            char stamp[32];
+            std::tm tm{};
+            ::localtime_r(&st.st_mtime, &tm);
+            std::strftime(stamp, sizeof stamp, "%Y-%m-%dT%H:%M:%S", &tm);
+            list.push(json::Value::object().set("file", name).set("bytes", static_cast<double>(st.st_size)).set("uploaded", stamp));
+        }
+    }
+    return json::Value::object().set("uploads", list).set("directory", dir)
+        .set("hint", dir.empty() ? "uploads are off: no writable state directory" : "agensio ctl upload NAME < archive.tar.gz adds one; site-install NAME --file FILE unpacks it into a site");
+}
+
+void ControlHandler::upload_delete(Stream& s, std::string_view name, std::string_view what) {
+    const std::string dir = backend_->uploads_dir();
+    if (!install::valid_upload_name(name) || dir.empty()) {
+        reply(s, 404, json::Value::object().set("error", "no such upload").set("file", std::string(name)));
+        return;
+    }
+    const std::string path = dir + "/" + std::string(name);
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec) || !std::filesystem::remove(path, ec)) {
+        reply(s, 404, json::Value::object().set("error", "no such upload").set("file", std::string(name)));
+        return;
+    }
+    audit_peer(s, what, "deleted");
+    reply(s, 200, json::Value::object().set("ok", true).set("file", std::string(name)));
+}
+
+void ControlHandler::site_install(Stream& s, std::string_view name, const json::Value& body, std::string_view what, std::function<void()> done) {
+    const Config& cfg = backend_->running();
+    const SiteConfig* site = control::find_site(cfg, name);
+    if (!site) {
+        reply(s, 404, json::Value::object().set("error", "no such site").set("site", std::string(name)));
+        done();
+        return;
+    }
+    // The source: a URL, an upload, or the preset's official archive (with a version).
+    std::string url(body.get("url")), file(body.get("file")), version(body.get("version"));
+    const std::string app = site->app.empty() ? "static" : site->app;
+    if (url.empty() && file.empty()) {
+        url = preset_source(app, version);
+        if (url.empty()) {
+            reply(s, 422, json::Value::object().set("error", "no source: give url (an https archive) or file (an upload)")
+                              .set("hint", app == "laravel" ? "Laravel projects are created with composer, not from an archive; upload the project as a tarball or give the URL of one"
+                                                             : "this preset has no official download; give url or file")
+                              .set("app", app));
+            done();
+            return;
+        }
+    }
+    if (!url.empty() && !file.empty()) {
+        reply(s, 400, json::Value::object().set("error", "give either url or file, not both"));
+        done();
+        return;
+    }
+    if (!url.empty() && !cfg.control.install) {
+        reply(s, 403, json::Value::object().set("error", "downloads are off on this server ([control] install = false)")
+                          .set("hint", "upload the archive with `agensio ctl upload NAME < file` and install with file: NAME"));
+        done();
+        return;
+    }
+    if (!url.empty() && !url.starts_with("https://")) {
+        reply(s, 400, json::Value::object().set("error", "url must be https://"));
+        done();
+        return;
+    }
+    if (!file.empty() && !install::valid_upload_name(file)) {
+        reply(s, 400, json::Value::object().set("error", "file must be the name of an upload (see uploads)"));
+        done();
+        return;
+    }
+    const std::string sha(body.get("sha256"));
+    if (!sha.empty() && !install::valid_sha256(sha)) {
+        reply(s, 400, json::Value::object().set("error", "sha256 must be 64 hex digits"));
+        done();
+        return;
+    }
+    // Where: the site's project directory (the configured root, above the served
+    // subdirectory of a preset), or `path` below it.
+    std::string target = site->project_root.empty() ? site->root : site->project_root;
+    const std::string sub(body.get("path"));
+    if (!sub.empty()) {
+        std::string why;
+        if (sub.front() == '/' || sub.find("..") != std::string::npos) {
+            reply(s, 400, json::Value::object().set("error", "path must be relative, below the site's directory, without '..'"));
+            done();
+            return;
+        }
+        target += "/" + sub;
+    }
+    std::string why;
+    if (target.empty() || !control::safe_path(target, why)) {
+        reply(s, 409, json::Value::object().set("error", "the site's directory is not a path an install can use: " + why).set("target", target));
+        done();
+        return;
+    }
+    json::Value req = json::Value::object().set("target", target);
+    if (!site->user.empty()) req.set("user", site->user);
+    if (!url.empty()) req.set("url", url);
+    if (!file.empty()) req.set("upload", file);
+    if (!sha.empty()) req.set("sha256", sha);
+    if (!body["strip"].is_null()) req.set("strip", body["strip"]);
+    const bool dry_run = body["dry_run"].boolean();
+    if (dry_run) {
+        reply(s, 200, json::Value::object().set("ok", true).set("dry_run", true).set("target", target).set("as", site->user.empty() ? "the directory's owner" : site->user)
+                          .set("source", url.empty() ? "upload " + file : url).set("request", req)
+                          .set("hint", "the directory must exist, be empty and belong to that account; a download is fenced to public https addresses"));
+        done();
+        return;
+    }
+    audit_peer(s, what, "installing " + (url.empty() ? "upload " + file : url) + " into " + target);
+    backend_->install_async(req, [this, &s, what = std::string(what), target, url, file, done](json::Value r) {
+        const bool ok = r["ok"].boolean();
+        audit_peer(s, what, ok ? "installed " + std::to_string(static_cast<long>(r["files"].num())) + " files into " + target + " (sha256 " + std::string(r.get("sha256")) + ")"
+                              : "failed: " + std::string(r.get("error")));
+        if (!ok) {
+            reply(s, 409, json::Value::object().set("ok", false).set("error", r.get("error")).set("target", target));
+        } else {
+            r.set("target", target);
+            json::Value steps = json::Value::array();
+            if (!url.empty()) steps.push("the files came from " + std::string(r.get("url").empty() ? url : std::string(r.get("url"))) + "; sha256 " + std::string(r.get("sha256")));
+            steps.push("open the site in a browser to finish the application's own setup (database, admin account)");
+            if (!file.empty()) steps.push("the upload " + file + " is still stored; delete it with uploads delete " + file + " when no longer needed");
+            r.set("next_steps", steps);
+            reply(s, 201, r);
+        }
+        done();
+    });
 }
 
 void ControlHandler::site_create(Stream& s, const json::Value& body, std::string_view what) {

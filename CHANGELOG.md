@@ -2,6 +2,22 @@
 
 ## 0.1.0-alpha.10
 
+- **`site-install`** (F9): puts an application's files into a site's empty directory as
+  the site's own account, from the preset's official archive (WordPress, Drupal;
+  `--version`), any https URL, or an archive uploaded with the new `agensio ctl upload
+  NAME [FILE]` (`uploads`, `uploads-delete`); MCP tools `site_install`, `uploads_list`,
+  `upload_delete`. agensio's own extractor handles `.tar`, `.tar.gz` and `.zip` and
+  refuses symlinks, hard links, devices, `..`, absolute paths, encrypted and zip64
+  entries, bad checksums and oversize archives; the download is https only with every
+  hop checked against a private-address fence; `--sha256` gates the whole thing; a
+  refusal leaves the directory empty. Modes follow the target directory's own
+  (`2750` gives `0640`/`2750`). `[control] install = false` turns downloads off and keeps
+  uploads; `install_private` and `install_ca` are for internal mirrors and test beds;
+  `upload_max` caps uploads (512 MB). The helper gained `app_install` (the child drops to
+  the site's account before it reads a byte); without the helper the server installs as
+  its own account into directories it owns. New dependency: zlib. Tests:
+  `tests/install.sh` (root devbox, 20 checks), unit tests of the extractor and the fence,
+  `fuzz_archive`, 17 integration checks.
 - **Provisioning helper** (`[control] provision = true`, the default): a server started
   as root forks a small root helper before the privilege drop, and `site-create` then
   creates the account, lays out the directories, hands the site its log, writes the

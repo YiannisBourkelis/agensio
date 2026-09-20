@@ -529,6 +529,8 @@ struct PhpPreset {
     std::vector<std::string> refuse;  // suffixes refused everywhere besides PHP (source spellings, dumps, backups)
     std::vector<Shield> shields;
     std::vector<const char*> never;   // exact paths answered 404 (credentials, lock files)
+    const char* source;               // official archive of the newest release ("" = none; site-install needs a URL or an upload)
+    const char* source_versioned;     // the same with {version} in it ("" = only the newest)
 };
 
 // Drupal's .htaccess, the part that matters: PHP source in its other spellings, templates,
@@ -540,12 +542,12 @@ const std::vector<std::string> kDrupalSource = {".inc", ".install", ".module", "
 const std::vector<PhpPreset> kPhpPresets = {
     // Plain PHP: any script runs, missing paths are 404, no front controller.
     {"php", "Plain PHP: every .php under the root runs, missing paths are 404, no front controller.",
-     "", false, {"index.php", "index.html"}, false, true, {}, {}, {}},
+     "", false, {"index.php", "index.html"}, false, true, {}, {}, {}, "", ""},
     // Laravel (and Statamic): one entry point; any other .php is refused, never served as
     // source (2026-09-19); Vite's hashed build output cached for a year.
     {"laravel", "Laravel and Statamic: the project directory is given, its public/ is served; only index.php ever runs, any other .php is refused; Vite's build/ is cached for a year.",
      "public", true, {"index.php"}, true, false, {},
-     {{"/build/", "public, max-age=31536000, immutable"}}, {}},
+     {{"/build/", "public, max-age=31536000, immutable"}}, {}, "", ""},
     // Drupal: many entry points (index.php, core/install.php, update.php); what its
     // .htaccess protects is refused natively, since .htaccess is never read.
     {"drupal", "Drupal (and other PHP applications with several entry points): the project directory is given, its web/ is served when present; any .php runs, missing paths reach index.php, and what Drupal's .htaccess protects is refused natively.",
@@ -554,7 +556,8 @@ const std::vector<PhpPreset> kPhpPresets = {
       {"/sites/default/files/", nullptr}},
      {"/sites/default/settings.php", "/sites/default/settings.local.php", "/sites/default/default.settings.php",
       "/sites/default/services.yml", "/sites/default/default.services.yml", "/composer.json", "/composer.lock",
-      "/web.config", "/update.php.bak"}},
+      "/web.config", "/update.php.bak"},
+     "https://www.drupal.org/download-latest/tar.gz", "https://ftp.drupal.org/files/projects/drupal-{version}.tar.gz"},
     // WordPress: any .php runs (wp-login.php, wp-admin/*, wp-cron.php, plugin endpoints),
     // pretty permalinks fall back to index.php, nothing under uploads or wp-includes is
     // ever executed and their files are cacheable (modestly: WordPress versions assets by
@@ -562,7 +565,8 @@ const std::vector<PhpPreset> kPhpPresets = {
     {"wordpress", "WordPress: any .php runs, pretty permalinks reach index.php, nothing under wp-content/uploads or wp-includes ever executes, wp-config.php is never answered.",
      "", false, {"index.php"}, true, true, {},
      {{"/wp-content/uploads/", "public, max-age=604800"}, {"/wp-includes/", "public, max-age=2592000"}},
-     {"/wp-config.php", "/wp-config-sample.php"}},
+     {"/wp-config.php", "/wp-config-sample.php"},
+     "https://wordpress.org/latest.tar.gz", "https://wordpress.org/wordpress-{version}.tar.gz"},
 };
 
 const PhpPreset* php_preset(const std::string& app) {
@@ -775,6 +779,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     // answers 404 for an empty root), never the configuration directory.
     site.root = root ? resolve_root(base_dir, *root, where) : std::string();
     const std::string root_given = site.root;  // the project directory (open_basedir starts there)
+    site.project_root = root_given;
     if (const PhpPreset* preset = php_preset(site.app)) {
         // The project directory is given; the served root is its public/ or web/ where the
         // application keeps one (Laravel always, Drupal when it is a composer project).
@@ -1304,6 +1309,10 @@ Config load_config(const fs::path& path) {
         cfg.control.viewers = account_name((*ct)["viewers"], "control.viewers");
         if (auto sr = (*ct)["sites_root"].value<std::string>()) cfg.control.sites_root = resolve(base_dir, *sr).string();
         cfg.control.provision = (*ct)["provision"].value_or(true);
+        cfg.control.install = (*ct)["install"].value_or(true);
+        cfg.control.install_private = (*ct)["install_private"].value_or(false);
+        if (auto ca = (*ct)["install_ca"].value<std::string>()) cfg.control.install_ca = resolve(base_dir, *ca).string();
+        cfg.control.upload_max = size_node((*ct)["upload_max"], cfg.control.upload_max, "control.upload_max");
         if (auto a = (*ct)["audit"].value<std::string>()) cfg.control.audit = resolve(base_dir, *a).string();
         else if (cfg.log.error != "stderr") cfg.control.audit = (fs::path(cfg.log.error).parent_path() / "audit.log").string();
         else cfg.control.audit = resolve(base_dir, "logs/audit.log").string();
@@ -1332,12 +1341,24 @@ json::Value preset_catalog() {
         json::Value never = json::Value::array();
         for (const char* n : p.never) never.push(n);
         v.set("never_served", std::move(never));
+        v.set("source", *p.source ? json::Value(p.source) : json::Value(nullptr));
         list.push(std::move(v));
     }
     list.push(json::Value::object().set("app", "proxy").set("summary", "Reverse proxy: every request goes to the site's upstream (Node, Rails, Go, Java, WebSockets); no root needed.")
                   .set("root", "none").set("php", "none"));
     return json::Value::object().set("presets", std::move(list))
         .set("note", "agensio never reads .htaccess; a preset provides the refusals an application's .htaccess would. Hand-written [[site.location]] entries win over a preset's.");
+}
+
+std::string preset_source(const std::string& app, const std::string& version) {
+    const PhpPreset* p = php_preset(app);
+    if (!p || !*p->source) return "";
+    if (version.empty()) return p->source;
+    if (!*p->source_versioned) return "";
+    std::string url = p->source_versioned;
+    const std::size_t at = url.find("{version}");
+    if (at != std::string::npos) url.replace(at, 9, version);
+    return url;
 }
 
 std::vector<std::string> app_presets() {
@@ -1357,8 +1378,8 @@ SiteConfig control_site() {
     loc.root = "/";
     loc.handler = "control";
     loc.kind = HandlerKind::control;
-    loc.methods = kStaticMethods | method_bit(Method::post);
-    loc.allow = "GET, HEAD, POST, OPTIONS";
+    loc.methods = kStaticMethods | method_bit(Method::post) | method_bit(Method::put);
+    loc.allow = "GET, HEAD, POST, PUT, OPTIONS";
     site.locations.push_back(std::move(loc));
     finalize_site(site);
     return site;

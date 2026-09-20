@@ -419,7 +419,7 @@ private:
         request_logged_ = false;
         worker_.state.site = nullptr;
         if (req.has_body) {
-            if (!req.chunked && req.content_length > live_->max_body_size) {
+            if (!req.chunked && req.content_length > body_limit()) {
                 fail_request(413);  // refused before the handler runs; the client gets it while it may still be sending
                 return;
             }
@@ -646,7 +646,7 @@ private:
                 ec = make_error_code(BodyError::malformed);
                 return false;
             }
-            if (body_read_ > live_->max_body_size) {
+            if (body_read_ > body_limit()) {
                 ec = make_error_code(BodyError::too_large);
                 return false;
             }
@@ -707,6 +707,12 @@ private:
     Worker& worker_;
     std::shared_ptr<const Generation> gen_;  // the configuration this connection serves from (kept alive by it)
     const Listener* listener_;               // in gen_
+    // The control socket carries uploads ([control] upload_max); sites keep server.max_body_size.
+    std::size_t body_limit() const noexcept {
+        if constexpr (IsLocalSocket<Socket>::value) return live_->control.upload_max;
+        else return live_->max_body_size;
+    }
+
     const Config* live_;                     // gen_->cfg: sites, limits, trusted proxies (reloadable)
     bool retire_ = false;                    // the listener left the configuration: close after this response
     const Config& cfg_;                      // the boot configuration (writer settings)

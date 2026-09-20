@@ -1,9 +1,12 @@
 #include "server.hpp"
 #include "control/commands.hpp"
 #include "control/peer.hpp"
+#include "services/install.hpp"
 #include "services/pools.hpp"
+#include "services/provision.hpp"
 
 #ifndef _WIN32
+#include <fcntl.h>
 #include <grp.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -19,6 +22,7 @@
 #include <csignal>
 #include <iostream>
 #include <stdexcept>
+#include <thread>
 
 #include "file.hpp"
 #include "http1/connection.hpp"
@@ -546,6 +550,7 @@ void Server::run() {
             open_acceptor(l, *workers_[0], false);
     }
     open_control();
+    prepare_uploads();
     write_pid_file();
     // The provisioning helper keeps root for the five operations site creation needs;
     // forked before the drop so that nothing else in this process is ever root again.
@@ -607,6 +612,71 @@ void Server::run() {
     threads_.clear();
     for (auto& w : workers_)
         w->state.logs.flush();
+}
+
+// The uploads directory: created by the server for itself (0700), so an archive put there
+// by `agensio ctl upload` is readable by nobody else until the install reads it.
+void Server::prepare_uploads() {
+    if (!cfg_.control.enabled) return;
+#ifndef _WIN32
+    const std::string dir = provision::uploads_dir(cfg_);
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec) {
+        error_log_.warn("control: cannot create " + dir + " (" + ec.message() + "); uploads and installs from uploads are off");
+        return;
+    }
+    if (::geteuid() == 0 && !cfg_.user.empty()) {
+        unsigned uid = 0, gid = 0;
+        if (system_facts().user(cfg_.user, uid, gid) && ::chown(dir.c_str(), uid, gid) != 0)
+            error_log_.warn("control: cannot chown " + dir + ": " + std::strerror(errno));
+    }
+    ::chmod(dir.c_str(), 0700);
+    if (::access(dir.c_str(), W_OK) != 0 && ::geteuid() != 0) {
+        error_log_.warn("control: " + dir + " is not writable; uploads are off");
+        return;
+    }
+    uploads_dir_ = dir;
+#endif
+}
+
+void Server::install_async(const json::Value& req, std::function<void(json::Value)> done) {
+    // Off the worker: the helper's request blocks for the download's duration, and so does
+    // the in-process install. The result is posted back to worker 0, where the control
+    // connection lives.
+    std::thread([this, req, done = std::move(done)] {
+        json::Value r;
+        if (provisioner_.available()) {
+            json::Value h = req;
+            h.set("op", "app_install");
+            r = provisioner_.request(h);
+        } else {
+#ifndef _WIN32
+            install::Request ir;
+            ir.target = std::string(req.get("target"));
+            ir.url = std::string(req.get("url"));
+            ir.upload_name = std::string(req.get("upload"));
+            ir.sha256 = std::string(req.get("sha256"));
+            ir.strip = req["strip"].is_null() ? -1 : static_cast<int>(req["strip"].num());
+            ir.allow_private = cfg_.control.install_private;
+            ir.ca_file = cfg_.control.install_ca;
+            if (!ir.url.empty() && !cfg_.control.install) {
+                r = json::Value::object().set("ok", false).set("error", "downloads are off ([control] install = false); upload the archive instead");
+            } else {
+                if (!ir.upload_name.empty()) {
+                    const std::string path = uploads_dir_ + "/" + ir.upload_name;
+                    ir.upload_fd = uploads_dir_.empty() ? -1 : ::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+                    if (ir.upload_fd < 0) r = json::Value::object().set("ok", false).set("error", "upload " + ir.upload_name + ": " + std::strerror(errno));
+                }
+                if (r.is_null()) r = install::execute(ir);
+                if (ir.upload_fd >= 0) ::close(ir.upload_fd);
+            }
+#else
+            r = json::Value::object().set("ok", false).set("error", "not available on this platform");
+#endif
+        }
+        asio::post(workers_[0]->ctx, [done, r] { done(r); });
+    }).detach();
 }
 
 void Server::restart_later() {

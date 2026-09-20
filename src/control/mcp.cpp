@@ -96,7 +96,7 @@ std::vector<Tool> tools() {
                          {"status", prop("string", "Access-log filter: 5xx (default), 4xx, all, or a number for that status and above.")},
                          {"limit", prop("integer", "Newest lines to return (default 200, max 5000).")}},
                         {})});
-    t.push_back({"presets_list", "Application presets", "What each `app` value does: which directory is served, whether every .php runs or only the front controller, what is refused, which directories never run PHP, which files are never served. Use it to answer 'which applications are supported' and to pick app for site_create; the site_show tool shows the expanded locations of a real site.", "GET", "/v1/presets", true, false, Role::viewer, schema({}, {})});
+    t.push_back({"presets_list", "Application presets", "What each `app` value does: which directory is served, whether every .php runs or only the front controller, what is refused, which directories never run PHP, which files are never served, and `source`: the official archive site_install takes when it has one (wordpress, drupal). Use it to answer 'which applications are supported', to pick app for site_create and to know whether site_install can fetch the application itself; the site_show tool shows the expanded locations of a real site.", "GET", "/v1/presets", true, false, Role::viewer, schema({}, {})});
     t.push_back({"health_check", "Health check", "What an administrator should look at: certificates, missing redirects, port 80 for ACME, recent errors, settings waiting for a restart, root, shared accounts, stale pools. Each finding has a severity and a fix. Run this first on a server you do not know.", "GET", "/v1/health", true, false, Role::viewer, schema({}, {})});
     t.push_back({"reload", "Reload configuration", "Validate the configuration on disk and switch to it without dropping a connection. Refused with the reason when it does not validate; nothing changes then.", "POST", "/v1/reload", false, false, Role::operator_, schema({{"confirm", confirm_arg()}, {"reason", reason_arg()}}, {"confirm", "reason"})});
     t.push_back({"logs_reopen", "Reopen logs", "Reopen every log file after rotation.", "POST", "/v1/logs/reopen", false, false, Role::operator_, schema({{"confirm", confirm_arg()}, {"reason", reason_arg()}}, {"confirm", "reason"})});
@@ -110,6 +110,20 @@ std::vector<Tool> tools() {
     t.push_back({"site_enable", "Enable a site", "Brings a disabled site back and reloads.", "POST", "/v1/sites/{name}/enable", false, false, Role::admin, schema({{"name", name_arg()}, {"confirm", confirm_arg()}, {"reason", reason_arg()}}, {"name", "confirm", "reason"})});
     t.push_back({"site_delete", "Delete a site", "Removes the site's configuration file (a .bak copy stays) and reloads. The site's files and account are never touched.", "POST", "/v1/sites/{name}/delete", false, true, Role::admin, schema({{"name", name_arg()}, {"confirm", confirm_arg()}, {"reason", reason_arg()}}, {"name", "confirm", "reason"})});
     t.push_back({"cert_renew", "Renew certificate", "Orders the site's automatic certificate again now. Watch site_show and logs_query for the result.", "POST", "/v1/sites/{name}/renew", false, false, Role::operator_, schema({{"name", name_arg()}, {"confirm", confirm_arg()}, {"reason", reason_arg()}}, {"name", "confirm", "reason"})});
+    t.push_back({"uploads_list", "List uploads", "Archives stored on the server with `agensio ctl upload NAME < file` (run by the user on the server, or over ssh: `ssh admin@host agensio ctl upload NAME < file`), ready for site_install with file: NAME. This bridge cannot carry files itself: when the user has an archive on their own machine, give them that command.", "GET", "/v1/uploads", true, false, Role::viewer, schema({}, {})});
+    t.push_back({"upload_delete", "Delete an upload", "Removes a stored upload once it is installed or not needed.", "POST", "/v1/uploads/{file}/delete", false, true, Role::operator_, schema({{"file", prop("string", "The upload's name as uploads_list shows it.")}, {"confirm", confirm_arg()}, {"reason", reason_arg()}}, {"file", "confirm", "reason"})});
+    t.push_back({"site_install", "Install an application", "Puts an application's files into the site's directory, as the site's own account, from one of three sources: the preset's official archive (presets_list shows which presets have one, e.g. wordpress and drupal; version picks a release, default the newest), any https URL the user gives (url), or an archive the user uploaded (file, see uploads_list). The directory must exist, be empty and belong to the site's account; a single top directory in the archive (wordpress/) is unwrapped. Rules the server enforces and reports: https only, no private, loopback or link-local address on any hop, size caps, no symlinks, hard links or devices inside an archive, optional sha256 check; on any refusal nothing is left behind. dry_run: true shows the target and the account without installing. Tell the user the source and the sha256 from the answer, then the application's own setup remains (database, admin account), done in the browser. Laravel has no archive: it is created with composer.", "POST", "/v1/sites/{name}/install", false, false, Role::admin,
+                 schema({{"name", name_arg()},
+                         {"url", prop("string", "An https URL of a .tar.gz, .tar or .zip archive. Omit it to use the preset's official archive, or give file instead.")},
+                         {"file", prop("string", "The name of a stored upload (uploads_list). Use it when the user has the archive on their machine or a download is refused by the server's rules.")},
+                         {"version", prop("string", "With the preset's official archive: the release to install, e.g. \"6.7.1\"; default the newest.")},
+                         {"sha256", prop("string", "Expected sha256 of the archive (64 hex digits); the install is refused when it differs. Use it when the user or the publisher gives one.")},
+                         {"path", prop("string", "A subdirectory below the site's directory to install into (default: the site's directory itself).")},
+                         {"strip", prop("integer", "1 unwraps a single top directory, 0 keeps it; default: unwrap when the archive has exactly one.")},
+                         {"dry_run", prop("boolean", "Show the target directory, the account and the source without installing.")},
+                         {"confirm", confirm_arg()},
+                         {"reason", reason_arg()}},
+                        {"name", "confirm", "reason"})});
     return t;
 }
 
@@ -118,10 +132,16 @@ const char* kInstructions =
     "started this bridge. Start a session on a server you do not know with health_check and "
     "server_status, then explain the findings in plain words and offer the usual jobs: create a "
     "site (HTTPS by default, ask about the site user and what runs there), inspect a site, look "
-    "at recent errors. Every change needs the user's explicit agreement first (confirm: true) "
+    "at recent errors, install an application into a site. Every change needs the user's explicit agreement first (confirm: true) "
     "and a one-line reason. When the server answers with commands to run as root, show them "
     "exactly, say that the server waits for them, and continue only when the user says they ran "
-    "them. On a server whose helper is present, site_create does that root work itself and reports it under done. Never invent settings: what a tool does not offer is not configurable here. Host names are "
+    "them. On a server whose helper is present, site_create does that root work itself and reports it under done. "
+    "After a site exists, site_install fills it: the preset's official archive (wordpress, drupal), an https URL "
+    "the user names, or an archive the user uploaded with `agensio ctl upload NAME < file` (this bridge carries no files; "
+    "give the user that command when the archive is on their machine, and also when the server refuses a download by its "
+    "rules). The install runs as the site's account into an empty directory and refuses symlinks, private addresses and "
+    "oversize archives, leaving nothing behind on a refusal; report the source and sha256 it answers with. "
+    "Never invent settings: what a tool does not offer is not configurable here. Host names are "
     "strict: a site answers only the names in server_name, and a listener without a catch-all site "
     "(server_name [\"*\"] or default = true) answers 421 to any other Host, including the IP address; "
     "when a user reports 421, that is the cause.";
@@ -142,7 +162,9 @@ const char* kNewSite =
     "laravel, wordpress or proxy) and where the files are. Call site_create again with every "
     "field and confirm: true only after the user agreed. If the server returns commands to run "
     "as root, show them verbatim and wait. After success, show next_steps and check with "
-    "site_show that the certificate arrives.";
+    "site_show that the certificate arrives. When the site's app has an official archive (presets_list, "
+    "source) offer to install it now with site_install; for other applications ask whether the user has "
+    "an https URL of the archive or wants to upload it with agensio ctl upload.";
 
 class Mcp {
 public:
@@ -230,20 +252,24 @@ private:
             return;
         }
         std::string path = tool->path;
-        const std::size_t brace = path.find("{name}");
-        if (brace != std::string::npos) {
-            const std::string site(args.get("name"));
-            if (site.empty() || site.find('/') != std::string::npos) {
-                tool_error(id, "the 'name' argument is required: the site's host name");
+        std::string path_arg;  // the argument that fills the path: a site name or an upload name
+        for (const char* key : {"name", "file"}) {
+            const std::string token = std::string("{") + key + "}";
+            const std::size_t brace = path.find(token);
+            if (brace == std::string::npos) continue;
+            const std::string v(args.get(key));
+            if (v.empty() || v.find('/') != std::string::npos) {
+                tool_error(id, std::string("the '") + key + "' argument is required: " + (token == "{name}" ? "the site's host name" : "the upload's name"));
                 return;
             }
-            path.replace(brace, 6, site);
+            path.replace(brace, token.size(), v);
+            path_arg = key;
         }
         std::string body;
         if (tool->method == std::string_view("POST")) {
             json::Value b = json::Value::object();
             for (const auto& m : args.members())
-                if (m.first != "name") b.set(m.first, m.second);
+                if (m.first != path_arg) b.set(m.first, m.second);
             body = b.dump();
         } else if (name == "logs_query") {
             std::string q;

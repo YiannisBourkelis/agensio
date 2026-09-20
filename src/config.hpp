@@ -107,6 +107,7 @@ struct SiteConfig {
     // port), also allowed on a TLS site. No root needed.
     std::string redirect;
     std::string root;                       // absolute document root, no trailing slash
+    std::string project_root;               // the root as given, before a preset appended its public/ or web/ (site-install's target)
     std::vector<std::string> index{"index.html"};
     std::vector<TryStep> try_files;  // default for locations that do not set their own
     FcgiConfig php;                  // `php = { socket = ... }`: default upstream for fastcgi locations
@@ -134,6 +135,10 @@ struct ControlConfig {
     std::string audit;      // one line per mutating command or refusal; default next to the error log
     std::string sites_root; // where site_create suggests document roots ("" = /var/www)
     bool provision = true;  // fork the root provisioning helper at start (accounts, layout, pools, restart on request)
+    bool install = true;    // site-install may download an application from an https URL (false: uploads only)
+    bool install_private = false;  // let site-install fetch from loopback, private and link-local addresses (test beds, internal mirrors)
+    std::string install_ca;        // PEM bundle site-install trusts instead of the system store (private mirrors, test beds)
+    std::size_t upload_max = 512u * 1024 * 1024;  // `agensio ctl upload` body limit (PUT /v1/uploads/NAME)
 };
 
 struct LogConfig {
@@ -214,6 +219,9 @@ std::vector<std::string> app_presets();
 // What each `app` value does, for `agensio ctl presets` and the MCP tool: served root,
 // which .php runs, front controller, refused suffixes, shielded directories, files never served.
 json::Value preset_catalog();
+// The official download of a preset's application ("" when the preset has none): the
+// newest release, or `version` when given. Pure; used by site-install.
+std::string preset_source(const std::string& app, const std::string& version);
 
 // Prints the effective configuration after presets, one TOML-like block per site and
 // location, so nothing a preset did is hidden (`agensio -t --explain`).

@@ -22,11 +22,13 @@ bool control_request(const std::string& socket_path, const std::string& method, 
         asio::local::stream_protocol::socket sock(io);
         sock.connect(asio::local::stream_protocol::endpoint(socket_path));
         std::string req = method + " " + path + " HTTP/1.1\r\nHost: control\r\nConnection: close\r\n";
-        if (!body.empty()) req += "Content-Type: application/json\r\nContent-Length: " + std::to_string(body.size()) + "\r\n";
+        if (!body.empty())
+            req += std::string("Content-Type: ") + (method == "PUT" ? "application/octet-stream" : "application/json") +
+                   "\r\nContent-Length: " + std::to_string(body.size()) + "\r\n";
         req += "\r\n" + body;
-        asio::write(sock, asio::buffer(req));
-        std::string raw;
         asio::error_code ec;
+        asio::write(sock, asio::buffer(req), ec);  // a refusal (413) may arrive before the body is out: read on
+        std::string raw;
         char buf[8192];
         for (;;) {
             const std::size_t n = sock.read_some(asio::buffer(buf), ec);

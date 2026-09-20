@@ -4,6 +4,8 @@
 #include <fcntl.h>
 #include <grp.h>
 #include <pwd.h>
+#include <poll.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -16,6 +18,8 @@
 #include <sstream>
 
 #include "control/sites.hpp"
+#include "services/fetch.hpp"
+#include "services/install.hpp"
 #include "services/pools.hpp"
 
 namespace agensio {
@@ -30,6 +34,8 @@ std::string logs_root(const Config& cfg) {
     if (cfg.log.access.empty() || cfg.log.access == "off") return "/var/log/agensio";
     return fs::path(cfg.log.access).parent_path().string();
 }
+
+std::string uploads_dir(const Config& cfg) { return cfg.state_dir + "/uploads"; }
 
 namespace {
 bool under(const std::string& path, const std::string& root) {
@@ -57,6 +63,22 @@ std::string validate(const json::Value& req, const Config& cfg) {
         if (!control::safe_path(file, why)) return "log_own: file " + why;
         if (!under(file, logs_root(cfg)) || !file.ends_with(".log")) return "log_own: " + file + " is not a log under " + logs_root(cfg);
         if (!control::valid_account(group, why)) return "log_own: group " + why;
+        return "";
+    }
+    if (op == "app_install") {
+        const std::string target(req.get("target")), user(req.get("user")), url(req.get("url")), upload(req.get("upload"));
+        if (!control::safe_path(target, why)) return "app_install: target " + why;
+        if (!under(target, sites_root(cfg)) || target == sites_root(cfg)) return "app_install: " + target + " is not below " + sites_root(cfg);
+        if (!user.empty() && !control::valid_account(user, why)) return "app_install: user " + why;
+        if (url.empty() == upload.empty()) return "app_install: exactly one of url and upload";
+        std::string h, p, path;
+        if (!url.empty() && !fetch::split_url(url, h, p, path)) return "app_install: url must be https://host/path without credentials";
+        if (!url.empty() && !cfg.control.install) return "app_install: downloads are off ([control] install = false); upload the archive instead";
+        if (!upload.empty() && !install::valid_upload_name(upload)) return "app_install: upload is not a plain file name";
+        if (!req.get("sha256").empty() && !install::valid_sha256(req.get("sha256"))) return "app_install: sha256 must be 64 hex digits";
+        const json::Value& strip = req["strip"];
+        if (!strip.is_null() && (strip.type() != json::Value::Type::number || (strip.num() != -1 && strip.num() != 0 && strip.num() != 1)))
+            return "app_install: strip must be -1, 0 or 1";
         return "";
     }
     if (op == "pools_apply" || op == "service_restart" || op == "ping") return "";
@@ -196,6 +218,129 @@ bool lay_out(const Config& cfg, const std::string& dir, uid_t owner, gid_t group
     return true;
 }
 
+// Which account installs: the site's user when the site has one, else the owner of the
+// target directory, and in both cases only a site account or the server's own account.
+// Root, a login account or another site's account is refused before anything runs.
+bool install_account(const Config& cfg, const std::string& target, const std::string& user, uid_t& uid, gid_t& gid, std::string& why) {
+    struct stat st {};
+    if (::lstat(target.c_str(), &st) != 0) {
+        why = "target " + target + ": " + std::strerror(errno);
+        return false;
+    }
+    if (!S_ISDIR(st.st_mode)) {
+        why = "target " + target + " is not a directory (or is a symlink); refused";
+        return false;
+    }
+    if (!user.empty()) {
+        if (!site_account(cfg, user, uid, gid, why)) return false;
+        if (st.st_uid != uid) {
+            why = "target " + target + " belongs to uid " + std::to_string(st.st_uid) + ", not to " + user + "; refused";
+            return false;
+        }
+        return true;
+    }
+    if (st.st_uid == 0) {
+        why = "target " + target + " belongs to root; give it to a site account (or the server's account) first";
+        return false;
+    }
+    const struct passwd* pw = ::getpwuid(st.st_uid);
+    if (!pw) {
+        why = "target " + target + " belongs to unknown uid " + std::to_string(st.st_uid);
+        return false;
+    }
+    const std::string owner = pw->pw_name;
+    if (owner == cfg.user) {
+        uid = pw->pw_uid;
+        gid = pw->pw_gid;
+        return true;
+    }
+    return site_account(cfg, owner, uid, gid, why);
+}
+
+// Runs install::execute in a child that has become the installing account; the reply
+// comes back through a pipe as one JSON line. Bounded by a deadline.
+json::Value app_install(const json::Value& req, const Config& cfg, int helper_fd) {
+    json::Value reply = json::Value::object();
+    const std::string target(req.get("target")), user(req.get("user")), upload(req.get("upload"));
+    uid_t uid = 0;
+    gid_t gid = 0;
+    std::string why;
+    if (!install_account(cfg, target, user, uid, gid, why)) return reply.set("ok", false).set("error", why);
+    if (uid == 0) return reply.set("ok", false).set("error", "refusing to install as root");
+    int upload_fd = -1;
+    if (!upload.empty()) {
+        const std::string path = provision::uploads_dir(cfg) + "/" + upload;
+        upload_fd = ::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        if (upload_fd < 0) return reply.set("ok", false).set("error", "upload " + upload + ": " + std::strerror(errno));
+    }
+    int pipefd[2];
+    if (::pipe(pipefd) != 0) {
+        if (upload_fd >= 0) ::close(upload_fd);
+        return reply.set("ok", false).set("error", std::string("pipe: ") + std::strerror(errno));
+    }
+    const pid_t pid = ::fork();
+    if (pid < 0) {
+        if (upload_fd >= 0) ::close(upload_fd);
+        ::close(pipefd[0]);
+        ::close(pipefd[1]);
+        return reply.set("ok", false).set("error", std::string("fork: ") + std::strerror(errno));
+    }
+    if (pid == 0) {
+        ::close(helper_fd);
+        ::close(pipefd[0]);
+        ::umask(0);  // the extractor sets exact modes; nothing else is created here
+        json::Value out = json::Value::object();
+        if (::setgroups(0, nullptr) != 0 || ::setgid(gid) != 0 || ::setuid(uid) != 0 || ::setuid(0) == 0 || ::geteuid() != uid) {
+            out.set("ok", false).set("error", std::string("cannot become uid ") + std::to_string(uid) + ": " + std::strerror(errno));
+        } else {
+            install::Request r;
+            r.target = target;
+            r.url = std::string(req.get("url"));
+            r.upload_fd = upload_fd;
+            r.upload_name = upload;
+            r.sha256 = std::string(req.get("sha256"));
+            r.strip = req["strip"].is_null() ? -1 : static_cast<int>(req["strip"].num());
+            r.allow_private = cfg.control.install_private;
+            r.ca_file = cfg.control.install_ca;
+            out = install::execute(r);
+        }
+        const std::string text = out.dump() + "\n";
+        (void)!::write(pipefd[1], text.data(), text.size());
+        ::_exit(0);
+    }
+    ::close(pipefd[1]);
+    if (upload_fd >= 0) ::close(upload_fd);
+    std::string in;
+    char buf[4096];
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(20);
+    for (;;) {
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+        if (left <= 0) {
+            ::kill(pid, SIGKILL);
+            reply.set("ok", false).set("error", "the installation did not finish within 20 minutes; stopped");
+            break;
+        }
+        struct pollfd pfd {pipefd[0], POLLIN, 0};
+        const int pr = ::poll(&pfd, 1, static_cast<int>(std::min<long long>(left, 60000)));
+        if (pr == 0) continue;
+        if (pr < 0 && errno == EINTR) continue;
+        const ssize_t n = ::read(pipefd[0], buf, sizeof buf);
+        if (n <= 0) break;
+        in.append(buf, static_cast<std::size_t>(n));
+        if (in.size() > 65536) break;
+    }
+    ::close(pipefd[0]);
+    int status = 0;
+    ::waitpid(pid, &status, 0);
+    if (reply["ok"].is_null()) {
+        std::string err;
+        const std::size_t nl = in.find('\n');
+        if (nl == std::string::npos || !json::parse(in.substr(0, nl), reply, err))
+            reply = json::Value::object().set("ok", false).set("error", "the install process ended without a result" + (WIFSIGNALED(status) ? std::string(" (signal ") + std::to_string(WTERMSIG(status)) + ")" : ""));
+    }
+    return reply;
+}
+
 // The helper's loop: one JSON line in, one out, until the server closes its end.
 void helper_loop(int fd, const Config& cfg) {
     // A root process that must not inherit the listeners or anything else: only the socket
@@ -303,6 +448,8 @@ void helper_loop(int fd, const Config& cfg) {
                     } catch (const std::exception& e) {
                         reply.set("ok", false).set("error", e.what());
                     }
+                } else if (op == "app_install") {
+                    reply = app_install(req, cfg, fd);
                 } else if (op == "service_restart") {
                     const auto now = std::chrono::steady_clock::now();
                     if (now - last_restart < std::chrono::seconds(60)) {
@@ -353,7 +500,7 @@ bool Provisioner::start(const Config& cfg, ErrorLog& log) {
     ::close(pair[1]);
     fd_ = pair[0];
     pid_ = pid;
-    log.info("provisioning helper started (pid " + std::to_string(pid) + "): accounts, site layout, pools, restart on request");
+    log.info("provisioning helper started (pid " + std::to_string(pid) + "): accounts, site layout, pools, restart, application install on request");
     return true;
 }
 

@@ -37,6 +37,10 @@ under `src/control/` updates the row it touches.
 | 16 | The MCP bridge is not a listener; it inherits the caller's role and holds no secret; a viewer's session does not list mutating tools; mutating tools carry `readOnlyHint: false` and `destructiveHint` where it applies and require `confirm` and `reason` | `control/mcp.cpp` | `tests/control.sh` tool counts per role; `tests/integration.sh` annotations and the 428 through the bridge |
 | 17 | Server logs opened as root are handed to the service user so rotation works after the drop; the audit log is among them | `own_site_logs` | `tests/control.sh` "audit log owned by the server user" |
 | 18 | The same fuzzed HTTP/1.1 parser as the data plane reads the control socket | `Http1Connection<local socket>` | the parser's own fuzz target and its 17 smuggling tests |
+| 19 | An application install writes only as the site's account into an empty directory that account owns: the site's `user`, or the owner of the directory when it is a site account or the server's; root and login accounts are refused; the helper's child drops privileges before it reads a byte | `provision.cpp` `install_account`, `app_install`; `install::execute` checks the owner against its own euid again | `tests/install.sh`: files owned by the site user, root-owned and login-owned targets refused; unit test of the owner check |
+| 20 | Downloads are https only, certificate and host verified, every address of every hop checked against the private-address fence (loopback, link-local, RFC 1918, ULA, 100.64/10, multicast, IPv4-mapped), 5 redirects, 1 GB, 15 minutes; `install = false` turns downloads off and leaves uploads; `install_private` opens the fence knowingly | `services/fetch.*` | unit test of `is_private_address` and `split_url`; `tests/integration.sh` "a private https address is fenced", "install = false"; `tests/install.sh` download as the site user with `install_private` |
+| 21 | Archives are unpacked by agensio's own bounded extractor: symlinks, hard links, devices, fifos, absolute paths, `..`, backslashes, control characters, encrypted and zip64 entries, checksum and CRC mismatches, entry, size, depth and path caps all end the install with the reason and an emptied directory; files are created `O_EXCL | O_NOFOLLOW` with modes from the target's own; an optional sha256 gates the whole thing | `services/archive.*`, `services/install.*`, `tests/fuzz/fuzz_archive.cpp` | unit tests of every refusal on in-memory tar and zip; `tests/install.sh` "symlink refused, directory empty"; fuzz run recorded below |
+| 22 | Uploads land in `<state_dir>/uploads`, the server's own directory (0700), by name only (no path), capped by `upload_max` (413 before a byte is stored), a partial transfer leaves nothing, and are readable by no site account; the helper opens them as root for the install child | `ControlHandler::upload_receive`, `Server::prepare_uploads`, `body_limit()` on the local socket | `tests/integration.sh` upload checks; `tests/install.sh` "unreadable by the site account" |
 
 Threat 2 (browsers) is answered by rule 2: there is no TCP transport, so no browser can
 reach the socket. When the loopback transport arrives after the alpha, the `Origin`
@@ -53,7 +57,7 @@ changes the trust model, so here is exactly what it is:
 - **Reachability.** The helper holds one end of a socketpair; there is no path and no
   port. Only the server process can talk to it. A site user, a PHP application or a
   network peer has nothing to connect to.
-- **Vocabulary.** Five requests, each validated again inside the helper against the
+- **Vocabulary.** Six requests, each validated again inside the helper against the
   configuration it started with (`provision::validate`, unit tested): `account_add`
   (name by the account rule, no system accounts, no words for "none"; `useradd --system
   --no-create-home`, home in `state_dir`, `nologin`), `site_layout` (a normalised
@@ -62,8 +66,13 @@ changes the trust model, so here is exactly what it is:
   refused; a directory owned by anyone but root, the server or that owner is refused, so
   no site is ever handed over to another), `log_own` (a `.log` below the log directory,
   `agensio:<group> 0640`, `O_NOFOLLOW`), `pools_apply` (re-reads the configuration
-  itself, runs the hosting rules, writes the pool files, reloads php-fpm), and
-  `service_restart` (once a minute at most).
+  itself, runs the hosting rules, writes the pool files, reloads php-fpm),
+  `service_restart` (once a minute at most), and `app_install` (F9: a target strictly
+  below `sites_root`, one source that is an https URL or a plain upload name, the
+  account rule of row 19; a forked child becomes that account with `setgroups`,
+  `setgid`, `setuid` and a check that root cannot be regained, then downloads or reads
+  the upload, verifies the digest and unpacks with the fences of rows 20 and 21; the
+  helper waits with a 20-minute deadline).
 - **Execution.** `useradd`, `groupadd` and `systemctl` by absolute path, fixed argument
   list, empty environment. No shell, ever. Nothing the server sends can name a program.
 - **Audit.** Every request and every refusal is written to the audit log with the
@@ -71,13 +80,17 @@ changes the trust model, so here is exactly what it is:
 
 What a fully compromised server process gains: it can create `nologin` system accounts
 without a home, lay out directories under `sites_root` for such accounts, regenerate pool
-files the hosting rules accept, and restart the service (rate-limited). What it cannot
-do: obtain a shell or run any other program, read or write outside `sites_root`,
-`state_dir`, the pool directory and the log directory, take over a directory of another
-site, or touch an account that has a login shell. That exposure is smaller than php-fpm's
-root master on the same host. `provision = false` removes the helper, and with it the
-one-call site creation: the commands come back as text, as before. Tested in
-`tests/provision.sh` (root devbox): the one-call path and each refusal.
+files the hosting rules accept, restart the service (rate-limited), and have an archive
+of its choosing unpacked, as a site account, into an empty directory that account owns
+under `sites_root` (regular files and directories only, no symlinks, no set-uid, no
+program run). What it cannot do: obtain a shell or run any other program, read or write
+outside `sites_root`, `state_dir`, the pool directory and the log directory, take over a
+directory of another site, write as root or as any login account, or touch an account
+that has a login shell. That exposure is smaller than php-fpm's root master on the same
+host. `provision = false` removes the helper, and with it the one-call site creation:
+the commands come back as text, as before, and installs run as the server's own account
+into directories it owns. Tested in `tests/provision.sh` and `tests/install.sh` (root
+devbox): the one-call paths and each refusal.
 
 ## Deferred, and why it is acceptable for the alpha
 
@@ -89,6 +102,10 @@ one-call site creation: the commands come back as text, as before. Tested in
 
 ## Sanitizer and fuzz record
 
+2026-09-20, F9 (site-install): `fuzz_archive` 14.73 M runs in 121 s (`-max_len=65536`,
+seeded with a tar and a zip), no finding. Unit tests, `tests/install.sh` and
+`tests/provision.sh` under `-fsanitize=address,undefined`: clean.
+
 2026-09-19, the run that closed F7: `fuzz_json` 5.83 M runs in 121 s (`-max_len=4096`),
 no finding. Unit, integration, root-role, reload and Pebble suites under
 `-fsanitize=address,undefined`: one finding, a use-after-free at shutdown in the ACME
@@ -99,5 +116,6 @@ all suites clean afterwards. Repeat both before every tag:
 cmake -B build-san -DAGENSIO_SANITIZE=address,undefined -DAGENSIO_TESTS=ON && cmake --build build-san
 build-san/agensio_tests && tests/integration.sh build-san/agensio && tests/acme.sh build-san/agensio
 cmake -B build-fuzz -DAGENSIO_FUZZ=ON -DAGENSIO_TESTS=OFF -DAGENSIO_TLS=OFF -DCMAKE_CXX_COMPILER=clang++
-cmake --build build-fuzz --target fuzz_json && build-fuzz/fuzz_json tests/fuzz/regressions/json -max_total_time=120
+cmake --build build-fuzz --target fuzz_json fuzz_archive && build-fuzz/fuzz_json tests/fuzz/regressions/json -max_total_time=120
+build-fuzz/fuzz_archive tests/fuzz/regressions/archive -max_len=65536 -max_total_time=120
 ```

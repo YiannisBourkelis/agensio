@@ -8,7 +8,7 @@ project and should be saved in `bench/results/` and committed.
 
 ```sh
 sudo apt update
-sudo apt install -y build-essential g++ cmake ninja-build git ca-certificates libssl-dev \
+sudo apt install -y build-essential g++ cmake ninja-build git ca-certificates libssl-dev zlib1g-dev \
   curl netcat-openbsd openssl python3 procps wrk nginx
 # Debian 12 ships GCC 12 (the C++20 floor) and Asio 1.22, which is too old; CMake fetches
 # Asio 1.38 from GitHub automatically, so do not install libasio-dev.
