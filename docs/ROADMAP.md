@@ -806,8 +806,9 @@ Rules:
       packages on every `v*` tag, checks the binary's version against the tag,
       smoke-installs the `.deb`, attaches both to the release, and publishes a signed
       APT repository to GitHub Pages when the `APT_GPG_PRIVATE_KEY` secret exists;
-      `ci.yml` builds and tests on Ubuntu and macOS for every push (release commits
-      skipped, the release job tests them). An `arch` job builds the binary pacman package
+      `ci.yml` builds and tests on Ubuntu and macOS on a pull request or a manual run
+      (`workflow_dispatch`; since 2026-09-20 no longer on every push: the release job
+      tests the tagged commit). An `arch` job builds the binary pacman package
       from the `PKGBUILD` in an Arch container and attaches it too (`pacman -U`). First
       release with all three packages: `v0.1.0-alpha.3` (2026-09-19). Lessons from the
       runners: Ubuntu 22.04 needs CMake from an action, GCC 12 and a fetched asio; the

@@ -1,12 +1,13 @@
+# Build and test on Ubuntu and macOS. Not run on every push: a release tag runs
+# release.yml, which builds and tests the tagged commit before packaging; this workflow
+# is for a pull request or a manual run from the Actions tab (Run workflow) when a
+# change should be checked on both platforms before it is tagged.
 name: ci
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
   pull_request:
 jobs:
   build:
-    # A release commit is built and tested by release.yml (triggered by its tag); skip it here.
-    if: ${{ !startsWith(github.event.head_commit.message, 'Release v') }}
     strategy:
       matrix:
         os: [ubuntu-24.04, macos-14]
