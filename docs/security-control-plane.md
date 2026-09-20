@@ -45,6 +45,40 @@ it, plus their tests. Threat 5 (a stolen token or configuration) is answered by 
 and 4: there is no token, and a configuration copy grants nothing without an account in
 a role.
 
+## The provisioning helper (F8, 2026-09-20)
+
+`[control] provision = true` (default) forks a root helper before the privilege drop. It
+changes the trust model, so here is exactly what it is:
+
+- **Reachability.** The helper holds one end of a socketpair; there is no path and no
+  port. Only the server process can talk to it. A site user, a PHP application or a
+  network peer has nothing to connect to.
+- **Vocabulary.** Five requests, each validated again inside the helper against the
+  configuration it started with (`provision::validate`, unit tested): `account_add`
+  (name by the account rule, no system accounts, no words for "none"; `useradd --system
+  --no-create-home`, home in `state_dir`, `nologin`), `site_layout` (a normalised
+  absolute path strictly below `sites_root`; owner must be a site account, i.e. `nologin`
+  with its home in `state_dir`; the walk uses `openat(O_NOFOLLOW)` so a planted symlink is
+  refused; a directory owned by anyone but root, the server or that owner is refused, so
+  no site is ever handed over to another), `log_own` (a `.log` below the log directory,
+  `agensio:<group> 0640`, `O_NOFOLLOW`), `pools_apply` (re-reads the configuration
+  itself, runs the hosting rules, writes the pool files, reloads php-fpm), and
+  `service_restart` (once a minute at most).
+- **Execution.** `useradd`, `groupadd` and `systemctl` by absolute path, fixed argument
+  list, empty environment. No shell, ever. Nothing the server sends can name a program.
+- **Audit.** Every request and every refusal is written to the audit log with the
+  control-socket peer's uid and the reason of the command that caused it.
+
+What a fully compromised server process gains: it can create `nologin` system accounts
+without a home, lay out directories under `sites_root` for such accounts, regenerate pool
+files the hosting rules accept, and restart the service (rate-limited). What it cannot
+do: obtain a shell or run any other program, read or write outside `sites_root`,
+`state_dir`, the pool directory and the log directory, take over a directory of another
+site, or touch an account that has a login shell. That exposure is smaller than php-fpm's
+root master on the same host. `provision = false` removes the helper, and with it the
+one-call site creation: the commands come back as text, as before. Tested in
+`tests/provision.sh` (root devbox): the one-call path and each refusal.
+
 ## Deferred, and why it is acceptable for the alpha
 
 - `agensio -t` isolation warning (a pool or origin running as the server's own user or

@@ -78,6 +78,7 @@ add_library(agensio_core STATIC
   src/services/log.cpp
   src/services/pools.cpp
   src/services/acme.cpp
+  src/services/provision.cpp
   src/control/handler.cpp
   src/control/commands.cpp
   src/control/sites.cpp

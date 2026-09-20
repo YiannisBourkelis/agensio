@@ -861,6 +861,7 @@ operators = "agensio-ops"
 viewers = "agensio-view"
 audit = "/var/log/agensio/audit.log"   # default: audit.log next to the error log
 sites_root = "/var/www"                # where site-create suggests document roots
+provision = true                       # the root helper: accounts, layout, pools, restart on request (false: commands are handed back)
 ```
 
 The control API is how `agensio ctl`, the MCP bridge (`agensio mcp`) and any local tool
@@ -909,8 +910,21 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 | `cert-renew NAME` | operator | orders the site's automatic certificate again now |
 
 A change that does not validate is undone before the answer: the file is removed or the
-previous one restored, and the old configuration keeps serving. The server never runs
-a shell command for any of these; what needs root comes back as text.
+previous one restored, and the old configuration keeps serving.
+
+**Root work.** With `provision = true` (the default) a server started as root forks a
+small helper before it drops privileges. It holds the other end of a socketpair, never a
+path, and does five things and nothing else: create a site account (`useradd --system`,
+`nologin`, home in the state directory), lay out a site's directories under `sites_root`
+(`owner:<server group> 2750`, walked without following symlinks, refused when a directory
+belongs to another site), hand a per-site log to the site's group, write the php-fpm
+pools and reload php-fpm, restart the service after a change that needs one. Programs
+run by absolute path with a fixed argument list and no shell; every argument is checked
+again inside the helper with the same rules; every action is audited. `site-create` then
+does the whole job in one call and lists what it did under `done`. With `provision =
+false`, or a server not started as root, what needs root comes back as commands, as
+before. `docs/security-control-plane.md` states what a compromised server could and
+could not do through the helper.
 
 Unknown commands answer a JSON 404, a wrong method a 405 with `Allow`, a role that is too
 low a 403 naming the role needed. `curl --unix-socket /run/agensio/control.sock

@@ -33,7 +33,12 @@ agent host  --stdin/stdout-->  agensio mcp  --unix socket-->  agensio (control A
   not be a system account or a word for "none"; paths must be absolute and free of shell
   characters. A refused value never produces a `useradd` or `chown` line. "No account"
   is `no_user: true` (or JSON `null`), never the string `"null"`.
-- Anything that needs root (creating a system account, making a directory, restarting
+- On a server started as root with `[control] provision = true` (the default), a small
+  root helper forked before the privilege drop does the root work of a site on the
+  server's behalf: the account, the directory layout, the site's log, the php-fpm pool,
+  a restart. `site_create` is then one call and reports what it did under `done`. The
+  helper does those five things and nothing else; `docs/security-control-plane.md`.
+- Otherwise, anything that needs root (creating a system account, making a directory, restarting
   the service, reloading php-fpm) is never executed: the server answers with the exact
   commands and waits. The agent shows them, you run them, the agent continues.
 

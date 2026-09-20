@@ -133,6 +133,7 @@ struct ControlConfig {
     std::string viewers;
     std::string audit;      // one line per mutating command or refusal; default next to the error log
     std::string sites_root; // where site_create suggests document roots ("" = /var/www)
+    bool provision = true;  // fork the root provisioning helper at start (accounts, layout, pools, restart on request)
 };
 
 struct LogConfig {

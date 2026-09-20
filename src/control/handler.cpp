@@ -298,6 +298,33 @@ void ControlHandler::site_create(Stream& s, const json::Value& body, std::string
     const bool dry_run = body["dry_run"].boolean();
     const auto file = control::site_file(cfg, spec.domain);
     const std::string rendered = control::render_site(spec, now_stamp());
+    // With the provisioning helper, the blocking problems that have a fix are done here and
+    // now instead of handed back as commands; what the helper refuses comes back as such.
+    json::Value done = json::Value::array();
+    std::vector<control::Problem> remaining;
+    if (!dry_run && blocking && backend_->provision_available()) {
+        for (const auto& p : problems) {
+            if (!p.blocks || p.fix.is_null()) {
+                remaining.push_back(p);
+                continue;
+            }
+            const json::Value r = backend_->provision(p.fix);
+            if (r["ok"].boolean()) {
+                done.push(p.code + ": " + std::string(p.fix.get("op")) + (p.fix.get("name").empty() ? "" : " " + std::string(p.fix.get("name"))) +
+                          (p.fix.get("dir").empty() ? "" : " " + std::string(p.fix.get("dir"))));
+                audit_peer(s, what, "provisioned " + p.code + " " + p.fix.dump());
+            } else {
+                control::Problem left = p;
+                left.detail += " (the helper refused: " + std::string(r.get("error")) + ")";
+                remaining.push_back(left);
+                audit_peer(s, what, "helper refused " + p.fix.dump() + ": " + std::string(r.get("error")));
+            }
+        }
+        blocking = false;
+        for (const auto& p : remaining) blocking = blocking || p.blocks;
+    } else {
+        remaining = problems;
+    }
     // A listener without a catch-all answers 421 to any other Host: say so once, here.
     json::Value warnings = json::Value::array();
     for (const std::string& address : {spec.listen_plain, spec.listen_tls}) {
@@ -316,8 +343,8 @@ void ControlHandler::site_create(Stream& s, const json::Value& body, std::string
     if (blocking) {
         reply(s, 409, json::Value::object().set("error", "prerequisites missing").set("waiting", true)
                           .set("hint", "show every command to the user to run as root, then send the same command again")
-                          .set("problems", problems_json(problems)).set("run_as_root", commands_of(problems, true))
-                          .set("spec", spec.to_json()));
+                          .set("problems", problems_json(remaining)).set("run_as_root", commands_of(remaining, true))
+                          .set("done", done).set("spec", spec.to_json()));
         return;
     }
     if (!control::write_site_file(file, rendered, error)) {
@@ -336,10 +363,13 @@ void ControlHandler::site_create(Stream& s, const json::Value& body, std::string
             return;
         }
         audit_peer(s, what, "created " + file.string() + " (restart needed for a privileged port)");
-        reply(s, 202, json::Value::object().set("ok", true).set("file", file.string()).set("needs_restart", true).set("waiting", true)
-                          .set("problems", problems_json(problems)).set("run_as_root", commands_of(problems, false))
-                          .set("hint", "the site file is written and valid; it is served once the service restarts")
-                          .set("spec", spec.to_json()).set("next_steps", strings(control::next_steps(spec, cfg))).set("warnings", warnings));
+        const bool helper = backend_->provision_available();
+        if (helper) backend_->restart_later();
+        reply(s, 202, json::Value::object().set("ok", true).set("file", file.string()).set("needs_restart", true).set("waiting", !helper)
+                          .set("restarting", helper).set("problems", problems_json(remaining)).set("run_as_root", helper ? json::Value::array() : commands_of(remaining, false))
+                          .set("hint", helper ? "the site file is written and valid; the service restarts in a moment and serves it"
+                                              : "the site file is written and valid; it is served once the service restarts")
+                          .set("done", done).set("spec", spec.to_json()).set("next_steps", strings(control::next_steps(spec, cfg))).set("warnings", warnings));
         return;
     }
     if (!backend_->reload_now(error)) {
@@ -350,8 +380,33 @@ void ControlHandler::site_create(Stream& s, const json::Value& body, std::string
         return;
     }
     audit_peer(s, what, "created " + file.string());
+    // The rest of the root work, when the helper is there: the site's log to its group, the
+    // php-fpm pool written and reloaded. next_steps then holds only what remains.
+    std::vector<std::string> steps = control::next_steps(spec, cfg);
+    if (backend_->provision_available()) {
+        const Config& live = backend_->running();
+        if (!spec.user.empty() && !spec.access_log.empty()) {
+            const json::Value r = backend_->provision(json::Value::object().set("op", "log_own").set("file", spec.access_log)
+                                                          .set("group", spec.group.empty() ? spec.user : spec.group));
+            if (r["ok"].boolean()) done.push("log " + spec.access_log + " readable by " + spec.user);
+        }
+        const bool php = spec.app != "static" && spec.app != "proxy";
+        if (php && !spec.user.empty() && spec.php_socket.empty()) {
+            const json::Value r = backend_->provision(json::Value::object().set("op", "pools_apply"));
+            if (r["ok"].boolean()) {
+                done.push("php-fpm pool: " + std::string(r.get("output")));
+                std::vector<std::string> rest;
+                for (const auto& st : steps)
+                    if (st != "agensio pools" && !st.starts_with("systemctl reload php") && !st.starts_with("brew services")) rest.push_back(st);
+                steps = rest;
+            } else {
+                steps.insert(steps.begin(), "# the helper could not apply the pool (" + std::string(r.get("error")) + "); run: agensio pools");
+            }
+        }
+        (void)live;
+    }
     reply(s, 201, json::Value::object().set("ok", true).set("file", file.string()).set("spec", spec.to_json())
-                      .set("next_steps", strings(control::next_steps(spec, cfg))).set("warnings", warnings));
+                      .set("done", done).set("next_steps", strings(steps)).set("warnings", warnings));
 }
 
 void ControlHandler::site_update(Stream& s, std::string_view name, const json::Value& body, std::string_view what) {
@@ -387,9 +442,32 @@ void ControlHandler::site_update(Stream& s, std::string_view name, const json::V
                           .set("run_as_root", commands_of(problems, false)).set("spec", spec.to_json()));
         return;
     }
+    json::Value done = json::Value::array();
+    std::vector<control::Problem> remaining;
+    if (blocking && backend_->provision_available()) {
+        for (const auto& p : problems) {
+            if (!p.blocks || p.fix.is_null()) {
+                remaining.push_back(p);
+                continue;
+            }
+            const json::Value r = backend_->provision(p.fix);
+            if (r["ok"].boolean()) {
+                done.push(p.code + ": " + std::string(p.fix.get("op")));
+                audit_peer(s, what, "provisioned " + p.code + " " + p.fix.dump());
+            } else {
+                control::Problem left = p;
+                left.detail += " (the helper refused: " + std::string(r.get("error")) + ")";
+                remaining.push_back(left);
+            }
+        }
+        blocking = false;
+        for (const auto& p : remaining) blocking = blocking || p.blocks;
+    } else {
+        remaining = problems;
+    }
     if (blocking) {
         reply(s, 409, json::Value::object().set("error", "prerequisites missing").set("waiting", true)
-                          .set("problems", problems_json(problems)).set("run_as_root", commands_of(problems, true)));
+                          .set("problems", problems_json(remaining)).set("run_as_root", commands_of(remaining, true)).set("done", done));
         return;
     }
     if (!control::write_site_file(file, control::render_site(spec, now_stamp()), error)) {

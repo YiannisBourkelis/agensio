@@ -422,7 +422,7 @@ std::vector<Problem> preflight(const SiteSpec& spec, const Config& cfg, bool pri
     if ((!spec.user.empty() && !valid_account(spec.user, why)) || (!spec.group.empty() && !valid_account(spec.group, why)) ||
         (!spec.root.empty() && !safe_path(spec.root, why)) || (!spec.cert.empty() && !safe_path(spec.cert, why)) ||
         (!spec.key.empty() && !safe_path(spec.key, why))) {
-        out.push_back({"refused", why, "", true});
+        out.push_back({"refused", why, "", true, json::Value()});
         return out;
     }
     const HostFacts facts = system_facts();
@@ -433,12 +433,13 @@ std::vector<Problem> preflight(const SiteSpec& spec, const Config& cfg, bool pri
     if (!spec.user.empty() && !have_user)
         out.push_back({"missing_account", "the account " + spec.user + " does not exist",
                        "useradd --system --no-create-home --home-dir " + cfg.state_dir + "/" + spec.user +
-                           " --shell /usr/sbin/nologin " + spec.user, true});
+                           " --shell /usr/sbin/nologin " + spec.user, true,
+                       json::Value::object().set("op", "account_add").set("name", spec.user)});
     if (!spec.group.empty()) {
         unsigned g = 0;
         if (!facts.group(spec.group, g))
             out.push_back({"missing_group", "the group " + spec.group + " does not exist",
-                           "groupadd " + spec.group + " && usermod -g " + spec.group + " " + spec.user, true});
+                           "groupadd " + spec.group + " && usermod -g " + spec.group + " " + spec.user, true, json::Value()});
     }
     std::error_code ec;
     if (!spec.root.empty()) {
@@ -459,18 +460,20 @@ std::vector<Problem> preflight(const SiteSpec& spec, const Config& cfg, bool pri
         // Directories only: files keep their owner and group, so a secret such as .env stays
         // the user's (0640 user:user) and is never readable by the server.
         const std::string layout = "find " + top + " -type d -exec chown " + owner + ":" + group + " {} + -exec chmod 2750 {} +";
+        // The helper lays out every directory from sites_root down to the root, for a site account only.
+        const json::Value fix = spec.user.empty() ? json::Value() : json::Value::object().set("op", "site_layout").set("dir", spec.root).set("owner", spec.user);
         if (!exists)
             out.push_back({"root_missing", "the directory " + spec.root + " does not exist",
-                           "mkdir -p " + spec.root + " && chown " + owner + ":" + group + " " + top + " && " + layout, true});
+                           "mkdir -p " + spec.root + " && chown " + owner + ":" + group + " " + top + " && " + layout, true, fix});
         else if (!readable || (!spec.user.empty() && (f.uid != uid || !(server.known && f.gid == server.gid))))
             out.push_back({"root_unreadable", spec.root + " is not owned " + owner + ":" + group + " with 2750, so the server cannot read it",
-                           layout + "   # the server reads the site's directories through its group", true});
+                           layout + "   # the server reads the site's directories through its group", true, fix});
     }
     if (spec.https == "manual") {
         if (!fs::is_regular_file(spec.cert, ec))
-            out.push_back({"certificate_missing", "no certificate chain at " + spec.cert, "# put the certificate chain at " + spec.cert, true});
+            out.push_back({"certificate_missing", "no certificate chain at " + spec.cert, "# put the certificate chain at " + spec.cert, true, json::Value()});
         if (!fs::is_regular_file(spec.key, ec))
-            out.push_back({"certificate_missing", "no private key at " + spec.key, "# put the private key at " + spec.key + " (mode 0600)", true});
+            out.push_back({"certificate_missing", "no private key at " + spec.key, "# put the private key at " + spec.key + " (mode 0600)", true, json::Value()});
     }
     // A listener the running server does not hold yet: a reload binds it, unless the port is
     // privileged and the server has already dropped root. Then the file is written and the
@@ -488,7 +491,7 @@ std::vector<Problem> preflight(const SiteSpec& spec, const Config& cfg, bool pri
             if (!bound && port > 0 && port < 1024)
                 out.push_back({"needs_restart", "listener " + address + " is not bound yet and the server no longer runs as root, so this "
                                                 "port cannot be added by a reload; the site file is written and the site is served after a restart",
-                               "systemctl restart agensio", false});
+                               "systemctl restart agensio", false, json::Value::object().set("op", "service_restart")});
         }
     }
     return out;

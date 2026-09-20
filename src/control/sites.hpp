@@ -84,6 +84,7 @@ struct Problem {
     std::string detail;
     std::string run_as_root;  // "" when there is no command to run
     bool blocks = true;       // false: the site can be written now and served after the restart
+    json::Value fix;          // the provisioning helper's request that resolves it, or null
 };
 // Every problem at once, so the caller fixes all of them and retries once. `privileged`
 // says whether the server still runs as root (before the drop it can bind any port).

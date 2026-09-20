@@ -21,6 +21,7 @@
 #include "control/roles.hpp"
 #include "control/commands.hpp"
 #include "control/sites.hpp"
+#include "services/provision.hpp"
 #include "services/json.hpp"
 #include "handlers/proxy.hpp"
 #include "core/headers.hpp"
@@ -1764,6 +1765,27 @@ static void test_control_sites() {
         CHECK(problems.size() == 3 && problems[0].code == "missing_account" && problems[1].code == "root_missing" && problems[2].code == "needs_restart");
         CHECK(problems.size() == 3 && problems[0].blocks && problems[1].blocks && !problems[2].blocks && problems[2].run_as_root == "systemctl restart agensio");
         CHECK(problems.size() == 3 && problems[2].detail.find("0.0.0.0:444") != std::string::npos && preflight(missing, loaded, true).size() == 2);
+        // Each fixable problem carries the helper request that resolves it; a certificate has none.
+        CHECK(problems.size() == 3 && problems[0].fix.get("op") == "account_add" && problems[0].fix.get("name") == "no-such-user-zz");
+        CHECK(problems.size() == 3 && problems[1].fix.get("op") == "site_layout" && problems[1].fix.get("owner") == "no-such-user-zz" && problems[2].fix.get("op") == "service_restart");
+        SiteSpec manual = ok;
+        manual.https = "manual";
+        manual.cert = "/etc/ssl/none.pem";
+        manual.key = "/etc/ssl/none.key";
+        const auto mp = preflight(manual, loaded, true);
+        CHECK(mp.size() == 2 && mp[0].code == "certificate_missing" && mp[0].fix.is_null());
+        // The helper's own validation: the same rules, applied to what it is asked, whoever asks.
+        Config hcfg = loaded;
+        hcfg.control.sites_root = "/srv/sites";
+        hcfg.log.access = "/var/log/agensio/access.log";
+        auto v = [&](const char* text) { json::Value r; std::string e2; json::parse(text, r, e2); return provision::validate(r, hcfg); };
+        CHECK(v(R"({"op":"account_add","name":"shop"})").empty() && !v(R"({"op":"account_add","name":"root"})").empty() && !v(R"({"op":"account_add","name":"null"})").empty());
+        CHECK(v(R"({"op":"site_layout","dir":"/srv/sites/a.test/web","owner":"shop"})").empty());
+        CHECK(!v(R"({"op":"site_layout","dir":"/etc/agensio","owner":"shop"})").empty() && !v(R"({"op":"site_layout","dir":"/srv/sites","owner":"shop"})").empty());
+        CHECK(!v(R"({"op":"site_layout","dir":"/srv/sites/../etc","owner":"shop"})").empty() && !v(R"({"op":"site_layout","dir":"/srv/sites/x","owner":"a;b"})").empty());
+        CHECK(v(R"({"op":"log_own","file":"/var/log/agensio/sites/a.test.log","group":"shop"})").empty());
+        CHECK(!v(R"({"op":"log_own","file":"/etc/shadow","group":"shop"})").empty() && !v(R"({"op":"log_own","file":"/var/log/agensio/x.txt","group":"shop"})").empty());
+        CHECK(v(R"({"op":"pools_apply"})").empty() && v(R"({"op":"service_restart"})").empty() && !v(R"({"op":"shell","cmd":"id"})").empty());
         SiteSpec high = missing;
         high.listen_tls = "0.0.0.0:8443";
         CHECK(preflight(high, loaded, false).size() == 2);  // an unprivileged port is bound by the reload

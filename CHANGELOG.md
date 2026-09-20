@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.0-alpha.10
+
+- **Provisioning helper** (`[control] provision = true`, the default): a server started
+  as root forks a small root helper before the privilege drop, and `site-create` then
+  creates the account, lays out the directories, hands the site its log, writes the
+  php-fpm pool and reloads php-fpm in one call, listing it under `done`; a change that
+  needs a restart restarts the service after answering. The helper does exactly those
+  five things, re-validates every argument, runs programs by absolute path without a
+  shell, and refuses another site's directory, a symlink on the way, a system account.
+  `docs/security-control-plane.md` states what a compromised server could and could not
+  do through it; `provision = false` or a server not started as root keeps the previous
+  behaviour of handing commands back.
+
 ## 0.1.0-alpha.9 (2026-09-20)
 
 Sixth live report, all five items, on the way from a bare server to a working Drupal site.

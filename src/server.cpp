@@ -547,6 +547,9 @@ void Server::run() {
     }
     open_control();
     write_pid_file();
+    // The provisioning helper keeps root for the five operations site creation needs;
+    // forked before the drop so that nothing else in this process is ever root again.
+    if (cfg_.control.enabled && cfg_.control.provision) provisioner_.start(gen_->cfg, error_log_);
     drop_privileges();  // ports are bound and logs open: nothing else needs root
     for (auto& w : workers_) w->gen = gen_;
 #ifdef AGENSIO_HAS_TLS
@@ -606,8 +609,19 @@ void Server::run() {
         w->state.logs.flush();
 }
 
+void Server::restart_later() {
+    restart_timer_ = std::make_unique<asio::steady_timer>(workers_[0]->ctx);
+    restart_timer_->expires_after(std::chrono::milliseconds(800));  // the reply is on the wire by then
+    restart_timer_->async_wait([this](const asio::error_code& ec) {
+        if (ec) return;
+        const json::Value r = provisioner_.request(json::Value::object().set("op", "service_restart"));
+        if (!r["ok"].boolean()) error_log_.error("restart through the helper failed: " + std::string(r.get("error")));
+    });
+}
+
 void Server::stop() {
     if (stopping_.exchange(true)) return;
+    provisioner_.stop();
     acme_.stop();
 #ifdef ASIO_HAS_LOCAL_SOCKETS
     if (control_acceptor_) {

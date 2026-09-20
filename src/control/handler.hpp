@@ -32,6 +32,11 @@ struct ControlBackend {
     virtual void reopen_logs() = 0;
     virtual const Config& running() = 0;
     virtual bool privileged() = 0;  // still root (before the drop): a reload can bind any port
+    // The provisioning helper (F8): available when the server started as root with
+    // [control] provision = true. `provision` sends one request and returns its reply.
+    virtual bool provision_available() = 0;
+    virtual json::Value provision(const json::Value& req) = 0;
+    virtual void restart_later() = 0;  // after the current reply went out
 };
 
 class ControlHandler {

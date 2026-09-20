@@ -1303,6 +1303,7 @@ Config load_config(const fs::path& path) {
         cfg.control.operators = account_name((*ct)["operators"], "control.operators");
         cfg.control.viewers = account_name((*ct)["viewers"], "control.viewers");
         if (auto sr = (*ct)["sites_root"].value<std::string>()) cfg.control.sites_root = resolve(base_dir, *sr).string();
+        cfg.control.provision = (*ct)["provision"].value_or(true);
         if (auto a = (*ct)["audit"].value<std::string>()) cfg.control.audit = resolve(base_dir, *a).string();
         else if (cfg.log.error != "stderr") cfg.control.audit = (fs::path(cfg.log.error).parent_path() / "audit.log").string();
         else cfg.control.audit = resolve(base_dir, "logs/audit.log").string();

@@ -724,6 +724,15 @@ Rules:
       as handler `deny` and locations list what they `refuse`; `health` finds a per-site
       log the site user cannot read (a restart hands it over); the MCP `app` enum was
       already table-driven, now asserted equal to `presets_list` by a test.
+- [x] F8 (2026-09-20) Provisioning helper: `services/provision.*`, forked before the drop,
+      socketpair only, five validated operations (`account_add`, `site_layout` with an
+      `O_NOFOLLOW` walk and the "never another site's directory" rule, `log_own`,
+      `pools_apply`, rate-limited `service_restart`), execve by absolute path with a fixed
+      argv and empty environment, audited. `Problem.fix` carries the request that resolves
+      a prerequisite; `site-create` / `site-update` apply the fixes and report `done`, the
+      pool and the log follow, `needs_restart` restarts after the reply. Default on
+      (`[control] provision = false` to opt out). `tests/provision.sh` (root devbox): the
+      one-call path and the refusals. Security page section written.
 - [ ] H1b Certificates watched and reloaded when the files change (manual `tls = { cert,
       key }` sites; automatic ones already reload themselves); reload must not stall new
       QUIC connections (nginx's known weakness).

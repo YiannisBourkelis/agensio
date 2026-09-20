@@ -35,6 +35,7 @@ error = "$T/logs/error.log"
 socket = "$T/run/control.sock"
 audit = "$T/logs/audit.log"
 sites_root = "$T/www"
+provision = false   # this suite runs the prescribed commands itself; tests/provision.sh covers the helper
 [[site]]
 server_name = ["*"]
 listen = ["127.0.0.1:18097"]

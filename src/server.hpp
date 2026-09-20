@@ -25,6 +25,7 @@
 #include "control/handler.hpp"
 #include "control/roles.hpp"
 #include "services/acme.hpp"
+#include "services/provision.hpp"
 #include "services/log.hpp"
 #include "upstream/fcgi_client.hpp"
 
@@ -135,6 +136,9 @@ private:
     bool renew_certificate(std::string_view site, std::string& error) override;
     void reopen_logs() override { logs_.reopen_all(); }
     const Config& running() override { return gen_->cfg; }
+    bool provision_available() override { return provisioner_.available(); }
+    json::Value provision(const json::Value& req) override { return provisioner_.request(req); }
+    void restart_later() override;
     bool privileged() override {
 #ifdef _WIN32
         return true;
@@ -157,6 +161,8 @@ private:
     ControlHandler control_handler_;
     Dispatcher dispatcher_;
     AcmeManager acme_{error_log_};
+    Provisioner provisioner_;
+    std::unique_ptr<asio::steady_timer> restart_timer_;
     std::vector<std::unique_ptr<Worker>> workers_;
     std::vector<std::unique_ptr<Acceptor>> acceptors_;
     std::vector<std::unique_ptr<asio::executor_work_guard<asio::io_context::executor_type>>> guards_;
