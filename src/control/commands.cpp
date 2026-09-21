@@ -5,7 +5,9 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <cstdlib>
 #include <fstream>
+#include <set>
 #include <sstream>
 
 #include "services/acme.hpp"
@@ -496,6 +498,35 @@ UnreadableFiles unreadable_files(const SiteConfig& site, const std::vector<std::
     return r;
 }
 
+// The PHP processes of one php-fpm pool, from /proc (Linux; elsewhere none are found):
+// php-fpm titles each child "php-fpm: pool NAME", and /proc/PID/status gives VmRSS and
+// RssAnon (the private part) for another account's process too. What a pool keeps
+// resident is the number an administrator or an agent needs when the machine fills up.
+PoolResidency pool_residency(const std::string& pool) {
+    PoolResidency r;
+#ifdef __linux__
+    const std::string title = "php-fpm: pool " + pool;
+    std::error_code ec;
+    for (const auto& e : fs::directory_iterator("/proc", ec)) {
+        const std::string pid = e.path().filename().string();
+        if (pid.empty() || !std::isdigit(static_cast<unsigned char>(pid[0]))) continue;
+        std::ifstream cmd(e.path() / "cmdline", std::ios::binary);
+        std::string line;
+        std::getline(cmd, line, '\0');
+        if (line.rfind(title, 0) != 0 || (line.size() > title.size() && line[title.size()] != ' ')) continue;
+        ++r.processes;
+        std::ifstream st(e.path() / "status");
+        for (std::string l; std::getline(st, l);) {
+            if (l.rfind("VmRSS:", 0) == 0) r.rss_kb += std::strtoull(l.c_str() + 6, nullptr, 10);
+            else if (l.rfind("RssAnon:", 0) == 0) r.anon_kb += std::strtoull(l.c_str() + 8, nullptr, 10);
+        }
+    }
+#else
+    (void)pool;
+#endif
+    return r;
+}
+
 std::vector<Finding> health_findings(const Config& running, const Config& boot, bool as_root, std::time_t now) {
     std::vector<Finding> out;
     auto add = [&](std::string sev, std::string code, std::string site, std::string msg, std::string fix = "") {
@@ -623,6 +654,23 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
             else if (known && (f.uid != uid || !f.is_dir))
                 add("error", "php_tmp_not_owned", s.server_names.front(), "PHP's private directory " + d + " is owned by uid " + std::to_string(f.uid) + ", not by " + s.user + ": PHP cannot write uploads or sessions there",
                     "chown -R " + s.user + " " + d + " && chmod 0700 " + d + " " + d + "/tmp " + d + "/sessions");
+        }
+        // What a pool keeps resident while its sites are idle (2026-09-21, a live host: 8
+        // children per idle site, 150-200 MB each, a 4 GB machine full at 20 sites): static
+        // keeps every child, dynamic half of them, ondemand none. One finding per pool.
+        std::set<std::string> pools_seen;
+        for (const auto& s : running.sites) {
+            if (!s.pool.generated || s.pool.pm == "ondemand" || !pools_seen.insert(s.pool.name).second) continue;
+            const PoolResidency r = pool_residency(s.pool.name);
+            const unsigned kept = s.pool.pm == "static" ? s.pool.children : std::max(1u, s.pool.children / 2);
+            std::string msg = "pool " + s.pool.name + " is pm = " + s.pool.pm + ": " + (s.pool.pm == "static" ? "all " : "at least ") +
+                              std::to_string(kept) + " PHP processes stay resident while the site is idle";
+            if (r.processes)
+                msg += " (now " + std::to_string(r.processes) + " processes, " + std::to_string((r.rss_kb + 512) / 1024) + " MB RSS, " +
+                       std::to_string((r.anon_kb + 512) / 1024) + " MB private)";
+            add("info", "php_pool_resident", s.server_names.front(), msg,
+                "site-update " + s.server_names.front() + " --set pm=ondemand (a child starts on the first request and exits after 60 s idle), or keep " +
+                    s.pool.pm + " for a site that must not pay a fork on its first request");
         }
         std::string conf;
         if (php_fpm_hard_reload(running, conf))

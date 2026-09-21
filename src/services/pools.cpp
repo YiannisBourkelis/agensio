@@ -56,6 +56,11 @@ std::string render_pool(const Config& cfg, const SiteConfig& site, const std::st
         const unsigned start = std::max(1u, p.children / 2);
         o << "pm.start_servers = " << start << "\npm.min_spare_servers = 1\npm.max_spare_servers = " << start
           << "\n";
+    } else if (p.pm == "ondemand") {
+        // A child exits after a quiet minute (php-fpm's default is 10 s, too eager for a
+        // site with a visitor every half minute); the server closes its kept connections
+        // after idle_timeout (30 s) first, so the child is free to go.
+        o << "pm.process_idle_timeout = 60s\n";
     }
     if (p.max_requests) o << "pm.max_requests = " << p.max_requests << "\n";
     o << "catch_workers_output = yes\n";

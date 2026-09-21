@@ -92,7 +92,7 @@ takes `--socket PATH`.
 
 | tool | role | what it does |
 |---|---|---|
-| `health_check` | viewer | findings with a fix each: certificates, missing redirects, port 80 for ACME, recent errors, settings waiting for a restart, root, shared accounts, stale pools |
+| `health_check` | viewer | findings with a fix each: certificates, missing redirects, port 80 for ACME, recent errors, settings waiting for a restart, root, shared accounts, stale pools, every `static` or `dynamic` pool with the PHP processes it keeps resident and their memory (`php_pool_resident`, fix: `settings: {pm: "ondemand"}`) |
 | `server_status` | viewer | version, pid, uptime, workers, connections, listeners, sites, the caller's role |
 | `sites_list`, `site_show` | viewer | sites with their certificate state; one site with its effective locations |
 | `config_validate` | viewer | the file on disk: errors and restart-only differences |

@@ -37,6 +37,11 @@ struct UpstreamOptions {
     // proxying: on by default, an origin server expects keep-alive.
     bool keep_conn = false;
     std::size_t max_idle = 8;                       // idle connections kept per upstream and worker
+    // How long a kept connection may sit idle before the pool closes it (0 = until the peer
+    // does): a kept FastCGI connection pins a php-fpm child, and an `ondemand` child can
+    // only exit once it is closed; an origin with a shorter keep-alive timeout would
+    // otherwise be met dead. Applied by the pool's tick, no timer per connection.
+    std::chrono::milliseconds idle_timeout{30000};
     // Pool bounds (per worker and upstream): an explicit queue instead of the kernel backlog.
     std::size_t max_connections = 16;               // in-flight requests to the upstream
     std::size_t queue_depth = 64;                   // waiting requests before answering 503

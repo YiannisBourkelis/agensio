@@ -207,6 +207,7 @@ server_name = ["proxy.test"]
 default = true
 listen = ["127.0.0.1:8091"]
 root = "{root}/bench/www"
+proxy = {{ idle_timeout = 1 }}   # kept origin connections closed after 1 s idle (the suite watches them go)
 
 [[site.location]]
 path = "/api/"
@@ -626,7 +627,7 @@ print("same" if schema == catalogue else "schema!=catalogue", "same" if accepted
 PYT
 )"
 "$BIN" ctl site-update inst.test --set max_body_size=1MB --yes --reason back --socket $CS > /dev/null
-check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 144 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
+check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 146 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
 check "secrets: the presets catalogue lists each preset's credential files" "/wp-config.php /sites/default/settings.php" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["wordpress"]["secrets"][0], p["drupal"]["secrets"][0])')"
 check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$("$BIN" ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; "$BIN" ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
@@ -844,6 +845,28 @@ print(len(deny), n404, readme[0]["handler"] if readme else "-")')"
   check "wordpress: a backup of wp-config.php upper-cased is refused too" "404 404" "$(printf 'x' > tests/wordpress/WP-CONFIG.PHP.BAK; code $W/WP-CONFIG.PHP.BAK; echo -n ' '; code $W/Wp-Config.Txt; rm -f tests/wordpress/WP-CONFIG.PHP.BAK)"
   check "wordpress: the presets catalogue states the backup rule" "yes" "$(curl -sS --unix-socket bench/tmp/control.sock http://control/v1/presets | grep -q 'backup spelling' && echo yes)"
   rm -rf tests/drupal/web/.git tests/drupal/web/.env tests/drupal/web/sites/default/files/.ht.sqlite
+fi
+
+# ---- kept origin connections are closed after idle_timeout (1 s on proxy.test) by the pool tick ----
+if [ -n "$UP_PID" ] && [ -r /proc/net/tcp ]; then
+est9107() {  # established connections of the server to 127.0.0.1:9107, from /proc
+  python3 - "$PID" <<'PY'
+import os, sys
+pid = sys.argv[1]; inodes = set()
+for fd in os.listdir(f"/proc/{pid}/fd"):
+    try: l = os.readlink(f"/proc/{pid}/fd/{fd}")
+    except OSError: continue
+    if l.startswith("socket:["): inodes.add(l[8:-1])
+n = 0
+for line in open("/proc/net/tcp").read().splitlines()[1:]:
+    f = line.split()
+    if f[2].endswith(":2393") and f[3] == "01" and f[9] in inodes: n += 1
+print(n)
+PY
+}
+curl -sS -o /dev/null http://127.0.0.1:8091/api/json; c1=$(est9107); sleep 1.6; c2=$(est9107)
+check "proxy: a kept origin connection is closed after idle_timeout (1 s) by the pool tick, none left open" "yes 0" "$([ "$c1" -ge 1 ] && echo yes || echo "$c1") $c2"
+check "proxy: the next request opens a fresh one and is answered" "200" "$(code http://127.0.0.1:8091/api/json)"
 fi
 
 # ---- request bodies (A3): decoded, limited, drained after the response ----

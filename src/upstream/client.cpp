@@ -234,6 +234,8 @@ void UpstreamPool::release(const std::string& key, const UpstreamOptions& opts, 
         conn->in_len = 0;
         conn->released_at = std::chrono::steady_clock::now();
         u.idle.push_back(std::move(conn));
+        u.idle_timeout = opts.idle_timeout;
+        if (opts.idle_timeout.count() > 0) arm_tick();  // the tick closes it when its time is up
     }
     // Next in line: a priority waiter first, else the oldest one the limit allows.
     for (auto it = u.queue.begin(); it != u.queue.end(); ++it) {
@@ -262,15 +264,19 @@ void UpstreamPool::dequeue(const std::string& key, const UpstreamRequest* req) n
         }
 }
 
-void UpstreamPool::watch(UpstreamRequest* req) {
-    req->watch_index = watched_.size();
-    watched_.push_back(req);
+void UpstreamPool::arm_tick() {
     if (ticking_) return;
     ticking_ = true;
     tick_.expires_after(kTick);
     tick_.async_wait([this](const asio::error_code& ec) {
         if (!ec) tick();
     });
+}
+
+void UpstreamPool::watch(UpstreamRequest* req) {
+    req->watch_index = watched_.size();
+    watched_.push_back(req);
+    arm_tick();
 }
 
 void UpstreamPool::unwatch(UpstreamRequest* req) noexcept {
@@ -287,12 +293,24 @@ void UpstreamPool::unwatch(UpstreamRequest* req) noexcept {
 
 void UpstreamPool::reap_later(long pid) {
     children_.emplace_back(pid, std::chrono::steady_clock::now());
-    if (ticking_) return;
-    ticking_ = true;
-    tick_.expires_after(kTick);
-    tick_.async_wait([this](const asio::error_code& ec) {
-        if (!ec) tick();
-    });
+    arm_tick();
+}
+
+// Kept connections idle past their upstream's idle_timeout are closed here, from the same
+// tick that watches deadlines: the oldest sit at the front of the list (release appends,
+// grant takes from the back), so the scan stops at the first one still young enough.
+bool UpstreamPool::sweep_idle(std::chrono::steady_clock::time_point now) {
+    bool any = false;
+    for (auto& [key, u] : upstreams_) {
+        if (u.idle.empty()) continue;
+        if (u.idle_timeout.count() > 0) {
+            std::size_t n = 0;
+            while (n < u.idle.size() && now - u.idle[n]->released_at > u.idle_timeout) ++n;
+            if (n) u.idle.erase(u.idle.begin(), u.idle.begin() + static_cast<std::ptrdiff_t>(n));  // closed with the objects
+        }
+        any = any || (!u.idle.empty() && u.idle_timeout.count() > 0);
+    }
+    return any;
 }
 
 void UpstreamPool::tick() {
@@ -319,7 +337,8 @@ void UpstreamPool::tick() {
             ++i;
         }
     }
-    if (watched_.empty() && children_.empty()) {
+    const bool idle_left = sweep_idle(now);
+    if (watched_.empty() && children_.empty() && !idle_left) {
         ticking_ = false;
         return;
     }

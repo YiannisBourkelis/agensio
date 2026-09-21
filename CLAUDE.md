@@ -289,9 +289,13 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
 - **Per-site users** (C3b-1, `src/services/pools.*`, design in
   `docs/design-per-site-users.md`): `user = "web1"` on a site derives a php-fpm pool
   (socket `<pools_run>/agensio-web1.sock`, state dir, `open_basedir`, sizing from
-  `php = { children, pm, ... }`), sets `keep_conn = true` with `max_connections =
-  children / workers`, and `agensio pools` writes the pool file into the distro's
-  directory (exit 3 when php-fpm needs a reload). Sites of one user share a pool and
+  `php = { children, pm, ... }`; `pm` is `ondemand` by default since 2026-09-21 with a
+  60 s child idle timeout, because static pools kept 150-200 MB resident per idle site,
+  and `static` is what a PHP benchmark must set), sets `keep_conn = true` with
+  `max_connections = children / workers`, closes kept upstream connections after
+  `idle_timeout` (30 s, from the pool tick) so children can exit, and `agensio pools`
+  writes the pool file into the distro's directory (exit 3 when php-fpm needs a reload).
+  `health` `php_pool_resident` reads `/proc` for what a static or dynamic pool keeps. Sites of one user share a pool and
   must agree on it; different users never share a socket. `check_hosting` (C3b-2) runs
   the ownership rules (roots, secrets, sockets, logs, nothing shared between users) under
   `-t` and before every start, behind an injectable `HostFacts` so the unit tests describe

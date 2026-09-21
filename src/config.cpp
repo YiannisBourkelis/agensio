@@ -283,6 +283,10 @@ void parse_fcgi_table(const toml::table& t, const fs::path& base_dir, FcgiConfig
         }
     };
     count("max_idle", out.options.max_idle, 0, 1024);
+    if (auto v = t["idle_timeout"].value<double>()) {  // 0 allowed: keep until the peer closes
+        if (*v < 0) fail(where + ".idle_timeout must not be negative");
+        out.options.idle_timeout = std::chrono::milliseconds(static_cast<long long>(*v * 1000));
+    }
     if (auto v = t["max_fails"].value<std::int64_t>()) {
         if (*v < 1 || *v > 1000) fail(where + ".max_fails out of range");
         out.options.max_fails = static_cast<unsigned>(*v);
@@ -1342,9 +1346,9 @@ Config load_config(const fs::path& path) {
                 const FcgiOptions& f = *it->second.opts;
                 if (o.max_connections != f.max_connections || o.queue_depth != f.queue_depth ||
                     o.queue_wait != f.queue_wait || o.priority_reserve != f.priority_reserve ||
-                    o.max_idle != f.max_idle || o.keep_conn != f.keep_conn)
+                    o.max_idle != f.max_idle || o.keep_conn != f.keep_conn || o.idle_timeout != f.idle_timeout)
                     fail(where + ": pool limits (max_connections, queue_depth, queue_wait, priority_reserve, "
-                                 "max_idle, keep_conn) for upstream " +
+                                 "max_idle, idle_timeout, keep_conn) for upstream " +
                          key + " differ from " + it->second.where +
                          "; the pool is per upstream, set them once (site-level php = {...} or proxy = {...})");
             }

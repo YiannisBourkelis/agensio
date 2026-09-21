@@ -14,7 +14,7 @@ const std::vector<SettingDef>& setting_defs() {
         {"max_execution_time", "int", "seconds", "PHP max_execution_time of the site's pool.", "agensio reload and a php-fpm reload", "", {}, true},
         {"max_input_time", "int", "seconds", "PHP max_input_time of the site's pool (how long an upload may take to arrive).", "agensio reload and a php-fpm reload", "", {}, true},
         {"children", "int", "count", "pm.max_children: how many PHP requests run at once for this site.", "agensio reload and a php-fpm reload", "the FastCGI connection budget per worker", {}, true},
-        {"pm", "enum", "", "php-fpm process manager: static keeps every child, dynamic and ondemand start them as needed.", "agensio reload and a php-fpm reload", "", {"static", "dynamic", "ondemand"}, true},
+        {"pm", "enum", "", "php-fpm process manager. ondemand (default): a child starts on the first request and exits after 60 s idle, so a quiet site keeps no PHP process resident; dynamic: half the children stay on standby; static: every child stays resident (15 to 25 MB of private memory each), predictable latency, what a benchmark uses. health names each static or dynamic pool with what it keeps.", "agensio reload and a php-fpm reload", "", {"static", "dynamic", "ondemand"}, true},
         {"max_requests", "int", "count", "pm.max_requests: a child is recycled after this many requests (0 = never).", "agensio reload and a php-fpm reload", "", {}, true},
     };
     return defs;

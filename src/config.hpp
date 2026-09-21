@@ -97,7 +97,7 @@ struct PhpPool {
     std::string socket;     // <server.pools_run>/agensio-<user>.sock
     std::string state_dir;  // <server.state_dir>/<user>, holding tmp/ and sessions/
     std::string version;    // php version for the pool directory ("" = newest installed)
-    std::string pm = "static";  // static | dynamic | ondemand
+    std::string pm = "ondemand";  // ondemand (nothing resident while idle) | dynamic | static (benchmarks)
     unsigned children = 8;      // pm.max_children
     unsigned max_requests = 500;
     std::string memory_limit = "256M";

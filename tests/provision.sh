@@ -98,6 +98,22 @@ for pair in "t7 wordpress" "t6 drupal"; do set -- $pair; u=$1; app=$2
 done
 sed -i "s#^include = .*#include = $POOLD/agensio-t9.conf\ninclude = $POOLD/agensio-t7.conf\ninclude = $POOLD/agensio-t6.conf#" $T/fpm.conf
 kill "$(cat $T/fpm.pid)"; sleep 0.5; rm -f $T/run/agensio-t*.sock; $FPM -y $T/fpm.conf -D; for _ in $(seq 1 50); do [ -S $T/run/agensio-t6.sock ] && break; sleep 0.1; done; sleep 0.3
+# Idle cost (2026-09-21, a live host: 8 resident children per idle site): generated pools are
+# ondemand, so a pool that has not seen a request has no child; a static pool is named by
+# health with what it keeps, measured from /proc.
+check "pools: generated pools are ondemand with a 60 s child idle timeout; a pool without a request has no PHP process" "3 3 0" "$(grep -l '^pm = ondemand' $POOLD/agensio-t9.conf $POOLD/agensio-t7.conf $POOLD/agensio-t6.conf | wc -l | tr -d ' ') $(grep -l '^pm.process_idle_timeout = 60s' $POOLD/agensio-t*.conf | wc -l | tr -d ' ') $(pgrep -c -f 'php-fpm: pool agensio-t7' || true)"
+check "health: no resident finding for ondemand pools" "0" "$(curl -sS --unix-socket $T/run/control.sock http://control/v1/health | grep -o '"code":"php_pool_resident"' | wc -l | tr -d ' ')"
+"$BIN" ctl site-update t9.test --set pm=static --yes --reason resident --socket $T/run/control.sock > /dev/null
+kill "$(cat $T/fpm.pid)"; sleep 0.5; rm -f $T/run/agensio-t*.sock; $FPM -y $T/fpm.conf -D; for _ in $(seq 1 50); do [ -S $T/run/agensio-t6.sock ] && break; sleep 0.1; done; sleep 0.5
+check "health: a static pool is named with its resident processes and memory (from /proc), the fix is pm=ondemand; the ondemand pools are not" "yes 2 yes no" "$(curl -sS --unix-socket $T/run/control.sock http://control/v1/health | python3 -c '
+import json,sys,re
+f=[x for x in json.load(sys.stdin)["findings"] if x["code"]=="php_pool_resident"]
+t9=[x for x in f if x.get("site")=="t9.test"]
+print("yes" if len(t9)==1 and "pm = static: all 2 PHP processes" in t9[0]["message"] else t9, end=" ")
+m=re.search(r"now (\d+) processes, (\d+) MB RSS, (\d+) MB private", t9[0]["message"]) if t9 else None
+print(m.group(1) if m else "-", "yes" if m and int(m.group(2))>0 and "--set pm=ondemand" in t9[0]["fix"] else "no", "yes" if any(x.get("site") in ("t7.test","t6.test") for x in f) else "no")')"
+"$BIN" ctl site-update t9.test --set pm=ondemand --yes --reason resident --socket $T/run/control.sock > /dev/null
+kill "$(cat $T/fpm.pid)"; sleep 0.5; rm -f $T/run/agensio-t*.sock; $FPM -y $T/fpm.conf -D; for _ in $(seq 1 50); do [ -S $T/run/agensio-t6.sock ] && break; sleep 0.1; done; sleep 0.3
 for pair in "t7 wordpress" "t6 drupal"; do set -- $pair; u=$1; app=$2
   check "upload ($app preset, user $u): the moved upload has the server's group and is served" "200 0 614400 | agensio | 200 614400" "$(r=$(curl -sS -o $T/upl.out -w '%{http_code}' -H "Host: $u.test" -F "f=@$T/mid.bin" http://127.0.0.1:18198/upload.php); echo -n "$r "; head -1 $T/upl.out | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["error"], d["size"], end="")' 2>/dev/null; echo -n " | $(stat -c %G $T/www/$u.test/moved.bin 2>/dev/null) | "; curl -sS -o /dev/null -w '%{http_code} %{size_download}' -H "Host: $u.test" http://127.0.0.1:18198/moved.bin)"
 done

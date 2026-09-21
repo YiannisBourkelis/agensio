@@ -136,7 +136,11 @@ private:
         std::vector<std::unique_ptr<UpstreamConnection>> idle;
         std::deque<Waiter> queue;
         std::size_t active = 0;
+        std::chrono::milliseconds idle_timeout{0};  // of the options that released the last connection; 0 = keep
     };
+    // Closes kept connections idle for longer than their upstream's idle_timeout; true when any remain.
+    bool sweep_idle(std::chrono::steady_clock::time_point now);
+    void arm_tick();
     static std::size_t limit_for(const UpstreamOptions& opts, bool priority) noexcept;
     void grant(Upstream& u, Waiter w);
 

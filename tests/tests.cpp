@@ -1091,13 +1091,25 @@ static void test_pools() {
     CHECK(!b.php.options.keep_conn && b.php.options.max_connections == 5 && b.group == "client2");
     const std::string ini = render_pool(cfg, a, "www");
     for (const char* line : {"[agensio-web1]", "user = web1", "group = web1", "listen.group = www",
-                             "listen.mode = 0660", "pm = static", "pm.max_children = 6", "clear_env = yes",
+                             "listen.mode = 0660", "pm = ondemand", "pm.process_idle_timeout = 60s", "pm.max_children = 6", "clear_env = yes",
                              "php_admin_value[memory_limit] = 512M", "php_admin_value[date.timezone] = UTC",
                              "php_admin_value[upload_max_filesize] = 1M"})
         CHECK(ini.find(std::string(line) + "\n") != std::string::npos);
     CHECK(ini.find("php_admin_value[open_basedir] = " + a.pool.open_basedir[0] + ":") != std::string::npos);
     CHECK(render_pool(cfg, b, "www").find("pm.start_servers = 4\n") != std::string::npos);
     CHECK(generated_pools(cfg, "www").size() == 2);
+    // health names the dynamic pool (what it keeps resident) and not the ondemand one.
+    {
+        using control::Finding;
+        const auto hf = control::health_findings(cfg, cfg, false, std::time(nullptr));
+        const auto resident = [&](const std::string& site) {
+            return std::count_if(hf.begin(), hf.end(), [&](const Finding& f) { return f.code == "php_pool_resident" && f.site == site; });
+        };
+        CHECK(resident("shop") == 0 && resident("blog") == 1);
+        const auto it = std::find_if(hf.begin(), hf.end(), [](const Finding& f) { return f.code == "php_pool_resident"; });
+        CHECK(it != hf.end() && it->message.find("pm = dynamic: at least 4 PHP processes") != std::string::npos && it->fix.find("--set pm=ondemand") != std::string::npos);
+        CHECK(control::pool_residency("agensio-no-such-pool").processes == 0);
+    }
 
     // Writing: files appear, a rerun changes nothing, a dropped user's file is removed,
     // a foreign file with our name is refused.

@@ -77,6 +77,13 @@ std::vector<std::string> restart_needed(const Config& fresh, const Config& runni
 // when the file exists and the setting is absent or 0; `file` names it.
 bool php_fpm_hard_reload(const Config& cfg, std::string& file);
 
+// What one php-fpm pool keeps resident: its child processes and their memory (Linux /proc).
+struct PoolResidency {
+    unsigned processes = 0;
+    unsigned long long rss_kb = 0, anon_kb = 0;
+};
+PoolResidency pool_residency(const std::string& pool);
+
 struct Finding {
     std::string severity;  // error | warn | info
     std::string code;

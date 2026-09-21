@@ -750,6 +750,11 @@ Rules:
       `ctl reference`, `GET /v1/config/reference`, MCP `config_reference`, `docs/keys.md`
       generated and diffed by the integration suite, unit test against the parser's keys
       and the reference's headings, instructions for the hand-back of root's edits.
+- [x] H2k (2026-09-21, live host) Idle PHP cost: generated pools `pm = "ondemand"` with
+      `pm.process_idle_timeout = 60s` by default; `UpstreamOptions::idle_timeout` (30 s)
+      applied by the pool tick to kept connections so children can exit; `health`
+      `php_pool_resident` from `/proc` (processes, RSS, private) per static or dynamic
+      pool; docs and MCP texts, root suite checks with a real php-fpm.
 - [x] H2j (2026-09-20, live report) Backups of never-served names: `wp-config.php~`,
       `.bak`, `.save`, `.orig`, `.txt` were served with the credentials in them.
       `ProtectedName` built from each preset's `never` list at load, carried by every

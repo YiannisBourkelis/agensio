@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.0-alpha.19 (2026-09-21)
+
+- **Generated pools default to `pm = "ondemand"`** with `pm.process_idle_timeout = 60s`
+  (live host: every site with its own account kept 8 PHP processes resident around the
+  clock, 150 to 200 MB per idle site). A child starts on the first request and exits after
+  a quiet minute; `static` and `dynamic` stay available per site (`settings: {pm:
+  "static"}`), and `static` is what a PHP benchmark should use. Existing pool files
+  differ from the configuration until `agensio pools` rewrites them; `health` says so
+  (`pools_stale`).
+- **Kept upstream connections are closed after `idle_timeout`** (new option of `php = {}`
+  and `proxy = {}`, default 30 s, 0 = never) from the pool's existing tick, so an
+  `ondemand` child is not held open by an idle server and an origin with a short
+  keep-alive timeout is never met dead.
+- `health` `php_pool_resident`: every `static` or `dynamic` pool with the PHP processes
+  it keeps and their memory (RSS and private, read from `/proc` on Linux), with the
+  setting that frees it, so an agent asked why the machine is full has the number.
+
 ## 0.1.0-alpha.18 (2026-09-20)
 
 - **Fixed, wordpress preset: backups of `wp-config.php` were served** (live report:

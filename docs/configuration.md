@@ -424,6 +424,7 @@ location on the same socket must agree on them: set them once on the site.
 | `queue_depth`, `queue_wait` | 64, 5 s | queue size and longest wait; beyond either, 503 with `Retry-After` |
 | `priority_reserve` | 0 | share of `max_connections` kept for `priority = true` locations |
 | `max_idle` | 8 | idle connections kept per worker to this socket when `keep_conn` is on |
+| `idle_timeout` | 30 | seconds a kept connection may stay idle before agensio closes it (0 = kept until the peer closes); a kept connection pins a php-fpm child, and an `ondemand` child can only exit once it is closed |
 | `keep_conn` | `false` | FastCGI keep-alive; php-fpm pins a child to every kept connection, so `max_connections` x workers must stay below `pm.max_children`. Not worth it through a Docker-published port (see below) |
 | `head_max` | `"64KB"` | reply head larger than this is 502 |
 | `path_info` | `true` | split `/x.php/extra` into SCRIPT_NAME and PATH_INFO |
@@ -539,7 +540,7 @@ Pool keys in `php = { ... }`, all optional:
 | key | default | meaning |
 |---|---|---|
 | `children` | 8 | `pm.max_children` |
-| `pm` | `"static"` | `"static"`, `"dynamic"` (half the children on standby) or `"ondemand"` |
+| `pm` | `"ondemand"` | `"ondemand"`: a child starts on the first request and exits after 60 s idle, nothing resident while the site is quiet; `"dynamic"`: half the children on standby; `"static"`: every child resident, predictable, what a PHP benchmark should use |
 | `max_requests` | 500 | `pm.max_requests`; 0 = unlimited |
 | `memory_limit` | `"256M"` | `memory_limit` |
 | `max_execution_time` | 60 | seconds |
@@ -547,6 +548,20 @@ Pool keys in `php = { ... }`, all optional:
 | `version` | newest installed | php version whose pool directory `agensio pools` writes to |
 | `open_basedir` | project, tmp, sessions | replaces the default list |
 | `extra` | none | `{ "date.timezone" = "Europe/Athens" }` becomes `php_admin_value[...]` lines |
+
+**Why `ondemand` is the default** (2026-09-21, a live host): with `static`, every site
+with its own account kept its 8 children resident around the clock, 15 to 25 MB of
+private memory each on top of the shared PHP image, about 150 to 200 MB per idle site,
+and a 4 GB machine ran out at 15 to 20 sites before serving anything. `ondemand` costs a
+fork on the first request after a quiet minute (tens of milliseconds) and starts
+children up to `children` under a burst; agensio writes `pm.process_idle_timeout =
+60s` and closes its own kept connections after `idle_timeout` (30 s, section 7) so the
+children are free to exit. Set `pm = "static"` on a site that must not pay that first
+fork, and in a development environment when measuring PHP throughput: the benchmark beds
+under `bench/` use static pools, and a comparison against nginx in front of an
+`ondemand` pool would measure php-fpm's forking. `health` names every `static` or
+`dynamic` pool with the PHP processes it keeps and their memory (`php_pool_resident`),
+so the cost is visible before the machine is full.
 
 A site's own `max_body_size = "200MB"` (a site key, next to `root`) bounds its request
 bodies (413 above) and sets the pool's `upload_max_filesize` and `post_max_size`; without
@@ -713,14 +728,16 @@ on a location.
 | `buffering` | `true` | collect the whole answer (memory, then a temp file above `buffer_max`) so a slow client never holds the origin; `false` streams with backpressure |
 | `request_buffering` | `true` | collect the request body before connecting; `false` streams it as it arrives |
 | `connect_timeout`, `send_timeout`, `read_timeout` | 5, 30, 60 s | 504 when exceeded; `read_timeout` is between two reads from the origin |
-| `keep_conn`, `max_idle` | `true`, 64 | keep-alive to the origin; idle connections kept per worker |
+| `keep_conn`, `max_idle`, `idle_timeout` | `true`, 64, 30 s | keep-alive to the origin; idle connections kept per worker; how long one may stay idle before agensio closes it (0 = until the origin does) |
 | `max_connections`, `queue_depth`, `queue_wait` | 256, 1024, 5 s | per worker: in flight, waiting, and the longest wait before a 503 with `Retry-After` |
 | `head_max` | 64 KB | an origin head larger than this is a 502 |
 | `max_fails`, `fail_timeout` | 3, 10 s | consecutive failures that mark a group member down, and for how long |
 | `tls` | verify on, system store | `{ verify, server_name, ca }` for `https://` origins |
 
 The pool is per worker, so an origin sees at most workers x `max_connections` connections
-and workers x `max_idle` idle ones. Before a kept connection that has been idle for longer
+and workers x `max_idle` idle ones, none of them idle for longer than `idle_timeout`
+(the pool's 250 ms tick closes them, so an origin with a shorter keep-alive timeout, Node's
+5 s, should get `idle_timeout` below it). Before a kept connection that has been idle for longer
 than a pool tick (250 ms) is reused it is peeked once without blocking: a peer that closed it (php-fpm reloaded, an origin's idle timeout)
 is dropped for a fresh connection, so a POST or an upload never meets a dead one. A GET or HEAD whose kept connection turns out dead is
 retried once on a fresh one. An origin that is down gives 502, a timeout 504, a full

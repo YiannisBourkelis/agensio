@@ -110,7 +110,7 @@ section of `docs/configuration.md` that explains the key.
 |---|---|---|---|---|---|---|
 | `socket` | unix:/path or host:port | (generated with user) | An existing php-fpm pool to use. | reload | site-create (php_socket) | 7 |
 | `children` | int | 8 | pm.max_children of the generated pool; also the FastCGI connection budget. | reload + php-fpm reload | settings (children) / site-create (php_children) | 7 |
-| `pm` | enum: static \| dynamic \| ondemand | static | The pool's process manager. | reload + php-fpm reload | settings | 7 |
+| `pm` | enum: ondemand \| dynamic \| static | ondemand | The pool's process manager: ondemand keeps nothing resident while idle, static keeps every child (benchmarks). | reload + php-fpm reload | settings | 7 |
 | `max_requests` | int | 500 | pm.max_requests (0 = never recycle). | reload + php-fpm reload | settings | 7 |
 | `memory_limit` | size | 256M | PHP memory_limit of the pool. | reload + php-fpm reload | settings | 7 |
 | `max_execution_time` | seconds | 60 | PHP max_execution_time of the pool. | reload + php-fpm reload | settings | 7 |
@@ -123,6 +123,7 @@ section of `docs/configuration.md` that explains the key.
 | `send_timeout` | seconds | 60 | Sending the request to php-fpm. | reload | site file | 7 |
 | `max_connections` | int | children / workers with a pool, else 32 | Connections to php-fpm per worker. | reload | site file | 7 |
 | `max_idle` | int | max_connections | Kept idle connections per worker (keep_conn). | reload | site file | 7 |
+| `idle_timeout` | seconds | 30 | Kept connection closed after this long idle (0 = never); lets an ondemand child exit. | reload | site file | 7 |
 | `queue_depth` | int | 256 | Requests waiting for a connection per worker; 503 beyond. | reload | site file | 7 |
 | `queue_wait` | seconds | 10 | Longest wait in that queue; 503 with Retry-After beyond. | reload | site file | 7 |
 | `priority_reserve` | int | 0 | Connections kept for priority = true locations. | reload | site file | 7 |
@@ -154,6 +155,7 @@ section of `docs/configuration.md` that explains the key.
 | `send_timeout` | seconds | 60 | Sending to the origin. | reload | site file | 12 |
 | `max_connections` | int | 32 | Connections to the origin per worker. | reload | site file | 12 |
 | `max_idle` | int | max_connections | Kept idle connections per worker. | reload | site file | 12 |
+| `idle_timeout` | seconds | 30 | Kept connection closed after this long idle (0 = until the origin closes it). | reload | site file | 12 |
 | `queue_depth` | int | 256 | Requests waiting per worker; 503 beyond. | reload | site file | 12 |
 | `queue_wait` | seconds | 10 | Longest wait in the queue. | reload | site file | 12 |
 | `priority_reserve` | int | 0 | Connections kept for priority = true locations. | reload | site file | 12 |
