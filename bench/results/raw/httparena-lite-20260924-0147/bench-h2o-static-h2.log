@@ -1,0 +1,78 @@
+=== h2o / static-h2 / 512c (tool=h2load) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+starting benchmark...
+
+
+
+
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+finished in 5.17s, 294448.60 req/s, 17.44GB/s
+requests: 1472243 total, 1488627 started, 1472243 done, 1472243 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 1476539 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 87.22GB (93646661673) total, 15.53MB (16281993) headers (space savings 82.50%), 87.13GB (93555640807) data
+                     min         max         mean         sd        +/- sd
+time for request:      118us    718.73ms     41.42ms     49.54ms    90.83%
+time for connect:    26.47ms    168.08ms    114.24ms     37.25ms    63.09%
+time to 1st byte:    41.92ms    224.42ms    145.36ms     46.02ms    73.05%
+req/s           :     404.44      915.61      572.23       82.31    67.58%
+[info] CPU 1252.6% | Mem 364MiB
+
+[run 2/3]
+starting benchmark...
+
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+3.
+
+
+finished in 5.18s, 298944.20 req/s, 17.70GB/s
+requests: 1494721 total, 1511105 started, 1494721 done, 1494721 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 1501886 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 88.49GB (95017604372) total, 15.79MB (16560883) headers (space savings 82.50%), 88.41GB (94925141645) data
+                     min         max         mean         sd        +/- sd
+time for request:      270us    543.80ms     42.60ms     47.71ms    89.69%
+time for connect:     2.96ms    143.03ms     20.58ms     15.60ms    80.08%
+time to 1st byte:    22.31ms    157.93ms     39.16ms     15.67ms    87.30%
+req/s           :     402.07      916.88      581.17       96.52    66.80%
+[info] CPU 1430.5% | Mem 343MiB
+
+[run 3/3]
+starting benchmark...
+9.
+
+11.
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+6.Main benchmark duration is started for thread #4.
+
+
+finished in 5.16s, 297724.60 req/s, 17.63GB/s
+requests: 1488623 total, 1505007 started, 1488623 done, 1488623 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 1495828 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 88.15GB (94647009045) total, 15.73MB (16494170) headers (space savings 82.50%), 88.06GB (94554926798) data
+                     min         max         mean         sd        +/- sd
+time for request:      244us    974.81ms     42.22ms     50.29ms    90.60%
+time for connect:     2.39ms     54.88ms     25.14ms     13.81ms    57.03%
+time to 1st byte:     9.28ms     84.07ms     51.27ms     13.55ms    88.48%
+req/s           :     331.39     1018.82      579.44      114.20    68.95%
+[info] CPU 1312.4% | Mem 365MiB
+
+=== Best: 289939 req/s (CPU: 1430.5%, Mem: 343MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-h2o
+httparena-bench-h2o
+[info] done
+[info] restoring loopback MTU to 65536
+exit=0

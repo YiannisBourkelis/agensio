@@ -1,0 +1,45 @@
+=== nginx / static-tls / 512c (tool=wrk) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     0.92ms    1.15ms  20.55ms   87.89%
+    Req/Sec    53.20k     7.13k   81.89k    66.45%
+  3204852 requests in 5.10s, 49.06GB read
+Requests/sec: 628228.05
+Transfer/sec:      9.62GB
+[info] CPU 1133.6% | Mem 707MiB
+
+[run 2/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     0.97ms    1.24ms  28.60ms   87.32%
+    Req/Sec    53.75k     7.21k  111.02k    70.93%
+  3220511 requests in 5.10s, 49.30GB read
+Requests/sec: 631561.91
+Transfer/sec:      9.67GB
+[info] CPU 1212.4% | Mem 706MiB
+
+[run 3/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     0.97ms    1.24ms  21.59ms   87.54%
+    Req/Sec    53.84k     6.83k   89.72k    71.52%
+  3236452 requests in 5.10s, 49.55GB read
+Requests/sec: 634561.23
+Transfer/sec:      9.71GB
+[info] CPU 1129.1% | Mem 708MiB
+
+=== Best: 634561 req/s (CPU: 1129.1%, Mem: 708MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-nginx
+httparena-bench-nginx
+[info] done
+[info] restoring loopback MTU to 65536
+exit=0

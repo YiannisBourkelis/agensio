@@ -716,6 +716,20 @@ privilege drop, fuzz targets for every new parser (chunked, FastCGI), h1 complia
   before each measurement. Raw wrk output lands in `bench/results/raw/<stamp>/`.
 - Later: Docker Compose on Linux (adds Apache httpd event MPM and `SO_REUSEPORT` numbers),
   30 s runs with three repetitions and medians.
+- **HttpArena** (https://www.http-arena.com, the public board with an infrastructure tier where
+  nginx, Caddy and h2o are ranked as web servers): `bench/httparena/agensio/` is agensio's
+  entry (Dockerfile building the tag, two configs because `protocols` is server-wide and the
+  arena wants h1-only TLS on 8081 next to h2 on 8443, `meta.json`, README), copied verbatim
+  into `frameworks/agensio/` of a HttpArena pull request. `bench/httparena/local.sh` runs the
+  arena's own `validate.sh` and `benchmark-lite.sh` here inside Docker-in-Docker (the host's
+  8080-8082 are taken and the harness restarts the Docker daemon). First run,
+  `bench/results/httparena-lite-20260924-0147.md`: validator 23/23; pipelined agensio 4.77M
+  req/s, nginx 4.65M, h2o 5.65M; the static rows are bandwidth-bound and agensio moves 16-19
+  GB/s against nginx's 10-13 at equal CPU, but every static request asks for `br` and nginx
+  serves the `.br` twin (15 KB per response against our 58-60), so agensio sits at 0.36-0.42 of
+  nginx's req/s there until pre-compressed siblings are served. The infrastructure tier scores
+  nine profiles; baseline, short-lived and JSON need an in-process handler (`/baseline11`,
+  `/baseline2`, `/json/{count}`, no proxying allowed) and the two HTTP/3 rows need phase I.
 - Verify correctness before speed: responses must be byte-identical in body and carry
   `Content-Length`, `Content-Type`, `Date`, `Last-Modified`, `ETag`.
 

@@ -1,0 +1,67 @@
+=== nginx / static-h2 / 512c (tool=h2load) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+starting benchmark...
+9.
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+finished in 5.16s, 863728.00 req/s, 13.17GB/s
+requests: 4318640 total, 4335024 started, 4318640 done, 4318640 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 4318641 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 65.83GB (70682734798) total, 268.53MB (281574866) headers (space savings 43.48%), 65.44GB (70265096928) data
+                     min         max         mean         sd        +/- sd
+time for request:       57us     96.86ms     13.88ms      9.45ms    75.45%
+time for connect:     3.20ms     53.21ms     22.42ms     12.63ms    60.35%
+time to 1st byte:    10.75ms    101.76ms     41.88ms     15.30ms    73.05%
+req/s           :    1266.92     2577.29     1685.03      226.07    70.90%
+[info] CPU 1371.7% | Mem 942MiB
+
+[run 2/3]
+starting benchmark...
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+finished in 5.15s, 869726.00 req/s, 13.26GB/s
+requests: 4348630 total, 4365014 started, 4348630 done, 4348630 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 4348632 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 66.29GB (71173160688) total, 270.40MB (283530057) headers (space savings 43.48%), 65.89GB (70752623401) data
+                     min         max         mean         sd        +/- sd
+time for request:       53us     87.43ms     13.66ms      9.34ms    76.22%
+time for connect:     4.20ms     85.82ms     26.79ms     16.54ms    65.43%
+time to 1st byte:    23.60ms     99.84ms     52.08ms     18.16ms    54.49%
+req/s           :    1197.52     2698.19     1696.22      217.59    74.61%
+[info] CPU 1559.7% | Mem 982MiB
+
+[run 3/3]
+starting benchmark...
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+finished in 5.17s, 874449.00 req/s, 13.33GB/s
+requests: 4372245 total, 4388629 started, 4372245 done, 4372245 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 4372247 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 66.65GB (71559906503) total, 271.86MB (285069902) headers (space savings 43.48%), 66.25GB (71137085188) data
+                     min         max         mean         sd        +/- sd
+time for request:       69us     95.32ms     13.54ms      8.83ms    74.16%
+time for connect:     1.51ms     71.91ms     17.84ms     10.90ms    69.73%
+time to 1st byte:    11.14ms     82.80ms     36.73ms     12.93ms    67.38%
+req/s           :    1197.69     2172.28     1705.75      198.01    69.53%
+[info] CPU 1422.2% | Mem 962MiB
+
+=== Best: 845695 req/s (CPU: 1422.2%, Mem: 962MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-nginx
+httparena-bench-nginx
+[info] done
+[info] restoring loopback MTU to 65536
+exit=0

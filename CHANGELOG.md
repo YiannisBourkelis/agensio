@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.0-alpha.21 (unreleased)
+
+- **HttpArena entry** (`bench/httparena/`): agensio packaged for the public HttpArena board
+  (Dockerfile from the tag, the arena's port layout, `meta.json` subscribing to the pipelined,
+  static-tls and static-h2 profiles) and a driver that runs the arena's own validator and lite
+  benchmark on a developer machine inside Docker-in-Docker. First run against the nginx and
+  h2o entries in `bench/results/httparena-lite-20260924-0147.md`: the validator passes, the
+  pipelined row is level with nginx, and the static rows show the next step, pre-compressed
+  `.br`/`.gz` siblings, since the arena asks for `br` on every static request.
+
 ## 0.1.0-alpha.20 (2026-09-24)
 
 - **Fixed: a Grav site on the borrowed drupal preset served its backup** (2026-09-23,

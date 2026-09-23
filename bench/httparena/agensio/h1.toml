@@ -1,0 +1,52 @@
+# agensio for HttpArena, the HTTP/1.1 listeners: 8080 plain (baseline, pipelined,
+# short-lived), 8081 TLS with HTTP/1.1 only (json-tls, static-tls measure h1 on the wire,
+# so ALPN must not offer h2 there). `protocols` is server-wide in v0.1.0-alpha.20, hence
+# a second process (h2.toml) for 8443. start.sh fills @WORKERS@ from the container's cpuset.
+[server]
+workers = @WORKERS@
+idle_timeout = 65
+max_requests_per_connection = 0
+reuse_port = "auto"
+tcp_nodelay = true
+sendfile = true
+protocols = ["h1"]
+pid_file = ""
+
+[log]
+access = "off"
+error = "stderr"
+
+[cache]
+max_file_size = "4MB"
+max_size = "256MB"
+
+[[site]]
+server_name = ["localhost"]
+listen = ["0.0.0.0:8080"]
+default = true
+root = "/srv/www"
+
+[[site.location]]
+path = "/static/"
+alias = "/data/static/"
+
+[[site.location]]
+path = "/pipeline"
+match = "exact"
+try_files = ["/pipeline.txt"]
+
+[[site]]
+server_name = ["localhost"]
+listen = ["0.0.0.0:8081"]
+default = true
+root = "/srv/www"
+tls = { cert = "/run/agensio/server.crt", key = "/run/agensio/server.key" }
+
+[[site.location]]
+path = "/static/"
+alias = "/data/static/"
+
+[[site.location]]
+path = "/pipeline"
+match = "exact"
+try_files = ["/pipeline.txt"]

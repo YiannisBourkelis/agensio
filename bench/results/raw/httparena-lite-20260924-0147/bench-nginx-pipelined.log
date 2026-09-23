@@ -1,0 +1,75 @@
+=== nginx / pipelined / 512c (tool=gcannon) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+gcannon v0.6.1
+  Target:    localhost:8080/pipeline
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  16
+  Req/conn:  unlimited (keep-alive)
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   1.81ms    905us   4.96ms   12.00ms   16.90ms
+
+  22763690 requests in 5.00s, 22756165 responses
+  Throughput: 4.55M req/s
+  Bandwidth:  616.05MB/s
+  Status codes: 2xx=22756165, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 22756165 / 22756165 responses (100.0%)
+[info] CPU 1318.5% | Mem 679MiB
+
+[run 2/3]
+gcannon v0.6.1
+  Target:    localhost:8080/pipeline
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  16
+  Req/conn:  unlimited (keep-alive)
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   1.79ms    852us   4.93ms   12.10ms   16.90ms
+
+  23042772 requests in 5.01s, 23040698 responses
+  Throughput: 4.60M req/s
+  Bandwidth:  623.39MB/s
+  Status codes: 2xx=23040698, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 23040698 / 23040698 responses (100.0%)
+[info] CPU 1459.1% | Mem 679MiB
+
+[run 3/3]
+gcannon v0.6.1
+  Target:    localhost:8080/pipeline
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  16
+  Req/conn:  unlimited (keep-alive)
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   1.77ms    886us   4.90ms   12.10ms   17.40ms
+
+  23266291 requests in 5.00s, 23258792 responses
+  Throughput: 4.65M req/s
+  Bandwidth:  629.33MB/s
+  Status codes: 2xx=23258792, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 23258792 / 23258792 responses (100.0%)
+[info] CPU 1351.0% | Mem 682MiB
+
+=== Best: 4651758 req/s (CPU: 1351.0%, Mem: 682MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-nginx
+httparena-bench-nginx
+[info] done
+[info] restoring loopback MTU to 65536
+exit=0
