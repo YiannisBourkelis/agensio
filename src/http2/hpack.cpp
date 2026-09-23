@@ -195,9 +195,7 @@ void append_status(std::string& out, int status) {
 
 // ---- decoding ----
 
-Decoder::Decoder(std::size_t ceiling) : ceiling_(ceiling), limit_(ceiling) {
-    ring_.resize(ceiling / 32 + 1);  // an entry costs at least 32 bytes, so this many fit
-}
+Decoder::Decoder(std::size_t ceiling) : ceiling_(ceiling), limit_(ceiling) {}  // the ring is made on the first insertion
 
 void Decoder::evict_to(std::size_t limit) noexcept {
     while (count_ > 0 && size_ > limit) {
@@ -217,6 +215,7 @@ void Decoder::add(std::string_view name, std::string_view value) {
         return;
     }
     evict_to(limit_ - need);
+    if (ring_.empty()) ring_.resize(ceiling_ / 32 + 1);  // an entry costs at least 32 bytes, so this many fit; 8 KB, only for a peer that indexes
     head_ = (head_ + 1) % ring_.size();
     Entry& e = ring_[head_];
     e.name.assign(name);
@@ -233,7 +232,7 @@ bool Decoder::lookup(std::uint32_t index, std::string_view& name, std::string_vi
         return true;
     }
     const std::uint32_t k = index - static_cast<std::uint32_t>(kStaticTable.size()) - 1;  // 0 = newest
-    if (k >= count_) return false;
+    if (k >= count_ || ring_.empty()) return false;
     const Entry& e = ring_[(head_ + ring_.size() - k) % ring_.size()];
     name = e.name;
     value = e.value;

@@ -14,6 +14,8 @@ G0 numbers against the targets of 7.1 (`bench/results/ab-20260923-171228.md`,
 per connection, below HTTP/1 at ten, 30 to 45 % less CPU per request than nginx on every
 small-file row, 27 % less on the 10 MB TLS stream and 28 % less on 100 KB at ten streams
 once levers 5 and 6 of 7.2 were in (the same day); the HTTP/1 rows of the A/B unchanged.
+G2 (the same day): four workers 1.59M req/s on h2c against nginx's 665k; idle memory per
+connection 19 KB against nginx's 7.5 KB and Caddy's 35 KB (section 7.3).
 
 ## 1. Goals
 
@@ -430,8 +432,11 @@ rather than assumed; the published comparisons put HTTP/2 within 10 % of HTTP/1 
 8. One lazy timer per connection, no timer per stream (the D1 lesson: `timerfd_settime`
    was two of seven syscalls).
 9. The Huffman decoder as a table walk, the encoder as a table lookup at build time.
-10. The receive buffer released when a connection has been idle for a while (a G2
-    measurement; it applies to HTTP/1 too and would cut idle memory by two thirds).
+10. The receive buffer released when a connection has been idle for a while (G2, both
+    protocols: the pending read is cancelled, the buffers freed, the socket's readiness
+    awaited; glibc keeps freed chunks mapped, so the worker trims the heap once a second
+    after sheds and closes; an idle HTTP/1 connection went from 25 to 13 KB, an HTTP/2
+    one from 40 to 19 KB).
 
 ### 7.3 Memory per connection
 
@@ -445,8 +450,14 @@ rather than assumed; the published comparisons put HTTP/2 within 10 % of HTTP/1 
 | idle connection | about 18 KB | about 22 KB, target 6 KB with lever 10 |
 | worst case at the defaults | 16 KB + 64 KB + body limit | 16 KB + 4 KB + 128 x 18 KB + 1 MB + 512 KB, about 3.8 MB, nothing unbounded |
 
-These are measured in G2 with 10,000 idle and 1,000 busy connections and published next
-to the CPU numbers; the numbers of nginx and Caddy on the same run sit beside them.
+Measured in G2 (`bench/h2/memory.sh`, `bench/results/h2-memory-20260923-204605.md`, one
+worker): with lever 10 built (buffers shed two seconds after the last request, the heap
+trimmed once a second after sheds and closes), 10,000 idle HTTP/2 connections cost
+agensio 19 KB each, nginx 7.5 KB, Caddy 35 KB; 1,000 busy connections at ten streams
+90 MB, nginx 93 MB, Caddy 209 MB; an idle HTTP/1 connection 13 KB. What remains per idle
+HTTP/2 connection is the HPACK ring a client fills (8 KB, the protocol's) and the fixed
+objects, of which the two 100-field header arrays of the stream (6.4 KB) are the next
+lever.
 
 ### 7.4 The benchmark
 

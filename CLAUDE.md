@@ -161,6 +161,12 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
 - **Session**: `std::shared_ptr<Connection>` with `enable_shared_from_this`, handlers as
   lambdas capturing `self`. Receive buffer reused across keep-alive requests; hard cap on
   header size (default 16 KB) and an idle timeout (default 15 s) via `asio::steady_timer`.
+  Idle memory (G2, 2026-09-23): a connection idle for 2 s sheds what it does not need
+  (both protocols: body and writer buffers, pooled HTTP/2 streams, and the receive buffer,
+  whose pending read is cancelled and replaced by `async_wait(wait_read)`; the buffer
+  comes back with the next bytes), and each worker calls `malloc_trim(0)` at most once a
+  second after sheds or closes, because glibc keeps freed 16 KB chunks mapped. Measured:
+  an idle HTTP/1 connection 13 KB (25 before), HTTP/2 19 KB (40 before), nginx 7.5 KB.
 - **Request core (phase A1)**: the unit of work is a `Stream` (`Request` + `Response`);
   HTTP/1 embeds one per connection. Handlers fill a `Response`: status, an optional
   prebuilt header block (the cache entry's, already terminated), extra `Headers`, and a
@@ -562,11 +568,20 @@ carries four frames per stream, and a file's frames are read with one preadv str
 into a pre-framed chunk (headers written in place, one contiguous piece, no copy) that
 TLS writes directly; nginx fills its 16 KB SSL buffer per record and copies. What is left
 on that row is the encrypt copy, which kTLS removes. Caddy costs 30 us per small request.
-Two lessons: the inline completion pattern needs a yield budget on every loop that can
-chain (the write cycle and the read loop each overflowed the stack under h2load before
-they got one, found by the sanitizer build in the devbox, `AGENSIO_BIN=build-asan/agensio
-bench/h2/run.sh -s agensio`), and h2spec passes only when a stream whose response is
-complete keeps reading its body.
+Memory (`bench/h2/memory.sh`, `h2-memory-20260923-204605.md`): 10,000 idle HTTP/2
+connections cost agensio 19 KB each, nginx 7.5 KB, Caddy 35 KB; 1,000 busy connections at
+ten streams 90 MB, nginx 93 MB, Caddy 209 MB. h2c streams (`h2-20260923-202135.md`): the
+preadv block path beats nginx on the 10 MB stream (1116 vs 1204 us) and 100 KB at ten
+streams (8.6 vs 14.7 us), so sendfile per frame was measured against and not pursued.
+Four workers each (`h2-20260923-201044.md`, G2): agensio 1.59M req/s on h2c and 1.28M over
+TLS at ten streams per connection (1.83 and 2.51 us), nginx 665k and 559k (4.59 and
+3.75 us), Caddy 100k (40 us); 100 KB at ten streams 126k vs 68k req/s; the 10 MB TLS stream
+1305 vs 786 req/s. Per-request CPU rises with the worker count for both servers, as it
+did for HTTP/1 (cross-core traffic on loopback). Two lessons: the inline completion
+pattern needs a yield budget on every loop that can chain (the write cycle and the read
+loop each overflowed the stack under h2load before they got one, found by the sanitizer
+build in the devbox, `AGENSIO_BIN=build-asan/agensio bench/h2/run.sh -s agensio`), and
+h2spec passes only when a stream whose response is complete keeps reading its body.
 
 Benchmark hygiene: `pkill -x nginx` does not kill nginx (it retitles its processes); a
 stale instance keeps the ports and silently serves the next run. `bench/run.sh` now

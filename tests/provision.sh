@@ -22,6 +22,7 @@ include = ["sites.d/*.toml"]
 [server]
 workers = 1
 user = "agensio"
+protocols = ["h2c", "h2", "h1"]
 pid_file = "$T/agensio.pid"
 pools_run = "$T/run"
 state_dir = "$T/state"
@@ -115,6 +116,8 @@ print(m.group(1) if m else "-", "yes" if m and int(m.group(2))>0 and "--set pm=o
 "$BIN" ctl site-update t9.test --set pm=ondemand --yes --reason resident --socket $T/run/control.sock > /dev/null
 kill "$(cat $T/fpm.pid)"; sleep 0.5; rm -f $T/run/agensio-t*.sock; $FPM -y $T/fpm.conf -D; for _ in $(seq 1 50); do [ -S $T/run/agensio-t6.sock ] && break; sleep 0.1; done; sleep 0.3
 for pair in "t7 wordpress" "t6 drupal"; do set -- $pair; u=$1; app=$2
+  # The same upload over HTTP/2 (prior knowledge): DATA frames to the pool's tmp, then served.
+  check "upload over HTTP/2 ($app preset, user $u): a 600 KB multipart body reaches PHP and the file is served" "200 0 614400 | 200 614400" "$(r=$(curl -sS --http2-prior-knowledge -o $T/upl.out -w '%{http_code}' -H "Host: $u.test" -F "f=@$T/mid.bin" http://127.0.0.1:18198/upload.php); echo -n "$r "; head -1 $T/upl.out | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["error"], d["size"], end="")' 2>/dev/null; echo -n " | "; curl -sS --http2-prior-knowledge -o /dev/null -w '%{http_code} %{size_download}' -H "Host: $u.test" http://127.0.0.1:18198/moved.bin)"
   check "upload ($app preset, user $u): the moved upload has the server's group and is served" "200 0 614400 | agensio | 200 614400" "$(r=$(curl -sS -o $T/upl.out -w '%{http_code}' -H "Host: $u.test" -F "f=@$T/mid.bin" http://127.0.0.1:18198/upload.php); echo -n "$r "; head -1 $T/upl.out | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["error"], d["size"], end="")' 2>/dev/null; echo -n " | $(stat -c %G $T/www/$u.test/moved.bin 2>/dev/null) | "; curl -sS -o /dev/null -w '%{http_code} %{size_download}' -H "Host: $u.test" http://127.0.0.1:18198/moved.bin)"
 done
 check "health: a file under a root the server cannot read is an error finding naming it; fixed, it is gone" "files_unreadable yes 0" "$(chgrp t9 $T/www/t9.test/web/moved.bin; chmod 0640 $T/www/t9.test/web/moved.bin; h=$("$BIN" ctl health --socket $T/run/control.sock); echo -n "$(echo "$h" | grep -o '"code":"files_unreadable"' | head -1 | cut -d'"' -f4) "; echo "$h" | grep -q "moved.bin (t9:t9 0640)" && echo -n yes; chgrp agensio $T/www/t9.test/web/moved.bin; echo " $("$BIN" ctl health --socket $T/run/control.sock | grep -c files_unreadable)")"

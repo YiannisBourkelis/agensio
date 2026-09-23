@@ -10,6 +10,21 @@
   h2-library client: a connection that picks up the new generation at its next stream
   without a GOAWAY, and one on a removed listener that is served once more, told GOAWAY
   and closed.
+- HTTP/2 performance pass (phase G, step G2): the four-worker comparison
+  (`bench/results/h2-20260923-201044.md`: 1.59M req/s on h2c and 1.28M over TLS at ten
+  streams per connection against nginx's 665k and 559k, every row ahead). **Idle
+  connections cost less**, on both protocols: two seconds after its last request a
+  connection sheds its buffers (the pooled HTTP/2 streams, the writer's buffers, and the
+  receive buffer, whose pending read is cancelled and replaced by a readiness wait; the
+  buffer comes back with the next bytes), the HPACK ring is made on a client's first
+  insertion, at most four released streams stay pooled, and each worker trims the heap
+  once a second after sheds or closes, since glibc keeps freed chunks mapped. Measured
+  with 10,000 idle and 1,000 busy connections (`bench/h2/memory.sh`,
+  `h2-memory-20260923-204605.md`): an idle HTTP/2 connection 19 KB (40 before; nginx 7.5,
+  Caddy 35), an idle HTTP/1 connection 13 KB (25 before); busy, 90 MB against nginx's
+  93 MB. The integration suite checks that a connection idle past the shed point still
+  serves its next request on every protocol. Uploads through the WordPress and Drupal
+  presets are exercised over HTTP/2 in the root suite.
 - **Fixed: a heap read past the HTTP/2 receive buffer** after a connection error decided
   inside a frame handler (found by the sanitizer build under h2spec, which the release
   build survived by luck): the lingering close reset the buffer while the frame loop went

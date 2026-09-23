@@ -42,6 +42,7 @@ struct Worker {
     asio::steady_timer flush_timer{ctx};  // access log buffers, once per second
     UpstreamPool upstream_pool{ctx};      // this worker's FastCGI and origin connections
     std::atomic<std::uint64_t> connections{0};
+    unsigned sheds = 0;  // connections that dropped their idle buffers or closed since the last trim (this thread only)
     // The configuration this worker hands to new connections and to connections at their
     // next request. Written only by a handler posted to this worker's loop (reload).
     std::shared_ptr<const Generation> gen;

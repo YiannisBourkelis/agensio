@@ -128,6 +128,14 @@ public:
     bool idle() const noexcept { return !writing_ && ctl_.empty() && ready_head_ == nullptr; }
     unsigned pulls() const noexcept { return pulls_; }
 
+    // Idle: the coalescing buffer (up to a cycle's worth) and the scatter list go.
+    void shed() noexcept {
+        if (writing_) return;
+        std::vector<char>().swap(out_);
+        std::vector<unsigned char>().swap(hdrs_);
+        std::vector<asio::const_buffer>().swap(pieces_);
+    }
+
     // The connection is closing: nothing more is written, in-flight completions are ignored.
     void reset() noexcept {
         closed_ = true;

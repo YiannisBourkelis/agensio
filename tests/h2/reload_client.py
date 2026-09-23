@@ -6,6 +6,7 @@ short wait for a GOAWAY and a close. Prints
 usage: reload_client.py PORT PATH -- command args...
 """
 import socket
+import ssl
 import subprocess
 import sys
 import time
@@ -16,9 +17,17 @@ import h2.events
 
 
 def main():
-    port, path = int(sys.argv[1]), sys.argv[2]
-    cmd = sys.argv[sys.argv.index("--") + 1:]
+    tls = "--tls" in sys.argv
+    args = [a for a in sys.argv[1:] if a != "--tls"]
+    port, path = int(args[0]), args[1]
+    cmd = args[args.index("--") + 1:]
     sock = socket.create_connection(("127.0.0.1", port))
+    if tls:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        ctx.set_alpn_protocols(["h2"])
+        sock = ctx.wrap_socket(sock, server_hostname="localhost")
     sock.settimeout(5)
     conn = h2.connection.H2Connection(config=h2.config.H2Configuration(client_side=True, header_encoding="utf-8"))
     conn.initiate_connection()
@@ -36,8 +45,8 @@ def main():
 
     def get():
         sid = conn.get_next_available_stream_id()
-        conn.send_headers(sid, [(":method", "GET"), (":path", path), (":authority", "k"), (":scheme", "http")],
-                          end_stream=True)
+        conn.send_headers(sid, [(":method", "GET"), (":path", path), (":authority", "localhost"),
+                                (":scheme", "https" if tls else "http")], end_stream=True)
         sock.sendall(conn.data_to_send())
         body = b""
         while True:
@@ -76,7 +85,8 @@ def main():
             break
         for _ev in pump(data):
             pass
-    print(first, "|", second, "|", "goaway" if state["goaway"] else "none", "|", "closed" if state["closed"] else "open", "|", rc)
+    flat = lambda b: " ".join(b.split())  # one line whatever the body contains
+    print(flat(first), "|", flat(second), "|", "goaway" if state["goaway"] else "none", "|", "closed" if state["closed"] else "open", "|", rc)
 
 
 if __name__ == "__main__":

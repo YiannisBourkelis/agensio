@@ -917,6 +917,35 @@ if python3 -c 'import h2' 2>/dev/null; then
 else
   echo "skip h2 authority checks (python3-h2 not installed)"
 fi
+# A connection idle for longer than the shed point (2 s) has given its buffers up and waits
+# for readiness; the next request on it must be served as before, over every protocol.
+idle_h1() {  # port [tls]
+  python3 - "$1" "${2:-}" <<'PY'
+import socket, ssl, sys, time
+port, tls = int(sys.argv[1]), sys.argv[2] == "tls"
+s = socket.create_connection(("127.0.0.1", port)); s.settimeout(5)
+if tls:
+    c = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT); c.check_hostname = False; c.verify_mode = ssl.CERT_NONE
+    c.set_alpn_protocols(["http/1.1"]); s = c.wrap_socket(s, server_hostname="localhost")
+def get():
+    s.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    d = b""
+    while b"\r\n\r\n" not in d: d += s.recv(65536)
+    head, body = d.split(b"\r\n\r\n", 1)
+    n = int([l for l in head.decode().split("\r\n") if l.lower().startswith("content-length:")][0].split(":")[1])
+    while len(body) < n: body += s.recv(65536)
+    return head.split(b" ")[1].decode()
+a = get(); time.sleep(2.6); b = get()
+print(a, b)
+PY
+}
+check "idle 2.6 s then a request on the same connection: HTTP/1 plain" "200 200" "$(idle_h1 8080)"
+check "idle 2.6 s then a request on the same connection: HTTP/1 over TLS" "200 200" "$(idle_h1 8443 tls)"
+if python3 -c 'import h2' 2>/dev/null; then
+  check "idle 2.6 s then a request on the same connection: HTTP/2 h2c" "1 1 none open" "$(python3 tests/h2/reload_client.py 8080 / -- sleep 2.6 | awk -F' [|] ' '{print (length($1)>100), (length($2)>100), $3, $4}')"
+  check "idle 2.6 s then a request on the same connection: HTTP/2 over TLS" "1 1 none open" "$(python3 tests/h2/reload_client.py --tls 8443 / -- sleep 2.6 | awk -F' [|] ' '{print (length($1)>100), (length($2)>100), $3, $4}')"
+fi
+
 # Conformance: h2spec against both listeners. Every case must pass.
 if command -v h2spec >/dev/null; then
   h2spec -h 127.0.0.1 -p 8080 -o 5 > bench/tmp/h2spec-h2c.txt 2>&1 || true
@@ -1104,7 +1133,7 @@ if [ -n "$UP_PID" ]; then
   check "cgi: 3 MB output spilled and intact" "3000000" "$(curl -sS $P/cgi-bin/big.cgi | wc -c | tr -d ' ')"
   check "cgi: Status from the script" "404" "$(code $P/cgi-bin/status.cgi)"
   check "cgi: Location alone is a 302" "302 /moved" "$(curl -sSi $P/cgi-bin/redirect.cgi | tr -d '\r' | awk '/^HTTP/{c=$2} /^Location:/{l=$2} END{print c, l}')"
-  check "cgi: stderr logged, output still served" "ok despite stderr yes" "$(curl -sS $P/cgi-bin/stderr.cgi | tr -d '\n') $(grep -q 'stderr.cgi stderr: something went sideways' bench/tmp/error.log && echo yes)"
+  check "cgi: stderr logged, output still served" "ok despite stderr yes" "$(curl -sS $P/cgi-bin/stderr.cgi | tr -d '\n') $(for _ in 1 2 3 4 5 6 7 8 9 10; do grep -q 'stderr.cgi stderr: something went sideways' bench/tmp/error.log && break; sleep 0.2; done; grep -q 'stderr.cgi stderr: something went sideways' bench/tmp/error.log && echo yes)"
   check "cgi: exit without a header block is a 502" "502" "$(code $P/cgi-bin/crash.cgi)"
   check "cgi: the crash's stderr and reason logged" "yes" "$(grep -q 'crash.cgi stderr: boom' bench/tmp/error.log && grep -q 'crash.cgi closed_early' bench/tmp/error.log && echo yes)"
   check "cgi: missing script is 404" "404" "$(code $P/cgi-bin/nope.cgi)"

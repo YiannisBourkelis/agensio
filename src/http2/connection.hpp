@@ -52,6 +52,8 @@ public:
     static constexpr unsigned kRecentClosed = 8;                     // ids of streams we reset, tolerated for a while
     static constexpr std::uint64_t kDrainAfterResponse = 65536;      // body bytes still taken after a response; more is cut short
     static constexpr unsigned kInlineBudget = 8;                     // reads completed inline before yielding to the loop
+    static constexpr std::size_t kPoolKeep = 4;                      // released streams kept with their buffers for reuse
+    static constexpr std::chrono::seconds kShedAfter{2};             // idle this long: buffers go, readiness brings them back
 
     // `initial` holds bytes the HTTP/1 connection had already read (the preface and
     // whatever followed, h2c); on ALPN it is empty.
@@ -80,7 +82,10 @@ public:
     }
     Http2Connection(const Http2Connection&) = delete;
     Http2Connection& operator=(const Http2Connection&) = delete;
-    ~Http2Connection() override { worker_.connections.fetch_sub(1, std::memory_order_relaxed); }
+    ~Http2Connection() override {
+        worker_.connections.fetch_sub(1, std::memory_order_relaxed);
+        ++worker_.sheds;  // freed buffers: the worker's next trim gives the pages back
+    }
 
     void start() {
         last_activity_ = std::chrono::steady_clock::now();
@@ -203,6 +208,15 @@ private:
     void on_read(const asio::error_code& ec, std::size_t n) {
         read_pending_ = false;
         if (closed_) return;
+        if (shedding_) {  // the idle tick cancelled this read to drop the buffer
+            shedding_ = false;
+            if (ec == asio::error::operation_aborted) {
+                std::vector<char>().swap(in_);
+                wait_readable();
+                return;
+            }
+            // Bytes arrived first: served as usual, the buffer stays.
+        }
         if (ec) {
             close();  // the client is gone: every exchange in flight is cancelled with it
             return;
@@ -215,6 +229,39 @@ private:
         in_len_ += n;
         last_activity_ = std::chrono::steady_clock::now();
         process_frames();
+    }
+
+    // An idle connection holds no receive buffer: the socket's readiness is awaited instead,
+    // and the buffer comes back (16 KB, once) when bytes are there to read.
+    void wait_readable() {
+        read_pending_ = true;
+        auto self = this->shared_from_this();
+        lowest().async_wait(asio::ip::tcp::socket::wait_read, [self](const asio::error_code& ec) {
+            self->read_pending_ = false;
+            if (self->closed_) return;
+            if (ec) {
+                self->close();
+                return;
+            }
+            self->in_.resize(kMaxFramePayload + kFrameHeaderSize);
+            self->last_activity_ = std::chrono::steady_clock::now();
+            self->do_read();
+        });
+    }
+
+    // Idle for kShedAfter: what an idle connection does not need goes (the pooled streams
+    // with their chunk and arena buffers, the writer's coalescing buffer, the receive
+    // buffer once its pending read is cancelled), so ten thousand idle connections cost
+    // what ten thousand sockets cost, not ten thousand times 40 KB.
+    void shed() {
+        ++worker_.sheds;
+        pool_.clear();
+        writer_.shed();
+        if (read_pending_ && !shedding_ && in_len_ == 0 && !in_.empty() && !linger_ && !closing_after_write_) {
+            shedding_ = true;
+            asio::error_code ec;
+            lowest().cancel(ec);
+        }
     }
 
     // Handles every complete frame in the buffer, keeps the partial one, reads on.
@@ -612,7 +659,10 @@ private:
             active_[i] = std::move(active_.back());
             active_.pop_back();
             p->reset();
-            pool_.push_back(std::move(p));
+            // A few released streams stay with their buffers (arena, chunk) for the next
+            // requests; beyond that the object goes, or a connection that once ran a hundred
+            // streams would keep a hundred chunk buffers for its life.
+            if (pool_.size() < kPoolKeep) pool_.push_back(std::move(p));
             return;
         }
     }
@@ -1139,20 +1189,27 @@ private:
 
     // ---- timers ----
 
-    void arm_timer() {
+    void arm_timer(std::chrono::steady_clock::duration d) {
         auto self = this->shared_from_this();
-        timer_.expires_after(idle_timeout_);
+        timer_.expires_after(d);
         timer_.async_wait([self](const asio::error_code& ec) {
             if (ec || self->closed_) return;
             self->check_timeouts();
         });
     }
+    void arm_timer() { arm_timer(std::min<std::chrono::steady_clock::duration>(idle_timeout_, kShedAfter)); }
 
     void check_timeouts() {
         const auto now = std::chrono::steady_clock::now();
         if (active_.empty()) {
-            if (now - last_activity_ >= idle_timeout_) {
+            const auto idle = now - last_activity_;
+            if (idle >= idle_timeout_) {
                 close();
+                return;
+            }
+            if (idle >= kShedAfter) {
+                shed();
+                arm_timer(idle_timeout_ - idle);  // nothing more to do until the idle timeout
                 return;
             }
         } else {
@@ -1245,6 +1302,7 @@ private:
     std::vector<char> in_;
     std::size_t in_len_ = 0;
     bool read_pending_ = false;
+    bool shedding_ = false;  // the pending read was cancelled to drop the receive buffer
     unsigned inline_reads_ = 0;
     bool preface_seen_ = false;
     bool settings_seen_ = false;

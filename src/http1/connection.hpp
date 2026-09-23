@@ -81,11 +81,16 @@ public:
 
     Http1Connection(const Http1Connection&) = delete;
     Http1Connection& operator=(const Http1Connection&) = delete;
-    ~Http1Connection() { worker_.connections.fetch_sub(1, std::memory_order_relaxed); }
+    ~Http1Connection() {
+        worker_.connections.fetch_sub(1, std::memory_order_relaxed);
+        ++worker_.sheds;  // freed buffers: the worker's next trim gives the pages back
+    }
+
+    static constexpr std::chrono::seconds kShedAfter{2};  // idle this long: buffers go, readiness brings them back
 
     void start() {
         last_activity_ = std::chrono::steady_clock::now();
-        arm_timer(idle_timeout_);
+        arm_timer(next_tick(std::chrono::steady_clock::duration::zero()));
         if constexpr (IsTlsStream<Socket>::value) {
             auto self = this->shared_from_this();
             socket_.async_handshake([self](const asio::error_code& ec) {
@@ -322,15 +327,60 @@ private:
 
     // ---- timers ----
 
+    // The next tick: the shed point while the connection still holds its buffers, else the
+    // idle timeout itself.
+    std::chrono::steady_clock::duration next_tick(std::chrono::steady_clock::duration idle) const noexcept {
+        if (!shed_ && timeout_ == idle_timeout_ && idle < kShedAfter) return kShedAfter - idle;
+        return timeout_ - idle;
+    }
+
     void arm_timer(std::chrono::steady_clock::duration d) {
         auto self = this->shared_from_this();
         timer_.expires_after(d);
         timer_.async_wait([self](const asio::error_code& ec) {
             if (ec) return;  // cancelled
-            if (!self->lowest().is_open()) return;
+            if (!self->lowest().is_open() || self->handed_over_) return;
             auto idle = std::chrono::steady_clock::now() - self->last_activity_;
-            if (idle >= self->timeout_) self->close();
-            else self->arm_timer(self->timeout_ - idle);
+            if (idle >= self->timeout_) {
+                self->close();
+                return;
+            }
+            if (idle >= kShedAfter && !self->shed_) self->shed();
+            self->arm_timer(self->next_tick(idle));
+        });
+    }
+
+    // Idle for kShedAfter with nothing in flight: the receive buffer (its pending read
+    // cancelled), the body buffers and the writer's buffers go; the socket's readiness is
+    // awaited instead and the receive buffer comes back with the next bytes. An idle
+    // keep-alive connection then costs what its socket costs.
+    void shed() {
+        if (responding_ || body_pending_ || tunnel_ || upstream_ || in_len_ > 0 || !read_pending_ || shedding_) return;
+        shed_ = true;
+        ++worker_.sheds;
+        std::vector<char>().swap(body_buf_);
+        std::vector<char>().swap(drain_);
+        bpos_ = blen_ = 0;
+        writer_.shed();
+        shedding_ = true;
+        asio::error_code ec;
+        lowest().cancel(ec);  // the read completes aborted: on_read drops in_ and waits for readiness
+    }
+
+    void wait_readable() {
+        read_pending_ = true;
+        auto self = this->shared_from_this();
+        lowest().async_wait(asio::ip::tcp::socket::wait_read, [self](const asio::error_code& ec) {
+            self->read_pending_ = false;
+            if (ec || self->handed_over_) {
+                if (!ec) return;
+                self->close();
+                return;
+            }
+            self->in_.resize(self->cfg_.max_header_size);
+            self->shed_ = false;
+            self->last_activity_ = std::chrono::steady_clock::now();
+            self->arm_read();
         });
     }
 
@@ -381,6 +431,15 @@ private:
 
     void on_read(const asio::error_code& ec, std::size_t n) {
         read_pending_ = false;
+        if (shedding_) {  // the idle tick cancelled this read to drop the buffer
+            shedding_ = false;
+            if (ec == asio::error::operation_aborted) {
+                std::vector<char>().swap(in_);
+                wait_readable();
+                return;
+            }
+            shed_ = false;  // bytes arrived first: served as usual, the buffer stays
+        }
         if (tunnel_) {
             if (ec) return tunnel_client_eof();
             last_activity_ = std::chrono::steady_clock::now();
@@ -802,6 +861,8 @@ private:
     const Config* live_;                     // gen_->cfg: sites, limits, trusted proxies (reloadable)
     bool retire_ = false;                    // the listener left the configuration: close after this response
     bool handed_over_ = false;               // the socket now belongs to an Http2Connection
+    bool shed_ = false;                      // idle: buffers dropped, waiting for readiness
+    bool shedding_ = false;                  // the pending read was cancelled for that
     const Config& cfg_;                      // the boot configuration (writer settings)
     Dispatcher& dispatcher_;
     asio::steady_timer timer_;

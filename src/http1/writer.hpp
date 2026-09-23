@@ -72,6 +72,12 @@ public:
     // Body bytes handed to the kernel for the current or last response (access log).
     std::uint64_t body_bytes_sent() const noexcept { return body_sent_; }
 
+    // Idle: the chunk and coalescing buffers go (they come back on first use).
+    void shed() noexcept {
+        std::vector<char>().swap(chunk_);
+        std::vector<char>().swap(out_);
+    }
+
     // Forgets any transfer in progress (the connection is closing).
     void reset() noexcept {
         sf_file_ = nullptr;

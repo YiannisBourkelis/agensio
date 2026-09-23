@@ -201,11 +201,28 @@ void Server::drop_privileges() {
 #endif
 }
 
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
+static void trim_heap() noexcept {
+#if defined(__GLIBC__)
+    malloc_trim(0);
+#endif
+}
+
 void Server::arm_flush(Worker& w) {
     w.flush_timer.expires_after(std::chrono::seconds(1));
     w.flush_timer.async_wait([this, &w](const asio::error_code& ec) {
         if (ec) return;
         w.state.logs.flush();
+        // Buffers shed by idle connections and those of closed connections are freed, but
+        // glibc keeps freed chunks of that size mapped: a trim once a second, only when
+        // something was freed, gives the pages back (measured: 3,000 idle connections held
+        // 75 MB of RSS until this ran, and a burst of closes left the peak mapped for good).
+        if (w.sheds) {
+            w.sheds = 0;
+            trim_heap();
+        }
         arm_flush(w);
     });
 }

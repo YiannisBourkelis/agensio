@@ -637,8 +637,24 @@ misbehaviour counters against every published attack class up to the 2026 HTTP/2
       (uploads at the consumer's pace, not 64 KB per round trip), POST through FastCGI,
       proxy and CGI, the presets' uploads over h2 in the root suite, abort by RST_STREAM,
       trailers, the content-length rule, h2spec complete.
-- [ ] G2 Performance: the levers measured one by one, multi-worker against nginx and Caddy
-      with h2load, memory per connection published, the idle receive buffer decided.
+- [x] G2 (2026-09-23) Performance pass. Four workers each (`h2-20260923-201044.md`):
+      agensio 1.59M req/s on h2c and 1.28M over TLS at ten streams per connection against
+      nginx's 665k and 559k, ahead on every row. h2c streams (`h2-20260923-202135.md`): the
+      preadv block path beats nginx on the 10 MB stream (1116 vs 1204 us) and on 100 KB at
+      ten streams (8.6 vs 14.7 us), so sendfile per frame was not pursued. Memory
+      (`bench/h2/memory.sh`, `h2-memory-20260923-204605.md`): an idle connection sheds its
+      buffers two seconds after its last request in both protocols (the pooled streams,
+      the writer's buffers, and the receive buffer, whose pending read is cancelled and
+      replaced by a readiness wait; the buffer comes back with the next bytes), the HPACK
+      ring is made on the first insertion, at most four released streams stay pooled, and
+      the worker trims the heap once a second after sheds or closes because glibc keeps
+      freed chunks mapped. 10,000 idle HTTP/2 connections: agensio 19 KB each (40 before),
+      nginx 7.5 KB, Caddy 35 KB; 1,000 busy connections at ten streams: 90 MB, nginx
+      93 MB, Caddy 209 MB; an idle HTTP/1 connection 13 KB (25 before). Left for later: the
+      two 100-field header arrays every stream carries (6.4 KB) and the HPACK ring a client
+      fills (8 KB) are what remains per idle connection. Gates: `ab-20260923-205035.md`
+      flat on every HTTP/1 row, integration with four idle-then-request checks, reload,
+      sanitizer run clean.
 - [ ] G3 Hardening: `tests/h2-attacks.py` (rapid reset, MadeYouReset, CONTINUATION,
       HPACK bomb and the 2026 Bomb hold, slow read, floods) with memory sampled, budgets
       tuned, sanitizer and fuzz records, the security page's HTTP/2 section, counters in
