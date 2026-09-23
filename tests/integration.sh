@@ -287,7 +287,7 @@ if [ -x build/agensio_upstream ]; then
   build/agensio_upstream -p 9109 >/dev/null 2>&1 &
   UP3_PID=$!
 fi
-"$BIN" -c bench/tmp/agensio-test.toml >/dev/null 2>&1 &
+"$BIN" -c bench/tmp/agensio-test.toml >/dev/null 2>bench/tmp/server.err &   # stderr kept: a sanitizer build reports there
 PID=$!
 trap 'kill $PID 2>/dev/null; wait $PID 2>/dev/null; [ -n "$FPM_PID" ] && kill $FPM_PID 2>/dev/null; [ -n "$UP_PID" ] && kill $UP_PID 2>/dev/null; [ -n "$UP2_PID" ] && kill $UP2_PID 2>/dev/null; [ -n "$UP3_PID" ] && kill $UP3_PID 2>/dev/null; true' EXIT
 for _ in $(seq 1 50); do nc -z 127.0.0.1 8080 2>/dev/null && nc -z 127.0.0.1 8443 2>/dev/null && break; sleep 0.1; done

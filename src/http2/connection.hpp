@@ -236,7 +236,10 @@ private:
             preface_seen_ = true;
             pos = kPreface.size();
         }
-        while (!closed_ && in_len_ - pos >= kFrameHeaderSize) {
+        // A connection error or a graceful close decided inside a handler ends the loop: the
+        // lingering close owns the buffer and the reads from then on (the sanitizer caught the
+        // old loop reading a header past the buffer after in_len_ had been reset under it).
+        while (!closed_ && !closing_after_write_ && !linger_ && in_len_ - pos >= kFrameHeaderSize) {
             const auto* p = reinterpret_cast<const unsigned char*>(in_.data() + pos);  // NOLINT: bytes
             const FrameHeader h = read_frame_header(p);
             if (h.length > kMaxFramePayload) {
@@ -247,7 +250,7 @@ private:
             handle_frame(h, p + kFrameHeaderSize);
             pos += kFrameHeaderSize + h.length;
         }
-        if (closed_) return;
+        if (closed_ || closing_after_write_ || linger_) return;
         if (pos > 0) {
             if (pos < in_len_) std::memmove(in_.data(), in_.data() + pos, in_len_ - pos);
             in_len_ -= pos;
@@ -533,7 +536,10 @@ private:
     // A new stream for a request block, or nullptr (refused: RST_STREAM sent) when the
     // client is over its concurrency, the connection is going away, or its cap is reached.
     H2Stream* open_stream(std::uint32_t id) {
-        if (going_away_) return nullptr;  // past the GOAWAY's last id: the client retries elsewhere
+        if (going_away_) {  // the client has not seen our GOAWAY yet: refused, so it retries elsewhere
+            send_rst(id, ErrorCode::refused_stream, "");
+            return nullptr;
+        }
         if (active_.size() >= live_->http2.max_concurrent_streams) {
             for (auto& s : active_) {  // a stream kept only to drain its body gives its slot up
                 if (s->state != StreamState::half_closed_local) continue;
@@ -566,9 +572,12 @@ private:
         H2Stream* raw = s.get();
         active_.push_back(std::move(s));
         ++streams_opened_;
+        // The last stream this connection takes: served, then a GOAWAY naming it and the
+        // close (the frame goes out after the answer, so a client never has to read a
+        // response behind a GOAWAY).
         if (live_->max_requests_per_connection != 0 && streams_opened_ >= live_->max_requests_per_connection)
-            goaway(ErrorCode::no_error, "max_requests_per_connection reached");  // this stream is still served
-        if (retire_) goaway(ErrorCode::no_error, "listener left the configuration");
+            leave_after_streams("max_requests_per_connection reached");
+        if (retire_) leave_after_streams("listener left the configuration");
         return raw;
     }
 
@@ -1059,6 +1068,15 @@ private:
         do_read();
     }
 
+    // Graceful, the frame deferred: no new streams (refused), the open ones finish, then
+    // the GOAWAY and the close.
+    void leave_after_streams(std::string_view reason) {
+        if (going_away_ || closed_) return;
+        going_away_ = true;
+        goaway_pending_ = true;
+        goaway_reason_ = reason;
+    }
+
     // Graceful: no new streams after this id, the open ones finish, then the connection closes.
     void goaway(ErrorCode code, std::string_view reason) {
         if (going_away_ || closed_) return;
@@ -1074,6 +1092,14 @@ private:
 
     void maybe_finish() {
         if (going_away_ && active_.empty() && !closed_) {
+            if (goaway_pending_) {
+                goaway_pending_ = false;
+                if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::info))
+                    log->info("http2 " + remote_text() + ": GOAWAY after stream " + std::to_string(last_stream_id_) + ", NO_ERROR: " + goaway_reason_);
+                std::string f;
+                append_goaway(f, last_stream_id_, ErrorCode::no_error, goaway_reason_);
+                writer_.control(f);
+            }
             closing_after_write_ = true;
             if (writer_.idle()) begin_linger();
         }
@@ -1224,6 +1250,8 @@ private:
     bool settings_seen_ = false;
     bool settings_acked_ = false;
     bool going_away_ = false;
+    bool goaway_pending_ = false;   // the GOAWAY is sent once the streams in flight are done
+    std::string goaway_reason_;
     bool closing_after_write_ = false;
     bool linger_ = false;
     bool closed_ = false;

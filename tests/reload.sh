@@ -20,6 +20,7 @@ write_config() {  # root [extra-site-toml]
 [server]
 workers = 2
 pid_file = "$T/agensio.pid"
+protocols = ["h2c", "h2", "h1"]
 [log]
 access = "$T/logs/access.log"
 error = "$T/logs/error.log"
@@ -70,6 +71,24 @@ PYT
 )
 check "keep-alive connection serves v2 after the reload, no close" "version one | version two | kept | 0" "$ka"
 check "new listener 8098 answers" "version two" "$(curl -sS http://127.0.0.1:8098/)"
+# The same over HTTP/2 (phase G): the connection picks up the new generation at its next
+# stream, without a GOAWAY, and stays open. Reloading back and forth keeps the file valid.
+if python3 -c 'import h2' 2>/dev/null; then
+  write_config "$T/v1"
+  h2ka=$(python3 tests/h2/reload_client.py 8097 / -- "$BIN" reload -c "$T/agensio.toml")
+  check "h2: a connection serves the new configuration after the reload, no GOAWAY, stays open" "version two | version one | none | open | 0" "$h2ka"
+  write_config "$T/v2" "
+[[site.location]]
+path = \"/slow/\"
+upstream = \"http://127.0.0.1:9110/\"
+
+[[site]]
+server_name = [\"*\"]
+listen = [\"127.0.0.1:8098\"]
+root = \"$T/v2\"
+access_log = \"$T/logs/site8098.log\""
+  "$BIN" reload -c "$T/agensio.toml" > /dev/null 2>&1
+fi
 curl -sS -o /dev/null "http://127.0.0.1:8098/?marker=reload-added-log"; sleep 1.3
 check "a log file the reload added receives the requests (no silent drop)" "1" "$(grep -c 'marker=reload-added-log' "$T/logs/site8098.log" 2>/dev/null)"
 check "reload with no arguments finds ./agensio.toml" "0" "$(cd "$T" && "$BIN" reload > /dev/null 2>&1; echo $?)"
@@ -109,6 +128,21 @@ PYT
 )
 check "in-flight request finished on the old configuration; removed listener's connection served once, told to close, closed" "HTTP/1.1 200 OK | close-header served then closed" "$inflight"
 check "removed listener refuses new connections" "000" "$(code --max-time 2 http://127.0.0.1:8098/ 2>/dev/null)"
+# Over HTTP/2 a connection on a removed listener serves its next stream from the old
+# configuration, then gets a GOAWAY and is closed.
+if python3 -c 'import h2' 2>/dev/null; then
+  write_config "$T/v2" "
+[[site]]
+server_name = [\"*\"]
+listen = [\"127.0.0.1:8098\"]
+root = \"$T/v2\""
+  "$BIN" reload -c "$T/agensio.toml" > /dev/null 2>&1
+  for _ in $(seq 1 30); do nc -z 127.0.0.1 8098 2>/dev/null && break; sleep 0.1; done
+  write_config "$T/v2"
+  h2rm=$(python3 tests/h2/reload_client.py 8098 / -- "$BIN" reload -c "$T/agensio.toml")
+  check "h2: a connection on a removed listener is served once more, then GOAWAY and closed" "version two | version two | goaway | closed | 0" "$h2rm"
+  check "h2: the removed listener is gone again" "000" "$(code --max-time 2 http://127.0.0.1:8098/ 2>/dev/null)"
+fi
 check "removed location is gone" "404" "$(code $B/slow/json)"
 
 # A broken file is refused by the command before signalling, and by the server if signalled.

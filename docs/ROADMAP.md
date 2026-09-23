@@ -644,7 +644,9 @@ misbehaviour counters against every published attack class up to the 2026 HTTP/2
       tuned, sanitizer and fuzz records, the security page's HTTP/2 section, counters in
       `server_status` and `health`, MCP texts.
 - [ ] G4 Extras: RFC 9218 urgency, RFC 8441 CONNECT over h2 through the tunnel, per-site
-      protocols via SNI, the TLS-ALPN-01 hook, GOAWAY on reload reviewed.
+      protocols via SNI, the TLS-ALPN-01 hook. (GOAWAY on reload reviewed 2026-09-23: the
+      frame follows the streams in flight, new streams are refused meanwhile, both cases
+      in `tests/reload.sh`.)
 - [ ] Checkpoint: h2spec passes; HTTP/1.1 rows unchanged in every A/B (no cost when h2 is
       idle or off); CPU per request and memory per connection below nginx on the same box.
 

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.0-alpha.20 (unreleased)
+
+- HTTP/2 across a reload: a connection whose listener left the configuration, or that
+  reached `max_requests_per_connection`, serves the stream in flight and only then sends
+  its GOAWAY and closes, so no client has to read an answer behind a GOAWAY; a stream
+  opened while the connection is leaving is refused (`REFUSED_STREAM`) so the client
+  retries on a new connection. `tests/reload.sh` now drives both cases over HTTP/2 with an
+  h2-library client: a connection that picks up the new generation at its next stream
+  without a GOAWAY, and one on a removed listener that is served once more, told GOAWAY
+  and closed.
+- **Fixed: a heap read past the HTTP/2 receive buffer** after a connection error decided
+  inside a frame handler (found by the sanitizer build under h2spec, which the release
+  build survived by luck): the lingering close reset the buffer while the frame loop went
+  on with its old position. The loop now stops the moment a close is decided. The
+  integration harness keeps the server's stderr in `bench/tmp/server.err` so a sanitizer
+  report is never discarded again.
+
 ## 0.1.0-alpha.19 (2026-09-23)
 
 - **Generated pools default to `pm = "ondemand"`** with `pm.process_idle_timeout = 60s`
