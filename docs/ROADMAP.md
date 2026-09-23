@@ -33,7 +33,7 @@ Current source map (`src/`): `server` (workers, listeners, accept), `connection.
                  +------+-----------------+-------------------------+--------+
                         |                 |                         |
    protocol       Http1Connection    Http2Connection          Http3Connection
-   connections    (1 stream at a time)  (nghttp2 session)    (ngtcp2 + nghttp3)
+   connections    (1 stream at a time)  (own framing+HPACK)  (ngtcp2 + nghttp3)
                         \                |                         /
                          \               v                        /
                           +---------> Stream <--------------------+
@@ -82,7 +82,7 @@ Target source layout:
 ```
 src/core/        stream.hpp, request.hpp, response.hpp, body_source.hpp, headers.hpp, router.*
 src/http1/       parser.*, connection.hpp, chunked.*
-src/http2/       connection.hpp (nghttp2 glue)
+src/http2/       frame, hpack, settings, stream, writer, connection (own, docs/design-http2.md)
 src/http3/       listener.*, connection.hpp (ngtcp2 + nghttp3 glue)
 src/handlers/    static.*, fastcgi.*, proxy.*, cgi.*, redirect.*, control.*
 src/upstream/    fcgi_client.*, http_client.*, process.*, pool.hpp
@@ -603,14 +603,50 @@ Rules:
       the threat model.
 
 ### Phase G. HTTP/2  `[ ]`
-- [ ] G1 ALPN in `TlsStream` (`h2`, `http/1.1`); `Http2Connection` around an nghttp2
-      session: our socket I/O feeds nghttp2, callbacks create/complete `Stream`s, response
-      `BodySource`s become DATA frames with flow control honoured.
-- [ ] G2 Settings and limits: max concurrent streams, window sizes, header list size,
-      priority ignored (RFC 9113), PING/GOAWAY, graceful close.
-- [ ] G3 h2c (cleartext upgrade / prior knowledge) optional, off by default.
-- [ ] G4 Benchmark with `h2load` (nghttp2) vs nginx `http2 on`: static, Laravel, proxy.
-- [ ] Checkpoint: h2spec passes; HTTP/1.1 numbers unchanged (no cost when h2 is idle).
+Design: `docs/design-http2.md` (proposed 2026-09-23, awaiting the owner's review). It
+proposes our own framing, HPACK, flow control and scheduler with nghttp2 in the test bed
+only (h2load, a differential HPACK fuzzer, `nghttp`), h2spec for conformance, a protocol
+layer with one contract for h1, h2 and later h3, two configuration keys (`[server]
+protocols`, `http2.max_concurrent_streams`), a per-connection memory budget and two
+misbehaviour counters against every published attack class up to the 2026 HTTP/2 Bomb.
+- [x] G0 (2026-09-23) HTTP/2 in `src/http2/`: ALPN and the h2c preface hand-over from
+      `Http1Connection`, framing, the HPACK decoder (Huffman automaton generated from the
+      RFC text) and the static-only encoder with prebuilt blocks per cache entry and error
+      page, pooled streams through the existing dispatcher for every handler, request
+      bodies through DATA frames with windows sized to the body limit (G1's first item,
+      needed for conformance), response flow control and the round-robin write cycle,
+      SETTINGS/PING/GOAWAY/RST_STREAM, every connection-level limit and both budgets, a
+      lingering close after GOAWAY, a stream kept half-closed to drain a small body after
+      its response. Two bugs the sanitizer found under h2load and fixed the same day: the
+      write cycle and the read loop each recursed without bound when a socket stayed
+      writable or readable (inline completions), now bounded like HTTP/1's response budget.
+      Tests: RFC 7541 vectors and error cases, `fuzz_hpack` (2.2M runs clean),
+      h2spec 146/146 over TLS and 145/146 on h2c (3.5/2: an invalid preface on a plain
+      listener is an HTTP/1 400), curl and the h2-library client in the integration run,
+      the H2h coalescing check live. Numbers (`bench/results/ab-20260923-171228.md`,
+      `h2-20260923-164706.md`, `h2-20260923-171144.md`, one worker): HTTP/1 rows 0.98 to
+      1.04 (noise); HTTP/2 1 KB 2.3 us plain and 3.1 to 3.4 us TLS at one stream per
+      connection (HTTP/1: 2.0 and 2.9), 1.6 to 1.8 and 2.0 to 2.1 us at ten streams (below
+      HTTP/1); against nginx 3.98 / 4.72 / 3.54 us on the same rows, 606k req/s at ten
+      streams against nginx's 252k; 100 KB TLS at ten streams 20.5 vs 28.4 us; the 10 MB
+      TLS stream 2017 vs 2771 us after the record-sized frames and the pre-framed preadv
+      file chunks of the same day (2864 before, nginx's only win). Caddy 30 us on every
+      small row. Not done from the G0 list: `fuzz_h2_frame` with a fake socket (G3, with
+      the attack suite).
+- [ ] G1 Request bodies: DATA to `StreamBody`, windows sized to the site's body limit
+      (uploads at the consumer's pace, not 64 KB per round trip), POST through FastCGI,
+      proxy and CGI, the presets' uploads over h2 in the root suite, abort by RST_STREAM,
+      trailers, the content-length rule, h2spec complete.
+- [ ] G2 Performance: the levers measured one by one, multi-worker against nginx and Caddy
+      with h2load, memory per connection published, the idle receive buffer decided.
+- [ ] G3 Hardening: `tests/h2-attacks.py` (rapid reset, MadeYouReset, CONTINUATION,
+      HPACK bomb and the 2026 Bomb hold, slow read, floods) with memory sampled, budgets
+      tuned, sanitizer and fuzz records, the security page's HTTP/2 section, counters in
+      `server_status` and `health`, MCP texts.
+- [ ] G4 Extras: RFC 9218 urgency, RFC 8441 CONNECT over h2 through the tunnel, per-site
+      protocols via SNI, the TLS-ALPN-01 hook, GOAWAY on reload reviewed.
+- [ ] Checkpoint: h2spec passes; HTTP/1.1 rows unchanged in every A/B (no cost when h2 is
+      idle or off); CPU per request and memory per connection below nginx on the same box.
 
 ### Phase H. Production hardening  `[ ]`
 - [x] H1 (2026-09-18) Zero-downtime reload: a `Generation` owns a loaded `Config` with
@@ -938,6 +974,8 @@ Rules:
 1. **HTTP/2 and HTTP/3 libraries.** Start with nghttp2 and ngtcp2 + nghttp3. Benchmark h2
    and h3 against nginx and Caddy; if the numbers disappoint, write HTTP/2 framing + HPACK
    ourselves (QUIC stays a library either way).
+   Superseded (proposed 2026-09-23) by `docs/design-http2.md`: own HTTP/2 framing and HPACK,
+   nghttp2 in the test bed only; QUIC stays a library, HTTP/3 framing decided in phase I.
 2. **Control interface: security first, MCP built in** (reaffirmed 2026-09-16). HTTP + JSON
    API over a unix domain socket by default with peer-credential checks; an optional
    loopback TCP listener with a bearer token (off by default on POSIX, the default on

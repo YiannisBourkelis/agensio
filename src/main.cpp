@@ -358,11 +358,14 @@ int main(int argc, char** argv) {
     }
 
     try {
+        const bool cfg_h2 = cfg.h2, cfg_h2c = cfg.h2c;
         agensio::Server server(std::move(cfg));
         std::cout << "agensio " AGENSIO_VERSION " starting with " << server.worker_count() << " worker(s)"
                   << (server.reuse_port_enabled() ? ", SO_REUSEPORT per worker" : ", shared acceptor") << "\n";
         for (const auto& l : server.listeners()) {
-            std::cout << "  listening on " << (l.tls ? "https://" : "http://") << l.address << "  sites:";
+            std::cout << "  listening on " << (l.tls ? "https://" : "http://") << l.address
+                      << (l.tls ? (cfg_h2 ? " (h2, h1)" : " (h1)") : (cfg_h2c ? " (h2c, h1)" : " (h1)"))
+                      << "  sites:";
             for (const auto& n : l.site_names)
                 std::cout << ' ' << n;
             std::cout << "\n";

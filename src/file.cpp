@@ -15,6 +15,7 @@
 #include <netinet/tcp.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/uio.h>  // preadv
 #include <unistd.h>
 #if defined(__APPLE__)
 #include <sys/socket.h>
@@ -90,6 +91,17 @@ std::int64_t File::read_at(void* buf, std::size_t len, std::uint64_t offset) con
     return n;
 }
 
+std::int64_t File::read_at(const MutSlice* slices, int count, std::uint64_t offset) const noexcept {
+    std::int64_t total = 0;
+    for (int i = 0; i < count; ++i) {
+        const std::int64_t n = read_at(slices[i].data, slices[i].len, offset + static_cast<std::uint64_t>(total));
+        if (n < 0) return total > 0 ? total : -1;
+        total += n;
+        if (static_cast<std::size_t>(n) < slices[i].len) break;
+    }
+    return total;
+}
+
 void File::close() noexcept {
     if (fd_ >= 0) {
         _close(fd_);
@@ -159,6 +171,20 @@ bool File::info(FileInfo& out) const noexcept {
 std::int64_t File::read_at(void* buf, std::size_t len, std::uint64_t offset) const noexcept {
     for (;;) {
         ssize_t n = ::pread(fd_, buf, len, static_cast<off_t>(offset));
+        if (n < 0 && errno == EINTR) continue;
+        return n;
+    }
+}
+
+std::int64_t File::read_at(const MutSlice* slices, int count, std::uint64_t offset) const noexcept {
+    struct iovec iov[16];
+    if (count > 16) count = 16;
+    for (int i = 0; i < count; ++i) {
+        iov[i].iov_base = slices[i].data;
+        iov[i].iov_len = slices[i].len;
+    }
+    for (;;) {
+        const ssize_t n = ::preadv(fd_, iov, count, static_cast<off_t>(offset));
         if (n < 0 && errno == EINTR) continue;
         return n;
     }

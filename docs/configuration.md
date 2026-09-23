@@ -1111,3 +1111,48 @@ tools, locally or over SSH: see `docs/mcp.md`.
 runs as the server's own user or as a member of the admin group: with everything under
 one account the peer-credential check cannot tell sites apart. Per-site users (section
 11) are what makes the control socket safe on a shared host.
+
+## 16. HTTP/2
+
+HTTP/2 (RFC 9113) is on for every TLS listener: a client that offers `h2` through ALPN
+gets it, any other client gets HTTP/1.1 on the same port. Nothing is configured per
+site, and every HTTP/2 limit derives from keys you already know. The design, the
+comparison with nginx, Caddy, lighttpd and HAProxy, and the threat model are in
+`docs/design-http2.md`.
+
+```toml
+[server]
+protocols = ["h2", "h1"]          # the default; order = ALPN preference
+# protocols = ["h1"]              # HTTP/2 off, for instance during an incident
+# protocols = ["h2c", "h2", "h1"] # also accept prior-knowledge HTTP/2 on plain listeners
+http2 = { max_concurrent_streams = 128 }
+```
+
+| key | default | meaning |
+|---|---|---|
+| `protocols` | `["h2", "h1"]` | what TLS listeners offer through ALPN, in order of preference (Caddy's names; `"http/1.1"`, the ALPN identifier, is accepted for `"h1"`). `"h2c"` in the list makes plain listeners accept HTTP/2 with prior knowledge (the connection preface; `curl --http2-prior-knowledge`, `h2load`, a backend behind a proxy). Browsers never use h2c, so it is off by default. `"h3"` arrives with phase I. |
+| `http2.max_concurrent_streams` | 128 | streams a client may have open at once on one connection (`SETTINGS_MAX_CONCURRENT_STREAMS`, nginx's default); a stream beyond it is refused, the connection stays |
+
+What derives from the other keys, so that HTTP/2 needs no tuning of its own:
+
+| HTTP/2 limit | comes from | value at the defaults |
+|---|---|---|
+| `SETTINGS_MAX_HEADER_LIST_SIZE`, the decoded size of a request's fields, and the size of a compressed header block | `max_header_size` | 16 KB each; a block over either closes the connection (`ENHANCE_YOUR_CALM`), a peer doing that is not a browser |
+| streams on one connection before `GOAWAY` | `max_requests_per_connection` | 1000, like a keep-alive connection's requests |
+| a connection with no stream open, or a stream whose head or response makes no progress | `idle_timeout` | 15 s |
+| a body announced but not arriving | `body_timeout` | 60 s |
+| the request-body limit and the size of the receive windows | `max_body_size`, or the site's own | 1 MB per stream and per connection at most, so an upload runs at the pace of the disk or the origin rather than 64 KB per round trip |
+| `SETTINGS_MAX_FRAME_SIZE`, `SETTINGS_HEADER_TABLE_SIZE` | fixed | 16 KB, 4 KB |
+
+Two counters per connection close it when a client misbehaves, whatever the shape of the
+attack (Rapid Reset, MadeYouReset, CONTINUATION floods, PING and SETTINGS floods, empty
+frames, window-update dribbles, HPACK bombs; the list is in the design document): 100
+protocol glitches (a `GOAWAY` is sent at 75 so a slightly broken client can reconnect and
+carry on), and 128 streams cancelled before a response within one second, by either
+side. Every `GOAWAY` and `RST_STREAM` the server sends is one line in the error log at
+level info with the client address, the stream id, the error code and the reason.
+
+Requests over HTTP/2 are logged as `"GET /path HTTP/2.0"` (`"proto":"HTTP/2.0"` in JSON),
+and PHP sees `SERVER_PROTOCOL=HTTP/2.0`. `agensio ctl status` names the protocols of each
+listener. Server push is not implemented (browsers removed it), nor the RFC 7540
+priority tree (deprecated; PRIORITY frames are ignored), nor `Upgrade: h2c`.

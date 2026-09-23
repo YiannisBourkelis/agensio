@@ -1039,6 +1039,9 @@ void print_fcgi(std::ostream& out, const char* key, const FcgiConfig& f) {
 
 void explain_config(const Config& cfg, std::ostream& out) {
     out << "# effective configuration of " << cfg.config_path.string() << " (presets expanded)\n";
+    out << "\n[server]\n";
+    print_list(out, "protocols", cfg.protocols);
+    out << "http2 = { max_concurrent_streams = " << cfg.http2.max_concurrent_streams << " }\n";
     for (const auto& site : cfg.sites) {
         out << "\n[[site]]";
         if (!site.app.empty()) out << "  # app = \"" << site.app << "\"";
@@ -1203,6 +1206,27 @@ Config load_config(const fs::path& path) {
         size_node(server["sendfile_max_chunk"], cfg.sendfile_max_chunk, "server.sendfile_max_chunk");
     if (cfg.sendfile_max_chunk < 65536) fail("server.sendfile_max_chunk must be at least 64KB");
     cfg.server_header = server["server_header"].value_or(std::string("agensio"));
+    if (server.as_table() && server.as_table()->contains("protocols"))
+        cfg.protocols = string_list(server["protocols"], "server.protocols");
+    cfg.h2 = cfg.h2c = false;
+    cfg.alpn_wire.clear();
+    if (cfg.protocols.empty()) fail("server.protocols must list at least \"h1\"");
+    for (std::string& p : cfg.protocols) {
+        if (p == "http/1.1") p = "h1";  // the ALPN identifier, accepted as an alias
+        if (p == "h2") cfg.h2 = true;
+        else if (p == "h2c") cfg.h2c = true;
+        else if (p != "h1") fail("server.protocols: \"" + p + "\" is not one of \"h1\", \"h2\", \"h2c\"");
+        const std::string_view alpn = p == "h2" ? "h2" : p == "h1" ? "http/1.1" : "";
+        if (!alpn.empty()) cfg.alpn_wire.push_back(static_cast<char>(alpn.size())), cfg.alpn_wire.append(alpn);
+    }
+    if (auto h = server["http2"].as_table()) {
+        for (const auto& [k, v] : *h)
+            if (k != "max_concurrent_streams") fail("server.http2: unknown key \"" + std::string(k.str()) + "\"");
+        if (auto n = (*h)["max_concurrent_streams"].value<std::int64_t>()) {
+            if (*n < 1 || *n > 65535) fail("server.http2.max_concurrent_streams must be between 1 and 65535");
+            cfg.http2.max_concurrent_streams = static_cast<std::uint32_t>(*n);
+        }
+    }
     for (const auto& text : string_list(server["trusted_proxies"], "server.trusted_proxies")) {
         Cidr c;
         std::string err;

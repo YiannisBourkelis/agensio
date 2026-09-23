@@ -263,6 +263,25 @@ static int select_certificate(SSL* ssl, int* alert, void* arg) {
 }
 #endif
 
+#ifdef AGENSIO_HAS_TLS
+// ALPN (HTTP/2, phase G): the first protocol of our list the client offers wins, in our
+// order; a client without ALPN, or without any of ours, gets no selection and speaks
+// HTTP/1.1 as before. Set on every context, since the SNI callback switches contexts.
+static int select_protocol(SSL*, const unsigned char** out, unsigned char* outlen, const unsigned char* in,
+                           unsigned inlen, void* arg) {
+    const auto* l = static_cast<const Listener*>(arg);
+    if (l->alpn.empty()) return SSL_TLSEXT_ERR_NOACK;
+    unsigned char* selected = nullptr;
+    unsigned char selected_len = 0;
+    const int r = SSL_select_next_proto(&selected, &selected_len, reinterpret_cast<const unsigned char*>(l->alpn.data()),
+                                        static_cast<unsigned>(l->alpn.size()), in, inlen);
+    if (r != OPENSSL_NPN_NEGOTIATED) return SSL_TLSEXT_ERR_NOACK;
+    *out = selected;
+    *outlen = selected_len;
+    return SSL_TLSEXT_ERR_OK;
+}
+#endif
+
 void Server::build_listeners(Generation& gen) {
     auto& listeners = gen.listeners;
     for (const auto& site : gen.cfg.sites) {
@@ -311,11 +330,14 @@ void Server::build_listeners(Generation& gen) {
     }
 #ifdef AGENSIO_HAS_TLS
     // The vector is complete: each listener's address is stable for the callback argument.
-    for (auto& l : listeners)
+    for (auto& l : listeners) {
+        l.alpn = gen.cfg.alpn_wire;
         for (auto& [path, ctx] : l.tls_contexts) {
             SSL_CTX_set_tlsext_servername_callback(ctx->native_handle(), select_certificate);
             SSL_CTX_set_tlsext_servername_arg(ctx->native_handle(), &l);
+            SSL_CTX_set_alpn_select_cb(ctx->native_handle(), select_protocol, &l);
         }
+    }
 #endif
     if (gen.cfg.control.enabled) {
         gen.control_site = control_site();
@@ -454,6 +476,15 @@ json::Value Server::status() {
     json::Value listeners = json::Value::array();
     for (const auto& l : gen_->listeners) {
         json::Value entry = json::Value::object().set("address", l.address).set("tls", l.tls).set("sites", static_cast<double>(l.site_names.size()));
+        json::Value protocols = json::Value::array();
+        if (l.tls) {
+            if (gen_->cfg.h2) protocols.push("h2");
+            protocols.push("h1");
+        } else {
+            if (gen_->cfg.h2c) protocols.push("h2c");
+            protocols.push("h1");
+        }
+        entry.set("protocols", std::move(protocols));
         const SiteConfig* all = l.router.default_site();
         entry.set("catch_all", all ? json::Value(all->server_names.front()) : json::Value(nullptr));
         listeners.push(std::move(entry));

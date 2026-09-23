@@ -37,6 +37,7 @@ void Dispatcher::redirect_https(Stream& s, const SiteConfig& site) {
     r.head = req.method == Method::head;
     r.headers.add("Location", location);
     r.prebuilt_headers = page.headers;
+    r.prebuilt_h2 = page.h2_headers;
     r.body = MemoryBody{page.body};
 }
 

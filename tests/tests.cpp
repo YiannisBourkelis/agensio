@@ -42,6 +42,11 @@
 #include "core/router.hpp"
 #include "handlers/fastcgi.hpp"
 #include "handlers/static.hpp"
+#include "core/fields.hpp"
+#include "http2/frame.hpp"
+#include "http2/hpack.hpp"
+#include "http2/settings.hpp"
+#include "hpack_vectors.hpp"
 #include "http1/parser.hpp"
 #include "http_date.hpp"
 #include "mime.hpp"
@@ -2602,7 +2607,7 @@ static void test_config_reference() {
                                           "exact", "prefix", "suffix", "value", "agensio", "https", "http", "none", "allow", "deny", "append", "replace",
                                           "rfc7239", "rewrite", "pass", "fastcgi", "proxy", "cgi", "control", "php", "laravel", "wordpress", "drupal",
                                           "linux", "darwin", "unix", "tcp", "get", "head", "post", "put", "delete", "patch", "options", "trace", "connect",
-                                          "server", "cache", "log", "site", "acme"};  // table names, not keys
+                                          "server", "cache", "log", "site", "acme", "http2"};  // table names, not keys
     std::set<std::string> missing;
     const std::size_t begin = src.find("void parse_proxy_policy"), end = src.find("json::Value preset_catalog");
     CHECK(begin != std::string::npos && end != std::string::npos && begin < end);
@@ -2643,6 +2648,236 @@ static void test_config_reference() {
 }
 
 // The refused-endings rule, with the spellings a live host served as source.
+// HTTP/2 framing, settings, the shared field rules and HPACK (RFC 7541 appendix C).
+static std::string unhex(std::string_view hex) {
+    std::string out;
+    for (std::size_t i = 0; i + 1 < hex.size(); i += 2)
+        out.push_back(static_cast<char>(std::stoul(std::string(hex.substr(i, 2)), nullptr, 16)));
+    return out;
+}
+static std::string tohex(std::string_view s) {
+    static const char* d = "0123456789abcdef";
+    std::string out;
+    for (const unsigned char c : s) {
+        out.push_back(d[c >> 4]);
+        out.push_back(d[c & 15]);
+    }
+    return out;
+}
+
+static void test_h2_frame_and_settings() {
+    using namespace h2;
+    unsigned char buf[kFrameHeaderSize];
+    write_frame_header(buf, 0x123456, FrameType::headers, flag::end_headers | flag::end_stream, 0x80000007u);
+    const FrameHeader h = read_frame_header(buf);
+    CHECK(h.length == 0x123456 && h.type == 1 && h.flags == 5 && h.stream_id == 7);  // the reserved bit is dropped
+    std::string out;
+    append_goaway(out, 9, ErrorCode::enhance_your_calm, "calm");
+    CHECK(tohex(out) == "00000c07000000000000000009000000" "0b" "63616c6d");
+    out.clear();
+    append_rst_stream(out, 3, ErrorCode::cancel);
+    CHECK(tohex(out) == "000004030000000003" "00000008");
+    out.clear();
+    append_window_update(out, 0, 1u << 20);
+    CHECK(tohex(out) == "000004080000000000" "00100000");
+    out.clear();
+    const SettingPair pairs[] = {{setting_max_concurrent_streams, 128}, {setting_no_rfc7540_priorities, 1}};
+    append_settings(out, pairs);
+    CHECK(tohex(out) == "00000c040000000000" "000300000080" "000900000001");
+    out.clear();
+    append_settings_ack(out);
+    CHECK(tohex(out) == "000000040100000000");
+    const unsigned char ping[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    out.clear();
+    append_ping_ack(out, ping);
+    CHECK(tohex(out) == "000008060100000000" "0102030405060708");
+    PeerSettings ps;
+    CHECK(ps.apply(setting_enable_push, 2) == ErrorCode::protocol_error);
+    CHECK(ps.apply(setting_initial_window_size, 0x80000000u) == ErrorCode::flow_control_error);
+    CHECK(ps.apply(setting_max_frame_size, 100) == ErrorCode::protocol_error);
+    CHECK(ps.apply(setting_max_frame_size, 1u << 24) == ErrorCode::protocol_error);
+    CHECK(ps.apply(setting_max_frame_size, 65536) == ErrorCode::no_error && ps.max_frame_size == 65536);
+    CHECK(ps.apply(setting_initial_window_size, 1 << 20) == ErrorCode::no_error && ps.initial_window_size == 1u << 20);
+    CHECK(ps.apply(setting_no_rfc7540_priorities, 1) == ErrorCode::no_error && ps.no_rfc7540_priorities);
+    CHECK(ps.apply(0x99, 12345) == ErrorCode::no_error);  // unknown: ignored
+    CHECK(error_name(ErrorCode::compression_error) == "COMPRESSION_ERROR");
+    // The shared field rules.
+    CHECK(fields::valid_name("content-type") && fields::valid_name("x-a_b.c~") && !fields::valid_name("Content-Type") &&
+          !fields::valid_name("a b") && !fields::valid_name("") && !fields::valid_name("a\x7fb"));
+    CHECK(fields::valid_value("text/html; charset=utf-8") && fields::valid_value("") && !fields::valid_value("a\r\nb") &&
+          !fields::valid_value(std::string_view("a\0b", 3)) && !fields::valid_value(" x") && !fields::valid_value("x\t"));
+    CHECK(fields::connection_specific("transfer-encoding") && fields::connection_specific("keep-alive") &&
+          !fields::connection_specific("te") && !fields::connection_specific("host"));
+}
+
+static void test_hpack() {
+    using namespace hpack;
+    // Integers (RFC 7541 C.1).
+    std::string out;
+    append_integer(out, 10, 5, 0);
+    CHECK(tohex(out) == "0a");
+    out.clear();
+    append_integer(out, 1337, 5, 0);
+    CHECK(tohex(out) == "1f9a0a");
+    out.clear();
+    append_integer(out, 42, 8, 0);
+    CHECK(tohex(out) == "2a");
+    std::size_t pos = 0;
+    std::uint32_t v = 0;
+    CHECK(read_integer(unhex("1f9a0a"), pos, 5, v) && v == 1337 && pos == 3);
+    pos = 0;
+    CHECK(!read_integer(unhex("1f9a"), pos, 5, v));  // truncated
+    pos = 0;
+    CHECK(!read_integer(unhex("ffffffffffff7f"), pos, 7, v));  // more than 32 bits
+    // Huffman (the literals of C.4 and C.6).
+    out.clear();
+    huffman_encode(out, "www.example.com");
+    CHECK(tohex(out) == "f1e3c2e5f23a6ba0ab90f4ff" && huffman_size("www.example.com") == 12);
+    out.clear();
+    huffman_encode(out, "no-cache");
+    CHECK(tohex(out) == "a8eb10649cbf");
+    out.clear();
+    huffman_encode(out, "custom-key");
+    CHECK(tohex(out) == "25a849e95ba97d7f");
+    std::string dec;
+    CHECK(huffman_decode(unhex("f1e3c2e5f23a6ba0ab90f4ff"), dec, 100) == HuffStatus::ok && dec == "www.example.com");
+    dec.clear();
+    CHECK(huffman_decode(unhex("a8eb10649cbf"), dec, 100) == HuffStatus::ok && dec == "no-cache");
+    dec.clear();
+    CHECK(huffman_decode("", dec, 100) == HuffStatus::ok && dec.empty());
+    dec.clear();
+    CHECK(huffman_decode(unhex("1f"), dec, 100) == HuffStatus::ok && dec == "a");  // 00011 + 111 padding
+    dec.clear();
+    CHECK(huffman_decode(unhex("ff"), dec, 100) == HuffStatus::malformed);        // 8 bits of padding
+    dec.clear();
+    CHECK(huffman_decode(unhex("ffffffff"), dec, 100) == HuffStatus::malformed);  // EOS
+    dec.clear();
+    CHECK(huffman_decode(unhex("18"), dec, 100) == HuffStatus::malformed);        // 00011 then 000: not padding
+    dec.clear();
+    CHECK(huffman_decode(unhex("a8eb10649cbf"), dec, 3) == HuffStatus::too_large);
+    // Every byte round-trips, alone and in a run.
+    for (int c = 0; c < 256; ++c) {
+        const std::string one(1, static_cast<char>(c));
+        out.clear();
+        huffman_encode(out, one);
+        dec.clear();
+        CHECK(huffman_decode(out, dec, 8) == HuffStatus::ok && dec == one);
+    }
+    std::string all;
+    for (int c = 0; c < 256; ++c) all.push_back(static_cast<char>(c));
+    out.clear();
+    huffman_encode(out, all);
+    dec.clear();
+    CHECK(huffman_decode(out, dec, 1000) == HuffStatus::ok && dec == all && out.size() == huffman_size(all));
+    // Static table lookups and the encoder.
+    CHECK(static_name_index(":method") == 2 && static_name_index("content-type") == 31 && static_name_index("date") == 33 &&
+          static_name_index("etag") == 34 && static_name_index("server") == 54 && static_name_index("nope") == 0);
+    CHECK(static_index(":method", "GET") == 2 && static_index(":method", "POST") == 3 && static_index(":status", "200") == 8 &&
+          static_index(":status", "304") == 11 && static_index("accept-encoding", "gzip, deflate") == 16 &&
+          static_index("content-type", "text/html") == 0);
+    out.clear();
+    append_field(out, ":method", "GET");
+    CHECK(tohex(out) == "82");
+    out.clear();
+    append_status(out, 200);
+    CHECK(tohex(out) == "88");
+    out.clear();
+    append_status(out, 421);
+    CHECK(tohex(out) == "08" "03" "343231");
+    out.clear();
+    append_field(out, "content-type", "text/html");
+    CHECK(tohex(out).substr(0, 4) == "0f10");  // literal without indexing, name index 31 (15 + 16)
+    out.clear();
+    append_field(out, "x-custom", "v");
+    CHECK(tohex(out).substr(0, 2) == "00" && out.size() == 1 + 1 + 6 + 1 + 1);  // literal name (Huffman: 45 bits), raw value
+    // The RFC's examples: groups share one decoder (the dynamic table evolves).
+    std::map<int, std::unique_ptr<Decoder>> decoders;
+    for (const auto& vec : hpack_vectors::all()) {
+        auto& d = decoders[vec.group];
+        if (!d || vec.group == 2) d = std::make_unique<Decoder>(vec.max_table);  // C.2's examples are independent
+        std::string arena;
+        std::vector<std::pair<std::string, std::string>> got;
+        const Decoder::Result r = d->decode(unhex(vec.hex), arena, 4096, [&](std::string_view n, std::string_view v2) {
+            got.emplace_back(n, v2);
+            return true;
+        });
+        bool same = r == Decoder::Result::ok && got.size() == vec.fields.size();
+        for (std::size_t i = 0; same && i < got.size(); ++i)
+            same = got[i].first == vec.fields[i].name && got[i].second == vec.fields[i].value;
+        if (!same || d->table_size() != vec.table_size_after)
+            std::printf("hpack vector %s: result %d, %zu fields, table %zu (expected %u)\n", std::string(vec.name).c_str(),
+                        static_cast<int>(r), got.size(), d->table_size(), vec.table_size_after);
+        CHECK(same && d->table_size() == vec.table_size_after);
+    }
+    // Our encoder's output decodes back, with names and values as given.
+    {
+        out.clear();
+        append_status(out, 200);
+        append_field(out, "server", "agensio");
+        append_field(out, "content-type", "text/html; charset=utf-8");
+        append_field(out, "content-length", "1234");
+        append_field(out, "x-custom-header", "a value with spaces and UTF-8 \xce\xb1");
+        Decoder d;
+        std::string arena;
+        std::vector<std::pair<std::string, std::string>> got;
+        CHECK(d.decode(out, arena, 4096, [&](std::string_view n, std::string_view v2) {
+                  got.emplace_back(n, v2);
+                  return true;
+              }) == Decoder::Result::ok);
+        CHECK(got.size() == 5 && got[0].first == ":status" && got[0].second == "200" && got[1].second == "agensio" &&
+              got[2].first == "content-type" && got[3].second == "1234" && got[4].second == "a value with spaces and UTF-8 \xce\xb1");
+        CHECK(d.table_size() == 0);  // nothing we encode ever enters a dynamic table
+    }
+    // Errors: index 0, an index past the tables, a size update above the ceiling or after
+    // a field, a truncated literal, bad Huffman data.
+    auto result = [](std::string_view raw, std::size_t max_list = 4096, std::size_t ceiling = 4096) {
+        Decoder d(ceiling);
+        std::string arena;
+        return d.decode(raw, arena, max_list, [](std::string_view, std::string_view) { return true; });
+    };
+    CHECK(result(unhex("80")) == Decoder::Result::malformed);          // indexed 0
+    CHECK(result(unhex("bf80")) == Decoder::Result::malformed);        // indexed 191: nothing there
+    CHECK(result(unhex("3fe11f")) == Decoder::Result::ok);             // size update to exactly the ceiling (4096)
+    CHECK(result(unhex("3fe21f")) == Decoder::Result::malformed);      // 4097: above the ceiling
+    CHECK(result(unhex("8220")) == Decoder::Result::malformed);        // size update after a field
+    CHECK(result(unhex("20")) == Decoder::Result::ok);                 // size update to 0, nothing else
+    CHECK(result(unhex("0f10ff")) == Decoder::Result::malformed);      // literal value: length 127 + continuation missing
+    CHECK(result(unhex("0f1005ffffffffff")) == Decoder::Result::ok);         // a raw value of five 0xff bytes is fine
+    CHECK(result(unhex("0f1085ffffffffff")) == Decoder::Result::malformed);  // the same as Huffman data: EOS
+    CHECK(result(unhex("0f10")) == Decoder::Result::malformed);        // value missing
+    CHECK(result(unhex("00")) == Decoder::Result::malformed);          // literal name missing
+    // The list size limit stops the decode at the field that crosses it, whatever the
+    // representation: three 46-byte fields (name 10 + value 4 + 32) against a 100-byte budget.
+    {
+        std::string block;
+        for (int i = 0; i < 3; ++i) append_field(block, "abcdefghij", "wxyz");
+        CHECK(result(block, 100) == Decoder::Result::too_large && result(block, 138) == Decoder::Result::ok);
+        // The compression bomb shape: a table entry referenced many times costs its full size each time.
+        std::string bomb = unhex("40") + std::string(1, 8) + "12345678" + std::string(1, 100) + std::string(100, 'x');
+        for (int i = 0; i < 100; ++i) bomb += unhex("be");  // index 62 = the entry just added
+        CHECK(result(bomb, 2000) == Decoder::Result::too_large);
+        std::string arena;
+        Decoder d;
+        std::size_t n = 0;
+        CHECK(d.decode(bomb, arena, 2000, [&](std::string_view, std::string_view) { ++n; return true; }) == Decoder::Result::too_large);
+        CHECK(n <= 2000 / 140 + 1 && arena.size() <= 2000 + 64);  // stopped where the budget ended
+        // A sink that refuses.
+        CHECK(d.decode(unhex("8286"), arena, 4096, [](std::string_view, std::string_view) { return false; }) == Decoder::Result::too_many);
+    }
+    // Eviction: a 256-byte table takes the entries the RFC's C.5 sequence says (checked above); an
+    // entry larger than the table empties it.
+    {
+        Decoder d(64);
+        std::string arena;
+        std::string block = unhex("40") + std::string(1, 1) + "a" + std::string(1, 1) + "b";  // a: b (34 bytes)
+        CHECK(d.decode(block, arena, 4096, [](std::string_view, std::string_view) { return true; }) == Decoder::Result::ok &&
+              d.table_entries() == 1);
+        block = unhex("40") + std::string(1, 1) + "c" + std::string(1, 60) + std::string(60, 'v');  // 93 bytes > 64
+        CHECK(d.decode(block, arena, 4096, [](std::string_view, std::string_view) { return true; }) == Decoder::Result::ok &&
+              d.table_entries() == 0 && d.table_size() == 0);
+    }
+}
+
 static void test_refused_suffix() {
     const std::vector<std::string> deny = {".php", ".phtml", ".inc", "~"};
     for (const char* p : {"/files/x.php", "/files/x.PHP", "/files/x.PhP", "/files/x.php.", "/files/x.PHP..", "/files/x.phtml", "/files/x.INC", "/files/x.php~", "/files/x.jpg.php", "/x.php"})
@@ -2806,6 +3041,8 @@ int main() {
     test_parser_prefixes();
     test_refused_suffix();
     test_backup_of_protected();
+    test_h2_frame_and_settings();
+    test_hpack();
     test_config_reference();
     test_install();
 #ifdef AGENSIO_HAS_TLS

@@ -17,6 +17,8 @@ struct WorkerState {
     std::string server_line;  // "Server: agensio\r\n" or empty (set by Server)
     std::string prefix200;    // "HTTP/1.1 200 OK\r\nServer: ..\r\nDate: ..\r\n", refreshed per second
     std::time_t prefix200_time = 0;
+    std::string h2_prefix;    // HTTP/2: the server and date fields as HPACK, refreshed per second
+    std::time_t h2_prefix_time = 0;
     std::string path;     // normalised request path
     std::string fs_path;  // filesystem path being served
     const void* site = nullptr;  // the SiteConfig chosen for the current request (for the access log)

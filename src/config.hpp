@@ -186,6 +186,17 @@ struct Config {
     std::size_t sendfile_max_chunk =
         1024 * 1024;  // bytes per sendfile() call; one huge call holds the socket lock and the loop
     std::string server_header = "agensio";
+    // HTTP/2 (phase G, docs/design-http2.md): what TLS listeners offer through ALPN, in order
+    // of preference ("h2", "h1"), and whether plain listeners accept prior-knowledge HTTP/2
+    // ("h2c" in the list; off by default: browsers never use it). Caddy's spelling; the
+    // ALPN identifier "http/1.1" is accepted for "h1" and normalised to it.
+    std::vector<std::string> protocols = {"h2", "h1"};
+    bool h2 = true;         // "h2" in protocols: offered on TLS listeners
+    bool h2c = false;       // "h2c" in protocols: accepted on plain listeners
+    std::string alpn_wire;  // the ALPN protocol list as OpenSSL wants it (length-prefixed), from protocols
+    struct Http2 {
+        std::uint32_t max_concurrent_streams = 128;  // SETTINGS_MAX_CONCURRENT_STREAMS (nginx's default)
+    } http2;
     // Proxies in front of us whose X-Forwarded-For / X-Forwarded-Proto are believed: the
     // rightmost untrusted address becomes the client (REMOTE_ADDR, access log) and the
     // scheme sets HTTPS / REQUEST_SCHEME for FastCGI. Empty (default): headers are ignored.

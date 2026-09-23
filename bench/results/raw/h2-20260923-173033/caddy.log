@@ -1,0 +1,20 @@
+{"level":"info","ts":1790184722.5852363,"msg":"maxprocs: Honoring GOMAXPROCS=\"1\" as set in environment"}
+{"level":"info","ts":1790184722.5852644,"msg":"GOMEMLIMIT is updated","GOMEMLIMIT":29442897100,"previous":9223372036854775807}
+{"level":"info","ts":1790184722.5852666,"msg":"using config from file","file":"Caddyfile"}
+{"level":"info","ts":1790184722.5852683,"msg":"adapted config to JSON","adapter":"caddyfile"}
+{"level":"warn","ts":1790184722.585269,"msg":"Caddyfile input is not formatted; run 'caddy fmt --overwrite' to fix inconsistencies","adapter":"caddyfile","file":"Caddyfile","line":4}
+{"level":"warn","ts":1790184722.5857248,"logger":"admin","msg":"admin endpoint disabled"}
+{"level":"info","ts":1790184722.5861163,"logger":"http.auto_https","msg":"automatic HTTPS is completely disabled for server","server_name":"srv0"}
+{"level":"info","ts":1790184722.5861223,"logger":"http.auto_https","msg":"automatic HTTPS is completely disabled for server","server_name":"srv1"}
+{"level":"warn","ts":1790184722.5864956,"logger":"http","msg":"HTTP/2 skipped because it requires TLS","network":"tcp","addr":":8082"}
+{"level":"info","ts":1790184722.5865,"logger":"http.log","msg":"server running","name":"srv0","protocols":["h1","h2","h2c"]}
+{"level":"info","ts":1790184722.5865119,"logger":"http.log","msg":"server running","name":"srv1","protocols":["h1","h2","h2c"]}
+{"level":"info","ts":1790184722.5868564,"msg":"autosaved config (load with --resume flag)","file":"/home/dev/.config/caddy/autosave.json"}
+{"level":"info","ts":1790184722.586861,"msg":"serving initial configuration"}
+{"level":"info","ts":1790184722.59049,"logger":"tls","msg":"cleaning storage unit","storage":"FileStorage:/home/dev/.local/share/caddy"}
+{"level":"info","ts":1790184722.5922887,"logger":"tls","msg":"finished cleaning storage units"}
+{"level":"info","ts":1790184722.592562,"logger":"tls.cache.maintenance","msg":"started background certificate maintenance","cache":"0x3bab8940780"}
+{"level":"info","ts":1790184766.0575461,"msg":"shutting down apps, then terminating","signal":"SIGTERM"}
+{"level":"warn","ts":1790184766.057573,"msg":"exiting; byeee!! 👋","signal":"SIGTERM"}
+{"level":"info","ts":1790184766.057596,"logger":"http","msg":"servers shutting down with eternal grace period"}
+{"level":"info","ts":1790184766.057665,"msg":"shutdown complete","signal":"SIGTERM","exit_code":0}

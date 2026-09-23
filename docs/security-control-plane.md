@@ -125,3 +125,16 @@ cmake -B build-fuzz -DAGENSIO_FUZZ=ON -DAGENSIO_TESTS=OFF -DAGENSIO_TLS=OFF -DCM
 cmake --build build-fuzz --target fuzz_json fuzz_archive && build-fuzz/fuzz_json tests/fuzz/regressions/json -max_total_time=120
 build-fuzz/fuzz_archive tests/fuzz/regressions/archive -max_len=65536 -max_total_time=120
 ```
+
+
+## HTTP/2 (phase G)
+
+The request-path threats of HTTP/2 (Rapid Reset, MadeYouReset, CONTINUATION floods, HPACK
+bombs and the 2026 HTTP/2 Bomb, slow reads and window dribbles, PING, SETTINGS and empty
+frame floods, priority trees, request smuggling over the HTTP/1.1 downgrade) and the
+bound each one meets are the table of `docs/design-http2.md` section 8; the limits are
+constants at the top of `src/http2/connection.hpp` and derive from `max_header_size`,
+`max_requests_per_connection`, `idle_timeout`, `body_timeout` and the body limits. Fuzz
+record: `fuzz_hpack` (decoder, persistent decoder, encoder round trip, Huffman round trip).
+The attack suite (`tests/h2-attacks.py`) and the differential fuzz against nghttp2 are
+step G3 of the roadmap.

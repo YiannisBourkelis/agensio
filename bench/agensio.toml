@@ -7,6 +7,7 @@ max_requests_per_connection = 1000000   # parity with nginx keepalive_requests i
 reuse_port = "auto"
 tcp_nodelay = true
 sendfile = true
+protocols = ["h2c", "h2", "h1"]   # HTTP/2 through ALPN on 8443, prior knowledge on 8080 (h2load, bench/h2/run.sh)
 
 [log]
 access = "@ACCESS_LOG@"   # off in the benchmark (nginx and Caddy bench configs log nothing either); ACCESS_LOG=path to measure

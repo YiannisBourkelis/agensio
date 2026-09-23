@@ -99,6 +99,7 @@ add_library(agensio_core STATIC
   src/control/mcp.cpp
   src/control/client.cpp
   src/response.cpp
+  src/http2/hpack.cpp
   src/handlers/static.cpp
   src/handlers/fastcgi.cpp
   src/handlers/proxy.cpp
@@ -171,8 +172,8 @@ target_link_libraries(agensio_upstream PRIVATE asio Threads::Threads)
 
 # ---------------------------------------------------------------- fuzzers (parsers only, no asio)
 if(AGENSIO_FUZZ)
-  foreach(t parser path chunked fcgi http_head json archive)
-    add_executable(fuzz_${t} tests/fuzz/fuzz_${t}.cpp src/http1/parser.cpp src/path.cpp src/services/archive.cpp)
+  foreach(t parser path chunked fcgi http_head json archive hpack)
+    add_executable(fuzz_${t} tests/fuzz/fuzz_${t}.cpp src/http1/parser.cpp src/path.cpp src/services/archive.cpp src/http2/hpack.cpp)
     target_include_directories(fuzz_${t} PRIVATE src)
     target_compile_features(fuzz_${t} PRIVATE cxx_std_20)
     target_compile_definitions(fuzz_${t} PRIVATE $<$<BOOL:${AGENSIO_HAS_ZLIB}>:AGENSIO_HAS_ZLIB=1>)

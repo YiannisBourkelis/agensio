@@ -6,6 +6,7 @@ core, a zero-copy in-memory file cache, and a hand-written HTTP/1.1 parser.
 
 It serves static sites, PHP applications (Laravel, Statamic, WordPress, Drupal, plain PHP) through
 FastCGI, and anything else through its reverse proxy (Node, Rails, Go, Java, WebSockets),
+speaks HTTP/1.1 and HTTP/2 with its own protocol layer,
 obtains its own TLS certificates, reloads without dropping a connection, and can be
 configured by an AI agent through a built-in [MCP server](docs/mcp.md) over SSH.
 
@@ -163,7 +164,9 @@ and `agensio ctl health`, upgrade on every alpha (each one fixes something found
 and read the changelog before you do. There is no warranty of any kind (see the licence).
 Reports are the most useful thing you can send.
 
-- HTTP/1.1 only. HTTP/2 and HTTP/3 are phases G and I of the roadmap.
+- HTTP/2 is new (alpha.19, phase G step G0: every handler, conformance-tested, the
+  attack defences built in, the performance pass and the attack suite still to come);
+  HTTP/3 is phase I of the roadmap.
 - No response compression, no directory listing, no rate limiting yet.
 - Certificates: HTTP-01 only, so port 80 must be reachable; no wildcards (DNS-01), no
   OCSP stapling.

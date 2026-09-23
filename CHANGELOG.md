@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.19 (2026-09-21)
+## 0.1.0-alpha.19 (2026-09-23)
 
 - **Generated pools default to `pm = "ondemand"`** with `pm.process_idle_timeout = 60s`
   (live host: every site with its own account kept 8 PHP processes resident around the
@@ -16,6 +16,36 @@
 - `health` `php_pool_resident`: every `static` or `dynamic` pool with the PHP processes
   it keeps and their memory (RSS and private, read from `/proc` on Linux), with the
   setting that frees it, so an agent asked why the machine is full has the number.
+
+- **HTTP/2** (phase G, step G0; design in `docs/design-http2.md`): RFC 9113 with HPACK
+  (RFC 7541) in agensio's own protocol layer, `src/http2/`, on every TLS listener through
+  ALPN and, with `"h2c"` in the new `[server] protocols` key (`["h2", "h1"]` by default,
+  Caddy's names; `"http/1.1"` accepted for `"h1"`), by prior knowledge on plain listeners. Every handler serves it: static files from the cache and disk, conditional
+  and range answers, FastCGI, proxy, CGI, redirects, request bodies through DATA frames
+  with windows that follow the site's body limit (uploads at the consumer's pace, not
+  64 KB per round trip). The encoder uses static indexes and literals only, so a cache
+  entry's headers are one HPACK block built at insert and copied per response; a
+  worker's server and date pair is re-encoded once per second. Limits and defences
+  built in from the first line: frame size, header list and compressed block sizes from
+  `max_header_size`, CONTINUATION count, a glitch budget (PING, SETTINGS, empty frames,
+  window-update dribbles, PRIORITY, frames on closed streams) with a graceful GOAWAY at
+  three quarters, a reset counter that counts server-provoked resets too (Rapid Reset,
+  MadeYouReset), no priority tree (RFC 9218 announced), stream and connection memory
+  bounded by the windows and `max_header_size`. Every GOAWAY and RST_STREAM the server
+  sends is an info line in the error log. `http2 = { max_concurrent_streams = 128 }`,
+  `agensio ctl status` names each listener's protocols, requests log as `HTTP/2.0`,
+  PHP sees `SERVER_PROTOCOL=HTTP/2.0`. HTTP/1.1 pays nothing: the hand-over sits behind
+  the TLS handshake and the parser's 505 branch. Tests: RFC 7541's vectors and error
+  cases, a Huffman table generated from the RFC text, `fuzz_hpack`, h2spec against both
+  listeners (146 of 146 over TLS; on h2c the one case where an invalid preface is an
+  HTTP/1 400), curl and an h2-library client in the integration run (the H2h coalescing
+  check is live now), `bench/h2/run.sh` and `bench/ab.sh -2` (h2load). Measured, one
+  worker on the Linux box: the HTTP/1 rows unchanged; HTTP/2 1 KB at 2.3 us plain and
+  3.1 to 3.4 us TLS with one stream per connection, 1.6 to 1.8 and 2.0 to 2.1 us with ten
+  (below HTTP/1); nginx 3.5 to 4.7 us on the same rows, Caddy 30 us. Large bodies over
+  TLS: a DATA frame is exactly one record (16,375-byte payloads) and a file's frames are
+  read with one preadv into a pre-framed chunk that is written as is, so the 10 MB stream
+  costs 2017 us against nginx's 2771 and 100 KB at ten streams 20.5 against 28.4.
 
 ## 0.1.0-alpha.18 (2026-09-20)
 

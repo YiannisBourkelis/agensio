@@ -21,6 +21,9 @@ struct Response {
     // writer can send it untouched when there are no extra fields.
     std::string_view prebuilt_headers;
     bool prebuilt_terminated = false;
+    // The same fields as an HPACK block (cache entries, error pages: built once, copied
+    // per response by the HTTP/2 writer). Empty: the HTTP/2 writer encodes the text block.
+    std::string_view prebuilt_h2;
 
     // Per-request fields (Connection, Location, Allow, ETag on a 304, ...). Values must
     // outlive the response: static text, or views into `entry`.
@@ -45,6 +48,7 @@ struct Response {
         status = 200;
         prebuilt_headers = {};
         prebuilt_terminated = false;
+        prebuilt_h2 = {};
         headers.clear();
         body = NoBody{};
         keep_alive = true;

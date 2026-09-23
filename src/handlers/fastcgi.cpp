@@ -85,7 +85,7 @@ void FcgiHandler::append_request_params(std::string& out, Stream& s, const SiteC
     const Request& req = s.request;
     std::string& tmp = ws.scratch;  // per-worker scratch, capacity retained
     auto add = [&](std::string_view name, std::string_view value) { fcgi::append_param(out, name, value); };
-    add("SERVER_PROTOCOL", req.version_minor == 0 ? "HTTP/1.0" : "HTTP/1.1");
+    add("SERVER_PROTOCOL", !req.protocol.empty() ? req.protocol : req.version_minor == 0 ? "HTTP/1.0" : "HTTP/1.1");
     add("REQUEST_METHOD", req.method_name);
     // The script as the FastCGI server sees it: the local root swapped for remote_root.
     const std::string& local_root = loc.alias.empty() ? loc.root : loc.alias;

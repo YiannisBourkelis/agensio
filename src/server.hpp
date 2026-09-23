@@ -61,6 +61,7 @@ struct Listener {
     // the entry of the context its handshake ended with and keeps it (shared) for its life,
     // so a renewal or reload never changes what an established connection is authoritative for.
     std::map<const SSL_CTX*, std::shared_ptr<const CertNames>> cert_names;
+    std::string alpn;  // the protocols offered, OpenSSL wire form ("\x02h2\x08http/1.1"), from [server] protocols
     std::shared_ptr<const CertNames> names_for(const SSL_CTX* ctx) const {
         const auto it = cert_names.find(ctx);
         return it == cert_names.end() ? nullptr : it->second;

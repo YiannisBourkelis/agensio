@@ -115,7 +115,7 @@ std::vector<std::pair<std::string, json::Value>> site_fields() {
 
 std::vector<Tool> tools() {
     std::vector<Tool> t;
-    t.push_back({"server_status", "Server status", "Version, pid, uptime, workers, open connections, listeners, sites and the caller's role. Each listener names its catch_all site (the one with server_name [\"*\"] or default = true) or null: a listener with none answers 421 Misdirected Request to any Host its sites do not list, including the IP address; on TLS a connection also answers 421 for a Host the certificate it presented does not cover (each site's own certificate bounds what its connections serve; a SAN or wildcard certificate covers every site it names).", "GET", "/v1/status", true, false, Role::viewer, schema({}, {})});
+    t.push_back({"server_status", "Server status", "Version, pid, uptime, workers, open connections, listeners with the protocols each offers (h2 and h1 on TLS listeners, through ALPN; h1 on plain ones, plus h2c when [server] protocols lists it), sites and the caller's role. Each listener names its catch_all site (the one with server_name [\"*\"] or default = true) or null: a listener with none answers 421 Misdirected Request to any Host its sites do not list, including the IP address; on TLS a connection also answers 421 for a Host the certificate it presented does not cover (each site's own certificate bounds what its connections serve; a SAN or wildcard certificate covers every site it names).", "GET", "/v1/status", true, false, Role::viewer, schema({}, {})});
     t.push_back({"sites_list", "List sites", "Every configured site with its listeners, root, app, user, redirect, whether it is the catch_all of its listener, and certificate state (issuer, days left, whether it is still the placeholder). A site answers only the names it lists unless it is the catch-all.", "GET", "/v1/sites", true, false, Role::viewer, schema({}, {})});
     t.push_back({"site_show", "Show one site", "One site in full: effective locations after the preset expanded, PHP pool, upstreams, certificate.", "GET", "/v1/sites/{name}", true, false, Role::viewer, schema({{"name", name_arg()}}, {"name"})});
     t.push_back({"config_validate", "Validate configuration", "Loads the configuration file on disk again and runs the hosting rules; reports errors and the restart-only settings that differ from the running server.", "GET", "/v1/config/validate", true, false, Role::viewer, schema({}, {})});
@@ -206,6 +206,12 @@ const char* kInstructions =
     "restart, and which tool changes it. Only when via is file is there no tool: the main configuration file "
     "is root's and agensio never edits it, so answer with the exact line to set, the file, and the reload or "
     "restart command, exactly like the root commands protocol; never claim to have changed it. "
+    "HTTP/2 is on for every TLS site (ALPN) with nothing to configure per site; [server] protocols = "
+    "[\"h1\"] switches it off server-wide (root's file, via = file, then agensio reload), for instance "
+    "while a client misbehaves; h2c in that list accepts prior-knowledge HTTP/2 on plain listeners for "
+    "backends and load tools. Uploads are not slower over HTTP/2 here (windows follow the site's body limit), "
+    "and the error log carries an info line for every GOAWAY or RST_STREAM the server sends, naming the "
+    "client, the stream and the reason, which is where to look when a user reports HTTP/2 trouble. "
     "Never invent settings: what a tool does not offer is not configurable here. Host names are "
     "strict: a site answers only the names in server_name, and a listener without a catch-all site "
     "(server_name [\"*\"] or default = true) answers 421 to any other Host, including the IP address; and on "

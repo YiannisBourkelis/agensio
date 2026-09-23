@@ -1,0 +1,26 @@
+starting benchmark...
+spawning thread #0: 16 total client(s). 780674 total requests
+spawning thread #1: 16 total client(s). 780674 total requests
+spawning thread #2: 16 total client(s). 780674 total requests
+spawning thread #3: 16 total client(s). 780673 total requests
+Application protocol: h2c
+progress: 9% done
+progress: 19% done
+progress: 29% done
+progress: 39% done
+progress: 49% done
+progress: 59% done
+progress: 69% done
+progress: 79% done
+progress: 89% done
+progress: 99% done
+
+finished in 5.15s, 606427.08 req/s, 646.58MB/s
+requests: 3122695 total, 3122695 started, 3122695 done, 3122695 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 3122695 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 3.25GB (3491177298) total, 318.65MB (334128365) headers (space savings 42.78%), 2.89GB (3100836135) data
+                     min         max         mean         sd        +/- sd
+time for request:        4us     85.05ms      1.04ms      1.14ms    91.48%
+time for connect:       23us       221us        88us        38us    70.31%
+time to 1st byte:      141us     85.09ms     24.12ms     26.66ms    79.69%
+req/s           :    9476.84    10505.78     9655.33      211.91    89.06%

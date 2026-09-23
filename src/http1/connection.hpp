@@ -36,6 +36,8 @@
 #include "http1/chunked.hpp"
 #include "http1/parser.hpp"
 #include "http1/writer.hpp"
+#include "http2/connection.hpp"
+#include "core/forwarded.hpp"
 #include "server.hpp"
 #include "services/log.hpp"
 
@@ -95,6 +97,14 @@ public:
                 // ended with (the SNI callback chose it from this listener's contexts).
 #ifdef AGENSIO_HAS_TLS
                 self->cert_names_ = self->listener_->names_for(SSL_get_SSL_CTX(self->socket_.native_handle()));
+                // ALPN chose HTTP/2: the connection is an Http2Connection from here (phase G).
+                const unsigned char* alpn = nullptr;
+                unsigned alpn_len = 0;
+                SSL_get0_alpn_selected(self->socket_.native_handle(), &alpn, &alpn_len);
+                if (alpn_len == 2 && alpn[0] == 'h' && alpn[1] == '2') {
+                    self->switch_to_http2();
+                    return;
+                }
 #endif
                 self->last_activity_ = std::chrono::steady_clock::now();
                 self->do_read();
@@ -148,6 +158,7 @@ public:
     void close() {
         asio::error_code ec;
         timer_.cancel();
+        if (handed_over_) return;
         ++request_gen_;  // a late upstream completion must not touch this connection
         if (upstream_) {
             upstream_->cancel();
@@ -427,6 +438,7 @@ private:
                 fail_request(400);
                 return;
             case ParseStatus::version_not_supported:
+                if (try_h2c()) return;  // the HTTP/2 connection preface on a plain listener (h2c)
                 fail_request(505);
                 return;
             case ParseStatus::too_many_headers:
@@ -474,24 +486,7 @@ private:
         }
         stream_.conn.trusted_peer = trusted_peer_;
         if (!trusted_peer_) return;
-        const Request& req = stream_.request;
-        std::string_view xff = req.headers.get("x-forwarded-for");
-        while (!xff.empty()) {
-            const std::size_t comma = xff.rfind(',');
-            std::string_view entry = comma == std::string_view::npos ? xff : xff.substr(comma + 1);
-            xff = comma == std::string_view::npos ? std::string_view() : xff.substr(0, comma);
-            while (!entry.empty() && (entry.front() == ' ' || entry.front() == '\t')) entry.remove_prefix(1);
-            while (!entry.empty() && (entry.back() == ' ' || entry.back() == '\t')) entry.remove_suffix(1);
-            if (entry.empty()) continue;
-            asio::error_code ec;
-            const auto a = asio::ip::make_address(std::string(entry), ec);
-            if (ec) break;  // garbage: trust nothing further left
-            client_addr_ = entry;
-            stream_.conn.client_address = client_addr_;
-            if (!in_any(live_->trusted_proxies, a)) break;  // first hop that is not one of ours
-        }
-        const std::string_view proto = req.headers.get("x-forwarded-proto");
-        stream_.conn.forwarded_https = Headers::iequals(proto, "https");
+        resolve_forwarded(stream_.request, live_->trusted_proxies, stream_.conn, client_addr_);  // core/forwarded.hpp
     }
 
     // ---- tunnel (D3): after a 101 the connection is two byte pumps ----
@@ -625,6 +620,41 @@ private:
         if (body_pending_ && expect_continue_ && !continue_sent_ && consumed_ >= in_len_) r.keep_alive = false;
         responding_ = true;
         writer_.write(stream_, worker_.state);
+    }
+
+    // "PRI * HTTP/2.0" is the only request line that parses as an unsupported version: with
+    // "h2c" in [server] protocols and the full 24-byte preface present (or still arriving)
+    // the connection becomes an Http2Connection with the bytes read so far. Nothing on the
+    // HTTP/1 request path changes: this sits behind the 505 branch.
+    bool try_h2c() {
+        if constexpr (IsLocalSocket<Socket>::value || IsTlsStream<Socket>::value) {
+            return false;
+        } else {
+            if (!live_->h2c || upstream_ || responding_) return false;
+            const std::string_view have(in_.data(), std::min(in_len_, h2::kPreface.size()));
+            if (h2::kPreface.substr(0, have.size()) != have) return false;
+            if (in_len_ < h2::kPreface.size()) {
+                do_read();
+                return true;
+            }
+            switch_to_http2();
+            return true;
+        }
+    }
+
+    // Hands the socket and whatever was read to a new HTTP/2 connection; this object is
+    // then only waiting for its last handlers to run out.
+    void switch_to_http2() {
+        if constexpr (IsLocalSocket<Socket>::value) {
+            return;
+        } else {
+            timer_.cancel();
+            auto c = std::make_shared<h2::Http2Connection<Socket>>(std::move(socket_), worker_, gen_, listener_, cfg_, dispatcher_,
+                                                                   cert_names_, std::string_view(in_.data(), in_len_));
+            in_len_ = 0;
+            handed_over_ = true;
+            c->start();
+        }
     }
 
     // Client address and listener for handlers that need them (FastCGI params), once.
@@ -771,6 +801,7 @@ private:
 
     const Config* live_;                     // gen_->cfg: sites, limits, trusted proxies (reloadable)
     bool retire_ = false;                    // the listener left the configuration: close after this response
+    bool handed_over_ = false;               // the socket now belongs to an Http2Connection
     const Config& cfg_;                      // the boot configuration (writer settings)
     Dispatcher& dispatcher_;
     asio::steady_timer timer_;

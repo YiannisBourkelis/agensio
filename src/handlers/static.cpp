@@ -1,5 +1,7 @@
 #include "handlers/static.hpp"
 
+#include "http2/hpack.hpp"
+
 #include "http1/range.hpp"
 
 #include <charconv>
@@ -43,6 +45,7 @@ void StaticHandler::error(Stream& s, int status, bool keep_alive, std::string_vi
     r.keep_alive = keep_alive;
     r.head = s.request.method == Method::head;
     r.prebuilt_headers = page.headers;  // Content-Type + Content-Length, not terminated
+    r.prebuilt_h2 = page.h2_headers;
     if (!allow.empty()) r.headers.add("Allow", allow);
     r.body = MemoryBody{page.body};
 }
@@ -141,6 +144,7 @@ void StaticHandler::serve_entry(Stream& s, EntryPtr e) {
     r.status = 200;
     r.prebuilt_headers = e->headers;
     r.prebuilt_terminated = true;
+    r.prebuilt_h2 = e->h2_block;
     if (e->descriptor_only) r.body = FileBody{&e->fd, e->size, 0};  // streamed from the cached descriptor
     else r.body = MemoryBody{std::string_view(e->data.data(), e->data.size())};
     r.entry = std::move(e);
@@ -161,6 +165,16 @@ void StaticHandler::fill_entry(CacheEntry& entry, const FileInfo& fi, const Work
         .append("\r\nETag: ")
         .append(entry.etag)
         .append("\r\nAccept-Ranges: bytes\r\n\r\n");
+    // The HTTP/2 twin: one HPACK block built here, copied per response by the h2 writer
+    // (nginx encodes every header of every response; the cache pays once per entry).
+    entry.h2_block.reserve(96);
+    hpack::append_field(entry.h2_block, "content-type", mime_for_path(ws.fs_path));
+    std::string length;
+    append_number(length, fi.size);
+    hpack::append_field(entry.h2_block, "content-length", length);
+    hpack::append_field(entry.h2_block, "last-modified", entry.last_modified);
+    hpack::append_field(entry.h2_block, "etag", entry.etag);
+    hpack::append_field(entry.h2_block, "accept-ranges", "bytes");
     entry.last_access.store(now, std::memory_order_relaxed);
     entry.last_validated.store(now, std::memory_order_relaxed);
 }
@@ -214,6 +228,7 @@ void StaticHandler::redirect_slash(Stream& s, WorkerState& ws) {
     r.scratch.assign(ws.path).push_back('/');
     r.headers.add("Location", r.scratch);
     r.prebuilt_headers = page.headers;
+    r.prebuilt_h2 = page.h2_headers;
     r.body = MemoryBody{page.body};
 }
 

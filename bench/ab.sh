@@ -5,6 +5,11 @@
 #
 # usage: bench/ab.sh <base-ref> [-r ROUNDS] [-d DURATION] [-t THREADS] [-w WORKERS] [-P] [-u URLSPEC ...]
 #   base-ref  commit, branch or tag to build as the "base" side (worktree under bench/tmp/ab/)
+#   -2        HTTP/2 gate (phase G): adds the rows "h2c:/:64:1", "h2c:/:64:10", "h2:/:64:1" and
+#             "h2:/:64:10" measured with h2load (proto:path:connections:streams; h2c is prior
+#             knowledge on 8080, h2 is ALPN on 8443). A base without HTTP/2 gets none of them.
+#             Run it for every change under src/http2/ together with the static rows, which
+#             must stay flat: HTTP/1 pays nothing for HTTP/2.
 #   -P        proxy gate (phase D): also start the benchmark upstream (build/agensio_upstream on
 #             127.0.0.1:9100) and add the proxy rows "proxy:/json:64", "proxy:/big:64" and
 #             "proxy:/slow?ms=20:256" through the proxy site of bench/proxy/ab-site.toml, on
@@ -24,11 +29,11 @@ BENCH="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$BENCH")"
 [ $# -ge 1 ] || { sed -n '2,16p' "$0"; exit 2; }
 BASE_REF="$1"; shift
-ROUNDS=2; DURATION=5s; THREADS=4; WORKERS=1; SPECS=(); PROXY=0
-while getopts "r:d:t:w:u:P" opt; do
+ROUNDS=2; DURATION=5s; THREADS=4; WORKERS=1; SPECS=(); PROXY=0; H2=0
+while getopts "r:d:t:w:u:P2" opt; do
   case $opt in
     r) ROUNDS=$OPTARG ;; d) DURATION=$OPTARG ;; t) THREADS=$OPTARG ;; w) WORKERS=$OPTARG ;;
-    u) SPECS+=("$OPTARG") ;; P) PROXY=1 ;; *) exit 2 ;;
+    u) SPECS+=("$OPTARG") ;; P) PROXY=1 ;; 2) H2=1 ;; *) exit 2 ;;
   esac
 done
 [ ${#SPECS[@]} -eq 0 ] && SPECS=("http:/:64" "http:/style.css:64" "https:/:64" "https:/style.css:64" "http:/big.bin:16" "https:/big.bin:16")
@@ -38,6 +43,10 @@ if [ $PROXY = 1 ]; then
   SPECS+=("proxy:/json:64" "proxy:/big:64" "proxy:/slow?ms=20:256")
 fi
 
+if [ $H2 = 1 ]; then
+  command -v h2load >/dev/null || { echo "missing tool: h2load (Debian: nghttp2-client)"; exit 1; }
+  SPECS+=("h2c:/:64:1" "h2c:/:64:10" "h2:/:64:1" "h2:/:64:10")
+fi
 for tool in wrk curl nc git cmake; do command -v "$tool" >/dev/null || { echo "missing tool: $tool"; exit 1; }; done
 [ -x "$ROOT/build/agensio" ] || { echo "build the new side first: cmake --build build"; exit 1; }
 [ -f "$BENCH/www/big.bin" ] || "$BENCH/gen-www.sh" >/dev/null
@@ -74,7 +83,7 @@ if [ $PROXY = 1 ]; then
   UP_PID=$!
 fi
 
-PID=""; SIDE_PROXY=0
+PID=""; SIDE_PROXY=0; SIDE_H2=0
 start() {  # binary
   for port in 8080 8443 8093; do
     nc -z 127.0.0.1 "$port" 2>/dev/null && { echo "port $port is busy; stop the running server first"; exit 1; }
@@ -94,6 +103,12 @@ start() {  # binary
   if [ $SIDE_PROXY = 1 ] && [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8093/json)" != 200 ]; then
     SIDE_PROXY=0; echo "  (this side does not proxy: static rows only)"
   fi
+  # A base without HTTP/2 answers the preface with 505: it gets no h2 rows.
+  SIDE_H2=0
+  if [ $H2 = 1 ]; then
+    if [ "$(curl -s --http2-prior-knowledge -o /dev/null -w '%{http_version}' http://127.0.0.1:8080/)" = 2 ]; then SIDE_H2=1
+    else echo "  (this side has no HTTP/2: no h2 rows)"; fi
+  fi
 }
 stop() { [ -n "$PID" ] && kill "$PID" 2>/dev/null && wait "$PID" 2>/dev/null || true; PID=""; sleep 0.3; }
 trap 'stop; [ -n "$UP_PID" ] && kill "$UP_PID" 2>/dev/null; true' EXIT
@@ -106,24 +121,35 @@ cpu_seconds() {  # user + system CPU of the server process
 }
 
 measure() {  # side round -> appends "side round spec cpu_us rps" lines to $RAW/rows
-  local side=$1 round=$2 spec proto path conns url t raw c0 c1 n rps
+  local side=$1 round=$2 spec proto path conns streams url t raw c0 c1 n rps rest
   for spec in "${SPECS[@]}"; do
-    proto="${spec%%:*}"; path="${spec#*:}"; conns="${path##*:}"; path="${path%:*}"
+    proto="${spec%%:*}"; rest="${spec#*:}"; streams=""
+    case $proto in
+      h2|h2c) path="${rest%%:*}"; rest="${rest#*:}"; conns="${rest%%:*}"; streams="${rest#*:}" ;;
+      *) conns="${rest##*:}"; path="${rest%:*}" ;;
+    esac
     case $proto in
       https) url="https://127.0.0.1:8443$path" ;;
       proxy) [ $SIDE_PROXY = 1 ] || continue; url="http://127.0.0.1:8093$path" ;;
+      h2c) [ $SIDE_H2 = 1 ] || continue; url="http://127.0.0.1:8080$path" ;;
+      h2) [ $SIDE_H2 = 1 ] || continue; url="https://127.0.0.1:8443$path" ;;
       *) url="http://127.0.0.1:8080$path" ;;
     esac
     curl -sk -o /dev/null "$url"  # warm-up
     t=$THREADS; [ "$conns" -lt "$t" ] && t=$conns
-    raw="$RAW/$side-r$round-$proto-$(echo "$path" | tr '/?=' '___')-c$conns.txt"
+    raw="$RAW/$side-r$round-$proto-$(echo "$path" | tr '/?=' '___')-c$conns${streams:+-m$streams}.txt"
     c0=$(cpu_seconds)
-    wrk -t"$t" -c"$conns" -d"$DURATION" "$url" > "$raw" 2>&1
+    if [ -n "$streams" ]; then
+      h2load -D "${DURATION%s}" -c"$conns" -m"$streams" -t"$t" "$url" > "$raw" 2>&1 || true
+      n=$(awk '/^requests:/{print $6}' "$raw"); rps=$(awk '/^finished in/{print $4}' "$raw")  # "N done", "X req/s"
+    else
+      wrk -t"$t" -c"$conns" -d"$DURATION" "$url" > "$raw" 2>&1
+      n=$(awk '/requests in/{print $1}' "$raw"); rps=$(awk '/^Requests\/sec/{print $2}' "$raw")
+    fi
     c1=$(cpu_seconds)
-    n=$(awk '/requests in/{print $1}' "$raw"); rps=$(awk '/^Requests\/sec/{print $2}' "$raw")
-    LC_NUMERIC=C awk -v a="$c0" -v b="$c1" -v n="$n" -v s="$side" -v r="$round" -v k="$proto $path $conns" -v q="$rps" \
+    LC_NUMERIC=C awk -v a="$c0" -v b="$c1" -v n="${n:-0}" -v s="$side" -v r="$round" -v k="$proto $path $conns${streams:+x$streams}" -v q="${rps:-0}" \
       'BEGIN{ printf "%s %d %s %.2f %s\n", s, r, k, (n>0 ? (b-a)*1e6/n : -1), q }' >> "$RAW/rows"
-    printf '  %-4s r%d %-5s %-11s c=%-3s %8.2f us/req  %s req/s\n' "$side" "$round" "$proto" "$path" "$conns" \
+    printf '  %-4s r%d %-5s %-11s c=%-3s%s %8.2f us/req  %s req/s\n' "$side" "$round" "$proto" "$path" "$conns" "${streams:+ m=$streams}" \
       "$(tail -1 "$RAW/rows" | awk '{print $6}')" "$rps"
   done
 }
@@ -143,11 +169,15 @@ done
   echo "| case | base us/req (per round) | new us/req (per round) | new/base |"
   echo "|---|---|---|---|"
   for spec in "${SPECS[@]}"; do
-    proto="${spec%%:*}"; path="${spec#*:}"; conns="${path##*:}"; path="${path%:*}"
-    LC_NUMERIC=C awk -v k="$proto $path $conns" -v label="$proto $path c=$conns" '
+    proto="${spec%%:*}"; rest="${spec#*:}"; streams=""
+    case $proto in
+      h2|h2c) path="${rest%%:*}"; rest="${rest#*:}"; conns="${rest%%:*}"; streams="${rest#*:}" ;;
+      *) conns="${rest##*:}"; path="${rest%:*}" ;;
+    esac
+    LC_NUMERIC=C awk -v k="$proto $path $conns${streams:+x$streams}" -v label="$proto $path c=$conns${streams:+ m=$streams}" '
       $3" "$4" "$5==k { if ($1=="base") { b=b (b?" / ":"") sprintf("%.2f",$6); bs+=$6; bn++ } else { w=w (w?" / ":"") sprintf("%.2f",$6); ws+=$6; wn++ } }
       END { if (bn && wn) printf "| %s | %s | %s | %.3f |\n", label, b, w, (ws/wn)/(bs/bn);
-            else if (wn) printf "| %s | n/a (base has no proxy) | %s | n/a |\n", label, w }' "$RAW/rows"
+            else if (wn) printf "| %s | n/a (base has neither proxy nor HTTP/2) | %s | n/a |\n", label, w }' "$RAW/rows"
   done
 } > "$OUT"
 echo; cat "$OUT"; echo; echo "summary written to $OUT"

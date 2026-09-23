@@ -12,6 +12,7 @@ std::string_view status_line(int code) noexcept;
 struct ErrorPage {
     std::string body;     // small HTML document
     std::string headers;  // "Content-Type: text/html; charset=utf-8\r\nContent-Length: N\r\n"
+    std::string h2_headers;  // the same two fields as an HPACK block
 };
 
 // Canned page for an error status. Unknown codes map to 500.

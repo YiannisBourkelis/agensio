@@ -74,6 +74,7 @@ struct AccessRecord {
     std::string_view method;
     std::string_view target;
     int version_minor = 1;
+    std::string_view protocol;  // "HTTP/2.0" from the HTTP/2 connection; empty: HTTP/1.<version_minor>
     int status = 200;
     std::uint64_t bytes = 0;  // body bytes sent
     std::string_view referer;

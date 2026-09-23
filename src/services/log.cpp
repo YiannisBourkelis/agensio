@@ -221,7 +221,8 @@ void WorkerLogs::format_combined(std::string& out, std::string_view time_local, 
         append_escaped(out, r.method);
         out.push_back(' ');
         append_escaped(out, r.target);
-        out.append(r.version_minor == 0 ? " HTTP/1.0" : " HTTP/1.1");
+        if (r.protocol.empty()) out.append(r.version_minor == 0 ? " HTTP/1.0" : " HTTP/1.1");
+        else out.push_back(' '), out.append(r.protocol);
     }
     out.append("\" ");
     append_uint(out, static_cast<std::uint64_t>(r.status));
@@ -247,7 +248,8 @@ void WorkerLogs::format_json(std::string& out, std::string_view time_iso, const 
     append_json(out, r.method);
     out.append(",\"target\":");
     append_json(out, r.target);
-    out.append(",\"proto\":\"HTTP/1.").push_back(r.version_minor == 0 ? '0' : '1');
+    if (r.protocol.empty()) out.append(",\"proto\":\"HTTP/1.").push_back(r.version_minor == 0 ? '0' : '1');
+    else out.append(",\"proto\":\"").append(r.protocol);
     out.append("\",\"status\":");
     append_uint(out, static_cast<std::uint64_t>(r.status));
     out.append(",\"bytes\":");

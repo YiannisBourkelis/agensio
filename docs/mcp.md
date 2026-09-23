@@ -93,7 +93,7 @@ takes `--socket PATH`.
 | tool | role | what it does |
 |---|---|---|
 | `health_check` | viewer | findings with a fix each: certificates, missing redirects, port 80 for ACME, recent errors, settings waiting for a restart, root, shared accounts, stale pools, every `static` or `dynamic` pool with the PHP processes it keeps resident and their memory (`php_pool_resident`, fix: `settings: {pm: "ondemand"}`) |
-| `server_status` | viewer | version, pid, uptime, workers, connections, listeners, sites, the caller's role |
+| `server_status` | viewer | version, pid, uptime, workers, connections, listeners with their `protocols` (`h2` and `h1` on TLS, `h2c` too when enabled on plain), sites, the caller's role |
 | `sites_list`, `site_show` | viewer | sites with their certificate state; one site with its effective locations |
 | `config_validate` | viewer | the file on disk: errors and restart-only differences |
 | `config_reference` | viewer | every configuration key with type, default, meaning, reload or restart, who changes it (root in the main file, a site file, `site_create`, `settings`), the reference section, and the running value of server-level keys; the agent answers "how do I change X" from it, handing root's edits back as the exact line plus the reload or restart command |

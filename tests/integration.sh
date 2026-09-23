@@ -298,6 +298,10 @@ check() {  # name expected actual
   if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: expected [$2] got [$3]"; fails=$((fails+1)); failed_names="$failed_names
   - $1"; fi
 }
+# Every check in this file was written against HTTP/1.1, and curl negotiates HTTP/2 on the
+# TLS listener by default (lower-case header names, a different first line): pin the
+# suite to HTTP/1.1 and let the HTTP/2 section below call `command curl --http2`.
+curl() { command curl --http1.1 "$@"; }
 code() { curl -sS -o /dev/null -w '%{http_code}' "$@"; }
 # One table of PHP-source and backup spellings planted under every preset's shield and root
 # and asserted refused on each (2026-09-20 report: testing each preset against its own list
@@ -627,7 +631,7 @@ print("same" if schema == catalogue else "schema!=catalogue", "same" if accepted
 PYT
 )"
 "$BIN" ctl site-update inst.test --set max_body_size=1MB --yes --reason back --socket $CS > /dev/null
-check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 146 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
+check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 148 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
 check "secrets: the presets catalogue lists each preset's credential files" "/wp-config.php /sites/default/settings.php" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["wordpress"]["secrets"][0], p["drupal"]["secrets"][0])')"
 check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$("$BIN" ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; "$BIN" ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
@@ -867,6 +871,63 @@ PY
 curl -sS -o /dev/null http://127.0.0.1:8091/api/json; c1=$(est9107); sleep 1.6; c2=$(est9107)
 check "proxy: a kept origin connection is closed after idle_timeout (1 s) by the pool tick, none left open" "yes 0" "$([ "$c1" -ge 1 ] && echo yes || echo "$c1") $c2"
 check "proxy: the next request opens a fresh one and is answered" "200" "$(code http://127.0.0.1:8091/api/json)"
+fi
+
+# ---- HTTP/2 (phase G): prior knowledge on 8080 (h2c), ALPN on 8443; the same answers as HTTP/1 ----
+H2C="--http2-prior-knowledge"; H2="--http2 -k"
+for base in http://127.0.0.1:8080 https://127.0.0.1:8443; do
+  p="h2-${base%%:*}"; if [ "$base" = http://127.0.0.1:8080 ]; then H=$H2C; else H=$H2; fi
+  check "$p negotiated"            "2 200" "$(command curl -sS $H -o /dev/null -w '%{http_version} %{http_code}' $base/)"
+  check "$p index body"            "$IDX" "$(command curl -sS $H $base/ | sum)"
+  check "$p cached 100KB body"     "$CSS" "$(command curl -sS $H $base/style.css | sum)"
+  check "$p streamed 10MB body"    "$BIG" "$(command curl -sS $H $base/big.bin | sum)"
+  check "$p head fields"           "text/html; charset=utf-8 $IDXLEN yes" "$(command curl -sS $H -D - -o /dev/null $base/ | tr -d '\r' | awk 'tolower($1)=="content-type:"{sub(/^[^ ]+ /,""); t=$0} tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=1} tolower($1)=="date:"{d=1} tolower($1)=="server:"{s=$2} END{print t, l, (e&&d&&s=="agensio")?"yes":"no"}')"
+  check "$p HEAD has no body"      "200 0" "$(command curl -sS $H -I -o /dev/null -w '%{http_code} %{size_download}' $base/)"
+  check "$p 404 page"              "404 150" "$(command curl -sS $H -o /dev/null -w '%{http_code} %{size_download}' $base/nope)"
+  check "$p 405 POST with a body, then the next request" "405 200" "$(command curl -sS $H -o /dev/null -w '%{http_code} ' -d 'a=1' $base/; command curl -sS $H -o /dev/null -w '%{http_code}' $base/)"
+  check "$p dir redirect"          "301 /sub/" "$(command curl -sS $H -D - -o /dev/null $base/sub | tr -d '\r' | awk 'NR==1{c=$2} tolower($1)=="location:"{l=$2} END{print c, l}')"
+  ET=$(command curl -sS $H -I $base/ | tr -d '\r' | awk 'tolower($1)=="etag:"{print $2}')
+  check "$p 304 etag"              "304 0" "$(command curl -sS $H -o /dev/null -w '%{http_code} %{size_download}' -H "If-None-Match: $ET" $base/)"
+  check "$p 206 range"             "206 100 bytes 100-199/102430" "$(command curl -sS $H -D - -o /dev/null -r 100-199 $base/style.css | tr -d '\r' | awk 'NR==1{c=$2} tolower($1)=="content-length:"{l=$2} tolower($1)=="content-range:"{r=$2" "$3} END{print c, l, r}')"
+  check "$p one connection for three requests" "1 0 0" "$(command curl -sS $H -o /dev/null -o /dev/null -o /dev/null -w '%{num_connects} ' $base/ $base/style.css $base/app.html | sed 's/ $//')"
+  check "$p parallel streams on one connection" "200 200 200 200 1 0" "$(command curl -sS $H --parallel --parallel-max 8 -o /dev/null -o /dev/null -o /dev/null -o /dev/null -w '%{http_code} ' $base/ $base/style.css $base/big.bin $base/app.html; command curl -sS $H --parallel -o /dev/null -o /dev/null -w '%{num_connects} ' $base/ $base/style.css | sed 's/ $//')"
+  check "$p traversal refused"     "400" "$(command curl -sS $H -o /dev/null -w '%{http_code}' --path-as-is $base/../etc/passwd)"
+done
+check "h2: the access log names the protocol" "yes" "$(sleep 1.1; grep -q '"GET / HTTP/2.0" 200' bench/tmp/access.log && echo yes)"
+check "h2: a plain HTTP/1.1 client on the same port is untouched" "1.1 200" "$(curl -sS -o /dev/null -w '%{http_version} %{http_code}' http://127.0.0.1:8080/)"
+check "h2: ALPN offers h2 then h1; a client offering only http/1.1 gets it" "1.1 200" "$(command curl -sSk --http1.1 -o /dev/null -w '%{http_version} %{http_code}' https://127.0.0.1:8443/)"
+check "h2: explain and status name the protocols" "yes yes" "$(grep -q 'protocols = \["h2c", "h2", "h1"\]' bench/tmp/explain.out && echo yes) $(curl -sS --unix-socket bench/tmp/control.sock http://control/v1/status | python3 -c 'import json,sys; d=json.load(sys.stdin); ls={l["address"]:l["protocols"] for l in d["listeners"]}; print("yes" if ls["127.0.0.1:8080"]==["h2c","h1"] and ls["127.0.0.1:8443"]==["h2","h1"] else ls)')"
+if [ -n "$FPM_PID" ]; then
+  check "h2 php: GET runs through FastCGI with SERVER_PROTOCOL HTTP/2.0" "HTTP/2.0 GET" "$(command curl -sS $H2C http://127.0.0.1:8080/php/params.php | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("SERVER_PROTOCOL"), d.get("REQUEST_METHOD"))')"
+  printf 'hello h2 %.0s' $(seq 1 3000) > bench/tmp/h2post.bin
+  check "h2 php: a 27 KB POST body reaches PHP intact (DATA frames to the request body)" "27000 $(md5sum bench/tmp/h2post.bin | cut -d' ' -f1)" "$(command curl -sS $H2C -H 'Content-Type: application/octet-stream' --data-binary @bench/tmp/h2post.bin http://127.0.0.1:8080/php/post.php | sed 's/ *$//')"
+  check "h2 php: a 1.5 MB POST over the 1 MB limit is 413 up front, the connection survives" "413 200" "$(command curl -sS $H2C -o /dev/null -w '%{http_code} ' --data-binary @bench/tmp/inst/1.5mb.bin http://127.0.0.1:8080/php/post.php; command curl -sS $H2C -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/)"
+  check "h2 php: streamed PHP output over h2" "$(curl -sS http://127.0.0.1:8080/php/stream.php | sum)" "$(command curl -sS $H2C http://127.0.0.1:8080/php/stream.php | sum)"
+  check "h2 laravel: the front controller answers over h2" "laravel /some/route?x=1 /index.php -" "$(command curl -sS $H2C -H 'Host: laravel.test' 'http://127.0.0.1:8090/some/route?x=1')"
+  check "h2 wordpress: uploads shield holds over h2 too" "404 200" "$(command curl -sS $H2C -o /dev/null -w '%{http_code} ' -H 'Host: wp.test' http://127.0.0.1:8096/wp-content/uploads/shell.php; command curl -sS $H2C -o /dev/null -w '%{http_code}' -H 'Host: wp.test' http://127.0.0.1:8096/wp-includes/wp.js)"
+fi
+if [ -n "$UP_PID" ]; then
+  check "h2 proxy: a proxied JSON answer and a streamed one" "200 200" "$(command curl -sS $H2C -o /dev/null -w '%{http_code} ' http://127.0.0.1:8091/api/json; command curl -sS $H2C -o /dev/null -w '%{http_code}' http://127.0.0.1:8091/stream/big)"
+fi
+# The authority rule of H2h on the protocol it was written for: one TLS connection to a.test
+# (its SAN certificate covers b.test, not c.test) carries requests for all three.
+if python3 -c 'import h2' 2>/dev/null; then
+  check "h2 authority: coalesced requests on one connection: a.test and b.test served, c.test 421" "200 200 421" "$(python3 tests/h2/h2client.py --tls --sni a.test 127.0.0.1 8446 / a.test / b.test / c.test | awk '{printf "%s ", $1}' | sed 's/ $//')"
+  check "h2 wildcard: x.wild.test and y.wild.test on one connection, a name outside the wildcard 421" "200 200 421" "$(python3 tests/h2/h2client.py --tls --sni x.wild.test 127.0.0.1 8449 / x.wild.test / y.wild.test / a.b.wild.test | awk '{printf "%s ", $1}' | sed 's/ $//')"
+else
+  echo "skip h2 authority checks (python3-h2 not installed)"
+fi
+# Conformance: h2spec against both listeners. Every case must pass.
+if command -v h2spec >/dev/null; then
+  h2spec -h 127.0.0.1 -p 8080 -o 5 > bench/tmp/h2spec-h2c.txt 2>&1 || true
+  h2spec -h 127.0.0.1 -p 8443 -t -k -o 5 > bench/tmp/h2spec-h2.txt 2>&1 || true
+  # On a plain listener an invalid preface is a malformed HTTP/1 request and gets a 400 in
+  # HTTP/1 form, which h2spec's 3.5/2 cannot read as a frame: that case, and only it, fails.
+  check "h2spec h2c: every case passes except 3.5/2 (invalid preface: an HTTP/1 400 on a plain listener)" "1 yes" "$(grep -E '^[0-9]+ tests, ' bench/tmp/h2spec-h2c.txt | sed -E 's/.* ([0-9]+) failed.*/\1/' | tail -1) $(grep -q '× 2: Sends invalid connection preface' bench/tmp/h2spec-h2c.txt && echo yes)"
+  check "h2spec h2 (TLS): every case passes" "0" "$(grep -E '^[0-9]+ tests, ' bench/tmp/h2spec-h2.txt | sed -E 's/.* ([0-9]+) failed.*/\1/' | tail -1)"
+  grep -E '^[0-9]+ tests, ' bench/tmp/h2spec-h2c.txt | tail -1 | sed 's/^/  h2spec h2c: /'
+else
+  echo "skip h2spec (not installed)"
 fi
 
 # ---- request bodies (A3): decoded, limited, drained after the response ----

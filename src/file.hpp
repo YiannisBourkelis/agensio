@@ -45,6 +45,14 @@ public:
 
     // Reads up to len bytes at offset. Returns bytes read, 0 at EOF, -1 on error.
     std::int64_t read_at(void* buf, std::size_t len, std::uint64_t offset) const noexcept;
+    // Reads into several buffers with one call (preadv): the HTTP/2 writer fills the payload
+    // slots of a pre-framed chunk this way. Returns the bytes read in total, 0 at the end,
+    // -1 on error; a short read fills the slots in order.
+    struct MutSlice {
+        char* data;
+        std::size_t len;
+    };
+    std::int64_t read_at(const MutSlice* slices, int count, std::uint64_t offset) const noexcept;
 
     // Reads exactly len bytes starting at offset 0 into buf. Returns false on short read.
     bool read_all(void* buf, std::size_t len) const noexcept;

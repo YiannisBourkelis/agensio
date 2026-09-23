@@ -49,6 +49,9 @@ struct Request {
     StreamBody* body = nullptr;        // the body as a pull source when has_body; owned by the connection
     bool keep_alive = true;
     std::size_t length = 0;  // HTTP/1: bytes of the head consumed from the buffer
+    // The protocol as SERVER_PROTOCOL and the access log name it: "HTTP/2.0" from the
+    // HTTP/2 connection; empty on HTTP/1, where version_minor says (no work per request).
+    std::string_view protocol;
 
     void reset() noexcept {  // cheaper than *this = Request{}: leaves the field array alone
         method = Method::other;
@@ -60,6 +63,7 @@ struct Request {
         body = nullptr;
         keep_alive = true;
         length = 0;
+        protocol = {};
     }
 };
 

@@ -3,6 +3,9 @@
 {
     admin off
     auto_https off
+    servers {
+        protocols h1 h2 h2c   # HTTP/2 through ALPN on 8445 and prior knowledge on 8082 (bench/h2/run.sh)
+    }
 }
 
 http://127.0.0.1:8082 {

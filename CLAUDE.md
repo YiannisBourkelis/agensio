@@ -33,7 +33,9 @@ the sanitizer and fuzz runs listed in `docs/security-control-plane.md`, and
   it counts. Proxy code (`src/upstream/http*`, `src/handlers/proxy*`, phase D) is gated
   with `bench/ab.sh <base-ref> -P`, which adds the proxy rows through the benchmark
   upstream (`bench/upstream/`, D0); `bench/proxy/run.sh` is the comparison against nginx
-  and Caddy. Linux-only work (kTLS, io_uring, Landlock, FUSE behaviour) is developed there.
+  and Caddy. HTTP/2 code (`src/http2/`) is gated with `bench/ab.sh <base-ref> -2`, which
+  adds four h2load rows, and `bench/h2/run.sh` is its comparison against nginx and Caddy;
+  the static rows of that A/B must stay flat. Linux-only work (kTLS, io_uring, Landlock, FUSE behaviour) is developed there.
   Never trade throughput for convenience on the hot path (no allocations per request that
   the old design avoided, no locks on the cache-hit path, no per-request string formatting
   of constant headers).
@@ -373,7 +375,28 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   thread as its own account. `[control] install`, `install_private`, `install_ca`,
   `upload_max`; `tests/install.sh` (root devbox). Rule for every change here: the
   security page rows 19-23 and the MCP texts move with it.
-- **Not yet**: directory listing, TLS-ALPN-01 / DNS-01 (wildcards), OCSP stapling.
+- **HTTP/2** (G0, 2026-09-23, `src/http2/`, design `docs/design-http2.md`): our own protocol
+  layer, no library at run time (nghttp2 only in the test bed: h2load, `nghttp`, the
+  HPACK oracle). `frame.hpp` (framing, control-frame builders), `hpack.*` (decoder with
+  the dynamic table and a Huffman automaton generated from the RFC text by
+  `tools/gen-hpack-tables.py`; static-only encoder, so encodings are state-independent
+  and prebuilt: `CacheEntry::h2_block`, `ErrorPage::h2_headers`, the worker's server+date
+  pair per second), `stream.hpp` (pooled per-stream state, the body source), `writer.hpp`
+  (write cycles: control frames, then a quantum per ready stream within its windows,
+  one writev of views on plain sockets, one buffer on TLS; StreamBody pulls bounded per
+  connection), `connection.hpp` (frames, streams, request assembly with the field rules
+  of `core/fields.hpp`, receive windows sized to the body limit, timeouts, the glitch and
+  reset budgets, GOAWAY). Selection is a hand-over from `Http1Connection`: after the
+  handshake when ALPN chose h2, or on the parser's 505 branch when a plain listener with
+  `h2c` in `[server] protocols` saw the preface; the accept path and the HTTP/1 request
+  path are unchanged (A/B gate). `http2.max_concurrent_streams` is the one HTTP/2 key;
+  everything else derives from the existing limits (docs/configuration.md 16). Every
+  GOAWAY and RST_STREAM sent is an info log line. Tests: RFC 7541 vectors, `fuzz_hpack`,
+  h2spec on both listeners and an h2-library client in `tests/integration.sh`,
+  `bench/h2/run.sh` against nginx and Caddy. Rule for every change here: the threat table
+  of the design document and the MCP texts move with it; the h1 rows of the A/B stay flat.
+- **Not yet**: directory listing, TLS-ALPN-01 / DNS-01 (wildcards), OCSP stapling, RFC 9218
+  priorities, CONNECT over h2, HTTP/2 to origins.
 
 ## Performance notes (measured, keep current)
 
@@ -521,6 +544,29 @@ front set it (otherwise it repeats Host). WebSocket-shaped echo through 64 tunne
 (`bench/proxy/ws.sh`, `proxy-ws-20260917-204524.md`): nginx 3.75 us and agensio 3.80 us
 of CPU per 1 KB message crossing the proxy twice, parity; the Python load generator
 bounds the rate at about 137k msg/s.
+
+HTTP/2 (G0, 2026-09-23, `bench/results/ab-20260923-171228.md`, `h2-20260923-164706.md`
+for nginx and Caddy, `h2-20260923-171144.md` for agensio's final rows; one worker, h2load
+4 threads): the HTTP/1 rows of the A/B moved 0.98 to 1.04 (noise), so HTTP/1 pays nothing.
+HTTP/2 1 KB at 64 connections: 2.3 us plain and 3.1 to 3.4 us TLS with one stream per
+connection (HTTP/1: 2.0 and 2.9), 1.6 to 1.8 and 2.0 to 2.1 us with ten streams, below
+HTTP/1, because one writev or one TLS record carries several responses; 606k req/s on h2c
+and 498k over TLS at ten streams. nginx on the same rows: 3.98 us / 252k (h2c, ten
+streams), 4.72 us / 212k and 3.54 us / 282k (TLS, one and ten streams), 3.63 us at 256
+connections against our 2.06. 100 KB over TLS at ten streams: 20.5 vs 28.4 us. The 10 MB
+TLS stream: 2017 vs 2771 us (496 against 361 req/s). That row was nginx's at first (2864
+us): each 16,384-byte DATA frame plus its 9-byte header was written as one TLS record
+and a 9-byte one, twice the sends per response, and one write cycle carried one frame.
+Now a DATA payload on TLS is 16,375 bytes so a frame is exactly one record, a cycle
+carries four frames per stream, and a file's frames are read with one preadv straight
+into a pre-framed chunk (headers written in place, one contiguous piece, no copy) that
+TLS writes directly; nginx fills its 16 KB SSL buffer per record and copies. What is left
+on that row is the encrypt copy, which kTLS removes. Caddy costs 30 us per small request.
+Two lessons: the inline completion pattern needs a yield budget on every loop that can
+chain (the write cycle and the read loop each overflowed the stack under h2load before
+they got one, found by the sanitizer build in the devbox, `AGENSIO_BIN=build-asan/agensio
+bench/h2/run.sh -s agensio`), and h2spec passes only when a stream whose response is
+complete keeps reading its body.
 
 Benchmark hygiene: `pkill -x nginx` does not kill nginx (it retitles its processes); a
 stale instance keeps the ports and silently serves the next run. `bench/run.sh` now
