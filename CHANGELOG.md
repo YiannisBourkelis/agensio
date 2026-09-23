@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.20 (unreleased)
+## 0.1.0-alpha.20 (2026-09-24)
 
 - **Fixed: a Grav site on the borrowed drupal preset served its backup** (2026-09-23,
   a live host): `logs/grav.log` was served and named the `backup/*.zip` next to it, which
