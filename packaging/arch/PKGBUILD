@@ -1,7 +1,7 @@
 # Maintainer: Yiannis Bourkelis
 pkgname=agensio
-_tag=0.1.0-alpha.18
-pkgver=0.1.0alpha18
+_tag=0.1.0-alpha.19
+pkgver=0.1.0alpha19
 pkgrel=1
 pkgdesc="Fast web server with PHP, reverse proxy, automatic TLS and an MCP control plane"
 arch=('x86_64' 'aarch64')
