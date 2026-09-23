@@ -261,7 +261,7 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   server_name, ca }`. CGI (D5, `src/upstream/cgi_client.*`, `src/handlers/cgi.*`): the
   exchange's connect step forks the script with a socketpair as stdin/stdout, so the
   shared exchange code does the rest; processes capped and reaped per worker pool.
-- **Presets** (C3): `app = "laravel" | "drupal" | "wordpress" | "php" | "static"` on a site expands
+- **Presets** (C3): `app = "laravel" | "drupal" | "wordpress" | "grav" | "php" | "static"` on a site expands
   at load into root, index, try_files and locations (Laravel: only `/index.php` is ever
   executed and any other `.php` is refused with 404, never served as source; Drupal: any
   `.php` runs, front controller for the rest, Drupal's `.htaccess` refusals built in;
@@ -270,8 +270,12 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   files answered 404, which are also refused in every backup spelling: `name.bak`,
   `name~`, `stem.txt`, `.name.swp`, `handlers/static.hpp` `backup_of_protected`) expanded
   by one shared routine, so a new application is a row, a fixture and a docs section;
-  every PHP preset's root and shields refuse the PHP spellings, `.inc` and editor backups
-  (`kSourceBackups`), and the integration suite plants one spelling table under every
+  every PHP preset's root and shields refuse the PHP spellings, `.inc`, editor backups,
+  `.log` and `.sql` (`kSourceBackups`); a preset row can also name directories refused
+  whole (`never_dirs`: Grav's `logs/`, `backup/`) and extra endings per shield (Grav's
+  `system/`, `user/`); `health` reports a site whose files are another application's
+  (`preset_mismatch`, from `detect_app`) and archives or dumps under a served tree
+  (`archives_in_root`), and the integration suite plants one spelling table under every
   preset; `/build/` gets an immutable Cache-Control via `add_headers`; WordPress: any
   `.php` runs, `wp-content/uploads` and `wp-includes` are `final` prefix locations, nginx
   `^~`, with `deny_suffixes` so PHP there is 404 and never executed); hand-written

@@ -59,6 +59,8 @@ bool safe_path(std::string_view path, std::string& why);
 std::string suggest_user(std::string_view domain);
 // The application the files under `root` suggest: laravel, wordpress, php, proxy, static.
 std::string detect_app(const std::filesystem::path& root);
+// What detect_app looked at for that answer, for a message ("bin/grav and system/defines.php").
+std::string detect_app_marker(const std::string& app);
 
 // Applies `body` onto `spec` (fields present win; absent ones keep what spec had) and
 // lists the decisions still open. `error` names a value that is wrong outright.

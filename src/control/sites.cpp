@@ -188,11 +188,21 @@ std::string detect_app(const fs::path& root) {
     std::error_code ec;
     if (!fs::is_directory(root, ec)) return {};
     if (fs::exists(root / "artisan", ec) || fs::exists(root.parent_path() / "artisan", ec)) return "laravel";
+    if (fs::exists(root / "bin" / "grav", ec) && fs::exists(root / "system" / "defines.php", ec)) return "grav";
     if (fs::exists(root / "core" / "lib" / "Drupal.php", ec) || fs::exists(root / "web" / "core" / "lib" / "Drupal.php", ec)) return "drupal";
     if (fs::exists(root / "wp-config.php", ec) || fs::is_directory(root / "wp-includes", ec)) return "wordpress";
     if (fs::exists(root / "index.php", ec)) return "php";
     if (fs::exists(root / "package.json", ec) || fs::exists(root / "Gemfile", ec)) return "proxy";
     return "static";
+}
+
+std::string detect_app_marker(const std::string& app) {
+    if (app == "laravel") return "artisan";
+    if (app == "grav") return "bin/grav and system/defines.php";
+    if (app == "drupal") return "core/lib/Drupal.php";
+    if (app == "wordpress") return "wp-config.php or wp-includes/";
+    if (app == "php") return "index.php";
+    return "package.json or Gemfile";
 }
 
 std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, SiteSpec& spec, std::string& error) {

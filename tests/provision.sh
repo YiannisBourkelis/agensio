@@ -115,6 +115,19 @@ m=re.search(r"now (\d+) processes, (\d+) MB RSS, (\d+) MB private", t9[0]["messa
 print(m.group(1) if m else "-", "yes" if m and int(m.group(2))>0 and "--set pm=ondemand" in t9[0]["fix"] else "no", "yes" if any(x.get("site") in ("t7.test","t6.test") for x in f) else "no")')"
 "$BIN" ctl site-update t9.test --set pm=ondemand --yes --reason resident --socket $T/run/control.sock > /dev/null
 kill "$(cat $T/fpm.pid)"; sleep 0.5; rm -f $T/run/agensio-t*.sock; $FPM -y $T/fpm.conf -D; for _ in $(seq 1 50); do [ -S $T/run/agensio-t6.sock ] && break; sleep 0.1; done; sleep 0.3
+# The pool file on disk is what php-fpm runs (2026-09-23 live report: after the ondemand default
+# arrived, two pools still static on disk held 681 MB and health said nothing, because it judged
+# the configuration). t9's file goes back to static behind the configuration's back.
+sed -i 's/^pm = ondemand$/pm = static/' $POOLD/agensio-t9.conf
+kill "$(cat $T/fpm.pid)"; sleep 0.5; rm -f $T/run/agensio-t*.sock; $FPM -y $T/fpm.conf -D; for _ in $(seq 1 50); do [ -S $T/run/agensio-t6.sock ] && break; sleep 0.1; done; sleep 0.5
+check "health: a pool still static on disk while the configuration says ondemand is a warning naming both, with its resident processes; the fix is agensio pools" "warn yes 2 yes" "$(curl -sS --unix-socket $T/run/control.sock http://control/v1/health | python3 -c '
+import json,sys,re
+f=[x for x in json.load(sys.stdin)["findings"] if x["code"]=="php_pool_resident" and x.get("site")=="t9.test"]
+m=re.search(r"now (\d+) processes", f[0]["message"]) if f else None
+print(f[0]["severity"] if f else "-", "yes" if f and "pm = static on disk (the configuration says ondemand; agensio pools has not run): all 2 PHP processes" in f[0]["message"] else f, m.group(1) if m else "-", "yes" if f and f[0]["fix"].startswith("run agensio pools, then reload php-fpm") else "no")')"
+"$BIN" pools -c $T/agensio.toml > /dev/null 2>&1 || true
+check "health: after agensio pools the file says ondemand again and the finding is gone" "ondemand 0" "$(grep '^pm = ' $POOLD/agensio-t9.conf | cut -d' ' -f3) $(curl -sS --unix-socket $T/run/control.sock http://control/v1/health | grep -o '"code":"php_pool_resident"' | wc -l | tr -d ' ')"
+kill "$(cat $T/fpm.pid)"; sleep 0.5; rm -f $T/run/agensio-t*.sock; $FPM -y $T/fpm.conf -D; for _ in $(seq 1 50); do [ -S $T/run/agensio-t6.sock ] && break; sleep 0.1; done; sleep 0.3
 for pair in "t7 wordpress" "t6 drupal"; do set -- $pair; u=$1; app=$2
   # The same upload over HTTP/2 (prior knowledge): DATA frames to the pool's tmp, then served.
   check "upload over HTTP/2 ($app preset, user $u): a 600 KB multipart body reaches PHP and the file is served" "200 0 614400 | 200 614400" "$(r=$(curl -sS --http2-prior-knowledge -o $T/upl.out -w '%{http_code}' -H "Host: $u.test" -F "f=@$T/mid.bin" http://127.0.0.1:18198/upload.php); echo -n "$r "; head -1 $T/upl.out | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["error"], d["size"], end="")' 2>/dev/null; echo -n " | "; curl -sS --http2-prior-knowledge -o /dev/null -w '%{http_code} %{size_download}' -H "Host: $u.test" http://127.0.0.1:18198/moved.bin)"

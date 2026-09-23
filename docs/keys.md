@@ -98,7 +98,7 @@ section of `docs/configuration.md` that explains the key.
 | `server_name` | list of host names | ["*"] | The names this site answers; "*" makes it the listener's catch-all. A name no site lists answers 421. | reload | site-create (domain, aliases) | 1b |
 | `listen` | list of host:port | (required) | The addresses this site listens on; one site per name per address. | reload (a new privileged port needs a restart) | site-create (listen_plain, listen_tls) | 1 |
 | `root` | path | (required unless app = proxy) | The document root, or for a preset the project directory (Laravel's public/, Drupal's web/ are served). | reload | site-create (root) | 1 |
-| `app` | enum: static \| php \| laravel \| drupal \| wordpress \| proxy | static | The preset: routing, which .php runs, what is refused; presets_list explains each. | reload | site-create (app) | 2 |
+| `app` | enum: static \| php \| laravel \| drupal \| wordpress \| grav \| proxy | static | The preset: routing, which .php runs, what is refused; presets_list explains each. | reload | site-create (app) | 2 |
 | `index` | list | ["index.html"] (presets set their own) | Files tried for a directory request. | reload | site file | 1 |
 | `try_files` | list | preset-dependent | What to try for a path: $uri, $uri/, a fallback such as /index.php?$query_string, or =404. | reload | site file | 6 |
 | `user` | string | "" | The account the site's PHP runs as, in its own pool; also who owns its files. What makes a shared host safe. | reload (agensio pools / the helper writes the pool) | site-create (user, no_user) | 11 |

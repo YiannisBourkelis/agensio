@@ -1,6 +1,7 @@
 #include "control/commands.hpp"
 
 #include "control/settings.hpp"
+#include "control/sites.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -498,6 +499,62 @@ UnreadableFiles unreadable_files(const SiteConfig& site, const std::vector<std::
     return r;
 }
 
+// Backup archives and database dumps under a document root (2026-09-23 live report: a
+// Grav site's backup/ held a 23 MB zip with the admin account and the salt, and the log
+// that named it was served). Bounded like unreadable_files; hidden directories skipped.
+ArchivesInRoot archives_in_root(const SiteConfig& site, std::size_t budget) {
+    ArchivesInRoot r;
+    if (site.root.empty()) return r;
+    static const char* const kEndings[] = {".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".7z", ".rar", ".sql", ".sql.gz"};
+    std::error_code ec;
+    if (!fs::is_directory(site.root, ec)) return r;
+    // Directories the preset never answers (Grav's backup/, logs/) are not one path away
+    // from public; they are not searched.
+    std::vector<std::string> skip;
+    for (const auto& loc : site.locations)
+        if (loc.handler == "deny" && !loc.exact && loc.path.size() > 1 && loc.path.back() == '/') skip.push_back(site.root + loc.path.substr(0, loc.path.size() - 1));
+    for (fs::recursive_directory_iterator it(site.root, fs::directory_options::skip_permission_denied, ec), end; it != end && r.seen < budget; it.increment(ec)) {
+        if (ec) break;
+        const std::string name = it->path().filename().string();
+        if (it->is_directory(ec)) {
+            if ((!name.empty() && name[0] == '.') || it.depth() >= 8 || std::find(skip.begin(), skip.end(), it->path().string()) != skip.end())
+                it.disable_recursion_pending();
+            continue;
+        }
+        if (!name.empty() && name[0] == '.') continue;
+        if (!it->is_regular_file(ec)) continue;
+        ++r.seen;
+        std::string lower = name;
+        for (char& c : lower) c = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
+        bool hit = false;
+        for (const char* e : kEndings) {
+            const std::size_t n = std::strlen(e);
+            if (lower.size() > n && lower.compare(lower.size() - n, n, e) == 0) { hit = true; break; }
+        }
+        if (!hit) continue;
+        const std::uintmax_t size = it->file_size(ec);
+        if (r.count++ == 0) {
+            r.example = it->path().string();
+            r.example_bytes = ec ? 0 : static_cast<std::uint64_t>(size);
+        }
+    }
+    return r;
+}
+
+// The pm the pool file on disk says: php-fpm runs that one until `agensio pools` and a
+// reload, whatever the configuration means to (2026-09-23 live report: two pools still
+// static on disk held 681 MB while the configuration already said ondemand).
+std::string pool_file_pm(const Config& cfg, const PhpPool& pool) {
+    const fs::path dir = pools_dir(cfg, "");
+    if (dir.empty()) return {};
+    std::ifstream in(dir / (pool.name + ".conf"));
+    for (std::string line; std::getline(in, line);) {
+        if (line.rfind("pm = ", 0) == 0) return line.substr(5);
+        if (line.rfind("pm=", 0) == 0) return line.substr(3);
+    }
+    return {};
+}
+
 // The PHP processes of one php-fpm pool, from /proc (Linux; elsewhere none are found):
 // php-fpm titles each child "php-fpm: pool NAME", and /proc/PID/status gives VmRSS and
 // RssAnon (the private part) for another account's process too. What a pool keeps
@@ -660,17 +717,23 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
         // keeps every child, dynamic half of them, ondemand none. One finding per pool.
         std::set<std::string> pools_seen;
         for (const auto& s : running.sites) {
-            if (!s.pool.generated || s.pool.pm == "ondemand" || !pools_seen.insert(s.pool.name).second) continue;
+            if (!s.pool.generated || !pools_seen.insert(s.pool.name).second) continue;
+            // What php-fpm runs is the pool file on disk, not the configuration's intent.
+            const std::string on_disk = pool_file_pm(running, s.pool);
+            const std::string pm = on_disk.empty() ? s.pool.pm : on_disk;
+            if (pm == "ondemand") continue;
+            const bool stale = !on_disk.empty() && on_disk != s.pool.pm;
             const PoolResidency r = pool_residency(s.pool.name);
-            const unsigned kept = s.pool.pm == "static" ? s.pool.children : std::max(1u, s.pool.children / 2);
-            std::string msg = "pool " + s.pool.name + " is pm = " + s.pool.pm + ": " + (s.pool.pm == "static" ? "all " : "at least ") +
-                              std::to_string(kept) + " PHP processes stay resident while the site is idle";
+            const unsigned kept = pm == "static" ? s.pool.children : std::max(1u, s.pool.children / 2);
+            std::string msg = "pool " + s.pool.name + " is pm = " + pm + (stale ? " on disk (the configuration says " + s.pool.pm + "; agensio pools has not run)" : "") +
+                              ": " + (pm == "static" ? "all " : "at least ") + std::to_string(kept) + " PHP processes stay resident while the site is idle";
             if (r.processes)
                 msg += " (now " + std::to_string(r.processes) + " processes, " + std::to_string((r.rss_kb + 512) / 1024) + " MB RSS, " +
                        std::to_string((r.anon_kb + 512) / 1024) + " MB private)";
-            add("info", "php_pool_resident", s.server_names.front(), msg,
-                "site-update " + s.server_names.front() + " --set pm=ondemand (a child starts on the first request and exits after 60 s idle), or keep " +
-                    s.pool.pm + " for a site that must not pay a fork on its first request");
+            add(stale ? "warn" : "info", "php_pool_resident", s.server_names.front(), msg,
+                stale ? "run agensio pools, then reload php-fpm: the pool becomes " + s.pool.pm + " as configured"
+                      : "site-update " + s.server_names.front() + " --set pm=ondemand (a child starts on the first request and exits after 60 s idle), or keep " +
+                            pm + " for a site that must not pay a fork on its first request");
         }
         std::string conf;
         if (php_fpm_hard_reload(running, conf))
@@ -678,6 +741,32 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
                 "set process_control_timeout = 10s in " + conf + " and reload php-fpm once");
     }
 
+    // A document root whose files belong to another application than the preset says: the
+    // borrowed preset's refusals do not fit, and what the application's own .htaccess would
+    // have protected is served (2026-09-23: Grav on the drupal preset published its backup).
+    for (const auto& s : running.sites) {
+        if (s.root.empty() || !s.redirect.empty() || s.app.empty() || s.app == "static" || s.app == "proxy") continue;
+        const std::string detected = detect_app(s.project_root.empty() ? s.root : s.project_root);
+        if (detected.empty() || detected == s.app || detected == "static" || detected == "proxy" || detected == "php") continue;
+        add("warn", "preset_mismatch", s.server_names.front(),
+            "the files under " + (s.project_root.empty() ? s.root : s.project_root) + " look like " + detected + " (" + detect_app_marker(detected) +
+                "), but app = \"" + s.app + "\": the " + s.app + " preset's refusals do not fit them, and what " + detected +
+                "'s own .htaccess would protect may be served",
+            "set app = \"" + detected + "\" (site-update " + s.server_names.front() + " with app: " + detected + " for a managed site)");
+    }
+    // Backup archives and database dumps inside a served tree are one path or one preset
+    // away from being public, whatever the preset refuses today.
+    for (const auto& s : running.sites) {
+        if (s.root.empty() || !s.redirect.empty() || s.app.empty() || s.app == "static" || s.app == "proxy") continue;
+        const ArchivesInRoot a = archives_in_root(s, 2000);
+        if (a.count == 0) continue;
+        const std::string size = a.example_bytes >= 1024 * 1024 ? std::to_string((a.example_bytes + 512 * 1024) / (1024 * 1024)) + " MB"
+                                                                : std::to_string((a.example_bytes + 512) / 1024) + " KB";
+        add("warn", "archives_in_root", s.server_names.front(),
+            std::to_string(a.count) + " archive(s) or database dump(s) under the document root, e.g. " + a.example + " (" + size + ")" +
+                (a.seen >= 2000 ? ", the first 2000 files looked at" : ""),
+            "move backups and dumps out of the document root (a backup plugin's directory too) and delete stale ones; nothing served should hold a copy of the site");
+    }
     // Files the server cannot read under a document root (2026-09-20: every upload of every
     // site with a user was 0640 user:user after move_uploaded_file, 404 with no log line).
     {

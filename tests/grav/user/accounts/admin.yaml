@@ -1,0 +1,5 @@
+email: admin@example.com
+hashed_password: $2y$10$AGENSIO-HASH-CANARY
+access:
+  admin:
+    super: true

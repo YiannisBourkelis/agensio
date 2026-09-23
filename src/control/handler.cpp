@@ -675,6 +675,12 @@ void ControlHandler::site_create(Stream& s, const json::Value& body, std::string
     }
     // A listener without a catch-all answers 421 to any other Host: say so once, here.
     json::Value warnings = json::Value::array();
+    if (!spec.root.empty() && spec.app != "static" && spec.app != "proxy") {
+        const std::string detected = control::detect_app(spec.root);
+        if (!detected.empty() && detected != spec.app && detected != "static" && detected != "proxy" && detected != "php")
+            warnings.push("the files under " + spec.root + " look like " + detected + " (" + control::detect_app_marker(detected) +
+                          "), not " + spec.app + ": the " + spec.app + " preset's refusals do not fit them (health reports it as preset_mismatch); use app: " + detected);
+    }
     for (const std::string& address : {spec.listen_plain, spec.listen_tls}) {
         const bool used = address == spec.listen_plain ? (spec.https == "none" || spec.redirect_http) : spec.https != "none";
         if (used && !control::listener_has_catch_all(cfg, address))

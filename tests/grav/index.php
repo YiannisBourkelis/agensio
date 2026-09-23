@@ -1,0 +1,1 @@
+<?php echo "grav front ", $_SERVER["REQUEST_URI"];

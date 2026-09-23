@@ -832,13 +832,53 @@ static void test_presets() {
     CHECK(Router::location(w, "/wp-content/plugins/x/ajax.php").kind == HandlerKind::fastcgi);
     const LocationConfig& up = Router::location(w, "/wp-content/uploads/2026/shell.php");
     CHECK(up.path == "/wp-content/uploads/" && up.final && up.kind == HandlerKind::static_);
-    CHECK(up.deny_suffixes.size() == 19 && up.add_headers.size() == 1 && up.origin == "preset:wordpress");
+    CHECK(up.deny_suffixes.size() == 21 && up.add_headers.size() == 1 && up.origin == "preset:wordpress");
     CHECK(Router::location(w, "/wp-includes/js/x.js").final);
     CHECK(Router::location(w, "/wp-admin/").path == "/");
     CHECK(rejects("badfinal.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n"
                                    "[[site.location]]\npath = \".php\"\nmatch = \"suffix\"\nfinal = true\n"));
     CHECK(rejects("baddeny.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n"
                                   "[[site.location]]\npath = \"/u/\"\ndeny_suffixes = [\"php\"]\n"));
+
+    // Grav (2026-09-23 live report, run on the borrowed drupal preset): only index.php runs;
+    // logs/, backup/, cache/, bin/, tests/, tmp/ are refused whole; system/ and vendor/
+    // serve assets only; user/ hides pages, accounts and configuration; .log and .sql are
+    // refused on every preset now.
+    fs::create_directories(dir / "grav" / "bin");
+    fs::create_directories(dir / "grav" / "system");
+    write("grav/index.php", "<?php");
+    write("grav/bin/grav", "#!");
+    write("grav/system/defines.php", "<?php");
+    write("grav.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"grav\"\napp = \"grav\"\n"
+                       "php = { socket = \"unix:/run/php/fpm.sock\" }\n");
+    Config gcfg = load_config(dir / "grav.toml");
+    const SiteConfig& g = gcfg.sites[0];
+    auto refuses = [](const LocationConfig& l, const char* s) { return std::find(l.deny_suffixes.begin(), l.deny_suffixes.end(), s) != l.deny_suffixes.end(); };
+    CHECK(g.app == "grav" && g.root == fs::canonical(dir / "grav").string() && g.try_files.size() == 3 && g.try_files[2].target == "/index.php");
+    CHECK(Router::location(g, "/index.php").kind == HandlerKind::fastcgi && Router::location(g, "/index.php").exact);
+    const LocationConfig& gother = Router::location(g, "/other.php");
+    CHECK(gother.path == "/" && gother.kind == HandlerKind::static_ && refuses(gother, ".php") && refuses(gother, ".log") && refuses(gother, ".sql"));
+    const LocationConfig& glogs = Router::location(g, "/logs/grav.log");
+    CHECK(glogs.path == "/logs/" && glogs.final && glogs.handler == "deny" && glogs.origin == "preset:grav" && glogs.try_files.size() == 1);
+    CHECK(Router::location(g, "/logs").exact && Router::location(g, "/logs").handler == "deny" && Router::location(g, "/logstash.js").path == "/");
+    CHECK(Router::location(g, "/backup/site.zip").handler == "deny" && Router::location(g, "/backup/pic.jpg").path == "/backup/" &&
+          Router::location(g, "/cache/x").handler == "deny" && Router::location(g, "/bin/grav").handler == "deny" &&
+          Router::location(g, "/tests/x").handler == "deny" && Router::location(g, "/tmp/x").handler == "deny");
+    const LocationConfig& guser = Router::location(g, "/user/config/system.yaml");
+    CHECK(guser.path == "/user/" && guser.final && guser.handler == "static" && refuses(guser, ".yaml") && refuses(guser, ".md") &&
+          refuses(guser, ".twig") && refuses(guser, ".php") && refuses(guser, ".bak") && !refuses(guser, ".xml") && !refuses(guser, ".jpg"));
+    const LocationConfig& gsys = Router::location(g, "/system/config/system.yaml");
+    CHECK(gsys.path == "/system/" && gsys.final && refuses(gsys, ".xml") && refuses(gsys, ".html") && refuses(gsys, ".yaml") && refuses(gsys, ".php"));
+    CHECK(Router::location(g, "/vendor/autoload.php").path == "/vendor/" && refuses(Router::location(g, "/vendor/x"), ".md"));
+    CHECK(Router::location(g, "/user/config/security.yaml").exact && Router::location(g, "/user/config/security.yaml").handler == "deny");
+    CHECK(Router::location(g, "/LICENSE.txt").exact && Router::location(g, "/composer.json").exact && Router::location(g, "/README.md").exact);
+    CHECK(Router::location(g, "/user/pages/x.jpg").protects.size() == 9 && Router::location(g, "/images/x.jpg").path == "/");
+    // The drupal preset on the same files, the report's shape: the .zip is served, the .log is not.
+    write("gravmis.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"grav\"\napp = \"drupal\"\n"
+                          "php = { socket = \"unix:/run/php/fpm.sock\" }\n");
+    const Config mcfg = load_config(dir / "gravmis.toml");
+    CHECK(mcfg.sites[0].root == g.root && Router::location(mcfg.sites[0], "/backup/site.zip").handler == "static" &&
+          refuses(Router::location(mcfg.sites[0], "/logs/grav.log"), ".log"));
 
     fs::remove_all(dir);
 }
@@ -1705,6 +1745,12 @@ static void test_control_sites() {
     CHECK(detect_app(dir / "www") == "php");
     std::ofstream(dir / "www" / "wp-config.php") << "<?php";
     CHECK(detect_app(dir / "www") == "wordpress");
+    std::filesystem::create_directories(dir / "www" / "bin");
+    std::filesystem::create_directories(dir / "www" / "system");
+    std::ofstream(dir / "www" / "bin" / "grav") << "#!";
+    CHECK(detect_app(dir / "www") == "wordpress");  // bin/grav alone is not Grav
+    std::ofstream(dir / "www" / "system" / "defines.php") << "<?php";
+    CHECK(detect_app(dir / "www") == "grav" && detect_app_marker("grav") == "bin/grav and system/defines.php");
     std::ofstream(dir / "artisan") << "#!";
     CHECK(detect_app(dir / "www") == "laravel");
     CHECK(detect_app(dir / "nope").empty());
@@ -1731,10 +1777,12 @@ static void test_control_sites() {
     CHECK(json::parse(R"({"user":"shop","app":"laravel","aliases":["www.shop.test"]})", body, err));
     needs = apply_request(body, cfg, spec, err);
     CHECK(err.empty() && needs.empty() && spec.user == "shop" && spec.app == "laravel");
-    CHECK(json::parse(R"({"app":"weird"})", body, err) && (apply_request(body, cfg, spec, err), err.find("app must be one of: static, php, laravel, drupal, wordpress, proxy") != std::string::npos));
-    CHECK(app_presets().size() == 6 && app_presets().front() == "static" && app_presets().back() == "proxy");
+    CHECK(json::parse(R"({"app":"weird"})", body, err) && (apply_request(body, cfg, spec, err), err.find("app must be one of: static, php, laravel, drupal, wordpress, grav, proxy") != std::string::npos));
+    CHECK(app_presets().size() == 7 && app_presets().front() == "static" && app_presets()[5] == "grav" && app_presets().back() == "proxy");
     const json::Value catalog = preset_catalog();
-    CHECK(catalog["presets"].items().size() == 6 && catalog["presets"].items()[0].get("app") == "static" && catalog["presets"].items()[5].get("app") == "proxy");
+    CHECK(catalog["presets"].items().size() == 7 && catalog["presets"].items()[0].get("app") == "static" && catalog["presets"].items()[5].get("app") == "grav" && catalog["presets"].items()[6].get("app") == "proxy");
+    CHECK(catalog["presets"].items()[5]["never_served_directories"].items().size() == 6 && catalog["presets"].items()[5]["never_served_directories"].items()[0].str() == "/logs/" &&
+          catalog["presets"].items()[3]["never_served_directories"].items().empty() && catalog["presets"].items()[5].get("source").starts_with("https://getgrav.org/"));
     const json::Value& laravel_row = catalog["presets"].items()[2];
     CHECK(laravel_row.get("app") == "laravel" && !laravel_row.get("summary").empty() && laravel_row.get("php").starts_with("only /index.php"));
     CHECK(catalog["presets"].items()[3]["never_served"].items().size() == 9 && catalog["presets"].items()[3]["no_php_under"].items().size() == 5);

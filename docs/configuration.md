@@ -272,8 +272,9 @@ handler = "fastcgi"
 
 [[site.location]]        # what Drupal's .htaccess protects, refused natively (404): PHP source in its
 path = "/"               # other spellings, templates, translations, dumps, editor backups
-deny_suffixes = [".inc", ".install", ".module", ".theme", ".engine", ".profile", ".make", ".po", ".sql",
-                 ".twig", ".yml", ".yaml", ".sqlite", ".sqlite3", ".db", ".bak", ".orig", ".save", ".swp", ".swo", ".tpl", ".xtmpl"]
+deny_suffixes = [".inc", ".bak", ".orig", ".save", ".swp", ".swo", "~", ".log", ".sql",   # the shared list (below)
+                 ".install", ".module", ".theme", ".engine", ".profile", ".make", ".po", ".twig", ".yml", ".yaml",
+                 ".sqlite", ".sqlite3", ".db", ".tpl", ".xtmpl"]                             # Drupal's own
 
 # final prefixes (nginx ^~): nothing PHP-like under library, vendor and upload directories
 [[site.location]]  path = "/core/lib/"             final = true  try_files = ["$uri", "=404"]  deny_suffixes = [...php and the list above...]
@@ -316,8 +317,11 @@ for a miss.)
 
 **One list for every PHP preset.** Besides the PHP spellings, every preset's root and
 every shield refuse `.inc` (the include suffix PHP code ships as; a bare Apache serves it
-as text) and editor or copy backups of anything: `.bak`, `.orig`, `.save`, `.swp`,
-`.swo`, `~`. Drupal's list is that plus its own spellings. The root refuses the PHP
+as text), editor or copy backups of anything: `.bak`, `.orig`, `.save`, `.swp`,
+`.swo`, `~`, and since alpha.20 logs and database dumps, `.log` and `.sql` (2026-09-23:
+a Grav site's `logs/grav.log` named the backup archive next to it; WordPress's
+`wp-content/debug.log` is the classic). A hand-written location still serves any of them
+where a site means to. Drupal's list is that plus its own spellings. The root refuses the PHP
 spellings too, on every preset: when every `.php` runs, the suffix location takes the
 exact spelling first, so what reaches the root is `x.PHP` or `x.phtml`, which nothing
 runs and which would otherwise be served as source. The integration suite plants one
@@ -326,6 +330,76 @@ table of spellings under every preset's shields and roots and asserts each is re
 Drupal, and `x.inc`, `x.php~` under `wp-content/uploads` were served as source). And
 every name a preset never serves (section 4, WordPress) is refused in every backup
 spelling: `settings.php~`, `settings.php.bak`, `settings.bak`, `.settings.php.swp`.
+
+**The preset must be the application's.** A site whose files belong to another
+application than its `app` says gets that application's refusals and none of its own:
+run on the drupal preset, a Grav site served its `logs/grav.log` (before `.log` was on
+the shared list) and, named in it, the `backup/*.zip` with the admin account and the
+signing salt inside (2026-09-23, a live host). `health` reports such a site as
+`preset_mismatch` with the application it detected (`bin/grav` and `system/defines.php`
+for Grav, `artisan`, `core/lib/Drupal.php`, `wp-config.php`) and the `app` to set;
+`site-create` warns the same way when the directory already holds files. Backup
+archives and database dumps under any served tree (`.zip`, `.tar.gz`, `.7z`, `.sql`,
+...) are reported as `archives_in_root`, whatever the preset refuses today: nothing
+served should hold a copy of the site.
+
+## 4d. Grav: `app = "grav"`
+
+```toml
+[[site]]
+server_name = ["grav.example.com"]
+listen = ["0.0.0.0:80"]
+root = "/var/www/grav"              # the Grav directory itself (index.php, system/, user/)
+app = "grav"
+php = { socket = "unix:/run/php/php8.4-fpm.sock" }
+```
+
+expands to Grav's own nginx recipe, which denies directories rather than endings:
+
+```toml
+index = ["index.php"]
+try_files = ["$uri", "$uri/", "/index.php?$query_string"]   # every page route reaches the front controller
+
+[[site.location]]        # only index.php runs; any other .php is refused (404), never served as source
+path = "/index.php"
+match = "exact"
+handler = "fastcgi"
+
+[[site.location]]        # the root: PHP spellings, .inc, editor backups, .log and .sql refused
+path = "/"
+deny_suffixes = [".php", ".phtml", ..., ".inc", ".bak", ".orig", ".save", ".swp", ".swo", "~", ".log", ".sql"]
+
+# never answered, whatever they hold: Grav's own nginx recipe denies these directories, and a
+# backup archive under backup/ is the site (accounts, salt, configuration, pages)
+[[site.location]]  path = "/logs/"    final = true  try_files = ["=404"]     # handler = "deny"
+[[site.location]]  path = "/logs"     match = "exact"  try_files = ["=404"]  # the bare name: no redirect confirms the directory
+# likewise /backup/, /cache/, /bin/, /tests/, /tmp/
+
+# assets only below system/ and vendor/ (css, js, images, fonts): no source, templates,
+# configuration or documentation
+[[site.location]]  path = "/system/"  final = true  try_files = ["$uri", "=404"]
+                   deny_suffixes = [...the root's list..., ".txt", ".xml", ".md", ".html", ".yaml", ".yml", ".pl", ".py", ".cgi", ".twig", ".sh", ".bat"]
+[[site.location]]  path = "/vendor/"  (same)
+
+# user/: images, css, js, fonts and uploads are served; pages (.md), accounts and
+# configuration (.yaml), templates (.twig) and scripts are not
+[[site.location]]  path = "/user/"    final = true  try_files = ["$uri", "=404"]
+                   deny_suffixes = [...the root's list..., ".txt", ".md", ".yaml", ".yml", ".pl", ".py", ".cgi", ".twig", ".sh", ".bat"]
+
+# never answered although present (404): the version fingerprints and composer files
+[[site.location]]  path = "/LICENSE.txt"  match = "exact"  try_files = ["=404"]
+# likewise composer.json, composer.lock, nginx.conf, web.config, htaccess.txt, CHANGELOG.md,
+# README.md, user/config/security.yaml (the signing salt; the preset's `secret`)
+```
+
+`.htaccess` and `.git/` are dotfiles and stay hidden by the site default. Grav's
+processed images (`images/`), the asset pipeline (`assets/`) and theme and plugin assets
+under `user/` are plain files and cache like any other. The admin plugin's routes
+(`/admin`) are pages and reach `index.php`. `site-install` fetches the newest
+`grav-admin` release from getgrav.org (`--version 1.7.48` for a release); the site's
+directory is Grav's own, no `public/`. Health looks at `user/pages` first for
+unreadable uploads. What every `never` name gets (section 4c) applies here: backups of
+`security.yaml` in any spelling are refused.
 
 ## 4b. Proxied applications: `app = "proxy"`
 
@@ -561,7 +635,10 @@ fork, and in a development environment when measuring PHP throughput: the benchm
 under `bench/` use static pools, and a comparison against nginx in front of an
 `ondemand` pool would measure php-fpm's forking. `health` names every `static` or
 `dynamic` pool with the PHP processes it keeps and their memory (`php_pool_resident`),
-so the cost is visible before the machine is full.
+so the cost is visible before the machine is full. The verdict comes from the pool file
+php-fpm runs, not from the configuration: a pool whose file still says `static` after the
+configuration changed to `ondemand` is named as a warning until `agensio pools` and a
+php-fpm reload (2026-09-23: two such pools held 681 MB while the finding stayed silent).
 
 A site's own `max_body_size = "200MB"` (a site key, next to `root`) bounds its request
 bodies (413 above) and sets the pool's `upload_max_filesize` and `post_max_size`; without
@@ -1009,7 +1086,7 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 | `logs` | viewer | `--site NAME` (default: all sites plus the error log), `--since 3h` (`m`, `h`, `d`, `w`, seconds, or a local `YYYY-MM-DDThh:mm:ss`; default 1h), `--level error|warn|info` for the error log (default warn = error+warn), `--status 5xx|4xx|all|NNN` for access logs (default 5xx), `--limit N` (default 200, newest). Reads at most 2 MB per file from the end; `truncated` says when that cut in |
 | `uploads` | viewer | the archives stored with `upload` (`file`, `bytes`, `uploaded`), ready for `site-install --file` |
 | `settings [NAME]` | viewer | the per-site limits `site-create` and `site-update` accept under `settings`: for each key its type, unit and spellings, meaning, default and its origin, minimum, the ceiling from `[control] site_limits`, what changing it costs (agensio reload, php-fpm reload) and what it derives; with a site, the current value and whether it comes from the site, the server or a built-in default. `site NAME` reports the same `settings` |
-| `health` | viewer | findings with `severity`, `code`, `site`, `message`, `fix` (also `files_unreadable`: files under a document root, the preset's upload directory first, that the server's account cannot open and that answer 404 with no log line; `php_tmp_missing`; `php_fpm_hard_reload`): configuration on disk invalid or failing the hosting rules, restart-only settings changed, running as root, certificate unreadable / still the placeholder / expired / expiring within 14 days (manual), `tls = "auto"` without a plain port-80 site for the names, no http-to-https redirect, application sites sharing the server's account, generated pools out of date, errors in the last 24 hours. `ok` is true when nothing above info level was found |
+| `health` | viewer | findings with `severity`, `code`, `site`, `message`, `fix` (also `files_unreadable`: files under a document root, the preset's upload directory first, that the server's account cannot open and that answer 404 with no log line; `php_tmp_missing`; `php_fpm_hard_reload`; `php_pool_resident`, judged from the pool file php-fpm runs; `preset_mismatch`: the files under a site's directory belong to another application than its `app` says, with the application detected and the `app` to set; `archives_in_root`: backup archives and database dumps under a served tree, the directories a preset never answers excepted): configuration on disk invalid or failing the hosting rules, restart-only settings changed, running as root, certificate unreadable / still the placeholder / expired / expiring within 14 days (manual), `tls = "auto"` without a plain port-80 site for the names, no http-to-https redirect, application sites sharing the server's account, generated pools out of date, errors in the last 24 hours. `ok` is true when nothing above info level was found |
 
 **Changes** (`POST` with a JSON body; every one needs `"confirm": true`, takes a
 `"reason"` that goes to the audit log, and answers 428 without the confirmation):

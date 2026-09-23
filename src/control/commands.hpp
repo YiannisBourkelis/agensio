@@ -77,6 +77,15 @@ std::vector<std::string> restart_needed(const Config& fresh, const Config& runni
 // when the file exists and the setting is absent or 0; `file` names it.
 bool php_fpm_hard_reload(const Config& cfg, std::string& file);
 
+// Backup archives and database dumps found under a document root (health, archives_in_root).
+struct ArchivesInRoot {
+    std::size_t seen = 0;
+    std::size_t count = 0;
+    std::string example;
+    std::uint64_t example_bytes = 0;
+};
+ArchivesInRoot archives_in_root(const SiteConfig& site, std::size_t budget);
+
 // What one php-fpm pool keeps resident: its child processes and their memory (Linux /proc).
 struct PoolResidency {
     unsigned processes = 0;

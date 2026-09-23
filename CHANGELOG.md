@@ -2,6 +2,29 @@
 
 ## 0.1.0-alpha.20 (unreleased)
 
+- **Fixed: a Grav site on the borrowed drupal preset served its backup** (2026-09-23,
+  a live host): `logs/grav.log` was served and named the `backup/*.zip` next to it, which
+  was served too, with the admin account and the signing salt inside. Three changes.
+  **`app = "grav"`**, a preset from Grav's own nginx recipe: only `index.php` runs;
+  `logs/`, `backup/`, `cache/`, `bin/`, `tests/` and `tmp/` are never answered, whatever
+  they hold (the preset table gained whole-directory refusals, `never_served_directories`
+  in the catalogue); `system/` and `vendor/` serve assets only; `user/` serves images,
+  css, js and uploads while pages, accounts and configuration stay private (per-shield
+  endings); the version fingerprints and composer files are 404; `site-install` fetches
+  the `grav-admin` release; `site-create` detects Grav from `bin/grav` and
+  `system/defines.php`. **`.log` and `.sql` are refused on every PHP preset's root and
+  shields**, like `.inc` and editor backups (WordPress's `wp-content/debug.log` too).
+  **`health` reports `preset_mismatch`**, a site whose files belong to another
+  application than its `app` says, with the marker found and the `app` to set (the
+  borrowed preset's refusals do not fit), and `site-create` warns the same way on a
+  directory that already holds files; and **`archives_in_root`**, backup archives and
+  database dumps under a served tree, the directories a preset never answers excepted.
+  The integration suite serves a Grav fixture through both presets.
+- **Fixed: `php_pool_resident` stayed silent for a pool left `static` on disk** after
+  the configuration changed to `ondemand` (the same host: two such pools held 16 PHP
+  processes and 681 MB). The finding now judges the pool file php-fpm runs and names a
+  stale one as a warning with `agensio pools` plus a php-fpm reload as the fix; the root
+  suite makes a file stale behind the configuration's back and checks both.
 - HTTP/2 across a reload: a connection whose listener left the configuration, or that
   reached `max_requests_per_connection`, serves the stream in flight and only then sends
   its GOAWAY and closes, so no client has to read an answer behind a GOAWAY; a stream

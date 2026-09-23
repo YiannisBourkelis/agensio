@@ -524,6 +524,7 @@ struct Shield {
     const char* path;   // a `final` prefix (nginx ^~): files served, nothing PHP-like ever runs
     const char* cache;  // Cache-Control added, or nullptr
     bool fallback = false;  // a missing file goes to the front controller (Drupal makes image styles and aggregates on request)
+    const std::vector<std::string>* extra = nullptr;  // endings refused below this shield besides the shared list (Grav's system/, user/)
 };
 
 struct PhpPreset {
@@ -541,6 +542,8 @@ struct PhpPreset {
     const char* source_versioned;     // the same with {version} in it ("" = only the newest)
     std::vector<const char*> secrets; // the credential files among `never`: created 0600 by every write path, checked by the hosting rules
     const char* uploads;              // where the application puts what users upload, relative to the served root ("" = unknown); health looks there first
+    std::vector<const char*> never_dirs;  // directories answered 404 whole, whatever is in them (Grav's logs/, backup/): a preset that
+                                          // borrowed another's rules could never supply these (2026-09-23 live report)
 };
 
 // What every PHP preset refuses besides PHP itself, on its root and under its shields: the
@@ -549,13 +552,27 @@ struct PhpPreset {
 // PHP source is source; nothing public is spelled so). One list for all presets, since
 // testing each against its own let wordpress fall behind drupal (2026-09-20 report:
 // x.inc and x.php~ under wp-content/uploads were served as source).
-const std::vector<std::string> kSourceBackups = {".inc", ".bak", ".orig", ".save", ".swp", ".swo", "~"};
+const std::vector<std::string> kSourceBackups = {".inc", ".bak", ".orig", ".save", ".swp", ".swo", "~",
+                                                 // logs and database dumps (2026-09-23 live report: a Grav site's logs/grav.log
+                                                 // named its backup archive; WordPress's wp-content/debug.log is the classic)
+                                                 ".log", ".sql"};
+
+// Grav's own nginx recipe: below system/ and vendor/ only assets are served; below user/
+// (pages, accounts, configuration, themes, uploads) images, css and js are, the rest not.
+const std::vector<std::string> kGravSystemDeny = {".txt", ".xml", ".md", ".html", ".yaml", ".yml", ".pl", ".py", ".cgi", ".twig", ".sh", ".bat"};
+const std::vector<std::string> kGravUserDeny = {".txt", ".md", ".yaml", ".yml", ".pl", ".py", ".cgi", ".twig", ".sh", ".bat"};
 
 // Drupal's .htaccess, the part that matters: PHP source in its other spellings, templates,
 // translations, dumps, and the shared list above.
-const std::vector<std::string> kDrupalSource = {".inc", ".install", ".module", ".theme", ".engine", ".profile", ".make",
-                                                ".po", ".sql", ".twig", ".yml", ".yaml", ".sqlite", ".sqlite3", ".db",
-                                                ".bak", ".orig", ".save", ".swp", ".swo", ".tpl", ".xtmpl", "~"};
+// Drupal's own spellings on top of the shared list (built from it, so an ending added to
+// the shared list can never fall behind here again: .log did, 2026-09-23).
+const std::vector<std::string> kDrupalSource = [] {
+    std::vector<std::string> v = kSourceBackups;
+    for (const char* s : {".install", ".module", ".theme", ".engine", ".profile", ".make", ".po", ".twig", ".yml", ".yaml",
+                          ".sqlite", ".sqlite3", ".db", ".tpl", ".xtmpl"})
+        v.emplace_back(s);
+    return v;
+}();
 
 // "/wp-content/db.php" -> {"/wp-content/db", ".php", 12}: the form backup_of_protected
 // (handlers/static.hpp) matches request paths against. Lower case; a name without a dot
@@ -611,6 +628,20 @@ const std::vector<PhpPreset> kPhpPresets = {
       "/wp-content/db.php", "/wp-content/advanced-cache.php", "/wp-content/object-cache.php"},
      "https://wordpress.org/latest.tar.gz", "https://wordpress.org/wordpress-{version}.tar.gz",
      {"/wp-config.php"}, "/wp-content/uploads"},
+    // Grav (flat-file CMS; 2026-09-23 live report: run on the borrowed drupal preset, its
+    // logs/grav.log named a backup archive under backup/ that held the admin account and
+    // the signing salt, and both were served). Only index.php runs; logs/, backup/, cache/,
+    // bin/, tests/ and tmp/ are never answered, whatever they hold (Grav's own recipe denies
+    // the directories, not endings); system/ and vendor/ serve assets only; user/ serves
+    // images, css, js and uploads while pages, accounts and configuration stay private.
+    {"grav", "Grav: the Grav directory is given and served; only index.php runs; logs/, backup/, cache/, bin/, tests/ and tmp/ are never answered; system/, vendor/ and user/ serve their assets only (no yaml, md, twig, php or scripts), so pages, accounts and configuration stay private.",
+     "", false, {"index.php"}, true, false, kSourceBackups,
+     {{"/system/", nullptr, false, &kGravSystemDeny}, {"/vendor/", nullptr, false, &kGravSystemDeny}, {"/user/", nullptr, false, &kGravUserDeny}},
+     {"/LICENSE.txt", "/composer.json", "/composer.lock", "/nginx.conf", "/web.config", "/htaccess.txt", "/CHANGELOG.md",
+      "/README.md", "/user/config/security.yaml"},
+     "https://getgrav.org/download/core/grav-admin/latest", "https://getgrav.org/download/core/grav-admin/{version}",
+     {"/user/config/security.yaml"}, "/user/pages",
+     {"/logs/", "/backup/", "/cache/", "/bin/", "/tests/", "/tmp/"}},
 };
 
 const PhpPreset* php_preset(const std::string& app) {
@@ -718,7 +749,9 @@ void apply_preset(SiteConfig& site, const std::string& where) {
     shield_deny.insert(shield_deny.end(), preset.refuse.begin(), preset.refuse.end());
     for (const Shield& sh : preset.shields) {
         if (has(sh.path, false, false)) continue;
-        LocationConfig loc = static_location(sh.path, false, true, shield_deny);
+        std::vector<std::string> deny = shield_deny;
+        if (sh.extra) deny.insert(deny.end(), sh.extra->begin(), sh.extra->end());
+        LocationConfig loc = static_location(sh.path, false, true, std::move(deny));
         // A shield that falls back: the file when it exists (fast, static), else the front
         // controller with the query string, which is what generates it (Drupal's image
         // styles with their itok, aggregated css/js after a cache rebuild; 2026-09-20: a
@@ -727,6 +760,22 @@ void apply_preset(SiteConfig& site, const std::string& where) {
                                                                                 : std::vector<std::string>{"$uri", "=404"});
         if (sh.cache) loc.add_headers.emplace_back("Cache-Control", sh.cache);
         site.locations.push_back(std::move(loc));
+    }
+    // Directories answered 404 whole (logs, backups, caches): a final prefix, nothing below
+    // it is ever looked up, whatever it holds or is named.
+    for (const char* dir : preset.never_dirs) {
+        if (has(dir, false, false)) continue;
+        LocationConfig loc = static_location(dir, false, true, {});
+        loc.try_files = parse_try_files({"=404"});
+        loc.handler = "deny";
+        site.locations.push_back(std::move(loc));
+        // The bare name too (/logs): the root's directory redirect would confirm it exists.
+        const std::string bare(dir, std::strlen(dir) - 1);
+        if (has(bare, true, false)) continue;
+        LocationConfig exact = static_location(bare, true, false, {});
+        exact.try_files = parse_try_files({"=404"});
+        exact.handler = "deny";
+        site.locations.push_back(std::move(exact));
     }
     // Files that answer 404 whatever exists on disk (credentials, lock files).
     for (const char* path : preset.never) {
@@ -1454,6 +1503,9 @@ json::Value preset_catalog() {
         json::Value never = json::Value::array();
         for (const char* n : p.never) never.push(n);
         v.set("never_served", std::move(never));
+        json::Value dirs = json::Value::array();
+        for (const char* d : p.never_dirs) dirs.push(d);
+        v.set("never_served_directories", std::move(dirs));
         json::Value secrets = json::Value::array();
         for (const char* n : p.secrets) secrets.push(n);
         v.set("secrets", std::move(secrets));

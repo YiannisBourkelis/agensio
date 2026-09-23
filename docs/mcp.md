@@ -92,13 +92,13 @@ takes `--socket PATH`.
 
 | tool | role | what it does |
 |---|---|---|
-| `health_check` | viewer | findings with a fix each: certificates, missing redirects, port 80 for ACME, recent errors, settings waiting for a restart, root, shared accounts, stale pools, every `static` or `dynamic` pool with the PHP processes it keeps resident and their memory (`php_pool_resident`, fix: `settings: {pm: "ondemand"}`) |
+| `health_check` | viewer | findings with a fix each: certificates, missing redirects, port 80 for ACME, recent errors, settings waiting for a restart, root, shared accounts, stale pools, every `static` or `dynamic` pool with the PHP processes it keeps resident and their memory (`php_pool_resident`, fix: `settings: {pm: "ondemand"}`; judged from the pool file php-fpm runs, so a pool left `static` on disk after the configuration changed is a warning fixed by `agensio pools`), a site whose files belong to another application than its `app` says (`preset_mismatch`, fix: the detected `app`), backup archives and database dumps under a served tree (`archives_in_root`) |
 | `server_status` | viewer | version, pid, uptime, workers, connections, listeners with their `protocols` (`h2` and `h1` on TLS, `h2c` too when enabled on plain), sites, the caller's role |
 | `sites_list`, `site_show` | viewer | sites with their certificate state; one site with its effective locations |
 | `config_validate` | viewer | the file on disk: errors and restart-only differences |
 | `config_reference` | viewer | every configuration key with type, default, meaning, reload or restart, who changes it (root in the main file, a site file, `site_create`, `settings`), the reference section, and the running value of server-level keys; the agent answers "how do I change X" from it, handing root's edits back as the exact line plus the reload or restart command |
 | `site_settings_list` | viewer | the per-site limits `site_update` accepts under `settings`, with type, unit, default, minimum, the ceiling root set, what a change costs and derives; with `name`, each key's current value and source. The schema of `settings` is generated from the same table |
-| `presets_list` | viewer | what each `app` value does: served root, which `.php` runs, refusals, the files never served (also refused in every backup spelling: `wp-config.php.bak`, `~`, `.swp`, `wp-config.txt`); from the preset table, so a new preset appears at once |
+| `presets_list` | viewer | what each `app` value does: served root, which `.php` runs, refusals, the files never served (also refused in every backup spelling: `wp-config.php.bak`, `~`, `.swp`, `wp-config.txt`); from the preset table, so a new preset appears at once; `never_served_directories` lists what a preset refuses whole (Grav's `logs/`, `backup/`), and `source` the official archive `site_install` fetches (wordpress, drupal, grav) |
 | `logs_query` | viewer | recent error-log and access-log lines, filtered by site, time, level and status |
 | `reload`, `logs_reopen` | operator | reload without dropping connections; reopen logs after rotation |
 | `cert_renew` | operator | order an automatic certificate again now |

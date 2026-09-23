@@ -148,6 +148,25 @@ root = "{root}/tests/wordpress"
 app = "wordpress"
 php = {{ socket = "unix:{root}/bench/tmp/php/fpm.sock" }}
 """
+# A Grav-shaped project through its preset, and the same files on the drupal preset: the
+# 2026-09-23 live report's shape (logs/grav.log named the backup archive, both served).
+text += f"""
+[[site]]
+server_name = ["grav.test"]
+default = true
+listen = ["127.0.0.1:8098"]
+root = "{root}/tests/grav"
+app = "grav"
+php = {{ socket = "unix:{root}/bench/tmp/php/fpm.sock" }}
+
+[[site]]
+server_name = ["gravmis.test"]
+default = true
+listen = ["127.0.0.1:8093"]
+root = "{root}/tests/grav"
+app = "drupal"
+php = {{ socket = "unix:{root}/bench/tmp/php/fpm.sock" }}
+"""
 # Strict host matching (2026-09-19): a listener with a named site only, and a TLS listener
 # with two named sites and two certificates chosen by SNI (the second one made by the shell above).
 text += f"""
@@ -306,7 +325,7 @@ code() { curl -sS -o /dev/null -w '%{http_code}' "$@"; }
 # One table of PHP-source and backup spellings planted under every preset's shield and root
 # and asserted refused on each (2026-09-20 report: testing each preset against its own list
 # let wordpress fall behind drupal: .inc and .php~ under uploads were served as source).
-SPELL="ag.PHP ag.PhP ag.php. ag.pht ag.phtm ag.php3 ag.php7 ag.PHTML ag.phar ag.php~ ag.inc ag.INC ag.inc~ ag.php.bak ag.php.orig ag.php.save ag.php.swp ag.php.swo ag.inc.bak"
+SPELL="ag.PHP ag.PhP ag.php. ag.pht ag.phtm ag.php3 ag.php7 ag.PHTML ag.phar ag.php~ ag.inc ag.INC ag.inc~ ag.php.bak ag.php.orig ag.php.save ag.php.swp ag.php.swo ag.inc.bak ag.log ag.sql ag.LOG"
 shield_check() {  # label url-prefix directory
   for n in $SPELL; do printf '<?php echo "LEAK";' > "$3/$n"; done
   check "$1: PHP source and backups are refused in every spelling ($(echo $SPELL | wc -w | tr -d ' ') planted)" "$(for n in $SPELL; do echo -n '404 '; done)" "$(for n in $SPELL; do code "$2/$n"; echo -n ' '; done)"
@@ -536,7 +555,7 @@ check "control: unknown site is a 404" "404" "$(curl -sS -o /dev/null -w '%{http
 check "control: validate reads the file on disk" "yes" "$(curl -sS --unix-socket $CS http://control/v1/config/validate | grep -q '"ok":true' && echo yes)"
 curl -sS -o /dev/null http://127.0.0.1:8080/control-probe-404 >/dev/null; sleep 1.2
 check "control: logs finds the 404 just made" "yes" "$(curl -sS --unix-socket $CS 'http://control/v1/logs?since=1m&status=4xx' | grep -q 'control-probe-404' && echo yes)"
-check "control: presets catalogue comes from the preset table" "6 drupal yes" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; d=json.load(sys.stdin); p={x["app"]:x for x in d["presets"]}; print(len(p), "drupal" if "drupal" in p else "-", "yes" if "web/" in p["drupal"]["root"] and "/core/lib/" in p["drupal"]["no_php_under"] and p["laravel"]["php"].startswith("only /index.php") else "no")')"
+check "control: presets catalogue comes from the preset table" "7 drupal yes" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; d=json.load(sys.stdin); p={x["app"]:x for x in d["presets"]}; print(len(p), "drupal" if "drupal" in p else "-", "yes" if "web/" in p["drupal"]["root"] and "/core/lib/" in p["drupal"]["no_php_under"] and p["laravel"]["php"].startswith("only /index.php") else "no")')"
 check "control: health answers with findings" "yes" "$(curl -sS --unix-socket $CS http://control/v1/health | grep -q '"findings":\[' && echo yes)"
 check "control: ctl logs and health through the client" "0 0" "$("$BIN" ctl logs --since 5m --status all --socket $CS > /dev/null; echo -n "$? "; "$BIN" ctl health --socket $CS > /dev/null; echo $?)"
 # Mutations (F3): confirm required, the decision form, create, update, disable, enable, delete, reload.
@@ -849,6 +868,45 @@ print(len(deny), n404, readme[0]["handler"] if readme else "-")')"
   check "wordpress: a backup of wp-config.php upper-cased is refused too" "404 404" "$(printf 'x' > tests/wordpress/WP-CONFIG.PHP.BAK; code $W/WP-CONFIG.PHP.BAK; echo -n ' '; code $W/Wp-Config.Txt; rm -f tests/wordpress/WP-CONFIG.PHP.BAK)"
   check "wordpress: the presets catalogue states the backup rule" "yes" "$(curl -sS --unix-socket bench/tmp/control.sock http://control/v1/presets | grep -q 'backup spelling' && echo yes)"
   rm -rf tests/drupal/web/.git tests/drupal/web/.env tests/drupal/web/sites/default/files/.ht.sqlite
+  check "wordpress: wp-content/debug.log and a dump at the root are 404 (.log and .sql are refused on every preset since alpha.20)" "404 404" "$(printf 'x' > tests/wordpress/wp-content/debug.log; printf 'x' > tests/wordpress/dump.sql; code $W/wp-content/debug.log; echo -n ' '; code $W/dump.sql; rm -f tests/wordpress/wp-content/debug.log tests/wordpress/dump.sql)"
+
+  # ---- Grav through its preset (2026-09-23 live report: on the borrowed drupal preset, logs/grav.log
+  # named the backup archive under backup/ and both were served, admin account and salt inside) ----
+  G=http://127.0.0.1:8098; M=http://127.0.0.1:8093
+  ctype() { curl -sSi "$1" | tr -d '\r' | awk 'NR==1{c=$2} tolower($1)=="content-type:"{t=$2} END{printf "%s %s", c, t}' | tr -d ';'; }
+  check "grav: the front controller executes; a missing page reaches it" "grav front / grav front /blog/post" "$(curl -sS $G/) $(curl -sS $G/blog/post)"
+  check "grav: only index.php runs; another .php is 404, never source" "404 no-source" "$(code $G/other.php) $(no_source $G/other.php)"
+  check "grav: logs/, backup/, cache/, bin/, tests/ and tmp/ are never answered, whatever they hold" "404 404 404 404 404 404" "$(code $G/logs/grav.log) $(code $G/backup/default_site_backup--20260923-101010.zip) $(code $G/cache/x.txt) $(code $G/bin/grav) $(code $G/tests/x.txt) $(code $G/tmp/x.txt)"
+  check "grav: a jpg or css below those names is 404 too (a directory refusal, not an ending) and the directories themselves" "404 404 404 404" "$(printf 'x' > tests/grav/backup/pic.jpg; printf 'x' > tests/grav/logs/style.css; code $G/backup/pic.jpg; echo -n ' '; code $G/logs/style.css; rm -f tests/grav/backup/pic.jpg tests/grav/logs/style.css; echo -n ' '; code $G/backup/; echo -n ' '; code $G/logs)"
+  check "grav: user/ serves images, css and js; pages, accounts and configuration are 404" "200 image/jpeg 200 text/css 404 404 404 404" "$(ctype $G/user/pages/01.home/pic.jpg) $(ctype $G/user/themes/quark/css/theme.css) $(code $G/user/pages/01.home/default.md) $(code $G/user/accounts/admin.yaml) $(code $G/user/config/system.yaml) $(code $G/user/config/security.yaml)"
+  check "grav: none of the private files under user/ leaked a byte" "0" "$(curl -sS $G/user/accounts/admin.yaml $G/user/config/security.yaml $G/user/config/system.yaml $G/user/pages/01.home/default.md | grep -c 'CANARY\|hashed_password\|Draft\|alias')"
+  check "grav: system/ and vendor/ serve assets only" "200 text/css 404 no-source 404 404 404" "$(ctype $G/system/assets/x.css) $(code $G/system/defines.php) $(no_source $G/system/defines.php) $(code $G/system/config/system.yaml) $(code $G/system/templates/x.html.twig) $(code $G/vendor/autoload.php)"
+  check "grav: the version fingerprints and composer files are 404 although present" "404 404 404 404 yes" "$(code $G/LICENSE.txt) $(code $G/composer.json) $(code $G/README.md) $(code $G/CHANGELOG.md) $([ -f tests/grav/README.md ] && [ -f tests/grav/LICENSE.txt ] && echo yes)"
+  shield_check "grav user/" $G/user/pages/01.home tests/grav/user/pages/01.home
+  shield_check "grav system/" $G/system/assets tests/grav/system/assets
+  shield_check "grav root" $G tests/grav
+  backup_check "grav" $G/user/config tests/grav/user/config security.yaml
+  check "grav: every location reported as deny answers 404, files, directories and their bare names; the presets catalogue lists the directories" "21 21 /logs/,/backup/,/cache/,/bin/,/tests/,/tmp/" "$(curl -sS --unix-socket bench/tmp/control.sock http://control/v1/sites/grav.test | python3 -c '
+import json,sys,urllib.request
+locs=json.load(sys.stdin)["locations"]
+deny=[l["path"] for l in locs if l["handler"]=="deny"]
+n404=0
+for p in deny:
+    try:
+        urllib.request.urlopen("http://127.0.0.1:8098"+p)
+    except urllib.error.HTTPError as e:
+        n404+= e.code==404
+print(len(deny), n404, end=" ")'; curl -sS --unix-socket bench/tmp/control.sock http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(",".join(p["grav"]["never_served_directories"]), end="")')"
+  check "drupal preset on grav files (the report): the backup archive is served, the log is not (an ending every preset refuses now), the accounts are (Drupal refuses .yaml)" "200 404 404" "$(code $M/backup/default_site_backup--20260923-101010.zip) $(code $M/logs/grav.log) $(code $M/user/accounts/admin.yaml)"
+  check "health: preset_mismatch names the site whose files are another application's, with the marker and the app to set; sites on their own preset are not named" "gravmis.test yes yes" "$(curl -sS --unix-socket bench/tmp/control.sock http://control/v1/health | python3 -c '
+import json,sys
+f=[x for x in json.load(sys.stdin)["findings"] if x["code"]=="preset_mismatch"]
+print(",".join(sorted(x["site"] for x in f)), "yes" if len(f)==1 and f[0]["severity"]=="warn" and "look like grav (bin/grav and system/defines.php), but app = \"drupal\"" in f[0]["message"] else f, "yes" if f and f[0]["fix"].startswith("set app = \"grav\" (site-update gravmis.test with app: grav") else "no")')"
+  check "health: archives_in_root names the archive under a served tree with its size; a directory the preset never answers is not searched" "gravmis.test 1 yes yes" "$(curl -sS --unix-socket bench/tmp/control.sock http://control/v1/health | python3 -c '
+import json,sys
+f=[x for x in json.load(sys.stdin)["findings"] if x["code"]=="archives_in_root"]
+print(",".join(sorted(x["site"] for x in f)), f[0]["message"].split(" ")[0] if f else "-", "yes" if f and "tests/grav/backup/default_site_backup--20260923-101010.zip (0 KB)" in f[0]["message"] else f, "yes" if f and f[0]["fix"].startswith("move backups and dumps out of the document root") else "no")')"
+  check "control: site-create on a directory holding another application warns, names the marker and the app to use" "yes" "$(cpost /v1/sites "{\"domain\":\"gravwarn.test\",\"https\":\"none\",\"user\":null,\"app\":\"wordpress\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"root\":\"$ROOT/tests/grav\",\"listen_plain\":\"127.0.0.1:8093\",\"dry_run\":true,\"confirm\":true}" > /dev/null; grep -q '"warnings":\["the files under [^"]*tests/grav look like grav (bin/grav and system/defines.php), not wordpress: the wordpress preset.s refusals do not fit them (health reports it as preset_mismatch); use app: grav"' bench/tmp/ctl-reply.json && echo yes || cat bench/tmp/ctl-reply.json)"
 fi
 
 # ---- kept origin connections are closed after idle_timeout (1 s on proxy.test) by the pool tick ----

@@ -45,7 +45,7 @@ void usage() {
                  "                           [--status 5xx|4xx|all] [--limit N]\n"
                  "                      Change (need --yes, take --reason TEXT): reload | logs-reopen |\n"
                  "                      site-create --domain D [--alias A]... [--https auto|none] [--cert F --key F]\n"
-                 "                           [--user U|--no-user] [--group G] [--app static|php|laravel|wordpress|proxy]\n"
+                 "                           [--user U|--no-user] [--group G] [--app static|php|laravel|drupal|wordpress|grav|proxy]\n"
                  "                           [--root DIR] [--upstream URL] [--php-socket S] [--php-children N]\n"
                  "                           [--no-redirect] [--hsts] [--listen-plain A] [--listen-tls A]\n"
                  "                      site-update NAME (same flags) | site-disable NAME | site-enable NAME |\n"
