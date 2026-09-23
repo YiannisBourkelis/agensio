@@ -196,6 +196,13 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   `max_file_size` get a *descriptor entry* (`descriptor_only`: open fd + prebuilt headers,
   no bytes, budget `cache.max_open_files`, default 1024, LRU like bytes but a separate
   budget), so streamed responses skip the per-request open/fstat/realpath (A1b).
+  Pre-compressed twins (2026-09-24, for HttpArena's static rows): `name.br` and `name.gz`
+  beside a file are loaded at fill as entries hanging off the file's entry (own bytes or
+  fd, blocks, ETag; `Content-Encoding` and `Vary` prebuilt), counted in the byte budget
+  with it, chosen per request by `choose_encoding` (`handlers/encoding.hpp`, RFC 9110 q
+  rules) only when the entry has twins, so a file without them pays two pointer tests; a
+  twin older than the file is ignored, revalidation stats the twins with the file, and
+  `cache.precompressed = false` switches the lookup off. Only memory entries have twins.
 - **Response**: prebuilt header fragments; `Date:` refreshed once per second per worker;
   one `async_write` with a `std::array<const_buffer, N>` of header + body. Uncached large
   files stream in 64 KB chunks from an open fd (`sendfile` on Linux later).
@@ -727,7 +734,10 @@ privilege drop, fuzz targets for every new parser (chunked, FastCGI), h1 complia
   req/s, nginx 4.65M, h2o 5.65M; the static rows are bandwidth-bound and agensio moves 16-19
   GB/s against nginx's 10-13 at equal CPU, but every static request asks for `br` and nginx
   serves the `.br` twin (15 KB per response against our 58-60), so agensio sits at 0.36-0.42 of
-  nginx's req/s there until pre-compressed siblings are served. The infrastructure tier scores
+  nginx's req/s there until pre-compressed siblings are served. With the twins served (same
+  file, rerun section; A/B against alpha.20 flat, `ab-20260923-232326.md`): static-h2 955k
+  req/s against nginx's 846k and static-tls 687k against 635k at the same 15 KB per
+  response, pipelined 4.95M against 4.65M (h2o 5.65M). The infrastructure tier scores
   nine profiles; baseline, short-lived and JSON need an in-process handler (`/baseline11`,
   `/baseline2`, `/json/{count}`, no proxying allowed) and the two HTTP/3 rows need phase I.
 - Verify correctness before speed: responses must be byte-identical in body and carry

@@ -1,0 +1,22 @@
+# Local variant of the entry's Dockerfile for bench/httparena/local.sh with LOCAL=1: builds
+# the working tree (src.tar.gz, made by the driver) instead of a tag, so a change can be
+# measured in the arena's harness before it is tagged. Not part of the pull request.
+FROM debian:trixie AS build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake ninja-build git ca-certificates libssl-dev zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY src.tar.gz /tmp/src.tar.gz
+RUN tar -xzf /tmp/src.tar.gz -C /src \
+    && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DAGENSIO_TESTS=OFF -DAGENSIO_NATIVE=ON \
+    && cmake --build build --target agensio
+
+FROM debian:trixie-slim
+RUN apt-get update && apt-get install -y --no-install-recommends libssl3t64 zlib1g \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/build/agensio /usr/local/bin/agensio
+COPY h1.toml h2.toml start.sh /etc/agensio/
+COPY www /srv/www
+RUN chmod 0755 /etc/agensio/start.sh
+EXPOSE 8080 8081 8443
+CMD ["/etc/agensio/start.sh"]

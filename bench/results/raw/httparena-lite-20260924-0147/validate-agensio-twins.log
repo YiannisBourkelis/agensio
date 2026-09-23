@@ -1,0 +1,32 @@
+[test] pipelined endpoint
+  PASS [GET /pipeline]
+  PASS [GET /pipeline Content-Type] (Content-Type: text/plain; charset=utf-8)
+  PASS [static-tls serves the mounted certificate]
+  PASS [static-tls negotiates TLS 1.3] (cipher TLS_AES_256_GCM_SHA384)
+  PASS [static-tls uses a TLS 1.3 AEAD cipher] (TLS_AES_256_GCM_SHA384)
+  PASS [static-tls ALPN] (http/1.1)
+[test] static-tls endpoint
+  PASS [static-tls protocol negotiation] (HTTP/1.1 over TLS)
+  PASS [GET /static/reset.css Content-Type (TLS)] (Content-Type: text/css; charset=utf-8)
+  PASS [GET /static/app.js Content-Type (TLS)] (Content-Type: text/javascript; charset=utf-8)
+  PASS [GET /static/manifest.json Content-Type (TLS)] (Content-Type: application/json; charset=utf-8)
+  PASS [static-tls file sizes] (20 files verified)
+  PASS [static-tls compression] (15 files compressed, 5 skipped)
+  PASS [GET /static/nonexistent.txt (TLS)] (HTTP 404)
+  PASS [static-tls file follows the disk] (1 file(s) replaced, served in 1s, original back in 1s)
+  PASS [static-tls variant follows the disk] (3 file(s) replaced, served in 1s, original back in 1s)
+  PASS [static-h2 serves the mounted certificate]
+  PASS [static-h2 negotiates TLS 1.3] (cipher TLS_AES_256_GCM_SHA384)
+  PASS [static-h2 uses a TLS 1.3 AEAD cipher] (TLS_AES_256_GCM_SHA384)
+  PASS [static-h2 ALPN] (h2)
+[test] static-h2 endpoint
+[wait] Waiting for HTTPS port...
+  PASS [GET /static/reset.css Content-Type] (Content-Type: text/css; charset=utf-8)
+  PASS [GET /static/app.js Content-Type] (Content-Type: text/javascript; charset=utf-8)
+  PASS [GET /static/manifest.json Content-Type] (Content-Type: application/json; charset=utf-8)
+  PASS [static-h2 response size] (8192 bytes)
+  PASS [GET /static/nonexistent.txt] (HTTP 404)
+[info] TLS verdict: pass, opt-in tls_check: none
+
+=== Results: 24 passed, 0 failed ===
+httparena-validate-agensio

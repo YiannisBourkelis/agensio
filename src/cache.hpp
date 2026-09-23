@@ -16,6 +16,10 @@
 // entries hold the open descriptor and the prebuilt headers (nginx's open_file_cache),
 // so a streamed response costs no open/fstat/realpath per request. They add nothing to
 // the byte budget and are counted against max_open_files instead.
+//
+// A memory entry may carry the file's pre-compressed twins (name.br, name.gz) as entries
+// of their own hanging off it, served in its place to a client that accepts them; they
+// are never in the map and count against the byte budget with their file.
 #pragma once
 
 #include <atomic>
@@ -44,6 +48,20 @@ struct CacheEntry {
     std::string last_modified;  // IMF-fixdate
     std::int64_t mtime = 0;
     std::uint64_t size = 0;
+    std::string content_type;  // the MIME type of the path the entry answers (a twin keeps its file's)
+
+    // Pre-compressed twins (name.br, name.gz beside the file, served to a client whose
+    // Accept-Encoding takes them; 2026-09-24, HttpArena): each is an entry of its own, bytes
+    // or an open descriptor, header block, HPACK block, ETag and Last-Modified from the
+    // twin's own mtime and size, that the static handler serves exactly as it serves this
+    // one once chosen. Never in the map: they live and die with this entry, and a response
+    // in flight holds its own reference to the one it sends.
+    std::shared_ptr<CacheEntry> br, gzip;
+    // Static text already inside `headers` and `h2_block`, repeated by the 206 and 304
+    // paths: "Content-Encoding: br\r\nVary: Accept-Encoding\r\n" on a twin, the Vary line
+    // alone on an entry that has twins, empty otherwise.
+    std::string_view coding_headers;
+    bool has_variants() const noexcept { return br != nullptr || gzip != nullptr; }
 
     std::atomic<std::int64_t> last_access{0};     // seconds since epoch
     std::atomic<std::int64_t> last_validated{0};  // seconds since epoch
@@ -90,6 +108,12 @@ struct CacheKeyEq {
 };
 
 using EntryPtr = std::shared_ptr<CacheEntry>;
+
+// What an entry holds against the byte budget: its bytes and its twins'.
+inline std::size_t bytes_of(const CacheEntry& e) noexcept {
+    return e.data.size() + (e.br ? e.br->data.size() : 0) + (e.gzip ? e.gzip->data.size() : 0);
+}
+
 using CacheMap = std::unordered_map<CacheKey, EntryPtr, CacheKeyHash, CacheKeyEq>;
 
 class FileCache {

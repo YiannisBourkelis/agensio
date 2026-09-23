@@ -400,10 +400,15 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       streamed 10 MB file and over TLS, suffix and open ranges, 416, If-Range both ways,
       several ranges, HEAD, keep-alive after a 206. Gate (`ab-20260917-213829.md`, 3
       rounds): 1 KB rows 1.020 / 1.022, 100 KB 0.995, inside the 3 % noise band.
-- [ ] E2 Compression, off by default, per site/location: `compression = "precompressed"`
-      serves `.br`/`.gz` siblings by `Accept-Encoding` (no CPU); `compression = "on-the-fly"`
-      gzip/brotli for dynamic responses with level setting; measure and document the
-      CPU and latency cost of each.
+- [~] E2 Compression. Pre-compressed siblings **done 2026-09-24** (for HttpArena's static
+      rows, where every request asks for `br`): `name.br` / `name.gz` beside a cached file
+      are loaded as twin entries and served by `Accept-Encoding` with `Content-Encoding`
+      and `Vary`, an ETag per representation, revalidated with the file, a twin older than
+      its file ignored. Built as `[cache] precompressed`, on by default, rather than the
+      per-location switch planned below: a file without twins pays two pointer tests per
+      request, and the stale-build hazard is what the mtime rule is for. Remaining:
+      on-the-fly gzip/brotli for dynamic responses with a level setting, per site or
+      location, off by default, its CPU and latency cost measured and documented.
 - [~] E3 Request-smuggling and parser hardening: **done 2026-09-16** for the request head
       (CL vs TE rules, duplicate CL/Host, obs-fold, bare CR, CTLs, header count limit,
       `Host` validation; libFuzzer targets for the parser and path normaliser). Remaining:
@@ -1007,9 +1012,11 @@ misbehaviour counters against every published attack class up to the 2026 HTTP/2
    round-robin, passive health marking (N failures -> down for T seconds), retries on
    idempotent requests only. No active health checks, no weights, until asked for.
    General rule: take the good parts of nginx and other servers, keep it simple and stable.
-5. **Compression is a per-site/location setting, off by default.** Precompressed siblings
-   (`.br`, `.gz`) cost nothing and are served when present and enabled; on-the-fly
-   gzip/brotli is a separate switch with a measured CPU/latency cost documented.
+5. **Compression: pre-compressed siblings on by default, on-the-fly off by default.**
+   Siblings (`.br`, `.gz`) cost nothing when absent and are served when present
+   (`[cache] precompressed`, 2026-09-24; a twin older than its file is ignored); on-the-fly
+   gzip/brotli is a separate per-site/location switch with a measured CPU/latency cost
+   documented.
 6. **Certificates: later (phase H), automatic once set up, cross-platform.** Built-in ACME
    (HTTP-01 and TLS-ALPN-01, keys and JWS via OpenSSL) is the only option that works the
    same on Linux, macOS and Windows; external clients (certbot, win-acme, acme.sh) get a

@@ -67,6 +67,7 @@ section of `docs/configuration.md` that explains the key.
 | `stream_chunk_size` | size | 64KB | Read size when a large file is streamed without sendfile (TLS). | reload | file | 1 |
 | `sendfile_min_size` | size | 48KB | Cached files at least this large are sent with sendfile on plain sockets (0 = never); below it the memory copy is cheaper. | reload | file | 1 |
 | `max_open_files` | int | 1024 | How many streamed files may keep an open descriptor in the cache (0 = none). | reload | file | 1 |
+| `precompressed` | bool | true | Serve name.br or name.gz beside a cached file to a client whose Accept-Encoding takes it (Content-Encoding, Vary), cached with the file and revalidated with it; a twin older than the file is ignored. | reload | file | 1 |
 ## `[log]`
 
 | key | type | default | meaning | applies | via | doc |

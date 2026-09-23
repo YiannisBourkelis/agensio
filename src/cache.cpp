@@ -22,9 +22,9 @@ EntryPtr FileCache::find(const CacheKeyView& key) {
 }
 
 EntryPtr FileCache::insert(const CacheKeyView& key, EntryPtr entry) {
-    const std::size_t bytes = entry->data.size();
+    const std::size_t bytes = bytes_of(*entry);
     const std::size_t files = files_of(*entry);
-    if (bytes > max_file_size_ || bytes > max_total_size_ || files > max_open_files_) return nullptr;
+    if (entry->data.size() > max_file_size_ || bytes > max_total_size_ || files > max_open_files_) return nullptr;
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = map_.find(key);
     if (it != map_.end()) return it->second;
@@ -42,7 +42,7 @@ void FileCache::erase(const CacheKeyView& key, const CacheEntry* expected) {
     auto it = map_.find(key);
     if (it == map_.end() || it->second.get() != expected) return;
     it->second->stale.store(true, std::memory_order_release);
-    total_.fetch_sub(it->second->data.size(), std::memory_order_relaxed);
+    total_.fetch_sub(bytes_of(*it->second), std::memory_order_relaxed);
     open_.fetch_sub(files_of(*it->second), std::memory_order_relaxed);
     map_.erase(it);
 }
@@ -78,7 +78,7 @@ void FileCache::evict_locked(std::size_t needed_bytes, std::size_t needed_files)
         const bool bytes_ok = !want_bytes || (total + needed_bytes <= max_total_size_ && total <= target_bytes);
         const bool files_ok = !want_files || (open + needed_files <= max_open_files_ && open <= target_files);
         if (bytes_ok && files_ok) break;
-        const std::size_t cb = c.it->second->data.size();
+        const std::size_t cb = bytes_of(*c.it->second);
         const std::size_t cf = files_of(*c.it->second);
         if (!((!bytes_ok && cb > 0) || (!files_ok && cf > 0))) continue;
         c.it->second->stale.store(true, std::memory_order_release);

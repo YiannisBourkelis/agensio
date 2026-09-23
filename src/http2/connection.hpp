@@ -753,6 +753,7 @@ private:
             else if (f.name == "if-modified-since") req.if_modified_since = f.value;
             else if (f.name == "range") req.range = f.value;
             else if (f.name == "if-range") req.if_range = f.value;
+            else if (f.name == "accept-encoding") req.accept_encoding = f.value;
             else if (f.name == "content-length") {
                 std::uint64_t n = 0;
                 if (f.value.empty() || f.value.size() > 19) return stream_error(s, ErrorCode::protocol_error, "content-length not a number");

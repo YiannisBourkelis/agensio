@@ -1334,6 +1334,7 @@ Config load_config(const fs::path& path) {
         if (*m < 0) fail("cache.max_open_files must not be negative");
         cfg.cache_max_open_files = static_cast<std::size_t>(*m);
     }
+    if (auto p = cache["precompressed"].value<bool>()) cfg.cache_precompressed = *p;
 
     auto log = root["log"];
     if (auto a = log["access"].value<std::string>())

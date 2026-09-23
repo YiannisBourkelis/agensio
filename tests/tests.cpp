@@ -263,6 +263,156 @@ static void test_size() {
     CHECK(threw);
 }
 
+// Accept-Encoding against the twins an entry holds (RFC 9110 12.5.3): the arena's header,
+// browsers', q-values, refusals and wildcards.
+static void test_encoding() {
+    using E = Encoding;
+    struct Case {
+        const char* accept;
+        bool br, gz;
+        E want;
+    };
+    const Case cases[] = {
+        {"br;q=1, gzip;q=0.8", true, true, E::br},        {"gzip, deflate, br, zstd", true, true, E::br},
+        {"gzip, deflate", true, true, E::gzip},            {"br", false, true, E::identity},
+        {"gzip", true, false, E::identity},                {"", true, true, E::identity},
+        {"br;q=0, gzip", true, true, E::gzip},             {"br;q=0.5, gzip;q=0.9", true, true, E::gzip},
+        {"br;q=0.9, gzip;q=0.9", true, true, E::br},       {"*", true, true, E::br},
+        {"*;q=0", true, true, E::identity},                {"gzip;q=0, *", true, true, E::br},
+        {"br;q=0, *", true, true, E::gzip},                {"identity", true, true, E::identity},
+        {"deflate, zstd", true, true, E::identity},        {"BR, GZIP", true, true, E::br},
+        {"x-gzip", false, true, E::gzip},                  {" br ; q=0.001 ", true, true, E::br},
+        {"br;q=0.000", true, true, E::identity},           {"br;q=abc, gzip", true, true, E::br},
+        {"gzip;q=1.0, br;q=1.0", true, true, E::br},       {", , gzip", true, true, E::gzip},
+        {"br;level=11;q=0.7, gzip;q=0.8", true, true, E::gzip}, {"gzip;q=0.8, br;q=1.5", true, true, E::br},
+    };
+    for (const Case& c : cases) {
+        const E got = choose_encoding(c.accept, c.br, c.gz);
+        if (got != c.want) std::printf("choose_encoding(\"%s\", %d, %d) = %d, want %d\n", c.accept, c.br, c.gz, static_cast<int>(got), static_cast<int>(c.want));
+        CHECK(got == c.want);
+    }
+}
+
+// The static handler with twins on disk: the chosen representation, its headers and
+// validators, ranges over it, a stale twin ignored, a replaced twin picked up by the
+// revalidation, and the switch.
+static void test_precompressed() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-twins-" + std::to_string(::getpid()));
+    fs::remove_all(dir);
+    fs::create_directories(dir / "www");
+    auto write = [&](const char* name, const std::string& text) { std::ofstream(dir / "www" / name, std::ios::binary) << text; };
+    const std::string css(100, 'c'), br(60, 'b'), gz(70, 'g');
+    write("a.css", css);
+    write("a.css.br", br);
+    write("a.css.gz", gz);
+    write("b.css", css);
+    write("b.css.br", br);
+    fs::last_write_time(dir / "www" / "b.css.br", fs::last_write_time(dir / "www" / "b.css") - std::chrono::seconds(10));  // a build not redone
+    std::ofstream(dir / "agensio.toml") << "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n";
+    Config cfg = load_config(dir / "agensio.toml");
+    FileCache cache(4 << 20, 256 << 20, 0.2, 64);
+    StaticHandler handler(cfg, cache);
+    WorkerState ws;
+    ws.now = std::time(nullptr);
+    ws.site = &cfg.sites[0];
+    Stream s;
+    auto serve = [&](const char* path, std::string_view accept, std::string_view if_none_match = {}, std::string_view range = {}) {
+        s.request.reset();
+        s.response.reset();
+        s.request.method = Method::get;
+        s.request.accept_encoding = accept;
+        s.request.if_none_match = if_none_match;
+        s.request.range = range;
+        ws.path = path;
+        handler.serve_location(s, Router::location(cfg.sites[0], ws.path), ws);
+    };
+    auto body = [&]() -> std::string_view {
+        const auto* m = std::get_if<MemoryBody>(&s.response.body);
+        return m ? m->data : std::string_view{};
+    };
+    auto has = [&](std::string_view field) { return s.response.prebuilt_headers.find(field) != std::string_view::npos; };
+    auto vary_field = [&]() {
+        for (const auto& f : s.response.headers)
+            if (f.name == "Vary" && f.value == "Accept-Encoding") return true;
+        return false;
+    };
+    serve("/a.css", "br;q=1, gzip;q=0.8");
+    CHECK(s.response.status == 200 && body() == br && has("Content-Type: text/css") && has("Content-Length: 60\r\n") &&
+          has("\r\nContent-Encoding: br\r\nVary: Accept-Encoding\r\nAccept-Ranges: bytes\r\n\r\n") && !s.response.prebuilt_h2.empty());
+    const std::string br_etag(s.response.entry->etag);
+    const std::string br_h2(s.response.prebuilt_h2);
+    serve("/a.css", "gzip");
+    CHECK(body() == gz && has("Content-Encoding: gzip\r\n") && has("Content-Length: 70\r\n") && s.response.entry->etag != br_etag);
+    serve("/a.css", "");
+    CHECK(body() == css && !has("Content-Encoding") && has("\r\nVary: Accept-Encoding\r\nAccept-Ranges") && s.response.entry->etag != br_etag &&
+          s.response.prebuilt_h2 != br_h2);
+    const std::string id_etag(s.response.entry->etag);
+    serve("/a.css", "br;q=0, gzip");
+    CHECK(body() == gz);
+    serve("/a.css", "*");
+    CHECK(body() == br);
+    serve("/a.css", "deflate, identity");
+    CHECK(body() == css);
+    // One entry with its three bodies, inserted once; the choice is per request.
+    CHECK(cache.entry_count() == 1 && cache.total_bytes() == 230u);
+    // Validators are per representation: the twin's ETag gives 304 (with Vary), the file's does not match the twin.
+    serve("/a.css", "br", br_etag);
+    CHECK(s.response.status == 304 && vary_field());
+    serve("/a.css", "br", id_etag);
+    CHECK(s.response.status == 200 && body() == br);
+    serve("/a.css", "", id_etag);
+    CHECK(s.response.status == 304 && vary_field());
+    // A Range on the twin slices the compressed bytes and keeps its Content-Encoding.
+    serve("/a.css", "br", {}, "bytes=0-9");
+    CHECK(s.response.status == 206 && body() == std::string_view(br).substr(0, 10) && has("Content-Range: bytes 0-9/60\r\n") &&
+          has("Content-Encoding: br\r\nVary: Accept-Encoding\r\nAccept-Ranges"));
+    // HEAD declares the twin.
+    s.request.reset();
+    s.response.reset();
+    s.request.method = Method::head;
+    s.request.accept_encoding = "br";
+    ws.path = "/a.css";
+    handler.serve_location(s, Router::location(cfg.sites[0], ws.path), ws);
+    CHECK(s.response.head && has("Content-Length: 60\r\n") && has("Content-Encoding: br\r\n"));
+    // A twin older than its file is a build that was not redone: the file is served, without Vary.
+    serve("/b.css", "br");
+    CHECK(body() == css && !has("Content-Encoding") && !has("Vary"));
+    // A replaced twin shows within the revalidation interval, as a change of the file would.
+    const std::string br2(61, 'B');
+    write("a.css.br", br2);
+    fs::last_write_time(dir / "www" / "a.css.br", fs::last_write_time(dir / "www" / "a.css") + std::chrono::seconds(5));
+    const CacheKeyView key{Router::location(cfg.sites[0], "/a.css").id, "/a.css"};
+    cache.find(key)->last_validated.store(0);
+    ws.now += 2;
+    serve("/a.css", "br");
+    CHECK(body() == br2 && has("Content-Length: 61\r\n") && cache.entry_count() == 2 && cache.total_bytes() == 331u);  // a.css with twins, b.css alone
+    // Twins removed: the file alone, and no Vary any more.
+    fs::remove(dir / "www" / "a.css.br");
+    fs::remove(dir / "www" / "a.css.gz");
+    cache.find(key)->last_validated.store(0);
+    ws.now += 2;
+    serve("/a.css", "br, gzip");
+    CHECK(body() == css && !has("Vary") && cache.total_bytes() == 200u);
+    // The switch: twins on disk are not looked at.
+    write("a.css.br", br);
+    fs::last_write_time(dir / "www" / "a.css.br", fs::last_write_time(dir / "www" / "a.css") + std::chrono::seconds(5));
+    cfg.cache_precompressed = false;
+    FileCache plain(4 << 20, 256 << 20, 0.2, 64);
+    StaticHandler off(cfg, plain);
+    WorkerState fresh;  // its own local index: the entries above belong to the other cache
+    fresh.now = ws.now;
+    fresh.site = ws.site;
+    fresh.path = "/a.css";
+    s.request.reset();
+    s.response.reset();
+    s.request.method = Method::get;
+    s.request.accept_encoding = "br";
+    off.serve_location(s, Router::location(cfg.sites[0], fresh.path), fresh);
+    CHECK(body() == css && !has("Vary") && plain.total_bytes() == 100u);
+    fs::remove_all(dir);
+}
+
 static void test_cache() {
     FileCache cache(100, 250, 0.5, 2);
     auto make = [](std::size_t n, std::int64_t access) {
@@ -328,6 +478,22 @@ static void test_cache() {
     // erase releases the descriptor budget.
     cache.erase(CacheKeyView{7, "/d3"}, d3.get());
     CHECK_EQ(cache.open_files(), 1u);
+    // Pre-compressed twins hang off their file's entry and count against the byte budget
+    // with it; the file alone is held to max_file_size, so a file at the limit keeps its twins.
+    {
+        FileCache small(100, 400, 0.5, 2);
+        auto t = make(100, 1);
+        t->br = make(60, 1);
+        t->gzip = make(70, 1);
+        CHECK(bytes_of(*t) == 230u && t->has_variants());
+        auto stored = small.insert(CacheKeyView{7, "/t"}, t);
+        CHECK(stored != nullptr && small.total_bytes() == 230u);
+        CHECK(small.insert(CacheKeyView{7, "/u"}, make(100, 2)) != nullptr && small.total_bytes() == 330u);
+        CHECK(small.insert(CacheKeyView{7, "/v"}, make(100, 3)) != nullptr);  // no room: the oldest, the twins' file, goes whole
+        CHECK(t->stale.load() && small.find(CacheKeyView{7, "/t"}) == nullptr && small.total_bytes() == 200u);
+        small.erase(CacheKeyView{7, "/u"}, small.find(CacheKeyView{7, "/u"}).get());
+        CHECK(small.total_bytes() == 100u);
+    }
     // A zero-byte memory entry is not a descriptor entry.
     CHECK(cache.insert(CacheKeyView{7, "/empty"}, make(0, 9)) != nullptr);
     CHECK_EQ(cache.open_files(), 1u);
@@ -3067,6 +3233,8 @@ int main() {
     test_mime();
     test_size();
     test_cache();
+    test_encoding();
+    test_precompressed();
     test_chunked();
     test_core_types();
     test_route_and_etag();

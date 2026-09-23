@@ -39,6 +39,7 @@ const std::vector<KeyDef>& key_defs() {
         {"[cache]", "stream_chunk_size", "size", "64KB", "Read size when a large file is streamed without sendfile (TLS).", "reload", "file", "1"},
         {"[cache]", "sendfile_min_size", "size", "48KB", "Cached files at least this large are sent with sendfile on plain sockets (0 = never); below it the memory copy is cheaper.", "reload", "file", "1"},
         {"[cache]", "max_open_files", "int", "1024", "How many streamed files may keep an open descriptor in the cache (0 = none).", "reload", "file", "1"},
+        {"[cache]", "precompressed", "bool", "true", "Serve name.br or name.gz beside a cached file to a client whose Accept-Encoding takes it (Content-Encoding, Vary), cached with the file and revalidated with it; a twin older than the file is ignored.", "reload", "file", "1"},
         {"[log]", "access", "path or \"off\"", "logs/access.log next to the configuration", "The access log every site uses unless it sets access_log; \"off\" logs nothing.", "reload", "file", "8"},
         {"[log]", "format", "enum: combined | json", "combined", "Apache/nginx combined (fail2ban-compatible) or one JSON object per line with the upstream outcome.", "reload", "file", "8"},
         {"[log]", "error", "path or \"stderr\"", "stderr", "Where the error log goes.", "reload", "file", "8"},

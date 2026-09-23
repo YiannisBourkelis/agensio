@@ -650,7 +650,7 @@ print("same" if schema == catalogue else "schema!=catalogue", "same" if accepted
 PYT
 )"
 "$BIN" ctl site-update inst.test --set max_body_size=1MB --yes --reason back --socket $CS > /dev/null
-check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 148 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
+check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 149 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
 check "secrets: the presets catalogue lists each preset's credential files" "/wp-config.php /sites/default/settings.php" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["wordpress"]["secrets"][0], p["drupal"]["secrets"][0])')"
 check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$("$BIN" ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; "$BIN" ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
@@ -930,6 +930,30 @@ curl -sS -o /dev/null http://127.0.0.1:8091/api/json; c1=$(est9107); sleep 1.6; 
 check "proxy: a kept origin connection is closed after idle_timeout (1 s) by the pool tick, none left open" "yes 0" "$([ "$c1" -ge 1 ] && echo yes || echo "$c1") $c2"
 check "proxy: the next request opens a fresh one and is answered" "200" "$(code http://127.0.0.1:8091/api/json)"
 fi
+
+# ---- Pre-compressed twins (alpha.21, HttpArena): name.br / name.gz beside a file are served to a client that takes them ----
+P=bench/www; printf 'x%.0s' $(seq 1 2000) > $P/comp.css; printf 'BR-TWIN-%.0s' $(seq 1 40) > $P/comp.css.br; printf 'GZ-TWIN-%.0s' $(seq 1 50) > $P/comp.css.gz
+BRSUM=$(sum < $P/comp.css.br); GZSUM=$(sum < $P/comp.css.gz); IDSUM=$(sum < $P/comp.css)
+hdrs() { curl -sS -D - -o /dev/null "$@" | tr -d '\r' | awk 'NR==1{c=$2} tolower($1)=="content-encoding:"{e=$2} tolower($1)=="vary:"{v=$2} tolower($1)=="content-length:"{l=$2} END{printf "%s %s %s %s", c, e?e:"-", v?v:"-", l}'; }
+for base in http://127.0.0.1:8080 https://127.0.0.1:8443; do
+  p="twins-${base%%:*}"; K=""; [ "${base%%:*}" = https ] && K="-k"
+  check "$p: br wins over gzip by q; Content-Encoding, Vary and the twin's length and bytes" "200 br Accept-Encoding 320 $BRSUM" "$(hdrs $K -H 'Accept-Encoding: br;q=1, gzip;q=0.8' $base/comp.css) $(curl -sS $K -H 'Accept-Encoding: br;q=1, gzip;q=0.8' $base/comp.css | sum)"
+  check "$p: gzip alone gets the .gz twin" "200 gzip Accept-Encoding 400 $GZSUM" "$(hdrs $K -H 'Accept-Encoding: gzip' $base/comp.css) $(curl -sS $K -H 'Accept-Encoding: gzip' $base/comp.css | sum)"
+  check "$p: no Accept-Encoding gets the file, with Vary so caches keep the representations apart" "200 - Accept-Encoding 2000 $IDSUM" "$(hdrs $K $base/comp.css) $(curl -sS $K $base/comp.css | sum)"
+  check "$p: q=0 refuses a twin; identity and unknown codings get the file" "gzip - -" "$(hdrs $K -H 'Accept-Encoding: br;q=0, gzip' $base/comp.css | cut -d' ' -f2) $(hdrs $K -H 'Accept-Encoding: identity' $base/comp.css | cut -d' ' -f2) $(hdrs $K -H 'Accept-Encoding: deflate, zstd' $base/comp.css | cut -d' ' -f2)"
+  check "$p: HEAD declares the twin without a body" "200 br Accept-Encoding 320 0" "$(hdrs $K -I -H 'Accept-Encoding: br' $base/comp.css) $(curl -sS $K -I -H 'Accept-Encoding: br' -o /dev/null -w '%{size_download}' $base/comp.css)"
+  BRET=$(curl -sS $K -I -H 'Accept-Encoding: br' $base/comp.css | tr -d '\r' | awk 'tolower($1)=="etag:"{print $2}'); IDET=$(curl -sS $K -I $base/comp.css | tr -d '\r' | awk 'tolower($1)=="etag:"{print $2}')
+  check "$p: each representation has its own ETag: 304 against the twin's, 200 against the file's" "yes 304 200" "$([ -n "$BRET" ] && [ "$BRET" != "$IDET" ] && echo yes) $(code $K -H 'Accept-Encoding: br' -H "If-None-Match: $BRET" $base/comp.css) $(code $K -H 'Accept-Encoding: br' -H "If-None-Match: $IDET" $base/comp.css)"
+  check "$p: a Range on the twin is a slice of the compressed bytes and keeps Content-Encoding" "206 br 10 bytes 0-9/320 $(head -c 10 $P/comp.css.br | sum)" "$(curl -sS $K -D - -o /dev/null -r 0-9 -H 'Accept-Encoding: br' $base/comp.css | tr -d '\r' | awk 'NR==1{c=$2} tolower($1)=="content-encoding:"{e=$2} tolower($1)=="content-length:"{l=$2} tolower($1)=="content-range:"{r=$2" "$3} END{printf "%s %s %s %s", c, e, l, r}') $(curl -sS $K -r 0-9 -H 'Accept-Encoding: br' $base/comp.css | sum)"
+done
+check "twins h2: the HPACK block carries content-encoding and vary; the body is the twin" "200 br Accept-Encoding 320 $BRSUM" "$(command curl -sSk --http2 -D - -o /dev/null -H 'accept-encoding: br' https://127.0.0.1:8443/comp.css | tr -d '\r' | awk 'NR==1{c=$2} $1=="content-encoding:"{e=$2} $1=="vary:"{v=$2} $1=="content-length:"{l=$2} END{printf "%s %s %s %s", c, e, v, l}') $(command curl -sSk --http2 -H 'accept-encoding: br' https://127.0.0.1:8443/comp.css | sum)"
+printf 'BR-NEW-%.0s' $(seq 1 30) > $P/comp.css.br; sleep 1.2
+check "twins: a replaced twin is served within the revalidation interval" "210 $(sum < $P/comp.css.br)" "$(curl -sS -H 'Accept-Encoding: br' -o /dev/null -w '%{size_download}' http://127.0.0.1:8080/comp.css) $(curl -sS -H 'Accept-Encoding: br' http://127.0.0.1:8080/comp.css | sum)"
+touch -d '2020-01-01' $P/comp.css.br; sleep 1.2
+check "twins: a twin older than the file is a build not redone and is ignored; the other twin still serves" "- gzip" "$(hdrs -H 'Accept-Encoding: br' http://127.0.0.1:8080/comp.css | cut -d' ' -f2) $(hdrs -H 'Accept-Encoding: br, gzip' http://127.0.0.1:8080/comp.css | cut -d' ' -f2)"
+rm -f $P/comp.css.br $P/comp.css.gz; sleep 1.2
+check "twins: with both twins gone the file is served without Vary" "200 - - 2000" "$(hdrs -H 'Accept-Encoding: br, gzip' http://127.0.0.1:8080/comp.css)"
+rm -f $P/comp.css
 
 # ---- HTTP/2 (phase G): prior knowledge on 8080 (h2c), ALPN on 8443; the same answers as HTTP/1 ----
 H2C="--http2-prior-knowledge"; H2="--http2 -k"

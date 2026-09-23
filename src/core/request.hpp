@@ -41,6 +41,7 @@ struct Request {
     std::string_view if_modified_since;
     std::string_view range;     // "bytes=..." as sent (static files: one range, RFC 9110 section 14)
     std::string_view if_range;  // the validator the range is conditional on
+    std::string_view accept_encoding;  // "br;q=1, gzip;q=0.8": which pre-compressed twin of a file to serve, if any
 
     bool has_body = false;             // Content-Length > 0 or Transfer-Encoding: chunked
     bool chunked = false;              // Transfer-Encoding: chunked (HTTP/1.1 only)
@@ -55,7 +56,7 @@ struct Request {
 
     void reset() noexcept {  // cheaper than *this = Request{}: leaves the field array alone
         method = Method::other;
-        method_name = target = host = connection = if_none_match = if_modified_since = range = if_range = {};
+        method_name = target = host = connection = if_none_match = if_modified_since = range = if_range = accept_encoding = {};
         version_minor = 1;
         headers.clear();
         has_body = chunked = expect_continue = false;

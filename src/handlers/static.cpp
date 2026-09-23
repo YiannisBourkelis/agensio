@@ -86,7 +86,8 @@ bool StaticHandler::not_modified(const Request& req, std::string_view etag, std:
 // or If-Range says the file changed. Off the plain path: one test of an empty view.
 StaticHandler::RangeOutcome StaticHandler::apply_range(Stream& s, std::uint64_t size, std::string_view content_type,
                                                        std::string_view etag, std::string_view last_modified,
-                                                       std::uint64_t& first, std::uint64_t& length) {
+                                                       std::uint64_t& first, std::uint64_t& length,
+                                                       std::string_view extra) {
     const Request& req = s.request;
     if (req.range.empty() || !if_range_matches(req.if_range, etag, last_modified)) return RangeOutcome::whole;
     std::uint64_t last = 0;
@@ -114,24 +115,45 @@ StaticHandler::RangeOutcome StaticHandler::apply_range(Stream& s, std::uint64_t 
         .append(last_modified)
         .append("\r\nETag: ")
         .append(etag)
-        .append("\r\nAccept-Ranges: bytes\r\n\r\n");
+        .append("\r\n")
+        .append(extra)
+        .append("Accept-Ranges: bytes\r\n\r\n");
     r.prebuilt_headers = r.scratch;
     r.prebuilt_terminated = true;
     return RangeOutcome::partial;
 }
 
 void StaticHandler::serve_entry(Stream& s, EntryPtr e) {
+    // A pre-compressed twin when the client takes one: the twin is an entry of its own, so
+    // the reference moves to it and eviction of the file cannot free bytes in flight. A file
+    // without twins pays two pointer tests.
+    if (e->has_variants() && !s.request.accept_encoding.empty()) {
+        switch (choose_encoding(s.request.accept_encoding, e->br != nullptr, e->gzip != nullptr)) {
+            case Encoding::br: {
+                EntryPtr twin = e->br;
+                e = std::move(twin);
+                break;
+            }
+            case Encoding::gzip: {
+                EntryPtr twin = e->gzip;
+                e = std::move(twin);
+                break;
+            }
+            case Encoding::identity: break;
+        }
+    }
     Response& r = s.response;
     r.head = s.request.method == Method::head;
     if (not_modified(s.request, e->etag, e->last_modified)) {
         r.status = 304;
         r.headers.add("ETag", e->etag);
         r.headers.add("Last-Modified", e->last_modified);
+        if (!e->coding_headers.empty()) r.headers.add("Vary", "Accept-Encoding");
         r.entry = std::move(e);  // keeps the views above alive
         return;
     }
     std::uint64_t first = 0, length = 0;
-    switch (apply_range(s, e->size, mime_for_path(e->file_path), e->etag, e->last_modified, first, length)) {
+    switch (apply_range(s, e->size, e->content_type, e->etag, e->last_modified, first, length, e->coding_headers)) {
         case RangeOutcome::done: return;
         case RangeOutcome::partial:
             if (e->descriptor_only) r.body = FileBody{&e->fd, length, 0, first};
@@ -150,33 +172,96 @@ void StaticHandler::serve_entry(Stream& s, EntryPtr e) {
     r.entry = std::move(e);
 }
 
-void StaticHandler::fill_entry(CacheEntry& entry, const FileInfo& fi, const WorkerState& ws, std::time_t now) {
-    entry.file_path = ws.fs_path;
+void StaticHandler::fill_entry(CacheEntry& entry, const FileInfo& fi, std::string_view path,
+                               std::string_view content_type, Encoding coding, bool vary, std::time_t now) {
+    static constexpr std::string_view kVary = "Vary: Accept-Encoding\r\n";
+    static constexpr std::string_view kBr = "Content-Encoding: br\r\nVary: Accept-Encoding\r\n";
+    static constexpr std::string_view kGzip = "Content-Encoding: gzip\r\nVary: Accept-Encoding\r\n";
+    entry.file_path = path;
+    entry.content_type = content_type;
     entry.mtime = fi.mtime;
     entry.size = fi.size;
+    entry.coding_headers = coding == Encoding::br ? kBr : coding == Encoding::gzip ? kGzip : vary ? kVary : std::string_view{};
     make_etag(fi.mtime, fi.size, entry.etag);
     entry.last_modified.resize(kHttpDateLength);
     format_http_date(static_cast<std::time_t>(fi.mtime), entry.last_modified.data());
-    entry.headers.reserve(160);
-    entry.headers.append("Content-Type: ").append(mime_for_path(ws.fs_path)).append("\r\nContent-Length: ");
+    entry.headers.reserve(224);
+    entry.headers.append("Content-Type: ").append(content_type).append("\r\nContent-Length: ");
     append_number(entry.headers, fi.size);
     entry.headers.append("\r\nLast-Modified: ")
         .append(entry.last_modified)
         .append("\r\nETag: ")
         .append(entry.etag)
-        .append("\r\nAccept-Ranges: bytes\r\n\r\n");
+        .append("\r\n")
+        .append(entry.coding_headers)
+        .append("Accept-Ranges: bytes\r\n\r\n");
     // The HTTP/2 twin: one HPACK block built here, copied per response by the h2 writer
     // (nginx encodes every header of every response; the cache pays once per entry).
-    entry.h2_block.reserve(96);
-    hpack::append_field(entry.h2_block, "content-type", mime_for_path(ws.fs_path));
+    entry.h2_block.reserve(128);
+    hpack::append_field(entry.h2_block, "content-type", content_type);
     std::string length;
     append_number(length, fi.size);
     hpack::append_field(entry.h2_block, "content-length", length);
     hpack::append_field(entry.h2_block, "last-modified", entry.last_modified);
     hpack::append_field(entry.h2_block, "etag", entry.etag);
+    if (coding != Encoding::identity) hpack::append_field(entry.h2_block, "content-encoding", coding == Encoding::br ? "br" : "gzip");
+    if (!entry.coding_headers.empty()) hpack::append_field(entry.h2_block, "vary", "Accept-Encoding");
     hpack::append_field(entry.h2_block, "accept-ranges", "bytes");
     entry.last_access.store(now, std::memory_order_relaxed);
     entry.last_validated.store(now, std::memory_order_relaxed);
+}
+
+// The pre-compressed twins of the file just loaded, name.br and name.gz beside it (Vite,
+// webpack, the brotli and gzip tools write them at build time; nginx's gzip_static and
+// brotli_static serve them): a twin at least as new as the file is loaded like the file,
+// bytes, a descriptor for sendfile when large enough, the file's Content-Type and an ETag
+// of its own. An older twin is a build that was not redone and is left alone rather than
+// served stale. Two opens per fill, failing at once when there are none.
+void StaticHandler::load_variants(CacheEntry& parent, const FileInfo& fi, const LocationConfig& loc,
+                                  WorkerState& ws, std::time_t now) {
+    struct Twin {
+        const char* suffix;
+        Encoding coding;
+    };
+    static constexpr Twin kTwins[] = {{".br", Encoding::br}, {".gz", Encoding::gzip}};
+    const std::size_t base = ws.fs_path.size();
+    for (const Twin& t : kTwins) {
+        ws.fs_path.resize(base);
+        ws.fs_path.append(t.suffix);
+        File f = File::open(ws.fs_path.c_str());
+        FileInfo tfi;
+        if (!f.is_open() || !f.info(tfi) || !tfi.is_regular || tfi.size == 0 || tfi.mtime < fi.mtime ||
+            tfi.size > cache_.max_file_size())
+            continue;
+        if (loc.symlinks_deny && !path_within_root(ws.fs_path.c_str(), loc.alias.empty() ? loc.root : loc.alias)) continue;
+        auto twin = std::make_shared<CacheEntry>();
+        twin->data.resize(static_cast<std::size_t>(tfi.size));
+        if (!f.read_all(twin->data.data(), twin->data.size())) continue;
+        if (cfg_.cache_sendfile_min_size > 0 && tfi.size >= cfg_.cache_sendfile_min_size) twin->fd = std::move(f);
+        fill_entry(*twin, tfi, ws.fs_path, parent.content_type, t.coding, true, now);
+        (t.coding == Encoding::br ? parent.br : parent.gzip) = std::move(twin);
+    }
+    ws.fs_path.resize(base);
+}
+
+// Whether the twins beside a cached file are as the entry loaded them: the same two stats
+// as a fill, once per revalidation interval, so a twin added, replaced or removed shows
+// within the interval like a change of the file itself.
+bool StaticHandler::twins_unchanged(const CacheEntry& e, WorkerState& ws) {
+    struct Twin {
+        const char* suffix;
+        const CacheEntry* cached;
+    };
+    const Twin twins[] = {{".br", e.br.get()}, {".gz", e.gzip.get()}};
+    for (const Twin& t : twins) {
+        ws.fs_path.assign(e.file_path).append(t.suffix);
+        FileInfo fi;
+        const bool usable = stat_path(ws.fs_path.c_str(), fi) && fi.is_regular && fi.size > 0 && fi.mtime >= e.mtime &&
+                            fi.size <= cache_.max_file_size();
+        if (usable != (t.cached != nullptr)) return false;
+        if (t.cached && (t.cached->mtime != fi.mtime || t.cached->size != fi.size)) return false;
+    }
+    return true;
 }
 
 void StaticHandler::serve_file(Stream& s, File&& f, const FileInfo& fi, WorkerState& ws) {
@@ -405,8 +490,9 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
         now - raw->last_validated.load(std::memory_order_relaxed) >=
             static_cast<std::int64_t>(cfg_.cache_revalidate_s)) {
         FileInfo fi;
-        if (!stat_path(raw->file_path.c_str(), fi) || !fi.is_regular || fi.mtime != raw->mtime ||
-            fi.size != raw->size) {
+        bool same = stat_path(raw->file_path.c_str(), fi) && fi.is_regular && fi.mtime == raw->mtime && fi.size == raw->size;
+        if (same && cfg_.cache_precompressed && !raw->descriptor_only) same = twins_unchanged(*raw, ws);
+        if (!same) {
             cache_.erase(key, raw);
             ws.local.erase(key);
             raw = nullptr;
@@ -453,7 +539,10 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
         }
         if (cfg_.cache_sendfile_min_size > 0 && fi.size >= cfg_.cache_sendfile_min_size) entry->fd = std::move(f);
         else f.close();
-        fill_entry(*entry, fi, ws, now);
+        const std::string_view type = mime_for_path(ws.fs_path);
+        entry->content_type = type;
+        if (cfg_.cache_precompressed) load_variants(*entry, fi, loc, ws, now);
+        fill_entry(*entry, fi, ws.fs_path, type, Encoding::identity, entry->has_variants(), now);
 
         EntryPtr canonical = cache_.insert(key, entry);
         if (canonical) ws.local.insert(key, canonical);
@@ -471,7 +560,7 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
         auto entry = std::make_shared<CacheEntry>();
         entry->descriptor_only = true;
         entry->fd = std::move(f);
-        fill_entry(*entry, fi, ws, now);
+        fill_entry(*entry, fi, ws.fs_path, mime_for_path(ws.fs_path), Encoding::identity, false, now);
         EntryPtr canonical = cache_.insert(key, entry);
         if (canonical) {
             ws.local.insert(key, canonical);

@@ -223,6 +223,7 @@ struct Config {
     std::size_t cache_max_size = 256u * 1024 * 1024;
     double cache_evict_fraction = 0.2;
     std::uint32_t cache_revalidate_s = 1;
+    bool cache_precompressed = true;  // serve name.br / name.gz beside a cached file to a client that accepts it
     std::size_t stream_chunk_size = 64 * 1024;
     std::size_t cache_sendfile_min_size =
         48 * 1024;  // cached files at least this large are served by sendfile on plain sockets (0 = never)

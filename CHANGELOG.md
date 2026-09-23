@@ -2,6 +2,24 @@
 
 ## 0.1.0-alpha.21 (unreleased)
 
+- **Pre-compressed files are served**: a `name.br` or `name.gz` beside a cached file goes
+  out with `Content-Encoding` and `Vary: Accept-Encoding` to a client whose
+  `Accept-Encoding` takes it (q-values, `q=0` and `*` honoured, `br` on a tie), the file
+  itself to any other; the twin is cached beside the file with its own ETag and
+  Last-Modified, counts in the byte budget with it, is revalidated with it, and an older
+  twin than its file is ignored as a build not redone. Conditional and Range requests work
+  per representation on both protocols. `[cache] precompressed = false` turns it off.
+  Motivated by HttpArena's static rows, where every request asks for `br` and nginx served
+  the twins at a quarter of our bytes per response: in the arena's own harness on the
+  bench box (`bench/results/httparena-lite-20260924-0147.md`, rerun section) static-h2 went
+  from 304k to 955k req/s against nginx's 846k and static-tls from 269k to 687k against
+  635k; the A/B against alpha.20 is flat on every HTTP/1 and HTTP/2 row.
+- **Fixed: a heap use-after-free in the upstream streaming path** (FastCGI and proxy
+  responses streamed to the client, `buffering = false` or past the temp-file cap): when a
+  body ended short, the writer's inline completion closed the connection, dropped the body
+  source and with it the last reference to the exchange while its own `pull` was still on
+  the stack. Found by the sanitizer build under the integration suite; the exchange now
+  holds itself alive for the length of the call.
 - **HttpArena entry** (`bench/httparena/`): agensio packaged for the public HttpArena board
   (Dockerfile from the tag, the arena's port layout, `meta.json` subscribing to the pipelined,
   static-tls and static-h2 profiles) and a driver that runs the arena's own validator and lite

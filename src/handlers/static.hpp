@@ -15,6 +15,7 @@
 #include "core/stream.hpp"
 #include "core/worker_state.hpp"
 #include "file.hpp"
+#include "handlers/encoding.hpp"
 
 namespace agensio {
 
@@ -94,8 +95,10 @@ public:
     void error(Stream& s, int status, bool keep_alive, std::string_view allow = {});
 
     enum class RangeOutcome { whole, partial, done };
+    // `extra`: the representation's Content-Encoding and Vary lines, if any (a pre-compressed twin).
     RangeOutcome apply_range(Stream& s, std::uint64_t size, std::string_view content_type, std::string_view etag,
-                             std::string_view last_modified, std::uint64_t& first, std::uint64_t& length);
+                             std::string_view last_modified, std::uint64_t& first, std::uint64_t& length,
+                             std::string_view extra = {});
     // 204 with an Allow header (OPTIONS).
     void no_content(Stream& s, std::string_view allow);
 
@@ -108,10 +111,15 @@ private:
     Lookup try_files_lookup(Stream& s, const LocationConfig& loc, WorkerState& ws, File& f, FileInfo& fi);
     Lookup index_lookup(const LocationConfig& loc, WorkerState& ws, File& f, FileInfo& fi);
 
-    void serve_entry(Stream& s, EntryPtr e);  // takes ownership of the ref
+    void serve_entry(Stream& s, EntryPtr e);  // takes ownership of the ref; picks a twin by Accept-Encoding
     static void add_headers(Stream& s, const LocationConfig& loc);
-    // Metadata and prebuilt header block shared by memory and descriptor entries.
-    void fill_entry(CacheEntry& e, const FileInfo& fi, const WorkerState& ws, std::time_t now);
+    // Metadata and prebuilt header blocks shared by memory, descriptor and twin entries:
+    // `coding` names the twin's Content-Encoding, `vary` adds Vary: Accept-Encoding.
+    void fill_entry(CacheEntry& e, const FileInfo& fi, std::string_view path, std::string_view content_type,
+                    Encoding coding, bool vary, std::time_t now);
+    void load_variants(CacheEntry& parent, const FileInfo& fi, const LocationConfig& loc, WorkerState& ws,
+                       std::time_t now);
+    bool twins_unchanged(const CacheEntry& e, WorkerState& ws);
     void serve_file(Stream& s, File&& f, const FileInfo& fi, WorkerState& ws);
     void redirect_slash(Stream& s, WorkerState& ws);
     static bool not_modified(const Request& req, std::string_view etag, std::string_view last_modified) noexcept;

@@ -141,6 +141,9 @@ ParseStatus parse_request(std::string_view buf, Request& out) noexcept {
             if ((c < 0x20 && c != '\t') || c == 0x7f) return ParseStatus::bad_request;  // field-value: no CTLs
 
         switch (lower(name[0])) {
+            case 'a':
+                if (iequals(name, "accept-encoding")) out.accept_encoding = value;
+                break;
             case 'h':
                 if (iequals(name, "host")) {
                     if (seen_host) return ParseStatus::bad_request;  // RFC 9112 3.2: exactly one Host

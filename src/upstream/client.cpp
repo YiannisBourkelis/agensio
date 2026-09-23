@@ -982,6 +982,12 @@ void UpstreamRequest::fail(UpstreamFailure why, std::error_code ec) {
 }
 
 void UpstreamRequest::pull(char* buf, std::size_t len, StreamBody::ReadHandler handler) {
+    // The handler may run inline and end the exchange: a body that ends short makes the
+    // writer close the connection, which drops the source and with it the last other
+    // reference, while this frame (or an outer pull, through the writer's inline
+    // completions) still has members to read. Held until the call is over (heap
+    // use-after-free found by the sanitizer suite, 2026-09-24).
+    auto self = shared_from_this();
     waiter_ = Waiter{buf, len, std::move(handler)};
     satisfy_waiter();
     if (waiter_.handler) read_more();  // nothing pending yet: keep the upstream flowing

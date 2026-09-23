@@ -35,6 +35,17 @@ larger ones streamed with sendfile, access log on (see section 8), and Range req
 (one range per request, `If-Range` honoured; video seeking, resumable downloads, PDF
 viewers) answered with 206 from the cache and from disk alike.
 
+**Pre-compressed files.** A `name.br` or `name.gz` beside a cached file is served, with
+`Content-Encoding` and `Vary: Accept-Encoding`, to a client whose `Accept-Encoding` takes it
+(`br` wins a tie, `q=0` refuses one, `*` covers the rest), and the file itself to any other
+client. Vite, webpack and the `brotli` and `gzip` tools write these twins at build time;
+nothing is compressed at request time (nginx: `gzip_static`, `brotli_static`). A twin is
+used only when it is at least as new as the file, since an older one is a build that was
+not redone, and it is cached beside the file with an ETag and Last-Modified of its own and
+revalidated with it, so a twin added, replaced or removed shows within
+`cache.revalidate_interval`. Files above `cache.max_file_size` are served as stored.
+`[cache] precompressed = false` turns the lookup off.
+
 A single-page application that routes on the client:
 
 ```toml

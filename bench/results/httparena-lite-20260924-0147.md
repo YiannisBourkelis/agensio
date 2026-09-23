@@ -48,6 +48,31 @@ Memory: agensio 42 MiB, nginx 682 MiB (`worker_connections 65536` preallocated p
 20 MiB. On static-h2 agensio keeps 291 MiB for 512 connections with 32 streams each, 18 KB per
 open stream; the two 100-field header arrays per stream are the known lever (design G2).
 
+## Rerun with pre-compressed twins served (working tree after alpha.20, same session)
+
+The same three profiles with the twins change (`[cache] precompressed`, alpha.21): the
+validator now passes the compression check too (24 checks, "15 files compressed, 5 skipped",
+the five being the images and fonts that have no twins), and the static rows move as the
+byte analysis predicted.
+
+| profile | agensio before | agensio with twins | nginx | h2o |
+|---|---|---|---|---|
+| pipelined, req/s | 4,773,257 | 4,951,197 | 4,651,758 | 5,645,580 |
+| pipelined, CPU / peak memory | 1562 % / 42 MiB | 1535 % / 43 MiB | 1351 % / 682 MiB | 1537 % / 20 MiB |
+| static-h2, req/s | 304,381 | 954,688 | 845,695 | 289,939 |
+| static-h2, payload | 18.7 GB/s, 60.0 KB per response | 15.1 GB/s, 14.9 KB per response | 13.3 GB/s, 14.9 KB per response | 17.6 GB/s, 57.8 KB per response |
+| static-h2, CPU / peak memory | 1247 % / 291 MiB | 1417 % / 178 MiB | 1422 % / 962 MiB | 1430 % / 343 MiB |
+| static-tls, req/s | 268,642 | 687,388 | 634,561 | not subscribed |
+| static-tls, payload | 16.0 GB/s, 58.0 KB per response | 10.6 GB/s, 15.0 KB per response | 9.7 GB/s, 15.0 KB per response | |
+| static-tls, CPU / peak memory | 1216 % / 68 MiB | 1073 % / 70 MiB | 1129 % / 708 MiB | |
+
+With the same bytes per response as nginx, agensio serves 1.13 times nginx's request rate
+on static-h2 and 1.08 times on static-tls, at the same or less CPU and a fraction of the
+memory (twins are cached beside the file, so the entries grew, and the h2 peak fell because
+the responses did). Pipelined is 1.06 times nginx; h2o stays ahead there by 0.88, answering
+from its handler where agensio serves a cached file through a `try_files` hop. Raw output
+in `raw/httparena-lite-20260924-0147/*-twins.log`.
+
 Not run: baseline, short-lived and the JSON profiles need the in-process handler (`/baseline11`,
 `/baseline2`, `/json/{count}`; the rules forbid proxying them); the two HTTP/3 rows need phase I.
 

@@ -11,8 +11,10 @@
 #   bench/httparena/local.sh stop                     # remove the dind container (its images go with it)
 #
 # Environment: ARENA (the clone, default bench/tmp/httparena), DURATION (5s), RUNS (3),
-# LOAD_THREADS (the harness default, nproc/2). The lite profile set skips static-tls; setup
-# adds it with the static-h2 shape (512 connections) for the local comparison only.
+# LOAD_THREADS (the harness default, nproc/2), LOCAL=1 to build the working tree (tracked and
+# untracked files, uncommitted changes included) instead of the tag the entry pins. The lite
+# profile set skips static-tls; setup adds it with the static-h2 shape (512 connections) for
+# the local comparison only.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
@@ -22,11 +24,21 @@ cmd=${1:-}; shift || true
 
 dind_exec() { docker exec -w /arena "$@"; }
 
+# The entry as the harness sees it: the pull-request files, or with LOCAL=1 the same files
+# with the local Dockerfile and a tarball of the working tree.
+sync_entry() {
+  rsync -a --delete --exclude Dockerfile.local "$HERE/agensio/" "$ARENA/frameworks/agensio/"
+  if [ "${LOCAL:-0}" = 1 ]; then
+    cp "$HERE/agensio/Dockerfile.local" "$ARENA/frameworks/agensio/Dockerfile"
+    (cd "$ROOT" && git ls-files -z --cached --others --exclude-standard | tar --null -T - -czf "$ARENA/frameworks/agensio/src.tar.gz")
+  fi
+}
+
 case "$cmd" in
   setup)
     mkdir -p "$(dirname "$ARENA")"
     [ -d "$ARENA/.git" ] || git clone --depth 1 https://github.com/MDA2AV/HttpArena.git "$ARENA"
-    rsync -a --delete "$HERE/agensio/" "$ARENA/frameworks/agensio/"
+    sync_entry
     # The lite map lacks static-tls (added to run it here, 512 connections like static-h2) and the
     # h2c and json-tls profiles the nginx and h2o entries subscribe to; the script refuses a
     # meta.json naming a profile it does not know, so those three are declared but never run.
@@ -41,14 +53,14 @@ case "$cmd" in
     echo "harness at $ARENA, container $DIND ($(docker exec "$DIND" docker info --format '{{.NCPU}} cpus, {{.ServerVersion}}'))"
     ;;
   sync)   # copy the entry again after editing it
-    rsync -a --delete "$HERE/agensio/" "$ARENA/frameworks/agensio/"
+    sync_entry
     ;;
   validate)
-    rsync -a --delete "$HERE/agensio/" "$ARENA/frameworks/agensio/"
+    sync_entry
     dind_exec "$DIND" bash scripts/validate.sh "$@"
     ;;
   bench)
-    rsync -a --delete "$HERE/agensio/" "$ARENA/frameworks/agensio/"
+    sync_entry
     dind_exec -e "DURATION=${DURATION:-5s}" -e "RUNS=${RUNS:-3}" "$DIND" bash scripts/benchmark-lite.sh ${LOAD_THREADS:+--load-threads "$LOAD_THREADS"} "$@"
     ;;
   shell)
