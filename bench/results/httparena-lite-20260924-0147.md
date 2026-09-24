@@ -73,6 +73,32 @@ the responses did). Pipelined is 1.06 times nginx; h2o stays ahead there by 0.88
 from its handler where agensio serves a cached file through a `try_files` hop. Raw output
 in `raw/httparena-lite-20260924-0147/*-twins.log`.
 
+## Worker count under SMT, server and load generator on disjoint cores
+
+The arena pins the server to 32 cores plus their SMT siblings and the load generators to
+the other half. To decide between one worker per thread (what `start.sh` does, like nginx's
+`worker_processes auto` and h2o's one thread per processor) and one per physical core, the
+same three profiles ran with the server container on CPUs 0-5,12-17 (six cores and their
+siblings) and the load generators on 6-11,18-23 with six threads (`SERVER_CPUS`, `LOAD_CPUS`,
+`WORKERS` of `bench/httparena/local.sh`; twins served in all three).
+
+| profile | agensio, 12 workers | agensio, 6 workers | nginx, 12 workers |
+|---|---|---|---|
+| pipelined, req/s | 4,036,962 | 2,643,089 | 3,386,956 |
+| pipelined, CPU / peak memory | 1208 % / 35 MiB | 555 % / 36 MiB | 1110 % / 678 MiB |
+| static-h2, req/s | 841,051 | 626,873 | 728,665 |
+| static-h2, CPU / peak memory | 1199 % / 119 MiB | 604 % / 101 MiB | 1105 % / 942 MiB |
+| static-tls, req/s | 461,520 | 438,864 | 451,582 |
+| static-tls, CPU / peak memory | 707 % / 68 MiB | 582 % / 65 MiB | 886 % / 702 MiB |
+
+One worker per thread wins on every row: 1.53 times the six-worker rate on pipelined, 1.34
+on static-h2, 1.05 on static-tls. The CPU column is thread time, so under SMT it cannot be
+read as per-request cost across the two counts. static-tls is bound by the six wrk threads
+here (agensio at 707 % of 1200 % available, nginx at the same rate), which is why the
+unpinned run above, with twelve wrk threads, shows higher numbers; the arena's load
+generators have 64 threads. Against nginx at the same pinning: pipelined 1.19, static-h2
+1.15, static-tls level and load-bound. Raw output in `raw/httparena-lite-20260924-0147/*-pinned.log`.
+
 Not run: baseline, short-lived and the JSON profiles need the in-process handler (`/baseline11`,
 `/baseline2`, `/json/{count}`; the rules forbid proxying them); the two HTTP/3 rows need phase I.
 

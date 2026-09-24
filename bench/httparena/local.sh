@@ -14,7 +14,10 @@
 # LOAD_THREADS (the harness default, nproc/2), LOCAL=1 to build the working tree (tracked and
 # untracked files, uncommitted changes included) instead of the tag the entry pins. The lite
 # profile set skips static-tls; setup adds it with the static-h2 shape (512 connections) for
-# the local comparison only.
+# the local comparison only. WORKERS=n overrides the entry's one-worker-per-CPU count;
+# SERVER_CPUS and LOAD_CPUS (cpuset syntax, e.g. 0-5,12-17 and 6-11,18-23: keep SMT siblings
+# together) pin the server container and the load generators to disjoint cores like the
+# arena does, which the lite script does not do by itself.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
@@ -32,6 +35,11 @@ sync_entry() {
     cp "$HERE/agensio/Dockerfile.local" "$ARENA/frameworks/agensio/Dockerfile"
     (cd "$ROOT" && git ls-files -z --cached --others --exclude-standard | tar --null -T - -czf "$ARENA/frameworks/agensio/src.tar.gz")
   fi
+  [ -n "${WORKERS:-}" ] && sed -i "s/^W=.*/W=${WORKERS}/" "$ARENA/frameworks/agensio/start.sh"
+  # The lite runner passes no CPU limit to the server container; let an environment variable supply one.
+  grep -q HTTPARENA_SERVER_CPUS "$ARENA/scripts/lib/framework.sh" || \
+    sed -i 's/^    local cpu_limit="${2:-}"$/    local cpu_limit="${2:-}"\n    [ -z "$cpu_limit" ] \&\& cpu_limit="${HTTPARENA_SERVER_CPUS:-}"/' "$ARENA/scripts/lib/framework.sh"
+  return 0
 }
 
 case "$cmd" in
@@ -61,7 +69,7 @@ case "$cmd" in
     ;;
   bench)
     sync_entry
-    dind_exec -e "DURATION=${DURATION:-5s}" -e "RUNS=${RUNS:-3}" "$DIND" bash scripts/benchmark-lite.sh ${LOAD_THREADS:+--load-threads "$LOAD_THREADS"} "$@"
+    dind_exec -e "DURATION=${DURATION:-5s}" -e "RUNS=${RUNS:-3}" ${SERVER_CPUS:+-e "HTTPARENA_SERVER_CPUS=$SERVER_CPUS"} ${LOAD_CPUS:+-e "GCANNON_CPUS=$LOAD_CPUS"} "$DIND" bash scripts/benchmark-lite.sh ${LOAD_THREADS:+--load-threads "$LOAD_THREADS"} "$@"
     ;;
   shell)
     dind_exec -it "$DIND" bash

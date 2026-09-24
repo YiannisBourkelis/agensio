@@ -737,7 +737,13 @@ privilege drop, fuzz targets for every new parser (chunked, FastCGI), h1 complia
   nginx's req/s there until pre-compressed siblings are served. With the twins served (same
   file, rerun section; A/B against alpha.20 flat, `ab-20260923-232326.md`): static-h2 955k
   req/s against nginx's 846k and static-tls 687k against 635k at the same 15 KB per
-  response, pipelined 4.95M against 4.65M (h2o 5.65M). The infrastructure tier scores
+  response, pipelined 4.95M against 4.65M (h2o 5.65M). Workers: one per CPU thread of the
+  container's cpuset (`nproc`), like nginx and h2o; measured with the server pinned to six
+  cores plus SMT siblings and the load generators elsewhere, 12 workers beat 6 by 1.53 on
+  pipelined, 1.34 on static-h2 and 1.05 on static-tls (same file, SMT section), so the
+  siblings are worth using and the CPU column is thread time, not per-request cost. The
+  lite mode shares all cores with the load generators; `SERVER_CPUS`/`LOAD_CPUS` of the
+  driver pin them apart. The infrastructure tier scores
   nine profiles; baseline, short-lived and JSON need an in-process handler (`/baseline11`,
   `/baseline2`, `/json/{count}`, no proxying allowed) and the two HTTP/3 rows need phase I.
 - Verify correctness before speed: responses must be byte-identical in body and carry

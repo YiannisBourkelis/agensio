@@ -1,0 +1,361 @@
+=== nginx / pipelined / 512c (tool=gcannon) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+gcannon v0.6.1
+  Target:    localhost:8080/pipeline
+  Threads:   6
+  Conns:     512 (85/thread)
+  Pipeline:  16
+  Req/conn:  unlimited (keep-alive)
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   2.43ms   1.30ms   5.78ms   12.70ms   17.80ms
+
+  16941597 requests in 5.00s, 16934784 responses
+  Throughput: 3.39M req/s
+  Bandwidth:  458.61MB/s
+  Status codes: 2xx=16934784, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 16934784 / 16934784 responses (100.0%)
+[info] CPU 1109.5% | Mem 678MiB
+
+[run 2/3]
+gcannon v0.6.1
+  Target:    localhost:8080/pipeline
+  Threads:   6
+  Conns:     512 (85/thread)
+  Pipeline:  16
+  Req/conn:  unlimited (keep-alive)
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   2.44ms   1.33ms   5.63ms   10.00ms   17.00ms
+
+  16858218 requests in 5.00s, 16851404 responses
+  Throughput: 3.37M req/s
+  Bandwidth:  456.36MB/s
+  Status codes: 2xx=16851404, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 16851404 / 16851404 responses (100.0%)
+[info] CPU 1200.2% | Mem 679MiB
+
+[run 3/3]
+gcannon v0.6.1
+  Target:    localhost:8080/pipeline
+  Threads:   6
+  Conns:     512 (85/thread)
+  Pipeline:  16
+  Req/conn:  unlimited (keep-alive)
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   2.46ms   1.25ms   5.75ms   9.96ms   13.80ms
+
+  16730665 requests in 5.00s, 16722473 responses
+  Throughput: 3.34M req/s
+  Bandwidth:  452.87MB/s
+  Status codes: 2xx=16722473, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 16722473 / 16722473 responses (100.0%)
+[info] CPU 1106.7% | Mem 680MiB
+
+=== Best: 3386956 req/s (CPU: 1109.5%, Mem: 678MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-nginx
+httparena-bench-nginx
+[info] done
+[info] restoring loopback MTU to 65536
+[info] load-threads override: THREADS=6
+[info] available cores: 24 | threads: 6
+[info] tuning host for benchmark runs
+[info] setting kernel socket limits
+[info] setting UDP buffer sizes for QUIC
+[info] setting loopback MTU to 1500 (realistic Ethernet)
+[info] restarting docker daemon
+[warn] could not restart docker daemon (no sudo?)
+[info] dropping kernel caches
+[info] framework: nginx (nginx, C)
+[info] subscribed tests: baseline,pipelined,limited-conn,json-tls,static-tls,baseline-h2,static-h2,baseline-h2c,json-h2c,baseline-h3,static-h3
+[info] building image: httparena-nginx
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 2.09kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/debian:trixie
+#2 ...
+
+#3 [internal] load metadata for docker.io/library/debian:trixie-slim
+#3 DONE 0.2s
+
+#2 [internal] load metadata for docker.io/library/debian:trixie
+#2 DONE 0.2s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 106B done
+#5 DONE 0.0s
+
+#6 [build 1/8] FROM docker.io/library/debian:trixie@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c
+#6 resolve docker.io/library/debian:trixie@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c 0.0s done
+#6 DONE 0.0s
+
+#7 [stage-1 1/5] FROM docker.io/library/debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+#7 resolve docker.io/library/debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a 0.0s done
+#7 DONE 0.0s
+
+#8 [build 5/8] RUN git clone --recurse-submodules -j8 https://github.com/google/ngx_brotli &&     cd ngx_brotli/deps/brotli  &&     mkdir out && cd out  &&     cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_C_FLAGS="-Ofast -m64 -march=native -mtune=native -flto -funroll-loops -ffunction-sections -fdata-sections -Wl,--gc-sections" -DCMAKE_CXX_FLAGS="-Ofast -m64 -march=native -mtune=native -flto -funroll-loops -ffunction-sections -fdata-sections -Wl,--gc-sections" -DCMAKE_INSTALL_PREFIX=./installed .. &&     cmake --build . --config Release --target brotlienc  &&     cd ../../../..
+#8 CACHED
+
+#9 [build 2/8] RUN apt-get update && apt-get install -y --no-install-recommends     build-essential libpcre2-dev libssl-dev zlib1g-dev libgd-dev curl ca-certificates gnupg wget git perl cmake -y
+#9 CACHED
+
+#10 [build 8/8] RUN ./configure     --with-http_ssl_module     --with-http_v2_module     --with-http_v3_module     --with-http_gzip_static_module     --add-module=/tmp/ngx_brotli     --add-module=/tmp/module     --with-cc-opt="-O3 -march=native -DNDEBUG" &&     make -j$(nproc)
+#10 CACHED
+
+#11 [build 7/8] WORKDIR /tmp/nginx-1.31.4
+#11 CACHED
+
+#12 [build 3/8] WORKDIR /tmp
+#12 CACHED
+
+#13 [build 4/8] RUN wget -q http://nginx.org/download/nginx-1.31.4.tar.gz &&     tar xzf nginx-1.31.4.tar.gz
+#13 CACHED
+
+#14 [stage-1 3/5] COPY --from=build /tmp/nginx-1.31.4/objs/nginx /usr/sbin/nginx
+#14 CACHED
+
+#15 [build 6/8] COPY ngx_http_httparena_module.c config /tmp/module/
+#15 CACHED
+
+#16 [stage-1 4/5] RUN mkdir -p /usr/local/nginx/logs
+#16 CACHED
+
+#17 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends     libpcre2-8-0 &&     rm -rf /var/lib/apt/lists/*
+#17 CACHED
+
+#18 [stage-1 5/5] COPY nginx.conf /usr/local/nginx/conf/nginx.conf
+#18 CACHED
+
+#19 exporting to image
+#19 exporting layers done
+#19 exporting manifest sha256:de03fd95dfc494af2511c077bb4fff7d1ecdbadaacb8c5cbc31936af8ab49071 done
+#19 exporting config sha256:529b48e4da6fc00a110c8466ea415ad70668f0754dfb5d522d55ea83d4c7da17 done
+#19 exporting attestation manifest sha256:7c2291c3c8b30dfef27be95b866c07e0753c83c3c1d7d305562a4775e63d171f 0.0s done
+#19 exporting manifest list sha256:a52df2b7ca5cc4af0b6b75770a779991af83145368e49cd35a900b40eaf4f016 0.0s done
+#19 naming to docker.io/library/httparena-nginx:latest done
+#19 unpacking to docker.io/library/httparena-nginx:latest done
+#19 DONE 0.1s
+
+==============================================
+=== nginx / static-h2 / 512c (tool=h2load) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+starting benchmark...
+
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+
+finished in 5.13s, 747610.20 req/s, 11.40GB/s
+requests: 3738051 total, 3754435 started, 3738051 done, 3738051 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 3738053 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 56.98GB (61179862408) total, 232.43MB (243720315) headers (space savings 43.48%), 56.64GB (60818368079) data
+                     min         max         mean         sd        +/- sd
+time for request:       39us    188.68ms     20.60ms     11.60ms    71.88%
+time for connect:     4.25ms     69.95ms     18.30ms     10.33ms    71.48%
+time to 1st byte:    13.08ms    131.50ms     36.65ms     15.21ms    85.16%
+req/s           :     815.24     2546.07     1459.37      384.65    72.27%
+[info] CPU 1104.6% | Mem 942MiB
+
+[run 2/3]
+starting benchmark...
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+finished in 5.16s, 739079.00 req/s, 11.27GB/s
+requests: 3695395 total, 3711779 started, 3695395 done, 3695395 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 3695402 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 56.33GB (60482236041) total, 229.78MB (240939682) headers (space savings 43.48%), 56.00GB (60124865442) data
+                     min         max         mean         sd        +/- sd
+time for request:       67us    148.58ms     21.05ms     10.48ms    62.92%
+time for connect:     3.33ms     71.89ms     16.24ms      7.69ms    70.90%
+time to 1st byte:     6.93ms    100.98ms     33.31ms     11.27ms    79.10%
+req/s           :     923.63     2147.64     1442.32      352.39    61.52%
+[info] CPU 1212.6% | Mem 953MiB
+
+[run 3/3]
+starting benchmark...
+.Main benchmark duration is started for thread #3.
+
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+finished in 5.16s, 738096.60 req/s, 11.25GB/s
+requests: 3690483 total, 3706867 started, 3690483 done, 3690483 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 3690489 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 56.25GB (60401487314) total, 229.47MB (240619184) headers (space savings 43.48%), 55.92GB (60044592301) data
+                     min         max         mean         sd        +/- sd
+time for request:       96us    151.83ms     21.00ms     12.46ms    69.30%
+time for connect:     3.52ms     69.83ms     16.83ms     10.02ms    73.05%
+time to 1st byte:    18.59ms     96.51ms     35.04ms     14.10ms    71.29%
+req/s           :     792.29     3338.76     1440.81      503.12    70.90%
+[info] CPU 1102.9% | Mem 997MiB
+
+=== Best: 728665 req/s (CPU: 1104.6%, Mem: 942MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-nginx
+httparena-bench-nginx
+[info] done
+[info] restoring loopback MTU to 65536
+[info] load-threads override: THREADS=6
+[info] available cores: 24 | threads: 6
+[info] tuning host for benchmark runs
+[info] setting kernel socket limits
+[info] setting UDP buffer sizes for QUIC
+[info] setting loopback MTU to 1500 (realistic Ethernet)
+[info] restarting docker daemon
+[warn] could not restart docker daemon (no sudo?)
+[info] dropping kernel caches
+[info] framework: nginx (nginx, C)
+[info] subscribed tests: baseline,pipelined,limited-conn,json-tls,static-tls,baseline-h2,static-h2,baseline-h2c,json-h2c,baseline-h3,static-h3
+[info] building image: httparena-nginx
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 2.09kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/debian:trixie
+#2 ...
+
+#3 [internal] load metadata for docker.io/library/debian:trixie-slim
+#3 DONE 0.2s
+
+#2 [internal] load metadata for docker.io/library/debian:trixie
+#2 DONE 0.2s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 106B done
+#5 DONE 0.0s
+
+#6 [build 1/8] FROM docker.io/library/debian:trixie@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c
+#6 resolve docker.io/library/debian:trixie@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c 0.0s done
+#6 DONE 0.0s
+
+#7 [stage-1 1/5] FROM docker.io/library/debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+#7 resolve docker.io/library/debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a 0.0s done
+#7 DONE 0.0s
+
+#8 [build 6/8] COPY ngx_http_httparena_module.c config /tmp/module/
+#8 CACHED
+
+#9 [build 2/8] RUN apt-get update && apt-get install -y --no-install-recommends     build-essential libpcre2-dev libssl-dev zlib1g-dev libgd-dev curl ca-certificates gnupg wget git perl cmake -y
+#9 CACHED
+
+#10 [build 5/8] RUN git clone --recurse-submodules -j8 https://github.com/google/ngx_brotli &&     cd ngx_brotli/deps/brotli  &&     mkdir out && cd out  &&     cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_C_FLAGS="-Ofast -m64 -march=native -mtune=native -flto -funroll-loops -ffunction-sections -fdata-sections -Wl,--gc-sections" -DCMAKE_CXX_FLAGS="-Ofast -m64 -march=native -mtune=native -flto -funroll-loops -ffunction-sections -fdata-sections -Wl,--gc-sections" -DCMAKE_INSTALL_PREFIX=./installed .. &&     cmake --build . --config Release --target brotlienc  &&     cd ../../../..
+#10 CACHED
+
+#11 [build 3/8] WORKDIR /tmp
+#11 CACHED
+
+#12 [build 8/8] RUN ./configure     --with-http_ssl_module     --with-http_v2_module     --with-http_v3_module     --with-http_gzip_static_module     --add-module=/tmp/ngx_brotli     --add-module=/tmp/module     --with-cc-opt="-O3 -march=native -DNDEBUG" &&     make -j$(nproc)
+#12 CACHED
+
+#13 [build 4/8] RUN wget -q http://nginx.org/download/nginx-1.31.4.tar.gz &&     tar xzf nginx-1.31.4.tar.gz
+#13 CACHED
+
+#14 [stage-1 4/5] RUN mkdir -p /usr/local/nginx/logs
+#14 CACHED
+
+#15 [build 7/8] WORKDIR /tmp/nginx-1.31.4
+#15 CACHED
+
+#16 [stage-1 3/5] COPY --from=build /tmp/nginx-1.31.4/objs/nginx /usr/sbin/nginx
+#16 CACHED
+
+#17 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends     libpcre2-8-0 &&     rm -rf /var/lib/apt/lists/*
+#17 CACHED
+
+#18 [stage-1 5/5] COPY nginx.conf /usr/local/nginx/conf/nginx.conf
+#18 CACHED
+
+#19 exporting to image
+#19 exporting layers done
+#19 exporting manifest sha256:de03fd95dfc494af2511c077bb4fff7d1ecdbadaacb8c5cbc31936af8ab49071 done
+#19 exporting config sha256:529b48e4da6fc00a110c8466ea415ad70668f0754dfb5d522d55ea83d4c7da17 done
+#19 exporting attestation manifest sha256:101ed3f6f661e465592cb49fa3c41ef8e30a8d9d9b9abb14009a27daa16e35a0 0.0s done
+#19 exporting manifest list sha256:c02dba8e1e64d3a7d1b57294ddb5a9deeb8f2997238d7988e8fb2468dfbde57f 0.0s done
+#19 naming to docker.io/library/httparena-nginx:latest done
+#19 unpacking to docker.io/library/httparena-nginx:latest done
+#19 DONE 0.1s
+
+==============================================
+=== nginx / static-tls / 512c (tool=wrk) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+Running 5s test @ https://localhost:8081
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   706.01us  493.74us  16.77ms   86.21%
+    Req/Sec    77.82k     2.41k   84.92k    81.97%
+  2276287 requests in 5.04s, 34.85GB read
+Requests/sec: 451582.51
+Transfer/sec:      6.91GB
+[info] CPU 885.5% | Mem 702MiB
+
+[run 2/3]
+Running 5s test @ https://localhost:8081
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   709.27us  487.65us  16.16ms   82.59%
+    Req/Sec    76.86k     2.82k   80.19k    87.58%
+  2279061 requests in 5.09s, 34.89GB read
+Requests/sec: 447524.14
+Transfer/sec:      6.85GB
+[info] CPU 935.5% | Mem 705MiB
+
+[run 3/3]
+Running 5s test @ https://localhost:8081
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   709.61us  505.37us  17.92ms   87.78%
+    Req/Sec    77.68k     2.36k   82.14k    79.25%
+  2271988 requests in 5.07s, 34.78GB read
+Requests/sec: 448348.31
+Transfer/sec:      6.86GB
+[info] CPU 868.4% | Mem 707MiB
+
+=== Best: 451582 req/s (CPU: 885.5%, Mem: 702MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-nginx
+httparena-bench-nginx
+[info] done
+[info] restoring loopback MTU to 65536

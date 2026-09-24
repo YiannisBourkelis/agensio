@@ -1,0 +1,195 @@
+=== agensio / pipelined / 512c (tool=gcannon) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+gcannon v0.6.1
+  Target:    localhost:8080/pipeline
+  Threads:   6
+  Conns:     512 (85/thread)
+  Pipeline:  16
+  Req/conn:  unlimited (keep-alive)
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   3.29ms   3.16ms   4.05ms   4.46ms   28.00ms
+
+  12491415 requests in 5.00s, 12490041 responses
+  Throughput: 2.50M req/s
+  Bandwidth:  531.16MB/s
+  Status codes: 2xx=12490041, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 12490041 / 12490041 responses (100.0%)
+[info] CPU 558.3% | Mem 36MiB
+
+[run 2/3]
+gcannon v0.6.1
+  Target:    localhost:8080/pipeline
+  Threads:   6
+  Conns:     512 (85/thread)
+  Pipeline:  16
+  Req/conn:  unlimited (keep-alive)
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   3.37ms   3.37ms   3.77ms   4.55ms   5.44ms
+
+  12192739 requests in 5.00s, 12184553 responses
+  Throughput: 2.44M req/s
+  Bandwidth:  518.22MB/s
+  Status codes: 2xx=12184553, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 12184553 / 12184553 responses (100.0%)
+[info] CPU 609.6% | Mem 35MiB
+
+[run 3/3]
+gcannon v0.6.1
+  Target:    localhost:8080/pipeline
+  Threads:   6
+  Conns:     512 (85/thread)
+  Pipeline:  16
+  Req/conn:  unlimited (keep-alive)
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   3.11ms   3.01ms   3.71ms   4.11ms   5.17ms
+
+  13223634 requests in 5.00s, 13215445 responses
+  Throughput: 2.64M req/s
+  Bandwidth:  562.01MB/s
+  Status codes: 2xx=13215445, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 13215445 / 13215445 responses (100.0%)
+[info] CPU 554.7% | Mem 36MiB
+
+=== Best: 2643089 req/s (CPU: 554.7%, Mem: 36MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+[info] skip: agensio does not subscribe to limited-conn
+[info] skip: agensio does not subscribe to json-comp
+[info] skip: agensio does not subscribe to 8gbit
+[info] skip: agensio does not subscribe to async-db
+[info] skip: agensio does not subscribe to baseline-h2
+
+==============================================
+=== agensio / static-h2 / 512c (tool=h2load) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+starting benchmark...
+3.
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+finished in 5.14s, 622916.80 req/s, 9.52GB/s
+requests: 3114584 total, 3130968 started, 3114584 done, 3114584 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 3114584 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 47.61GB (51122570473) total, 357.65MB (375019007) headers (space savings 43.73%), 47.19GB (50674635063) data
+                     min         max         mean         sd        +/- sd
+time for request:       22us    145.50ms     23.74ms     15.46ms    73.89%
+time for connect:     4.47ms       1.58s    284.62ms    345.71ms    82.62%
+time to 1st byte:    24.12ms       1.63s    312.96ms    353.36ms    82.62%
+req/s           :     705.21     1572.21     1215.80      167.29    70.90%
+[info] CPU 550.6% | Mem 104MiB
+
+[run 2/3]
+starting benchmark...
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+finished in 5.21s, 653201.80 req/s, 9.99GB/s
+requests: 3266009 total, 3282393 started, 3266009 done, 3266009 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 3266010 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 49.93GB (53607624597) total, 375.03MB (393250653) headers (space savings 43.73%), 49.49GB (53137914529) data
+                     min         max         mean         sd        +/- sd
+time for request:       20us    151.54ms     22.64ms     13.28ms    71.74%
+time for connect:     3.38ms       1.35s    205.31ms    288.77ms    84.96%
+time to 1st byte:    22.74ms       1.40s    231.82ms    294.18ms    84.96%
+req/s           :     772.13     1595.96     1274.98      172.57    68.36%
+[info] CPU 603.6% | Mem 101MiB
+
+[run 3/3]
+starting benchmark...
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+
+finished in 5.17s, 636135.60 req/s, 9.72GB/s
+requests: 3180678 total, 3197062 started, 3180678 done, 3180678 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 3180678 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 48.62GB (52207384949) total, 365.23MB (382975964) headers (space savings 43.73%), 48.20GB (51749946076) data
+                     min         max         mean         sd        +/- sd
+time for request:       23us    144.89ms     22.93ms     14.47ms    72.72%
+time for connect:     3.32ms       1.30s    256.27ms    309.92ms    81.84%
+time to 1st byte:    17.43ms       1.36s    278.94ms    320.53ms    81.45%
+req/s           :     795.51     1557.71     1241.77      145.78    68.75%
+[info] CPU 545.2% | Mem 102MiB
+
+=== Best: 626873 req/s (CPU: 603.6%, Mem: 101MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+
+==============================================
+=== agensio / static-tls / 512c (tool=wrk) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+Running 5s test @ https://localhost:8081
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     1.02ms    2.55ms  55.26ms   99.04%
+    Req/Sec    75.30k     7.46k   81.18k    95.58%
+  2201705 requests in 5.07s, 33.89GB read
+Requests/sec: 434237.53
+Transfer/sec:      6.68GB
+[info] CPU 509.9% | Mem 64MiB
+
+[run 2/3]
+Running 5s test @ https://localhost:8081
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     0.91ms  543.29us  15.21ms   80.08%
+    Req/Sec    75.34k     4.17k   85.54k    79.80%
+  2226213 requests in 5.07s, 34.27GB read
+Requests/sec: 438864.93
+Transfer/sec:      6.76GB
+[info] CPU 582.0% | Mem 65MiB
+
+[run 3/3]
+Running 5s test @ https://localhost:8081
+  6 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     0.90ms  567.99us  22.87ms   86.44%
+    Req/Sec    74.79k     4.42k   84.35k    84.69%
+  2187129 requests in 5.06s, 33.66GB read
+Requests/sec: 431825.63
+Transfer/sec:      6.65GB
+[info] CPU 534.4% | Mem 65MiB
+
+=== Best: 438864 req/s (CPU: 582.0%, Mem: 65MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+[info] skip: agensio does not subscribe to baseline-h3
+[info] skip: agensio does not subscribe to static-h3
+[info] skip: agensio does not subscribe to unary-grpc
+[info] skip: agensio does not subscribe to unary-grpc-tls
+[info] skip: agensio does not subscribe to echo-ws
+[info] done
+[info] restoring loopback MTU to 65536
