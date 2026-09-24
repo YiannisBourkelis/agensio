@@ -293,7 +293,19 @@ saturated either way, while the server takes 759 % and 441 %. The 8 % between th
 rates is what the saturated client spends per answer, and ours carries one field more
 (`date`, which h2o's entry omits and the RFC asks for). The per-request cost, the
 number the arena's machine with its 64-thread load generators will turn into
-throughput, is 1.5 times better than h2o's at twelve workers and 1.38 times on one core. A/B against
+throughput, is 1.5 times better than h2o's at twelve workers and 1.38 times on one core.
+
+Step 6, the request side: the field rules (syntax, connection-specific names, `te`) run
+once per dynamic-table entry and not for the syntax of a static pair (`Decoder::Origin`
+and a mark on the entry, design 6.4), the request's fields of interest found by length
+first, and the benchmark handler builds only the head of the protocol in use. One worker
+over TLS 3.99M req/s (3.60M before), 1315 cycles per request at 4.35 instructions per
+cycle (h2o 2054); twelve workers pinned 1905 cycles per request (2030 before) against
+h2o's 3210 in the same session (`raw/httparena-lite-20260924-0147/perf/*step6*`,
+`*after-field-rules-once*`); the pinned row 11.91M at 459 % and 70 MiB, client-bound as
+above. A/B against alpha.20 (`ab-20260924-130317.md`): ten-stream rows 0.236 and 0.274,
+single-stream 0.866 and 0.906, HTTP/1 rows 0.930 to 0.997. Integration 509/509 on release
+and under the sanitizers, no reports. A/B against
 alpha.20 (`ab-20260924-112040.md`): ten-stream rows 0.252 and 0.273, single-stream 0.913
 and 0.950, HTTP/1 rows 0.958 to 1.006. Integration 509/509 on release and under the
 sanitizers, no reports.
@@ -305,6 +317,32 @@ without OpenSSL had not compiled since the per-site `protocols` change. Both fix
 The A/B against alpha.20 after step 4 (`ab-20260924-091348.md`): the ten-stream rows at
 0.254 and 0.274 of the base CPU per request, the single-stream rows 0.901 and 0.971, the
 HTTP/1 rows 0.965 to 1.010.
+
+## All rows again, after emit at respond (same harness as the nine-row run above)
+
+Unpinned lite mode as in the nine-row run, 512 connections, 5 s, best of 3, the three
+servers in one session (`raw/httparena-lite-20260924-0147/nine-rows-after-emit-at-respond.log`).
+
+| profile | agensio | nginx | h2o | agensio / nginx | agensio / h2o |
+|---|---|---|---|---|---|
+| baseline | 2,939,382 (1276 %, 35 MiB) | 2,885,661 (1197 %, 676 MiB) | 2,943,271 (1172 %, 18 MiB) | 1.02 | 1.00 |
+| pipelined | 5,786,240 (1555 %, 22 MiB) | 4,705,643 (1499 %, 669 MiB) | 5,663,224 (1581 %, 11 MiB) | 1.23 | 1.02 |
+| limited-conn | 2,019,477 (1083 %, 45 MiB) | 2,026,255 (1057 %, 675 MiB) | 2,075,735 (1163 %, 19 MiB) | 1.00 | 0.97 |
+| baseline-h2 | 12,386,147 (776 %, 60 MiB) | 2,985,039 (1325 %, 778 MiB) | 12,291,104 (1001 %, 56 MiB) | 4.15 | 1.01 |
+| static-h2 | 942,123 (1248 %, 332 MiB) | 840,717 (1542 %, 1008 MiB) | 292,374 (1433 %, 290 MiB) | 1.12 | 3.22 |
+| static-tls | 676,118 (1053 %, 69 MiB) | 645,041 (1221 %, 697 MiB) | not subscribed | 1.05 | |
+| json-tls | 1,213,049 (996 %, 62 MiB) | 1,058,365 (1244 %, 690 MiB) | 864,858 (1246 %, 46 MiB) | 1.15 | 1.40 |
+| baseline-h2c (reference) | 13,273,546 (671 %, 30 MiB) | 3,009,906 (1705 %, 770 MiB) | not subscribed | 4.41 | |
+| json-h2c (reference) | 3,682,504 (1238 %, 224 MiB) | 1,626,490 (1683 %, 730 MiB) | not subscribed | 2.26 | |
+
+baseline-h2 is now level with h2o at 225 % less CPU (it was 0.28 of h2o at the start of
+this file), baseline-h2c 4.4 times nginx at 30 MiB, json-h2c 2.3 times nginx. The three
+HTTP/1 rows are what they were: ties with h2o within 3 %, bound by the request path's two
+syscalls and, on limited-conn, by the loopback's connection churn; limited-conn's 0.97 is
+inside the run-to-run band (the same three servers tied at 2.05M in the nine-row run).
+Memory: the multiplexed rows with bodies above the 2 KB copy threshold (static-h2's
+15 KB twins, json-h2c) keep their streams open across the write and so keep the pool
+filled, 332 and 224 MiB; nginx's are 1008 and 730 MiB, h2o's static-h2 290 MiB.
 
 Not run: the two HTTP/3 rows, which need phase I.
 

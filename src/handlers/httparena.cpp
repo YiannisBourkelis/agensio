@@ -85,37 +85,41 @@ void append_json_string(std::string& out, std::string_view s) {
 }
 
 // A small text answer: the head in scratch, the body in buffer (both owned by the response).
-// The head for a body of `length` bytes: the HTTP/1 text block, and behind it in the same
-// scratch the HTTP/2 tail (content-length as an HPACK literal; the type goes through the
-// connection's table), so neither protocol parses text per answer.
-void head(Response& r, int status, std::string_view type, std::size_t length) {
+// The head for a body of `length` bytes, for the protocol the request came on: the
+// HTTP/1 text block, or the HTTP/2 tail (content-length as an HPACK literal; the type
+// goes through the connection's table), so neither protocol parses text per answer.
+void head(Stream& s, int status, std::string_view type, std::size_t length) {
+    Response& r = s.response;
     r.status = status;
-    r.scratch.assign("Content-Type: ").append(type).append("\r\nContent-Length: ");
-    append_number(r.scratch, length);
-    r.scratch.append("\r\n\r\n");
-    const std::size_t text = r.scratch.size();
-    char digits[24];
-    const auto end = std::to_chars(digits, digits + sizeof digits, length).ptr;
-    hpack::append_literal(r.scratch, 28, std::string_view(digits, static_cast<std::size_t>(end - digits)));  // 28: content-length
-    r.prebuilt_headers = std::string_view(r.scratch).substr(0, text);
-    r.prebuilt_terminated = true;
-    r.prebuilt_h2 = std::string_view(r.scratch).substr(text);
-    r.content_type = type;
+    if (s.request.protocol.empty()) {  // HTTP/1
+        r.scratch.assign("Content-Type: ").append(type).append("\r\nContent-Length: ");
+        append_number(r.scratch, length);
+        r.scratch.append("\r\n\r\n");
+        r.prebuilt_headers = r.scratch;
+        r.prebuilt_terminated = true;
+    } else {
+        char digits[24];
+        const auto end = std::to_chars(digits, digits + sizeof digits, length).ptr;
+        r.scratch.clear();
+        hpack::append_literal(r.scratch, 28, std::string_view(digits, static_cast<std::size_t>(end - digits)));  // 28: content-length
+        r.prebuilt_h2 = r.scratch;
+        r.content_type = type;
+    }
     r.body = MemoryBody{std::string_view(r.buffer)};
 }
 
-void answer(Response& r, int status, std::string_view type, std::string_view body) {
-    r.buffer.assign(body);
-    head(r, status, type, body.size());
+void answer(Stream& s, int status, std::string_view type, std::string_view body) {
+    s.response.buffer.assign(body);
+    head(s, status, type, body.size());
 }
 
-// The body is already in r.buffer: the head goes around it.
-void answer_buffer(Response& r, int status, std::string_view type) { head(r, status, type, r.buffer.size()); }
+// The body is already in the response buffer: the head goes around it.
+void answer_buffer(Stream& s, int status, std::string_view type) { head(s, status, type, s.response.buffer.size()); }
 
-void answer_sum(Response& r, std::int64_t sum) {
+void answer_sum(Stream& s, std::int64_t sum) {
     char digits[24];
     const auto end = std::to_chars(digits, digits + sizeof digits, sum).ptr;
-    answer(r, 200, "text/plain", std::string_view(digits, static_cast<std::size_t>(end - digits)));
+    answer(s, 200, "text/plain", std::string_view(digits, static_cast<std::size_t>(end - digits)));
 }
 
 // A POST's body, at most 64 bytes of it like the nginx module keeps, read through the
@@ -134,7 +138,7 @@ void read_post(std::shared_ptr<PostRead> st) {
     if (st->len >= 64) {
         r.buffer.resize(st->len);
         const std::int64_t sum = st->sum + parse_int(r.buffer);
-        answer_sum(r, sum);
+        answer_sum(s, sum);
         st->done();
         return;
     }
@@ -144,7 +148,7 @@ void read_post(std::shared_ptr<PostRead> st) {
             Response& rr = st->s->response;
             rr.buffer.resize(st->len);
             const std::int64_t sum = st->sum + (st->len ? parse_int(rr.buffer) : 0);
-            answer_sum(rr, sum);
+            answer_sum(*st->s, sum);
             st->done();
             return;
         }
@@ -216,7 +220,7 @@ void HttparenaHandler::start(Stream& s, const LocationConfig& loc, WorkerState& 
     const std::string_view path = ws.path;
     const std::string_view query = query_of(req.target);
     if (path == "/pipeline") {
-        answer(r, 200, "text/plain", "ok");
+        answer(s, 200, "text/plain", "ok");
         done();
         return;
     }
@@ -227,14 +231,14 @@ void HttparenaHandler::start(Stream& s, const LocationConfig& loc, WorkerState& 
             read_post(std::make_shared<PostRead>(PostRead{&s, sum, std::move(done)}));
             return;
         }
-        answer_sum(r, sum);
+        answer_sum(s, sum);
         done();
         return;
     }
     if (path.starts_with("/json/")) {
         const std::shared_ptr<const HttparenaDataset>& ds = loc.httparena;
         if (!ds) {
-            answer(r, 500, "text/plain", "dataset unavailable");
+            answer(s, 500, "text/plain", "dataset unavailable");
             done();
             return;
         }
@@ -243,7 +247,7 @@ void HttparenaHandler::start(Stream& s, const LocationConfig& loc, WorkerState& 
         const auto res = std::from_chars(digits.data(), digits.data() + digits.size(), count);
         if (digits.empty() || res.ec != std::errc() || res.ptr != digits.data() + digits.size() || count < 1 ||
             count > static_cast<std::int64_t>(ds->items.size())) {
-            answer(r, 400, "text/plain", "Bad Request");
+            answer(s, 400, "text/plain", "Bad Request");
             done();
             return;
         }
@@ -263,11 +267,11 @@ void HttparenaHandler::start(Stream& s, const LocationConfig& loc, WorkerState& 
         body.append("],\"count\":");
         append_int(body, count);
         body.push_back('}');
-        answer_buffer(r, 200, "application/json");
+        answer_buffer(s, 200, "application/json");
         done();
         return;
     }
-    answer(r, 404, "text/plain", "Not Found");
+    answer(s, 404, "text/plain", "Not Found");
     done();
 }
 

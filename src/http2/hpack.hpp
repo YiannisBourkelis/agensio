@@ -14,6 +14,7 @@
 #include <ctime>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 namespace agensio::hpack {
@@ -81,6 +82,9 @@ public:
     bool at(std::size_t k, std::string_view& name, std::string_view& value) const noexcept;
     // The place (0 = newest) of the newest entry with this name and value, or npos.
     std::size_t find(std::string_view name, std::string_view value) const noexcept;
+    // The entry k places from the newest, with its mark.
+    bool at(std::size_t k, std::string_view& name, std::string_view& value, std::uint8_t*& mark) const noexcept;
+    std::uint8_t* newest_mark() const noexcept { return count_ ? &ring_[head_].checked : nullptr; }
     std::size_t size() const noexcept { return size_; }
     std::size_t count() const noexcept { return count_; }
     std::size_t limit() const noexcept { return limit_; }
@@ -89,6 +93,7 @@ private:
     struct Entry {
         std::string name;
         std::string value;
+        mutable std::uint8_t checked = 0;  // the decoder's sink marks an entry whose rules have passed
     };
     std::vector<Entry> ring_;  // circular; the newest entry at head_
     std::size_t head_ = 0;
@@ -174,13 +179,27 @@ public:
     // The list size (name + value + 32 per field, RFC 7541 4.1) is added up as fields are
     // produced and the decode stops at the first field over max_list_size: a compression
     // bomb costs at most that many bytes.
-    using SinkFn = bool (*)(void*, std::string_view, std::string_view);
+    // Where a field came from: name and value both from the static table (a token and a
+    // clean value by construction), a dynamic-table entry whose `checked` mark the sink
+    // may set once its rules have passed, so they run once per entry and not once per
+    // reference, or a literal (nothing known, `checked` null).
+    struct Origin {
+        bool static_table = false;
+        std::uint8_t* checked = nullptr;
+    };
+    using SinkFn = bool (*)(void*, std::string_view, std::string_view, Origin);
     Result decode(std::string_view block, std::string& arena, std::size_t max_list_size, SinkFn sink, void* ctx);
     template <class F>
     Result decode(std::string_view block, std::string& arena, std::size_t max_list_size, F&& f) {
-        return decode(
-            block, arena, max_list_size,
-            [](void* c, std::string_view n, std::string_view v) { return (*static_cast<F*>(c))(n, v); }, &f);
+        if constexpr (std::is_invocable_v<F&, std::string_view, std::string_view, Origin>) {
+            return decode(
+                block, arena, max_list_size,
+                [](void* c, std::string_view n, std::string_view v, Origin o) { return (*static_cast<F*>(c))(n, v, o); }, &f);
+        } else {
+            return decode(
+                block, arena, max_list_size,
+                [](void* c, std::string_view n, std::string_view v, Origin) { return (*static_cast<F*>(c))(n, v); }, &f);
+        }
     }
 
     std::size_t table_size() const noexcept { return table_.size(); }
@@ -191,6 +210,7 @@ private:
     enum class StrStatus { ok, malformed, too_large };
 
     bool lookup(std::uint32_t index, std::string_view& name, std::string_view& value) const noexcept;
+    bool lookup(std::uint32_t index, std::string_view& name, std::string_view& value, Origin& origin) const noexcept;
     // Reads a string literal at in[pos] into the arena (at most `max_out` decoded bytes).
     StrStatus read_string(std::string_view in, std::size_t& pos, std::string& arena, std::size_t max_out,
                           std::string_view& out);

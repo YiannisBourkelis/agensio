@@ -27,9 +27,18 @@
   against h2o's 3100 (instructions per cycle 3.20 against 2.74, cache misses per request
   6 against 24, 68 MiB resident against the pool's 441), one worker 3.60M req/s. On this
   box the pinned row is 12.0M against h2o's 12.4-12.9M with half of agensio's CPU idle:
-  the twelve-thread load generator is the limit there. The router and normaliser
-  shortcuts and the continuation reach HTTP/1 as well. Details and the profiles in
-  `docs/design-http2.md` 6.2.1, 6.6 and 7.3 and `bench/results/httparena-lite-20260924-0147.md`.
+  the twelve-thread load generator is the limit there. Then the request side: the field
+  rules run once per dynamic-table entry (the decoder reports each field's origin and
+  the entry carries a mark; a static pair skips the syntax rules; a literal is checked
+  every time), the fields of interest are found by length first, and the benchmark
+  handler builds only the head of the protocol in use: one worker 3.99M req/s, 1315
+  cycles per request against h2o's 2054, twelve workers 1905 against 3210. In the
+  arena's own harness, all rows: level with h2o on baseline-h2 (12.39M against 12.29M at
+  776 % against 1001 % CPU) and on the HTTP/1 rows, ahead on json-tls (1.40) and
+  static-h2 (3.22), 4.2 to 4.4 times nginx on the HTTP/2 baselines. The router and
+  normaliser shortcuts and the continuation reach HTTP/1 as well. Details and the
+  profiles in `docs/design-http2.md` 6.2.1, 6.4, 6.6 and 7.3 and
+  `bench/results/httparena-lite-20260924-0147.md`.
 - **Fixed: a control-socket request with a body leaked its connection.** The body-reading
   step of the control handler (mutations, uploads) captured itself strongly, a reference
   cycle that kept the connection, its receive buffer and the request's state alive for

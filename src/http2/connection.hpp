@@ -719,7 +719,7 @@ private:
         // while one core did 1.27 of it).
         std::string& scratch = decode_scratch_;
         scratch.clear();
-        const auto r = decoder_.decode(block_, scratch, live_->max_header_size, [&](std::string_view n, std::string_view v) {
+        const auto r = decoder_.decode(block_, scratch, live_->max_header_size, [&](std::string_view n, std::string_view v, hpack::Decoder::Origin o) {
             if (!n.empty() && n.front() == ':') {
                 if (seen.regular) { seen.bad = true; seen.reason = "pseudo-header after a regular field"; return true; }
                 std::string_view* slot = n == ":method" ? &seen.method : n == ":scheme" ? &seen.scheme
@@ -731,10 +731,18 @@ private:
                 return true;
             }
             seen.regular = true;
-            if (!fields::valid_name(n)) { seen.bad = true; seen.reason = "field name not a lower-case token"; return true; }
-            if (!fields::valid_value(v)) { seen.bad = true; seen.reason = "field value with CR, LF, NUL or edge whitespace"; return true; }
-            if (fields::connection_specific(n)) { seen.bad = true; seen.reason = "connection-specific field"; return true; }
-            if (n == "te" && v != "trailers") { seen.bad = true; seen.reason = "te other than trailers"; return true; }
+            // The field rules run once per dynamic-table entry (its mark) and not for the
+            // syntax of a static pair; the connection-specific rule still runs for those
+            // (transfer-encoding is in the static table).
+            if (!(o.checked && *o.checked)) {
+                if (!o.static_table) {
+                    if (!fields::valid_name(n)) { seen.bad = true; seen.reason = "field name not a lower-case token"; return true; }
+                    if (!fields::valid_value(v)) { seen.bad = true; seen.reason = "field value with CR, LF, NUL or edge whitespace"; return true; }
+                }
+                if (fields::connection_specific(n)) { seen.bad = true; seen.reason = "connection-specific field"; return true; }
+                if (n == "te" && v != "trailers") { seen.bad = true; seen.reason = "te other than trailers"; return true; }
+                if (o.checked) *o.checked = 1;
+            }
             if (n == "host") {
                 if (seen.host_field) { seen.bad = true; seen.reason = "duplicate host"; return true; }
                 seen.host_field = true;
@@ -792,20 +800,25 @@ private:
         req.keep_alive = true;
         req.length = 1;  // "a request exists" for the log on close
         for (const HeaderField& f : req.headers) {
-            if (f.name == "if-none-match") req.if_none_match = f.value;
-            else if (f.name == "if-modified-since") req.if_modified_since = f.value;
-            else if (f.name == "range") req.range = f.value;
-            else if (f.name == "if-range") req.if_range = f.value;
-            else if (f.name == "accept-encoding") req.accept_encoding = f.value;
-            else if (f.name == "content-length") {
-                std::uint64_t n = 0;
-                if (f.value.empty() || f.value.size() > 19) return stream_error(s, ErrorCode::protocol_error, "content-length not a number");
-                for (const char c : f.value) {
-                    if (c < '0' || c > '9') return stream_error(s, ErrorCode::protocol_error, "content-length not a number");
-                    n = n * 10 + static_cast<std::uint64_t>(c - '0');
-                }
-                s.length_known = true;
-                s.content_length = n;
+            switch (f.name.size()) {  // the fields of interest, by length first
+                case 5: if (f.name == "range") req.range = f.value; break;
+                case 8: if (f.name == "if-range") req.if_range = f.value; break;
+                case 13: if (f.name == "if-none-match") req.if_none_match = f.value; break;
+                case 15: if (f.name == "accept-encoding") req.accept_encoding = f.value; break;
+                case 17: if (f.name == "if-modified-since") req.if_modified_since = f.value; break;
+                case 14:
+                    if (f.name == "content-length") {
+                        std::uint64_t n = 0;
+                        if (f.value.empty() || f.value.size() > 19) return stream_error(s, ErrorCode::protocol_error, "content-length not a number");
+                        for (const char c : f.value) {
+                            if (c < '0' || c > '9') return stream_error(s, ErrorCode::protocol_error, "content-length not a number");
+                            n = n * 10 + static_cast<std::uint64_t>(c - '0');
+                        }
+                        s.length_known = true;
+                        s.content_length = n;
+                    }
+                    break;
+                default: break;
             }
         }
         if (block_end_stream_) {

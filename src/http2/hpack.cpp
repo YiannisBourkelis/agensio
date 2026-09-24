@@ -263,6 +263,7 @@ bool DynamicTable::add(std::string_view name, std::string_view value) {
     Entry& e = ring_[head_];
     e.name.assign(name);
     e.value.assign(value);
+    e.checked = 0;
     ++count_;
     size_ += need;
     return true;
@@ -273,6 +274,15 @@ bool DynamicTable::at(std::size_t k, std::string_view& name, std::string_view& v
     const Entry& e = ring_[head_ >= k ? head_ - k : head_ + ring_.size() - k];
     name = e.name;
     value = e.value;
+    return true;
+}
+
+bool DynamicTable::at(std::size_t k, std::string_view& name, std::string_view& value, std::uint8_t*& mark) const noexcept {
+    if (k >= count_ || ring_.empty()) return false;
+    const Entry& e = ring_[head_ >= k ? head_ - k : head_ + ring_.size() - k];
+    name = e.name;
+    value = e.value;
+    mark = &e.checked;
     return true;
 }
 
@@ -448,6 +458,17 @@ bool Decoder::lookup(std::uint32_t index, std::string_view& name, std::string_vi
     return table_.at(index - static_cast<std::uint32_t>(kStaticTable.size()) - 1, name, value);  // 0 = newest
 }
 
+bool Decoder::lookup(std::uint32_t index, std::string_view& name, std::string_view& value, Origin& origin) const noexcept {
+    if (index == 0) return false;
+    if (index <= kStaticTable.size()) {
+        name = kStaticTable[index - 1].name;
+        value = kStaticTable[index - 1].value;
+        origin.static_table = true;
+        return true;
+    }
+    return table_.at(index - static_cast<std::uint32_t>(kStaticTable.size()) - 1, name, value, origin.checked);
+}
+
 Decoder::StrStatus Decoder::read_string(std::string_view in, std::size_t& pos, std::string& arena,
                                         std::size_t max_out, std::string_view& out) {
     if (pos >= in.size()) return StrStatus::malformed;
@@ -490,9 +511,10 @@ Decoder::Result Decoder::decode(std::string_view block, std::string& arena, std:
     while (pos < block.size()) {
         const unsigned char b = static_cast<unsigned char>(block[pos]);
         std::string_view name, value;
+        Origin origin;
         if (b & 0x80) {  // 6.1 indexed
             std::uint32_t index = 0;
-            if (!read_integer(block, pos, 7, index) || !lookup(index, name, value)) return Result::malformed;
+            if (!read_integer(block, pos, 7, index) || !lookup(index, name, value, origin)) return Result::malformed;
             if (name.size() + value.size() + 32 > max_list_size - std::min(total, max_list_size)) return Result::too_large;
             if (index > kStaticTable.size()) {  // a dynamic entry can be evicted later in this block: copied
                 name = copy_in(name);
@@ -518,7 +540,7 @@ Decoder::Result Decoder::decode(std::string_view block, std::string& arena, std:
                 case StrStatus::malformed: return Result::malformed;
                 case StrStatus::too_large: return Result::too_large;
             }
-            table_.add(name, value);
+            if (table_.add(name, value)) origin.checked = table_.newest_mark();  // the sink's rules, once for the entry
         } else if (b & 0x20) {  // 6.3 dynamic table size update: only before the first field
             if (fields_started) return Result::malformed;
             std::uint32_t size = 0;
@@ -549,7 +571,7 @@ Decoder::Result Decoder::decode(std::string_view block, std::string& arena, std:
         fields_started = true;
         total += name.size() + value.size() + 32;
         if (total > max_list_size) return Result::too_large;
-        if (!sink(ctx, name, value)) return Result::too_many;
+        if (!sink(ctx, name, value, origin)) return Result::too_many;
     }
     return Result::ok;
 }

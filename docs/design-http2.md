@@ -427,6 +427,14 @@ Applied while decoding, so nothing invalid ever reaches the dispatcher:
 A malformed request is a `RST_STREAM(PROTOCOL_ERROR)` plus an error-log line naming the
 remote, the stream and the rule, like `log_bad_request_line` does today.
 
+The rules run once per field, not once per reference (2026-09-24): the decoder tells
+the sink where a field came from (`Decoder::Origin`), and a dynamic-table entry carries
+a mark the sink sets when the entry has passed the syntax, connection-specific and `te`
+rules, so a later block that indexes the same entry skips them; a static pair skips the
+syntax rules only (its name is a token and its value clean by construction, but
+`transfer-encoding` is in the static table, so the connection-specific rule still runs);
+a literal is checked every time. The mark is cleared when the entry's slot is reused.
+
 ### 6.5 Request bodies and the receive windows
 
 DATA frames land in the stream's body buffer and the handler pulls them through the same

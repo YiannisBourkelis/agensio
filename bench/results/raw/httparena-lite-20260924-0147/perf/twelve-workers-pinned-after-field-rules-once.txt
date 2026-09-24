@@ -1,0 +1,110 @@
+### h2o, 12 threads
+== h2o: 12 workers pinned, h2load -c 512 -m 100 -t 12 pinned
+       71965365161      cycles:u                                                              
+        6954510216      cycles:k                                                              
+      190712756496      instructions:u                   #    2.65  insn per cycle            
+         615796025      cache-misses                                                          
+        2897404964      L1-dcache-load-misses                                                 
+    66.29%  server          
+    22.29%  libc.so.6       
+     8.25%  [unknown]       
+     2.01%  libcrypto.so.3  
+     1.14%  libssl.so.3     
+     0.02%  [vdso]          
+     8.55%  [.] h2o_hpack_decode_huffman
+     5.44%  [.] _int_malloc
+     4.63%  [.] h2o_hpack_parse_request
+     3.08%  [.] h2o_hpack_decode_header
+     2.95%  [.] __printf_buffer
+     2.58%  [.] finalostream_send
+     2.25%  [.] h2o_url_normalize_path
+     2.21%  [.] h2o_mem__do_alloc_pool_aligned
+     1.71%  [.] malloc
+     1.71%  [.] handle_incoming_request
+     1.68%  [.] do_encode_header
+     1.62%  [.] _int_free_chunk
+     1.58%  [.] find_hostconf
+     1.51%  [.] cfree@GLIBC_2.2.5
+     1.51%  [.] __GI_____strtoll_l_internal
+     1.47%  [.] h2o_http2_stream_send_pending_data
+     1.46%  [.] h2o_hpack_flatten_response
+     1.46%  [.] h2o_init_request
+     1.44%  [.] h2o_url_parse_hostport
+     1.36%  [.] on_baseline2
+     1.20%  [.] h2o_req_setup
+     1.12%  [.] h2o_add_header
+     1.09%  [.] incr_active_cnt
+     1.08%  [.] __printf_buffer_write
+     1.00%  [.] malloc_consolidate
+     0.94%  [.] setup_pathconf
+     0.94%  [.] h2o_send
+     0.88%  [.] h2o_http2_scheduler_run
+     0.87%  [.] __memmove_avx512_unaligned_erms
+     0.87%  [.] process_request
+     0.86%  [.] handle_headers_frame
+     0.85%  [.] unlink_chunk.isra.0
+     0.84%  [.] h2o_http2_conn_register_stream
+     0.84%  [.] h2o_http2_stream_open
+     0.81%  [.] update_idle_timeout
+     0.80%  [.] h2o_vector__expand
+     0.75%  [.] h2o_buffer_try_reserve
+     0.75%  [.] decode_string
+     0.74%  [.] h2o_mem_link_shared
+     0.72%  [.] h2o_process_request
+finished in 8.14s, 12285962.50 req/s, 304.64MB/s
+status codes: 98287700 2xx, 0 3xx, 0 4xx, 0 5xx
+### agensio, 12 workers
+== agensio: 12 workers pinned, h2load -c 512 -m 100 -t 12 pinned
+       36630372080      cycles:u                                                              
+        5880237552      cycles:k                                                              
+      117684353491      instructions:u                   #    3.21  insn per cycle            
+         155538581      cache-misses                                                          
+         372970065      L1-dcache-load-misses                                                 
+    75.54%  agensio            
+    13.35%  [unknown]          
+     6.08%  libc.so.6          
+     2.58%  libcrypto.so.3     
+     2.23%  libssl.so.3        
+     0.13%  [vdso]             
+    14.30%  [.] agensio::hpack::huffman_decode(std::basic_string_view<char, std::char_traits<char> >, std::__cxx11::basic_string<char, std::char_trait
+     7.79%  [.] agensio::hpack::Decoder::decode(std::basic_string_view<char, std::char_traits<char> >, std::__cxx11::basic_string<char, std::char_trai
+     6.19%  [.] agensio::Dispatcher::route(agensio::Stream&, agensio::Router const&, agensio::WorkerState&)
+     4.09%  [.] agensio::hpack::Decoder::decode<agensio::h2::Http2Connection<agensio::BasicTlsStream<asio::basic_stream_socket<asio::ip::tcp, asio::an
+     3.89%  [.] agensio::h2::Http2Connection<agensio::BasicTlsStream<asio::basic_stream_socket<asio::ip::tcp, asio::any_io_executor> > >::begin_reques
+     3.08%  [.] agensio::hpack::append_integer(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&, unsigned long, unsign
+     2.71%  [.] std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >::append(char const*, unsigned long)
+     2.66%  [.] agensio::normalize_target(std::basic_string_view<char, std::char_traits<char> >, std::__cxx11::basic_string<char, std::char_traits<cha
+     2.45%  [.] __memmove_avx512_unaligned_erms
+     2.39%  [.] agensio::h2::Http2Connection<agensio::BasicTlsStream<asio::basic_stream_socket<asio::ip::tcp, asio::any_io_executor> > >::release(agen
+     2.18%  [.] agensio::HttparenaHandler::start(agensio::Stream&, agensio::LocationConfig const&, agensio::WorkerState&, std::function<void ()>)
+     1.93%  [.] agensio::h2::Http2Connection<agensio::BasicTlsStream<asio::basic_stream_socket<asio::ip::tcp, asio::any_io_executor> > >::respond(agen
+     1.79%  [.] agensio::h2::Http2Connection<agensio::BasicTlsStream<asio::basic_stream_socket<asio::ip::tcp, asio::any_io_executor> > >::dispatch(age
+     1.56%  [.] agensio::h2::Http2Writer<agensio::BasicTlsStream<asio::basic_stream_socket<asio::ip::tcp, asio::any_io_executor> >, agensio::h2::Http2
+     1.50%  [.] __memcmp_evex_movbe
+     1.22%  [.] agensio::(anonymous namespace)::answer_sum(agensio::Stream&, long)
+     1.21%  [.] agensio::(anonymous namespace)::head(agensio::Stream&, int, std::basic_string_view<char, std::char_traits<char> >, unsigned long)
+     1.19%  [.] agensio::Stream::reset()
+     1.16%  [.] __memchr_evex
+     1.07%  [.] agensio::h2::Http2Connection<agensio::BasicTlsStream<asio::basic_stream_socket<asio::ip::tcp, asio::any_io_executor> > >::process_fram
+     1.00%  [.] agensio::h2::Http2Connection<agensio::BasicTlsStream<asio::basic_stream_socket<asio::ip::tcp, asio::any_io_executor> > >::open_stream(
+     0.99%  [.] agensio::hpack::read_integer(std::basic_string_view<char, std::char_traits<char> >, unsigned long&, unsigned int, unsigned int&)
+     0.96%  [.] agensio::(anonymous namespace)::parse_int(std::basic_string_view<char, std::char_traits<char> >)
+     0.94%  [.] std::basic_string_view<char, std::char_traits<char> >::compare(std::basic_string_view<char, std::char_traits<char> >) const
+     0.82%  [.] agensio::hpack::append_string(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&, std::basic_string_view
+     0.79%  [.] agensio::hpack::Decoder::read_string(std::basic_string_view<char, std::char_traits<char> >, unsigned long&, std::__cxx11::basic_string
+     0.71%  [.] agensio::hpack::Decoder::lookup(unsigned int, std::basic_string_view<char, std::char_traits<char> >&, std::basic_string_view<char, std
+     0.67%  [.] agensio::h2::Http2Connection<agensio::BasicTlsStream<asio::basic_stream_socket<asio::ip::tcp, asio::any_io_executor> > >::on_headers(a
+     0.59%  [.] agensio::hpack::DynamicTable::at(unsigned long, std::basic_string_view<char, std::char_traits<char> >&, std::basic_string_view<char, s
+     0.55%  [.] std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >::_M_assign(std::__cxx11::basic_string<char, std::char_
+     0.52%  [.] std::unique_ptr<agensio::h2::H2Stream, std::default_delete<agensio::h2::H2Stream> >& std::vector<std::unique_ptr<agensio::h2::H2Stream
+     0.51%  [.] agensio::h2::Http2Connection<agensio::BasicTlsStream<asio::basic_stream_socket<asio::ip::tcp, asio::any_io_executor> > >::close_stream
+     0.46%  [.] agensio::hpack::Encoder::server(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&, std::basic_string_vi
+     0.46%  [.] agensio::h2::Http2Connection<agensio::BasicTlsStream<asio::basic_stream_socket<asio::ip::tcp, asio::any_io_executor> > >::log_request(
+     0.42%  [.] agensio::parse_method(std::basic_string_view<char, std::char_traits<char> >, agensio::Method&)
+     0.40%  [.] std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >::_M_replace_aux(unsigned long, unsigned long, unsigned
+     0.40%  [.] agensio::hpack::Encoder::begin(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&)
+     0.37%  [.] agensio::hpack::Encoder::content_type(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&, std::basic_str
+     0.37%  [.] agensio::hpack::append_status(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&, int)
+     0.35%  [k] 0xffffffffa6496907
+finished in 8.17s, 11171412.50 req/s, 287.67MB/s
+status codes: 89371300 2xx, 0 3xx, 0 4xx, 0 5xx

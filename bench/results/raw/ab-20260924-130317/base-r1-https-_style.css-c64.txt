@@ -1,0 +1,8 @@
+Running 5s test @ https://127.0.0.1:8443/style.css
+  4 threads and 64 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     1.25ms  302.00us   3.64ms   87.25%
+    Req/Sec    12.83k   358.41    13.29k    91.18%
+  260234 requests in 5.10s, 24.88GB read
+Requests/sec:  51028.53
+Transfer/sec:      4.88GB

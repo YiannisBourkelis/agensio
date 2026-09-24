@@ -1,0 +1,185 @@
+### agensio
+=== agensio / baseline / 512c (tool=gcannon) ===
+[info] CPU 1151.8% | Mem 34MiB
+[info] CPU 1276.2% | Mem 35MiB
+[info] CPU 1170.1% | Mem 36MiB
+=== Best: 2939382 req/s (CPU: 1276.2%, Mem: 35MiB) ===
+=== agensio / pipelined / 512c (tool=gcannon) ===
+[info] CPU 1691.5% | Mem 22MiB
+[info] CPU 1555.0% | Mem 22MiB
+[info] CPU 1670.0% | Mem 22MiB
+=== Best: 5786240 req/s (CPU: 1555.0%, Mem: 22MiB) ===
+=== agensio / limited-conn / 512c (tool=gcannon) ===
+[info] CPU 1051.7% | Mem 35MiB
+[info] CPU 1163.9% | Mem 46MiB
+[info] CPU 1083.3% | Mem 45MiB
+=== Best: 2019477 req/s (CPU: 1083.3%, Mem: 45MiB) ===
+=== agensio / baseline-h2 / 512c (tool=h2load) ===
+finished in 5.15s, 12536220.00 req/s, 322.82MB/s
+[info] CPU 759.0% | Mem 56MiB
+finished in 5.14s, 12657120.00 req/s, 325.93MB/s
+[info] CPU 719.9% | Mem 59MiB
+finished in 5.14s, 12732960.00 req/s, 327.89MB/s
+[info] CPU 775.6% | Mem 60MiB
+=== Best: 12386147 req/s (CPU: 775.6%, Mem: 60MiB) ===
+=== agensio / static-h2 / 512c (tool=h2load) ===
+finished in 5.14s, 955321.40 req/s, 14.55GB/s
+[info] CPU 1193.5% | Mem 314MiB
+finished in 5.16s, 958779.40 req/s, 14.60GB/s
+[info] CPU 1329.0% | Mem 289MiB
+finished in 5.14s, 968502.80 req/s, 14.75GB/s
+[info] CPU 1247.6% | Mem 332MiB
+=== Best: 942123 req/s (CPU: 1247.6%, Mem: 332MiB) ===
+=== agensio / static-tls / 512c (tool=wrk) ===
+Requests/sec: 656659.43
+[info] CPU 1048.3% | Mem 66MiB
+Requests/sec: 670755.32
+[info] CPU 973.4% | Mem 67MiB
+Requests/sec: 676118.82
+[info] CPU 1052.8% | Mem 69MiB
+=== Best: 676118 req/s (CPU: 1052.8%, Mem: 69MiB) ===
+=== agensio / json-tls / 512c (tool=wrk) ===
+Requests/sec: 1203317.97
+[info] CPU 908.1% | Mem 60MiB
+Requests/sec: 1213049.89
+[info] CPU 996.2% | Mem 62MiB
+Requests/sec: 1211665.82
+[info] CPU 924.4% | Mem 63MiB
+=== Best: 1213049 req/s (CPU: 996.2%, Mem: 62MiB) ===
+=== agensio / baseline-h2c / 512c (tool=h2load) ===
+finished in 5.15s, 13461320.00 req/s, 346.64MB/s
+[info] CPU 725.4% | Mem 28MiB
+finished in 5.16s, 13698300.00 req/s, 352.74MB/s
+[info] CPU 670.8% | Mem 30MiB
+finished in 5.15s, 13665480.00 req/s, 351.90MB/s
+[info] CPU 715.4% | Mem 30MiB
+=== Best: 13273546 req/s (CPU: 670.8%, Mem: 30MiB) ===
+=== agensio / json-h2c / 512c (tool=h2load) ===
+finished in 5.15s, 3629722.80 req/s, 11.99GB/s
+[info] CPU 1168.8% | Mem 226MiB
+finished in 5.19s, 3728539.00 req/s, 12.32GB/s
+[info] CPU 1321.2% | Mem 226MiB
+finished in 5.13s, 3778249.40 req/s, 12.48GB/s
+[info] CPU 1238.2% | Mem 224MiB
+=== Best: 3682504 req/s (CPU: 1238.2%, Mem: 224MiB) ===
+### nginx
+=== nginx / baseline / 512c (tool=gcannon) ===
+[info] CPU 1197.1% | Mem 676MiB
+[info] CPU 1289.1% | Mem 676MiB
+[info] CPU 1171.8% | Mem 676MiB
+=== Best: 2885661 req/s (CPU: 1197.1%, Mem: 676MiB) ===
+=== nginx / pipelined / 512c (tool=gcannon) ===
+[info] CPU 1492.4% | Mem 669MiB
+[info] CPU 1365.1% | Mem 669MiB
+[info] CPU 1499.4% | Mem 669MiB
+=== Best: 4705643 req/s (CPU: 1499.4%, Mem: 669MiB) ===
+=== nginx / limited-conn / 512c (tool=gcannon) ===
+[info] CPU 1039.3% | Mem 673MiB
+[info] CPU 1132.5% | Mem 675MiB
+[info] CPU 1056.8% | Mem 675MiB
+=== Best: 2026255 req/s (CPU: 1056.8%, Mem: 675MiB) ===
+=== nginx / baseline-h2 / 512c (tool=h2load) ===
+finished in 5.18s, 3072059.00 req/s, 251.96MB/s
+[info] CPU 1303.6% | Mem 727MiB
+finished in 5.15s, 3071138.80 req/s, 251.89MB/s
+[info] CPU 1200.9% | Mem 756MiB
+finished in 5.15s, 3074590.80 req/s, 252.17MB/s
+[info] CPU 1324.7% | Mem 778MiB
+=== Best: 2985039 req/s (CPU: 1324.7%, Mem: 778MiB) ===
+=== nginx / static-h2 / 512c (tool=h2load) ===
+finished in 5.17s, 858225.80 req/s, 13.08GB/s
+[info] CPU 1380.7% | Mem 1.0GiB
+finished in 5.15s, 865937.60 req/s, 13.20GB/s
+[info] CPU 1541.9% | Mem 1008MiB
+finished in 5.17s, 868558.40 req/s, 13.24GB/s
+[info] CPU 1409.2% | Mem 979MiB
+=== Best: 840717 req/s (CPU: 1541.9%, Mem: 1008MiB) ===
+=== nginx / static-tls / 512c (tool=wrk) ===
+Requests/sec: 632946.03
+[info] CPU 1217.0% | Mem 696MiB
+Requests/sec: 640937.04
+[info] CPU 1140.5% | Mem 697MiB
+Requests/sec: 645041.22
+[info] CPU 1221.1% | Mem 697MiB
+=== Best: 645041 req/s (CPU: 1221.1%, Mem: 697MiB) ===
+=== nginx / json-tls / 512c (tool=wrk) ===
+Requests/sec: 1057325.17
+[info] CPU 1146.4% | Mem 687MiB
+Requests/sec: 1058365.99
+[info] CPU 1243.6% | Mem 690MiB
+Requests/sec: 1055995.87
+[info] CPU 1140.1% | Mem 692MiB
+=== Best: 1058365 req/s (CPU: 1243.6%, Mem: 690MiB) ===
+=== nginx / baseline-h2c / 512c (tool=h2load) ===
+finished in 5.13s, 3088163.60 req/s, 182.60MB/s
+[info] CPU 1704.5% | Mem 770MiB
+finished in 5.15s, 3090159.80 req/s, 182.72MB/s
+[info] CPU 1583.0% | Mem 785MiB
+finished in 5.17s, 3075609.40 req/s, 181.86MB/s
+[info] CPU 1727.1% | Mem 808MiB
+=== Best: 3009906 req/s (CPU: 1704.5%, Mem: 770MiB) ===
+=== nginx / json-h2c / 512c (tool=h2load) ===
+finished in 5.14s, 1672030.60 req/s, 5.59GB/s
+[info] CPU 1683.4% | Mem 730MiB
+finished in 5.15s, 1661261.80 req/s, 5.55GB/s
+[info] CPU 1797.2% | Mem 725MiB
+finished in 5.16s, 1664708.00 req/s, 5.56GB/s
+[info] CPU 1646.5% | Mem 755MiB
+=== Best: 1626490 req/s (CPU: 1683.4%, Mem: 730MiB) ===
+=== nginx / baseline-h3 / 64c (tool=h2load-h3) ===
+finished in 5.04s, 0.00 req/s, 0B/s
+[info] CPU 0.1% | Mem 660MiB
+finished in 5.05s, 0.00 req/s, 0B/s
+[info] CPU 0.0% | Mem 660MiB
+finished in 5.06s, 0.00 req/s, 0B/s
+[info] CPU 0.1% | Mem 660MiB
+=== Best: 0 req/s (CPU: 0.1%, Mem: 660MiB) ===
+=== nginx / static-h3 / 64c (tool=h2load-h3) ===
+finished in 5.04s, 0.00 req/s, 0B/s
+[info] CPU 0.0% | Mem 663MiB
+finished in 5.05s, 0.00 req/s, 0B/s
+[info] CPU 0.0% | Mem 660MiB
+finished in 5.05s, 0.00 req/s, 0B/s
+[info] CPU 0.0% | Mem 660MiB
+=== Best: 0 req/s (CPU: 0.0%, Mem: 663MiB) ===
+### h2o
+=== h2o / baseline / 512c (tool=gcannon) ===
+[info] CPU 1171.5% | Mem 18MiB
+[info] CPU 1262.8% | Mem 19MiB
+[info] CPU 1189.9% | Mem 19MiB
+=== Best: 2943271 req/s (CPU: 1171.5%, Mem: 18MiB) ===
+=== h2o / pipelined / 512c (tool=gcannon) ===
+[info] CPU 1532.0% | Mem 12MiB
+[info] CPU 1668.1% | Mem 11MiB
+[info] CPU 1581.0% | Mem 11MiB
+=== Best: 5663224 req/s (CPU: 1581.0%, Mem: 11MiB) ===
+=== h2o / limited-conn / 512c (tool=gcannon) ===
+[info] CPU 1051.3% | Mem 21MiB
+[info] CPU 1162.8% | Mem 19MiB
+[info] CPU 1055.0% | Mem 20MiB
+=== Best: 2075735 req/s (CPU: 1162.8%, Mem: 19MiB) ===
+=== h2o / baseline-h2 / 512c (tool=h2load) ===
+finished in 5.15s, 12434160.00 req/s, 308.32MB/s
+[info] CPU 897.9% | Mem 48MiB
+finished in 5.16s, 12684420.00 req/s, 314.52MB/s
+[info] CPU 1001.1% | Mem 56MiB
+finished in 5.18s, 12618220.00 req/s, 312.88MB/s
+[info] CPU 900.6% | Mem 59MiB
+=== Best: 12291104 req/s (CPU: 1001.1%, Mem: 56MiB) ===
+=== h2o / static-h2 / 512c (tool=h2load) ===
+finished in 5.19s, 299501.60 req/s, 17.74GB/s
+[info] CPU 1289.2% | Mem 336MiB
+finished in 5.20s, 302963.40 req/s, 17.94GB/s
+[info] CPU 1433.1% | Mem 290MiB
+finished in 5.17s, 300403.40 req/s, 17.79GB/s
+[info] CPU 1345.0% | Mem 313MiB
+=== Best: 292374 req/s (CPU: 1433.1%, Mem: 290MiB) ===
+=== h2o / json-tls / 512c (tool=wrk) ===
+Requests/sec: 837474.11
+[info] CPU 1215.7% | Mem 40MiB
+Requests/sec: 859093.34
+[info] CPU 1343.2% | Mem 44MiB
+Requests/sec: 864858.07
+[info] CPU 1245.5% | Mem 46MiB
+=== Best: 864858 req/s (CPU: 1245.5%, Mem: 46MiB) ===
+rc=0
