@@ -1,7 +1,7 @@
 # agensio for HttpArena: one process, the arena's four listeners. 8080 plain HTTP/1.1
 # (baseline, pipelined, short-lived), 8081 TLS kept at HTTP/1.1 (json-tls, static-tls measure
 # h1 on the wire, so ALPN must not offer h2 there), 8082 plain with the HTTP/2 preface
-# (baseline-h2c, json-h2c), 8443 TLS with h2 (baseline-h2, static-h2). `workers = 0` is one
+# (baseline-h2c, json-h2c), 8443 TLS with h2 and h3 (baseline-h2, static-h2, baseline-h3, static-h3). `workers = 0` is one
 # per CPU of the container's cpuset. /static/ is the mounted asset directory, everything
 # else the benchmark handler (bench/httparena in the agensio repository).
 [server]
@@ -71,10 +71,10 @@ httparena = { dataset = "/data/dataset.json" }
 
 [[site]]
 server_name = ["localhost"]
-listen = ["0.0.0.0:8443"]
+listen = ["[::]:8443"]   # dual-stack: the arena's load generators resolve localhost to ::1, and QUIC cannot fall back to IPv4 the way TCP does
 default = true
 root = "/srv/www"
-protocols = ["h2", "h1"]
+protocols = ["h2", "h1", "h3"]   # h2 over TCP and h3 over QUIC on 8443 (baseline-h3, static-h3)
 tls = { cert = "/run/agensio/server.crt", key = "/run/agensio/server.key" }
 
 [[site.location]]

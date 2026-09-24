@@ -1,0 +1,1 @@
+server mode=wait gro=0 gso=1 batch=64 received=2271608 sent=2271608 per_sec=567898 cpu_us_per_datagram=1.321 wakeups=555 recv_calls=35495 send_calls=35494 datagrams_per_recv_call=64.0 datagrams_per_send_call=64.0 gro_messages=0

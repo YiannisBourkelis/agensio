@@ -1,0 +1,49 @@
+# The development box the Linux steps run in (CLAUDE.md "Linux box: bench in container"):
+# Debian trixie with the build tools, OpenSSL 3.5, nginx (with the http_v3 module), Caddy,
+# wrk, php-fpm, h2spec, Debian's nghttp2 client tools, and, under /opt/nghttp2, an h2load
+# built with HTTP/3 (nghttp3, ngtcp2's OpenSSL 3.5 backend, nghttp2 with --enable-http3),
+# which Debian's h2load lacks: bench/h3/run.sh and bench/ab.sh -3 use it.
+#   docker build -t agensio-devbox -f bench/docker/Dockerfile.devbox --build-arg UID=$(id -u) --build-arg GID=$(id -g) bench/docker
+FROM debian:trixie AS base
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y build-essential g++ cmake ninja-build git ca-certificates libssl-dev \
+      curl netcat-openbsd openssl python3 procps wrk nginx clang libclang-rt-dev perl php-fpm php-cli zlib1g-dev \
+      nghttp2-client libnghttp2-dev python3-h2 pkg-config autoconf automake libtool libev-dev \
+      libc-ares-dev libevent-dev libjansson-dev libsystemd-dev libjemalloc-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL 'https://caddyserver.com/api/download?os=linux&arch=amd64' -o /usr/local/bin/caddy \
+    && chmod +x /usr/local/bin/caddy && /usr/local/bin/caddy version
+RUN curl -sSL -o /tmp/h2spec.tar.gz https://github.com/summerwind/h2spec/releases/download/v2.6.0/h2spec_linux_amd64.tar.gz \
+    && tar -xzf /tmp/h2spec.tar.gz -C /usr/local/bin h2spec && chmod 755 /usr/local/bin/h2spec && rm /tmp/h2spec.tar.gz \
+    && h2spec --version
+RUN chmod -R a+rwx /var/lib/nginx /var/log/nginx
+
+# h2load with HTTP/3 over OpenSSL 3.5's QUIC TLS API (the libngtcp2_crypto_ossl backend).
+FROM base AS h3tools
+ARG NGHTTP3_TAG=v1.18.0
+ARG NGTCP2_TAG=v1.25.0
+ARG NGHTTP2_TAG=v1.70.0
+WORKDIR /src
+RUN git clone --depth 1 -b ${NGHTTP3_TAG} --recursive https://github.com/ngtcp2/nghttp3 \
+    && cd nghttp3 && autoreconf -i && ./configure --prefix=/opt/nghttp3 --enable-lib-only \
+    && make -j"$(nproc)" && make install
+RUN git clone --depth 1 -b ${NGTCP2_TAG} --recursive https://github.com/ngtcp2/ngtcp2 \
+    && cd ngtcp2 && autoreconf -i \
+    && PKG_CONFIG_PATH=/opt/nghttp3/lib/pkgconfig ./configure --prefix=/opt/ngtcp2 --with-openssl --enable-lib-only \
+    && make -j"$(nproc)" && make install
+RUN git clone --depth 1 -b ${NGHTTP2_TAG} https://github.com/nghttp2/nghttp2 \
+    && cd nghttp2 && git submodule update --init && autoreconf -i \
+    && PKG_CONFIG_PATH=/opt/nghttp3/lib/pkgconfig:/opt/ngtcp2/lib/pkgconfig \
+       LDFLAGS="-Wl,-rpath,/opt/nghttp3/lib:/opt/ngtcp2/lib" CXXFLAGS="-std=c++23" \
+       ./configure --prefix=/opt/nghttp2 --enable-app --enable-http3 --disable-examples --disable-python-bindings \
+    && make -j"$(nproc)" && make install \
+    && /opt/nghttp2/bin/h2load --version && /opt/nghttp2/bin/h2load --help | grep -q udp-gso
+
+FROM base
+COPY --from=h3tools /opt/nghttp3 /opt/nghttp3
+COPY --from=h3tools /opt/ngtcp2 /opt/ngtcp2
+COPY --from=h3tools /opt/nghttp2 /opt/nghttp2
+ARG UID=1000
+ARG GID=1000
+RUN groupadd -g $GID dev 2>/dev/null || true; useradd -m -u $UID -g $GID -s /bin/bash dev
+USER dev

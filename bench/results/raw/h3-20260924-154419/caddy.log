@@ -1,0 +1,22 @@
+{"level":"info","ts":1790264809.5207005,"msg":"maxprocs: Honoring GOMAXPROCS=\"1\" as set in environment"}
+{"level":"info","ts":1790264809.5207293,"msg":"GOMEMLIMIT is updated","GOMEMLIMIT":29442897100,"previous":9223372036854775807}
+{"level":"info","ts":1790264809.520732,"msg":"using config from file","file":"tmp/Caddyfile-h3"}
+{"level":"info","ts":1790264809.5207334,"msg":"adapted config to JSON","adapter":"caddyfile"}
+{"level":"warn","ts":1790264809.5207343,"msg":"Caddyfile input is not formatted; run 'caddy fmt --overwrite' to fix inconsistencies","adapter":"caddyfile","file":"tmp/Caddyfile-h3","line":4}
+{"level":"warn","ts":1790264809.520796,"logger":"admin","msg":"admin endpoint disabled"}
+{"level":"info","ts":1790264809.5211155,"logger":"http.auto_https","msg":"automatic HTTPS is completely disabled for server","server_name":"srv0"}
+{"level":"info","ts":1790264809.5211217,"logger":"http.auto_https","msg":"automatic HTTPS is completely disabled for server","server_name":"srv1"}
+{"level":"warn","ts":1790264809.521493,"logger":"http","msg":"HTTP/2 skipped because it requires TLS","network":"tcp","addr":":8082"}
+{"level":"warn","ts":1790264809.521497,"logger":"http","msg":"HTTP/3 skipped because it requires TLS","network":"tcp","addr":":8082"}
+{"level":"info","ts":1790264809.5214984,"logger":"http.log","msg":"server running","name":"srv0","protocols":["h1","h2","h2c","h3"]}
+{"level":"info","ts":1790264809.5215096,"logger":"http","msg":"enabling HTTP/3 listener","addr":":8445"}
+{"level":"info","ts":1790264809.5215392,"msg":"failed to sufficiently increase receive buffer size (was: 208 kiB, wanted: 7168 kiB, got: 416 kiB). See https://github.com/quic-go/quic-go/wiki/UDP-Buffer-Sizes for details."}
+{"level":"info","ts":1790264809.5217438,"logger":"http.log","msg":"server running","name":"srv1","protocols":["h1","h2","h2c","h3"]}
+{"level":"info","ts":1790264809.5219486,"msg":"autosaved config (load with --resume flag)","file":"/home/dev/.config/caddy/autosave.json"}
+{"level":"info","ts":1790264809.5219529,"msg":"serving initial configuration"}
+{"level":"info","ts":1790264809.5246403,"logger":"tls","msg":"cleaning storage unit","storage":"FileStorage:/home/dev/.local/share/caddy"}
+{"level":"info","ts":1790264809.5264642,"logger":"tls","msg":"finished cleaning storage units"}
+{"level":"info","ts":1790264809.5267751,"logger":"tls.cache.maintenance","msg":"started background certificate maintenance","cache":"0x6ba7aa8c000"}
+{"level":"info","ts":1790264851.5765574,"msg":"shutting down apps, then terminating","signal":"SIGTERM"}
+{"level":"warn","ts":1790264851.5765886,"msg":"exiting; byeee!! 👋","signal":"SIGTERM"}
+{"level":"info","ts":1790264851.5766141,"logger":"http","msg":"servers shutting down with eternal grace period"}

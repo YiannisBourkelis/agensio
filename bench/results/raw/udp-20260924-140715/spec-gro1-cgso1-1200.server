@@ -1,0 +1,1 @@
+server mode=spec gro=1 gso=0 batch=64 received=3264 sent=3264 per_sec=816 cpu_us_per_datagram=1.877 wakeups=240 recv_calls=480 send_calls=381 datagrams_per_recv_call=6.8 datagrams_per_send_call=8.6 gro_messages=378

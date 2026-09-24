@@ -6,6 +6,7 @@
 
 #include "core/strings.hpp"
 #include "http2/hpack.hpp"
+#include "http3/qpack.hpp"
 #include "services/json.hpp"
 
 namespace agensio {
@@ -100,9 +101,15 @@ void head(Stream& s, int status, std::string_view type, std::size_t length) {
     } else {
         char digits[24];
         const auto end = std::to_chars(digits, digits + sizeof digits, length).ptr;
+        const std::string_view len(digits, static_cast<std::size_t>(end - digits));
         r.scratch.clear();
-        hpack::append_literal(r.scratch, 28, std::string_view(digits, static_cast<std::size_t>(end - digits)));  // 28: content-length
-        r.prebuilt_h2 = r.scratch;
+        if (s.request.protocol.size() == 8 && s.request.protocol[5] == '3') {  // HTTP/3.0: the QPACK tail
+            qpack::append_literal_name_ref(r.scratch, 4, len);  // 4: content-length
+            r.prebuilt_h3 = r.scratch;
+        } else {
+            hpack::append_literal(r.scratch, 28, len);  // 28: content-length
+            r.prebuilt_h2 = r.scratch;
+        }
         r.content_type = type;
     }
     r.body = MemoryBody{std::string_view(r.buffer)};

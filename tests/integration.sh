@@ -35,7 +35,14 @@ FPMCONF
   for _ in $(seq 1 50); do [ -S bench/tmp/php/fpm.sock ] && break; sleep 0.1; done
   printf '<?php echo "hello ", $_SERVER["REQUEST_METHOD"], " ", $_GET["x"] ?? "-";\n' > bench/www/hello.php
 fi
-sed "s#@WORKERS@#0#g; s#@BENCH@#$ROOT/bench#g; s#@SENDFILE_MIN@#${SENDFILE_MIN:-48KB}#g; s#@ACCESS_LOG@#$ROOT/bench/tmp/access.log#; s#^tcp_nodelay = true#tcp_nodelay = true\ntrusted_proxies = [\"127.0.0.1\"]#" bench/agensio.toml > bench/tmp/agensio-test.toml
+# HTTP/3 (phase I) when this binary has it (OpenSSL 3.5 on Linux): "h3" joins the protocols
+# and the TLS listeners also answer over QUIC; curl with HTTP/3 runs the h3 checks below.
+H3=0
+printf '[server]\nprotocols = ["h2", "h1", "h3"]\n[[site]]\nlisten = ["127.0.0.1:18443"]\nroot = "%s/bench/www"\ntls = { cert = "%s/bench/certs/cert.pem", key = "%s/bench/certs/key.pem" }\n' "$ROOT" "$ROOT" "$ROOT" > bench/tmp/h3-probe.toml
+"$BIN" -t -c bench/tmp/h3-probe.toml >/dev/null 2>&1 && H3=1
+H3LIST=""; H3JSON=""; H3STATUS=""; [ $H3 = 1 ] && { H3LIST=', "h3"'; H3JSON=',"h3"'; H3STATUS=",h3"; }
+export H3 H3JSON
+sed "s#@WORKERS@#0#g; s#@BENCH@#$ROOT/bench#g; s#@SENDFILE_MIN@#${SENDFILE_MIN:-48KB}#g; s#@ACCESS_LOG@#$ROOT/bench/tmp/access.log#; s#@H3@#$H3LIST#g; s#^tcp_nodelay = true#tcp_nodelay = true\ntrusted_proxies = [\"127.0.0.1\"]#" bench/agensio.toml > bench/tmp/agensio-test.toml
 printf '\n[control]\nsocket = "%s/bench/tmp/control.sock"\naudit = "%s/bench/tmp/audit.log"\nupload_max = "1M"\n' "$ROOT" "$ROOT" >> bench/tmp/agensio-test.toml
 sed -i "s#^\[server\]#[server]\nstate_dir = \"$ROOT/bench/tmp/state\"#" bench/tmp/agensio-test.toml
 rm -rf bench/tmp/state bench/tmp/inst; mkdir -p bench/tmp/state bench/tmp/inst
@@ -983,6 +990,11 @@ for base in http://127.0.0.1:8080 https://127.0.0.1:8443; do
   check "$p: each representation has its own ETag: 304 against the twin's, 200 against the file's" "yes 304 200" "$([ -n "$BRET" ] && [ "$BRET" != "$IDET" ] && echo yes) $(code $K -H 'Accept-Encoding: br' -H "If-None-Match: $BRET" $base/comp.css) $(code $K -H 'Accept-Encoding: br' -H "If-None-Match: $IDET" $base/comp.css)"
   check "$p: a Range on the twin is a slice of the compressed bytes and keeps Content-Encoding" "206 br 10 bytes 0-9/320 $(head -c 10 $P/comp.css.br | sum)" "$(curl -sS $K -D - -o /dev/null -r 0-9 -H 'Accept-Encoding: br' $base/comp.css | tr -d '\r' | awk 'NR==1{c=$2} tolower($1)=="content-encoding:"{e=$2} tolower($1)=="content-length:"{l=$2} tolower($1)=="content-range:"{r=$2" "$3} END{printf "%s %s %s %s", c, e, l, r}') $(curl -sS $K -r 0-9 -H 'Accept-Encoding: br' $base/comp.css | sum)"
 done
+# The same twin over HTTP/3, while the files exist (the QPACK section carries content-encoding and vary).
+if [ "$H3" = 1 ] && curl -V 2>/dev/null | grep -q HTTP3; then
+  # vary's value is a field name, case-insensitive (RFC 9110 12.5.5): over h3 it is the QPACK static pair "vary: accept-encoding", one byte.
+  check "h3 twins: the QPACK section carries content-encoding and vary; the body is the twin" "200 br accept-encoding 320 $BRSUM" "$(command curl -sSk --http3-only -D - -o /dev/null -H 'accept-encoding: br' https://127.0.0.1:8443/comp.css | tr -d '\r' | awk 'NR==1{c=$2} $1=="content-encoding:"{e=$2} $1=="vary:"{v=tolower($2)} $1=="content-length:"{l=$2} END{printf "%s %s %s %s", c, e, v, l}') $(command curl -sSk --http3-only -H 'accept-encoding: br' https://127.0.0.1:8443/comp.css | sum)"
+fi
 check "twins h2: the HPACK block carries content-encoding and vary; the body is the twin" "200 br Accept-Encoding 320 $BRSUM" "$(command curl -sSk --http2 -D - -o /dev/null -H 'accept-encoding: br' https://127.0.0.1:8443/comp.css | tr -d '\r' | awk 'NR==1{c=$2} $1=="content-encoding:"{e=$2} $1=="vary:"{v=$2} $1=="content-length:"{l=$2} END{printf "%s %s %s %s", c, e, v, l}') $(command curl -sSk --http2 -H 'accept-encoding: br' https://127.0.0.1:8443/comp.css | sum)"
 printf 'BR-NEW-%.0s' $(seq 1 30) > $P/comp.css.br; sleep 1.2
 check "twins: a replaced twin is served within the revalidation interval" "210 $(sum < $P/comp.css.br)" "$(curl -sS -H 'Accept-Encoding: br' -o /dev/null -w '%{size_download}' http://127.0.0.1:8080/comp.css) $(curl -sS -H 'Accept-Encoding: br' http://127.0.0.1:8080/comp.css | sum)"
@@ -994,7 +1006,7 @@ rm -f $P/comp.css
 
 # ---- Per-site protocols: a TLS listener kept at HTTP/1.1 while the server offers h2 ----
 check "protocols: a site with protocols = [\"h1\"] offers no h2 through ALPN; curl --http2 gets HTTP/1.1" "1.1 200 http/1.1" "$(command curl -sSk --http2 -H 'Host: b.test' -o /dev/null -w '%{http_version} %{http_code}' https://127.0.0.1:8447/) $(echo | openssl s_client -connect 127.0.0.1:8447 -alpn h2,http/1.1 2>/dev/null | grep -m1 '^ALPN protocol:' | sed 's/.*: //')"
-check "protocols: status names each listener's own protocols" "h1 | h2,h1 | h2c,h1" "$(curl -sS --unix-socket bench/tmp/control.sock http://control/v1/status | python3 -c 'import json,sys; d=json.load(sys.stdin); ls={l["address"]:",".join(l["protocols"]) for l in d["listeners"]}; print(ls["127.0.0.1:8447"], "|", ls["127.0.0.1:8443"], "|", ls["127.0.0.1:8080"])')"
+check "protocols: status names each listener's own protocols" "h1 | h2,h1$H3STATUS | h2c,h1" "$(curl -sS --unix-socket bench/tmp/control.sock http://control/v1/status | python3 -c 'import json,sys; d=json.load(sys.stdin); ls={l["address"]:",".join(l["protocols"]) for l in d["listeners"]}; print(ls["127.0.0.1:8447"], "|", ls["127.0.0.1:8443"], "|", ls["127.0.0.1:8080"])')"
 check "protocols: -t refuses two sites on one address with different lists" "yes" "$(printf '[[site]]\nlisten = ["127.0.0.1:18090"]\nroot = "%s/bench/www"\n[[site]]\nserver_name = ["b"]\nlisten = ["127.0.0.1:18090"]\nroot = "%s/bench/www"\nprotocols = ["h1"]\n' "$ROOT" "$ROOT" > bench/tmp/proto-bad.toml; out=$("$BIN" -t -c bench/tmp/proto-bad.toml 2>&1); echo "$out" | grep -q 'list different protocols' && echo yes || echo "$out" | head -c 300)"
 
 # ---- The HttpArena benchmark handler (build option; the arena's validator is the full contract) ----
@@ -1052,7 +1064,7 @@ print("yes" if len(lens)==2 and lens[1] < lens[0] and lens[1] <= 60 else lens, "
 fi
 check "h2: a plain HTTP/1.1 client on the same port is untouched" "1.1 200" "$(curl -sS -o /dev/null -w '%{http_version} %{http_code}' http://127.0.0.1:8080/)"
 check "h2: ALPN offers h2 then h1; a client offering only http/1.1 gets it" "1.1 200" "$(command curl -sSk --http1.1 -o /dev/null -w '%{http_version} %{http_code}' https://127.0.0.1:8443/)"
-check "h2: explain and status name the protocols" "yes yes" "$(grep -q 'protocols = \["h2c", "h2", "h1"\]' bench/tmp/explain.out && echo yes) $(curl -sS --unix-socket bench/tmp/control.sock http://control/v1/status | python3 -c 'import json,sys; d=json.load(sys.stdin); ls={l["address"]:l["protocols"] for l in d["listeners"]}; print("yes" if ls["127.0.0.1:8080"]==["h2c","h1"] and ls["127.0.0.1:8443"]==["h2","h1"] else ls)')"
+check "h2: explain and status name the protocols" "yes yes" "$(grep -q "protocols = \[\"h2c\", \"h2\", \"h1\"$H3LIST\]" bench/tmp/explain.out && echo yes) $(curl -sS --unix-socket bench/tmp/control.sock http://control/v1/status | python3 -c 'import json,sys,os; d=json.load(sys.stdin); ls={l["address"]:l["protocols"] for l in d["listeners"]}; print("yes" if ls["127.0.0.1:8080"]==["h2c","h1"] and ls["127.0.0.1:8443"]==["h2","h1"]+(["h3"] if os.environ.get("H3")=="1" else []) else ls)')"
 if [ -n "$FPM_PID" ]; then
   check "h2 php: GET runs through FastCGI with SERVER_PROTOCOL HTTP/2.0" "HTTP/2.0 GET" "$(command curl -sS $H2C http://127.0.0.1:8080/php/params.php | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("SERVER_PROTOCOL"), d.get("REQUEST_METHOD"))')"
   printf 'hello h2 %.0s' $(seq 1 3000) > bench/tmp/h2post.bin
@@ -1113,6 +1125,27 @@ if command -v h2spec >/dev/null; then
   grep -E '^[0-9]+ tests, ' bench/tmp/h2spec-h2c.txt | tail -1 | sed 's/^/  h2spec h2c: /'
 else
   echo "skip h2spec (not installed)"
+fi
+
+
+# ---- HTTP/3 (phase I): QUIC on 8443 (udp) when the binary and curl have it; the same answers as HTTP/1 and HTTP/2 ----
+if [ "$H3" = 1 ] && curl -V 2>/dev/null | grep -q HTTP3; then
+  H3C="--http3-only -k"; base=https://127.0.0.1:8443; p=h3
+  check "$p negotiated"            "3 200" "$(command curl -sS $H3C -o /dev/null -w '%{http_version} %{http_code}' $base/)"
+  check "$p index body"            "$IDX" "$(command curl -sS $H3C $base/ | sum)"
+  check "$p cached 100KB body"     "$CSS" "$(command curl -sS $H3C $base/style.css | sum)"
+  check "$p streamed 10MB body"    "$BIG" "$(command curl -sS $H3C $base/big.bin | sum)"
+  check "$p head fields"           "text/html; charset=utf-8 $IDXLEN yes" "$(command curl -sS $H3C -D - -o /dev/null $base/ | tr -d '\r' | awk 'tolower($1)=="content-type:"{sub(/^[^ ]+ /,""); t=$0} tolower($1)=="content-length:"{l=$2} tolower($1)=="etag:"{e=1} tolower($1)=="date:"{d=1} tolower($1)=="server:"{s=$2} END{print t, l, (e&&d&&s=="agensio")?"yes":"no"}')"
+  check "$p HEAD has no body"      "200 0" "$(command curl -sS $H3C -I -o /dev/null -w '%{http_code} %{size_download}' $base/)"
+  check "$p 404 page"              "404 150" "$(command curl -sS $H3C -o /dev/null -w '%{http_code} %{size_download}' $base/nope)"
+  check "$p 405 POST with a body, then the next request" "405 200" "$(command curl -sS $H3C -o /dev/null -w '%{http_code} ' -d 'a=1' $base/; command curl -sS $H3C -o /dev/null -w '%{http_code}' $base/)"
+  check "$p dir redirect"          "301 /sub/" "$(command curl -sS $H3C -D - -o /dev/null $base/sub | tr -d '\r' | awk 'NR==1{c=$2} tolower($1)=="location:"{l=$2} END{print c, l}')"
+  ET=$(command curl -sS $H3C -I $base/ | tr -d '\r' | awk 'tolower($1)=="etag:"{print $2}')
+  check "$p 304 etag"              "304 0" "$(command curl -sS $H3C -o /dev/null -w '%{http_code} %{size_download}' -H "If-None-Match: $ET" $base/)"
+  check "$p 206 range"             "206 100 bytes 100-199/102430" "$(command curl -sS $H3C -D - -o /dev/null -r 100-199 $base/style.css | tr -d '\r' | awk 'NR==1{c=$2} tolower($1)=="content-length:"{l=$2} tolower($1)=="content-range:"{r=$2" "$3} END{print c, l, r}')"
+  check "$p one connection for three requests" "1 0 0" "$(command curl -sS $H3C -o /dev/null -o /dev/null -o /dev/null -w '%{num_connects} ' $base/ $base/style.css $base/app.html | sed 's/ $//')"
+  check "$p access log names the protocol" "yes" "$(sleep 1.2; grep -q '"GET / HTTP/3.0" 200' bench/tmp/access.log && echo yes)"
+  check "$p a site kept at h1 offers no h3 on its port" "no" "$(command curl -sS --http3-only -k -m 3 -o /dev/null -w '%{http_version}' https://127.0.0.1:8447/ 2>/dev/null | grep -q 3 && echo yes || echo no)"
 fi
 
 # ---- request bodies (A3): decoded, limited, drained after the response ----

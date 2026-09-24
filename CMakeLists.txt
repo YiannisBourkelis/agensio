@@ -66,6 +66,27 @@ if(AGENSIO_TLS)
   endif()
 endif()
 
+# ---------------------------------------------------------------- HTTP/3 (phase I, docs/design-http3.md)
+# Our own QUIC transport over OpenSSL 3.5's QUIC TLS API (SSL_set_quic_tls_cbs) and its
+# primitives; the UDP endpoint uses recvmmsg, sendmmsg, UDP_GRO and UDP_SEGMENT, so it is
+# Linux for now. Without the API the build has TLS, HTTP/1 and HTTP/2 and refuses "h3".
+set(AGENSIO_HAS_QUIC OFF)
+option(AGENSIO_QUIC_TRACE "Print every QUIC packet and event to stderr (development only)" OFF)
+if(AGENSIO_HAS_TLS AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  include(CheckSymbolExists)
+  set(CMAKE_REQUIRED_INCLUDES ${OPENSSL_INCLUDE_DIR})
+  set(CMAKE_REQUIRED_LIBRARIES OpenSSL::SSL OpenSSL::Crypto)
+  check_symbol_exists(SSL_set_quic_tls_cbs "openssl/ssl.h" AGENSIO_OPENSSL_QUIC_TLS)
+  unset(CMAKE_REQUIRED_INCLUDES)
+  unset(CMAKE_REQUIRED_LIBRARIES)
+  if(AGENSIO_OPENSSL_QUIC_TLS)
+    set(AGENSIO_HAS_QUIC ON)
+    message(STATUS "HTTP/3 enabled (OpenSSL QUIC TLS API)")
+  else()
+    message(STATUS "HTTP/3 disabled: OpenSSL ${OPENSSL_VERSION} has no QUIC TLS API (3.5 or later needed)")
+  endif()
+endif()
+
 # ---------------------------------------------------------------- zlib (optional: site-install archives)
 # gzip and deflate for the archive extractor behind `site-install` (.tar.gz and .zip);
 # present on every Linux, macOS and BSD system. Without it plain .tar still works.
@@ -100,7 +121,11 @@ add_library(agensio_core STATIC
   src/control/mcp.cpp
   src/control/client.cpp
   src/response.cpp
+  src/http/field_codec.cpp
   src/http2/hpack.cpp
+  src/http3/qpack.cpp
+  $<$<BOOL:${AGENSIO_HAS_QUIC}>:src/quic/crypto.cpp>
+  $<$<BOOL:${AGENSIO_HAS_QUIC}>:src/quic/tls.cpp>
   src/handlers/static.cpp
   src/handlers/fastcgi.cpp
   src/handlers/proxy.cpp
@@ -118,6 +143,8 @@ target_link_libraries(agensio_core PUBLIC asio tomlplusplus)
 target_compile_definitions(agensio_core PUBLIC
   AGENSIO_VERSION="${AGENSIO_VERSION_STRING}"
   $<$<BOOL:${AGENSIO_HAS_TLS}>:AGENSIO_HAS_TLS=1>
+  $<$<BOOL:${AGENSIO_HAS_QUIC}>:AGENSIO_HAS_QUIC=1>
+  $<$<BOOL:${AGENSIO_QUIC_TRACE}>:AGENSIO_QUIC_TRACE=1>
   $<$<BOOL:${AGENSIO_HTTPARENA}>:AGENSIO_HTTPARENA=1>
   $<$<BOOL:${AGENSIO_HAS_ZLIB}>:AGENSIO_HAS_ZLIB=1>)
 if(AGENSIO_HAS_TLS)

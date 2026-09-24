@@ -1,5 +1,10 @@
 #include "server.hpp"
 
+#ifdef AGENSIO_HAS_QUIC
+#include "http3/connection.hpp"
+#include "quic/tls.hpp"
+#endif
+
 #include "core/cpus.hpp"
 #include "control/commands.hpp"
 #include "control/peer.hpp"
@@ -286,9 +291,25 @@ static int select_certificate(SSL* ssl, int* alert, void* arg) {
 // ALPN (HTTP/2, phase G): the first protocol of our list the client offers wins, in our
 // order; a client without ALPN, or without any of ours, gets no selection and speaks
 // HTTP/1.1 as before. Set on every context, since the SNI callback switches contexts.
-static int select_protocol(SSL*, const unsigned char** out, unsigned char* outlen, const unsigned char* in,
+static int select_protocol(SSL* ssl, const unsigned char** out, unsigned char* outlen, const unsigned char* in,
                            unsigned inlen, void* arg) {
     const auto* l = static_cast<const Listener*>(arg);
+#ifdef AGENSIO_HAS_QUIC
+    // A QUIC handshake (the session marks its SSL): h3 alone, and a client without it
+    // gets no_application_protocol (RFC 9001 8.1 requires ALPN).
+    if (SSL_get_ex_data(ssl, quic::TlsSession::ex_index())) {
+        static const unsigned char h3[] = {2, 'h', '3'};
+        unsigned char* selected = nullptr;
+        unsigned char selected_len = 0;
+        if (SSL_select_next_proto(&selected, &selected_len, h3, sizeof h3, in, inlen) != OPENSSL_NPN_NEGOTIATED)
+            return SSL_TLSEXT_ERR_ALERT_FATAL;
+        *out = selected;
+        *outlen = selected_len;
+        return SSL_TLSEXT_ERR_OK;
+    }
+#else
+    (void)ssl;
+#endif
     if (l->alpn.empty()) return SSL_TLSEXT_ERR_NOACK;
     unsigned char* selected = nullptr;
     unsigned char selected_len = 0;
@@ -321,6 +342,7 @@ void Server::build_listeners(Generation& gen) {
                 l->tls = site.tls.has_value();
                 l->h2 = site.h2;
                 l->h2c = site.h2c;
+                l->h3 = site.h3 && site.tls.has_value();
 #ifdef AGENSIO_HAS_TLS
                 l->alpn = site.alpn_wire;
 #else
@@ -420,6 +442,67 @@ void Server::open_control() {
 #endif
 }
 
+// ---- HTTP/3 (phase I) ----
+
+#ifdef AGENSIO_HAS_QUIC
+struct Server::H3Endpoints {
+    std::vector<std::unique_ptr<quic::Endpoint<h3::Http3Connection>>> list;
+};
+
+// The transport's limits derive from the existing keys (docs/design-http3.md section 10).
+static quic::Limits h3_limits(const Config& cfg) {
+    quic::Limits l;
+    l.idle_timeout_ms = static_cast<std::uint64_t>(cfg.idle_timeout_s) * 1000;
+    l.stream_window = cfg.max_header_size;
+    l.max_data = std::max<std::uint64_t>(1u << 20, cfg.max_header_size);
+    l.max_streams_bidi = cfg.http2.max_concurrent_streams;
+    l.max_streams_uni = 8;
+    return l;
+}
+
+void Server::open_h3() {
+    h3_ = std::make_unique<H3Endpoints>();
+    for (const Listener& l : gen_->listeners) {
+        if (!l.tls || !l.h3) continue;
+        Worker& w = *workers_[0];
+        using Endpoint = quic::Endpoint<h3::Http3Connection>;
+        auto ep = std::make_unique<Endpoint>(w.ctx, 0, [this, &w, address = l.address](Endpoint& e, const quic::PacketHeader& h,
+                                                                                      const sockaddr_storage& from, socklen_t fromlen,
+                                                                                      quic::TimePoint now) -> std::shared_ptr<h3::Http3Connection> {
+            std::shared_ptr<const Generation> gen = w.gen;  // the worker's current one, on its own thread
+            const Listener* lst = gen->find(address);
+            if (!lst || !lst->tls || !lst->h3 || !lst->ssl) return nullptr;
+            auto c = std::make_shared<h3::Http3Connection>(e, w, gen, lst, cfg_, dispatcher_, lst->ssl->native_handle(), h, from,
+                                                           fromlen, h3_limits(gen->cfg), now);
+            if (!c->quic().ok()) return nullptr;
+            for (const quic::Cid& cid : c->quic().our_cids()) e.add_cid(cid, c);
+            return c;
+        });
+        std::string error;
+        if (!ep->open(asio::ip::udp::endpoint(l.endpoint.address(), l.port), error))
+            throw std::runtime_error("cannot bind udp " + l.address + " for h3: " + error);
+        error_log_.info("h3 (QUIC) on udp " + l.address + (ep->gro() ? "" : ", without GRO"));
+        std::cout << "  h3 on udp " << l.address << "\n";
+        h3_->list.push_back(std::move(ep));
+    }
+}
+
+void Server::start_h3() {
+    if (!h3_) return;
+    for (auto& e : h3_->list) e->start();
+}
+
+void Server::stop_h3() {
+    if (!h3_) return;
+    for (auto& e : h3_->list) e->stop();
+}
+#else
+struct Server::H3Endpoints {};
+void Server::open_h3() {}
+void Server::start_h3() {}
+void Server::stop_h3() {}
+#endif
+
 void Server::start_accept_control() {
 #ifdef ASIO_HAS_LOCAL_SOCKETS
     if (!control_acceptor_) return;
@@ -502,6 +585,7 @@ json::Value Server::status() {
         if (l.tls) {
             if (l.h2) protocols.push("h2");
             protocols.push("h1");
+            if (l.h3) protocols.push("h3");
         } else {
             if (l.h2c) protocols.push("h2c");
             protocols.push("h1");
@@ -643,6 +727,7 @@ void Server::run() {
             open_acceptor(l, *workers_[0], false);
     }
     open_control();
+    open_h3();
     prepare_uploads();
     write_pid_file();
     // The provisioning helper keeps root for the five operations site creation needs;
@@ -668,6 +753,7 @@ void Server::run() {
     for (std::size_t i = 0; i < acceptors_.size(); ++i)
         start_accept(i);
     start_accept_control();
+    start_h3();
 
     asio::signal_set signals(workers_[0]->ctx, SIGINT, SIGTERM);
     signals.async_wait([this](const asio::error_code& ec, int) {
@@ -808,6 +894,7 @@ void Server::stop() {
     if (stopping_.exchange(true)) return;
     provisioner_.stop();
     acme_.stop();
+    stop_h3();
 #ifdef ASIO_HAS_LOCAL_SOCKETS
     if (control_acceptor_) {
         asio::error_code ignored;

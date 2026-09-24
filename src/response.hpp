@@ -13,6 +13,7 @@ struct ErrorPage {
     std::string body;     // small HTML document
     std::string headers;  // "Content-Type: text/html; charset=utf-8\r\nContent-Length: N\r\n"
     std::string h2_headers;  // the same two fields as an HPACK block
+    std::string h3_headers;  // and as a QPACK section (HTTP/3)
 };
 
 // Canned page for an error status. Unknown codes map to 500.

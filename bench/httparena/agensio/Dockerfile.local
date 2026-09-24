@@ -17,5 +17,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends libssl3t64 zlib
 COPY --from=build /src/build/agensio /usr/local/bin/agensio
 COPY agensio.toml start.sh /etc/agensio/
 RUN chmod 0755 /etc/agensio/start.sh
-EXPOSE 8080 8081 8082 8443
+EXPOSE 8080 8081 8082 8443 8443/udp
 CMD ["/etc/agensio/start.sh"]

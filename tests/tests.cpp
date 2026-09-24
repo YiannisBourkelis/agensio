@@ -47,6 +47,11 @@
 #include "core/fields.hpp"
 #include "http2/frame.hpp"
 #include "http2/hpack.hpp"
+#include "http3/qpack.hpp"
+#ifdef AGENSIO_HAS_QUIC
+#include "quic/connection.hpp"
+#include "quic_vectors.hpp"
+#endif
 #include "http2/settings.hpp"
 #include "hpack_vectors.hpp"
 #include "http1/parser.hpp"
@@ -3161,6 +3166,284 @@ static void test_h2_frame_and_settings() {
           !fields::connection_specific("te") && !fields::connection_specific("host"));
 }
 
+
+// ---- QPACK (RFC 9204) over the static table, and the QUIC transport's codecs (RFC 9000, 9001, 9002) ----
+static void test_qpack() {
+    unsigned i = 0;
+    CHECK(qpack::static_name("server", i) && i == 92);
+    CHECK(qpack::static_name("date", i) && i == 6);
+    CHECK(qpack::static_pair(":method", "GET", i) && i == 17);
+    CHECK(qpack::static_pair("content-type", "application/json", i) && i == 46);
+    CHECK(qpack::static_pair("accept-ranges", "bytes", i) && i == 32);
+    CHECK(qpack::static_pair("content-security-policy", "script-src 'none'; object-src 'none'; base-uri 'none'", i) && i == 85);
+    CHECK(!qpack::static_pair("content-type", "text/x-agensio", i) && !qpack::static_name("x-nothing", i));
+    std::string sec;
+    qpack::append_section_prefix(sec);
+    qpack::append_status(sec, 200);
+    CHECK(sec.size() == 3 && static_cast<unsigned char>(sec[2]) == 0xd9);  // 11 + 011001: static index 25
+    qpack::append_field(sec, "content-type", "text/plain");             // static pair 53
+    qpack::append_field(sec, "server", "agensio");                       // name reference 92
+    qpack::append_field(sec, "content-length", "55");                    // name reference 4
+    qpack::append_field(sec, "x-custom", "v");                           // literal name
+    qpack::append_status(sec, 299);                                      // literal by name
+    struct Field { std::string name, value; bool static_pair; };
+    std::vector<Field> got;
+    std::string arena;
+    qpack::Decoder d;
+    auto r = d.decode(sec, arena, 16384, [&](std::string_view n, std::string_view v, qpack::Origin o) {
+        got.push_back({std::string(n), std::string(v), o.static_table});
+        return true;
+    });
+    CHECK(r == qpack::Decoder::Result::ok && got.size() == 6);
+    CHECK(got[0].name == ":status" && got[0].value == "200" && got[0].static_pair);
+    CHECK(got[1].name == "content-type" && got[1].value == "text/plain" && got[1].static_pair);
+    CHECK(got[2].name == "server" && got[2].value == "agensio" && !got[2].static_pair);
+    CHECK(got[3].name == "content-length" && got[3].value == "55");
+    CHECK(got[4].name == "x-custom" && got[4].value == "v");
+    CHECK(got[5].name == ":status" && got[5].value == "299");
+    // A dynamic reference is refused (the table capacity is 0), as is a bad prefix.
+    std::string dyn = std::string("\0\0", 2) + std::string("\x80", 1);
+    arena.clear();
+    CHECK(d.decode(dyn, arena, 16384, [](std::string_view, std::string_view, qpack::Origin) { return true; }) == qpack::Decoder::Result::malformed);
+    std::string ric = std::string("\x01\x00", 2) + std::string("\xd9", 1);
+    CHECK(d.decode(ric, arena, 16384, [](std::string_view, std::string_view, qpack::Origin) { return true; }) == qpack::Decoder::Result::malformed);
+    // The list-size budget stops the decode.
+    std::string big;
+    qpack::append_section_prefix(big);
+    qpack::append_field(big, "x-a", std::string(100, 'a'));
+    arena.clear();
+    CHECK(d.decode(big, arena, 100, [](std::string_view, std::string_view, qpack::Origin) { return true; }) == qpack::Decoder::Result::too_large);
+}
+
+#ifdef AGENSIO_HAS_QUIC
+static std::string bytes_of(std::string_view hex) { return unhex(std::string(hex)); }
+
+static void test_quic() {
+    using namespace quic;
+    // Variable-length integers (RFC 9000 16): the RFC's examples and the boundaries.
+    for (std::uint64_t v : {std::uint64_t{0}, std::uint64_t{63}, std::uint64_t{64}, std::uint64_t{16383}, std::uint64_t{16384},
+                            std::uint64_t{1073741823}, std::uint64_t{1073741824}, kVarintMax}) {
+        std::string out;
+        append_varint(out, v);
+        CHECK(out.size() == varint_size(v));
+        const auto* p = reinterpret_cast<const unsigned char*>(out.data());
+        std::uint64_t back = 0;
+        CHECK(read_varint(p, p + out.size(), back) && back == v && p == reinterpret_cast<const unsigned char*>(out.data()) + out.size());
+    }
+    {
+        const std::string ex = bytes_of("c2197c5eff14e88c");
+        const auto* p = reinterpret_cast<const unsigned char*>(ex.data());
+        std::uint64_t v = 0;
+        CHECK(read_varint(p, p + ex.size(), v) && v == 151288809941952652ull);
+        const std::string two = bytes_of("9d7f3e7d");
+        p = reinterpret_cast<const unsigned char*>(two.data());
+        CHECK(read_varint(p, p + two.size(), v) && v == 494878333);
+        const std::string one = bytes_of("25");
+        p = reinterpret_cast<const unsigned char*>(one.data());
+        CHECK(read_varint(p, p + 1, v) && v == 37);
+    }
+    // Ranges.
+    {
+        RangeSet r;
+        r.add(10, 20);
+        r.add(30, 40);
+        r.add(20, 30);
+        CHECK(r.count() == 1 && r.contains(10, 40) && !r.contains(9, 11) && r.contiguous_from(10) == 40 && r.contiguous_from(5) == 5);
+        r.add_point(50);
+        CHECK(r.count() == 2 && r.max() == 50 && r.min() == 10);
+        std::uint64_t gb = 0, ge = 0;
+        CHECK(r.first_gap(10, 100, gb, ge) && gb == 40 && ge == 50);
+        r.remove(15, 17);
+        CHECK(r.count() == 3 && r.contains(10, 15) && r.contains(17, 40) && !r.contains_point(15));
+        r.remove_below(18);
+        CHECK(r.count() == 2 && r.min() == 18);
+        r.keep_highest(1);
+        CHECK(r.count() == 1 && r.min() == 50);
+    }
+    // Packet numbers (RFC 9000 A.2, A.3).
+    CHECK(decode_pn(0xa82f30ea, true, 0x9b32, 16) == 0xa82f9b32);
+    CHECK(pn_length(0xac5c02, 0xabe8b3, true) == 2);
+    CHECK(decode_pn(0, false, 2, 32) == 2);
+    // The deadline heap.
+    {
+        TimerHeap h;
+        Timed a, b, c;
+        const auto t0 = Clock::now();
+        a.deadline = t0 + std::chrono::milliseconds(30);
+        b.deadline = t0 + std::chrono::milliseconds(10);
+        c.deadline = t0 + std::chrono::milliseconds(20);
+        h.update(&a);
+        h.update(&b);
+        h.update(&c);
+        CHECK(h.top() == &b);
+        b.deadline = t0 + std::chrono::milliseconds(40);
+        h.update(&b);
+        CHECK(h.top() == &c);
+        h.remove(&c);
+        CHECK(h.top() == &a && h.earliest() == a.deadline);
+        h.remove(&a);
+        h.remove(&b);
+        CHECK(h.empty());
+    }
+    // Frames: an ACK with gaps, STREAM headers, CONNECTION_CLOSE, round trips.
+    {
+        unsigned char buf[256];
+        RangeSet got;
+        got.add(1, 4);
+        got.add(7, 10);
+        got.add_point(12);
+        const std::size_t n = put_ack(buf, sizeof buf, got, 5);
+        CHECK(n > 0);
+        const unsigned char* p = buf;
+        Frame f;
+        CHECK(read_frame(p, buf + n, f) && f.type == frame::ack && f.largest_ack == 12 && f.ack_delay == 5 && f.range_count == 3);
+        CHECK(f.ranges[0].first == 12 && f.ranges[0].second == 13 && f.ranges[1].first == 7 && f.ranges[1].second == 10 &&
+              f.ranges[2].first == 1 && f.ranges[2].second == 4);
+        const std::size_t h = put_stream_header(buf, sizeof buf, 8, 1000, 5, true, true);
+        std::memcpy(buf + h, "hello", 5);
+        p = buf;
+        CHECK(read_frame(p, buf + h + 5, f) && f.type == 0x0f && f.stream_id == 8 && f.offset == 1000 && f.length == 5 && f.fin &&
+              std::string_view(reinterpret_cast<const char*>(f.data), 5) == "hello");
+        const std::size_t c = put_connection_close(buf, sizeof buf, false, err::protocol_violation, frame::stream, "bad");
+        p = buf;
+        CHECK(read_frame(p, buf + c, f) && f.type == frame::connection_close && f.value == err::protocol_violation && f.value2 == frame::stream && f.reason == "bad");
+        CHECK(frame_allowed(frame::crypto, Space::initial) && !frame_allowed(frame::stream, Space::handshake) && frame_allowed(frame::stream, Space::application));
+    }
+    // Transport parameters: a client's set round trips; the server-only ones are refused.
+    {
+        TransportParams t;
+        t.max_idle_timeout = 30000;
+        t.initial_max_data = 1 << 20;
+        t.initial_max_stream_data_bidi_local = 65536;
+        t.initial_max_streams_bidi = 100;
+        t.initial_max_streams_uni = 3;
+        t.active_connection_id_limit = 4;
+        t.initial_scid.assign(reinterpret_cast<const unsigned char*>("\x01\x02\x03\x04"), 4);
+        t.has_initial_scid = true;
+        const std::string enc = encode_transport_params(t);
+        TransportParams back;
+        CHECK(decode_transport_params(reinterpret_cast<const unsigned char*>(enc.data()), enc.size(), back));
+        CHECK(back.max_idle_timeout == 30000 && back.initial_max_data == (1u << 20) && back.initial_max_streams_bidi == 100 &&
+              back.active_connection_id_limit == 4 && back.has_initial_scid && back.initial_scid == t.initial_scid && !back.disable_active_migration);
+        std::string bad;
+        append_param(bad, tp::ack_delay_exponent, 21);
+        CHECK(!decode_transport_params(reinterpret_cast<const unsigned char*>(bad.data()), bad.size(), back));
+        std::string dup;
+        append_param(dup, tp::max_idle_timeout, 1);
+        append_param(dup, tp::max_idle_timeout, 2);
+        CHECK(!decode_transport_params(reinterpret_cast<const unsigned char*>(dup.data()), dup.size(), back));
+        std::string server_only;
+        append_param_bytes(server_only, tp::stateless_reset_token, reinterpret_cast<const unsigned char*>("0123456789abcdef"), 16);
+        CHECK(!decode_transport_params(reinterpret_cast<const unsigned char*>(server_only.data()), server_only.size(), back));
+    }
+    // RFC 9001 appendix A: the Initial secrets and keys (A.1).
+    Cid dcid;
+    dcid.assign(reinterpret_cast<const unsigned char*>(bytes_of("8394c8f03e515708").data()), 8);
+    unsigned char client[32], server[32];
+    CHECK(initial_secrets(dcid, client, server));
+    CHECK(tohex(std::string(reinterpret_cast<const char*>(client), 32)) == "c00cf151ca5be075ed0ebfb5c80323c42d6b7db67881289af4008f1f6c357aea");
+    CHECK(tohex(std::string(reinterpret_cast<const char*>(server), 32)) == "3c199828fd139efd216c155ad844cc81fb82fa8d7446fa7d78be803acdda951b");
+    // A.2: the client's protected Initial opens with the client keys: the header
+    // protection mask, the packet number 2, the CRYPTO frame.
+    {
+        Keys k;
+        CHECK(k.install(Suite::aes128gcm, client, 32, false));
+        std::string pkt = bytes_of(quic_vectors::kClientInitialProtected);
+        auto* data = reinterpret_cast<unsigned char*>(pkt.data());
+        PacketHeader h;
+        CHECK(parse_header(data, pkt.size(), 8, h) && h.long_form && h.type == LongType::initial && h.version == 1 && h.dcid == dcid && h.scid.len == 0 &&
+              h.token_len == 0 && h.length == 1182 && h.pn_offset == 18);
+        unsigned char mask[5];
+        CHECK(k.mask(data + h.pn_offset + 4, mask) && tohex(std::string(reinterpret_cast<const char*>(mask), 5)) == "437b9aec36");
+        data[0] ^= static_cast<unsigned char>(mask[0] & 0x0f);
+        const unsigned pn_len = (data[0] & 3) + 1;
+        std::uint64_t truncated = 0;
+        for (unsigned i = 0; i < pn_len; ++i) {
+            data[h.pn_offset + i] ^= mask[1 + i];
+            truncated = (truncated << 8) | data[h.pn_offset + i];
+        }
+        CHECK(pn_len == 4 && truncated == 2);
+        std::size_t plain = 0;
+        CHECK(k.open(2, data, h.pn_offset + pn_len, data + h.pn_offset + pn_len, h.length - pn_len, plain) && plain == 1162);
+        const std::string crypto = bytes_of(quic_vectors::kClientInitialCrypto);
+        CHECK(std::memcmp(data + h.pn_offset + pn_len, crypto.data(), crypto.size()) == 0);
+        const unsigned char* fp = data + h.pn_offset + pn_len;
+        Frame f;
+        CHECK(read_frame(fp, fp + plain, f) && f.type == frame::crypto && f.offset == 0 && f.length == 241);
+        // A wrong tag is refused and counted.
+        data[pkt.size() - 1] ^= 1;
+        CHECK(!k.open(2, data, h.pn_offset + pn_len, data + h.pn_offset + pn_len, h.length - pn_len, plain) && k.failures == 1);
+    }
+    // A.3: the server's Initial, sealed and protected with the server keys, is the RFC's packet byte for byte.
+    {
+        Keys k;
+        CHECK(k.install(Suite::aes128gcm, server, 32, true));
+        std::string pkt = bytes_of("c1000000010008f067a5502a4262b50040750001");
+        const std::size_t pn_offset = pkt.size() - 2;
+        const std::string payload = bytes_of(quic_vectors::kServerInitialPayload);
+        pkt.append(payload);
+        pkt.resize(pkt.size() + kAeadTagLen);
+        auto* data = reinterpret_cast<unsigned char*>(pkt.data());
+        CHECK(k.seal(1, data, pn_offset + 2, payload.size()));
+        unsigned char mask[5];
+        CHECK(k.mask(data + pn_offset + 4, mask));
+        protect_header(data, pn_offset, 2, true, mask);
+        CHECK(tohex(pkt) == std::string(quic_vectors::kServerInitialProtected));
+    }
+    // A.5: a ChaCha20-Poly1305 short-header packet, sealed and protected (key, iv, hp from the secret).
+    {
+        const std::string secret = bytes_of("9ac312a7f877468ebe69422748ad00a15443f18203a07d6060f688f30f21632b");
+        Keys k;
+        CHECK(k.install(Suite::chacha20, reinterpret_cast<const unsigned char*>(secret.data()), secret.size(), true));
+        std::string pkt = bytes_of("4200bff401");
+        pkt.resize(pkt.size() + kAeadTagLen);
+        auto* data = reinterpret_cast<unsigned char*>(pkt.data());
+        CHECK(k.seal(654360564, data, 4, 1));
+        CHECK(tohex(pkt.substr(4)) == "655e5cd55c41f69080575d7999c25a5bfb");
+        unsigned char mask[5];
+        CHECK(k.mask(data + 1 + 4, mask) && tohex(std::string(reinterpret_cast<const char*>(mask), 5)) == "aefefe7d03");
+        protect_header(data, 1, 3, false, mask);
+        CHECK(tohex(pkt) == "4cfe4189655e5cd55c41f69080575d7999c25a5bfb");
+        unsigned char next[32];
+        CHECK(next_secret(Suite::chacha20, reinterpret_cast<const unsigned char*>(secret.data()), secret.size(), next) &&
+              tohex(std::string(reinterpret_cast<const char*>(next), 32)) == "1223504755036d556342ee9361d253421a826c9ecdf3c7148684b36b714881f9");
+    }
+    // Loss recovery: three packets sent, the third acknowledged: the first is lost by the
+    // packet threshold, the second waits for the time threshold (RFC 9002 6.1).
+    {
+        Recovery rec;
+        const auto t0 = Clock::now();
+        PnSpace& sp = rec.space(Space::application);
+        for (std::uint64_t pn = 0; pn < 4; ++pn) {
+            SentPacket& p = sp.record(pn);
+            p.bytes = 1200;
+            p.ack_eliciting = p.in_flight = true;
+            p.items.push_back({ItemKind::stream, false, 4, pn * 1000, 1000});
+            ++sp.next_pn;
+            rec.on_packet_sent(Space::application, p, t0 + std::chrono::milliseconds(pn));
+        }
+        CHECK(rec.bytes_in_flight == 4800);
+        Frame ack;
+        ack.type = frame::ack;
+        ack.largest_ack = 3;
+        ack.ack_delay = 0;
+        ack.range_count = 1;
+        ack.ranges[0] = {3, 4};
+        CHECK(rec.on_ack_received(Space::application, ack, t0 + std::chrono::milliseconds(50)));
+        CHECK(rec.acked.size() == 1 && rec.acked[0].offset == 3000);
+        CHECK(rec.lost.size() == 1 && rec.lost[0].offset == 0);  // pn 0: largest_acked (3) >= 0 + 3
+        CHECK(rec.bytes_in_flight == 2400 && sp.loss_time != TimePoint{});
+        Frame bad;
+        bad.type = frame::ack;
+        bad.largest_ack = 10;
+        bad.range_count = 1;
+        bad.ranges[0] = {10, 11};
+        CHECK(!rec.on_ack_received(Space::application, bad, t0));  // never sent
+        CHECK(rec.has_rtt && rec.smoothed_rtt == std::chrono::milliseconds(47));
+    }
+}
+#endif
+
 static void test_hpack() {
     using namespace hpack;
     // Integers (RFC 7541 C.1).
@@ -3501,6 +3784,10 @@ int main() {
     test_backup_of_protected();
     test_h2_frame_and_settings();
     test_hpack();
+    test_qpack();
+#ifdef AGENSIO_HAS_QUIC
+    test_quic();
+#endif
     test_config_reference();
     test_install();
 #ifdef AGENSIO_HAS_TLS

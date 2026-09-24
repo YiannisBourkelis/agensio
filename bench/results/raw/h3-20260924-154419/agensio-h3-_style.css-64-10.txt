@@ -1,0 +1,29 @@
+starting benchmark...
+spawning thread #0: 16 total client(s). 53175 total requests
+spawning thread #1: 16 total client(s). 53175 total requests
+spawning thread #2: 16 total client(s). 53175 total requests
+spawning thread #3: 16 total client(s). 53175 total requests
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Certificate: ECDSA prime256v1 256 bits
+Negotiated Group: x25519
+Resumption: no
+Application protocol: h3
+
+finished in 30.63s, 936.68 req/s, 92.47MB/s
+requests: 212700 total, 29295 started, 28695 done, 28695 succeeded, 184005 failed, 184005 errored, 0 timeout
+status codes: 29295 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 2.77GB (2970312758) total, 2.79MB (2929500) headers (space savings 47.64%), 2.76GB (2967148002) data
+UDP datagram: 24055 sent, 2556653 received
+                 min         max         median      p95         p99         mean        sd         +/- sd
+request     :      287us     31.52ms      2.61ms      6.06ms     10.89ms      3.06ms      2.02ms    83.14%
+connect     :     1.31ms     10.16ms      9.11ms     10.02ms     10.16ms      7.32ms      3.02ms    65.63%
+TTFB        :     8.27ms     12.75ms     11.95ms     12.53ms     12.75ms     10.89ms      1.60ms    59.38%
+req/s       :       0.00     4703.76        0.00     3970.89     4703.76      278.37     1057.31    93.75%
+min RTT     :        3us      3.34ms       655us      3.12ms      3.34ms      1.02ms      1.05ms    85.94%
+smoothed RTT:       37us      8.76ms      3.04ms      8.37ms      8.76ms      3.70ms      3.25ms    39.06%
+packets sent:          8        2841          11        2628        2841      377.86      744.90    85.94%
+packets recv:         35      293373         358      293158      293373    39942.75    80362.04    85.94%
+packets lost:          0           0           0           0           0        0.00        0.00   100.00%
+GRO packets :          1          55          54          54          54       38.86       19.39    83.54%

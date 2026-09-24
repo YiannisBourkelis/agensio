@@ -29,11 +29,11 @@ BENCH="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$BENCH")"
 [ $# -ge 1 ] || { sed -n '2,16p' "$0"; exit 2; }
 BASE_REF="$1"; shift
-ROUNDS=2; DURATION=5s; THREADS=4; WORKERS=1; SPECS=(); PROXY=0; H2=0
-while getopts "r:d:t:w:u:P2" opt; do
+ROUNDS=2; DURATION=5s; THREADS=4; WORKERS=1; SPECS=(); PROXY=0; H2=0; H3=0
+while getopts "r:d:t:w:u:P23" opt; do
   case $opt in
     r) ROUNDS=$OPTARG ;; d) DURATION=$OPTARG ;; t) THREADS=$OPTARG ;; w) WORKERS=$OPTARG ;;
-    u) SPECS+=("$OPTARG") ;; P) PROXY=1 ;; 2) H2=1 ;; *) exit 2 ;;
+    u) SPECS+=("$OPTARG") ;; P) PROXY=1 ;; 2) H2=1 ;; 3) H3=1 ;; *) exit 2 ;;
   esac
 done
 [ ${#SPECS[@]} -eq 0 ] && SPECS=("http:/:64" "http:/style.css:64" "https:/:64" "https:/style.css:64" "http:/big.bin:16" "https:/big.bin:16")
@@ -46,6 +46,14 @@ fi
 if [ $H2 = 1 ]; then
   command -v h2load >/dev/null || { echo "missing tool: h2load (Debian: nghttp2-client)"; exit 1; }
   SPECS+=("h2c:/:64:1" "h2c:/:64:10" "h2:/:64:1" "h2:/:64:10")
+fi
+# HTTP/3 rows (phase I): an h2load built with QUIC (H2LOAD_H3; the devbox's /opt/nghttp2/bin/h2load),
+# --alpn-list=h3 against the TLS port over UDP; a side without h3 gets no such rows.
+H2LOAD_H3="${H2LOAD_H3:-$( [ -x /opt/nghttp2/bin/h2load ] && echo /opt/nghttp2/bin/h2load || echo h2load )}"
+if [ $H3 = 1 ]; then
+  $H2LOAD_H3 --help 2>&1 | grep -q 'udp-gso' || { echo "$H2LOAD_H3 has no QUIC support (set H2LOAD_H3)"; exit 1; }
+  curl -V 2>/dev/null | grep -q HTTP3 || { echo "curl without HTTP/3: cannot probe the sides"; exit 1; }
+  SPECS+=("h3:/:64:1" "h3:/:64:10" "h3:/:64:64" "h3:/style.css:64:10")
 fi
 for tool in wrk curl nc git cmake; do command -v "$tool" >/dev/null || { echo "missing tool: $tool"; exit 1; }; done
 [ -x "$ROOT/build/agensio" ] || { echo "build the new side first: cmake --build build"; exit 1; }
@@ -72,7 +80,10 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT="$BENCH/results/ab-$STAMP.md"
 RAW="$BENCH/results/raw/ab-$STAMP"
 mkdir -p "$RAW" "$BENCH/tmp"
-sed "s#@WORKERS@#$WORKERS#g; s#@BENCH@#$BENCH#g; s#@SENDFILE_MIN@#${SENDFILE_MIN:-48KB}#g; s#@ACCESS_LOG@#${ACCESS_LOG:-off}#g" "$BENCH/agensio.toml" > "$BENCH/tmp/ab-agensio.toml"
+sed "s#@WORKERS@#$WORKERS#g; s#@BENCH@#$BENCH#g; s#@SENDFILE_MIN@#${SENDFILE_MIN:-48KB}#g; s#@ACCESS_LOG@#${ACCESS_LOG:-off}#g; s#@H3@##g" "$BENCH/agensio.toml" > "$BENCH/tmp/ab-agensio.toml"
+# With h3 rows the TLS listener also speaks QUIC; a side whose binary refuses "h3" (a base
+# before phase I) gets the plain config and no h3 rows.
+sed "s#@WORKERS@#$WORKERS#g; s#@BENCH@#$BENCH#g; s#@SENDFILE_MIN@#${SENDFILE_MIN:-48KB}#g; s#@ACCESS_LOG@#${ACCESS_LOG:-off}#g; s#@H3@#, \"h3\"#g" "$BENCH/agensio.toml" > "$BENCH/tmp/ab-agensio-h3.toml"
 # The proxy gate adds a site that forwards 127.0.0.1:8093 to the upstream; a side whose
 # binary cannot load it (a base before D1) gets the static-only config and no proxy rows.
 UP_PID=""
@@ -83,7 +94,7 @@ if [ $PROXY = 1 ]; then
   UP_PID=$!
 fi
 
-PID=""; SIDE_PROXY=0; SIDE_H2=0
+PID=""; SIDE_PROXY=0; SIDE_H2=0; SIDE_H3=0
 start() {  # binary
   for port in 8080 8443 8093; do
     nc -z 127.0.0.1 "$port" 2>/dev/null && { echo "port $port is busy; stop the running server first"; exit 1; }
@@ -93,6 +104,11 @@ start() {  # binary
   if [ $PROXY = 1 ]; then
     if "$1" -t -c "$BENCH/tmp/ab-agensio-proxy.toml" >/dev/null 2>&1; then cfg="$BENCH/tmp/ab-agensio-proxy.toml"; SIDE_PROXY=1
     else echo "  (this side cannot load the proxy site: static rows only)"; fi
+  fi
+  SIDE_H3=0
+  if [ $H3 = 1 ] && [ $PROXY = 0 ]; then
+    if "$1" -t -c "$BENCH/tmp/ab-agensio-h3.toml" >/dev/null 2>&1; then cfg="$BENCH/tmp/ab-agensio-h3.toml"; SIDE_H3=1
+    else echo "  (this side has no HTTP/3: no h3 rows)"; fi
   fi
   (cd "$BENCH" && exec "$1" -c "$cfg") >>"$RAW/server.log" 2>&1 &
   PID=$!
@@ -125,7 +141,7 @@ measure() {  # side round -> appends "side round spec cpu_us rps" lines to $RAW/
   for spec in "${SPECS[@]}"; do
     proto="${spec%%:*}"; rest="${spec#*:}"; streams=""
     case $proto in
-      h2|h2c) path="${rest%%:*}"; rest="${rest#*:}"; conns="${rest%%:*}"; streams="${rest#*:}" ;;
+      h2|h2c|h3) path="${rest%%:*}"; rest="${rest#*:}"; conns="${rest%%:*}"; streams="${rest#*:}" ;;
       *) conns="${rest##*:}"; path="${rest%:*}" ;;
     esac
     case $proto in
@@ -133,13 +149,17 @@ measure() {  # side round -> appends "side round spec cpu_us rps" lines to $RAW/
       proxy) [ $SIDE_PROXY = 1 ] || continue; url="http://127.0.0.1:8093$path" ;;
       h2c) [ $SIDE_H2 = 1 ] || continue; url="http://127.0.0.1:8080$path" ;;
       h2) [ $SIDE_H2 = 1 ] || continue; url="https://127.0.0.1:8443$path" ;;
+      h3) [ $SIDE_H3 = 1 ] || continue; url="https://127.0.0.1:8443$path" ;;
       *) url="http://127.0.0.1:8080$path" ;;
     esac
-    curl -sk -o /dev/null "$url"  # warm-up
+    if [ "$proto" = h3 ]; then curl -sk --http3-only -o /dev/null "$url"; else curl -sk -o /dev/null "$url"; fi  # warm-up
     t=$THREADS; [ "$conns" -lt "$t" ] && t=$conns
     raw="$RAW/$side-r$round-$proto-$(echo "$path" | tr '/?=' '___')-c$conns${streams:+-m$streams}.txt"
     c0=$(cpu_seconds)
-    if [ -n "$streams" ]; then
+    if [ "$proto" = h3 ]; then
+      $H2LOAD_H3 --alpn-list=h3 -D "${DURATION%s}" -c"$conns" -m"$streams" -t"$t" "$url" > "$raw" 2>&1 || true
+      n=$(awk '/^requests:/{print $6}' "$raw"); rps=$(awk '/^finished in/{print $4}' "$raw")
+    elif [ -n "$streams" ]; then
       h2load -D "${DURATION%s}" -c"$conns" -m"$streams" -t"$t" "$url" > "$raw" 2>&1 || true
       n=$(awk '/^requests:/{print $6}' "$raw"); rps=$(awk '/^finished in/{print $4}' "$raw")  # "N done", "X req/s"
     else
@@ -171,7 +191,7 @@ done
   for spec in "${SPECS[@]}"; do
     proto="${spec%%:*}"; rest="${spec#*:}"; streams=""
     case $proto in
-      h2|h2c) path="${rest%%:*}"; rest="${rest#*:}"; conns="${rest%%:*}"; streams="${rest#*:}" ;;
+      h2|h2c|h3) path="${rest%%:*}"; rest="${rest#*:}"; conns="${rest%%:*}"; streams="${rest#*:}" ;;
       *) conns="${rest##*:}"; path="${rest%:*}" ;;
     esac
     LC_NUMERIC=C awk -v k="$proto $path $conns${streams:+x$streams}" -v label="$proto $path c=$conns${streams:+ m=$streams}" '

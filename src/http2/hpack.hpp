@@ -6,7 +6,8 @@
 // entry's validators stay a prebuilt literal tail. Both tables are one DynamicTable, so
 // our encoder evicts by the same code as our decoder. Decoded names and values are
 // appended to an arena the stream owns and reported as views into it: one copy, no
-// allocation per field. Tables come from tools/gen-hpack-tables.py (hpack_tables.hpp).
+// allocation per field. Tables come from tools/gen-hpack-tables.py (hpack_tables.hpp,
+// http/codec_tables.hpp).
 #pragma once
 
 #include <cstddef>
@@ -17,27 +18,19 @@
 #include <type_traits>
 #include <vector>
 
+#include "http/field_codec.hpp"
+
 namespace agensio::hpack {
 
-// ---- Huffman coding (section 5.2) ----
-
-// Bytes the Huffman coding of `s` takes.
-std::size_t huffman_size(std::string_view s) noexcept;
-// Appends the Huffman coding of `s`, padded with the leading bits of EOS.
-void huffman_encode(std::string& out, std::string_view s);
-
-enum class HuffStatus { ok, malformed, too_large };
-// Appends the decoded symbols to `out`; stops with too_large when more than `max_out`
-// symbols would be produced (the caller's list-size budget), malformed on a code that
-// does not exist, EOS in the data, or padding other than up to seven 1-bits.
-HuffStatus huffman_decode(std::string_view in, std::string& out, std::size_t max_out);
-
-// ---- integers (section 5.1) ----
-
-// Appends `value` with an N-bit prefix; `prefix_flags` are the high bits of the first byte.
-void append_integer(std::string& out, std::uint64_t value, unsigned prefix_bits, std::uint8_t prefix_flags);
-// Reads an N-bit-prefix integer at in[pos], advancing pos. False when truncated or above 2^32-1.
-bool read_integer(std::string_view in, std::size_t& pos, unsigned prefix_bits, std::uint32_t& value) noexcept;
+// The Huffman code, the prefixed integers and the dynamic table are the codec shared with
+// QPACK (http/field_codec.hpp); the names stay usable as hpack::.
+using codec::HuffStatus;
+using codec::huffman_size;
+using codec::huffman_encode;
+using codec::huffman_decode;
+using codec::append_integer;
+using codec::read_integer;
+using codec::DynamicTable;
 
 // ---- encoding: static table and literals only ----
 
@@ -62,46 +55,6 @@ void append_status(std::string& out, int status);
 void append_insert(std::string& out, std::string_view name, std::string_view value);
 // Literal header field never indexed (6.2.3): for fields that must not be compressed.
 void append_never_indexed(std::string& out, std::string_view name, std::string_view value);
-
-// ---- the dynamic table (section 4) ----
-
-// A ring of entries, the newest at head, evicted oldest first as the limit demands. The
-// decoder mirrors the peer's encoder with one; our Encoder keeps its own, so both sides
-// of a connection evict by the same code. Allocated on the first insertion.
-class DynamicTable {
-public:
-    static constexpr std::size_t npos = static_cast<std::size_t>(-1);
-    explicit DynamicTable(std::size_t capacity) : capacity_(capacity), limit_(capacity) {}
-    // Adds the entry, evicting to make room. False, with the table emptied, when the entry
-    // alone is larger than the limit (RFC 7541 4.4).
-    bool add(std::string_view name, std::string_view value);
-    // Changes the maximum size (a size update, a SETTINGS change), evicting to fit.
-    void set_limit(std::size_t limit) noexcept;
-    void evict_to(std::size_t limit) noexcept;
-    // The entry k places from the newest (0 = newest).
-    bool at(std::size_t k, std::string_view& name, std::string_view& value) const noexcept;
-    // The place (0 = newest) of the newest entry with this name and value, or npos.
-    std::size_t find(std::string_view name, std::string_view value) const noexcept;
-    // The entry k places from the newest, with its mark.
-    bool at(std::size_t k, std::string_view& name, std::string_view& value, std::uint8_t*& mark) const noexcept;
-    std::uint8_t* newest_mark() const noexcept { return count_ ? &ring_[head_].checked : nullptr; }
-    std::size_t size() const noexcept { return size_; }
-    std::size_t count() const noexcept { return count_; }
-    std::size_t limit() const noexcept { return limit_; }
-
-private:
-    struct Entry {
-        std::string name;
-        std::string value;
-        mutable std::uint8_t checked = 0;  // the decoder's sink marks an entry whose rules have passed
-    };
-    std::vector<Entry> ring_;  // circular; the newest entry at head_
-    std::size_t head_ = 0;
-    std::size_t count_ = 0;
-    std::size_t size_ = 0;     // RFC 4.1 size of the entries held
-    std::size_t capacity_;     // the ring is sized for it on the first insertion
-    std::size_t limit_;        // the current maximum
-};
 
 // ---- the response encoder (design 6.2.1) ----
 
@@ -179,14 +132,9 @@ public:
     // The list size (name + value + 32 per field, RFC 7541 4.1) is added up as fields are
     // produced and the decode stops at the first field over max_list_size: a compression
     // bomb costs at most that many bytes.
-    // Where a field came from: name and value both from the static table (a token and a
-    // clean value by construction), a dynamic-table entry whose `checked` mark the sink
-    // may set once its rules have passed, so they run once per entry and not once per
-    // reference, or a literal (nothing known, `checked` null).
-    struct Origin {
-        bool static_table = false;
-        std::uint8_t* checked = nullptr;
-    };
+    // Where a field came from (codec::Origin): the static table, a dynamic-table entry
+    // with its rules-once mark, or a literal.
+    using Origin = codec::Origin;
     using SinkFn = bool (*)(void*, std::string_view, std::string_view, Origin);
     Result decode(std::string_view block, std::string& arena, std::size_t max_list_size, SinkFn sink, void* ctx);
     template <class F>

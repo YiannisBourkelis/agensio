@@ -57,6 +57,7 @@ struct Listener {
     bool tls = false;
     bool h2 = true;   // TLS: h2 offered through ALPN (the sites' `protocols`)
     bool h2c = false; // plain: the HTTP/2 preface accepted
+    bool h3 = false;  // TLS: HTTP/3 over QUIC on the same port number (UDP), phase I
 #ifdef AGENSIO_HAS_TLS
     std::shared_ptr<asio::ssl::context> ssl;  // the handshake starts here; SNI switches to the site's context
     std::map<std::string, std::shared_ptr<asio::ssl::context>> tls_contexts;  // by certificate path
@@ -139,6 +140,12 @@ private:
     void prepare_acme(const Config& cfg);  // storage tree and placeholder certificates for tls = "auto" sites
     void open_control();                   // the control socket (F0/F1), before the privilege drop
     void start_accept_control();
+    // HTTP/3 (phase I, docs/design-http3.md): a UDP endpoint per TLS listener that lists
+    // h3, on worker 0 in this slice; bound before the privilege drop like the acceptors.
+    void open_h3();
+    void start_h3();
+    void stop_h3();
+    struct H3Endpoints;
     json::Value status() override;
     json::Value sites() override;
     json::Value site(std::string_view name, bool& found) override;
@@ -183,6 +190,7 @@ private:
     std::unique_ptr<asio::steady_timer> restart_timer_;
     std::vector<std::unique_ptr<Worker>> workers_;
     std::vector<std::unique_ptr<Acceptor>> acceptors_;
+    std::unique_ptr<H3Endpoints> h3_;
     std::vector<std::unique_ptr<asio::executor_work_guard<asio::io_context::executor_type>>> guards_;
     std::vector<std::thread> threads_;  // joined in run(); not jthread: libc++ has it only as experimental
     std::atomic<unsigned> next_worker_{0};

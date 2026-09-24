@@ -26,6 +26,7 @@ struct Response {
     // The block is the tail: the fields the HTTP/2 encoder sends through its dynamic
     // table go beside it (content_type, content_encoding, vary; design 6.2.1).
     std::string_view prebuilt_h2;
+    std::string_view prebuilt_h3;       // the same tail as a QPACK section over the static table (HTTP/3)
     std::string_view content_type;      // with prebuilt_h2: the representation's type
     std::string_view content_encoding;  // with prebuilt_h2: "br" / "gzip" for a twin, else empty
     bool vary = false;                  // with prebuilt_h2: Vary: Accept-Encoding
@@ -54,6 +55,7 @@ struct Response {
         prebuilt_headers = {};
         prebuilt_terminated = false;
         prebuilt_h2 = {};
+        prebuilt_h3 = {};
         content_type = content_encoding = {};
         vary = false;
         headers.clear();

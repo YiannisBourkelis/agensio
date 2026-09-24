@@ -1,0 +1,32 @@
+starting benchmark...
+spawning thread #0: 16 total client(s). 51990 total requests
+spawning thread #1: 16 total client(s). 51990 total requests
+spawning thread #2: 16 total client(s). 51990 total requests
+spawning thread #3: 16 total client(s). 51990 total requests
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Certificate: ECDSA prime256v1 256 bits
+Negotiated Group: x25519
+Resumption: no
+Application protocol: h3
+progress: 10% done
+progress: 20% done
+progress: 30% done
+
+finished in 31.79s, 2393.46 req/s, 234.73MB/s
+requests: 207960 total, 76546 started, 76086 done, 76086 succeeded, 131874 failed, 131874 errored, 0 timeout
+status codes: 76546 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 7.29GB (7824392219) total, 7.30MB (7654600) headers (space savings 47.64%), 7.28GB (7816124355) data
+UDP datagram: 66183 sent, 6731370 received
+                 min         max         median      p95         p99         mean        sd         +/- sd
+request     :      657us     78.22ms      5.41ms      7.69ms     31.44ms      6.16ms      4.63ms    96.80%
+connect     :     1.39ms      9.64ms      8.65ms      9.50ms      9.64ms      7.13ms      2.75ms    70.31%
+TTFB        :     7.89ms     12.26ms     10.44ms     12.10ms     12.26ms     10.35ms      1.55ms    53.13%
+req/s       :       0.00     1754.19        5.62     1729.01     1754.19      490.12      770.26    71.88%
+min RTT     :        6us       993us       323us       839us       993us       365us       236us    70.31%
+smoothed RTT:       73us      7.27ms      1.04ms      6.92ms      7.27ms      2.23ms      2.34ms    78.13%
+packets sent:         10        3022         154        2894        3022     1036.11     1257.02    67.19%
+packets recv:        166      286705       15453      286675      286705   105177.41   127793.52    67.19%
+packets lost:          0           0           0           0           0        0.00        0.00   100.00%
+GRO packets :          1          54          54          54          54       39.81       18.72    67.74%

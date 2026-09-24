@@ -10,8 +10,8 @@ same machine, with the benchmark harness checked in so anyone can reproduce the 
 
 ## Status
 
-Pre-alpha `0.1.0-alpha.1` (2026-09-19): phases A-D, E1/E9, F0-F7, H1, H3 done; see
-`CHANGELOG.md`. Everything under "Architecture" below is what the code does now, not a
+Pre-alpha `0.1.0-alpha.1` (2026-09-19): phases A-D, E1/E9, F0-F7, H1, H3 done, G (HTTP/2)
+2026-09-23, the first slice of I (HTTP/3) 2026-09-24; see `CHANGELOG.md`. Everything under "Architecture" below is what the code does now, not a
 proposal. Before every tag: the suites (unit, integration, reload, pools, control, acme),
 the sanitizer and fuzz runs listed in `docs/security-control-plane.md`, and
 `bench/ab.sh` against the previous tag.
@@ -53,6 +53,16 @@ owning, no exceptions on the request path, no per-request allocation on the hot 
 `.clang-format` / `.clang-tidy` (`scripts/format.sh`, `scripts/lint.sh`). The agent skills
 `cpp-guidelines`, `perf-check` and `security-review-cpp` in `.claude/skills/` are the
 checklists to apply when writing, measuring and reviewing.
+
+## Protocol references
+
+`docs/rfc/` holds the text of every RFC a protocol layer implements (HTTP semantics and
+HTTP/1.1, HTTP/2 and HPACK, QUIC with its TLS and recovery documents, HTTP/3 and QPACK,
+CUBIC, DPLPMTUD), with `docs/rfc/README.md` mapping each to the code that implements it.
+Read the section there before writing or reviewing protocol code, cite it by number and
+section in comments and design notes (`RFC 9000 8.1`), and add the RFC first when a new
+protocol feature starts. The design documents (`docs/design-http2.md`,
+`docs/design-http3.md`) say what was decided and why; the RFCs say what is required.
 
 ## Working agreement with the agent
 
@@ -419,8 +429,47 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   h2spec on both listeners and an h2-library client in `tests/integration.sh`,
   `bench/h2/run.sh` against nginx and Caddy. Rule for every change here: the threat table
   of the design document and the MCP texts move with it; the h1 rows of the A/B stay flat.
+- **HTTP/3** (phase I, 2026-09-24, `src/quic/` and `src/http3/`, design `docs/design-http3.md`,
+  the RFCs in `docs/rfc/`): our own QUIC transport (RFC 9000, 9001, 9002) with OpenSSL 3.5's
+  QUIC TLS API for the handshake and its EVP ciphers for the packets, no QUIC library.
+  `quic/udp.hpp` is the worker's UDP endpoint: one socket per h3 listener read with
+  `recvmmsg` after `async_wait` with GRO on (Asio's own receive cannot see the GRO segment
+  size, measured in `bench/udp/`), the datagrams handed to their connections by destination
+  id, every connection's answers of a wake-up sent with one `sendmmsg`, consecutive
+  datagrams to a peer folded into GSO messages; the worker's one deadline heap and timer.
+  `quic/connection.hpp` is the connection, templated over the application: packets in,
+  the frames of each space, the handshake through `quic/tls.*`, acknowledgements and
+  losses (`quic/recovery.hpp`, RFC 9002 with NewReno), streams and credit
+  (`quic/stream.hpp`), the packetiser that builds and seals packets into the batch, idle
+  and close. `http3/connection.hpp` is HTTP/3 over it: the control and QPACK streams,
+  request streams through `http/request_assembly.hpp` (the one copy HTTP/2 uses too) and
+  `http/stream_pool.hpp`, the same dispatch as HTTP/2, answers as HEADERS and DATA frames
+  with the body referenced (a cache entry, a file read in 64 KB windows), request bodies
+  pulled from the QUIC stream's buffer so credit returns as the handler reads; QPACK
+  (`http3/qpack.*`) over the static table in this slice (capacity 0 advertised). `"h3"` in
+  `protocols` opens it on every TLS listener's port over UDP, worker 0 only for now.
+  Measured (`bench/httparena/profile-h3.sh`, the arena's h2load over QUIC, 64 connections
+  with 64 streams): 1.22 to 1.25M req/s on one worker at 0.61 us of CPU per request,
+  about 3,100 cycles at 3.19 instructions per cycle, twenty-one answers per datagram,
+  the kernel 4.2 % and libcrypto 3.5 % of the cycles, against the devbox's nginx at
+  2.32 us and 402 to 433k; in the arena's harness `baseline-h3` 1.77 to 1.81M req/s and
+  `static-h3` 98 to 108k on the one core that serves QUIC; one worker each on this box
+  (`bench/h3/run.sh`) the 1 KB file at 64 streams costs 0.90 us here, 3.27 on nginx,
+  26.6 on Caddy, and the 10 MB stream is nginx's row (1.95 against 2.72 ms). The top
+  item of the profile is the Huffman decoding of the request's literals (21 %), which
+  QPACK's dynamic table (I1c) removes; then several workers (I1b).
+  Rules for every change here: read the RFC section in `docs/rfc/` first and cite it, keep
+  the threat table of the design document and the MCP texts in step, the h1 and h2 rows
+  of `bench/ab.sh <ref> -2` flat, and `bench/ab.sh <ref> -3` for the h3 rows. Loopback
+  loses packets when a burst overflows the client's receive buffer (the 100 KB row at
+  ten streams), so every transport change is also run there; the tracing build
+  (`-DAGENSIO_QUIC_TRACE=ON`, every packet on stderr with a timestamp) loses datagrams on
+  purpose with `AGENSIO_QUIC_DROP=N` (every Nth) or `AGENSIO_QUIC_DROP_TAIL=1` (one final
+  packet of a response), the way the probe-size bug of 2026-09-24 was found.
 - **Not yet**: directory listing, TLS-ALPN-01 / DNS-01 (wildcards), OCSP stapling, RFC 9218
-  priorities, CONNECT over h2, HTTP/2 to origins.
+  priorities, CONNECT over h2, HTTP/2 to origins; in HTTP/3 (design-http3 I1b to I4):
+  several workers, Retry, stateless reset, key update, migration, path MTU discovery,
+  0-RTT, ECN, `alt-svc`, streamed upstream bodies, QPACK's dynamic table.
 
 ## Performance notes (measured, keep current)
 

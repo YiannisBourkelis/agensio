@@ -951,14 +951,45 @@ misbehaviour counters against every published attack class up to the 2026 HTTP/2
 - [ ] Checkpoint: runs a real site for a week; documented ops guide.
 
 ### Phase I. HTTP/3  `[ ]`
-- [ ] I1 UDP listener per worker (one worker first); ngtcp2 with OpenSSL 3.5+ QUIC TLS
-      API; connection ids, retry tokens, timers on our loop.
-- [ ] I2 nghttp3 session per connection creating `Stream`s exactly like h2.
-- [ ] I3 `Alt-Svc` advertising from h1/h2; 0-RTT policy (only idempotent GET);
-      connection migration; multi-worker via SO_REUSEPORT + connection-id routing (Linux
-      eBPF) later.
-- [ ] I4 Benchmark with `h2load --npn-list h3` or `quiche` client vs nginx `quic`.
-- [ ] Checkpoint: browsers connect over h3; h1/h2 numbers unchanged.
+Design: `docs/design-http3.md` (accepted 2026-09-24): our own QUIC transport, HTTP/3 and
+QPACK, OpenSSL 3.5's QUIC TLS API and primitives for the crypto, the code HTTP/2 and HTTP/3
+share lifted into `src/http/` first. The RFCs are in `docs/rfc/`.
+- [x] I0 The lifts (2026-09-24): the field codec (Huffman, integers, the dynamic table
+      with its rules-once marks), the request assembler and the stream pool into
+      `src/http/`; HTTP/2 rebuilt on them, `ab.sh -2` 0.96 to 1.04 on every row. The body
+      source and the budgets stay per protocol until HTTP/3 needs the same (I1b, I2).
+- [x] I1 first slice, a GET over HTTP/3 on one worker (2026-09-24, so the benchmark and the
+      profile run early): the UDP endpoint (worker 0; `async_wait`, `recvmmsg` with GRO,
+      one `sendmmsg` with GSO per wake-up, measured in `bench/udp/`), packets, frames,
+      transport parameters, keys and the AEAD over OpenSSL 3.5's QUIC TLS API, the
+      handshake with address validation, acknowledgements, loss recovery and NewReno,
+      streams with flow control, the packetiser, idle and close, the deadline heap;
+      HTTP/3 framing, the control and QPACK streams, QPACK over the static table, the
+      request path through the shared assembler, answers with memory and file bodies,
+      request bodies pulled from the QUIC buffer; `"h3"` in `protocols`; the RFC 9001
+      vectors and the codecs in the unit tests, curl over HTTP/3 in the integration
+      suite; 1.22 to 1.25M req/s on one worker under the arena's `baseline-h3` load at
+      0.61 us of CPU per request (`bench/httparena/profile-h3.sh`), 1.77 to 1.81M and 98
+      to 108k on the arena's two rows in its harness, `ab.sh -2 -3` and both suites
+      green, three corrections found by the sanitizer and by loopback's own packet loss.
+- [ ] I1b The rest of the transport: per-worker sockets with the worker byte in the
+      connection id and the reuseport program, Retry and tokens, stateless reset,
+      NEW_CONNECTION_ID replacements, key update, path validation on an address change,
+      path MTU discovery, streamed upstream bodies (chunks kept until acknowledged), the
+      body source and budgets lifted to `src/http/`, the write-stall and body timeouts
+      per stream, GOAWAY on reload and shutdown, `alt-svc`, `http3.*` keys.
+- [ ] I1c QPACK's dynamic table: the decoder with the encoder and decoder streams and
+      the rules-once marks (the profile's first item: a client Huffman-codes `:path`,
+      `:authority` and `user-agent` on every request while the capacity is 0), then our
+      dynamic head over the encoder stream.
+- [ ] I2 Conformance and hardening: the QUIC interop runner, the loss proxy, the attack
+      suite, the fuzzers, the security page's HTTP/3 section, `server_status` and `health`.
+- [ ] I3 Performance: the levers of design 8.2 measured against nginx and Caddy, the
+      dynamic QPACK head, CUBIC and pacing, memory per connection, the arena's two HTTP/3
+      rows subscribed and run.
+- [ ] I4 Extras: 0-RTT as an opt-in for GET and HEAD, NEW_TOKEN, ECN, active migration,
+      version 2, the `gateway-h3` entry.
+- [ ] Checkpoint: browsers connect over h3; h1/h2 numbers unchanged; the interop table clean.
 
 ### Principles confirmed by user research (`docs/web-server-feedback.md`)
 - Everything ships in the one open build; no feature is held back for a paid tier. The

@@ -1,5 +1,91 @@
 # Changelog
 
+## 0.1.0-alpha.22 (unreleased)
+
+- **HTTP/3 over our own QUIC transport, the first slice** (phase I, `docs/design-http3.md`,
+  accepted 2026-09-24): `src/quic/` (packets, frames, transport parameters, the keys and
+  the AEAD over OpenSSL 3.5's QUIC TLS API and EVP, RFC 9002 loss detection and NewReno,
+  streams with flow control, the packetiser that fills a worker-wide send batch, idle and
+  close) and `src/http3/` (QPACK over the static table, the frames, the control and QPACK
+  streams, request streams turned into `Stream`s through the same request assembler,
+  dispatcher and pool as HTTP/2, answers as HEADERS and DATA frames with memory and file
+  bodies, request bodies as the pull source with the bytes waiting in the QUIC stream's
+  buffer until the handler takes them). `"h3"` in `protocols` opens QUIC on every TLS
+  listener's port over UDP, on worker 0 in this slice; the UDP endpoint reads with
+  `recvmmsg` after `async_wait` with GRO on and sends the wake-up's answers of every
+  connection with one `sendmmsg`, consecutive datagrams to a peer folded into GSO
+  messages. Measured first (`bench/udp/run.sh`, `bench/results/udp-20260924-140715.md`):
+  the textbook one-datagram-per-completion Asio loop costs 1.45 to 1.60 us per datagram,
+  batching the syscalls a tenth less, GRO in and GSO out 0.55 to 0.64 us, and Asio's own
+  receive cannot see the GRO segment size, which decides the loop. Under the arena's
+  `baseline-h3` load (the arena's own h2load over QUIC, 64 connections with 64 streams
+  each, `bench/httparena/profile-h3.sh`): 1.22 to 1.25M req/s on one worker at 0.61 us of
+  server CPU per request, about 3,100 cycles at 3.19 instructions per cycle, twenty-one
+  answers per datagram, the kernel 4.2 % of the cycles and libcrypto 3.5 %; the devbox's
+  nginx 1.26 with its http_v3 module does 402 to 433k req/s at 2.32 us on the same load
+  serving a two-byte file with one worker. In the arena's own harness (`local.sh`, twelve
+  workers pinned, one of them serving QUIC in this slice): `baseline-h3` 1.77 to 1.81M
+  req/s and `static-h3` 98 to 108k on that one core, no failed request; the board's nginx
+  entry does 4.85M and 361k on 31 and 50 cores. Three servers with one worker each on
+  this box (`bench/h3/run.sh`, `h3-20260924-162836.md`): the 1 KB file at 64 connections
+  and 64 streams agensio 0.90 us and 1.03M req/s, nginx 3.27 us and 305k, Caddy 26.6 us
+  and 38k; at ten streams 1.05 / 2.70 / 26.8 us; the 100 KB file at ten streams 24.8 /
+  31.0 / 121 us; the 10 MB stream is nginx's row (1.95 ms against our 2.72 ms per
+  response: the file's 64 KB windows are read and copied per packet). `ab.sh
+  v0.1.0-alpha.21 -2 -3` (`ab-20260924-162251.md`): every h1 and h2 row 0.92 to 1.01,
+  the h3 rows 4.4 us at one stream per connection, 1.05 at ten, 0.88 at sixty-four,
+  24.7 for the 100 KB file at ten. Open: two of 4.5 million requests stalled at 256
+  connections with ten streams (the client saw a few of its own packets lost; the
+  next step's loss injection on the receive side targets it). The profile's top item is the Huffman decoding of the
+  request's literals (23 %): with the dynamic table at capacity 0 a client sends `:path`,
+  `:authority` and `user-agent` as Huffman literals on every request where HPACK indexed
+  them after the first, which is the QPACK step of the design's I3. Tests: the RFC 9001
+  appendix A vectors (the client Initial opened, the server Initial and the ChaCha20
+  packet sealed byte for byte), varints, ranges, frames, transport parameters, the
+  deadline heap, the recovery's loss and RTT arithmetic, QPACK's static encoding and
+  decoding; in the integration suite a curl over HTTP/3 through every static answer
+  (bodies, the streamed 10 MB file, HEAD, 404, 405 with a body, 301, 304, 206, the
+  pre-compressed twin, one connection for several requests, the access log's
+  `HTTP/3.0`) when the binary and curl have it; the sanitizer suite, run over the same
+  rows and under the QUIC load, caught the endpoint freeing a connection while it still
+  walked that connection's own id list (every idle timeout; the release build survived
+  it silently), fixed before the slice was measured again. Two more findings from the
+  first rows: a response packet carried no acknowledgement of the request it answered
+  (the delayed-ACK rule waited for a second packet or 25 ms), so at one stream per
+  connection the client's stream could not close until an ACK-only packet followed and
+  the row ran at 2,575 req/s over 64 connections; the pending acknowledgement now rides
+  on any packet sent for another reason (RFC 9000 13.2.1) and the row does 212k, with
+  the 100 KB row's failures partly with it. And the arena's harness resolves `localhost`
+  to `::1`, which QUIC cannot fall back from the way TCP does: the endpoint on a `[::]`
+  address is dual-stack like the acceptors, and the entry's TLS site listens there. Two
+  more came from the 100 KB row at ten streams, whose bursts overflow the client's
+  receive buffer, the loss loopback does have: a response whose last packet is lost is
+  recovered only by a probe, and our probe was a one-byte PING behind a one-byte packet
+  number, shorter than header protection can sample (RFC 9001 5.4.2), so the client
+  could not unprotect it and never acknowledged; such packets are padded to the minimum
+  now, and the tracing build (`-DAGENSIO_QUIC_TRACE=ON`) can lose every Nth datagram or
+  one final packet on purpose (`AGENSIO_QUIC_DROP=N`, `AGENSIO_QUIC_DROP_TAIL=1`) to
+  exercise loss detection, probes and retransmission on loopback; and a send batch that
+  filled during a wake-up left the connections behind it without a send until their idle
+  timeout, so it goes out when full and fills again. The arena entry subscribes
+  `baseline-h3` and `static-h3`. Not in this slice (I1b to I4 of the design): streamed upstream bodies
+  over h3, Retry, stateless reset, key update, path validation, path MTU discovery,
+  0-RTT, ECN, `alt-svc`, the per-worker sockets.
+- **The code HTTP/2 and HTTP/3 share lifted into `src/http/`** first, as a pure refactor
+  (design-http3 section 4): the Huffman code, the prefixed integers and the dynamic
+  table with its rules-once marks (`field_codec`), the request assembler (`request_assembly`),
+  the stream table and pool (`stream_pool`); HTTP/2 rebuilt on them, `ab.sh v0.1.0-alpha.21 -2`
+  0.96 to 1.04 on every row (`ab-20260924-142634.md`), the suites unchanged. The table
+  generator also emits QPACK's 99-entry static table.
+- **The RFCs the protocol layers implement are in `docs/rfc/`** as text (HTTP semantics
+  and HTTP/1.1, HTTP/2 and HPACK, QUIC with its TLS and recovery documents, HTTP/3 and
+  QPACK, CUBIC, DPLPMTUD), with an index mapping each to the code; CLAUDE.md asks for the
+  section to be read and cited.
+- Benchmarks: `bench/h3/run.sh` (the HTTP/3 rows against nginx and Caddy with an h2load
+  built with QUIC; `bench/docker/Dockerfile.devbox` now carries the devbox recipe with
+  one under `/opt/nghttp2`), `bench/ab.sh -3` (four h3 rows; a base without h3 gets
+  none), `bench/httparena/profile-h3.sh`, `bench/udp/`.
+
 ## 0.1.0-alpha.21 (2026-09-24)
 
 - **HTTP/2 per-request cost, in three measured steps** on the arena's HTTP/2 baseline

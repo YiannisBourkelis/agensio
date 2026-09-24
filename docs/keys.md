@@ -38,12 +38,12 @@ section of `docs/configuration.md` that explains the key.
 
 | key | type | default | meaning | applies | via | doc |
 |---|---|---|---|---|---|---|
-| `protocols` | list of "h2", "h1", "h2c" | the [server] list | This site's listeners' protocols when they differ from the server's (a TLS port kept at HTTP/1.1 next to one offering h2); sites sharing an address must agree. | reload | site file | 16 |
+| `protocols` | list of "h2", "h1", "h2c", "h3" | the [server] list | This site's listeners' protocols when they differ from the server's (a TLS port kept at HTTP/1.1 next to one offering h2, or h3 on one site's port); sites sharing an address must agree; "h3" needs a TLS site. | reload | site file | 16 |
 ## `[server]`
 
 | key | type | default | meaning | applies | via | doc |
 |---|---|---|---|---|---|---|
-| `protocols` | list of "h2", "h1", "h2c" | ["h2", "h1"] | What TLS listeners offer through ALPN, in order of preference ("http/1.1" is accepted for "h1"); "h2c" in the list also accepts prior-knowledge HTTP/2 on plain listeners (benchmarks and backends; browsers never use it). ["h1"] alone switches HTTP/2 off, for instance during an incident. | reload | file | 16 |
+| `protocols` | list of "h2", "h1", "h2c", "h3" | ["h2", "h1"] | What TLS listeners offer through ALPN, in order of preference ("http/1.1" is accepted for "h1"); "h2c" in the list also accepts prior-knowledge HTTP/2 on plain listeners (benchmarks and backends; browsers never use it); "h3" opens HTTP/3 over QUIC on every TLS listener's port number (UDP; needs a build with OpenSSL 3.5 on Linux; one worker serves it in this phase). ["h1"] alone switches HTTP/2 off, for instance during an incident. | reload | file | 16 |
 ## `http2 = {}`
 
 | key | type | default | meaning | applies | via | doc |

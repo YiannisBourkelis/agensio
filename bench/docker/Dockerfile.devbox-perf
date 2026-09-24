@@ -1,0 +1,7 @@
+# The devbox with the profiling tools (perf, strace, valgrind) for bench/h2/profile.sh,
+# bench/httparena/profile-*.sh; run it with --cap-add SYS_ADMIN --cap-add PERFMON --user root.
+#   docker build -t agensio-devbox-perf -f bench/docker/Dockerfile.devbox-perf bench/docker
+FROM agensio-devbox
+USER root
+RUN apt-get update && apt-get install -y linux-perf valgrind strace && rm -rf /var/lib/apt/lists/*
+USER dev

@@ -138,3 +138,18 @@ constants at the top of `src/http2/connection.hpp` and derive from `max_header_s
 record: `fuzz_hpack` (decoder, persistent decoder, encoder round trip, Huffman round trip).
 The attack suite (`tests/h2-attacks.py`) and the differential fuzz against nghttp2 are
 step G3 of the roadmap.
+
+## HTTP/3 (phase I)
+
+The QUIC transport and the HTTP/3 layer (`src/quic/`, `src/http3/`) follow the threat table
+of `docs/design-http3.md` section 9: the anti-amplification limit before the address is
+validated, Initial packets under 1,200 bytes dropped, the packet number spaces' frame
+rules, flow-control and stream limits enforced as FLOW_CONTROL_ERROR and STREAM_LIMIT_ERROR,
+CRYPTO data bounded per level, an acknowledgement of a packet never sent closing the
+connection, the QPACK table at capacity 0 in this slice so no decoder state can be
+grown, control-stream rules of RFC 9114 (SETTINGS first, one of each critical stream,
+request frames refused on control streams), unread bodies drained up to 64 KB then
+STOP_SENDING. The rows of that table that need work not yet built (Retry and tokens,
+stateless reset, key update, path validation, the glitch and reset budgets over QUIC), the
+attack suite, the fuzzers and the interop runner are the design's I1b and I2; until they
+land, `"h3"` is off by default and this page's HTTP/3 section is this paragraph.

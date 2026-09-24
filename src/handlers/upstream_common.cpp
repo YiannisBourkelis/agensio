@@ -17,6 +17,7 @@ void upstream_error(Stream& s, int status, std::string_view retry_after) {
     r.head = s.request.method == Method::head;
     r.prebuilt_headers = page.headers;
     r.prebuilt_h2 = page.h2_headers;
+    r.prebuilt_h3 = page.h3_headers;
     r.content_type = "text/html; charset=utf-8";
     if (!retry_after.empty()) r.headers.add("Retry-After", retry_after);
     r.body = MemoryBody{page.body};

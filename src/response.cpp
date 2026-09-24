@@ -1,6 +1,7 @@
 #include "response.hpp"
 
 #include "http2/hpack.hpp"
+#include "http3/qpack.hpp"
 
 #include <map>
 
@@ -72,6 +73,7 @@ const std::map<int, ErrorPage>& pages() {
             p.headers =
                 "Content-Type: text/html; charset=utf-8\r\nContent-Length: " + std::to_string(p.body.size()) + "\r\n";
             hpack::append_field(p.h2_headers, "content-length", std::to_string(p.body.size()));  // the type goes through the connection's table
+            qpack::append_field(p.h3_headers, "content-length", std::to_string(p.body.size()));
             out.emplace(code, std::move(p));
         }
         return out;

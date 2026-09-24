@@ -1221,7 +1221,7 @@ http2 = { max_concurrent_streams = 128 }
 
 | key | default | meaning |
 |---|---|---|
-| `protocols` | `["h2", "h1"]` | what TLS listeners offer through ALPN, in order of preference (Caddy's names; `"http/1.1"`, the ALPN identifier, is accepted for `"h1"`). `"h2c"` in the list makes plain listeners accept HTTP/2 with prior knowledge (the connection preface; `curl --http2-prior-knowledge`, `h2load`, a backend behind a proxy). Browsers never use h2c, so it is off by default. `"h3"` arrives with phase I. |
+| `protocols` | `["h2", "h1"]` | what TLS listeners offer through ALPN, in order of preference (Caddy's names; `"http/1.1"`, the ALPN identifier, is accepted for `"h1"`). `"h2c"` in the list makes plain listeners accept HTTP/2 with prior knowledge (the connection preface; `curl --http2-prior-knowledge`, `h2load`, a backend behind a proxy). Browsers never use h2c, so it is off by default. `"h3"` adds HTTP/3 over QUIC on every TLS listener's port number, over UDP (section 17). |
 | `http2.max_concurrent_streams` | 128 | streams a client may have open at once on one connection (`SETTINGS_MAX_CONCURRENT_STREAMS`, nginx's default); a stream beyond it is refused, the connection stays |
 | `protocols` on a `[[site]]` | the server's | the same list for this site's listeners only: `protocols = ["h1"]` on a TLS site keeps that port at HTTP/1.1 while another offers h2, `["h2c", "h1"]` on a plain site accepts the preface there alone. Every site on an address must list the same, or `-t` refuses the file. |
 
@@ -1248,3 +1248,43 @@ Requests over HTTP/2 are logged as `"GET /path HTTP/2.0"` (`"proto":"HTTP/2.0"` 
 and PHP sees `SERVER_PROTOCOL=HTTP/2.0`. `agensio ctl status` names the protocols of each
 listener. Server push is not implemented (browsers removed it), nor the RFC 7540
 priority tree (deprecated; PRIORITY frames are ignored), nor `Upgrade: h2c`.
+
+## 17. HTTP/3
+
+HTTP/3 (RFC 9114) over QUIC (RFC 9000) is agensio's own transport, with OpenSSL 3.5's
+QUIC TLS API for the handshake and its ciphers for the packets; the design, the
+comparison with the other servers and the threat model are in `docs/design-http3.md`,
+the specifications in `docs/rfc/`. It is on where `protocols` lists `"h3"`, server-wide or
+on a TLS site, and then every TLS listener of that list also answers on the same port
+number over UDP:
+
+```toml
+[server]
+protocols = ["h2", "h1", "h3"]   # h2 and h1 over TCP through ALPN, h3 over QUIC on the same ports
+```
+
+What it needs from the host: UDP open on the listener's port in the firewall (the TCP
+port alone gives a client nothing to reach), a build with OpenSSL 3.5 or later on Linux
+(`-t` refuses `"h3"` on any other, so a configuration file moves between hosts
+predictably), and, for a browser to switch, an `alt-svc` field (a later step; h2load and
+curl choose `--alpn-list=h3` / `--http3-only` directly). In this phase one worker serves
+every HTTP/3 connection of a listener; the per-worker sockets with connection ids that
+name their worker come next (design 6.1).
+
+Every HTTP/3 limit derives from keys you already know:
+
+| HTTP/3 limit | comes from | value at the defaults |
+|---|---|---|
+| streams a client may have open on one connection (`initial_max_streams_bidi`, then `MAX_STREAMS` as they close) | `http2.max_concurrent_streams` | 128 |
+| the field section limit (`SETTINGS_MAX_FIELD_SECTION_SIZE`) and a request stream's first window | `max_header_size` | 16 KB |
+| the window a request body gets, and the connection's | `max_body_size`, or the site's own | up to 1 MB |
+| the idle timeout (`max_idle_timeout`) and the handshake's bound | `idle_timeout` | 15 s |
+| a body announced but not arriving | `body_timeout` | 60 s |
+| the QPACK dynamic table the client may use (`SETTINGS_QPACK_MAX_TABLE_CAPACITY`) | fixed in this phase | 0 (static table and literals; the dynamic table is phase I3) |
+| the datagram size | fixed until the MTU probe (I1b) | 1,200 bytes |
+
+Requests over HTTP/3 are logged as `"GET /path HTTP/3.0"` and PHP sees
+`SERVER_PROTOCOL=HTTP/3.0`; `agensio ctl status` lists `h3` among a listener's protocols.
+Not yet (the design's I1b to I4): request bodies from unbuffered upstreams over h3,
+Retry and address-validation tokens, stateless reset, key update, path validation and
+migration, path MTU discovery, 0-RTT, ECN, `alt-svc`, several workers.

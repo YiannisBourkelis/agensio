@@ -33,7 +33,7 @@ STAMP=$(date +%Y%m%d-%H%M%S); RAW="$BENCH/results/raw/h2-$STAMP"; mkdir -p "$RAW
 OUT="$BENCH/results/h2-$STAMP.md"
 
 # ---- configs (as bench/run.sh) ----
-sed "s#@WORKERS@#$WORKERS#g; s#@BENCH@#$BENCH#g; s#@ACCESS_LOG@##g; s#@SENDFILE_MIN@#48KB#g" "$BENCH/agensio.toml" > "$BENCH/tmp/agensio-h2.toml"
+sed "s#@WORKERS@#$WORKERS#g; s#@BENCH@#$BENCH#g; s#@ACCESS_LOG@##g; s#@SENDFILE_MIN@#48KB#g; s#@H3@##g" "$BENCH/agensio.toml" > "$BENCH/tmp/agensio-h2.toml"
 NGINX_WORKERS=$WORKERS; [ "$WORKERS" = 0 ] && NGINX_WORKERS=auto
 sed "s#@WORKERS@#$NGINX_WORKERS#g; s#@BENCH@#$BENCH#g" "$BENCH/nginx.conf" > "$BENCH/tmp/nginx-h2.conf"
 

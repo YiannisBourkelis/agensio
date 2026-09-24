@@ -29,6 +29,8 @@
 #include "core/worker_state.hpp"
 #include "handlers/dispatch.hpp"
 #include "http2/frame.hpp"
+#include "http/request_assembly.hpp"
+#include "http/stream_pool.hpp"
 #include "http2/hpack.hpp"
 #include "http2/settings.hpp"
 #include "http2/stream.hpp"
@@ -177,7 +179,7 @@ public:
         asio::error_code ec;
         timer_.cancel();
         writer_.reset();
-        for (auto& s : active_) {
+        for (auto& s : streams_.all()) {
             ++s->gen;
             if (s->upstream) {
                 s->upstream->cancel();
@@ -271,7 +273,7 @@ private:
     // what ten thousand sockets cost, not ten thousand times 40 KB.
     void shed() {
         ++worker_.sheds;
-        pool_.clear();
+        streams_.shed();
         std::string().swap(decode_scratch_);
         writer_.shed();
         if (read_pending_ && !shedding_ && in_len_ == 0 && !in_.empty() && !linger_ && !closing_after_write_) {
@@ -393,7 +395,7 @@ private:
             if (id == setting_initial_window_size && value != old_window) {
                 // Every stream's window moves by the difference (RFC 9113 6.9.2).
                 const std::int64_t delta = static_cast<std::int64_t>(value) - static_cast<std::int64_t>(old_window);
-                for (auto& s : active_) {
+                for (auto& s : streams_.all()) {
                     const std::int64_t w = static_cast<std::int64_t>(s->send_window) + delta;
                     if (w > kMaxWindow) return connection_error(ErrorCode::flow_control_error, "window overflow");
                     s->send_window = static_cast<std::int32_t>(w);
@@ -434,7 +436,7 @@ private:
             if (w > kMaxWindow) return connection_error(ErrorCode::flow_control_error, "connection window overflow");
             writer_.set_conn_window(static_cast<std::int32_t>(w));
             if (inc < 1024) glitch("WINDOW_UPDATE below 1 KB");
-            for (auto& s : active_)
+            for (auto& s : streams_.all())
                 if (s->responded && !s->finished && s->send_window > 0) writer_.enqueue(*s);
             return;
         }
@@ -598,7 +600,7 @@ private:
     // ---- streams ----
 
     H2Stream* find(std::uint32_t id) noexcept {
-        for (auto& s : active_)
+        for (auto& s : streams_.all())
             if (s->id == id) return s.get();
         return nullptr;
     }
@@ -616,38 +618,31 @@ private:
             send_rst(id, ErrorCode::refused_stream, "");
             return nullptr;
         }
-        if (active_.size() >= live_->http2.max_concurrent_streams) {
-            for (auto& s : active_) {  // a stream kept only to drain its body gives its slot up
+        if (streams_.active() >= live_->http2.max_concurrent_streams) {
+            for (auto& s : streams_.all()) {  // a stream kept only to drain its body gives its slot up
                 if (s->state != StreamState::half_closed_local) continue;
                 send_rst(s->id, ErrorCode::no_error, "response complete, slot needed");
                 close_stream(*s);
                 break;
             }
         }
-        if (active_.size() >= live_->http2.max_concurrent_streams) {
+        if (streams_.active() >= live_->http2.max_concurrent_streams) {
             send_rst(id, ErrorCode::refused_stream, "over SETTINGS_MAX_CONCURRENT_STREAMS");
             glitch("stream over the concurrency limit");
             count_reset();
             return nullptr;
         }
         refresh_generation();
-        std::unique_ptr<H2Stream> s;
-        if (!pool_.empty()) {
-            s = std::move(pool_.back());
-            pool_.pop_back();
-        } else {
-            s = std::make_unique<H2Stream>();
-            s->body_source.owner = this;
-            s->body_source.stream = s.get();
-        }
-        s->id = id;
-        s->state = StreamState::open;
-        s->send_window = static_cast<std::int32_t>(peer_.initial_window_size);
-        s->recv_grant = static_cast<std::int32_t>(kDefaultWindow);
-        s->since = clock_now();
-        s->slot = active_.size();
-        H2Stream* raw = s.get();
-        active_.push_back(std::move(s));
+        H2Stream& s = streams_.take([this](H2Stream& fresh) {
+            fresh.body_source.owner = this;
+            fresh.body_source.stream = &fresh;
+        });
+        s.id = id;
+        s.state = StreamState::open;
+        s.send_window = static_cast<std::int32_t>(peer_.initial_window_size);
+        s.recv_grant = static_cast<std::int32_t>(kDefaultWindow);
+        s.since = clock_now();
+        H2Stream* raw = &s;
         ++streams_opened_;
         // The last stream this connection takes: served, then a GOAWAY naming it and the
         // close (the frame goes out after the answer, so a client never has to read a
@@ -682,80 +677,27 @@ private:
         release(s);
     }
 
-    void release(H2Stream& s) {
-        const std::size_t i = s.slot;
-        if (i >= active_.size() || active_[i].get() != &s) return;  // not in the table
-        std::unique_ptr<H2Stream> p = std::move(active_[i]);
-        active_[i] = std::move(active_.back());
-        active_.pop_back();
-        if (i < active_.size()) active_[i]->slot = i;
-        p->reset();
-        // Released streams stay with their buffers (arena, chunk) for the next requests, as
-        // many as the client may have open at once: at its peak the connection held that
-        // many anyway, and an idle connection sheds the pool (G2). Below the limit, a
-        // client that keeps a hundred streams busy would construct and free a stream
-        // object per request (measured: a fifth of the CPU of a small answer).
-        if (pool_.size() < live_->http2.max_concurrent_streams) pool_.push_back(std::move(p));
-    }
+    // Out of the table and, reset, into the pool for the next request (http/stream_pool.hpp).
+    void release(H2Stream& s) { streams_.release(s, live_->http2.max_concurrent_streams); }
 
     // ---- the request ----
 
     void begin_request(H2Stream& s) {
         Request& req = s.stream.request;
-        struct Seen {
-            std::string_view method, scheme, path, authority;
-            unsigned pseudo = 0;
-            bool regular = false, bad = false, overflow = false, te_bad = false, host_field = false;
-            std::string_view host;
-            unsigned cookies = 0;
-            std::size_t cookie_bytes = 0;
-            const char* reason = "";
-        } seen;
+        http::RequestSeen seen;
         // Decoded into the connection's scratch, which is reserved once and stays hot, then
         // moved into the stream's arena at its exact size: a stream reserved the whole
         // header limit (16 KB) for itself before, and a client with a hundred streams in
         // flight walked a hundred cold arenas per burst (2026-09-24: 647 MiB resident on
         // the arena's baseline-h2 against h2o's 65, and the twelve-worker row 0.87 of h2o
-        // while one core did 1.27 of it).
+        // while one core did 1.27 of it). The rules are http/request_assembly.hpp's, the
+        // one copy HTTP/3 uses too.
         std::string& scratch = decode_scratch_;
         scratch.clear();
-        const auto r = decoder_.decode(block_, scratch, live_->max_header_size, [&](std::string_view n, std::string_view v, hpack::Decoder::Origin o) {
-            if (!n.empty() && n.front() == ':') {
-                if (seen.regular) { seen.bad = true; seen.reason = "pseudo-header after a regular field"; return true; }
-                std::string_view* slot = n == ":method" ? &seen.method : n == ":scheme" ? &seen.scheme
-                                       : n == ":path" ? &seen.path : n == ":authority" ? &seen.authority : nullptr;
-                if (!slot) { seen.bad = true; seen.reason = "unknown or response pseudo-header"; return true; }
-                if (!slot->empty() || (slot == &seen.authority && seen.pseudo & 8)) { seen.bad = true; seen.reason = "duplicate pseudo-header"; return true; }
-                *slot = v;
-                seen.pseudo |= slot == &seen.method ? 1 : slot == &seen.scheme ? 2 : slot == &seen.path ? 4 : 8;
-                return true;
-            }
-            seen.regular = true;
-            // The field rules run once per dynamic-table entry (its mark) and not for the
-            // syntax of a static pair; the connection-specific rule still runs for those
-            // (transfer-encoding is in the static table).
-            if (!(o.checked && *o.checked)) {
-                if (!o.static_table) {
-                    if (!fields::valid_name(n)) { seen.bad = true; seen.reason = "field name not a lower-case token"; return true; }
-                    if (!fields::valid_value(v)) { seen.bad = true; seen.reason = "field value with CR, LF, NUL or edge whitespace"; return true; }
-                }
-                if (fields::connection_specific(n)) { seen.bad = true; seen.reason = "connection-specific field"; return true; }
-                if (n == "te" && v != "trailers") { seen.bad = true; seen.reason = "te other than trailers"; return true; }
-                if (o.checked) *o.checked = 1;
-            }
-            if (n == "host") {
-                if (seen.host_field) { seen.bad = true; seen.reason = "duplicate host"; return true; }
-                seen.host_field = true;
-                seen.host = v;
-            }
-            if (n == "cookie") {
-                ++seen.cookies;
-                seen.cookie_bytes += v.size() + 2;
-                if (seen.cookies > 1) return true;  // joined below
-            }
-            if (!req.headers.add(n, v)) seen.overflow = true;
-            return true;
-        });
+        const auto r = decoder_.decode(block_, scratch, live_->max_header_size,
+                                       [&](std::string_view n, std::string_view v, hpack::Decoder::Origin o) {
+                                           return http::sink_field(seen, req, n, v, o);
+                                       });
         switch (r) {
             case hpack::Decoder::Result::ok: break;
             case hpack::Decoder::Result::malformed: return connection_error(ErrorCode::compression_error, "HPACK error in the request");
@@ -764,62 +706,12 @@ private:
         }
         s.arena.assign(scratch);  // the capacity a pooled stream keeps is what its requests need
         req.headers.rebase(scratch.data(), scratch.size(), s.arena.data());
-        for (std::string_view* v : {&seen.method, &seen.scheme, &seen.path, &seen.authority, &seen.host})
-            Headers::rebase_view(*v, scratch.data(), scratch.size(), s.arena.data());
+        seen.rebase(scratch.data(), scratch.size(), s.arena.data());
         if (seen.overflow) return fail_stream(s, 431);
-        if (!seen.bad) {
-            if (seen.method.empty() || seen.scheme.empty() || seen.path.empty()) seen.bad = true, seen.reason = "missing :method, :scheme or :path";
-            else if (seen.path == "*" ? seen.method != "OPTIONS" : seen.path.front() != '/') seen.bad = true, seen.reason = ":path not absolute";
-            else if (seen.authority.empty() && seen.host.empty()) seen.bad = true, seen.reason = "no :authority and no host";
-            else if (!seen.authority.empty() && !seen.host.empty() && seen.authority != seen.host) seen.bad = true, seen.reason = ":authority and host differ";
-        }
-        if (seen.bad) {
-            stream_error(s, ErrorCode::protocol_error, seen.reason);
-            return;
-        }
-        if (seen.cookies > 1) {  // RFC 9113 8.2.3: one field, "; " between the crumbs
-            s.cookie.clear();
-            s.cookie.reserve(seen.cookie_bytes);
-            Headers joined;
-            for (const HeaderField& f : req.headers) {
-                if (f.name != "cookie") { joined.add(f.name, f.value); continue; }
-                if (!s.cookie.empty()) s.cookie.append("; ");
-                s.cookie.append(f.value);
-            }
-            // The crumbs beyond the first were never added; every cookie value collected here.
-            req.headers = joined;
-            req.headers.add("cookie", s.cookie);
-        }
-        req.method_name = seen.method;
-        if (!parse_method(seen.method, req.method)) req.method = Method::other;
-        req.target = seen.path;
-        req.host = seen.authority.empty() ? seen.host : seen.authority;
-        if (!seen.host_field) req.headers.add("host", req.host);  // handlers see HTTP/1's shape (HTTP_HOST)
-        req.version_minor = 1;
-        req.protocol = "HTTP/2.0";
-        req.keep_alive = true;
-        req.length = 1;  // "a request exists" for the log on close
-        for (const HeaderField& f : req.headers) {
-            switch (f.name.size()) {  // the fields of interest, by length first
-                case 5: if (f.name == "range") req.range = f.value; break;
-                case 8: if (f.name == "if-range") req.if_range = f.value; break;
-                case 13: if (f.name == "if-none-match") req.if_none_match = f.value; break;
-                case 15: if (f.name == "accept-encoding") req.accept_encoding = f.value; break;
-                case 17: if (f.name == "if-modified-since") req.if_modified_since = f.value; break;
-                case 14:
-                    if (f.name == "content-length") {
-                        std::uint64_t n = 0;
-                        if (f.value.empty() || f.value.size() > 19) return stream_error(s, ErrorCode::protocol_error, "content-length not a number");
-                        for (const char c : f.value) {
-                            if (c < '0' || c > '9') return stream_error(s, ErrorCode::protocol_error, "content-length not a number");
-                            n = n * 10 + static_cast<std::uint64_t>(c - '0');
-                        }
-                        s.length_known = true;
-                        s.content_length = n;
-                    }
-                    break;
-                default: break;
-            }
+        switch (http::finish_request(seen, req, s.cookie, "HTTP/2.0", s.length_known, s.content_length)) {
+            case http::Assembled::ok: break;
+            case http::Assembled::malformed: return stream_error(s, ErrorCode::protocol_error, seen.reason);
+            case http::Assembled::bad_content_length: return stream_error(s, ErrorCode::protocol_error, "content-length not a number");
         }
         if (block_end_stream_) {
             s.state = StreamState::half_closed_remote;
@@ -1167,7 +1059,7 @@ private:
         std::string f;
         append_goaway(f, last_stream_id_, code, reason.substr(0, 64));
         closing_after_write_ = true;
-        for (auto& s : active_) {  // nothing more is served; the GOAWAY is the last write
+        for (auto& s : streams_.all()) {  // nothing more is served; the GOAWAY is the last write
             if (s->upstream) {
                 s->upstream->cancel();
                 s->upstream.reset();
@@ -1219,7 +1111,7 @@ private:
     }
 
     void maybe_finish() {
-        if (going_away_ && active_.empty() && !closed_) {
+        if (going_away_ && streams_.active() == 0 && !closed_) {
             if (goaway_pending_) {
                 goaway_pending_ = false;
                 if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::info))
@@ -1279,7 +1171,7 @@ private:
 
     void check_timeouts() {
         const auto now = std::chrono::steady_clock::now();
-        if (active_.empty()) {
+        if (streams_.active() == 0) {
             const auto idle = now - last_activity_;
             if (idle >= idle_timeout_) {
                 close();
@@ -1295,8 +1187,8 @@ private:
                 connection_error(ErrorCode::enhance_your_calm, "header block not completed in time");
                 return;
             }
-            for (std::size_t i = 0; i < active_.size();) {
-                H2Stream& s = *active_[i];
+            for (std::size_t i = 0; i < streams_.active();) {
+                H2Stream& s = *streams_.all()[i];
                 const auto age = now - s.since;
                 bool cut = false;
                 if (s.state == StreamState::half_closed_local && age >= idle_timeout_) {  // the body never finished
@@ -1406,8 +1298,7 @@ private:
     std::uint32_t conn_unreturned_ = 0;
     std::uint32_t last_stream_id_ = 0;
     std::uint32_t streams_opened_ = 0;
-    std::vector<std::unique_ptr<H2Stream>> active_;
-    std::vector<std::unique_ptr<H2Stream>> pool_;
+    http::StreamPool<H2Stream> streams_;  // the active table and the pool (http/stream_pool.hpp)
     std::uint32_t recent_closed_[kRecentClosed] = {};
     unsigned recent_pos_ = 0;
     unsigned glitches_ = 0;

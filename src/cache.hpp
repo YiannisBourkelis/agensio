@@ -44,6 +44,7 @@ struct CacheEntry {
     std::string
         headers;       // "Content-Type: ..\r\nContent-Length: ..\r\nLast-Modified: ..\r\nETag: ..\r\n\r\n" (terminated)
     std::string h2_block;  // the same headers as HPACK (static name indexes, Huffman where shorter), for HTTP/2
+    std::string h3_block;  // the same as a QPACK section over the static table, for HTTP/3
     std::string etag;  // including the quotes
     std::string last_modified;  // IMF-fixdate
     std::int64_t mtime = 0;

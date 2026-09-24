@@ -1,6 +1,7 @@
 #include "handlers/static.hpp"
 
 #include "http2/hpack.hpp"
+#include "http3/qpack.hpp"
 
 #include "http1/range.hpp"
 
@@ -46,6 +47,7 @@ void StaticHandler::error(Stream& s, int status, bool keep_alive, std::string_vi
     r.head = s.request.method == Method::head;
     r.prebuilt_headers = page.headers;  // Content-Type + Content-Length, not terminated
     r.prebuilt_h2 = page.h2_headers;
+    r.prebuilt_h3 = page.h3_headers;
     r.content_type = "text/html; charset=utf-8";
     if (!allow.empty()) r.headers.add("Allow", allow);
     r.body = MemoryBody{page.body};
@@ -168,6 +170,7 @@ void StaticHandler::serve_entry(Stream& s, EntryPtr e) {
     r.prebuilt_headers = e->headers;
     r.prebuilt_terminated = true;
     r.prebuilt_h2 = e->h2_block;
+    r.prebuilt_h3 = e->h3_block;
     r.content_type = e->content_type;
     r.content_encoding = e->content_encoding;
     r.vary = !e->coding_headers.empty();
@@ -211,6 +214,12 @@ void StaticHandler::fill_entry(CacheEntry& entry, const FileInfo& fi, std::strin
     hpack::append_field(entry.h2_block, "last-modified", entry.last_modified);
     hpack::append_field(entry.h2_block, "etag", entry.etag);
     hpack::append_field(entry.h2_block, "accept-ranges", "bytes");
+    // The HTTP/3 twin: the same fields as a QPACK section over the static table.
+    entry.h3_block.reserve(96);
+    qpack::append_field(entry.h3_block, "content-length", length);
+    qpack::append_field(entry.h3_block, "last-modified", entry.last_modified);
+    qpack::append_field(entry.h3_block, "etag", entry.etag);
+    qpack::append_field(entry.h3_block, "accept-ranges", "bytes");
     entry.last_access.store(now, std::memory_order_relaxed);
     entry.last_validated.store(now, std::memory_order_relaxed);
 }
@@ -318,6 +327,7 @@ void StaticHandler::redirect_slash(Stream& s, WorkerState& ws) {
     r.headers.add("Location", r.scratch);
     r.prebuilt_headers = page.headers;
     r.prebuilt_h2 = page.h2_headers;
+    r.prebuilt_h3 = page.h3_headers;
     r.content_type = "text/html; charset=utf-8";
     r.body = MemoryBody{page.body};
 }
