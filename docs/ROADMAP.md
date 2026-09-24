@@ -676,8 +676,11 @@ misbehaviour counters against every published attack class up to the 2026 HTTP/2
       no allocation for a handler's continuation; the request and response HPACK fast
       paths, the router's and the normaliser's common-case shortcuts; the write cycle as
       one buffer. One worker on the arena's TLS baseline: 1.42M to 3.30M req/s, h2o on one
-      thread 2.60M; h2c 3.97M. Left in that profile: the `:path` Huffman decode (the same
-      automaton h2o uses), request field checks, routing.
+      thread 2.60M; h2c 3.97M; then emit at respond (a complete small answer into the
+      cycle's buffer inside the frame loop, its stream pooled at once): twelve workers
+      2030 cycles per request against h2o's 3100, one worker 3.60M. Left in the one-core
+      profile: the `:path` Huffman decode (the same automaton h2o uses), request field
+      checks, routing.
 - [ ] G4 Extras: RFC 9218 urgency, RFC 8441 CONNECT over h2 through the tunnel, per-site
       protocols via SNI, the TLS-ALPN-01 hook. (GOAWAY on reload reviewed 2026-09-23: the
       frame follows the streams in flight, new streams are refused meanwhile, both cases

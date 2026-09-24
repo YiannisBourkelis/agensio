@@ -891,6 +891,16 @@ private:
     void respond(H2Stream& s) {
         if (s.state == StreamState::closed) return;
         s.stream.response.upgrade = false;  // a 101 has no meaning here; the body is what came with it
+        // Emit at respond (design 6.6): inside a read's frame loop, a complete small answer
+        // to a request that has fully arrived goes into the cycle's buffer now and its
+        // stream is closed and pooled at once, so the next HEADERS frame of the read takes
+        // the same object. Everything else waits in the ready list for the cycle.
+        if ((!s.has_body || s.body_done) && !s.pulling && writer_.emit_now(s)) {
+            log_request(s);
+            close_stream(s);
+            maybe_finish();
+            return;
+        }
         s.ready = true;
         s.since = clock_now();
         writer_.enqueue(s);

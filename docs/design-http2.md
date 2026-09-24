@@ -488,24 +488,29 @@ than the client takes (Netflix's "internal data buffering", CVE-2019-9517). A wi
 zero parks the stream until a `WINDOW_UPDATE` of at least 1 KB, or the end of the body;
 smaller updates are not progress (6.9).
 
-**Emit at respond, designed 2026-09-24, not built.** With the cycle one buffer, an answer
+**Emit at respond (designed and built 2026-09-24).** With the cycle one buffer, an answer
 that is complete when `respond()` runs and small enough to be copied (a memory body up
-to `kCopyMax`, or no body) needs nothing of its stream once its frames are in the
-buffer. Today it waits in the ready list until the hold ends, and its stream stays open
-until the write completes: a read with a hundred HEADERS frames therefore holds a
-hundred stream objects per connection at once, and with twelve workers that working set
-is what costs the row (the twelve-worker profile in the results file: instructions per
-cycle 1.54 against 4.16 on one worker, h2o 2.73 against 3.89; h2o frees a stream's
-memory as soon as its answer is in the connection's buffer). The change: while the writer
-is held and no write is in flight, `respond()` for such an answer appends the HEADERS and
-DATA frames to the cycle's buffer at once (the head through the encoder as now), logs
-the request, and closes the stream, which goes back to the pool and is the object the
-next HEADERS frame of the same read takes; the cycle is sent at release as today.
-Answers that arrive asynchronously, bodies above `kCopyMax`, files and sources keep the
-ready list and the write-completion path. Expected: a hot working set of one or two
-stream objects per connection, the pool small again, the twelve-worker row at the
-single-worker efficiency; the h1 rows untouched. Gate: the twelve-worker profile,
-the pinned row, the A/B, h2spec and the suites.
+to `kCopyMax`, or no body, within the windows) needs nothing of its stream once its
+frames are in the buffer. Before, it waited in the ready list until the hold ended, and
+its stream stayed open until the write completed: a read with a hundred HEADERS frames
+held a hundred stream objects per connection at once, and with twelve workers that
+working set was what cost the row (instructions per cycle 1.54 against 4.16 on one
+worker; h2o frees a stream's memory as soon as its answer is in the connection's
+buffer). Now, while the writer is held inside a read's frame loop and no write is in
+flight, `respond()` for such an answer to a request that has fully arrived appends the
+HEADERS and DATA frames to the cycle's buffer at once (`Writer::emit_now`; control
+frames produced before it are flushed ahead of it, the head through the encoder as
+always), logs the request and closes the stream, which goes back to the pool and is
+the object the next HEADERS frame of the same read takes; the cycle is sent at the
+release of the hold, and the buffer is cleared when the write completes. Answers that
+arrive asynchronously, bodies above `kCopyMax`, files, sources and answers to requests
+whose body is still arriving keep the ready list and the write-completion path.
+Measured (the results file, twelve workers pinned under twelve load threads): 2030
+cycles per request against h2o's 3100, instructions per cycle 3.20 against 2.74, cache
+misses per request 6 against 24, resident memory 68 MiB against the pool's 441; one
+worker 3.60M req/s over TLS against h2o's 2.60M; the A/B's HTTP/1 and single-stream rows
+flat or better. The writer is not idle while the buffer holds bytes (`idle()`), so a
+GOAWAY's linger waits for them.
 
 The clock is read once per socket event (2026-09-24): the read completion takes the
 steady time and the wall time (the `Date` of every answer of that read), the streams the

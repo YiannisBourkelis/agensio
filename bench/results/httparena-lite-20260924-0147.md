@@ -277,6 +277,27 @@ writer is held, and its stream closed and pooled at once, so the next HEADERS fr
 the read takes the same object; only asynchronous answers and large bodies keep a
 stream open across the write.
 
+Step 5, emit at respond, built (`Writer::emit_now`, design 6.6). The same twelve-worker
+profile (`raw/httparena-lite-20260924-0147/perf/twelve-workers-pinned-after-emit-at-respond.txt`):
+agensio 40.0G user and 5.5G kernel cycles for 22.4M requests in the two seconds sampled,
+2030 cycles per request, against h2o's 70.1G and 6.5G for 24.7M, 3100; instructions per
+cycle 3.20 against 2.74 (1.54 before); last-level cache misses 6 per request against 24
+(31 before), L1 load misses 16 against 118 (91 before). One worker over TLS 3.60M req/s
+(3.48M before). The pinned row under twelve load threads: 11.97M req/s at 534 % and
+68 MiB (11.12M at 1112 % and 441 MiB before) against h2o's 12.88M at 891 % and 65 MiB;
+in the perf session, on the same load, 11.22M against 12.36M. Half of agensio's CPU is
+idle at that rate, so the twelve-thread load generator is what bounds the row on this
+box: sampled from `/proc` during the same load (`bench/httparena/client-cpu.sh`),
+h2load runs at 1198 % against h2o and 1202 % against agensio, its twelve threads
+saturated either way, while the server takes 759 % and 441 %. The 8 % between the two
+rates is what the saturated client spends per answer, and ours carries one field more
+(`date`, which h2o's entry omits and the RFC asks for). The per-request cost, the
+number the arena's machine with its 64-thread load generators will turn into
+throughput, is 1.5 times better than h2o's at twelve workers and 1.38 times on one core. A/B against
+alpha.20 (`ab-20260924-112040.md`): ten-stream rows 0.252 and 0.273, single-stream 0.913
+and 0.950, HTTP/1 rows 0.958 to 1.006. Integration 509/509 on release and under the
+sanitizers, no reports.
+
 Two bugs found by the suites on the way: LeakSanitizer reported, at the end of the
 integration suite, 84 control-socket connections with their buffers (15 MB) kept alive by
 the control handler's body-reading step, which captured itself strongly; and a build

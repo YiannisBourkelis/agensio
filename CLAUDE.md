@@ -784,11 +784,15 @@ privilege drop, fuzz targets for every new parser (chunked, FastCGI), h1 complia
   prebuilt (3.04M); the write cycle as one buffer, a read's answers in one send (3.30M,
   3.97M on h2c); requests decoded into a per-connection scratch with exact-size arenas
   per stream (3.48M, and the pool's memory 647 to 441 MiB on 512 connections with a
-  hundred streams each). Pinned, twelve load threads: agensio 11.1M against h2o's 12.9M
-  (0.86; 1.34 on one core), so the twelve-worker cost is what remains to measure. A/B
-  `ab-20260924-091348.md`: ten-stream rows 0.25-0.27, single-stream 0.90-0.97, HTTP/1
-  0.97-1.01. Two fixes found by the suites on the way: the control handler's body step
-  captured itself (a leak per request with a body) and the TLS-off build did not compile.
+  hundred streams each); emit at respond (a complete small answer into the cycle's
+  buffer inside the frame loop, its stream closed and pooled at once): twelve workers
+  pinned 2030 cycles per request against h2o's 3100, IPC 3.20 against 2.74, 68 MiB
+  resident, one worker 3.60M. The pinned row on this box is 12.0M against h2o's
+  12.4-12.9M with half of agensio's CPU idle: the twelve-thread load generator bounds
+  it. A/B `ab-20260924-112040.md`: ten-stream rows 0.25-0.27, single-stream 0.91-0.95,
+  HTTP/1 0.96-1.01. Two fixes found by the suites on the way: the control handler's body
+  step captured itself (a leak per request with a body) and the TLS-off build did not
+  compile.
 - Verify correctness before speed: responses must be byte-identical in body and carry
   `Content-Length`, `Content-Type`, `Date`, `Last-Modified`, `ETag`.
 

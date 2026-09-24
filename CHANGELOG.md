@@ -19,10 +19,16 @@
   1.27 times h2o on one core; and, once the pinned rows showed the pool's memory
   (647 MiB resident for 512 connections with a hundred streams each, h2o 65), requests
   decoded into the connection's scratch with each stream keeping an exact-size copy
-  instead of a 16 KB reservation, to 3.48M and 441 MiB. Pinned to six cores with their
-  siblings under twelve load threads the row is 11.1M req/s against h2o's 12.9M: the
-  twelve-worker cost is the next measurement. The router and normaliser shortcuts and
-  the continuation reach HTTP/1 as well. Details and the profiles in
+  instead of a 16 KB reservation, to 3.48M and 441 MiB; and emit at respond: inside a
+  read's frame loop a complete small answer goes into the cycle's buffer at once and its
+  stream is closed and pooled, so a read of a hundred requests reuses one or two hot
+  stream objects instead of holding a hundred cold ones until the write completes.
+  Twelve workers pinned to six cores with their siblings: 2030 cycles per request
+  against h2o's 3100 (instructions per cycle 3.20 against 2.74, cache misses per request
+  6 against 24, 68 MiB resident against the pool's 441), one worker 3.60M req/s. On this
+  box the pinned row is 12.0M against h2o's 12.4-12.9M with half of agensio's CPU idle:
+  the twelve-thread load generator is the limit there. The router and normaliser
+  shortcuts and the continuation reach HTTP/1 as well. Details and the profiles in
   `docs/design-http2.md` 6.2.1, 6.6 and 7.3 and `bench/results/httparena-lite-20260924-0147.md`.
 - **Fixed: a control-socket request with a body leaked its connection.** The body-reading
   step of the control handler (mutations, uploads) captured itself strongly, a reference

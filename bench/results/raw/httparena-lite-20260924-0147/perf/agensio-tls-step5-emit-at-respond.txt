@@ -1,0 +1,84 @@
+### agensio (one worker)
+== agensio: syscalls (3 s under load)
+% time     seconds  usecs/call     calls    errors syscall
+------ ----------- ----------- --------- --------- ----------------
+ 55.96    0.028216           0     68238           write
+ 41.95    0.021154           0    128034     59797 recvfrom
+  2.07    0.001042           1       959           epoll_wait
+100.00    0.050421           0    197278     59797 total
+finished in 6.04s, 2929050.00 req/s, 75.42MB/s
+requests: 17574300 total, 17580700 started, 17574300 done, 17574300 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 17574300 2xx, 0 3xx, 0 4xx, 0 5xx
+== agensio: cycles and profile
+        9864579257      cycles:u                                                              
+         759920769      cycles:k                                                              
+       41250589707      instructions:u                   #    4.18  insn per cycle            
+    84.20%  agensio         
+     7.56%  [unknown]       
+     4.86%  libc.so.6       
+     2.30%  libcrypto.so.3  
+     0.94%  libssl.so.3     
+     0.13%  [vdso]          
+    16.95%  [.] agensio::hpack::huffman_decode(std::basic_string_view<char, std::char_traits<char> >, std::__cxx11::basic_string<char, std::char_traits<char>, s
+     9.04%  [.] agensio::hpack::Decoder::decode<agensio::h2::Http2Connection<agensio::BasicTlsStream<asio::basic_stream_socket<asio::ip::tcp, asio::any_io_execu
+     7.18%  [.] agensio::Dispatcher::route(agensio::Stream&, agensio::Router const&, agensio::WorkerState&)
+     6.83%  [.] agensio::hpack::Decoder::decode(std::basic_string_view<char, std::char_traits<char> >, std::__cxx11::basic_string<char, std::char_traits<char>, 
+     4.59%  [.] agensio::h2::Http2Connection<agensio::BasicTlsStream<asio::basic_stream_socket<asio::ip::tcp, asio::any_io_executor> > >::begin_request(agensio:
+     2.96%  [.] agensio::hpack::append_integer(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&, unsigned long, unsigned int, un
+     2.67%  [.] agensio::normalize_target(std::basic_string_view<char, std::char_traits<char> >, std::__cxx11::basic_string<char, std::char_traits<char>, std::a
+     2.61%  [.] agensio::(anonymous namespace)::head(agensio::Response&, int, std::basic_string_view<char, std::char_traits<char> >, unsigned long)
+     2.12%  [.] agensio::h2::Http2Connection<agensio::BasicTlsStream<asio::basic_stream_socket<asio::ip::tcp, asio::any_io_executor> > >::respond(agensio::h2::H
+     1.90%  [.] agensio::Stream::reset()
+     1.89%  [.] agensio::(anonymous namespace)::answer_sum(agensio::Response&, long)
+     1.88%  [.] agensio::h2::Http2Connection<agensio::BasicTlsStream<asio::basic_stream_socket<asio::ip::tcp, asio::any_io_executor> > >::release(agensio::h2::H
+     1.81%  [.] agensio::HttparenaHandler::start(agensio::Stream&, agensio::LocationConfig const&, agensio::WorkerState&, std::function<void ()>)
+     1.77%  [.] std::basic_string_view<char, std::char_traits<char> >::compare(std::basic_string_view<char, std::char_traits<char> >) const
+     1.71%  [.] __memmove_avx512_unaligned_erms
+     1.54%  [.] __memcmp_evex_movbe
+     1.37%  [.] agensio::h2::Http2Writer<agensio::BasicTlsStream<asio::basic_stream_socket<asio::ip::tcp, asio::any_io_executor> >, agensio::h2::Http2Connection
+     1.36%  [.] std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >::append(char const*, unsigned long)
+     1.25%  [.] agensio::h2::Http2Connection<agensio::BasicTlsStream<asio::basic_stream_socket<asio::ip::tcp, asio::any_io_executor> > >::open_stream(unsigned i
+     1.24%  [.] agensio::h2::Http2Connection<agensio::BasicTlsStream<asio::basic_stream_socket<asio::ip::tcp, asio::any_io_executor> > >::dispatch(agensio::h2::
+     0.89%  [.] agensio::hpack::read_integer(std::basic_string_view<char, std::char_traits<char> >, unsigned long&, unsigned int, unsigned int&)
+     0.88%  [.] __memchr_evex
+     0.86%  [.] agensio::Dispatcher::check_method(agensio::Stream&, agensio::LocationConfig const&, agensio::WorkerState&)
+     0.84%  [.] agensio::h2::Http2Connection<agensio::BasicTlsStream<asio::basic_stream_socket<asio::ip::tcp, asio::any_io_executor> > >::close_stream(agensio::
+     0.81%  [.] agensio::hpack::append_string(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&, std::basic_string_view<char, std
+     0.81%  [.] agensio::h2::Http2Connection<agensio::BasicTlsStream<asio::basic_stream_socket<asio::ip::tcp, asio::any_io_executor> > >::process_frames()
+     0.74%  [.] agensio::hpack::Decoder::read_string(std::basic_string_view<char, std::char_traits<char> >, unsigned long&, std::__cxx11::basic_string<char, std
+     0.68%  [.] agensio::h2::Http2Connection<agensio::BasicTlsStream<asio::basic_stream_socket<asio::ip::tcp, asio::any_io_executor> > >::on_headers(agensio::h2
+     0.59%  [.] agensio::hpack::DynamicTable::at(unsigned long, std::basic_string_view<char, std::char_traits<char> >&, std::basic_string_view<char, std::char_t
+     0.58%  [.] std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >::_M_assign(std::__cxx11::basic_string<char, std::char_traits<cha
+     0.57%  [.] agensio::(anonymous namespace)::parse_int(std::basic_string_view<char, std::char_traits<char> >)
+     0.57%  [.] std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >::_M_replace_aux(unsigned long, unsigned long, unsigned long, cha
+     0.52%  [.] agensio::fields::connection_specific(std::basic_string_view<char, std::char_traits<char> >)
+     0.50%  [.] agensio::hpack::Decoder::lookup(unsigned int, std::basic_string_view<char, std::char_traits<char> >&, std::basic_string_view<char, std::char_tra
+     0.41%  [.] agensio::hpack::Encoder::server(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&, std::basic_string_view<char, s
+     0.40%  [.] agensio::hpack::Encoder::content_type(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&, std::basic_string_view<c
+     0.35%  [.] agensio::h2::Http2Connection<agensio::BasicTlsStream<asio::basic_stream_socket<asio::ip::tcp, asio::any_io_executor> > >::log_request(agensio::h
+     0.35%  [.] agensio::hpack::Encoder::date(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&, long, std::basic_string_view<cha
+     0.34%  [.] std::unique_ptr<agensio::h2::H2Stream, std::default_delete<agensio::h2::H2Stream> >& std::vector<std::unique_ptr<agensio::h2::H2Stream, std::def
+     0.32%  [.] agensio::hpack::append_status(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&, int)
+     0.31%  [.] agensio::hpack::huffman_size(std::basic_string_view<char, std::char_traits<char> >)
+     0.30%  [.] __memset_avx512_unaligned
+     0.30%  [k] 0xffffffffa5e4dc20
+     0.29%  [.] agensio::hpack::append_literal(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&, unsigned int, std::basic_string
+     0.27%  [.] agensio::Router::site(std::basic_string_view<char, std::char_traits<char> >) const
+     0.25%  [.] agensio::h2::Http2Connection<agensio::BasicTlsStream<asio::basic_stream_socket<asio::ip::tcp, asio::any_io_executor> > >::maybe_finish()
+     0.24%  [.] agensio::File::close()
+     0.24%  [.] memcpy@plt
+     0.22%  [.] agensio::hpack::append_indexed(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&, unsigned int)
+     0.19%  [.] __memset_avx512_unaligned_erms
+     0.19%  [.] agensio::h2::Http2Connection<agensio::BasicTlsStream<asio::basic_stream_socket<asio::ip::tcp, asio::any_io_executor> > >::finish_block()
+     0.18%  [k] 0xffffffffa683dfc9
+     0.18%  [.] agensio::hpack::Encoder::begin(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&)
+     0.17%  [k] 0xffffffffa6c00080
+     0.15%  [k] 0xffffffffa6496907
+     0.15%  [.] std::_Function_handler<void (), agensio::h2::Http2Connection<agensio::BasicTlsStream<asio::basic_stream_socket<asio::ip::tcp, asio::any_io_execu
+     0.15%  [.] agensio::parse_method(std::basic_string_view<char, std::char_traits<char> >, agensio::Method&)
+     0.15%  [k] 0xffffffffa6496ff7
+     0.14%  [.] std::_Function_handler<void (), agensio::h2::Http2Connection<agensio::BasicTlsStream<asio::basic_stream_socket<asio::ip::tcp, asio::any_io_execu
+     0.14%  [k] 0xffffffffa6aa5bdb
+finished in 8.04s, 3597500.00 req/s, 92.63MB/s
+status codes: 28780000 2xx, 0 3xx, 0 4xx, 0 5xx
+00:00:13

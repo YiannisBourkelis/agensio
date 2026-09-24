@@ -135,6 +135,46 @@ public:
         holding_ = false;
         if (again_) schedule();
     }
+    // Emit at respond (design 6.6): while the connection holds the writer inside a read's
+    // frame loop and no write is in flight, an answer that is complete and small (no body,
+    // or a memory body up to kCopyMax within the windows) goes straight into the cycle's
+    // buffer, and the caller closes its stream at once, since nothing in the cycle refers
+    // to it: a read of a hundred requests reuses one or two hot stream objects instead of
+    // holding a hundred cold ones until the write completes (the twelve-worker profile of
+    // 2026-09-24: 1.54 instructions per cycle against 4.16 on one worker). False when the
+    // answer has to go through the ready list.
+    bool emit_now(H2Stream& s) {
+        if (!holding_ || writing_ || building_ || in_completion_ || closed_) return false;
+        if (out_.size() >= kMaxCycleBytes) return false;
+        Response& r = s.stream.response;
+        std::string_view body;
+        if (!r.head && has_body(r.body)) {
+            const auto* m = std::get_if<MemoryBody>(&r.body);
+            if (!m || m->data.size() > kCopyMax) return false;
+            body = m->data;
+            const auto n = static_cast<std::int32_t>(body.size());
+            if (n > 0 && (s.send_window < n || conn_window_ < n)) return false;
+        }
+        if (!ctl_.empty()) {  // control frames produced before this answer stay ahead of it
+            out_.append(ctl_);
+            ctl_.clear();
+        }
+        const std::size_t at = out_.size();
+        build_head(s, out_);
+        const bool end = body.empty();
+        write_frame_header(reinterpret_cast<unsigned char*>(out_.data() + at),  // NOLINT: bytes
+                           static_cast<std::uint32_t>(out_.size() - at - kFrameHeaderSize), FrameType::headers,
+                           static_cast<std::uint8_t>(flag::end_headers | (end ? flag::end_stream : 0)), s.id);
+        if (!end) {
+            data_frame(s.id, body, true);
+            s.send_window -= static_cast<std::int32_t>(body.size());
+            conn_window_ -= static_cast<std::int32_t>(body.size());
+            s.body_sent = body.size();
+        }
+        s.head_sent = s.responded = s.finished = true;
+        again_ = true;  // the release of the hold sends the cycle
+        return true;
+    }
     struct Hold {
         Http2Writer& w;
         explicit Hold(Http2Writer& writer) noexcept : w(writer) { w.hold(); }
@@ -149,12 +189,12 @@ public:
     std::int32_t conn_window() const noexcept { return conn_window_; }
     void set_conn_window(std::int32_t w) noexcept { conn_window_ = w; }
     void set_max_frame(std::uint32_t n) noexcept { max_frame_ = n; }
-    bool idle() const noexcept { return !writing_ && ctl_.empty() && ready_head_ == nullptr; }
+    bool idle() const noexcept { return !writing_ && ctl_.empty() && ready_head_ == nullptr && out_.empty(); }
     unsigned pulls() const noexcept { return pulls_; }
 
     // Idle: the coalescing buffer (up to a cycle's worth) and the scatter list go.
     void shed() noexcept {
-        if (writing_) return;
+        if (writing_ || !out_.empty()) return;
         std::string().swap(out_);
         std::vector<External>().swap(external_);
         std::vector<asio::const_buffer>().swap(bufs_);
@@ -193,11 +233,9 @@ private:
         if (closed_ || writing_ || building_) return;
         building_ = true;
         again_ = false;
-        out_.clear();
-        external_.clear();
         finished_.clear();
         inflight_.clear();
-        std::size_t bytes = 0;
+        std::size_t bytes = out_.size();  // what emit_now() put there already counts
         if (!ctl_.empty()) {  // control frames first; ctl_ takes new ones while this cycle is in flight
             out_.append(ctl_);
             bytes += ctl_.size();
@@ -260,6 +298,8 @@ private:
 
     void on_written(const asio::error_code& ec) {
         writing_ = false;
+        out_.clear();  // the cycle's bytes are with the kernel; the next cycle builds from empty
+        external_.clear();
         if (closed_) return;
         if (ec) {
             owner_.close();
