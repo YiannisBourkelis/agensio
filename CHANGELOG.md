@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.21 (unreleased)
+## 0.1.0-alpha.21 (2026-09-24)
 
 - **HTTP/2 per-request cost, in three measured steps** on the arena's HTTP/2 baseline
   row (one worker, `h2load -c 64 -m 100`; the same load against h2o's arena entry on one
