@@ -399,7 +399,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   the dynamic table and a Huffman automaton generated from the RFC text by
   `tools/gen-hpack-tables.py`; static-only encoder, so encodings are state-independent
   and prebuilt: `CacheEntry::h2_block`, `ErrorPage::h2_headers`, the worker's server+date
-  pair per second), `stream.hpp` (pooled per-stream state, the body source), `writer.hpp`
+  pair per second; since 2026-09-24 the entry's block is the tail of literals and
+  `hpack::Encoder`, one per connection, sends `server`, `date`, `content-type` and what
+  a text block repeats through a 1 KB dynamic table that shares `DynamicTable` with the
+  decoder, design 6.2.1), `stream.hpp` (pooled per-stream state, the body source), `writer.hpp`
   (write cycles: control frames, then a quantum per ready stream within its windows,
   one writev of views on plain sockets, one buffer on TLS; StreamBody pulls bounded per
   connection), `connection.hpp` (frames, streams, request assembly with the field rules
@@ -764,8 +767,14 @@ privilege drop, fuzz targets for every new parser (chunked, FastCGI), h1 complia
   (`Writer::Hold` across a read's frame loop, small cycles coalesced into one buffer,
   design 6.6): one send per 57 answers, pinned baseline-h2 3.26M to 7.55M req/s at 927 %
   (h2o 11.06M at 754 %, load-bound), the ten-stream A/B rows at 0.35 of alpha.20's CPU
-  per request, single-stream and HTTP/1 rows flat (`ab-20260924-011552.md`). Next: the
-  dynamic-table head for server, date and content-type, and one clock read per read.
+  per request, single-stream and HTTP/1 rows flat (`ab-20260924-011552.md`). Dynamic-table
+  head done (`hpack::Encoder`, design 6.2.1): the handler's block 48 to 8 bytes, pinned
+  baseline-h2 8.46M at 1042 % (h2o 11.06M at 754 %, load-bound; 0.29 of it at the start,
+  0.76 now), one worker 1.54M h2c / 1.62M TLS; TLS cycles capped at 64 KB of body (256 KB
+  cycles cost static-h2 9 % once every cycle was full); A/B `ab-20260924-075048.md`
+  ten-stream rows 0.37-0.39, the rest flat. Left on that row: per-request user time (two
+  clock reads per stream, the sync handler's heap-allocated completion, request HPACK
+  decoding, routing).
 - Verify correctness before speed: responses must be byte-identical in body and carry
   `Content-Length`, `Content-Type`, `Date`, `Last-Modified`, `ETag`.
 

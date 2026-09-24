@@ -372,6 +372,7 @@ private:
             const std::uint32_t value = read_u32(p + i + 2);
             const std::uint32_t old_window = peer_.initial_window_size;
             const ErrorCode ec = peer_.apply(id, value);
+            if (ec == ErrorCode::no_error && id == setting_header_table_size) writer_.set_peer_table_size(value);
             if (ec != ErrorCode::no_error) return connection_error(ec, "SETTINGS value out of range");
             if (id == setting_initial_window_size && value != old_window) {
                 // Every stream's window moves by the difference (RFC 9113 6.9.2).

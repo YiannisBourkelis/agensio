@@ -250,17 +250,134 @@ every field: the classic HPACK bomb and the 2026 Bomb stop at the first byte ove
 limit, before the arena grows, with an `ENHANCE_YOUR_CALM` connection error (a peer that
 does this is not a browser).
 
-Encoder: static indexes for the table's names and values, literal without indexing for
-everything else, Huffman when it is shorter, and no dynamic table at all (never a size
-update, never an insertion): nginx's discipline, which makes every encoding
-state-independent. That is what allows **prebuilt blocks**: the cache entry's four
-headers (`content-type`, `content-length`, `last-modified`, `etag`, plus
-`accept-ranges`) become one HPACK block at insert, Huffman-encoded once; error pages and
-redirects get theirs at startup; the per-worker `server` and `date` pair is re-encoded
-once per second like `prefix200`. A response head over HTTP/2 is then the status index
-byte, the worker's pair, the entry's block and the extra fields encoded now, four
-pieces without concatenation, the mirror of the HTTP/1 writer's three. nginx encodes
-every header of every response; we copy.
+Encoder, as built in G0: static indexes for the table's names and values, literal
+without indexing for everything else, Huffman when it is shorter, and no dynamic table
+at all: nginx's discipline, which makes every encoding state-independent. That is what
+allows **prebuilt blocks**: the cache entry's headers become one HPACK block at insert,
+Huffman-encoded once; error pages and redirects get theirs at startup; the per-worker
+`server` and `date` pair is re-encoded once per second like `prefix200`. nginx encodes
+every header of every response; we copy. Since 6.2.1 below (2026-09-24) the entry's
+block is the *tail*, `content-length`, `last-modified`, `etag` and `accept-ranges`, and
+the fields that repeat across a connection go through the connection's own dynamic
+table: a static answer's head is the status byte, three index bytes and the tail.
+
+#### 6.2.1 The dynamic-table head (designed and built 2026-09-24)
+
+**Why.** With the write batching in, the arena's HTTP/2 baseline costs agensio 1.23 µs of
+thread time per request against h2o's 0.68 at most. Captured with `nghttp -v`, our
+HEADERS block is 48 bytes on every answer and h2o's is 7 after the first: `server` and
+`date` as literals are 33 of our bytes, `content-type` 10 to 12 more, and encoding them
+(`static_name_index`, Huffman) is about 5 % of the profile. On the wire an answer is 67
+bytes from agensio and 26 from h2o; segments, TLS records and the client's decoding all
+scale with it. The static-only encoder was the right first step; this adds a dynamic
+table on the encoder side, while the prebuilt blocks stay prebuilt.
+
+**What h2o does** (read in `lib/http2/hpack.c` and `lib/http2/connection.c`, 2026-09-24).
+Its encoder, `do_encode_header`, tries the static table, then scans its dynamic table
+for a name-and-value match and emits an index; otherwise it emits a *literal with
+incremental indexing*, so every field it sends is inserted, except the tokens flagged
+`dont_compress` (`cookie`, `set-cookie`, sent never-indexed) and `content-length`,
+which `encode_content_length` always sends as a literal without indexing; `:status`
+has its own fixed encoding. The table is capped at 32 entries
+(`header_table_add(..., 32)`) and at the peer's `SETTINGS_HEADER_TABLE_SIZE`
+(`header_table_adjust_size` only ever shrinks it, emitting the size update); eviction
+is oldest first. Nothing is cached between answers: the same fields are looked up and
+re-encoded per response, which is cheap once they are indexes. Its `date` is an ordinary
+header the application adds (`h2o_resp_add_date_header`, from a per-context timestamp
+cached per second); the arena's h2o entry does not add it, which is why its block is 7
+bytes and not 8. Its writes are gathered per event-loop iteration: `request_gathered_write`
+links a zero-length timer, `emit_writereq` then appends every stream's frames to one
+buffer and writes once, and requests parsed from a read are queued in `_pending_reqs`
+and run in order. That is the batching we built in 6.6, with one difference noted at
+the end of this section.
+
+**What goes into the table.** h2o's rule, with two deviations:
+
+| field | representation |
+|---|---|
+| `server` | inserted once per connection, then one index byte; the encoder remembers its sequence, no scan |
+| `date` | inserted once per second per connection, one index byte between; the insertion bytes are prebuilt per worker-second like today's literal, and the encoder remembers the second, no scan |
+| `content-type`, `vary`, `content-encoding`, `cache-control`, `x-powered-by`, any other field of a handler's or an upstream's text block | h2o's rule: an index when the table holds name and value (a scan of at most 32 entries), else inserted |
+| `content-length` | literal without indexing, like h2o: it changes per answer |
+| `set-cookie`, `cookie`, `authorization`, `proxy-authorization`, `www-authenticate` | never indexed, and never inserted (RFC 7541 7.1.3) |
+| `etag`, `last-modified`, `accept-ranges` of a cache entry | literal, in the entry's prebuilt tail, not inserted (deviation one) |
+
+Deviation one: validators stay literal. A page load asks for tens of different files on
+one connection, and inserting each file's `etag` and `last-modified` pushes 130 bytes of
+table per file and evicts the fields that do repeat; with the cache entry's tail prebuilt
+at insert, a static answer touches the table only for `server`, `date` and
+`content-type`. The static rows lose nothing measurable by it: their bytes are the
+bodies. Deviation two: we keep sending `date` (RFC 9110 requires it of an origin
+server); through the table it costs one byte per answer and one insertion per
+connection-second.
+
+**The encoder's state, per connection** (`hpack::Encoder`): the same ring of bytes the
+decoder uses for its dynamic table (`hpack.cpp`, allocated on the first insertion, so an
+idle or HTTP/1-only connection pays nothing), with the entries' offsets and sizes, the
+total size, `next_seq`, the remembered sequences of `server` and `date` and the date's
+second, the size the peer's decoder assumes and a pending size update. An entry
+inserted with sequence *s* has index `61 + next_seq - s` at emission time, so a
+reference is computed per representation and stays right across insertions earlier in
+the same block. An insertion adds `name + value + 32` and evicts oldest first until the
+total fits, exactly what RFC 7541 4.4 makes the decoder do, so the two tables never
+differ; using the decoder's own ring for it is what makes that a property of the code
+rather than a promise.
+
+**Table size.** `min(the peer's SETTINGS_HEADER_TABLE_SIZE, 1024)` and at most 32
+entries like h2o: the fields that repeat on a real connection are a dozen, under 800
+bytes, and a small ring keeps the per-connection memory near the idle 19 KB (h2o uses
+the peer's 4,096; the difference is measured on the static-h2 and proxy rows during the
+build, and the constant is one line). The first block on a connection begins with a
+dynamic table size update to our size when it is below the peer's (RFC 7541 4.2, 6.3),
+since the decoder assumes the SETTINGS value until told; a later SETTINGS that lowers the
+limit shrinks the table, evicting, and the next block begins with the update; a limit of
+0 disables insertion and the encoder falls back to today's literals. When the limit drops
+and rises again before a block goes out, the block carries two updates, the lowest size
+used and then the current one, so a decoder that evicts only on our updates loses the
+same entries we did (RFC 7541 4.2; the fuzz target found the case). The decoder side is
+untouched: we still advertise 4,096 and never depend on the client inserting anything.
+
+**Where it plugs in.** `build_head` becomes: status index; `server` and `date` through
+their remembered sequences (the worker keeps `h2_date_insert`, the insertion bytes for
+the current second, next to `prefix200`); `content-type` through the table, the value
+from the entry (`CacheEntry::content_type`, the error page's type, the text block's
+field); then the entry's prebuilt **tail** (`content-length`, `last-modified`, `etag`,
+`accept-ranges`, unchanged HPACK literals, still built once at insert) or the text
+block's remaining fields through the table; `vary` and `content-encoding` through the
+table for a twin; extra fields through the table. Per answer a static entry costs two
+sequence compares and one scan for its content type; a text block costs a scan per
+field, what h2o pays for every field of every answer. Nothing changes for HTTP/1, for
+the decoder, or for the request path; HTTP/3's QPACK will get the same encoder with its
+own instructions.
+
+**Expected effect.** The baseline-h2 block from 48 bytes to 7 or 8 (status, server, date
+and content-type one byte each, content-length three), the answer on the wire from 67
+bytes to about 27, h2o's 26; a static file's head from about 95 bytes to about 55, the
+validators staying literal. Fewer bytes per record on TLS and less to decode on the
+client, which shares the arena's machine.
+
+**Correctness.** The failure mode is a table out of step, which a client answers with a
+`COMPRESSION_ERROR` on the whole connection, so: unit tests round-trip sequences of
+answers through `hpack::Encoder` and our own RFC-vector-tested `Decoder` under every
+table size, with evictions, a SETTINGS change mid-way and a limit of 0; a libFuzzer
+target drives random answer and settings sequences through the same pair; `nghttp -v`
+in the integration suite checks the block lengths of the first and second answer on one
+connection and that both decode; h2spec on both listeners as before; the arena's
+validator. Gate: `bench/ab.sh <ref> -2` flat on the single-stream and HTTP/1 rows, the
+pinned baseline-h2 row and `bench/h2/profile.sh` before and after.
+
+**Bundled small items, same hot path, measured together:** one wall-clock and one
+steady-clock read per read of the socket instead of two per stream, and the
+synchronous handler's completion called directly instead of through a heap-allocated
+`std::function`.
+
+**The one gathering difference left, for later.** h2o gathers writes per event-loop
+iteration, so answers that arrive asynchronously in one iteration (a hundred upstream
+completions delivered by one `epoll_wait`) leave in one write too; our hold covers the
+frames of one read, and an upstream answer still starts its own cycle. A posted flush
+(`asio::post` runs after the completions already queued) would gather those as well, at
+the cost of one loop trip for a connection with a single answer per iteration. To be
+measured on the proxy and FastCGI HTTP/2 rows, not part of this step.
 
 ### 6.3 Streams
 
@@ -334,7 +451,10 @@ assembles:
   16 KB record; a cycle whose pieces are all whole frames or blocks is written as is,
   each piece an integral number of records, and only a cycle with separate header pieces
   (memory and source bodies) is coalesced first, so a header never becomes a record of
-  its own.
+  its own; such a cycle takes at most 64 KB of body (256 KB on plain sockets), because
+  once the write batching filled every cycle, 256 KB cycles copied and encrypted outside
+  the cache and cost the arena's static-h2 row 9 % (2026-09-24: 770k to 834k req/s
+  pinned, at less CPU and a third less memory).
 
 The cycle is held while the connection runs the frame loop of one read (`Writer::Hold`,
 2026-09-24): every answer, window update and control frame the frames of that read
@@ -431,8 +551,9 @@ rather than assumed; the published comparisons put HTTP/2 within 10 % of HTTP/1 
 1. No allocation per stream once the connection is warm (pooled streams, arenas that keep
    their capacity), the property HTTP/1 has.
 2. No allocation or second copy per header: decode straight into the arena, views out.
-3. Prebuilt HPACK blocks per cache entry and per error page; `server` + `date` once a
-   second per worker; the head is copied, not encoded (6.2).
+3. Prebuilt HPACK blocks per cache entry and per error page, the connection's dynamic
+   table for `server`, `date`, `content-type` and what a text block repeats (6.2.1): a
+   static answer's head is copied, not encoded, and the repeating fields cost a byte.
 4. One syscall per write cycle across streams: `writev` of up to 256 pieces on plain
    sockets, full records on TLS, the cycle held across a read's frame loop and tiny
    answers coalesced (6.6).

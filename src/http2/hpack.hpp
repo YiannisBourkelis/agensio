@@ -1,14 +1,17 @@
-// HPACK (RFC 7541): the decoder with its dynamic table and Huffman automaton, and the
-// encoding helpers the writer uses. The encoder side never touches a dynamic table
-// (static indexes and literals only, Huffman when shorter), so every encoding is
-// state-independent and can be built once and copied per response (nginx's discipline;
-// what makes a cache entry's prebuilt HPACK block possible). Decoded names and values are
+// HPACK (RFC 7541): the decoder with its dynamic table and Huffman automaton, the
+// state-free encoding helpers (static indexes and literals, Huffman when shorter) that
+// prebuilt blocks are made of, and the connection's Encoder (design 6.2.1): a small
+// dynamic table for the fields that repeat across a connection's answers (server, date,
+// content-type and whatever a handler's or an upstream's block repeats), while a cache
+// entry's validators stay a prebuilt literal tail. Both tables are one DynamicTable, so
+// our encoder evicts by the same code as our decoder. Decoded names and values are
 // appended to an arena the stream owns and reported as views into it: one copy, no
 // allocation per field. Tables come from tools/gen-hpack-tables.py (hpack_tables.hpp).
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
+#include <ctime>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -53,6 +56,94 @@ void append_literal(std::string& out, std::string_view name, std::string_view va
 void append_field(std::string& out, std::string_view name, std::string_view value);
 // The :status pseudo-header: one byte for the seven static values, a literal otherwise.
 void append_status(std::string& out, int status);
+// Literal header field with incremental indexing (6.2.1): the representation that inserts
+// the field into the decoder's table; the name by static index when it is there.
+void append_insert(std::string& out, std::string_view name, std::string_view value);
+// Literal header field never indexed (6.2.3): for fields that must not be compressed.
+void append_never_indexed(std::string& out, std::string_view name, std::string_view value);
+
+// ---- the dynamic table (section 4) ----
+
+// A ring of entries, the newest at head, evicted oldest first as the limit demands. The
+// decoder mirrors the peer's encoder with one; our Encoder keeps its own, so both sides
+// of a connection evict by the same code. Allocated on the first insertion.
+class DynamicTable {
+public:
+    static constexpr std::size_t npos = static_cast<std::size_t>(-1);
+    explicit DynamicTable(std::size_t capacity) : capacity_(capacity), limit_(capacity) {}
+    // Adds the entry, evicting to make room. False, with the table emptied, when the entry
+    // alone is larger than the limit (RFC 7541 4.4).
+    bool add(std::string_view name, std::string_view value);
+    // Changes the maximum size (a size update, a SETTINGS change), evicting to fit.
+    void set_limit(std::size_t limit) noexcept;
+    void evict_to(std::size_t limit) noexcept;
+    // The entry k places from the newest (0 = newest).
+    bool at(std::size_t k, std::string_view& name, std::string_view& value) const noexcept;
+    // The place (0 = newest) of the newest entry with this name and value, or npos.
+    std::size_t find(std::string_view name, std::string_view value) const noexcept;
+    std::size_t size() const noexcept { return size_; }
+    std::size_t count() const noexcept { return count_; }
+    std::size_t limit() const noexcept { return limit_; }
+
+private:
+    struct Entry {
+        std::string name;
+        std::string value;
+    };
+    std::vector<Entry> ring_;  // circular; the newest entry at head_
+    std::size_t head_ = 0;
+    std::size_t count_ = 0;
+    std::size_t size_ = 0;     // RFC 4.1 size of the entries held
+    std::size_t capacity_;     // the ring is sized for it on the first insertion
+    std::size_t limit_;        // the current maximum
+};
+
+// ---- the response encoder (design 6.2.1) ----
+
+// One per connection. A field goes out as a static index when the static table has the
+// pair, as an index into this table when it holds the pair, else it is inserted (a
+// literal with incremental indexing), except content-length and the validators, which
+// change per answer and stay literal, and the sensitive names, never indexed. `server`
+// and `date` are remembered by sequence number so they cost no scan: one index byte per
+// answer, one insertion per connection for server and one per second for date, whose
+// insertion bytes the worker prebuilds. The table is min(the peer's
+// SETTINGS_HEADER_TABLE_SIZE, kMaxSize); a block begins with a size update when the
+// decoder assumes another size (RFC 7541 4.2, 6.3).
+class Encoder {
+public:
+    static constexpr std::size_t kMaxSize = 1024;  // at most 32 entries of at least 32 bytes each
+    Encoder() : table_(kMaxSize) {}
+    // The peer's SETTINGS_HEADER_TABLE_SIZE (4096 until it says otherwise).
+    void set_peer_max(std::uint32_t value);
+    // At the start of every header block: the pending size update, if any.
+    void begin(std::string& out);
+    // A field by lower-case name.
+    void field(std::string& out, std::string_view name, std::string_view value);
+    // server and date: `insert_bytes` is append_insert(name, value), prebuilt by the caller.
+    void server(std::string& out, std::string_view value, std::string_view insert_bytes);
+    void date(std::string& out, std::time_t second, std::string_view value, std::string_view insert_bytes);
+    std::size_t table_size() const noexcept { return table_.size(); }
+    std::size_t table_entries() const noexcept { return table_.count(); }
+    std::size_t table_limit() const noexcept { return max_; }
+
+private:
+    enum class Policy { index, literal, never };
+    static Policy policy(std::string_view name) noexcept;
+    bool alive(std::uint64_t seq) const noexcept { return seq != 0 && seq + table_.count() >= next_seq_; }
+    unsigned index_of(std::uint64_t seq) const noexcept { return static_cast<unsigned>(61 + (next_seq_ - seq)); }
+    bool insert(std::string_view name, std::string_view value);
+
+    DynamicTable table_;
+    std::uint64_t next_seq_ = 1;  // the sequence the next insertion gets
+    std::uint64_t server_seq_ = 0;
+    std::uint64_t date_seq_ = 0;
+    std::time_t date_second_ = 0;
+    std::size_t max_ = kMaxSize;  // our maximum: min(peer, kMaxSize)
+    std::size_t floor_ = kMaxSize;  // the lowest maximum since the last update sent: a decoder that
+                                    // only learns sizes from updates must evict to it first (RFC 7541 4.2)
+    std::size_t assumed_ = 4096;  // what the decoder takes as its maximum until told
+    bool pending_update_ = true;  // the first block tells it ours
+};
 
 // ---- decoding ----
 
@@ -84,30 +175,20 @@ public:
             [](void* c, std::string_view n, std::string_view v) { return (*static_cast<F*>(c))(n, v); }, &f);
     }
 
-    std::size_t table_size() const noexcept { return size_; }
-    std::size_t table_entries() const noexcept { return count_; }
-    std::size_t table_limit() const noexcept { return limit_; }
+    std::size_t table_size() const noexcept { return table_.size(); }
+    std::size_t table_entries() const noexcept { return table_.count(); }
+    std::size_t table_limit() const noexcept { return table_.limit(); }
 
 private:
-    struct Entry {
-        std::string name;
-        std::string value;
-    };
     enum class StrStatus { ok, malformed, too_large };
 
-    void add(std::string_view name, std::string_view value);
-    void evict_to(std::size_t limit) noexcept;
     bool lookup(std::uint32_t index, std::string_view& name, std::string_view& value) const noexcept;
     // Reads a string literal at in[pos] into the arena (at most `max_out` decoded bytes).
     StrStatus read_string(std::string_view in, std::size_t& pos, std::string& arena, std::size_t max_out,
                           std::string_view& out);
 
-    std::vector<Entry> ring_;  // circular; the newest entry at head_
-    std::size_t head_ = 0;
-    std::size_t count_ = 0;
-    std::size_t size_ = 0;     // RFC 4.1 size of the entries held
-    std::size_t ceiling_;      // what we advertised
-    std::size_t limit_;        // the current maximum (size updates move it, up to the ceiling)
+    DynamicTable table_;
+    std::size_t ceiling_;  // what we advertised: the most a size update may set
 };
 
 }  // namespace agensio::hpack

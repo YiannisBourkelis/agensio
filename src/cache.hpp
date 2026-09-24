@@ -61,6 +61,7 @@ struct CacheEntry {
     // paths: "Content-Encoding: br\r\nVary: Accept-Encoding\r\n" on a twin, the Vary line
     // alone on an entry that has twins, empty otherwise.
     std::string_view coding_headers;
+    std::string_view content_encoding;  // "br" / "gzip" on a twin (static text), empty otherwise
     bool has_variants() const noexcept { return br != nullptr || gzip != nullptr; }
 
     std::atomic<std::int64_t> last_access{0};     // seconds since epoch

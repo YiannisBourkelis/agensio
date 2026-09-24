@@ -265,6 +265,143 @@ static void test_size() {
     CHECK(threw);
 }
 
+// The response encoder's dynamic table (design 6.2.1) against our own decoder: every block
+// an Encoder produces decodes to the fields it was given, across insertions, evictions,
+// a SETTINGS change mid-connection, a zero limit and a value larger than the table.
+static void test_hpack_encoder() {
+    using namespace hpack;
+    struct Field {
+        std::string name, value;
+    };
+    auto decode = [](Decoder& d, const std::string& block) {
+        std::vector<Field> got;
+        std::string arena;
+        const auto r = d.decode(block, arena, 16384, [&](std::string_view n, std::string_view v) {
+            got.push_back({std::string(n), std::string(v)});
+            return true;
+        });
+        CHECK(r == Decoder::Result::ok);
+        return got;
+    };
+    auto same = [](const std::vector<Field>& got, std::vector<Field> want) {
+        if (got.size() != want.size()) return false;
+        for (std::size_t i = 0; i < got.size(); ++i)
+            if (got[i].name != want[i].name || got[i].value != want[i].value) return false;
+        return true;
+    };
+    std::string server_insert, date_insert;
+    append_insert(server_insert, "server", "agensio");
+    append_insert(date_insert, "date", "Wed, 24 Sep 2026 10:00:00 GMT");
+    Encoder e;
+    Decoder d(4096);
+    // First block: the size update to our 1 KB, then everything inserted; a second block
+    // is nearly all indexes and no update.
+    std::string b1;
+    e.begin(b1);
+    append_status(b1, 200);
+    e.server(b1, "agensio", server_insert);
+    e.date(b1, 1000, "Wed, 24 Sep 2026 10:00:00 GMT", date_insert);
+    e.field(b1, "content-type", "text/plain");
+    e.field(b1, "content-length", "2");
+    CHECK(static_cast<unsigned char>(b1[0]) == 0x3f && static_cast<unsigned char>(b1[1]) == 0xe1);  // 001 + 1024 (5-bit prefix: 31 then 993)
+    CHECK(same(decode(d, b1), {{":status", "200"}, {"server", "agensio"}, {"date", "Wed, 24 Sep 2026 10:00:00 GMT"}, {"content-type", "text/plain"}, {"content-length", "2"}}));
+    CHECK(d.table_limit() == 1024 && d.table_entries() == 3 && e.table_entries() == 3 && e.table_size() == d.table_size());
+    std::string b2;
+    e.begin(b2);
+    append_status(b2, 200);
+    e.server(b2, "agensio", server_insert);
+    e.date(b2, 1000, "Wed, 24 Sep 2026 10:00:00 GMT", date_insert);
+    e.field(b2, "content-type", "text/plain");
+    e.field(b2, "content-length", "55");
+    CHECK(b2.size() == 9 && same(decode(d, b2), {{":status", "200"}, {"server", "agensio"}, {"date", "Wed, 24 Sep 2026 10:00:00 GMT"}, {"content-type", "text/plain"}, {"content-length", "55"}}));
+    // A new second inserts a new date; the old one stays until evicted. content-length,
+    // etag and set-cookie never enter the table.
+    std::string date2;
+    append_insert(date2, "date", "Wed, 24 Sep 2026 10:00:01 GMT");
+    std::string b3;
+    e.begin(b3);
+    e.date(b3, 1001, "Wed, 24 Sep 2026 10:00:01 GMT", date2);
+    e.field(b3, "etag", "\"abc\"");
+    e.field(b3, "set-cookie", "a=1");
+    e.field(b3, "content-length", "3");
+    e.field(b3, "vary", "Accept-Encoding");
+    CHECK(same(decode(d, b3), {{"date", "Wed, 24 Sep 2026 10:00:01 GMT"}, {"etag", "\"abc\""}, {"set-cookie", "a=1"}, {"content-length", "3"}, {"vary", "Accept-Encoding"}}));
+    CHECK(e.table_entries() == 5 && d.table_entries() == 5 && b3.find("\x1f\x28") != std::string::npos);  // set-cookie never indexed: 0001 + index 55
+    // Fill the table with content types until server is evicted: it is re-inserted, the
+    // decoder agrees at every step.
+    for (int i = 0; i < 40; ++i) {
+        std::string b;
+        e.begin(b);
+        e.server(b, "agensio", server_insert);
+        e.field(b, "content-type", "application/x-" + std::to_string(i));
+        CHECK(same(decode(d, b), {{"server", "agensio"}, {"content-type", "application/x-" + std::to_string(i)}}));
+        CHECK(e.table_size() == d.table_size() && e.table_entries() == d.table_entries() && d.table_size() <= 1024);
+    }
+    // A value larger than the table stays a literal and leaves the table alone.
+    {
+        const std::string big(2000, 'v');
+        std::string b;
+        e.begin(b);
+        e.field(b, "x-big", big);
+        e.field(b, "content-type", "text/css");
+        const std::size_t before = e.table_entries();
+        CHECK(same(decode(d, b), {{"x-big", big}, {"content-type", "text/css"}}) && e.table_entries() == before && d.table_entries() == before);
+    }
+    // The peer lowers its limit below ours: the next block starts with the update, both
+    // tables evict alike; then to zero: literals only, both tables empty.
+    e.set_peer_max(300);
+    {
+        std::string b;
+        e.begin(b);
+        e.server(b, "agensio", server_insert);
+        e.field(b, "content-type", "text/css");
+        e.field(b, "content-type", "text/html");
+        CHECK(static_cast<unsigned char>(b[0]) == 0x3f);  // an update first
+        CHECK(same(decode(d, b), {{"server", "agensio"}, {"content-type", "text/css"}, {"content-type", "text/html"}}));
+        CHECK(d.table_limit() == 300 && e.table_limit() == 300 && e.table_size() == d.table_size() && d.table_size() <= 300);
+    }
+    e.set_peer_max(0);
+    {
+        std::string b;
+        e.begin(b);
+        e.server(b, "agensio", server_insert);
+        e.date(b, 1002, "Wed, 24 Sep 2026 10:00:02 GMT", date2);
+        e.field(b, "content-type", "text/css");
+        CHECK(same(decode(d, b), {{"server", "agensio"}, {"date", "Wed, 24 Sep 2026 10:00:02 GMT"}, {"content-type", "text/css"}}));
+        CHECK(d.table_entries() == 0 && e.table_entries() == 0 && d.table_limit() == 0);
+        std::string c;
+        e.begin(c);
+        CHECK(c.empty());  // no pending update
+    }
+    // Raised again: back to our size, an update first, insertions resume.
+    e.set_peer_max(4096);
+    {
+        std::string b;
+        e.begin(b);
+        e.server(b, "agensio", server_insert);
+        CHECK(same(decode(d, b), {{"server", "agensio"}}) && d.table_limit() == 1024 && d.table_entries() == 1);
+    }
+    // The limit drops to 0 and rises again before a block goes out: the block walks the
+    // decoder down to 0 and up to our size, so the entries we emptied are gone there too.
+    e.set_peer_max(0);
+    e.set_peer_max(4096);
+    {
+        std::string b;
+        e.begin(b);
+        e.field(b, "content-type", "text/plain");
+        CHECK(static_cast<unsigned char>(b[0]) == 0x20 && static_cast<unsigned char>(b[1]) == 0x3f);  // update 0, then update 1024
+        CHECK(same(decode(d, b), {{"content-type", "text/plain"}}) && d.table_entries() == 1 && e.table_entries() == 1 && d.table_limit() == 1024);
+    }
+    // A fresh connection whose peer announced 512 before the first block: the update says 512.
+    Encoder e2;
+    Decoder d2(4096);
+    e2.set_peer_max(512);
+    std::string b;
+    e2.begin(b);
+    e2.field(b, "content-type", "text/plain");
+    CHECK(same(decode(d2, b), {{"content-type", "text/plain"}}) && d2.table_limit() == 512);
+}
+
 // Accept-Encoding against the twins an entry holds (RFC 9110 12.5.3): the arena's header,
 // browsers', q-values, refusals and wildcards.
 static void test_encoding() {
@@ -3333,6 +3470,7 @@ int main() {
     test_mime();
     test_size();
     test_cache();
+    test_hpack_encoder();
     test_site_protocols();
 #ifdef AGENSIO_HTTPARENA
     test_httparena();

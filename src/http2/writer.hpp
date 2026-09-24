@@ -55,7 +55,11 @@ public:
     static constexpr std::size_t kSlot = kFrameHeaderSize + kPayload;
     static constexpr std::size_t kQuantum = kFramesPerChunk * kPayload;  // body bytes per stream per cycle
     static constexpr std::size_t kMaxPieces = 256;         // scatter entries per cycle
-    static constexpr std::size_t kMaxCycleBytes = 256 * 1024;
+    // Body bytes per cycle. TLS cycles with separate header pieces are copied into one
+    // buffer before SSL_write; 64 KB keeps that copy and the encrypt in cache (measured
+    // 2026-09-24 on the arena's static-h2: 256 KB cycles cost 9 % after the write batching
+    // made every cycle full).
+    static constexpr std::size_t kMaxCycleBytes = IsTlsStream<Socket>::value ? 64 * 1024 : 256 * 1024;
     // A cycle of many small pieces (the answers of many streams to one read) is copied into
     // one buffer and written once: asio hands the kernel at most 64 entries per call, so a
     // scatter list of tiny answers costs a syscall per 21 of them, and the copy is cheaper
@@ -144,6 +148,9 @@ public:
         Hold(const Hold&) = delete;
         Hold& operator=(const Hold&) = delete;
     };
+    // The peer's SETTINGS_HEADER_TABLE_SIZE: the most our encoder's table may be.
+    void set_peer_table_size(std::uint32_t v) { encoder_.set_peer_max(v); }
+    const hpack::Encoder& encoder() const noexcept { return encoder_; }
     // The peer's connection-level window and frame size (SETTINGS, WINDOW_UPDATE).
     std::int32_t conn_window() const noexcept { return conn_window_; }
     void set_conn_window(std::int32_t w) noexcept { conn_window_ = w; }
@@ -516,28 +523,41 @@ private:
             append_lower(out, line.substr(0, colon), value, scratch);
         }
     }
-    static void append_lower(std::string& out, std::string_view name, std::string_view value, std::string& scratch) {
+    void append_lower(std::string& out, std::string_view name, std::string_view value, std::string& scratch) {
         scratch.assign(name);
         for (char& c : scratch) c = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
         if (fields::connection_specific(scratch)) return;
-        hpack::append_field(out, scratch, value);
+        encoder_.field(out, scratch, value);
     }
 
+    // The head through the connection's dynamic table (design 6.2.1): status, server and
+    // date by remembered index, the representation's type and coding through the table,
+    // then the entry's prebuilt tail of literals, or a text block field by field.
     void build_head(H2Stream& s) {
         Response& r = s.stream.response;
         WorkerState& ws = owner_.worker_state();
         std::string& h = s.head;
         h.assign(kFrameHeaderSize, '\0');  // the HEADERS frame header, filled in by emit()
+        encoder_.begin(h);
         hpack::append_status(h, r.status);
-        if (ws.h2_prefix_time != ws.now) {  // server + date, once per second
-            ws.h2_prefix.clear();
-            if (!ws.server_line.empty()) hpack::append_field(ws.h2_prefix, "server", cfg_.server_header);
-            hpack::append_field(ws.h2_prefix, "date", ws.date.at(ws.now));
-            ws.h2_prefix_time = ws.now;
+        if (!ws.server_line.empty()) {
+            if (ws.h2_server_insert.empty()) hpack::append_insert(ws.h2_server_insert, "server", cfg_.server_header);
+            encoder_.server(h, cfg_.server_header, ws.h2_server_insert);
         }
-        h.append(ws.h2_prefix);
-        if (!r.prebuilt_h2.empty()) h.append(r.prebuilt_h2);
-        else if (!r.prebuilt_headers.empty()) encode_text_block(h, r.prebuilt_headers, s.scratch);
+        if (ws.h2_date_time != ws.now) {  // the date's inserting literal, once per second per worker
+            ws.h2_date_insert.clear();
+            hpack::append_insert(ws.h2_date_insert, "date", ws.date.at(ws.now));
+            ws.h2_date_time = ws.now;
+        }
+        encoder_.date(h, ws.now, ws.date.at(ws.now), ws.h2_date_insert);
+        if (!r.prebuilt_h2.empty()) {
+            if (!r.content_type.empty()) encoder_.field(h, "content-type", r.content_type);
+            if (!r.content_encoding.empty()) encoder_.field(h, "content-encoding", r.content_encoding);
+            if (r.vary) encoder_.field(h, "vary", "Accept-Encoding");
+            h.append(r.prebuilt_h2);
+        } else if (!r.prebuilt_headers.empty()) {
+            encode_text_block(h, r.prebuilt_headers, s.scratch);
+        }
         for (const HeaderField& f : r.headers) append_lower(h, f.name, f.value, s.scratch);
         if (const StreamBody* source = source_of(r)) {
             std::uint64_t len = 0;
@@ -546,7 +566,7 @@ private:
             if (s.source_sized) {
                 s.scratch.clear();
                 append_number(s.scratch, len);
-                hpack::append_field(h, "content-length", s.scratch);
+                encoder_.field(h, "content-length", s.scratch);
             }
         }
     }
@@ -555,6 +575,7 @@ private:
     Owner& owner_;
     asio::io_context& ctx_;
     const Config& cfg_;
+    hpack::Encoder encoder_;  // the connection's dynamic table for response heads (design 6.2.1)
     std::string ctl_;      // control frames waiting for the next cycle
     std::string ctl_out_;  // the control frames of the cycle in flight
     std::vector<unsigned char> hdrs_;         // frame headers of the cycle in flight

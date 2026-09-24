@@ -172,6 +172,26 @@ void append_field(std::string& out, std::string_view name, std::string_view valu
     else append_literal(out, name, value);
 }
 
+void append_insert(std::string& out, std::string_view name, std::string_view value) {
+    if (const unsigned n = static_name_index(name)) {
+        append_integer(out, n, 6, 0x40);
+    } else {
+        append_integer(out, 0, 6, 0x40);
+        append_string(out, name);
+    }
+    append_string(out, value);
+}
+
+void append_never_indexed(std::string& out, std::string_view name, std::string_view value) {
+    if (const unsigned n = static_name_index(name)) {
+        append_integer(out, n, 4, 0x10);
+    } else {
+        append_integer(out, 0, 4, 0x10);
+        append_string(out, name);
+    }
+    append_string(out, value);
+}
+
 void append_status(std::string& out, int status) {
     switch (status) {
         case 200: append_indexed(out, 8); return;
@@ -193,11 +213,9 @@ void append_status(std::string& out, int status) {
     out.append(digits, 3);
 }
 
-// ---- decoding ----
+// ---- the dynamic table ----
 
-Decoder::Decoder(std::size_t ceiling) : ceiling_(ceiling), limit_(ceiling) {}  // the ring is made on the first insertion
-
-void Decoder::evict_to(std::size_t limit) noexcept {
+void DynamicTable::evict_to(std::size_t limit) noexcept {
     while (count_ > 0 && size_ > limit) {
         const std::size_t oldest = (head_ + ring_.size() - (count_ - 1)) % ring_.size();
         Entry& e = ring_[oldest];
@@ -208,21 +226,160 @@ void Decoder::evict_to(std::size_t limit) noexcept {
     }
 }
 
-void Decoder::add(std::string_view name, std::string_view value) {
+void DynamicTable::set_limit(std::size_t limit) noexcept {
+    limit_ = limit;
+    evict_to(limit_);
+}
+
+bool DynamicTable::add(std::string_view name, std::string_view value) {
     const std::size_t need = name.size() + value.size() + 32;
     if (need > limit_) {  // RFC 7541 4.4: an entry larger than the table empties it and is not added
         evict_to(0);
-        return;
+        return false;
     }
     evict_to(limit_ - need);
-    if (ring_.empty()) ring_.resize(ceiling_ / 32 + 1);  // an entry costs at least 32 bytes, so this many fit; 8 KB, only for a peer that indexes
+    if (ring_.empty()) ring_.resize(capacity_ / 32 + 1);  // an entry costs at least 32 bytes, so this many fit
     head_ = (head_ + 1) % ring_.size();
     Entry& e = ring_[head_];
     e.name.assign(name);
     e.value.assign(value);
     ++count_;
     size_ += need;
+    return true;
 }
+
+bool DynamicTable::at(std::size_t k, std::string_view& name, std::string_view& value) const noexcept {
+    if (k >= count_ || ring_.empty()) return false;
+    const Entry& e = ring_[(head_ + ring_.size() - k) % ring_.size()];
+    name = e.name;
+    value = e.value;
+    return true;
+}
+
+std::size_t DynamicTable::find(std::string_view name, std::string_view value) const noexcept {
+    for (std::size_t k = 0; k < count_; ++k) {
+        const Entry& e = ring_[(head_ + ring_.size() - k) % ring_.size()];
+        if (e.name.size() == name.size() && e.value.size() == value.size() && e.name == name && e.value == value) return k;
+    }
+    return npos;
+}
+
+// ---- the encoder ----
+
+Encoder::Policy Encoder::policy(std::string_view name) noexcept {
+    switch (name.size()) {
+        case 3: if (name == "age") return Policy::literal; break;
+        case 4: if (name == "etag" || name == "date") return Policy::literal; break;
+        case 6: if (name == "cookie") return Policy::never; break;
+        case 7: if (name == "expires") return Policy::literal; break;
+        case 8: if (name == "location") return Policy::literal; break;
+        case 10: if (name == "set-cookie") return Policy::never; break;
+        case 11: if (name == "retry-after") return Policy::literal; break;
+        case 13:
+            if (name == "authorization" || name == "content-range" || name == "last-modified") return name == "authorization" ? Policy::never : Policy::literal;
+            break;
+        case 14: if (name == "content-length") return Policy::literal; break;
+        case 16: if (name == "www-authenticate") return Policy::never; break;
+        case 18: if (name == "proxy-authenticate") return Policy::never; break;
+        case 19:
+            if (name == "proxy-authorization") return Policy::never;
+            if (name == "content-disposition") return Policy::literal;
+            break;
+        default: break;
+    }
+    return Policy::index;
+}
+
+bool Encoder::insert(std::string_view name, std::string_view value) {
+    if (name.size() + value.size() + 32 > max_) return false;  // the decoder would empty its table: not worth an entry
+    if (!table_.add(name, value)) return false;
+    ++next_seq_;
+    return true;
+}
+
+void Encoder::set_peer_max(std::uint32_t value) {
+    const std::size_t new_max = std::min<std::size_t>(value, kMaxSize);
+    if (new_max != max_) {
+        table_.set_limit(new_max);  // down: evicts oldest first, as the decoder will on the update
+        pending_update_ = true;
+    }
+    if (value < assumed_) pending_update_ = true;  // the decoder may have shrunk with its own setting: tell it our size
+    max_ = new_max;
+    floor_ = std::min(floor_, new_max);
+}
+
+// A decoder that evicts only on our updates must be walked down to the lowest size we
+// used since the last update (the entries evicted there are gone on our side), then up
+// to the current one; a decoder that shrank on its own setting sees the same table
+// either way.
+void Encoder::begin(std::string& out) {
+    if (!pending_update_) return;
+    if (floor_ < max_ && floor_ < assumed_) append_integer(out, floor_, 5, 0x20);
+    if (max_ != assumed_ || floor_ < max_) append_integer(out, max_, 5, 0x20);
+    assumed_ = max_;
+    floor_ = max_;
+    pending_update_ = false;
+}
+
+void Encoder::field(std::string& out, std::string_view name, std::string_view value) {
+    if (const unsigned i = static_index(name, value)) {
+        append_indexed(out, i);
+        return;
+    }
+    switch (policy(name)) {
+        case Policy::never:
+            append_never_indexed(out, name, value);
+            return;
+        case Policy::index:
+            if (max_ > 0) {
+                const std::size_t k = table_.find(name, value);
+                if (k != DynamicTable::npos) {
+                    append_indexed(out, static_cast<unsigned>(62 + k));
+                    return;
+                }
+                if (insert(name, value)) {
+                    append_insert(out, name, value);
+                    return;
+                }
+            }
+            break;
+        case Policy::literal:
+            break;
+    }
+    if (const unsigned n = static_name_index(name)) append_literal(out, n, value);
+    else append_literal(out, name, value);
+}
+
+void Encoder::server(std::string& out, std::string_view value, std::string_view insert_bytes) {
+    if (alive(server_seq_)) {
+        append_indexed(out, index_of(server_seq_));
+        return;
+    }
+    if (max_ > 0 && insert("server", value)) {
+        server_seq_ = next_seq_ - 1;
+        out.append(insert_bytes);
+        return;
+    }
+    append_literal(out, 54, value);
+}
+
+void Encoder::date(std::string& out, std::time_t second, std::string_view value, std::string_view insert_bytes) {
+    if (second == date_second_ && alive(date_seq_)) {
+        append_indexed(out, index_of(date_seq_));
+        return;
+    }
+    if (max_ > 0 && insert("date", value)) {
+        date_seq_ = next_seq_ - 1;
+        date_second_ = second;
+        out.append(insert_bytes);
+        return;
+    }
+    append_literal(out, 33, value);
+}
+
+// ---- decoding ----
+
+Decoder::Decoder(std::size_t ceiling) : table_(ceiling), ceiling_(ceiling) {}  // the ring is made on the first insertion
 
 bool Decoder::lookup(std::uint32_t index, std::string_view& name, std::string_view& value) const noexcept {
     if (index == 0) return false;
@@ -231,12 +388,7 @@ bool Decoder::lookup(std::uint32_t index, std::string_view& name, std::string_vi
         value = kStaticTable[index - 1].value;
         return true;
     }
-    const std::uint32_t k = index - static_cast<std::uint32_t>(kStaticTable.size()) - 1;  // 0 = newest
-    if (k >= count_ || ring_.empty()) return false;
-    const Entry& e = ring_[(head_ + ring_.size() - k) % ring_.size()];
-    name = e.name;
-    value = e.value;
-    return true;
+    return table_.at(index - static_cast<std::uint32_t>(kStaticTable.size()) - 1, name, value);  // 0 = newest
 }
 
 Decoder::StrStatus Decoder::read_string(std::string_view in, std::size_t& pos, std::string& arena,
@@ -307,13 +459,12 @@ Decoder::Result Decoder::decode(std::string_view block, std::string& arena, std:
                 case StrStatus::malformed: return Result::malformed;
                 case StrStatus::too_large: return Result::too_large;
             }
-            add(name, value);
+            table_.add(name, value);
         } else if (b & 0x20) {  // 6.3 dynamic table size update: only before the first field
             if (fields_started) return Result::malformed;
             std::uint32_t size = 0;
             if (!read_integer(block, pos, 5, size) || size > ceiling_) return Result::malformed;
-            evict_to(size);
-            limit_ = size;
+            table_.set_limit(size);
             continue;
         } else {  // 6.2.2 without indexing (0000) and 6.2.3 never indexed (0001)
             std::uint32_t index = 0;

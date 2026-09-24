@@ -1034,6 +1034,22 @@ for base in http://127.0.0.1:8080 https://127.0.0.1:8443; do
   check "$p traversal refused"     "400" "$(command curl -sS $H -o /dev/null -w '%{http_code}' --path-as-is $base/../etc/passwd)"
 done
 check "h2: the access log names the protocol" "yes" "$(sleep 1.1; grep -q '"GET / HTTP/2.0" 200' bench/tmp/access.log && echo yes)"
+# The dynamic-table head (design 6.2.1): on one connection the second answer's HPACK block
+# is a fraction of the first (server, date and content-type as one index byte each), the
+# fields decode the same, and nghttp2's decoder, the strictest one around, accepts it.
+if command -v nghttp >/dev/null; then
+  check "h2 head: the second answer on a connection is indexed: a smaller block, the same fields, no compression error" "yes yes 200 200 text/html; charset=utf-8 agensio" "$(nghttp -v http://127.0.0.1:8080/ 'http://127.0.0.1:8080/?again=1' 2>&1 | grep -a -E 'recv .*HEADERS frame|:status|server:|content-type:' | sed 's/^\[[^]]*\] //' | python3 -c '
+import re,sys
+lines=sys.stdin.read().splitlines()
+lens=[int(m.group(1)) for l in lines for m in [re.search(r"HEADERS frame <length=(\d+)", l)] if m]
+st=[l.split(":status: ")[1] for l in lines if ":status: " in l]
+ct=[l.split("content-type: ")[1] for l in lines if "content-type: " in l]
+sv=[l.split("server: ")[1] for l in lines if "server: " in l]
+print("yes" if len(lens)==2 and lens[1] < lens[0] and lens[1] <= 60 else lens, "yes" if lens and lens[0] > lens[1] + 20 else lens, st[0] if st else "-", st[1] if len(st)>1 else "-", ct[-1] if ct else "-", sv[-1] if sv else "-")')"
+  if [ "$ARENA" = 1 ]; then
+    check "h2 head (handler): the second answer's block is at most 12 bytes" "yes" "$(nghttp -v 'http://127.0.0.1:8083/baseline2?a=1&b=2' 'http://127.0.0.1:8083/baseline2?a=3&b=4' 2>&1 | grep -a -E 'recv .*HEADERS frame' | sed 's/.*<length=\([0-9]*\).*/\1/' | python3 -c 'import sys; l=[int(x) for x in sys.stdin.read().split()]; print("yes" if len(l)==2 and l[1] <= 12 and l[0] > 30 else l, end="")')"
+  fi
+fi
 check "h2: a plain HTTP/1.1 client on the same port is untouched" "1.1 200" "$(curl -sS -o /dev/null -w '%{http_version} %{http_code}' http://127.0.0.1:8080/)"
 check "h2: ALPN offers h2 then h1; a client offering only http/1.1 gets it" "1.1 200" "$(command curl -sSk --http1.1 -o /dev/null -w '%{http_version} %{http_code}' https://127.0.0.1:8443/)"
 check "h2: explain and status name the protocols" "yes yes" "$(grep -q 'protocols = \["h2c", "h2", "h1"\]' bench/tmp/explain.out && echo yes) $(curl -sS --unix-socket bench/tmp/control.sock http://control/v1/status | python3 -c 'import json,sys; d=json.load(sys.stdin); ls={l["address"]:l["protocols"] for l in d["listeners"]}; print("yes" if ls["127.0.0.1:8080"]==["h2c","h1"] and ls["127.0.0.1:8443"]==["h2","h1"] else ls)')"

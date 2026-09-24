@@ -23,7 +23,12 @@ struct Response {
     bool prebuilt_terminated = false;
     // The same fields as an HPACK block (cache entries, error pages: built once, copied
     // per response by the HTTP/2 writer). Empty: the HTTP/2 writer encodes the text block.
+    // The block is the tail: the fields the HTTP/2 encoder sends through its dynamic
+    // table go beside it (content_type, content_encoding, vary; design 6.2.1).
     std::string_view prebuilt_h2;
+    std::string_view content_type;      // with prebuilt_h2: the representation's type
+    std::string_view content_encoding;  // with prebuilt_h2: "br" / "gzip" for a twin, else empty
+    bool vary = false;                  // with prebuilt_h2: Vary: Accept-Encoding
 
     // Per-request fields (Connection, Location, Allow, ETag on a 304, ...). Values must
     // outlive the response: static text, or views into `entry`.
@@ -49,6 +54,8 @@ struct Response {
         prebuilt_headers = {};
         prebuilt_terminated = false;
         prebuilt_h2 = {};
+        content_type = content_encoding = {};
+        vary = false;
         headers.clear();
         body = NoBody{};
         keep_alive = true;

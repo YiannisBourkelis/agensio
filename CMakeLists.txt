@@ -175,7 +175,7 @@ target_link_libraries(agensio_upstream PRIVATE asio Threads::Threads)
 
 # ---------------------------------------------------------------- fuzzers (parsers only, no asio)
 if(AGENSIO_FUZZ)
-  foreach(t parser path chunked fcgi http_head json archive hpack)
+  foreach(t parser path chunked fcgi http_head json archive hpack hpack_roundtrip)
     add_executable(fuzz_${t} tests/fuzz/fuzz_${t}.cpp src/http1/parser.cpp src/path.cpp src/services/archive.cpp src/http2/hpack.cpp)
     target_include_directories(fuzz_${t} PRIVATE src)
     target_compile_features(fuzz_${t} PRIVATE cxx_std_20)

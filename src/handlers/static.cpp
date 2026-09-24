@@ -46,6 +46,7 @@ void StaticHandler::error(Stream& s, int status, bool keep_alive, std::string_vi
     r.head = s.request.method == Method::head;
     r.prebuilt_headers = page.headers;  // Content-Type + Content-Length, not terminated
     r.prebuilt_h2 = page.h2_headers;
+    r.content_type = "text/html; charset=utf-8";
     if (!allow.empty()) r.headers.add("Allow", allow);
     r.body = MemoryBody{page.body};
 }
@@ -167,6 +168,9 @@ void StaticHandler::serve_entry(Stream& s, EntryPtr e) {
     r.prebuilt_headers = e->headers;
     r.prebuilt_terminated = true;
     r.prebuilt_h2 = e->h2_block;
+    r.content_type = e->content_type;
+    r.content_encoding = e->content_encoding;
+    r.vary = !e->coding_headers.empty();
     if (e->descriptor_only) r.body = FileBody{&e->fd, e->size, 0};  // streamed from the cached descriptor
     else r.body = MemoryBody{std::string_view(e->data.data(), e->data.size())};
     r.entry = std::move(e);
@@ -182,6 +186,7 @@ void StaticHandler::fill_entry(CacheEntry& entry, const FileInfo& fi, std::strin
     entry.mtime = fi.mtime;
     entry.size = fi.size;
     entry.coding_headers = coding == Encoding::br ? kBr : coding == Encoding::gzip ? kGzip : vary ? kVary : std::string_view{};
+    entry.content_encoding = coding == Encoding::br ? std::string_view("br") : coding == Encoding::gzip ? std::string_view("gzip") : std::string_view{};
     make_etag(fi.mtime, fi.size, entry.etag);
     entry.last_modified.resize(kHttpDateLength);
     format_http_date(static_cast<std::time_t>(fi.mtime), entry.last_modified.data());
@@ -195,17 +200,16 @@ void StaticHandler::fill_entry(CacheEntry& entry, const FileInfo& fi, std::strin
         .append("\r\n")
         .append(entry.coding_headers)
         .append("Accept-Ranges: bytes\r\n\r\n");
-    // The HTTP/2 twin: one HPACK block built here, copied per response by the h2 writer
-    // (nginx encodes every header of every response; the cache pays once per entry).
-    entry.h2_block.reserve(128);
-    hpack::append_field(entry.h2_block, "content-type", content_type);
+    // The HTTP/2 tail: the fields that change per file as one HPACK block of literals,
+    // built here and copied per response by the h2 writer (nginx encodes every header of
+    // every response; the cache pays once per entry). content-type, content-encoding and
+    // vary are not in it: the writer sends those through the connection's dynamic table.
+    entry.h2_block.reserve(96);
     std::string length;
     append_number(length, fi.size);
     hpack::append_field(entry.h2_block, "content-length", length);
     hpack::append_field(entry.h2_block, "last-modified", entry.last_modified);
     hpack::append_field(entry.h2_block, "etag", entry.etag);
-    if (coding != Encoding::identity) hpack::append_field(entry.h2_block, "content-encoding", coding == Encoding::br ? "br" : "gzip");
-    if (!entry.coding_headers.empty()) hpack::append_field(entry.h2_block, "vary", "Accept-Encoding");
     hpack::append_field(entry.h2_block, "accept-ranges", "bytes");
     entry.last_access.store(now, std::memory_order_relaxed);
     entry.last_validated.store(now, std::memory_order_relaxed);
@@ -314,6 +318,7 @@ void StaticHandler::redirect_slash(Stream& s, WorkerState& ws) {
     r.headers.add("Location", r.scratch);
     r.prebuilt_headers = page.headers;
     r.prebuilt_h2 = page.h2_headers;
+    r.content_type = "text/html; charset=utf-8";
     r.body = MemoryBody{page.body};
 }
 

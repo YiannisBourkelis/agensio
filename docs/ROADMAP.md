@@ -664,6 +664,11 @@ misbehaviour counters against every published attack class up to the 2026 HTTP/2
       HPACK bomb and the 2026 Bomb hold, slow read, floods) with memory sampled, budgets
       tuned, sanitizer and fuzz records, the security page's HTTP/2 section, counters in
       `server_status` and `health`, MCP texts.
+- [ ] G2c The dynamic-table head: `server`, `date`, `content-type`, `vary` and
+      `content-encoding` through a per-connection HPACK dynamic table of eight slots and a
+      1 KB cap, validators and everything else literal as today; design in
+      `docs/design-http2.md` 6.2.1 (2026-09-24, after the write batching took the arena's
+      baseline-h2 from 3.26M to 7.55M req/s pinned; h2o's block is 7 bytes, ours 48).
 - [ ] G4 Extras: RFC 9218 urgency, RFC 8441 CONNECT over h2 through the tunnel, per-site
       protocols via SNI, the TLS-ALPN-01 hook. (GOAWAY on reload reviewed 2026-09-23: the
       frame follows the streams in flight, new streams are refused meanwhile, both cases

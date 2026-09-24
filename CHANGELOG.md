@@ -2,6 +2,21 @@
 
 ## 0.1.0-alpha.21 (unreleased)
 
+- **HTTP/2 response heads through a dynamic table** (design 6.2.1): `server`, `date`,
+  `content-type`, `vary`, `content-encoding` and whatever a handler's or an upstream's
+  block repeats are inserted once per connection (date once per second) and cost one byte
+  after; `content-length`, the validators and everything that changes per answer stay
+  literal, `set-cookie` and the authorization fields are never indexed. A cache entry's
+  block is now the tail of literals, still built once at insert. The table is at most 1 KB
+  and never above the peer's SETTINGS_HEADER_TABLE_SIZE, shrinks with it and stops at
+  zero; encoder and decoder share one table implementation, so both sides evict by the
+  same code, and unit tests, a fuzz target and nghttp2's decoder hold them in step. The
+  arena's HTTP/2 baseline answer went from a 48-byte HEADERS block to 8, and the row
+  from 7.55M to 8.46M req/s pinned (h2o 11.06M, load-bound; agensio was at 3.26M before
+  the write batching). With it, TLS
+  write cycles that are coalesced before `SSL_write` are capped at 64 KB of body: once
+  the write batching filled every cycle, 256 KB cycles copied and encrypted outside the
+  cache and cost the arena's static-h2 row 9 %.
 - **HTTP/2 answers of one read go out in one write.** The writer is held while the
   connection runs the frames of a read, so the answers to a hundred HEADERS frames leave
   in one cycle instead of one every two or three streams (the write completed inline and

@@ -185,6 +185,26 @@ against alpha.20 (`ab-20260924-011552.md`): the multiplexed rows h2c and h2 at t
 streams 0.347 and 0.348 of the base CPU per request, the single-stream rows 0.989 and
 1.008, the HTTP/1 rows 0.951 to 1.005. Next: the dynamic-table head.
 
+## After the dynamic-table head (the second fix)
+
+`hpack::Encoder` per connection (design 6.2.1): the handler's answer block went from 48
+bytes to 8 (`nghttp -v`: 48, then 8, 8), a static file's from 107 to 56. TLS cycles that
+are coalesced before `SSL_write` are capped at 64 KB of body with it (256 KB cycles, full
+since the batching, cost the static-h2 row 9 %: 770k against 834k req/s pinned). Pinned
+like the rows above: baseline-h2 8,460,254 req/s at 1042 % (7,549,133 at 927 % after the
+batching alone; 3,263,453 at 1124 % before it), h2c 9,288,525 at 1177 %, static-h2
+834,117 at 1082 % and 232 MiB (841,051 before the batching at 1199 %). One worker: 1.54M
+req/s on h2c and 1.62M over TLS, one send per 57 answers. The A/B against alpha.20
+(`ab-20260924-075048.md`): the ten-stream rows at 0.387 and 0.373 of the base CPU per
+request, the single-stream rows 1.015 and 1.022, the HTTP/1 rows 0.962 to 1.004.
+
+Against h2o on baseline-h2: 8.46M against 11.06M, from 0.29 of it at the start of this
+investigation to 0.76; h2o is load-bound there at 754 % of CPU, we are at 1042 % of 1200,
+so what is left is our cost per request, 1.23 µs of thread time against h2o's 0.68 at
+most. The profile's remaining items are all per-request user time: two clock reads per
+stream, the heap-allocated completion of the synchronous handler, HPACK decoding of the
+request with Huffman, target normalisation and routing.
+
 Not run: the two HTTP/3 rows, which need phase I.
 
 Commands (`bench/httparena/local.sh` wraps them in the Docker-in-Docker container):

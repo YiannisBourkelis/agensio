@@ -38,6 +38,7 @@ void Dispatcher::redirect_https(Stream& s, const SiteConfig& site) {
     r.headers.add("Location", location);
     r.prebuilt_headers = page.headers;
     r.prebuilt_h2 = page.h2_headers;
+    r.content_type = "text/html; charset=utf-8";
     r.body = MemoryBody{page.body};
 }
 

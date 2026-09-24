@@ -71,8 +71,7 @@ const std::map<int, ErrorPage>& pages() {
                      "</h1></center><hr><center>agensio</center></body></html>\n";
             p.headers =
                 "Content-Type: text/html; charset=utf-8\r\nContent-Length: " + std::to_string(p.body.size()) + "\r\n";
-            hpack::append_field(p.h2_headers, "content-type", "text/html; charset=utf-8");
-            hpack::append_field(p.h2_headers, "content-length", std::to_string(p.body.size()));
+            hpack::append_field(p.h2_headers, "content-length", std::to_string(p.body.size()));  // the type goes through the connection's table
             out.emplace(code, std::move(p));
         }
         return out;
