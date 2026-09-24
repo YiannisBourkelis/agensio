@@ -39,8 +39,10 @@
 #include "core/headers.hpp"
 #include "core/result.hpp"
 #include "core/host.hpp"
+#include "core/cpus.hpp"
 #include "core/router.hpp"
 #include "handlers/fastcgi.hpp"
+#include "handlers/httparena.hpp"
 #include "handlers/static.hpp"
 #include "core/fields.hpp"
 #include "http2/frame.hpp"
@@ -412,6 +414,104 @@ static void test_precompressed() {
     CHECK(body() == css && !has("Vary") && plain.total_bytes() == 100u);
     fs::remove_all(dir);
 }
+
+// Per-site protocols (HttpArena needs a TLS port kept at HTTP/1.1 next to one offering h2):
+// inherited from [server], overridden per site, sites on one address must agree.
+static void test_site_protocols() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-protocols-" + std::to_string(::getpid()));
+    fs::remove_all(dir);
+    fs::create_directories(dir / "www");
+    auto load = [&](const std::string& text) {
+        std::ofstream(dir / "p.toml") << text;
+        return load_config(dir / "p.toml");
+    };
+    const Config a = load("[server]\nprotocols = [\"h2c\", \"h2\", \"h1\"]\n"
+                          "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n"
+                          "[[site]]\nserver_name = [\"b\"]\nlisten = [\"127.0.0.1:18081\"]\nroot = \"www\"\nprotocols = [\"http/1.1\"]\n");
+    CHECK(a.sites[0].h2 && a.sites[0].h2c && a.sites[0].alpn_wire == std::string("\x02h2\x08http/1.1", 12) && a.sites[0].protocols.size() == 3);
+    CHECK(!a.sites[1].h2 && !a.sites[1].h2c && a.sites[1].alpn_wire == std::string("\x08http/1.1", 9) && a.sites[1].protocols == std::vector<std::string>{"h1"});
+    bool refused = false;
+    try {
+        load("[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n"
+             "[[site]]\nserver_name = [\"b\"]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\nprotocols = [\"h1\"]\n");
+    } catch (const std::exception& e) {
+        refused = std::string(e.what()).find("share 127.0.0.1:18080 but list different protocols") != std::string::npos;
+    }
+    CHECK(refused);
+    refused = false;
+    try {
+        load("[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\nprotocols = [\"spdy\"]\n");
+    } catch (const std::exception& e) {
+        refused = std::string(e.what()).find("protocols") != std::string::npos;
+    }
+    CHECK(refused);
+    CHECK(available_cpus() >= 1);
+    fs::remove_all(dir);
+}
+
+#ifdef AGENSIO_HTTPARENA
+// The benchmark handler against a three-item dataset: the sums, the JSON shape and
+// arithmetic, /pipeline, the refusals.
+static void test_httparena() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-arena-" + std::to_string(::getpid()));
+    fs::remove_all(dir);
+    fs::create_directories(dir / "www");
+    std::ofstream(dir / "dataset.json") << R"([
+      {"id": 1, "name": "Alpha \"W\"", "category": "electronics", "price": 328, "quantity": 15, "active": true, "tags": ["sale", "popular"], "rating": {"score": 48, "count": 53}},
+      {"id": 2, "name": "Pro Valve", "category": "tools", "price": 347, "quantity": 95, "active": false, "tags": [], "rating": {"score": 40, "count": 7}},
+      {"id": 3, "name": "Gizmo", "category": "toys", "price": 5, "quantity": 2, "active": true, "tags": ["new"], "rating": {"score": 10, "count": 1}}])";
+    std::ofstream(dir / "a.toml") << "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n"
+                                     "[[site.location]]\npath = \"/\"\nhandler = \"httparena\"\nhttparena = { dataset = \"dataset.json\" }\n";
+    Config cfg = load_config(dir / "a.toml");
+    const LocationConfig& loc = Router::location(cfg.sites[0], "/baseline11");
+    CHECK(loc.kind == HandlerKind::httparena && loc.httparena && loc.httparena->items.size() == 3 && loc.allow == "GET, HEAD, POST");
+    HttparenaHandler handler;
+    WorkerState ws;
+    ws.site = &cfg.sites[0];
+    Stream s;
+    int done = 0;
+    auto serve = [&](Method m, const char* target, const char* path) {
+        s.request.reset();
+        s.response.reset();
+        s.request.method = m;
+        s.request.target = target;
+        ws.path = path;
+        handler.start(s, loc, ws, [&] { ++done; });
+    };
+    auto body = [&]() -> std::string_view {
+        const auto* mb = std::get_if<MemoryBody>(&s.response.body);
+        return mb ? mb->data : std::string_view{};
+    };
+    serve(Method::get, "/baseline11?a=13&b=42", "/baseline11");
+    CHECK(s.response.status == 200 && body() == "55" && s.response.prebuilt_headers == "Content-Type: text/plain\r\nContent-Length: 2\r\n\r\n" && done == 1);
+    serve(Method::get, "/baseline2?a=-5&b=7&c=100", "/baseline2");
+    CHECK(body() == "102");
+    serve(Method::get, "/baseline11", "/baseline11");
+    CHECK(body() == "0");
+    serve(Method::head, "/baseline11?a=1&b=2", "/baseline11");
+    CHECK(s.response.head && body() == "3");
+    serve(Method::get, "/pipeline", "/pipeline");
+    CHECK(body() == "ok" && s.response.status == 200);
+    serve(Method::get, "/json/2?m=3", "/json/2");
+    CHECK(s.response.status == 200 &&
+          body() == "{\"items\":[{\"id\":1,\"name\":\"Alpha \\\"W\\\"\",\"category\":\"electronics\",\"price\":328,\"quantity\":15,\"active\":true,\"tags\":[\"sale\",\"popular\"],\"rating\":{\"score\":48,\"count\":53},\"total\":14760},"
+                    "{\"id\":2,\"name\":\"Pro Valve\",\"category\":\"tools\",\"price\":347,\"quantity\":95,\"active\":false,\"tags\":[],\"rating\":{\"score\":40,\"count\":7},\"total\":98895}],\"count\":2}" &&
+          s.response.prebuilt_headers.starts_with("Content-Type: application/json\r\nContent-Length: "));
+    serve(Method::get, "/json/3", "/json/3");
+    CHECK(body().ends_with(",\"total\":10}],\"count\":3}"));  // m defaults to 1
+    serve(Method::get, "/json/4?m=1", "/json/4");
+    CHECK(s.response.status == 400 && body() == "Bad Request");
+    serve(Method::get, "/json/0", "/json/0");
+    CHECK(s.response.status == 400);
+    serve(Method::get, "/json/x", "/json/x");
+    CHECK(s.response.status == 400);
+    serve(Method::get, "/other", "/other");
+    CHECK(s.response.status == 404 && body() == "Not Found" && done == 11);
+    fs::remove_all(dir);
+}
+#endif
 
 static void test_cache() {
     FileCache cache(100, 250, 0.5, 2);
@@ -2821,7 +2921,7 @@ static void test_config_reference() {
                                           "exact", "prefix", "suffix", "value", "agensio", "https", "http", "none", "allow", "deny", "append", "replace",
                                           "rfc7239", "rewrite", "pass", "fastcgi", "proxy", "cgi", "control", "php", "laravel", "wordpress", "drupal",
                                           "linux", "darwin", "unix", "tcp", "get", "head", "post", "put", "delete", "patch", "options", "trace", "connect",
-                                          "server", "cache", "log", "site", "acme", "http2"};  // table names, not keys
+                                          "server", "cache", "log", "site", "acme", "http2", "httparena"};  // table names, not keys
     std::set<std::string> missing;
     const std::size_t begin = src.find("void parse_proxy_policy"), end = src.find("json::Value preset_catalog");
     CHECK(begin != std::string::npos && end != std::string::npos && begin < end);
@@ -3233,6 +3333,10 @@ int main() {
     test_mime();
     test_size();
     test_cache();
+    test_site_protocols();
+#ifdef AGENSIO_HTTPARENA
+    test_httparena();
+#endif
     test_encoding();
     test_precompressed();
     test_chunked();

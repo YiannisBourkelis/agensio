@@ -99,8 +99,47 @@ unpinned run above, with twelve wrk threads, shows higher numbers; the arena's l
 generators have 64 threads. Against nginx at the same pinning: pipelined 1.19, static-h2
 1.15, static-tls level and load-bound. Raw output in `raw/httparena-lite-20260924-0147/*-pinned.log`.
 
-Not run: baseline, short-lived and the JSON profiles need the in-process handler (`/baseline11`,
-`/baseline2`, `/json/{count}`; the rules forbid proxying them); the two HTTP/3 rows need phase I.
+## All nine profiles, with the benchmark handler (working tree after alpha.20, same session)
+
+The handler step (`handler = "httparena"`, `-DAGENSIO_HTTPARENA=ON`; `protocols` per site,
+`workers = 0` from the cpuset; one process with the four listeners): the arena's validator
+passes 70 checks, and every profile the infrastructure tier scores except the two HTTP/3
+rows ran for agensio, with the rows nginx and h2o subscribe to. Same lite setup: 24
+threads shared with the load generators, 512 connections, 5 s, best of 3.
+
+| profile | agensio | nginx | h2o | agensio / nginx | agensio / h2o |
+|---|---|---|---|---|---|
+| baseline | 2,974,438 (1297 %, 38 MiB) | 2,875,625 (1209 %, 676 MiB) | 2,948,866 (1295 %, 19 MiB) | 1.03 | 1.01 |
+| pipelined | 5,775,579 (1580 %, 23 MiB) | 4,651,758 (1351 %, 682 MiB) | 5,645,580 (1537 %, 20 MiB) | 1.24 | 1.02 |
+| limited-conn | 2,048,426 (1189 %, 44 MiB) | 2,072,407 (1047 %, 686 MiB) | 2,048,322 (1138 %, 28 MiB) | 0.99 | 1.00 |
+| json-tls | 1,215,901 (1004 %, 78 MiB) | 1,072,323 (1142 %, 702 MiB) | 866,158 (1257 %, 55 MiB) | 1.13 | 1.40 |
+| static-tls | 683,283 (995 %, 67 MiB) | 634,561 (1129 %, 708 MiB) | not subscribed | 1.08 | |
+| baseline-h2 | 3,527,827 (1176 %, 63 MiB) | 3,002,565 (1203 %, 755 MiB) | 12,385,544 (931 %, 67 MiB) | 1.18 | 0.28 |
+| static-h2 | 951,716 (1397 %, 153 MiB) | 845,695 (1422 %, 962 MiB) | 289,939 (1430 %, 343 MiB) | 1.13 | 3.28 |
+| baseline-h2c (reference) | 5,029,619 (1418 %, 49 MiB) | 3,020,093 (1582 %, 801 MiB) | not subscribed | 1.67 | |
+| json-h2c (reference) | 2,704,293 (1641 %, 84 MiB) | 1,632,291 (1681 %, 738 MiB) | not subscribed | 1.66 | |
+
+Row by row. baseline is a three-way tie within 3 %: the request path itself, two syscalls
+per request, is where all three sit. pipelined moved from 4.95M to 5.78M with the handler
+alone (no `try_files` hop, a minimal head) and is now ahead of h2o without response
+coalescing. limited-conn is a three-way tie at 2.05M, which is 205k connections a second:
+bound outside the servers, by the accept and close churn of the loopback. json-tls: the
+pre-rendered item prefixes make the row mostly TLS, where agensio leads nginx by 1.13 and
+h2o by 1.40 at less CPU than either. baseline-h2 is the one row h2o owns: 12.4M against our
+3.5M, at less CPU. h2load's own accounting shows why in part: h2o's answer is 25 bytes on
+the wire (302 MB/s at 12.2M), ours 64 (a literal content-type, content-length, server and
+date per response) and nginx's 82; with a hundred streams per connection and the load
+generator sharing the cores, bytes per response are segments, syscalls and h2load CPU.
+Per request agensio spends 3.3 µs there against h2o's 0.75, so the wire size is not the
+whole story; the small-response HTTP/2 path needs a profile before anything is changed.
+The h2c rows are reference only (not scored for infrastructure) and sit at 1.67 of nginx.
+
+Against nginx, then: ahead on eight of nine rows and level on the ninth, at a fifth to a
+twentieth of the memory. Against h2o: ahead or level on five of its six rows, behind on
+baseline-h2. Raw output in `raw/httparena-lite-20260924-0147/*-handler-rows.log` and
+`validate-agensio-handler.log`.
+
+Not run: the two HTTP/3 rows, which need phase I.
 
 Commands (`bench/httparena/local.sh` wraps them in the Docker-in-Docker container):
 

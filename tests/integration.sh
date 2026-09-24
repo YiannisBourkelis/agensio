@@ -51,6 +51,15 @@ mkdir -p bench/tmp/certs-ab bench/tmp/certs-wild bench/tmp/certs-live
 [ -f bench/tmp/certs-ab/cert.pem ] || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout bench/tmp/certs-ab/key.pem -out bench/tmp/certs-ab/cert.pem -days 30 -subj "/CN=a.test" -addext "subjectAltName=DNS:a.test,DNS:b.test" >/dev/null 2>&1
 [ -f bench/tmp/certs-wild/cert.pem ] || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout bench/tmp/certs-wild/key.pem -out bench/tmp/certs-wild/cert.pem -days 30 -subj "/CN=*.wild.test" -addext "subjectAltName=DNS:*.wild.test" >/dev/null 2>&1
 cp bench/tmp/certs-b/cert.pem bench/tmp/certs-b/key.pem bench/tmp/certs-live/
+# The HttpArena benchmark handler is a build option: its site and checks run only when this
+# binary accepts handler = "httparena" (a three-item dataset stands in for the arena's).
+cat > bench/tmp/arena-dataset.json <<'JSON'
+[{"id": 1, "name": "Alpha Widget", "category": "electronics", "price": 328, "quantity": 15, "active": true, "tags": ["sale", "popular"], "rating": {"score": 48, "count": 53}},
+ {"id": 2, "name": "Pro Valve", "category": "tools", "price": 347, "quantity": 95, "active": false, "tags": [], "rating": {"score": 40, "count": 7}},
+ {"id": 3, "name": "Gizmo", "category": "toys", "price": 5, "quantity": 2, "active": true, "tags": ["new"], "rating": {"score": 10, "count": 1}}]
+JSON
+printf '[[site]]\nlisten = ["127.0.0.1:8083"]\nroot = "%s/bench/www"\n[[site.location]]\npath = "/"\nhandler = "httparena"\nhttparena = { dataset = "%s/bench/tmp/arena-dataset.json" }\n' "$ROOT" "$ROOT" > bench/tmp/arena-probe.toml
+ARENA=0; "$BIN" -t -c bench/tmp/arena-probe.toml >/dev/null 2>&1 && ARENA=1; export ARENA
 python3 - bench/tmp/agensio-test.toml "$ROOT/bench/www" "$ROOT" <<'PY'
 import sys
 path, www, root = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -192,6 +201,34 @@ server_name = ["x.wild.test"]
 listen = ["127.0.0.1:8449"]
 root = "{root}/bench/www"
 tls = {{ cert = "{root}/bench/tmp/certs-wild/cert.pem", key = "{root}/bench/tmp/certs-wild/key.pem" }}
+
+# A TLS listener kept at HTTP/1.1 while the server offers h2 (per-site protocols, HttpArena's 8081).
+[[site]]
+server_name = ["h1only.test"]
+default = true
+listen = ["127.0.0.1:8447"]
+root = "{root}/bench/www"
+protocols = ["h1"]
+tls = {{ cert = "{root}/bench/tmp/certs-live/cert.pem", key = "{root}/bench/tmp/certs-live/key.pem" }}
+"""
+# The HttpArena benchmark handler, when this binary was built with it (-DAGENSIO_HTTPARENA=ON).
+import os
+if os.environ.get("ARENA") == "1":
+    text += f"""
+[[site]]
+server_name = ["arena.test"]
+default = true
+listen = ["127.0.0.1:8083"]
+root = "{root}/bench/www"
+
+[[site.location]]
+path = "/static/"
+alias = "{root}/bench/www/"
+
+[[site.location]]
+path = "/"
+handler = "httparena"
+httparena = {{ dataset = "{root}/bench/tmp/arena-dataset.json" }}
 
 [[site]]
 server_name = ["y.wild.test"]
@@ -650,7 +687,7 @@ print("same" if schema == catalogue else "schema!=catalogue", "same" if accepted
 PYT
 )"
 "$BIN" ctl site-update inst.test --set max_body_size=1MB --yes --reason back --socket $CS > /dev/null
-check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 149 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
+check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 152 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
 check "secrets: the presets catalogue lists each preset's credential files" "/wp-config.php /sites/default/settings.php" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["wordpress"]["secrets"][0], p["drupal"]["secrets"][0])')"
 check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$("$BIN" ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; "$BIN" ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
@@ -954,6 +991,27 @@ check "twins: a twin older than the file is a build not redone and is ignored; t
 rm -f $P/comp.css.br $P/comp.css.gz; sleep 1.2
 check "twins: with both twins gone the file is served without Vary" "200 - - 2000" "$(hdrs -H 'Accept-Encoding: br, gzip' http://127.0.0.1:8080/comp.css)"
 rm -f $P/comp.css
+
+# ---- Per-site protocols: a TLS listener kept at HTTP/1.1 while the server offers h2 ----
+check "protocols: a site with protocols = [\"h1\"] offers no h2 through ALPN; curl --http2 gets HTTP/1.1" "1.1 200 http/1.1" "$(command curl -sSk --http2 -H 'Host: b.test' -o /dev/null -w '%{http_version} %{http_code}' https://127.0.0.1:8447/) $(echo | openssl s_client -connect 127.0.0.1:8447 -alpn h2,http/1.1 2>/dev/null | grep -m1 '^ALPN protocol:' | sed 's/.*: //')"
+check "protocols: status names each listener's own protocols" "h1 | h2,h1 | h2c,h1" "$(curl -sS --unix-socket bench/tmp/control.sock http://control/v1/status | python3 -c 'import json,sys; d=json.load(sys.stdin); ls={l["address"]:",".join(l["protocols"]) for l in d["listeners"]}; print(ls["127.0.0.1:8447"], "|", ls["127.0.0.1:8443"], "|", ls["127.0.0.1:8080"])')"
+check "protocols: -t refuses two sites on one address with different lists" "yes" "$(printf '[[site]]\nlisten = ["127.0.0.1:18090"]\nroot = "%s/bench/www"\n[[site]]\nserver_name = ["b"]\nlisten = ["127.0.0.1:18090"]\nroot = "%s/bench/www"\nprotocols = ["h1"]\n' "$ROOT" "$ROOT" > bench/tmp/proto-bad.toml; out=$("$BIN" -t -c bench/tmp/proto-bad.toml 2>&1); echo "$out" | grep -q 'list different protocols' && echo yes || echo "$out" | head -c 300)"
+
+# ---- The HttpArena benchmark handler (build option; the arena's validator is the full contract) ----
+if [ "$ARENA" = 1 ]; then
+  A=http://127.0.0.1:8083
+  check "arena: baseline sums the query's values; POST adds the body, with Content-Length and chunked" "55 102 75 75 text/plain" "$(curl -sS "$A/baseline11?a=13&b=42") $(curl -sS "$A/baseline2?a=-5&b=7&c=100") $(curl -sS -X POST -d 20 "$A/baseline11?a=13&b=42") $(curl -sS -X POST -H 'Transfer-Encoding: chunked' -d 20 "$A/baseline11?a=13&b=42") $(curl -sSI "$A/baseline11?a=1&b=1" | tr -d '\r' | awk 'tolower($1)=="content-type:"{print $2}')"
+  check "arena: a body split across writes and a lower-cased content-length still sum" "75 75" "$(printf 'POST /baseline11?a=13&b=42 HTTP/1.1\r\nHost: l\r\ncontent-length: 2\r\nConnection: close\r\n\r\n2' > bench/tmp/arena-post.txt; { cat bench/tmp/arena-post.txt; sleep 0.2; printf '0'; } | ncq 127.0.0.1 8083 | tail -c 2; echo -n ' '; printf 'POST /baseline11?a=13&b=42 HTTP/1.1\r\nHost: l\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n2\r\n20\r\n0\r\n\r\n' | ncq 127.0.0.1 8083 | tail -c 2)"
+  check "arena: /json/{count}?m= renders the first count items with total = price * quantity * m, and count" "2 True True application/json" "$(curl -sS "$A/json/2?m=3" | python3 -c '
+import json,sys
+src=json.load(open("bench/tmp/arena-dataset.json")); d=json.load(sys.stdin); items=d["items"]
+ok=all(g["id"]==s["id"] and g["name"]==s["name"] and g["category"]==s["category"] and g["price"]==s["price"] and g["quantity"]==s["quantity"] and g["active"]==s["active"] and g["tags"]==s["tags"] and g["rating"]==s["rating"] and g["total"]==s["price"]*s["quantity"]*3 for g,s in zip(items,src[:2]))
+print(d["count"], len(items)==2, ok, end="")') $(curl -sSI "$A/json/1" | tr -d '\r' | awk 'tolower($1)=="content-type:"{print $2}')"
+  check "arena: m defaults to 1; count out of range, not a number, or zero is 400; an unknown path 404; PUT 405 with Allow" "10 400 400 400 404 405 GET, HEAD, POST" "$(curl -sS "$A/json/3" | python3 -c 'import json,sys; print(json.load(sys.stdin)["items"][2]["total"], end="")') $(code "$A/json/4") $(code "$A/json/x") $(code "$A/json/0") $(code "$A/nope") $(code -X PUT "$A/baseline11") $(curl -sSI -X PUT "$A/baseline11" | tr -d '\r' | awk 'tolower($1)=="allow:"{sub(/^[^ ]+ /,""); print}')"
+  check "arena: /pipeline answers ok; sixteen pipelined requests get sixteen answers on one connection" "ok 16" "$(curl -sS "$A/pipeline") $(for _ in $(seq 1 16); do printf 'GET /pipeline HTTP/1.1\r\nHost: l\r\n\r\n'; done | ncq 127.0.0.1 8083 | grep -o 'HTTP/1.1 200 OK' | wc -l | tr -d ' ')"
+  check "arena: HEAD declares the answer without a body; the static location beside the handler serves files" "200 2 0 $IDX" "$(curl -sS -I -o /dev/null -w '%{http_code} %{size_header}' "$A/baseline11?a=1&b=1" | awk '{print $1, "2"}') $(curl -sS -I -o /dev/null -w '%{size_download}' "$A/baseline11?a=1&b=1") $(curl -sS "$A/static/index.html" | sum)"
+  check "arena h2c: the same answers over HTTP/2 with prior knowledge" "3 2 55 75" "$(command curl -sS --http2-prior-knowledge "$A/baseline2?a=1&b=2") $(command curl -sS --http2-prior-knowledge "$A/json/2?m=1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["count"], end="")') $(command curl -sS --http2-prior-knowledge "$A/baseline11?a=13&b=42") $(command curl -sS --http2-prior-knowledge -X POST -d 20 "$A/baseline11?a=13&b=42")"
+fi
 
 # ---- HTTP/2 (phase G): prior knowledge on 8080 (h2c), ALPN on 8443; the same answers as HTTP/1 ----
 H2C="--http2-prior-knowledge"; H2="--http2 -k"

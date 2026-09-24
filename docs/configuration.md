@@ -488,6 +488,7 @@ matched at the end of the path or before a `/`), then the longest `prefix`; an i
 | `deny_suffixes` | endings answered with 404 (like hidden files: a refusal never confirms a file exists), e.g. `[".php"]` under an uploads directory |
 | `add_headers` | response fields added on 200 and 304, e.g. `{ "Cache-Control" = "..." }` |
 | `priority` | may use the FastCGI pool slots reserved by `priority_reserve` |
+| `httparena = { dataset }` | with `handler = "httparena"`, in a build made with `-DAGENSIO_HTTPARENA=ON` only: the HttpArena benchmark endpoints answered in-process from the dataset (`bench/httparena/`); a release build refuses the handler |
 
 ## 7. PHP and FastCGI options
 
@@ -1203,8 +1204,10 @@ one account the peer-credential check cannot tell sites apart. Per-site users (s
 ## 16. HTTP/2
 
 HTTP/2 (RFC 9113) is on for every TLS listener: a client that offers `h2` through ALPN
-gets it, any other client gets HTTP/1.1 on the same port. Nothing is configured per
-site, and every HTTP/2 limit derives from keys you already know. The design, the
+gets it, any other client gets HTTP/1.1 on the same port. A site may name its own
+`protocols` when its listeners must differ from the server's (a TLS port kept at HTTP/1.1
+next to one offering h2; the sites sharing an address must agree), and every HTTP/2
+limit derives from keys you already know. The design, the
 comparison with nginx, Caddy, lighttpd and HAProxy, and the threat model are in
 `docs/design-http2.md`.
 
@@ -1220,6 +1223,7 @@ http2 = { max_concurrent_streams = 128 }
 |---|---|---|
 | `protocols` | `["h2", "h1"]` | what TLS listeners offer through ALPN, in order of preference (Caddy's names; `"http/1.1"`, the ALPN identifier, is accepted for `"h1"`). `"h2c"` in the list makes plain listeners accept HTTP/2 with prior knowledge (the connection preface; `curl --http2-prior-knowledge`, `h2load`, a backend behind a proxy). Browsers never use h2c, so it is off by default. `"h3"` arrives with phase I. |
 | `http2.max_concurrent_streams` | 128 | streams a client may have open at once on one connection (`SETTINGS_MAX_CONCURRENT_STREAMS`, nginx's default); a stream beyond it is refused, the connection stays |
+| `protocols` on a `[[site]]` | the server's | the same list for this site's listeners only: `protocols = ["h1"]` on a TLS site keeps that port at HTTP/1.1 while another offers h2, `["h2c", "h1"]` on a plain site accepts the preface there alone. Every site on an address must list the same, or `-t` refuses the file. |
 
 What derives from the other keys, so that HTTP/2 needs no tuning of its own:
 

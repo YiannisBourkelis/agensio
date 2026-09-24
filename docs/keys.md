@@ -14,7 +14,7 @@ section of `docs/configuration.md` that explains the key.
 
 | key | type | default | meaning | applies | via | doc |
 |---|---|---|---|---|---|---|
-| `workers` | int | 0: one per hardware thread | Worker threads; each owns an event loop and, on Linux, its own accepting socket (SO_REUSEPORT). Fewer workers than cores leave room for PHP and the database on the same machine; one worker already serves hundreds of thousands of requests a second on static files. | restart | file | 1 |
+| `workers` | int | 0: one per CPU the process may run on | Worker threads; each owns an event loop and, on Linux, its own accepting socket (SO_REUSEPORT). 0 counts the CPUs of the affinity mask, so a container's cpuset or a taskset gives its own count. Fewer workers than cores leave room for PHP and the database on the same machine; one worker already serves hundreds of thousands of requests a second on static files. | restart | file | 1 |
 | `idle_timeout` | seconds | 15 | How long a keep-alive connection may sit idle before the server closes it. | reload | file | 1 |
 | `max_requests_per_connection` | int | 1000 | Requests served on one connection before the server answers Connection: close (0 = unlimited). | reload | file | 1 |
 | `max_header_size` | size | 16KB | The request head (request line and headers) may not exceed this: 431 above it. | reload | file | 1 |
@@ -24,6 +24,25 @@ section of `docs/configuration.md` that explains the key.
 | `tcp_nodelay` | bool | true | TCP_NODELAY on client sockets (no Nagle delay on small writes). | reload | file | 1 |
 | `sendfile` | bool | true | Zero-copy sendfile() for files on plain sockets; off makes the server copy through user space (useful only when a filesystem misbehaves with sendfile). | restart | file | 1 |
 | `sendfile_max_chunk` | size | 1MB | Bytes per sendfile() call, so one huge file cannot hold a worker. | reload | file | 1 |
+## `[[site.location]]`
+
+| key | type | default | meaning | applies | via | doc |
+|---|---|---|---|---|---|---|
+| `httparena` | table { dataset } | { dataset = "/data/dataset.json" } | With handler = "httparena" (builds with -DAGENSIO_HTTPARENA=ON only): the HttpArena benchmark endpoints answered in-process from this dataset. | reload | site file | 6 |
+## `httparena = {}`
+
+| key | type | default | meaning | applies | via | doc |
+|---|---|---|---|---|---|---|
+| `dataset` | path | /data/dataset.json | The arena's dataset (a JSON array of items) the /json/{count} endpoint serializes; read at load. | reload | site file | 6 |
+## `[[site]]`
+
+| key | type | default | meaning | applies | via | doc |
+|---|---|---|---|---|---|---|
+| `protocols` | list of "h2", "h1", "h2c" | the [server] list | This site's listeners' protocols when they differ from the server's (a TLS port kept at HTTP/1.1 next to one offering h2); sites sharing an address must agree. | reload | site file | 16 |
+## `[server]`
+
+| key | type | default | meaning | applies | via | doc |
+|---|---|---|---|---|---|---|
 | `protocols` | list of "h2", "h1", "h2c" | ["h2", "h1"] | What TLS listeners offer through ALPN, in order of preference ("http/1.1" is accepted for "h1"); "h2c" in the list also accepts prior-knowledge HTTP/2 on plain listeners (benchmarks and backends; browsers never use it). ["h1"] alone switches HTTP/2 off, for instance during an incident. | reload | file | 16 |
 ## `http2 = {}`
 

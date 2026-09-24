@@ -817,6 +817,10 @@ private:
                     sp->upstream.reset();
                     self->respond(*sp);
                 };
+                if (loc->kind == HandlerKind::httparena) {  // the benchmark handler: no exchange to cancel
+                    dispatcher_.httparena().start(s.stream, *loc, ws, std::move(done));
+                    return;
+                }
                 const auto* site = static_cast<const SiteConfig*>(ws.site);
                 std::shared_ptr<UpstreamRequest> req =
                     loc->kind == HandlerKind::fastcgi

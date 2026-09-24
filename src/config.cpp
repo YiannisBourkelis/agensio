@@ -1,5 +1,8 @@
 #include "config.hpp"
 
+#include "core/cpus.hpp"
+#include "handlers/httparena.hpp"
+
 #include "handlers/fastcgi.hpp"
 #include "path.hpp"
 #include "services/pools.hpp"
@@ -441,6 +444,27 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
         loc.methods = kFcgiMethods;
         loc.allow = allow_header(kFcgiMethods);
         loc.priority = t["priority"].value_or(false);
+    } else if (loc.handler == "httparena") {
+        // The HttpArena benchmark endpoints, in-process (bench/httparena/); a build option,
+        // never in a release binary.
+#ifdef AGENSIO_HTTPARENA
+        loc.kind = HandlerKind::httparena;
+        std::string dataset = "/data/dataset.json";
+        if (auto ht = t["httparena"].as_table()) {
+            for (const auto& [k, v] : *ht)
+                if (k != "dataset") fail(where + ".httparena: unknown key \"" + std::string(k.str()) + "\"");
+            if (auto d = (*ht)["dataset"].value<std::string>()) dataset = resolve(base_dir, *d).string();
+        } else if (t.contains("httparena")) {
+            fail(where + ": 'httparena' must be a table");
+        }
+        std::string error;
+        loc.httparena = load_httparena_dataset(dataset, error);
+        if (!loc.httparena) fail(where + ".httparena.dataset: " + error);
+        loc.methods = kStaticMethods & ~method_bit(Method::options) | method_bit(Method::post);
+        loc.allow = allow_header(loc.methods);
+#else
+        fail(where + ": handler \"httparena\" needs a build with -DAGENSIO_HTTPARENA=ON (the benchmark handler is not in this binary)");
+#endif
     } else if (loc.handler == "cgi") {
         // A process per request: the pool caps them per worker (max_connections, default 8)
         // and queues the rest; the script's own output is the response.
@@ -854,11 +878,29 @@ void parse_pool(const toml::table* php, const fs::path& base_dir, const Config& 
     // Keep-alive sized so kept connections cannot pin every child (C3a), unless set by hand.
     if (!php || !php->contains("keep_conn")) site.php.options.keep_conn = true;
     if (!php || !php->contains("max_connections")) {
-        const unsigned workers = cfg.workers ? cfg.workers : std::max(1u, std::thread::hardware_concurrency());
+        const unsigned workers = cfg.workers ? cfg.workers : available_cpus();
         site.php.options.max_connections = std::max(1u, pool.children / workers);
     }
 }
 
+
+// "h2", "h1", "h2c" (Caddy's names; "http/1.1" accepted for "h1") into the flags a listener
+// takes: what TLS offers through ALPN in order, and whether plain listeners take the
+// HTTP/2 preface. Shared by [server] protocols and a site's own list.
+static void resolve_protocols(std::vector<std::string>& protocols, bool& h2, bool& h2c, std::string& alpn_wire,
+                              const std::string& where) {
+    h2 = h2c = false;
+    alpn_wire.clear();
+    if (protocols.empty()) fail(where + " must list at least \"h1\"");
+    for (std::string& p : protocols) {
+        if (p == "http/1.1") p = "h1";  // the ALPN identifier, accepted as an alias
+        if (p == "h2") h2 = true;
+        else if (p == "h2c") h2c = true;
+        else if (p != "h1") fail(where + ": \"" + p + "\" is not one of \"h1\", \"h2\", \"h2c\"");
+        const std::string_view alpn = p == "h2" ? "h2" : p == "h1" ? "http/1.1" : "";
+        if (!alpn.empty()) alpn_wire.push_back(static_cast<char>(alpn.size())), alpn_wire.append(alpn);
+    }
+}
 
 void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, const std::string& where) {
     SiteConfig site;
@@ -949,6 +991,17 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
         if (!fs::is_regular_file(tc.cert)) fail(where + ".tls: cert file not found: " + tc.cert.string());
         if (!fs::is_regular_file(tc.key)) fail(where + ".tls: key file not found: " + tc.key.string());
         site.tls = std::move(tc);
+    }
+    // The listeners' protocols: the server's unless this site names its own (a TLS port
+    // kept at HTTP/1.1 next to one offering h2); sites on one address must agree, checked
+    // once every site is in.
+    site.protocols = cfg.protocols;
+    site.h2 = cfg.h2;
+    site.h2c = cfg.h2c;
+    site.alpn_wire = cfg.alpn_wire;
+    if (t.contains("protocols")) {
+        site.protocols = string_list(t["protocols"], (where + ".protocols").c_str());
+        resolve_protocols(site.protocols, site.h2, site.h2c, site.alpn_wire, where + ".protocols");
     }
     site.is_default = t["default"].value_or(false);
     site.hidden_files = t["hidden_files"].value_or(false);
@@ -1257,17 +1310,7 @@ Config load_config(const fs::path& path) {
     cfg.server_header = server["server_header"].value_or(std::string("agensio"));
     if (server.as_table() && server.as_table()->contains("protocols"))
         cfg.protocols = string_list(server["protocols"], "server.protocols");
-    cfg.h2 = cfg.h2c = false;
-    cfg.alpn_wire.clear();
-    if (cfg.protocols.empty()) fail("server.protocols must list at least \"h1\"");
-    for (std::string& p : cfg.protocols) {
-        if (p == "http/1.1") p = "h1";  // the ALPN identifier, accepted as an alias
-        if (p == "h2") cfg.h2 = true;
-        else if (p == "h2c") cfg.h2c = true;
-        else if (p != "h1") fail("server.protocols: \"" + p + "\" is not one of \"h1\", \"h2\", \"h2c\"");
-        const std::string_view alpn = p == "h2" ? "h2" : p == "h1" ? "http/1.1" : "";
-        if (!alpn.empty()) cfg.alpn_wire.push_back(static_cast<char>(alpn.size())), cfg.alpn_wire.append(alpn);
-    }
+    resolve_protocols(cfg.protocols, cfg.h2, cfg.h2c, cfg.alpn_wire, "server.protocols");
     if (auto h = server["http2"].as_table()) {
         for (const auto& [k, v] : *h)
             if (k != "max_concurrent_streams") fail("server.http2: unknown key \"" + std::string(k.str()) + "\"");
@@ -1365,6 +1408,15 @@ Config load_config(const fs::path& path) {
     }
 
     if (cfg.sites.empty()) fail(path.string() + ": no [[site]] defined");
+
+    // A listener speaks one set of protocols: every site on an address must name the same.
+    for (std::size_t i = 0; i < cfg.sites.size(); ++i)
+        for (std::size_t j = 0; j < i; ++j)
+            for (const std::string& a : cfg.sites[i].listen)
+                for (const std::string& b : cfg.sites[j].listen)
+                    if (a == b && cfg.sites[i].protocols != cfg.sites[j].protocols)
+                        fail("sites " + cfg.sites[j].server_names.front() + " and " + cfg.sites[i].server_names.front() +
+                             " share " + a + " but list different protocols; sites on one address must agree");
 
     // One user, one pool: sites of the same user share it and must size it alike; sites of
     // different users never share a socket, whatever they say.

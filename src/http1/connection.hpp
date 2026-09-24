@@ -650,6 +650,10 @@ private:
                     self->upstream_.reset();
                     self->respond();
                 };
+                if (loc->kind == HandlerKind::httparena) {  // the benchmark handler: no exchange to cancel
+                    dispatcher_.httparena().start(stream_, *loc, ws, std::move(done));
+                    return;
+                }
                 const auto* site = static_cast<const SiteConfig*>(ws.site);
                 std::shared_ptr<UpstreamRequest> req =
                     loc->kind == HandlerKind::fastcgi
@@ -689,7 +693,7 @@ private:
         if constexpr (IsLocalSocket<Socket>::value || IsTlsStream<Socket>::value) {
             return false;
         } else {
-            if (!live_->h2c || upstream_ || responding_) return false;
+            if (!listener_->h2c || upstream_ || responding_) return false;
             const std::string_view have(in_.data(), std::min(in_len_, h2::kPreface.size()));
             if (h2::kPreface.substr(0, have.size()) != have) return false;
             if (in_len_ < h2::kPreface.size()) {

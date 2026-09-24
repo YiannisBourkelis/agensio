@@ -17,7 +17,9 @@
 
 namespace agensio {
 
-enum class HandlerKind : std::uint8_t { static_, fastcgi, proxy, cgi, control };
+enum class HandlerKind : std::uint8_t { static_, fastcgi, proxy, cgi, control, httparena };
+
+struct HttparenaDataset;  // handlers/httparena.hpp: the benchmark handler's dataset, loaded at config time
 
 struct TlsConfig {
     std::filesystem::path cert;
@@ -79,6 +81,7 @@ struct LocationConfig {
     FcgiConfig fastcgi;                        // handler = "fastcgi": upstream and options
     UpstreamConfig proxy;                      // handler = "proxy": the origin (`upstream = "http://..."`) and options
     UpstreamConfig cgi;                        // handler = "cgi": a process per request (`cgi = { ... }`)
+    std::shared_ptr<const HttparenaDataset> httparena;  // handler = "httparena" (AGENSIO_HTTPARENA builds only): `httparena = { dataset }`
     bool priority = false;                     // may use the pool slots reserved by priority_reserve
     std::uint64_t id = 0;  // unique for the process's life (cache key scope); set by finalize_site
     MethodSet methods = kStaticMethods;      // what the handler serves here (`methods = [...]` narrows it)
@@ -113,6 +116,13 @@ struct SiteConfig {
     std::string group;  // default: the user's primary group
     PhpPool pool;
     std::vector<std::string> listen;        // "host:port" strings, normalised
+    // The protocols of this site's listeners: [server] protocols unless the site says
+    // otherwise (a TLS port that must stay HTTP/1.1 next to one that offers h2). Sites on
+    // one address must agree. Resolved at load into the flags the listener takes.
+    std::vector<std::string> protocols;
+    bool h2 = true;
+    bool h2c = false;
+    std::string alpn_wire;
     std::string app;                        // preset: "laravel", "php", "static" or "" (none)
     // `redirect = "https"`: every request gets a 301 to https://<Host><target>; a full
     // "https://host[:port]" prefix names the target instead (canonical www host, another

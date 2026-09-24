@@ -111,6 +111,7 @@ cmake --build build
 ./build/agensio_tests                      # unit tests (parser, path, cache, mime, date)
 ./build/agensio -c bench/agensio.toml      # http://127.0.0.1:8080 and https://127.0.0.1:8443
 ./build/agensio -t -c config/agensio.toml  # config check only
+cmake -S . -B build -DAGENSIO_HTTPARENA=ON  # adds the HttpArena benchmark handler (handler = "httparena"); never in a release
 (cd build && cpack -G DEB)                 # the .deb (packaging/, tests/package.sh runs it in the root devbox)
 bench/run.sh                               # 5 s per case; -d 15s for publishable numbers
 scripts/lint.sh && scripts/format.sh       # clang-tidy / clang-format
@@ -744,8 +745,20 @@ privilege drop, fuzz targets for every new parser (chunked, FastCGI), h1 complia
   siblings are worth using and the CPU column is thread time, not per-request cost. The
   lite mode shares all cores with the load generators; `SERVER_CPUS`/`LOAD_CPUS` of the
   driver pin them apart. The infrastructure tier scores
-  nine profiles; baseline, short-lived and JSON need an in-process handler (`/baseline11`,
-  `/baseline2`, `/json/{count}`, no proxying allowed) and the two HTTP/3 rows need phase I.
+  nine profiles; the two HTTP/3 rows need phase I. The handler step (2026-09-24): `handler =
+  "httparena"` (`src/handlers/httparena.*`, `-DAGENSIO_HTTPARENA=ON`, refused by a build
+  without it) answers `/baseline11`, `/baseline2`, `/json/{count}` and `/pipeline`
+  in-process from a dataset given as a location option, the arena's rule for an
+  infrastructure entry; `protocols` per `[[site]]` (sites on one address agree) gives the
+  8081 h1-only TLS port next to 8443 h2 in one process; `workers = 0` counts the affinity
+  mask (`core/cpus.hpp`), so a cpuset gives its own count. The entry now subscribes to all
+  nine non-h3 profiles; validator 70/70. Nine-row run (same file, handler section): ahead of
+  nginx on eight rows, level on limited-conn (a three-way tie at 2.05M, bound by the
+  loopback's connection churn); pipelined 5.78M with the handler alone (h2o 5.65M, nginx
+  4.65M), json-tls 1.22M (nginx 1.07M, h2o 0.87M), baseline-h2 3.53M (nginx 3.00M), where h2o
+  does 12.4M at 25 bytes per response on the wire against our 64 and 0.75 µs per request
+  against our 3.3: the small-response HTTP/2 path is the open item, to be profiled before
+  it is changed.
 - Verify correctness before speed: responses must be byte-identical in body and carry
   `Content-Length`, `Content-Type`, `Date`, `Last-Modified`, `ETag`.
 

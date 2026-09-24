@@ -8,15 +8,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /src
 COPY src.tar.gz /tmp/src.tar.gz
 RUN tar -xzf /tmp/src.tar.gz -C /src \
-    && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DAGENSIO_TESTS=OFF -DAGENSIO_NATIVE=ON \
+    && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DAGENSIO_TESTS=OFF -DAGENSIO_NATIVE=ON -DAGENSIO_HTTPARENA=ON \
     && cmake --build build --target agensio
 
 FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends libssl3t64 zlib1g \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/build/agensio /usr/local/bin/agensio
-COPY h1.toml h2.toml start.sh /etc/agensio/
-COPY www /srv/www
+COPY agensio.toml start.sh /etc/agensio/
 RUN chmod 0755 /etc/agensio/start.sh
-EXPOSE 8080 8081 8443
+EXPOSE 8080 8081 8082 8443
 CMD ["/etc/agensio/start.sh"]

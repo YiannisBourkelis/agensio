@@ -2,6 +2,22 @@
 
 ## 0.1.0-alpha.21 (unreleased)
 
+- **`protocols` per site**: a `[[site]]` may name its own list (`["h1"]` keeps a TLS port at
+  HTTP/1.1 while another offers h2; `["h2c", "h1"]` accepts the preface on one plain
+  listener), inherited from `[server]` otherwise; sites sharing an address must agree.
+  `status` names each listener's own protocols.
+- **`workers = 0` counts the CPUs the process may run on** (the affinity mask: a
+  container's cpuset, a `taskset`) instead of every hardware thread, like nginx's
+  `worker_processes auto`.
+- **HttpArena benchmark handler** behind `-DAGENSIO_HTTPARENA=ON`: `handler = "httparena"`
+  answers the arena's `/baseline11`, `/baseline2`, `/json/{count}?m=` and `/pipeline`
+  in-process from a dataset given as `httparena = { dataset }`, as the arena's rules
+  require of an infrastructure entry; a release build refuses the handler. The entry in
+  `bench/httparena/` is one process with the four listeners and subscribes to every
+  profile the infrastructure tier scores except the two HTTP/3 rows. The arena's validator
+  passes 70 checks; in its harness on the bench box agensio is ahead of nginx on eight of
+  the nine rows and level on the ninth, and ahead of or level with h2o on five of its six,
+  behind only on the HTTP/2 baseline (`bench/results/httparena-lite-20260924-0147.md`).
 - **Pre-compressed files are served**: a `name.br` or `name.gz` beside a cached file goes
   out with `Content-Encoding` and `Vary: Accept-Encoding` to a client whose
   `Accept-Encoding` takes it (q-values, `q=0` and `*` honoured, `br` on a tie), the file

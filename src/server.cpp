@@ -1,4 +1,6 @@
 #include "server.hpp"
+
+#include "core/cpus.hpp"
 #include "control/commands.hpp"
 #include "control/peer.hpp"
 #include "services/install.hpp"
@@ -66,7 +68,7 @@ Server::Server(Config cfg)
       proxy_handler_(cfg_, error_log_),
       cgi_handler_(cfg_, error_log_),
       control_handler_(error_log_),
-      dispatcher_(handler_, fcgi_handler_, proxy_handler_, cgi_handler_, control_handler_) {
+      dispatcher_(handler_, fcgi_handler_, proxy_handler_, cgi_handler_, control_handler_, httparena_handler_) {
     auto gen = std::make_shared<Generation>();
     gen->cfg = std::move(cfg);
     open_logs();
@@ -317,6 +319,9 @@ void Server::build_listeners(Generation& gen) {
                 l->address_text = l->endpoint.address().to_string();
                 l->port = l->endpoint.port();
                 l->tls = site.tls.has_value();
+                l->h2 = site.h2;
+                l->h2c = site.h2c;
+                l->alpn = site.alpn_wire;
 #ifndef AGENSIO_HAS_TLS
                 if (l->tls)
                     throw std::runtime_error("site on " + address +
@@ -348,7 +353,6 @@ void Server::build_listeners(Generation& gen) {
 #ifdef AGENSIO_HAS_TLS
     // The vector is complete: each listener's address is stable for the callback argument.
     for (auto& l : listeners) {
-        l.alpn = gen.cfg.alpn_wire;
         for (auto& [path, ctx] : l.tls_contexts) {
             SSL_CTX_set_tlsext_servername_callback(ctx->native_handle(), select_certificate);
             SSL_CTX_set_tlsext_servername_arg(ctx->native_handle(), &l);
@@ -495,10 +499,10 @@ json::Value Server::status() {
         json::Value entry = json::Value::object().set("address", l.address).set("tls", l.tls).set("sites", static_cast<double>(l.site_names.size()));
         json::Value protocols = json::Value::array();
         if (l.tls) {
-            if (gen_->cfg.h2) protocols.push("h2");
+            if (l.h2) protocols.push("h2");
             protocols.push("h1");
         } else {
-            if (gen_->cfg.h2c) protocols.push("h2c");
+            if (l.h2c) protocols.push("h2c");
             protocols.push("h1");
         }
         entry.set("protocols", std::move(protocols));
@@ -525,7 +529,7 @@ json::Value Server::status() {
 }
 
 void Server::build_workers() {
-    unsigned n = cfg_.workers ? cfg_.workers : std::thread::hardware_concurrency();
+    unsigned n = cfg_.workers ? cfg_.workers : available_cpus();  // the affinity mask: a container's cpuset counts
     if (n == 0) n = 1;
     for (unsigned i = 0; i < n; ++i)
         workers_.push_back(std::make_unique<Worker>(i));

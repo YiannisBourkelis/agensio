@@ -10,6 +10,7 @@
 #include "core/worker_state.hpp"
 #include "handlers/cgi.hpp"
 #include "handlers/fastcgi.hpp"
+#include "handlers/httparena.hpp"
 #include "handlers/proxy.hpp"
 #include "handlers/static.hpp"
 #include "services/log.hpp"
@@ -21,9 +22,10 @@ namespace agensio {
 class Dispatcher {
 public:
     Dispatcher(StaticHandler& static_handler, FcgiHandler& fcgi, ProxyHandler& proxy, CgiHandler& cgi,
-               ControlHandler& control)
-        : static_(static_handler), fcgi_(fcgi), proxy_(proxy), cgi_(cgi), control_(control) {}
+               ControlHandler& control, HttparenaHandler& httparena)
+        : static_(static_handler), fcgi_(fcgi), proxy_(proxy), cgi_(cgi), control_(control), httparena_(httparena) {}
     CgiHandler& cgi() noexcept { return cgi_; }
+    HttparenaHandler& httparena() noexcept { return httparena_; }
     ControlHandler& control() noexcept { return control_; }
     // HTTP-01: /.well-known/acme-challenge/<token> is answered from here before routing.
     void set_acme(AcmeChallenges* challenges) noexcept { acme_ = challenges; }
@@ -57,6 +59,7 @@ private:
     ProxyHandler& proxy_;
     CgiHandler& cgi_;
     ControlHandler& control_;
+    HttparenaHandler& httparena_;
     AcmeChallenges* acme_ = nullptr;
     ErrorLog* log_ = nullptr;
 };

@@ -55,6 +55,8 @@ struct Listener {
     std::uint16_t port = 0;
     Router router;  // site by Host, location by path
     bool tls = false;
+    bool h2 = true;   // TLS: h2 offered through ALPN (the sites' `protocols`)
+    bool h2c = false; // plain: the HTTP/2 preface accepted
 #ifdef AGENSIO_HAS_TLS
     std::shared_ptr<asio::ssl::context> ssl;  // the handshake starts here; SNI switches to the site's context
     std::map<std::string, std::shared_ptr<asio::ssl::context>> tls_contexts;  // by certificate path
@@ -173,6 +175,7 @@ private:
     ProxyHandler proxy_handler_;
     CgiHandler cgi_handler_;
     ControlHandler control_handler_;
+    HttparenaHandler httparena_handler_;
     Dispatcher dispatcher_;
     AcmeManager acme_{error_log_};
     Provisioner provisioner_;

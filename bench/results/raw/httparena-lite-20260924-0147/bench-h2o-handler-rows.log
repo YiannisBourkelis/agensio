@@ -1,0 +1,549 @@
+=== h2o / baseline / 512c (tool=gcannon) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+gcannon v0.6.1
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  unlimited (keep-alive)
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency    174us     84us    183us   2.61ms   6.23ms
+
+  14704723 requests in 5.01s, 14704254 responses
+  Throughput: 2.94M req/s
+  Bandwidth:  288.52MB/s
+  Status codes: 2xx=14704254, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 14704254 / 14704254 responses (100.0%)
+  Per-template: 4907854,4891313,4905087
+  Per-template-ok: 4907854,4891313,4905087
+[info] CPU 1172.9% | Mem 18MiB
+
+[run 2/3]
+gcannon v0.6.1
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  unlimited (keep-alive)
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency    173us     86us    188us   2.56ms   6.10ms
+
+  14774249 requests in 5.01s, 14773823 responses
+  Throughput: 2.95M req/s
+  Bandwidth:  289.95MB/s
+  Status codes: 2xx=14773823, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 14773823 / 14773823 responses (100.0%)
+  Per-template: 4962011,4921443,4890369
+  Per-template-ok: 4962011,4921443,4890369
+[info] CPU 1295.2% | Mem 19MiB
+
+[run 3/3]
+gcannon v0.6.1
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  unlimited (keep-alive)
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency    175us     88us    188us   2.58ms   6.41ms
+
+  14643994 requests in 5.01s, 14643525 responses
+  Throughput: 2.92M req/s
+  Bandwidth:  287.20MB/s
+  Status codes: 2xx=14643525, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 14643525 / 14643525 responses (100.0%)
+  Per-template: 4898313,4862290,4882922
+  Per-template-ok: 4898313,4862290,4882922
+[info] CPU 1189.9% | Mem 19MiB
+
+=== Best: 2948866 req/s (CPU: 1295.2%, Mem: 19MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-h2o
+httparena-bench-h2o
+[info] done
+[info] restoring loopback MTU to 65536
+[info] available cores: 24 | threads: 12
+[info] tuning host for benchmark runs
+[info] setting kernel socket limits
+[info] setting UDP buffer sizes for QUIC
+[info] setting loopback MTU to 1500 (realistic Ethernet)
+[info] restarting docker daemon
+[warn] could not restart docker daemon (no sudo?)
+[info] dropping kernel caches
+[info] framework: h2o (h2o, C)
+[info] subscribed tests: baseline,pipelined,limited-conn,json-tls,baseline-h2,static-h2
+[info] building image: httparena-h2o
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 1.72kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/buildpack-deps:bookworm
+#2 ...
+
+#3 [internal] load metadata for docker.io/library/debian:bookworm-slim
+#3 DONE 0.2s
+
+#2 [internal] load metadata for docker.io/library/buildpack-deps:bookworm
+#2 DONE 0.2s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [build 1/8] FROM docker.io/library/buildpack-deps:bookworm@sha256:5ac8377b7884040464fbf9390409073c6ac62ac8e6563e886fc560f9ea13ec5d
+#5 resolve docker.io/library/buildpack-deps:bookworm@sha256:5ac8377b7884040464fbf9390409073c6ac62ac8e6563e886fc560f9ea13ec5d 0.0s done
+#5 DONE 0.0s
+
+#6 [stage-1 1/5] FROM docker.io/library/debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
+#6 resolve docker.io/library/debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 0.0s done
+#6 DONE 0.0s
+
+#7 [internal] load build context
+#7 transferring context: 90B done
+#7 DONE 0.0s
+
+#8 [build 7/8] WORKDIR /app/build
+#8 CACHED
+
+#9 [build 2/8] RUN apt-get update && apt-get install -y --no-install-recommends     cmake clang libssl-dev zlib1g-dev libuv1-dev libbrotli-dev
+#9 CACHED
+
+#10 [build 8/8] RUN cmake       -DCMAKE_BUILD_TYPE=Release       -DCMAKE_C_COMPILER=clang       -DCMAKE_C_FLAGS="-march=native -mtune=native"       -S .. &&     cmake --build . -j
+#10 CACHED
+
+#11 [build 3/8] WORKDIR /tmp/h2o
+#11 CACHED
+
+#12 [build 5/8] COPY CMakeLists.txt /app/
+#12 CACHED
+
+#13 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends     libssl3 libbrotli1 &&     rm -rf /var/lib/apt/lists/*
+#13 CACHED
+
+#14 [build 4/8] RUN curl -LSs "https://github.com/h2o/h2o/archive/ccea64b17ade832753db933658047ede9f31a380.tar.gz" |     tar --strip-components=1 -xz &&     cmake -B build       -DCMAKE_BUILD_TYPE=Release       -DCMAKE_C_COMPILER=clang       -DCMAKE_C_FLAGS="-march=native -mtune=native"       -DWITH_MRUBY=off       -S . &&     cmake --build build -j &&     cmake --install build
+#14 CACHED
+
+#15 [build 6/8] COPY src /app/src/
+#15 CACHED
+
+#16 [stage-1 4/5] COPY --from=build /app/build/h2o-app /server
+#16 CACHED
+
+#17 [stage-1 3/5] COPY --from=build /usr/local/lib/libh2o-evloop.so* /usr/local/lib/
+#17 CACHED
+
+#18 [stage-1 5/5] RUN ldconfig
+#18 CACHED
+
+#19 exporting to image
+#19 exporting layers done
+#19 exporting manifest sha256:28963077ce4e378fd43bc8bcbb6dfed17346f304fa97820a8da582d4bbb0e37e done
+#19 exporting config sha256:e299bcf32dc801584e28b6da5a48ef30583d44bc76967a68bf5135af7ceb002c done
+#19 exporting attestation manifest sha256:2b622d36033fd37f9c85590ef9cf85f1f52ab9284f91e370feb1fc81b25fa2bd 0.0s done
+#19 exporting manifest list sha256:d3d81ed57e96fd23e82797f9047960273fb6ce07952b7e6fe332204d2bf151e0 0.0s done
+#19 naming to docker.io/library/httparena-h2o:latest done
+#19 unpacking to docker.io/library/httparena-h2o:latest done
+#19 DONE 0.1s
+
+==============================================
+=== h2o / limited-conn / 512c (tool=gcannon) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+gcannon v0.6.1
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  10
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency    244us    128us    446us   2.22ms   4.71ms
+
+  10172957 requests in 5.00s, 10172495 responses
+  Throughput: 2.03M req/s
+  Bandwidth:  199.68MB/s
+  Status codes: 2xx=10172495, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 10172495 / 10172495 responses (100.0%)
+  Reconnects: 1017071
+  Per-template: 3390789,3390847,3390859
+  Per-template-ok: 3390789,3390847,3390859
+[info] CPU 1039.3% | Mem 29MiB
+
+[run 2/3]
+gcannon v0.6.1
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  10
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency    242us    128us    452us   2.23ms   4.58ms
+
+  10242012 requests in 5.00s, 10241610 responses
+  Throughput: 2.05M req/s
+  Bandwidth:  201.17MB/s
+  Status codes: 2xx=10241610, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 10241610 / 10241610 responses (100.0%)
+  Reconnects: 1024025
+  Per-template: 3413895,3413861,3413854
+  Per-template-ok: 3413895,3413861,3413854
+[info] CPU 1138.0% | Mem 28MiB
+
+[run 3/3]
+gcannon v0.6.1
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  10
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency    247us    123us    462us   2.42ms   4.86ms
+
+  10012842 requests in 5.00s, 10012393 responses
+  Throughput: 2.00M req/s
+  Bandwidth:  196.59MB/s
+  Status codes: 2xx=10012393, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 10012393 / 10012393 responses (100.0%)
+  Reconnects: 1001065
+  Per-template: 3337509,3337412,3337472
+  Per-template-ok: 3337509,3337412,3337472
+[info] CPU 1044.7% | Mem 29MiB
+
+=== Best: 2048322 req/s (CPU: 1138.0%, Mem: 28MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-h2o
+httparena-bench-h2o
+[info] done
+[info] restoring loopback MTU to 65536
+[info] available cores: 24 | threads: 12
+[info] tuning host for benchmark runs
+[info] setting kernel socket limits
+[info] setting UDP buffer sizes for QUIC
+[info] setting loopback MTU to 1500 (realistic Ethernet)
+[info] restarting docker daemon
+[warn] could not restart docker daemon (no sudo?)
+[info] dropping kernel caches
+[info] framework: h2o (h2o, C)
+[info] subscribed tests: baseline,pipelined,limited-conn,json-tls,baseline-h2,static-h2
+[info] building image: httparena-h2o
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 1.72kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/buildpack-deps:bookworm
+#2 DONE 0.2s
+
+#3 [internal] load metadata for docker.io/library/debian:bookworm-slim
+#3 DONE 0.2s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [build 1/8] FROM docker.io/library/buildpack-deps:bookworm@sha256:5ac8377b7884040464fbf9390409073c6ac62ac8e6563e886fc560f9ea13ec5d
+#5 resolve docker.io/library/buildpack-deps:bookworm@sha256:5ac8377b7884040464fbf9390409073c6ac62ac8e6563e886fc560f9ea13ec5d 0.0s done
+#5 DONE 0.0s
+
+#6 [stage-1 1/5] FROM docker.io/library/debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
+#6 resolve docker.io/library/debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 0.0s done
+#6 DONE 0.0s
+
+#7 [internal] load build context
+#7 transferring context: 90B done
+#7 DONE 0.0s
+
+#8 [build 2/8] RUN apt-get update && apt-get install -y --no-install-recommends     cmake clang libssl-dev zlib1g-dev libuv1-dev libbrotli-dev
+#8 CACHED
+
+#9 [build 5/8] COPY CMakeLists.txt /app/
+#9 CACHED
+
+#10 [build 8/8] RUN cmake       -DCMAKE_BUILD_TYPE=Release       -DCMAKE_C_COMPILER=clang       -DCMAKE_C_FLAGS="-march=native -mtune=native"       -S .. &&     cmake --build . -j
+#10 CACHED
+
+#11 [build 7/8] WORKDIR /app/build
+#11 CACHED
+
+#12 [build 4/8] RUN curl -LSs "https://github.com/h2o/h2o/archive/ccea64b17ade832753db933658047ede9f31a380.tar.gz" |     tar --strip-components=1 -xz &&     cmake -B build       -DCMAKE_BUILD_TYPE=Release       -DCMAKE_C_COMPILER=clang       -DCMAKE_C_FLAGS="-march=native -mtune=native"       -DWITH_MRUBY=off       -S . &&     cmake --build build -j &&     cmake --install build
+#12 CACHED
+
+#13 [build 6/8] COPY src /app/src/
+#13 CACHED
+
+#14 [stage-1 3/5] COPY --from=build /usr/local/lib/libh2o-evloop.so* /usr/local/lib/
+#14 CACHED
+
+#15 [stage-1 4/5] COPY --from=build /app/build/h2o-app /server
+#15 CACHED
+
+#16 [build 3/8] WORKDIR /tmp/h2o
+#16 CACHED
+
+#17 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends     libssl3 libbrotli1 &&     rm -rf /var/lib/apt/lists/*
+#17 CACHED
+
+#18 [stage-1 5/5] RUN ldconfig
+#18 CACHED
+
+#19 exporting to image
+#19 exporting layers done
+#19 exporting manifest sha256:28963077ce4e378fd43bc8bcbb6dfed17346f304fa97820a8da582d4bbb0e37e done
+#19 exporting config sha256:e299bcf32dc801584e28b6da5a48ef30583d44bc76967a68bf5135af7ceb002c done
+#19 exporting attestation manifest sha256:52165125f30aee1a2d413d7441a1f1eb67519b4635132a137106a84a416634f1 0.0s done
+#19 exporting manifest list sha256:c7be312944cc2b5319938037bd4306b6af82af0441f7ffcab0b507639da1bbf7 0.0s done
+#19 naming to docker.io/library/httparena-h2o:latest done
+#19 unpacking to docker.io/library/httparena-h2o:latest done
+#19 DONE 0.1s
+
+==============================================
+=== h2o / json-tls / 512c (tool=wrk) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   708.61us    0.87ms  23.05ms   87.52%
+    Req/Sec    72.33k     9.96k  144.93k    89.87%
+  4334015 requests in 5.10s, 14.65GB read
+Requests/sec: 849814.19
+Transfer/sec:      2.87GB
+[info] CPU 1211.4% | Mem 49MiB
+
+[run 2/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   707.66us  844.12us  16.38ms   87.28%
+    Req/Sec    73.12k     8.10k  114.51k    76.08%
+  4381139 requests in 5.06s, 14.81GB read
+Requests/sec: 865296.51
+Transfer/sec:      2.92GB
+[info] CPU 1347.3% | Mem 53MiB
+
+[run 3/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   717.56us    0.88ms  19.94ms   87.35%
+    Req/Sec    73.46k     8.01k  125.61k    74.01%
+  4416666 requests in 5.10s, 14.93GB read
+Requests/sec: 866158.49
+Transfer/sec:      2.93GB
+[info] CPU 1256.8% | Mem 55MiB
+
+=== Best: 866158 req/s (CPU: 1256.8%, Mem: 55MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-h2o
+httparena-bench-h2o
+[info] done
+[info] restoring loopback MTU to 65536
+[info] available cores: 24 | threads: 12
+[info] tuning host for benchmark runs
+[info] setting kernel socket limits
+[info] setting UDP buffer sizes for QUIC
+[info] setting loopback MTU to 1500 (realistic Ethernet)
+[info] restarting docker daemon
+[info] dropping kernel caches
+[warn] could not restart docker daemon (no sudo?)
+[info] framework: h2o (h2o, C)
+[info] subscribed tests: baseline,pipelined,limited-conn,json-tls,baseline-h2,static-h2
+[info] building image: httparena-h2o
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 1.72kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/buildpack-deps:bookworm
+#2 ...
+
+#3 [internal] load metadata for docker.io/library/debian:bookworm-slim
+#3 DONE 0.2s
+
+#2 [internal] load metadata for docker.io/library/buildpack-deps:bookworm
+#2 DONE 0.2s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [build 1/8] FROM docker.io/library/buildpack-deps:bookworm@sha256:5ac8377b7884040464fbf9390409073c6ac62ac8e6563e886fc560f9ea13ec5d
+#5 resolve docker.io/library/buildpack-deps:bookworm@sha256:5ac8377b7884040464fbf9390409073c6ac62ac8e6563e886fc560f9ea13ec5d 0.0s done
+#5 DONE 0.0s
+
+#6 [stage-1 1/5] FROM docker.io/library/debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
+#6 resolve docker.io/library/debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 0.0s done
+#6 DONE 0.0s
+
+#7 [internal] load build context
+#7 transferring context: 90B done
+#7 DONE 0.0s
+
+#8 [build 7/8] WORKDIR /app/build
+#8 CACHED
+
+#9 [build 6/8] COPY src /app/src/
+#9 CACHED
+
+#10 [stage-1 3/5] COPY --from=build /usr/local/lib/libh2o-evloop.so* /usr/local/lib/
+#10 CACHED
+
+#11 [build 5/8] COPY CMakeLists.txt /app/
+#11 CACHED
+
+#12 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends     libssl3 libbrotli1 &&     rm -rf /var/lib/apt/lists/*
+#12 CACHED
+
+#13 [build 2/8] RUN apt-get update && apt-get install -y --no-install-recommends     cmake clang libssl-dev zlib1g-dev libuv1-dev libbrotli-dev
+#13 CACHED
+
+#14 [build 3/8] WORKDIR /tmp/h2o
+#14 CACHED
+
+#15 [stage-1 4/5] COPY --from=build /app/build/h2o-app /server
+#15 CACHED
+
+#16 [build 4/8] RUN curl -LSs "https://github.com/h2o/h2o/archive/ccea64b17ade832753db933658047ede9f31a380.tar.gz" |     tar --strip-components=1 -xz &&     cmake -B build       -DCMAKE_BUILD_TYPE=Release       -DCMAKE_C_COMPILER=clang       -DCMAKE_C_FLAGS="-march=native -mtune=native"       -DWITH_MRUBY=off       -S . &&     cmake --build build -j &&     cmake --install build
+#16 CACHED
+
+#17 [build 8/8] RUN cmake       -DCMAKE_BUILD_TYPE=Release       -DCMAKE_C_COMPILER=clang       -DCMAKE_C_FLAGS="-march=native -mtune=native"       -S .. &&     cmake --build . -j
+#17 CACHED
+
+#18 [stage-1 5/5] RUN ldconfig
+#18 CACHED
+
+#19 exporting to image
+#19 exporting layers done
+#19 exporting manifest sha256:28963077ce4e378fd43bc8bcbb6dfed17346f304fa97820a8da582d4bbb0e37e done
+#19 exporting config sha256:e299bcf32dc801584e28b6da5a48ef30583d44bc76967a68bf5135af7ceb002c done
+#19 exporting attestation manifest sha256:e2cb65299ec5c9c47aca11203d29f1ecba135c1a05e83e01896c69f41e2f143b 0.0s done
+#19 exporting manifest list sha256:b50c7903cd75ccd591ae5676398eadc701c749523f50f18c6b64d5c3ba29e99e 0.0s done
+#19 naming to docker.io/library/httparena-h2o:latest done
+#19 unpacking to docker.io/library/httparena-h2o:latest done
+#19 DONE 0.1s
+
+==============================================
+=== h2o / baseline-h2 / 512c (tool=h2load) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+starting benchmark...
+6.
+11Main benchmark duration is started for thread #9.
+.
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+finished in 5.19s, 12204180.00 req/s, 302.61MB/s
+requests: 61020900 total, 61072100 started, 61020900 done, 61020900 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 61020900 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 1.48GB (1586571048) total, 407.36MB (427151932) headers (space savings 87.50%), 58.19MB (61020900) data
+                     min         max         mean         sd        +/- sd
+time for request:      106us    142.40ms      2.33ms      4.24ms    99.52%
+time for connect:     2.00ms    151.66ms     86.10ms     46.13ms    64.06%
+time to 1st byte:    15.31ms    158.54ms    124.05ms     34.56ms    85.35%
+req/s           :   22512.31    26009.53    23829.10      561.54    68.55%
+[info] CPU 871.9% | Mem 56MiB
+
+[run 2/3]
+starting benchmark...
+
+.Main benchmark duration is started for thread #0.
+
+
+.
+
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+finished in 5.11s, 12630060.00 req/s, 313.17MB/s
+requests: 63150300 total, 63201500 started, 63150300 done, 63150300 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 63150300 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 1.53GB (1641935448) total, 421.58MB (442057732) headers (space savings 87.50%), 60.22MB (63150300) data
+                     min         max         mean         sd        +/- sd
+time for request:      118us     38.10ms      2.12ms       749us    85.20%
+time for connect:     2.15ms     75.67ms     25.62ms     15.47ms    62.50%
+time to 1st byte:    22.37ms     82.30ms     48.09ms     14.93ms    68.16%
+req/s           :   23493.68    26012.57    24660.37      526.17    65.82%
+[info] CPU 1010.4% | Mem 64MiB
+
+[run 3/3]
+starting benchmark...
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+10Main benchmark duration is started for thread #.1
+.Warm-up phase is over for thread #Main benchmark duration is started for thread #10.
+2.
+7.
+
+.
+
+finished in 5.14s, 12732340.00 req/s, 315.71MB/s
+requests: 63661700 total, 63712900 started, 63661700 done, 63661700 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 63661700 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 1.54GB (1655231848) total, 424.99MB (445637532) headers (space savings 87.50%), 60.71MB (63661700) data
+                     min         max         mean         sd        +/- sd
+time for request:       91us     24.64ms      2.10ms       784us    86.12%
+time for connect:     2.19ms     56.01ms     22.97ms     16.06ms    62.50%
+time to 1st byte:    10.42ms     62.08ms     44.24ms     19.89ms    66.80%
+req/s           :   23668.94    26028.63    24861.33      510.82    58.01%
+[info] CPU 930.9% | Mem 67MiB
+
+=== Best: 12385544 req/s (CPU: 930.9%, Mem: 67MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-h2o
+httparena-bench-h2o
+[info] done
+[info] restoring loopback MTU to 65536

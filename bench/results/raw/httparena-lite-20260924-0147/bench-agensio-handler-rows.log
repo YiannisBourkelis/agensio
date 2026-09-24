@@ -1,0 +1,1053 @@
+=== agensio / baseline / 512c (tool=gcannon) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+gcannon v0.6.1
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  unlimited (keep-alive)
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency    176us     86us    196us   2.41ms   5.80ms
+
+  14597434 requests in 5.00s, 14596922 responses
+  Throughput: 2.92M req/s
+  Bandwidth:  333.85MB/s
+  Status codes: 2xx=14596922, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 14596922 / 14596922 responses (100.0%)
+  Per-template: 4876870,4856389,4863663
+  Per-template-ok: 4876870,4856389,4863663
+[info] CPU 1144.6% | Mem 37MiB
+
+[run 2/3]
+gcannon v0.6.1
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  unlimited (keep-alive)
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency    172us     87us    188us   2.40ms   5.92ms
+
+  14872706 requests in 5.00s, 14872194 responses
+  Throughput: 2.97M req/s
+  Bandwidth:  340.12MB/s
+  Status codes: 2xx=14872194, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 14872194 / 14872194 responses (100.0%)
+  Per-template: 4977658,4913874,4980662
+  Per-template-ok: 4977658,4913874,4980662
+[info] CPU 1296.6% | Mem 38MiB
+
+[run 3/3]
+gcannon v0.6.1
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  unlimited (keep-alive)
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency    173us     86us    187us   2.49ms   5.63ms
+
+  14760914 requests in 5.00s, 14760445 responses
+  Throughput: 2.95M req/s
+  Bandwidth:  337.57MB/s
+  Status codes: 2xx=14760445, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 14760445 / 14760445 responses (100.0%)
+  Per-template: 4938569,4912879,4908997
+  Per-template-ok: 4938569,4912879,4908997
+[info] CPU 1200.7% | Mem 38MiB
+
+=== Best: 2974438 req/s (CPU: 1296.6%, Mem: 38MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+
+==============================================
+=== agensio / pipelined / 512c (tool=gcannon) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+gcannon v0.6.1
+  Target:    localhost:8080/pipeline
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  16
+  Req/conn:  unlimited (keep-alive)
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   1.47ms    822us   3.99ms   8.49ms   13.80ms
+
+  28131273 requests in 5.00s, 28123780 responses
+  Throughput: 5.62M req/s
+  Bandwidth:  643.53MB/s
+  Status codes: 2xx=28123780, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 28123780 / 28123780 responses (100.0%)
+[info] CPU 1689.9% | Mem 22MiB
+
+[run 2/3]
+gcannon v0.6.1
+  Target:    localhost:8080/pipeline
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  16
+  Req/conn:  unlimited (keep-alive)
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   1.43ms    861us   3.80ms   8.52ms   13.50ms
+
+  28885396 requests in 5.00s, 28877898 responses
+  Throughput: 5.77M req/s
+  Bandwidth:  660.79MB/s
+  Status codes: 2xx=28877898, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 28877898 / 28877898 responses (100.0%)
+[info] CPU 1580.3% | Mem 23MiB
+
+[run 3/3]
+gcannon v0.6.1
+  Target:    localhost:8080/pipeline
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  16
+  Req/conn:  unlimited (keep-alive)
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   1.43ms    816us   3.96ms   8.41ms   12.20ms
+
+  28721390 requests in 5.00s, 28713894 responses
+  Throughput: 5.74M req/s
+  Bandwidth:  657.08MB/s
+  Status codes: 2xx=28713894, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 28713894 / 28713894 responses (100.0%)
+[info] CPU 1698.6% | Mem 23MiB
+
+=== Best: 5775579 req/s (CPU: 1580.3%, Mem: 23MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+
+==============================================
+=== agensio / limited-conn / 512c (tool=gcannon) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+gcannon v0.6.1
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  10
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency    251us    112us    463us   2.66ms   6.22ms
+
+  9896727 requests in 5.00s, 9896243 responses
+  Throughput: 1.98M req/s
+  Bandwidth:  226.48MB/s
+  Status codes: 2xx=9896243, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 9896243 / 9896243 responses (100.0%)
+  Reconnects: 989450
+  Per-template: 3298814,3298702,3298727
+  Per-template-ok: 3298814,3298702,3298727
+[info] CPU 1045.7% | Mem 35MiB
+
+[run 2/3]
+gcannon v0.6.1
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  10
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency    242us    113us    450us   2.50ms   5.65ms
+
+  10242599 requests in 5.00s, 10242132 responses
+  Throughput: 2.05M req/s
+  Bandwidth:  234.39MB/s
+  Status codes: 2xx=10242132, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 10242132 / 10242132 responses (100.0%)
+  Reconnects: 1024035
+  Per-template: 3414057,3414099,3413976
+  Per-template-ok: 3414057,3414099,3413976
+[info] CPU 1188.7% | Mem 44MiB
+
+[run 3/3]
+gcannon v0.6.1
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  10
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency    246us    112us    458us   2.64ms   5.89ms
+
+  10100436 requests in 5.00s, 10099999 responses
+  Throughput: 2.02M req/s
+  Bandwidth:  230.98MB/s
+  Status codes: 2xx=10099999, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 10099999 / 10099999 responses (100.0%)
+  Reconnects: 1009825
+  Per-template: 3366600,3366713,3366686
+  Per-template-ok: 3366600,3366713,3366686
+[info] CPU 1079.2% | Mem 45MiB
+
+=== Best: 2048426 req/s (CPU: 1188.7%, Mem: 44MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+[info] skip: agensio does not subscribe to json-comp
+[info] skip: agensio does not subscribe to 8gbit
+[info] skip: agensio does not subscribe to async-db
+
+==============================================
+=== agensio / baseline-h2 / 512c (tool=h2load) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+starting benchmark...
+
+
+4.
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+finished in 5.17s, 3573712.60 req/s, 228.35MB/s
+requests: 17868563 total, 17919763 started, 17868563 done, 17868563 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 17868563 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 1.12GB (1197228025) total, 817.96MB (857691024) headers (space savings 48.39%), 17.04MB (17868563) data
+                     min         max         mean         sd        +/- sd
+time for request:       40us     80.68ms      8.54ms      5.26ms    82.89%
+time for connect:     3.44ms     96.90ms     54.05ms     23.44ms    67.19%
+time to 1st byte:     4.60ms    116.90ms     77.71ms     22.51ms    71.48%
+req/s           :    6096.90     8336.77     6975.32      431.36    68.75%
+[info] CPU 1243.4% | Mem 59MiB
+
+[run 2/3]
+starting benchmark...
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+finished in 5.18s, 3654828.80 req/s, 233.54MB/s
+requests: 18274144 total, 18325344 started, 18274144 done, 18274144 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 18274144 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 1.14GB (1224401952) total, 836.52MB (877158912) headers (space savings 48.39%), 17.43MB (18274144) data
+                     min         max         mean         sd        +/- sd
+time for request:       73us     74.91ms      8.97ms      5.79ms    78.41%
+time for connect:     2.51ms     92.23ms     20.95ms     14.36ms    73.05%
+time to 1st byte:    10.62ms    112.83ms     41.52ms     15.79ms    81.25%
+req/s           :    5740.55     9521.70     7130.03      616.32    74.02%
+[info] CPU 1176.0% | Mem 63MiB
+
+[run 3/3]
+starting benchmark...
+
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+.Warm-up phase is over for thread #
+6.Main benchmark duration is started for thread #
+3.Main benchmark duration is started for thread #6.
+
+
+finished in 5.15s, 3611079.20 req/s, 230.74MB/s
+requests: 18055396 total, 18106596 started, 18055396 done, 18055396 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 18055396 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 1.13GB (1209745836) total, 826.51MB (866659008) headers (space savings 48.39%), 17.22MB (18055396) data
+                     min         max         mean         sd        +/- sd
+time for request:       62us     84.33ms      8.83ms      5.90ms    83.35%
+time for connect:     2.96ms     70.27ms     23.23ms     12.20ms    63.28%
+time to 1st byte:    33.12ms     92.61ms     50.94ms     13.11ms    63.28%
+req/s           :    6038.63     9426.25     7045.26      587.02    71.88%
+[info] CPU 1257.1% | Mem 63MiB
+
+=== Best: 3527827 req/s (CPU: 1176.0%, Mem: 63MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+
+==============================================
+=== agensio / static-h2 / 512c (tool=h2load) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+starting benchmark...
+7.
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+finished in 5.16s, 973800.00 req/s, 14.89GB/s
+requests: 4869000 total, 4885384 started, 4869000 done, 4869000 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 4869001 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 74.43GB (79918295970) total, 559.09MB (586249921) headers (space savings 43.73%), 73.78GB (79218077001) data
+                     min         max         mean         sd        +/- sd
+time for request:       18us     73.72ms     11.79ms      8.69ms    77.42%
+time for connect:     2.65ms    220.85ms     52.78ms     43.33ms    74.22%
+time to 1st byte:     9.49ms    250.91ms     75.27ms     43.61ms    70.31%
+req/s           :    1588.64     2448.96     1899.50      162.91    64.65%
+[info] CPU 1275.1% | Mem 154MiB
+
+[run 2/3]
+starting benchmark...
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+4Warm-up phase is over for thread #Main benchmark duration is started for thread #5.7
+..
+
+
+finished in 5.15s, 980267.80 req/s, 14.99GB/s
+requests: 4901339 total, 4917723 started, 4901339 done, 4901339 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 4901340 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 74.93GB (80450592557) total, 562.81MB (590145384) headers (space savings 43.73%), 74.27GB (79745720739) data
+                     min         max         mean         sd        +/- sd
+time for request:       32us    110.23ms     11.85ms      8.82ms    76.94%
+time for connect:     2.55ms     69.34ms     24.20ms     17.47ms    60.94%
+time to 1st byte:     9.44ms    101.18ms     52.13ms     22.94ms    62.70%
+req/s           :    1483.15     2702.33     1912.46      190.72    71.29%
+[info] CPU 1397.2% | Mem 153MiB
+
+[run 3/3]
+starting benchmark...
+
+4.
+3.
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+finished in 5.16s, 967156.20 req/s, 14.78GB/s
+requests: 4835781 total, 4852165 started, 4835781 done, 4835781 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 4835787 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 73.92GB (79373877370) total, 555.28MB (582251503) headers (space savings 43.73%), 73.28GB (78678433681) data
+                     min         max         mean         sd        +/- sd
+time for request:       28us    105.28ms     11.68ms      8.36ms    76.25%
+time for connect:     2.47ms    128.38ms     30.20ms     18.41ms    59.77%
+time to 1st byte:     9.88ms    133.59ms     64.52ms     20.31ms    78.32%
+req/s           :    1544.93     2638.43     1887.02      179.59    76.56%
+[info] CPU 1274.3% | Mem 152MiB
+
+=== Best: 951716 req/s (CPU: 1397.2%, Mem: 153MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+
+==============================================
+=== agensio / static-tls / 512c (tool=wrk) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   578.12us  566.29us  20.30ms   91.94%
+    Req/Sec    57.14k     6.54k   84.48k    89.26%
+  3440286 requests in 5.10s, 52.95GB read
+Requests/sec: 674606.62
+Transfer/sec:     10.38GB
+[info] CPU 1071.0% | Mem 65MiB
+
+[run 2/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   591.67us  625.91us  20.32ms   92.97%
+    Req/Sec    57.52k     4.08k   70.38k    83.25%
+  3485581 requests in 5.10s, 53.65GB read
+Requests/sec: 683283.00
+Transfer/sec:     10.52GB
+[info] CPU 995.3% | Mem 67MiB
+
+[run 3/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   589.46us  606.99us  18.37ms   92.54%
+    Req/Sec    57.93k     4.73k   95.04k    86.07%
+  3475260 requests in 5.10s, 53.49GB read
+Requests/sec: 681503.84
+Transfer/sec:     10.49GB
+[info] CPU 1078.7% | Mem 70MiB
+
+=== Best: 683283 req/s (CPU: 995.3%, Mem: 67MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+[info] skip: agensio does not subscribe to baseline-h3
+[info] skip: agensio does not subscribe to static-h3
+[info] skip: agensio does not subscribe to unary-grpc
+[info] skip: agensio does not subscribe to unary-grpc-tls
+[info] skip: agensio does not subscribe to echo-ws
+[info] done
+[info] restoring loopback MTU to 65536
+[info] available cores: 24 | threads: 12
+[info] tuning host for benchmark runs
+[info] setting kernel socket limits
+[info] setting UDP buffer sizes for QUIC
+[info] setting loopback MTU to 1500 (realistic Ethernet)
+[info] restarting docker daemon
+[warn] could not restart docker daemon (no sudo?)
+[info] dropping kernel caches
+[info] framework: agensio (agensio, C++)
+[info] subscribed tests: baseline,pipelined,limited-conn,json-tls,static-tls,baseline-h2,static-h2,baseline-h2c,json-h2c
+[info] building image: httparena-agensio
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 1.12kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/debian:trixie
+#2 DONE 0.5s
+
+#3 [internal] load metadata for docker.io/library/debian:trixie-slim
+#3 DONE 0.5s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [build 1/5] FROM docker.io/library/debian:trixie@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c
+#5 resolve docker.io/library/debian:trixie@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c 0.0s done
+#5 DONE 0.0s
+
+#6 [stage-1 1/5] FROM docker.io/library/debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+#6 resolve docker.io/library/debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a 0.0s done
+#6 DONE 0.0s
+
+#7 [internal] load build context
+#7 transferring context: 1.18MB done
+#7 DONE 0.0s
+
+#8 [build 2/5] RUN apt-get update && apt-get install -y --no-install-recommends         build-essential cmake ninja-build git ca-certificates libssl-dev zlib1g-dev     && rm -rf /var/lib/apt/lists/*
+#8 CACHED
+
+#9 [build 3/5] WORKDIR /src
+#9 CACHED
+
+#10 [build 4/5] COPY src.tar.gz /tmp/src.tar.gz
+#10 DONE 0.0s
+
+#11 [build 5/5] RUN tar -xzf /tmp/src.tar.gz -C /src     && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DAGENSIO_TESTS=OFF -DAGENSIO_NATIVE=ON -DAGENSIO_HTTPARENA=ON     && cmake --build build --target agensio
+#11 0.280 -- The CXX compiler identification is GNU 14.2.0
+#11 0.285 -- Detecting CXX compiler ABI info
+#11 0.315 -- Detecting CXX compiler ABI info - done
+#11 0.321 -- Check for working CXX compiler: /usr/bin/c++ - skipped
+#11 0.322 -- Detecting CXX compile features
+#11 0.322 -- Detecting CXX compile features - done
+#11 0.327 -- asio not found on the system, fetching asio-1-38-2 from GitHub
+#11 10.95 -- asio include dir: /src/build/_deps/asio-src/asio/include
+#11 10.95 -- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+#11 10.98 -- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+#11 10.98 -- Found Threads: TRUE
+#11 10.99 -- Found OpenSSL: /usr/lib/x86_64-linux-gnu/libcrypto.so (found version "3.5.7")
+#11 10.99 -- TLS enabled with OpenSSL 3.5.7
+#11 10.99 -- Found ZLIB: /usr/lib/x86_64-linux-gnu/libz.so (found version "1.3.1")
+#11 10.99 -- Configuring done (10.8s)
+#11 11.00 -- Generating done (0.0s)
+#11 11.00 -- Build files have been written to: /src/build
+#11 11.14 [1/39] Building CXX object CMakeFiles/agensio_core.dir/src/http_date.cpp.o
+#11 11.30 [2/39] Building CXX object CMakeFiles/agensio_core.dir/src/mime.cpp.o
+#11 11.31 [3/39] Building CXX object CMakeFiles/agensio_core.dir/src/file.cpp.o
+#11 11.31 /src/src/file.cpp: In function 'agensio::SendFileResult agensio::send_file(int, const File&, uint64_t, uint64_t, const IoSlice*, int)':
+#11 11.31 /src/src/file.cpp:203:41: warning: unused parameter 'headers' [-Wunused-parameter]
+#11 11.31   203 |                          const IoSlice* headers, int header_count) noexcept {
+#11 11.31       |                          ~~~~~~~~~~~~~~~^~~~~~~
+#11 11.36 [4/39] Building CXX object CMakeFiles/agensio_core.dir/src/path.cpp.o
+#11 11.43 [5/39] Building CXX object CMakeFiles/agensio_core.dir/src/http1/parser.cpp.o
+#11 11.72 [6/39] Building CXX object CMakeFiles/agensio_core.dir/src/response.cpp.o
+#11 11.75 [7/39] Building CXX object CMakeFiles/agensio_core.dir/src/cache.cpp.o
+#11 12.23 [8/39] Building CXX object CMakeFiles/agensio_core.dir/src/http2/hpack.cpp.o
+#11 12.26 [9/39] Building CXX object CMakeFiles/agensio_core.dir/src/core/router.cpp.o
+#11 12.29 [10/39] Building CXX object CMakeFiles/agensio_core.dir/src/services/log.cpp.o
+#11 13.20 [11/39] Building CXX object CMakeFiles/agensio_core.dir/src/services/archive.cpp.o
+#11 13.56 [12/39] Building CXX object CMakeFiles/agensio_core.dir/src/control/reference.cpp.o
+#11 13.93 [13/39] Building CXX object CMakeFiles/agensio_core.dir/src/services/pools.cpp.o
+#11 13.93 /src/src/services/pools.cpp: In function 'std::vector<std::__cxx11::basic_string<char> > agensio::check_hosting(const Config&, const HostFacts&)':
+#11 13.93 /src/src/services/pools.cpp:206:37: warning: '%04o' directive output may be truncated writing between 4 and 11 bytes into a region of size 8 [-Wformat-truncation=]
+#11 13.93   206 |     std::snprintf(buf, sizeof buf, "%04o", mode);
+#11 13.93       |                                     ^~~~
+#11 13.93 In function 'std::string agensio::{anonymous}::octal(unsigned int)',
+#11 13.93     inlined from 'std::vector<std::__cxx11::basic_string<char> > agensio::check_hosting(const Config&, const HostFacts&)' at /src/src/services/pools.cpp:326:88:
+#11 13.93 /src/src/services/pools.cpp:206:36: note: directive argument in the range [1, 4294967295]
+#11 13.93   206 |     std::snprintf(buf, sizeof buf, "%04o", mode);
+#11 13.93       |                                    ^~~~~~
+#11 13.93 In file included from /usr/include/stdio.h:970,
+#11 13.93                  from /usr/include/c++/14/cstdio:42,
+#11 13.93                  from /usr/include/c++/14/ext/string_conversions.h:45,
+#11 13.93                  from /usr/include/c++/14/bits/basic_string.h:4154,
+#11 13.93                  from /usr/include/c++/14/string:54,
+#11 13.93                  from /usr/include/c++/14/stdexcept:39,
+#11 13.93                  from /usr/include/c++/14/system_error:43,
+#11 13.93                  from /usr/include/c++/14/bits/fs_fwd.h:35,
+#11 13.93                  from /usr/include/c++/14/filesystem:51,
+#11 13.93                  from /src/src/services/pools.hpp:7,
+#11 13.93                  from /src/src/services/pools.cpp:1:
+#11 13.93 In function 'int snprintf(char*, size_t, const char*, ...)',
+#11 13.93     inlined from 'std::string agensio::{anonymous}::octal(unsigned int)' at /src/src/services/pools.cpp:206:18,
+#11 13.93     inlined from 'std::vector<std::__cxx11::basic_string<char> > agensio::check_hosting(const Config&, const HostFacts&)' at /src/src/services/pools.cpp:326:88:
+#11 13.93 /usr/include/x86_64-linux-gnu/bits/stdio2.h:68:35: note: '__builtin___snprintf_chk' output between 5 and 12 bytes into a destination of size 8
+#11 13.93    68 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,
+#11 13.93       |          ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#11 13.93    69 |                                    __glibc_objsize (__s), __fmt,
+#11 13.93       |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#11 13.93    70 |                                    __va_arg_pack ());
+#11 13.93       |                                    ~~~~~~~~~~~~~~~~~
+#11 14.04 [14/39] Building CXX object CMakeFiles/agensio_core.dir/src/handlers/static.cpp.o
+#11 14.14 [15/39] Building CXX object CMakeFiles/agensio_core.dir/src/control/settings.cpp.o
+#11 14.27 [16/39] Building CXX object CMakeFiles/agensio_core.dir/src/control/sites.cpp.o
+#11 14.49 [17/39] Building CXX object CMakeFiles/agensio_core.dir/src/upstream/fcgi_client.cpp.o
+#11 14.60 [18/39] Building CXX object CMakeFiles/agensio_core.dir/src/handlers/cgi.cpp.o
+#11 14.61 [19/39] Building CXX object CMakeFiles/agensio_core.dir/src/handlers/upstream_common.cpp.o
+#11 14.66 [20/39] Building CXX object CMakeFiles/agensio_core.dir/src/handlers/httparena.cpp.o
+#11 14.85 [21/39] Building CXX object CMakeFiles/agensio_core.dir/src/upstream/http_client.cpp.o
+#11 14.88 [22/39] Building CXX object CMakeFiles/agensio_core.dir/src/control/client.cpp.o
+#11 14.90 [23/39] Building CXX object CMakeFiles/agensio_core.dir/src/handlers/dispatch.cpp.o
+#11 14.91 [24/39] Building CXX object CMakeFiles/agensio_core.dir/src/handlers/fastcgi.cpp.o
+#11 14.92 [25/39] Building CXX object CMakeFiles/agensio_core.dir/src/handlers/proxy.cpp.o
+#11 14.94 [26/39] Building CXX object CMakeFiles/agensio_core.dir/src/services/provision.cpp.o
+#11 15.30 [27/39] Building CXX object CMakeFiles/agensio_core.dir/src/services/install.cpp.o
+#11 15.39 [28/39] Building CXX object CMakeFiles/agensio_core.dir/src/services/fetch.cpp.o
+#11 15.52 [29/39] Building CXX object CMakeFiles/agensio_core.dir/src/upstream/cgi_client.cpp.o
+#11 16.13 [30/39] Building CXX object CMakeFiles/agensio_core.dir/src/control/commands.cpp.o
+#11 16.13 /src/src/control/commands.cpp: In function 'bool agensio::control::php_fpm_hard_reload(const agensio::Config&, std::string&)':
+#11 16.13 /src/src/control/commands.cpp:433:25: warning: loop variable 'candidate' creates a copy from type 'const std::filesystem::__cxx11::path' [-Wrange-loop-construct]
+#11 16.13   433 |     for (const fs::path candidate : {dir.parent_path() / "php-fpm.conf", dir.parent_path().parent_path() / "php-fpm.conf"}) {
+#11 16.13       |                         ^~~~~~~~~
+#11 16.13 /src/src/control/commands.cpp:433:25: note: use reference type to prevent copying
+#11 16.13   433 |     for (const fs::path candidate : {dir.parent_path() / "php-fpm.conf", dir.parent_path().parent_path() / "php-fpm.conf"}) {
+#11 16.13       |                         ^~~~~~~~~
+#11 16.13       |                         &
+#11 16.63 [31/39] Building CXX object CMakeFiles/agensio_core.dir/src/control/mcp.cpp.o
+#11 16.91 [32/39] Building CXX object CMakeFiles/agensio_core.dir/src/services/acme.cpp.o
+#11 16.93 [33/39] Building CXX object CMakeFiles/agensio.dir/src/main.cpp.o
+#11 18.42 [34/39] Building CXX object CMakeFiles/agensio_core.dir/src/control/handler.cpp.o
+#11 20.22 [35/39] Building CXX object CMakeFiles/agensio_core.dir/src/config.cpp.o
+#11 20.22 /src/src/config.cpp: In function 'void agensio::{anonymous}::parse_location(const toml::v3::table&, const std::filesystem::__cxx11::path&, agensio::SiteConfig&, const std::string&)':
+#11 20.22 /src/src/config.cpp:463:38: warning: suggest parentheses around arithmetic in operand of '|' [-Wparentheses]
+#11 20.22   463 |         loc.methods = kStaticMethods & ~method_bit(Method::options) | method_bit(Method::post);
+#11 20.22       |                       ~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#11 20.22 /src/src/config.cpp: At global scope:
+#11 20.22 /src/src/config.cpp:669:1: warning: missing initializer for member 'agensio::{anonymous}::{anonymous}::PhpPreset::never_dirs' [-Wmissing-field-initializers]
+#11 20.22   669 | };
+#11 20.22       | ^
+#11 20.22 /src/src/config.cpp:669:1: warning: missing initializer for member 'agensio::{anonymous}::{anonymous}::PhpPreset::never_dirs' [-Wmissing-field-initializers]
+#11 20.22 /src/src/config.cpp:669:1: warning: missing initializer for member 'agensio::{anonymous}::{anonymous}::PhpPreset::never_dirs' [-Wmissing-field-initializers]
+#11 20.22 /src/src/config.cpp:669:1: warning: missing initializer for member 'agensio::{anonymous}::{anonymous}::PhpPreset::never_dirs' [-Wmissing-field-initializers]
+#11 21.65 [36/39] Building CXX object CMakeFiles/agensio_core.dir/src/upstream/client.cpp.o
+#11 31.65 [37/39] Building CXX object CMakeFiles/agensio_core.dir/src/server.cpp.o
+#11 31.69 [38/39] Linking CXX static library libagensio_core.a
+#11 31.76 [39/39] Linking CXX executable agensio
+#11 DONE 31.8s
+
+#12 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends libssl3t64 zlib1g     && rm -rf /var/lib/apt/lists/*
+#12 CACHED
+
+#13 [stage-1 3/5] COPY --from=build /src/build/agensio /usr/local/bin/agensio
+#13 CACHED
+
+#14 [stage-1 4/5] COPY agensio.toml start.sh /etc/agensio/
+#14 CACHED
+
+#15 [stage-1 5/5] RUN chmod 0755 /etc/agensio/start.sh
+#15 CACHED
+
+#16 exporting to image
+#16 exporting layers done
+#16 exporting manifest sha256:41038374fb736bc9ead8d7f8e045ea3c31a49b17371c6a8a3916af95311cdaa3 done
+#16 exporting config sha256:03fe4a5e374a0602d48087f223f35220feccbd03160cc525900a2b087030ae22 done
+#16 exporting attestation manifest sha256:e757b58da08dec4e8676572060e882ef97ed71d2b2fc16b8f57e569478a6f956 0.0s done
+#16 exporting manifest list sha256:eda7b3f87a99eb2a2e597722f3e465dd1902e07fd88e5f4838ea1de8fc39b93e 0.0s done
+#16 naming to docker.io/library/httparena-agensio:latest done
+#16 unpacking to docker.io/library/httparena-agensio:latest done
+#16 DONE 0.1s
+
+==============================================
+=== agensio / json-tls / 512c (tool=wrk) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   332.81us    1.25ms  60.74ms   98.48%
+    Req/Sec   101.14k    10.72k  149.76k    89.57%
+  6078649 requests in 5.10s, 20.64GB read
+Requests/sec: 1192046.93
+Transfer/sec:      4.05GB
+[info] CPU 905.6% | Mem 76MiB
+
+[run 2/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   285.56us  375.74us  14.32ms   96.89%
+    Req/Sec   102.22k     6.59k  124.39k    78.20%
+  6202460 requests in 5.10s, 21.06GB read
+Requests/sec: 1215901.84
+Transfer/sec:      4.13GB
+[info] CPU 1003.9% | Mem 78MiB
+
+[run 3/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   277.34us  342.81us  16.53ms   97.11%
+    Req/Sec   102.73k     6.59k  142.45k    80.36%
+  6194246 requests in 5.10s, 21.03GB read
+Requests/sec: 1214738.58
+Transfer/sec:      4.12GB
+[info] CPU 925.2% | Mem 80MiB
+
+=== Best: 1215901 req/s (CPU: 1003.9%, Mem: 78MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+[info] done
+[info] restoring loopback MTU to 65536
+[info] available cores: 24 | threads: 12
+[info] tuning host for benchmark runs
+[info] setting kernel socket limits
+[info] setting UDP buffer sizes for QUIC
+[info] setting loopback MTU to 1500 (realistic Ethernet)
+[info] restarting docker daemon
+[warn] could not restart docker daemon (no sudo?)
+[info] dropping kernel caches
+[info] framework: agensio (agensio, C++)
+[info] subscribed tests: baseline,pipelined,limited-conn,json-tls,static-tls,baseline-h2,static-h2,baseline-h2c,json-h2c
+[info] building image: httparena-agensio
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 1.12kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/debian:trixie
+#2 DONE 0.7s
+
+#3 [internal] load metadata for docker.io/library/debian:trixie-slim
+#3 DONE 0.7s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [stage-1 1/5] FROM docker.io/library/debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+#5 resolve docker.io/library/debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a 0.0s done
+#5 DONE 0.0s
+
+#6 [build 1/5] FROM docker.io/library/debian:trixie@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c
+#6 resolve docker.io/library/debian:trixie@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c 0.0s done
+#6 DONE 0.0s
+
+#7 [internal] load build context
+#7 transferring context: 1.19MB done
+#7 DONE 0.0s
+
+#8 [build 2/5] RUN apt-get update && apt-get install -y --no-install-recommends         build-essential cmake ninja-build git ca-certificates libssl-dev zlib1g-dev     && rm -rf /var/lib/apt/lists/*
+#8 CACHED
+
+#9 [build 3/5] WORKDIR /src
+#9 CACHED
+
+#10 [build 4/5] COPY src.tar.gz /tmp/src.tar.gz
+#10 DONE 0.0s
+
+#11 [build 5/5] RUN tar -xzf /tmp/src.tar.gz -C /src     && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DAGENSIO_TESTS=OFF -DAGENSIO_NATIVE=ON -DAGENSIO_HTTPARENA=ON     && cmake --build build --target agensio
+#11 0.278 -- The CXX compiler identification is GNU 14.2.0
+#11 0.283 -- Detecting CXX compiler ABI info
+#11 0.313 -- Detecting CXX compiler ABI info - done
+#11 0.319 -- Check for working CXX compiler: /usr/bin/c++ - skipped
+#11 0.320 -- Detecting CXX compile features
+#11 0.320 -- Detecting CXX compile features - done
+#11 0.325 -- asio not found on the system, fetching asio-1-38-2 from GitHub
+#11 13.18 -- asio include dir: /src/build/_deps/asio-src/asio/include
+#11 13.18 -- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+#11 13.21 -- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+#11 13.21 -- Found Threads: TRUE
+#11 13.22 -- Found OpenSSL: /usr/lib/x86_64-linux-gnu/libcrypto.so (found version "3.5.7")
+#11 13.22 -- TLS enabled with OpenSSL 3.5.7
+#11 13.22 -- Found ZLIB: /usr/lib/x86_64-linux-gnu/libz.so (found version "1.3.1")
+#11 13.22 -- Configuring done (13.0s)
+#11 13.23 -- Generating done (0.0s)
+#11 13.23 -- Build files have been written to: /src/build
+#11 13.36 [1/39] Building CXX object CMakeFiles/agensio_core.dir/src/http_date.cpp.o
+#11 13.54 [2/39] Building CXX object CMakeFiles/agensio_core.dir/src/mime.cpp.o
+#11 13.60 [3/39] Building CXX object CMakeFiles/agensio_core.dir/src/file.cpp.o
+#11 13.60 /src/src/file.cpp: In function 'agensio::SendFileResult agensio::send_file(int, const File&, uint64_t, uint64_t, const IoSlice*, int)':
+#11 13.60 /src/src/file.cpp:203:41: warning: unused parameter 'headers' [-Wunused-parameter]
+#11 13.60   203 |                          const IoSlice* headers, int header_count) noexcept {
+#11 13.60       |                          ~~~~~~~~~~~~~~~^~~~~~~
+#11 13.65 [4/39] Building CXX object CMakeFiles/agensio_core.dir/src/http1/parser.cpp.o
+#11 13.66 [5/39] Building CXX object CMakeFiles/agensio_core.dir/src/path.cpp.o
+#11 14.09 [6/39] Building CXX object CMakeFiles/agensio_core.dir/src/response.cpp.o
+#11 14.11 [7/39] Building CXX object CMakeFiles/agensio_core.dir/src/cache.cpp.o
+#11 14.16 [8/39] Building CXX object CMakeFiles/agensio_core.dir/src/http2/hpack.cpp.o
+#11 14.47 [9/39] Building CXX object CMakeFiles/agensio_core.dir/src/core/router.cpp.o
+#11 14.60 [10/39] Building CXX object CMakeFiles/agensio_core.dir/src/services/log.cpp.o
+#11 15.21 [11/39] Building CXX object CMakeFiles/agensio_core.dir/src/services/archive.cpp.o
+#11 15.34 [12/39] Building CXX object CMakeFiles/agensio_core.dir/src/control/reference.cpp.o
+#11 16.03 [13/39] Building CXX object CMakeFiles/agensio_core.dir/src/services/pools.cpp.o
+#11 16.03 /src/src/services/pools.cpp: In function 'std::vector<std::__cxx11::basic_string<char> > agensio::check_hosting(const Config&, const HostFacts&)':
+#11 16.03 /src/src/services/pools.cpp:206:37: warning: '%04o' directive output may be truncated writing between 4 and 11 bytes into a region of size 8 [-Wformat-truncation=]
+#11 16.03   206 |     std::snprintf(buf, sizeof buf, "%04o", mode);
+#11 16.03       |                                     ^~~~
+#11 16.03 In function 'std::string agensio::{anonymous}::octal(unsigned int)',
+#11 16.03     inlined from 'std::vector<std::__cxx11::basic_string<char> > agensio::check_hosting(const Config&, const HostFacts&)' at /src/src/services/pools.cpp:326:88:
+#11 16.03 /src/src/services/pools.cpp:206:36: note: directive argument in the range [1, 4294967295]
+#11 16.03   206 |     std::snprintf(buf, sizeof buf, "%04o", mode);
+#11 16.03       |                                    ^~~~~~
+#11 16.03 In file included from /usr/include/stdio.h:970,
+#11 16.03                  from /usr/include/c++/14/cstdio:42,
+#11 16.03                  from /usr/include/c++/14/ext/string_conversions.h:45,
+#11 16.03                  from /usr/include/c++/14/bits/basic_string.h:4154,
+#11 16.03                  from /usr/include/c++/14/string:54,
+#11 16.03                  from /usr/include/c++/14/stdexcept:39,
+#11 16.03                  from /usr/include/c++/14/system_error:43,
+#11 16.03                  from /usr/include/c++/14/bits/fs_fwd.h:35,
+#11 16.03                  from /usr/include/c++/14/filesystem:51,
+#11 16.03                  from /src/src/services/pools.hpp:7,
+#11 16.03                  from /src/src/services/pools.cpp:1:
+#11 16.03 In function 'int snprintf(char*, size_t, const char*, ...)',
+#11 16.03     inlined from 'std::string agensio::{anonymous}::octal(unsigned int)' at /src/src/services/pools.cpp:206:18,
+#11 16.03     inlined from 'std::vector<std::__cxx11::basic_string<char> > agensio::check_hosting(const Config&, const HostFacts&)' at /src/src/services/pools.cpp:326:88:
+#11 16.03 /usr/include/x86_64-linux-gnu/bits/stdio2.h:68:35: note: '__builtin___snprintf_chk' output between 5 and 12 bytes into a destination of size 8
+#11 16.03    68 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,
+#11 16.03       |          ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#11 16.03    69 |                                    __glibc_objsize (__s), __fmt,
+#11 16.03       |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#11 16.03    70 |                                    __va_arg_pack ());
+#11 16.03       |                                    ~~~~~~~~~~~~~~~~~
+#11 16.24 [14/39] Building CXX object CMakeFiles/agensio_core.dir/src/handlers/static.cpp.o
+#11 16.50 [15/39] Building CXX object CMakeFiles/agensio_core.dir/src/control/settings.cpp.o
+#11 16.53 [16/39] Building CXX object CMakeFiles/agensio_core.dir/src/handlers/httparena.cpp.o
+#11 16.55 [17/39] Building CXX object CMakeFiles/agensio_core.dir/src/control/client.cpp.o
+#11 16.67 [18/39] Building CXX object CMakeFiles/agensio_core.dir/src/services/provision.cpp.o
+#11 16.69 [19/39] Building CXX object CMakeFiles/agensio_core.dir/src/upstream/fcgi_client.cpp.o
+#11 16.74 [20/39] Building CXX object CMakeFiles/agensio_core.dir/src/handlers/upstream_common.cpp.o
+#11 16.80 [21/39] Building CXX object CMakeFiles/agensio_core.dir/src/control/sites.cpp.o
+#11 16.89 [22/39] Building CXX object CMakeFiles/agensio_core.dir/src/handlers/dispatch.cpp.o
+#11 16.89 [23/39] Building CXX object CMakeFiles/agensio_core.dir/src/handlers/proxy.cpp.o
+#11 16.95 [24/39] Building CXX object CMakeFiles/agensio_core.dir/src/handlers/cgi.cpp.o
+#11 17.05 [25/39] Building CXX object CMakeFiles/agensio_core.dir/src/upstream/http_client.cpp.o
+#11 17.05 [26/39] Building CXX object CMakeFiles/agensio_core.dir/src/handlers/fastcgi.cpp.o
+#11 17.34 [27/39] Building CXX object CMakeFiles/agensio_core.dir/src/services/fetch.cpp.o
+#11 17.41 [28/39] Building CXX object CMakeFiles/agensio_core.dir/src/services/install.cpp.o
+#11 17.73 [29/39] Building CXX object CMakeFiles/agensio_core.dir/src/upstream/cgi_client.cpp.o
+#11 18.39 [30/39] Building CXX object CMakeFiles/agensio_core.dir/src/control/mcp.cpp.o
+#11 18.43 [31/39] Building CXX object CMakeFiles/agensio_core.dir/src/control/commands.cpp.o
+#11 18.43 /src/src/control/commands.cpp: In function 'bool agensio::control::php_fpm_hard_reload(const agensio::Config&, std::string&)':
+#11 18.43 /src/src/control/commands.cpp:433:25: warning: loop variable 'candidate' creates a copy from type 'const std::filesystem::__cxx11::path' [-Wrange-loop-construct]
+#11 18.43   433 |     for (const fs::path candidate : {dir.parent_path() / "php-fpm.conf", dir.parent_path().parent_path() / "php-fpm.conf"}) {
+#11 18.43       |                         ^~~~~~~~~
+#11 18.43 /src/src/control/commands.cpp:433:25: note: use reference type to prevent copying
+#11 18.43   433 |     for (const fs::path candidate : {dir.parent_path() / "php-fpm.conf", dir.parent_path().parent_path() / "php-fpm.conf"}) {
+#11 18.43       |                         ^~~~~~~~~
+#11 18.43       |                         &
+#11 19.00 [32/39] Building CXX object CMakeFiles/agensio.dir/src/main.cpp.o
+#11 19.28 [33/39] Building CXX object CMakeFiles/agensio_core.dir/src/services/acme.cpp.o
+#11 20.63 [34/39] Building CXX object CMakeFiles/agensio_core.dir/src/control/handler.cpp.o
+#11 22.81 [35/39] Building CXX object CMakeFiles/agensio_core.dir/src/config.cpp.o
+#11 22.81 /src/src/config.cpp: In function 'void agensio::{anonymous}::parse_location(const toml::v3::table&, const std::filesystem::__cxx11::path&, agensio::SiteConfig&, const std::string&)':
+#11 22.81 /src/src/config.cpp:463:38: warning: suggest parentheses around arithmetic in operand of '|' [-Wparentheses]
+#11 22.81   463 |         loc.methods = kStaticMethods & ~method_bit(Method::options) | method_bit(Method::post);
+#11 22.81       |                       ~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#11 22.81 /src/src/config.cpp: At global scope:
+#11 22.81 /src/src/config.cpp:669:1: warning: missing initializer for member 'agensio::{anonymous}::{anonymous}::PhpPreset::never_dirs' [-Wmissing-field-initializers]
+#11 22.81   669 | };
+#11 22.81       | ^
+#11 22.81 /src/src/config.cpp:669:1: warning: missing initializer for member 'agensio::{anonymous}::{anonymous}::PhpPreset::never_dirs' [-Wmissing-field-initializers]
+#11 22.81 /src/src/config.cpp:669:1: warning: missing initializer for member 'agensio::{anonymous}::{anonymous}::PhpPreset::never_dirs' [-Wmissing-field-initializers]
+#11 22.81 /src/src/config.cpp:669:1: warning: missing initializer for member 'agensio::{anonymous}::{anonymous}::PhpPreset::never_dirs' [-Wmissing-field-initializers]
+#11 24.03 [36/39] Building CXX object CMakeFiles/agensio_core.dir/src/upstream/client.cpp.o
+#11 34.19 [37/39] Building CXX object CMakeFiles/agensio_core.dir/src/server.cpp.o
+#11 34.22 [38/39] Linking CXX static library libagensio_core.a
+#11 34.30 [39/39] Linking CXX executable agensio
+#11 DONE 34.3s
+
+#12 [stage-1 3/5] COPY --from=build /src/build/agensio /usr/local/bin/agensio
+#12 CACHED
+
+#13 [stage-1 4/5] COPY agensio.toml start.sh /etc/agensio/
+#13 CACHED
+
+#14 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends libssl3t64 zlib1g     && rm -rf /var/lib/apt/lists/*
+#14 CACHED
+
+#15 [stage-1 5/5] RUN chmod 0755 /etc/agensio/start.sh
+#15 CACHED
+
+#16 exporting to image
+#16 exporting layers done
+#16 exporting manifest sha256:41038374fb736bc9ead8d7f8e045ea3c31a49b17371c6a8a3916af95311cdaa3 done
+#16 exporting config sha256:03fe4a5e374a0602d48087f223f35220feccbd03160cc525900a2b087030ae22 done
+#16 exporting attestation manifest sha256:7ca3aeb4d029346da33922fa582031178ec6abae811a5ddf1bf1e7f30aa8bca4 0.0s done
+#16 exporting manifest list sha256:f5301dd9c05a8ed40a6e239f3d0e5059474415d47b6e5e747adb9f1bd41c387f 0.0s done
+#16 naming to docker.io/library/httparena-agensio:latest done
+#16 unpacking to docker.io/library/httparena-agensio:latest done
+#16 DONE 0.1s
+
+==============================================
+=== agensio / baseline-h2c / 512c (tool=h2load) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+starting benchmark...
+8.
+
+5.
+Application protocol: h2c
+
+finished in 5.13s, 5090199.40 req/s, 325.25MB/s
+requests: 25450997 total, 25502197 started, 25450997 done, 25450997 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 25450997 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 1.59GB (1705251103) total, 1.14GB (1221647856) headers (space savings 48.39%), 24.27MB (25450997) data
+                     min         max         mean         sd        +/- sd
+time for request:       29us    167.23ms      8.51ms      8.15ms    84.94%
+time for connect:       25us     33.09ms       567us      1.49ms    99.80%
+time to 1st byte:     1.60ms    167.91ms     46.35ms     32.48ms    59.38%
+req/s           :    7017.55    14766.06     9939.63     1566.19    68.16%
+[info] CPU 1409.7% | Mem 49MiB
+
+[run 2/3]
+starting benchmark...
+10.
+11.Main benchmark duration is started for thread #8.
+
+Application protocol: h2c
+
+finished in 5.19s, 5176278.60 req/s, 330.75MB/s
+requests: 25881393 total, 25932593 started, 25881393 done, 25881393 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 25881393 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 1.61GB (1734087635) total, 1.16GB (1242306864) headers (space savings 48.39%), 24.68MB (25881393) data
+                     min         max         mean         sd        +/- sd
+time for request:       35us    235.57ms      7.70ms      6.20ms    77.37%
+time for connect:       32us     42.20ms      1.45ms      5.18ms    96.09%
+time to 1st byte:     1.46ms    236.79ms     11.49ms     24.24ms    94.92%
+req/s           :    7357.25    14199.30    10105.96     1331.70    65.43%
+[info] CPU 1567.0% | Mem 49MiB
+
+[run 3/3]
+starting benchmark...
+.
+7.
+Application protocol: h2c
+
+finished in 5.16s, 5190567.60 req/s, 331.66MB/s
+requests: 25952838 total, 26004038 started, 25952838 done, 25952838 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 25952838 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 1.62GB (1738874450) total, 1.16GB (1245736224) headers (space savings 48.39%), 24.75MB (25952838) data
+                     min         max         mean         sd        +/- sd
+time for request:       36us     57.88ms      7.79ms      5.80ms    72.41%
+time for connect:       34us     29.51ms       667us      1.33ms    99.80%
+time to 1st byte:     1.81ms     59.05ms      6.28ms      5.43ms    95.51%
+req/s           :    7925.99    13682.77    10131.97     1290.50    64.06%
+[info] CPU 1418.0% | Mem 49MiB
+
+=== Best: 5029619 req/s (CPU: 1418.0%, Mem: 49MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+[info] done
+[info] restoring loopback MTU to 65536
+[info] available cores: 24 | threads: 12
+[info] tuning host for benchmark runs
+[info] setting kernel socket limits
+[info] setting UDP buffer sizes for QUIC
+[info] setting loopback MTU to 1500 (realistic Ethernet)
+[info] restarting docker daemon
+[warn] could not restart docker daemon (no sudo?)
+[info] dropping kernel caches
+[info] framework: agensio (agensio, C++)
+[info] subscribed tests: baseline,pipelined,limited-conn,json-tls,static-tls,baseline-h2,static-h2,baseline-h2c,json-h2c
+[info] building image: httparena-agensio
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 1.12kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/debian:trixie
+#2 DONE 0.6s
+
+#3 [internal] load metadata for docker.io/library/debian:trixie-slim
+#3 DONE 0.6s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [build 1/5] FROM docker.io/library/debian:trixie@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c
+#5 resolve docker.io/library/debian:trixie@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c 0.0s done
+#5 DONE 0.0s
+
+#6 [stage-1 1/5] FROM docker.io/library/debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+#6 resolve docker.io/library/debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a 0.0s done
+#6 DONE 0.0s
+
+#7 [internal] load build context
+#7 transferring context: 1.19MB done
+#7 DONE 0.0s
+
+#8 [build 2/5] RUN apt-get update && apt-get install -y --no-install-recommends         build-essential cmake ninja-build git ca-certificates libssl-dev zlib1g-dev     && rm -rf /var/lib/apt/lists/*
+#8 CACHED
+
+#9 [stage-1 4/5] COPY agensio.toml start.sh /etc/agensio/
+#9 CACHED
+
+#10 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends libssl3t64 zlib1g     && rm -rf /var/lib/apt/lists/*
+#10 CACHED
+
+#11 [build 3/5] WORKDIR /src
+#11 CACHED
+
+#12 [build 5/5] RUN tar -xzf /tmp/src.tar.gz -C /src     && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DAGENSIO_TESTS=OFF -DAGENSIO_NATIVE=ON -DAGENSIO_HTTPARENA=ON     && cmake --build build --target agensio
+#12 CACHED
+
+#13 [stage-1 3/5] COPY --from=build /src/build/agensio /usr/local/bin/agensio
+#13 CACHED
+
+#14 [build 4/5] COPY src.tar.gz /tmp/src.tar.gz
+#14 CACHED
+
+#15 [stage-1 5/5] RUN chmod 0755 /etc/agensio/start.sh
+#15 CACHED
+
+#16 exporting to image
+#16 exporting layers done
+#16 exporting manifest sha256:41038374fb736bc9ead8d7f8e045ea3c31a49b17371c6a8a3916af95311cdaa3 done
+#16 exporting config sha256:03fe4a5e374a0602d48087f223f35220feccbd03160cc525900a2b087030ae22 done
+#16 exporting attestation manifest sha256:05e6525cbb62b98f8713c4a917c1855dcb4f8f16242280fdd4a491ab9f276f06 0.0s done
+#16 exporting manifest list sha256:4704976a0121c886ad8c72269ca225f62a243e780e8a482a7ca1ddb624fb7bf6 0.0s done
+#16 naming to docker.io/library/httparena-agensio:latest done
+#16 unpacking to docker.io/library/httparena-agensio:latest
+#16 unpacking to docker.io/library/httparena-agensio:latest done
+#16 DONE 0.1s
+
+==============================================
+=== agensio / json-h2c / 512c (tool=h2load) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+starting benchmark...
+
+11.
+5.
+Application protocol: h2c
+
+finished in 5.18s, 2700998.60 req/s, 9.03GB/s
+requests: 13504993 total, 13521377 started, 13504993 done, 13504993 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 13504993 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 45.17GB (48497451955) total, 693.65MB (727340131) headers (space savings 47.05%), 44.26GB (47526987646) data
+                     min         max         mean         sd        +/- sd
+time for request:       18us     88.07ms      5.30ms      5.11ms    86.56%
+time for connect:       26us     36.82ms       522us      2.30ms    99.61%
+time to 1st byte:      827us     88.83ms     37.38ms     21.70ms    70.12%
+req/s           :    4279.56     6673.88     5273.03      486.84    69.73%
+[info] CPU 1446.3% | Mem 79MiB
+
+[run 2/3]
+starting benchmark...
+Application protocol: h2c
+10Main benchmark duration is over for thread #8. Stopping all clients.
+. Stopping all clients.
+. Stopping all clients.
+
+finished in 5.14s, 2780014.00 req/s, 9.30GB/s
+requests: 13900070 total, 13916454 started, 13900070 done, 13900070 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 13900070 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 46.49GB (49916366397) total, 713.94MB (748617845) headers (space savings 47.05%), 45.56GB (48917512988) data
+                     min         max         mean         sd        +/- sd
+time for request:       17us    106.24ms      4.89ms      3.87ms    69.97%
+time for connect:       34us     47.90ms      1.04ms      2.37ms    90.43%
+time to 1st byte:     1.19ms    107.60ms     10.21ms     12.90ms    90.04%
+req/s           :    4187.28     7018.53     5426.86      595.31    65.43%
+[info] CPU 1641.4% | Mem 84MiB
+
+[run 3/3]
+starting benchmark...
+10.
+Application protocol: h2c
+
+finished in 5.17s, 2755171.40 req/s, 9.21GB/s
+requests: 13775857 total, 13792241 started, 13775857 done, 13775857 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 13775857 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 46.07GB (49470337160) total, 707.56MB (741928086) headers (space savings 47.05%), 45.15GB (48480409344) data
+                     min         max         mean         sd        +/- sd
+time for request:       16us     49.14ms      4.91ms      3.84ms    70.23%
+time for connect:       30us     55.08ms       976us      2.80ms    93.75%
+time to 1st byte:      897us     58.60ms      7.77ms      8.92ms    88.48%
+req/s           :    3641.62     8317.51     5379.26      771.03    77.93%
+[info] CPU 1495.0% | Mem 89MiB
+
+=== Best: 2704293 req/s (CPU: 1641.4%, Mem: 84MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+[info] done
+[info] restoring loopback MTU to 65536

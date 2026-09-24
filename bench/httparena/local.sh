@@ -33,9 +33,10 @@ sync_entry() {
   rsync -a --delete --exclude Dockerfile.local "$HERE/agensio/" "$ARENA/frameworks/agensio/"
   if [ "${LOCAL:-0}" = 1 ]; then
     cp "$HERE/agensio/Dockerfile.local" "$ARENA/frameworks/agensio/Dockerfile"
-    (cd "$ROOT" && git ls-files -z --cached --others --exclude-standard | tar --null -T - -czf "$ARENA/frameworks/agensio/src.tar.gz")
+    # tracked files deleted in the working tree are listed too: skipped, not fatal
+    (cd "$ROOT" && git ls-files -z --cached --others --exclude-standard | tar --null -T - --ignore-failed-read -czf "$ARENA/frameworks/agensio/src.tar.gz" 2>/dev/null)
   fi
-  [ -n "${WORKERS:-}" ] && sed -i "s/^W=.*/W=${WORKERS}/" "$ARENA/frameworks/agensio/start.sh"
+  [ -n "${WORKERS:-}" ] && sed -i "s/^workers = .*/workers = ${WORKERS}/" "$ARENA/frameworks/agensio/agensio.toml"
   # The lite runner passes no CPU limit to the server container; let an environment variable supply one.
   grep -q HTTPARENA_SERVER_CPUS "$ARENA/scripts/lib/framework.sh" || \
     sed -i 's/^    local cpu_limit="${2:-}"$/    local cpu_limit="${2:-}"\n    [ -z "$cpu_limit" ] \&\& cpu_limit="${HTTPARENA_SERVER_CPUS:-}"/' "$ARENA/scripts/lib/framework.sh"
@@ -51,7 +52,7 @@ case "$cmd" in
     # h2c and json-tls profiles the nginx and h2o entries subscribe to; the script refuses a
     # meta.json naming a profile it does not know, so those three are declared but never run.
     if ! grep -q '\[static-tls\]' "$ARENA/scripts/benchmark-lite.sh"; then
-      sed -i 's/^    \[static-h2\]=\(.*\)$/    [static-h2]=\1\n    [static-tls]="1|0||512|static-tls"\n    [json-tls]="1|0||512|json-tls"\n    [baseline-h2c]="1|0||512|h2c"\n    [json-h2c]="1|0||512|json-h2c"/; s/^    baseline-h2 static-h2$/    baseline-h2 static-h2 static-tls/' "$ARENA/scripts/benchmark-lite.sh"
+      sed -i 's/^    \[static-h2\]=\(.*\)$/    [static-h2]=\1\n    [static-tls]="1|0||512|static-tls"\n    [json-tls]="1|0||512|json-tls"\n    [baseline-h2c]="1|0||512|h2c"\n    [json-h2c]="1|0||512|json-h2c"/; s/^    baseline-h2 static-h2$/    baseline-h2 static-h2 static-tls json-tls baseline-h2c json-h2c/' "$ARENA/scripts/benchmark-lite.sh"
     fi
     if ! docker inspect "$DIND" >/dev/null 2>&1; then
       docker run -d --privileged --name "$DIND" -v "$ARENA:/arena" -e DOCKER_TLS_CERTDIR= docker:dind >/dev/null

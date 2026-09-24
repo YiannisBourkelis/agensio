@@ -18,6 +18,7 @@ option(AGENSIO_HARDEN "Hardened build: stack protector, fortify, hardened std li
 set(AGENSIO_SANITIZE "" CACHE STRING "Sanitizers for all targets, e.g. address,undefined")
 option(AGENSIO_FUZZ "Build libFuzzer targets (needs clang with libFuzzer, e.g. brew llvm)" OFF)
 option(AGENSIO_HARDEN_ZERO_INIT "Part of AGENSIO_HARDEN: zero-initialise automatic variables (-ftrivial-auto-var-init=zero)" ON)
+option(AGENSIO_HTTPARENA "Compile the HttpArena benchmark handler (handler = \"httparena\", bench/httparena/); never in a release build" OFF)
 
 # ---------------------------------------------------------------- asio (standalone, header-only)
 find_path(ASIO_INCLUDE_DIR asio.hpp
@@ -106,6 +107,7 @@ add_library(agensio_core STATIC
   src/handlers/cgi.cpp
   src/handlers/upstream_common.cpp
   src/handlers/dispatch.cpp
+  $<$<BOOL:${AGENSIO_HTTPARENA}>:src/handlers/httparena.cpp>
   src/upstream/client.cpp
   src/upstream/fcgi_client.cpp
   src/upstream/http_client.cpp
@@ -116,6 +118,7 @@ target_link_libraries(agensio_core PUBLIC asio tomlplusplus)
 target_compile_definitions(agensio_core PUBLIC
   AGENSIO_VERSION="${AGENSIO_VERSION_STRING}"
   $<$<BOOL:${AGENSIO_HAS_TLS}>:AGENSIO_HAS_TLS=1>
+  $<$<BOOL:${AGENSIO_HTTPARENA}>:AGENSIO_HTTPARENA=1>
   $<$<BOOL:${AGENSIO_HAS_ZLIB}>:AGENSIO_HAS_ZLIB=1>)
 if(AGENSIO_HAS_TLS)
   target_link_libraries(agensio_core PUBLIC OpenSSL::SSL OpenSSL::Crypto)
