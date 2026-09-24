@@ -1,0 +1,17 @@
+=== agensio baseline-h2, 12 load threads
+finished in 5.16s, 11274920.00 req/s, 290.34MB/s
+requests: 56374600 total, 56425800 started, 56374600 done, 56374600 succeeded, 0 failed, 0 errored, 0 timeout
+finished in 5.15s, 11489900.00 req/s, 295.88MB/s
+requests: 57449500 total, 57500700 started, 57449500 done, 57449500 succeeded, 0 failed, 0 errored, 0 timeout
+finished in 5.18s, 11374160.00 req/s, 292.90MB/s
+requests: 56870800 total, 56922000 started, 56870800 done, 56870800 succeeded, 0 failed, 0 errored, 0 timeout
+=== Best: 11155242 req/s (CPU: 1142.1%, Mem: 647MiB) ===
+=== h2o baseline-h2, 12 load threads
+finished in 5.18s, 13191040.00 req/s, 327.08MB/s
+requests: 65955200 total, 66006400 started, 65955200 done, 65955200 succeeded, 0 failed, 0 errored, 0 timeout
+finished in 5.19s, 13268300.00 req/s, 329.00MB/s
+requests: 66341500 total, 66392700 started, 66341500 done, 66341500 succeeded, 0 failed, 0 errored, 0 timeout
+finished in 5.17s, 13322000.00 req/s, 330.33MB/s
+requests: 66610000 total, 66661200 started, 66610000 done, 66610000 succeeded, 0 failed, 0 errored, 0 timeout
+=== Best: 12883945 req/s (CPU: 891.0%, Mem: 65MiB) ===
+rc=0

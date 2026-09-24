@@ -1,0 +1,33 @@
+[server]
+workers = 1
+idle_timeout = 65
+max_requests_per_connection = 0
+protocols = ["h2c", "h2", "h1"]
+pid_file = ""
+
+[log]
+access = "off"
+error = "stderr"
+
+[[site]]
+server_name = ["localhost"]
+listen = ["127.0.0.1:8080"]
+default = true
+root = "@ROOT@/bench/www"
+
+[[site.location]]
+path = "/"
+handler = "httparena"
+httparena = { dataset = "@ROOT@/bench/tmp/arena-dataset.json" }
+
+[[site]]
+server_name = ["localhost"]
+listen = ["127.0.0.1:8443"]
+default = true
+root = "@ROOT@/bench/www"
+tls = { cert = "@ROOT@/bench/certs/cert.pem", key = "@ROOT@/bench/certs/key.pem" }
+
+[[site.location]]
+path = "/"
+handler = "httparena"
+httparena = { dataset = "@ROOT@/bench/tmp/arena-dataset.json" }

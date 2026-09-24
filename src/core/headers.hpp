@@ -30,6 +30,16 @@ public:
     bool empty() const noexcept { return count_ == 0; }
     const HeaderField* begin() const noexcept { return fields_.data(); }
     const HeaderField* end() const noexcept { return fields_.data() + count_; }
+    // The fields' bytes moved: every view into [from, from + len) now points into `to`.
+    void rebase(const char* from, std::size_t len, const char* to) noexcept {
+        for (std::size_t i = 0; i < count_; ++i) {
+            rebase_view(fields_[i].name, from, len, to);
+            rebase_view(fields_[i].value, from, len, to);
+        }
+    }
+    static void rebase_view(std::string_view& v, const char* from, std::size_t len, const char* to) noexcept {
+        if (v.data() >= from && v.data() < from + len) v = std::string_view(to + (v.data() - from), v.size());
+    }
     const HeaderField& operator[](std::size_t i) const noexcept { return fields_[i]; }
 
     // First field with this name (case-insensitive), or an empty view.

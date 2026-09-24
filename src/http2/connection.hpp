@@ -53,7 +53,6 @@ public:
     static constexpr unsigned kRecentClosed = 8;                     // ids of streams we reset, tolerated for a while
     static constexpr std::uint64_t kDrainAfterResponse = 65536;      // body bytes still taken after a response; more is cut short
     static constexpr unsigned kInlineBudget = 8;                     // reads completed inline before yielding to the loop
-    static constexpr std::size_t kPoolKeep = 4;                      // released streams kept with their buffers for reuse
     static constexpr std::chrono::seconds kShedAfter{2};             // idle this long: buffers go, readiness brings them back
 
     // `initial` holds bytes the HTTP/1 connection had already read (the preface and
@@ -105,7 +104,12 @@ public:
         append_window_update(frames, 0, kConnectionWindow - kDefaultWindow);
         conn_recv_grant_ = kConnectionWindow;
         writer_.control(frames);
-        if (in_len_ > 0) process_frames();
+        if (in_len_ > 0) {  // the bytes read before the hand-over: a read's worth of frames
+            worker_.state.now = std::time(nullptr);
+            in_read_ = true;
+            process_frames();
+            in_read_ = false;
+        }
         else do_read();
     }
 
@@ -113,6 +117,14 @@ public:
 
     WorkerState& worker_state() noexcept { return worker_.state; }
     void touch() noexcept { last_activity_ = std::chrono::steady_clock::now(); }
+    std::chrono::steady_clock::time_point last_activity() const noexcept { return last_activity_; }
+    // The clock as of the socket event being handled: a read's frame loop runs in
+    // microseconds, so every stream it opens or answers takes the timestamp read once at
+    // the read (it was four clock reads per request). A completion from elsewhere (an
+    // upstream's answer) reads the clock itself.
+    std::chrono::steady_clock::time_point clock_now() const noexcept {
+        return in_read_ ? last_activity_ : std::chrono::steady_clock::now();
+    }
 
     // A stream's END_STREAM reached the kernel: log it, tell a client still sending its
     // body to stop (RFC 9113 8.1.1: RST_STREAM(NO_ERROR) after a complete response), free it.
@@ -126,7 +138,7 @@ public:
                                (s.length_known && s.content_length - s.body_received > kDrainAfterResponse);
             if (!large) {
                 s.state = StreamState::half_closed_local;
-                s.since = std::chrono::steady_clock::now();
+                s.since = last_activity_;  // the write's completion, just taken
                 maybe_finish();
                 return;
             }
@@ -229,7 +241,10 @@ private:
         }
         in_len_ += n;
         last_activity_ = std::chrono::steady_clock::now();
+        worker_.state.now = std::time(nullptr);  // the Date of every answer of this read
+        in_read_ = true;
         process_frames();
+        in_read_ = false;
     }
 
     // An idle connection holds no receive buffer: the socket's readiness is awaited instead,
@@ -257,6 +272,7 @@ private:
     void shed() {
         ++worker_.sheds;
         pool_.clear();
+        std::string().swap(decode_scratch_);
         writer_.shed();
         if (read_pending_ && !shedding_ && in_len_ == 0 && !in_.empty() && !linger_ && !closing_after_write_) {
             shedding_ = true;
@@ -444,7 +460,7 @@ private:
             return;
         }
         s->send_window = static_cast<std::int32_t>(w);
-        if (inc >= 1024) s->since = std::chrono::steady_clock::now();  // progress; a dribble is not
+        if (inc >= 1024) s->since = clock_now();  // progress; a dribble is not
         else glitch("WINDOW_UPDATE below 1 KB");
         if (s->responded && !s->finished) writer_.enqueue(*s);
     }
@@ -485,7 +501,7 @@ private:
             off += 5;
             len -= 5;
         }
-        H2Stream* existing = find(h.stream_id);
+        H2Stream* existing = h.stream_id <= last_stream_id_ ? find(h.stream_id) : nullptr;  // a new id is never in the table
         if (existing) {
             // A second HEADERS on an open stream is the trailers: only with END_STREAM, only
             // after a body was announced. On a stream the client already ended it is a
@@ -520,7 +536,7 @@ private:
         block_.clear();
         if (!append_block(p + off, len)) return;
         if (h.flags & flag::end_headers) finish_block();
-        else block_since_ = std::chrono::steady_clock::now();
+        else block_since_ = clock_now();
     }
 
     void on_continuation(const FrameHeader& h, const unsigned char* p) {
@@ -549,9 +565,9 @@ private:
         switch (block_kind_) {
             case BlockKind::request: {
                 H2Stream* s = open_stream(id);
-                if (!s) {  // refused or GOAWAY: decode into scratch so the tables stay in step
-                    std::string arena;
-                    decoder_.decode(block_, arena, live_->max_header_size, [](std::string_view, std::string_view) { return true; });
+                if (!s) {  // refused or GOAWAY: decoded all the same so the tables stay in step
+                    decode_scratch_.clear();
+                    decoder_.decode(block_, decode_scratch_, live_->max_header_size, [](std::string_view, std::string_view) { return true; });
                     return;
                 }
                 begin_request(*s);
@@ -559,8 +575,8 @@ private:
             }
             case BlockKind::trailers:
             case BlockKind::discard: {
-                std::string arena;
-                const auto r = decoder_.decode(block_, arena, live_->max_header_size, [](std::string_view, std::string_view) { return true; });
+                decode_scratch_.clear();
+                const auto r = decoder_.decode(block_, decode_scratch_, live_->max_header_size, [](std::string_view, std::string_view) { return true; });
                 if (r == hpack::Decoder::Result::malformed) return connection_error(ErrorCode::compression_error, "HPACK error in trailers");
                 if (r == hpack::Decoder::Result::too_large) return connection_error(ErrorCode::enhance_your_calm, "trailers over max_header_size");
                 if (block_kind_ == BlockKind::trailers) {
@@ -628,7 +644,8 @@ private:
         s->state = StreamState::open;
         s->send_window = static_cast<std::int32_t>(peer_.initial_window_size);
         s->recv_grant = static_cast<std::int32_t>(kDefaultWindow);
-        s->since = std::chrono::steady_clock::now();
+        s->since = clock_now();
+        s->slot = active_.size();
         H2Stream* raw = s.get();
         active_.push_back(std::move(s));
         ++streams_opened_;
@@ -666,18 +683,19 @@ private:
     }
 
     void release(H2Stream& s) {
-        for (std::size_t i = 0; i < active_.size(); ++i) {
-            if (active_[i].get() != &s) continue;
-            std::unique_ptr<H2Stream> p = std::move(active_[i]);
-            active_[i] = std::move(active_.back());
-            active_.pop_back();
-            p->reset();
-            // A few released streams stay with their buffers (arena, chunk) for the next
-            // requests; beyond that the object goes, or a connection that once ran a hundred
-            // streams would keep a hundred chunk buffers for its life.
-            if (pool_.size() < kPoolKeep) pool_.push_back(std::move(p));
-            return;
-        }
+        const std::size_t i = s.slot;
+        if (i >= active_.size() || active_[i].get() != &s) return;  // not in the table
+        std::unique_ptr<H2Stream> p = std::move(active_[i]);
+        active_[i] = std::move(active_.back());
+        active_.pop_back();
+        if (i < active_.size()) active_[i]->slot = i;
+        p->reset();
+        // Released streams stay with their buffers (arena, chunk) for the next requests, as
+        // many as the client may have open at once: at its peak the connection held that
+        // many anyway, and an idle connection sheds the pool (G2). Below the limit, a
+        // client that keeps a hundred streams busy would construct and free a stream
+        // object per request (measured: a fifth of the CPU of a small answer).
+        if (pool_.size() < live_->http2.max_concurrent_streams) pool_.push_back(std::move(p));
     }
 
     // ---- the request ----
@@ -693,7 +711,15 @@ private:
             std::size_t cookie_bytes = 0;
             const char* reason = "";
         } seen;
-        const auto r = decoder_.decode(block_, s.arena, live_->max_header_size, [&](std::string_view n, std::string_view v) {
+        // Decoded into the connection's scratch, which is reserved once and stays hot, then
+        // moved into the stream's arena at its exact size: a stream reserved the whole
+        // header limit (16 KB) for itself before, and a client with a hundred streams in
+        // flight walked a hundred cold arenas per burst (2026-09-24: 647 MiB resident on
+        // the arena's baseline-h2 against h2o's 65, and the twelve-worker row 0.87 of h2o
+        // while one core did 1.27 of it).
+        std::string& scratch = decode_scratch_;
+        scratch.clear();
+        const auto r = decoder_.decode(block_, scratch, live_->max_header_size, [&](std::string_view n, std::string_view v) {
             if (!n.empty() && n.front() == ':') {
                 if (seen.regular) { seen.bad = true; seen.reason = "pseudo-header after a regular field"; return true; }
                 std::string_view* slot = n == ":method" ? &seen.method : n == ":scheme" ? &seen.scheme
@@ -728,6 +754,10 @@ private:
             case hpack::Decoder::Result::too_large: return connection_error(ErrorCode::enhance_your_calm, "decoded header list over max_header_size");
             case hpack::Decoder::Result::too_many: break;  // never returned: the sink keeps decoding
         }
+        s.arena.assign(scratch);  // the capacity a pooled stream keeps is what its requests need
+        req.headers.rebase(scratch.data(), scratch.size(), s.arena.data());
+        for (std::string_view* v : {&seen.method, &seen.scheme, &seen.path, &seen.authority, &seen.host})
+            Headers::rebase_view(*v, scratch.data(), scratch.size(), s.arena.data());
         if (seen.overflow) return fail_stream(s, 431);
         if (!seen.bad) {
             if (seen.method.empty() || seen.scheme.empty() || seen.path.empty()) seen.bad = true, seen.reason = "missing :method, :scheme or :path";
@@ -809,7 +839,6 @@ private:
 
     void dispatch(H2Stream& s) {
         WorkerState& ws = worker_.state;
-        ws.now = std::time(nullptr);
         ws.site = nullptr;
         fill_connection_info(s);
         if (!live_->trusted_proxies.empty()) apply_forwarded(s);
@@ -824,16 +853,24 @@ private:
             if (loc->kind != HandlerKind::static_) {  // FastCGI, proxy, CGI: completes later
                 const unsigned gen = s.gen;
                 H2Stream* sp = &s;
+                if (loc->kind == HandlerKind::httparena) {
+                    // The benchmark handler answers before it returns, or from a body read
+                    // that this connection itself completes (or cancels at close, while it
+                    // is alive): the continuation needs no owning reference and, two words
+                    // and trivially copyable, sits in the std::function's own storage. No
+                    // allocation per request.
+                    dispatcher_.httparena().start(s.stream, *loc, ws, [sp, gen] {
+                        if (sp->gen != gen) return;  // reset or closed meanwhile
+                        static_cast<Http2Connection*>(sp->body_source.owner)->respond(*sp);
+                    });
+                    return;
+                }
                 auto self = this->shared_from_this();
                 auto done = [self, sp, gen] {
                     if (sp->gen != gen) return;  // reset or closed meanwhile
                     sp->upstream.reset();
                     self->respond(*sp);
                 };
-                if (loc->kind == HandlerKind::httparena) {  // the benchmark handler: no exchange to cancel
-                    dispatcher_.httparena().start(s.stream, *loc, ws, std::move(done));
-                    return;
-                }
                 const auto* site = static_cast<const SiteConfig*>(ws.site);
                 std::shared_ptr<UpstreamRequest> req =
                     loc->kind == HandlerKind::fastcgi
@@ -855,7 +892,7 @@ private:
         if (s.state == StreamState::closed) return;
         s.stream.response.upgrade = false;  // a 101 has no meaning here; the body is what came with it
         s.ready = true;
-        s.since = std::chrono::steady_clock::now();
+        s.since = clock_now();
         writer_.enqueue(s);
     }
 
@@ -992,7 +1029,7 @@ private:
             std::memcpy(s->body_buf.data() + s->body_len, p + off, len);
             s->body_len += len;
             s->recv_pending += static_cast<std::int32_t>(len);
-            s->since = std::chrono::steady_clock::now();
+            s->since = clock_now();
         }
         if (h.flags & flag::end_stream) {
             s->state = StreamState::half_closed_remote;
@@ -1027,7 +1064,7 @@ private:
         s.pending_buf = buf;  // nothing buffered: the next DATA frame completes it
         s.pending_len = len;
         s.pending_handler = std::move(handler);
-        s.since = std::chrono::steady_clock::now();
+        s.since = clock_now();
     }
 
     void deliver(H2Stream& s) {
@@ -1333,11 +1370,13 @@ private:
     bool closed_ = false;
     // The header block being assembled.
     std::string block_;
+    std::string decode_scratch_;  // where a request's fields are decoded (reserved once, hot); each stream keeps an exact copy
     std::uint32_t block_stream_ = 0;
     bool block_end_stream_ = false;
     unsigned block_frames_ = 0;
     BlockKind block_kind_ = BlockKind::request;
     std::chrono::steady_clock::time_point block_since_{};
+    bool in_read_ = false;  // inside a read's frame loop: clock_now() is the read's timestamp
     hpack::Decoder decoder_;
     PeerSettings peer_;
     std::uint32_t conn_recv_grant_ = kDefaultWindow;  // what the peer may still send us in total

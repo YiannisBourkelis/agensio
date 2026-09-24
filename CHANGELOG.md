@@ -2,6 +2,36 @@
 
 ## 0.1.0-alpha.21 (unreleased)
 
+- **HTTP/2 per-request cost, in three measured steps** on the arena's HTTP/2 baseline
+  row (one worker, `h2load -c 64 -m 100`; the same load against h2o's arena entry on one
+  thread in the same container does 2.60M req/s over TLS, `bench/httparena/profile-h2o.sh`):
+  the clock read once per socket event instead of four times per request, released
+  streams pooled up to the concurrency limit (a client with a hundred streams in flight
+  constructed and freed a stream object with its two hundred header views per request),
+  stream lookups and the writer's in-flight bookkeeping without scans, and the benchmark
+  handler's continuation in the `std::function`'s own storage, 1.42M to 2.44M req/s over
+  TLS; the Huffman decoder writing through a pointer, static-table fields viewed in place,
+  one static-name search per encoded field and a remembered content-type index, the
+  router's single-site shortcut, the normaliser's plain-target shortcut and the handler's
+  HTTP/2 tail prebuilt, to 3.04M over TLS and 3.37M on h2c; and the write cycle built into
+  one buffer, large payloads on plain sockets as scatter entries between its runs, so the
+  answers of one read leave in one send instead of two, to 3.30M over TLS and 3.97M on h2c,
+  1.27 times h2o on one core; and, once the pinned rows showed the pool's memory
+  (647 MiB resident for 512 connections with a hundred streams each, h2o 65), requests
+  decoded into the connection's scratch with each stream keeping an exact-size copy
+  instead of a 16 KB reservation, to 3.48M and 441 MiB. Pinned to six cores with their
+  siblings under twelve load threads the row is 11.1M req/s against h2o's 12.9M: the
+  twelve-worker cost is the next measurement. The router and normaliser shortcuts and
+  the continuation reach HTTP/1 as well. Details and the profiles in
+  `docs/design-http2.md` 6.2.1, 6.6 and 7.3 and `bench/results/httparena-lite-20260924-0147.md`.
+- **Fixed: a control-socket request with a body leaked its connection.** The body-reading
+  step of the control handler (mutations, uploads) captured itself strongly, a reference
+  cycle that kept the connection, its receive buffer and the request's state alive for
+  the life of the process, once per such request; LeakSanitizer found it at the end of
+  the integration suite (84 connections, 15 MB). The step refers to itself weakly now and
+  the read in flight keeps the chain alive.
+- **Fixed: a build without OpenSSL did not compile** since `protocols` per site (the
+  listener's ALPN field exists only with TLS).
 - **HTTP/2 response heads through a dynamic table** (design 6.2.1): `server`, `date`,
   `content-type`, `vary`, `content-encoding` and whatever a handler's or an upstream's
   block repeats are inserted once per connection (date once per second) and cost one byte

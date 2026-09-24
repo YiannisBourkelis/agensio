@@ -39,8 +39,13 @@ inline bool valid_value(std::string_view value) noexcept {
 // Connection-specific fields are malformed in HTTP/2 and HTTP/3 (RFC 9113 8.2.2). `te` is
 // allowed only with the value "trailers" (checked by the caller).
 inline bool connection_specific(std::string_view name) noexcept {
-    return name == "connection" || name == "keep-alive" || name == "proxy-connection" ||
-           name == "transfer-encoding" || name == "upgrade";
+    switch (name.size()) {
+        case 7: return name == "upgrade";
+        case 10: return name == "connection" || name == "keep-alive";
+        case 16: return name == "proxy-connection";
+        case 17: return name == "transfer-encoding";
+        default: return false;
+    }
 }
 
 }  // namespace agensio::fields

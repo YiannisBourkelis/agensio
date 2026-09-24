@@ -5,6 +5,7 @@
 #include <sstream>
 
 #include "core/strings.hpp"
+#include "http2/hpack.hpp"
 #include "services/json.hpp"
 
 namespace agensio {
@@ -84,27 +85,32 @@ void append_json_string(std::string& out, std::string_view s) {
 }
 
 // A small text answer: the head in scratch, the body in buffer (both owned by the response).
-void answer(Response& r, int status, std::string_view type, std::string_view body) {
+// The head for a body of `length` bytes: the HTTP/1 text block, and behind it in the same
+// scratch the HTTP/2 tail (content-length as an HPACK literal; the type goes through the
+// connection's table), so neither protocol parses text per answer.
+void head(Response& r, int status, std::string_view type, std::size_t length) {
     r.status = status;
-    r.buffer.assign(body);
     r.scratch.assign("Content-Type: ").append(type).append("\r\nContent-Length: ");
-    append_number(r.scratch, body.size());
+    append_number(r.scratch, length);
     r.scratch.append("\r\n\r\n");
-    r.prebuilt_headers = r.scratch;
+    const std::size_t text = r.scratch.size();
+    char digits[24];
+    const auto end = std::to_chars(digits, digits + sizeof digits, length).ptr;
+    hpack::append_literal(r.scratch, 28, std::string_view(digits, static_cast<std::size_t>(end - digits)));  // 28: content-length
+    r.prebuilt_headers = std::string_view(r.scratch).substr(0, text);
     r.prebuilt_terminated = true;
+    r.prebuilt_h2 = std::string_view(r.scratch).substr(text);
+    r.content_type = type;
     r.body = MemoryBody{std::string_view(r.buffer)};
 }
 
-// The body is already in r.buffer: the head goes around it.
-void answer_buffer(Response& r, int status, std::string_view type) {
-    r.status = status;
-    r.scratch.assign("Content-Type: ").append(type).append("\r\nContent-Length: ");
-    append_number(r.scratch, r.buffer.size());
-    r.scratch.append("\r\n\r\n");
-    r.prebuilt_headers = r.scratch;
-    r.prebuilt_terminated = true;
-    r.body = MemoryBody{std::string_view(r.buffer)};
+void answer(Response& r, int status, std::string_view type, std::string_view body) {
+    r.buffer.assign(body);
+    head(r, status, type, body.size());
 }
+
+// The body is already in r.buffer: the head goes around it.
+void answer_buffer(Response& r, int status, std::string_view type) { head(r, status, type, r.buffer.size()); }
 
 void answer_sum(Response& r, std::int64_t sum) {
     char digits[24];

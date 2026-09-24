@@ -321,8 +321,9 @@ void Server::build_listeners(Generation& gen) {
                 l->tls = site.tls.has_value();
                 l->h2 = site.h2;
                 l->h2c = site.h2c;
+#ifdef AGENSIO_HAS_TLS
                 l->alpn = site.alpn_wire;
-#ifndef AGENSIO_HAS_TLS
+#else
                 if (l->tls)
                     throw std::runtime_error("site on " + address +
                                              " requires TLS but agensio was built without OpenSSL");
@@ -674,24 +675,27 @@ void Server::run() {
     });
 #ifndef _WIN32
     // Reload: SIGHUP (also what `agensio reload` sends) loads the file again and switches.
+    // The handlers re-arm themselves and, like the signal sets, live in this frame for
+    // as long as the loop runs (a self-owning std::function was a reference cycle the
+    // sanitizer reported at exit).
     asio::signal_set hup(workers_[0]->ctx, SIGHUP);
-    auto on_hup = std::make_shared<std::function<void(const asio::error_code&, int)>>();
-    *on_hup = [this, &hup, on_hup](const asio::error_code& ec, int) {
+    std::function<void(const asio::error_code&, int)> on_hup;
+    on_hup = [this, &hup, &on_hup](const asio::error_code& ec, int) {
         if (ec) return;
         reload();
-        hup.async_wait(*on_hup);
+        hup.async_wait(on_hup);
     };
-    hup.async_wait(*on_hup);
+    hup.async_wait(on_hup);
     // Log rotation: SIGUSR1 reopens every log file (logrotate's postrotate hook).
     asio::signal_set reopen(workers_[0]->ctx, SIGUSR1);
-    auto on_reopen = std::make_shared<std::function<void(const asio::error_code&, int)>>();
-    *on_reopen = [this, &reopen, on_reopen](const asio::error_code& ec, int) {
+    std::function<void(const asio::error_code&, int)> on_reopen;
+    on_reopen = [this, &reopen, &on_reopen](const asio::error_code& ec, int) {
         if (ec) return;
         logs_.reopen_all();
         error_log_.info("log files reopened (SIGUSR1)");
-        reopen.async_wait(*on_reopen);
+        reopen.async_wait(on_reopen);
     };
-    reopen.async_wait(*on_reopen);
+    reopen.async_wait(on_reopen);
 #endif
 
     for (std::size_t i = 1; i < workers_.size(); ++i) {

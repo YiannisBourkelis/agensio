@@ -205,6 +205,86 @@ most. The profile's remaining items are all per-request user time: two clock rea
 stream, the heap-allocated completion of the synchronous handler, HPACK decoding of the
 request with Huffman, target normalisation and routing.
 
+## After the per-request steps (three, same session, later the same day)
+
+h2o measured on one thread against one agensio worker under the same `h2load -c 64 -m 100
+-t 4` in the same perf container (`bench/httparena/profile-h2o.sh`; the arena's h2o app
+rebuilt with an `H2O_THREADS` variable, since it starts a loop per online CPU): h2o 2.60M
+req/s on the TLS baseline URL, 2054 cycles per request (10.1G user + 0.56G kernel cycles
+over 2 s), IPC 3.89, one `read` and one `sendmsg` per 227 answers, and a profile whose
+top items are its Huffman decoder (9 %), malloc (7 %) and request parsing. agensio before
+this work, the same way: 1.42M over TLS (the TLS numbers of the two sections above were
+invalid: the perf config's certificate did not cover the host and every answer was a 421;
+the h2c numbers stood), 3730 cycles per request, of which the clock 11 % (four reads per
+request), the stream object's construction and freeing with malloc 23 % (the pool kept
+four streams; h2load keeps a hundred in flight), request HPACK 18 %, routing and target
+normalisation 12 %, response HPACK 7 %.
+
+Step 1, the clock read once per socket event, the stream pool sized to the concurrency
+limit, O(1) stream release and lookups, the writer's in-flight list a flag, the handler's
+continuation in the `std::function`'s storage: 2.44M over TLS, 2230 cycles per request.
+Step 2, the Huffman decoder writing through a pointer, static-table fields not copied,
+one static-name search per encoded field plus a remembered content-type index, the
+single-site router shortcut, the plain-target normaliser shortcut, the handler's HTTP/2
+tail prebuilt instead of a text block per answer: 3.04M over TLS and 3.37M on h2c, 1775
+cycles. Step 3, the write cycle built into one buffer (a read's answers were leaving in
+two sends: the 256-piece scatter cap stopped a cycle at 85 small answers): 3.30M over
+TLS and 3.97M on h2c, about 1610 cycles per request, 1481 of them user time; one `send`
+per read now, the kernel's share per request 129 cycles against h2o's 108. Per core
+agensio answers 1.27 times what h2o does on this row. What remains in the profile is
+the request side: the Huffman decode of the `:path` literal (15 %, the same automaton
+h2o walks), the field checks of request assembly (9 %), routing (6 %) and the
+normaliser's scan (6 %). Raw perf output per step in `raw/httparena-lite-20260924-0147/perf/`.
+
+Step 4, after the pinned rows below showed the cost of the pool's memory: requests are
+decoded into the connection's scratch (reserved once, hot) and each stream keeps an
+exact-size copy instead of reserving the 16 KB header limit for itself: 3.48M req/s over
+TLS on one worker, IPC 4.16.
+
+Pinned like the earlier sections (twelve workers on six cores and their siblings, the
+load generators on the other six), all nine rows after step 3, six load threads
+(`raw/httparena-lite-20260924-0147/pinned-nine-rows-after-step3.log`): baseline 1.83M
+req/s at 920 % (h1, gcannon), pipelined 4.16M at 1125 %, limited-conn 1.35M at 844 %,
+baseline-h2 9.83M at 714 % (8.46M at 1042 % after the dynamic-table head), static-h2
+846k at 1086 %, static-tls 466k at 709 %, json-tls 798k at 642 %, baseline-h2c 10.56M at
+680 % (9.29M at 1177 %), json-h2c 2.66M at 1206 %. The h2 baseline rows are load-bound
+with six threads now (h2o's 11.06M at 754 % was too), so baseline-h2 was rerun with
+twelve load threads for both (`pinned-baseline-h2-12-load-threads.log`): h2o 12.88M at
+891 % and 65 MiB, agensio 11.16M at 1142 % and 647 MiB after step 3, 11.12M at 1112 % and
+441 MiB after step 4. So on one core agensio answers 1.34 times what h2o does on this row
+(3.48M against 2.60M), and with twelve workers on six cores 0.86 of it: the per-request
+thread time grows 3.5 times from one worker to twelve for agensio and 1.8 times for h2o.
+The memory is the pool of 6.6 keeping as many stream objects as the client had in flight
+(a hundred per connection here), 24 KB each before step 4 and about 8 KB after, the two
+100-field header arrays; released when the connection idles.
+
+Where the twelve-worker cost goes (`bench/httparena/profile-12w.sh`, perf over every
+thread of each server under the pinned twelve-thread load, raw in
+`raw/httparena-lite-20260924-0147/perf/twelve-workers-pinned-h2o-and-agensio.txt`):
+agensio executes fewer instructions per request than h2o, 5.9k against 7.9k, but at
+1.54 instructions per cycle against h2o's 2.73, where one worker ran at 4.16 and h2o's
+one thread at 3.89: 3860 cycles per request against 2880, with 31 last-level cache misses
+per request against 23. The symbols that grow are the ones that touch the stream object
+(`route` from 6 % to 13 %, `begin_request`, `dispatch`, `release`, `open_stream`), not the
+decoders. The cause is the working set: a read with a hundred HEADERS frames opens a
+hundred streams, every one answered inside the frame loop but kept open until the write
+completes, so each burst walks a hundred stream objects per connection, 43 connections
+per worker, 8 KB apiece spread over cold cache lines; h2o frees a stream's memory as
+soon as its answer is in the connection's output buffer and takes the same hot chunk
+back for the next. The fix is the same shape (design 6.6, not built): an answer that is
+complete and small is emitted into the cycle's buffer at `respond()` time even while the
+writer is held, and its stream closed and pooled at once, so the next HEADERS frame of
+the read takes the same object; only asynchronous answers and large bodies keep a
+stream open across the write.
+
+Two bugs found by the suites on the way: LeakSanitizer reported, at the end of the
+integration suite, 84 control-socket connections with their buffers (15 MB) kept alive by
+the control handler's body-reading step, which captured itself strongly; and a build
+without OpenSSL had not compiled since the per-site `protocols` change. Both fixed.
+The A/B against alpha.20 after step 4 (`ab-20260924-091348.md`): the ten-stream rows at
+0.254 and 0.274 of the base CPU per request, the single-stream rows 0.901 and 0.971, the
+HTTP/1 rows 0.965 to 1.010.
+
 Not run: the two HTTP/3 rows, which need phase I.
 
 Commands (`bench/httparena/local.sh` wraps them in the Docker-in-Docker container):

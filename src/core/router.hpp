@@ -67,6 +67,7 @@ public:
 private:
     std::unordered_map<std::string, const SiteConfig*, StringViewHash, std::equal_to<>> by_name_;
     const SiteConfig* default_site_ = nullptr;
+    bool single_ = false;  // every name resolves to the default site: no lookup per request
 };
 
 }  // namespace agensio

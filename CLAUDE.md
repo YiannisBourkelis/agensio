@@ -402,10 +402,13 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   pair per second; since 2026-09-24 the entry's block is the tail of literals and
   `hpack::Encoder`, one per connection, sends `server`, `date`, `content-type` and what
   a text block repeats through a 1 KB dynamic table that shares `DynamicTable` with the
-  decoder, design 6.2.1), `stream.hpp` (pooled per-stream state, the body source), `writer.hpp`
-  (write cycles: control frames, then a quantum per ready stream within its windows,
-  one writev of views on plain sockets, one buffer on TLS; StreamBody pulls bounded per
-  connection), `connection.hpp` (frames, streams, request assembly with the field rules
+  decoder, design 6.2.1), `stream.hpp` (pooled per-stream state, the body source; the pool holds as many as
+  the client may have open, emptied by the idle shed), `writer.hpp` (write cycles, one
+  buffer each since 2026-09-24: control frames, every stream's head and frame headers
+  and payloads up to 2 KB appended, larger payloads on plain sockets and pre-framed file
+  blocks on TLS as scatter entries between the buffer's runs, a quantum per ready stream
+  within its windows, so a read's answers are one send; StreamBody pulls bounded per
+  connection; the clock read once per socket event), `connection.hpp` (frames, streams, request assembly with the field rules
   of `core/fields.hpp`, receive windows sized to the body limit, timeouts, the glitch and
   reset budgets, GOAWAY). Selection is a hand-over from `Http1Connection`: after the
   handshake when ALPN chose h2, or on the parser's 505 branch when a plain listener with
@@ -772,9 +775,20 @@ privilege drop, fuzz targets for every new parser (chunked, FastCGI), h1 complia
   baseline-h2 8.46M at 1042 % (h2o 11.06M at 754 %, load-bound; 0.29 of it at the start,
   0.76 now), one worker 1.54M h2c / 1.62M TLS; TLS cycles capped at 64 KB of body (256 KB
   cycles cost static-h2 9 % once every cycle was full); A/B `ab-20260924-075048.md`
-  ten-stream rows 0.37-0.39, the rest flat. Left on that row: per-request user time (two
-  clock reads per stream, the sync handler's heap-allocated completion, request HPACK
-  decoding, routing).
+  ten-stream rows 0.37-0.39, the rest flat. Per-request steps (same day, four, each
+  profiled against h2o's entry on one thread under the same load,
+  `bench/httparena/profile-h2o.sh`, h2o 2.60M req/s over TLS): the clock once per socket
+  event, the stream pool at the concurrency limit, O(1) stream bookkeeping, no allocation
+  for the handler's continuation (1.42M to 2.44M one worker over TLS); HPACK decode and
+  encode fast paths, the router's and normaliser's shortcuts, the handler's HTTP/2 tail
+  prebuilt (3.04M); the write cycle as one buffer, a read's answers in one send (3.30M,
+  3.97M on h2c); requests decoded into a per-connection scratch with exact-size arenas
+  per stream (3.48M, and the pool's memory 647 to 441 MiB on 512 connections with a
+  hundred streams each). Pinned, twelve load threads: agensio 11.1M against h2o's 12.9M
+  (0.86; 1.34 on one core), so the twelve-worker cost is what remains to measure. A/B
+  `ab-20260924-091348.md`: ten-stream rows 0.25-0.27, single-stream 0.90-0.97, HTTP/1
+  0.97-1.01. Two fixes found by the suites on the way: the control handler's body step
+  captured itself (a leak per request with a body) and the TLS-off build did not compile.
 - Verify correctness before speed: responses must be byte-identical in body and carry
   `Content-Length`, `Content-Type`, `Date`, `Last-Modified`, `ETag`.
 

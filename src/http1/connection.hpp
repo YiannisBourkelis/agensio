@@ -650,8 +650,14 @@ private:
                     self->upstream_.reset();
                     self->respond();
                 };
-                if (loc->kind == HandlerKind::httparena) {  // the benchmark handler: no exchange to cancel
-                    dispatcher_.httparena().start(stream_, *loc, ws, std::move(done));
+                if (loc->kind == HandlerKind::httparena) {
+                    // The benchmark handler answers before it returns, or from a body read
+                    // that this connection itself completes (or cancels at close, while it
+                    // is alive): the continuation needs no owning reference and, trivially
+                    // copyable, sits in the std::function's own storage. No allocation.
+                    dispatcher_.httparena().start(stream_, *loc, ws, [this, gen] {
+                        if (request_gen_ == gen) respond();
+                    });
                     return;
                 }
                 const auto* site = static_cast<const SiteConfig*>(ws.site);

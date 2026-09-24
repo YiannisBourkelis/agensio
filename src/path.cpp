@@ -13,11 +13,27 @@ inline int hex_val(char c) {
     if (c >= 'A' && c <= 'F') return c - 'A' + 10;
     return -1;
 }
+
+// The length of the path part of a target that needs no work (no escape, no control
+// character, no empty, "." or ".." segment: nearly every request), or npos.
+std::size_t plain_path(std::string_view target) noexcept {
+    for (std::size_t i = 0; i < target.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(target[i]);
+        if (c == '?' || c == '#') return i;
+        if (c == '%' || c < 0x20 || c == 0x7f) return std::string_view::npos;
+        if (c == '/' && i + 1 < target.size() && (target[i + 1] == '/' || target[i + 1] == '.')) return std::string_view::npos;
+    }
+    return target.size();
+}
 }  // namespace
 
 bool normalize_target(std::string_view target, std::string& out) {
     out.clear();
     if (target.empty() || target[0] != '/') return false;
+    if (const std::size_t n = plain_path(target); n != std::string_view::npos) {  // as it is
+        out.assign(target.data(), n);
+        return true;
+    }
 
     // Strip query (and fragment, which clients should never send).
     auto q = target.find('?');

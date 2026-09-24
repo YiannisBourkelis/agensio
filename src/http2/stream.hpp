@@ -63,7 +63,6 @@ struct H2Stream {
     Stream stream;         // Request, Response, ConnectionInfo
     std::string arena;     // decoded field bytes; the Request's views point here
     std::string cookie;    // several cookie fields joined with "; " (RFC 9113 8.2.3)
-    std::string head;      // the response head as HPACK, built by the writer
     std::string scratch;   // lower-cased names while encoding the head
     std::string client_addr;  // X-Forwarded-For result (conn.client_address views it)
     const SiteConfig* site = nullptr;  // decided at routing, for the access log (WorkerState::site is per worker)
@@ -108,14 +107,15 @@ struct H2Stream {
     bool logged = false;
     bool defer_release = false;    // closed while its bytes were in flight: released when the write ends
     bool in_ready = false;         // linked in the writer's ready list
+    bool in_cycle = false;         // noted in the writer's cycle in flight (bytes of it are with the kernel)
     H2Stream* next_ready = nullptr;
+    std::size_t slot = 0;          // its place in the connection's active table (O(1) release)
 
     void reset() {
         state = StreamState::idle;
         stream.reset();
         arena.clear();
         cookie.clear();
-        head.clear();
         scratch.clear();
         client_addr.clear();
         site = nullptr;
@@ -132,8 +132,9 @@ struct H2Stream {
         ready = head_sent = finished = responded = pulling = source_done = source_sized = false;
         source_remaining = body_sent = body_offset = 0;
         chunk_len = chunk_pos = 0;
-        logged = defer_release = in_ready = false;
+        logged = defer_release = in_ready = in_cycle = false;
         next_ready = nullptr;
+        slot = 0;
     }
 };
 

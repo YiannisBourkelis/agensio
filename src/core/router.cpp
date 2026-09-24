@@ -1,5 +1,7 @@
 #include "core/router.hpp"
 
+#include <algorithm>
+
 #include "core/strings.hpp"
 
 namespace agensio {
@@ -24,10 +26,13 @@ void Router::add_site(const SiteConfig& site) {
         }
     }
     if (site.is_default && !default_site_) default_site_ = &site;
+    // One site, whatever the Host says: the common server, and then the lookup is skipped.
+    single_ = default_site_ != nullptr &&
+              std::all_of(by_name_.begin(), by_name_.end(), [&](const auto& e) { return e.second == default_site_; });
 }
 
 const SiteConfig* Router::site(std::string_view host) const noexcept {
-    if (host.empty()) return default_site_;
+    if (single_ || host.empty()) return default_site_;
     // Strip the port: "example.com:8080", "[::1]:8080".
     if (host.front() == '[') {
         auto close = host.find(']');

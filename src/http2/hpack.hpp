@@ -119,6 +119,10 @@ public:
     void begin(std::string& out);
     // A field by lower-case name.
     void field(std::string& out, std::string_view name, std::string_view value);
+    // content-type, on nearly every answer: the last value that went through the table is
+    // remembered by sequence, so a run of answers of one type costs a comparison and an
+    // index byte, no table scan.
+    void content_type(std::string& out, std::string_view value);
     // server and date: `insert_bytes` is append_insert(name, value), prebuilt by the caller.
     void server(std::string& out, std::string_view value, std::string_view insert_bytes);
     void date(std::string& out, std::time_t second, std::string_view value, std::string_view insert_bytes);
@@ -138,6 +142,8 @@ private:
     std::uint64_t server_seq_ = 0;
     std::uint64_t date_seq_ = 0;
     std::time_t date_second_ = 0;
+    std::uint64_t ct_seq_ = 0;  // the table entry holding ct_value_ as content-type, while alive
+    std::string ct_value_;
     std::size_t max_ = kMaxSize;  // our maximum: min(peer, kMaxSize)
     std::size_t floor_ = kMaxSize;  // the lowest maximum since the last update sent: a decoder that
                                     // only learns sizes from updates must evict to it first (RFC 7541 4.2)
@@ -159,10 +165,12 @@ public:
     // `ceiling` is the SETTINGS_HEADER_TABLE_SIZE we advertised: the most the peer may set.
     explicit Decoder(std::size_t ceiling = 4096);
 
-    // Decodes one complete block. Every field is appended to `arena` and reported as
-    // views into it through `sink(name, value)`; a false from the sink stops the decode.
-    // The arena is reserved for max_list_size bytes first and never reallocates during
-    // the call, so the views stay valid for as long as the caller keeps the arena.
+    // Decodes one complete block. Every field is reported as views through
+    // `sink(name, value)`: into `arena`, where literal and dynamic-table bytes are
+    // appended, or into the static table, which lives for the program. A false from the
+    // sink stops the decode. The arena is reserved for max_list_size bytes first and
+    // never reallocates during the call, so the views stay valid for as long as the
+    // caller keeps the arena.
     // The list size (name + value + 32 per field, RFC 7541 4.1) is added up as fields are
     // produced and the decode stops at the first field over max_list_size: a compression
     // bomb costs at most that many bytes.

@@ -1,11 +1,12 @@
 // HTTP/2 response writer: turns the Responses of ready streams into HEADERS and DATA
 // frames and writes them, together with the pending control frames, in write cycles.
-// One cycle gathers up to kMaxPieces scatter entries across streams: control frames
-// first, then each ready stream gets up to a quantum of body bytes within its send
-// window, the connection window and the peer's frame size, and a stream with more to
-// send goes back to the end of the list (round robin). On plain sockets the payloads are
-// views into cache entries and chunk buffers, nothing copied (one writev); on TLS the
-// cycle is concatenated into one buffer and encrypted as a run of records. The head is
+// One cycle is one buffer: control frames first, then each ready stream's head and up to
+// a quantum of body bytes within its send window, the connection window and the peer's
+// frame size, a stream with more to send going back to the end of the list (round
+// robin). Frame headers, heads and small payloads are appended to the buffer; a payload
+// above kCopyMax on a plain socket (a cache entry, a chunk) and a pre-framed file block
+// on TLS are written from where they are, as scatter entries between the buffer's runs.
+// So the answers of one read leave in one send, and on TLS as a run of records. The head is
 // HPACK: the status index, the worker's server+date pair refreshed once per second, the
 // response's prebuilt block (a cache entry's, built at insert) or its text block encoded
 // now, and the extra fields. StreamBody sources (FastCGI, proxy, CGI) are pulled one
@@ -13,9 +14,11 @@
 // origin is never read faster than the client takes.
 //
 // The connection (Owner) provides the socket, its lifetime (shared_from_this), close(),
-// touch(), on_stream_written(H2Stream&) when a stream's END_STREAM has been handed to the
-// kernel, on_stream_failed(H2Stream&) when a source fails mid-body, and release_deferred(H2Stream&)
-// for a stream closed while its bytes were in flight.
+// touch() and last_activity() (the clock as of a write's completion: the streams whose
+// bytes it carried made progress then), on_stream_written(H2Stream&) when a stream's
+// END_STREAM has been handed to the kernel, on_stream_failed(H2Stream&) when a source
+// fails mid-body, and release_deferred(H2Stream&) for a stream closed while its bytes
+// were in flight.
 #pragma once
 
 #include <array>
@@ -54,26 +57,22 @@ public:
     static constexpr std::size_t kFramesPerChunk = 4;      // file frames read with one preadv
     static constexpr std::size_t kSlot = kFrameHeaderSize + kPayload;
     static constexpr std::size_t kQuantum = kFramesPerChunk * kPayload;  // body bytes per stream per cycle
-    static constexpr std::size_t kMaxPieces = 256;         // scatter entries per cycle
-    // Body bytes per cycle. TLS cycles with separate header pieces are copied into one
-    // buffer before SSL_write; 64 KB keeps that copy and the encrypt in cache (measured
-    // 2026-09-24 on the arena's static-h2: 256 KB cycles cost 9 % after the write batching
-    // made every cycle full).
+    // Body bytes per cycle. On TLS the whole cycle is encrypted from the one buffer; 64 KB
+    // keeps the copy and the encrypt in cache (measured 2026-09-24 on the arena's
+    // static-h2: 256 KB cycles cost 9 % after the write batching made every cycle full).
     static constexpr std::size_t kMaxCycleBytes = IsTlsStream<Socket>::value ? 64 * 1024 : 256 * 1024;
-    // A cycle of many small pieces (the answers of many streams to one read) is copied into
-    // one buffer and written once: asio hands the kernel at most 64 entries per call, so a
-    // scatter list of tiny answers costs a syscall per 21 of them, and the copy is cheaper
-    // (2026-09-24, the arena's baseline-h2: one sendmsg per 2.4 answers before batching).
-    static constexpr std::size_t kCoalescePieces = 16;
-    static constexpr std::size_t kCoalesceBytes = 64 * 1024;
+    // A payload up to this size is copied into the cycle's buffer, cheaper than the scatter
+    // entry it would otherwise be (on TLS every payload is, so a header never becomes a
+    // record of its own); above it, on a plain socket, the payload is written from where
+    // it is. The scatter entries per cycle are bounded: asio hands the kernel 64 per call.
+    static constexpr std::size_t kCopyMax = 2048;
+    static constexpr std::size_t kMaxExternal = 128;
     static constexpr unsigned kPullBudget = 8;             // StreamBody reads in flight per connection
     static constexpr unsigned kInlineBudget = 8;           // cycles completed inline before yielding to the loop
 
     Http2Writer(Socket& socket, Owner& owner, asio::io_context& ctx, const Config& cfg)
         : socket_(socket), owner_(owner), ctx_(ctx), cfg_(cfg) {
         ctl_.reserve(256);
-        hdrs_.reserve(kMaxPieces * kFrameHeaderSize);
-        pieces_.reserve(kMaxPieces);
     }
     Http2Writer(const Http2Writer&) = delete;
     Http2Writer& operator=(const Http2Writer&) = delete;
@@ -114,12 +113,7 @@ public:
             if (w == &s) w = nullptr;
     }
     // True while bytes of this stream are in the write in flight (its buffers must live on).
-    bool in_flight(const H2Stream& s) const noexcept {
-        if (!writing_) return false;
-        for (const auto& [p, gen] : inflight_)
-            if (p == &s) return true;
-        return false;
-    }
+    bool in_flight(const H2Stream& s) const noexcept { return writing_ && s.in_cycle; }
     // Runs a cycle now, unless one is being built, one is in flight, or a completion is
     // running its callbacks: then the tail of that work runs the next cycle, so a callback
     // that enqueues a frame can never start a cycle inside the cycle that is calling it
@@ -161,9 +155,9 @@ public:
     // Idle: the coalescing buffer (up to a cycle's worth) and the scatter list go.
     void shed() noexcept {
         if (writing_) return;
-        std::vector<char>().swap(out_);
-        std::vector<unsigned char>().swap(hdrs_);
-        std::vector<asio::const_buffer>().swap(pieces_);
+        std::string().swap(out_);
+        std::vector<External>().swap(external_);
+        std::vector<asio::const_buffer>().swap(bufs_);
     }
 
     // The connection is closing: nothing more is written, in-flight completions are ignored.
@@ -199,21 +193,20 @@ private:
         if (closed_ || writing_ || building_) return;
         building_ = true;
         again_ = false;
-        pieces_.clear();
-        hdrs_.clear();
+        out_.clear();
+        external_.clear();
         finished_.clear();
         inflight_.clear();
         std::size_t bytes = 0;
-        if (!ctl_.empty()) {
-            ctl_out_.swap(ctl_);
+        if (!ctl_.empty()) {  // control frames first; ctl_ takes new ones while this cycle is in flight
+            out_.append(ctl_);
+            bytes += ctl_.size();
             ctl_.clear();
-            pieces_.push_back(asio::buffer(ctl_out_));
-            bytes += ctl_out_.size();
         }
         // Each ready stream once per cycle: the head of the list at cycle start marks the round.
         std::size_t rounds = 0;
         for (H2Stream* p = ready_head_; p; p = p->next_ready) ++rounds;
-        while (rounds-- > 0 && pieces_.size() + 2 <= kMaxPieces && bytes < kMaxCycleBytes) {
+        while (rounds-- > 0 && external_.size() < kMaxExternal && bytes < kMaxCycleBytes) {
             H2Stream* s = pop_ready();
             if (!s) break;
             const std::size_t before = bytes;
@@ -229,35 +222,25 @@ private:
             if (bytes > before || !inflight_.empty()) note_inflight(*s);
         }
         building_ = false;
-        if (pieces_.empty()) return;
+        if (out_.empty() && external_.empty()) return;
         writing_ = true;
         auto done = immediate([self = self(), this](const asio::error_code& ec, std::size_t) { on_written(ec); });
-        if constexpr (IsTlsStream<Socket>::value) {
-            // Every piece a whole frame or a pre-framed block (no separate frame headers):
-            // written one after another, each an integral number of records but its last.
-            // Otherwise the pieces are coalesced so a header never becomes a record of its own.
-            if (hdrs_.empty()) {
-                asio::async_write(socket_, pieces_, done);
-            } else {
-                out_.clear();
-                for (const asio::const_buffer& b : pieces_)
-                    out_.insert(out_.end(), static_cast<const char*>(b.data()), static_cast<const char*>(b.data()) + b.size());
-                asio::async_write(socket_, asio::buffer(out_), done);
-            }
-        } else {
-            if (pieces_.size() > kCoalescePieces) {
-                std::size_t total = 0;
-                for (const asio::const_buffer& b : pieces_) total += b.size();
-                if (total <= kCoalesceBytes) {
-                    out_.clear();
-                    for (const asio::const_buffer& b : pieces_)
-                        out_.insert(out_.end(), static_cast<const char*>(b.data()), static_cast<const char*>(b.data()) + b.size());
-                    asio::async_write(socket_, asio::buffer(out_), done);
-                    return;
-                }
-            }
-            asio::async_write(socket_, pieces_, done);
+        if (external_.empty()) {  // the whole cycle in the one buffer: one send, on TLS a run of records
+            asio::async_write(socket_, asio::buffer(out_), done);
+            return;
         }
+        // Payloads written from where they are, each between the buffer's bytes before and
+        // after it; on TLS those are whole frames (pre-framed file blocks), so every entry
+        // is an integral number of records but its last.
+        bufs_.clear();
+        std::size_t pos = 0;
+        for (const External& e : external_) {
+            if (e.at > pos) bufs_.push_back(asio::buffer(out_.data() + pos, e.at - pos));
+            bufs_.push_back(asio::buffer(e.data, e.len));
+            pos = e.at;
+        }
+        if (pos < out_.size()) bufs_.push_back(asio::buffer(out_.data() + pos, out_.size() - pos));
+        asio::async_write(socket_, bufs_, done);
     }
 
     void enqueue_silent(H2Stream& s) noexcept {
@@ -270,8 +253,8 @@ private:
     }
 
     void note_inflight(H2Stream& s) {
-        for (const auto& [p, gen] : inflight_)
-            if (p == &s) return;
+        if (s.in_cycle) return;
+        s.in_cycle = true;
         inflight_.emplace_back(&s, s.gen);
     }
 
@@ -290,6 +273,13 @@ private:
         finished_.clear();
         flown_.swap(inflight_);
         inflight_.clear();
+        // The bytes are with the kernel: every stream that had some in this cycle made
+        // progress now (the timeouts count from here), and its cycle mark comes off.
+        const auto written_at = owner_.last_activity();
+        for (const auto& [p, gen] : flown_) {
+            p->in_cycle = false;
+            if (p->gen == gen) p->since = written_at;
+        }
         // Streams closed while their bytes were in flight can be released now.
         for (const auto& [p, gen] : flown_)
             if (p->gen == gen && p->defer_release) owner_.release_deferred(*p);
@@ -321,13 +311,18 @@ private:
 
     // ---- frames of one stream ----
 
-    void push_frame(std::uint32_t length, FrameType type, std::uint8_t flags, std::uint32_t stream_id,
-                    std::string_view payload) {
-        const std::size_t at = hdrs_.size();
-        hdrs_.resize(at + kFrameHeaderSize);
-        write_frame_header(hdrs_.data() + at, length, type, flags, stream_id);
-        pieces_.push_back(asio::buffer(hdrs_.data() + at, kFrameHeaderSize));
-        if (!payload.empty()) pieces_.push_back(asio::buffer(payload.data(), payload.size()));
+    void frame_header(std::uint32_t length, FrameType type, std::uint8_t flags, std::uint32_t stream_id) {
+        const std::size_t at = out_.size();
+        out_.resize(at + kFrameHeaderSize);
+        write_frame_header(reinterpret_cast<unsigned char*>(out_.data() + at), length, type, flags, stream_id);  // NOLINT: bytes
+    }
+    // A DATA frame: the header into the buffer; the payload copied behind it when small
+    // (on TLS always), else written from where it is.
+    void data_frame(std::uint32_t stream_id, std::string_view payload, bool end) {
+        frame_header(static_cast<std::uint32_t>(payload.size()), FrameType::data, end ? flag::end_stream : 0, stream_id);
+        if (payload.empty()) return;
+        if (IsTlsStream<Socket>::value || payload.size() <= kCopyMax) out_.append(payload);
+        else external_.push_back({out_.size(), payload.data(), payload.size()});
     }
 
     static StreamBody* source_of(Response& r) noexcept {
@@ -339,19 +334,18 @@ private:
     Emit emit(H2Stream& s, std::size_t& bytes) {
         Response& r = s.stream.response;
         if (!s.head_sent) {
-            build_head(s);
+            const std::size_t at = out_.size();
+            build_head(s, out_);
             bool end = r.head || !has_body(r.body);
             if (!end) {
                 if (const auto* m = std::get_if<MemoryBody>(&r.body)) end = m->data.empty();
                 else if (const auto* f = std::get_if<FileBody>(&r.body)) end = f->size == 0;
             }
-            write_frame_header(reinterpret_cast<unsigned char*>(s.head.data()),  // NOLINT: bytes
-                               static_cast<std::uint32_t>(s.head.size() - kFrameHeaderSize), FrameType::headers,
+            write_frame_header(reinterpret_cast<unsigned char*>(out_.data() + at),  // NOLINT: bytes
+                               static_cast<std::uint32_t>(out_.size() - at - kFrameHeaderSize), FrameType::headers,
                                static_cast<std::uint8_t>(flag::end_headers | (end ? flag::end_stream : 0)), s.id);
-            pieces_.push_back(asio::buffer(s.head));
-            bytes += s.head.size();
+            bytes += out_.size() - at;
             s.head_sent = s.responded = true;
-            s.since = std::chrono::steady_clock::now();
             if (end) {
                 s.finished = true;
                 finished_.emplace_back(&s, s.gen);
@@ -359,7 +353,7 @@ private:
             }
         }
         std::size_t quantum = kQuantum;
-        while (pieces_.size() + 2 <= kMaxPieces) {
+        while (external_.size() < kMaxExternal) {
             std::string_view data;
             bool last = false;
             if (const auto* m = std::get_if<MemoryBody>(&r.body)) {
@@ -403,20 +397,19 @@ private:
                                            (ends && left == 0) ? flag::end_stream : 0, s.id);
                         block = static_cast<std::size_t>(i) * kSlot + kFrameHeaderSize + n;
                     }
-                    pieces_.push_back(asio::buffer(s.chunk.data(), block));
+                    external_.push_back({out_.size(), s.chunk.data(), block});  // pre-framed: whole records on TLS
                     s.body_offset += total;
                     s.body_sent += total;
                     s.send_window -= static_cast<std::int32_t>(total);
                     conn_window_ -= static_cast<std::int32_t>(total);
                     quantum -= std::min(quantum, total);
                     bytes += total;
-                    s.since = std::chrono::steady_clock::now();
                     if (ends) {
                         s.finished = true;
                         finished_.emplace_back(&s, s.gen);
                         return Emit::finished;
                     }
-                    if (quantum == 0 || pieces_.size() + 2 > kMaxPieces) return Emit::more;
+                    if (quantum == 0 || external_.size() >= kMaxExternal) return Emit::more;
                     continue;
                 }
             } else if (StreamBody* source = source_of(r)) {
@@ -437,7 +430,7 @@ private:
             }
             if (data.empty()) {  // the end: an empty DATA frame carries END_STREAM
                 if (!s.finished) {
-                    push_frame(0, FrameType::data, flag::end_stream, s.id, {});
+                    frame_header(0, FrameType::data, flag::end_stream, s.id);
                     s.finished = true;
                     finished_.emplace_back(&s, s.gen);
                 }
@@ -450,7 +443,7 @@ private:
             n = std::min<std::size_t>(n, static_cast<std::size_t>(conn_window_));
             if (n == 0) return quantum == 0 ? Emit::more : Emit::blocked;
             const bool end = last && n == data.size();
-            push_frame(static_cast<std::uint32_t>(n), FrameType::data, end ? flag::end_stream : 0, s.id, data.substr(0, n));
+            data_frame(s.id, data.substr(0, n), end);
             s.body_offset += n;
             s.body_sent += n;
             if (source_of(r)) s.chunk_pos += n;
@@ -458,7 +451,6 @@ private:
             conn_window_ -= static_cast<std::int32_t>(n);
             quantum -= n;
             bytes += n;
-            s.since = std::chrono::steady_clock::now();
             if (end) {
                 s.finished = true;
                 finished_.emplace_back(&s, s.gen);
@@ -533,11 +525,11 @@ private:
     // The head through the connection's dynamic table (design 6.2.1): status, server and
     // date by remembered index, the representation's type and coding through the table,
     // then the entry's prebuilt tail of literals, or a text block field by field.
-    void build_head(H2Stream& s) {
+    // Appends the HEADERS frame to `h`: a frame header slot, filled in by emit(), then the block.
+    void build_head(H2Stream& s, std::string& h) {
         Response& r = s.stream.response;
         WorkerState& ws = owner_.worker_state();
-        std::string& h = s.head;
-        h.assign(kFrameHeaderSize, '\0');  // the HEADERS frame header, filled in by emit()
+        h.append(kFrameHeaderSize, '\0');
         encoder_.begin(h);
         hpack::append_status(h, r.status);
         if (!ws.server_line.empty()) {
@@ -551,7 +543,7 @@ private:
         }
         encoder_.date(h, ws.now, ws.date.at(ws.now), ws.h2_date_insert);
         if (!r.prebuilt_h2.empty()) {
-            if (!r.content_type.empty()) encoder_.field(h, "content-type", r.content_type);
+            if (!r.content_type.empty()) encoder_.content_type(h, r.content_type);
             if (!r.content_encoding.empty()) encoder_.field(h, "content-encoding", r.content_encoding);
             if (r.vary) encoder_.field(h, "vary", "Accept-Encoding");
             h.append(r.prebuilt_h2);
@@ -576,11 +568,15 @@ private:
     asio::io_context& ctx_;
     const Config& cfg_;
     hpack::Encoder encoder_;  // the connection's dynamic table for response heads (design 6.2.1)
-    std::string ctl_;      // control frames waiting for the next cycle
-    std::string ctl_out_;  // the control frames of the cycle in flight
-    std::vector<unsigned char> hdrs_;         // frame headers of the cycle in flight
-    std::vector<asio::const_buffer> pieces_;  // the scatter list of the cycle in flight
-    std::vector<char> out_;                   // TLS: the cycle concatenated
+    std::string ctl_;  // control frames waiting for the next cycle
+    std::string out_;  // the cycle in flight: control frames, heads, frame headers, copied payloads
+    struct External {  // a payload written from where it is, before out_[at]
+        std::size_t at;
+        const char* data;
+        std::size_t len;
+    };
+    std::vector<External> external_;
+    std::vector<asio::const_buffer> bufs_;  // the scatter list of a cycle with external payloads
     std::vector<std::pair<H2Stream*, unsigned>> finished_;  // END_STREAM queued in this cycle
     std::vector<std::pair<H2Stream*, unsigned>> inflight_;  // streams with bytes in this cycle
     std::vector<std::pair<H2Stream*, unsigned>> done_, flown_;  // the same two, taken over by the completion

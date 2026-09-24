@@ -36,28 +36,48 @@ void huffman_encode(std::string& out, std::string_view s) {
 }
 
 HuffStatus huffman_decode(std::string_view in, std::string& out, std::size_t max_out) {
+    // No code is shorter than 5 bits, so the output is bounded: the string grows once and
+    // the symbols are stored through a pointer (a push_back per symbol was a third of the
+    // decode). On failure the output is as it was.
+    const std::size_t start = out.size();
+    const std::size_t cap = std::min(max_out, in.size() * 8 / 5 + 1);
+    out.resize(start + cap);
+    char* w = out.data() + start;
+    char* const end = w + cap;
     std::uint8_t state = 0;
     std::uint8_t flags = kHuffmanAccepted;  // the empty string is valid
-    std::size_t produced = 0;
     for (const unsigned char c : in) {
         const HuffmanStep& hi = kHuffmanSteps[state][c >> 4];
-        if (hi.flags & kHuffmanFail) return HuffStatus::malformed;
+        if (hi.flags & kHuffmanFail) {
+            out.resize(start);
+            return HuffStatus::malformed;
+        }
         if (hi.flags & kHuffmanSymbol) {
-            if (produced == max_out) return HuffStatus::too_large;
-            out.push_back(static_cast<char>(hi.symbol));
-            ++produced;
+            if (w == end) {
+                out.resize(start);
+                return HuffStatus::too_large;
+            }
+            *w++ = static_cast<char>(hi.symbol);
         }
         const HuffmanStep& lo = kHuffmanSteps[hi.next][c & 0xf];
-        if (lo.flags & kHuffmanFail) return HuffStatus::malformed;
+        if (lo.flags & kHuffmanFail) {
+            out.resize(start);
+            return HuffStatus::malformed;
+        }
         if (lo.flags & kHuffmanSymbol) {
-            if (produced == max_out) return HuffStatus::too_large;
-            out.push_back(static_cast<char>(lo.symbol));
-            ++produced;
+            if (w == end) {
+                out.resize(start);
+                return HuffStatus::too_large;
+            }
+            *w++ = static_cast<char>(lo.symbol);
         }
         state = lo.next;
         flags = lo.flags;
     }
-    return (flags & kHuffmanAccepted) ? HuffStatus::ok : HuffStatus::malformed;
+    out.resize(static_cast<std::size_t>(w - out.data()));
+    if (flags & kHuffmanAccepted) return HuffStatus::ok;
+    out.resize(start);
+    return HuffStatus::malformed;
 }
 
 // ---- integers ----
@@ -250,16 +270,18 @@ bool DynamicTable::add(std::string_view name, std::string_view value) {
 
 bool DynamicTable::at(std::size_t k, std::string_view& name, std::string_view& value) const noexcept {
     if (k >= count_ || ring_.empty()) return false;
-    const Entry& e = ring_[(head_ + ring_.size() - k) % ring_.size()];
+    const Entry& e = ring_[head_ >= k ? head_ - k : head_ + ring_.size() - k];
     name = e.name;
     value = e.value;
     return true;
 }
 
 std::size_t DynamicTable::find(std::string_view name, std::string_view value) const noexcept {
+    std::size_t i = head_;  // newest first, the ring walked backwards without a division per step
     for (std::size_t k = 0; k < count_; ++k) {
-        const Entry& e = ring_[(head_ + ring_.size() - k) % ring_.size()];
+        const Entry& e = ring_[i];
         if (e.name.size() == name.size() && e.value.size() == value.size() && e.name == name && e.value == value) return k;
+        i = i == 0 ? ring_.size() - 1 : i - 1;
     }
     return npos;
 }
@@ -322,9 +344,12 @@ void Encoder::begin(std::string& out) {
 }
 
 void Encoder::field(std::string& out, std::string_view name, std::string_view value) {
-    if (const unsigned i = static_index(name, value)) {
-        append_indexed(out, i);
-        return;
+    const unsigned n = static_name_index(name);  // once: the pair, the insertion and the literal all start from it
+    for (unsigned i = n; i != 0 && i <= kStaticTable.size() && kStaticTable[i - 1].name == name; ++i) {
+        if (kStaticTable[i - 1].value == value) {
+            append_indexed(out, i);
+            return;
+        }
     }
     switch (policy(name)) {
         case Policy::never:
@@ -338,7 +363,13 @@ void Encoder::field(std::string& out, std::string_view name, std::string_view va
                     return;
                 }
                 if (insert(name, value)) {
-                    append_insert(out, name, value);
+                    if (n) {
+                        append_integer(out, n, 6, 0x40);
+                    } else {
+                        append_integer(out, 0, 6, 0x40);
+                        append_string(out, name);
+                    }
+                    append_string(out, value);
                     return;
                 }
             }
@@ -346,8 +377,34 @@ void Encoder::field(std::string& out, std::string_view name, std::string_view va
         case Policy::literal:
             break;
     }
-    if (const unsigned n = static_name_index(name)) append_literal(out, n, value);
+    if (n) append_literal(out, n, value);
     else append_literal(out, name, value);
+}
+
+void Encoder::content_type(std::string& out, std::string_view value) {
+    constexpr unsigned kName = 31;  // content-type in the static table
+    if (alive(ct_seq_) && value == ct_value_) {  // the run of answers of one type: a comparison and an index byte
+        append_indexed(out, index_of(ct_seq_));
+        return;
+    }
+    ct_seq_ = 0;
+    if (max_ > 0) {
+        const std::size_t k = table_.find("content-type", value);
+        if (k != DynamicTable::npos) {
+            ct_seq_ = next_seq_ - 1 - k;
+            ct_value_.assign(value);
+            append_indexed(out, static_cast<unsigned>(62 + k));
+            return;
+        }
+        if (insert("content-type", value)) {
+            ct_seq_ = next_seq_ - 1;
+            ct_value_.assign(value);
+            append_integer(out, kName, 6, 0x40);
+            append_string(out, value);
+            return;
+        }
+    }
+    append_literal(out, kName, value);
 }
 
 void Encoder::server(std::string& out, std::string_view value, std::string_view insert_bytes) {
@@ -437,8 +494,10 @@ Decoder::Result Decoder::decode(std::string_view block, std::string& arena, std:
             std::uint32_t index = 0;
             if (!read_integer(block, pos, 7, index) || !lookup(index, name, value)) return Result::malformed;
             if (name.size() + value.size() + 32 > max_list_size - std::min(total, max_list_size)) return Result::too_large;
-            name = copy_in(name);
-            value = copy_in(value);
+            if (index > kStaticTable.size()) {  // a dynamic entry can be evicted later in this block: copied
+                name = copy_in(name);
+                value = copy_in(value);
+            }
         } else if (b & 0x40) {  // 6.2.1 literal with incremental indexing
             std::uint32_t index = 0;
             if (!read_integer(block, pos, 6, index)) return Result::malformed;
@@ -446,7 +505,7 @@ Decoder::Result Decoder::decode(std::string_view block, std::string& arena, std:
                 std::string_view v;
                 if (!lookup(index, name, v)) return Result::malformed;
                 if (name.size() > budget(0)) return Result::too_large;
-                name = copy_in(name);
+                if (index > kStaticTable.size()) name = copy_in(name);
             } else {
                 switch (read_string(block, pos, arena, budget(0), name)) {
                     case StrStatus::ok: break;
@@ -473,7 +532,7 @@ Decoder::Result Decoder::decode(std::string_view block, std::string& arena, std:
                 std::string_view v;
                 if (!lookup(index, name, v)) return Result::malformed;
                 if (name.size() > budget(0)) return Result::too_large;
-                name = copy_in(name);
+                if (index > kStaticTable.size()) name = copy_in(name);
             } else {
                 switch (read_string(block, pos, arena, budget(0), name)) {
                     case StrStatus::ok: break;

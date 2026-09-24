@@ -345,10 +345,19 @@ field); then the entry's prebuilt **tail** (`content-length`, `last-modified`, `
 `accept-ranges`, unchanged HPACK literals, still built once at insert) or the text
 block's remaining fields through the table; `vary` and `content-encoding` through the
 table for a twin; extra fields through the table. Per answer a static entry costs two
-sequence compares and one scan for its content type; a text block costs a scan per
-field, what h2o pays for every field of every answer. Nothing changes for HTTP/1, for
-the decoder, or for the request path; HTTP/3's QPACK will get the same encoder with its
-own instructions.
+sequence compares and, since the per-request step of 2026-09-24, one more for its
+content type: the encoder remembers the sequence of the last content-type it sent
+through the table (`Encoder::content_type`), so a run of answers of one type costs a
+comparison and an index byte, and only a change of type scans the table. A text block
+costs a scan per field, what h2o pays for every field of every answer; the arena
+handler no longer has one: its answer carries the type and a prebuilt content-length
+literal, like a cache entry. Nothing changes for HTTP/1 or for the request path;
+HTTP/3's QPACK will get the same encoder with its own instructions. On the decoder,
+the same step stopped copying static-table fields into the arena (their views point
+at the table, which lives for the program; dynamic entries are still copied, since a
+later insertion in the same block can evict them) and made the Huffman decoder write
+through a pointer into the arena, grown once per literal from the 5-bit minimum code
+length, instead of a `push_back` per symbol.
 
 **Expected effect.** The baseline-h2 block from 48 bytes to 7 or 8 (status, server, date
 and content-type one byte each, content-length three), the answer on the wire from 67
@@ -366,10 +375,12 @@ connection and that both decode; h2spec on both listeners as before; the arena's
 validator. Gate: `bench/ab.sh <ref> -2` flat on the single-stream and HTTP/1 rows, the
 pinned baseline-h2 row and `bench/h2/profile.sh` before and after.
 
-**Bundled small items, same hot path, measured together:** one wall-clock and one
-steady-clock read per read of the socket instead of two per stream, and the
-synchronous handler's completion called directly instead of through a heap-allocated
-`std::function`.
+**Bundled small items, same hot path, measured together (done in the per-request
+step that followed, 2026-09-24):** one wall-clock and one steady-clock read per read of
+the socket instead of two per stream (6.6), and the synchronous handler's completion
+in the `std::function`'s own storage instead of on the heap (a two-word, trivially
+copyable capture; the connection completes or cancels the body read itself, so no
+owning reference is needed).
 
 **The one gathering difference left, for later.** h2o gathers writes per event-loop
 iteration, so answers that arrive asynchronously in one iteration (a hundred upstream
@@ -438,23 +449,29 @@ RFC 9218 urgency as the sort key in G4), gives each up to one quantum (16 KB) wi
 send window, the connection window and the peer's `SETTINGS_MAX_FRAME_SIZE`, and
 assembles:
 
-- on plain sockets, one `writev` over up to 256 pieces: frame headers from a per-cycle
-  array of 9-byte headers, payloads as views into cache entries or the stream's chunk,
-  nothing copied; a cycle of more than 16 pieces that total under 64 KB (the tiny answers
-  of many streams) is copied into one buffer instead, because asio hands the kernel at
-  most 64 entries per call and the copy is cheaper than a syscall per 21 answers;
+- one buffer per cycle (2026-09-24, the third shape of the cycle): control frames,
+  every stream's HEADERS frame built straight into it by the encoder, DATA frame headers,
+  and payloads up to `kCopyMax` (2 KB) copied behind their header. A larger payload on a
+  plain socket (a cache entry, the stream's chunk) is written from where it is, as a
+  scatter entry between the buffer's runs, so a 100 KB file still costs no copy; the
+  entries per cycle are bounded (`kMaxExternal`, 128), as asio hands the kernel 64 per
+  call. The answers of one read therefore leave in one `send`. Before this, a cycle was
+  a scatter list of up to 256 pieces (a head piece per stream, a 9-byte header piece and
+  a payload piece per frame) coalesced into a buffer when small, which capped a cycle at
+  85 small answers and made two sends of a read's answers, and built every head in a
+  per-stream string first, copied later;
 - a file body as a pre-framed block: up to four frames read with one `preadv` straight
   into the payload slots of the stream's chunk, the headers written in place, one
   contiguous piece and no copy (built in G0; `sendfile` per frame on plain sockets stays
   a G2 measurement);
 - on TLS, DATA payloads of 16,375 bytes so one frame with its header is exactly one
-  16 KB record; a cycle whose pieces are all whole frames or blocks is written as is,
-  each piece an integral number of records, and only a cycle with separate header pieces
-  (memory and source bodies) is coalesced first, so a header never becomes a record of
-  its own; such a cycle takes at most 64 KB of body (256 KB on plain sockets), because
-  once the write batching filled every cycle, 256 KB cycles copied and encrypted outside
-  the cache and cost the arena's static-h2 row 9 % (2026-09-24: 770k to 834k req/s
-  pinned, at less CPU and a third less memory).
+  16 KB record; every payload but a pre-framed block is copied into the cycle's buffer
+  (`TlsStream` encrypts one buffer per write, so a separate 9-byte header piece would
+  be a record of its own), and the blocks are written as their own entries, each an
+  integral number of records; a cycle takes at most 64 KB of body (256 KB on plain
+  sockets), because once the write batching filled every cycle, 256 KB cycles copied
+  and encrypted outside the cache and cost the arena's static-h2 row 9 % (2026-09-24:
+  770k to 834k req/s pinned, at less CPU and a third less memory).
 
 The cycle is held while the connection runs the frame loop of one read (`Writer::Hold`,
 2026-09-24): every answer, window update and control frame the frames of that read
@@ -471,6 +488,40 @@ than the client takes (Netflix's "internal data buffering", CVE-2019-9517). A wi
 zero parks the stream until a `WINDOW_UPDATE` of at least 1 KB, or the end of the body;
 smaller updates are not progress (6.9).
 
+**Emit at respond, designed 2026-09-24, not built.** With the cycle one buffer, an answer
+that is complete when `respond()` runs and small enough to be copied (a memory body up
+to `kCopyMax`, or no body) needs nothing of its stream once its frames are in the
+buffer. Today it waits in the ready list until the hold ends, and its stream stays open
+until the write completes: a read with a hundred HEADERS frames therefore holds a
+hundred stream objects per connection at once, and with twelve workers that working set
+is what costs the row (the twelve-worker profile in the results file: instructions per
+cycle 1.54 against 4.16 on one worker, h2o 2.73 against 3.89; h2o frees a stream's
+memory as soon as its answer is in the connection's buffer). The change: while the writer
+is held and no write is in flight, `respond()` for such an answer appends the HEADERS and
+DATA frames to the cycle's buffer at once (the head through the encoder as now), logs
+the request, and closes the stream, which goes back to the pool and is the object the
+next HEADERS frame of the same read takes; the cycle is sent at release as today.
+Answers that arrive asynchronously, bodies above `kCopyMax`, files and sources keep the
+ready list and the write-completion path. Expected: a hot working set of one or two
+stream objects per connection, the pool small again, the twelve-worker row at the
+single-worker efficiency; the h1 rows untouched. Gate: the twelve-worker profile,
+the pinned row, the A/B, h2spec and the suites.
+
+The clock is read once per socket event (2026-09-24): the read completion takes the
+steady time and the wall time (the `Date` of every answer of that read), the streams the
+frame loop opens or answers take that timestamp (`Http2Connection::clock_now`), and a
+write completion marks progress on every stream whose bytes it carried, which is also
+where the response timeouts of 6.7 count from now (they used to count from the moment
+the bytes were queued). A completion from elsewhere, an upstream's answer, reads the
+clock itself. Before, a request read the clock four times (open, dispatch, respond,
+emit), 9 % of the arena's HTTP/2 baseline profile. Likewise, the pool of released
+streams holds as many as the client may have open at once (it held four): a client with
+a hundred streams in flight used to construct and free a stream object, with its 200
+header views, per request, a fifth of that profile, and the idle shed (7.3) empties the
+pool anyway. Stream lookups are O(1): a new stream id is never searched for (it is
+above the last one opened), a released stream is found by its slot, and a stream's
+presence in the cycle in flight is a flag, not a scan.
+
 ### 6.7 Timers
 
 One lazy `steady_timer` per connection, deadlines checked when it fires, as HTTP/1:
@@ -480,7 +531,7 @@ One lazy `steady_timer` per connection, deadlines checked when it fires, as HTTP
 | no stream open, no bytes | `idle_timeout` (15 s) | close (a browser reconnects; the admin raises the key for long-lived pages) |
 | a stream's head incomplete (HEADERS without END_HEADERS, or waiting for CONTINUATION) | `idle_timeout` | `GOAWAY(ENHANCE_YOUR_CALM)` + close: slow headers |
 | a body announced, handler waiting, no DATA | `body_timeout` (60 s) | `RST_STREAM(CANCEL)`, 408 not possible any more, log |
-| response pending, no window progress of at least 1 KB | `idle_timeout` | `RST_STREAM(CANCEL)`, buffers freed: the Bomb's "hold", zero-window slow read |
+| response pending, no window progress of at least 1 KB | `idle_timeout` | `RST_STREAM(CANCEL)`, buffers freed: the Bomb's "hold", zero-window slow read; progress is marked when a write carrying the stream's bytes completes |
 | response pending, socket not draining | `idle_timeout` | close: TCP-level slow read |
 
 ### 6.8 Lifecycle
@@ -548,15 +599,17 @@ rather than assumed; the published comparisons put HTTP/2 within 10 % of HTTP/1 
 
 ### 7.2 The levers, in order of expected impact
 
-1. No allocation per stream once the connection is warm (pooled streams, arenas that keep
-   their capacity), the property HTTP/1 has.
-2. No allocation or second copy per header: decode straight into the arena, views out.
+1. No allocation per stream once the connection is warm (pooled streams, as many as the
+   client may have open, arenas that keep their capacity), the property HTTP/1 has; and
+   no allocation for a synchronous handler's completion.
+2. No allocation or second copy per header: decode straight into the arena, views out;
+   static-table fields not even that.
 3. Prebuilt HPACK blocks per cache entry and per error page, the connection's dynamic
    table for `server`, `date`, `content-type` and what a text block repeats (6.2.1): a
    static answer's head is copied, not encoded, and the repeating fields cost a byte.
-4. One syscall per write cycle across streams: `writev` of up to 256 pieces on plain
-   sockets, full records on TLS, the cycle held across a read's frame loop and tiny
-   answers coalesced (6.6).
+4. One syscall per write cycle across streams: the cycle is one buffer with large
+   payloads as scatter entries on plain sockets, full records on TLS, held across a
+   read's frame loop so a read's answers are one send (6.6).
 5. DATA payloads sized to the TLS record, so framing never splits a record (G0: the
    10 MB TLS stream went from 2864 to 2017 us per request, nginx's 2771 overtaken).
 6. Files read with one `preadv` into pre-framed chunks, no copy (G0); `sendfile` per frame
@@ -564,8 +617,13 @@ rather than assumed; the published comparisons put HTTP/2 within 10 % of HTTP/1 
 7. Immediate executors and the inline budget, shared with HTTP/1 (item 1 of the notes).
 8. One lazy timer per connection, no timer per stream (the D1 lesson: `timerfd_settime`
    was two of seven syscalls).
-9. The Huffman decoder as a table walk, the encoder as a table lookup at build time.
-10. The receive buffer released when a connection has been idle for a while (G2, both
+9. The Huffman decoder as a nibble-table walk writing through a pointer, the encoder as a
+   table lookup at build time. (A byte-wide table was considered and not built: 256 KB
+   does not stay in L1 the way the 16 KB nibble table does.)
+10. The clock read once per socket event, not per stream (6.6); routing and target
+    normalisation with their common-case shortcuts (one site behind the listener, a
+    target with nothing to decode or collapse).
+11. The receive buffer released when a connection has been idle for a while (G2, both
     protocols: the pending read is cancelled, the buffers freed, the socket's readiness
     awaited; glibc keeps freed chunks mapped, so the worker trims the heap once a second
     after sheds and closes; an idle HTTP/1 connection went from 25 to 13 KB, an HTTP/2
@@ -578,7 +636,7 @@ rather than assumed; the published comparisons put HTTP/2 within 10 % of HTTP/1 
 | receive buffer | 16 KB | 16 KB + 9 |
 | HPACK dynamic table | none | at most 4 KB (the peer decides how much of it to use) |
 | connection object | about 1.5 KB | about 2 KB |
-| per active stream | one Stream embedded (about 1.5 KB) | Stream 1.5 KB + arena (2 KB typical, 16 KB cap) + body buffer up to its grant |
+| per active stream | one Stream embedded (about 1.5 KB) | Stream (the two 100-field header arrays, 6.4 KB) + arena at the request's exact size (decoded in the connection's 16 KB scratch first, 2026-09-24) + body buffer up to its grant |
 | output in flight | one chunk (64 KB) | at most 8 chunks (512 KB) |
 | idle connection | about 18 KB | about 22 KB, target 6 KB with lever 10 |
 | worst case at the defaults | 16 KB + 64 KB + body limit | 16 KB + 4 KB + 128 x 18 KB + 1 MB + 512 KB, about 3.8 MB, nothing unbounded |
@@ -591,6 +649,15 @@ agensio 19 KB each, nginx 7.5 KB, Caddy 35 KB; 1,000 busy connections at ten str
 HTTP/2 connection is the HPACK ring a client fills (8 KB, the protocol's) and the fixed
 objects, of which the two 100-field header arrays of the stream (6.4 KB) are the next
 lever.
+
+A busy connection keeps as many stream objects as its client had in flight at once
+(the pool of 6.6, emptied by the idle shed), so its memory follows the client's
+concurrency: on the arena's baseline-h2 (512 connections, a hundred streams each) the
+pool first cost 647 MiB resident against h2o's 65, because every stream reserved the
+whole header limit for its arena, and the twelve-worker row fell to 0.87 of h2o while
+one core did 1.27 of it: a burst walked a hundred cold 24 KB objects per connection.
+Decoding into the connection's scratch and keeping the exact bytes per stream is the
+fix in place; the header arrays are what remains per pooled stream.
 
 ### 7.4 The benchmark
 

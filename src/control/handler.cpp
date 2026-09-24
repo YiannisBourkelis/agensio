@@ -93,7 +93,13 @@ void ControlHandler::start(Stream& s, WorkerState& ws, std::function<void()> don
     }
     auto state = std::make_shared<BodyRead>();
     auto step = std::make_shared<std::function<void()>>();
-    *step = [this, &s, &ws, state, step, done]() {
+    // The step refers to itself weakly: the read in flight (its completion below) is what
+    // keeps the chain alive, so the chain ends with the last read. Capturing the step
+    // strongly made a cycle that outlived the request, and with it the connection and its
+    // buffers, once per request with a body (LeakSanitizer, 2026-09-24).
+    *step = [this, &s, &ws, state, weak = std::weak_ptr<std::function<void()>>(step), done]() {
+        std::shared_ptr<std::function<void()>> step = weak.lock();
+        if (!step) return;
         s.request.body->async_read(state->chunk, sizeof state->chunk, [this, &s, &ws, state, step, done](std::error_code ec, std::size_t n) {
             if (ec) return;  // the connection handles a vanished client
             if (n == 0) {
@@ -406,7 +412,9 @@ void ControlHandler::upload_receive(Stream& s, std::string_view name, std::funct
     }
     audit_peer(s, "uploads/" + st->name, "receiving");
     auto step = std::make_shared<std::function<void()>>();
-    *step = [this, &s, st, step, done]() {
+    *step = [this, &s, st, weak = std::weak_ptr<std::function<void()>>(step), done]() {  // weak: see start()
+        std::shared_ptr<std::function<void()>> step = weak.lock();
+        if (!step) return;
         s.request.body->async_read(st->chunk, sizeof st->chunk, [this, &s, st, step, done](std::error_code ec, std::size_t n) {
             if (ec) {
                 audit_peer(s, "uploads/" + st->name, "aborted: " + ec.message());

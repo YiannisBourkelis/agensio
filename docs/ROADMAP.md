@@ -664,11 +664,20 @@ misbehaviour counters against every published attack class up to the 2026 HTTP/2
       HPACK bomb and the 2026 Bomb hold, slow read, floods) with memory sampled, budgets
       tuned, sanitizer and fuzz records, the security page's HTTP/2 section, counters in
       `server_status` and `health`, MCP texts.
-- [ ] G2c The dynamic-table head: `server`, `date`, `content-type`, `vary` and
-      `content-encoding` through a per-connection HPACK dynamic table of eight slots and a
-      1 KB cap, validators and everything else literal as today; design in
-      `docs/design-http2.md` 6.2.1 (2026-09-24, after the write batching took the arena's
-      baseline-h2 from 3.26M to 7.55M req/s pinned; h2o's block is 7 bytes, ours 48).
+- [x] G2c (2026-09-24) The dynamic-table head: `server`, `date`, `content-type`, `vary`,
+      `content-encoding` and what a text block repeats through a per-connection HPACK
+      dynamic table with a 1 KB cap, validators and everything else literal; design in
+      `docs/design-http2.md` 6.2.1 (after the write batching took the arena's baseline-h2
+      from 3.26M to 7.55M req/s pinned, the head took it to 8.46M; h2o's block is 7 bytes,
+      ours went from 48 to 8).
+- [x] G2d (2026-09-24) The per-request cost against h2o, three measured steps on one
+      core (design 6.6, `bench/results/httparena-lite-20260924-0147.md`): the clock once
+      per socket event, the stream pool at the concurrency limit, O(1) stream bookkeeping,
+      no allocation for a handler's continuation; the request and response HPACK fast
+      paths, the router's and the normaliser's common-case shortcuts; the write cycle as
+      one buffer. One worker on the arena's TLS baseline: 1.42M to 3.30M req/s, h2o on one
+      thread 2.60M; h2c 3.97M. Left in that profile: the `:path` Huffman decode (the same
+      automaton h2o uses), request field checks, routing.
 - [ ] G4 Extras: RFC 9218 urgency, RFC 8441 CONNECT over h2 through the tunnel, per-site
       protocols via SNI, the TLS-ALPN-01 hook. (GOAWAY on reload reviewed 2026-09-23: the
       frame follows the streams in flight, new streams are refused meanwhile, both cases
