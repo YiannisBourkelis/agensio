@@ -1,0 +1,76 @@
+### agensio (one worker, the arena handler)
+== agensio: syscalls (3 s under load)
+% time     seconds  usecs/call     calls    errors syscall
+------ ----------- ----------- --------- --------- ----------------
+ 66.80    0.003286           1      2383           sendmmsg
+ 26.39    0.001298           0      5209       175 recvmmsg
+  3.66    0.000180           0      2478           epoll_wait
+  2.87    0.000141           0      2383           epoll_ctl
+100.00    0.004919           0     12669       175 total
+finished in 6.05s, 1144789.33 req/s, 52.36MB/s
+requests: 6868736 total, 6872832 started, 6868736 done, 6868736 succeeded, 0 failed, 0 errored, 0 timeout
+UDP datagram: 217037 sent, 322063 received
+== agensio: CPU per request, cycles and profile
+        6485130410      cycles:u                                                              
+         302312117      cycles:k                                                              
+       19307821556      instructions:u                   #    2.98  insn per cycle            
+    88.19%  agensio         
+     4.50%  libc.so.6       
+     3.99%  [unknown]       
+     3.19%  libcrypto.so.3  
+     0.13%  [vdso]          
+     8.78%  [.] agensio::codec::huffman_decode(std::basic_string_view<char, std::char_traits<char> >, std::__cxx11::basic_string<char, std::char_traits<char>, s
+     7.41%  [.] agensio::quic::QuicConnection<agensio::h3::Http3Connection>::incoming_stream(unsigned long, std::chrono::time_point<std::chrono::_V2::steady_clo
+     4.99%  [.] agensio::Dispatcher::route(agensio::Stream&, agensio::Router const&, agensio::WorkerState&)
+     4.78%  [.] agensio::quic::QuicConnection<agensio::h3::Http3Connection>::apply_acked()
+     4.41%  [.] agensio::h3::Http3Connection::close_stream(agensio::h3::H3Stream&)
+     3.99%  [.] agensio::Stream::reset()
+     3.75%  [.] agensio::quic::QuicConnection<agensio::h3::Http3Connection>::build_packet(agensio::quic::Space, unsigned char*, unsigned long, std::chrono::time
+     3.70%  [.] agensio::qpack::Decoder::decode(std::basic_string_view<char, std::char_traits<char> >, std::__cxx11::basic_string<char, std::char_traits<char>, 
+     2.97%  [.] agensio::normalize_target(std::basic_string_view<char, std::char_traits<char> >, std::__cxx11::basic_string<char, std::char_traits<char>, std::a
+     2.74%  [.] agensio::http::sink_field(agensio::http::RequestSeen&, agensio::Request&, std::basic_string_view<char, std::char_traits<char> >, std::basic_stri
+     2.66%  [.] agensio::h3::Http3Connection::begin_request(agensio::h3::H3Stream&)
+     2.36%  [.] std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >::append(char const*, unsigned long)
+     2.35%  [.] agensio::qpack::Decoder::decode(std::basic_string_view<char, std::char_traits<char> >, std::__cxx11::basic_string<char, std::char_traits<char>, 
+     2.20%  [.] agensio::h3::Http3Connection::pump(agensio::h3::H3Stream&)
+     2.07%  [.] __memcmp_evex_movbe
+     1.93%  [.] agensio::quic::QuicConnection<agensio::h3::Http3Connection>::process_frames(agensio::quic::Space, unsigned char const*, unsigned long, std::chro
+     1.92%  [.] agensio::HttparenaHandler::start(agensio::Stream&, agensio::LocationConfig const&, agensio::WorkerState&, std::function<void ()>)
+     1.92%  [.] agensio::qpack::static_name(std::basic_string_view<char, std::char_traits<char> >, unsigned int&)
+     1.79%  [.] agensio::qpack::static_pair(std::basic_string_view<char, std::char_traits<char> >, std::basic_string_view<char, std::char_traits<char> >, unsign
+     1.51%  [.] __memmove_avx512_unaligned_erms
+     1.50%  [.] agensio::codec::append_integer(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&, unsigned long, unsigned int, un
+     1.34%  [.] agensio::h3::Http3Connection::dispatch(agensio::h3::H3Stream&)
+     1.21%  [.] agensio::quic::QuicConnection<agensio::h3::Http3Connection>::on_stream_frame(agensio::quic::Frame const&, std::chrono::time_point<std::chrono::_
+     1.17%  [.] agensio::http::finish_request(agensio::http::RequestSeen&, agensio::Request&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allo
+     1.10%  [.] agensio::h3::Http3Connection::log_request(agensio::h3::H3Stream&)
+     0.98%  [.] agensio::h3::Http3Connection::respond(agensio::h3::H3Stream&)
+     0.98%  [.] agensio::(anonymous namespace)::head(agensio::Stream&, int, std::basic_string_view<char, std::char_traits<char> >, unsigned long)
+     0.92%  [.] agensio::codec::read_integer(std::basic_string_view<char, std::char_traits<char> >, unsigned long&, unsigned int, unsigned int&)
+     0.85%  [.] agensio::(anonymous namespace)::answer_sum(agensio::Stream&, long)
+     0.85%  [.] agensio::quic::append_varint(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&, unsigned long)
+     0.82%  [.] agensio::quic::RangeSet::add(unsigned long, unsigned long)
+     0.77%  [.] std::basic_string_view<char, std::char_traits<char> >::compare(std::basic_string_view<char, std::char_traits<char> >) const
+     0.77%  [.] agensio::h3::Http3Connection::build_head(agensio::h3::H3Stream&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >
+     0.74%  [.] agensio::quic::read_varint(unsigned char const*&, unsigned char const*, unsigned long&)
+     0.69%  [.] agensio::codec::DynamicTable::at(unsigned long, std::basic_string_view<char, std::char_traits<char> >&, std::basic_string_view<char, std::char_t
+     0.64%  [.] agensio::(anonymous namespace)::parse_int(std::basic_string_view<char, std::char_traits<char> >)
+     0.62%  [.] agensio::quic::QuicConnection<agensio::h3::Http3Connection>::stream_consumed(agensio::quic::QuicStream&, unsigned long)
+     0.58%  [.] __memchr_evex
+     0.49%  [.] agensio::quic::Recovery::on_ack_received(agensio::quic::Space, agensio::quic::Frame const&, std::chrono::time_point<std::chrono::_V2::steady_clo
+     0.49%  [.] agensio::Router::site(std::basic_string_view<char, std::char_traits<char> >) const
+     0.40%  [.] agensio::qpack::Decoder::read_string(std::basic_string_view<char, std::char_traits<char> >, unsigned long&, bool, unsigned long, std::__cxx11::b
+     0.39%  [.] agensio::qpack::Decoder::decode<agensio::h3::Http3Connection::begin_request(agensio::h3::H3Stream&)::{lambda(std::basic_string_view<char, std::c
+     0.36%  [.] agensio::quic::QuicConnection<agensio::h3::Http3Connection>::handle_frame(agensio::quic::Space, agensio::quic::Frame const&, std::chrono::time_p
+     0.34%  [.] agensio::quic::write_varint_fixed(unsigned char*, unsigned long, unsigned int)
+     0.33%  [.] agensio::qpack::append_status(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&, int)
+     0.32%  [.] agensio::Dispatcher::check_method(agensio::Stream&, agensio::LocationConfig const&, agensio::WorkerState&)
+     0.30%  [.] agensio::File::close()
+     0.27%  [.] agensio::qpack::append_field(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&, std::basic_string_view<char, std:
+     0.25%  [.] agensio::qpack::append_literal_name_ref(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&, unsigned int, std::bas
+     0.24%  [.] memcpy@plt
+finished in 8.05s, 1147880.00 req/s, 52.51MB/s
+requests: 9183040 total, 9187136 started, 9183040 done, 9183040 succeeded, 0 failed, 0 errored, 0 timeout
+UDP datagram: 291909 sent, 430570 received
+server CPU: 0.58 us per request over the 8 s run (529 ticks, 9187136 requests)
+RSS: 16024 KB

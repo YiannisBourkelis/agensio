@@ -144,6 +144,7 @@ private:
     // h3, on worker 0 in this slice; bound before the privilege drop like the acceptors.
     void open_h3();
     void start_h3();
+    void reload_h3(const Config& cfg);
     void stop_h3();
     struct H3Endpoints;
     json::Value status() override;

@@ -49,6 +49,12 @@ inline bool frame_allowed(std::uint64_t type, Space space) noexcept {
     }
 }
 
+// A probing frame (RFC 9000 9.1): a packet of only these from a new address is not a
+// migration.
+inline bool probing_frame(std::uint64_t type) noexcept {
+    return type == frame::padding || type == frame::path_challenge || type == frame::path_response || type == frame::new_connection_id;
+}
+
 inline bool ack_eliciting(std::uint64_t type) noexcept {
     return type != frame::padding && type != frame::ack && type != frame::ack_ecn && type != frame::connection_close &&
            type != frame::connection_close_app;
@@ -160,6 +166,12 @@ inline std::size_t put_stream_data_blocked(unsigned char* p, std::size_t cap, st
 inline std::size_t put_path_response(unsigned char* p, std::size_t cap, const unsigned char data[8]) noexcept {
     if (cap < 9) return 0;
     p[0] = frame::path_response;
+    std::memcpy(p + 1, data, 8);
+    return 9;
+}
+inline std::size_t put_path_challenge(unsigned char* p, std::size_t cap, const unsigned char data[8]) noexcept {
+    if (cap < 9) return 0;
+    p[0] = frame::path_challenge;
     std::memcpy(p + 1, data, 8);
     return 9;
 }

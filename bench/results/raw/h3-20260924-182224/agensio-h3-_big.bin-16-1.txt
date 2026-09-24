@@ -1,0 +1,39 @@
+starting benchmark...
+spawning thread #0: 4 total client(s). 518 total requests
+spawning thread #1: 4 total client(s). 518 total requests
+spawning thread #2: 4 total client(s). 517 total requests
+spawning thread #3: 4 total client(s). 517 total requests
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Certificate: ECDSA prime256v1 256 bits
+Negotiated Group: x25519
+Resumption: no
+Application protocol: h3
+progress: 9% done
+progress: 19% done
+progress: 29% done
+progress: 39% done
+progress: 49% done
+progress: 59% done
+progress: 68% done
+progress: 78% done
+progress: 88% done
+progress: 98% done
+
+finished in 4.97s, 416.81 req/s, 4.07GB/s
+requests: 2070 total, 2070 started, 2070 done, 2070 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 2070 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 20.22GB (21705755798) total, 206.19KB (211140) headers (space savings 47.69%), 20.21GB (21705523200) data
+UDP datagram: 130907 sent, 15127340 received
+                 min         max         median      p95         p99         mean        sd         +/- sd
+request     :     6.30ms     52.55ms     38.11ms     43.96ms     47.51ms     38.18ms      3.54ms    79.52%
+connect     :     1.07ms      3.08ms      2.66ms      3.08ms      3.08ms      2.58ms       445us    87.50%
+TTFB        :     2.84ms      3.94ms      3.36ms      3.94ms      3.94ms      3.38ms       335us    56.25%
+req/s       :      26.03       26.31       26.18       26.31       26.31       26.17        0.08    62.50%
+min RTT     :       36us       204us       158us       204us       204us       142us        64us    75.00%
+smoothed RTT:       41us       576us       275us       576us       576us       304us       170us    62.50%
+packets sent:       8099        8232        8195        8232        8232     8183.69       36.32    75.00%
+packets recv:     942707      950034      942733      950034      950034   945459.75     3650.48    62.50%
+packets lost:          0           0           0           0           0        0.00        0.00   100.00%
+GRO packets :          1          44          44          44          44       40.44        7.94    90.46%

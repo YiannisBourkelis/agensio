@@ -11,6 +11,9 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
+#ifdef __linux__
+#include <linux/filter.h>
+#endif
 
 #include <chrono>
 #include <cstddef>
@@ -24,7 +27,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include "quic/crypto.hpp"
 #include "quic/packet.hpp"
+#include "quic/stateless.hpp"
 #include "quic/timer_heap.hpp"
 
 #ifndef SOL_UDP
@@ -45,7 +50,7 @@ namespace agensio::quic {
 class SendBatch {
 public:
     static constexpr std::size_t kMaxSegments = 64;
-    explicit SendBatch(std::size_t bytes = 2 * 1024 * 1024) : buf_(bytes) {}
+    explicit SendBatch(std::size_t bytes = 1024 * 1024) : buf_(bytes) {}  // per worker; a full batch goes out and fills again
 
     bool empty() const noexcept { return msgs_.empty(); }
     std::size_t datagrams() const noexcept { return datagrams_; }
@@ -110,6 +115,11 @@ public:
                     if ((errno == EIO || errno == EINVAL) && gso_) {
                         refused = true;
                         break;
+                    }
+                    if (errno == EMSGSIZE) {  // a datagram the path cannot carry (an MTU probe with DF): skipped, the rest go
+                        dropped += msgs_[done].segments;
+                        ++done;
+                        continue;
                     }
                     for (std::size_t i = done; i < hdrs_.size(); ++i) dropped += msgs_[i].segments;
                     break;
@@ -194,15 +204,34 @@ private:
 #endif
 };
 
+// What the endpoint learned about a client before its connection exists.
+struct AcceptInfo {
+    bool validated = false;  // a Retry token proved the address (no amplification limit)
+    bool retried = false;    // the Initial's destination id is the one our Retry chose
+    Cid odcid;               // the original destination id (from the token when retried, else the Initial's)
+};
+
+// When a new client is sent a Retry before it gets a connection (design-http3 6.3).
+enum class RetryMode : std::uint8_t { never, auto_, always };
+
 // What a connection needs from its endpoint, untemplated: the send batch, the socket to
-// flush it through, the deadline heap.
+// flush it through, the deadline heap, the handshake budget.
 class EndpointBase {
 public:
+    static constexpr std::int64_t kTokenAge = 10;          // seconds a Retry token stays valid
+    static constexpr unsigned kResetsPerSecond = 1000;     // stateless resets per worker
+
     SendBatch batch;
     TimerHeap timers;
     int fd = -1;
     std::uint8_t worker = 0;
     std::uint64_t datagrams_in = 0, datagrams_out = 0, dropped = 0, wakeups = 0;
+    // Address validation and the half-open budget (6.3): connections still in their
+    // handshake; Retry at half the budget in "auto", Initials dropped at the budget.
+    RetryMode retry = RetryMode::auto_;
+    std::size_t half_open = 0;
+    std::size_t half_open_budget = 1024;
+    std::uint64_t retries_sent = 0, tokens_refused = 0, initials_dropped = 0, resets_sent = 0;
 
     void flush() noexcept {
         datagrams_out += batch.datagrams();
@@ -220,8 +249,10 @@ public:
     }
     void unschedule(Timed* t) { timers.remove(t); }
     // An id no longer routes to the connection (the client's original destination id once
-    // the handshake is complete).
+    // the handshake is complete, an id the peer retired).
     virtual void unmap(const Cid& cid, const void* conn) = 0;
+    // A new id of the connection that `known` maps to (NEW_CONNECTION_ID).
+    virtual bool map(const Cid& known, const Cid& added) = 0;
 
 protected:
     virtual void arm_if_earlier(std::chrono::steady_clock::time_point deadline) = 0;
@@ -235,13 +266,13 @@ class Endpoint final : public EndpointBase {
 public:
     using Clock = std::chrono::steady_clock;
     // Makes the connection for a client's first Initial (or nothing: the datagram is dropped).
-    using Accept = std::function<std::shared_ptr<Conn>(Endpoint&, const PacketHeader&, const sockaddr_storage&, socklen_t,
-                                                        Clock::time_point)>;
+    using Accept = std::function<std::shared_ptr<Conn>(Endpoint&, const PacketHeader&, const AcceptInfo&, const sockaddr_storage&,
+                                                        socklen_t, Clock::time_point)>;
 
     Endpoint(asio::io_context& ctx, std::uint8_t worker_index, Accept accept)
         : ctx_(ctx), socket_(ctx), timer_(ctx), accept_(std::move(accept)) {
         worker = worker_index;
-        slots_ = 32;
+        slots_ = 16;  // 1 MB of receive slots per worker (a GRO message fills one)
         slot_ = 65536;
         rbuf_.resize(slots_ * slot_);
         msgs_.resize(slots_);
@@ -250,8 +281,16 @@ public:
         ctl_.resize(slots_ * 64);
     }
 
-    // Binds; `error` says why not.
-    bool open(const asio::ip::udp::endpoint& ep, std::string& error) {
+    // Binds; `error` says why not. With `reuse_port` the socket joins the listener's
+    // SO_REUSEPORT group as the worker's member (the workers bind in order, so the
+    // group's index is the worker's) and the steering program of design 6.1 is attached:
+    // a packet goes to the socket whose index its destination connection id's first
+    // byte names, which is the worker that issued the id; a client-chosen id (an
+    // Initial) with a first byte beyond the group falls back to the kernel's 4-tuple hash,
+    // stable for that client, and the worker that takes it answers with an id naming
+    // itself. No privilege is needed (classic BPF); where the attach is refused, the
+    // hash alone routes every connection to one worker until its address changes.
+    bool open(const asio::ip::udp::endpoint& ep, std::string& error, bool reuse_port = false) {
         asio::error_code ec;
         socket_.open(ep.protocol(), ec);
         if (ec) { error = ec.message(); return false; }
@@ -259,6 +298,7 @@ public:
         if (ep.protocol() == asio::ip::udp::v6()) socket_.set_option(asio::ip::v6_only(false), ec);  // [::] takes IPv4 too, as the acceptors do
         int on = 1;
         ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
+        if (reuse_port) ::setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &on, sizeof on);
         if (::setsockopt(fd, SOL_UDP, UDP_GRO, &on, sizeof on) != 0) gro_ = false;
         int bytes = 4 * 1024 * 1024;
         ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bytes, sizeof bytes);
@@ -273,7 +313,30 @@ public:
         if (ec) { error = ec.message(); return false; }
         socket_.non_blocking(true, ec);
         local_ = ep;
+        if (reuse_port) steering_ = attach_steering(fd);
         return true;
+    }
+    bool steering() const noexcept { return steering_; }
+
+    // The classic BPF program that returns the first byte of the destination connection id
+    // (offset 1 in a short header, offset 6 in a long one: after the version and the id's
+    // length) as the group's socket index.
+    static bool attach_steering(int fd) noexcept {
+#ifdef SO_ATTACH_REUSEPORT_CBPF
+        sock_filter prog[] = {
+            BPF_STMT(BPF_LD | BPF_B | BPF_ABS, 0),             // A = the header's first byte
+            BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, 0x80, 2, 0),  // a long header: two down
+            BPF_STMT(BPF_LD | BPF_B | BPF_ABS, 1),             // short: the id's first byte
+            BPF_STMT(BPF_RET | BPF_A, 0),
+            BPF_STMT(BPF_LD | BPF_B | BPF_ABS, 6),             // long: 1 + version 4 + length 1
+            BPF_STMT(BPF_RET | BPF_A, 0),
+        };
+        sock_fprog fprog{static_cast<unsigned short>(sizeof(prog) / sizeof(prog[0])), prog};
+        return ::setsockopt(fd, SOL_SOCKET, SO_ATTACH_REUSEPORT_CBPF, &fprog, sizeof fprog) == 0;
+#else
+        (void)fd;
+        return false;
+#endif
     }
     void start() { wait_read(); }
     void stop() {
@@ -304,6 +367,13 @@ public:
     void unmap(const Cid& cid, const void* conn) override {
         const auto it = table_.find(cid.key());
         if (it != table_.end() && it->second.get() == conn) table_.erase(it);
+    }
+    bool map(const Cid& known, const Cid& added) override {
+        const auto it = table_.find(known.key());
+        if (it == table_.end() || table_.count(added.key())) return false;  // never over another connection's id
+        std::shared_ptr<Conn> c = it->second;
+        table_[added.key()] = std::move(c);
+        return true;
     }
 
     // Produce and send now, outside a wake-up (an upstream completion on the loop).
@@ -389,15 +459,45 @@ private:
             }
             if (!c) {
                 if (h.type != LongType::initial || len < kMinInitialDatagram || h.dcid.len < 8) return;
-                c = accept_(*this, h, from, fromlen, now);
+                AcceptInfo info;
+                info.odcid = h.dcid;
+                const auto seconds = static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count());
+                if (h.token_len) {
+                    // A token from our Retry: the client's address, the original id and the
+                    // time must open it; a client that comes back with a stale or foreign
+                    // token is told so at once (RFC 9000 8.1.2) and kept out.
+                    unsigned char addr[18];
+                    const std::size_t alen = address_bytes(from, addr);
+                    if (!alen || !open_token(std::string_view(reinterpret_cast<const char*>(h.token), h.token_len), addr, alen, seconds,
+                                             kTokenAge, info.odcid)) {
+                        ++tokens_refused;
+                        if (unsigned char* out = batch.reserve(256)) batch.commit(build_invalid_token_close(out, 256, h), from, fromlen);
+                        return;
+                    }
+                    info.validated = info.retried = true;
+                } else if (retry == RetryMode::always || (retry == RetryMode::auto_ && half_open >= half_open_budget / 2)) {
+                    send_retry(h, from, fromlen, seconds);
+                    return;
+                }
+                if (half_open >= half_open_budget) {
+                    ++initials_dropped;
+                    return;
+                }
+                c = accept_(*this, h, info, from, fromlen, now);
                 if (!c) return;
                 ++conns_;
+#ifdef AGENSIO_QUIC_TRACE
+                std::fprintf(stderr, "quic: accept on worker %u\n", worker);
+#endif
             }
         } else {
             Cid dcid;
             dcid.assign(data + 1, kOurCidLen);
             const auto it = table_.find(dcid.key());
-            if (it == table_.end() || !it->second->quic().owns(dcid)) return;  // a stateless reset is I1b
+            if (it == table_.end() || !it->second->quic().owns(dcid)) {
+                send_stateless_reset(dcid, len, from, fromlen, now);
+                return;
+            }
             c = it->second;
         }
         c->quic().receive(data, len, from, fromlen, now);
@@ -415,6 +515,42 @@ private:
         const std::uint32_t reserved = 0x0a0a0a0a | (static_cast<std::uint32_t>(rnd[1]) << 4);
         const std::size_t n = build_version_negotiation(out, 64 + 2 * kMaxCidLen, h.scid, h.dcid, reserved, rnd[0]);
         batch.commit(n, to, tolen);
+    }
+
+    // A Retry (RFC 9000 17.2.5) with an id naming this worker and a token bound to the
+    // client's address and its original id; no state is kept.
+    void send_retry(const PacketHeader& h, const sockaddr_storage& to, socklen_t tolen, std::int64_t seconds) {
+        unsigned char addr[18];
+        const std::size_t alen = address_bytes(to, addr);
+        if (!alen) return;
+        Cid ours;
+        ours.len = kOurCidLen;
+        ours.bytes[0] = worker;
+        random_bytes(ours.bytes + 1, kOurCidLen - 1);
+        const std::string token = seal_token(addr, alen, h.dcid, seconds);
+        constexpr std::size_t cap = 128 + 2 * kMaxCidLen;
+        unsigned char* out = batch.reserve(cap);
+        if (!out) return;
+        batch.commit(build_retry(out, cap, h.dcid, h.scid, ours, token), to, tolen);
+        ++retries_sent;
+    }
+
+    // A short-header packet for an id nobody here knows (10.3): a reset smaller than the
+    // packet, at most kResetsPerSecond per worker, none for a packet too small to answer.
+    void send_stateless_reset(const Cid& dcid, std::size_t len, const sockaddr_storage& to, socklen_t tolen, Clock::time_point now) {
+        if (len < 22) return;
+        const auto sec = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+        if (sec != reset_second_) {
+            reset_second_ = sec;
+            resets_in_second_ = 0;
+        }
+        if (++resets_in_second_ > kResetsPerSecond) return;
+        const std::size_t n = len <= 43 ? len - 1 : 43;
+        unsigned char* out = batch.reserve(n);
+        if (!out) return;
+        build_stateless_reset(out, n, dcid);
+        batch.commit(n, to, tolen);
+        ++resets_sent;
     }
 
     void retire_shared(Conn& c) { retire(c); }
@@ -458,6 +594,7 @@ private:
     Accept accept_;
     asio::ip::udp::endpoint local_;
     bool gro_ = true;
+    bool steering_ = false;
     std::size_t slots_ = 0, slot_ = 0;
     std::vector<unsigned char> rbuf_;
     std::vector<mmsghdr> msgs_;
@@ -467,6 +604,8 @@ private:
     std::unordered_map<std::uint64_t, std::shared_ptr<Conn>> table_;
     std::vector<Conn*> touched_;
     std::size_t conns_ = 0;
+    long long reset_second_ = -1;
+    unsigned resets_in_second_ = 0;
 };
 
 }  // namespace agensio::quic

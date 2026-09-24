@@ -71,6 +71,99 @@
   `baseline-h3` and `static-h3`. Not in this slice (I1b to I4 of the design): streamed upstream bodies
   over h3, Retry, stateless reset, key update, path validation, path MTU discovery,
   0-RTT, ECN, `alt-svc`, the per-worker sockets.
+- **HTTP/3 on every worker**: with `reuse_port` each worker opens its own UDP socket on the
+  h3 listener's port and a classic BPF program attached to the group (six instructions,
+  no privilege, `SO_ATTACH_REUSEPORT_CBPF`) delivers a packet to the socket whose index
+  the first byte of its destination connection id names, which is the worker that issued
+  the id; a client-chosen id falls back to the kernel's 4-tuple hash, so a connection
+  never changes worker (design 6.1). Where the attach is refused the hash routes alone. The per-worker buffers are 1 MB in
+  and 1 MB out. On the arena's rows in its harness (twelve workers pinned, twelve load
+  threads): `baseline-h3` 3.86 to 3.89M req/s at 2.6 cores of server CPU (the load
+  generator is the limit; one worker did 1.8M at one core), `static-h3` 541k at 8.3
+  cores (one worker 98 to 108k), no failed request, 83 and 92 MiB resident; the board's
+  nginx entry does 4.85M and 361k on 31 and 50 cores.
+- **QPACK's dynamic table on the decoding side** (RFC 9204 sections 3, 4.3 to 4.5; design
+  7.2's first step): the connection advertises a 4 KB table and 16 blocked streams, the
+  client's encoder stream (set capacity, insert with a name reference, insert with a
+  literal name, duplicate) fills the table, a field section's prefix names the insert
+  count it needs and its base, a section ahead of the table waits and is decoded when
+  the inserts arrive (a seventeenth waiting stream is QPACK_DECOMPRESSION_FAILED), and
+  the decoder stream carries the section acknowledgements, stream cancellations and
+  insert count increments the encoder needs. Dynamic entries keep the rules-once mark
+  of HTTP/2's HPACK, so a request's field rules run once per entry. Trailers are
+  decoded and discarded to keep the acknowledgements in step. The control streams' send
+  buffers drop what is acknowledged in order, so a long connection's decoder stream
+  stays small. Unit tests: RFC 9204 appendix B (B.1 to B.5) on the encoder stream, the
+  blocked section, the decoder stream's bytes, the eviction, and the errors. Measured
+  under the arena load (`profile-qpack.txt`): the Huffman share of the profile 21 % to
+  7.9 %, 0.61 to 0.56 us of server CPU per request, a request's field section seven
+  bytes with two dynamic references; A/B `ab-20260924-172435.md` h1 and h2 flat.
+- **A stream whose id arrives after a higher one is a new stream, not a closed one**: the
+  transport took a lower id for a stream it had already closed, so a client that opened
+  its unidirectional streams 2, 10 and then 6 lost its QPACK encoder stream, and a
+  request stream whose first packet landed after a later stream's did too (the likely
+  cause of the two stalled requests in 4.5 million at 256 connections). Closed ids are
+  now recorded (the last 64, as HTTP/2 keeps them) and only those are refused.
+- **Larger datagrams and fewer packets per HTTP/3 request** (design 6.7): one path MTU
+  probe after the handshake (a PING padded to 1,472 bytes over IPv4, 1,452 over IPv6, or
+  what the client announces; acknowledged, every datagram is that size; lost, 1,200 stays;
+  probed again when the client's address changes), so a 1 KB answer with its head is one
+  datagram and the 10 MB stream costs 2.37 ms per response instead of 2.72 (nginx 1.95;
+  `h3-20260924-174006.md`). And MAX_STREAMS no longer goes out in a datagram of its own
+  after every closed stream: the trace of a client with one request at a time showed a
+  31-byte packet per request that the client then acknowledged; the credit rides on the
+  next packet sent for another reason and goes alone only when the peer's room is under
+  a quarter of the limit. Measured with the transport step below in one A/B
+  (`ab-20260924-181813.md`, every h1 row 0.99 to 1.01, the h2 rows 0.94 to 0.98): the h3
+  rows against the first slice's 4.4 / 1.05 / 0.88 / 24.7 us are now 3.8 us at one
+  stream per connection, 0.90 at ten, 0.80 at sixty-four and 21.7 to 22.0 for the 100 KB
+  file at ten; one worker on this box (`h3-20260924-182224.md`): 1 KB at 64 connections
+  and 64 streams 0.78 us and 1.08M req/s, at ten streams 0.90 us and 664k, at 256
+  connections with ten 0.97 us and 546k (the row that stalled two requests in the first
+  slice: none now), the 100 KB file 21.8 us and 46.0k (nginx 31.0 and 32.1k), the 10 MB
+  stream 2.40 ms and 417 req/s (nginx 1.95 and 512), the one-stream row 3.78 us at 54.3k
+  where nginx costs 7.57 us for 57.4k (the row is bound by h2load's per-request work,
+  about a millisecond per connection in this shape: agensio, nginx and the previous
+  build all sit at 52 to 57k; the same client with one connection does a request every
+  148 us); in the arena's harness with twelve workers `baseline-h3` 3.85 to 3.88M req/s
+  at 2.35 cores and `static-h3` 618 to 622k at 8.9 cores (541k before the datagram work).
+- **The transport rows of HTTP/3's I1b** (RFC 9000 5.1, 8.1, 9, 10.3; RFC 9001 6; design
+  6.3, 6.4, 6.9): address validation with Retry (`http3 = { retry = "auto" | "always" |
+  "never" }`, the one HTTP/3 key: tokens sealed under a per-hour key from a per-process
+  secret, bound to the client's address, the original connection id and the time, valid
+  ten seconds; an Initial whose token does not open is answered with an INVALID_TOKEN
+  close under the client's Initial keys and forgotten; "auto" sends Retry once a worker
+  has 512 handshakes in progress and drops Initials at 1,024, "always" is for a host
+  under a handshake flood, "never" for a benchmark); stateless resets for a packet whose
+  id nobody knows (a server that restarted), the token of every id HMAC of the id under
+  the process secret so nothing is stored and any worker can answer, the reset one byte
+  shorter than the packet, none under 22 bytes, at most 1,000 per second per worker; four
+  connection ids issued to the peer at the handshake and one more for each it retires
+  (at most 64 per connection), the peer's own ids bounded at four; key update both ways
+  (the peer's followed before its packet is acknowledged, ours at the AEAD's
+  confidentiality limit; the previous keys kept three PTOs for reordered packets; a
+  second update before the first is acknowledged is KEY_UPDATE_ERROR; the
+  header-protection key never changes across updates, RFC 9001 6.1, which the first
+  version got wrong); a client whose address changes (a NAT rebinding) keeps its
+  connection: its new path is validated with PATH_CHALLENGE, sending to it is capped at
+  three times what arrived on it until PATH_RESPONSE (the cap is a byte allowance, so
+  the challenge goes out after a small packet), the congestion state starts over unless
+  only the port changed, and the previous address is used again when the validation
+  fails; the reset budget (RESET_STREAM and STOP_SENDING past `http2.max_concurrent_streams`
+  in one second close with H3_EXCESSIVE_LOAD) and the glitch budget (100 credit updates
+  that raise nothing). `tests/h3-attacks.py` on aioquic (now in the devbox image) drives
+  thirteen rows of the design's threat table by hand over its own sockets: handshake,
+  retry in both modes, invalid-token, key-update, key-update-twice, rebind, cid-retire,
+  stateless-reset, forged-flood, rapid-reset, stream-flood, control-stream,
+  handshake-flood (1,500 Initials in 1.1 s); the integration suite runs it where aioquic
+  is installed and adds a curl through a `retry = "always"` instance. Unit tests for the
+  tokens, the Retry packet and its tag, the stateless reset and the INVALID_TOKEN close.
+  Two bugs the suite found before the step was measured: the header-protection key was
+  re-derived at a key update (every packet after it failed to open), and the
+  amplification check counted whole datagrams, so a client that had just changed its
+  address could not be sent the PATH_CHALLENGE that validates it. No cost on the request
+  path: the profile after the step 1.14 to 1.15M req/s on one worker at 0.58 us per
+  request (`profile-transport.txt`).
 - **The code HTTP/2 and HTTP/3 share lifted into `src/http/`** first, as a pure refactor
   (design-http3 section 4): the Huffman code, the prefixed integers and the dynamic
   table with its rules-once marks (`field_codec`), the request assembler (`request_assembly`),

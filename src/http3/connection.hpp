@@ -45,12 +45,14 @@ public:
     using Endpoint = quic::Endpoint<Http3Connection>;
     using TimePoint = quic::TimePoint;
 
+    static constexpr std::uint64_t kExcessiveLoad = 0x107;       // H3_EXCESSIVE_LOAD: the transport's reset budget closes with it
     static constexpr std::uint64_t kStreamWindowMax = 1u << 20;  // a body's window, as HTTP/2's
     static constexpr std::uint64_t kDiscardMax = 64 * 1024;      // an unread body is drained this far, then STOP_SENDING
 
     Http3Connection(Endpoint& ep, Worker& worker, std::shared_ptr<const Generation> gen, const Listener* listener,
                     const Config& cfg, Dispatcher& dispatcher, SSL_CTX* ctx, const quic::PacketHeader& initial,
-                    const sockaddr_storage& peer, socklen_t peer_len, const quic::Limits& limits, TimePoint now)
+                    const quic::AcceptInfo& info, const sockaddr_storage& peer, socklen_t peer_len, const quic::Limits& limits,
+                    TimePoint now)
         : ep_(ep),
           worker_(worker),
           gen_(std::move(gen)),
@@ -58,7 +60,7 @@ public:
           live_(&gen_->cfg),
           cfg_(cfg),
           dispatcher_(dispatcher),
-          quic_(*this, ep, ctx, initial, peer, peer_len, limits, now),
+          quic_(*this, ep, ctx, initial, info, peer, peer_len, limits, now),
           now_(now) {
         worker_.connections.fetch_add(1, std::memory_order_relaxed);
         remote_from(peer);
@@ -167,13 +169,14 @@ public:
         quic::append_varint(settings, setting::max_field_section_size);
         quic::append_varint(settings, live_->max_header_size);
         quic::append_varint(settings, setting::qpack_max_table_capacity);
-        quic::append_varint(settings, 0);
+        quic::append_varint(settings, qpack::Decoder::kMaxCapacity);
         quic::append_varint(settings, setting::qpack_blocked_streams);
-        quic::append_varint(settings, 0);
+        quic::append_varint(settings, qpack::Decoder::kMaxBlocked);
         append_frame_header(c, frame::settings, settings.size());
         c.append(settings);
         qenc_.q.head.assign("\x02", 1);
         qdec_.q.head.assign("\x03", 1);
+        qdec_.q.trim_head = true;  // its acknowledgements accumulate for the connection's life
         for (H3Stream* u : {&ctl_, &qenc_, &qdec_}) {
             if (!quic_.open_uni_stream(u->q)) return connection_error(err::general_protocol, "the client allows no unidirectional streams");
             u->q.total = u->q.head.size();
@@ -207,7 +210,7 @@ private:
     // pull (or discarded after the answer), the rest skipped (RFC 9114 7.2).
     void pump(H3Stream& s) {
         quic::QuicStream& q = s.q;
-        for (int guard = 0; guard < 1024 && !s.closed && !closed_; ++guard) {
+        for (int guard = 0; guard < 1024 && !s.closed && !closed_ && !s.blocked; ++guard) {
             const std::size_t avail = q.available();
             if (!s.in_frame) {
                 if (avail == 0) break;
@@ -224,10 +227,11 @@ private:
                 s.frame_type = type;
                 s.frame_remaining = len;
                 if (type == frame::headers) {
-                    if (s.headers_done) {
-                        s.frame_type = ~std::uint64_t{0};  // trailers: skipped
-                    } else if (len > live_->max_header_size) {
-                        return fail_stream(s, 431);
+                    if (len > live_->max_header_size) {
+                        if (!s.headers_done) return fail_stream(s, 431);
+                        s.frame_type = ~std::uint64_t{0};  // oversized trailers: skipped, not decoded
+                    } else if (s.headers_done) {
+                        s.trailers = true;  // decoded and discarded, so the QPACK state and the acknowledgements stay in step
                     }
                 } else if (type == frame::data) {
                     if (!s.headers_done) return connection_error(err::frame_unexpected, "DATA before HEADERS");
@@ -247,7 +251,8 @@ private:
                 s.frame_remaining -= take;
                 if (s.frame_remaining == 0) {
                     s.in_frame = false;
-                    begin_request(s);
+                    if (s.trailers) decode_trailers(s);
+                    else begin_request(s);
                 }
                 continue;
             }
@@ -291,7 +296,7 @@ private:
             s.frame_remaining -= take;
             if (s.frame_remaining == 0) s.in_frame = false;
         }
-        if (s.closed || closed_) return;
+        if (s.closed || closed_ || s.blocked) return;
         if (q.at_end() && !q.fin_delivered) {
             q.fin_delivered = true;
             if (s.in_frame && s.frame_remaining) return connection_error(err::frame_error, "stream ended inside a frame");
@@ -310,14 +315,20 @@ private:
         http::RequestSeen seen;
         std::string& scratch = decode_scratch_;
         scratch.clear();
+        std::uint64_t required = 0;
         const auto r = decoder_.decode(s.section, scratch, live_->max_header_size,
-                                       [&](std::string_view n, std::string_view v, qpack::Origin o) { return http::sink_field(seen, req, n, v, o); });
-        s.section.clear();
+                                       [&](std::string_view n, std::string_view v, qpack::Origin o) { return http::sink_field(seen, req, n, v, o); },
+                                       required);
+        QUIC_TRACE("h3: section stream=%llu bytes=%zu result=%d required=%llu inserts=%llu\n", static_cast<unsigned long long>(s.q.id),
+                   s.section.size(), static_cast<int>(r), static_cast<unsigned long long>(required), static_cast<unsigned long long>(decoder_.insert_count()));
         switch (r) {
             case qpack::Decoder::Result::ok: break;
             case qpack::Decoder::Result::malformed: return connection_error(err::qpack_decompression_failed, "QPACK error in the request");
-            case qpack::Decoder::Result::too_large: return fail_stream(s, 431);
+            case qpack::Decoder::Result::too_large: s.section.clear(); return fail_stream(s, 431);
+            case qpack::Decoder::Result::blocked: return block(s, required);
         }
+        s.section.clear();
+        if (required) acknowledge_section(s.q.id, required);
         s.arena.assign(scratch);
         req.headers.rebase(scratch.data(), scratch.size(), s.arena.data());
         seen.rebase(scratch.data(), scratch.size(), s.arena.data());
@@ -346,6 +357,66 @@ private:
         dispatch(s);
     }
 
+    // The section references inserts the encoder stream has not delivered: the stream
+    // waits, at most kMaxBlocked of them (RFC 9204 2.1.2; a seventeenth is a connection error).
+    void block(H3Stream& s, std::uint64_t required) {
+        if (blocked_.size() >= qpack::Decoder::kMaxBlocked) return connection_error(err::qpack_decompression_failed, "too many blocked streams");
+        s.blocked = true;
+        s.required = required;
+        blocked_.push_back(&s);
+    }
+
+    // After encoder-stream inserts: every blocked stream the table now satisfies goes on.
+    void unblock_streams() {
+        for (std::size_t i = 0; i < blocked_.size() && !closed_;) {
+            H3Stream* s = blocked_[i];
+            if (s->required > decoder_.insert_count()) { ++i; continue; }
+            blocked_.erase(blocked_.begin() + static_cast<std::ptrdiff_t>(i));
+            s->blocked = false;
+            QUIC_TRACE("h3: unblock stream=%llu\n", static_cast<unsigned long long>(s->q.id));
+            if (s->trailers) decode_trailers(*s);
+            else begin_request(*s);
+            if (!s->closed && !s->blocked) pump(*s);
+        }
+    }
+
+    // Trailers are decoded to keep the decoder's state and its acknowledgements in step,
+    // and discarded (the handlers see none).
+    void decode_trailers(H3Stream& s) {
+        std::string& scratch = decode_scratch_;
+        scratch.clear();
+        std::uint64_t required = 0;
+        const auto r = decoder_.decode(s.section, scratch, live_->max_header_size,
+                                       [](std::string_view, std::string_view, qpack::Origin) { return true; }, required);
+        if (r == qpack::Decoder::Result::blocked) return block(s, required);
+        s.section.clear();
+        s.trailers = false;
+        if (r == qpack::Decoder::Result::malformed) return connection_error(err::qpack_decompression_failed, "QPACK error in the trailers");
+        if (required) acknowledge_section(s.q.id, required);
+    }
+
+    void acknowledge_section(std::uint64_t stream_id, std::uint64_t required) {
+        decoder_.section_acknowledged(stream_id, required, qdec_.q.head);
+        decoder_dirty_ = true;
+    }
+
+public:
+    // The transport is about to build packets: the decoder stream's pending instructions
+    // (an insert count increment for inserts no section acknowledged) go on it now.
+    void before_produce() {
+        if (ici_due_) {
+            decoder_.insert_count_increment(qdec_.q.head);
+            ici_due_ = false;
+            decoder_dirty_ = true;
+        }
+        if (decoder_dirty_ && qdec_.q.open) {
+            decoder_dirty_ = false;
+            qdec_.q.total = qdec_.q.head_end();
+            quic_.stream_ready(qdec_.q);
+        }
+    }
+
+private:
     std::size_t body_limit(std::string_view host) const noexcept {
         const SiteConfig* site = listener_->router.site(host);
         return site ? body_limit_of(*site, *live_) : live_->max_body_size;
@@ -545,6 +616,8 @@ private:
 
     void on_uni_data(H3Stream& s) {
         quic::QuicStream& q = s.q;
+        QUIC_TRACE("h3: uni stream=%llu known=%d type=%llu avail=%zu\n", static_cast<unsigned long long>(q.id), s.type_known ? 1 : 0,
+                   static_cast<unsigned long long>(s.uni_type), q.available());
         if (!s.type_known) {
             const auto* p = reinterpret_cast<const unsigned char*>(q.data());
             const unsigned char* const start = p;
@@ -614,13 +687,18 @@ private:
                 continue;
             }
             if (s.uni_type == stream_type::qpack_encoder) {
-                // With a table capacity of 0 the only instruction allowed is Set Dynamic
-                // Table Capacity to 0 (RFC 9204 4.3.1), one byte 0x20.
-                const auto* p = reinterpret_cast<const unsigned char*>(q.data());
-                for (std::size_t i = 0; i < avail; ++i)
-                    if (p[i] != 0x20) return connection_error(err::qpack_encoder_stream, "encoder instruction with the table capacity 0");
-                quic_.stream_consumed(q, avail);
-                continue;
+                const std::uint64_t before = decoder_.insert_count();
+                std::size_t consumed = 0;
+                if (!decoder_.encoder_stream(std::string_view(q.data(), avail), consumed))
+                    return connection_error(err::qpack_encoder_stream, "invalid encoder stream instruction");
+                QUIC_TRACE("h3: encoder stream avail=%zu consumed=%zu inserts=%llu capacity=%zu\n", avail, consumed,
+                           static_cast<unsigned long long>(decoder_.insert_count()), decoder_.capacity());
+                if (consumed) quic_.stream_consumed(q, consumed);
+                if (decoder_.insert_count() != before) {
+                    ici_due_ = true;
+                    unblock_streams();
+                }
+                break;  // an incomplete instruction waits for more bytes
             }
             // The QPACK decoder stream (acknowledgements we never need while nothing is
             // indexed) and unknown types: their bytes are consumed and discarded.
@@ -675,6 +753,12 @@ private:
         }
         if (s.pending_handler) deliver_error(s, asio::error::operation_aborted);
         if (s.kind == H3Stream::Kind::request && s.headers_done) log_request(s);
+        if (s.blocked) {  // the encoder learns that the section was never processed (RFC 9204 4.4.2)
+            for (std::size_t i = 0; i < blocked_.size();)
+                if (blocked_[i] == &s) blocked_.erase(blocked_.begin() + static_cast<std::ptrdiff_t>(i)); else ++i;
+            decoder_.stream_cancelled(s.q.id, qdec_.q.head);
+            decoder_dirty_ = true;
+        }
         if (&s == peer_control_) peer_control_ = nullptr;
         if (&s == peer_qenc_) peer_qenc_ = nullptr;
         if (&s == peer_qdec_) peer_qdec_ = nullptr;
@@ -785,6 +869,9 @@ private:
     H3Stream* peer_qdec_ = nullptr;
     std::uint64_t peer_qpack_capacity_ = 0, peer_qpack_blocked_ = 0, peer_max_field_section_ = ~std::uint64_t{0};
     qpack::Decoder decoder_;
+    std::vector<H3Stream*> blocked_;  // sections waiting for the encoder stream
+    bool ici_due_ = false;            // inserts arrived that no section acknowledged yet
+    bool decoder_dirty_ = false;      // the decoder stream has new bytes to send
     std::string decode_scratch_;
     std::string remote_;
     std::uint16_t remote_port_ = 0;

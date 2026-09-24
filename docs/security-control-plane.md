@@ -146,10 +146,28 @@ of `docs/design-http3.md` section 9: the anti-amplification limit before the add
 validated, Initial packets under 1,200 bytes dropped, the packet number spaces' frame
 rules, flow-control and stream limits enforced as FLOW_CONTROL_ERROR and STREAM_LIMIT_ERROR,
 CRYPTO data bounded per level, an acknowledgement of a packet never sent closing the
-connection, the QPACK table at capacity 0 in this slice so no decoder state can be
-grown, control-stream rules of RFC 9114 (SETTINGS first, one of each critical stream,
+connection, the QPACK dynamic table bounded at 4 KB with at most 16 sections waiting for it
+(a section beyond the table is refused, an insert larger than it or a reference to an
+evicted entry closes the connection), control-stream rules of RFC 9114 (SETTINGS first, one of each critical stream,
 request frames refused on control streams), unread bodies drained up to 64 KB then
-STOP_SENDING. The rows of that table that need work not yet built (Retry and tokens,
-stateless reset, key update, path validation, the glitch and reset budgets over QUIC), the
-attack suite, the fuzzers and the interop runner are the design's I1b and I2; until they
-land, `"h3"` is off by default and this page's HTTP/3 section is this paragraph.
+STOP_SENDING. Since the transport step of 2026-09-24 (design 6.3, 6.4, 6.9): address
+validation with Retry (`http3.retry`: tokens sealed under a per-hour key from the
+process secret, bound to the address, the original id and the time, valid ten seconds;
+an Initial with a token that does not open is answered with INVALID_TOKEN and forgotten;
+"auto" sends Retry once a worker has 512 handshakes in progress and drops Initials at
+1,024), stateless resets for ids nobody knows (tokens computed from the process secret,
+a reset always smaller than the packet, at most 1,000 per second per worker), at most
+four connection ids each way with replacements after RETIRE_CONNECTION_ID (a retirement
+of an id never issued or of the id the packet came to is PROTOCOL_VIOLATION, a fifth
+active id of the peer's is CONNECTION_ID_LIMIT_ERROR, at most 64 issued per connection),
+key update with the previous keys kept three PTOs and a second update before the first
+is acknowledged refused with KEY_UPDATE_ERROR, path validation when a client's address
+changes (three times the bytes received on the new path until PATH_RESPONSE, one
+validation at a time, the previous address restored when it fails), the reset budget
+(RESET_STREAM and STOP_SENDING past `http2.max_concurrent_streams` in one second close
+with H3_EXCESSIVE_LOAD) and the glitch budget (100 credit updates that raise nothing).
+`tests/h3-attacks.py` (aioquic, in the devbox image; the integration suite runs it where
+aioquic is installed) asserts thirteen rows of the design's table against the release and
+sanitizer builds. Still the design's I2: the interop runner, the loss proxy, the fuzzers
+of `src/quic/` and `src/http3/`, the attack rows that need a spoofed source or raw
+frames. `"h3"` stays off by default until then.

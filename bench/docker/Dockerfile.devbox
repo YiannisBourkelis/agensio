@@ -43,6 +43,9 @@ FROM base
 COPY --from=h3tools /opt/nghttp3 /opt/nghttp3
 COPY --from=h3tools /opt/ngtcp2 /opt/ngtcp2
 COPY --from=h3tools /opt/nghttp2 /opt/nghttp2
+# aioquic drives the HTTP/3 attack suite (tests/h3-attacks.py): key updates, address
+# changes and malformed frames that no load tool sends.
+RUN apt-get update && apt-get install -y --no-install-recommends python3-aioquic && rm -rf /var/lib/apt/lists/*
 ARG UID=1000
 ARG GID=1000
 RUN groupadd -g $GID dev 2>/dev/null || true; useradd -m -u $UID -g $GID -s /bin/bash dev

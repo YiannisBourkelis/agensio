@@ -446,18 +446,46 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   `http/stream_pool.hpp`, the same dispatch as HTTP/2, answers as HEADERS and DATA frames
   with the body referenced (a cache entry, a file read in 64 KB windows), request bodies
   pulled from the QUIC stream's buffer so credit returns as the handler reads; QPACK
-  (`http3/qpack.*`) over the static table in this slice (capacity 0 advertised). `"h3"` in
-  `protocols` opens it on every TLS listener's port over UDP, worker 0 only for now.
+  (`http3/qpack.*`): the decoder with its 4 KB dynamic table, the client's encoder stream
+  and our decoder stream, sections waiting for inserts (16 at most), the rules-once marks
+  shared with HPACK; our own answers use the static table only until the encoder-side
+  dynamic head (design 7.2's second step). `"h3"` in `protocols` opens it on every TLS listener's port over UDP; with `reuse_port` every
+  worker has its own socket and a classic BPF program on the group (no privilege) delivers
+  each packet to the worker named by the first byte of its destination connection id, the
+  worker that issued it, so a connection never changes worker; the kernel's hash is the
+  fallback. The transport rows of the design's I1b (2026-09-24): `quic/stateless.hpp`
+  answers without a connection (Retry with a token sealed under a per-hour key from the
+  process secret, bound to the address, the original id and the time, `http3.retry` =
+  auto past 512 handshakes in progress per worker, always, never; INVALID_TOKEN for a
+  token that does not open; a stateless reset, smaller than the packet, at most 1,000 a
+  second, its token HMAC of the id under the same secret, so any worker answers for any
+  id); the connection issues four ids and replaces retired ones, follows and initiates
+  key updates (the header-protection key never changes across them), validates a client's
+  new address with PATH_CHALLENGE under the byte allowance of the amplification limit and
+  falls back to the previous address when that fails, probes the path once for 1,472-byte
+  datagrams (1,452 over IPv6; again after an address change), and closes on the reset
+  budget (`H3_EXCESSIVE_LOAD`) and the glitch budget. `tests/h3-attacks.py` (aioquic in
+  the devbox image) drives thirteen rows of the design's threat table by hand; the
+  integration suite runs it where aioquic is installed, and the sanitizer build runs
+  it too. After that step (`ab-20260924-181813.md`, `h3-20260924-182224.md`): the h3
+  rows of the A/B 3.8 us at one stream per connection, 0.90 at ten, 0.80 at sixty-four,
+  21.7 to 22.0 for the 100 KB file at ten (4.4 / 1.05 / 0.88 / 24.7 in the first slice),
+  h1 and h2 flat; one worker 1.08M req/s at 64 streams, 546k at 256 connections with
+  ten (no stalled request), the 10 MB stream 2.40 ms (nginx 1.95), and the arena's
+  `static-h3` 618 to 622k with twelve workers (541k before the datagram work), `baseline-h3`
+  3.85 to 3.88M at 2.35 cores, load-bound. The one-stream row (54k req/s for agensio,
+  57k for nginx at twice the CPU) is bound by h2load's own per-request work.
   Measured (`bench/httparena/profile-h3.sh`, the arena's h2load over QUIC, 64 connections
   with 64 streams): 1.22 to 1.25M req/s on one worker at 0.61 us of CPU per request,
   about 3,100 cycles at 3.19 instructions per cycle, twenty-one answers per datagram,
   the kernel 4.2 % and libcrypto 3.5 % of the cycles, against the devbox's nginx at
-  2.32 us and 402 to 433k; in the arena's harness `baseline-h3` 1.77 to 1.81M req/s and
-  `static-h3` 98 to 108k on the one core that serves QUIC; one worker each on this box
+  2.32 us and 402 to 433k; in the arena's harness with twelve workers `baseline-h3` 3.86 to 3.89M req/s at 2.6 cores
+  (the load generator is the limit; one worker 1.8M) and `static-h3` 541k at 8.3 cores (one
+  worker 98 to 108k), 83 and 92 MiB; one worker each on this box
   (`bench/h3/run.sh`) the 1 KB file at 64 streams costs 0.90 us here, 3.27 on nginx,
   26.6 on Caddy, and the 10 MB stream is nginx's row (1.95 against 2.72 ms). The top
   item of the profile is the Huffman decoding of the request's literals (21 %), which
-  QPACK's dynamic table (I1c) removes; then several workers (I1b).
+  QPACK's dynamic table (I1c) removes.
   Rules for every change here: read the RFC section in `docs/rfc/` first and cite it, keep
   the threat table of the design document and the MCP texts in step, the h1 and h2 rows
   of `bench/ab.sh <ref> -2` flat, and `bench/ab.sh <ref> -3` for the h3 rows. Loopback
@@ -468,8 +496,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   packet of a response), the way the probe-size bug of 2026-09-24 was found.
 - **Not yet**: directory listing, TLS-ALPN-01 / DNS-01 (wildcards), OCSP stapling, RFC 9218
   priorities, CONNECT over h2, HTTP/2 to origins; in HTTP/3 (design-http3 I1b to I4):
-  several workers, Retry, stateless reset, key update, migration, path MTU discovery,
-  0-RTT, ECN, `alt-svc`, streamed upstream bodies, QPACK's dynamic table.
+  0-RTT, ECN, `alt-svc`, NEW_TOKEN, streamed upstream bodies, GOAWAY on reload and
+  shutdown, QPACK's dynamic table on the encoder side, the interop runner and the
+  fuzzers of the transport.
 
 ## Performance notes (measured, keep current)
 

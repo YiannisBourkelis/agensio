@@ -3063,7 +3063,7 @@ static void test_config_reference() {
                                           "exact", "prefix", "suffix", "value", "agensio", "https", "http", "none", "allow", "deny", "append", "replace",
                                           "rfc7239", "rewrite", "pass", "fastcgi", "proxy", "cgi", "control", "php", "laravel", "wordpress", "drupal",
                                           "linux", "darwin", "unix", "tcp", "get", "head", "post", "put", "delete", "patch", "options", "trace", "connect",
-                                          "server", "cache", "log", "site", "acme", "http2", "httparena"};  // table names, not keys
+                                          "server", "cache", "log", "site", "acme", "http2", "http3", "httparena"};  // table names, not keys
     std::set<std::string> missing;
     const std::size_t begin = src.find("void parse_proxy_policy"), end = src.find("json::Value preset_catalog");
     CHECK(begin != std::string::npos && end != std::string::npos && begin < end);
@@ -3215,8 +3215,145 @@ static void test_qpack() {
     CHECK(d.decode(big, arena, 100, [](std::string_view, std::string_view, qpack::Origin) { return true; }) == qpack::Decoder::Result::too_large);
 }
 
+
+// RFC 9204 appendix B: the encoder stream, blocked and unblocked sections, the decoder stream.
+static void test_qpack_dynamic() {
+    using qpack::Decoder;
+    struct Field { std::string name, value; };
+    std::vector<Field> got;
+    std::string arena, dec_out;
+    auto sink = [&](std::string_view n, std::string_view v, qpack::Origin) { got.push_back({std::string(n), std::string(v)}); return true; };
+    Decoder d;  // our capacity: 4096; the example's encoder sets 220
+    std::uint64_t required = 99;
+    std::size_t consumed = 0;
+    // B.1: a literal with a static name reference, no dynamic table.
+    got.clear();
+    CHECK(d.decode(unhex("0000510b2f696e6465782e68746d6c"), arena, 16384, sink, required) == Decoder::Result::ok);
+    CHECK(required == 0 && got.size() == 1 && got[0].name == ":path" && got[0].value == "/index.html");
+    // B.2's section before its inserts arrive: blocked with Required Insert Count 2.
+    got.clear();
+    CHECK(d.decode(unhex("03811011"), arena, 16384, sink, required) == Decoder::Result::blocked && required == 2);
+    // B.2: capacity 220, two inserts with static name references, cut at an instruction boundary and then completed.
+    const std::string enc = unhex("3fbd01c00f7777772e6578616d706c652e636f6dc10c2f73616d706c652f70617468");
+    CHECK(d.encoder_stream(std::string_view(enc).substr(0, 10), consumed) && consumed == 3 && d.capacity() == 220 && d.insert_count() == 0);
+    CHECK(d.encoder_stream(std::string_view(enc).substr(3), consumed) && consumed == enc.size() - 3);
+    CHECK(d.insert_count() == 2 && d.table_size() == 106 && d.table_entries() == 2);
+    got.clear();
+    CHECK(d.decode(unhex("03811011"), arena, 16384, sink, required) == Decoder::Result::ok && required == 2);
+    CHECK(got.size() == 2 && got[0].name == ":authority" && got[0].value == "www.example.com" && got[1].name == ":path" && got[1].value == "/sample/path");
+    d.section_acknowledged(4, required, dec_out);
+    CHECK(tohex(dec_out) == "84" && d.known_received() == 2);
+    dec_out.clear();
+    // B.3: a speculative insert with a literal name; the decoder increments the insert count.
+    CHECK(d.encoder_stream(unhex("4a637573746f6d2d6b65790c637573746f6d2d76616c7565"), consumed) && d.insert_count() == 3 && d.table_size() == 160);
+    d.insert_count_increment(dec_out);
+    CHECK(tohex(dec_out) == "01" && d.known_received() == 3);
+    dec_out.clear();
+    d.insert_count_increment(dec_out);
+    CHECK(dec_out.empty());  // nothing new to tell
+    // B.4: a duplicate of absolute index 0; the section on stream 8 references the copy and the static table.
+    CHECK(d.encoder_stream(unhex("02"), consumed) && d.insert_count() == 4 && d.table_size() == 217);
+    got.clear();
+    CHECK(d.decode(unhex("050080c181"), arena, 16384, sink, required) == Decoder::Result::ok && required == 4);
+    CHECK(got.size() == 3 && got[0].name == ":authority" && got[0].value == "www.example.com" && got[1].name == ":path" && got[1].value == "/" &&
+          got[2].name == "custom-key" && got[2].value == "custom-value");
+    d.stream_cancelled(8, dec_out);
+    CHECK(tohex(dec_out) == "48");
+    dec_out.clear();
+    // B.5: an insert with a dynamic name reference (relative 1 = absolute 2) evicts the oldest entry.
+    CHECK(d.encoder_stream(unhex("810d637573746f6d2d76616c756532"), consumed) && d.insert_count() == 5 && d.table_size() == 215 && d.table_entries() == 4);
+    got.clear();
+    CHECK(d.decode(unhex("050080"), arena, 16384, sink, required) == Decoder::Result::ok);  // absolute 3 (the duplicate) is still there
+    CHECK(got.size() == 1 && got[0].value == "www.example.com");
+    // A reference to the evicted entry (absolute 0, relative 4 at base 5) is malformed.
+    CHECK(d.decode(unhex("060084"), arena, 16384, sink, required) == Decoder::Result::malformed);
+    // Errors on the encoder stream: a capacity above ours, an entry larger than the capacity.
+    CHECK(d.encoder_stream(unhex("3fe11f"), consumed) && d.capacity() == 4096);  // exactly ours: allowed
+    CHECK(!d.encoder_stream(unhex("3fe21f"), consumed));  // 4096 + 1
+    Decoder small;
+    CHECK(small.encoder_stream(unhex("2a"), consumed) && small.capacity() == 10);  // 10 bytes: nothing fits
+    CHECK(!small.encoder_stream(unhex("c00f7777772e6578616d706c652e636f6d"), consumed));
+    // Blocked-section bookkeeping through the connection is exercised by the integration suite's clients.
+}
+
 #ifdef AGENSIO_HAS_QUIC
 static std::string bytes_of(std::string_view hex) { return unhex(std::string(hex)); }
+
+// The stateless answers of the endpoint (design-http3 6.3, 6.4): reset tokens and Retry
+// tokens from the process secret, the Retry packet, the stateless reset, the INVALID_TOKEN
+// close.
+static void test_quic_stateless() {
+    using namespace agensio::quic;
+    Cid a, b;
+    a.assign(reinterpret_cast<const unsigned char*>("\x01\x02\x03\x04\x05\x06\x07\x08"), 8);
+    b.assign(reinterpret_cast<const unsigned char*>("\x01\x02\x03\x04\x05\x06\x07\x09"), 8);
+    unsigned char t1[16], t2[16], t3[16];
+    reset_token(a, t1);
+    reset_token(a, t2);
+    reset_token(b, t3);
+    CHECK(std::memcmp(t1, t2, 16) == 0);  // computed, never stored: the same id gives the same token
+    CHECK(std::memcmp(t1, t3, 16) != 0);
+    // Retry tokens: bound to the address, the original id and the time.
+    const unsigned char addr[6] = {127, 0, 0, 1, 0x1f, 0x90};
+    const unsigned char other[6] = {127, 0, 0, 1, 0x1f, 0x91};
+    const std::string token = seal_token(addr, sizeof addr, a, 1000);
+    CHECK(token.size() == 12 + 9 + 8 + 16);
+    Cid out;
+    CHECK(open_token(token, addr, sizeof addr, 1005, 10, out));
+    CHECK(out == a);
+    CHECK(!open_token(token, other, sizeof other, 1005, 10, out));  // another port
+    CHECK(!open_token(token, addr, sizeof addr, 1011, 10, out));    // too old
+    CHECK(!open_token(token, addr, sizeof addr, 999, 10, out));     // from the future
+    std::string bad = token;
+    bad[20] ^= 1;
+    CHECK(!open_token(bad, addr, sizeof addr, 1005, 10, out));      // tampered
+    CHECK(!open_token(token.substr(0, 30), addr, sizeof addr, 1005, 10, out));
+    CHECK(seal_token(addr, sizeof addr, a, 1000) != token);         // a fresh nonce each time
+    // The Retry packet: the layout of RFC 9000 17.2.5 and a tag that verifies (RFC 9001 5.8).
+    Cid client_scid, ours;
+    client_scid.assign(reinterpret_cast<const unsigned char*>("\xaa\xbb\xcc\xdd"), 4);
+    ours.assign(reinterpret_cast<const unsigned char*>("\x00\x11\x22\x33\x44\x55\x66\x77"), 8);
+    unsigned char pkt[256];
+    const std::size_t n = build_retry(pkt, sizeof pkt, a, client_scid, ours, token);
+    CHECK(n == 1 + 4 + 1 + 4 + 1 + 8 + token.size() + 16);
+    CHECK((pkt[0] & 0xf0) == 0xf0);
+    CHECK(pkt[4] == 1 && pkt[5] == 4 && std::memcmp(pkt + 6, client_scid.bytes, 4) == 0 && pkt[10] == 8);
+    CHECK(std::memcmp(pkt + 11, ours.bytes, 8) == 0);
+    CHECK(std::memcmp(pkt + 19, token.data(), token.size()) == 0);
+    unsigned char tag[16];
+    CHECK(retry_tag(a, pkt, n - 16, tag) && std::memcmp(tag, pkt + n - 16, 16) == 0);
+    CHECK(build_retry(pkt, 20, a, client_scid, ours, token) == 0);  // no room
+    CHECK(build_retry(pkt, sizeof pkt, a, client_scid, ours, "") == 0);  // a token is required
+    // The stateless reset: a short header's fixed bits, the token last.
+    unsigned char reset[43];
+    build_stateless_reset(reset, sizeof reset, a);
+    CHECK((reset[0] & 0xc0) == 0x40);
+    CHECK(std::memcmp(reset + 43 - 16, t1, 16) == 0);
+    // The INVALID_TOKEN close opens under the Initial keys of the client's destination id.
+    PacketHeader h;
+    h.dcid = ours;
+    h.scid = client_scid;
+    unsigned char close[256];
+    const std::size_t cn = build_invalid_token_close(close, sizeof close, h);
+    CHECK(cn > 0);
+    CHECK((close[0] & 0xf0) == 0xc0);  // an Initial, protected
+    unsigned char cs[32], ss[32];
+    Keys rx;
+    CHECK(initial_secrets(ours, cs, ss) && rx.install(Suite::aes128gcm, ss, 32, false));
+    PacketHeader ph;
+    CHECK(parse_header(close, cn, 8, ph) && ph.long_form && ph.type == LongType::initial);
+    CHECK(ph.dcid == client_scid && ph.scid == ours);
+    unsigned char mask[5];
+    CHECK(rx.mask(close + ph.pn_offset + 4, mask));
+    protect_header(close, ph.pn_offset, 1, true, mask);
+    CHECK((close[0] & 0x03) == 0 && close[ph.pn_offset] == 0);  // packet number 0, one byte
+    std::size_t plain = 0;
+    CHECK(rx.open(0, close, ph.pn_offset + 1, close + ph.pn_offset + 1, cn - ph.pn_offset - 1, plain));
+    Frame f;
+    const unsigned char* fp = close + ph.pn_offset + 1;
+    CHECK(read_frame(fp, fp + plain, f) && f.type == frame::connection_close && f.value == err::invalid_token);
+    CHECK(f.reason == "invalid token");
+}
 
 static void test_quic() {
     using namespace quic;
@@ -3785,8 +3922,10 @@ int main() {
     test_h2_frame_and_settings();
     test_hpack();
     test_qpack();
+    test_qpack_dynamic();
 #ifdef AGENSIO_HAS_QUIC
     test_quic();
+    test_quic_stateless();
 #endif
     test_config_reference();
     test_install();

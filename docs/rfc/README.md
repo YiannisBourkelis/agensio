@@ -12,7 +12,7 @@ Keep this list in step with the code: a new protocol feature adds its RFC here f
 | `rfc9113.txt` | HTTP/2 | `src/http2/` (`docs/design-http2.md`) |
 | `rfc7541.txt` | HPACK: Header Compression for HTTP/2 | `src/http2/hpack.*`, the Huffman and integer codec shared with QPACK (`src/http/field_codec.*`) |
 | `rfc8999.txt` | Version-Independent Properties of QUIC | `src/quic/packet.hpp` (the invariants every version keeps) |
-| `rfc9000.txt` | QUIC: A UDP-Based Multiplexed and Secure Transport | `src/quic/` (`docs/design-http3.md` section 6) |
+| `rfc9000.txt` | QUIC: A UDP-Based Multiplexed and Secure Transport | `src/quic/` (`docs/design-http3.md` section 6); the stateless answers of 8.1.2 and 10.3 in `src/quic/stateless.hpp`, connection ids (5.1) and migration (9) in `src/quic/connection.hpp` |
 | `rfc9001.txt` | Using TLS to Secure QUIC | `src/quic/crypto.*`, `src/quic/tls.*` |
 | `rfc9002.txt` | QUIC Loss Detection and Congestion Control | `src/quic/recovery.*`, `src/quic/ack.hpp` |
 | `rfc9114.txt` | HTTP/3 | `src/http3/` (`docs/design-http3.md` section 7) |

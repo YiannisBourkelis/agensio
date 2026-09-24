@@ -263,7 +263,8 @@ completes inline until the stack overflows; the bench needed the yield budget of
 `async_wait`, `recvmmsg` with GRO, `sendmmsg` with GSO, a bound per wake-up, the
 send batch per worker.
 
-**Steering by connection id.** Our connection ids carry the worker: byte 0 is the
+**Steering by connection id** (built 2026-09-24 as described: `quic::Endpoint::attach_steering`,
+six classic BPF instructions; a 4-worker run spread 64 connections 14, 20, 16 and 14). Our connection ids carry the worker: byte 0 is the
 worker's index, bytes 1 to 7 are random (6.4). A classic BPF program attached with
 `SO_ATTACH_REUSEPORT_CBPF` (no privilege, Linux 4.5+, six instructions: load the first
 byte of the UDP payload, branch on the header form, load the first byte of the
@@ -570,7 +571,10 @@ present at build time and compares the fields, as `fuzz_hpack` does with nghttp2
 
 **Encoder** (our answers), in two steps like HTTP/2's:
 
-- I1: the static table only. `:status` one byte for the fourteen static values,
+- I1 (built 2026-09-24, and the decoder's dynamic table the same day: the encoder stream's
+  four instructions, blocked sections with the 16-stream limit, the decoder stream's
+  acknowledgements, cancellations and increments, appendix B as unit tests): the static
+  table only for our answers. `:status` one byte for the fourteen static values,
   `content-type` one byte for its eleven, `server`, `date` and `content-length` literals
   with a static name reference, the cache entry's validators in the prebuilt tail, the section
   prefix `00 00`. About 40 bytes for the arena's answer, no encoder stream traffic, no
@@ -695,8 +699,10 @@ the same load: 402k to 433k req/s at 2.32 us and about 12,500 cycles per request
 resident. In the arena's own harness (twelve workers pinned to six cores and their
 siblings, twelve load threads elsewhere; one worker serves QUIC in this slice):
 `baseline-h3` 1.77 to 1.81M req/s and `static-h3` 98 to 108k on that core, no failed
-request, against the board's nginx entry at 4.85M and 361k on 31 and 50 cores. One
-worker each on this box (`bench/h3/run.sh`, `h3-20260924-162836.md`): the 1 KB file at
+request, against the board's nginx entry at 4.85M and 361k on 31 and 50 cores; with the
+per-worker sockets and the steering program (6.1, the same day) twelve workers do 3.86 to
+3.89M at 2.6 cores on `baseline-h3`, where the twelve-thread load generator is the limit,
+and 541k at 8.3 cores on `static-h3`, 83 and 92 MiB resident. One worker each on this box (`bench/h3/run.sh`, `h3-20260924-162836.md`): the 1 KB file at
 64 connections and 64 streams agensio 0.90 us per request and 1.03M req/s, nginx 3.27 us
 and 305k, Caddy 26.6 us and 38k; at ten streams 1.05, 2.70 and 26.8 us; the 100 KB file
 at ten streams 24.8, 31.0 and 121 us; the 10 MB stream is nginx's (1.95 ms per response
@@ -733,6 +739,33 @@ until their idle timeout; the batch goes out when full and fills again. The trac
 build loses datagrams on purpose (`AGENSIO_QUIC_DROP=N` every Nth,
 `AGENSIO_QUIC_DROP_TAIL=1` one final packet), which is how both were reproduced; the
 loss proxy of 9.2 stays the test for the client's side of the same paths.
+
+**The steps after the slice, the same day**, each with its A/B (h1 and h2 flat every
+time) and the same profile load (`profile-transport.txt` and the files before it):
+
+- Per-worker sockets with the reuseport program (6.1): twelve workers in the arena's
+  harness 3.86 to 3.89M req/s on `baseline-h3` at 2.6 cores (the load generator is the
+  limit) and 541k on `static-h3` at 8.3 cores.
+- QPACK's dynamic table on the decoder side (7.2): the profile's Huffman share 21 % to
+  7.9 %, 0.61 to 0.56 us per request under the arena load, a request's field section
+  seven bytes with two dynamic references (`profile-qpack.txt`); on the way, the
+  stream-ordering bug of 6.6 (a lower id arriving after a higher one was refused as
+  closed), which also explains the two stalled requests of the first slice: none since.
+- Larger datagrams and fewer packets (6.7): the MTU probe (1,472-byte datagrams) and
+  MAX_STREAMS riding on the next packet. The trace of a client with one request at a
+  time showed the cost: our 1,141-byte answer, then the client's 5-byte ACK, then our
+  31-byte MAX_STREAMS packet, then the client's ACK of that. One-stream row 5.3 to 3.8 us
+  of CPU per request; the 10 MB stream 2.72 to 2.40 ms (nginx 1.95); `static-h3` 541k to
+  618 to 622k req/s. The one-stream row's req/s (52 to 57k for agensio, nginx and the
+  previous build alike; a single connection does a request every 148 us) is h2load's own
+  per-request work in this shape, not the server's.
+- The transport rows of I1b (6.3, 6.4, 6.9, above): no cost on the request path; the
+  profile after them 1.14 to 1.15M req/s on one worker at 0.58 us per request, 2.98
+  instructions per cycle, 16 MB resident. Its top items now: Huffman decoding 8.8 %
+  (what the client still sends as literals), `incoming_stream` 7.4 % (the scan of the 64
+  recently closed ids on every new stream: the next small lever, a bitmap over the
+  recent range), the router 5.0 %, `apply_acked` 4.8 %, the stream's close 4.4 %, the
+  QPACK decode 3.7 %; the kernel 4.5 % of the cycles.
 
 ## 9. Security
 
@@ -888,6 +921,42 @@ answers with memory and file bodies (streamed upstream bodies I1b), request bodi
 pulled from the QUIC buffer; `"h3"` in `protocols` (the `http3.*` keys and `alt-svc`
 I1b); the unit vectors and the curl rows of the integration suite (the interop runner,
 the loss proxy, the fuzzers and the attack suite I2).
+
+Built later the same day: the per-worker sockets with the reuseport program (6.1), the
+QPACK dynamic table on the decoder side (7.2), and the transport rows of I1b as 6.3, 6.4,
+6.7 and 6.9 describe them, with these corrections found on the way. Retry tokens are
+sealed with AES-128-GCM under a key derived per hour from the process secret, bound to
+the address, the original id and the time, ten seconds of validity; an Initial whose
+token does not open is answered with an INVALID_TOKEN close under the client's Initial
+keys (RFC 9000 8.1.2), which costs one key schedule and no state. The stateless reset
+token of an id is HMAC-SHA256 of the id under the same secret, so the token in our
+transport parameters and in every NEW_CONNECTION_ID is computed, never stored, and a
+worker answers a short-header packet for an unknown id with a reset one byte shorter than
+the packet (43 bytes at most), never for a packet under 22 bytes, at most 1,000 per
+second. Key update: the header-protection key does not change across updates (RFC 9001
+6.1), which the first version got wrong (every packet after the update failed to open
+with a garbage packet number); `Keys::install_next` copies it from the current keys.
+The anti-amplification limit is a byte allowance, not a count of full datagrams: a
+client that changed its address sends a small packet, and a check of "one more full
+datagram fits" starved the PATH_CHALLENGE that validates the path; the datagram now
+shrinks to what the allowance leaves (and the challenge goes unpadded when 1,200 bytes
+do not fit, as 8.2.1 allows). A path MTU probe belongs to the path it was sent on: the
+acknowledgement of a probe sent before the address changed no longer raises the new
+path's datagram size. MAX_STREAMS: sent in a datagram of its own after every closed
+stream, it cost a client with one request at a time a packet and an acknowledgement per
+request (the trace of 6.7's timeline showed it); it rides on the next packet sent for
+another reason and goes alone only when the peer's room is under a quarter of the limit.
+The attack suite is `tests/h3-attacks.py` on aioquic (in the devbox image), driving the
+connection by hand over its own sockets: handshake, retry (both modes), invalid-token,
+key-update, key-update-twice (KEY_UPDATE_ERROR; the client, two phases ahead, cannot open
+the close and sees a connection that answers nothing), rebind (answers follow the client
+to its new port after validation), cid-retire (replacements), stateless-reset,
+forged-flood (3,000 forged packets on a live id), rapid-reset (H3_EXCESSIVE_LOAD past
+128 in a second), stream-flood (STREAM_LIMIT_ERROR), control-stream (a second SETTINGS),
+handshake-flood (1,500 Initials in 1.1 s: Retry past the half budget in "auto", every one
+in "always", a real client answered after). The rows that need raw frames or a spoofed
+source (amplification, optimistic ACK, the connection-id and flow-control games) and the
+interop runner stay in I2.
 
 ## 13. Sources
 

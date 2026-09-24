@@ -62,6 +62,8 @@ struct QuicStream {
 
     // ---- send ----
     std::string head;             // the first bytes of the stream (a frame header, a field section)
+    std::uint64_t head_base = 0;  // bytes dropped from the front of head once acknowledged (trim_head streams)
+    bool trim_head = false;       // a long-lived stream whose head grows: acknowledged bytes are dropped
     std::string_view mem;         // a memory body after the head
     const File* file = nullptr;   // or a file region after the head
     std::uint64_t file_offset = 0;
@@ -88,7 +90,8 @@ struct QuicStream {
     bool send_done = false;       // every byte and the FIN acknowledged, or reset acknowledged
 
     bool has_unsent() const noexcept { return !lost.empty() || next < total || (fin && !fin_sent); }
-    std::uint64_t body_len() const noexcept { return total - head.size(); }
+    std::uint64_t body_len() const noexcept { return total - head_base - head.size(); }
+    std::uint64_t head_end() const noexcept { return head_base + head.size(); }
 
     void reset_quic() {
         id = 0;
@@ -104,6 +107,8 @@ struct QuicStream {
         credit_due = reset_received = stop_sending_received = false;
         reset_code = stop_code = 0;
         head.clear();
+        head_base = 0;
+        trim_head = false;
         mem = {};
         file = nullptr;
         file_offset = file_len = 0;

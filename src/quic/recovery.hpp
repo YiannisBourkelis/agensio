@@ -31,7 +31,7 @@ inline constexpr unsigned kPersistentCongestionThreshold = 3;
 // from current state (a MAX_DATA carries the value that is current when it is resent).
 enum class ItemKind : std::uint8_t {
     stream, crypto, handshake_done, new_cid, retire_cid, max_data, max_stream_data, max_streams_bidi, max_streams_uni,
-    reset_stream, stop_sending, ping, path_response, padding
+    reset_stream, stop_sending, ping, path_response, padding, mtu_probe, path_challenge
 };
 
 struct SentItem {
@@ -359,6 +359,16 @@ public:
     unsigned pto_count = 0;
 
     void reset_cwnd() noexcept { cwnd = std::max<std::uint64_t>(std::min<std::uint64_t>(10 * max_datagram, 14720), 2 * max_datagram); }
+    // A new path (RFC 9000 9.4): the estimator starts over.
+    void reset_rtt() noexcept {
+        latest_rtt = {};
+        smoothed_rtt = kInitialRtt;
+        rttvar = kInitialRtt / 2;
+        min_rtt = {};
+        has_rtt = false;
+        ssthresh = ~std::uint64_t{0};
+        recovery_start = {};
+    }
     std::uint64_t minimum_window() const noexcept { return 2 * max_datagram; }
 
 private:

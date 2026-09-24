@@ -1,6 +1,7 @@
 #include "quic/crypto.hpp"
 
 #include <cstring>
+#include <string>
 #include <string_view>
 
 #include <openssl/hmac.h>
@@ -120,6 +121,18 @@ bool Keys::install(Suite s, const unsigned char* secret, std::size_t secret_len,
     return true;
 }
 
+bool Keys::install_next(const Keys& current, bool for_sending) noexcept {
+    unsigned char next[64];
+    if (!current.valid() || !next_secret(current.suite_, current.secret_, current.secret_len_, next)) return false;
+    if (!install(current.suite_, next, current.secret_len_, for_sending)) return false;
+    OPENSSL_cleanse(next, sizeof next);
+    if (EVP_CIPHER_CTX_copy(hp_, current.hp_) != 1) {  // the header protection key stays
+        clear();
+        return false;
+    }
+    return true;
+}
+
 static void make_nonce(const unsigned char iv[12], std::uint64_t pn, unsigned char nonce[12]) noexcept {
     std::memcpy(nonce, iv, 12);
     for (unsigned i = 0; i < 8; ++i) nonce[4 + i] ^= static_cast<unsigned char>(pn >> (8 * (7 - i)));
@@ -209,5 +222,86 @@ bool retry_tag(const Cid& odcid, const unsigned char* retry, std::size_t retry_l
 }
 
 bool random_bytes(unsigned char* out, std::size_t n) noexcept { return RAND_bytes(out, static_cast<int>(n)) == 1; }
+
+const unsigned char* process_secret() noexcept {
+    static const unsigned char* secret = [] {
+        static unsigned char bytes[32];
+        RAND_bytes(bytes, sizeof bytes);
+        return bytes;
+    }();
+    return secret;
+}
+
+void reset_token(const Cid& cid, unsigned char out[16]) noexcept {
+    unsigned char mac[EVP_MAX_MD_SIZE];
+    unsigned len = 0;
+    HMAC(EVP_sha256(), process_secret(), 32, cid.bytes, cid.len, mac, &len);
+    std::memcpy(out, mac, 16);
+}
+
+namespace {
+// The Retry token's key: one HKDF step from the process secret.
+const unsigned char* token_key() noexcept {
+    static const unsigned char* key = [] {
+        static unsigned char bytes[16];
+        expand_label(EVP_sha256(), process_secret(), 32, "retry token", bytes, 16);
+        return bytes;
+    }();
+    return key;
+}
+}  // namespace
+
+std::string seal_token(const unsigned char* address, std::size_t address_len, const Cid& odcid, std::int64_t now) {
+    // nonce(12) || AEAD(time(8) || odcid_len(1) || odcid) with the address as associated data || tag(16)
+    std::string out;
+    unsigned char nonce[12];
+    random_bytes(nonce, sizeof nonce);
+    unsigned char plain[9 + kMaxCidLen];
+    for (unsigned i = 0; i < 8; ++i) plain[i] = static_cast<unsigned char>(static_cast<std::uint64_t>(now) >> (8 * (7 - i)));
+    plain[8] = odcid.len;
+    std::memcpy(plain + 9, odcid.bytes, odcid.len);
+    const int plain_len = 9 + odcid.len;
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return out;
+    unsigned char cipher[9 + kMaxCidLen], tag[16];
+    int l = 0, l2 = 0;
+    if (EVP_EncryptInit_ex(ctx, EVP_aes_128_gcm(), nullptr, token_key(), nonce) == 1 &&
+        EVP_EncryptUpdate(ctx, nullptr, &l, address, static_cast<int>(address_len)) == 1 &&
+        EVP_EncryptUpdate(ctx, cipher, &l, plain, plain_len) == 1 && EVP_EncryptFinal_ex(ctx, cipher + l, &l2) == 1 &&
+        EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_GET_TAG, 16, tag) == 1) {
+        out.append(reinterpret_cast<const char*>(nonce), 12);
+        out.append(reinterpret_cast<const char*>(cipher), static_cast<std::size_t>(plain_len));
+        out.append(reinterpret_cast<const char*>(tag), 16);
+    }
+    EVP_CIPHER_CTX_free(ctx);
+    return out;
+}
+
+bool open_token(std::string_view token, const unsigned char* address, std::size_t address_len, std::int64_t now,
+                std::int64_t max_age, Cid& odcid) noexcept {
+    if (token.size() < 12 + 9 + 16 || token.size() > 12 + 9 + kMaxCidLen + 16) return false;
+    const auto* t = reinterpret_cast<const unsigned char*>(token.data());
+    const std::size_t cipher_len = token.size() - 28;
+    unsigned char plain[9 + kMaxCidLen], tag[16];
+    std::memcpy(tag, t + 12 + cipher_len, 16);
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return false;
+    int l = 0, l2 = 0;
+    const bool ok = EVP_DecryptInit_ex(ctx, EVP_aes_128_gcm(), nullptr, token_key(), t) == 1 &&
+                    EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_TAG, 16, tag) == 1 &&
+                    EVP_DecryptUpdate(ctx, nullptr, &l, address, static_cast<int>(address_len)) == 1 &&
+                    EVP_DecryptUpdate(ctx, plain, &l, t + 12, static_cast<int>(cipher_len)) == 1 &&
+                    EVP_DecryptFinal_ex(ctx, plain + l, &l2) == 1;
+    EVP_CIPHER_CTX_free(ctx);
+    if (!ok) return false;
+    std::uint64_t issued = 0;
+    for (unsigned i = 0; i < 8; ++i) issued = (issued << 8) | plain[i];
+    const std::int64_t age = now - static_cast<std::int64_t>(issued);
+    if (age < 0 || age > max_age) return false;
+    const std::size_t len = plain[8];
+    if (len < 8 || len > kMaxCidLen || 9 + len != cipher_len) return false;
+    odcid.assign(plain + 9, len);
+    return true;
+}
 
 }  // namespace agensio::quic

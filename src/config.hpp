@@ -209,6 +209,9 @@ struct Config {
     struct Http2 {
         std::uint32_t max_concurrent_streams = 128;  // SETTINGS_MAX_CONCURRENT_STREAMS (nginx's default)
     } http2;
+    struct Http3 {
+        std::string retry = "auto";  // Retry before a QUIC handshake: "auto" (under load), "always", "never"
+    } http3;
     // Proxies in front of us whose X-Forwarded-For / X-Forwarded-Proto are believed: the
     // rightmost untrusted address becomes the client (REMOTE_ADDR, access log) and the
     // scheme sets HTTPS / REQUEST_SCHEME for FastCGI. Empty (default): headers are ignored.

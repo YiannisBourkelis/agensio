@@ -1267,9 +1267,12 @@ What it needs from the host: UDP open on the listener's port in the firewall (th
 port alone gives a client nothing to reach), a build with OpenSSL 3.5 or later on Linux
 (`-t` refuses `"h3"` on any other, so a configuration file moves between hosts
 predictably), and, for a browser to switch, an `alt-svc` field (a later step; h2load and
-curl choose `--alpn-list=h3` / `--http3-only` directly). In this phase one worker serves
-every HTTP/3 connection of a listener; the per-worker sockets with connection ids that
-name their worker come next (design 6.1).
+curl choose `--alpn-list=h3` / `--http3-only` directly). With `reuse_port` (Linux, the
+default) every worker has its own UDP socket on the port and a classic BPF program on the
+group delivers each packet to the worker that issued its connection id, so a connection
+never changes worker (design 6.1); where the kernel refuses the program the 4-tuple hash
+routes each connection to one worker instead. Without `reuse_port` one socket on worker 0
+serves the listener.
 
 Every HTTP/3 limit derives from keys you already know:
 
@@ -1280,11 +1283,37 @@ Every HTTP/3 limit derives from keys you already know:
 | the window a request body gets, and the connection's | `max_body_size`, or the site's own | up to 1 MB |
 | the idle timeout (`max_idle_timeout`) and the handshake's bound | `idle_timeout` | 15 s |
 | a body announced but not arriving | `body_timeout` | 60 s |
-| the QPACK dynamic table the client may use (`SETTINGS_QPACK_MAX_TABLE_CAPACITY`) | fixed in this phase | 0 (static table and literals; the dynamic table is phase I3) |
-| the datagram size | fixed until the MTU probe (I1b) | 1,200 bytes |
+| the QPACK dynamic table a client's encoder may fill (`SETTINGS_QPACK_MAX_TABLE_CAPACITY`) and the field sections that may wait for it (`SETTINGS_QPACK_BLOCKED_STREAMS`) | fixed | 4 KB, 16 streams (each holding at most `max_header_size` of encoded section) |
+| the datagram size | 1,200 bytes until one probe after the handshake (a padded PING; acknowledged, the size is the probe's; lost, 1,200 stays); probed again when the client's address changes | 1,472 bytes over IPv4, 1,452 over IPv6, or less if the client announces less |
+| connection ids issued to a client, and accepted from it | fixed (RFC 9000 5.1) | 4 each; a retired id is replaced, at most 64 per connection |
+| handshakes in progress per worker | fixed | 1,024; see `http3.retry` |
+| stream resets a client may send per second (`RESET_STREAM`, `STOP_SENDING`) before the connection closes with `H3_EXCESSIVE_LOAD` | `http2.max_concurrent_streams` | 128 |
+| protocol glitches (flow-control or stream credit that does not raise the limit) before `PROTOCOL_VIOLATION` | fixed | 100 |
+
+The one key of its own:
+
+```toml
+[server]
+http3 = { retry = "auto" }   # "auto" | "always" | "never"
+```
+
+| key | default | meaning |
+|---|---|---|
+| `http3.retry` | `"auto"` | whether a new client must first answer a Retry (RFC 9000 8.1.2): a stateless packet carrying a token bound to the client's address, the original connection id and the time, valid ten seconds, that the client repeats in its next Initial; the round trip proves the address before the server spends a TLS session on it. `"auto"` sends Retry once a worker has 512 handshakes in progress and drops further Initials at 1,024; `"always"` for a host under a handshake flood (every new connection pays one round trip); `"never"` for a benchmark that must not pay it. An Initial whose token does not open is answered with `INVALID_TOKEN` and forgotten |
+
+What else the transport does without a key: a client whose address changes (a NAT
+rebinding) keeps its connection, the new path is validated with a `PATH_CHALLENGE`
+before more than three times the bytes received on it are sent to it, and the previous
+address is used again if the validation fails; a client that updates its keys (RFC 9001
+6) is followed, a second update before the first is acknowledged is `KEY_UPDATE_ERROR`,
+and the server updates its own keys at the AEAD's confidentiality limit; a packet for a
+connection nobody here knows (a client of a server that restarted) is answered with a
+stateless reset (RFC 9000 10.3), smaller than the packet, at most 1,000 per second per
+worker, and the reset token of every id is derived from a per-process secret, so any
+worker can answer for any id.
 
 Requests over HTTP/3 are logged as `"GET /path HTTP/3.0"` and PHP sees
 `SERVER_PROTOCOL=HTTP/3.0`; `agensio ctl status` lists `h3` among a listener's protocols.
 Not yet (the design's I1b to I4): request bodies from unbuffered upstreams over h3,
-Retry and address-validation tokens, stateless reset, key update, path validation and
-migration, path MTU discovery, 0-RTT, ECN, `alt-svc`, several workers.
+0-RTT, ECN, `alt-svc`, endpoints for listeners a reload adds, NEW_TOKEN for later
+connections.

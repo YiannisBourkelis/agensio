@@ -1150,6 +1150,7 @@ void explain_config(const Config& cfg, std::ostream& out) {
     out << "\n[server]\n";
     print_list(out, "protocols", cfg.protocols);
     out << "http2 = { max_concurrent_streams = " << cfg.http2.max_concurrent_streams << " }\n";
+    out << "http3 = { retry = \"" << cfg.http3.retry << "\" }\n";
     for (const auto& site : cfg.sites) {
         out << "\n[[site]]";
         if (!site.app.empty()) out << "  # app = \"" << site.app << "\"";
@@ -1323,6 +1324,14 @@ Config load_config(const fs::path& path) {
         if (auto n = (*h)["max_concurrent_streams"].value<std::int64_t>()) {
             if (*n < 1 || *n > 65535) fail("server.http2.max_concurrent_streams must be between 1 and 65535");
             cfg.http2.max_concurrent_streams = static_cast<std::uint32_t>(*n);
+        }
+    }
+    if (auto h = server["http3"].as_table()) {
+        for (const auto& [k, v] : *h)
+            if (k != "retry") fail("server.http3: unknown key \"" + std::string(k.str()) + "\"");
+        if (auto r = (*h)["retry"].value<std::string>()) {
+            if (*r != "auto" && *r != "always" && *r != "never") fail("server.http3.retry must be \"auto\", \"always\" or \"never\"");
+            cfg.http3.retry = *r;
         }
     }
     for (const auto& text : string_list(server["trusted_proxies"], "server.trusted_proxies")) {

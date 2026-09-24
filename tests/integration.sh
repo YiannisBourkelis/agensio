@@ -694,7 +694,7 @@ print("same" if schema == catalogue else "schema!=catalogue", "same" if accepted
 PYT
 )"
 "$BIN" ctl site-update inst.test --set max_body_size=1MB --yes --reason back --socket $CS > /dev/null
-check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 152 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
+check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 153 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
 check "secrets: the presets catalogue lists each preset's credential files" "/wp-config.php /sites/default/settings.php" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["wordpress"]["secrets"][0], p["drupal"]["secrets"][0])')"
 check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$("$BIN" ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; "$BIN" ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
@@ -1146,6 +1146,20 @@ if [ "$H3" = 1 ] && curl -V 2>/dev/null | grep -q HTTP3; then
   check "$p one connection for three requests" "1 0 0" "$(command curl -sS $H3C -o /dev/null -o /dev/null -o /dev/null -w '%{num_connects} ' $base/ $base/style.css $base/app.html | sed 's/ $//')"
   check "$p access log names the protocol" "yes" "$(sleep 1.2; grep -q '"GET / HTTP/3.0" 200' bench/tmp/access.log && echo yes)"
   check "$p a site kept at h1 offers no h3 on its port" "no" "$(command curl -sS --http3-only -k -m 3 -o /dev/null -w '%{http_version}' https://127.0.0.1:8447/ 2>/dev/null | grep -q 3 && echo yes || echo no)"
+  # Address validation with Retry (RFC 9000 8.1.2): a second instance that always sends it;
+  # curl answers the token and gets its page, and the explain output names the key.
+  sed 's/^protocols = .*/&\nhttp3 = { retry = "always" }/' bench/tmp/h3-probe.toml > bench/tmp/h3-retry.toml
+  "$BIN" -t --explain -c bench/tmp/h3-retry.toml > bench/tmp/h3-retry-explain.out 2>/dev/null
+  check "$p retry = always: explain names it" "yes" "$(grep -q 'http3 = { retry = "always" }' bench/tmp/h3-retry-explain.out && echo yes)"
+  "$BIN" -c bench/tmp/h3-retry.toml > bench/tmp/h3-retry.err 2>&1 & RETRY_PID=$!
+  for _ in $(seq 1 30); do nc -z 127.0.0.1 18443 2>/dev/null && break; sleep 0.1; done
+  check "$p retry = always: a client that answers the Retry gets its page" "3 200 $IDX" "$(command curl -sS --http3-only -k -o /dev/null -w '%{http_version} %{http_code} ' https://127.0.0.1:18443/; command curl -sS --http3-only -k https://127.0.0.1:18443/ | sum)"
+  kill -INT $RETRY_PID 2>/dev/null; wait $RETRY_PID 2>/dev/null
+  # The attack suite (docs/design-http3.md 9.1) where aioquic is installed (the devbox image).
+  if python3 -c 'import aioquic' 2>/dev/null; then
+    check "$p attack suite, retry auto"   "all rows passed" "$(python3 tests/h3-attacks.py "$BIN" --retry auto 2>&1 | tail -1)"
+    check "$p attack suite, retry always" "all rows passed" "$(python3 tests/h3-attacks.py "$BIN" --retry always --rows retry,invalid-token,handshake-flood 2>&1 | tail -1)"
+  fi
 fi
 
 # ---- request bodies (A3): decoded, limited, drained after the response ----

@@ -972,18 +972,35 @@ share lifted into `src/http/` first. The RFCs are in `docs/rfc/`.
       0.61 us of CPU per request (`bench/httparena/profile-h3.sh`), 1.77 to 1.81M and 98
       to 108k on the arena's two rows in its harness, `ab.sh -2 -3` and both suites
       green, three corrections found by the sanitizer and by loopback's own packet loss.
-- [ ] I1b The rest of the transport: per-worker sockets with the worker byte in the
-      connection id and the reuseport program, Retry and tokens, stateless reset,
-      NEW_CONNECTION_ID replacements, key update, path validation on an address change,
-      path MTU discovery, streamed upstream bodies (chunks kept until acknowledged), the
-      body source and budgets lifted to `src/http/`, the write-stall and body timeouts
-      per stream, GOAWAY on reload and shutdown, `alt-svc`, `http3.*` keys.
-- [ ] I1c QPACK's dynamic table: the decoder with the encoder and decoder streams and
-      the rules-once marks (the profile's first item: a client Huffman-codes `:path`,
-      `:authority` and `user-agent` on every request while the capacity is 0), then our
-      dynamic head over the encoder stream.
-- [ ] I2 Conformance and hardening: the QUIC interop runner, the loss proxy, the attack
-      suite, the fuzzers, the security page's HTTP/3 section, `server_status` and `health`.
+- [x] I1b (part, 2026-09-24) Per-worker sockets with the worker byte in the connection id
+      and the classic BPF steering program on the reuseport group (no privilege; the hash
+      as the fallback): twelve workers on the arena rows 3.86 to 3.89M req/s (baseline-h3,
+      2.6 cores, load-generator-bound) and 541k (static-h3, 8.3 cores).
+- [x] I1b (transport, 2026-09-24) Path MTU discovery (one padded PING after the
+      handshake: 1,472-byte datagrams over IPv4, the 10 MB row 2.72 to 2.40 ms per
+      response); MAX_STREAMS riding on the next packet instead of a datagram of its own
+      per closed stream (the one-stream row 5.3 to 3.8 us of CPU per request, the arena's
+      `static-h3` 541k to 618k req/s); Retry with sealed tokens and the half-open budget
+      (`http3.retry`), the INVALID_TOKEN close; stateless reset with tokens from a
+      per-process secret; NEW_CONNECTION_ID issuance and replacement after
+      RETIRE_CONNECTION_ID, the peer's ids bounded; key update both ways; path
+      validation when the client's address changes, the previous path kept for a failed
+      validation; the glitch and reset budgets over QUIC; `tests/h3-attacks.py` (aioquic
+      in the devbox) with thirteen rows of the design's threat table.
+- [ ] I1b (rest) Streamed upstream bodies (chunks kept until acknowledged), the body
+      source and budgets lifted to `src/http/`, the write-stall and body timeouts per
+      stream, GOAWAY on reload and shutdown, `alt-svc`, NEW_TOKEN.
+- [x] I1c (decoder side, 2026-09-24) QPACK's dynamic table: the decoder with the encoder
+      and decoder streams, blocked sections and the rules-once marks; RFC 9204 appendix B
+      as unit tests. On the way: a stream whose id arrived after a higher one was dropped
+      as closed (the QPACK encoder stream, and reordered request streams); fixed.
+- [ ] I1c (encoder side) our dynamic head over the encoder stream (design 7.2's second
+      step: the answer's `server`, `date`, `alt-svc` and `content-type` as one index byte each).
+- [ ] I2 Conformance and hardening: the QUIC interop runner, the loss proxy, the rest of
+      the attack suite (amplification with a spoofed source, optimistic ACK, the
+      connection-id and flow-control games that need raw frames), the fuzzers
+      (`fuzz_quic_packet`, `fuzz_transport_params`, `fuzz_qpack`, `fuzz_h3_frame`,
+      `fuzz_quic_conn`), the security page's HTTP/3 section, `server_status` and `health`.
 - [ ] I3 Performance: the levers of design 8.2 measured against nginx and Caddy, the
       dynamic QPACK head, CUBIC and pacing, memory per connection, the arena's two HTTP/3
       rows subscribed and run.

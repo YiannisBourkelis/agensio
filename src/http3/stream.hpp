@@ -71,6 +71,9 @@ struct H3Stream {
     std::uint64_t frame_remaining = 0;
     std::string section;  // the HEADERS payload as it arrives (bounded by max_header_size)
     bool headers_done = false;
+    bool blocked = false;         // the section waits for the encoder stream (RFC 9204 2.2.1)
+    bool trailers = false;        // the pending section is a trailer section (decoded, discarded)
+    std::uint64_t required = 0;   // the blocked section's Required Insert Count
 
     // Request body: the bytes stay in the QUIC stream's receive buffer until the handler
     // reads them (credit returns as it does).
@@ -111,6 +114,8 @@ struct H3Stream {
         frame_type = frame_remaining = 0;
         section.clear();
         headers_done = false;
+        blocked = trailers = false;
+        required = 0;
         has_body = length_known = body_done = false;
         content_length = body_received = body_limit = discarded = 0;
         pending_buf = nullptr;

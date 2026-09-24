@@ -20,6 +20,10 @@ inline std::size_t hash_len(Suite s) noexcept { return s == Suite::aes256gcm ? 4
 inline std::size_t key_len(Suite s) noexcept { return s == Suite::aes128gcm ? 16 : 32; }
 // TLS 1.3 cipher suite ids (0x1301 AES_128_GCM_SHA256, 0x1302 AES_256_GCM_SHA384, 0x1303 CHACHA20_POLY1305_SHA256).
 bool suite_from_tls_id(std::uint32_t id, Suite& out) noexcept;
+// RFC 9001 6.6: packets one key may protect before an update is due, and forgeries one
+// key may see before the connection closes.
+inline std::uint64_t confidentiality_limit(Suite s) noexcept { return s == Suite::chacha20 ? std::uint64_t{1} << 62 : std::uint64_t{1} << 23; }
+inline std::uint64_t integrity_limit(Suite s) noexcept { return s == Suite::chacha20 ? std::uint64_t{1} << 36 : std::uint64_t{1} << 52; }
 
 // The keys of one level in one direction.
 class Keys {
@@ -34,6 +38,9 @@ public:
     // Derives key, iv and the header-protection key from the traffic secret and prepares
     // the cipher contexts. `for_sending` selects the encrypting direction.
     bool install(Suite s, const unsigned char* secret, std::size_t secret_len, bool for_sending) noexcept;
+    // The next generation of `current` (RFC 9001 6.1): the secret advanced with "quic ku",
+    // new key and iv, the header-protection key kept (it never changes across updates).
+    bool install_next(const Keys& current, bool for_sending) noexcept;
     bool valid() const noexcept { return aead_ != nullptr; }
     void clear() noexcept;
     Suite suite() const noexcept { return suite_; }
@@ -77,5 +84,18 @@ inline void protect_header(unsigned char* pkt, std::size_t pn_offset, unsigned p
     for (unsigned i = 0; i < pn_len; ++i) pkt[pn_offset + i] ^= mask[1 + i];
 }
 bool random_bytes(unsigned char* out, std::size_t n) noexcept;
+
+// A 32-byte secret made once per process: the stateless reset tokens of our connection
+// ids and the Retry tokens derive from it (RFC 9000 10.3.2, 8.1.4), so any worker can
+// answer for any id and a restart forgets nothing it needs.
+const unsigned char* process_secret() noexcept;
+// The stateless reset token of one of our ids (RFC 9000 10.3.2): HMAC-SHA256 truncated.
+void reset_token(const Cid& cid, unsigned char out[16]) noexcept;
+// A Retry token (RFC 9000 8.1.2): the client's address, the original destination id and
+// the time, sealed with a key from the process secret; `open_token` checks it against
+// the address that presents it and its age (seconds).
+std::string seal_token(const unsigned char* address, std::size_t address_len, const Cid& odcid, std::int64_t now);
+bool open_token(std::string_view token, const unsigned char* address, std::size_t address_len, std::int64_t now,
+                std::int64_t max_age, Cid& odcid) noexcept;
 
 }  // namespace agensio::quic
