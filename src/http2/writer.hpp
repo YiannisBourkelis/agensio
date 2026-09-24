@@ -54,8 +54,14 @@ public:
     static constexpr std::size_t kFramesPerChunk = 4;      // file frames read with one preadv
     static constexpr std::size_t kSlot = kFrameHeaderSize + kPayload;
     static constexpr std::size_t kQuantum = kFramesPerChunk * kPayload;  // body bytes per stream per cycle
-    static constexpr std::size_t kMaxPieces = 64;          // scatter entries per write
+    static constexpr std::size_t kMaxPieces = 256;         // scatter entries per cycle
     static constexpr std::size_t kMaxCycleBytes = 256 * 1024;
+    // A cycle of many small pieces (the answers of many streams to one read) is copied into
+    // one buffer and written once: asio hands the kernel at most 64 entries per call, so a
+    // scatter list of tiny answers costs a syscall per 21 of them, and the copy is cheaper
+    // (2026-09-24, the arena's baseline-h2: one sendmsg per 2.4 answers before batching).
+    static constexpr std::size_t kCoalescePieces = 16;
+    static constexpr std::size_t kCoalesceBytes = 64 * 1024;
     static constexpr unsigned kPullBudget = 8;             // StreamBody reads in flight per connection
     static constexpr unsigned kInlineBudget = 8;           // cycles completed inline before yielding to the loop
 
@@ -115,12 +121,29 @@ public:
     // that enqueues a frame can never start a cycle inside the cycle that is calling it
     // (the recursion the sanitizer found under h2load as a stack overflow).
     void schedule() {
-        if (writing_ || building_ || in_completion_) {
+        if (holding_ || writing_ || building_ || in_completion_) {
             again_ = true;
             return;
         }
         cycle();
     }
+    // While held, enqueued streams and control frames wait; release starts the one cycle
+    // that carries them all. The connection holds the writer across the frames of one
+    // read, so a hundred answers to a hundred HEADERS frames leave in one write instead
+    // of one every few streams (the write completes inline on a fast socket, and the
+    // next cycle used to start with whatever was ready by then).
+    void hold() noexcept { holding_ = true; }
+    void release() {
+        holding_ = false;
+        if (again_) schedule();
+    }
+    struct Hold {
+        Http2Writer& w;
+        explicit Hold(Http2Writer& writer) noexcept : w(writer) { w.hold(); }
+        ~Hold() { w.release(); }
+        Hold(const Hold&) = delete;
+        Hold& operator=(const Hold&) = delete;
+    };
     // The peer's connection-level window and frame size (SETTINGS, WINDOW_UPDATE).
     std::int32_t conn_window() const noexcept { return conn_window_; }
     void set_conn_window(std::int32_t w) noexcept { conn_window_ = w; }
@@ -215,6 +238,17 @@ private:
                 asio::async_write(socket_, asio::buffer(out_), done);
             }
         } else {
+            if (pieces_.size() > kCoalescePieces) {
+                std::size_t total = 0;
+                for (const asio::const_buffer& b : pieces_) total += b.size();
+                if (total <= kCoalesceBytes) {
+                    out_.clear();
+                    for (const asio::const_buffer& b : pieces_)
+                        out_.insert(out_.end(), static_cast<const char*>(b.data()), static_cast<const char*>(b.data()) + b.size());
+                    asio::async_write(socket_, asio::buffer(out_), done);
+                    return;
+                }
+            }
             asio::async_write(socket_, pieces_, done);
         }
     }
@@ -537,6 +571,7 @@ private:
     unsigned pulls_ = 0;
     unsigned inline_runs_ = 0;
     bool writing_ = false;
+    bool holding_ = false;        // the connection is inside a read's frame loop: cycles wait for release()
     bool building_ = false;       // a cycle is being assembled
     bool in_completion_ = false;  // on_written is running the owner's callbacks
     bool again_ = false;

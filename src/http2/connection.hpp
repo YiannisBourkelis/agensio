@@ -41,6 +41,7 @@ namespace agensio::h2 {
 template <class Socket>
 class Http2Connection : public std::enable_shared_from_this<Http2Connection<Socket>>, private BodyOwner {
 public:
+    using Writer = Http2Writer<Socket, Http2Connection>;
     static constexpr std::uint32_t kMaxFramePayload = 16384;         // what we advertise and accept
     static constexpr std::uint32_t kHeaderTableSize = 4096;          // SETTINGS_HEADER_TABLE_SIZE
     static constexpr std::uint32_t kConnectionWindow = 1u << 20;     // what we let the peer send in total
@@ -286,16 +287,21 @@ private:
         // A connection error or a graceful close decided inside a handler ends the loop: the
         // lingering close owns the buffer and the reads from then on (the sanitizer caught the
         // old loop reading a header past the buffer after in_len_ had been reset under it).
-        while (!closed_ && !closing_after_write_ && !linger_ && in_len_ - pos >= kFrameHeaderSize) {
-            const auto* p = reinterpret_cast<const unsigned char*>(in_.data() + pos);  // NOLINT: bytes
-            const FrameHeader h = read_frame_header(p);
-            if (h.length > kMaxFramePayload) {
-                connection_error(ErrorCode::frame_size_error, "frame larger than SETTINGS_MAX_FRAME_SIZE");
-                return;
+        // The writer is held for the loop: every answer, window update and control frame the
+        // frames of this read produce goes out in one cycle when the hold ends.
+        {
+            const typename Writer::Hold hold(writer_);  // released at the closing brace, before the next read
+            while (!closed_ && !closing_after_write_ && !linger_ && in_len_ - pos >= kFrameHeaderSize) {
+                const auto* p = reinterpret_cast<const unsigned char*>(in_.data() + pos);  // NOLINT: bytes
+                const FrameHeader h = read_frame_header(p);
+                if (h.length > kMaxFramePayload) {
+                    connection_error(ErrorCode::frame_size_error, "frame larger than SETTINGS_MAX_FRAME_SIZE");
+                    return;
+                }
+                if (in_len_ - pos < kFrameHeaderSize + h.length) break;  // wait for the rest
+                handle_frame(h, p + kFrameHeaderSize);
+                pos += kFrameHeaderSize + h.length;
             }
-            if (in_len_ - pos < kFrameHeaderSize + h.length) break;  // wait for the rest
-            handle_frame(h, p + kFrameHeaderSize);
-            pos += kFrameHeaderSize + h.length;
         }
         if (closed_ || closing_after_write_ || linger_) return;
         if (pos > 0) {
@@ -481,10 +487,16 @@ private:
         H2Stream* existing = find(h.stream_id);
         if (existing) {
             // A second HEADERS on an open stream is the trailers: only with END_STREAM, only
-            // after a body was announced.
-            if ((existing->state != StreamState::open && existing->state != StreamState::half_closed_local) || !(h.flags & flag::end_stream)) {
-                stream_error(*existing, ErrorCode::protocol_error, "HEADERS on a stream that is not expecting trailers");
+            // after a body was announced. On a stream the client already ended it is a
+            // STREAM_CLOSED stream error (RFC 9113 5.1), not PROTOCOL_ERROR: with the answers
+            // of a read written after its frames, the stream is still there when the second
+            // frame arrives in the same read (h2spec 5.1/6, seen once the writer batched).
+            if (existing->state == StreamState::half_closed_remote || existing->state == StreamState::closed) {
+                stream_error(*existing, ErrorCode::stream_closed, "HEADERS on a stream the client has ended");
                 block_kind_ = BlockKind::discard;  // the block still has to be decoded to keep HPACK in step
+            } else if (!(h.flags & flag::end_stream)) {
+                stream_error(*existing, ErrorCode::protocol_error, "HEADERS on a stream that is not expecting trailers");
+                block_kind_ = BlockKind::discard;
             } else {
                 block_kind_ = BlockKind::trailers;
             }

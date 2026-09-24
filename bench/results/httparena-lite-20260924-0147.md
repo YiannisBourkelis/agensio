@@ -139,6 +139,52 @@ twentieth of the memory. Against h2o: ahead or level on five of its six rows, be
 baseline-h2. Raw output in `raw/httparena-lite-20260924-0147/*-handler-rows.log` and
 `validate-agensio-handler.log`.
 
+## baseline-h2 against h2o: the cause
+
+Pinned like the SMT section (server on six cores plus siblings, load generators on the other
+six): agensio 3,263,453 req/s at 1124 % against h2o 11,058,796 at 754 %, and h2o is then
+load-bound (7.5 of its 12 threads busy), so its true cost per request is at most 0.68 µs of
+thread time against our 3.4. h2c for agensio at the same pinning: 3,649,724 at 1204 %, so
+TLS is not where the time goes. One worker under h2load 64 x 100 (`bench/h2/profile.sh`,
+raw in `raw/.../profile-baseline-h2-agensio.txt`): 583k req/s on h2c, 516k over TLS.
+
+1. **Writes.** `strace -c` for 3 s under load: 473,309 `sendmsg` against 4,739 `recvfrom`
+   for about 1.1M requests, one send per 2.4 answers. A read brings some 240 HEADERS
+   frames, and the answer to each is enqueued as soon as the handler returns; the write
+   completes inline on loopback, so the next cycle starts with whatever became ready in
+   between, two or three streams. h2o answers every frame of a read into its buffer and
+   writes once. `perf stat` puts 61 % of our cycles in the kernel (13.2G kernel against
+   8.5G user over 4 s): the send path, at 0.42 calls per request, is the largest single cost.
+2. **Bytes.** `nghttp -v`: our HEADERS block is 48 bytes on every answer (server and date
+   as literals, 33 of them, plus content-type and content-length literals), h2o's is 18 on
+   the first answer and 7 after, because it encodes its fields into the dynamic table and
+   omits Date. On the wire an answer is 67 bytes from agensio and 26 from h2o: segments,
+   TLS records and the client's own parsing scale with it.
+3. **User time**, 3.7k cycles per request, is diffuse: HPACK decoding of the request with
+   Huffman 7 to 8 %, two clock reads per request 3.5 %, encoding the text head
+   (`static_name_index`, `build_head`, `huffman_encode`) about 5 %, target normalisation
+   and routing 2.5 %.
+
+The plan that follows from it: batch the answers of one read into one write cycle (the
+frame loop enqueues, the cycle starts when the loop ends or the scatter budget fills; no
+change for a connection with one stream), encode server, date and content-type through the
+HPACK dynamic table (Date stays: RFC 9110 requires it of an origin server; it costs one byte
+a response and one insertion a second), one clock read per read, and a prebuilt head for
+the handler. Then measure again.
+
+## After write batching (the first of the two fixes)
+
+The writer is held across the frame loop of one read and a cycle of many small pieces is
+copied into one buffer (`Writer::Hold`, `kCoalescePieces`; design 6.6). Same one-worker
+profile: 67,984 sends for 7.8M requests, one per 57 answers against one per 2.4; 1.30M
+req/s on h2c during the syscall count (1.50M in the profile run, from 583k) and 1.61M over
+TLS (from 516k). Pinned like the rows above: agensio baseline-h2 7,549,133 req/s at 927 %
+against 3,263,453 at 1124 % before, 1.23 µs per request against 3.4; baseline-h2c
+8,099,499 at 950 %. h2o's 11,058,796 at 754 % stays the bar, and is load-bound. The A/B
+against alpha.20 (`ab-20260924-011552.md`): the multiplexed rows h2c and h2 at ten
+streams 0.347 and 0.348 of the base CPU per request, the single-stream rows 0.989 and
+1.008, the HTTP/1 rows 0.951 to 1.005. Next: the dynamic-table head.
+
 Not run: the two HTTP/3 rows, which need phase I.
 
 Commands (`bench/httparena/local.sh` wraps them in the Docker-in-Docker container):

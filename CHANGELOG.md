@@ -2,6 +2,21 @@
 
 ## 0.1.0-alpha.21 (unreleased)
 
+- **HTTP/2 answers of one read go out in one write.** The writer is held while the
+  connection runs the frames of a read, so the answers to a hundred HEADERS frames leave
+  in one cycle instead of one every two or three streams (the write completed inline and
+  the next cycle started with whatever was ready), and a cycle of many small pieces is
+  copied into one buffer, since asio hands the kernel at most 64 scatter entries per
+  call. Measured on the arena's HTTP/2 baseline, one worker: sends per answer from one in
+  2.4 to one in 57, 583k to 1.50M req/s on h2c and 516k to 1.61M over TLS; pinned to six
+  cores plus siblings, 3.26M to 7.55M req/s at less CPU. The A/B against alpha.20 puts the
+  ten-stream rows at 0.35 of the base CPU per request and every single-stream and HTTP/1
+  row inside the noise band.
+- **Fixed: a HEADERS frame on a stream the client had already ended was reset with
+  PROTOCOL_ERROR** where RFC 9113 5.1 requires STREAM_CLOSED. Rarely visible before, since
+  the answer had usually gone out inline and the frame then met a closed stream; with the
+  answers of a read written after its frames, h2spec 5.1/6 caught it under the sanitizer
+  build.
 - **`protocols` per site**: a `[[site]]` may name its own list (`["h1"]` keeps a TLS port at
   HTTP/1.1 while another offers h2; `["h2c", "h1"]` accepts the preface on one plain
   listener), inherited from `[server]` otherwise; sites sharing an address must agree.

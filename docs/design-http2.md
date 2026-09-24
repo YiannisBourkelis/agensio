@@ -321,9 +321,11 @@ RFC 9218 urgency as the sort key in G4), gives each up to one quantum (16 KB) wi
 send window, the connection window and the peer's `SETTINGS_MAX_FRAME_SIZE`, and
 assembles:
 
-- on plain sockets, one `writev` over up to 64 pieces: frame headers from a per-cycle
+- on plain sockets, one `writev` over up to 256 pieces: frame headers from a per-cycle
   array of 9-byte headers, payloads as views into cache entries or the stream's chunk,
-  nothing copied;
+  nothing copied; a cycle of more than 16 pieces that total under 64 KB (the tiny answers
+  of many streams) is copied into one buffer instead, because asio hands the kernel at
+  most 64 entries per call and the copy is cheaper than a syscall per 21 answers;
 - a file body as a pre-framed block: up to four frames read with one `preadv` straight
   into the payload slots of the stream's chunk, the headers written in place, one
   contiguous piece and no copy (built in G0; `sendfile` per frame on plain sockets stays
@@ -333,6 +335,15 @@ assembles:
   each piece an integral number of records, and only a cycle with separate header pieces
   (memory and source bodies) is coalesced first, so a header never becomes a record of
   its own.
+
+The cycle is held while the connection runs the frame loop of one read (`Writer::Hold`,
+2026-09-24): every answer, window update and control frame the frames of that read
+produce leaves in one cycle when the loop ends. Before, a cycle started the moment one
+stream was ready, the write completed inline on a fast socket, and the next cycle began
+with whatever two or three streams were ready by then: the arena's baseline-h2 profile
+counted one `sendmsg` per 2.4 answers, 61 % of the cycles in the kernel. A connection
+with one stream per read sees no difference, and nothing waits past the loop iteration
+that produced it.
 
 A `StreamBody` (FastCGI, proxy, CGI) is pulled one chunk at a time per stream and at most
 `kPullBudget` (8) streams pull at once per connection, so an origin is never read faster
@@ -422,8 +433,9 @@ rather than assumed; the published comparisons put HTTP/2 within 10 % of HTTP/1 
 2. No allocation or second copy per header: decode straight into the arena, views out.
 3. Prebuilt HPACK blocks per cache entry and per error page; `server` + `date` once a
    second per worker; the head is copied, not encoded (6.2).
-4. One syscall per write cycle across streams: `writev` of up to 32 pieces on plain
-   sockets, full records on TLS (6.6).
+4. One syscall per write cycle across streams: `writev` of up to 256 pieces on plain
+   sockets, full records on TLS, the cycle held across a read's frame loop and tiny
+   answers coalesced (6.6).
 5. DATA payloads sized to the TLS record, so framing never splits a record (G0: the
    10 MB TLS stream went from 2864 to 2017 us per request, nginx's 2771 overtaken).
 6. Files read with one `preadv` into pre-framed chunks, no copy (G0); `sendfile` per frame

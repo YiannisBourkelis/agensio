@@ -1,0 +1,66 @@
+=== agensio / baseline-h2 / 512c (tool=h2load) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+starting benchmark...
+2.
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+finished in 5.13s, 3312282.80 req/s, 211.65MB/s
+requests: 16561414 total, 16612614 started, 16561414 done, 16561414 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 16561414 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 1.03GB (1109649042) total, 758.12MB (794947872) headers (space savings 48.39%), 15.79MB (16561414) data
+                     min         max         mean         sd        +/- sd
+time for request:       48us    140.68ms      9.47ms      5.74ms    90.15%
+time for connect:     4.42ms    135.26ms     64.91ms     24.73ms    74.02%
+time to 1st byte:    30.19ms    153.79ms    100.36ms     27.96ms    71.88%
+req/s           :    5268.45     7201.62     6460.70      443.81    77.54%
+[info] CPU 1004.0% | Mem 71MiB
+
+[run 2/3]
+starting benchmark...
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+finished in 5.14s, 3354830.00 req/s, 214.37MB/s
+requests: 16774150 total, 16825350 started, 16774150 done, 16774150 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 16774150 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 1.05GB (1123902354) total, 767.86MB (805159200) headers (space savings 48.39%), 16.00MB (16774150) data
+                     min         max         mean         sd        +/- sd
+time for request:       43us    163.57ms      9.14ms      4.86ms    87.38%
+time for connect:     3.52ms     41.99ms     17.80ms      7.92ms    66.21%
+time to 1st byte:    24.69ms     59.73ms     41.37ms      7.03ms    65.23%
+req/s           :    4934.97     7723.85     6544.29      729.12    66.21%
+[info] CPU 1123.6% | Mem 72MiB
+
+[run 3/3]
+starting benchmark...
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+finished in 5.15s, 3334637.40 req/s, 213.08MB/s
+requests: 16673187 total, 16724387 started, 16673187 done, 16673187 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 16673187 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 1.04GB (1117137833) total, 763.24MB (800312976) headers (space savings 48.39%), 15.90MB (16673187) data
+                     min         max         mean         sd        +/- sd
+time for request:       37us    153.34ms      9.20ms      4.52ms    85.95%
+time for connect:     3.55ms     50.26ms     15.63ms      7.08ms    65.04%
+time to 1st byte:    24.77ms     65.57ms     35.87ms      7.29ms    69.73%
+req/s           :    5532.63     7489.66     6503.10      432.59    69.34%
+[info] CPU 1017.5% | Mem 74MiB
+
+=== Best: 3263453 req/s (CPU: 1123.6%, Mem: 72MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+[info] done
+[info] restoring loopback MTU to 65536

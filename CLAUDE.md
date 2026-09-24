@@ -757,8 +757,15 @@ privilege drop, fuzz targets for every new parser (chunked, FastCGI), h1 complia
   loopback's connection churn); pipelined 5.78M with the handler alone (h2o 5.65M, nginx
   4.65M), json-tls 1.22M (nginx 1.07M, h2o 0.87M), baseline-h2 3.53M (nginx 3.00M), where h2o
   does 12.4M at 25 bytes per response on the wire against our 64 and 0.75 µs per request
-  against our 3.3: the small-response HTTP/2 path is the open item, to be profiled before
-  it is changed.
+  against our 3.3. Profiled (`bench/h2/profile.sh`, same file, cause section): one
+  `sendmsg` per 2.4 answers because a cycle starts as soon as one stream is ready and the
+  write completes inline, 61 % of cycles in the kernel; a 48-byte HEADERS block per answer
+  (server and date literals) against h2o's 7 (dynamic table). Write batching done
+  (`Writer::Hold` across a read's frame loop, small cycles coalesced into one buffer,
+  design 6.6): one send per 57 answers, pinned baseline-h2 3.26M to 7.55M req/s at 927 %
+  (h2o 11.06M at 754 %, load-bound), the ten-stream A/B rows at 0.35 of alpha.20's CPU
+  per request, single-stream and HTTP/1 rows flat (`ab-20260924-011552.md`). Next: the
+  dynamic-table head for server, date and content-type, and one clock read per read.
 - Verify correctness before speed: responses must be byte-identical in body and carry
   `Content-Length`, `Content-Type`, `Date`, `Last-Modified`, `ETag`.
 
