@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.22 (unreleased)
+## 0.1.0-alpha.22 (2026-09-25)
 
 - **HTTP/3 over our own QUIC transport, the first slice** (phase I, `docs/design-http3.md`,
   accepted 2026-09-24): `src/quic/` (packets, frames, transport parameters, the keys and
