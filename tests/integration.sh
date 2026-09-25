@@ -1155,6 +1155,13 @@ if [ "$H3" = 1 ] && curl -V 2>/dev/null | grep -q HTTP3; then
   for _ in $(seq 1 30); do nc -z 127.0.0.1 18443 2>/dev/null && break; sleep 0.1; done
   check "$p retry = always: a client that answers the Retry gets its page" "3 200 $IDX" "$(command curl -sS --http3-only -k -o /dev/null -w '%{http_version} %{http_code} ' https://127.0.0.1:18443/; command curl -sS --http3-only -k https://127.0.0.1:18443/ | sum)"
   kill -INT $RETRY_PID 2>/dev/null; wait $RETRY_PID 2>/dev/null
+  # The loss proxy (design 9.2): 3 % of the datagrams dropped and 5 % delayed up to 3 ms in
+  # both directions; the handshake, a 1 KB page and the 10 MB file must still complete.
+  python3 tests/quic-lossy.py 18444 8443 --loss 0.03 --reorder 0.05 --delay-ms 3 & LOSSY_PID=$!
+  sleep 0.3
+  check "$p through 3 % loss: index" "3 200" "$(command curl -sS --http3-only -k -m 30 -o /dev/null -w '%{http_version} %{http_code}' https://127.0.0.1:18444/)"
+  check "$p through 3 % loss: the 10 MB file" "$BIG" "$(command curl -sS --http3-only -k -m 120 https://127.0.0.1:18444/big.bin | sum)"
+  kill $LOSSY_PID 2>/dev/null; wait $LOSSY_PID 2>/dev/null  # SIGTERM: a background job of a script has SIGINT ignored, and Python keeps that
   # The attack suite (docs/design-http3.md 9.1) where aioquic is installed (the devbox image).
   if python3 -c 'import aioquic' 2>/dev/null; then
     check "$p attack suite, retry auto"   "all rows passed" "$(python3 tests/h3-attacks.py "$BIN" --retry auto 2>&1 | tail -1)"

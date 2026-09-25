@@ -1,0 +1,80 @@
+### agensio (one worker, the arena handler)
+== agensio: syscalls (3 s under load)
+% time     seconds  usecs/call     calls    errors syscall
+------ ----------- ----------- --------- --------- ----------------
+ 54.23    0.165534          14     11227           sendmmsg
+ 42.61    0.130083           0    146101           pread64
+  2.02    0.006173           1      4899       104 recvmmsg
+  0.58    0.001776           0      4669           epoll_ctl
+  0.52    0.001573           0      4669           epoll_wait
+100.00    0.305263           1    171793       104 total
+finished in 6.00s, 360.83 req/s, 3.54GB/s
+requests: 2165 total, 2181 started, 2165 done, 2165 succeeded, 0 failed, 0 errored, 0 timeout
+UDP datagram: 139085 sent, 15881706 received
+== agensio: CPU per request, cycles and profile
+        7635919766      cycles:u                                                              
+        3124334756      cycles:k                                                              
+       24824738816      instructions:u                   #    3.25  insn per cycle            
+    45.93%  libcrypto.so.3  
+    29.83%  [unknown]       
+                       0xffffffffa6123ce4
+                       0xffffffffa6124430
+                       0xffffffffa6241f8a
+                       0xffffffffa6242e48
+                       0xffffffffa6afe467
+                       0xffffffffa6c0012f
+    10.49%  [.] agensio::quic::QuicConnection<agensio::h3::Http3Connection>::build_packet(agensio::quic::Space, unsigned char*, unsigned long, std::chrono::time
+     7.20%  [k] 0xffffffffa6aa5bdb
+     4.43%  [k] 0xffffffffa6496ff7
+     4.34%  [k] 0xffffffffa6496907
+     2.94%  [.] EVP_CIPHER_CTX_ctrl
+     2.58%  [.] agensio::quic::SendBatch::commit(unsigned long, sockaddr_storage const&, unsigned int)
+     2.29%  [.] __memmove_avx512_unaligned_erms
+     1.88%  [.] agensio::quic::QuicConnection<agensio::h3::Http3Connection>::produce(agensio::quic::SendBatch&, std::chrono::time_point<std::chrono::_V2::steady
+     1.76%  [.] agensio::quic::Recovery::on_ack_received(agensio::quic::Space, agensio::quic::Frame const&, std::chrono::time_point<std::chrono::_V2::steady_clo
+     1.07%  [.] EVP_EncryptUpdate
+     0.79%  [.] agensio::quic::Keys::seal(unsigned long, unsigned char*, unsigned long, unsigned long)
+     0.78%  [.] agensio::quic::QuicConnection<agensio::h3::Http3Connection>::apply_acked()
+     0.77%  [.] agensio::quic::RangeSet::add(unsigned long, unsigned long)
+     0.66%  [.] agensio::quic::SentItem& std::vector<agensio::quic::SentItem, std::allocator<agensio::quic::SentItem> >::emplace_back<agensio::quic::SentItem>(a
+     0.61%  [.] 0x0000000000477f0e
+     0.59%  [.] EVP_EncryptFinal_ex
+     0.51%  [.] 0x0000000000478045
+     0.47%  [.] agensio::quic::QuicConnection<agensio::h3::Http3Connection>::process_frames(agensio::quic::Space, unsigned char const*, unsigned long, std::chro
+     0.39%  [.] 0x000000000047570f
+     0.36%  [.] agensio::quic::Keys::mask(unsigned char const*, unsigned char*)
+     0.36%  [.] agensio::quic::write_varint_fixed(unsigned char*, unsigned long, unsigned int)
+     0.35%  [.] 0x000000000047806b
+     0.35%  [.] EVP_CIPHER_CTX_get_iv_length
+     0.33%  [.] EVP_CipherInit_ex
+     0.25%  [.] 0x00000000004780c1
+     0.23%  [.] 0x00000000002a12b6
+     0.22%  [.] 0x000000000029d27f
+     0.22%  [.] EVP_CIPHER_CTX_get_iv_length@plt
+     0.20%  [.] 0x000000000010e945
+     0.20%  [.] 0x000000000010e943
+     0.19%  [.] EVP_EncryptInit_ex
+     0.19%  [.] 0x0000000000341970
+     0.19%  [.] 0x000000000029d39e
+     0.19%  [.] __memcmp_evex_movbe
+     0.19%  [.] agensio::quic::Recovery::detect_lost(agensio::quic::Space, std::chrono::time_point<std::chrono::_V2::steady_clock, std::chrono::duration<long, s
+     0.19%  [.] 0x00000000002a0ff3
+     0.17%  [.] 0x000000000029e1a8
+     0.17%  [.] OSSL_PARAM_construct_octet_string
+     0.17%  [.] 0x000000000029d7db
+     0.16%  [.] 0x000000000029d415
+     0.16%  [.] 0x00000000002a1274
+     0.16%  [.] 0x000000000029d286
+     0.16%  [.] 0x000000000029d390
+     0.16%  [.] 0x000000000029db14
+     0.16%  [.] 0x000000000029d826
+     0.15%  [.] 0x000000000029d81f
+     0.15%  [.] 0x00000000003419fc
+     0.15%  [.] 0x00000000002a0eba
+     0.15%  [.] 0x000000000029d82d
+     0.15%  [.] 0x000000000010e948
+finished in 8.00s, 416.25 req/s, 4.08GB/s
+requests: 3330 total, 3346 started, 3330 done, 3330 succeeded, 0 failed, 0 errored, 0 timeout
+UDP datagram: 211211 sent, 24397204 received
+server CPU: 2390.91 us per request over the 8 s run (800 ticks, 3346 requests)
+RSS: 19308 KB

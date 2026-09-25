@@ -18,6 +18,7 @@ import subprocess
 import sys
 import time
 
+from aioquic.buffer import encode_uint_var
 from aioquic.h3 import connection as h3c
 from aioquic.h3.events import DataReceived, HeadersReceived
 from aioquic.quic import events as qe
@@ -153,6 +154,23 @@ class Client:
             self.pump(0.3)
         finally:
             self.sock.close()
+
+    def inject(self, frames):
+        """Writes raw frames into the next packet (frames: (type, payload bytes) pairs), by
+        riding on aioquic's PING writer, which runs inside an open packet."""
+        quic = self.quic
+        original = quic._write_ping_frame
+
+        def patched(builder, uids=[], comment=""):
+            original(builder, uids, comment)
+            for ftype, payload in frames:
+                buf = builder.start_frame(ftype, capacity=1 + len(payload))
+                buf.push_bytes(payload)
+            quic._write_ping_frame = original
+
+        quic._write_ping_frame = patched
+        quic.send_ping(7)
+        self.send_all()
 
     def rebind(self):
         """A new socket, a new port: the NAT rebinding of RFC 9000 9.3."""
@@ -435,6 +453,103 @@ def row_handshake_flood(args):
     return True, "%d Initials in %.1fs: %d Retry, %d other answers; a real client gets 200" % (sent, took, retries, others)
 
 
+def varint(v):
+    return encode_uint_var(v)
+
+
+def row_expect_close(name, frames, code, what):
+    """A row that injects frames and expects the connection closed with `code`."""
+    c = Client()
+    if not c.connect():
+        return False, "handshake did not complete"
+    c.get("/")
+    c.inject(frames)
+    c.pump(2.0, lambda: c.terminated is not None)
+    t = c.terminated
+    c.close()
+    if t is None:
+        return False, "%s did not close the connection" % what
+    if t.error_code != code:
+        return False, "closed with 0x%x, expected 0x%x" % (t.error_code, code)
+    return True, "0x%x for %s" % (code, what)
+
+
+def row_glitches(args):
+    # 101 MAX_DATA frames that raise nothing: the glitch budget is 100 (design 9.1).
+    return row_expect_close("glitches", [(0x10, varint(1))] * 101, 0x0A, "101 credit updates that raise nothing")
+
+
+def row_optimistic_ack(args):
+    # An ACK of packet 1,000,000, never sent (RFC 9000 13.1, 21.4).
+    return row_expect_close("optimistic-ack", [(0x02, varint(1000000) + varint(0) + varint(0) + varint(0))], 0x0A,
+                            "an acknowledgement of a packet never sent")
+
+
+def row_cid_flood(args):
+    # A fifth active id from the peer (the handshake's plus aioquic's three, then this one).
+    frames = [(0x18, varint(seq) + varint(0) + bytes([8]) + os.urandom(8) + os.urandom(16)) for seq in (20, 21)]
+    return row_expect_close("cid-flood", frames, 0x09, "a fifth active connection id")
+
+
+def row_retire_unissued(args):
+    return row_expect_close("retire-unissued", [(0x19, varint(99))], 0x0A, "retiring a sequence never issued")
+
+
+def row_retire_in_use(args):
+    c = Client()
+    if not c.connect():
+        return False, "handshake did not complete"
+    c.get("/")
+    seq = c.quic._peer_cid.sequence_number
+    c.inject([(0x19, varint(seq))])
+    c.pump(2.0, lambda: c.terminated is not None)
+    t = c.terminated
+    c.close()
+    if t is None or t.error_code != 0x0A:
+        return False, "retiring the id in use gave %s" % (t and hex(t.error_code))
+    return True, "PROTOCOL_VIOLATION for retiring the id the packet came to"
+
+
+def row_flow_control(args):
+    c = Client()
+    if not c.connect():
+        return False, "handshake did not complete"
+    c.get("/")
+    sid = c.quic.get_next_available_stream_id()
+    # STREAM with offset and length (type 0x0e): one byte at offset 1 MB, beyond the window.
+    c.inject([(0x0E, varint(sid) + varint(1 << 20) + varint(1) + b"x")])
+    c.pump(2.0, lambda: c.terminated is not None)
+    t = c.terminated
+    c.close()
+    if t is None or t.error_code != 0x03:
+        return False, "data beyond the window gave %s" % (t and hex(t.error_code))
+    return True, "FLOW_CONTROL_ERROR for data beyond the stream's window"
+
+
+def row_shutdown(args):
+    """The last row: a connection is open when the server gets SIGINT; it must see the
+    GOAWAY and a close with H3_NO_ERROR at once, not an idle timeout."""
+    c = Client()
+    if not c.connect():
+        return False, "handshake did not complete"
+    s, _ = c.get("/")
+    args.server.send_signal(2)
+    c.pump(3.0, lambda: c.terminated is not None)
+    t = c.terminated
+    c.close()
+    try:
+        args.server.wait(5)
+    except subprocess.TimeoutExpired:
+        return False, "the server did not exit after SIGINT"
+    if s != 200:
+        return False, "the request before the shutdown gave %s" % s
+    if t is None:
+        return False, "no close arrived after SIGINT (the client would wait for its idle timeout)"
+    if t.error_code != 0x100:
+        return False, "closed with 0x%x, expected H3_NO_ERROR" % t.error_code
+    return True, "H3_NO_ERROR close within %s" % (t.reason_phrase or "the shutdown")
+
+
 ROWS = [
     ("handshake", row_handshake),
     ("retry", row_retry),
@@ -449,6 +564,13 @@ ROWS = [
     ("stream-flood", row_stream_flood),
     ("control-stream", row_control_stream),
     ("handshake-flood", row_handshake_flood),
+    ("glitches", row_glitches),
+    ("optimistic-ack", row_optimistic_ack),
+    ("cid-flood", row_cid_flood),
+    ("retire-unissued", row_retire_unissued),
+    ("retire-in-use", row_retire_in_use),
+    ("flow-control", row_flow_control),
+    ("shutdown", row_shutdown),  # last: it stops the server
 ]
 
 
@@ -485,6 +607,7 @@ def main():
     SERVER = ("127.0.0.1", args.port)
     want = set(args.rows.split(",")) if args.rows else None
     p = start_server(args.binary, args.port, args.retry)
+    args.server = p
     failed = 0
     try:
         for name, fn in ROWS:
@@ -498,11 +621,12 @@ def main():
             if not ok:
                 failed += 1
     finally:
-        p.send_signal(2)
-        try:
-            p.wait(5)
-        except subprocess.TimeoutExpired:
-            p.kill()
+        if p.poll() is None:
+            p.send_signal(2)
+            try:
+                p.wait(5)
+            except subprocess.TimeoutExpired:
+                p.kill()
     err = open(os.path.join(ROOT, "bench", "tmp", "h3-attacks.err")).read()
     reports = err.count("Sanitizer") + err.count("runtime error")
     if reports:

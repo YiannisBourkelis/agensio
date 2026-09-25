@@ -56,3 +56,4 @@ bench/wordpress/.ddev/*
 !bench/wordpress/.ddev/agensio.toml
 !bench/wordpress/.ddev/setup.sh
 .mcp.json
+__pycache__/

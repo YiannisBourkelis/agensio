@@ -111,9 +111,59 @@ public:
     void on_stream_readable(quic::QuicStream& q) {
         H3Stream& s = of(q);
         worker_.state.now = std::time(nullptr);
+#ifdef AGENSIO_INTEROP
+        if (hq_) {
+            if (s.kind == H3Stream::Kind::request) pump_hq(s);
+            return;
+        }
+#endif
         if (s.kind == H3Stream::Kind::request) pump(s);
         else if (s.kind == H3Stream::Kind::peer_uni) on_uni_data(s);
     }
+
+#ifdef AGENSIO_INTEROP
+    // hq-interop (the interop runner's transport tests, docs/design-http3.md 9.2): the
+    // client writes "GET /path\r\n" on a bidirectional stream, the file's bytes come back
+    // raw and the stream ends; no fields, no framing. The request goes through the same
+    // dispatcher and static handler as HTTP/3, as an HTTP/1.0-style request (no Host).
+    void pump_hq(H3Stream& s) {
+        quic::QuicStream& q = s.q;
+        const std::size_t avail = q.available();
+        if (s.headers_done) {  // the line is in; anything more on the stream is ignored
+            if (avail) quic_.stream_consumed(q, avail);
+        } else {
+            const std::string_view in(q.data(), avail);
+            const std::size_t nl = in.find('\n');
+            if (nl == std::string_view::npos && !q.at_end()) {
+                if (avail > 4096) return connection_error(err::general_protocol, "hq request line too long");
+                return;  // more bytes needed
+            }
+            std::string_view line = nl == std::string_view::npos ? in : in.substr(0, nl);
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.remove_suffix(1);
+            if (line.size() < 5 || line.compare(0, 4, "GET ") != 0) {
+                quic_.stream_consumed(q, avail);
+                s.headers_done = true;
+                quic_.stream_reset(q, err::request_rejected);
+                return maybe_close(s);
+            }
+            s.arena.assign(line.substr(4));
+            quic_.stream_consumed(q, avail);
+            Request& req = s.stream.request;
+            req.method = Method::get;
+            req.method_name = "GET";
+            req.target = s.arena;
+            req.version_minor = 0;  // no Host, as HTTP/1.0
+            req.protocol = "hq-interop";
+            s.headers_done = true;
+            dispatch(s);
+        }
+        if (q.at_end() && !q.fin_delivered) {
+            q.fin_delivered = true;
+            s.body_done = true;
+            maybe_close(s);
+        }
+    }
+#endif
 
     void on_stream_reset(quic::QuicStream& q, std::uint64_t code) {
         H3Stream& s = of(q);
@@ -160,6 +210,12 @@ public:
 #ifdef AGENSIO_HAS_TLS
         if (SSL* ssl = quic_.tls().ssl()) cert_names_ = listener_->names_for(SSL_get_SSL_CTX(ssl));
 #endif
+#ifdef AGENSIO_INTEROP
+        if (quic_.alpn() == "hq-interop") {  // the interop runner's transport tests: no control streams, a GET line per stream
+            hq_ = true;
+            return;
+        }
+#endif
         if (quic_.alpn() != "h3") return connection_error(err::no_error, "ALPN is not h3");
         // Our control stream (SETTINGS first, RFC 9114 6.2.1) and the two QPACK streams,
         // which carry nothing beyond their type while the table capacity is 0.
@@ -183,6 +239,29 @@ public:
             u->q.fin = false;
             quic_.stream_ready(u->q);
         }
+    }
+
+    // The server is going (RFC 9114 5.2): GOAWAY names the first request id it will not
+    // process, so the client retries those elsewhere; the close follows once it is sent.
+    void shutdown_notice(TimePoint now) {
+        now_ = now;
+        if (closed_ || goaway_sent_ || !quic_.established() || !ctl_.q.open) return;
+        goaway_sent_ = true;
+        std::string id;
+        quic::append_varint(id, quic_.next_client_bidi_id());
+        append_frame_header(ctl_.q.head, frame::goaway, id.size());
+        ctl_.q.head.append(id);
+        ctl_.q.total = ctl_.q.head_end();
+        quic_.stream_ready(ctl_.q);
+    }
+    void shutdown_close(TimePoint now) {
+        now_ = now;
+        if (closed_) return;
+        std::uint64_t code = err::no_error;
+#ifdef AGENSIO_INTEROP
+        if (hq_) code = 0;  // hq-interop has no error codes of its own: zero is the clean close
+#endif
+        quic_.close(true, code, "server shutdown", now);
     }
 
     void on_closed(bool by_peer, std::uint64_t code) {
@@ -475,6 +554,10 @@ private:
         Response& r = s.stream.response;
         r.upgrade = false;
         quic::QuicStream& q = s.q;
+#ifdef AGENSIO_INTEROP
+        if (hq_) q.head.clear();  // the body alone, no HEADERS or DATA frame
+        else
+#endif
         build_head(s, q.head);
         std::uint64_t body_len = 0;
         if (!r.head) {
@@ -493,7 +576,11 @@ private:
                 return;
             }
         }
+#ifdef AGENSIO_INTEROP
+        if (body_len && !hq_) append_frame_header(q.head, frame::data, body_len);
+#else
         if (body_len) append_frame_header(q.head, frame::data, body_len);
+#endif
         q.total = q.head.size() + body_len;
         q.fin = true;
         s.responded = true;
@@ -724,7 +811,10 @@ private:
                 seen |= std::uint64_t{1} << id;
             }
             switch (id) {
-                case setting::qpack_max_table_capacity: peer_qpack_capacity_ = value; break;
+                case setting::qpack_max_table_capacity:
+                    peer_qpack_capacity_ = value;
+                    QUIC_TRACE("h3: peer settings: qpack capacity=%llu\n", static_cast<unsigned long long>(value));
+                    break;
                 case setting::max_field_section_size: peer_max_field_section_ = value; break;
                 case setting::qpack_blocked_streams: peer_qpack_blocked_ = value; break;
                 case 0x0: case 0x2: case 0x3: case 0x4: case 0x5: return false;  // HTTP/2 identifiers (7.2.4.1)
@@ -878,6 +968,10 @@ private:
     asio::ip::address remote_addr_;
     bool trusted_checked_ = false, trusted_peer_ = false;
     bool closed_ = false;
+    bool goaway_sent_ = false;
+#ifdef AGENSIO_INTEROP
+    bool hq_ = false;  // ALPN hq-interop: GET lines and raw bodies (pump_hq, respond)
+#endif
     unsigned inline_reads_ = 0;
     std::uint64_t streams_opened_ = 0;
 };

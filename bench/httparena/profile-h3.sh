@@ -13,6 +13,8 @@ export LC_NUMERIC=C
 cd "$(dirname "$0")/../.."
 CFG=${CFG:-bench/tmp/perf-h3.toml}   # one worker, 8443 TLS with h2 and h3, handler = "httparena" on /, the localhost cert
 BIN=${BIN:-build/agensio}
+SHAPE=${SHAPE:--c 64 -m 64 -t 4}   # the h2load shape; the 10 MB row: SHAPE="-c 16 -m 1 -t 4" URL=https://127.0.0.1:8443/big.bin CFG=bench/tmp/ab-agensio-h3.toml
+URL=${URL:-https://127.0.0.1:8443/baseline2?a=1&b=1}
 [ -f "$CFG" ] || sed "s|@ROOT@|$PWD|g; s|protocols = \[\"h2c\", \"h2\", \"h1\"\]|protocols = [\"h2c\", \"h2\", \"h1\", \"h3\"]|" bench/httparena/perf-h2.toml.example > "$CFG"
 [ -f bench/tmp/arena-dataset.json ] || cp bench/tmp/httparena/data/dataset.json bench/tmp/arena-dataset.json
 docker image inspect h2load-h3:local >/dev/null 2>&1 || { echo "build the load generator first: docker build -t h2load-h3:local -f bench/tmp/httparena/docker/h2load-h3.Dockerfile bench/tmp/httparena/docker"; exit 1; }
@@ -22,13 +24,13 @@ lg() { docker run --rm --network container:perfbox h2load-h3:local "$@"; }
 profile() {  # name pid-command url
     local name=$1 pidcmd=$2 url=$3
     echo "== $name: syscalls (3 s under load)"
-    lg --alpn-list=h3 -c 64 -m 64 -t 4 -D 6 "$url" > bench/tmp/h2load-h3-$name-st.txt 2>&1 &
+    lg --alpn-list=h3 $SHAPE -D 6 "$url" > bench/tmp/h2load-h3-$name-st.txt 2>&1 &
     sleep 1.5; docker exec perfbox bash -c "P=\$($pidcmd); timeout -s INT 3 strace -c -f -p \$P -o /tmp/strace.txt >/dev/null 2>&1; awk 'NR<=2 || /total/ || /sendmmsg|recvmmsg|sendmsg|recvmsg|epoll|write|read/' /tmp/strace.txt | head -14"
     wait
     grep -a -E "finished in|requests:|UDP datagram" bench/tmp/h2load-h3-$name-st.txt | head -3
     echo "== $name: CPU per request, cycles and profile"
     local c0; c0=$(docker exec perfbox bash -c "P=\$($pidcmd); awk '{print \$14+\$15}' /proc/\$P/stat")
-    lg --alpn-list=h3 -c 64 -m 64 -t 4 -D 8 "$url" > bench/tmp/h2load-h3-$name-c.txt 2>&1 &
+    lg --alpn-list=h3 $SHAPE -D 8 "$url" > bench/tmp/h2load-h3-$name-c.txt 2>&1 &
     sleep 1.5; docker exec perfbox bash -c "P=\$($pidcmd); perf stat -e cycles:u,cycles:k,instructions:u -p \$P -- sleep 2 2>&1 | grep -E 'cycles|instructions'; perf record -F 1999 -g -p \$P -o /tmp/perf-$name.data -- sleep 3 >/dev/null 2>&1; perf report -i /tmp/perf-$name.data --stdio --no-children --sort dso 2>/dev/null | grep -E '^ +[0-9]' | head -8; perf report -i /tmp/perf-$name.data --stdio --no-children -g none --sort symbol 2>/dev/null | grep -E '^ +[0-9]' | sed 's/ \+- \+-.*$//' | cut -c1-160 | head -50"
     wait
     local c1; c1=$(docker exec perfbox bash -c "P=\$($pidcmd); awk '{print \$14+\$15}' /proc/\$P/stat")
@@ -41,7 +43,7 @@ if [ "${ONLY:-}" != nginx ]; then
     echo "### agensio (one worker, the arena handler)"
     docker exec -d perfbox bash -c "$BIN -c $CFG > /tmp/agensio.err 2>&1"
     sleep 1
-    profile agensio "pidof agensio" "https://127.0.0.1:8443/baseline2?a=1&b=1"
+    profile agensio "pidof agensio" "$URL"
     docker exec perfbox bash -c 'kill $(pidof agensio)'
     sleep 0.5
 fi

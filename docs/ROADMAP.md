@@ -987,20 +987,37 @@ share lifted into `src/http/` first. The RFCs are in `docs/rfc/`.
       validation when the client's address changes, the previous path kept for a failed
       validation; the glitch and reset budgets over QUIC; `tests/h3-attacks.py` (aioquic
       in the devbox) with thirteen rows of the design's threat table.
+- [x] I1b (2026-09-25) GOAWAY then a close with H3_NO_ERROR on every HTTP/3 connection
+      at shutdown, before the workers' loops stop; the path MTU search upward (doubling
+      probes outside the congestion window, up to what the client announces: loopback and
+      jumbo-frame paths carry tens of KB per datagram, a 1,500-byte path stops at 1,472;
+      the 10 MB row 2.40 to 1.44 ms per response, nginx 1.95, the 100 KB row 21.2 to
+      11.7 us);
+      closed streams as a bitmap over the 64 indices below the highest opened instead
+      of a scan per new stream.
 - [ ] I1b (rest) Streamed upstream bodies (chunks kept until acknowledged), the body
       source and budgets lifted to `src/http/`, the write-stall and body timeouts per
-      stream, GOAWAY on reload and shutdown, `alt-svc`, NEW_TOKEN.
+      stream, GOAWAY on reload, `alt-svc`, NEW_TOKEN.
 - [x] I1c (decoder side, 2026-09-24) QPACK's dynamic table: the decoder with the encoder
       and decoder streams, blocked sections and the rules-once marks; RFC 9204 appendix B
       as unit tests. On the way: a stream whose id arrived after a higher one was dropped
       as closed (the QPACK encoder stream, and reordered request streams); fixed.
 - [ ] I1c (encoder side) our dynamic head over the encoder stream (design 7.2's second
       step: the answer's `server`, `date`, `alt-svc` and `content-type` as one index byte each).
-- [ ] I2 Conformance and hardening: the QUIC interop runner, the loss proxy, the rest of
-      the attack suite (amplification with a spoofed source, optimistic ACK, the
-      connection-id and flow-control games that need raw frames), the fuzzers
-      (`fuzz_quic_packet`, `fuzz_transport_params`, `fuzz_qpack`, `fuzz_h3_frame`,
-      `fuzz_quic_conn`), the security page's HTTP/3 section, `server_status` and `health`.
+- [x] I2 (part, 2026-09-25) The loss proxy (`tests/quic-lossy.py`, 3 % dropped and 5 %
+      delayed both ways in the integration suite, the 10 MB file through it); the
+      attack rows that need raw frames, written into aioquic's packets (glitches,
+      optimistic ACK, a fifth connection id, retiring an unissued or the in-use id, data
+      beyond the window) and the shutdown row; the fuzzers `fuzz_quic_packet`,
+      `fuzz_transport_params` and `fuzz_qpack` (the HTTP/3 frame head is two varints
+      read by the connection, covered by the packet fuzzer's varints and the suite).
+- [x] I2 (interop, 2026-09-25) The QUIC interop runner: `bench/quic-interop/` (the
+      server image on Debian trixie with the endpoint's setup script, the runner image
+      with tshark, `run.sh`), the `hq-interop` protocol and the `SSLKEYLOGFILE` export
+      in `-DAGENSIO_INTEROP=ON` builds only; the results table in the security page.
+- [ ] I2 (rest) `fuzz_quic_conn` (a connection through a fake clock and a test AEAD), the
+      amplification row of the attack suite (a spoofed source), the security page's
+      HTTP/3 section as a table, `server_status` and `health` for the transport.
 - [ ] I3 Performance: the levers of design 8.2 measured against nginx and Caddy, the
       dynamic QPACK head, CUBIC and pacing, memory per connection, the arena's two HTTP/3
       rows subscribed and run.

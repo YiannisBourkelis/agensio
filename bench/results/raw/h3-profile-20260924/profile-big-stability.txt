@@ -1,0 +1,77 @@
+### agensio (one worker, the arena handler)
+== agensio: syscalls (3 s under load)
+% time     seconds  usecs/call     calls    errors syscall
+------ ----------- ----------- --------- --------- ----------------
+ 51.30    0.419959          27     15162        22 sendmmsg
+ 46.78    0.382963           1    220348           pread64
+  1.20    0.009806           1      5560       119 recvmmsg
+  0.23    0.001853           0      2924           epoll_ctl
+  0.21    0.001760           0      2924           epoll_wait
+100.00    0.818709           3    250060       141 total
+finished in 6.00s, 561.33 req/s, 5.49GB/s
+requests: 3368 total, 3384 started, 3368 done, 3368 succeeded, 0 failed, 0 errored, 0 timeout
+UDP datagram: 143370 sent, 798502 received
+== agensio: CPU per request, cycles and profile
+        4500608313      cycles:u                                                              
+        6305383822      cycles:k                                                              
+       10605934468      instructions:u                   #    2.36  insn per cycle            
+    58.73%  [unknown]       
+    27.56%  libcrypto.so.3  
+     9.85%  libc.so.6       
+     3.85%  agensio         
+     0.02%  [vdso]          
+    15.49%  [k] 0xffffffffa6aa5bdb
+     9.48%  [.] __memmove_avx512_unaligned_erms
+     8.75%  [k] 0xffffffffa6496ff7
+     8.71%  [k] 0xffffffffa6496907
+     1.42%  [.] agensio::quic::QuicConnection<agensio::h3::Http3Connection>::build_packet(agensio::quic::Space, unsigned char*, unsigned long, std::chrono::time
+     0.57%  [.] agensio::quic::QuicConnection<agensio::h3::Http3Connection>::process_frames(agensio::quic::Space, unsigned char const*, unsigned long, std::chro
+     0.49%  [.] 0x000000000029de9d
+     0.48%  [.] 0x000000000029db14
+     0.45%  [.] 0x000000000029d81f
+     0.42%  [.] 0x000000000029de52
+     0.41%  [.] 0x000000000029d82d
+     0.39%  [.] 0x000000000029db58
+     0.38%  [.] 0x000000000029db0d
+     0.36%  [.] 0x000000000029de4b
+     0.36%  [.] 0x000000000029dea4
+     0.35%  [.] 0x000000000029db1b
+     0.34%  [.] 0x000000000029d7e2
+     0.33%  [.] 0x000000000029d7db
+     0.32%  [k] 0xffffffffa649690c
+     0.31%  [.] 0x000000000029d797
+     0.31%  [.] 0x000000000029db5f
+     0.30%  [.] EVP_CIPHER_CTX_ctrl
+     0.30%  [.] 0x000000000029d826
+     0.29%  [.] agensio::quic::SendBatch::commit(unsigned long, sockaddr_storage const&, unsigned int)
+     0.29%  [.] 0x000000000029de59
+     0.28%  [.] 0x000000000029d7d4
+     0.27%  [.] 0x000000000029db66
+     0.27%  [.] 0x000000000029d7cd
+     0.27%  [.] 0x000000000029de96
+     0.27%  [.] agensio::quic::QuicConnection<agensio::h3::Http3Connection>::produce(agensio::quic::SendBatch&, std::chrono::time_point<std::chrono::_V2::steady
+     0.27%  [.] 0x000000000029dc1b
+     0.27%  [.] 0x000000000029de07
+     0.26%  [.] 0x000000000029d782
+     0.26%  [k] 0xffffffffa612213b
+     0.26%  [.] 0x000000000029d789
+     0.25%  [.] 0x000000000029dabb
+     0.24%  [.] 0x000000000029d8c5
+     0.24%  [.] 0x000000000029e049
+     0.24%  [.] agensio::quic::Recovery::on_ack_received(agensio::quic::Space, agensio::quic::Frame const&, std::chrono::time_point<std::chrono::_V2::steady_clo
+     0.23%  [.] 0x000000000029dac2
+     0.22%  [.] 0x000000000029df44
+     0.22%  [.] 0x000000000029dc0d
+     0.22%  [.] 0x000000000029db51
+     0.22%  [.] 0x000000000029e05c
+     0.22%  [.] __internal_syscall_cancel
+     0.22%  [.] 0x000000000029dc06
+     0.21%  [k] 0xffffffffa61220f0
+     0.21%  [.] 0x000000000029de0e
+     0.20%  [.] 0x000000000029ddf9
+     0.20%  [k] 0xffffffffa5e4dc20
+finished in 8.00s, 708.88 req/s, 6.93GB/s
+requests: 5671 total, 5687 started, 5671 done, 5671 succeeded, 0 failed, 0 errored, 0 timeout
+UDP datagram: 238248 sent, 1340719 received
+server CPU: 1406.72 us per request over the 8 s run (800 ticks, 5687 requests)
+RSS: 15736 KB

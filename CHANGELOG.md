@@ -164,6 +164,72 @@
   address could not be sent the PATH_CHALLENGE that validates it. No cost on the request
   path: the profile after the step 1.14 to 1.15M req/s on one worker at 0.58 us per
   request (`profile-transport.txt`).
+- **HTTP/3 stability and the transport's remaining per-request costs** (2026-09-25).
+  The path MTU search goes on upward (RFC 8899): after 1,472 bytes each acknowledged
+  probe doubles the next, up to what the client announces, so loopback and jumbo-frame
+  paths carry tens of KB per datagram (the trace: 1,472, 2,944, 5,888, 11,776, 23,552,
+  47,104 bytes in five round trips) and a 1,500-byte path stops at 1,472; probes are
+  outside the congestion window (their loss is the path's answer, not congestion) and
+  a datagram larger than the window's room shrinks to it instead of waiting. Closed
+  streams are a bitmap over the 64 indices below the highest opened (a bit test per new
+  stream instead of a scan of 64 ids, 7.4 % of the profile). At shutdown every HTTP/3
+  connection gets a GOAWAY naming the first request id it will not process and a close
+  with H3_NO_ERROR, in the datagrams that go out before the workers' loops stop, so a
+  client retries at once instead of waiting for its idle timeout. Stability tests: the
+  loss proxy `tests/quic-lossy.py` (3 % of the datagrams dropped and 5 % delayed up to
+  3 ms, both ways) sits between curl and the server in the integration suite, and the
+  1 KB page and the 10 MB file arrive through it; six attack rows written as raw frames
+  into aioquic's packets (101 credit updates that raise nothing, an acknowledgement of a
+  packet never sent, a fifth connection id, retiring an unissued and the in-use id, data
+  beyond a stream's window) and the shutdown row; the fuzzers `fuzz_quic_packet`,
+  `fuzz_transport_params` and `fuzz_qpack` (20.6 M, 121 M and 11.7 M runs in two minutes
+  each, no findings). Measured (`ab-20260925-013754.md` against the previous commit, h1
+  and h2 rows 0.97 to 1.05): the h3 rows on loopback, where the search reaches 47 KB
+  datagrams, 1.00 at one stream per connection, 0.83 at ten, 0.76 at sixty-four and 0.53
+  for the 100 KB file at ten (21.2 to 11.2 us); one worker (`h3-20260925-014251.md`) 1.23M
+  req/s at sixty-four streams (0.62 us), 1.09M at 256 connections with ten (0.87 us), the
+  100 KB file 85k req/s at 11.7 us (nginx 32k at 31.0), and the 10 MB stream 1.44 ms per
+  response against nginx's 1.95, the last row nginx held (2.72 ms in the first slice;
+  the profile's datagrams there average 42 KB now); under the arena load 0.54 us per
+  request (0.58 before, the closed-stream scan gone); the arena's rows, on a 1,500-byte
+  path, within noise (`baseline-h3` 3.70 to 3.72M at 2.0 cores, `static-h3` 610 to
+  614k). The tree as committed, with the interop fixes below, measured again
+  (`ab-20260925-031102.md`, `h3-20260925-031559.md`, the interop matrix running on the
+  same box): the h3 rows 1.00 / 0.84 / 0.80 / 0.55 of the previous commit, h1 and h2
+  within noise. A finding for the next step: h2load, the arena's client, announces a 4 KB QPACK
+  table (curl announces none), so the encoder-side dynamic head will shorten every answer
+  it sends there. And the QUIC
+  interop runner (`bench/quic-interop/`, design 9.2): agensio as a server implementation
+  in a Debian trixie image with the runner's endpoint setup, the runner in its own image
+  with tshark, `run.sh` driving both through the host's docker; the runner's `hq-interop`
+  protocol (a `GET /path` line per stream, the file raw) and the `SSLKEYLOGFILE` export
+  exist only in `-DAGENSIO_INTEROP=ON` builds, and `zerortt`, `ecn`, `v2` and
+  `connectionmigration` exit 127 as unsupported. Its first finding, before any test
+  case ran: the simulator's readiness probe is a packet with an unknown QUIC version
+  expecting Version Negotiation, and the header parser read the rest of such a packet
+  by version 1's rules (RFC 8999 5.1 makes everything after the ids opaque), so no
+  Version Negotiation was ever sent; fixed, with a unit test. The harness runs inside a
+  Docker-in-Docker daemon (the runner's compose file needs Engine 28.1 and the host has
+  26.1) with the bridge netfilter hook off, because the daemon's iptables rules dropped
+  every bridged frame whose IP destination lay on the other bridge, which is what the
+  client's packets to the server through the simulator are. Two bugs the first matrix
+  found: a request retransmitted after loss was refused as a stale stream when the
+  client had opened more than 64 streams since (the closed-stream window is 1,024
+  indices now; 24 of 2,000 requests of the multiplexing case), and the `[::]` socket set
+  don't-fragment for IPv4 peers only, so on the simulator's 1,500-byte link the MTU
+  probes went through as fragments, the search reached 11 KB datagrams, and a transfer
+  crawled under fragment loss (DF is set for both families now, and a probe beyond the
+  path fails at once). And a third from the multi-connection cases under 30 % loss and
+  corruption: a probe timeout sent a bare PING, so a lost Handshake flight or a lost
+  response was repaired only after the probe's acknowledgement declared the old packets
+  lost, two or three round trips instead of one; a probe now carries the oldest
+  unacknowledged data of its space again (RFC 9002 6.2.4), the original packet staying in
+  the ring for its own acknowledgement. The matrix after the three fixes
+  (`bench/results/interop-20260925-061102.md`): every supported case passes with quic-go
+  (18 of 18) and ngtcp2 (17, plus one run of handshakeloss where the client restarted an
+  attempt under the 30 % burst loss and the runner counted 51 handshakes for 50);
+  `zerortt`, `ecn`, `v2` and `connectionmigration` exit 127 by choice. The results table
+  is in the security page.
 - **The code HTTP/2 and HTTP/3 share lifted into `src/http/`** first, as a pure refactor
   (design-http3 section 4): the Huffman code, the prefixed integers and the dynamic
   table with its rules-once marks (`field_codec`), the request assembler (`request_assembly`),

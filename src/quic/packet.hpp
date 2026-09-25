@@ -89,7 +89,12 @@ inline bool parse_header(const unsigned char* p, std::size_t n, std::size_t shor
     if (sl > kMaxCidLen || pos + sl > n) return false;
     h.scid.assign(p + pos, sl);
     pos += sl;
-    if (h.version == 0) {  // Version Negotiation (RFC 8999 6): the rest is versions; a server never receives one
+    if (h.version != kVersion1) {
+        // Version Negotiation (RFC 8999 6: a server never receives one) or a version we do
+        // not speak: only the invariant fields are parsed (RFC 8999 5.1), the rest is
+        // opaque, and the endpoint answers a datagram of 1,200 bytes or more with Version
+        // Negotiation (RFC 9000 5.2.2). Reading the rest by version 1's rules dropped every
+        // such packet, which the interop runner's readiness probe found.
         h.pn_offset = pos;
         h.length = n - pos;
         h.total = n;

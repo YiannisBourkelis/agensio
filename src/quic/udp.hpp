@@ -303,10 +303,22 @@ public:
         int bytes = 4 * 1024 * 1024;
         ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bytes, sizeof bytes);
         ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bytes, sizeof bytes);
+        // Don't-fragment on both families (a [::] socket carries IPv4 peers as mapped
+        // addresses): a datagram larger than the path's MTU fails at send or is dropped
+        // on the way instead of going as fragments, which is what makes the MTU probes of
+        // design 6.7 an answer about the path. Without it the interop runner's simulator
+        // (a 1,500-byte link) carried fragmented 11 KB probes, the search went on past the
+        // link and the transfer then crawled under fragment loss.
 #ifdef IP_MTU_DISCOVER
-        if (ep.protocol() == asio::ip::udp::v4()) {
+        {
             int probe = IP_PMTUDISC_PROBE;
             ::setsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &probe, sizeof probe);
+        }
+#endif
+#ifdef IPV6_MTU_DISCOVER
+        if (ep.protocol() == asio::ip::udp::v6()) {
+            int probe6 = IPV6_PMTUDISC_PROBE;
+            ::setsockopt(fd, IPPROTO_IPV6, IPV6_MTU_DISCOVER, &probe6, sizeof probe6);
         }
 #endif
         socket_.bind(ep, ec);
@@ -343,6 +355,27 @@ public:
         asio::error_code ec;
         socket_.close(ec);
         timer_.cancel();
+    }
+    // Every connection is told the server is going (the application's GOAWAY, then its
+    // close) and the datagrams go out now; the caller stops the socket after.
+    void shutdown() {
+        const auto now = Clock::now();
+        std::vector<Conn*> conns;
+        for (auto& [key, c] : table_) {
+            bool seen = false;
+            for (Conn* k : conns) seen = seen || k == c.get();
+            if (!seen) conns.push_back(c.get());
+        }
+        for (Conn* c : conns) {
+            c->shutdown_notice(now);
+            if (!c->quic().closed()) c->quic().produce(batch, now);
+        }
+        flush();
+        for (Conn* c : conns) {
+            c->shutdown_close(now);
+            if (!c->quic().closed()) c->quic().produce(batch, now);
+        }
+        flush();
     }
     const asio::ip::udp::endpoint& local() const noexcept { return local_; }
     bool gro() const noexcept { return gro_; }

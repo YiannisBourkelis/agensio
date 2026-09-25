@@ -1,0 +1,12 @@
+# The interop runner itself (Python, tshark for the trace checks, the docker client and
+# compose plugin to drive the simulator and the endpoints through the host's daemon).
+FROM debian:trixie
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 python3-pip python3-venv tshark git ca-certificates curl gnupg \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && echo "deb [signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian trixie stable" > /etc/apt/sources.list.d/docker.list \
+    && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin \
+    && rm -rf /var/lib/apt/lists/*
+RUN python3 -m venv /opt/runner && /opt/runner/bin/pip install --no-cache-dir pycryptodome random-slugs termcolor prettytable pyshark
+ENV PATH=/opt/runner/bin:$PATH

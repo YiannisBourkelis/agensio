@@ -108,6 +108,16 @@ devbox): the one-call paths and each refusal.
 
 ## Sanitizer and fuzz record
 
+2026-09-25, the HTTP/3 stability step: `fuzz_quic_packet` 20.58 M runs in 121 s
+(`-max_len=2048`, corpus 378 inputs, 195 edges), `fuzz_transport_params` 121.37 M runs
+(corpus 119, 185 edges), `fuzz_qpack` 11.72 M runs (corpus 333, 386 edges), all under
+ASan and UBSan with no findings; the corpora are checked in under
+`tests/fuzz/regressions/`. The same day the release and sanitizer builds ran the
+integration suite (530 checks, the lossy relay's two included) and the twenty-row attack
+suite with no report, and the sanitizer build served h2load over QUIC (one and sixty-four
+streams per connection, 64 connections, 3.3 M requests) clean.
+
+
 2026-09-20, F9 (site-install): `fuzz_archive` 14.73 M runs in 121 s (`-max_len=65536`,
 seeded with a tar and a zip), no finding. Unit tests, `tests/install.sh` and
 `tests/provision.sh` under `-fsanitize=address,undefined`: clean.
@@ -167,7 +177,45 @@ validation at a time, the previous address restored when it fails), the reset bu
 (RESET_STREAM and STOP_SENDING past `http2.max_concurrent_streams` in one second close
 with H3_EXCESSIVE_LOAD) and the glitch budget (100 credit updates that raise nothing).
 `tests/h3-attacks.py` (aioquic, in the devbox image; the integration suite runs it where
-aioquic is installed) asserts thirteen rows of the design's table against the release and
-sanitizer builds. Still the design's I2: the interop runner, the loss proxy, the fuzzers
-of `src/quic/` and `src/http3/`, the attack rows that need a spoofed source or raw
-frames. `"h3"` stays off by default until then.
+aioquic is installed) asserts twenty rows of the design's table against the release and
+sanitizer builds: the handshake, Retry in both modes, a garbage token, a key update and a
+second one before the first is acknowledged, a client that changes its port, retired ids,
+a stateless reset, 3,000 forged packets on a live id, 200 stream resets in a second, 300
+streams beyond the limit, a second SETTINGS, 1,500 Initials in a second, and, as raw
+frames written into aioquic's packets, 101 credit updates that raise nothing, an
+acknowledgement of a packet never sent, a fifth connection id, retiring an unissued and
+the in-use id, data beyond a stream's window; the last row opens a connection and sends
+the server SIGINT, expecting GOAWAY and a close with H3_NO_ERROR at once. The loss proxy
+`tests/quic-lossy.py` sits between curl and the server in the integration suite (3 % of
+the datagrams dropped, 5 % delayed up to 3 ms, both ways; the 10 MB file must arrive).
+The transport's parsers are fuzzed: `fuzz_quic_packet` (headers, coalescing, the frames
+of every space), `fuzz_transport_params` (decode and the round trip through the encoder),
+`fuzz_qpack` (the encoder stream, a section against the table, the decoder stream's
+answers); runs recorded below.
+
+The QUIC interop runner (`bench/quic-interop/run.sh`, design 9.2), agensio as the server
+against the quic-go and ngtcp2 clients through the ns-3 simulator, 2026-09-25
+(`bench/results/interop-20260925-061102.md`):
+
+| case | quic-go | ngtcp2 | what it proves |
+|---|---|---|---|
+| handshake, transfer, longrtt (750 ms), http3, ipv6 | pass | pass | the handshake, streams and flow control, HTTP/3 over both address families |
+| chacha20 | pass | pass | the ChaCha20-Poly1305 suite for the packets |
+| multiplexing (2,000 files on one connection) | pass | pass | stream limits raised as streams close; a request retransmitted after loss is not refused as stale |
+| retry | pass | pass | Retry with the sealed token, the client's Initial with the token accepted |
+| resumption | pass | pass | TLS session resumption on a second connection |
+| keyupdate | pass | pass | the client's key update followed, the header-protection key kept |
+| amplificationlimit | pass | pass | three times the bytes received until the address is validated |
+| blackhole (the path goes dark, then returns) | pass | pass | probes, timers and the congestion controller recover |
+| handshakeloss, handshakecorruption (50 connections at 30 % loss or corruption) | pass | pass (one run counted 51 handshakes for 50 connections: the client restarted an attempt) | probes carry the oldest unacknowledged data (RFC 9002 6.2.4) |
+| transferloss, transfercorruption | pass | pass | loss recovery and retransmission on a busy connection |
+| rebind-port, rebind-addr | pass | pass | path validation when the client's address changes |
+| zerortt, ecn, v2, connectionmigration | unsupported by choice (exit 127) | same | early data, ECN, version 2 and active migration are the design's I4 |
+
+Three server bugs the runner found before the table came out like this, all fixed the same
+day: no Version Negotiation was ever sent (the header parser applied version 1's rules to
+an unknown version), the closed-stream window of 64 indices refused retransmitted
+requests, and don't-fragment was set for IPv4 sockets only, so the MTU search went past a
+1,500-byte link on fragments. Still the design's I2: a connection-level fuzzer and the
+amplification row of the attack suite (a spoofed source). `"h3"` stays off by default
+until the design's checkpoint.

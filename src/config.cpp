@@ -887,9 +887,9 @@ void parse_pool(const toml::table* php, const fs::path& base_dir, const Config& 
 // "h2", "h1", "h2c" (Caddy's names; "http/1.1" accepted for "h1") into the flags a listener
 // takes: what TLS offers through ALPN in order, and whether plain listeners take the
 // HTTP/2 preface. Shared by [server] protocols and a site's own list.
-static void resolve_protocols(std::vector<std::string>& protocols, bool& h2, bool& h2c, bool& h3, std::string& alpn_wire,
+static void resolve_protocols(std::vector<std::string>& protocols, bool& h2, bool& h2c, bool& h3, bool& hq, std::string& alpn_wire,
                               const std::string& where) {
-    h2 = h2c = h3 = false;
+    h2 = h2c = h3 = hq = false;
     alpn_wire.clear();
     if (protocols.empty()) fail(where + " must list at least \"h1\"");
     for (std::string& p : protocols) {
@@ -897,12 +897,18 @@ static void resolve_protocols(std::vector<std::string>& protocols, bool& h2, boo
         if (p == "h2") h2 = true;
         else if (p == "h2c") h2c = true;
         else if (p == "h3") h3 = true;  // QUIC on the TLS listener's port; the TCP ALPN list stays h2 and http/1.1
+        else if (p == "hq-interop") hq = true;  // the interop runner's protocol over QUIC, test builds only
         else if (p != "h1") fail(where + ": \"" + p + "\" is not one of \"h1\", \"h2\", \"h2c\", \"h3\"");
         const std::string_view alpn = p == "h2" ? "h2" : p == "h1" ? "http/1.1" : "";
         if (!alpn.empty()) alpn_wire.push_back(static_cast<char>(alpn.size())), alpn_wire.append(alpn);
     }
 #ifndef AGENSIO_HAS_QUIC
-    if (h3) fail(where + ": \"h3\" needs a build with OpenSSL 3.5 or later on Linux (this one has no QUIC)");
+    if (h3 || hq) fail(where + ": \"h3\" needs a build with OpenSSL 3.5 or later on Linux (this one has no QUIC)");
+#endif
+#ifndef AGENSIO_INTEROP
+    if (hq) fail(where + ": \"hq-interop\" is the QUIC interop runner's protocol and needs a build with -DAGENSIO_INTEROP=ON");
+#else
+    if (hq && !h3) fail(where + ": \"hq-interop\" goes with \"h3\"");
 #endif
 }
 
@@ -1003,10 +1009,11 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     site.h2 = cfg.h2;
     site.h2c = cfg.h2c;
     site.h3 = cfg.h3;
+    site.hq_interop = cfg.hq_interop;
     site.alpn_wire = cfg.alpn_wire;
     if (t.contains("protocols")) {
         site.protocols = string_list(t["protocols"], (where + ".protocols").c_str());
-        resolve_protocols(site.protocols, site.h2, site.h2c, site.h3, site.alpn_wire, where + ".protocols");
+        resolve_protocols(site.protocols, site.h2, site.h2c, site.h3, site.hq_interop, site.alpn_wire, where + ".protocols");
         if (site.h3 && !t.contains("tls")) fail(where + ".protocols: \"h3\" needs a TLS site (QUIC is TLS 1.3)");
     }
     site.is_default = t["default"].value_or(false);
@@ -1317,7 +1324,7 @@ Config load_config(const fs::path& path) {
     cfg.server_header = server["server_header"].value_or(std::string("agensio"));
     if (server.as_table() && server.as_table()->contains("protocols"))
         cfg.protocols = string_list(server["protocols"], "server.protocols");
-    resolve_protocols(cfg.protocols, cfg.h2, cfg.h2c, cfg.h3, cfg.alpn_wire, "server.protocols");
+    resolve_protocols(cfg.protocols, cfg.h2, cfg.h2c, cfg.h3, cfg.hq_interop, cfg.alpn_wire, "server.protocols");
     if (auto h = server["http2"].as_table()) {
         for (const auto& [k, v] : *h)
             if (k != "max_concurrent_streams") fail("server.http2: unknown key \"" + std::string(k.str()) + "\"");

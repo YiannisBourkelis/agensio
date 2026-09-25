@@ -3284,6 +3284,21 @@ static std::string bytes_of(std::string_view hex) { return unhex(std::string(hex
 // close.
 static void test_quic_stateless() {
     using namespace agensio::quic;
+    {
+        // An unknown version (RFC 8999 5.1): the ids parse, the rest is opaque, and a
+        // 1,200-byte datagram gets Version Negotiation naming the client's ids.
+        unsigned char probe[1200] = {0xc0, 0xde, 0xad, 0xbe, 0xef, 8, 1, 2, 3, 4, 5, 6, 7, 8, 4, 9, 9, 9, 9, 0, 0x40, 0x00};
+        PacketHeader ph;
+        CHECK(parse_header(probe, sizeof probe, 8, ph));
+        CHECK(ph.long_form && ph.version == 0xdeadbeef && ph.dcid.len == 8 && ph.scid.len == 4 && ph.total == sizeof probe);
+        unsigned char vn[64 + 2 * kMaxCidLen];
+        const std::size_t n = build_version_negotiation(vn, sizeof vn, ph.scid, ph.dcid, 0x0a0a0a0a, 0x33);
+        CHECK(n == 1 + 4 + 1 + 4 + 1 + 8 + 8);
+        CHECK((vn[0] & 0x80) != 0 && vn[1] == 0 && vn[4] == 0 && vn[5] == 4 && vn[10] == 8);
+        CHECK(vn[n - 8] == 0 && vn[n - 5] == 1);  // version 1 first, then the reserved value
+        PacketHeader vh;
+        CHECK(parse_header(vn, n, 8, vh) && vh.version == 0 && vh.dcid.len == 4 && vh.scid.len == 8);
+    }
     Cid a, b;
     a.assign(reinterpret_cast<const unsigned char*>("\x01\x02\x03\x04\x05\x06\x07\x08"), 8);
     b.assign(reinterpret_cast<const unsigned char*>("\x01\x02\x03\x04\x05\x06\x07\x09"), 8);

@@ -19,6 +19,7 @@ set(AGENSIO_SANITIZE "" CACHE STRING "Sanitizers for all targets, e.g. address,u
 option(AGENSIO_FUZZ "Build libFuzzer targets (needs clang with libFuzzer, e.g. brew llvm)" OFF)
 option(AGENSIO_HARDEN_ZERO_INIT "Part of AGENSIO_HARDEN: zero-initialise automatic variables (-ftrivial-auto-var-init=zero)" ON)
 option(AGENSIO_HTTPARENA "Compile the HttpArena benchmark handler (handler = \"httparena\", bench/httparena/); never in a release build" OFF)
+option(AGENSIO_INTEROP "Compile the QUIC interop runner's hq-interop protocol and the SSLKEYLOGFILE export (bench/quic-interop/); never in a release build" OFF)
 
 # ---------------------------------------------------------------- asio (standalone, header-only)
 find_path(ASIO_INCLUDE_DIR asio.hpp
@@ -146,6 +147,7 @@ target_compile_definitions(agensio_core PUBLIC
   $<$<BOOL:${AGENSIO_HAS_QUIC}>:AGENSIO_HAS_QUIC=1>
   $<$<BOOL:${AGENSIO_QUIC_TRACE}>:AGENSIO_QUIC_TRACE=1>
   $<$<BOOL:${AGENSIO_HTTPARENA}>:AGENSIO_HTTPARENA=1>
+  $<$<BOOL:${AGENSIO_INTEROP}>:AGENSIO_INTEROP=1>
   $<$<BOOL:${AGENSIO_HAS_ZLIB}>:AGENSIO_HAS_ZLIB=1>)
 if(AGENSIO_HAS_TLS)
   target_link_libraries(agensio_core PUBLIC OpenSSL::SSL OpenSSL::Crypto)
@@ -202,8 +204,9 @@ target_link_libraries(agensio_upstream PRIVATE asio Threads::Threads)
 
 # ---------------------------------------------------------------- fuzzers (parsers only, no asio)
 if(AGENSIO_FUZZ)
-  foreach(t parser path chunked fcgi http_head json archive hpack hpack_roundtrip)
-    add_executable(fuzz_${t} tests/fuzz/fuzz_${t}.cpp src/http1/parser.cpp src/path.cpp src/services/archive.cpp src/http2/hpack.cpp)
+  foreach(t parser path chunked fcgi http_head json archive hpack hpack_roundtrip quic_packet transport_params qpack)
+    add_executable(fuzz_${t} tests/fuzz/fuzz_${t}.cpp src/http1/parser.cpp src/path.cpp src/services/archive.cpp src/http2/hpack.cpp
+                   src/http/field_codec.cpp src/http3/qpack.cpp)
     target_include_directories(fuzz_${t} PRIVATE src)
     target_compile_features(fuzz_${t} PRIVATE cxx_std_20)
     target_compile_definitions(fuzz_${t} PRIVATE $<$<BOOL:${AGENSIO_HAS_ZLIB}>:AGENSIO_HAS_ZLIB=1>)

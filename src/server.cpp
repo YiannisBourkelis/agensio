@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -291,6 +292,18 @@ static int select_certificate(SSL* ssl, int* alert, void* arg) {
 // ALPN (HTTP/2, phase G): the first protocol of our list the client offers wins, in our
 // order; a client without ALPN, or without any of ours, gets no selection and speaks
 // HTTP/1.1 as before. Set on every context, since the SNI callback switches contexts.
+#ifdef AGENSIO_INTEROP
+static void keylog_line(const SSL*, const char* line) {
+    const char* path = std::getenv("SSLKEYLOGFILE");
+    if (!path) return;
+    if (FILE* f = std::fopen(path, "a")) {
+        std::fputs(line, f);
+        std::fputc('\n', f);
+        std::fclose(f);
+    }
+}
+#endif
+
 static int select_protocol(SSL* ssl, const unsigned char** out, unsigned char* outlen, const unsigned char* in,
                            unsigned inlen, void* arg) {
     const auto* l = static_cast<const Listener*>(arg);
@@ -299,9 +312,12 @@ static int select_protocol(SSL* ssl, const unsigned char** out, unsigned char* o
     // gets no_application_protocol (RFC 9001 8.1 requires ALPN).
     if (SSL_get_ex_data(ssl, quic::TlsSession::ex_index())) {
         static const unsigned char h3[] = {2, 'h', '3'};
+        static const unsigned char h3_hq[] = {2, 'h', '3', 10, 'h', 'q', '-', 'i', 'n', 't', 'e', 'r', 'o', 'p'};
         unsigned char* selected = nullptr;
         unsigned char selected_len = 0;
-        if (SSL_select_next_proto(&selected, &selected_len, h3, sizeof h3, in, inlen) != OPENSSL_NPN_NEGOTIATED)
+        const unsigned char* offer = l->hq ? h3_hq : h3;
+        const unsigned offer_len = l->hq ? sizeof h3_hq : sizeof h3;
+        if (SSL_select_next_proto(&selected, &selected_len, offer, offer_len, in, inlen) != OPENSSL_NPN_NEGOTIATED)
             return SSL_TLSEXT_ERR_ALERT_FATAL;
         *out = selected;
         *outlen = selected_len;
@@ -343,6 +359,7 @@ void Server::build_listeners(Generation& gen) {
                 l->h2 = site.h2;
                 l->h2c = site.h2c;
                 l->h3 = site.h3 && site.tls.has_value();
+                l->hq = site.hq_interop && site.tls.has_value();
 #ifdef AGENSIO_HAS_TLS
                 l->alpn = site.alpn_wire;
 #else
@@ -380,6 +397,11 @@ void Server::build_listeners(Generation& gen) {
             SSL_CTX_set_tlsext_servername_callback(ctx->native_handle(), select_certificate);
             SSL_CTX_set_tlsext_servername_arg(ctx->native_handle(), &l);
             SSL_CTX_set_alpn_select_cb(ctx->native_handle(), select_protocol, &l);
+#ifdef AGENSIO_INTEROP
+            // The interop runner decrypts its traces with the TLS secrets (SSLKEYLOGFILE);
+            // test builds only, the file is the environment's.
+            if (std::getenv("SSLKEYLOGFILE")) SSL_CTX_set_keylog_callback(ctx->native_handle(), keylog_line);
+#endif
         }
     }
 #endif
@@ -522,9 +544,16 @@ void Server::reload_h3(const Config& cfg) {
         asio::post(h3_->owners[i]->ctx, [e = h3_->list[i].get(), mode] { e->retry = mode; });
 }
 
+// Each endpoint closes its connections on its own worker's loop (GOAWAY, then the
+// close, in the datagrams that go out at once), then its socket; the worker's loop is
+// stopped by a handler posted after this one, so the order holds.
 void Server::stop_h3() {
     if (!h3_) return;
-    for (auto& e : h3_->list) e->stop();
+    for (std::size_t i = 0; i < h3_->list.size(); ++i)
+        asio::post(h3_->owners[i]->ctx, [e = h3_->list[i].get()] {
+            e->shutdown();
+            e->stop();
+        });
 }
 #else
 struct Server::H3Endpoints {};
@@ -933,8 +962,9 @@ void Server::stop() {
         ::unlink(cfg_.control.socket.c_str());
     }
 #endif
+    // Posted, not called: what stop_h3 posted to a worker runs first, then its loop ends.
     for (auto& w : workers_)
-        w->ctx.stop();
+        asio::post(w->ctx, [w = w.get()] { w->ctx.stop(); });
 }
 
 // ---- reload ----

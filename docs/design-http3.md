@@ -759,6 +759,38 @@ time) and the same profile load (`profile-transport.txt` and the files before it
   618 to 622k req/s. The one-stream row's req/s (52 to 57k for agensio, nginx and the
   previous build alike; a single connection does a request every 148 us) is h2load's own
   per-request work in this shape, not the server's.
+- Stability (9.2) and the last per-request costs, 2026-09-25: the lossy relay
+  `tests/quic-lossy.py` between curl and the server in the integration suite (3 % of
+  the datagrams dropped, 5 % delayed up to 3 ms, both directions; the handshake, the
+  page and the 10 MB file complete); six attack rows as raw frames written into
+  aioquic's packets through its packet builder (the glitch budget, an optimistic ACK,
+  a fifth connection id, retiring an unissued and the in-use id, data beyond the
+  window) and a shutdown row; `fuzz_quic_packet`, `fuzz_transport_params` and
+  `fuzz_qpack` (the HTTP/3 frame head is two varints the connection reads, covered by
+  the packet fuzzer's varints and the suites); the interop runner harness in
+  `bench/quic-interop/` with the `hq-interop` protocol in interop builds. Closed streams
+  became a bitmap over the 64 indices below the highest opened (`incoming_stream` was
+  7.4 % of the profile with its scan of 64 ids). GOAWAY then a close with H3_NO_ERROR
+  at shutdown, on each endpoint's worker before its loop stops. And the MTU search
+  (6.7) continues upward by doubling: the trace showed 1,472, 2,944, 5,888, 11,776,
+  23,552 and 47,104-byte datagrams acknowledged in five round trips on loopback, which
+  is what nginx does on the 10 MB row (its datagrams there average 22 KB, ours were
+  1,364 bytes); probes stay outside the congestion window, and a datagram larger than
+  the window's room shrinks to the room instead of waiting for it. The socket sets
+  don't-fragment for both families (a `[::]` socket carries IPv4 peers as mapped
+  addresses; the first version set it for IPv4 sockets only, and the interop runner's
+  1,500-byte link then carried fragmented 11 KB probes that were acknowledged, so the
+  search went past the link and a transfer crawled under fragment loss). Probe packets
+  (6.5) carry the oldest unacknowledged CRYPTO or stream data of their space again, as
+  RFC 9002 6.2.4 recommends, instead of a PING: the interop runner's multi-connection
+  cases under 30 % loss and corruption completed 35 and 11 of 50 handshakes with quic-go
+  in the time allowed while the PING probe cost two or three round trips per loss.
+  Measured
+  (`ab-20260925-013754.md`, h1 and h2 flat): the h3 rows at ten and sixty-four streams
+  0.83 and 0.76 of the previous commit, the 100 KB file 0.53 (21.2 to 11.2 us); one
+  worker 1.23M req/s at sixty-four streams, the 100 KB file 85k at 11.7 us, the 10 MB
+  stream 1.44 ms per response (nginx 1.95, ours 2.72 in the first slice), 0.54 us per
+  request under the arena load; the arena's own rows, on a 1,500-byte path, unchanged.
 - The transport rows of I1b (6.3, 6.4, 6.9, above): no cost on the request path; the
   profile after them 1.14 to 1.15M req/s on one worker at 0.58 us per request, 2.98
   instructions per cycle, 16 MB resident. Its top items now: Huffman decoding 8.8 %

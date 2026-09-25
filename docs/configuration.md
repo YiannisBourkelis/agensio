@@ -1284,7 +1284,7 @@ Every HTTP/3 limit derives from keys you already know:
 | the idle timeout (`max_idle_timeout`) and the handshake's bound | `idle_timeout` | 15 s |
 | a body announced but not arriving | `body_timeout` | 60 s |
 | the QPACK dynamic table a client's encoder may fill (`SETTINGS_QPACK_MAX_TABLE_CAPACITY`) and the field sections that may wait for it (`SETTINGS_QPACK_BLOCKED_STREAMS`) | fixed | 4 KB, 16 streams (each holding at most `max_header_size` of encoded section) |
-| the datagram size | 1,200 bytes until one probe after the handshake (a padded PING; acknowledged, the size is the probe's; lost, 1,200 stays); probed again when the client's address changes | 1,472 bytes over IPv4, 1,452 over IPv6, or less if the client announces less |
+| the datagram size | 1,200 bytes until the path is probed after the handshake (a padded PING, outside the congestion window; acknowledged, the size is the probe's and the next probe doubles it; lost, the search stops); probed again when the client's address changes | 1,472 bytes over IPv4 and 1,452 over IPv6 on a 1,500-byte path; up to what the client announces (65,527 at most) on loopback or a jumbo-frame network |
 | connection ids issued to a client, and accepted from it | fixed (RFC 9000 5.1) | 4 each; a retired id is replaced, at most 64 per connection |
 | handshakes in progress per worker | fixed | 1,024; see `http3.retry` |
 | stream resets a client may send per second (`RESET_STREAM`, `STOP_SENDING`) before the connection closes with `H3_EXCESSIVE_LOAD` | `http2.max_concurrent_streams` | 128 |

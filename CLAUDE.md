@@ -475,6 +475,31 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   `static-h3` 618 to 622k with twelve workers (541k before the datagram work), `baseline-h3`
   3.85 to 3.88M at 2.35 cores, load-bound. The one-stream row (54k req/s for agensio,
   57k for nginx at twice the CPU) is bound by h2load's own per-request work.
+  Stability step (2026-09-25): the MTU search goes on upward by doubling to what the
+  client announces (loopback carries 47 KB datagrams, a 1,500-byte path stops at 1,472;
+  probes outside the congestion window); closed streams are a bitmap over the 64
+  indices below the highest opened; GOAWAY then H3_NO_ERROR on every connection at
+  shutdown; the lossy relay `tests/quic-lossy.py` in the integration suite; the attack
+  suite at twenty rows (six of them raw frames through aioquic's packet builder); the
+  fuzzers `fuzz_quic_packet`, `fuzz_transport_params`, `fuzz_qpack`; and the QUIC
+  interop runner in `bench/quic-interop/` (`run.sh`, everything inside a
+  Docker-in-Docker daemon with the bridge netfilter hook off; the `hq-interop` protocol
+  and `SSLKEYLOGFILE` exist only in `-DAGENSIO_INTEROP=ON` builds): every supported case
+  passes with quic-go and ngtcp2 (18 each; zerortt, ecn, v2 and connectionmigration
+  exit 127 by choice), after it found three bugs in a day: no Version Negotiation for an
+  unknown version, retransmitted requests refused as stale by the 64-index closed-stream
+  window (1,024 now), and don't-fragment set for IPv4 sockets only (the MTU search went
+  past a 1,500-byte link on fragments); probe packets carry the oldest unacknowledged
+  data (RFC 9002 6.2.4) since the loss cases showed the PING probe costing two or three
+  round trips per loss. A rule learned there:
+  a background job of a test script has SIGINT ignored and a Python helper keeps it,
+  so helpers are stopped with SIGTERM. Measured (`ab-20260925-013754.md`,
+  `h3-20260925-014251.md`): h1 and h2 flat; on loopback the h3 rows at ten and
+  sixty-four streams 0.83 and 0.76 of the commit before, the 100 KB file 0.53 (11.7 us,
+  85k req/s; nginx 31.0 us), one worker 1.23M req/s at sixty-four streams and 1.09M at
+  256 connections with ten, the 10 MB stream 1.44 ms per response against nginx's 1.95
+  (the last row nginx held), 0.54 us per request under the arena load; the arena's rows
+  on their 1,500-byte path unchanged.
   Measured (`bench/httparena/profile-h3.sh`, the arena's h2load over QUIC, 64 connections
   with 64 streams): 1.22 to 1.25M req/s on one worker at 0.61 us of CPU per request,
   about 3,100 cycles at 3.19 instructions per cycle, twenty-one answers per datagram,

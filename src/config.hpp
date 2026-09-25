@@ -123,6 +123,7 @@ struct SiteConfig {
     bool h2 = true;
     bool h2c = false;
     bool h3 = false;  // "h3" in protocols: QUIC on the TLS listener's port (phase I, docs/design-http3.md)
+    bool hq_interop = false;  // "hq-interop" in protocols: the interop runner's transport tests (AGENSIO_INTEROP builds only)
     std::string alpn_wire;
     std::string app;                        // preset: "laravel", "php", "static" or "" (none)
     // `redirect = "https"`: every request gets a 301 to https://<Host><target>; a full
@@ -205,6 +206,7 @@ struct Config {
     bool h2 = true;         // "h2" in protocols: offered on TLS listeners
     bool h2c = false;       // "h2c" in protocols: accepted on plain listeners
     bool h3 = false;        // "h3" in protocols: HTTP/3 over QUIC on the TLS listeners' ports (UDP)
+    bool hq_interop = false;  // "hq-interop" in protocols (AGENSIO_INTEROP builds): the QUIC interop runner's GET-line protocol
     std::string alpn_wire;  // the ALPN protocol list as OpenSSL wants it (length-prefixed), from protocols
     struct Http2 {
         std::uint32_t max_concurrent_streams = 128;  // SETTINGS_MAX_CONCURRENT_STREAMS (nginx's default)

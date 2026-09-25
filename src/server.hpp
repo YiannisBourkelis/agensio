@@ -58,6 +58,7 @@ struct Listener {
     bool h2 = true;   // TLS: h2 offered through ALPN (the sites' `protocols`)
     bool h2c = false; // plain: the HTTP/2 preface accepted
     bool h3 = false;  // TLS: HTTP/3 over QUIC on the same port number (UDP), phase I
+    bool hq = false;  // TLS: the interop runner's hq-interop over QUIC too (AGENSIO_INTEROP builds)
 #ifdef AGENSIO_HAS_TLS
     std::shared_ptr<asio::ssl::context> ssl;  // the handshake starts here; SNI switches to the site's context
     std::map<std::string, std::shared_ptr<asio::ssl::context>> tls_contexts;  // by certificate path

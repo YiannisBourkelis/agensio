@@ -17,6 +17,7 @@
 #include <sys/socket.h>
 
 #include <algorithm>
+#include <bitset>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -120,7 +121,6 @@ public:
         advertised_bidi_ = limits.max_streams_bidi;
         advertised_uni_ = limits.max_streams_uni;
         our_max_ack_delay_ = std::chrono::milliseconds(limits.max_ack_delay_ms);
-        for (std::uint64_t& c : recent_closed_) c = ~std::uint64_t{0};
     }
     QuicConnection(const QuicConnection&) = delete;
     QuicConnection& operator=(const QuicConnection&) = delete;
@@ -141,6 +141,8 @@ public:
             if (c == cid) return true;
         return false;
     }
+    // The lowest client-initiated bidirectional stream id not opened yet: what a GOAWAY names.
+    std::uint64_t next_client_bidi_id() const noexcept { return opened_bidi_ * 4; }
     const sockaddr_storage& peer() const noexcept { return peer_; }
     socklen_t peer_len() const noexcept { return peer_len_; }
     TlsSession& tls() noexcept { return tls_; }
@@ -198,7 +200,11 @@ public:
         for (std::size_t i = 0; i < credit_.size();)
             if (credit_[i] == &s) credit_.erase(credit_.begin() + static_cast<std::ptrdiff_t>(i)); else ++i;
         if (stream_is_client(s.id)) {
-            recent_closed_[recent_pos_++ % kRecentClosed] = s.id;
+            // Its index joins the closed bitmap (bit k: k below the highest opened).
+            const std::uint64_t index = s.id >> 2;
+            const std::uint64_t opened = stream_is_bidi(s.id) ? opened_bidi_ : opened_uni_;
+            if (index < opened && opened - 1 - index < kClosedWindow)
+                (stream_is_bidi(s.id) ? closed_map_bidi_ : closed_map_uni_).set(static_cast<std::size_t>(opened - 1 - index));
             // The credit goes back with the next packet sent anyway (a client with one
             // request at a time otherwise gets a MAX_STREAMS datagram per request, and
             // acknowledges it); it is sent on its own only when the peer's room is under a
@@ -384,6 +390,9 @@ public:
                 if (left < 64) break;
                 cap = static_cast<std::size_t>(std::min<std::uint64_t>(cap, left));
             }
+            // A datagram larger than the congestion window's room shrinks to it (a probed
+            // path may carry tens of KB per datagram, more than an early window).
+            if (const std::uint64_t room = rec_.cwnd_room(); room < cap) cap = static_cast<std::size_t>(std::max<std::uint64_t>(room, kMinInitialDatagram));
             unsigned char* buf = batch.reserve(cap);
             if (!buf) {  // the wake-up's batch is full: it goes out now and this connection continues
                 ep_.flush();
@@ -439,7 +448,30 @@ public:
             rec_.on_timeout(now);
             QUIC_TRACE("quic: loss timer: probes=%u,%u,%u pto_count=%u in_flight=%llu cwnd=%llu\n", rec_.probes[0], rec_.probes[1], rec_.probes[2],
                        rec_.pto_count, static_cast<unsigned long long>(rec_.bytes_in_flight), static_cast<unsigned long long>(rec_.cwnd));
+            probe_with_data();
             apply_lost();
+        }
+    }
+
+    // A probe timeout (RFC 9002 6.2.4): the probe packets carry the oldest unacknowledged
+    // data of the space again instead of a PING alone, so a lost Handshake flight or a lost
+    // response is repaired in one round trip. The original packet stays in the ring: its
+    // late acknowledgement is still counted, and the duplicate is harmless.
+    void probe_with_data() {
+        for (unsigned i = 0; i < kSpaces; ++i) {
+            if (rec_.probes[i] == 0) continue;
+            PnSpace& ps = rec_.spaces[i];
+            for (std::uint64_t pn = ps.oldest(); pn < ps.next_pn; ++pn) {
+                const SentPacket* p = ps.find(pn);
+                if (!p || !p->in_flight || !p->ack_eliciting) continue;
+                bool any = false;
+                for (const SentItem& it : p->items) {
+                    if (it.kind != ItemKind::crypto && it.kind != ItemKind::stream && it.kind != ItemKind::handshake_done) continue;
+                    rec_.lost.push_back(it);
+                    any = true;
+                }
+                if (any) break;
+            }
         }
     }
 
@@ -674,17 +706,30 @@ private:
             return nullptr;
         }
         if (QuicStream* s = app_.find_stream(id)) return s;
-        if (recently_closed(id)) return nullptr;  // a late frame for a stream that is done
-        // Streams open in id order on the client's side but not in arrival order here:
-        // a lower id after a higher one is a new stream, never a closed one (the record of
-        // closed ids says which those are).
+        // Streams open in id order on the client's side but not in arrival order here: a
+        // lower id after a higher one is a new stream unless the bitmap of the indices
+        // below the highest opened says it was closed. The window is 1,024 indices: a
+        // request lost on the path and retransmitted arrives after the client, which keeps
+        // going on its other streams, opened a few hundred more (the interop runner's
+        // multiplexing case, where a 64-index window refused 24 of 2,000 requests). Below
+        // the window a late frame is refused.
         std::uint64_t& opened = bidi ? opened_bidi_ : opened_uni_;
+        std::bitset<kClosedWindow>& closed = bidi ? closed_map_bidi_ : closed_map_uni_;
+        if (index < opened) {
+            const std::uint64_t k = opened - 1 - index;
+            if (k >= kClosedWindow || closed.test(static_cast<std::size_t>(k))) return nullptr;
+        }
         QuicStream* s = app_.on_new_stream(id);
         if (!s) {
             fail(err::internal, 0, "no stream", now);
             return nullptr;
         }
-        if (index + 1 > opened) opened = index + 1;
+        if (index + 1 > opened) {
+            const std::uint64_t shift = index + 1 - opened;
+            if (shift >= kClosedWindow) closed.reset();
+            else closed <<= static_cast<std::size_t>(shift);
+            opened = index + 1;
+        }
         s->id = id;
         s->open = true;
         s->window = bidi ? limits_.stream_window : limits_.uni_stream_window;
@@ -798,12 +843,8 @@ private:
         leave_handshake();
         rec_.handshake_confirmed = true;
         handshake_done_due_ = true;
-        {
-            const std::size_t target = peer_.ss_family == AF_INET6 ? limits_.mtu_target_v6 : limits_.mtu_target_v4;
-            const std::size_t cap = static_cast<std::size_t>(std::min<std::uint64_t>(peer_tp_.max_udp_payload_size, 65527));
-            mtu_target_ = std::min(target, cap);
-            mtu_probe_due_ = mtu_target_ > max_datagram_;
-        }
+        mtu_cap_ = static_cast<std::size_t>(std::min<std::uint64_t>(peer_tp_.max_udp_payload_size, 65527));
+        start_mtu_search();
         if (rx_[1].valid()) {  // RFC 9001 4.9.2: Handshake keys go once the handshake is confirmed
             rec_.discard_space(Space::handshake);
             rx_[1].clear();
@@ -893,8 +934,7 @@ private:
         bytes_sent_ = 0;
         max_datagram_ = kMinInitialDatagram;  // the new path's size is unknown: probed again
         rec_.max_datagram = max_datagram_;
-        mtu_probe_due_ = mtu_target_ > max_datagram_;
-        mtu_probe_sent_ = false;
+        start_mtu_search();
         ++path_gen_;
         if (!port_only) {  // a port change alone is a NAT rebinding: the estimates stay (9.4)
             rec_.reset_rtt();
@@ -938,6 +978,18 @@ private:
         if (!half_open_counted_) return;
         half_open_counted_ = false;
         if (ep_.half_open) --ep_.half_open;
+    }
+
+    // Path MTU discovery (RFC 8899 in its simplest form, design 6.7): a PING padded to the
+    // target, alone in its datagram and outside the congestion window (its loss is the
+    // path's answer, not congestion); acknowledged, the target is the datagram size and
+    // the next probe doubles it, up to what the client announced (65,527 at most), so a
+    // 1,500-byte path stops at 1,472 and loopback or a jumbo-frame network goes on.
+    void start_mtu_search() {
+        const std::size_t first = peer_.ss_family == AF_INET6 ? limits_.mtu_target_v6 : limits_.mtu_target_v4;
+        mtu_target_ = std::min(first, mtu_cap_);
+        mtu_probe_due_ = mtu_target_ > max_datagram_;
+        mtu_probe_sent_ = false;
     }
 
     void discard_initial() {
@@ -986,7 +1038,13 @@ private:
                         max_datagram_ = mtu_target_;
                         rec_.max_datagram = mtu_target_;
                     }
-                    mtu_probe_due_ = false;
+                    if (mtu_target_ < mtu_cap_) {  // the next step of the search
+                        mtu_target_ = std::min(mtu_cap_, mtu_target_ * 2);
+                        mtu_probe_due_ = true;
+                        mtu_probe_sent_ = false;
+                    } else {
+                        mtu_probe_due_ = false;
+                    }
                     break;
                 default: break;
             }
@@ -1077,7 +1135,7 @@ private:
         if (handshake_done_due_ || max_data_due_ || max_streams_due_ || path_responses_ > 0 || path_challenge_due_ || !control_.empty() ||
             !credit_.empty() || !retire_due_.empty() || !new_cid_due_.empty())
             return true;
-        return ready_head_ != nullptr && rec_.cwnd_room() >= max_datagram_;
+        return ready_head_ != nullptr && rec_.cwnd_room() >= kMinInitialDatagram;
     }
 
     // ---- the packetiser ----
@@ -1134,7 +1192,7 @@ private:
             if (n) { w += n; ack_written = true; }
         }
         // CRYPTO
-        {
+        if (!want_ping_) {
             CryptoOut& co = crypto_out_[si];
             const std::string& data = tls_.out(tls_level(si));
             for (int guard = 0; guard < 8; ++guard) {
@@ -1160,7 +1218,7 @@ private:
                 else co.sent = b + take;
             }
         }
-        if (space == Space::application) {
+        if (space == Space::application && !want_ping_) {
             if (handshake_done_due_) {
                 const std::size_t n = put_handshake_done(payload + w, room - w);
                 if (n) { w += n; handshake_done_due_ = false; eliciting = in_flight = true; rec.items.push_back({ItemKind::handshake_done, false, 0, 0, 0}); }
@@ -1256,7 +1314,7 @@ private:
                 }
             }
             // STREAM data: lost ranges first, then new bytes, one frame per stream in turn.
-            if (rec_.cwnd_room() >= max_datagram_ || rec_.probes[si] > 0) {
+            if (rec_.cwnd_room() >= kMinInitialDatagram || rec_.probes[si] > 0) {
                 unsigned turns = 0;
                 while (ready_head_ && turns++ < 64) {
                     QuicStream& s = *ready_head_;
@@ -1374,7 +1432,7 @@ private:
         const std::size_t total = pn_offset + pn_len + w + kAeadTagLen;
         rec.bytes = static_cast<std::uint32_t>(total);
         rec.ack_eliciting = eliciting;
-        rec.in_flight = in_flight;
+        rec.in_flight = in_flight && !want_ping_;  // an MTU probe is outside the congestion window (RFC 8899 4.6.4)
         ++ps.next_pn;
         rec_.on_packet_sent(space, rec, now);
         if (ack_written) {
@@ -1549,11 +1607,6 @@ private:
             credit_.push_back(&s);
         }
     }
-    bool recently_closed(std::uint64_t id) const noexcept {
-        for (std::uint64_t c : recent_closed_)
-            if (c == id) return true;
-        return false;
-    }
 
     struct CryptoIn {
         std::string buf;
@@ -1632,7 +1685,8 @@ private:
     std::size_t max_datagram_ = 1200;
     // Path MTU discovery (RFC 8899 in its simplest form, design 6.7): one probe after the
     // handshake, a PING padded to the target; acknowledged, the target is the datagram size.
-    std::size_t mtu_target_ = 0;
+    std::size_t mtu_target_ = 0;  // the size being probed
+    std::size_t mtu_cap_ = 0;     // what the client announced (max_udp_payload_size), at most 65,527
     bool mtu_probe_due_ = false, mtu_probe_sent_ = false, want_ping_ = false;
     std::uint64_t path_gen_ = 0;  // counts the peer's address changes: a probe belongs to one path
     // Flow control (RFC 9000 4).
@@ -1640,9 +1694,8 @@ private:
     std::uint64_t peer_max_data_ = 0, data_sent_ = 0;
     std::uint64_t our_max_streams_bidi_ = 0, our_max_streams_uni_ = 0;
     std::uint64_t opened_bidi_ = 0, opened_uni_ = 0, closed_bidi_ = 0, closed_uni_ = 0;
-    static constexpr unsigned kRecentClosed = 64;
-    std::uint64_t recent_closed_[kRecentClosed];  // ids of the streams closed last; filled with an impossible id at construction
-    unsigned recent_pos_ = 0;
+    static constexpr std::size_t kClosedWindow = 1024;
+    std::bitset<kClosedWindow> closed_map_bidi_, closed_map_uni_;  // closed indices below the highest opened, bit k = k below
     std::uint64_t peer_max_streams_bidi_ = 0, peer_max_streams_uni_ = 0;
     std::uint64_t next_uni_index_ = 0;
     // Frames due.
