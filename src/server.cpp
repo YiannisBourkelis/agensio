@@ -360,6 +360,10 @@ void Server::build_listeners(Generation& gen) {
                 l->h2c = site.h2c;
                 l->h3 = site.h3 && site.tls.has_value();
                 l->hq = site.hq_interop && site.tls.has_value();
+                if (l->h3 && gen.cfg.http3.alt_svc) {  // design 7.4
+                    l->alt_svc = "h3=\":" + std::to_string(l->port) + "\"; ma=86400";
+                    l->alt_svc_line = "alt-svc: " + l->alt_svc + "\r\n";
+                }
 #ifdef AGENSIO_HAS_TLS
                 l->alpn = site.alpn_wire;
 #else
@@ -469,7 +473,8 @@ void Server::open_control() {
 #ifdef AGENSIO_HAS_QUIC
 struct Server::H3Endpoints {
     std::vector<std::unique_ptr<quic::Endpoint<h3::Http3Connection>>> list;
-    std::vector<Worker*> owners;  // the worker each endpoint runs on, for settings a reload changes
+    std::vector<Worker*> owners;         // the worker each endpoint runs on, for settings a reload changes
+    std::vector<std::string> addresses;  // the listener each endpoint serves, for the reload's diff
 };
 
 static quic::RetryMode retry_mode(const Config& cfg) {
@@ -493,42 +498,98 @@ static quic::Limits h3_limits(const Config& cfg) {
 // (design-http3 6.1). Otherwise one endpoint on worker 0 serves the listener.
 void Server::open_h3() {
     h3_ = std::make_unique<H3Endpoints>();
-    for (const Listener& l : gen_->listeners) {
-        if (!l.tls || !l.h3) continue;
-        const std::size_t count = reuse_port_ ? workers_.size() : 1;
-        bool steering = true, gro = true;
-        for (std::size_t i = 0; i < count; ++i) {
-            Worker& w = *workers_[i];
-            using Endpoint = quic::Endpoint<h3::Http3Connection>;
-            auto ep = std::make_unique<Endpoint>(w.ctx, static_cast<std::uint8_t>(w.id), [this, &w, address = l.address](
-                                                                                             Endpoint& e, const quic::PacketHeader& h,
-                                                                                             const quic::AcceptInfo& info,
-                                                                                             const sockaddr_storage& from, socklen_t fromlen,
-                                                                                             quic::TimePoint now) -> std::shared_ptr<h3::Http3Connection> {
-                std::shared_ptr<const Generation> gen = w.gen;  // the worker's current one, on its own thread
-                const Listener* lst = gen->find(address);
-                if (!lst || !lst->tls || !lst->h3 || !lst->ssl) return nullptr;
-                auto c = std::make_shared<h3::Http3Connection>(e, w, gen, lst, cfg_, dispatcher_, lst->ssl->native_handle(), h, info, from,
-                                                               fromlen, h3_limits(gen->cfg), now);
-                if (!c->quic().ok()) return nullptr;
-                for (const quic::Cid& cid : c->quic().our_cids()) e.add_cid(cid, c);
-                return c;
-            });
-            std::string error;
-            if (!ep->open(asio::ip::udp::endpoint(l.endpoint.address(), l.port), error, reuse_port_))
-                throw std::runtime_error("cannot bind udp " + l.address + " for h3: " + error);
-            steering = steering && (!reuse_port_ || ep->steering());
-            gro = gro && ep->gro();
-            ep->retry = retry_mode(gen_->cfg);
-            h3_->list.push_back(std::move(ep));
-            h3_->owners.push_back(&w);
-        }
-        std::string note;
-        if (count > 1) note += ", " + std::to_string(count) + " workers" + (steering ? ", steered by connection id" : ", steered by the kernel's hash only (the reuseport program was refused)");
-        if (!gro) note += ", without GRO";
-        error_log_.info("h3 (QUIC) on udp " + l.address + note);
-        std::cout << "  h3 on udp " << l.address << note << "\n";
+    for (const Listener& l : gen_->listeners)
+        if (l.tls && l.h3) open_h3_listener(l, gen_->cfg, false);
+}
+
+// The endpoints of one h3 listener: one per worker with reuse_port (the group's members in
+// worker order, steered by connection id), else one on worker 0. `start` posts their
+// reads at once (a listener a reload added); at startup start_h3 does it for all.
+void Server::open_h3_listener(const Listener& l, const Config& cfg, bool start) {
+    const std::size_t count = reuse_port_ ? workers_.size() : 1;
+    bool steering = true, gro = true;
+    [[maybe_unused]] int rcvbuf = 0;  // the smallest receive buffer the kernel granted (the note is Linux-only)
+    for (std::size_t i = 0; i < count; ++i) {
+        Worker& w = *workers_[i];
+        using Endpoint = quic::Endpoint<h3::Http3Connection>;
+        auto ep = std::make_unique<Endpoint>(
+            w.ctx, static_cast<std::uint8_t>(w.id),
+            [this, &w, address = l.address](Endpoint& e, const quic::PacketHeader& h, const quic::AcceptInfo& info,
+                                            const sockaddr_storage& from, socklen_t fromlen,
+                                            quic::TimePoint now) -> std::shared_ptr<h3::Http3Connection> {
+            std::shared_ptr<const Generation> gen = w.gen;  // the worker's current one, on its own thread
+            const Listener* lst = gen->find(address);
+            if (!lst || !lst->tls || !lst->h3 || !lst->ssl) return nullptr;
+            auto c = std::make_shared<h3::Http3Connection>(e, w, gen, lst, cfg_, dispatcher_, lst->ssl->native_handle(),
+                                                           h, info, from, fromlen, h3_limits(gen->cfg), now);
+            if (!c->quic().ok()) return nullptr;
+            for (const quic::Cid& cid : c->quic().our_cids()) e.add_cid(cid, c);
+            return c;
+        });
+        std::string error;
+        if (!ep->open(asio::ip::udp::endpoint(l.endpoint.address(), l.port), error, reuse_port_))
+            throw std::runtime_error("cannot bind udp " + l.address + " for h3: " + error);
+        steering = steering && (!reuse_port_ || ep->steering());
+        gro = gro && ep->gro();
+        if (rcvbuf == 0 || ep->receive_buffer() < rcvbuf) rcvbuf = ep->receive_buffer();
+        ep->retry = retry_mode(cfg);
+        if (start) asio::post(w.ctx, [e = ep.get()] { e->start(); });
+        h3_->list.push_back(std::move(ep));
+        h3_->owners.push_back(&w);
+        h3_->addresses.push_back(l.address);
     }
+    std::string note;
+    if (count > 1) {
+        note += ", " + std::to_string(count) + " workers";
+        note += steering ? ", steered by connection id"
+                         : ", steered by the kernel's hash only (the reuseport program was refused)";
+    }
+    if (!gro) note += ", without GRO";
+#ifdef __linux__
+    // Linux reports twice the granted size; a cap below what was asked means the sysctl.
+    if (rcvbuf > 0 && rcvbuf < quic::Endpoint<h3::Http3Connection>::kSocketBufferAsked)
+        note += ", receive buffer " + std::to_string(rcvbuf / 2048) +
+                " KB (raise net.core.rmem_max for bursts of handshakes; 4 MB asked)";
+#endif
+    error_log_.info("h3 (QUIC) on udp " + l.address + note);
+    if (!start) std::cout << "  h3 on udp " << l.address << note << "\n";
+}
+
+// A reload (design 6.9): an h3 listener that left the configuration, or lost h3, tells
+// its connections (GOAWAY, then the close with H3_NO_ERROR) and closes its sockets on
+// its workers' loops; a listener that gained h3 opens its sockets; the rest keep their
+// sockets and their connections, which take the new generation at their next request.
+void Server::sync_h3(const std::shared_ptr<const Generation>& gen) {
+    if (!h3_) h3_ = std::make_unique<H3Endpoints>();
+    std::size_t closed = 0, opened = 0;
+    for (std::size_t i = 0; i < h3_->list.size();) {
+        const Listener* l = gen->find(h3_->addresses[i]);
+        if (l && l->tls && l->h3) {
+            ++i;
+            continue;
+        }
+        Worker* w = h3_->owners[i];
+        asio::post(w->ctx, [w, e = std::move(h3_->list[i])]() mutable {
+            e->shutdown();
+            e->stop();
+            asio::post(w->ctx, [e = std::move(e)] {});  // freed a loop trip later, once the cancelled reads completed
+        });
+        h3_->list.erase(h3_->list.begin() + static_cast<std::ptrdiff_t>(i));
+        h3_->owners.erase(h3_->owners.begin() + static_cast<std::ptrdiff_t>(i));
+        h3_->addresses.erase(h3_->addresses.begin() + static_cast<std::ptrdiff_t>(i));
+        ++closed;
+    }
+    for (const Listener& l : gen->listeners) {
+        if (!l.tls || !l.h3) continue;
+        bool served = false;
+        for (const std::string& a : h3_->addresses) served = served || a == l.address;
+        if (served) continue;
+        open_h3_listener(l, gen->cfg, true);
+        ++opened;
+    }
+    if (closed || opened)
+        error_log_.info("h3 endpoints after the reload: " + std::to_string(opened) + " opened, " +
+                        std::to_string(closed) + " closed");
 }
 
 void Server::start_h3() {
@@ -558,6 +619,8 @@ void Server::stop_h3() {
 #else
 struct Server::H3Endpoints {};
 void Server::open_h3() {}
+void Server::open_h3_listener(const Listener&, const Config&, bool) {}
+void Server::sync_h3(const std::shared_ptr<const Generation>&) {}
 void Server::start_h3() {}
 void Server::reload_h3(const Config&) {}
 void Server::stop_h3() {}
@@ -1032,6 +1095,7 @@ bool Server::reload(std::string& error) {
     gen_ = gen;
     for (auto& w : workers_) asio::post(w->ctx, [w = w.get(), gen] { w->gen = gen; });
     reload_h3(gen->cfg);
+    sync_h3(gen);
     for (std::size_t i : opened) asio::post(acceptors_[i]->owner->ctx, [this, i] { start_accept(i); });
     // Addresses that left the configuration stop accepting; their open connections finish
     // their current request and are told to close (Connection: close) on the next one.

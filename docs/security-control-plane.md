@@ -108,6 +108,18 @@ devbox): the one-call paths and each refusal.
 
 ## Sanitizer and fuzz record
 
+2026-09-25, the QPACK encoder, `alt-svc`, reload and connection-fuzzer step:
+`fuzz_quic_conn` (design 9.2: a connection established by a fuzz-build hook, the
+fuzzer's frames sealed with its keys, the timers stepped) 431 k runs in 120 s on its
+first day, which found an ACK delay field that overflowed the clock's arithmetic on its
+way to a duration (bounded now), then 213 k runs in 61 s on the tree with the
+`alt-svc` fast paths with no finding (corpus 861 inputs, 2,321 edges); `fuzz_hpack` 1.13 M runs in 61 s (473 inputs,
+708 edges) after the encoder's `alt-svc` memo; `fuzz_qpack` 5.44 M runs in 91 s feeding
+the encoder's decoder-stream parser too. The release and sanitizer builds ran the
+integration suite (534 checks) and the twenty-one-row attack suite (the reload row
+included) with no report, the reload suite 18 checks, and the sanitizer build served
+h2load over QUIC (one and sixty-four streams, 2.5 M requests) clean.
+
 2026-09-25, the HTTP/3 stability step: `fuzz_quic_packet` 20.58 M runs in 121 s
 (`-max_len=2048`, corpus 378 inputs, 195 edges), `fuzz_transport_params` 121.37 M runs
 (corpus 119, 185 edges), `fuzz_qpack` 11.72 M runs (corpus 333, 386 edges), all under
@@ -177,15 +189,18 @@ validation at a time, the previous address restored when it fails), the reset bu
 (RESET_STREAM and STOP_SENDING past `http2.max_concurrent_streams` in one second close
 with H3_EXCESSIVE_LOAD) and the glitch budget (100 credit updates that raise nothing).
 `tests/h3-attacks.py` (aioquic, in the devbox image; the integration suite runs it where
-aioquic is installed) asserts twenty rows of the design's table against the release and
+aioquic is installed) asserts twenty-one rows of the design's table against the release and
 sanitizer builds: the handshake, Retry in both modes, a garbage token, a key update and a
 second one before the first is acknowledged, a client that changes its port, retired ids,
 a stateless reset, 3,000 forged packets on a live id, 200 stream resets in a second, 300
 streams beyond the limit, a second SETTINGS, 1,500 Initials in a second, and, as raw
 frames written into aioquic's packets, 101 credit updates that raise nothing, an
 acknowledgement of a packet never sent, a fifth connection id, retiring an unissued and
-the in-use id, data beyond a stream's window; the last row opens a connection and sends
-the server SIGINT, expecting GOAWAY and a close with H3_NO_ERROR at once. The loss proxy
+the in-use id, data beyond a stream's window; a reload row rewrites the configuration
+without h3 and sends SIGHUP, expecting GOAWAY and a close with H3_NO_ERROR on its open
+connection and no QUIC server on the port after, then brings h3 back with another reload;
+the last row opens a connection and sends the server SIGINT, expecting GOAWAY and a close
+with H3_NO_ERROR at once. The loss proxy
 `tests/quic-lossy.py` sits between curl and the server in the integration suite (3 % of
 the datagrams dropped, 5 % delayed up to 3 ms, both ways; the 10 MB file must arrive).
 The transport's parsers are fuzzed: `fuzz_quic_packet` (headers, coalescing, the frames

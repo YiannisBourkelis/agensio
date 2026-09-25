@@ -1256,7 +1256,8 @@ QUIC TLS API for the handshake and its ciphers for the packets; the design, the
 comparison with the other servers and the threat model are in `docs/design-http3.md`,
 the specifications in `docs/rfc/`. It is on where `protocols` lists `"h3"`, server-wide or
 on a TLS site, and then every TLS listener of that list also answers on the same port
-number over UDP:
+number over UDP, and every HTTP/1 and HTTP/2 answer of it carries `alt-svc` so browsers
+switch on their next connection:
 
 ```toml
 [server]
@@ -1266,13 +1267,29 @@ protocols = ["h2", "h1", "h3"]   # h2 and h1 over TCP through ALPN, h3 over QUIC
 What it needs from the host: UDP open on the listener's port in the firewall (the TCP
 port alone gives a client nothing to reach), a build with OpenSSL 3.5 or later on Linux
 (`-t` refuses `"h3"` on any other, so a configuration file moves between hosts
-predictably), and, for a browser to switch, an `alt-svc` field (a later step; h2load and
-curl choose `--alpn-list=h3` / `--http3-only` directly). With `reuse_port` (Linux, the
+predictably); h2load and curl choose `--alpn-list=h3` / `--http3-only` directly, a
+browser follows the `alt-svc` field. With `reuse_port` (Linux, the
 default) every worker has its own UDP socket on the port and a classic BPF program on the
 group delivers each packet to the worker that issued its connection id, so a connection
 never changes worker (design 6.1); where the kernel refuses the program the 4-tuple hash
 routes each connection to one worker instead. Without `reuse_port` one socket on worker 0
 serves the listener.
+
+The sockets ask the kernel for 4 MB receive and send buffers. Linux grants at most
+`net.core.rmem_max` and `net.core.wmem_max`, 208 KB on an untuned host, and the startup
+line (and the error log) then says so: `receive buffer 208 KB (raise net.core.rmem_max
+for bursts of handshakes; 4 MB asked)`. A burst of handshakes larger than the buffer
+loses Initials, which the clients retry after their probe timeout, one to three seconds
+later (256 connections opening at once do that on loopback), so a server that expects
+hundreds of connections to open together raises both limits as root and persists them:
+
+```
+sysctl -w net.core.rmem_max=8388608 net.core.wmem_max=8388608
+printf 'net.core.rmem_max = 8388608\nnet.core.wmem_max = 8388608\n' > /etc/sysctl.d/90-agensio-quic.conf
+```
+
+The buffers are set when a socket opens: at start and at a reload that adds h3 to a
+listener; a running socket keeps what it got.
 
 Every HTTP/3 limit derives from keys you already know:
 
@@ -1284,6 +1301,7 @@ Every HTTP/3 limit derives from keys you already know:
 | the idle timeout (`max_idle_timeout`) and the handshake's bound | `idle_timeout` | 15 s |
 | a body announced but not arriving | `body_timeout` | 60 s |
 | the QPACK dynamic table a client's encoder may fill (`SETTINGS_QPACK_MAX_TABLE_CAPACITY`) and the field sections that may wait for it (`SETTINGS_QPACK_BLOCKED_STREAMS`) | fixed | 4 KB, 16 streams (each holding at most `max_header_size` of encoded section) |
+| the QPACK dynamic table our answers use on the client's side (`server`, `date`, `content-type` as one index byte each after the first) | fixed, and at most what the client announces | 1 KB; none for a client that announces no table (curl) |
 | the datagram size | 1,200 bytes until the path is probed after the handshake (a padded PING, outside the congestion window; acknowledged, the size is the probe's and the next probe doubles it; lost, the search stops); probed again when the client's address changes | 1,472 bytes over IPv4 and 1,452 over IPv6 on a 1,500-byte path; up to what the client announces (65,527 at most) on loopback or a jumbo-frame network |
 | connection ids issued to a client, and accepted from it | fixed (RFC 9000 5.1) | 4 each; a retired id is replaced, at most 64 per connection |
 | handshakes in progress per worker | fixed | 1,024; see `http3.retry` |
@@ -1300,6 +1318,7 @@ http3 = { retry = "auto" }   # "auto" | "always" | "never"
 | key | default | meaning |
 |---|---|---|
 | `http3.retry` | `"auto"` | whether a new client must first answer a Retry (RFC 9000 8.1.2): a stateless packet carrying a token bound to the client's address, the original connection id and the time, valid ten seconds, that the client repeats in its next Initial; the round trip proves the address before the server spends a TLS session on it. `"auto"` sends Retry once a worker has 512 handshakes in progress and drops further Initials at 1,024; `"always"` for a host under a handshake flood (every new connection pays one round trip); `"never"` for a benchmark that must not pay it. An Initial whose token does not open is answered with `INVALID_TOKEN` and forgotten |
+| `http3.alt_svc` | `true` | every HTTP/1 and HTTP/2 answer of a TLS listener that also speaks h3 carries `alt-svc: h3=":port"; ma=86400`, which is how a browser learns to switch to HTTP/3 on its next connection (design 7.4); `false` removes the field, and clients that know the port (`curl --http3-only`, h2load) still connect over QUIC |
 
 What else the transport does without a key: a client whose address changes (a NAT
 rebinding) keeps its connection, the new path is validated with a `PATH_CHALLENGE`
@@ -1314,6 +1333,8 @@ worker can answer for any id.
 
 Requests over HTTP/3 are logged as `"GET /path HTTP/3.0"` and PHP sees
 `SERVER_PROTOCOL=HTTP/3.0`; `agensio ctl status` lists `h3` among a listener's protocols.
-Not yet (the design's I1b to I4): request bodies from unbuffered upstreams over h3,
-0-RTT, ECN, `alt-svc`, endpoints for listeners a reload adds, NEW_TOKEN for later
+A reload that removes h3 from a listener (or the listener itself) tells that listener's
+HTTP/3 connections GOAWAY and closes them with H3_NO_ERROR, then closes its UDP sockets;
+a reload that adds h3 to a TLS listener opens them. Not yet (the design's I1b to I4):
+request bodies from unbuffered upstreams over h3, 0-RTT, ECN, NEW_TOKEN for later
 connections.

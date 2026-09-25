@@ -499,6 +499,42 @@ public:
     // Counters for the status page.
     std::uint64_t packets_in = 0, packets_out = 0;
 
+#ifdef AGENSIO_FUZZ_HOOKS
+    // Fuzz builds only (tests/fuzz/fuzz_quic_conn.cpp): the connection as established after
+    // a handshake that never ran, with application keys from one secret both ways (the
+    // fuzzer seals its packets with the same) and the peer's transport parameters at
+    // generous values, so arbitrary 1-RTT packets meet streams, credit, acknowledgements,
+    // losses and timers with real packet protection.
+    bool fuzz_establish(const unsigned char* secret, std::size_t len, TimePoint now) {
+        if (!rx_[2].install(Suite::aes128gcm, secret, len, false)) return false;
+        if (!tx_[2].install(Suite::aes128gcm, secret, len, true)) return false;
+        peer_tp_ = TransportParams{};
+        peer_tp_.initial_max_data = 1 << 20;
+        peer_tp_.initial_max_stream_data_bidi_local = 65536;
+        peer_tp_.initial_max_stream_data_bidi_remote = 65536;
+        peer_tp_.initial_max_stream_data_uni = 65536;
+        peer_tp_.initial_max_streams_bidi = 100;
+        peer_tp_.initial_max_streams_uni = 8;
+        peer_tp_.active_connection_id_limit = 4;
+        peer_tp_.max_udp_payload_size = 1472;
+        peer_tp_.max_ack_delay = 25;
+        peer_params_ok_ = true;
+        peer_max_data_ = peer_tp_.initial_max_data;
+        peer_max_streams_bidi_ = peer_tp_.initial_max_streams_bidi;
+        peer_max_streams_uni_ = peer_tp_.initial_max_streams_uni;
+        rec_.max_ack_delay = std::chrono::milliseconds(25);
+        address_validated_ = true;
+        discard_initial();
+        state_ = State::established;
+        leave_handshake();
+        rec_.handshake_confirmed = true;
+        mtu_cap_ = 1472;
+        start_mtu_search();
+        last_receive_ = now;
+        return true;
+    }
+#endif
+
 private:
     using Level = TlsSession::Level;
 

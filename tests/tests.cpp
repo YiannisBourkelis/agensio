@@ -342,6 +342,18 @@ static void test_hpack_encoder() {
         CHECK(same(decode(d, b), {{"server", "agensio"}, {"content-type", "application/x-" + std::to_string(i)}}));
         CHECK(e.table_size() == d.table_size() && e.table_entries() == d.table_entries() && d.table_size() <= 1024);
     }
+    // alt-svc (design-http3 7.4) is not in the static table: a literal with a new name
+    // enters the dynamic table once, then it is one index byte per answer.
+    {
+        std::string b;
+        e.begin(b);
+        e.alt_svc(b, "h3=\":8443\"; ma=86400");
+        CHECK(same(decode(d, b), {{"alt-svc", "h3=\":8443\"; ma=86400"}}) && static_cast<unsigned char>(b[0]) == 0x40);
+        std::string c;
+        e.begin(c);
+        e.alt_svc(c, "h3=\":8443\"; ma=86400");
+        CHECK(c.size() == 1 && same(decode(d, c), {{"alt-svc", "h3=\":8443\"; ma=86400"}}));
+    }
     // A value larger than the table stays a literal and leaves the table alone.
     {
         const std::string big(2000, 'v');
@@ -663,7 +675,6 @@ static void test_cache() {
         e->last_access = access;
         return e;
     };
-    int site = 0;
     CHECK(cache.insert(CacheKeyView{7, "/a"}, make(100, 1)) != nullptr);
     CHECK(cache.find(CacheKeyView{8, "/a"}) == nullptr);  // another location (another generation): no hit
     CHECK(cache.insert(CacheKeyView{7, "/b"}, make(100, 2)) != nullptr);
@@ -3159,7 +3170,7 @@ static void test_h2_frame_and_settings() {
     CHECK(error_name(ErrorCode::compression_error) == "COMPRESSION_ERROR");
     // The shared field rules.
     CHECK(fields::valid_name("content-type") && fields::valid_name("x-a_b.c~") && !fields::valid_name("Content-Type") &&
-          !fields::valid_name("a b") && !fields::valid_name("") && !fields::valid_name("a\x7fb"));
+          !fields::valid_name("a b") && !fields::valid_name("") && !fields::valid_name("a\x7f" "b"));
     CHECK(fields::valid_value("text/html; charset=utf-8") && fields::valid_value("") && !fields::valid_value("a\r\nb") &&
           !fields::valid_value(std::string_view("a\0b", 3)) && !fields::valid_value(" x") && !fields::valid_value("x\t"));
     CHECK(fields::connection_specific("transfer-encoding") && fields::connection_specific("keep-alive") &&
@@ -3274,6 +3285,155 @@ static void test_qpack_dynamic() {
     CHECK(small.encoder_stream(unhex("2a"), consumed) && small.capacity() == 10);  // 10 bytes: nothing fits
     CHECK(!small.encoder_stream(unhex("c00f7777772e6578616d706c652e636f6d"), consumed));
     // Blocked-section bookkeeping through the connection is exercised by the integration suite's clients.
+}
+
+// The encoder side (RFC 9204 appendix B from the encoder's chair, and the rules of
+// sections 2.1.1 and 2.1.2): the instruction bytes, the section bytes, the round trip
+// through our decoder, the peer's decoder stream, references holding entries in the
+// table, the blocked-streams limit.
+static void test_qpack_encoder() {
+    using namespace agensio::qpack;
+    {
+        Encoder e;
+        Section sec0;
+        std::string sec;
+        e.begin(sec0);
+        e.server(sec, "agensio");  // no peer settings yet: a literal with a static name reference
+        CHECK(!e.enabled() && (static_cast<unsigned char>(sec[0]) & 0xf0) == 0x50);
+        std::string px;
+        e.prefix(px);
+        CHECK(px == std::string("\0\0", 2));
+        e.end();
+        CHECK(!sec0.pending && e.instructions().empty());
+    }
+    {
+        // B.2: capacity 220, two inserts with static name references, the section that
+        // references them post-base: the same section bytes the appendix shows.
+        Encoder e;
+        e.set_peer(220, 100);
+        Encoder::Memo authority, path;
+        Section s0;
+        std::string sec, px;
+        e.begin(s0);
+        e.memo_field(sec, 0, ":authority", "www.example.com", authority);
+        e.memo_field(sec, 1, ":path", "/sample/path", path);
+        e.prefix(px);
+        // The appendix writes the values raw; ours are Huffman when shorter, the same table results.
+        CHECK(e.instructions().compare(0, 4, unhex("3fbd01c0")) == 0 && e.instructions().size() < 36);
+        CHECK(px + sec == unhex("03811011"));
+        e.end();
+        CHECK(s0.pending && s0.ric == 2 && s0.n == 2 && e.insert_count() == 2 && e.table_entries() == 2 && e.known_received() == 0);
+        // Our decoder reads it back.
+        Decoder d;
+        std::size_t consumed = 0;
+        CHECK(d.encoder_stream(e.instructions(), consumed) && consumed == e.instructions().size() && d.insert_count() == 2);
+        std::string arena, fields;
+        std::uint64_t required = 0;
+        CHECK(d.decode(px + sec, arena, 16384, [&](std::string_view n, std::string_view v, Origin) { fields += std::string(n) + "=" + std::string(v) + ";"; return true; }, required) == Decoder::Result::ok);
+        CHECK(fields == ":authority=www.example.com;:path=/sample/path;" && required == 2);
+        // The peer acknowledges the section (stream 0): the references are released, known received count 2.
+        std::vector<std::pair<std::uint64_t, bool>> seen;
+        auto route = [&](std::uint64_t id, bool cancelled) {
+            seen.emplace_back(id, cancelled);
+            if (id == 0) { if (cancelled) e.cancelled(s0); else e.acknowledged(s0); }
+        };
+        CHECK(e.decoder_stream(unhex("80"), consumed, route) && consumed == 1 && !s0.pending && e.known_received() == 2);
+        // A second section references both again, relative to its base, and adds nothing.
+        e.instructions().clear();
+        Section s1;
+        sec.clear(); px.clear();
+        e.begin(s1);
+        e.memo_field(sec, 0, ":authority", "www.example.com", authority);
+        e.memo_field(sec, 1, ":path", "/sample/path", path);
+        e.prefix(px);
+        CHECK(e.instructions().empty() && px + sec == unhex("03008180"));
+        e.end();
+        Decoder d2;
+        CHECK(d2.encoder_stream(unhex("3fbd01c00f7777772e6578616d706c652e636f6dc10c2f73616d706c652f70617468"), consumed));
+        fields.clear();
+        CHECK(d2.decode(px + sec, arena, 16384, [&](std::string_view n, std::string_view v, Origin) { fields += std::string(n) + "=" + std::string(v) + ";"; return true; }, required) == Decoder::Result::ok);
+        CHECK(fields == ":authority=www.example.com;:path=/sample/path;");
+        // A cancellation for stream 4 is reported and releases nothing here; an increment beyond the inserts is an error.
+        CHECK(e.decoder_stream(unhex("44"), consumed, route) && seen.back() == std::make_pair(std::uint64_t{4}, true));
+        CHECK(!e.decoder_stream(unhex("05"), consumed, route));
+        CHECK(!e.decoder_stream(unhex("00"), consumed, route));  // an increment of 0 is an error
+        e.cancelled(s1);
+        CHECK(!s1.pending);
+    }
+    {
+        // 2.1.1: an entry a pending section references is never evicted; the insert that
+        // would need to is refused and the field goes as a literal.
+        Encoder e;
+        e.set_peer(100, 100);  // room for one entry: server (6 + 7 + 32 = 45) or date (4 + 29 + 32 = 65), not both
+        Section s0, s1;
+        std::string sec, px;
+        e.begin(s0);
+        e.server(sec, "agensio");
+        CHECK(e.table_entries() == 1 && (static_cast<unsigned char>(sec[0]) & 0xf0) == 0x10);  // post-base reference
+        e.date(sec, 1000, "Thu, 25 Sep 2026 06:00:00 GMT");
+        CHECK(e.table_entries() == 1);  // could not evict the referenced server entry: a literal
+        CHECK((static_cast<unsigned char>(sec[1]) & 0xf0) == 0x50);
+        e.prefix(px);
+        e.end();
+        e.acknowledged(s0);  // acknowledged: the server entry may go
+        sec.clear();
+        e.begin(s1);
+        e.date(sec, 1000, "Thu, 25 Sep 2026 06:00:00 GMT");
+        CHECK(e.table_entries() == 1 && e.insert_count() == 2 && (static_cast<unsigned char>(sec[0]) & 0xf0) == 0x10);
+        e.end();
+    }
+    {
+        // 2.1.2: a peer that allows no blocked streams gets literals until it has acknowledged the insert.
+        Encoder e;
+        e.set_peer(4096, 0);
+        Section s0, s1, s2, s3;
+        std::string sec, px;
+        e.begin(s0);
+        e.server(sec, "agensio");
+        CHECK(e.table_entries() == 1 && (static_cast<unsigned char>(sec[0]) & 0xf0) == 0x50);  // inserted, but a literal
+        e.prefix(px);
+        CHECK(px == std::string("\0\0", 2));
+        e.end();
+        CHECK(!s0.pending);
+        CHECK(e.increment(1) && e.known_received() == 1);  // Insert Count Increment 1
+        sec.clear(); px.clear();
+        e.begin(s1);
+        e.server(sec, "agensio");
+        CHECK((static_cast<unsigned char>(sec[0]) & 0xc0) == 0x80);  // now an index byte
+        e.prefix(px);
+        CHECK(px == unhex("0200"));  // Required Insert Count 1 (encoded 2), base 1, delta 0
+        e.end();
+        // content-type: a static value is one static byte; another goes through the table once.
+        sec.clear();
+        e.begin(s2);
+        e.content_type(sec, "text/html; charset=utf-8");
+        CHECK(sec.size() == 1 && static_cast<unsigned char>(sec[0]) == (0xc0 | 52));  // static row 52
+        e.content_type(sec, "text/html; charset=utf-8");
+        CHECK(sec.size() == 2 && static_cast<unsigned char>(sec[1]) == (0xc0 | 52));  // remembered, no search
+        e.content_type(sec, "text/x-agensio");
+        e.content_type(sec, "text/x-agensio");
+        CHECK(e.insert_count() == 2);
+        {
+            unsigned ct = 0;
+            CHECK(static_name("content-type", ct) && ct == 44);  // kContentTypeName, the insert's name reference
+        }
+        e.end();
+        CHECK(e.increment(1) && e.known_received() == 2);
+        sec.clear();
+        e.begin(s3);
+        e.content_type(sec, "text/x-agensio");
+        CHECK(sec.size() == 1 && e.insert_count() == 2);  // the memo: one index byte, no scan, no insert
+        e.end();
+        // The date by second: the same second is an index byte, the next second an insert.
+        Section s4;
+        sec.clear();
+        e.begin(s4);
+        e.date(sec, 5, "Thu, 25 Sep 2026 06:00:05 GMT");
+        e.date(sec, 5, "Thu, 25 Sep 2026 06:00:05 GMT");
+        e.date(sec, 6, "Thu, 25 Sep 2026 06:00:06 GMT");
+        CHECK(e.insert_count() == 4);
+        e.end();
+    }
 }
 
 #ifdef AGENSIO_HAS_QUIC
@@ -3938,6 +4098,7 @@ int main() {
     test_hpack();
     test_qpack();
     test_qpack_dynamic();
+    test_qpack_encoder();
 #ifdef AGENSIO_HAS_QUIC
     test_quic();
     test_quic_stateless();

@@ -84,6 +84,8 @@ public:
     // server and date: `insert_bytes` is append_insert(name, value), prebuilt by the caller.
     void server(std::string& out, std::string_view value, std::string_view insert_bytes);
     void date(std::string& out, std::time_t second, std::string_view value, std::string_view insert_bytes);
+    // alt-svc (design-http3 7.4), one value per listener: remembered by sequence like server.
+    void alt_svc(std::string& out, std::string_view value);
     std::size_t table_size() const noexcept { return table_.size(); }
     std::size_t table_entries() const noexcept { return table_.count(); }
     std::size_t table_limit() const noexcept { return max_; }
@@ -98,6 +100,7 @@ private:
     DynamicTable table_;
     std::uint64_t next_seq_ = 1;  // the sequence the next insertion gets
     std::uint64_t server_seq_ = 0;
+    std::uint64_t alt_svc_seq_ = 0;
     std::uint64_t date_seq_ = 0;
     std::time_t date_second_ = 0;
     std::uint64_t ct_seq_ = 0;  // the table entry holding ct_value_ as content-type, while alive

@@ -169,7 +169,8 @@ inline std::size_t build_version_negotiation(unsigned char* out, std::size_t cap
     if (cap < need) return 0;
     std::size_t pos = 0;
     out[pos++] = static_cast<unsigned char>(0x80 | (random_first & 0x7f));
-    out[pos++] = out[pos++] = out[pos++] = out[pos++] = 0;
+    std::memset(out + pos, 0, 4);  // version 0: a Version Negotiation packet (RFC 8999 6, RFC 9000 17.2.1)
+    pos += 4;
     out[pos++] = to.len;
     std::memcpy(out + pos, to.bytes, to.len);
     pos += to.len;

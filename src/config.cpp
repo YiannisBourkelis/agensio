@@ -1157,7 +1157,8 @@ void explain_config(const Config& cfg, std::ostream& out) {
     out << "\n[server]\n";
     print_list(out, "protocols", cfg.protocols);
     out << "http2 = { max_concurrent_streams = " << cfg.http2.max_concurrent_streams << " }\n";
-    out << "http3 = { retry = \"" << cfg.http3.retry << "\" }\n";
+    out << "http3 = { retry = \"" << cfg.http3.retry << "\", alt_svc = " << (cfg.http3.alt_svc ? "true" : "false")
+        << " }\n";
     for (const auto& site : cfg.sites) {
         out << "\n[[site]]";
         if (!site.app.empty()) out << "  # app = \"" << site.app << "\"";
@@ -1335,11 +1336,13 @@ Config load_config(const fs::path& path) {
     }
     if (auto h = server["http3"].as_table()) {
         for (const auto& [k, v] : *h)
-            if (k != "retry") fail("server.http3: unknown key \"" + std::string(k.str()) + "\"");
+            if (k != "retry" && k != "alt_svc") fail("server.http3: unknown key \"" + std::string(k.str()) + "\"");
         if (auto r = (*h)["retry"].value<std::string>()) {
             if (*r != "auto" && *r != "always" && *r != "never") fail("server.http3.retry must be \"auto\", \"always\" or \"never\"");
             cfg.http3.retry = *r;
         }
+        if (auto a = (*h)["alt_svc"].value<bool>()) cfg.http3.alt_svc = *a;
+        else if ((*h)["alt_svc"]) fail("server.http3.alt_svc must be true or false");
     }
     for (const auto& text : string_list(server["trusted_proxies"], "server.trusted_proxies")) {
         Cidr c;

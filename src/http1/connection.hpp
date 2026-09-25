@@ -687,6 +687,7 @@ private:
         // A client waiting for "100 Continue" that gets a final answer instead will not send
         // the body, so there is nothing to drain: close after the response (RFC 9110 10.1.1).
         if (body_pending_ && expect_continue_ && !continue_sent_ && consumed_ >= in_len_) r.keep_alive = false;
+        r.alt_svc_line = listener_->alt_svc_line;  // the way to HTTP/3 (design-http3 7.4), prebuilt for the writer
         responding_ = true;
         writer_.write(stream_, worker_.state);
     }

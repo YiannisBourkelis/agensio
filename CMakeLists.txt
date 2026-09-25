@@ -216,6 +216,17 @@ if(AGENSIO_FUZZ)
       target_link_libraries(fuzz_${t} PRIVATE ZLIB::ZLIB)
     endif()
   endforeach()
+  # The connection fuzzer needs the transport's crypto: a fuzz build configured with
+  # -DAGENSIO_TLS=ON on a host whose OpenSSL has the QUIC TLS API (3.5).
+  if(AGENSIO_HAS_QUIC)
+    add_executable(fuzz_quic_conn tests/fuzz/fuzz_quic_conn.cpp src/quic/crypto.cpp src/quic/tls.cpp src/file.cpp)
+    target_include_directories(fuzz_quic_conn PRIVATE src)
+    target_compile_features(fuzz_quic_conn PRIVATE cxx_std_20)
+    target_compile_definitions(fuzz_quic_conn PRIVATE AGENSIO_HAS_TLS=1 AGENSIO_HAS_QUIC=1 AGENSIO_FUZZ_HOOKS=1)
+    target_compile_options(fuzz_quic_conn PRIVATE -fsanitize=fuzzer,address,undefined -g -O1 -fno-omit-frame-pointer)
+    target_link_options(fuzz_quic_conn PRIVATE -fsanitize=fuzzer,address,undefined)
+    target_link_libraries(fuzz_quic_conn PRIVATE asio OpenSSL::SSL OpenSSL::Crypto)
+  endif()
 endif()
 
 # ---------------------------------------------------------------- install and packages (H7)

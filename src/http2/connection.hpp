@@ -796,6 +796,7 @@ private:
     void respond(H2Stream& s) {
         if (s.state == StreamState::closed) return;
         s.stream.response.upgrade = false;  // a 101 has no meaning here; the body is what came with it
+        s.stream.response.alt_svc = listener_->alt_svc;  // the way to HTTP/3 (design-http3 7.4), the encoder's memo
         // Emit at respond (design 6.6): inside a read's frame loop, a complete small answer
         // to a request that has fully arrived goes into the cycle's buffer now and its
         // stream is closed and pooled at once, so the next HEADERS frame of the read takes

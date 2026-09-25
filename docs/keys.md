@@ -54,6 +54,7 @@ section of `docs/configuration.md` that explains the key.
 | key | type | default | meaning | applies | via | doc |
 |---|---|---|---|---|---|---|
 | `retry` | "auto" \| "always" \| "never" | "auto" | Whether a new HTTP/3 client must prove its address with a Retry round trip before it gets a connection (RFC 9000 8.1.2; the token is bound to the address and valid ten seconds). "auto" sends Retry once a worker has 512 handshakes in progress and drops further Initials at 1024; "always" is for a host under a handshake flood; "never" for a benchmark that must not pay the round trip. Everything else HTTP/3 derives from the HTTP/2 and connection limits. | reload | file | 17 |
+| `alt_svc` | bool | true | Whether every HTTP/1 and HTTP/2 answer of a TLS listener that also speaks h3 carries alt-svc (h3=":port"; ma=86400), which is how browsers learn to switch to HTTP/3 on their next connection; off, clients that know the port (curl --http3-only, h2load) still connect over QUIC. | reload | file | 17 |
 ## `[server]`
 
 | key | type | default | meaning | applies | via | doc |

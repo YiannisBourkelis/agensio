@@ -231,6 +231,8 @@ public:
         append_frame_header(c, frame::settings, settings.size());
         c.append(settings);
         qenc_.q.head.assign("\x02", 1);
+        // Its inserts accumulate for the connection's life, as the decoder stream's acknowledgements do.
+        qenc_.q.trim_head = true;
         qdec_.q.head.assign("\x03", 1);
         qdec_.q.trim_head = true;  // its acknowledgements accumulate for the connection's life
         for (H3Stream* u : {&ctl_, &qenc_, &qdec_}) {
@@ -588,25 +590,21 @@ private:
         quic_.stream_ready(q);
     }
 
+    // The response head as a HEADERS frame: server, date and content-type through the
+    // peer's dynamic table (design 7.2), the cache entry's tail prebuilt over the static
+    // table, the rest static or literal. The inserts the section needs go on the encoder
+    // stream first, so the packet carries them ahead of the section.
     void build_head(H3Stream& s, std::string& out) {
         Response& r = s.stream.response;
         WorkerState& ws = worker_.state;
         std::string& sec = s.scratch;
         sec.clear();
-        qpack::append_section_prefix(sec);
+        encoder_.begin(s.qpack);
         qpack::append_status(sec, r.status);
-        if (!ws.server_line.empty()) {
-            if (ws.h3_server_field.empty()) qpack::append_literal_name_ref(ws.h3_server_field, 92, cfg_.server_header);
-            sec.append(ws.h3_server_field);
-        }
-        if (ws.h3_date_time != ws.now) {  // the date literal, once per second per worker
-            ws.h3_date_field.clear();
-            qpack::append_literal_name_ref(ws.h3_date_field, 6, ws.date.at(ws.now));
-            ws.h3_date_time = ws.now;
-        }
-        sec.append(ws.h3_date_field);
+        if (!ws.server_line.empty()) encoder_.server(sec, cfg_.server_header);
+        encoder_.date(sec, ws.now, ws.date.at(ws.now));
         if (!r.prebuilt_h3.empty()) {
-            if (!r.content_type.empty()) qpack::append_field(sec, "content-type", r.content_type);
+            if (!r.content_type.empty()) encoder_.content_type(sec, r.content_type);
             if (!r.content_encoding.empty()) qpack::append_field(sec, "content-encoding", r.content_encoding);
             if (r.vary) qpack::append_indexed(sec, 59);  // vary: accept-encoding
             sec.append(r.prebuilt_h3);
@@ -614,9 +612,24 @@ private:
             encode_text_block(sec, r.prebuilt_headers, s.section);
         }
         for (const HeaderField& f : r.headers) append_lower(sec, f.name, f.value, s.section);
+        std::string& px = s.section;  // free at this point: the request's section is long decoded
+        px.clear();
+        encoder_.prefix(px);
         out.clear();
-        append_frame_header(out, frame::headers, sec.size());
+        append_frame_header(out, frame::headers, px.size() + sec.size());
+        out.append(px);
         out.append(sec);
+        encoder_.end();
+        std::string& ins = encoder_.instructions();
+        if (!ins.empty() && qenc_.q.open) {
+            QUIC_TRACE("h3: encoder stream +%zu bytes (inserts %llu, table %zu, blocking %zu)\n", ins.size(),
+                       static_cast<unsigned long long>(encoder_.insert_count()), encoder_.table_entries(),
+                       encoder_.blocking_sections());
+            qenc_.q.head.append(ins);
+            ins.clear();
+            qenc_.q.total = qenc_.q.head_end();
+            quic_.stream_ready(qenc_.q);  // ahead of the response stream, which respond() enqueues after this
+        }
     }
 
     void encode_text_block(std::string& out, std::string_view text, std::string& scratch) {
@@ -787,8 +800,23 @@ private:
                 }
                 break;  // an incomplete instruction waits for more bytes
             }
-            // The QPACK decoder stream (acknowledgements we never need while nothing is
-            // indexed) and unknown types: their bytes are consumed and discarded.
+            // The peer's acknowledgements of our sections and inserts (RFC 9204 4.4).
+            if (s.uni_type == stream_type::qpack_decoder) {
+                std::size_t consumed = 0;
+                const bool ok = encoder_.decoder_stream(
+                    std::string_view(q.data(), avail), consumed, [this](std::uint64_t id, bool cancelled) {
+                    quic::QuicStream* t = find_stream(id);
+                    // A stream already closed: its references were released then.
+                    if (!t || !quic::stream_is_bidi(id)) return;
+                    H3Stream& h = of(*t);
+                    if (cancelled) encoder_.cancelled(h.qpack);
+                    else encoder_.acknowledged(h.qpack);
+                });
+                if (!ok) return connection_error(err::qpack_decoder_stream, "invalid decoder stream instruction");
+                if (consumed) quic_.stream_consumed(q, consumed);
+                break;  // an incomplete instruction waits for more bytes
+            }
+            // Unknown types: their bytes are consumed and discarded.
             quic_.stream_consumed(q, avail);
         }
         if (q.at_end() && !q.fin_delivered) {
@@ -821,6 +849,7 @@ private:
                 default: break;
             }
         }
+        encoder_.set_peer(peer_qpack_capacity_, peer_qpack_blocked_);
         return true;
     }
 
@@ -852,6 +881,7 @@ private:
         if (&s == peer_control_) peer_control_ = nullptr;
         if (&s == peer_qenc_) peer_qenc_ = nullptr;
         if (&s == peer_qdec_) peer_qdec_ = nullptr;
+        if (s.kind == H3Stream::Kind::request) encoder_.cancelled(s.qpack);  // its section's table references are free
         quic_.stream_closed(s.q);
         streams_.release(s, live_->http2.max_concurrent_streams);
     }
@@ -959,6 +989,7 @@ private:
     H3Stream* peer_qdec_ = nullptr;
     std::uint64_t peer_qpack_capacity_ = 0, peer_qpack_blocked_ = 0, peer_max_field_section_ = ~std::uint64_t{0};
     qpack::Decoder decoder_;
+    qpack::Encoder encoder_;  // our answers through the peer's dynamic table (design 7.2)
     std::vector<H3Stream*> blocked_;  // sections waiting for the encoder stream
     bool ici_due_ = false;            // inserts arrived that no section acknowledged yet
     bool decoder_dirty_ = false;      // the decoder stream has new bytes to send

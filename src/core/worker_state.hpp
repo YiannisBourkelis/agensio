@@ -20,9 +20,6 @@ struct WorkerState {
     std::string h2_server_insert;  // HTTP/2: the server field as an inserting literal, built once (the encoder indexes it after)
     std::string h2_date_insert;    // HTTP/2: the date field as an inserting literal, refreshed per second
     std::time_t h2_date_time = 0;
-    std::string h3_server_field;  // HTTP/3: the server field as a QPACK literal, built once
-    std::string h3_date_field;    // HTTP/3: the date field as a QPACK literal, refreshed per second
-    std::time_t h3_date_time = 0;
     std::string path;     // normalised request path
     std::string fs_path;  // filesystem path being served
     const void* site = nullptr;  // the SiteConfig chosen for the current request (for the access log)

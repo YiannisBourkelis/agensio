@@ -526,6 +526,42 @@ def row_flow_control(args):
     return True, "FLOW_CONTROL_ERROR for data beyond the stream's window"
 
 
+def row_reload(args):
+    """A reload whose configuration drops h3 from the listener: an open connection gets
+    GOAWAY and a close with H3_NO_ERROR at once, a new client finds no QUIC server on the
+    port; a reload that brings h3 back answers again (design 6.9, Reload)."""
+    c = Client()
+    if not c.connect():
+        return False, "handshake did not complete"
+    s1, _ = c.get("/")
+    write_config(args.port, args.retry, h3=False)
+    args.server.send_signal(1)  # SIGHUP: agensio reloads
+    c.pump(5.0, lambda: c.terminated is not None)
+    t = c.terminated
+    c.close()
+    gone = Client()
+    still = gone.connect(timeout=2.5)
+    gone.close()
+    write_config(args.port, args.retry, h3=True)
+    args.server.send_signal(1)
+    time.sleep(0.5)
+    back = Client()
+    ok = back.connect()
+    s3, _ = back.get("/") if ok else (None, None)
+    back.close()
+    if s1 != 200:
+        return False, "the request before the reload gave %s" % s1
+    if t is None:
+        return False, "no close arrived after the reload dropped h3"
+    if t.error_code != 0x100:
+        return False, "closed with 0x%x, expected H3_NO_ERROR" % t.error_code
+    if still:
+        return False, "a new connection was accepted although h3 left the configuration"
+    if s3 != 200:
+        return False, "after the reload that brought h3 back: %s" % s3
+    return True, "H3_NO_ERROR on the reload that dropped h3, no server without it, answers again with it"
+
+
 def row_shutdown(args):
     """The last row: a connection is open when the server gets SIGINT; it must see the
     GOAWAY and a close with H3_NO_ERROR at once, not an idle timeout."""
@@ -570,18 +606,25 @@ ROWS = [
     ("retire-unissued", row_retire_unissued),
     ("retire-in-use", row_retire_in_use),
     ("flow-control", row_flow_control),
+    ("reload", row_reload),
     ("shutdown", row_shutdown),  # last: it stops the server
 ]
 
 
-def start_server(binary, port, retry):
+def write_config(port, retry, h3=True):
     os.makedirs(os.path.join(ROOT, "bench", "tmp"), exist_ok=True)
     conf = os.path.join(ROOT, "bench", "tmp", "h3-attacks.toml")
     with open(conf, "w") as f:
-        f.write('[server]\nworkers = 1\nprotocols = ["h2", "h1", "h3"]\nhttp3 = { retry = "%s" }\n' % retry)
+        f.write('[server]\nworkers = 1\nprotocols = [%s]\nhttp3 = { retry = "%s" }\n' % ('"h2", "h1", "h3"' if h3 else '"h2", "h1"', retry))
+        f.write('pid_file = "%s/bench/tmp/h3-attacks.pid"\n' % ROOT)
         f.write('[log]\naccess = "off"\n')
         f.write('[[site]]\nlisten = ["127.0.0.1:%d"]\nroot = "%s/bench/www"\n' % (port, ROOT))
         f.write('tls = { cert = "%s/bench/certs/cert.pem", key = "%s/bench/certs/key.pem" }\n' % (ROOT, ROOT))
+    return conf
+
+
+def start_server(binary, port, retry):
+    conf = write_config(port, retry)
     err = open(os.path.join(ROOT, "bench", "tmp", "h3-attacks.err"), "w")
     p = subprocess.Popen([binary, "-c", conf], stdout=subprocess.DEVNULL, stderr=err)
     for _ in range(50):

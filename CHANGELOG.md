@@ -1,5 +1,84 @@
 # Changelog
 
+## 0.1.0-alpha.23 (unreleased)
+
+- **QPACK's dynamic table on the encoder side** (RFC 9204 sections 2.1, 4.3, 4.5;
+  design 7.2's second step): our answers' `server`, `date` and `content-type` (and
+  `alt-svc` once it exists) go through the peer's dynamic table, inserted once with a
+  static name reference on the encoder stream and then one index byte each, the table at
+  most 1 KB and at most what the peer announced (h2load, the arena's client, and browsers
+  announce 4 KB; curl announces none and keeps getting literals). The encoder mirrors the
+  peer's table, references entries inserted for the same section post-base (appendix
+  B.2's section is reproduced byte for byte), never evicts an entry a pending section
+  references (the insert is refused and the field goes as a literal), counts the sections
+  that may block the peer against its `QPACK_BLOCKED_STREAMS`, and reads the peer's
+  decoder stream (acknowledgements, cancellations, increments) on the connection; the
+  inserts a section needs are enqueued ahead of it, so they travel in the same packet. Unit
+  tests for the instruction and section bytes, the round trip through our decoder, the
+  eviction rule and the blocked-streams limit; `fuzz_qpack` feeds the encoder's
+  decoder-stream parser too. Measured under the arena load (`profile-encoder2.txt`):
+  the bytes on the wire per answer a third of before (20 MB/s at 1.18M req/s where the
+  static-only head moved 52), 0.56 us of server CPU per request against 0.54 before the
+  step, 0.55 with the content-type memo (`profile-altsvc.txt`, 1.17 to 1.22M req/s,
+  2.97 instructions per cycle, the static-table search gone from the profile); the first version scanned the table per field and a pending-section list per
+  acknowledgement and close (0.64 us, the scans 8 % of the profile), so every field now
+  remembers its entry and a section's references live in the stream that sent it, and
+  nothing in the encoder scans per answer; the last of those scans, found in the profile
+  after the arena run (`content-type`'s row of the static table searched per answer, the
+  name by binary search and the value through the 99 rows, 3 % of the cycles), is
+  remembered per value change as well. The h3 rows of the A/B on loopback, three rounds
+  each (`ab-20260925-084739.md` before that last memo, `ab-20260925-085625.md` with it,
+  base v0.1.0-alpha.22): 1.05 / 1.04 / 1.02 / 1.02 then 1.00 / 0.99 / 0.99 / 0.98 of
+  the tag at one, ten and sixty-four streams and for the 100 KB file, so the dynamic
+  head costs the server nothing per request and the client a third of the bytes; h1
+  and h2 within noise throughout. The step is for the client and the path: an answer's
+  head is a dozen bytes instead of fifty, which the arena's load generator decodes as
+  index bytes. One worker on this box (`h3-20260925-085922.md`): 1.20M req/s at
+  sixty-four streams (0.65 us), the 100 KB file 85.5k at 11.6 us, the 10 MB stream
+  1.38 ms per response (nginx 1.95; 1.44 at the stability step); in the arena's harness
+  `baseline-h3` 3.89 to 3.90M req/s at 2.1 cores, load-bound as before, and `static-h3`
+  597 to 603k at 8.5 cores, within noise of the days before (610 to 622k).
+- **`alt-svc`** (design 7.4): every HTTP/1 and HTTP/2 answer of a TLS listener that also
+  speaks h3 carries `alt-svc: h3=":port"; ma=86400`, so browsers switch to HTTP/3 on
+  their next connection; `http3 = { alt_svc = false }` removes it. Prebuilt per listener
+  and kept off the hot paths: over HTTP/1 the line is a third buffer of the writer's
+  fast path (the entry's block borrowed up to its last line, the line and the blank line
+  in the tail), not an extra field that would send the answer down the general path;
+  over HTTP/2 it is one index byte after the first answer of a connection through the
+  HPACK encoder's memo (`hpack::Encoder::alt_svc`, a literal with a new name once, since
+  the static table has no `alt-svc`), like `server` and `date`. The first version added
+  it as an extra field at respond time and cost the ten-stream HTTP/2 row 9 % and the
+  arena's `baseline-h2` 3 % (`ab-20260925-081753.md`); with the fast paths
+  (`ab-20260925-084021.md`, base v0.1.0-alpha.22) the HTTP/1 rows are 1.00 to 1.03 and
+  the HTTP/2 rows 0.96 to 1.00, the ten-stream row 1.00, so the field is free; in the
+  arena's harness the same hour, `static-tls` 603k req/s against the tag's 606k and
+  `baseline-h2` 11.86 to 11.99M against the tag's 12.29 to 12.42M as h2load counts
+  them (load-bound, the server at 440 to 490 % either way): the field is one more
+  index byte for the server and one more field for the load generator to decode per
+  answer, which is where that row's 3 % goes; the arena's nginx entry sends the same
+  `Alt-Svc` on its h2 and h3 port, so the entry keeps it.
+- **The receive buffer on the h3 startup line**: the QUIC sockets ask for 4 MB receive
+  and send buffers and Linux grants at most `net.core.rmem_max` / `wmem_max`, 208 KB on
+  an untuned host; 256 connections opening at once on loopback then lose Initials to the
+  full socket and their handshakes complete after the clients' probe timeouts, one to
+  three seconds later (the 256-connection row of `h3-20260925-085922.md`, 326k req/s
+  where the run before did 915k, its connect times p95 3.03 s, no failed request). The
+  startup line and the error log now say what was granted and which sysctl to raise
+  when it is less than asked; `docs/configuration.md` 17 has the command.
+- **GOAWAY on reload** (design 6.9): an h3 listener that a reload removes, or whose site
+  drops h3, tells its HTTP/3 connections GOAWAY and closes them with H3_NO_ERROR on their
+  workers' loops, then closes its UDP sockets; a TLS listener that gains h3 in a reload
+  opens its endpoints. The attack suite's `reload` row drives both directions with
+  SIGHUP and an open connection.
+- **`fuzz_quic_conn`**, the connection-level fuzzer of the design's 9.2: a fuzz-build hook
+  puts a connection in the established state with application keys from one fixed
+  secret, the harness seals the fuzzer's plaintext frame payloads with the same keys and
+  steps a clock of its own through the timers, so streams, credit, acknowledgements,
+  losses, probes, connection ids, key phases and the close meet arbitrary frames with
+  real packet protection (`build-fuzz-quic`, a fuzz build with `-DAGENSIO_TLS=ON`). Its
+  first two minutes found an ACK frame whose delay field overflowed the clock's
+  arithmetic on its way to a duration; the delay is bounded before it becomes one.
+
 ## 0.1.0-alpha.22 (2026-09-25)
 
 - **HTTP/3 over our own QUIC transport, the first slice** (phase I, `docs/design-http3.md`,

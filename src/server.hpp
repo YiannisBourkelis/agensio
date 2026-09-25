@@ -59,6 +59,8 @@ struct Listener {
     bool h2c = false; // plain: the HTTP/2 preface accepted
     bool h3 = false;  // TLS: HTTP/3 over QUIC on the same port number (UDP), phase I
     bool hq = false;  // TLS: the interop runner's hq-interop over QUIC too (AGENSIO_INTEROP builds)
+    std::string alt_svc;       // TLS with h3: the alt-svc value (h3=":port"; ma=86400) every h1 and h2 answer carries
+    std::string alt_svc_line;  // the same as the HTTP/1 head line, prebuilt
 #ifdef AGENSIO_HAS_TLS
     std::shared_ptr<asio::ssl::context> ssl;  // the handshake starts here; SNI switches to the site's context
     std::map<std::string, std::shared_ptr<asio::ssl::context>> tls_contexts;  // by certificate path
@@ -146,6 +148,8 @@ private:
     void open_h3();
     void start_h3();
     void reload_h3(const Config& cfg);
+    void open_h3_listener(const Listener& l, const Config& cfg, bool start);
+    void sync_h3(const std::shared_ptr<const Generation>& gen);
     void stop_h3();
     struct H3Endpoints;
     json::Value status() override;

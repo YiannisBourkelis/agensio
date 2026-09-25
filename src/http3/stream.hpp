@@ -15,6 +15,7 @@
 
 #include "core/body.hpp"
 #include "core/stream.hpp"
+#include "http3/qpack.hpp"
 #include "quic/stream.hpp"
 
 namespace agensio {
@@ -70,6 +71,7 @@ struct H3Stream {
     std::uint64_t frame_type = 0;
     std::uint64_t frame_remaining = 0;
     std::string section;  // the HEADERS payload as it arrives (bounded by max_header_size)
+    qpack::Section qpack;  // our answer's dynamic-table references until the peer acknowledges the section
     bool headers_done = false;
     bool blocked = false;         // the section waits for the encoder stream (RFC 9204 2.2.1)
     bool trailers = false;        // the pending section is a trailer section (decoded, discarded)

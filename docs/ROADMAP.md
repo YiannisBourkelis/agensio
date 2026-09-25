@@ -995,15 +995,22 @@ share lifted into `src/http/` first. The RFCs are in `docs/rfc/`.
       11.7 us);
       closed streams as a bitmap over the 64 indices below the highest opened instead
       of a scan per new stream.
+- [x] I1b (2026-09-25) `alt-svc` on every HTTP/1 and HTTP/2 answer of a TLS listener
+      that speaks h3 (`http3.alt_svc`); GOAWAY and the close on a reload that removes an
+      h3 listener or its h3, endpoints opened for one a reload adds.
 - [ ] I1b (rest) Streamed upstream bodies (chunks kept until acknowledged), the body
       source and budgets lifted to `src/http/`, the write-stall and body timeouts per
-      stream, GOAWAY on reload, `alt-svc`, NEW_TOKEN.
+      stream, NEW_TOKEN.
 - [x] I1c (decoder side, 2026-09-24) QPACK's dynamic table: the decoder with the encoder
       and decoder streams, blocked sections and the rules-once marks; RFC 9204 appendix B
       as unit tests. On the way: a stream whose id arrived after a higher one was dropped
       as closed (the QPACK encoder stream, and reordered request streams); fixed.
-- [ ] I1c (encoder side) our dynamic head over the encoder stream (design 7.2's second
-      step: the answer's `server`, `date`, `alt-svc` and `content-type` as one index byte each).
+- [x] I1c (encoder side, 2026-09-25) our dynamic head over the encoder stream (design
+      7.2's second step): `server`, `date` and `content-type` one index byte each after
+      the insert, the inserts ahead of the section, no entry a pending section references
+      evicted, the peer's decoder stream read, the content-type value's static row
+      remembered per value change; A/B three rounds 1.00 / 0.99 / 0.99 / 0.98 of
+      alpha.22 on the h3 rows; `alt-svc` joins with its own step.
 - [x] I2 (part, 2026-09-25) The loss proxy (`tests/quic-lossy.py`, 3 % dropped and 5 %
       delayed both ways in the integration suite, the 10 MB file through it); the
       attack rows that need raw frames, written into aioquic's packets (glitches,
@@ -1015,9 +1022,15 @@ share lifted into `src/http/` first. The RFCs are in `docs/rfc/`.
       server image on Debian trixie with the endpoint's setup script, the runner image
       with tshark, `run.sh`), the `hq-interop` protocol and the `SSLKEYLOGFILE` export
       in `-DAGENSIO_INTEROP=ON` builds only; the results table in the security page.
-- [ ] I2 (rest) `fuzz_quic_conn` (a connection through a fake clock and a test AEAD), the
-      amplification row of the attack suite (a spoofed source), the security page's
-      HTTP/3 section as a table, `server_status` and `health` for the transport.
+- [x] I2 (2026-09-25) `fuzz_quic_conn`: a connection established without a handshake
+      (`fuzz_establish`, fuzz builds only), the fuzzer's plaintext frames sealed with the
+      keys it reads with, the harness's clock firing its timers; `build-fuzz-quic` with
+      `-DAGENSIO_TLS=ON`.
+- [x] I2 (2026-09-25) The receive buffer the kernel granted the QUIC sockets on the
+      startup line, with the sysctl to raise (`net.core.rmem_max` caps the 4 MB asked at
+      208 KB untuned; a burst of 256 handshakes on loopback lost Initials to it).
+- [ ] I2 (rest) The amplification row of the attack suite (a spoofed source), the security
+      page's HTTP/3 section as a table, `server_status` and `health` for the transport.
 - [ ] I3 Performance: the levers of design 8.2 measured against nginx and Caddy, the
       dynamic QPACK head, CUBIC and pacing, memory per connection, the arena's two HTTP/3
       rows subscribed and run.

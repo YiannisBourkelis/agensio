@@ -190,7 +190,7 @@ bench/h3/run.sh, profile.sh, memory rows; bench/quic-interop/ (the interop runne
 |---|---|---|
 | `server.hpp/.cpp` | `Listener::h3`; a UDP socket per worker per h3 listener (6.1), opened where the acceptors are, kept across reloads like them; the reuseport program on Linux | none on the TCP paths |
 | `config.*`, `control/reference.cpp`, `docs/keys.md` | `h3` in `protocols`; the `http3` table (section 10) | none |
-| `http1/writer.hpp`, `http2/writer.hpp` | the listener's prebuilt `alt-svc` value appended as an extra field on TLS listeners that also speak h3 (7.4) | one field on those listeners' answers; through the HTTP/2 encoder's table one index byte per answer |
+| `http1/writer.hpp`, `http2/writer.hpp`, `http2/hpack.*` | the listener's prebuilt `alt-svc` line inside the HTTP/1 writer's fast path and an HPACK encoder memo for HTTP/2 on TLS listeners that also speak h3 (7.4) | one more head buffer on those listeners' HTTP/1 answers, one index byte on their HTTP/2 answers; listeners without h3 pay two empty tests |
 | `cache.hpp`, `response.hpp/.cpp`, `core/response.hpp`, `handlers/static.cpp`, `upstream_common.cpp` | the QPACK twins (section 4) | the miss path and startup only |
 | `core/request.hpp` | `Request::protocol` takes `HTTP/3.0` | none |
 | `CMakeLists.txt` | `AGENSIO_HAS_QUIC` when OpenSSL has `SSL_set_quic_tls_cbs` (3.5+); without it the build has no `h3` and says so at `-t` | none |
@@ -579,18 +579,28 @@ present at build time and compares the fields, as `fuzz_hpack` does with nghttp2
   with a static name reference, the cache entry's validators in the prebuilt tail, the section
   prefix `00 00`. About 40 bytes for the arena's answer, no encoder stream traffic, no
   state.
-- I3: the dynamic head of design-http2 6.2.1 over the encoder stream: `server`, `date`
-  (one insert per second, the bytes prebuilt by the worker), `alt-svc` and the last
+- I3 (built 2026-09-25, `qpack::Encoder`): the dynamic head of design-http2 6.2.1 over
+  the encoder stream: `server`, `date` (one insert per second), `alt-svc` and the last
   `content-type` inserted with Insert With Name Reference, then referenced by one index
   byte each, the capacity at most 1 KB and at most the peer's setting. The rule QPACK
   adds: a section that references an entry the peer has not acknowledged (through Insert
   Count Increment or Section Acknowledgement) counts as a blocked stream, at most the
   peer's `QPACK_BLOCKED_STREAMS` at once (nghttp3 and Chrome allow 100; a peer that says
   0 gets literals until its acknowledgement arrives). The insert goes into the packet
-  before the section that uses it (6.7 orders the encoder stream first), so on a clean
-  path the decoder never blocks and under loss it blocks within its own limit. Measured
-  as HTTP/2's was: the head from about 40 bytes to 8, worth roughly a fifth of a packet
-  per answer on the arena's baseline row.
+  before the section that uses it (the encoder stream is enqueued ahead of the response
+  stream), so on a clean path the decoder never blocks and under loss it blocks within
+  its own limit. As built: the encoder mirrors the peer's table (at most 32 entries, a
+  scan of them for a value, a memo for the run of one content-type), references entries
+  inserted for the same section post-base (RFC 9204 4.5.3; appendix B.2's section comes
+  out byte for byte), counts references per entry so no pending section's entry is ever
+  evicted (2.1.1: the insert that would need it is refused and the field goes as a
+  literal), releases them on Section Acknowledgement, Stream Cancellation or the stream's
+  close, and reads the peer's decoder stream on the connection (an increment of zero or
+  beyond the inserts is QPACK_DECODER_STREAM_ERROR). curl (OpenSSL) announces no table
+  and gets literals as before; h2load and browsers announce 4 KB. Nothing in the encoder
+  searches per answer: every field remembers its entry, and the `content-type` value's
+  row of the static table (eleven values are rows of appendix A; the search was 3 % of
+  the cycles per answer in the arena profile) is looked up once per value change.
 
 ### 7.3 Requests, responses, bodies, GOAWAY, errors
 
@@ -622,7 +632,20 @@ offers `h3` alone. Discovery is `alt-svc: h3=":8443"; ma=86400` (the listener's 
 appended by the HTTP/1 and HTTP/2 writers as an extra field on every answer of a TLS
 listener that also speaks `h3`, prebuilt per listener; browsers then switch on the next
 connection and h2load or curl choose `h3` directly. `http3.alt_svc = false` switches
-the field off. HTTPS DNS records (SVCB) are the operator's; the docs say how.
+the field off. HTTPS DNS records (SVCB) are the operator's; the docs say how. Built
+2026-09-25: the value and the prebuilt head line live in the `Listener` (`alt_svc`,
+`alt_svc_line`), the connections hand them to the `Response` at respond time
+(`Response::alt_svc_line`, `Response::alt_svc`) and the writers keep them off the hot
+paths: the HTTP/1 writer's fast path (one borrowed prebuilt block, no tail) becomes the
+block up to its last line plus a tail of the line and the blank line, so a cache hit
+still builds no head; the HTTP/2 writer asks the HPACK encoder's memo
+(`hpack::Encoder::alt_svc`), a literal with a new name inserted once per connection and
+one index byte after that, the way `server` and `date` go. Adding the field to the
+response's extra fields instead, the first version, sent every HTTP/1 answer down the
+general path and cost the ten-stream HTTP/2 row 9 % of its CPU (a table scan per
+answer). The HTTP/3 answers carry nothing. The same day, reload: an h3 listener that leaves the
+configuration or loses h3 sends GOAWAY and closes its connections with H3_NO_ERROR on
+its workers' loops and closes its sockets; a TLS listener that gains h3 opens them.
 
 ### 7.5 Access log and observability
 
@@ -798,6 +821,22 @@ time) and the same profile load (`profile-transport.txt` and the files before it
   recently closed ids on every new stream: the next small lever, a bitmap over the
   recent range), the router 5.0 %, `apply_acked` 4.8 %, the stream's close 4.4 %, the
   QPACK decode 3.7 %; the kernel 4.5 % of the cycles.
+- The encoder side of QPACK (7.2), `alt-svc` (7.4), GOAWAY on reload (6.9) and
+  `fuzz_quic_conn` (9.2), 2026-09-25: the answer's head a dozen bytes instead of fifty,
+  the bytes on the wire per answer a third; the h3 rows of the A/B on loopback, three
+  rounds against v0.1.0-alpha.22, 1.05 / 1.04 / 1.02 / 1.02 with the first encoder that
+  searched the static table for the content-type row per answer (3 % of the cycles) and
+  1.00 / 0.99 / 0.99 / 0.98 once that row is remembered per value (`ab-20260925-084739.md`,
+  `ab-20260925-085625.md`); 0.55 us per request under the arena load
+  (`profile-altsvc.txt`), the arena's `baseline-h3` 3.89 to 3.90M at 2.1 cores
+  (load-bound) and `static-h3` 597 to 603k, the 10 MB stream 1.38 ms per response
+  (`h3-20260925-085922.md`). Two lessons: `alt-svc` as an extra response field cost the
+  ten-stream HTTP/2 row 9 % (the HTTP/1 fast path skipped, an HPACK table scan per
+  answer) and is free as a prebuilt line inside the fast path and an encoder memo; and
+  the QUIC sockets' 4 MB buffers are capped by `net.core.rmem_max` (208 KB untuned), so
+  256 connections opening at once on loopback lose Initials to the full socket and
+  connect one to three seconds later after their probe timeouts, which the startup line
+  now reports with the sysctl to raise.
 
 ## 9. Security
 
@@ -842,6 +881,15 @@ time) and the same profile load (`profile-transport.txt` and the files before it
   differential against nghttp3), `fuzz_h3_frame`, `fuzz_quic_conn` (a connection driven
   through a fake clock and a test AEAD that keeps plaintext, arbitrary datagrams after
   the handshake). ASan and UBSan, minutes per checkpoint, the counts in the security page.
+  As built (2026-09-25): `fuzz_quic_conn` keeps real packet protection instead of a test
+  AEAD: `fuzz_establish` (fuzz builds only) puts the connection in the established state
+  with application keys derived from one fixed secret both ways, and the harness seals
+  the fuzzer's plaintext frame payloads with the same keys, so the input is frames, not
+  ciphertext, and header protection, packet numbers and key phases are exercised for
+  real; the clock is the harness's and its steps fire the timers. It links the crypto and
+  needs a fuzz build with `-DAGENSIO_TLS=ON` (`build-fuzz-quic`). The HTTP/3 frame head
+  is two varints read by the connection, covered by the packet fuzzer and the suites, so
+  `fuzz_h3_frame` was not written.
 - **The attack suite** `tests/h3-attacks.py` on aioquic (Debian's `python3-aioquic` in
   the devbox image), one function per row of 9.1, each asserting the server's response
   (the error code, the close, the log line) and that RSS did not grow beyond the budget.

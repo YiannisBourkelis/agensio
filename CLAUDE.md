@@ -448,8 +448,17 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   pulled from the QUIC stream's buffer so credit returns as the handler reads; QPACK
   (`http3/qpack.*`): the decoder with its 4 KB dynamic table, the client's encoder stream
   and our decoder stream, sections waiting for inserts (16 at most), the rules-once marks
-  shared with HPACK; our own answers use the static table only until the encoder-side
-  dynamic head (design 7.2's second step). `"h3"` in `protocols` opens it on every TLS listener's port over UDP; with `reuse_port` every
+  shared with HPACK; since 2026-09-25 our answers go through the client's dynamic table
+  too (`qpack::Encoder`, at most 1 KB: `server`, `date` and `content-type` one index byte
+  each after the insert, the inserts enqueued ahead of the section, no entry a pending
+  section references ever evicted, the peer's decoder stream read for its
+  acknowledgements; curl announces no table and gets literals). Every HTTP/1 and HTTP/2
+  answer of a TLS listener that speaks h3 carries `alt-svc: h3=":port"; ma=86400`
+  (`http3.alt_svc = false` removes it; prebuilt per listener, a third head buffer inside
+  the HTTP/1 writer's fast path and an HPACK memo, one index byte, over HTTP/2, never an
+  extra field, which cost the ten-stream h2 row 9 %), and a reload that removes an h3 listener or its
+  h3 sends GOAWAY and closes its connections with H3_NO_ERROR before closing its sockets,
+  while a listener that gains h3 opens them. `"h3"` in `protocols` opens it on every TLS listener's port over UDP; with `reuse_port` every
   worker has its own socket and a classic BPF program on the group (no privilege) delivers
   each packet to the worker named by the first byte of its destination connection id, the
   worker that issued it, so a connection never changes worker; the kernel's hash is the
@@ -480,7 +489,8 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   probes outside the congestion window); closed streams are a bitmap over the 64
   indices below the highest opened; GOAWAY then H3_NO_ERROR on every connection at
   shutdown; the lossy relay `tests/quic-lossy.py` in the integration suite; the attack
-  suite at twenty rows (six of them raw frames through aioquic's packet builder); the
+  suite at twenty-one rows (six of them raw frames through aioquic's packet builder, one
+  a reload under an open connection); the
   fuzzers `fuzz_quic_packet`, `fuzz_transport_params`, `fuzz_qpack`; and the QUIC
   interop runner in `bench/quic-interop/` (`run.sh`, everything inside a
   Docker-in-Docker daemon with the bridge netfilter hook off; the `hq-interop` protocol
@@ -499,7 +509,15 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   85k req/s; nginx 31.0 us), one worker 1.23M req/s at sixty-four streams and 1.09M at
   256 connections with ten, the 10 MB stream 1.44 ms per response against nginx's 1.95
   (the last row nginx held), 0.54 us per request under the arena load; the arena's rows
-  on their 1,500-byte path unchanged.
+  on their 1,500-byte path unchanged. The encoder side of QPACK with `alt-svc`, GOAWAY
+  on reload and `fuzz_quic_conn` (2026-09-25, `ab-20260925-085625.md` three rounds,
+  `h3-20260925-085922.md`, `profile-altsvc.txt`): the h3 rows 1.00 / 0.99 / 0.99 / 0.98
+  of alpha.22 with a third of the bytes on the wire (the first encoder searched the
+  static table for the content-type row per answer, 3 % of the cycles, and sat at 1.02
+  to 1.05), h1 and h2 flat, 0.55 us per request under the arena load, the 10 MB stream
+  1.38 ms; the QUIC sockets' 4 MB buffers are capped by `net.core.rmem_max` (208 KB
+  untuned, the startup line says so with the sysctl) and 256 connections opening at
+  once on loopback lose Initials to it and connect one to three seconds later.
   Measured (`bench/httparena/profile-h3.sh`, the arena's h2load over QUIC, 64 connections
   with 64 streams): 1.22 to 1.25M req/s on one worker at 0.61 us of CPU per request,
   about 3,100 cycles at 3.19 instructions per cycle, twenty-one answers per datagram,
@@ -513,7 +531,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   QPACK's dynamic table (I1c) removes.
   Rules for every change here: read the RFC section in `docs/rfc/` first and cite it, keep
   the threat table of the design document and the MCP texts in step, the h1 and h2 rows
-  of `bench/ab.sh <ref> -2` flat, and `bench/ab.sh <ref> -3` for the h3 rows. Loopback
+  of `bench/ab.sh <ref> -2` flat, and `bench/ab.sh <ref> -3` for the h3 rows, with
+  `-r 3`: two rounds of the h3 rows swung 0.98 to 1.15 on one and the same code
+  (2026-09-25), three rounds settle within 2 %. Loopback
   loses packets when a burst overflows the client's receive buffer (the 100 KB row at
   ten streams), so every transport change is also run there; the tracing build
   (`-DAGENSIO_QUIC_TRACE=ON`, every packet on stderr with a timestamp) loses datagrams on
@@ -521,9 +541,8 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   packet of a response), the way the probe-size bug of 2026-09-24 was found.
 - **Not yet**: directory listing, TLS-ALPN-01 / DNS-01 (wildcards), OCSP stapling, RFC 9218
   priorities, CONNECT over h2, HTTP/2 to origins; in HTTP/3 (design-http3 I1b to I4):
-  0-RTT, ECN, `alt-svc`, NEW_TOKEN, streamed upstream bodies, GOAWAY on reload and
-  shutdown, QPACK's dynamic table on the encoder side, the interop runner and the
-  fuzzers of the transport.
+  0-RTT, ECN, NEW_TOKEN, key update, active migration, streamed upstream bodies, the
+  amplification row of the attack suite (a spoofed source).
 
 ## Performance notes (measured, keep current)
 

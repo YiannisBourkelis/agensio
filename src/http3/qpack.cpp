@@ -347,3 +347,181 @@ void Decoder::insert_count_increment(std::string& out) {
 }
 
 }  // namespace agensio::qpack
+
+namespace agensio::qpack {
+
+// ---- the encoder side (design-http3 7.2's second step) ----
+
+void Encoder::set_peer(std::uint64_t capacity, std::uint64_t blocked_streams) {
+    peer_capacity_ = capacity;
+    peer_blocked_ = blocked_streams;
+    capacity_ = static_cast<std::size_t>(std::min<std::uint64_t>(capacity, kMaxCapacity));
+}
+
+bool Encoder::usable(std::uint64_t abs) const noexcept {
+    if (!held(abs)) return false;
+    if (abs < known_) return true;                       // acknowledged: never blocks
+    if (current_ && current_->blocking) return true;     // this section already counts
+    return blocking_ < peer_blocked_;                    // one more blocked stream is allowed
+}
+
+// An insert (4.3.2, with a static name reference): only when the entry fits without
+// evicting one a pending section references.
+bool Encoder::insert(unsigned static_name, std::string_view name, std::string_view value, std::uint64_t& abs) {
+    const std::size_t need = name.size() + value.size() + 32;
+    if (capacity_ == 0 || need > capacity_) return false;
+    std::size_t evict = 0, freed = 0;
+    while (size_ - freed + need > capacity_) {
+        if (evict >= entries_.size() || entries_[evict].refs) return false;
+        freed += entries_[evict].size;
+        ++evict;
+    }
+    if (evict) {
+        entries_.erase(entries_.begin(), entries_.begin() + static_cast<std::ptrdiff_t>(evict));
+        size_ -= freed;
+    }
+    if (!capacity_sent_) {
+        codec::append_integer(instructions_, capacity_, 5, 0x20);  // 001: Set Dynamic Table Capacity (4.3.1)
+        capacity_sent_ = true;
+    }
+    codec::append_integer(instructions_, static_name, 6, 0xc0);  // 1 T=1: Insert With Name Reference (4.3.2)
+    append_string(instructions_, value);
+    Entry e;
+    e.abs = insert_count_++;
+    e.size = need;
+    e.name.assign(name);
+    e.value.assign(value);
+    entries_.push_back(std::move(e));
+    size_ += need;
+    abs = insert_count_ - 1;
+    return true;
+}
+
+void Encoder::begin(Section& section) noexcept {
+    section = Section{};
+    current_ = &section;
+    base_ = insert_count_;  // entries inserted for this section are referenced post-base (4.5.3)
+}
+
+// An indexed field line (4.5.2, 4.5.3) and the section's bookkeeping.
+void Encoder::reference(std::string& out, std::uint64_t abs) {
+    if (abs < base_) codec::append_integer(out, base_ - 1 - abs, 6, 0x80);  // 1 T=0, relative to the base
+    else codec::append_integer(out, abs - base_, 4, 0x10);                  // 0001: post-base
+    Section& c = *current_;
+    if (abs + 1 > c.ric) c.ric = abs + 1;
+    if (abs >= known_) c.blocking = true;
+    for (unsigned i = 0; i < c.n; ++i)
+        if (c.refs[i] == abs) return;
+    if (c.n < 4) {
+        if (Entry* e = entry(abs)) {
+            c.refs[c.n++] = abs;
+            ++e->refs;
+        }
+    }
+}
+
+// A field remembered by its entry: the run of one value is a comparison and an index
+// byte; a new value goes through the table once (a literal while the peer has not
+// acknowledged it and blocking is not allowed, or when the table is full of held entries).
+void Encoder::memo_field(std::string& out, unsigned static_name, std::string_view name, std::string_view value,
+                         Memo& memo) {
+    if (capacity_) {
+        if (memo.valid && held(memo.abs) && memo.value == value) {
+            if (usable(memo.abs)) return reference(out, memo.abs);
+        } else {
+            memo.valid = false;
+            std::uint64_t abs = 0;
+            if (insert(static_name, name, value, abs)) {
+                memo.abs = abs;
+                memo.value.assign(value);
+                memo.valid = true;
+                if (usable(abs)) return reference(out, abs);
+            }
+        }
+    }
+    append_literal_name_ref(out, static_name, value);
+}
+
+void Encoder::date(std::string& out, std::time_t second, std::string_view value) {
+    if (capacity_) {
+        if (date_valid_ && second == date_second_ && held(date_abs_)) {
+            if (usable(date_abs_)) return reference(out, date_abs_);
+        } else {
+            date_valid_ = false;
+            std::uint64_t abs = 0;
+            if (insert(6, "date", value, abs)) {
+                date_abs_ = abs;
+                date_second_ = second;
+                date_valid_ = true;
+                if (usable(abs)) return reference(out, abs);
+            }
+        }
+    }
+    append_literal_name_ref(out, 6, value);
+}
+
+// The first content-type row of the static table (appendix A), the name reference of an
+// insert or a literal; the profile of 2026-09-25 had the search for it and for the value's
+// row at 3 % of the cycles per answer, so both are remembered per value.
+constexpr unsigned kContentTypeName = 44;
+static_assert(kStaticTable[kContentTypeName].name == "content-type");
+
+void Encoder::content_type(std::string& out, std::string_view value) {
+    if (!ct_seen_valid_ || value != ct_seen_) {  // a new value: the static table searched once
+        ct_seen_.assign(value);
+        ct_seen_valid_ = true;
+        ct_seen_static_ = static_pair("content-type", value, ct_seen_index_);
+    }
+    if (ct_seen_static_) return append_indexed(out, ct_seen_index_);
+    memo_field(out, kContentTypeName, "content-type", value, ct_);
+}
+
+// The prefix (4.5.1): Required Insert Count encoded modulo twice the peer's maximum entries,
+// then the base as a signed delta; "00 00" for a section without dynamic references.
+void Encoder::prefix(std::string& out) {
+    const std::uint64_t ric = current_ ? current_->ric : 0;
+    if (ric == 0) {
+        out.append("\0\0", 2);
+        return;
+    }
+    const std::uint64_t max_entries = peer_capacity_ / 32;
+    codec::append_integer(out, (ric % (2 * max_entries)) + 1, 8, 0);
+    if (base_ >= ric) codec::append_integer(out, base_ - ric, 7, 0);       // sign 0: Base = RIC + delta
+    else codec::append_integer(out, ric - base_ - 1, 7, 0x80);             // sign 1: Base = RIC - delta - 1
+}
+
+void Encoder::end() {
+    if (!current_) return;
+    Section& c = *current_;
+    if (c.ric != 0) {
+        c.pending = true;
+        if (c.blocking) ++blocking_;
+    }
+    current_ = nullptr;
+}
+
+void Encoder::release(Section& section) noexcept {
+    if (!section.pending) return;
+    for (unsigned i = 0; i < section.n; ++i)
+        if (Entry* e = entry(section.refs[i]); e && e->refs) --e->refs;
+    if (section.blocking && blocking_) --blocking_;
+    section.pending = false;
+    section.blocking = false;
+    section.n = 0;
+}
+
+void Encoder::acknowledged(Section& section) noexcept {
+    if (!section.pending) return;
+    if (section.ric > known_) known_ = section.ric;
+    release(section);
+}
+
+void Encoder::cancelled(Section& section) noexcept { release(section); }
+
+bool Encoder::increment(std::uint64_t n) noexcept {
+    if (n == 0 || known_ + n > insert_count_) return false;
+    known_ += n;
+    return true;
+}
+
+}  // namespace agensio::qpack

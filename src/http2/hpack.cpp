@@ -256,6 +256,21 @@ void Encoder::server(std::string& out, std::string_view value, std::string_view 
     append_literal(out, 54, value);
 }
 
+void Encoder::alt_svc(std::string& out, std::string_view value) {
+    if (alive(alt_svc_seq_)) {
+        append_indexed(out, index_of(alt_svc_seq_));
+        return;
+    }
+    if (max_ > 0 && insert("alt-svc", value)) {  // a literal name: alt-svc is not in the static table
+        alt_svc_seq_ = next_seq_ - 1;
+        append_integer(out, 0, 6, 0x40);
+        append_string(out, "alt-svc");
+        append_string(out, value);
+        return;
+    }
+    append_literal(out, "alt-svc", value);
+}
+
 void Encoder::date(std::string& out, std::time_t second, std::string_view value, std::string_view insert_bytes) {
     if (second == date_second_ && alive(date_seq_)) {
         append_indexed(out, index_of(date_seq_));

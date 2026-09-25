@@ -213,6 +213,7 @@ struct Config {
     } http2;
     struct Http3 {
         std::string retry = "auto";  // Retry before a QUIC handshake: "auto" (under load), "always", "never"
+        bool alt_svc = true;         // the alt-svc field on h1 and h2 answers of a TLS listener that also speaks h3
     } http3;
     // Proxies in front of us whose X-Forwarded-For / X-Forwarded-Proto are believed: the
     // rightmost untrusted address becomes the client (REMOTE_ADDR, access log) and the

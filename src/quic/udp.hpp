@@ -300,9 +300,19 @@ public:
         ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
         if (reuse_port) ::setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &on, sizeof on);
         if (::setsockopt(fd, SOL_UDP, UDP_GRO, &on, sizeof on) != 0) gro_ = false;
-        int bytes = 4 * 1024 * 1024;
+        // 4 MB asked for both directions; the kernel grants at most net.core.rmem_max /
+        // wmem_max (208 KB on an untuned Linux), and a burst of handshakes larger than the
+        // receive buffer loses Initials, which the clients retransmit after a second or
+        // three (seen at 256 connections starting at once on loopback). What was granted
+        // is reported (receive_buffer) so the startup line can say which sysctl to raise.
+        int bytes = kSocketBufferAsked;
         ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bytes, sizeof bytes);
         ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bytes, sizeof bytes);
+        {
+            int got = 0;
+            socklen_t len = sizeof got;
+            if (::getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &got, &len) == 0) rcvbuf_ = got;
+        }
         // Don't-fragment on both families (a [::] socket carries IPv4 peers as mapped
         // addresses): a datagram larger than the path's MTU fails at send or is dropped
         // on the way instead of going as fragments, which is what makes the MTU probes of
@@ -379,6 +389,10 @@ public:
     }
     const asio::ip::udp::endpoint& local() const noexcept { return local_; }
     bool gro() const noexcept { return gro_; }
+    // The receive buffer the kernel granted, as it reports it (Linux counts the doubled
+    // value); below kSocketBufferAsked when net.core.rmem_max capped the request.
+    int receive_buffer() const noexcept { return rcvbuf_; }
+    static constexpr int kSocketBufferAsked = 4 * 1024 * 1024;
     std::size_t connections() const noexcept { return conns_; }
 
     // A connection's ids: registered by the connection as it issues them.
@@ -627,6 +641,7 @@ private:
     Accept accept_;
     asio::ip::udp::endpoint local_;
     bool gro_ = true;
+    int rcvbuf_ = 0;
     bool steering_ = false;
     std::size_t slots_ = 0, slot_ = 0;
     std::vector<unsigned char> rbuf_;

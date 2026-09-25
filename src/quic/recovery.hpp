@@ -233,7 +233,14 @@ public:
         if (largest_newly == f.largest_ack && largest_newly_eliciting) {
             // RFC 9002 5.1: the RTT sample from the largest acknowledged, less the ack delay
             // (bounded by max_ack_delay once the handshake is confirmed).
-            Duration ack_delay = std::chrono::microseconds(f.ack_delay << ack_delay_exponent);
+            // The peer's delay is a 62-bit value in units of its exponent: bounded before
+            // it becomes a duration (a huge one overflowed the clock's arithmetic, found
+            // by fuzz_quic_conn), and by max_ack_delay once the handshake is confirmed.
+            std::uint64_t raw = f.ack_delay;
+            constexpr std::uint64_t kDelayCap = std::uint64_t{1} << 30;  // about 18 minutes in microseconds
+            if (raw > (kDelayCap >> ack_delay_exponent)) raw = kDelayCap;
+            else raw <<= ack_delay_exponent;
+            Duration ack_delay = std::chrono::microseconds(raw);
             if (handshake_confirmed) ack_delay = std::min(ack_delay, max_ack_delay);
             update_rtt(now - largest_newly_time, ack_delay);
         }
