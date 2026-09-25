@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.23 (unreleased)
+## 0.1.0-alpha.23 (2026-09-25)
 
 - **QPACK's dynamic table on the encoder side** (RFC 9204 sections 2.1, 4.3, 4.5;
   design 7.2's second step): our answers' `server`, `date` and `content-type` (and
