@@ -1,27 +1,39 @@
 # agensio
 
-A very fast, small, cross-platform web server written in C++20 on top of standalone
-[Asio](https://think-async.com/Asio/). No Qt, no Boost, no framework: an event loop per
-core, a zero-copy in-memory file cache, and a hand-written HTTP/1.1 parser.
+agensio is a web server built to be very fast while asking very little of the machine.
+It serves static sites and dynamic applications with as little CPU and memory per
+request as possible, so the same program suits a small VPS with one core and a few
+hundred megabytes as well as a many-core server carrying a busy site: either way the
+hardware goes to the site, not to the server in front of it. On one core of a desktop
+Ryzen it answers about half a million small requests a second in plain HTTP and a third
+of a million over TLS, in about fifteen megabytes of memory.
 
-It serves static sites, PHP applications (Laravel, Statamic, WordPress, Drupal, plain PHP) through
-FastCGI, and anything else through its reverse proxy (Node, Rails, Go, Java, WebSockets),
-speaks HTTP/1.1 and HTTP/2 with its own protocol layer,
-obtains its own TLS certificates, reloads without dropping a connection, and can be
-configured by an AI agent through a built-in [MCP server](docs/mcp.md) over SSH.
+Under the hood it is a C++ program on standalone [Asio](https://think-async.com/Asio/):
+an event loop per core, a lock-free in-memory file cache, and its own HTTP/1.1, HTTP/2
+and HTTP/3 (QUIC) layers, with no framework and no protocol library in between.
 
-**Status: pre-alpha** (`0.1.0-alpha.17`). It runs real applications on Linux and macOS
-and beats nginx on CPU per request in every row of the benchmark harness, but it has
-had few users. See the known limitations below before putting it in front of anything
-that matters, and please report what you find.
+It serves static sites, PHP applications (Laravel, Statamic, WordPress, Drupal, Grav and
+plain PHP) through FastCGI with a preset per application that carries that application's
+own hardening rules, and anything else through its reverse proxy (Node, Rails, Go, Java,
+WebSockets). It obtains and renews its own TLS certificates, reloads without dropping a
+connection, and can be configured by an AI agent through a built-in
+[MCP server](docs/mcp.md) over SSH.
+
+**Status: pre-alpha** (`0.1.0-alpha.23`). It runs real applications and uses less CPU
+per request than nginx on nearly every row of its benchmark harness, but it has had few
+users. It aims to be cross-platform; **only Linux is supported at the moment** (macOS
+builds and runs and Windows compiles, but neither is tested release by release). See the
+known limitations below before putting it in front of anything that matters, and please
+report what you find.
 
 See [CLAUDE.md](CLAUDE.md) for the design and measurements, [docs/ROADMAP.md](docs/ROADMAP.md)
 for what comes next, and [docs/legacy-analysis.md](docs/legacy-analysis.md) for its 2018 ancestor.
 
 ## Build
 
-Requirements: a C++20 compiler (Apple clang 15+, GCC 12+, Clang 16+, MSVC 2022), CMake 3.24+,
-Asio headers (fetched automatically if not installed), OpenSSL 3 for TLS (optional).
+Requirements: a C++20 compiler (GCC 12+, Clang 16+, Apple clang 15+, MSVC 2022), CMake 3.24+,
+Asio headers (fetched automatically if not installed), OpenSSL 3 for TLS (optional; 3.5 or
+later for HTTP/3, which Debian 13 and Fedora 42 ship).
 
 ```sh
 # macOS
@@ -164,24 +176,40 @@ and `agensio ctl health`, upgrade on every alpha (each one fixes something found
 and read the changelog before you do. There is no warranty of any kind (see the licence).
 Reports are the most useful thing you can send.
 
-- HTTP/2 is new (alpha.19, phase G step G0: every handler, conformance-tested, the
-  attack defences built in, the performance pass and the attack suite still to come);
-  HTTP/3 is phase I of the roadmap.
-- No response compression, no directory listing, no rate limiting yet.
+- HTTP/2 and HTTP/3 are agensio's own implementations (conformance-tested with h2spec,
+  the QUIC interop runner and their attack suites) and a few weeks old. HTTP/3 needs
+  OpenSSL 3.5 or later at build time; without it the server speaks HTTP/1.1 and HTTP/2.
+  Not yet in HTTP/3: 0-RTT, ECN, active connection migration.
+- No on-the-fly response compression (pre-compressed `.br` and `.gz` files beside the
+  originals are served), no directory listing, no rate limiting yet.
 - Certificates: HTTP-01 only, so port 80 must be reachable; no wildcards (DNS-01), no
   OCSP stapling.
 - The control API is a unix socket; use it locally or over SSH. No TCP transport yet.
-- Windows compiles but is untested; the macOS defaults for logs and state still point at
-  the Linux paths unless set in the configuration.
+- Linux only for now: macOS builds and runs but its defaults for logs and state still
+  point at the Linux paths unless set in the configuration; Windows compiles but is
+  untested.
 - Single-machine benchmarks only so far. Numbers from your workload are welcome.
 
 ## Benchmark
 
+The harness runs agensio, nginx and Caddy one at a time on the same machine, plain and
+TLS, over HTTP/1.1 (wrk), HTTP/2 (h2load) and HTTP/3 (h2load over QUIC), verifies the
+bodies before measuring, and stores the raw output under `bench/results/`. The
+comparison is meant to be fair to servers that have set the standard for years: nginx
+runs with the tuning its documentation recommends for static files, Caddy with its
+defaults, and the metric is the server's own CPU per request, not only requests per
+second.
+
 ```sh
-brew install nginx caddy wrk        # competitors and load generator
+brew install nginx caddy wrk        # the servers agensio is compared with, and the load generator
 bench/run.sh                        # 15 s runs, plain and TLS, results in bench/results/
 bench/run.sh -d 30s -s "agensio nginx" -p http -u "/:256"
+bench/h2/run.sh                     # the HTTP/2 rows; bench/h3/run.sh needs an h2load built with QUIC
 ```
+
+`bench/httparena/` is agensio's entry for [HttpArena](https://www.http-arena.com), the
+public board where web servers and frameworks are measured on one machine;
+`bench/httparena/local.sh` runs the arena's own validator and benchmark locally.
 
 ## License
 

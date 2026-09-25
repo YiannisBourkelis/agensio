@@ -543,8 +543,8 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   packet of a response), the way the probe-size bug of 2026-09-24 was found.
 - **Not yet**: directory listing, TLS-ALPN-01 / DNS-01 (wildcards), OCSP stapling, RFC 9218
   priorities, CONNECT over h2, HTTP/2 to origins; in HTTP/3 (design-http3 I1b to I4):
-  0-RTT, ECN, NEW_TOKEN, key update, active migration, streamed upstream bodies, the
-  amplification row of the attack suite (a spoofed source).
+  0-RTT, ECN, NEW_TOKEN, active migration, QUIC version 2, streamed upstream bodies,
+  the amplification row of the attack suite (a spoofed source).
 
 ## Performance notes (measured, keep current)
 
