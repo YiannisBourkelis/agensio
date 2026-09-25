@@ -79,6 +79,20 @@
   first two minutes found an ACK frame whose delay field overflowed the clock's
   arithmetic on its way to a duration; the delay is bounded before it becomes one.
 
+- **Grav preset after Grav's user-folder-exposure guidance**
+  (learn.getgrav.org/2/security/user-folder-exposure, the rules of its `nginx.conf` and
+  `.htaccess`): `user/config/` and `user/env/` are never answered whatever the ending
+  (they were refused by ending before), `user/accounts/` answers avatar images alone and
+  `user/data/` public media, documents, fonts, css and js alone (svg out, a stored-XSS
+  vector) through a new location option, `allow_suffixes`, the inverse of `deny_suffixes`
+  (the endings served, everything else 404, directories and bare names included; a row of
+  the reference, section 6); `images/` and `assets/` never serve scripts and a missing
+  derivative reaches the front controller; `webserver-configs/` is refused whole; the
+  system, vendor and user lists gain `.json` and the html spellings; the root's other
+  markdown files (CONTRIBUTING, CODE_OF_CONDUCT, SECURITY) are 404; `.php2` joins the
+  PHP spellings every preset refuses. Seventeen fixture files and seven checks in the
+  integration suite; the presets catalogue and `site NAME` report `serves_only`.
+
 ## 0.1.0-alpha.22 (2026-09-25)
 
 - **HTTP/3 over our own QUIC transport, the first slice** (phase I, `docs/design-http3.md`,

@@ -66,7 +66,8 @@ case "$cmd" in
     ;;
   validate)
     sync_entry
-    dind_exec "$DIND" bash scripts/validate.sh "$@"
+    # The validator's HTTP/3 checks look for an image named h2load-h3; setup builds ours as h2load-h3:local.
+    dind_exec -e H2LOAD_H3_IMAGE=h2load-h3:local "$DIND" bash scripts/validate.sh "$@"
     ;;
   bench)
     sync_entry

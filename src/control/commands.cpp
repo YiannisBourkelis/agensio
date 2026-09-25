@@ -376,6 +376,7 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now) {
         json::Value loc = json::Value::object().set("path", l.path);
         loc.set("match", l.exact ? "exact" : l.suffix ? "suffix" : "prefix").set("handler", l.handler);
         if (!l.deny_suffixes.empty()) loc.set("refuses", strings(l.deny_suffixes));  // endings answered 404 here
+        if (!l.allow_suffixes.empty()) loc.set("serves_only", strings(l.allow_suffixes));  // no other ending is
         if (!l.origin.empty()) loc.set("from", l.origin);
         if (!l.alias.empty()) loc.set("alias", l.alias);
         else if (l.root != s.root) loc.set("root", l.root);
@@ -430,7 +431,8 @@ bool php_fpm_hard_reload(const Config& cfg, std::string& file) {
     const fs::path dir = pools_dir(cfg, "");
     if (dir.empty()) return false;
     std::error_code ec;
-    for (const fs::path candidate : {dir.parent_path() / "php-fpm.conf", dir.parent_path().parent_path() / "php-fpm.conf"}) {
+    for (const fs::path& candidate :
+         {dir.parent_path() / "php-fpm.conf", dir.parent_path().parent_path() / "php-fpm.conf"}) {
         if (!fs::is_regular_file(candidate, ec)) continue;
         file = candidate.string();
         std::ifstream in(candidate);

@@ -395,6 +395,12 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
         for (const auto& d : loc.deny_suffixes)
             if (d.size() < 2 || d[0] != '.') fail(where + ".deny_suffixes: entries are endings such as \".php\"");
     }
+    // The inverse: a directory that serves its media and nothing else (Grav's user/data).
+    if (t.contains("allow_suffixes")) {
+        loc.allow_suffixes = string_list(t["allow_suffixes"], (where + ".allow_suffixes").c_str());
+        for (const auto& d : loc.allow_suffixes)
+            if (d.size() < 2 || d[0] != '.') fail(where + ".allow_suffixes: entries are endings such as \".png\"");
+    }
     for (const auto& other : site.locations)
         if (other.path == loc.path && other.exact == loc.exact && other.suffix == loc.suffix)
             fail(where + ": duplicate location '" + loc.path + "'");
@@ -460,7 +466,7 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
         std::string error;
         loc.httparena = load_httparena_dataset(dataset, error);
         if (!loc.httparena) fail(where + ".httparena.dataset: " + error);
-        loc.methods = kStaticMethods & ~method_bit(Method::options) | method_bit(Method::post);
+        loc.methods = (kStaticMethods & ~method_bit(Method::options)) | method_bit(Method::post);
         loc.allow = allow_header(loc.methods);
 #else
         fail(where + ": handler \"httparena\" needs a build with -DAGENSIO_HTTPARENA=ON (the benchmark handler is not in this binary)");
@@ -542,13 +548,17 @@ namespace {
 // Every spelling php-fpm or a misconfigured handler might run, and the ones that leak
 // source: Drupal's .htaccess list (php|phar|pht|phtm|phtml|php[0-9]). Matched without
 // regard to case and to trailing dots (handlers/static.hpp, refused_suffix).
-const std::vector<std::string> kPhpSuffixes = {".php", ".phtml", ".phar", ".pht", ".phtm", ".php3", ".php4", ".php5", ".php6", ".php7", ".php8", ".phps"};
+const std::vector<std::string> kPhpSuffixes = {".php",  ".phtml", ".phar", ".pht",  ".phtm", ".php2", ".php3",
+                                               ".php4", ".php5",  ".php6", ".php7", ".php8", ".phps"};
 
 struct Shield {
     const char* path;   // a `final` prefix (nginx ^~): files served, nothing PHP-like ever runs
     const char* cache;  // Cache-Control added, or nullptr
     bool fallback = false;  // a missing file goes to the front controller (Drupal makes image styles and aggregates on request)
     const std::vector<std::string>* extra = nullptr;  // endings refused below this shield besides the shared list (Grav's system/, user/)
+    // When set, only these endings are served below the shield and everything else is 404
+    // (Grav's user/accounts avatars, user/data media).
+    const std::vector<std::string>* allow = nullptr;
 };
 
 struct PhpPreset {
@@ -581,10 +591,23 @@ const std::vector<std::string> kSourceBackups = {".inc", ".bak", ".orig", ".save
                                                  // named its backup archive; WordPress's wp-content/debug.log is the classic)
                                                  ".log", ".sql"};
 
-// Grav's own nginx recipe: below system/ and vendor/ only assets are served; below user/
-// (pages, accounts, configuration, themes, uploads) images, css and js are, the rest not.
-const std::vector<std::string> kGravSystemDeny = {".txt", ".xml", ".md", ".html", ".yaml", ".yml", ".pl", ".py", ".cgi", ".twig", ".sh", ".bat"};
-const std::vector<std::string> kGravUserDeny = {".txt", ".md", ".yaml", ".yml", ".pl", ".py", ".cgi", ".twig", ".sh", ".bat"};
+// Grav's own nginx recipe (webserver-configs/nginx.conf) and its user-folder-exposure
+// guidance (learn.getgrav.org/2/security/user-folder-exposure): below system/ and vendor/
+// only assets are served; below user/ (pages, themes, plugins) images, css, js and fonts
+// are, never yaml, md, json, twig or scripts; user/accounts/ answers avatar images alone
+// and user/data/ public media alone (svg left out on purpose: a stored-XSS vector); the
+// public caches images/ and assets/ never run or serve scripts. The PHP spellings come
+// from kPhpSuffixes on every shield.
+const std::vector<std::string> kGravSystemDeny = {".txt", ".xml", ".md",  ".html", ".htm", ".shtml", ".shtm", ".json",
+                                                  ".yaml", ".yml", ".pl", ".py",   ".cgi", ".twig",  ".sh",   ".bat"};
+const std::vector<std::string> kGravUserDeny = {".txt", ".md",  ".json", ".yaml", ".yml", ".pl",
+                                                ".py",  ".cgi", ".twig", ".sh",   ".bat"};
+const std::vector<std::string> kGravScripts = {".pl", ".py", ".cgi", ".sh", ".bat"};
+const std::vector<std::string> kGravAvatars = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".bmp", ".ico"};
+const std::vector<std::string> kGravPublicMedia = {".jpg", ".jpeg", ".png",  ".gif",  ".webp", ".avif", ".bmp",
+                                                   ".ico", ".mp4",  ".webm", ".ogg",  ".ogv",  ".mov",  ".mp3",
+                                                   ".wav", ".m4a",  ".flac", ".pdf",  ".woff2", ".woff", ".ttf",
+                                                   ".otf", ".eot",  ".css",  ".js"};
 
 // Drupal's .htaccess, the part that matters: PHP source in its other spellings, templates,
 // translations, dumps, and the shared list above.
@@ -618,12 +641,12 @@ ProtectedName protected_name(std::string path) {
 const std::vector<PhpPreset> kPhpPresets = {
     // Plain PHP: any script runs, missing paths are 404, no front controller.
     {"php", "Plain PHP: every .php under the root runs, missing paths are 404, no front controller; .inc and editor backups are refused.",
-     "", false, {"index.php", "index.html"}, false, true, kSourceBackups, {}, {}, "", "", {}, ""},
+     "", false, {"index.php", "index.html"}, false, true, kSourceBackups, {}, {}, "", "", {}, "", {}},
     // Laravel (and Statamic): one entry point; any other .php is refused, never served as
     // source (2026-09-19); Vite's hashed build output cached for a year.
     {"laravel", "Laravel and Statamic: the project directory is given, its public/ is served; only index.php ever runs, any other .php is refused; Vite's build/ is cached for a year.",
      "public", true, {"index.php"}, true, false, kSourceBackups,
-     {{"/build/", "public, max-age=31536000, immutable"}}, {}, "", "", {}, "/storage"},
+     {{"/build/", "public, max-age=31536000, immutable"}}, {}, "", "", {}, "/storage", {}},
     // Drupal: many entry points (index.php, core/install.php, update.php); what its
     // .htaccess protects is refused natively, since .htaccess is never read.
     {"drupal", "Drupal (and other PHP applications with several entry points): the project directory is given, its web/ is served when present; any .php runs, missing paths reach index.php (also below sites/default/files, where Drupal makes image-style derivatives and aggregated css/js on first request), and what Drupal's .htaccess protects is refused natively.",
@@ -634,7 +657,8 @@ const std::vector<PhpPreset> kPhpPresets = {
       "/sites/default/services.yml", "/sites/default/default.services.yml", "/composer.json", "/composer.lock",
       "/web.config", "/update.php.bak"},
      "https://www.drupal.org/download-latest/tar.gz", "https://ftp.drupal.org/files/projects/drupal-{version}.tar.gz",
-     {"/sites/default/settings.php", "/sites/default/settings.local.php", "/sites/default/services.yml"}, "/sites/default/files"},
+     {"/sites/default/settings.php", "/sites/default/settings.local.php", "/sites/default/services.yml"},
+     "/sites/default/files", {}},
     // WordPress: any .php runs (wp-login.php, wp-admin/*, wp-cron.php, plugin endpoints),
     // pretty permalinks fall back to index.php, nothing under uploads or wp-includes is
     // ever executed and their files are cacheable (modestly: WordPress versions assets by
@@ -651,21 +675,28 @@ const std::vector<PhpPreset> kPhpPresets = {
      {"/wp-config.php", "/wp-config-sample.php", "/readme.html", "/license.txt",
       "/wp-content/db.php", "/wp-content/advanced-cache.php", "/wp-content/object-cache.php"},
      "https://wordpress.org/latest.tar.gz", "https://wordpress.org/wordpress-{version}.tar.gz",
-     {"/wp-config.php"}, "/wp-content/uploads"},
+     {"/wp-config.php"}, "/wp-content/uploads", {}},
     // Grav (flat-file CMS; 2026-09-23 live report: run on the borrowed drupal preset, its
     // logs/grav.log named a backup archive under backup/ that held the admin account and
     // the signing salt, and both were served). Only index.php runs; logs/, backup/, cache/,
     // bin/, tests/ and tmp/ are never answered, whatever they hold (Grav's own recipe denies
     // the directories, not endings); system/ and vendor/ serve assets only; user/ serves
     // images, css, js and uploads while pages, accounts and configuration stay private.
-    {"grav", "Grav: the Grav directory is given and served; only index.php runs; logs/, backup/, cache/, bin/, tests/ and tmp/ are never answered; system/, vendor/ and user/ serve their assets only (no yaml, md, twig, php or scripts), so pages, accounts and configuration stay private.",
+    {"grav", "Grav: the Grav directory is given and served; only index.php runs; logs/, backup/, cache/, bin/, tests/, tmp/, webserver-configs/, user/config/ and user/env/ are never answered; system/, vendor/ and user/ serve their assets only (no yaml, md, json, twig, php or scripts), user/accounts/ avatar images only and user/data/ public media only, and images/ and assets/ never serve scripts, so pages, accounts, configuration and data stay private (Grav's user-folder-exposure guidance).",
      "", false, {"index.php"}, true, false, kSourceBackups,
-     {{"/system/", nullptr, false, &kGravSystemDeny}, {"/vendor/", nullptr, false, &kGravSystemDeny}, {"/user/", nullptr, false, &kGravUserDeny}},
+     {{"/system/", nullptr, false, &kGravSystemDeny},
+      {"/vendor/", nullptr, false, &kGravSystemDeny},
+      {"/user/", nullptr, false, &kGravUserDeny},
+      {"/user/accounts/", nullptr, false, &kGravUserDeny, &kGravAvatars},
+      {"/user/data/", nullptr, false, &kGravUserDeny, &kGravPublicMedia},
+      {"/images/", nullptr, true, &kGravScripts},
+      {"/assets/", nullptr, true, &kGravScripts}},
      {"/LICENSE.txt", "/composer.json", "/composer.lock", "/nginx.conf", "/web.config", "/htaccess.txt", "/CHANGELOG.md",
-      "/README.md", "/user/config/security.yaml"},
+      "/README.md", "/CONTRIBUTING.md", "/CODE_OF_CONDUCT.md", "/SECURITY.md", "/user/config/security.yaml"},
      "https://getgrav.org/download/core/grav-admin/latest", "https://getgrav.org/download/core/grav-admin/{version}",
      {"/user/config/security.yaml"}, "/user/pages",
-     {"/logs/", "/backup/", "/cache/", "/bin/", "/tests/", "/tmp/"}},
+     {"/logs/", "/backup/", "/cache/", "/bin/", "/tests/", "/tmp/", "/webserver-configs/", "/user/config/",
+      "/user/env/"}},
 };
 
 const PhpPreset* php_preset(const std::string& app) {
@@ -776,6 +807,7 @@ void apply_preset(SiteConfig& site, const std::string& where) {
         std::vector<std::string> deny = shield_deny;
         if (sh.extra) deny.insert(deny.end(), sh.extra->begin(), sh.extra->end());
         LocationConfig loc = static_location(sh.path, false, true, std::move(deny));
+        if (sh.allow) loc.allow_suffixes = *sh.allow;  // media alone below it (Grav's user/accounts, user/data)
         // A shield that falls back: the file when it exists (fast, static), else the front
         // controller with the query string, which is what generates it (Drupal's image
         // styles with their itok, aggregated css/js after a cache rebuild; 2026-09-20: a
@@ -1200,6 +1232,7 @@ void explain_config(const Config& cfg, std::ostream& out) {
             out << "path = \"" << loc.path << "\"\nmatch = \"" << match << "\"\n";
             if (loc.final) out << "final = true\n";
             if (!loc.deny_suffixes.empty()) print_list(out, "deny_suffixes", loc.deny_suffixes);
+            if (!loc.allow_suffixes.empty()) print_list(out, "allow_suffixes", loc.allow_suffixes);
             if (!loc.alias.empty()) out << "alias = \"" << loc.alias << "\"\n";
             else out << "root = \"" << loc.root << "\"\n";
             print_list(out, "index", loc.index);
@@ -1577,6 +1610,15 @@ json::Value preset_catalog() {
             if (sh.fallback) regenerated.push(sh.path);
         }
         v.set("no_php_under", std::move(shields));
+        // Shields that serve certain endings alone (Grav's user/accounts, user/data).
+        json::Value only = json::Value::object();
+        for (const auto& sh : p.shields) {
+            if (!sh.allow) continue;
+            json::Value endings = json::Value::array();
+            for (const auto& e : *sh.allow) endings.push(e);
+            only.set(sh.path, std::move(endings));
+        }
+        v.set("serves_only", std::move(only));
         v.set("missing_reaches_front_controller", std::move(regenerated));
         json::Value never = json::Value::array();
         for (const char* n : p.never) never.push(n);

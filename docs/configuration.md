@@ -162,7 +162,7 @@ handler = "fastcgi"
 
 [[site.location]]        # everything else: static files, or the front controller; PHP in
 path = "/"               # any spelling is refused (404), never executed, never served as source,
-deny_suffixes = [".php", ".phtml", ".phar", ".pht", ".phtm", ".php3", ".php4", ".php5", ".php6", ".php7", ".php8", ".phps",
+deny_suffixes = [".php", ".phtml", ".phar", ".pht", ".phtm", ".php2", ".php3", ".php4", ".php5", ".php6", ".php7", ".php8", ".phps",
                  ".inc", ".bak", ".orig", ".save", ".swp", ".swo", "~"]   # and .inc and editor backups too
 
 [[site.location]]        # Vite output is content-hashed: cache it for a year
@@ -218,7 +218,7 @@ handler = "fastcgi"
 
 [[site.location]]        # everything else: static files or the front controller; PHP in a spelling
 path = "/"               # the suffix location does not take (x.PHP, x.phtml), .inc and editor backups
-deny_suffixes = [".php", ".phtml", ".phar", ".pht", ".phtm", ".php3", ".php4", ".php5", ".php6", ".php7", ".php8", ".phps",
+deny_suffixes = [".php", ".phtml", ".phar", ".pht", ".phtm", ".php2", ".php3", ".php4", ".php5", ".php6", ".php7", ".php8", ".phps",
                  ".inc", ".bak", ".orig", ".save", ".swp", ".swo", "~"]
 
 [[site.location]]        # nothing under uploads is ever executed; files are cacheable
@@ -365,7 +365,9 @@ app = "grav"
 php = { socket = "unix:/run/php/php8.4-fpm.sock" }
 ```
 
-expands to Grav's own nginx recipe, which denies directories rather than endings:
+expands to Grav's own nginx recipe and its user-folder-exposure guidance
+(https://learn.getgrav.org/2/security/user-folder-exposure), which deny directories rather
+than endings wherever a directory is private:
 
 ```toml
 index = ["index.php"]
@@ -380,28 +382,54 @@ handler = "fastcgi"
 path = "/"
 deny_suffixes = [".php", ".phtml", ..., ".inc", ".bak", ".orig", ".save", ".swp", ".swo", "~", ".log", ".sql"]
 
-# never answered, whatever they hold: Grav's own nginx recipe denies these directories, and a
-# backup archive under backup/ is the site (accounts, salt, configuration, pages)
+# never answered, whatever they hold: Grav's recipe denies these directories whole, and a
+# backup archive under backup/ is the site (accounts, salt, configuration, pages); user/config/
+# and user/env/ hold the configuration and the signing salt, webserver-configs/ the recipes
 [[site.location]]  path = "/logs/"    final = true  try_files = ["=404"]     # handler = "deny"
 [[site.location]]  path = "/logs"     match = "exact"  try_files = ["=404"]  # the bare name: no redirect confirms the directory
-# likewise /backup/, /cache/, /bin/, /tests/, /tmp/
+# likewise /backup/, /cache/, /bin/, /tests/, /tmp/, /webserver-configs/, /user/config/, /user/env/
 
 # assets only below system/ and vendor/ (css, js, images, fonts): no source, templates,
-# configuration or documentation
+# configuration, documentation or json
 [[site.location]]  path = "/system/"  final = true  try_files = ["$uri", "=404"]
-                   deny_suffixes = [...the root's list..., ".txt", ".xml", ".md", ".html", ".yaml", ".yml", ".pl", ".py", ".cgi", ".twig", ".sh", ".bat"]
+                   deny_suffixes = [...the root's list..., ".txt", ".xml", ".md", ".html", ".htm", ".shtml", ".shtm", ".json",
+                                    ".yaml", ".yml", ".pl", ".py", ".cgi", ".twig", ".sh", ".bat"]
 [[site.location]]  path = "/vendor/"  (same)
 
 # user/: images, css, js, fonts and uploads are served; pages (.md), accounts and
-# configuration (.yaml), templates (.twig) and scripts are not
+# configuration (.yaml, .json), templates (.twig) and scripts are not
 [[site.location]]  path = "/user/"    final = true  try_files = ["$uri", "=404"]
-                   deny_suffixes = [...the root's list..., ".txt", ".md", ".yaml", ".yml", ".pl", ".py", ".cgi", ".twig", ".sh", ".bat"]
+                   deny_suffixes = [...the root's list..., ".txt", ".md", ".json", ".yaml", ".yml", ".pl", ".py", ".cgi", ".twig", ".sh", ".bat"]
 
-# never answered although present (404): the version fingerprints and composer files
+# user/accounts/ answers avatar images and nothing else (the account files sit beside them;
+# svg stays out on purpose, a stored-XSS vector); user/data/ answers public media, documents,
+# fonts, css and js and nothing else (Flex objects keep their data there). A directory or a
+# bare name below either is 404 too.
+[[site.location]]  path = "/user/accounts/"  final = true  try_files = ["$uri", "=404"]
+                   allow_suffixes = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".bmp", ".ico"]
+[[site.location]]  path = "/user/data/"      final = true  try_files = ["$uri", "=404"]
+                   allow_suffixes = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".bmp", ".ico", ".mp4", ".webm", ".ogg", ".ogv",
+                                     ".mov", ".mp3", ".wav", ".m4a", ".flac", ".pdf", ".woff2", ".woff", ".ttf", ".otf", ".eot", ".css", ".js"]
+
+# the public caches images/ (derivatives) and assets/ (pipelined css and js): scripts are
+# never run or served there, and a missing file reaches the front controller, which makes it
+[[site.location]]  path = "/images/"  final = true  try_files = ["$uri", "/index.php?$query_string"]
+                   deny_suffixes = [...the root's list..., ".pl", ".py", ".cgi", ".sh", ".bat"]
+[[site.location]]  path = "/assets/"  (same)
+
+# never answered although present (404): the version fingerprints, composer files and the
+# markdown files the release ships at the root
 [[site.location]]  path = "/LICENSE.txt"  match = "exact"  try_files = ["=404"]
 # likewise composer.json, composer.lock, nginx.conf, web.config, htaccess.txt, CHANGELOG.md,
-# README.md, user/config/security.yaml (the signing salt; the preset's `secret`)
+# README.md, CONTRIBUTING.md, CODE_OF_CONDUCT.md, SECURITY.md, user/config/security.yaml (the
+# signing salt; the preset's `secret`)
 ```
+
+Two things Grav's recipe leaves to the operator stay so here. Media under `user/pages/` is
+served directly, because Grav's `pages.media_route_urls` is off by default (a hand-written
+`[[site.location]]` for `/user/pages/` with `try_files = ["=404"]` hands it to the page
+route once that setting is on). And `.md` is refused by name at the root rather than by
+ending, because a page route that ends in `.md` is Grav's Markdown output, not a file.
 
 `.htaccess` and `.git/` are dotfiles and stay hidden by the site default. Grav's
 processed images (`images/`), the asset pipeline (`assets/`) and theme and plugin assets
@@ -486,6 +514,7 @@ matched at the end of the path or before a `/`), then the longest `prefix`; an i
 | `methods` | narrows what the handler serves, e.g. `["GET", "HEAD"]`; the rest get 405 with `Allow` |
 | `final` | prefix only: nginx `^~` |
 | `deny_suffixes` | endings answered with 404 (like hidden files: a refusal never confirms a file exists), e.g. `[".php"]` under an uploads directory |
+| `allow_suffixes` | when set, the only endings served here; every other path, directories and bare names included, is 404 whatever exists (Grav's `user/data`: public media beside private data) |
 | `add_headers` | response fields added on 200 and 304, e.g. `{ "Cache-Control" = "..." }` |
 | `priority` | may use the FastCGI pool slots reserved by `priority_reserve` |
 | `httparena = { dataset }` | with `handler = "httparena"`, in a build made with `-DAGENSIO_HTTPARENA=ON` only: the HttpArena benchmark endpoints answered in-process from the dataset (`bench/httparena/`); a release build refuses the handler |

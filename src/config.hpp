@@ -67,6 +67,7 @@ struct LocationConfig {
     bool suffix = false;
     bool final = false;  // prefix only (nginx ^~): when it is the longest prefix match, suffix locations are skipped
     std::vector<std::string> deny_suffixes;  // request paths ending with one of these get 404 (".php" under uploads)
+    std::vector<std::string> allow_suffixes;  // when set, only paths ending with one of these are served (else 404)
     std::vector<ProtectedName> protects;     // names the site never serves: any backup spelling of them gets 404 here (preset `never`)
     std::string root;   // absolute, canonical, no trailing slash; the file is root + path
     std::string alias;  // nginx alias: the file is alias + (path minus the location prefix); empty = use root

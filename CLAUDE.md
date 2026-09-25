@@ -290,8 +290,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   by one shared routine, so a new application is a row, a fixture and a docs section;
   every PHP preset's root and shields refuse the PHP spellings, `.inc`, editor backups,
   `.log` and `.sql` (`kSourceBackups`); a preset row can also name directories refused
-  whole (`never_dirs`: Grav's `logs/`, `backup/`) and extra endings per shield (Grav's
-  `system/`, `user/`); `health` reports a site whose files are another application's
+  whole (`never_dirs`: Grav's `logs/`, `backup/`, `user/config/`), extra endings per
+  shield (Grav's `system/`, `user/`) and endings a shield serves alone (`allow_suffixes`,
+  the inverse of `deny_suffixes`: Grav's `user/accounts/` avatars and `user/data/` media,
+  its user-folder-exposure guidance of 2026-09-25); `health` reports a site whose files are another application's
   (`preset_mismatch`, from `detect_app`) and archives or dumps under a served tree
   (`archives_in_root`), and the integration suite plants one spelling table under every
   preset; `/build/` gets an immutable Cache-Control via `add_headers`; WordPress: any

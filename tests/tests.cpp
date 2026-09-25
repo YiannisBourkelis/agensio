@@ -1251,13 +1251,22 @@ static void test_presets() {
     CHECK(Router::location(w, "/wp-content/plugins/x/ajax.php").kind == HandlerKind::fastcgi);
     const LocationConfig& up = Router::location(w, "/wp-content/uploads/2026/shell.php");
     CHECK(up.path == "/wp-content/uploads/" && up.final && up.kind == HandlerKind::static_);
-    CHECK(up.deny_suffixes.size() == 21 && up.add_headers.size() == 1 && up.origin == "preset:wordpress");
+    CHECK(up.deny_suffixes.size() == 22 && up.add_headers.size() == 1 && up.origin == "preset:wordpress");
     CHECK(Router::location(w, "/wp-includes/js/x.js").final);
     CHECK(Router::location(w, "/wp-admin/").path == "/");
     CHECK(rejects("badfinal.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n"
                                    "[[site.location]]\npath = \".php\"\nmatch = \"suffix\"\nfinal = true\n"));
     CHECK(rejects("baddeny.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n"
                                   "[[site.location]]\npath = \"/u/\"\ndeny_suffixes = [\"php\"]\n"));
+    CHECK(rejects("badallow.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n"
+                                   "[[site.location]]\npath = \"/u/\"\nallow_suffixes = [\"png\"]\n"));
+    write("allow.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n"
+                        "[[site.location]]\npath = \"/u/\"\nallow_suffixes = [\".png\", \".pdf\"]\n");
+    {
+        const Config acfg = load_config(dir / "allow.toml");
+        const LocationConfig& u = Router::location(acfg.sites[0], "/u/x.pdf");
+        CHECK(u.path == "/u/" && u.allow_suffixes.size() == 2 && u.allow_suffixes[1] == ".pdf" && u.deny_suffixes.empty());
+    }
 
     // Grav (2026-09-23 live report, run on the borrowed drupal preset): only index.php runs;
     // logs/, backup/, cache/, bin/, tests/, tmp/ are refused whole; system/ and vendor/
@@ -1283,7 +1292,7 @@ static void test_presets() {
     CHECK(Router::location(g, "/backup/site.zip").handler == "deny" && Router::location(g, "/backup/pic.jpg").path == "/backup/" &&
           Router::location(g, "/cache/x").handler == "deny" && Router::location(g, "/bin/grav").handler == "deny" &&
           Router::location(g, "/tests/x").handler == "deny" && Router::location(g, "/tmp/x").handler == "deny");
-    const LocationConfig& guser = Router::location(g, "/user/config/system.yaml");
+    const LocationConfig& guser = Router::location(g, "/user/themes/quark/blueprints.yaml");  // user/config/ is refused whole now
     CHECK(guser.path == "/user/" && guser.final && guser.handler == "static" && refuses(guser, ".yaml") && refuses(guser, ".md") &&
           refuses(guser, ".twig") && refuses(guser, ".php") && refuses(guser, ".bak") && !refuses(guser, ".xml") && !refuses(guser, ".jpg"));
     const LocationConfig& gsys = Router::location(g, "/system/config/system.yaml");
@@ -1291,7 +1300,24 @@ static void test_presets() {
     CHECK(Router::location(g, "/vendor/autoload.php").path == "/vendor/" && refuses(Router::location(g, "/vendor/x"), ".md"));
     CHECK(Router::location(g, "/user/config/security.yaml").exact && Router::location(g, "/user/config/security.yaml").handler == "deny");
     CHECK(Router::location(g, "/LICENSE.txt").exact && Router::location(g, "/composer.json").exact && Router::location(g, "/README.md").exact);
-    CHECK(Router::location(g, "/user/pages/x.jpg").protects.size() == 9 && Router::location(g, "/images/x.jpg").path == "/");
+    CHECK(Router::location(g, "/user/pages/x.jpg").protects.size() == 12 && Router::location(g, "/user/pages/x.jpg").allow_suffixes.empty());
+    // The user-folder-exposure guidance: avatars alone under user/accounts, public media alone
+    // under user/data (json, yaml and the rest 404 whatever exists), user/config and user/env
+    // whole, webserver-configs whole, the public caches without scripts, the root's markdown.
+    auto allows = [](const LocationConfig& l, const char* s) { return std::find(l.allow_suffixes.begin(), l.allow_suffixes.end(), s) != l.allow_suffixes.end(); };
+    const LocationConfig& gacc = Router::location(g, "/user/accounts/avatars/admin.png");
+    CHECK(gacc.path == "/user/accounts/" && gacc.final && gacc.handler == "static" && allows(gacc, ".png") && !allows(gacc, ".svg") &&
+          !allows(gacc, ".yaml") && refuses(gacc, ".php") && gacc.try_files.size() == 2);
+    const LocationConfig& gdata = Router::location(g, "/user/data/flex/objects/x.json");
+    CHECK(gdata.path == "/user/data/" && allows(gdata, ".pdf") && allows(gdata, ".woff2") && allows(gdata, ".css") && !allows(gdata, ".json") &&
+          !allows(gdata, ".svg") && gdata.allow_suffixes.size() == 25);
+    CHECK(Router::location(g, "/user/config/site.css").handler == "deny" && Router::location(g, "/user/config/site.css").path == "/user/config/" &&
+          Router::location(g, "/user/env").exact && Router::location(g, "/user/env").handler == "deny" &&
+          Router::location(g, "/webserver-configs/nginx.conf").handler == "deny" && Router::location(g, "/SECURITY.md").handler == "deny");
+    const LocationConfig& gimg = Router::location(g, "/images/x.sh");
+    CHECK(gimg.path == "/images/" && gimg.final && refuses(gimg, ".sh") && refuses(gimg, ".py") && refuses(gimg, ".php") && !refuses(gimg, ".jpg") &&
+          gimg.try_files.size() == 2 && gimg.try_files[1].target == "/index.php" && Router::location(g, "/assets/x.py").path == "/assets/");
+    CHECK(refuses(gsys, ".json") && refuses(gsys, ".htm") && refuses(guser, ".json") && refuses(gother, ".php2"));
     // The drupal preset on the same files, the report's shape: the .zip is served, the .log is not.
     write("gravmis.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"grav\"\napp = \"drupal\"\n"
                           "php = { socket = \"unix:/run/php/fpm.sock\" }\n");
@@ -2200,7 +2226,7 @@ static void test_control_sites() {
     CHECK(app_presets().size() == 7 && app_presets().front() == "static" && app_presets()[5] == "grav" && app_presets().back() == "proxy");
     const json::Value catalog = preset_catalog();
     CHECK(catalog["presets"].items().size() == 7 && catalog["presets"].items()[0].get("app") == "static" && catalog["presets"].items()[5].get("app") == "grav" && catalog["presets"].items()[6].get("app") == "proxy");
-    CHECK(catalog["presets"].items()[5]["never_served_directories"].items().size() == 6 && catalog["presets"].items()[5]["never_served_directories"].items()[0].str() == "/logs/" &&
+    CHECK(catalog["presets"].items()[5]["never_served_directories"].items().size() == 9 && catalog["presets"].items()[5]["never_served_directories"].items()[0].str() == "/logs/" &&
           catalog["presets"].items()[3]["never_served_directories"].items().empty() && catalog["presets"].items()[5].get("source").starts_with("https://getgrav.org/"));
     const json::Value& laravel_row = catalog["presets"].items()[2];
     CHECK(laravel_row.get("app") == "laravel" && !laravel_row.get("summary").empty() && laravel_row.get("php").starts_with("only /index.php"));

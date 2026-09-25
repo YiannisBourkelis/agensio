@@ -147,6 +147,7 @@ const std::vector<KeyDef>& key_defs() {
         {"[[site.location]]", "methods", "list", "what the handler implements", "Narrow the methods accepted (others get 405 with Allow).", "reload", "site file", "6"},
         {"[[site.location]]", "final", "bool", "false", "A prefix location that wins over suffix matches below it (nginx ^~): nothing PHP-like runs under it.", "reload", "site file", "6"},
         {"[[site.location]]", "deny_suffixes", "list", "[]", "Endings answered 404 here whatever exists (matched without regard to case or trailing dots).", "reload", "site file", "6"},
+        {"[[site.location]]", "allow_suffixes", "list", "[]", "When set, only request paths ending with one of these are served here (matched like deny_suffixes); every other path, a directory or a bare name included, is 404 whatever exists. For a directory whose public media sits beside private data (Grav's user/data).", "reload", "site file", "6"},
         {"[[site.location]]", "add_headers", "table", "{}", "Response headers added here (Cache-Control for assets, Strict-Transport-Security).", "reload", "site file", "6"},
         {"[[site.location]]", "priority", "bool", "false", "This location's upstream requests draw on priority_reserve.", "reload", "site file", "7"},
         {"[[site.location]]", "php", "table", "the site's", "php = { socket, ... }: FastCGI for this location.", "reload", "site file", "7"},

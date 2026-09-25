@@ -202,7 +202,7 @@ ServerAccount server_account(const Config& cfg, const HostFacts& facts) {
 namespace {
 
 std::string octal(unsigned mode) {
-    char buf[8];
+    char buf[16];
     std::snprintf(buf, sizeof buf, "%04o", mode);
     return buf;
 }

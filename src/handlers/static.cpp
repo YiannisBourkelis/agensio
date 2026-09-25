@@ -462,6 +462,13 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
         error(s, 404, req.keep_alive);
         return Outcome::done;
     }
+    // Endings this location serves and nothing else (Grav's user/data: the media and
+    // documents, never the yaml and json beside them; the same rule, so a directory or
+    // a bare name is refused too): the same 404, so nothing is confirmed either way.
+    if (!loc.allow_suffixes.empty() && !refused_suffix(ws.path, loc.allow_suffixes)) {
+        error(s, 404, req.keep_alive);
+        return Outcome::done;
+    }
     // Backup spellings of the names the site never serves (wp-config.php.bak, .wp-config.php.swp):
     // the same 404 as the name, whatever the ending and whatever hidden_files says.
     if (!loc.protects.empty() && backup_of_protected(ws.path, loc.protects)) {
