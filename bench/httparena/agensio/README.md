@@ -1,9 +1,9 @@
 # agensio
 
 [agensio](https://github.com/YiannisBourkelis/agensio) is a static-file and reverse-proxy
-server written in C++ on standalone Asio, with its own HTTP/1.1, TLS (OpenSSL) and HTTP/2
-layers. One event loop per worker, each with its own `SO_REUSEPORT` acceptor; a connection
-never leaves its worker. Files are served from a cache whose per-worker index is lock-free
+server written in C++ on standalone Asio, with its own HTTP/1.1, HTTP/2 and HTTP/3 (QUIC)
+layers over OpenSSL for TLS. One event loop per worker, each with its own `SO_REUSEPORT`
+acceptor (and its own UDP socket for QUIC); a connection never leaves its worker. Files are served from a cache whose per-worker index is lock-free
 over one shared store, with the response header blocks prebuilt at insert and the
 pre-compressed `.br` / `.gz` twins of a file cached beside it and chosen by `Accept-Encoding`.
 

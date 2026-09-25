@@ -1,6 +1,6 @@
 # HttpArena entry for agensio (https://github.com/YiannisBourkelis/agensio): the tagged
 # release built from source, the runtime on Debian slim like the nginx entry.
-ARG AGENSIO_REF=v0.1.0-alpha.20
+ARG AGENSIO_REF=v0.1.0-alpha.23
 
 FROM debian:trixie AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \

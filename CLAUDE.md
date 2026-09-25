@@ -857,8 +857,9 @@ privilege drop, fuzz targets for every new parser (chunked, FastCGI), h1 complia
 - **HttpArena** (https://www.http-arena.com, the public board with an infrastructure tier where
   nginx, Caddy and h2o are ranked as web servers): `bench/httparena/agensio/` is agensio's
   entry (Dockerfile building the tag, two configs because `protocols` is server-wide and the
-  arena wants h1-only TLS on 8081 next to h2 on 8443, `meta.json`, README), copied verbatim
-  into `frameworks/agensio/` of a HttpArena pull request. `bench/httparena/local.sh` runs the
+  arena wants h1-only TLS on 8081 next to h2 on 8443, `meta.json`, README), copied
+  into `frameworks/agensio/` of a HttpArena pull request without `Dockerfile.local`
+  (the local driver's variant that builds the working tree). `bench/httparena/local.sh` runs the
   arena's own `validate.sh` and `benchmark-lite.sh` here inside Docker-in-Docker (the host's
   8080-8082 are taken and the harness restarts the Docker daemon). First run,
   `bench/results/httparena-lite-20260924-0147.md`: validator 23/23; pipelined agensio 4.77M
