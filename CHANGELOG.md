@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.24 (unreleased)
+## 0.1.0-alpha.24 (2026-09-27)
 
 - **Site tasks (F13, `docs/design-site-operations.md` section 4)**: `agensio ctl site-task
   NAME TASK [--param KEY=VALUE]` and the MCP tool `site_task` run one named task of the
