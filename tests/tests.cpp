@@ -1829,8 +1829,13 @@ static void test_tasks() {
     if (!root) {
         CHECK(std::string(tasks::execute(tr).get("error")).find("creates the application in an empty directory") != std::string::npos);
         tr.ctx.root = (dir / "empty").string();
+        // A runtime directory that exists nowhere: GitHub's Ubuntu runners have a root-owned
+        // /bin/ruby (Ruby preinstalled, /bin merged into /usr/bin), so /bin cannot stand for
+        // "no interpreter here" (the alpha.24 release job, 2026-09-27).
+        tr.ctx.runtime_dir = "/nonexistent-agensio-runtime";
         const json::Value e = tasks::execute(tr);
-        CHECK(!e["ok"].boolean() && std::string(e.get("error")).find("the ruby runtime: /bin/ruby") != std::string::npos && !e.get("hint").empty());
+        CHECK(!e["ok"].boolean() && std::string(e.get("error")).find("the ruby runtime: /nonexistent-agensio-runtime") != std::string::npos && !e.get("hint").empty());
+        tr.ctx.runtime_dir = "/bin";
         tr.ctx.root = "/";
         CHECK(std::string(tasks::execute(tr).get("error")).find("belongs to root, not to the account running the task") != std::string::npos);
         tr.ctx.root = (dir / "empty").string();

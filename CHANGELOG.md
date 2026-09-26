@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.0-alpha.25 (2026-09-27)
+
+- **Unit tests: the missing-interpreter check no longer depends on the host.** The task
+  test used `/bin` as the runtime directory and expected no `/bin/ruby` there; GitHub's
+  Ubuntu runners ship Ruby and merge `/bin` into `/usr/bin`, so a root-owned `/bin/ruby`
+  made the dry run succeed and failed the alpha.24 release job at its first step. The check
+  now names a directory that exists nowhere and asserts the refusal names it; verified in
+  a container with the same root-owned `/bin/ruby`. No change to the server.
+
 ## 0.1.0-alpha.24 (2026-09-27)
 
 - **Site tasks (F13, `docs/design-site-operations.md` section 4)**: `agensio ctl site-task
