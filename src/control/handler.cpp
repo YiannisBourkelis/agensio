@@ -26,6 +26,7 @@
 #include "services/archive.hpp"
 #include "services/install.hpp"
 #include "services/pools.hpp"
+#include "services/tasks.hpp"
 
 namespace agensio {
 
@@ -164,6 +165,27 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
         reply(s, 200, control::settings_catalog(backend_->running(), nullptr));
     } else if (path == "/v1/config/reference") {
         reply(s, 200, control::config_reference(&backend_->running()));
+    } else if (path.starts_with("/v1/sites/") && path.ends_with("/tasks")) {
+        // The named tasks a site's preset offers (F13): from the table, nothing else can run.
+        const std::string_view name = path.substr(10, path.size() - 10 - 6);
+        const Config& cfg = backend_->running();
+        const SiteConfig* site = control::find_site(cfg, name);
+        if (!site) {
+            reply(s, 404, json::Value::object().set("error", "no such site").set("site", std::string(name)));
+            return false;
+        }
+        const std::string app = site->app.empty() ? "static" : site->app;
+        json::Value body = json::Value::object().set("site", std::string(name)).set("app", app).set("tasks", tasks::catalog(app));
+        if (tasks::has_tasks(app)) {
+            const auto it = running_tasks_.find(site->server_names.front());
+            body.set("running", it == running_tasks_.end() ? json::Value(nullptr) : json::Value(it->second))
+                .set("downloads", cfg.control.task_network).set("timeout_cap", static_cast<double>(cfg.control.task_timeout))
+                .set("runs_as", site->user.empty() ? json::Value("the owner of the site's directory") : json::Value(site->user))
+                .set("directory", site->project_root.empty() ? site->root : site->project_root);
+        } else {
+            body.set("hint", "tasks belong to a preset: app = \"rails\" has them. This site's app has none, and agensio runs no other command.");
+        }
+        reply(s, 200, body);
     } else if (path.starts_with("/v1/sites/") && path.ends_with("/settings")) {
         const std::string_view name = path.substr(10, path.size() - 10 - 9);
         const SiteConfig* site = control::find_site(backend_->running(), name);
@@ -287,7 +309,8 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
     }
     const bool known = path == "/v1/reload" || path == "/v1/sites" || path == "/v1/logs/reopen" ||
                        (site_path && !name.empty() && (action.empty() || action == "disable" || action == "enable" ||
-                                                       action == "delete" || action == "renew" || action == "install" || action == "copy")) ||
+                                                       action == "delete" || action == "renew" || action == "install" || action == "copy" ||
+                                                       action == "task")) ||
                        (upload_path && !name.empty() && action == "delete");
     if (!known) {
         reply(s, 404, json::Value::object().set("error", "unknown command").set("path", std::string(path)));
@@ -346,12 +369,13 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
         else reply(s, 409, json::Value::object().set("ok", false).set("error", error));
         return false;
     }
-    if (action == "install" || action == "copy") {
+    if (action == "install" || action == "copy" || action == "task") {
         if (!done) {  // no way to defer: answered synchronously as a refusal
-            reply(s, 503, json::Value::object().set("error", "install and copy need an asynchronous caller"));
+            reply(s, 503, json::Value::object().set("error", "install, copy and task need an asynchronous caller"));
             return false;
         }
         if (action == "copy") site_copy(s, name, body, what, std::move(done));
+        else if (action == "task") site_task(s, name, body, what, std::move(done));
         else site_install(s, name, body, what, std::move(done));
         return true;
     }
@@ -683,7 +707,7 @@ void ControlHandler::site_create(Stream& s, const json::Value& body, std::string
     }
     // A listener without a catch-all answers 421 to any other Host: say so once, here.
     json::Value warnings = json::Value::array();
-    if (!spec.root.empty() && spec.app != "static" && spec.app != "proxy") {
+    if (!spec.root.empty() && spec.app != "static" && !proxy_app(spec.app)) {
         const std::string detected = control::detect_app(spec.root);
         if (!detected.empty() && detected != spec.app && detected != "static" && detected != "proxy" && detected != "php")
             warnings.push("the files under " + spec.root + " look like " + detected + " (" + control::detect_app_marker(detected) +
@@ -764,7 +788,7 @@ void ControlHandler::site_create(Stream& s, const json::Value& body, std::string
 }
 
 void ControlHandler::finish_pool(Stream& s, const control::SiteSpec& spec, const Config& cfg, std::string_view what, json::Value& done, std::vector<std::string>& steps) {
-    const bool php = spec.app != "static" && spec.app != "proxy" && !spec.app.empty();
+    const bool php = php_app(spec.app);
     if (!(php && !spec.user.empty() && spec.php_socket.empty())) return;
     if (!backend_->provision_available()) return;  // next_steps already name agensio pools and the reload
     const json::Value r = backend_->provision(json::Value::object().set("op", "pools_apply"));
@@ -966,6 +990,100 @@ void ControlHandler::site_copy(Stream& s, std::string_view name, const json::Val
         } else {
             if (!before.empty()) r.set("warnings", json::Value::array().push("the configuration already failed validation before this call (health lists the findings); the copy itself is fine"));
             reply(s, replaced ? 200 : 201, r);
+        }
+        done();
+    });
+}
+
+namespace {
+
+// One argument as a shell would need it written, for the audit line (nothing is ever run
+// through a shell; the line should still read back as the exact argv).
+std::string shell_word(const std::string& a) {
+    if (!a.empty() && a.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-./=:,+@%") == std::string::npos) return a;
+    std::string out = "'";
+    for (char c : a) out += c == '\'' ? std::string("'\\''") : std::string(1, c);
+    return out + "'";
+}
+
+}  // namespace
+
+// site-task (F13): one named task of the site's preset, run as the site's account in the
+// site's directory, through the helper (or as this process's account without one). The
+// caller names the task and gives parameters; the command is the table's (services/tasks).
+void ControlHandler::site_task(Stream& s, std::string_view name, const json::Value& body, std::string_view what, std::function<void()> done) {
+    const Config& cfg = backend_->running();
+    auto answer = [&](int status, const json::Value& v) {
+        reply(s, status, v);
+        done();
+    };
+    const SiteConfig* site = control::find_site(cfg, name);
+    if (!site) return answer(404, json::Value::object().set("error", "no such site").set("site", std::string(name)));
+    const std::string app = site->app.empty() ? "static" : site->app;
+    if (!tasks::has_tasks(app))
+        return answer(422, json::Value::object().set("error", "app = \"" + app + "\" has no tasks").set("app", app)
+                               .set("hint", "tasks belong to a preset: app = \"rails\" has them (site_tasks_list shows a site's). agensio runs no other command."));
+    const std::string task(body.get("task"));
+    const tasks::Row* row = tasks::find(app, task);
+    if (!row) {
+        json::Value names = json::Value::array();
+        for (const auto& n : tasks::names(app)) names.push(n);
+        return answer(400, json::Value::object().set("error", task.empty() ? "which task? give task: one of the preset's (tasks)" : "no task '" + task + "' for app = \"" + app + "\"")
+                               .set("tasks", std::move(names)));
+    }
+    const json::Value params = body["params"].is_null() ? json::Value::object() : body["params"];
+    if (std::string bad = tasks::check_params(*row, params); !bad.empty()) return answer(400, json::Value::object().set("error", bad).set("task", task));
+    const std::string site_root = site->project_root.empty() ? site->root : site->project_root;
+    std::string why;
+    if (site_root.empty() || !control::safe_path(site_root, why))
+        return answer(409, json::Value::object().set("error", "the site has no directory a task can run in" + (why.empty() ? std::string() : ": " + why))
+                               .set("hint", "the site's root is the project directory tasks run in; site_update sets it"));
+    const bool dry_run = body["dry_run"].boolean();
+    const std::string key = site->server_names.front();
+    if (!dry_run)
+        if (const auto it = running_tasks_.find(key); it != running_tasks_.end())
+            return answer(409, json::Value::object().set("error", "a task is already running on this site: " + it->second + "; one task per site at a time").set("running", it->second));
+    json::Value req = json::Value::object().set("op", "task_run").set("site", std::string(name)).set("task", task).set("params", params).set("dry_run", dry_run)
+                          .set("app", app).set("root", site_root).set("secrets", site_secrets(*site, site_root));
+    if (!dry_run) {
+        running_tasks_[key] = task + " (since " + now_stamp() + ")";
+        std::string given;
+        for (const auto& m : params.members()) given += " " + m.first + "=" + m.second.str();
+        audit_peer(s, what, "running task " + task + given + " in " + site_root);
+    }
+    const std::vector<std::string> before = dry_run ? std::vector<std::string>{} : validation_errors(*backend_);
+    backend_->task_async(req, [this, &s, what = std::string(what), key, dry_run, before, done](json::Value r) {
+        if (!dry_run) running_tasks_.erase(key);
+        const bool ok = r["ok"].boolean();
+        if (dry_run) {
+            if (ok) reply(s, 200, r.set("hint", "nothing ran; the same call without dry_run runs exactly this"));
+            else reply(s, 409, r.set("dry_run", true));
+            done();
+            return;
+        }
+        // The audit line says what actually ran (the argv the helper executed), as whom,
+        // and how it ended; the output stays in the answer.
+        if (!r["ran"].boolean()) {
+            audit_peer(s, what, "refused: " + std::string(r.get("error")));
+        } else {
+            std::string argv;
+            for (const auto& a : r["argv"].items()) argv += (argv.empty() ? "" : " ") + shell_word(a.str());
+            std::string end = r["timed_out"].boolean() ? "stopped at the time limit"
+                              : !r["signal"].is_null() ? "signal " + std::to_string(static_cast<int>(r["signal"].num()))
+                              : r["exit"].is_null() ? "did not end" : "exit " + std::to_string(static_cast<int>(r["exit"].num()));
+            end += " after " + std::to_string(static_cast<long>(r["duration_ms"].num() / 1000)) + " s";
+            if (!r["secured"].items().empty()) end += ", secured " + std::to_string(r["secured"].items().size()) + " credential path(s)";
+            audit_peer(s, what, "ran as " + std::string(r.get("as")) + " in " + std::string(r.get("cwd")) + ": " + argv + " -> " + end);
+        }
+        if (!ok) {
+            reply(s, 409, r.set("ok", false));
+        } else if (const json::Value fresh = new_errors(before, validation_errors(*backend_)); !fresh.items().empty()) {
+            audit_peer(s, what, "ran, but the configuration no longer validates: " + fresh.dump());
+            reply(s, 409, r.set("ok", false).set("error", "the task ran, but the configuration no longer validates; agensio -t and a restart would refuse it")
+                              .set("errors", fresh).set("hint", "fix what the errors name (health lists them with a fix each), then config_validate"));
+        } else {
+            if (!before.empty()) r.set("warnings", json::Value::array().push("the configuration already failed validation before this task (health lists the findings); the task itself is fine"));
+            reply(s, 200, r);
         }
         done();
     });

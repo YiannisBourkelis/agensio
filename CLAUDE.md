@@ -11,7 +11,8 @@ same machine, with the benchmark harness checked in so anyone can reproduce the 
 ## Status
 
 Pre-alpha `0.1.0-alpha.1` (2026-09-19): phases A-D, E1/E9, F0-F7, H1, H3 done, G (HTTP/2)
-2026-09-23, the first slice of I (HTTP/3) 2026-09-24; see `CHANGELOG.md`. Everything under "Architecture" below is what the code does now, not a
+2026-09-23, the first slice of I (HTTP/3) 2026-09-24, F13 (site tasks, the first step of
+`docs/design-site-operations.md`) 2026-09-26; see `CHANGELOG.md`. Everything under "Architecture" below is what the code does now, not a
 proposal. Before every tag: the suites (unit, integration, reload, pools, control, acme),
 the sanitizer and fuzz runs listed in `docs/security-control-plane.md`, and
 `bench/ab.sh` against the previous tag.
@@ -171,7 +172,11 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   per-connection path.
 - **Session**: `std::shared_ptr<Connection>` with `enable_shared_from_this`, handlers as
   lambdas capturing `self`. Receive buffer reused across keep-alive requests; hard cap on
-  header size (default 16 KB) and an idle timeout (default 15 s) via `asio::steady_timer`.
+  header size (default 16 KB) and an idle timeout (default 15 s) via `asio::steady_timer`;
+  a request whose handler is still working (an upstream exchange with its own timeouts, a
+  control command running a task or a download) is not idle, only a body the client does
+  not send ends it (before 2026-09-26 any HTTP/1 request slower than the idle timeout was
+  closed with an empty reply; HTTP/2 always did it this way).
   Idle memory (G2, 2026-09-23): a connection idle for 2 s sheds what it does not need
   (both protocols: body and writer buffers, pooled HTTP/2 streams, and the receive buffer,
   whose pending read is cancelled and replaced by `async_wait(wait_read)`; the buffer
@@ -319,7 +324,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   for WordPress on `app = "php"` (pool on 9002, agensio on 8072, site
   http://wp.agensio.ddev.site:8072, wp-admin admin / 4444).
 - **Per-site users** (C3b-1, `src/services/pools.*`, design in
-  `docs/design-per-site-users.md`): `user = "web1"` on a site derives a php-fpm pool
+  `docs/design-per-site-users.md`): `user = "web1"` on a site that runs PHP (a PHP
+  preset or a `fastcgi` location; a proxy or static site with a user gets no pool,
+  2026-09-26) derives a php-fpm pool
   (socket `<pools_run>/agensio-web1.sock`, state dir, `open_basedir`, sizing from
   `php = { children, pm, ... }`; `pm` is `ondemand` by default since 2026-09-21 with a
   60 s child idle timeout, because static pools kept 150-200 MB resident per idle site,
@@ -393,6 +400,21 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   `agensio mcp` (F5, `control/mcp.*`): stdio JSON-RPC MCP server, 15 tools with
   annotations gated by the caller's role, prompts, meant to be spawned over SSH by the
   agent host (`docs/mcp.md`). `agensio ctl` (F6) is the same client for shells.
+- **Site tasks** (F13, `src/services/tasks.*`, design `docs/design-site-operations.md`
+  section 4): `agensio ctl site-task NAME TASK [--param k=v]` and MCP `site_task` run one
+  named task of the site's preset as the site's account in its directory: a row with a
+  fixed argv and typed parameters (`app = "rails"`: `gem_install_rails`, `rails_new`,
+  `bundle_install`, `db_prepare`, `db_migrate`, `assets_precompile`), never a command
+  line; the interpreter only from `[control] runtimes` (root-owned, checked before every
+  run), the environment built, umask 027, `RLIMIT_NPROC`, a timeout that kills the
+  process group, output head and tail, one task per site, the credential sweep and the
+  validation afterwards, the exact argv in the audit log. Through the helper's `task_run`
+  (the site from the configuration on disk, the account's home created), else as the
+  server's own account. `app = "rails"` is the proxy preset plus its tasks and credential
+  files; Puma is started by `docs/examples/puma.service` until F14. `tests/tasks.sh`
+  (root devbox, fake interpreters), `tests/rails.sh` (real Ruby and rubygems.org, the
+  whole workflow). Rule for every change here: the security page rows 26 and 27 and the
+  MCP texts move with it.
 - **Application install** (F9, `src/services/archive.*`, `fetch.*`, `install.*`):
   `agensio ctl site-install NAME [--url | --file | --version]` fills a site's empty
   directory as the site's account from an https archive, an upload (`agensio ctl upload`)

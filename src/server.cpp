@@ -11,10 +11,12 @@
 #include "services/install.hpp"
 #include "services/pools.hpp"
 #include "services/provision.hpp"
+#include "services/tasks.hpp"
 
 #ifndef _WIN32
 #include <fcntl.h>
 #include <grp.h>
+#include <pwd.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -994,6 +996,46 @@ void Server::install_async(const json::Value& req, std::function<void(json::Valu
                 }
                 if (r.is_null()) r = install::execute(ir);
                 if (ir.upload_fd >= 0) ::close(ir.upload_fd);
+            }
+#else
+            r = json::Value::object().set("ok", false).set("error", "not available on this platform");
+#endif
+        }
+        asio::post(workers_[0]->ctx, [done, r] { done(r); });
+    }).detach();
+}
+
+void Server::task_async(const json::Value& req, std::function<void(json::Value)> done) {
+    // Off the worker: a task runs for minutes (bundle install). With the helper the task runs
+    // as the site's account, and the helper is told names only; without it, as this
+    // process's own account, which tasks::execute requires to own the site's directory.
+    std::thread([this, req, done = std::move(done)] {
+        json::Value r;
+        if (provisioner_.available()) {
+            r = provisioner_.request(json::Value::object().set("op", "task_run").set("site", req["site"]).set("task", req["task"])
+                                         .set("params", req["params"]).set("dry_run", req["dry_run"].boolean()));
+        } else {
+#ifndef _WIN32
+            const tasks::Row* row = tasks::find(req.get("app"), req.get("task"));
+            const struct passwd* pw = ::getpwuid(::geteuid());
+            if (!row) {
+                r = json::Value::object().set("ok", false).set("error", "no such task");
+            } else if (!pw) {
+                r = json::Value::object().set("ok", false).set("error", "this process's account has no name");
+            } else {
+                tasks::Request tr;
+                tr.row = row;
+                tr.params = req["params"];
+                tr.ctx.runtime_dir = runtime_dir(cfg_.control, row->runtime);
+                tr.ctx.root = std::string(req.get("root"));
+                tr.ctx.home = cfg_.state_dir + "/" + pw->pw_name;
+                tr.ctx.timeout = std::min(row->timeout, cfg_.control.task_timeout);
+                tr.ctx.processes = cfg_.control.task_processes;
+                tr.sites_root = provision::sites_root(cfg_);
+                for (const auto& sec : req["secrets"].items()) tr.secrets.push_back(sec.str());
+                tr.network_allowed = cfg_.control.task_network;
+                tr.dry_run = req["dry_run"].boolean();
+                r = tasks::execute(tr);
             }
 #else
             r = json::Value::object().set("ok", false).set("error", "not available on this platform");

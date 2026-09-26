@@ -43,7 +43,7 @@ printf '[server]\nprotocols = ["h2", "h1", "h3"]\n[[site]]\nlisten = ["127.0.0.1
 H3LIST=""; H3JSON=""; H3STATUS=""; [ $H3 = 1 ] && { H3LIST=', "h3"'; H3JSON=',"h3"'; H3STATUS=",h3"; }
 export H3 H3JSON
 sed "s#@WORKERS@#0#g; s#@BENCH@#$ROOT/bench#g; s#@SENDFILE_MIN@#${SENDFILE_MIN:-48KB}#g; s#@ACCESS_LOG@#$ROOT/bench/tmp/access.log#; s#@H3@#$H3LIST#g; s#^tcp_nodelay = true#tcp_nodelay = true\ntrusted_proxies = [\"127.0.0.1\"]#" bench/agensio.toml > bench/tmp/agensio-test.toml
-printf '\n[control]\nsocket = "%s/bench/tmp/control.sock"\naudit = "%s/bench/tmp/audit.log"\nupload_max = "1M"\n' "$ROOT" "$ROOT" >> bench/tmp/agensio-test.toml
+printf '\n[control]\nsocket = "%s/bench/tmp/control.sock"\naudit = "%s/bench/tmp/audit.log"\nupload_max = "1M"\nruntimes = { ruby = "%s/bench/tmp/rt" }\n' "$ROOT" "$ROOT" "$ROOT" >> bench/tmp/agensio-test.toml
 sed -i "s#^\[server\]#[server]\nstate_dir = \"$ROOT/bench/tmp/state\"#" bench/tmp/agensio-test.toml
 rm -rf bench/tmp/state bench/tmp/inst; mkdir -p bench/tmp/state bench/tmp/inst
 rm -rf bench/tmp/sites.d; mkdir -p bench/tmp/sites.d bench/tmp/sites/created.test/web; echo created > bench/tmp/sites/created.test/web/index.html
@@ -599,7 +599,7 @@ check "control: unknown site is a 404" "404" "$(curl -sS -o /dev/null -w '%{http
 check "control: validate reads the file on disk" "yes" "$(curl -sS --unix-socket $CS http://control/v1/config/validate | grep -q '"ok":true' && echo yes)"
 curl -sS -o /dev/null http://127.0.0.1:8080/control-probe-404 >/dev/null; sleep 1.2
 check "control: logs finds the 404 just made" "yes" "$(curl -sS --unix-socket $CS 'http://control/v1/logs?since=1m&status=4xx' | grep -q 'control-probe-404' && echo yes)"
-check "control: presets catalogue comes from the preset table" "7 drupal yes" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; d=json.load(sys.stdin); p={x["app"]:x for x in d["presets"]}; print(len(p), "drupal" if "drupal" in p else "-", "yes" if "web/" in p["drupal"]["root"] and "/core/lib/" in p["drupal"]["no_php_under"] and p["laravel"]["php"].startswith("only /index.php") else "no")')"
+check "control: presets catalogue comes from the preset table" "8 drupal yes" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; d=json.load(sys.stdin); p={x["app"]:x for x in d["presets"]}; print(len(p), "drupal" if "drupal" in p else "-", "yes" if "web/" in p["drupal"]["root"] and "/core/lib/" in p["drupal"]["no_php_under"] and p["laravel"]["php"].startswith("only /index.php") else "no")')"
 check "control: health answers with findings" "yes" "$(curl -sS --unix-socket $CS http://control/v1/health | grep -q '"findings":\[' && echo yes)"
 check "control: ctl logs and health through the client" "0 0" "$("$BIN" ctl logs --since 5m --status all --socket $CS > /dev/null; echo -n "$? "; "$BIN" ctl health --socket $CS > /dev/null; echo $?)"
 # Mutations (F3): confirm required, the decision form, create, update, disable, enable, delete, reload.
@@ -675,7 +675,7 @@ check "settings: site-update raises one site's max_body_size; the other site kee
 check "settings: the answer says what was written and reloaded; site NAME shows the value and its source" "yes 2MB site 1MB server" "$(grep -q '"done":\["site file .*written, agensio reloaded"' bench/tmp/ctl.out && echo yes) $(curl -sS --unix-socket $CS http://control/v1/sites/inst.test | python3 -c 'import json,sys; d=json.load(sys.stdin)["settings"]["max_body_size"]; print(d["value"], d["source"])') $(curl -sS --unix-socket $CS http://control/v1/sites/strict.test | python3 -c 'import json,sys; d=json.load(sys.stdin)["settings"]["max_body_size"]; print(d["value"], d["source"])')"
 check "settings: a value above the ceiling is refused naming key, value and ceiling; nothing written" "400 yes 2MB" "$(cpost /v1/sites/inst.test '{"settings":{"max_body_size":"10GB"},"confirm":true}') $(grep -q 'max_body_size: 10GB is above the ceiling 512MB' bench/tmp/ctl-reply.json && echo yes) $(grep -o 'max_body_size = .*' bench/tmp/sites.d/inst.test.toml | head -1 | cut -d= -f2 | tr -d ' \"')"
 check "settings: every ini key outside the allowlist is refused as unknown, through settings" "400 400 400 400 400 400 yes" "$(for k in sendmail_path auto_prepend_file extension disable_functions open_basedir extra; do cpost /v1/sites/inst.test "{\"settings\":{\"$k\":\"/bin/sh\"},\"confirm\":true}"; echo -n ' '; done; grep -q 'unknown setting' bench/tmp/ctl-reply.json && echo yes)"
-check "settings: pool keys need a site with its own user; the refusal says so" "400 yes" "$(cpost /v1/sites/inst.test '{"settings":{"memory_limit":"512M"},"confirm":true}') $(grep -q 'needs a site with its own user' bench/tmp/ctl-reply.json && echo yes)"
+check "settings: pool keys need a site with its own user; the refusal says so" "400 yes" "$(cpost /v1/sites/inst.test '{"settings":{"memory_limit":"512M"},"confirm":true}') $(grep -q 'needs a PHP site with its own user' bench/tmp/ctl-reply.json && echo yes)"
 check "settings: the MCP schema, the catalogue and what site_update accepts are one set" "same same" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
 import json, subprocess, sys, urllib.request
 p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
@@ -694,7 +694,29 @@ print("same" if schema == catalogue else "schema!=catalogue", "same" if accepted
 PYT
 )"
 "$BIN" ctl site-update inst.test --set max_body_size=1MB --yes --reason back --socket $CS > /dev/null
-check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 155 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
+# Site tasks (F13): named commands of a preset, run as the site's account; here, without the
+# helper, as the server's own account in a directory it owns. [control] runtimes points at
+# a directory the test's account owns, which is exactly what the rule refuses.
+mkdir -p bench/tmp/sites/rails.test/app bench/tmp/rt; printf '#!/bin/sh\necho ran\n' > bench/tmp/rt/ruby; printf '#!/bin/sh\necho ran\n' > bench/tmp/rt/bundle; chmod 755 bench/tmp/rt/ruby bench/tmp/rt/bundle
+check "tasks: a rails site: its file says app = rails with the upstream, and no PHP pool or PHP finding comes with it" "201 yes no" "$(cpost /v1/sites "{\"domain\":\"rails.test\",\"https\":\"none\",\"user\":null,\"app\":\"rails\",\"root\":\"$ROOT/bench/tmp/sites/rails.test/app\",\"upstream\":\"http://127.0.0.1:8097\",\"listen_plain\":\"127.0.0.1:8096\",\"confirm\":true,\"reason\":\"rails\"}") $(grep -q '^app = "rails"' bench/tmp/sites.d/rails.test.toml && grep -q '^upstream = "http://127.0.0.1:8097"' bench/tmp/sites.d/rails.test.toml && echo yes) $(curl -sS --unix-socket $CS http://control/v1/health | grep -q 'php_tmp_missing\|pools_stale' && echo yes || echo no)"
+check "tasks: site-tasks lists the preset's six tasks, who runs them and where" "6 rails_new the owner of the site's directory yes" "$("$BIN" ctl site-tasks rails.test --socket $CS | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d["tasks"]), d["tasks"][1]["task"], d["runs_as"], "yes" if d["directory"].endswith("rails.test/app") else d["directory"])')"
+check "tasks: a preset without tasks, an unknown task, an option smuggled as a parameter and an unknown parameter are refused" "422 400 400 400 yes" "$(cpost /v1/sites/strict.test/task '{"task":"db_prepare","confirm":true}') $(cpost /v1/sites/rails.test/task '{"task":"sh","confirm":true}') $(cpost /v1/sites/rails.test/task '{"task":"rails_new","params":{"name":"-m https://evil.example/t.rb"},"confirm":true}') $(cpost /v1/sites/rails.test/task '{"task":"rails_new","params":{"name":"blog","template":"x"},"confirm":true}') $(grep -q "takes no parameter 'template'" bench/tmp/ctl-reply.json && echo yes)"
+check "tasks: an interpreter the site's side could have written is refused, dry run or not; nothing ran" "409 yes yes 409 0" "$(cpost /v1/sites/rails.test/task '{"task":"rails_new","params":{"name":"blog"},"dry_run":true,"confirm":true}') $(grep -q 'not root' bench/tmp/ctl-reply.json && echo yes) $(grep -q 'runtimes' bench/tmp/ctl-reply.json && echo yes) $(cpost /v1/sites/rails.test/task '{"task":"db_prepare","confirm":true,"reason":"t"}') $(ls -A bench/tmp/sites/rails.test/app | wc -l | tr -d ' ')"
+check "tasks: the refusal is in the audit log with the task's name" "yes" "$(grep -q 'sites/rails.test/task (t): refused: the ruby runtime' bench/tmp/audit.log && echo yes)"
+check "tasks: ctl site-task sends the task and --param, without --yes nothing happens (428), a missing task is a usage error" "1 yes 1 2" "$("$BIN" ctl site-task rails.test rails_new --param name=blog --dry-run --yes --socket $CS > bench/tmp/ctl.out 2>&1; echo -n "$? "; grep -q 'the ruby runtime' bench/tmp/ctl.out && echo -n yes; echo -n ' '; "$BIN" ctl site-task rails.test db_prepare --socket $CS > /dev/null 2>&1; echo -n "$? "; "$BIN" ctl site-task rails.test --yes --socket $CS > /dev/null 2>&1; echo $?)"
+check "tasks: the MCP task enum and parameters come from the table; listing reads, running is destructive" "6 name,version True False True" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
+import json, subprocess, sys
+p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n"); p.stdin.flush()
+tools = {t["name"]: t for t in json.loads(p.stdout.readline())["result"]["tools"]}
+run = tools["site_task"]["inputSchema"]["properties"]
+p.stdin.close(); p.wait()
+print(len(run["task"]["enum"]), ",".join(sorted(run["params"]["properties"])), tools["site_tasks_list"]["annotations"]["readOnlyHint"],
+      tools["site_task"]["annotations"]["readOnlyHint"], tools["site_task"]["annotations"]["destructiveHint"])
+PYT
+)"
+cpost /v1/sites/rails.test/delete '{"confirm":true}' > /dev/null
+check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 160 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
 check "secrets: the presets catalogue lists each preset's credential files" "/wp-config.php /sites/default/settings.php" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["wordpress"]["secrets"][0], p["drupal"]["secrets"][0])')"
 check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$("$BIN" ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; "$BIN" ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
@@ -808,7 +830,7 @@ p.stdin.close(); p.wait()
 print(" ".join(out))
 PYT
 )
-check "mcp: initialize, tool list with annotations, calls, confirm, decisions, prompts" "agensio 21 True laravel 428 reloaded https,root,app,user -32601 2" "$mcp"
+check "mcp: initialize, tool list with annotations, calls, confirm, decisions, prompts" "agensio 23 True laravel 428 reloaded https,root,app,user -32601 2" "$mcp"
 check "mcp: site_install and the upload tools are exposed with their arguments" "file url,file,version,sha256 True" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
 import json, subprocess, sys
 p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
@@ -1319,6 +1341,22 @@ if [ -n "$UP_PID" ]; then
   check "proxy: streamed chunked request body goes out chunked" "same" "$(curl -sS -H 'Transfer-Encoding: chunked' --data-binary @bench/tmp/proxy-blob $P/stream/echo | cmp -s - bench/tmp/proxy-blob && echo same)"
   check "proxy: slow upstream within the timeout" "200" "$(code "$P/slow?ms=100")"
   check "proxy: read timeout gives 504" "504" "$(code "$P/api/slow?ms=1500")"
+  # An answer slower than idle_timeout: the handler is still working, so the connection is
+  # not idle (before 2026-09-26 it was closed at idle_timeout with an empty reply; the
+  # suite's own idle_timeout is 65 s, so a separate instance with 1 s shows it).
+  printf '[server]\nworkers = 1\nidle_timeout = 1\n[log]\naccess = "off"\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:18089"]\napp = "proxy"\nupstream = "http://127.0.0.1:9107"\n' > bench/tmp/idle.toml
+  "$BIN" -c bench/tmp/idle.toml >/dev/null 2>&1 &
+  IDLE_PID=$!
+  for _ in $(seq 1 50); do nc -z 127.0.0.1 18089 2>/dev/null && break; sleep 0.1; done
+  check "proxy: an answer slower than idle_timeout (1 s) still arrives, and an idle connection is still closed" "200 closed" "$(code 'http://127.0.0.1:18089/slow?ms=2500') $(python3 -c '
+import socket, time
+s = socket.create_connection(("127.0.0.1", 18089)); s.sendall(b"GET /json HTTP/1.1\r\nHost: x\r\n\r\n"); s.settimeout(3)
+d = s.recv(65536); time.sleep(2.5)
+try:
+    print("closed" if s.recv(1) == b"" else "open")
+except OSError:
+    print("closed")')"
+  kill $IDLE_PID 2>/dev/null; wait $IDLE_PID 2>/dev/null
   check "proxy: origin down gives 502" "502" "$(code $P/down/json)"
   check "proxy: 502 reason in the error log" "yes" "$(grep -q 'proxy 127.0.0.1:9199 connect_refused' bench/tmp/error.log && echo yes)"
   before=$(curl -sS $UPS/stats | sed 's/.*"connections":\([0-9]*\).*/\1/')

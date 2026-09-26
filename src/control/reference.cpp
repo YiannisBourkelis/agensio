@@ -61,10 +61,15 @@ const std::vector<KeyDef>& key_defs() {
         {"[control]", "install_ca", "path", "\"\" (system store)", "A PEM bundle site-install trusts instead of the system store.", "reload", "file", "15"},
         {"[control]", "upload_max", "size", "512MB", "The largest archive agensio ctl upload may store.", "reload", "file", "15"},
         {"[control]", "site_limits", "table", "{ max_body_size = \"512MB\", memory_limit = \"512M\", max_execution_time = 300, max_input_time = 300, children = 32, max_requests = 1000000 }", "The ceilings a site's settings may be raised to through the control plane; root moves them here.", "reload", "file", "15"},
+        {"[control]", "runtimes", "table { ruby, node, php, python3 } of directories", "{ ruby = \"/usr/bin\", node = \"/usr/bin\", php = \"/usr/bin\", python3 = \"/usr/bin\" }", "Where site tasks find their interpreters (ruby, gem and bundle for app = \"rails\"). The program, the file it resolves to and every directory above both must be root's and writable by root alone, outside sites_root, or the task is refused: a site never supplies its own interpreter. Point it at a toolchain's root-owned installation (an rbenv Ruby under /opt) when the distribution's is too old.", "restart", "file", "15"},
+        {"[control]", "task_limits", "table { timeout, processes }", "{ timeout = 1200, processes = 512 }", "The bounds of every site task; the two keys are below.", "restart", "file", "15"},
+        {"[control]", "task_network", "bool", "true", "Site tasks that download (gem_install_rails, rails_new, bundle_install) may run; false refuses them, for a host that installs archives carrying vendor/bundle instead.", "restart", "file", "15"},
+        {"task_limits = {}", "timeout", "seconds", "1200", "Wall-clock limit of one site task: SIGTERM to its process group, SIGKILL ten seconds later; a task's own limit is capped by it. 5 to 86400.", "restart", "file", "15"},
+        {"task_limits = {}", "processes", "int", "512", "RLIMIT_NPROC of the site's account while a task runs, so a runaway build stops there. 16 to 65536.", "restart", "file", "15"},
         {"[[site]]", "server_name", "list of host names", "[\"*\"]", "The names this site answers; \"*\" makes it the listener's catch-all. A name no site lists answers 421.", "reload", "site-create (domain, aliases)", "1b"},
         {"[[site]]", "listen", "list of host:port", "(required)", "The addresses this site listens on; one site per name per address.", "reload (a new privileged port needs a restart)", "site-create (listen_plain, listen_tls)", "1"},
-        {"[[site]]", "root", "path", "(required unless app = proxy)", "The document root, or for a preset the project directory (Laravel's public/, Drupal's web/ are served).", "reload", "site-create (root)", "1"},
-        {"[[site]]", "app", "enum: static | php | laravel | drupal | wordpress | grav | proxy", "static", "The preset: routing, which .php runs, what is refused; presets_list explains each.", "reload", "site-create (app)", "2"},
+        {"[[site]]", "root", "path", "(required unless app = proxy)", "The document root, or for a preset the project directory (Laravel's public/, Drupal's web/ are served; for app = rails the application's directory, where site tasks run and nothing is served).", "reload", "site-create (root)", "1"},
+        {"[[site]]", "app", "enum: static | php | laravel | drupal | wordpress | grav | proxy | rails", "static", "The preset: routing, which .php runs, what is refused; presets_list explains each.", "reload", "site-create (app)", "2"},
         {"[[site]]", "index", "list", "[\"index.html\"] (presets set their own)", "Files tried for a directory request.", "reload", "site file", "1"},
         {"[[site]]", "try_files", "list", "preset-dependent", "What to try for a path: $uri, $uri/, a fallback such as /index.php?$query_string, or =404.", "reload", "site file", "6"},
         {"[[site]]", "user", "string", "\"\"", "The account the site's PHP runs as, in its own pool; also who owns its files. What makes a shared host safe.", "reload (agensio pools / the helper writes the pool)", "site-create (user, no_user)", "11"},
@@ -245,6 +250,17 @@ json::Value running_value(const Config& c, const std::string& table, const std::
                 .set("max_execution_time", static_cast<double>(l.max_execution_time)).set("max_input_time", static_cast<double>(l.max_input_time))
                 .set("children", static_cast<double>(l.children)).set("max_requests", static_cast<double>(l.max_requests));
         }
+        if (key == "runtimes") {
+            const auto& r = c.control.runtimes;
+            return V::object().set("ruby", r.ruby).set("node", r.node).set("php", r.php).set("python3", r.python3);
+        }
+        if (key == "task_limits")
+            return V::object().set("timeout", static_cast<double>(c.control.task_timeout)).set("processes", static_cast<double>(c.control.task_processes));
+        if (key == "task_network") return V(c.control.task_network);
+    } else if (table == "task_limits = {}") {
+        if (!c.control.enabled) return V("(no [control] table)");
+        if (key == "timeout") return V(static_cast<double>(c.control.task_timeout));
+        if (key == "processes") return V(static_cast<double>(c.control.task_processes));
     }
     return V(nullptr);
 }

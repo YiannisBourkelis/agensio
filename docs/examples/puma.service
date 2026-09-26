@@ -1,0 +1,43 @@
+# Puma for a site with app = "rails", until agensio manages the application process itself
+# (roadmap F14, docs/design-site-operations.md section 5). Replace ag5 (the site's account,
+# its `user`), the application's directory (the site's `root`) and 127.0.0.1:3000 (the
+# site's `upstream`), then, as root:
+#   cp puma.service /etc/systemd/system/agensio-app-ag5.service
+#   systemctl daemon-reload && systemctl enable --now agensio-app-ag5
+# The environment is the one site_task runs Rails with (production, the bundle in
+# vendor/bundle without the development and test groups), so what the tasks prepared is what
+# Puma loads. -b binds loopback explicitly: the puma.rb `rails new` writes binds every
+# address, which would publish the application next to agensio, without its TLS and refusals.
+[Unit]
+Description=Rails application of ag5 (Puma), behind agensio
+After=network.target
+
+[Service]
+User=ag5
+Group=ag5
+WorkingDirectory=/var/www/ag5.edoc.gr/app
+Environment=RAILS_ENV=production HOME=/var/lib/agensio/ag5 TMPDIR=/var/lib/agensio/ag5/tmp LANG=C.UTF-8
+Environment=BUNDLE_PATH=vendor/bundle BUNDLE_WITHOUT=development:test RAILS_LOG_TO_STDOUT=1
+ExecStart=/usr/bin/bundle exec puma -e production -b tcp://127.0.0.1:3000
+Restart=on-failure
+RestartSec=2
+KillMode=mixed
+TimeoutStopSec=30
+UMask=0027
+# Hardening that costs Puma nothing: it writes only below its own directory and its home.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/var/www/ag5.edoc.gr/app /var/lib/agensio/ag5
+ProtectHome=yes
+RestrictSUIDSGID=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+MemoryMax=1G
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target

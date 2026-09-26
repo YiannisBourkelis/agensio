@@ -175,7 +175,22 @@ struct ControlConfig {
         unsigned children = 32;
         unsigned max_requests = 1000000;
     } site_limits;
+    // Site tasks (F13, services/tasks.*): where the interpreters live ([control] runtimes,
+    // one directory per runtime, root's alone), the bounds of every run ([control]
+    // task_limits) and whether tasks that download may run ([control] task_network).
+    struct Runtimes {
+        std::string ruby = "/usr/bin";
+        std::string node = "/usr/bin";
+        std::string php = "/usr/bin";
+        std::string python3 = "/usr/bin";
+    } runtimes;
+    unsigned task_timeout = 1200;   // seconds before SIGTERM; a task row's own limit is capped by it
+    unsigned task_processes = 512;  // RLIMIT_NPROC of the site's account while a task runs
+    bool task_network = true;
 };
+
+// The directory [control] runtimes names for a runtime ("ruby"), "" for an unknown one.
+std::string runtime_dir(const ControlConfig& control, std::string_view runtime);
 
 struct LogConfig {
     std::string access;     // default access log path for sites, "" = off; the loader defaults it to
@@ -271,9 +286,14 @@ std::vector<TryStep> parse_try_files(const std::vector<std::string>& items);
 void finalize_site(SiteConfig& site);
 // The synthetic site the control listener routes to: one location of kind `control`.
 SiteConfig control_site();
-// Every value `app = "..."` accepts: "static", the PHP presets in table order, "proxy".
-// The control API and the MCP tool schema list these, so a new preset row is exposed at once.
+// Every value `app = "..."` accepts: "static", the PHP presets in table order, "proxy",
+// "rails". The control API and the MCP tool schema list these, so a new preset is exposed at once.
 std::vector<std::string> app_presets();
+// A preset that hands every request to the site's upstream ("proxy", "rails"): no PHP, no
+// document root served, `upstream` required.
+bool proxy_app(std::string_view app) noexcept;
+// A PHP preset (a row of the PHP preset table).
+bool php_app(std::string_view app);
 // What each `app` value does, for `agensio ctl presets` and the MCP tool: served root,
 // which .php runs, front controller, refused suffixes, shielded directories, files never served.
 json::Value preset_catalog();

@@ -43,8 +43,10 @@ php = { children = 8, version = "8.3" }   # no socket: generated, see below
 
 Rules:
 
-- A site with `user` and an `app` (or any FastCGI location) without `php.socket` gets a
-  generated pool. Its socket is `<pools_run>/agensio-<user>.sock` where `pools_run` is
+- A site with `user` and a PHP `app` (or a `handler = "fastcgi"` location without a
+  socket of its own) and no `php.socket` gets a generated pool; a proxied or static site
+  with `user` gets none (made explicit 2026-09-26, after a Rails site was reported
+  `php_tmp_missing` and `pools_stale`). Its socket is `<pools_run>/agensio-<user>.sock` where `pools_run` is
   `/run/php` on Debian and `/run/php-fpm` on RHEL, overridable with
   `[server] pools_run`.
 - Two sites with the same `user` share one pool (one customer, several sites) as long as

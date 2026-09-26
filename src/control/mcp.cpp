@@ -12,6 +12,7 @@
 #include "control/roles.hpp"
 #include "control/settings.hpp"
 #include "services/json.hpp"
+#include "services/tasks.hpp"
 
 namespace agensio {
 
@@ -75,7 +76,7 @@ json::Value settings_schema() {
         }
         text += std::string(" Changing it costs: ") + d.applies + ".";
         if (*d.derives) text += std::string(" Derives: ") + d.derives + ".";
-        if (d.pool) text += " Needs a site with its own user (a generated pool).";
+        if (d.pool) text += " Needs a PHP site with its own user (a generated pool; a proxy or static site has none).";
         props.set(d.key, p.set("description", text));
     }
     return json::Value::object().set("type", "object").set("properties", props).set("additionalProperties", false)
@@ -83,6 +84,32 @@ json::Value settings_schema() {
 }
 
 json::Value name_arg() { return prop("string", "The site's host name (any of its server_name values)."); }
+
+// site_task's task and params, generated from the task table: a new row is an option at once,
+// and no parameter the server would refuse is advertised.
+json::Value task_enum() {
+    json::Value values = json::Value::array();
+    std::string text = "The task, by name (site_tasks_list shows the site's):";
+    for (const auto& n : tasks::all_names()) {
+        values.push(n);
+        text += " " + n;
+    }
+    return json::Value::object().set("type", "string").set("enum", std::move(values)).set("description", text + ".");
+}
+
+json::Value task_params_schema() {
+    json::Value props = json::Value::object();
+    for (const tasks::Param* p : tasks::all_params()) {
+        std::string used;
+        for (const auto& r : tasks::rows())
+            for (const auto& q : r.params)
+                if (std::string_view(q.name) == p->name) used += (used.empty() ? "" : ", ") + std::string(r.name);
+        props.set(p->name, json::Value::object().set("type", "string").set("pattern", p->pattern)
+                               .set("description", std::string(p->description) + " (" + used + ")"));
+    }
+    return json::Value::object().set("type", "object").set("properties", std::move(props)).set("additionalProperties", false)
+        .set("description", "The task's parameters, each a string matching its pattern; a task takes only its own (site_tasks_list). Never options or flags: those are fixed by the table.");
+}
 json::Value reason_arg() { return prop("string", "One line saying why, written to the server's audit log."); }
 json::Value confirm_arg() {
     return prop("boolean", "Must be true. Only set it after the user has explicitly agreed to this change.");
@@ -99,8 +126,8 @@ std::vector<std::pair<std::string, json::Value>> site_fields() {
         {"no_user", prop("boolean", "Run the site without its own system account (the server's account serves it). Use this instead of user: null when null cannot be sent. Refused together with a user value.")},
         {"group", json::Value::object().set("type", "string").set("pattern", "^[a-z_][a-z0-9_-]{0,31}$").set("description", "The account's group (default: its primary group).")},
         {"app", app_enum()},
-        {"root", prop("string", "Document root (Laravel: the project directory, its public/ is served; Drupal: the project directory, its web/ is served when present). Required unless app is proxy.")},
-        {"upstream", prop("string", "app = proxy: where the application listens, e.g. http://127.0.0.1:3000.")},
+        {"root", prop("string", "Document root (Laravel: the project directory, its public/ is served; Drupal: the project directory, its web/ is served when present; Rails: the project directory, where site_task runs, suggested as <sites_root>/<domain>/app). Required unless app is proxy.")},
+        {"upstream", prop("string", "app = proxy or rails: where the application server listens, e.g. http://127.0.0.1:3000 (keep it on loopback).")},
         {"php_socket", prop("string", "PHP without a site user: the php-fpm socket to use (unix:/path or host:port).")},
         {"php_children", prop("integer", "PHP with a site user: pool size of the generated pool (default 8); the same as settings.children.")},
         {"settings", settings_schema()},
@@ -129,6 +156,7 @@ std::vector<Tool> tools() {
     t.push_back({"config_reference", "Configuration reference", "Every configuration key agensio reads, in one table: its table ([server], [cache], [log], [control], [[site]], php = {}, proxy = {}, [[site.location]]), type, default, meaning, whether a change applies on reload or needs a restart, who changes it (via: file = root in the main configuration file; site file; site-create = a field of site_create/site_update; settings = site_update's settings), the section of docs/configuration.md that explains it, and for server-level keys the running value and the file it comes from. Use it to answer 'how do I change X' and 'what is X set to'. Read via as which tool does it: settings and site-create mean site_update (or site_create), and you do it here; only via = file (root's main configuration) and via = site file (a hand-written site file) have no tool, and only then give the user the exact TOML line, the file, and `agensio reload` or `systemctl restart agensio` as applies says, stating that agensio does not edit that file itself. A key that is not listed does not exist.", "GET", "/v1/config/reference", true, false, Role::viewer, schema({}, {})});
     t.push_back({"site_settings_list", "Site settings", "The per-site limits site_create and site_update accept under settings, from the same table as the schema: for each key its type, unit and accepted spellings, meaning, default and where it comes from, minimum, the ceiling [control] site_limits sets (root raises it in the configuration file), what changing it costs (agensio reload, php-fpm reload) and what it derives (max_body_size drives the pool's upload_max_filesize and post_max_size). With name, also each key's current effective value and its source (site, server, default). Use it before changing a limit, and to answer 'what is this site's upload limit'.", "GET", "/v1/settings", true, false, Role::viewer,
                  schema({{"name", prop("string", "A site's host name: adds the current values. Omit for the table alone.")}}, {})});
+    t.push_back({"site_tasks_list", "List a site's tasks", "The named tasks site_task can run on this site, from its preset's table: for app = \"rails\" gem_install_rails, rails_new, bundle_install, db_prepare, db_migrate, assets_precompile. Each with what it does, its parameters (name, pattern, required), whether it downloads (refused when root set [control] task_network = false), whether the site's directory must be empty, and its time limit; also the account that runs it, the directory, and the task running now if any. Sites of other presets have none, and agensio runs no other command.", "GET", "/v1/sites/{name}/tasks", true, false, Role::viewer, schema({{"name", name_arg()}}, {"name"})});
     t.push_back({"presets_list", "Application presets", "What each `app` value does: which directory is served, whether every .php runs or only the front controller, what is refused, which directories never run PHP, which serve certain endings alone (`serves_only`: Grav's user/accounts avatars, user/data media), which files are never served (and, the note says, refused in every backup spelling too: wp-config.php.bak, wp-config.php~, .wp-config.php.swp, wp-config.txt, so a user asking whether a backup of the credentials file is exposed can be answered without a terminal), and `source`: the official archive site_install takes when it has one (wordpress, drupal, grav). Use it to answer 'which applications are supported', to pick app for site_create and to know whether site_install can fetch the application itself; the site_show tool shows the expanded locations of a real site.", "GET", "/v1/presets", true, false, Role::viewer, schema({}, {})});
     t.push_back({"health_check", "Health check", "What an administrator should look at: certificates, missing redirects, port 80 for ACME, recent errors, settings waiting for a restart, root, shared accounts, stale pools, php-fpm reloading without process_control_timeout (which cuts PHP requests on every site whenever a pool is written), and php_pool_resident: every static or dynamic pool with the PHP processes it keeps while idle and their memory (the answer to 'why so many php-fpm processes' or 'the machine is full': site_update with settings: {pm: \"ondemand\"} frees it; static stays right for a site that must not pay a fork on its first request), judged from the pool file php-fpm runs, so a pool left static on disk after the configuration changed is named as a warning whose fix is agensio pools plus a php-fpm reload. preset_mismatch: the files under a site's directory belong to another application than its app says (Grav on the drupal preset: the borrowed refusals do not fit, and its backup archive was public); the fix is site_update with the detected app. archives_in_root: backup archives and database dumps (.zip, .tar.gz, .sql) inside a served tree, one preset or one path away from public; the fix is moving them out. Each finding has a severity and a fix. Run this first on a server you do not know.", "GET", "/v1/health", true, false, Role::viewer, schema({}, {})});
     t.push_back({"reload", "Reload configuration", "Validate the configuration on disk and switch to it without dropping a connection. Refused with the reason when it does not validate; nothing changes then.", "POST", "/v1/reload", false, false, Role::operator_, schema({{"confirm", confirm_arg()}, {"reason", reason_arg()}}, {"confirm", "reason"})});
@@ -145,7 +173,7 @@ std::vector<Tool> tools() {
     t.push_back({"cert_renew", "Renew certificate", "Orders the site's automatic certificate again now. Watch site_show and logs_query for the result.", "POST", "/v1/sites/{name}/renew", false, false, Role::operator_, schema({{"name", name_arg()}, {"confirm", confirm_arg()}, {"reason", reason_arg()}}, {"name", "confirm", "reason"})});
     t.push_back({"uploads_list", "List uploads", "Archives stored on the server with `agensio ctl upload NAME < file` (run by the user on the server, or over ssh: `ssh admin@host agensio ctl upload NAME < file`), ready for site_install with file: NAME. This bridge cannot carry files itself: when the user has an archive on their own machine, give them that command.", "GET", "/v1/uploads", true, false, Role::viewer, schema({}, {})});
     t.push_back({"upload_delete", "Delete an upload", "Removes a stored upload once it is installed or not needed.", "POST", "/v1/uploads/{file}/delete", false, true, Role::operator_, schema({{"file", prop("string", "The upload's name as uploads_list shows it.")}, {"confirm", confirm_arg()}, {"reason", reason_arg()}}, {"file", "confirm", "reason"})});
-    t.push_back({"site_install", "Install an application", "Puts an application's files into the site's directory, as the site's own account, from one of three sources: the preset's official archive (presets_list shows which presets have one: wordpress, drupal, grav; version picks a release, default the newest), any https URL the user gives (url), or an archive the user uploaded (file, see uploads_list). The whole application goes into the site's directory, which must be empty; a plugin, theme or module goes into path (e.g. wp-content/plugins/NAME, web/modules/contrib/NAME) with create_path: true, which makes the missing directories as the site's account below the site's directory (never through a symlink, never in another account's directory); a single top directory in the archive (wordpress/, NAME/) is unwrapped. Rules the server enforces and reports: https only, no private, loopback or link-local address on any hop, size caps, no symlinks, hard links or devices inside an archive, optional sha256 check; on any refusal nothing is left behind. The preset's credential files (presets_list, secrets: wp-config.php, Drupal's settings.php) are made 0600 and listed under secured, and the configuration is validated after the install: an answer is never ok when agensio -t would refuse the result (a 409 with written: true and errors says what to fix). dry_run: true runs the same checks (target, account, what would be created) without installing. Tell the user the source and the sha256 from the answer, then the application's own setup remains (database, admin account), done in the browser. Laravel has no archive: it is created with composer.", "POST", "/v1/sites/{name}/install", false, false, Role::admin,
+    t.push_back({"site_install", "Install an application", "Puts an application's files into the site's directory, as the site's own account, from one of three sources: the preset's official archive (presets_list shows which presets have one: wordpress, drupal, grav; version picks a release, default the newest), any https URL the user gives (url), or an archive the user uploaded (file, see uploads_list). The whole application goes into the site's directory, which must be empty; a plugin, theme or module goes into path (e.g. wp-content/plugins/NAME, web/modules/contrib/NAME) with create_path: true, which makes the missing directories as the site's account below the site's directory (never through a symlink, never in another account's directory); a single top directory in the archive (wordpress/, NAME/) is unwrapped. Rules the server enforces and reports: https only, no private, loopback or link-local address on any hop, size caps, no symlinks, hard links or devices inside an archive, optional sha256 check; on any refusal nothing is left behind. The preset's credential files (presets_list, secrets: wp-config.php, Drupal's settings.php, Rails' config/master.key) are made 0600, a credential directory (.git, Rails' storage/) loses its group's read and write, and both are listed under secured, and the configuration is validated after the install: an answer is never ok when agensio -t would refuse the result (a 409 with written: true and errors says what to fix). dry_run: true runs the same checks (target, account, what would be created) without installing. Tell the user the source and the sha256 from the answer, then the application's own setup remains (database, admin account), done in the browser. Laravel has no archive: it is created with composer. A new Rails application is not an archive either: site_task rails_new makes it; an existing Rails application installed from an archive is then prepared with site_task (bundle_install, db_prepare, assets_precompile).", "POST", "/v1/sites/{name}/install", false, false, Role::admin,
                  schema({{"name", name_arg()},
                          {"url", prop("string", "An https URL of a .tar.gz, .tar or .zip archive. Omit it to use the preset's official archive, or give file instead.")},
                          {"file", prop("string", "The name of a stored upload (uploads_list). Use it when the user has the archive on their machine or a download is refused by the server's rules.")},
@@ -167,6 +195,14 @@ std::vector<Tool> tools() {
                          {"confirm", confirm_arg()},
                          {"reason", reason_arg()}},
                         {"name", "from", "to", "confirm", "reason"})});
+    t.push_back({"site_task", "Run a site task", "Runs one named task of the site's preset as the site's own account, in the site's directory (its root): a fixed command from the preset's table (site_tasks_list), never a command line. For a Ruby on Rails site (app = \"rails\") a new application is made in this order: gem_install_rails (Rails into the account's own gem directory; minutes), rails_new with params {\"name\": \"...\"} (the application, with SQLite, in the empty site directory, its gems in vendor/bundle; minutes), db_prepare, assets_precompile. Later: bundle_install after the Gemfile changed or after an application was installed from an archive (site_install), db_migrate after new migrations. The interpreter comes from [control] runtimes in root's file (ruby, gem and bundle in /usr/bin by default) and must be root's; when it is missing the answer carries run_as_root with the package command: show it, say the task waits for it, continue when the user ran it. The answer reports the exact argv that ran, the account, the directory, the exit status, the duration and the program's output (the first 16 KB and the last 48 KB when longer): read the output to explain a failure and fix its cause, then run the task again. A task is stopped at its time limit ([control] task_limits.timeout, 20 minutes by default); one task per site at a time (409 names the running one). Credential files the task wrote (config/master.key, config/database.yml, storage/ with the SQLite databases, .env) are made the site's alone and listed under secured, and the configuration is validated before the answer. dry_run: true shows the argv, account, directory, environment and limits without running anything. No task starts the application server (Puma): until agensio manages it, give the user docs/examples/puma.service from the agensio repository to install as root, and make sure the site's upstream points where it listens.", "POST", "/v1/sites/{name}/task", false, true, Role::admin,
+                 schema({{"name", name_arg()},
+                         {"task", task_enum()},
+                         {"params", task_params_schema()},
+                         {"dry_run", prop("boolean", "Report the exact argv, the account, the directory, the environment and the limits without running anything; a refusal (missing interpreter, a directory that is not empty) shows as it would for real.")},
+                         {"confirm", confirm_arg()},
+                         {"reason", reason_arg()}},
+                        {"name", "task", "confirm", "reason"})});
     return t;
 }
 
@@ -199,6 +235,13 @@ const char* kInstructions =
     "A plugin or theme goes into its own directory with site_install's path and create_path; a drop-in file an "
     "application ships as a template (WordPress's wp-content/db.php from the SQLite plugin's db.copy, Drupal's "
     "settings.php) is put in place with site_copy, which copies one file within the same site and nothing else. "
+    "A Ruby on Rails site is app = \"rails\" (root: the project directory, suggested <sites_root>/<domain>/app; upstream: "
+    "where Puma listens, on loopback). Its application is made and prepared with site_task, the preset's named commands "
+    "run as the site's account in that directory (site_tasks_list shows them): gem_install_rails, rails_new, db_prepare, "
+    "assets_precompile; bundle_install and db_migrate later. A task's answer carries its output: read it to explain a "
+    "failure. No tool runs any other command, so never offer one, and never ask the user for a shell command a task "
+    "covers. Puma itself is not started by a tool yet: give the user docs/examples/puma.service from the agensio "
+    "repository to install as root, the one step left for a terminal, and say so. "
     "Per-site limits (upload size, PHP memory, execution time, pool size) are changed with site_update's settings "
     "object; call site_settings_list first for the keys, units, current values and the ceilings root set. "
     "For any other key (workers, cache sizes, log level, timeouts, the control plane's own keys) call "
@@ -241,8 +284,8 @@ const char* kNewSite =
     "an alias). Call site_create with only the domain first: the server lists the open decisions "
     "with a suggestion each. Ask the user each question in turn: HTTPS (recommend auto, which "
     "needs port 80 reachable and the name pointing at this server), whether the site gets its own "
-    "system user (recommend yes, suggest the proposed name), what runs there (static, php, "
-    "laravel, wordpress or proxy) and where the files are. Call site_create again with every "
+    "system user (recommend yes, suggest the proposed name), what runs there (presets_list: a PHP "
+    "application's preset, rails, proxy for any other application server, or static) and where the files are. Call site_create again with every "
     "field and confirm: true only after the user agreed. If the server returns commands to run "
     "as root, show them verbatim and wait. After success, show next_steps and check with "
     "site_show that the certificate arrives. When the site's app has an official archive (presets_list, "

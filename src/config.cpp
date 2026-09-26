@@ -6,6 +6,7 @@
 #include "handlers/fastcgi.hpp"
 #include "path.hpp"
 #include "services/pools.hpp"
+#include "services/tasks.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -708,10 +709,11 @@ const PhpPreset* php_preset(const std::string& app) {
 std::string preset_names() {
     std::string out;
     for (const auto& p : kPhpPresets) out += std::string(out.empty() ? "" : ", ") + "\"" + p.name + "\"";
-    return out + ", \"proxy\" or \"static\"";
+    return out + ", \"proxy\", \"rails\" or \"static\"";
 }
 
 }  // namespace
+
 
 void apply_preset(SiteConfig& site, const std::string& where) {
     if (site.app.empty() || site.app == "static") return;
@@ -739,10 +741,12 @@ void apply_preset(SiteConfig& site, const std::string& where) {
         loc.fastcgi.params_prefix = FcgiHandler::prebuild_params(site, loc);
         return loc;
     };
-    if (site.app == "proxy") {
+    if (proxy_app(site.app)) {
         // Everything to the origin(s) named on the site; a hand-written "/" location wins,
-        // and other locations (static assets from disk, a second service) coexist.
-        if (!site.proxy.configured) fail(where + ": app = \"proxy\" needs upstream = \"http://host:port\" on the site");
+        // and other locations (static assets from disk, a second service) coexist. `rails`
+        // routes the same way; what it adds is its tasks (services/tasks.*) and its
+        // credential files (preset_secrets).
+        if (!site.proxy.configured) fail(where + ": app = \"" + site.app + "\" needs upstream = \"http://host:port\" on the site");
         if (!has("/", false, false)) {
             LocationConfig loc;
             loc.path = "/";
@@ -755,7 +759,7 @@ void apply_preset(SiteConfig& site, const std::string& where) {
             loc.proxy = site.proxy;
             loc.methods = kFcgiMethods;
             loc.allow = allow_header(kFcgiMethods);
-            loc.origin = "preset:proxy";
+            loc.origin = "preset:" + site.app;
             site.locations.push_back(std::move(loc));
         }
         return;
@@ -855,12 +859,30 @@ void apply_preset(SiteConfig& site, const std::string& where) {
             loc.try_files = site.try_files;
 }
 
+// Whether the site's `php` will serve a FastCGI handler: a PHP preset, or a hand-written
+// location with handler = "fastcgi" that names no socket of its own. Only then does `user`
+// derive a pool. A proxied or static site with a user gets none: the account owns the files
+// (and, behind app = "proxy", runs the application), nothing tells `agensio pools` to write
+// a php-fpm pool for a Rails site, and health has no PHP directory to look for (2026-09-26
+// live report: php_tmp_missing at error severity and pools_stale on a Rails site).
+bool runs_php(const toml::table& t, const SiteConfig& site) {
+    if (php_preset(site.app)) return true;
+    if (auto arr = t["location"].as_array())
+        for (auto& node : *arr)
+            if (auto* lt = node.as_table()) {
+                if (to_lower((*lt)["handler"].value_or(std::string())) != "fastcgi") continue;
+                auto* ft = (*lt)["fastcgi"].as_table();
+                if (!ft || !ft->contains("socket")) return true;
+            }
+    return false;
+}
+
 // The pool keys of `php = { ... }` for a site with `user` (docs/design-per-site-users.md).
 // Without `php.socket` the pool is agensio's to generate: the socket, the state directory
 // and the FastCGI sizing follow from the user, which is what makes a site's isolation one
-// line of configuration.
+// line of configuration. `php_handler` is runs_php(): without one there is nothing to pool.
 void parse_pool(const toml::table* php, const fs::path& base_dir, const Config& cfg, SiteConfig& site,
-                const std::string& project_root, const std::string& where) {
+                const std::string& project_root, const std::string& where, bool php_handler) {
     PhpPool& pool = site.pool;
     static constexpr const char* kKeys[] = {"children", "version", "max_requests", "memory_limit",
                                             "max_execution_time", "max_input_time", "pm", "open_basedir", "extra"};
@@ -869,6 +891,10 @@ void parse_pool(const toml::table* php, const fs::path& base_dir, const Config& 
         for (const char* k : kKeys) any = any || php->contains(k);
     if (site.user.empty()) {
         if (any) fail(where + ".php: pool keys (children, pm, ...) need 'user' on the site");
+        return;
+    }
+    if (!php_handler) {
+        if (any) fail(where + ".php: pool keys (children, pm, ...) need a PHP handler: a PHP app preset or a location with handler = \"fastcgi\"");
         return;
     }
     if (php) {
@@ -955,7 +981,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     if (site.listen.empty()) fail(where + ": 'listen' is required");
 
     site.app = to_lower(t["app"].value_or(std::string()));
-    if (!site.app.empty() && site.app != "static" && site.app != "proxy" && !php_preset(site.app))
+    if (!site.app.empty() && site.app != "static" && !proxy_app(site.app) && !php_preset(site.app))
         fail(where + ": app must be " + preset_names());
     if (auto r = t["redirect"].value<std::string>()) {
         if (*r != "https" && (!r->starts_with("https://") || r->size() <= 8 || r->find('/', 8) != std::string::npos))
@@ -1008,7 +1034,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     site.group = account_name(t["group"], where + ".group");
     if (!site.group.empty() && site.user.empty()) fail(where + ": 'group' needs 'user'");
     if (cfg.strict_users && site.user.empty()) fail(where + ": 'user' is required (server.strict_users)");
-    parse_pool(t["php"].as_table(), base_dir, cfg, site, root_given, where);
+    parse_pool(t["php"].as_table(), base_dir, cfg, site, root_given, where, runs_php(t, site));
 
     if (auto mode = t["tls"].value<std::string>()) {
         if (*mode != "auto") fail(where + ".tls: \"auto\" or a table { cert, key }");
@@ -1111,6 +1137,18 @@ std::vector<fs::path> expand_include(const fs::path& base_dir, const std::string
 }
 
 }  // namespace
+
+bool proxy_app(std::string_view app) noexcept { return app == "proxy" || app == "rails"; }
+
+bool php_app(std::string_view app) { return php_preset(std::string(app)) != nullptr; }
+
+std::string runtime_dir(const ControlConfig& control, std::string_view runtime) {
+    if (runtime == "ruby") return control.runtimes.ruby;
+    if (runtime == "node") return control.runtimes.node;
+    if (runtime == "php") return control.runtimes.php;
+    if (runtime == "python3") return control.runtimes.python3;
+    return "";
+}
 
 std::vector<TryStep> parse_try_files(const std::vector<std::string>& items) {
     std::vector<TryStep> out;
@@ -1582,6 +1620,46 @@ Config load_config(const fs::path& path) {
         } else if ((*ct).contains("site_limits")) {
             fail("control.site_limits must be a table: { max_body_size = \"512MB\", memory_limit = \"512M\", max_execution_time = 300, max_input_time = 300, children = 32, max_requests = 1000000 }");
         }
+        // Site tasks (F13): the interpreters' directories are root's decision alone, so they
+        // live here and nowhere else; none may lie below sites_root, where a site could write.
+        if (auto rt = (*ct)["runtimes"].as_table()) {
+            const std::string sites = cfg.control.sites_root.empty() ? std::string("/var/www") : cfg.control.sites_root;
+            for (const auto& [k, v] : *rt) {
+                const std::string name(k.str());
+                std::string* target = name == "ruby" ? &cfg.control.runtimes.ruby : name == "node" ? &cfg.control.runtimes.node
+                                    : name == "php" ? &cfg.control.runtimes.php : name == "python3" ? &cfg.control.runtimes.python3 : nullptr;
+                if (!target) fail("control.runtimes: unknown runtime \"" + name + "\" (ruby, node, php, python3)");
+                const auto dir = v.value<std::string>();
+                if (!dir || dir->empty() || (*dir)[0] != '/') fail("control.runtimes." + name + " must be an absolute directory, e.g. \"/usr/bin\"");
+                std::string clean = fs::path(*dir).lexically_normal().string();
+                while (clean.size() > 1 && clean.back() == '/') clean.pop_back();
+                if (clean == sites || (clean.size() > sites.size() && clean.compare(0, sites.size(), sites) == 0 && clean[sites.size()] == '/'))
+                    fail("control.runtimes." + name + ": " + clean + " is below sites_root, where a site could write its own interpreter");
+                *target = clean;
+            }
+        } else if ((*ct).contains("runtimes")) {
+            fail("control.runtimes must be a table: { ruby = \"/usr/bin\", node = \"/usr/bin\", php = \"/usr/bin\", python3 = \"/usr/bin\" }");
+        }
+        if (auto tl = (*ct)["task_limits"].as_table()) {
+            for (const auto& [k, v] : *tl)
+                if (k.str() != "timeout" && k.str() != "processes")
+                    fail("control.task_limits: unknown key \"" + std::string(k.str()) + "\" (timeout, processes)");
+            if (auto v = (*tl)["timeout"].value<std::int64_t>()) {
+                if (*v < 5 || *v > 86400) fail("control.task_limits.timeout must be 5 to 86400 seconds");
+                cfg.control.task_timeout = static_cast<unsigned>(*v);
+            } else if ((*tl).contains("timeout")) {
+                fail("control.task_limits.timeout must be a number of seconds");
+            }
+            if (auto v = (*tl)["processes"].value<std::int64_t>()) {
+                if (*v < 16 || *v > 65536) fail("control.task_limits.processes must be 16 to 65536");
+                cfg.control.task_processes = static_cast<unsigned>(*v);
+            } else if ((*tl).contains("processes")) {
+                fail("control.task_limits.processes must be a number");
+            }
+        } else if ((*ct).contains("task_limits")) {
+            fail("control.task_limits must be a table: { timeout = 1200, processes = 512 }");
+        }
+        cfg.control.task_network = (*ct)["task_network"].value_or(true);
         if (auto a = (*ct)["audit"].value<std::string>()) cfg.control.audit = resolve(base_dir, *a).string();
         else if (cfg.log.error != "stderr") cfg.control.audit = (fs::path(cfg.log.error).parent_path() / "audit.log").string();
         else cfg.control.audit = resolve(base_dir, "logs/audit.log").string();
@@ -1635,6 +1713,17 @@ json::Value preset_catalog() {
     }
     list.push(json::Value::object().set("app", "proxy").set("summary", "Reverse proxy: every request goes to the site's upstream (Node, Rails, Go, Java, WebSockets); no root needed.")
                   .set("root", "none").set("php", "none"));
+    {
+        json::Value names = json::Value::array(), secrets = json::Value::array();
+        for (const auto& n : tasks::names("rails")) names.push(n);
+        for (const auto& s : preset_secrets("rails")) secrets.push(s);
+        list.push(json::Value::object().set("app", "rails")
+                      .set("summary", "Ruby on Rails: every request goes to the application server (Puma) on the site's upstream; root is the project "
+                                      "directory, where site_task runs the preset's named commands as the site's account (gem_install_rails, rails_new, "
+                                      "bundle_install, db_prepare, db_migrate, assets_precompile; site_tasks_list shows them).")
+                      .set("root", "the project directory (nothing is served from it directly: every request goes to the upstream)")
+                      .set("php", "none").set("tasks", std::move(names)).set("secrets", std::move(secrets)));
+    }
     return json::Value::object().set("presets", std::move(list))
         .set("note", "agensio never reads .htaccess; a preset provides the refusals an application's .htaccess would. Hand-written [[site.location]] entries win over a preset's. Every never_served name is refused in any backup spelling too, in its directory, whatever the case: name.bak, name~, name.txt, name-old, stem.bak (wp-config.bak), .name.swp, #name#; nothing to configure, and the bare stem (/readme, /license) stays a permalink.");
 }
@@ -1643,6 +1732,9 @@ std::vector<std::string> preset_secrets(const std::string& app) {
     std::vector<std::string> out;
     if (const PhpPreset* p = php_preset(app))
         for (const char* n : p->secrets) out.emplace_back(n);
+    // Rails: the key that decrypts the credentials, per-environment keys, the database
+    // settings, and storage/ (the SQLite databases and Active Storage's files).
+    if (app == "rails") out = {"/config/master.key", "/config/credentials", "/config/database.yml", "/storage"};
     return out;
 }
 
@@ -1666,6 +1758,7 @@ std::vector<std::string> app_presets() {
     std::vector<std::string> out{"static"};
     for (const auto& p : kPhpPresets) out.emplace_back(p.name);
     out.emplace_back("proxy");
+    out.emplace_back("rails");
     return out;
 }
 

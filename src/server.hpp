@@ -166,6 +166,7 @@ private:
     json::Value provision(const json::Value& req) override { return provisioner_.request(req); }
     void restart_later() override;
     void install_async(const json::Value& req, std::function<void(json::Value)> done) override;
+    void task_async(const json::Value& req, std::function<void(json::Value)> done) override;
     std::string uploads_dir() override { return uploads_dir_; }
     void prepare_uploads();  // <state_dir>/uploads, the server's own, before the privilege drop
     bool privileged() override {

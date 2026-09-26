@@ -874,6 +874,32 @@ misbehaviour counters against every published attack class up to the 2026 HTTP/2
       `dry_run` on the same path; MCP `site_copy`; security page row 23. Unit tests of
       every refusal, integration and root-suite checks. Closed the last terminal step of
       WordPress on SQLite (site, install, plugin with `create_path`, drop-in copy).
+- [x] F13 (2026-09-26) Site tasks (`docs/design-site-operations.md` section 4): the named
+      commands of a preset run as the site's account in its directory, never a command
+      line. `services/tasks.*` (the table with fixed argv and typed parameters, the plan with
+      a built environment, the runner: own process group, umask 027, `RLIMIT_NPROC`, open
+      files, no core, a timeout that kills the group, output head and tail, nothing left
+      running; the credential sweep), `[control] runtimes` (root-owned interpreters only,
+      checked before every run), `task_limits`, `task_network`, helper op `task_run` (the
+      site from the configuration on disk, the account's home created), `app = "rails"` in
+      its first form (proxy routing, the six Rails rows, its credential files; `static` and
+      the `app/` rule are section 7's), `site-task` / `site-tasks`, MCP `site_task` and
+      `site_tasks_list`. Found on the way: credential directories failed every install that
+      carried one (`.git`), and an HTTP/1 request slower than `idle_timeout` was closed with
+      an empty reply (control installs and tasks, slow PHP and proxied requests); both
+      fixed. Security page rows 26 and 27. `tests/tasks.sh` (fake interpreters, root devbox),
+      `tests/rails.sh` (real Ruby: the whole workflow behind agensio).
+- [ ] F14 Managed application processes (`docs/design-site-operations.md` section 5):
+      `service = { runtime = "puma", ... }` rendered into a hardened systemd unit by the
+      helper, unix socket by default, start/stop/restart/logs, `service_dead` and
+      `service_resident` in health. Until then `docs/examples/puma.service`.
+- [ ] Section 7 and 2b of the same design: `app/` beside `web/`, the `root_is_project`
+      rule, `static = "public"` with an `@upstream` fallback, `detect_app` learning Rails.
+- [ ] Section 6: the upstream prober, `upstream_unreachable`, `upstream_exposed` with the
+      firewall rule handed back.
+- [ ] F12 The site's files as the site's account, one tool per operation (list, read,
+      write, edit, mkdir, move, delete), credential reads audited.
+- [ ] F12b Deleting a site with its files into a root-only recycle bin, restore, expiry.
 - [ ] H1b Certificates watched and reloaded when the files change (manual `tls = { cert,
       key }` sites; automatic ones already reload themselves); reload must not stall new
       QUIC connections (nginx's known weakness).
@@ -1181,6 +1207,7 @@ the Debian machine (ddev for PHP, Docker for the rest) and kept green from then 
 | **WordPress** | PHP, php-fpm, MySQL | C4 | the most deployed target: pretty permalinks, admin, media uploads (multipart bodies), plugins expecting `.htaccess` rules, `wp-cron`, REST API; `wordpress` preset |
 | **Nextcloud** | PHP | C4 + B1 (+ E1 for video) | WebDAV methods (PROPFIND, MKCOL, PUT, MOVE), very large and chunked uploads, Range requests, long-running PHP requests, strict forwarded-header handling |
 | **Redmine** | Ruby on Rails, Puma | E | classic Rails app behind a proxy: sessions, attachments, no WebSockets; the simplest Rails baseline |
+| **Rails 8 from `rails new`** | Ruby on Rails, Puma, SQLite | F13 | the whole terminal-free workflow: `app = "rails"`, `site_task` from Rails' installation to built assets, Puma as the site's account (`tests/rails.sh`) |
 | **Discourse** | Rails, Puma, Redis, Sidekiq | D3 | demanding Rails: long polling message bus, uploads, strict `X-Forwarded-*`/`Host` handling, heavy asset serving; the Rails stress test |
 | **Ghost** | Node.js | E | the most used Node CMS: proxy plus static assets, admin SPA, image uploads |
 | **Rocket.Chat** | Node.js (Meteor) | D3 | WebSockets (DDP) at scale, large file uploads, many concurrent long-lived connections |

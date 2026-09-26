@@ -407,6 +407,13 @@ std::vector<std::string> restart_needed(const Config& fresh, const Config& runni
         out.push_back("cache sizes");
     if (fresh.control.enabled != running.control.enabled || fresh.control.socket != running.control.socket)
         out.push_back("control");
+    // The task keys are read once, by the helper forked at start (and the server's boot copy).
+    const auto& fr = fresh.control.runtimes;
+    const auto& rr = running.control.runtimes;
+    if (fr.ruby != rr.ruby || fr.node != rr.node || fr.php != rr.php || fr.python3 != rr.python3) out.push_back("control.runtimes");
+    if (fresh.control.task_timeout != running.control.task_timeout || fresh.control.task_processes != running.control.task_processes)
+        out.push_back("control.task_limits");
+    if (fresh.control.task_network != running.control.task_network) out.push_back("control.task_network");
     return out;
 }
 
@@ -747,7 +754,7 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
     // borrowed preset's refusals do not fit, and what the application's own .htaccess would
     // have protected is served (2026-09-23: Grav on the drupal preset published its backup).
     for (const auto& s : running.sites) {
-        if (s.root.empty() || !s.redirect.empty() || s.app.empty() || s.app == "static" || s.app == "proxy") continue;
+        if (s.root.empty() || !s.redirect.empty() || s.app.empty() || s.app == "static" || proxy_app(s.app)) continue;
         const std::string detected = detect_app(s.project_root.empty() ? s.root : s.project_root);
         if (detected.empty() || detected == s.app || detected == "static" || detected == "proxy" || detected == "php") continue;
         add("warn", "preset_mismatch", s.server_names.front(),
@@ -759,7 +766,7 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
     // Backup archives and database dumps inside a served tree are one path or one preset
     // away from being public, whatever the preset refuses today.
     for (const auto& s : running.sites) {
-        if (s.root.empty() || !s.redirect.empty() || s.app.empty() || s.app == "static" || s.app == "proxy") continue;
+        if (s.root.empty() || !s.redirect.empty() || s.app.empty() || s.app == "static" || proxy_app(s.app)) continue;
         const ArchivesInRoot a = archives_in_root(s, 2000);
         if (a.count == 0) continue;
         const std::string size = a.example_bytes >= 1024 * 1024 ? std::to_string((a.example_bytes + 512 * 1024) / (1024 * 1024)) + " MB"
@@ -774,7 +781,9 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
     {
         const ServerAccount server = server_account(running, system_facts());
         for (const auto& s : running.sites) {
-            if (s.root.empty() || !s.redirect.empty()) continue;
+            // A proxy-family site serves nothing from its root (every request goes to the
+            // upstream), so what the server cannot read there answers no 404.
+            if (s.root.empty() || !s.redirect.empty() || proxy_app(s.app)) continue;
             const UnreadableFiles u = unreadable_files(s, secret_paths(s), 2000);
             if (u.unreadable == 0) continue;
             const FileFacts& f = u.example_facts;

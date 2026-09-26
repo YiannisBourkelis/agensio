@@ -45,7 +45,7 @@ void usage() {
                  "                           [--status 5xx|4xx|all] [--limit N]\n"
                  "                      Change (need --yes, take --reason TEXT): reload | logs-reopen |\n"
                  "                      site-create --domain D [--alias A]... [--https auto|none] [--cert F --key F]\n"
-                 "                           [--user U|--no-user] [--group G] [--app static|php|laravel|drupal|wordpress|grav|proxy]\n"
+                 "                           [--user U|--no-user] [--group G] [--app static|php|laravel|drupal|wordpress|grav|proxy|rails]\n"
                  "                           [--root DIR] [--upstream URL] [--php-socket S] [--php-children N]\n"
                  "                           [--no-redirect] [--hsts] [--listen-plain A] [--listen-tls A]\n"
                  "                      site-update NAME (same flags) | site-disable NAME | site-enable NAME |\n"
@@ -53,6 +53,7 @@ void usage() {
                  "                      site-install NAME [--url https://... | --file UPLOAD | --version V] [--sha256 H]\n"
                  "                           [--path SUB] [--create-path] [--strip 0|1] [--dry-run]\n"
                  "                      site-copy NAME --from SUB --to SUB [--overwrite] [--dry-run]\n"
+                 "                      site-task NAME TASK [--param KEY=VALUE]... [--dry-run] (site-tasks NAME lists them)\n"
                  "                      site-update NAME --set KEY=VALUE ... (settings [NAME] lists the keys and ceilings)\n"
                  "                      Uploads: upload NAME [FILE] (stdin by default) | uploads | uploads-delete NAME\n"
                  "  mcp                 Model Context Protocol server on stdin/stdout for an AI agent host,\n"
@@ -118,6 +119,7 @@ int main(int argc, char** argv) {
             auto ctl_usage = [] {
                 std::cout << "usage: agensio ctl <command> [options] [--socket PATH] [-c config.toml]\n"
                              "read:   status | sites | site NAME | validate | health | presets | uploads | settings [NAME] | reference |\n"
+                             "        site-tasks NAME |\n"
                              "        logs [--site NAME] [--since 3h] [--level error|warn|info] [--status 5xx|4xx|all] [--limit N]\n"
                              "change (each needs --yes, takes --reason TEXT):\n"
                              "        reload | logs-reopen | site-disable NAME | site-enable NAME | site-delete NAME | cert-renew NAME\n"
@@ -137,6 +139,10 @@ int main(int argc, char** argv) {
                              "        site-copy NAME --from SUB --to SUB [--overwrite] [--dry-run]: copies one of the site's files\n"
                              "                    to another path of the same site, as the site's account (drop-ins such as\n"
                              "                    wp-content/db.php from a plugin's db.copy); the destination's directory must exist\n"
+                             "        site-task NAME TASK [--param KEY=VALUE]... [--dry-run]: runs one named task of the site's\n"
+                             "                    preset as the site's account in its directory (app = rails: gem_install_rails,\n"
+                             "                    rails_new --param name=NAME, bundle_install, db_prepare, db_migrate, assets_precompile);\n"
+                             "                    `site-tasks NAME` lists them with their parameters. Never a command line.\n"
                              "        uploads-delete NAME\n"
                              "upload: upload NAME [FILE]   stores FILE (or stdin) on the server for site-install --file NAME;\n"
                              "                    needs the operator role, no --yes\n"
@@ -200,6 +206,14 @@ int main(int argc, char** argv) {
                 else if (b == "--from") field("from");
                 else if (b == "--to") field("to");
                 else if (b == "--overwrite") body.set("overwrite", true);
+                else if (b == "--param") {
+                    std::string v; value(v);
+                    const std::size_t eq = v.find('=');
+                    if (eq == std::string::npos || eq == 0) { std::cerr << "ctl: --param needs KEY=VALUE\n"; return 2; }
+                    agensio::json::Value pm = body["params"].is_object() ? body["params"] : agensio::json::Value::object();
+                    pm.set(v.substr(0, eq), v.substr(eq + 1));
+                    body.set("params", pm);
+                }
                 else if (b == "--set") {
                     std::string v; value(v);
                     const std::size_t eq = v.find('=');
@@ -210,14 +224,15 @@ int main(int argc, char** argv) {
                 }
                 else if (command.empty()) command = b;
                 else if (site_name.empty() && command.starts_with("site") && command != "sites") site_name = b;
+                else if (command == "site-task" && body["task"].is_null()) body.set("task", b);
                 else if (site_name.empty() && (command == "cert-renew" || command == "upload" || command == "uploads-delete" || command == "settings")) site_name = b;
                 else if (command == "upload" && upload_file.empty()) upload_file = b;
                 else { std::cerr << "ctl: unexpected argument " << b << "\n"; return 2; }
             }
             if (!aliases.items().empty()) body.set("aliases", aliases);
             std::string path, method = "GET";
-            const bool mutation = command == "reload" || command == "logs-reopen" || command.starts_with("site-") || command == "cert-renew" ||
-                                  command == "uploads-delete";
+            const bool mutation = command == "reload" || command == "logs-reopen" || (command.starts_with("site-") && command != "site-tasks") ||
+                                  command == "cert-renew" || command == "uploads-delete";
             const bool upload = command == "upload";
             if (command == "status" || command == "sites" || command == "health" || command == "presets" || command == "uploads") path = "/v1/" + command;
             else if (command == "settings") path = site_name.empty() ? "/v1/settings" : "/v1/sites/" + site_name + "/settings";
@@ -234,6 +249,8 @@ int main(int argc, char** argv) {
             else if (command == "cert-renew" && !site_name.empty()) path = "/v1/sites/" + site_name + "/renew";
             else if (command == "site-install" && !site_name.empty()) path = "/v1/sites/" + site_name + "/install";
             else if (command == "site-copy" && !site_name.empty()) path = "/v1/sites/" + site_name + "/copy";
+            else if (command == "site-task" && !site_name.empty() && !body["task"].is_null()) path = "/v1/sites/" + site_name + "/task";
+            else if (command == "site-tasks" && !site_name.empty()) path = "/v1/sites/" + site_name + "/tasks";
             else if (command == "uploads-delete" && !site_name.empty()) path = "/v1/uploads/" + site_name + "/delete";
             else if (upload && !site_name.empty()) path = "/v1/uploads/" + site_name;
             else {

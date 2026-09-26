@@ -1,14 +1,17 @@
 // The provisioning helper (F8): a root process forked before the privilege drop, connected
-// to the server by a socketpair, that does six things on the server's behalf so that a
-// site with its own account can be created and filled in one control call: create the
-// account, lay out the site's directories, hand a per-site log to the site's group, write
-// the php-fpm pools and reload php-fpm, restart the service, and install an application's
-// files as the site's account (F9, `app_install`). It is not a listener: only the server
-// process holds the other end. Every argument is validated again in the helper with the
-// same rules the control API uses; programs run by absolute path with a fixed argument
-// list and an empty environment, never through a shell. What a fully compromised server
-// process could obtain through it is bounded to exactly those six operations, within
-// the directories named below; docs/security-control-plane.md spells that out.
+// to the server by a socketpair, that does a fixed set of things on the server's behalf so
+// that a site with its own account can be created, filled and prepared through the control
+// plane: create the account, lay out the site's directories, hand a per-site log to the
+// site's group, write the php-fpm pools and reload php-fpm, restart the service, install an
+// application's files as the site's account (F9, `app_install`), copy one of a site's files
+// (F9b, `file_copy`), and run a named task of the site's preset as the site's account (F13,
+// `task_run`: a row of services/tasks, never a command line). It is not a listener: only
+// the server process holds the other end. Every argument is validated again in the helper
+// with the same rules the control API uses; programs run by absolute path with a fixed
+// argument list and an environment built for them, never through a shell. What a fully
+// compromised server process could obtain through it is bounded to exactly those
+// operations, within the directories named below; docs/security-control-plane.md spells
+// that out.
 #pragma once
 
 #include <mutex>
@@ -48,6 +51,8 @@ std::string sites_root(const Config& cfg);
 std::string logs_root(const Config& cfg);
 // Where `agensio ctl upload` puts archives: <state_dir>/uploads, the server's own, 0700.
 std::string uploads_dir(const Config& cfg);
+// `path` is `root` or lies below it, textually (both normalised).
+bool under_root(const std::string& path, const std::string& root);
 }  // namespace provision
 
 }  // namespace agensio

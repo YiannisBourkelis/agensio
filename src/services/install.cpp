@@ -393,13 +393,18 @@ json::Value execute(const Request& req) {
         if (sub.empty()) rel = secret;
         else if (secret.starts_with(sub)) rel = secret.substr(sub.size());
         else continue;
-        const int f = ::openat(dir_fd, rel.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        const int f = ::openat(dir_fd, rel.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
         if (f < 0) continue;
+        // A file becomes 0600; a directory (.git, Laravel's config/ and storage/, Rails'
+        // storage/) loses its group's read and write and everything for others (2750 ->
+        // 2710). Before 2026-09-26 a directory here failed every install that carried one.
         struct stat fs {};
-        bool ok_mode = ::fstat(f, &fs) == 0 && S_ISREG(fs.st_mode) && ::fchmod(f, 0600) == 0 && ::fstat(f, &fs) == 0 &&
+        const bool dir = ::fstat(f, &fs) == 0 && S_ISDIR(fs.st_mode);
+        const unsigned want = dir ? secret_dir_mode(fs.st_mode & 07777) : 0600u;
+        bool ok_mode = (dir || S_ISREG(fs.st_mode)) && ::fchmod(f, want) == 0 && ::fstat(f, &fs) == 0 &&
                        !secret_exposed(fs.st_mode & 07777, fs.st_gid, ::getegid());
         ::close(f);
-        if (!ok_mode) return fail_install(req.target + "/" + rel + " holds credentials and could not be made 0600 (owner " + std::to_string(fs.st_uid) + "); nothing installed");
+        if (!ok_mode) return fail_install(req.target + "/" + rel + " holds credentials and could not be made private (owner " + std::to_string(fs.st_uid) + "); nothing installed");
         secured.push(req.target + "/" + rel);
     }
     result.set("secured", secured);

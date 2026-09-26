@@ -30,6 +30,9 @@
 #include "services/fetch.hpp"
 #include "services/install.hpp"
 #include "services/json.hpp"
+#include "services/tasks.hpp"
+#include <chrono>
+#include <csignal>
 #ifdef AGENSIO_HAS_ZLIB
 #include <zlib.h>
 #endif
@@ -1636,6 +1639,255 @@ static void test_pools() {
     write("own.toml", server + shop + "php = { socket = \"unix:/run/php/mine.sock\" }\n");
     Config own = load_config(dir / "own.toml");
     CHECK(!own.sites[0].pool.generated && own.sites[0].php.address.key == "unix:/run/php/mine.sock" && !own.sites[0].php.options.keep_conn);
+    // A site that runs no PHP derives no pool from its user (2026-09-26 live report: a Rails
+    // site behind app = "proxy" got php_tmp_missing and pools_stale, and `agensio pools`
+    // would have written a php-fpm pool for it); a hand-written fastcgi location still does.
+    fs::create_directories(dir / "rails");
+    write("rails.toml", server + "[[site]]\nserver_name = [\"rails\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"rails\"\nuser = \"ag5\"\napp = \"proxy\"\nupstream = \"http://127.0.0.1:3000\"\n"
+                                 "[[site]]\nserver_name = [\"files\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"blog\"\nuser = \"web3\"\n");
+    Config rails = load_config(dir / "rails.toml");
+    CHECK(!rails.sites[0].pool.generated && !rails.sites[0].php.configured && rails.sites[0].pool.state_dir.empty());
+    CHECK(!rails.sites[1].pool.generated && generated_pools(rails, "www").empty());
+    {
+        using control::Finding;
+        const auto hf = control::health_findings(rails, rails, false, std::time(nullptr));
+        CHECK(std::none_of(hf.begin(), hf.end(), [](const Finding& f) { return f.code == "php_tmp_missing" || f.code == "pools_stale" || f.code == "pools_dir_unknown"; }));
+    }
+    write("hand.toml", server + "[[site]]\nserver_name = [\"hand\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"blog\"\nuser = \"web1\"\n"
+                                "[[site.location]]\npath = \".php\"\nmatch = \"suffix\"\nhandler = \"fastcgi\"\n");
+    Config hand = load_config(dir / "hand.toml");
+    const auto fl = std::find_if(hand.sites[0].locations.begin(), hand.sites[0].locations.end(), [](const LocationConfig& l) { return l.kind == HandlerKind::fastcgi; });
+    CHECK(hand.sites[0].pool.generated && fl != hand.sites[0].locations.end() && fl->fastcgi.address.key == "unix:" + dir.string() + "/run/agensio-web1.sock");
+    CHECK(refused("proxykeys.toml", server + "[[site]]\nserver_name = [\"rails\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"rails\"\nuser = \"ag5\"\napp = \"proxy\"\nupstream = \"http://127.0.0.1:3000\"\nphp = { children = 4 }\n", "need a PHP handler"));
+    fs::remove_all(dir);
+}
+
+// F13: site tasks. The table, the parameter checks, the plan (argv and environment
+// exactly), the output capture, the text cleaning, the interpreter rule, the runner and the
+// sweep on real processes and files (as the test's own account), execute's refusals, the
+// helper's validation, the [control] keys and app = "rails".
+static void test_tasks() {
+    namespace fs = std::filesystem;
+    std::string err;
+    auto js = [&](const char* text) {
+        json::Value x;
+        CHECK(json::parse(text, x, err));
+        return x;
+    };
+    for (const auto& r : tasks::rows()) {
+        CHECK(std::string_view(r.runtime) == "ruby" && std::string_view(r.program).find('/') == std::string_view::npos);
+        CHECK(tasks::find(r.app, r.name) == &r && tasks::family(r.app) != nullptr && r.timeout >= 600);
+    }
+    CHECK(tasks::names("rails").size() == 6 && tasks::names("proxy").empty() && !tasks::has_tasks("wordpress") && tasks::has_tasks("rails"));
+    CHECK(tasks::find("rails", "rails_new") && !tasks::find("proxy", "rails_new") && !tasks::find("rails", "sh"));
+    CHECK(tasks::all_names().size() == 6 && tasks::all_params().size() == 2);
+    const tasks::Row& gem = *tasks::find("rails", "gem_install_rails");
+    const tasks::Row& fresh = *tasks::find("rails", "rails_new");
+    const tasks::Row& prep = *tasks::find("rails", "db_prepare");
+    // Parameters: typed, never options.
+    CHECK(tasks::check_params(fresh, js(R"({"name":"blog"})")).empty() && tasks::check_params(fresh, js(R"({"name":"Blog_2"})")).empty());
+    CHECK(tasks::check_params(fresh, js("{}")).find("needs the parameter name") != std::string::npos);
+    CHECK(tasks::check_params(fresh, json::Value()).find("needs the parameter name") != std::string::npos);
+    for (const char* bad : {R"({"name":"2blog"})", R"({"name":"-m"})", R"({"name":"a b"})", R"({"name":"a;b"})", R"({"name":"a/b"})", R"({"name":""})", R"({"name":5})"})
+        CHECK(!tasks::check_params(fresh, js(bad)).empty());
+    CHECK(!tasks::check_params(fresh, json::Value::object().set("name", std::string(65, 'a'))).empty());
+    CHECK(tasks::check_params(fresh, js(R"({"name":"blog","template":"https://x"})")).find("takes no parameter 'template'") != std::string::npos);
+    CHECK(tasks::check_params(prep, js(R"({"x":"y"})")).find("it takes none") != std::string::npos);
+    CHECK(tasks::check_params(fresh, js("[1]")).find("must be an object") != std::string::npos);
+    CHECK(tasks::check_params(gem, json::Value()).empty() && tasks::check_params(gem, js(R"({"version":"8.1.4"})")).empty() && tasks::check_params(gem, js(R"({"version":"8.0"})")).empty());
+    for (const char* bad : {"7.1.0", "8", "8.", "8..1", "8.1.4.5.6", "8.1a", "-v", "8.1.99999", "80.1", "8.1 ", " 8.1"})
+        CHECK(!tasks::check_params(gem, json::Value::object().set("version", bad)).empty());
+    // The plan: argv and the whole environment, exactly.
+    tasks::Context ctx;
+    ctx.runtime_dir = "/usr/bin";
+    ctx.root = "/var/www/r.test/app";
+    ctx.home = "/var/lib/agensio/r1";
+    tasks::Plan pl = tasks::build(gem, json::Value(), ctx, "/usr/bin/gem");
+    CHECK(pl.argv == (std::vector<std::string>{"/usr/bin/gem", "install", "rails", "--no-document", "--version", "~> 8.0"}));
+    pl = tasks::build(gem, js(R"({"version":"8.1.4"})"), ctx, "/usr/bin/gem3.3");
+    CHECK(pl.argv == (std::vector<std::string>{"/usr/bin/gem3.3", "install", "rails", "--no-document", "--version", "8.1.4"}));
+    pl = tasks::build(fresh, js(R"({"name":"blog"})"), ctx, "/usr/bin/ruby3.3");
+    CHECK(pl.argv == (std::vector<std::string>{"/usr/bin/ruby3.3", "/var/lib/agensio/r1/gems/bin/rails", "new", ".", "--name=blog", "--database=sqlite3", "--skip-git",
+                                               "--skip-docker", "--skip-thruster", "--skip-ci"}));
+    CHECK(pl.env == (std::vector<std::string>{"PATH=/usr/bin:/usr/local/bin:/bin", "HOME=/var/lib/agensio/r1", "TMPDIR=/var/lib/agensio/r1/tmp", "LANG=C.UTF-8",
+                                              "RAILS_ENV=production", "GEM_HOME=/var/lib/agensio/r1/gems", "BUNDLE_PATH=vendor/bundle", "BUNDLE_WITHOUT=development:test"}));
+    CHECK(pl.cwd == "/var/www/r.test/app" && pl.timeout == 1200 && pl.processes == 512 && pl.open_files == 4096);
+    ctx.runtime_dir = "/opt/ruby/bin";
+    ctx.timeout = 300;
+    pl = tasks::build(*tasks::find("rails", "assets_precompile"), json::Value(), ctx, "/opt/ruby/bin/bundle");
+    CHECK(pl.argv == (std::vector<std::string>{"/opt/ruby/bin/bundle", "exec", "rails", "assets:precompile"}) &&
+          pl.env.front() == "PATH=/opt/ruby/bin:/usr/local/bin:/usr/bin:/bin" && pl.env.back() == "SECRET_KEY_BASE_DUMMY=1" && pl.timeout == 300);
+    const json::Value cat = tasks::catalog("rails");
+    CHECK(cat.items().size() == 6 && cat.items()[1].get("task") == "rails_new" && cat.items()[1]["needs_empty"].boolean() &&
+          cat.items()[1]["params"].items()[0].get("name") == "name" && tasks::catalog("static").items().empty());
+    // Output: head and tail, the cut named.
+    {
+        tasks::Capture c(8, 8);
+        c.add("hello", 5);
+        CHECK(c.text() == "hello" && !c.truncated());
+        c.add(" world, and more", 16);
+        CHECK(c.total() == 21 && c.truncated() && c.text() == "hello wo\n[... 5 bytes not shown ...]\nand more");
+        tasks::Capture big;
+        const std::string chunk(1000, 'x');
+        for (int i = 0; i < 300; ++i) big.add(chunk.data(), chunk.size());
+        CHECK(big.total() == 300000 && big.truncated() && big.text().size() < 16 * 1024 + 48 * 1024 + 64);
+    }
+    CHECK(tasks::clean_text("ok\n") == "ok\n" && tasks::clean_text("\x1b[32mgreen\x1b[0m") == "green" && tasks::clean_text("caf\xc3\xa9") == "caf\xc3\xa9");
+    CHECK(tasks::clean_text("a\xff" "b") == "a\xEF\xBF\xBD" "b" && tasks::clean_text("\xe2\x82") == "\xEF\xBF\xBD\xEF\xBF\xBD" && tasks::clean_text("\xc0\xaf") == "\xEF\xBF\xBD\xEF\xBF\xBD");
+    CHECK(tasks::clean_text("\xed\xa0\x80") == "\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD");
+    // The interpreter rule: /bin/sh is root's wherever this runs.
+    std::string canonical;
+    bool missing = false;
+    CHECK(tasks::trusted_program("/bin/sh", "/var/www", canonical, missing).empty() && !canonical.empty() && canonical[0] == '/');
+    CHECK(tasks::trusted_program("/bin/sh", "/", canonical, missing).find("below sites_root") != std::string::npos);
+    CHECK(tasks::trusted_program("/usr/bin/agensio-no-such-ruby", "/var/www", canonical, missing).find("No such file") != std::string::npos && missing);
+    CHECK(!tasks::trusted_program("bin/sh", "/var/www", canonical, missing).empty());
+    const fs::path dir = fs::temp_directory_path() / ("agensio-tasks-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "site");
+    fs::create_directories(dir / "empty");
+    const bool root = ::geteuid() == 0;
+    if (!root) {
+        std::ofstream(dir / "ruby") << "#!/bin/sh\n";
+        fs::permissions(dir / "ruby", fs::perms::owner_all);
+        // Refused at the first component root alone does not control (/tmp is world-writable).
+        const std::string why = tasks::trusted_program((dir / "ruby").string(), "/var/www", canonical, missing);
+        CHECK((why.find("not root") != std::string::npos || why.find("writable by its group or by others") != std::string::npos) && !missing);
+        fs::create_symlink("/bin/sh", dir / "sh-link");  // a name someone else controls: refused, whatever it points at
+        CHECK(!tasks::trusted_program((dir / "sh-link").string(), "/var/www", canonical, missing).empty());
+    }
+    // The runner on real processes.
+    const int site_fd = ::open((dir / "site").c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    tasks::Plan sh;
+    sh.argv = {"/bin/sh", "-c", "echo out; echo err >&2; pwd; echo \"HOME=$HOME X=${X:-unset}\"; umask; exit 3"};
+    sh.env = {"PATH=/usr/bin:/bin", "HOME=/nowhere"};
+    sh.cwd = (dir / "site").string();
+    sh.timeout = 20;
+    sh.processes = 1 << 20;  // RLIMIT_NPROC counts every thread of this account, and a desktop has thousands
+    ::setenv("X", "leaked", 1);
+    json::Value res = tasks::run(sh, site_fd);
+    ::unsetenv("X");
+    std::string out(res.get("output"));
+    CHECK(res["exit"].num() == 3 && !res["timed_out"].boolean() && out.find("out\n") != std::string::npos && out.find("err\n") != std::string::npos);
+    CHECK(out.find(fs::canonical(dir / "site").string() + "\n") != std::string::npos && out.find("HOME=/nowhere X=unset") != std::string::npos && out.find("0027") != std::string::npos);
+    sh.argv = {"/bin/sh", "-c", "trap '' TERM; echo started; sleep 30; echo never"};
+    sh.timeout = 1;
+    sh.term_grace = 1;
+    auto t0 = std::chrono::steady_clock::now();
+    res = tasks::run(sh, site_fd);
+    auto took = std::chrono::steady_clock::now() - t0;
+    CHECK(res["timed_out"].boolean() && res["signal"].num() == SIGKILL && std::string(res.get("output")) == "started\n" && took < std::chrono::seconds(8));
+    sh.argv = {"/bin/sh", "-c", "(sleep 30; echo late) & echo done"};
+    sh.timeout = 20;
+    sh.drain = 1;
+    t0 = std::chrono::steady_clock::now();
+    res = tasks::run(sh, site_fd);
+    took = std::chrono::steady_clock::now() - t0;
+    CHECK(res["exit"].num() == 0 && std::string(res.get("output")) == "done\n" && took < std::chrono::seconds(5));
+    sh.argv = {"/bin/sh", "-c", "i=0; while [ $i -lt 2000 ]; do echo 0123456789012345678901234567890123456789012345678901234567890123456789; i=$((i+1)); done"};
+    res = tasks::run(sh, site_fd);
+    CHECK(res["output_bytes"].num() == 142000 && res["truncated"].boolean() && std::string(res.get("output")).find("bytes not shown") != std::string::npos);
+    sh.argv = {"/nonexistent/program"};
+    res = tasks::run(sh, site_fd);
+    CHECK(res["exit"].num() == 127 && std::string(res.get("output")).find("could not be executed") != std::string::npos);
+    // The sweep: the rule's list and the preset's patterns; files 0600, directories without
+    // their group's read; never through a symlink.
+    fs::create_directories(dir / "site/config/credentials");
+    fs::create_directories(dir / "site/storage");
+    fs::create_directories(dir / "site/db");
+    fs::create_directories(dir / "site/.kamal");
+    for (const char* f : {"config/master.key", "config/database.yml", "config/credentials/production.key", ".env.production", "db/dev.sqlite3",
+                          "storage/production.sqlite3", "storage/production.sqlite3-wal", ".kamal/secrets", "Gemfile"}) {
+        std::ofstream(dir / "site" / f) << "x";
+        ::chmod((dir / "site" / f).c_str(), 0644);
+    }
+    ::chmod((dir / "site/storage").c_str(), 02750);
+    ::chmod((dir / "site/config/credentials").c_str(), 0755);
+    fs::create_symlink("/etc/hostname", dir / "site/.env");
+    const std::vector<std::string> rule{"config/master.key", "config/credentials", "config/database.yml", "storage", ".env", ".git"};
+    const json::Value sw = tasks::sweep(site_fd, (dir / "site").string(), rule, tasks::family("rails")->secret_patterns);
+    auto mode = [&](const char* f) {
+        struct stat st {};
+        ::lstat((dir / "site" / f).c_str(), &st);
+        return st.st_mode & 07777;
+    };
+    CHECK(mode("config/master.key") == 0600 && mode("config/database.yml") == 0600 && mode("config/credentials/production.key") == 0600 && mode(".env.production") == 0600);
+    CHECK(mode("db/dev.sqlite3") == 0600 && mode("storage/production.sqlite3") == 0600 && mode("storage/production.sqlite3-wal") == 0600 && mode("Gemfile") == 0644);
+    CHECK(mode("storage") == 02710 && mode("config/credentials") == 0710 && mode(".kamal/secrets") == 0600 && fs::is_symlink(dir / "site/.env"));
+    CHECK(sw["exposed"].items().empty() && sw["secured"].items().size() == 10);
+    CHECK(tasks::sweep(site_fd, (dir / "site").string(), rule, tasks::family("rails")->secret_patterns)["secured"].items().empty());
+    CHECK(secret_dir_mode(02750) == 02710 && secret_dir_mode(0755) == 0710 && secret_dir_mode(0700) == 0700 && !secret_exposed(02710, 33, 1001));
+    ::close(site_fd);
+    // execute's refusals, each before anything runs.
+    tasks::Request tr;
+    tr.row = &fresh;
+    tr.params = js(R"({"name":"blog"})");
+    tr.ctx.runtime_dir = "/bin";
+    tr.ctx.root = (dir / "site").string();
+    tr.ctx.home = (dir / "home").string();
+    tr.sites_root = "/var/www";
+    tr.dry_run = true;
+    if (!root) {
+        CHECK(std::string(tasks::execute(tr).get("error")).find("creates the application in an empty directory") != std::string::npos);
+        tr.ctx.root = (dir / "empty").string();
+        const json::Value e = tasks::execute(tr);
+        CHECK(!e["ok"].boolean() && std::string(e.get("error")).find("the ruby runtime: /bin/ruby") != std::string::npos && !e.get("hint").empty());
+        tr.ctx.root = "/";
+        CHECK(std::string(tasks::execute(tr).get("error")).find("belongs to root, not to the account running the task") != std::string::npos);
+        tr.ctx.root = (dir / "empty").string();
+        tr.params = js(R"({"name":"-m"})");
+        CHECK(std::string(tasks::execute(tr).get("error")).find("does not match") != std::string::npos);
+        tr.row = &gem;
+        tr.params = json::Value();
+        tr.network_allowed = false;
+        CHECK(std::string(tasks::execute(tr).get("error")).find("task_network = false") != std::string::npos);
+        CHECK(!fs::exists(dir / "home"));  // a dry run creates nothing
+    }
+    // The helper's validation: names and short string parameters only.
+    CHECK(provision::validate(js(R"({"op":"task_run","site":"r.test","task":"rails_new","params":{"name":"blog"},"dry_run":true})"), Config{}).empty());
+    CHECK(provision::validate(js(R"({"op":"task_run","site":"r.test","task":"db_prepare"})"), Config{}).empty());
+    for (const char* bad : {R"({"op":"task_run","site":"../etc","task":"db_prepare"})", R"({"op":"task_run","site":"r.test","task":"Rails-New"})",
+                            R"({"op":"task_run","site":"r.test","task":""})", R"({"op":"task_run","site":"r.test","task":"db_prepare","params":"name=x"})",
+                            R"({"op":"task_run","site":"r.test","task":"db_prepare","params":{"name":5}})", R"({"op":"task_run","site":"r.test","task":"db_prepare","dry_run":"yes"})"})
+        CHECK(!provision::validate(js(bad), Config{}).empty());
+    // [control] runtimes, task_limits, task_network; app = "rails".
+    fs::create_directories(dir / "app");
+    auto write = [&](const char* name, const std::string& text) { std::ofstream(dir / name) << text; };
+    const std::string rails = "[[site]]\nserver_name = [\"r.test\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"app\"\nuser = \"r1\"\napp = \"rails\"\nupstream = \"http://127.0.0.1:3000\"\n";
+    write("t.toml", "[control]\nruntimes = { ruby = \"/opt/ruby/bin/\" }\ntask_limits = { timeout = 60, processes = 100 }\ntask_network = false\n" + rails);
+    const Config cfg = load_config(dir / "t.toml");
+    CHECK(cfg.control.runtimes.ruby == "/opt/ruby/bin" && cfg.control.runtimes.node == "/usr/bin" && cfg.control.task_timeout == 60 && cfg.control.task_processes == 100 &&
+          !cfg.control.task_network);
+    CHECK(runtime_dir(cfg.control, "ruby") == "/opt/ruby/bin" && runtime_dir(cfg.control, "perl").empty());
+    const SiteConfig& rs = cfg.sites[0];
+    CHECK(rs.app == "rails" && !rs.pool.generated && proxy_app("rails") && proxy_app("proxy") && !proxy_app("laravel") && php_app("laravel") && !php_app("rails"));
+    const auto rl = std::find_if(rs.locations.begin(), rs.locations.end(), [](const LocationConfig& l) { return l.path == "/"; });
+    CHECK(rl != rs.locations.end() && rl->kind == HandlerKind::proxy && rl->origin == "preset:rails");
+    const auto rsec = secret_paths(rs);
+    CHECK(std::find(rsec.begin(), rsec.end(), rs.root + "/config/master.key") != rsec.end() && std::find(rsec.begin(), rsec.end(), rs.root + "/storage") != rsec.end());
+    write("d.toml", rails);
+    const Config def = load_config(dir / "d.toml");
+    CHECK(def.control.runtimes.ruby == "/usr/bin" && def.control.task_timeout == 1200 && def.control.task_processes == 512 && def.control.task_network);
+    auto refused = [&](const std::string& text, const char* needle) {
+        write("bad.toml", text);
+        try {
+            load_config(dir / "bad.toml");
+            return false;
+        } catch (const std::exception& e) {
+            const bool hit = std::string(e.what()).find(needle) != std::string::npos;
+            if (!hit) std::printf("tasks config: expected '%s', got '%s'\n", needle, e.what());
+            return hit;
+        }
+    };
+    CHECK(refused("[control]\nruntimes = { ruby = \"usr/bin\" }\n" + rails, "must be an absolute directory"));
+    CHECK(refused("[control]\nruntimes = { perl = \"/usr/bin\" }\n" + rails, "unknown runtime \"perl\""));
+    CHECK(refused("[control]\nruntimes = { ruby = \"/var/www/x/bin\" }\n" + rails, "below sites_root"));
+    CHECK(refused("[control]\nruntimes = \"/usr/bin\"\n" + rails, "control.runtimes must be a table"));
+    CHECK(refused("[control]\ntask_limits = { timeout = 1 }\n" + rails, "5 to 86400"));
+    CHECK(refused("[control]\ntask_limits = { processes = 8 }\n" + rails, "16 to 65536"));
+    CHECK(refused("[control]\ntask_limits = { timeout = 60, memory = 5 }\n" + rails, "unknown key \"memory\""));
+    CHECK(refused("[[site]]\nlisten = [\"127.0.0.1:1\"]\napp = \"rails\"\nupstream = \"http://127.0.0.1:3000\"\n", "'root' is required"));
+    CHECK(refused("[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"app\"\napp = \"rails\"\n", "app = \"rails\" needs upstream"));
+    CHECK(refused(rails + "php = { children = 4 }\n", "need a PHP handler"));
     fs::remove_all(dir);
 }
 
@@ -1724,6 +1976,7 @@ static void test_hosting_rules() {
         // Every preset's secrets are among what it never serves (a secret that is served is a contradiction).
         const json::Value catalog = preset_catalog();
         for (const auto& pr : catalog["presets"].items()) {
+            if (proxy_app(pr.get("app"))) continue;  // serves nothing from its directory: every request goes to the upstream
             const auto& never = pr["never_served"].items();
             for (const auto& sec : pr["secrets"].items())
                 CHECK(std::find_if(never.begin(), never.end(), [&](const json::Value& n) { return n.str() == sec.str(); }) != never.end());
@@ -2223,9 +2476,11 @@ static void test_control_sites() {
     needs = apply_request(body, cfg, spec, err);
     CHECK(err.empty() && needs.empty() && spec.user == "shop" && spec.app == "laravel");
     CHECK(json::parse(R"({"app":"weird"})", body, err) && (apply_request(body, cfg, spec, err), err.find("app must be one of: static, php, laravel, drupal, wordpress, grav, proxy") != std::string::npos));
-    CHECK(app_presets().size() == 7 && app_presets().front() == "static" && app_presets()[5] == "grav" && app_presets().back() == "proxy");
+    CHECK(app_presets().size() == 8 && app_presets().front() == "static" && app_presets()[5] == "grav" && app_presets()[6] == "proxy" && app_presets().back() == "rails");
     const json::Value catalog = preset_catalog();
-    CHECK(catalog["presets"].items().size() == 7 && catalog["presets"].items()[0].get("app") == "static" && catalog["presets"].items()[5].get("app") == "grav" && catalog["presets"].items()[6].get("app") == "proxy");
+    CHECK(catalog["presets"].items().size() == 8 && catalog["presets"].items()[0].get("app") == "static" && catalog["presets"].items()[5].get("app") == "grav" &&
+          catalog["presets"].items()[6].get("app") == "proxy" && catalog["presets"].items()[7].get("app") == "rails" &&
+          catalog["presets"].items()[7]["tasks"].items().size() == 6 && catalog["presets"].items()[7]["secrets"].items()[0].str() == "/config/master.key");
     CHECK(catalog["presets"].items()[5]["never_served_directories"].items().size() == 9 && catalog["presets"].items()[5]["never_served_directories"].items()[0].str() == "/logs/" &&
           catalog["presets"].items()[3]["never_served_directories"].items().empty() && catalog["presets"].items()[5].get("source").starts_with("https://getgrav.org/"));
     const json::Value& laravel_row = catalog["presets"].items()[2];
@@ -2340,7 +2595,7 @@ static void test_control_sites() {
             for (const char* key : {"sendmail_path", "auto_prepend_file", "extension", "zend_extension", "disable_functions", "open_basedir", "extra", "error_log", "session.save_path", "php_admin_value[x]"})
                 CHECK(refused((std::string("{\"") + key + "\":\"/bin/sh\"}").c_str(), true, "unknown setting"));
             // Pool keys need a site with its own user; max_body_size does not.
-            CHECK(refused(R"({"memory_limit":"64M"})", false, "needs a site with its own user"));
+            CHECK(refused(R"({"memory_limit":"64M"})", false, "needs a PHP site with its own user"));
             json::Value o2, g2;
             json::parse(R"({"max_body_size":"4MB"})", g2, e2);
             CHECK(apply_settings(g2, loaded, false, o2).empty() && o2.get("max_body_size") == "4MB");
@@ -4108,6 +4363,7 @@ int main() {
     test_log_format();
     test_fcgi_codec();
     test_pools();
+    test_tasks();
     test_hosting_rules();
     test_proxy();
     test_range();

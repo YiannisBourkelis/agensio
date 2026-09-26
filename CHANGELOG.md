@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.1.0-alpha.24 (unreleased)
+
+- **Site tasks (F13, `docs/design-site-operations.md` section 4)**: `agensio ctl site-task
+  NAME TASK [--param KEY=VALUE]` and the MCP tool `site_task` run one named task of the
+  site's preset as the site's account, in the site's directory; `site-tasks NAME` and
+  `site_tasks_list` list them. A task is a row of `src/services/tasks.cpp` with a fixed
+  argv and typed parameters, never a command line: no option can be given (`rails new -m
+  URL` is not expressible), a parameter that does not match its pattern is refused naming
+  it, and the argv the row builds is what runs, by `execve`, with an interpreter from
+  `[control] runtimes` (root's file; the program, the file it resolves to and every
+  directory above both must be root's and writable by root alone, outside `sites_root`,
+  checked before every run). The environment is built (PATH, HOME, TMPDIR, LANG and the
+  preset's variables), stdin is `/dev/null`, the umask 027, the limits `[control]
+  task_limits` (`timeout` 1200 s then SIGTERM and SIGKILL to the process group,
+  `processes` 512 as `RLIMIT_NPROC`) plus 4096 open files and no core; whatever the
+  program leaves in its group is killed; the output comes back as its first 16 KB and last
+  48 KB; one task per site; the preset's credential files are swept private and the
+  configuration validated after every run; the audit log names the exact argv, the
+  account and the outcome. `[control] task_network = false` refuses the tasks that
+  download. Through the provisioning helper (`task_run`: the site's app, directory and
+  user from the configuration on disk, the account's home `<state_dir>/<user>` created
+  `0700` when missing), else as the server's own account. The first preset with tasks is
+  **`app = "rails"`**: the proxy preset's routing, its credential files
+  (`config/master.key`, `config/credentials/`, `config/database.yml`, `storage/`), and
+  `gem_install_rails`, `rails_new`, `bundle_install`, `db_prepare`, `db_migrate`,
+  `assets_precompile`, all with `RAILS_ENV=production` and the bundle in `vendor/bundle`
+  without the development and test groups. `site_create` suggests `<sites_root>/<domain>/app`
+  as its root; Puma is started by `docs/examples/puma.service` until agensio manages it
+  (F14). Tests: unit (the table, every refusal, the exact argv and environment, the runner
+  on real processes, the sweep), `tests/tasks.sh` (root devbox, fake interpreters, 24
+  checks), `tests/rails.sh` (real Ruby and rubygems.org: Rails installed, a new application
+  made, its databases and assets prepared, Puma as the site's account, the application
+  served over TLS by agensio), integration checks; security page rows 26 and 27.
+- **HTTP/1: a request whose handler takes longer than `idle_timeout` is no longer closed
+  with an empty reply.** The idle timer counted from the last byte written and closed the
+  connection while an upstream exchange or a control command was still working: a PHP
+  script or a proxied request slower than 15 s (the default), a `site_install` download
+  or a site task ended in an empty reply (found when `gem install rails` outlived the
+  control connection). A connection whose handler has the request now waits for it; the
+  handler's own timeouts bound it (the upstream's read timeout, the task's limit), and a
+  request body the client does not send still ends it at `body_timeout`. HTTP/2 already
+  worked this way. Integration check with a 1 s `idle_timeout` and a 2.5 s answer. The
+  cost is one flag per request: `bench/ab.sh HEAD -P` (`ab-20260926-221141.md`, two
+  rounds) has the static rows at 0.997 to 1.035 and the proxy rows at 0.98 to 1.014 of
+  HEAD, within the noise band.
+- **Credential directories no longer fail an install.** `site-install` made every path of
+  the hosting rule's list `0600` and refused the install when one was a directory, so any
+  archive carrying `.git` (or Laravel's `config/`, `storage/`) could not be installed. A
+  credential directory now loses its group's read and write and everything for others
+  (`secret_dir_mode`: 2750 becomes 2710, the server may pass through but never list),
+  which is what the hosting rule asks; `site-copy` and the task sweep use the same rule.
+
+- **A site that runs no PHP derives no php-fpm pool from its `user`** (live report,
+  2026-09-26: a Rails site behind `app = "proxy"` with its own account was told
+  `php_tmp_missing` at error severity and `pools_stale`, and `agensio pools` would have
+  written `agensio-ag5.conf` for it and reloaded php-fpm). The loader derives a pool only
+  when the site's `php` will serve a FastCGI handler: a PHP preset, or a hand-written
+  location with `handler = "fastcgi"` and no socket of its own; pool keys in `php = { }`
+  on any other site are refused naming the rule, and `settings` refuses the pool keys for
+  a proxy or static site. Unit tests for the proxy and static cases, the hand-written
+  FastCGI case and the refusal; `docs/configuration.md` 11.
+
 ## 0.1.0-alpha.23 (2026-09-25)
 
 - **QPACK's dynamic table on the encoder side** (RFC 9204 sections 2.1, 4.3, 4.5;

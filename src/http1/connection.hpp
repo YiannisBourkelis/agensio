@@ -251,10 +251,12 @@ public:
             return;
         }
         rearm(body_timeout_);
+        body_reading_ = true;
         auto self = this->shared_from_this();
         socket_.async_read_some(
             asio::buffer(body_buf_.data() + blen_, body_buf_.size() - blen_),
             immediate([self, buf, len, h = std::move(handler)](const asio::error_code& ec, std::size_t n) mutable {
+                self->body_reading_ = false;
                 self->rearm(self->idle_timeout_);
                 if (ec) {
                     self->close();
@@ -342,6 +344,16 @@ private:
             if (!self->lowest().is_open() || self->handed_over_) return;
             auto idle = std::chrono::steady_clock::now() - self->last_activity_;
             if (idle >= self->timeout_) {
+                // A handler still working on the request (an upstream exchange, bounded by its
+                // own connect/send/read timeouts; a control command running a task or a
+                // download) is not idleness: the idle limit is for a connection with nothing
+                // in flight, as HTTP/2 applies it. Only a body the client does not send ends
+                // it here. Before 2026-09-26 any request slower than idle_timeout (15 s) got
+                // its connection closed with an empty reply.
+                if (self->handler_busy_ && !self->body_reading_) {
+                    self->arm_timer(self->timeout_);
+                    return;
+                }
                 self->close();
                 return;
             }
@@ -355,7 +367,7 @@ private:
     // awaited instead and the receive buffer comes back with the next bytes. An idle
     // keep-alive connection then costs what its socket costs.
     void shed() {
-        if (responding_ || body_pending_ || tunnel_ || upstream_ || in_len_ > 0 || !read_pending_ || shedding_) return;
+        if (responding_ || handler_busy_ || body_pending_ || tunnel_ || upstream_ || in_len_ > 0 || !read_pending_ || shedding_) return;
         shed_ = true;
         ++worker_.sheds;
         std::vector<char>().swap(body_buf_);
@@ -631,6 +643,7 @@ private:
         while (loc) {
             if (loc->kind == HandlerKind::control) {  // the control socket's API (worker 0 only)
                 fill_connection_info();
+                handler_busy_ = true;
                 const unsigned gen = ++request_gen_;
                 auto self = this->shared_from_this();
                 dispatcher_.control().start(stream_, ws, [self, gen] {
@@ -640,6 +653,7 @@ private:
             }
             if (loc->kind != HandlerKind::static_) {  // FastCGI or proxy: completes asynchronously
                 fill_connection_info();
+                handler_busy_ = true;
                 const unsigned gen = ++request_gen_;
                 auto self = this->shared_from_this();
                 auto done = [self, gen] {
@@ -680,6 +694,7 @@ private:
 
     // The response is filled in: apply connection policy and hand it to the writer.
     void respond() {
+        handler_busy_ = false;
         Response& r = stream_.response;
         if (live_->max_requests_per_connection != 0 && ++requests_served_ >= live_->max_requests_per_connection)
             r.keep_alive = false;  // cap reached: this is the last response
@@ -890,6 +905,8 @@ private:
     // Request body state.
     BodySource body_source_;
     bool body_pending_ = false;  // a body exists and has not been fully read
+    bool handler_busy_ = false;  // an asynchronous handler (upstream, control) has the request and has not answered yet
+    bool body_reading_ = false;  // a read of the request body is out: the body timeout applies, handler or not
     bool read_pending_ = false;  // one client read in flight (head, abort watch or tunnel)
     std::size_t read_at_ = 0;    // where that read delivers (in_len_ when it was armed; settle_read reconciles)
     bool responding_ = false;    // the writer is sending the response

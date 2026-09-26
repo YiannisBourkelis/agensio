@@ -18,11 +18,13 @@
 #include <filesystem>
 #include <sstream>
 
+#include "control/commands.hpp"
 #include "control/sites.hpp"
 #include "services/archive.hpp"
 #include "services/fetch.hpp"
 #include "services/install.hpp"
 #include "services/pools.hpp"
+#include "services/tasks.hpp"
 
 namespace agensio {
 
@@ -39,10 +41,12 @@ std::string logs_root(const Config& cfg) {
 
 std::string uploads_dir(const Config& cfg) { return cfg.state_dir + "/uploads"; }
 
-namespace {
-bool under(const std::string& path, const std::string& root) {
+bool under_root(const std::string& path, const std::string& root) {
     return path == root || (path.size() > root.size() && path.compare(0, root.size(), root) == 0 && path[root.size()] == '/');
 }
+
+namespace {
+bool under(const std::string& path, const std::string& root) { return under_root(path, root); }
 }  // namespace
 
 std::string validate(const json::Value& req, const Config& cfg) {
@@ -106,6 +110,20 @@ std::string validate(const json::Value& req, const Config& cfg) {
             if (!req[flag].is_null() && req[flag].type() != json::Value::Type::boolean) return std::string("file_copy: ") + flag + " must be a boolean";
         for (const auto& sec : req["secrets"].items())
             if (!sec.is_string() || !archive::clean_path(sec.str(), clean, why) || clean != sec.str()) return "file_copy: secrets must be clean relative paths";
+        return "";
+    }
+    if (op == "task_run") {
+        // Names and parameters only: the helper looks the site up in the configuration on
+        // disk and takes the command from the task table (task_run below).
+        const std::string site(req.get("site")), task(req.get("task"));
+        if (!control::valid_domain(site)) return "task_run: site must be a site's host name";
+        if (task.empty() || task.size() > 64 || task.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_") != std::string::npos)
+            return "task_run: task must be a task's name (lower-case letters, digits, _)";
+        const json::Value& params = req["params"];
+        if (!params.is_null() && !params.is_object()) return "task_run: params must be an object";
+        for (const auto& m : params.members())
+            if (m.first.empty() || m.first.size() > 64 || !m.second.is_string() || m.second.str().size() > 256) return "task_run: parameters are short strings";
+        if (!req["dry_run"].is_null() && req["dry_run"].type() != json::Value::Type::boolean) return "task_run: dry_run must be a boolean";
         return "";
     }
     if (op == "pools_apply" || op == "service_restart" || op == "ping") return "";
@@ -289,7 +307,8 @@ bool install_account(const Config& cfg, const std::string& site_root, const std:
 // Runs `work` in a child that has become the given account (setgroups, setgid, setuid,
 // root not regainable); the reply comes back through a pipe as one JSON line. Bounded
 // by a deadline. `extra_fd` (an upload) is closed in the parent afterwards.
-json::Value run_as_account(uid_t uid, gid_t gid, int helper_fd, int extra_fd, const std::function<json::Value()>& work) {
+json::Value run_as_account(uid_t uid, gid_t gid, int helper_fd, int extra_fd, const std::function<json::Value()>& work,
+                           std::chrono::seconds limit = std::chrono::minutes(20)) {
     json::Value reply = json::Value::object();
     int pipefd[2];
     if (::pipe(pipefd) != 0) {
@@ -320,12 +339,12 @@ json::Value run_as_account(uid_t uid, gid_t gid, int helper_fd, int extra_fd, co
     if (extra_fd >= 0) ::close(extra_fd);
     std::string in;
     char buf[4096];
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(20);
+    const auto deadline = std::chrono::steady_clock::now() + limit;
     for (;;) {
         const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
         if (left <= 0) {
             ::kill(pid, SIGKILL);
-            reply.set("ok", false).set("error", "the operation did not finish within 20 minutes; stopped");
+            reply.set("ok", false).set("error", "the operation did not finish within " + std::to_string(limit.count() / 60) + " minutes; stopped");
             break;
         }
         struct pollfd pfd {pipefd[0], POLLIN, 0};
@@ -335,7 +354,7 @@ json::Value run_as_account(uid_t uid, gid_t gid, int helper_fd, int extra_fd, co
         const ssize_t n = ::read(pipefd[0], buf, sizeof buf);
         if (n <= 0) break;
         in.append(buf, static_cast<std::size_t>(n));
-        if (in.size() > 65536) break;
+        if (in.size() > (4u << 20)) break;  // a task's answer carries up to 64 KB of output, escaped
     }
     ::close(pipefd[0]);
     int status = 0;
@@ -403,6 +422,102 @@ json::Value file_copy(const json::Value& req, const Config& cfg, int helper_fd) 
         for (const auto& sec : req["secrets"].items()) r.secrets.push_back(sec.str());
         return install::copy_file(r);
     });
+}
+
+// The account's home, <state_dir>/<account> (useradd gave it; for an account without a PHP
+// pool nothing created it), and its tmp/, for the programs a task runs (gem and bundler
+// write below HOME): created 0700 as the account when missing. An existing one must be a
+// directory the account owns; one this call did not create is never handed over.
+bool ensure_home(const Config& cfg, const std::string& name, uid_t uid, gid_t gid, std::string& why) {
+    const int sfd = ::open(cfg.state_dir.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (sfd < 0) {
+        why = "state directory " + cfg.state_dir + ": " + std::strerror(errno);
+        return false;
+    }
+    auto own = [&](int parent, const std::string& leaf, const std::string& path) {
+        bool created = false;
+        if (::mkdirat(parent, leaf.c_str(), 0700) == 0) created = true;
+        else if (errno != EEXIST) {
+            why = "mkdir " + path + ": " + std::strerror(errno);
+            return -1;
+        }
+        const int fd = ::openat(parent, leaf.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (fd < 0) {
+            why = path + ": " + (errno == ELOOP || errno == ENOTDIR ? std::string("a symlink or not a directory; refused") : std::strerror(errno));
+            return -1;
+        }
+        struct stat st {};
+        if (created && ::fchown(fd, uid, gid) != 0) {
+            why = path + ": " + std::strerror(errno);
+            ::close(fd);
+            return -1;
+        }
+        if (::fstat(fd, &st) != 0 || st.st_uid != uid) {
+            why = path + " belongs to uid " + std::to_string(st.st_uid) + ", not to " + name + "; refused";
+            ::close(fd);
+            return -1;
+        }
+        return fd;
+    };
+    const int hfd = own(sfd, name, cfg.state_dir + "/" + name);
+    ::close(sfd);
+    if (hfd < 0) return false;
+    const int tfd = own(hfd, "tmp", cfg.state_dir + "/" + name + "/tmp");
+    ::close(hfd);
+    if (tfd < 0) return false;
+    ::close(tfd);
+    return true;
+}
+
+// task_run (F13): a named task of the site's preset (services/tasks.*) run by the site's
+// account in a child. What runs is decided here, not by the server: the site (its app,
+// its directory, its user) comes from the configuration file on disk, the command from the
+// task table, the interpreter from this helper's own [control] runtimes and the bounds from
+// its own task_limits; the server sends names and parameters only.
+json::Value task_run(const json::Value& req, const Config& cfg, int helper_fd) {
+    json::Value reply = json::Value::object();
+    auto fail = [&](std::string why) { return reply.set("ok", false).set("error", std::move(why)); };
+    Config fresh;
+    try {
+        fresh = load_config(cfg.config_path);
+    } catch (const std::exception& e) {
+        return fail(std::string("the configuration on disk does not load, so no task runs: ") + e.what());
+    }
+    const std::string name(req.get("site"));
+    const SiteConfig* site = control::find_site(fresh, name);
+    if (!site) return fail("no site " + name + " in the configuration on disk");
+    const std::string app = site->app.empty() ? "static" : site->app;
+    const tasks::Row* row = tasks::find(app, req.get("task"));
+    if (!row) return fail("no task '" + std::string(req.get("task")) + "' for app = \"" + app + "\"");
+    if (std::string bad = tasks::check_params(*row, req["params"]); !bad.empty()) return fail(bad);
+    const std::string site_root = site->project_root.empty() ? site->root : site->project_root;
+    std::string why;
+    if (!control::safe_path(site_root, why)) return fail("the site's directory: " + why);
+    if (!provision::under_root(site_root, provision::sites_root(cfg)) || site_root == provision::sites_root(cfg))
+        return fail(site_root + " is not below " + provision::sites_root(cfg));
+    uid_t uid = 0;
+    gid_t gid = 0;
+    if (!install_account(cfg, site_root, site->user, uid, gid, why)) return fail(why);
+    if (uid == 0) return fail("refusing to run a task as root");
+    const struct passwd* pw = ::getpwuid(uid);
+    if (!pw) return fail("uid " + std::to_string(uid) + " has no name");
+    const std::string account = pw->pw_name;
+    const bool dry_run = req["dry_run"].boolean();
+    if (!dry_run && !ensure_home(cfg, account, uid, pw->pw_gid, why)) return fail("the account's home: " + why);
+    tasks::Request tr;
+    tr.row = row;
+    tr.params = req["params"];
+    tr.ctx.runtime_dir = runtime_dir(cfg.control, row->runtime);
+    tr.ctx.root = site_root;
+    tr.ctx.home = cfg.state_dir + "/" + account;
+    tr.ctx.timeout = std::min(row->timeout, cfg.control.task_timeout);
+    tr.ctx.processes = cfg.control.task_processes;
+    tr.sites_root = provision::sites_root(cfg);
+    for (const auto& abs : secret_paths(*site))
+        if (provision::under_root(abs, site_root) && abs != site_root) tr.secrets.push_back(abs.substr(site_root.size() + 1));
+    tr.network_allowed = cfg.control.task_network;
+    tr.dry_run = dry_run;
+    return run_as_account(uid, gid, helper_fd, -1, [&] { return tasks::execute(tr); }, std::chrono::seconds(tr.ctx.timeout + 120));
 }
 
 // The helper's loop: one JSON line in, one out, until the server closes its end.
@@ -517,6 +632,8 @@ void helper_loop(int fd, const Config& cfg) {
                     reply = app_install(req, cfg, fd);
                 } else if (op == "file_copy") {
                     reply = file_copy(req, cfg, fd);
+                } else if (op == "task_run") {
+                    reply = task_run(req, cfg, fd);
                 } else if (op == "service_restart") {
                     const auto now = std::chrono::steady_clock::now();
                     if (now - last_restart < std::chrono::seconds(60)) {

@@ -88,7 +88,7 @@ std::string apply_settings(const json::Value& given, const Config& cfg, bool has
         for (const auto& d : setting_defs())
             if (m.first == d.key) def = &d;
         if (!def) return "unknown setting '" + m.first + "': only the keys `settings` lists can be set through the control plane; anything else stays in the configuration file";
-        if (def->pool && !has_user) return "settings." + m.first + " needs a site with its own user (it belongs to the generated php-fpm pool)";
+        if (def->pool && !has_user) return "settings." + m.first + " needs a PHP site with its own user (it belongs to the generated php-fpm pool; a proxy or static site has none)";
         if (std::string_view(def->type) == "enum") {
             if (!m.second.is_string()) return "settings." + m.first + " must be one of the listed values";
             std::string v = m.second.str();

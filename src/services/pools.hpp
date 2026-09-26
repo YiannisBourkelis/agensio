@@ -86,6 +86,11 @@ std::vector<std::string> secret_paths(const SiteConfig& site);
 inline bool secret_exposed(unsigned mode, unsigned gid, unsigned site_gid) noexcept {
     return (mode & 0004) || ((mode & 0040) && gid != site_gid);
 }
+// The mode the writers and the task sweep give a credential directory (.git, storage/):
+// nothing for others and no read or write for its group, which is what the rule above
+// asks; the set-gid bit and the group's execute stay, so the server may pass through
+// (Laravel's public/storage link) but never list it. A 2750 directory becomes 2710.
+constexpr unsigned secret_dir_mode(unsigned mode) noexcept { return (mode & 02010u) | 0700u; }
 
 // Writes the pool files into `out_dir`, creates each user's state directories, removes
 // generated files whose user is gone, and prints what it did. Returns 0 when nothing

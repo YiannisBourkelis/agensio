@@ -114,6 +114,7 @@ add_library(agensio_core STATIC
   src/services/archive.cpp
   src/services/fetch.cpp
   src/services/install.cpp
+  src/services/tasks.cpp
   src/control/handler.cpp
   src/control/commands.cpp
   src/control/sites.cpp

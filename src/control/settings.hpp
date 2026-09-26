@@ -23,7 +23,7 @@ struct SettingDef {
     const char* applies;  // what changing it costs
     const char* derives;  // what is computed from it ("" = nothing)
     std::vector<const char*> options;  // enum values
-    bool pool = true;     // a generated-pool key: needs a site with its own user
+    bool pool = true;     // a generated-pool key: needs a PHP site with its own user (a generated pool)
 };
 
 const std::vector<SettingDef>& setting_defs();

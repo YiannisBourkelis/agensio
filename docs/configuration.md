@@ -466,6 +466,39 @@ Rocket.Chat and ThingsBoard are in `docs/examples/`; two real applications run t
 way in the repository's test beds, Redmine (Rails) in `bench/redmine/` and Uptime Kuma
 (Node, Socket.IO over WebSockets) in `bench/uptime-kuma/`.
 
+On a proxy site `root` is optional and nothing is served from it: every request goes to
+the upstream. When it is given, it is the application's directory, which `site-install`
+fills and the hosting rules check (section 11).
+
+**Ruby on Rails: `app = "rails"`.** The same routing as `proxy` (every request to the
+site's upstream, where Puma listens), plus what a Rails application needs from the
+control plane: `root` is required and is the project directory, by convention `app/`
+beside `web/` in the site's tree (`/var/www/example.com/app`, what `site-create`
+suggests), and the preset's named tasks run there as the site's account (section 15,
+`site-task`): `gem_install_rails`, `rails_new`, `bundle_install`, `db_prepare`,
+`db_migrate`, `assets_precompile`. Its credential files, `config/master.key`,
+`config/credentials/`, `config/database.yml` and `storage/` (the SQLite databases and
+Active Storage's files), are held to the hosting rule of section 11 like `wp-config.php`
+is, and every writer and task leaves them the site's alone. A site with its own `user`
+and `app = "rails"` gets no php-fpm pool.
+
+```toml
+[[site]]
+server_name = ["ag5.example.com"]
+listen = ["0.0.0.0:443"]
+tls = "auto"
+app = "rails"
+root = "/var/www/ag5.example.com/app"   # the project directory: tasks run here, nothing is served from it
+user = "ag5"
+upstream = "http://127.0.0.1:3000"      # where Puma listens; keep it on loopback
+```
+
+The application server itself is not started by agensio yet (roadmap F14): until then a
+systemd unit runs Puma as the site's account with the environment the tasks use,
+`docs/examples/puma.service`, binding loopback (`-b tcp://127.0.0.1:3000`; the `puma.rb`
+Rails generates binds every address, which would publish the application beside
+agensio, without its TLS and refusals).
+
 ## 5. Customising a preset
 
 A preset never overrides what the site writes itself:
@@ -691,7 +724,12 @@ are not: they change what a site may reach or run, and stay in this file, root's
 
 Rules: two sites with the same `user` share one pool and must agree on these keys;
 sites with different users may never name the same socket; a site with `user` and an
-explicit `php.socket` keeps its own pool and gets no generated file.
+explicit `php.socket` keeps its own pool and gets no generated file. A site that runs
+no PHP (`app = "proxy"`, `app = "static"`, no `handler = "fastcgi"` location) derives no
+pool from its `user`: the account owns the files and, behind a proxy, runs the
+application; `agensio pools` writes nothing for it, `health` looks for no PHP
+directory, and pool keys in its `php = { ... }` are refused (2026-09-26: a Rails site
+was reported `php_tmp_missing` and `pools_stale` before this rule).
 
 **What `agensio -t` (and every start) refuses** for a site with `user`, naming the path,
 its owner and mode, and what was expected:
@@ -716,6 +754,11 @@ its owner and mode, and what was expected:
   log or a state directory.
 
 Sites without `user` are not checked, so a single-tenant machine changes nothing.
+
+The account's home is its state directory, `<state_dir>/<user>`. For a PHP site `agensio
+pools` creates it with `tmp/` and `sessions/`; for an account without a PHP pool (a Rails
+site) the provisioning helper creates it, `0700` with a `tmp/`, the first time a site task
+runs, because `gem` and `bundle` write below `HOME` (section 15, `site-task`).
 
 One rule set answers `agensio -t`, the server's own start, every reload and site change
 through the control socket, and the health check: a configuration that reloads is one
@@ -1094,6 +1137,9 @@ install_ca = "/etc/ssl/mirror-ca.pem"  # PEM bundle site-install trusts instead 
 upload_max = "512M"                    # the largest archive `agensio ctl upload` may store
 site_limits = { max_body_size = "512MB", memory_limit = "512M", max_execution_time = 300, max_input_time = 300, children = 32, max_requests = 1000000 }
                                        # the ceilings site-create / site-update may raise a site's limits to (these are the defaults)
+runtimes = { ruby = "/usr/bin" }       # where site tasks find ruby, gem and bundle (also node, php, python3); root's files only
+task_limits = { timeout = 1200, processes = 512 }   # a task's wall-clock seconds and the processes its account may have
+task_network = true                    # tasks that download (gem install, rails new, bundle install) may run
 ```
 
 The control API is how `agensio ctl`, the MCP bridge (`agensio mcp`) and any local tool
@@ -1126,6 +1172,7 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 | `validate` | viewer | loads the file on disk again and runs the hosting rules: `ok`, `errors`, site count, and the restart-only settings that differ from the running server |
 | `logs` | viewer | `--site NAME` (default: all sites plus the error log), `--since 3h` (`m`, `h`, `d`, `w`, seconds, or a local `YYYY-MM-DDThh:mm:ss`; default 1h), `--level error|warn|info` for the error log (default warn = error+warn), `--status 5xx|4xx|all|NNN` for access logs (default 5xx), `--limit N` (default 200, newest). Reads at most 2 MB per file from the end; `truncated` says when that cut in |
 | `uploads` | viewer | the archives stored with `upload` (`file`, `bytes`, `uploaded`), ready for `site-install --file` |
+| `site-tasks NAME` | viewer | the named tasks the site's preset offers (`app = "rails"`: six), each with its summary, its parameters (name, meaning, pattern, required), whether it downloads, whether the directory must be empty and its time limit; the account that runs them (`runs_as`), the directory, the task running now; a site of another preset has none |
 | `settings [NAME]` | viewer | the per-site limits `site-create` and `site-update` accept under `settings`: for each key its type, unit and spellings, meaning, default and its origin, minimum, the ceiling from `[control] site_limits`, what changing it costs (agensio reload, php-fpm reload) and what it derives; with a site, the current value and whether it comes from the site, the server or a built-in default. `site NAME` reports the same `settings` |
 | `health` | viewer | findings with `severity`, `code`, `site`, `message`, `fix` (also `files_unreadable`: files under a document root, the preset's upload directory first, that the server's account cannot open and that answer 404 with no log line; `php_tmp_missing`; `php_fpm_hard_reload`; `php_pool_resident`, judged from the pool file php-fpm runs; `preset_mismatch`: the files under a site's directory belong to another application than its `app` says, with the application detected and the `app` to set; `archives_in_root`: backup archives and database dumps under a served tree, the directories a preset never answers excepted): configuration on disk invalid or failing the hosting rules, restart-only settings changed, running as root, certificate unreadable / still the placeholder / expired / expiring within 14 days (manual), `tls = "auto"` without a plain port-80 site for the names, no http-to-https redirect, application sites sharing the server's account, generated pools out of date, errors in the last 24 hours. `ok` is true when nothing above info level was found |
 
@@ -1138,15 +1185,75 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 | `logs-reopen` | operator | reopen every log file (what `SIGUSR1` does) |
 | `site-create` | admin | writes `sites.d/<domain>.toml`, validates, reloads. Fields: `domain`, `aliases`, `https` (`auto`, `none`, or `{cert, key}`), `redirect_http` (default true), `hsts`, `user` (an account name; `no_user: true` or JSON `null` for none; the words null, none, nil and system accounts are refused, never turned into commands), `group`, `app`, `root`, `upstream`, `php_socket`, `php_children`, `php_version`, `listen_plain`, `listen_tls`. Until `https`, `root` (or `upstream`), `app` and `user` are decided it answers 422 with the open questions and a suggestion each (a user name from the domain, the app the files under root suggest); when the account or the root directory does not exist it answers 409 with the commands to run as root and waits for the same command again. A new site is HTTPS-only: the plain site redirects. |
 | `site-create` answers | | 422 with `needs` while decisions are open; 409 `prerequisites missing` with `problems` (every one at once, each with a `code`, a `detail` and its `run_as_root` command: `missing_account`, `missing_group`, `root_missing`, `root_unreadable`, `certificate_missing`) plus the flat `run_as_root` list; 202 `needs_restart` when the site adds a privileged port the dropped server cannot bind by a reload (the file is written and valid, `systemctl restart agensio` serves it); 201 with `next_steps` (separate commands: `agensio pools`, then the php-fpm reload) and `warnings`. `dry_run: true` runs every check and returns the file that would be written without writing or reloading |
-| `site-update NAME` | admin | the same fields on a site `site-create` wrote (the file carries its spec on its first line); a hand-written file is refused with 409, edit it yourself. `settings = {key: value}` (CLI `--set KEY=VALUE`, repeatable) sets the per-site limits: `max_body_size` (any site), and for a site with its own user `memory_limit`, `max_execution_time`, `max_input_time`, `children`, `pm`, `max_requests`. Each value is checked against `[control] site_limits` and refused above it naming the key, the value and the ceiling; a key outside that list (`extra`, `open_basedir`, any ini name) is refused as unknown, whatever it is. The answer's `done` lists what was written and reloaded: the site file and agensio, and the php-fpm pool and php-fpm when a pool key changed (a php-fpm reload briefly affects every PHP site unless `process_control_timeout` is set) |
+| `site-update NAME` | admin | the same fields on a site `site-create` wrote (the file carries its spec on its first line); a hand-written file is refused with 409, edit it yourself. `settings = {key: value}` (CLI `--set KEY=VALUE`, repeatable) sets the per-site limits: `max_body_size` (any site), and for a PHP site with its own user (a generated pool) `memory_limit`, `max_execution_time`, `max_input_time`, `children`, `pm`, `max_requests`. Each value is checked against `[control] site_limits` and refused above it naming the key, the value and the ceiling; a key outside that list (`extra`, `open_basedir`, any ini name) is refused as unknown, whatever it is. The answer's `done` lists what was written and reloaded: the site file and agensio, and the php-fpm pool and php-fpm when a pool key changed (a php-fpm reload briefly affects every PHP site unless `process_control_timeout` is set) |
 | `site-disable NAME`, `site-enable NAME` | admin | renames the file to `.disabled` and back, reloads |
 | `site-delete NAME` | admin | removes the file (a `.bak` stays), reloads; never touches the root or the account |
 | `cert-renew NAME` | operator | orders the site's automatic certificate again now |
 | `upload NAME [FILE]` | operator | stores FILE (stdin by default) as `<state_dir>/uploads/NAME`, the server's own directory (0700); `PUT /v1/uploads/NAME` with the raw bytes on the socket; no `--yes`; at most `upload_max`; names are plain file names (letters, digits, `.`, `_`, `-`, no leading dot); a partial transfer leaves nothing |
 | `uploads-delete NAME` | operator | removes a stored upload |
 | `site-install NAME` | admin | puts an application's files into the site's directory (the `root` as given, above a preset's `public/` or `web/`; `--path SUB` for a subdirectory such as `wp-content/plugins/NAME`, with `--create-path` when it does not exist yet) **as the site's account**, from one source: `--url https://...` (a `.tar.gz`, `.tar` or `.zip`), `--file UPLOAD` (a stored upload), or nothing, which takes the preset's official archive (`presets` lists it under `source`; `--version V` picks a release, default the newest; WordPress and Drupal have one, Laravel is made with composer). `--sha256 HEX` refuses an archive whose digest differs. `--strip 0|1` keeps or unwraps a single top directory (default: unwrap when there is exactly one). `--dry-run` takes the same walk as the real call, as the same account, and answers with the target, the account and `would_create`, or with the refusal the real call would meet; nothing is downloaded or written. Answers 201 with `files`, `bytes`, `sha256`, `unwrapped`, `created` (each directory made, with owner and mode), `next_steps`; 409 with the reason and nothing left behind; 403 when `install = false` and a URL was given; 422 when no source can be found |
-
 | `site-copy NAME --from SUB --to SUB` | admin | copies one regular file of the site to another path of the same site **as the site's account**: the drop-in files applications ship as templates (`wp-content/db.php` from the SQLite plugin's `db.copy`, `advanced-cache.php` or `object-cache.php` from a caching plugin, Drupal's `sites/default/settings.php` from `default.settings.php`). Both paths are relative to the site's directory and reached by the same walk as an install; `from` must be an existing regular file (no directory, no symlink); the destination's directory must exist (`site-install --create-path` makes one); an existing destination is refused unless `--overwrite`, and the answer then reports the replaced file's size and mtime. The new file gets the directory's pattern (`0640` in a `2750` directory, the execute bits when the source has them), or `0600` when it is one of the preset's credential files (`secured: true`); written under a temporary name and linked or renamed into place, so a refusal leaves nothing; the configuration is validated afterwards (see below). Never across sites, never content from the caller, never a directory, no chmod or chown. `--dry-run` runs the same checks. Answers 201 (200 when replaced) with `from`, `to`, `as`, `bytes`, `mode`, `replaced`; 409 with the reason |
+| `site-task NAME TASK [--param KEY=VALUE]...` | admin | runs one named task of the site's preset **as the site's account** in the site's directory (`root`): a row of the task table, never a command line (below). `--dry-run` answers with the exact argv, the account, the directory, the environment and the limits, and runs nothing. Answers 200 when the task exited 0, 409 when it failed, was stopped at its time limit or was refused, each with `argv` (what ran, the interpreter resolved), `as`, `cwd`, `exit` or `signal`, `timed_out`, `duration_ms`, `output` (the first 16 KB and the last 48 KB of stdout and stderr together, `truncated` and `output_bytes` when longer), `secured` (credential paths made private), and `run_as_root` when the interpreter is missing; 400 for an unknown task or a parameter that does not match; 422 for a preset without tasks; 409 while another task runs on the same site |
+
+**What `site-task` enforces.** A task is a row of `src/services/tasks.cpp`: a preset, a
+name, an interpreter (a runtime and a program in it), a fixed argument list, typed
+parameters and a time limit. The caller names the task and gives parameters; no flag,
+option or command comes from the caller, and a parameter that does not match its pattern
+(`rails_new`'s `name`: a letter, then letters, digits and underscores; `gem_install_rails`'s
+`version`: an exact 8.x release) is refused naming it, so `rails new -m URL` and every
+other option are simply not expressible. The Rails rows:
+
+| task | runs | notes |
+|---|---|---|
+| `gem_install_rails` | `gem install rails --no-document --version VERSION` (default `~> 8.0`) | into the account's own `<home>/gems`; downloads, compiles native extensions |
+| `rails_new` | `ruby <home>/gems/bin/rails new . --name=NAME --database=sqlite3 --skip-git --skip-docker --skip-thruster --skip-ci` | the directory must be empty; installs the application's gems (Rails 8 skips its importmap, Hotwire and Solid installers without them); Kamal's files are kept because Rails 8.1 writes the production databases' paths only with them; downloads |
+| `bundle_install` | `bundle install` | after a Gemfile change, or an application installed from an archive; downloads |
+| `db_prepare`, `db_migrate` | `bundle exec rails db:prepare` / `db:migrate` | the production databases |
+| `assets_precompile` | `bundle exec rails assets:precompile` | with `SECRET_KEY_BASE_DUMMY=1`, so an application without its master key compiles too |
+
+Every Rails task runs with `RAILS_ENV=production`, `BUNDLE_PATH=vendor/bundle` and
+`BUNDLE_WITHOUT=development:test`: the gems of the application live in the project, only
+the production groups are installed, and what the tasks prepared is what Puma loads with
+the same environment (`docs/examples/puma.service`).
+
+The interpreter comes from `[control] runtimes` in root's file (`/usr/bin` by default):
+the program, the file it resolves to and every directory above both must belong to root
+and be writable by nobody else, and must lie outside `sites_root`; otherwise the task is
+refused naming the component, so no site can put its own `ruby` in the way. A missing
+interpreter is refused with the package command under `run_as_root` (Debian: `apt-get
+install -y ruby ruby-dev ruby-bundler build-essential libyaml-dev`). What the interpreter
+then loads from the site (the Gemfile, `vendor/bundle`, `bin/rails`) is the site's code
+and runs as the site's account.
+
+A task runs as the site's `user`, or for a site without one as the owner of the site's
+directory when that is a site account or the server's own, the account rule of
+`site-install`; never as root or a login account. With the provisioning helper the helper
+looks the site up in the configuration on disk itself (its app, directory and user: the
+server sends names and parameters only), creates the account's home when it is missing
+(`<state_dir>/<user>`, `0700`, with `tmp/`) and runs the task in a child that has become
+the account; without the helper it runs as the server's own account, in a directory that
+account owns. The environment is built, never inherited: `PATH` (the runtime's directory
+first), `HOME`, `TMPDIR`, `LANG=C.UTF-8` and the preset's variables. The working directory
+is reached without following a symlink; stdin is `/dev/null`; the umask is `027` (files
+`0640`, directories `2750` in the site's tree, readable by the server through its
+group). Limits: `[control] task_limits` (`timeout`, 1200 s by default, after which the
+task's process group gets SIGTERM and ten seconds later SIGKILL; `processes`, 512, the
+`RLIMIT_NPROC` of the account while the task runs, threads included), 4096 open files,
+no core files. When the program exits, whatever it left running in its process group is
+killed. One task per site at a time. `[control] task_network = false` refuses the tasks
+that download. The three keys are read at start (restart-only).
+
+After every run the credential sweep makes the preset's credential files the site's
+alone: the hosting rule's list (for Rails `config/master.key`, `config/credentials/`,
+`config/database.yml`, `storage/`, `.env`, `.git`) plus `config/credentials.yml.enc`,
+`config/credentials/*.key`, `.env.*`, `.kamal/secrets*` and the SQLite files under `db/` and `storage/`;
+files become `0600`, directories lose their group's read and write and everything for
+others (`0710`: the kernel drops the set-gid bit when the account is not in the
+directory's group), never through a symlink. Then the configuration is validated as for
+`site-install`: a task whose result `agensio -t` would refuse answers `409` with the
+validator's `errors`. The audit log gets one line before the task starts (the task and its
+parameters) and one after, with the exact argv that ran, the account, the directory and
+how it ended; the output stays in the answer.
 
 **What `site-install` enforces.** The account that installs is the site's `user`, or for
 a site without one the owner of the site's directory, which must be a site account
@@ -1167,10 +1274,14 @@ was.
 so everything created under it is readable by the server, which is what serving needs
 and exactly what hosting rule 3 forbids for a credential file. The two are reconciled by
 the preset table: each preset names its `secrets` (`wp-config.php`; Drupal's
-`settings.php`, `settings.local.php`, `services.yml`; `presets` shows them), the hosting
+`settings.php`, `settings.local.php`, `services.yml`; Rails' `config/master.key`,
+`config/credentials/`, `config/database.yml`, `storage/`; `presets` shows them), the hosting
 rule checks precisely those files plus `.env` and `.git` (Laravel: the project's `.env`,
 `config/`, `storage/`), and `site-install` and `site-copy` create precisely those files
-`0600` whatever the directory's pattern gives the rest, listing them under `secured`.
+`0600` whatever the directory's pattern gives the rest, and take the group's read and
+write and everything for others from those that are directories, listing both under
+`secured` (before 2026-09-26 an archive that carried such a directory, `.git` for one,
+could not be installed at all).
 Each call then checks the hosting rule on what it wrote and validates the whole
 configuration before answering: when the result would be refused by `agensio -t`, the
 answer is `409` with `written: true` and the validator's `errors`, never a bare ok. A
@@ -1207,9 +1318,10 @@ path, and does six things and nothing else: create a site account (`useradd --sy
 `nologin`, home in the state directory), lay out a site's directories under `sites_root`
 (`owner:<server group> 2750`, walked without following symlinks, refused when a directory
 belongs to another site), hand a per-site log to the site's group, write the php-fpm
-pools and reload php-fpm, restart the service after a change that needs one, and run a
-`site-install` in a child that has become the site's account (the helper opens an
-upload as root, the child drops to the account before reading a byte). Programs
+pools and reload php-fpm, restart the service after a change that needs one, run a
+`site-install` or a `site-copy` in a child that has become the site's account (the helper
+opens an upload as root, the child drops to the account before reading a byte), and run a
+`site-task` the same way, after creating the account's home when it is missing. Programs
 run by absolute path with a fixed argument list and no shell; every argument is checked
 again inside the helper with the same rules; every action is audited. `site-create` then
 does the whole job in one call and lists what it did under `done`. With `provision =

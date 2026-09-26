@@ -46,6 +46,9 @@ COPY --from=h3tools /opt/nghttp2 /opt/nghttp2
 # aioquic drives the HTTP/3 attack suite (tests/h3-attacks.py): key updates, address
 # changes and malformed frames that no load tool sends.
 RUN apt-get update && apt-get install -y --no-install-recommends python3-aioquic && rm -rf /var/lib/apt/lists/*
+# Ruby for the site tasks' live check (tests/rails.sh): gem and bundle build native
+# extensions (build-essential is in the base), psych needs libyaml's headers.
+RUN apt-get update && apt-get install -y --no-install-recommends ruby ruby-dev ruby-bundler libyaml-dev && rm -rf /var/lib/apt/lists/*
 ARG UID=1000
 ARG GID=1000
 RUN groupadd -g $GID dev 2>/dev/null || true; useradd -m -u $UID -g $GID -s /bin/bash dev

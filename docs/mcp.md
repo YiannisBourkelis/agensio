@@ -4,7 +4,8 @@ agensio ships a [Model Context Protocol](https://modelcontextprotocol.io) server
 `agensio mcp`. An agent host such as Claude Code, Claude Desktop, Cursor or any MCP
 client spawns it, and the agent can then inspect and configure the web server through
 a fixed set of tools: check its health, list sites, read recent errors, create or change
-a site, install an application into it, reload, renew a certificate. The server never
+a site, install an application into it, run a Rails application's named tasks, reload,
+renew a certificate. The server never
 embeds a model; the one network action it takes on an agent's behalf, downloading an
 application archive for `site_install`, is fenced (https only, public addresses only,
 size caps, verified certificate, optional sha256) and audited. It offers precise,
@@ -44,9 +45,9 @@ agent host  --stdin/stdout-->  agensio mcp  --unix socket-->  agensio (control A
 - On a server started as root with `[control] provision = true` (the default), a small
   root helper forked before the privilege drop does the root work of a site on the
   server's behalf: the account, the directory layout, the site's log, the php-fpm pool,
-  a restart, and an application install as the site's account. `site_create` is then one
-  call and reports what it did under `done`. The helper does those six things and nothing
-  else; `docs/security-control-plane.md`.
+  a restart, an application install or a file copy as the site's account, and a site task
+  as the site's account. `site_create` is then one call and reports what it did under
+  `done`. The helper does those things and nothing else; `docs/security-control-plane.md`.
 - **Files cannot travel through the bridge**: a tool argument is JSON inside the model's
   context, so an archive on your machine reaches the server by `ssh admin@host agensio
   ctl upload NAME < file` (the same SSH session the bridge uses), and the agent then
@@ -106,6 +107,8 @@ takes `--socket PATH`.
 | `site_disable`, `site_enable`, `site_delete` | admin | rename the file away and back; delete it (a `.bak` stays) |
 | `site_install` | admin | put an application's files into a site's empty directory as the site's account: the preset's official archive (`version` optional), any https `url`, or a stored upload (`file`); a plugin or theme goes into `path` with `create_path: true`; `sha256`, `strip`, `dry_run`; the server enforces the fences and reports the source, digest and what it created |
 | `site_copy` | admin | copy one regular file of a site to another path of the same site, as the site's account: the drop-ins applications ship as templates (WordPress's `wp-content/db.php` from the SQLite plugin, Drupal's `settings.php`); `overwrite`, `dry_run`; never across sites, never caller content, never a directory. Like `site_install`, credential files come out `0600` and the configuration is validated before the answer |
+| `site_tasks_list` | viewer | the named tasks of the site's preset (`app = "rails"`: `gem_install_rails`, `rails_new`, `bundle_install`, `db_prepare`, `db_migrate`, `assets_precompile`) with their parameters, whether each downloads, the account that runs them and the directory; other presets have none |
+| `site_task` | admin | runs one of them as the site's account in the site's directory: a fixed command from the table, typed parameters, never a command line; the answer carries the exact argv, the exit status and the output (head and tail); the credential files are made the site's alone and the configuration is validated; `dry_run` shows the command without running it; a missing interpreter comes back as `run_as_root`. Marked destructive, so the host asks |
 | `uploads_list` | viewer | archives stored with `agensio ctl upload`, for `site_install` |
 | `upload_delete` | operator | remove a stored upload |
 
@@ -148,9 +151,19 @@ there, where the files are).
 
 Every step is one line in the audit log with your uid and the reason the agent gave.
 
+A Rails application goes the same way. The agent creates the site with `app: "rails"`,
+its own user, `root` at `/var/www/example.com/app` and `upstream` at
+`http://127.0.0.1:3000`, then runs `site_task` four times: `gem_install_rails`,
+`rails_new` with `params: {"name": "shop"}`, `db_prepare` and `assets_precompile`, each as
+the site's account, reading the output when one fails. When Ruby is missing, the first
+answer carries the `apt-get` line for you to run as root. The one step left for a terminal
+is starting Puma, until agensio manages the application process: the agent hands you
+`docs/examples/puma.service` with the account, the directory and the port filled in.
+
 ## What it cannot do
 
-Install packages, edit hand-written site files or the main configuration file (root's:
+Run a command of its choosing (`site_task` runs only the named tasks of the site's preset,
+as the site's account, with an interpreter only root could have put there), install packages, edit hand-written site files or the main configuration file (root's:
 for a `[server]`, `[cache]`, `[log]` or `[control]` key the agent tells you the exact line
 and whether a reload or a restart follows, from `config_reference`), run anything as
 root, reach other machines except to download an archive you named into a site (and

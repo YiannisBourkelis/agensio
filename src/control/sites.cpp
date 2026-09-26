@@ -246,7 +246,10 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
         const bool will_have_user = has_key(body, "no_user") ? !body["no_user"].boolean()
                                     : has_key(body, "user") ? body["user"].is_string() && !body["user"].str().empty()
                                                             : !spec.user.empty();
-        const std::string bad = apply_settings(given, cfg, will_have_user && spec.php_socket.empty() && body.get("php_socket").empty(), normalised);
+        // The pool keys exist only where a pool will: a PHP site with its own user and no
+        // socket of its own; an undecided app passes here and meets the decision form below.
+        const bool php_site = spec.app != "static" && !proxy_app(spec.app);
+        const std::string bad = apply_settings(given, cfg, php_site && will_have_user && spec.php_socket.empty() && body.get("php_socket").empty(), normalised);
         if (!bad.empty()) {
             error = bad;
             return needs;
@@ -325,9 +328,13 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
         error = "https as a table needs cert and key";
         return needs;
     }
+    // A Rails application lives in app/ beside web/ (docs/design-site-operations.md 2b): its
+    // directory holds config/master.key and the databases, and is never a document root.
     if (spec.root.empty() && spec.app != "proxy")
-        needs.push_back(Decision{"root", "Where are the site's files? (the document root; for Laravel the project directory)",
-                                 (cfg.control.sites_root.empty() ? std::string("/var/www") : cfg.control.sites_root) + "/" + spec.domain + "/web", {}});
+        needs.push_back(Decision{"root", spec.app == "rails" ? "Where is the Rails application? (its project directory: tasks run there, nothing is served from it)"
+                                                             : "Where are the site's files? (the document root; for Laravel the project directory)",
+                                 (cfg.control.sites_root.empty() ? std::string("/var/www") : cfg.control.sites_root) + "/" + spec.domain +
+                                     (spec.app == "rails" ? "/app" : "/web"), {}});
     const std::vector<std::string> apps = app_presets();
     if (spec.app.empty()) {
         const std::string detected = spec.root.empty() ? std::string() : detect_app(spec.root);
@@ -338,12 +345,12 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
         for (std::size_t i = 0; i < apps.size(); ++i) error += (i ? ", " : "") + apps[i];
         return needs;
     }
-    if (spec.app == "proxy" && spec.upstream.empty())
+    if (proxy_app(spec.app) && spec.upstream.empty())
         needs.push_back(Decision{"upstream", "Where does the application listen? (http://host:port)", "http://127.0.0.1:3000", {}});
     if (!user_decided)
         needs.push_back(Decision{"user", "Run this site under its own system account? It isolates it from other sites. Answer with user: \"<name>\", or no_user: true for none.",
                                  suggest_user(spec.domain), {}});
-    const bool php = spec.app != "static" && spec.app != "proxy" && !spec.app.empty();
+    const bool php = php_app(spec.app);
     if (php && spec.user.empty() && spec.php_socket.empty() && user_decided)
         needs.push_back(Decision{"php_socket", "Without a site user no pool is generated: which php-fpm socket serves this site?",
                                  "unix:/run/php/php-fpm.sock", {}});
@@ -360,8 +367,8 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
     names.insert(names.end(), spec.aliases.begin(), spec.aliases.end());
     const bool tls = spec.https != "none";
     auto site_body = [&](std::string& s) {
-        if (spec.app == "proxy") {
-            s += "app = \"proxy\"\nupstream = " + toml_string(spec.upstream) + "\n";
+        if (proxy_app(spec.app)) {
+            s += "app = " + toml_string(spec.app) + "\nupstream = " + toml_string(spec.upstream) + "\n";
             if (!spec.root.empty()) s += "root = " + toml_string(spec.root) + "\n";
         } else {
             s += "root = " + toml_string(spec.root) + "\n";
@@ -370,7 +377,7 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
         if (!spec.user.empty()) s += "user = " + toml_string(spec.user) + "\n";
         if (!spec.group.empty()) s += "group = " + toml_string(spec.group) + "\n";
         if (!spec.user.empty() && !spec.access_log.empty()) s += "access_log = " + toml_string(spec.access_log) + "\n";
-        const bool php = spec.app != "static" && spec.app != "proxy" && !spec.app.empty();
+        const bool php = php_app(spec.app);
         if (spec.settings.is_object() && spec.settings["max_body_size"].is_string()) s += "max_body_size = " + toml_string(spec.settings.get("max_body_size")) + "\n";
         if (php) {
             if (!spec.php_socket.empty()) s += "php = { socket = " + toml_string(spec.php_socket) + " }\n";
@@ -565,7 +572,7 @@ std::string php_fpm_reload_command(const Config& cfg, const std::string& version
 
 std::vector<std::string> next_steps(const SiteSpec& spec, const Config& cfg) {
     std::vector<std::string> cmds;
-    const bool php = spec.app != "static" && spec.app != "proxy" && !spec.app.empty();
+    const bool php = php_app(spec.app);
     // Two entries, not one `a && b`: `agensio pools` exits 3 when it wrote files, which is
     // exactly when the reload matters (2026-09-20: the && skipped it).
     if (php && !spec.user.empty() && spec.php_socket.empty()) {
@@ -573,6 +580,9 @@ std::vector<std::string> next_steps(const SiteSpec& spec, const Config& cfg) {
         cmds.push_back(php_fpm_reload_command(cfg, spec.php_version));
     }
     if (spec.https == "auto") cmds.push_back("# make sure " + spec.domain + " resolves to this server and port 80 is reachable; the certificate follows within a minute");
+    if (spec.app == "rails")
+        cmds.push_back("# the application: site-task " + spec.domain + " gem_install_rails, then rails_new --param name=NAME, db_prepare and assets_precompile "
+                       "(site-tasks " + spec.domain + " lists them); then run Puma on " + spec.upstream + " (docs/examples/puma.service)");
     (void)cfg;
     return cmds;
 }

@@ -5,7 +5,9 @@
 #pragma once
 
 #include <functional>
+#include <map>
 #include <memory>
+#include <string>
 #include <string_view>
 
 #include "config.hpp"
@@ -44,6 +46,11 @@ struct ControlBackend {
     // "file_copy" selects the copy; anything else is an install.
     virtual void install_async(const json::Value& req, std::function<void(json::Value)> done) = 0;
     virtual std::string uploads_dir() = 0;  // "" when uploads are not possible (no state directory)
+    // A site task (F13): off the worker, `done` on worker 0. Through the helper as the site's
+    // account (the helper takes the site's name, the task and its parameters, and derives
+    // the rest from the configuration on disk), else on a thread as this process's account
+    // with the request's root, app and secrets.
+    virtual void task_async(const json::Value& req, std::function<void(json::Value)> done) = 0;
 };
 
 class ControlHandler {
@@ -77,6 +84,7 @@ private:
     void site_toggle(Stream& s, std::string_view name, std::string_view action, std::string_view reason);
     void site_install(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> done);
     void site_copy(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> done);
+    void site_task(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> done);
     void upload_receive(Stream& s, std::string_view name, std::function<void()> done);
     json::Value uploads_list();
     // The php-fpm pool after a site file changed: through the helper when there is one
@@ -89,6 +97,9 @@ private:
     ControlBackend* backend_ = nullptr;
     LogRegistry* logs_ = nullptr;
     int audit_ = -1;
+    // Sites with a task running (F13): one at a time per site. Touched on worker 0 only,
+    // where the control connections and the tasks' completions live.
+    std::map<std::string, std::string> running_tasks_;
 };
 
 }  // namespace agensio
