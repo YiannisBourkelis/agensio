@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -39,6 +40,15 @@ struct Arg {
     const char* unless = nullptr;
 };
 
+// A file a task needs before it runs, or must leave behind when it exits 0: a path relative
+// to the site's directory ("Gemfile") or one starting with {gem_home} or {home}, and what
+// the caller should do when it is missing (2026-09-27 report: gem_install_rails answered ok
+// without writing the rails command, and rails_new then failed with a bare LoadError).
+struct Need {
+    const char* path;
+    const char* hint;
+};
+
 struct Row {
     const char* app;      // the preset whose sites offer the task
     const char* name;     // what the caller names
@@ -51,6 +61,8 @@ struct Row {
     bool network;         // downloads; refused with [control] task_network = false
     bool needs_empty;     // the site's directory must be empty
     unsigned timeout;     // seconds; [control] task_limits.timeout caps it
+    std::vector<Need> needs = {};     // checked before it runs, dry run included
+    std::vector<Need> produces = {};  // checked after it exited 0
 };
 
 // What every row of a preset shares: its environment (values may hold {home} and
@@ -73,8 +85,17 @@ std::vector<std::string> all_names();
 std::vector<const Param*> all_params();
 
 // A site's tasks for GET /v1/sites/NAME/tasks: task, summary, runtime, params (name,
-// description, pattern, required), network, needs_empty, timeout.
-json::Value catalog(std::string_view app);
+// description, pattern, required), network, needs_empty, timeout. With a context, the
+// timeout is the effective one (the row's, capped by [control] task_limits.timeout) and
+// each task carries `interpreter`: the program it would run, whether the interpreter rule
+// accepts it, and when not the reason and the package command (`run_as_root`), so a
+// missing runtime is known before the first task, not on the third.
+struct CatalogContext {
+    unsigned timeout_cap = 0;
+    std::function<std::string(std::string_view runtime)> runtime_dir;
+    std::string sites_root;
+};
+json::Value catalog(std::string_view app, const CatalogContext* ctx = nullptr);
 
 // The caller's params against the row: an object (or null) of strings, no name the row
 // does not list, every required one given, each value matching its pattern. "" when
@@ -103,6 +124,12 @@ struct Plan {
 // The plan for a row whose params passed check_params; `program` is the interpreter's path
 // as trusted_program resolved it.
 Plan build(const Row& row, const json::Value& params, const Context& ctx, const std::string& program);
+
+// The row's `needs` (or, with `after`, its `produces`) against the filesystem, relative
+// paths below `root_fd`: "" when every one exists, else the refusal naming the first
+// missing path and what to do. As the executing account; never follows a symlink at the
+// last component of a relative path.
+std::string check_needs(const Row& row, const json::Value& params, const Context& ctx, int root_fd, bool after = false);
 
 // The rule for an interpreter: every component of the configured path and of the path it
 // resolves to belongs to root, every directory on them is writable by root alone, the file

@@ -23,6 +23,7 @@
 #include "control/roles.hpp"
 #include "control/commands.hpp"
 #include "control/reference.hpp"
+#include "control/mcp.hpp"
 #include "control/settings.hpp"
 #include "control/sites.hpp"
 #include "services/provision.hpp"
@@ -1710,7 +1711,8 @@ static void test_tasks() {
     CHECK(pl.argv == (std::vector<std::string>{"/usr/bin/ruby3.3", "/var/lib/agensio/r1/gems/bin/rails", "new", ".", "--name=blog", "--database=sqlite3", "--skip-git",
                                                "--skip-docker", "--skip-thruster", "--skip-ci"}));
     CHECK(pl.env == (std::vector<std::string>{"PATH=/usr/bin:/usr/local/bin:/bin", "HOME=/var/lib/agensio/r1", "TMPDIR=/var/lib/agensio/r1/tmp", "LANG=C.UTF-8",
-                                              "RAILS_ENV=production", "GEM_HOME=/var/lib/agensio/r1/gems", "BUNDLE_PATH=vendor/bundle", "BUNDLE_WITHOUT=development:test"}));
+                                              "RAILS_ENV=production", "GEM_HOME=/var/lib/agensio/r1/gems", "GEM_PATH=/var/lib/agensio/r1/gems",
+                                              "BUNDLE_PATH=vendor/bundle", "BUNDLE_WITHOUT=development:test"}));
     CHECK(pl.cwd == "/var/www/r.test/app" && pl.timeout == 1200 && pl.processes == 512 && pl.open_files == 4096);
     ctx.runtime_dir = "/opt/ruby/bin";
     ctx.timeout = 300;
@@ -1817,6 +1819,44 @@ static void test_tasks() {
     CHECK(tasks::sweep(site_fd, (dir / "site").string(), rule, tasks::family("rails")->secret_patterns)["secured"].items().empty());
     CHECK(secret_dir_mode(02750) == 02710 && secret_dir_mode(0755) == 0710 && secret_dir_mode(0700) == 0700 && !secret_exposed(02710, 33, 1001));
     ::close(site_fd);
+    // Needs and produces (2026-09-27 report): rails_new needs the rails command the earlier
+    // task installs, the bundle tasks need the application, gem_install_rails must leave the
+    // command behind; each named with what to do.
+    {
+        tasks::Context nc;
+        nc.root = (dir / "empty").string();
+        nc.home = (dir / "needs-home").string();
+        const int empty_fd = ::open(nc.root.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        const std::string no_rails = tasks::check_needs(fresh, js(R"({"name":"blog"})"), nc, empty_fd);
+        CHECK(no_rails.find("task rails_new needs " + nc.home + "/gems/bin/rails, which does not exist; run gem_install_rails first") == 0);
+        CHECK(tasks::check_needs(gem, json::Value(), nc, empty_fd, true).find("task gem_install_rails exited 0, but " + nc.home + "/gems/bin/rails does not exist") == 0);
+        CHECK(tasks::check_needs(prep, json::Value(), nc, empty_fd).find("task db_prepare needs " + nc.root + "/Gemfile, which does not exist; the site's directory holds no application yet") == 0);
+        CHECK(tasks::check_needs(gem, json::Value(), nc, empty_fd).empty());  // it needs nothing
+        fs::create_directories(dir / "needs-home/gems/bin");
+        std::ofstream(dir / "needs-home/gems/bin/rails") << "#!/usr/bin/env ruby\n";
+        CHECK(tasks::check_needs(fresh, js(R"({"name":"blog"})"), nc, empty_fd).empty() && tasks::check_needs(gem, json::Value(), nc, empty_fd, true).empty());
+        ::close(empty_fd);
+        nc.root = (dir / "site").string();  // holds a Gemfile (the sweep section made one)
+        const int app_fd = ::open(nc.root.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        CHECK(tasks::check_needs(prep, json::Value(), nc, app_fd).empty() && tasks::check_needs(*tasks::find("rails", "assets_precompile"), json::Value(), nc, app_fd).empty());
+        ::close(app_fd);
+    }
+    // The listing a site's tasks answer with: the effective time limit (the row's, capped by
+    // root's ceiling) and each interpreter's state.
+    {
+        tasks::CatalogContext cc;
+        cc.timeout_cap = 1200;
+        cc.runtime_dir = [](std::string_view) { return std::string("/nonexistent-agensio-runtime"); };
+        cc.sites_root = "/var/www";
+        const json::Value listed = tasks::catalog("rails", &cc);
+        CHECK(listed.items().size() == 6 && listed.items()[1].get("task") == "rails_new" && listed.items()[1]["timeout"].num() == 1200 &&
+              listed.items()[3]["timeout"].num() == 1200);  // db_prepare's own 1800 is capped too
+        const json::Value& in = listed.items()[0]["interpreter"];
+        CHECK(in.get("program") == "/nonexistent-agensio-runtime/gem" && !in["ok"].boolean() && !in.get("error").empty());
+        cc.timeout_cap = 7200;
+        CHECK(tasks::catalog("rails", &cc).items()[1]["timeout"].num() == 3600);  // a higher ceiling never raises a row
+        CHECK(tasks::catalog("rails").items()[1]["interpreter"].is_null());
+    }
     // execute's refusals, each before anything runs.
     tasks::Request tr;
     tr.row = &fresh;
@@ -1867,6 +1907,15 @@ static void test_tasks() {
     CHECK(rs.app == "rails" && !rs.pool.generated && proxy_app("rails") && proxy_app("proxy") && !proxy_app("laravel") && php_app("laravel") && !php_app("rails"));
     const auto rl = std::find_if(rs.locations.begin(), rs.locations.end(), [](const LocationConfig& l) { return l.path == "/"; });
     CHECK(rl != rs.locations.end() && rl->kind == HandlerKind::proxy && rl->origin == "preset:rails");
+    // The paths scanners probe are answered 404 at the edge, never proxied to Puma.
+    auto refused_at = [&](const char* path, bool exact) {
+        const auto it = std::find_if(rs.locations.begin(), rs.locations.end(), [&](const LocationConfig& l) { return l.path == path && l.exact == exact; });
+        return it != rs.locations.end() && it->handler == "deny" && it->kind == HandlerKind::static_ && it->origin == "preset:rails";
+    };
+    CHECK(refused_at("/config/master.key", true) && refused_at("/.env", true) && refused_at("/Gemfile.lock", true) && refused_at("/config/credentials/", false) &&
+          refused_at("/.kamal/", false));
+    CHECK(Router::location(rs, "/config/master.key").handler == "deny" && Router::location(rs, "/config/credentials/production.key").handler == "deny" &&
+          Router::location(rs, "/config").kind == HandlerKind::proxy && Router::location(rs, "/storage/x.png").kind == HandlerKind::proxy);
     const auto rsec = secret_paths(rs);
     CHECK(std::find(rsec.begin(), rsec.end(), rs.root + "/config/master.key") != rsec.end() && std::find(rsec.begin(), rsec.end(), rs.root + "/storage") != rsec.end());
     write("d.toml", rails);
@@ -1883,6 +1932,10 @@ static void test_tasks() {
             return hit;
         }
     };
+    CHECK(version_mismatch_note("0.1.0-alpha.26", "0.1.0-alpha.26").empty() && version_mismatch_note("0.1.0-alpha.26", "").empty());
+    const std::string note = version_mismatch_note("0.1.0-alpha.23", "0.1.0-alpha.26");
+    CHECK(note.find("bridge is agensio 0.1.0-alpha.23 and the server runs 0.1.0-alpha.26") != std::string::npos && note.find("reconnect this MCP server") != std::string::npos &&
+          note.find("systemctl restart agensio") != std::string::npos);
     CHECK(refused("[control]\nruntimes = { ruby = \"usr/bin\" }\n" + rails, "must be an absolute directory"));
     CHECK(refused("[control]\nruntimes = { perl = \"/usr/bin\" }\n" + rails, "unknown runtime \"perl\""));
     CHECK(refused("[control]\nruntimes = { ruby = \"/var/www/x/bin\" }\n" + rails, "below sites_root"));

@@ -62,25 +62,34 @@ const std::vector<Family>& families() {
         {"rails",
          // Production throughout: bundle install skips the development and test groups, so
          // anything Rails loads must be the production environment's.
-         {{"RAILS_ENV", "production"}, {"GEM_HOME", "{gem_home}"}, {"BUNDLE_PATH", "vendor/bundle"}, {"BUNDLE_WITHOUT", "development:test"}},
+         // GEM_PATH = GEM_HOME: the account sees its own gems and Ruby's default gems, never
+         // what root installed system-wide. Without it a host-wide `gem install rails`
+         // satisfied every dependency, gem_install_rails installed the meta-gem alone and no
+         // rails command appeared (2026-09-27 live report).
+         {{"RAILS_ENV", "production"}, {"GEM_HOME", "{gem_home}"}, {"GEM_PATH", "{gem_home}"}, {"BUNDLE_PATH", "vendor/bundle"},
+          {"BUNDLE_WITHOUT", "development:test"}},
          {"config/credentials.yml.enc", "config/credentials/*.key", ".env.*", "db/*.sqlite3", "storage/*.sqlite3", "storage/*.sqlite3-wal",
           "storage/*.sqlite3-shm", ".kamal/secrets*"}},
     };
     return f;
 }
 
+constexpr const char* kNoGemfile = "the site's directory holds no application yet: make one with rails_new, or install one with site_install";
+
 }  // namespace
 
 const std::vector<Row>& rows() {
     static const std::vector<Row> r = {
         {"rails", "gem_install_rails",
-         "Installs Rails 8 into the account's own gem directory (<home>/gems): the rails command rails_new runs. Downloads from rubygems.org "
-         "and compiles native extensions; a few minutes.",
+         "Installs Rails 8 with every dependency into the account's own gem directory (<home>/gems), isolated from gems installed "
+         "system-wide: the rails command rails_new runs. Downloads from rubygems.org and compiles native extensions; a few minutes. "
+         "Running it again completes the directory (an account made before 0.1.0-alpha.26 relied on the system's gems).",
          "ruby", "gem",
          {{"install"}, {"rails"}, {"--no-document"}, {"--version"}, {"{version}", "version"}, {"~> 8.0", nullptr, "version"}},
          {{"version", "An exact Rails 8 release, e.g. 8.1.4; default the newest 8.x.", "^8(\\.[0-9]{1,4}){1,3}$", rails_version, false}},
          {},
-         true, false, 3600},
+         true, false, 3600, {},
+         {{"{gem_home}/bin/rails", "gem installed nothing that provides the rails command; the output shows what it resolved"}}},
         // Not --skip-bundle: Rails 8 skips its importmap, Hotwire and Solid Cache/Queue/Cable
         // installers when the bundle is skipped, and the application it leaves behind fails in
         // production. The bundle it installs goes to vendor/bundle (the preset's environment).
@@ -96,20 +105,21 @@ const std::vector<Row>& rows() {
           {"--skip-thruster"}, {"--skip-ci"}},
          {{"name", "The application's name (its Ruby module): a letter, then letters, digits and underscores.", "^[A-Za-z][A-Za-z0-9_]{0,63}$", app_name, true}},
          {},
-         true, true, 3600},
+         true, true, 3600,
+         {{"{gem_home}/bin/rails", "run gem_install_rails first: it installs the rails command into the account's own gem directory"}}},
         {"rails", "bundle_install",
          "Installs the gems of the application's Gemfile into vendor/bundle (production gems only): after a Gemfile change, or after an "
          "application was installed from an archive. Downloads.",
-         "ruby", "bundle", {{"install"}}, {}, {}, true, false, 3600},
+         "ruby", "bundle", {{"install"}}, {}, {}, true, false, 3600, {{"Gemfile", kNoGemfile}}},
         {"rails", "db_prepare",
          "Creates the production databases when they are missing and loads the schema, else runs pending migrations (bin/rails db:prepare).",
-         "ruby", "bundle", {{"exec"}, {"rails"}, {"db:prepare"}}, {}, {}, false, false, 1800},
+         "ruby", "bundle", {{"exec"}, {"rails"}, {"db:prepare"}}, {}, {}, false, false, 1800, {{"Gemfile", kNoGemfile}}},
         {"rails", "db_migrate", "Runs pending migrations on the production databases (bin/rails db:migrate).",
-         "ruby", "bundle", {{"exec"}, {"rails"}, {"db:migrate"}}, {}, {}, false, false, 1800},
+         "ruby", "bundle", {{"exec"}, {"rails"}, {"db:migrate"}}, {}, {}, false, false, 1800, {{"Gemfile", kNoGemfile}}},
         // SECRET_KEY_BASE_DUMMY: compiling assets needs no real secret, and an application
         // installed from an archive has no config/master.key (it is never committed).
         {"rails", "assets_precompile", "Builds the assets into public/assets (bin/rails assets:precompile).",
-         "ruby", "bundle", {{"exec"}, {"rails"}, {"assets:precompile"}}, {}, {{"SECRET_KEY_BASE_DUMMY", "1"}}, false, false, 3600},
+         "ruby", "bundle", {{"exec"}, {"rails"}, {"assets:precompile"}}, {}, {{"SECRET_KEY_BASE_DUMMY", "1"}}, false, false, 3600, {{"Gemfile", kNoGemfile}}},
     };
     return r;
 }
@@ -154,15 +164,32 @@ std::vector<const Param*> all_params() {
     return out;
 }
 
-json::Value catalog(std::string_view app) {
+json::Value catalog(std::string_view app, const CatalogContext* ctx) {
     json::Value list = json::Value::array();
     for (const auto& r : rows()) {
         if (app != r.app) continue;
         json::Value params = json::Value::array();
         for (const auto& p : r.params)
             params.push(json::Value::object().set("name", p.name).set("description", p.description).set("pattern", p.pattern).set("required", p.required));
-        list.push(json::Value::object().set("task", r.name).set("summary", r.summary).set("runtime", r.runtime).set("params", std::move(params))
-                      .set("network", r.network).set("needs_empty", r.needs_empty).set("timeout", static_cast<double>(r.timeout)));
+        // The limit a run gets, not the table's: the row's own, capped by root's ceiling
+        // (2026-09-27 report: 3600 advertised, 1200 applied).
+        const unsigned timeout = ctx && ctx->timeout_cap ? std::min(r.timeout, ctx->timeout_cap) : r.timeout;
+        json::Value item = json::Value::object().set("task", r.name).set("summary", r.summary).set("runtime", r.runtime).set("params", std::move(params))
+                               .set("network", r.network).set("needs_empty", r.needs_empty).set("timeout", static_cast<double>(timeout));
+        if (ctx && ctx->runtime_dir) {
+            const std::string path = ctx->runtime_dir(r.runtime) + "/" + r.program;
+            std::string canonical;
+            bool missing = false;
+            const std::string why = trusted_program(path, ctx->sites_root, canonical, missing);
+            json::Value in = json::Value::object().set("program", path).set("ok", why.empty());
+            if (!why.empty()) {
+                in.set("error", why);
+                if (missing)
+                    if (const std::string cmd = install_hint(r.runtime); !cmd.empty()) in.set("run_as_root", cmd);
+            }
+            item.set("interpreter", std::move(in));
+        }
+        list.push(std::move(item));
     }
     return list;
 }
@@ -238,6 +265,22 @@ Plan build(const Row& row, const json::Value& params, const Context& ctx, const 
     plan.processes = ctx.processes;
     return plan;
 }
+
+#ifndef _WIN32
+std::string check_needs(const Row& row, const json::Value& params, const Context& ctx, int root_fd, bool after) {
+    for (const Need& n : after ? row.produces : row.needs) {
+        const std::string path = expand(n.path, params, ctx);
+        struct stat st {};
+        const bool absolute = !path.empty() && path[0] == '/';
+        const bool there = absolute ? ::stat(path.c_str(), &st) == 0 : ::fstatat(root_fd, path.c_str(), &st, AT_SYMLINK_NOFOLLOW) == 0;
+        if (there && S_ISREG(st.st_mode)) continue;
+        const std::string shown = absolute ? path : ctx.root + "/" + path;
+        return after ? "task " + std::string(row.name) + " exited 0, but " + shown + " does not exist; " + n.hint
+                     : "task " + std::string(row.name) + " needs " + shown + ", which does not exist; " + n.hint;
+    }
+    return "";
+}
+#endif
 
 void Capture::add(const char* p, std::size_t n) {
     total_ += n;
@@ -692,6 +735,13 @@ json::Value execute(const Request& req) {
             if (const std::string cmd = install_hint(row.runtime); !cmd.empty()) f.set("run_as_root", cmd);
         return f;
     }
+    // What the task needs from earlier ones, checked for a dry run too, so a dry run meets
+    // the refusal the real run would (2026-09-27 report: a dry run of rails_new answered ok
+    // with no rails command installed, the run failed 11 ms later).
+    if (std::string bad = check_needs(row, req.params, req.ctx, root_fd); !bad.empty()) {
+        ::close(root_fd);
+        return refusal(std::move(bad));
+    }
     const Plan plan = build(row, req.params, req.ctx, program);
     json::Value argv = json::Value::array(), env = json::Value::array();
     for (const auto& a : plan.argv) argv.push(a);
@@ -718,14 +768,17 @@ json::Value execute(const Request& req) {
     r.set("ran", true);
     const Family* fam = family(row.app);
     const json::Value swept = sweep(root_fd, req.ctx.root, req.secrets, fam ? fam->secret_patterns : std::vector<const char*>{});
+    const std::string not_produced = check_needs(row, req.params, req.ctx, root_fd, true);
     ::close(root_fd);
     r.set("secured", swept["secured"]).set("exposed", swept["exposed"]);
     const bool timed_out = result["timed_out"].boolean();
     const json::Value& exit = result["exit"];
     const bool clean = exit.type() == json::Value::Type::number && exit.num() == 0;
-    const bool ok = clean && !timed_out && swept["exposed"].items().empty();
+    const bool ok = clean && !timed_out && swept["exposed"].items().empty() && not_produced.empty();
     r.set("ok", ok);
-    if (!ok) {
+    if (!ok && clean && !timed_out && swept["exposed"].items().empty()) {
+        r.set("error", not_produced);  // it exited 0 without what the next task needs
+    } else if (!ok) {
         std::string what;
         if (timed_out) what = "stopped after its time limit of " + std::to_string(plan.timeout) + " s ([control] task_limits.timeout)";
         else if (!result["signal"].is_null()) what = "killed by signal " + std::to_string(static_cast<int>(result["signal"].num()));
@@ -737,6 +790,7 @@ json::Value execute(const Request& req) {
 }
 
 #else
+std::string check_needs(const Row&, const json::Value&, const Context&, int, bool) { return ""; }
 std::string trusted_program(const std::string&, const std::string&, std::string&, bool& missing) {
     missing = false;
     return "not available on this platform";

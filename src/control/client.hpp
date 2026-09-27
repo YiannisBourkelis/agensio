@@ -9,6 +9,7 @@ namespace agensio {
 struct ControlReply {
     int status = 0;
     std::string body;
+    std::string version;  // X-Agensio-Version of the answer: the server binary's version ("" from a server before 0.1.0-alpha.26)
 };
 
 // False with `error` set when the socket cannot be reached or the reply is not HTTP.

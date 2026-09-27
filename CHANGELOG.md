@@ -1,4 +1,44 @@
 # Changelog
+## 0.1.0-alpha.26 (unreleased)
+
+From the first Rails site built through `site_task` on a live host (report against
+alpha.25):
+
+- **Rails tasks no longer depend on gems installed system-wide.** With `GEM_HOME` alone
+  the system's gems stayed on the search path, so on a host where root had once run `gem
+  install rails`, `gem_install_rails` installed the meta-gem only, answered ok, and
+  `rails_new` failed with a bare LoadError on a missing `rails` command. Every Rails task
+  now also sets `GEM_PATH` to the account's `<home>/gems`: the account sees its own gems
+  and Ruby's default gems, never root's (verified with Debian's Ruby 3.3: the full tree
+  installs, `rails new`, `db:prepare` and `assets:precompile` run through the default
+  Bundler). An account made before this release keeps working for its application (the
+  application's gems live in `vendor/bundle`); `gem_install_rails` run once more completes
+  its gem directory. `docs/examples/puma.service` sets the same two variables.
+- **A task that needs an earlier one's result is refused before it runs, dry run
+  included**, naming the missing file and the task to run (`rails_new` needs the `rails`
+  command; the bundle tasks need the application's `Gemfile`), and **a task that exits 0
+  without what the next one needs answers 409**, never ok (`gem_install_rails` without the
+  `rails` command).
+- **`site_tasks_list` reports each task's interpreter** (the program, whether the rule
+  accepts it, and the package command when it is missing, with every missing package
+  listed once under `run_as_root`), so root installs `ruby-bundler` before the first task
+  instead of after the third, **and the effective time limit**: the row's, capped by
+  `[control] task_limits.timeout` (3600 was advertised where 1200 applied).
+- **The paths scanners probe on a Rails site are refused by agensio itself**
+  (`/config/master.key`, `/config/database.yml`, `/.env`, `/Gemfile.lock`, `/.git/`,
+  `/.kamal/` and the rest, listed under `never_served` in `presets`), 404 with no round trip
+  to Puma and no line in the application's log.
+- **The bridge says when it and the server are different builds.** Every control answer
+  carries `X-Agensio-Version`, and a tool result from a bridge whose version differs from
+  the server's carries a note: reconnect the MCP server after an upgrade, or restart a
+  server that was not. The report's `app` enum without `rails` came from a bridge started
+  before the upgrade to alpha.25; the enum is generated from the preset table and always
+  had it.
+- Tests: unit (the environment, `check_needs` both ways, the listing's time limit and
+  interpreter state, the Rails refusals, the note), `tests/tasks.sh` 29 checks (the fake
+  `gem` can now leave no `rails` command behind), the integration suite (the listing, the
+  version header), `tests/rails.sh` 16 checks (root installs Rails system-wide first; a
+  credential path answered 404 without `x-request-id`).
 
 ## 0.1.0-alpha.25 (2026-09-27)
 

@@ -35,7 +35,7 @@ void ControlHandler::reply(Stream& s, int status, const json::Value& body) {
     r.status = status;
     r.buffer = body.dump();
     r.buffer.push_back('\n');
-    r.scratch = "Content-Type: application/json\r\nCache-Control: no-store\r\nContent-Length: " +
+    r.scratch = "Content-Type: application/json\r\nCache-Control: no-store\r\nX-Agensio-Version: " AGENSIO_VERSION "\r\nContent-Length: " +
                 std::to_string(r.buffer.size()) + "\r\n\r\n";
     r.prebuilt_headers = r.scratch;
     r.prebuilt_terminated = true;
@@ -175,7 +175,22 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
             return false;
         }
         const std::string app = site->app.empty() ? "static" : site->app;
-        json::Value body = json::Value::object().set("site", std::string(name)).set("app", app).set("tasks", tasks::catalog(app));
+        tasks::CatalogContext cc;
+        cc.timeout_cap = cfg.control.task_timeout;
+        cc.runtime_dir = [&cfg](std::string_view runtime) { return runtime_dir(cfg.control, runtime); };
+        cc.sites_root = cfg.control.sites_root.empty() ? std::string("/var/www") : cfg.control.sites_root;
+        json::Value list = tasks::catalog(app, &cc);
+        // Every package a task's interpreter is missing, once: root installs them before the
+        // first task instead of on the third (2026-09-27 report).
+        json::Value missing = json::Value::array();
+        for (const auto& t : list.items()) {
+            const std::string_view cmd = t["interpreter"].get("run_as_root");
+            bool seen = cmd.empty();
+            for (const auto& m : missing.items()) seen = seen || m.str() == cmd;
+            if (!seen) missing.push(std::string(cmd));
+        }
+        json::Value body = json::Value::object().set("site", std::string(name)).set("app", app).set("tasks", std::move(list));
+        if (!missing.items().empty()) body.set("run_as_root", std::move(missing));
         if (tasks::has_tasks(app)) {
             const auto it = running_tasks_.find(site->server_names.front());
             body.set("running", it == running_tasks_.end() ? json::Value(nullptr) : json::Value(it->second))

@@ -619,3 +619,17 @@ the files and the trash round it off.
   rails` takes minutes, so the control connection died mid-task; the same bug cut slow
   PHP scripts and proxied requests. Fixed in `http1/connection.hpp` (a working handler is
   not idleness, only a body the client does not send is), as HTTP/2 already did.
+- From the first live Rails site on a real host (2026-09-27 report against alpha.25):
+  a host-wide `gem install rails` leaked into the account's installs, because `GEM_HOME`
+  alone keeps the system's gems on the search path, so `gem_install_rails` installed the
+  meta-gem only and `rails_new` failed on a missing `rails` command; the Rails family now
+  sets `GEM_PATH = GEM_HOME` too (Ruby's default gems stay visible, so the default Bundler
+  runs the bundle tasks), and `tests/rails.sh` installs a system-wide Rails first. Rows
+  carry `needs` (checked before a run, dry run included) and `produces` (checked after an
+  exit 0), so no task answers ok without what the next one needs and no dry run promises a
+  run that fails. The listing reports each interpreter's state and the effective time
+  limit. The paths scanners probe are refused at the edge for `rails` sites. Every control
+  answer names the server's version, and the bridge notes a mismatch: the report's missing
+  `rails` in the `app` enum came from a bridge started before the upgrade, which nothing
+  said. What the report read as agensio serving `public/` was Rails' own static file
+  server behind the proxy (no `x-request-id` on those answers); section 7 still stands.

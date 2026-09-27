@@ -480,7 +480,16 @@ suggests), and the preset's named tasks run there as the site's account (section
 `config/credentials/`, `config/database.yml` and `storage/` (the SQLite databases and
 Active Storage's files), are held to the hosting rule of section 11 like `wp-config.php`
 is, and every writer and task leaves them the site's alone. A site with its own `user`
-and `app = "rails"` gets no php-fpm pool.
+and `app = "rails"` gets no php-fpm pool. Nothing is served from the project directory
+yet: every request goes to Puma, and Rails' own public file server answers what lies in
+`public/` (serving it from disk is step 7 of `docs/design-site-operations.md`). The paths
+scanners probe are answered 404 by agensio itself and never reach the application:
+`/config/master.key`, `/config/database.yml`, `/config/credentials.yml.enc`,
+`/config/credentials/`, `/.env`, `/.env.production`, `/.kamal/`, `/.git/`, `/Gemfile`,
+`/Gemfile.lock`, `/log/production.log`, `/storage/production.sqlite3` (`presets` lists them
+under `never_served`; a hand-written location of the same path wins). Every task prints
+"Using vips to process variants requires the libvips library" until `libvips42` is
+installed; only Active Storage's image variants need it.
 
 ```toml
 [[site]]
@@ -1172,7 +1181,7 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 | `validate` | viewer | loads the file on disk again and runs the hosting rules: `ok`, `errors`, site count, and the restart-only settings that differ from the running server |
 | `logs` | viewer | `--site NAME` (default: all sites plus the error log), `--since 3h` (`m`, `h`, `d`, `w`, seconds, or a local `YYYY-MM-DDThh:mm:ss`; default 1h), `--level error|warn|info` for the error log (default warn = error+warn), `--status 5xx|4xx|all|NNN` for access logs (default 5xx), `--limit N` (default 200, newest). Reads at most 2 MB per file from the end; `truncated` says when that cut in |
 | `uploads` | viewer | the archives stored with `upload` (`file`, `bytes`, `uploaded`), ready for `site-install --file` |
-| `site-tasks NAME` | viewer | the named tasks the site's preset offers (`app = "rails"`: six), each with its summary, its parameters (name, meaning, pattern, required), whether it downloads, whether the directory must be empty and its time limit; the account that runs them (`runs_as`), the directory, the task running now; a site of another preset has none |
+| `site-tasks NAME` | viewer | the named tasks the site's preset offers (`app = "rails"`: six), each with its summary, its parameters (name, meaning, pattern, required), whether it downloads, whether the directory must be empty, its effective time limit (the row's, capped by `[control] task_limits.timeout`) and its `interpreter`: the program, whether the interpreter rule accepts it and, when not, why and the package command; `run_as_root` at the top lists every missing package once, so root installs them before the first task; the account that runs them (`runs_as`), the directory, the task running now; a site of another preset has none |
 | `settings [NAME]` | viewer | the per-site limits `site-create` and `site-update` accept under `settings`: for each key its type, unit and spellings, meaning, default and its origin, minimum, the ceiling from `[control] site_limits`, what changing it costs (agensio reload, php-fpm reload) and what it derives; with a site, the current value and whether it comes from the site, the server or a built-in default. `site NAME` reports the same `settings` |
 | `health` | viewer | findings with `severity`, `code`, `site`, `message`, `fix` (also `files_unreadable`: files under a document root, the preset's upload directory first, that the server's account cannot open and that answer 404 with no log line; `php_tmp_missing`; `php_fpm_hard_reload`; `php_pool_resident`, judged from the pool file php-fpm runs; `preset_mismatch`: the files under a site's directory belong to another application than its `app` says, with the application detected and the `app` to set; `archives_in_root`: backup archives and database dumps under a served tree, the directories a preset never answers excepted): configuration on disk invalid or failing the hosting rules, restart-only settings changed, running as root, certificate unreadable / still the placeholder / expired / expiring within 14 days (manual), `tls = "auto"` without a plain port-80 site for the names, no http-to-https redirect, application sites sharing the server's account, generated pools out of date, errors in the last 24 hours. `ok` is true when nothing above info level was found |
 
@@ -1214,7 +1223,18 @@ other option are simply not expressible. The Rails rows:
 Every Rails task runs with `RAILS_ENV=production`, `BUNDLE_PATH=vendor/bundle` and
 `BUNDLE_WITHOUT=development:test`: the gems of the application live in the project, only
 the production groups are installed, and what the tasks prepared is what Puma loads with
-the same environment (`docs/examples/puma.service`).
+the same environment (`docs/examples/puma.service`). `GEM_HOME` and `GEM_PATH` both name
+the account's own `<home>/gems`, so a task sees the account's gems and Ruby's default gems
+and never what root installed system-wide (before 0.1.0-alpha.26 a host-wide `gem install
+rails` satisfied every dependency, `gem_install_rails` installed the meta-gem alone and
+`rails_new` found no `rails` command; running `gem_install_rails` again completes an
+account made then).
+
+A task that needs an earlier task's result is refused before it runs, dry run included,
+naming the missing file and what to run: `rails_new` needs the `rails` command
+`gem_install_rails` writes into `<home>/gems/bin`, and the four bundle tasks need the
+application's `Gemfile`. A task that exits 0 without leaving what the next one needs
+(`gem_install_rails` without the `rails` command) answers 409 saying so, never ok.
 
 The interpreter comes from `[control] runtimes` in root's file (`/usr/bin` by default):
 the program, the file it resolves to and every directory above both must belong to root

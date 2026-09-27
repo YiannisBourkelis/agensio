@@ -587,6 +587,15 @@ struct PhpPreset {
 // PHP source is source; nothing public is spelled so). One list for all presets, since
 // testing each against its own let wordpress fall behind drupal (2026-09-20 report:
 // x.inc and x.php~ under wp-content/uploads were served as source).
+// Paths scanners probe on a Rails site, answered 404 by agensio itself. Nothing of the
+// project is served from disk under app = "rails" (Rails' own public file server answers
+// public/ behind the proxy), so before 2026-09-27 these reached Puma and cost an
+// application round trip and a log line each. Exact paths, and directories no
+// application routes to; the rest of the URL space stays the application's.
+const std::vector<const char*> kRailsRefused = {"/config/master.key", "/config/database.yml", "/config/credentials.yml.enc", "/config/credentials/",
+                                                "/.env", "/.env.production", "/.kamal/", "/.git/", "/Gemfile", "/Gemfile.lock",
+                                                "/log/production.log", "/storage/production.sqlite3"};
+
 const std::vector<std::string> kSourceBackups = {".inc", ".bak", ".orig", ".save", ".swp", ".swo", "~",
                                                  // logs and database dumps (2026-09-23 live report: a Grav site's logs/grav.log
                                                  // named its backup archive; WordPress's wp-content/debug.log is the classic)
@@ -762,6 +771,26 @@ void apply_preset(SiteConfig& site, const std::string& where) {
             loc.origin = "preset:" + site.app;
             site.locations.push_back(std::move(loc));
         }
+        if (site.app == "rails")
+            for (const char* p : kRailsRefused) {
+                const std::string path = p;
+                const bool dir = path.back() == '/';
+                if (has(path, !dir, false)) continue;  // a hand-written location wins
+                LocationConfig loc;
+                loc.path = path;
+                loc.exact = !dir;
+                loc.root = site.root;
+                loc.index = site.index;
+                loc.hidden_files = site.hidden_files;
+                loc.symlinks_deny = site.symlinks_deny;
+                loc.try_files = parse_try_files({"=404"});
+                loc.handler = "deny";  // the static handler answers 404 without looking at the disk
+                loc.kind = HandlerKind::static_;
+                loc.methods = kStaticMethods;
+                loc.allow = allow_header(kStaticMethods);
+                loc.origin = "preset:rails";
+                site.locations.push_back(std::move(loc));
+            }
         return;
     }
     if (!site.php.configured)
@@ -1714,15 +1743,17 @@ json::Value preset_catalog() {
     list.push(json::Value::object().set("app", "proxy").set("summary", "Reverse proxy: every request goes to the site's upstream (Node, Rails, Go, Java, WebSockets); no root needed.")
                   .set("root", "none").set("php", "none"));
     {
-        json::Value names = json::Value::array(), secrets = json::Value::array();
+        json::Value names = json::Value::array(), secrets = json::Value::array(), never = json::Value::array();
         for (const auto& n : tasks::names("rails")) names.push(n);
         for (const auto& s : preset_secrets("rails")) secrets.push(s);
+        for (const char* p : kRailsRefused) never.push(p);
         list.push(json::Value::object().set("app", "rails")
                       .set("summary", "Ruby on Rails: every request goes to the application server (Puma) on the site's upstream; root is the project "
                                       "directory, where site_task runs the preset's named commands as the site's account (gem_install_rails, rails_new, "
                                       "bundle_install, db_prepare, db_migrate, assets_precompile; site_tasks_list shows them).")
                       .set("root", "the project directory (nothing is served from it directly: every request goes to the upstream)")
-                      .set("php", "none").set("tasks", std::move(names)).set("secrets", std::move(secrets)));
+                      .set("php", "none").set("tasks", std::move(names)).set("secrets", std::move(secrets))
+                      .set("never_served", std::move(never)));
     }
     return json::Value::object().set("presets", std::move(list))
         .set("note", "agensio never reads .htaccess; a preset provides the refusals an application's .htaccess would. Hand-written [[site.location]] entries win over a preset's. Every never_served name is refused in any backup spelling too, in its directory, whatever the case: name.bak, name~, name.txt, name-old, stem.bak (wp-config.bak), .name.swp, #name#; nothing to configure, and the bare stem (/readme, /license) stays a permalink.");

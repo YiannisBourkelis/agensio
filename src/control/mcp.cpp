@@ -156,7 +156,7 @@ std::vector<Tool> tools() {
     t.push_back({"config_reference", "Configuration reference", "Every configuration key agensio reads, in one table: its table ([server], [cache], [log], [control], [[site]], php = {}, proxy = {}, [[site.location]]), type, default, meaning, whether a change applies on reload or needs a restart, who changes it (via: file = root in the main configuration file; site file; site-create = a field of site_create/site_update; settings = site_update's settings), the section of docs/configuration.md that explains it, and for server-level keys the running value and the file it comes from. Use it to answer 'how do I change X' and 'what is X set to'. Read via as which tool does it: settings and site-create mean site_update (or site_create), and you do it here; only via = file (root's main configuration) and via = site file (a hand-written site file) have no tool, and only then give the user the exact TOML line, the file, and `agensio reload` or `systemctl restart agensio` as applies says, stating that agensio does not edit that file itself. A key that is not listed does not exist.", "GET", "/v1/config/reference", true, false, Role::viewer, schema({}, {})});
     t.push_back({"site_settings_list", "Site settings", "The per-site limits site_create and site_update accept under settings, from the same table as the schema: for each key its type, unit and accepted spellings, meaning, default and where it comes from, minimum, the ceiling [control] site_limits sets (root raises it in the configuration file), what changing it costs (agensio reload, php-fpm reload) and what it derives (max_body_size drives the pool's upload_max_filesize and post_max_size). With name, also each key's current effective value and its source (site, server, default). Use it before changing a limit, and to answer 'what is this site's upload limit'.", "GET", "/v1/settings", true, false, Role::viewer,
                  schema({{"name", prop("string", "A site's host name: adds the current values. Omit for the table alone.")}}, {})});
-    t.push_back({"site_tasks_list", "List a site's tasks", "The named tasks site_task can run on this site, from its preset's table: for app = \"rails\" gem_install_rails, rails_new, bundle_install, db_prepare, db_migrate, assets_precompile. Each with what it does, its parameters (name, pattern, required), whether it downloads (refused when root set [control] task_network = false), whether the site's directory must be empty, and its time limit; also the account that runs it, the directory, and the task running now if any. Sites of other presets have none, and agensio runs no other command.", "GET", "/v1/sites/{name}/tasks", true, false, Role::viewer, schema({{"name", name_arg()}}, {"name"})});
+    t.push_back({"site_tasks_list", "List a site's tasks", "The named tasks site_task can run on this site, from its preset's table: for app = \"rails\" gem_install_rails, rails_new, bundle_install, db_prepare, db_migrate, assets_precompile. Each with what it does, its parameters (name, pattern, required), whether it downloads (refused when root set [control] task_network = false), whether the site's directory must be empty, its effective time limit, and its interpreter: the program it would run, whether the interpreter rule accepts it, and when not the reason and the package command. run_as_root at the top lists every missing package once: call this before the first task and ask the user to install them then, not after a task fails. Also the account that runs the tasks, the directory, and the task running now if any. Sites of other presets have none, and agensio runs no other command.", "GET", "/v1/sites/{name}/tasks", true, false, Role::viewer, schema({{"name", name_arg()}}, {"name"})});
     t.push_back({"presets_list", "Application presets", "What each `app` value does: which directory is served, whether every .php runs or only the front controller, what is refused, which directories never run PHP, which serve certain endings alone (`serves_only`: Grav's user/accounts avatars, user/data media), which files are never served (and, the note says, refused in every backup spelling too: wp-config.php.bak, wp-config.php~, .wp-config.php.swp, wp-config.txt, so a user asking whether a backup of the credentials file is exposed can be answered without a terminal), and `source`: the official archive site_install takes when it has one (wordpress, drupal, grav). Use it to answer 'which applications are supported', to pick app for site_create and to know whether site_install can fetch the application itself; the site_show tool shows the expanded locations of a real site.", "GET", "/v1/presets", true, false, Role::viewer, schema({}, {})});
     t.push_back({"health_check", "Health check", "What an administrator should look at: certificates, missing redirects, port 80 for ACME, recent errors, settings waiting for a restart, root, shared accounts, stale pools, php-fpm reloading without process_control_timeout (which cuts PHP requests on every site whenever a pool is written), and php_pool_resident: every static or dynamic pool with the PHP processes it keeps while idle and their memory (the answer to 'why so many php-fpm processes' or 'the machine is full': site_update with settings: {pm: \"ondemand\"} frees it; static stays right for a site that must not pay a fork on its first request), judged from the pool file php-fpm runs, so a pool left static on disk after the configuration changed is named as a warning whose fix is agensio pools plus a php-fpm reload. preset_mismatch: the files under a site's directory belong to another application than its app says (Grav on the drupal preset: the borrowed refusals do not fit, and its backup archive was public); the fix is site_update with the detected app. archives_in_root: backup archives and database dumps (.zip, .tar.gz, .sql) inside a served tree, one preset or one path away from public; the fix is moving them out. Each finding has a severity and a fix. Run this first on a server you do not know.", "GET", "/v1/health", true, false, Role::viewer, schema({}, {})});
     t.push_back({"reload", "Reload configuration", "Validate the configuration on disk and switch to it without dropping a connection. Refused with the reason when it does not validate; nothing changes then.", "POST", "/v1/reload", false, false, Role::operator_, schema({{"confirm", confirm_arg()}, {"reason", reason_arg()}}, {"confirm", "reason"})});
@@ -195,7 +195,7 @@ std::vector<Tool> tools() {
                          {"confirm", confirm_arg()},
                          {"reason", reason_arg()}},
                         {"name", "from", "to", "confirm", "reason"})});
-    t.push_back({"site_task", "Run a site task", "Runs one named task of the site's preset as the site's own account, in the site's directory (its root): a fixed command from the preset's table (site_tasks_list), never a command line. For a Ruby on Rails site (app = \"rails\") a new application is made in this order: gem_install_rails (Rails into the account's own gem directory; minutes), rails_new with params {\"name\": \"...\"} (the application, with SQLite, in the empty site directory, its gems in vendor/bundle; minutes), db_prepare, assets_precompile. Later: bundle_install after the Gemfile changed or after an application was installed from an archive (site_install), db_migrate after new migrations. The interpreter comes from [control] runtimes in root's file (ruby, gem and bundle in /usr/bin by default) and must be root's; when it is missing the answer carries run_as_root with the package command: show it, say the task waits for it, continue when the user ran it. The answer reports the exact argv that ran, the account, the directory, the exit status, the duration and the program's output (the first 16 KB and the last 48 KB when longer): read the output to explain a failure and fix its cause, then run the task again. A task is stopped at its time limit ([control] task_limits.timeout, 20 minutes by default); one task per site at a time (409 names the running one). Credential files the task wrote (config/master.key, config/database.yml, storage/ with the SQLite databases, .env) are made the site's alone and listed under secured, and the configuration is validated before the answer. dry_run: true shows the argv, account, directory, environment and limits without running anything. No task starts the application server (Puma): until agensio manages it, give the user docs/examples/puma.service from the agensio repository to install as root, and make sure the site's upstream points where it listens.", "POST", "/v1/sites/{name}/task", false, true, Role::admin,
+    t.push_back({"site_task", "Run a site task", "Runs one named task of the site's preset as the site's own account, in the site's directory (its root): a fixed command from the preset's table (site_tasks_list), never a command line. For a Ruby on Rails site (app = \"rails\") a new application is made in this order: gem_install_rails (Rails into the account's own gem directory; minutes), rails_new with params {\"name\": \"...\"} (the application, with SQLite, in the empty site directory, its gems in vendor/bundle; minutes), db_prepare, assets_precompile. Later: bundle_install after the Gemfile changed or after an application was installed from an archive (site_install), db_migrate after new migrations. The interpreter comes from [control] runtimes in root's file (ruby, gem and bundle in /usr/bin by default) and must be root's; when it is missing the answer carries run_as_root with the package command: show it, say the task waits for it, continue when the user ran it. The answer reports the exact argv that ran, the account, the directory, the exit status, the duration and the program's output (the first 16 KB and the last 48 KB when longer): read the output to explain a failure and fix its cause, then run the task again. A task that needs an earlier one's result is refused before it runs, dry run included, naming the missing file and what to run (rails_new needs the rails command gem_install_rails installs; the bundle tasks need the application's Gemfile); a task that exits 0 without leaving what the next one needs answers 409 saying so. The account's gems are its own: gems root installed system-wide are invisible to the tasks. A task is stopped at its time limit ([control] task_limits.timeout, 20 minutes by default); one task per site at a time (409 names the running one). Credential files the task wrote (config/master.key, config/database.yml, storage/ with the SQLite databases, .env) are made the site's alone and listed under secured, and the configuration is validated before the answer. dry_run: true shows the argv, account, directory, environment and limits without running anything. No task starts the application server (Puma): until agensio manages it, give the user docs/examples/puma.service from the agensio repository to install as root, and make sure the site's upstream points where it listens.", "POST", "/v1/sites/{name}/task", false, true, Role::admin,
                  schema({{"name", name_arg()},
                          {"task", task_enum()},
                          {"params", task_params_schema()},
@@ -265,6 +265,7 @@ const char* kInstructions =
     "slower over HTTP/2 here (windows follow the site's body limit), "
     "and the error log carries an info line for every GOAWAY or RST_STREAM the server sends, naming the "
     "client, the stream and the reason, which is where to look when a user reports HTTP/2 trouble. "
+    "If an answer carries a NOTE that this bridge and the server are different versions, tell the user at once and how to fix it (reconnect the MCP server, or restart agensio): tools may be missing and descriptions out of date until then. "
     "Never invent settings: what a tool does not offer is not configurable here. Host names are "
     "strict: a site answers only the names in server_name, and a listener without a catch-all site "
     "(server_name [\"*\"] or default = true) answers 421 to any other Host, including the IP address; and on "
@@ -292,6 +293,19 @@ const char* kNewSite =
     "source) offer to install it now with site_install; for other applications ask whether the user has "
     "an https URL of the archive or wants to upload it with agensio ctl upload.";
 
+}  // namespace
+
+std::string version_mismatch_note(std::string_view bridge, std::string_view server) {
+    if (server.empty() || server == bridge) return "";
+    return "NOTE: this MCP bridge is agensio " + std::string(bridge) + " and the server runs " + std::string(server) +
+           ". The tools, their options and these texts are the bridge's own, so tools the other version has may be missing here and "
+           "descriptions may be wrong. Tell the user now: either the bridge started before an upgrade (reconnect this MCP server "
+           "in the agent host, so a new `agensio mcp` starts), or the server was not restarted after one (as root: systemctl restart "
+           "agensio). Until then trust the server's answers over these descriptions.";
+}
+
+namespace {
+
 class Mcp {
 public:
     Mcp(std::string socket, std::ostream& out) : socket_(std::move(socket)), out_(out), tools_(tools()) {
@@ -300,6 +314,7 @@ public:
         if (control_request(socket_, "GET", "/v1/status", "", reply, error) && reply.status == 200) {
             json::Value v;
             if (json::parse(reply.body, v, error)) {
+                server_version_ = std::string(v.get("version"));
                 const std::string_view role = v["peer"].get("role");
                 role_ = role == "admin" ? Role::admin : role == "operator" ? Role::operator_ : role == "viewer" ? Role::viewer : Role::none;
             }
@@ -326,6 +341,7 @@ public:
             caps.set("tools", json::Value::object().set("listChanged", false));
             caps.set("prompts", json::Value::object().set("listChanged", false));
             std::string instructions = kInstructions;
+            if (const std::string note = version_mismatch_note(AGENSIO_VERSION, server_version_); !note.empty()) instructions += " " + note;
             if (!unreachable_.empty())
                 instructions += " NOTE: the control socket is not reachable right now (" + unreachable_ +
                                 "); tell the user, and that the server must run with [control] enabled and this account must have a role.";
@@ -430,6 +446,10 @@ private:
         const bool is_json = json::parse(reply.body, parsed, err);
         json::Value content = json::Value::array();
         content.push(json::Value::object().set("type", "text").set("text", reply.body));
+        // The server's version rides on every answer: a bridge left running across an
+        // upgrade says so on the next call, not never.
+        if (const std::string note = version_mismatch_note(AGENSIO_VERSION, reply.version); !note.empty())
+            content.push(json::Value::object().set("type", "text").set("text", note));
         json::Value r = json::Value::object().set("content", std::move(content)).set("isError", reply.status >= 400);
         if (is_json && parsed.is_object()) r.set("structuredContent", parsed);
         result(id, std::move(r));
@@ -454,6 +474,7 @@ private:
     std::vector<Tool> tools_;
     Role role_ = Role::none;
     std::string unreachable_;
+    std::string server_version_;
 };
 
 }  // namespace

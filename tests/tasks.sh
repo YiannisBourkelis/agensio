@@ -35,7 +35,8 @@ fi
 SH
 cat > $RT/gem <<'SH'
 #!/bin/sh
-echo "prog=gem"; echo "args=$*"; echo "uid=$(id -un) GEM_HOME=$GEM_HOME HOME=$HOME TMPDIR=$TMPDIR"
+echo "prog=gem"; echo "args=$*"; echo "uid=$(id -un) GEM_HOME=$GEM_HOME GEM_PATH=$GEM_PATH HOME=$HOME TMPDIR=$TMPDIR"
+[ -e "$HOME/no-binstub" ] && { echo "1 gem installed"; exit 0; }   # what a host-wide Rails made gem do before GEM_PATH was isolated
 mkdir -p "$GEM_HOME/bin" && echo '# fake rails' > "$GEM_HOME/bin/rails"
 SH
 cat > $RT/bundle <<'SH'
@@ -94,15 +95,17 @@ APP=$T/www/r1.test/app
 out=$(ctl site-create --domain r1.test --app rails --root $APP --user r1 --upstream http://127.0.0.1:18398 --https none --listen-plain 127.0.0.1:18399 --yes --reason tasks)
 check "site-create: a rails site with its own account in one call, laid out r1:agensio 2750, no php-fpm pool" "yes r1 agensio 2750 | r1 agensio 2750 no" "$(echo "$out" | grep -q '"ok":true' && echo yes) $(stat -c '%U %G %a' $T/www/r1.test) | $(stat -c '%U %G %a' $APP) $(echo "$out" | grep -q 'php-fpm pool' && echo yes || echo no)"
 check "site-tasks lists the preset's six tasks, run as r1 in the app directory" "6 r1 yes" "$(ctl site-tasks r1.test > $T/out; j 'len(d["tasks"]), d["runs_as"], "yes" if d["directory"] == "'$APP'" else d["directory"]')"
-ctl site-task r1.test rails_new --param name=blog --dry-run --yes --reason dry > $T/out
-check "dry run: the exact argv from the table, as r1 in its directory, the home it would make; nothing created" "$RT/ruby $T/state/r1/gems/bin/rails new . --name=blog r1 $APP $T/state/r1 0 no" "$(j '" ".join(d["argv"][:5]), d["as"], d["cwd"], d["would_create"][0]') $(ls -A $APP | wc -l | tr -d ' ') $([ -e $T/state/r1 ] && echo yes || echo no)"
+check "site-tasks: every interpreter accepted, the effective time limit (the rows' capped at task_limits' 5 s), nothing for root" "True True 5 5 False" "$(j 'all(t["interpreter"]["ok"] for t in d["tasks"]), d["tasks"][1]["interpreter"]["program"] == "'$RT'/ruby", int(d["tasks"][1]["timeout"]), int(d["tasks"][3]["timeout"]), "run_as_root" in d')"
+ctl site-task r1.test gem_install_rails --dry-run --yes --reason dry > $T/out
+check "dry run: the exact argv from the table, as r1 in its directory, the home it would make; nothing created" "$RT/gem install rails --no-document r1 $APP $T/state/r1 0 no" "$(j '" ".join(d["argv"][:4]), d["as"], d["cwd"], d["would_create"][0]') $(ls -A $APP | wc -l | tr -d ' ') $([ -e $T/state/r1 ] && echo yes || echo no)"
+check "dry run of rails_new before gem_install_rails: refused as the real run would be, naming the missing rails command and the task to run" "1 yes" "$(ctl site-task r1.test rails_new --param name=blog --dry-run --yes --reason dry > $T/out; echo -n "$? "; grep -q "needs $T/state/r1/gems/bin/rails, which does not exist; run gem_install_rails first" $T/out && echo yes)"
 
 ctl site-task r1.test gem_install_rails --yes --reason gems > $T/out
-check "gem_install_rails: runs gem as r1 into the account's own gem directory; the helper made the home 0700 r1:r1" "True install rails --no-document --version ~> 8.0 | uid=r1 GEM_HOME=$T/state/r1/gems HOME=$T/state/r1 TMPDIR=$T/state/r1/tmp | r1 r1 700 r1 700" "$(j 'd["ok"], " ".join(d["argv"][1:])') | $(j 'd["output"].splitlines()[2]') | $(stat -c '%U %G %a' $T/state/r1) $(stat -c '%U %a' $T/state/r1/tmp)"
+check "gem_install_rails: runs gem as r1 into the account's own gem directory, GEM_PATH isolated to it; the helper made the home 0700 r1:r1" "True install rails --no-document --version ~> 8.0 | uid=r1 GEM_HOME=$T/state/r1/gems GEM_PATH=$T/state/r1/gems HOME=$T/state/r1 TMPDIR=$T/state/r1/tmp | r1 r1 700 r1 700" "$(j 'd["ok"], " ".join(d["argv"][1:])') | $(j 'd["output"].splitlines()[2]') | $(stat -c '%U %G %a' $T/state/r1) $(stat -c '%U %a' $T/state/r1/tmp)"
 
 ctl site-task r1.test rails_new --param name=blog --yes --reason new > $T/out
 check "rails_new: as r1, in the site's directory, umask 0027, from the runtime directory" "True uid=r1 cwd=$APP umask=0027 $RT/ruby" "$(j 'd["ok"], d["output"].splitlines()[2], d["argv"][0]')"
-check "rails_new: the environment is exactly the table's; nothing of the server's (LEAK) reaches the task" "HOME LANG PATH PWD BUNDLE_PATH BUNDLE_WITHOUT GEM_HOME RAILS_ENV TMPDIR | no" "$(j '" ".join(sorted(set(l[5:].split("=")[0] for l in d["output"].splitlines() if l.startswith("env: ")) - {"OLDPWD","SHLVL","_"}, key=lambda k: (k not in ("HOME","LANG","PATH","PWD"), k)))') | $(grep -q LEAK $T/out && echo yes || echo no)"
+check "rails_new: the environment is exactly the table's; nothing of the server's (LEAK) reaches the task" "HOME LANG PATH PWD BUNDLE_PATH BUNDLE_WITHOUT GEM_HOME GEM_PATH RAILS_ENV TMPDIR | no" "$(j '" ".join(sorted(set(l[5:].split("=")[0] for l in d["output"].splitlines() if l.startswith("env: ")) - {"OLDPWD","SHLVL","_"}, key=lambda k: (k not in ("HOME","LANG","PATH","PWD"), k)))') | $(grep -q LEAK $T/out && echo yes || echo no)"
 check "rails_new: files belong to r1 with the server's group, served files 0640 and readable by the server" "r1 agensio 640 yes" "$(stat -c '%U %G %a' $APP/public/index.html) $(su -s /bin/sh agensio -c "cat $APP/public/index.html" > /dev/null 2>&1 && echo yes)"
 check "rails_new: the credential sweep: master.key, database.yml, .env 0600, storage/ 0710 (the kernel drops set-gid for an account outside the group); the server cannot read the key" "600 600 600 710 no" "$(stat -c %a $APP/config/master.key) $(stat -c %a $APP/config/database.yml) $(stat -c %a $APP/.env) $(stat -c %a $APP/storage) $(su -s /bin/sh agensio -c "cat $APP/config/master.key" > /dev/null 2>&1 && echo yes || echo no)"
 check "rails_new: the answer lists what was secured, and the configuration validates" "4 true" "$(j 'len(d["secured"])') $(ctl validate | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["ok"]).lower())')"
@@ -129,6 +132,10 @@ check "one task per site: a second one while the first runs is refused naming it
 wait $SLOW   # not a bare wait: the server started by start() is a background job of this script too
 check "the time limit: SIGTERM to the group at 5 s, a 409 naming the limit, nothing of r1 left running" "True yes 0" "$(python3 -c "import json; d=json.load(open('$T/slow.out')); print(d['timed_out'], 'yes' if 'time limit of 5 s' in d['error'] and 5000 <= d['duration_ms'] < 15000 else d)") $(pgrep -u r1 -c . || true)"
 rm -f $APP/slow
+touch $T/state/r1/no-binstub; rm -f $T/state/r1/gems/bin/rails
+check "gem_install_rails that exits 0 without the rails command: 409 naming what is missing, not ok" "1 False yes" "$(ctl site-task r1.test gem_install_rails --yes --reason nobin > $T/out; echo -n "$? "; j 'd["ok"], "yes" if "exited 0, but '$T'/state/r1/gems/bin/rails does not exist" in d["error"] else d["error"]')"
+rm -f $T/state/r1/no-binstub
+check "run again, it leaves the command behind and answers ok" "True" "$(ctl site-task r1.test gem_install_rails --yes --reason again > $T/out; j 'd["ok"]')"
 
 chmod 775 $RT
 check "a runtime directory another account could write is refused, naming it" "1 yes" "$(ctl site-task r1.test db_migrate --yes --reason rt > $T/out; echo -n "$? "; grep -q "$RT is writable by its group or by others" $T/out && echo yes)"
@@ -137,6 +144,7 @@ check "a runtime file root does not own is refused" "1 yes" "$(ctl site-task r1.
 chown root $RT/bundle
 
 out=$(ctl site-create --domain r2.test --app rails --root $T/www/r2.test/app --user r2 --upstream http://127.0.0.1:18400 --https none --listen-plain 127.0.0.1:18399 --yes --reason tasks)
+check "db_prepare in a directory with no application: refused before anything runs, dry run or not" "1 1 yes" "$(ctl site-task r2.test db_prepare --dry-run --yes --reason noapp > /dev/null; echo -n "$? "; ctl site-task r2.test db_prepare --yes --reason noapp > $T/out; echo -n "$? "; grep -q "needs $T/www/r2.test/app/Gemfile, which does not exist; the site's directory holds no application yet" $T/out && echo yes)"
 chown root $T/www/r2.test/app
 check "a site directory the site's account does not own: refused before anything runs" "1 yes" "$(ctl site-task r2.test gem_install_rails --yes --reason owner > $T/out; echo -n "$? "; grep -q 'belongs to uid 0, not to r2' $T/out && echo yes)"
 check "the audit log: each run with the exact argv, the account and the outcome; each refusal with its reason" "yes yes yes" "$(grep -q "sites/r1.test/task (new): ran as r1 in $APP: $RT/ruby $T/state/r1/gems/bin/rails new . --name=blog .* -> exit 0" $T/logs/audit.log && echo yes) $(grep -q "sites/r1.test/task (slow): ran as r1 .* -> stopped at the time limit" $T/logs/audit.log && echo yes) $(grep -q "sites/r2.test/task (owner): refused: .*belongs to uid 0" $T/logs/audit.log && echo yes)"

@@ -1,7 +1,9 @@
 #include "control/client.hpp"
 
+#include <cctype>
 #include <cstdlib>
 #include <string>
+#include <string_view>
 #include <asio.hpp>
 
 namespace agensio {
@@ -42,6 +44,22 @@ bool control_request(const std::string& socket_path, const std::string& method, 
         }
         reply.status = std::atoi(raw.substr(9, 3).c_str());
         reply.body = raw.substr(head_end + 4);
+        reply.version.clear();
+        for (std::size_t pos = raw.find("\r\n"); pos != std::string::npos && pos < head_end;) {
+            const std::size_t next = raw.find("\r\n", pos + 2);
+            const std::string line = raw.substr(pos + 2, (next == std::string::npos ? head_end : next) - pos - 2);
+            static constexpr std::string_view kName = "x-agensio-version:";
+            if (line.size() > kName.size()) {
+                std::string lower = line.substr(0, kName.size());
+                for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                if (lower == kName) {
+                    std::size_t b = kName.size();
+                    while (b < line.size() && line[b] == ' ') ++b;
+                    reply.version = line.substr(b);
+                }
+            }
+            pos = next;
+        }
         return true;
     } catch (const std::exception& e) {
         error = std::string("control socket ") + socket_path + ": " + e.what();

@@ -74,10 +74,14 @@ task() {  # task NAME [--param k=v]: runs it, prints ok exit seconds, keeps the 
     python3 -c "import json; d=json.load(open('$T/out')); o=d.get('output', ''); print(d.get('error', '')); print(o if len(o) < 6000 else o[:3000] + '\n[...]\n' + o[-3000:])" > $T/last-$1.txt
 }
 
+# A host-wide Rails, as root installed it on the host of the 2026-09-27 report: without
+# GEM_PATH isolation it satisfied every dependency and the account got no rails command.
+gem install rails --no-document > $T/system-rails.log 2>&1 || { echo "rails: root's gem install rails failed"; tail -3 $T/system-rails.log; }
 out=$(ctl site-create --domain r5.test --app rails --root $APP --user r5 --upstream http://127.0.0.1:18500 --cert $T/certs/cert.pem --key $T/certs/key.pem --listen-plain 127.0.0.1:18580 --listen-tls 127.0.0.1:18543 --yes --reason live)
 check "site-create: app = rails with its own account, through the helper" "yes r5" "$(echo "$out" | grep -q '"ok":true' && echo yes) $(stat -c %U $APP)"
+check "site-tasks: every interpreter is in place before the first task" "True" "$(ctl site-tasks r5.test | python3 -c 'import json,sys; print(all(t["interpreter"]["ok"] for t in json.load(sys.stdin)["tasks"]))')"
 r=$(task gem_install_rails)
-check "gem_install_rails: Rails 8 in the account's gem directory (compiles native extensions)" "True 0 yes" "$(echo $r | cut -d' ' -f1-2) $([ -x $T/state/r5/gems/bin/rails ] && echo yes)"
+check "gem_install_rails: Rails 8 with its whole tree in the account's gem directory, despite root's system-wide Rails" "True 0 yes" "$(echo $r | cut -d' ' -f1-2) $([ -x $T/state/r5/gems/bin/rails ] && echo yes)"
 echo "     gem_install_rails took $(echo $r | cut -d' ' -f3) s"
 r=$(task rails_new --param name=live)
 check "rails_new: a new application with its bundle in vendor/bundle" "True 0 yes yes" "$(echo $r | cut -d' ' -f1-2) $([ -f $APP/config/application.rb ] && echo yes) $([ -d $APP/vendor/bundle ] && echo yes)"
@@ -103,6 +107,7 @@ H="--resolve r5.test:18543:127.0.0.1 -k"
 check "agensio serves the application over TLS: /up is green" "200 yes" "$(curl -sS $H -o $T/up.html -w '%{http_code}' https://r5.test:18543/up) $(grep -q 'green' $T/up.html && echo yes)"
 ASSET=$(python3 -c "import json; m=json.load(open('$APP/public/assets/.manifest.json')); v=m[sorted(m)[0]]; print(v if isinstance(v, str) else v['digested_path'])" 2>/dev/null)
 check "a precompiled asset comes through agensio" "200" "$(curl -sS $H -o /dev/null -w '%{http_code}' https://r5.test:18543/assets/$ASSET)"
+check "a credential path is refused by agensio itself, never proxied to Puma (no x-request-id)" "404 no" "$(curl -sS $H -D $T/probe.h -o /dev/null -w '%{http_code}' https://r5.test:18543/config/master.key) $(grep -qi '^x-request-id' $T/probe.h && echo yes || echo no)"
 check "plain http is redirected to https" "301" "$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: r5.test' http://127.0.0.1:18580/up)"
 check "the audit log has each task with the argv that ran" "4" "$(grep -c 'sites/r5.test/task (live): ran as r5 .* -> exit 0' $T/logs/audit.log)"
 check "health: no PHP finding and no unreadable-files finding for the Rails site" "no" "$(ctl health | grep -q 'php_tmp_missing\|pools_stale\|files_unreadable' && echo yes || echo no)"

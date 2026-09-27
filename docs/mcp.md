@@ -48,6 +48,12 @@ agent host  --stdin/stdout-->  agensio mcp  --unix socket-->  agensio (control A
   a restart, an application install or a file copy as the site's account, and a site task
   as the site's account. `site_create` is then one call and reports what it did under
   `done`. The helper does those things and nothing else; `docs/security-control-plane.md`.
+- **A bridge knows its own version.** Every answer of the control socket names the
+  server's version (`X-Agensio-Version`), and when it differs from the bridge's the tool
+  result carries a note saying so: a long-lived `agensio mcp` keeps the tools and texts it
+  started with after an upgrade (reconnect the MCP server in the agent host), and a server
+  not restarted after one still runs the old code (`systemctl restart agensio`). Bridges
+  before 0.1.0-alpha.26 cannot tell; reconnect them once after upgrading.
 - **Files cannot travel through the bridge**: a tool argument is JSON inside the model's
   context, so an archive on your machine reaches the server by `ssh admin@host agensio
   ctl upload NAME < file` (the same SSH session the bridge uses), and the agent then
@@ -107,8 +113,8 @@ takes `--socket PATH`.
 | `site_disable`, `site_enable`, `site_delete` | admin | rename the file away and back; delete it (a `.bak` stays) |
 | `site_install` | admin | put an application's files into a site's empty directory as the site's account: the preset's official archive (`version` optional), any https `url`, or a stored upload (`file`); a plugin or theme goes into `path` with `create_path: true`; `sha256`, `strip`, `dry_run`; the server enforces the fences and reports the source, digest and what it created |
 | `site_copy` | admin | copy one regular file of a site to another path of the same site, as the site's account: the drop-ins applications ship as templates (WordPress's `wp-content/db.php` from the SQLite plugin, Drupal's `settings.php`); `overwrite`, `dry_run`; never across sites, never caller content, never a directory. Like `site_install`, credential files come out `0600` and the configuration is validated before the answer |
-| `site_tasks_list` | viewer | the named tasks of the site's preset (`app = "rails"`: `gem_install_rails`, `rails_new`, `bundle_install`, `db_prepare`, `db_migrate`, `assets_precompile`) with their parameters, whether each downloads, the account that runs them and the directory; other presets have none |
-| `site_task` | admin | runs one of them as the site's account in the site's directory: a fixed command from the table, typed parameters, never a command line; the answer carries the exact argv, the exit status and the output (head and tail); the credential files are made the site's alone and the configuration is validated; `dry_run` shows the command without running it; a missing interpreter comes back as `run_as_root`. Marked destructive, so the host asks |
+| `site_tasks_list` | viewer | the named tasks of the site's preset (`app = "rails"`: `gem_install_rails`, `rails_new`, `bundle_install`, `db_prepare`, `db_migrate`, `assets_precompile`) with their parameters, whether each downloads, its effective time limit, whether its interpreter is in place (`run_as_root` lists every missing package once, before the first task), the account that runs them and the directory; other presets have none |
+| `site_task` | admin | runs one of them as the site's account in the site's directory: a fixed command from the table, typed parameters, never a command line; the answer carries the exact argv, the exit status and the output (head and tail); the credential files are made the site's alone and the configuration is validated; `dry_run` shows the command without running it and meets the same refusals (a missing interpreter as `run_as_root`, a missing result of an earlier task naming the task to run); a task that exits 0 without what the next one needs is a 409. Marked destructive, so the host asks |
 | `uploads_list` | viewer | archives stored with `agensio ctl upload`, for `site_install` |
 | `upload_delete` | operator | remove a stored upload |
 

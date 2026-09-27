@@ -406,7 +406,8 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   fixed argv and typed parameters (`app = "rails"`: `gem_install_rails`, `rails_new`,
   `bundle_install`, `db_prepare`, `db_migrate`, `assets_precompile`), never a command
   line; the interpreter only from `[control] runtimes` (root-owned, checked before every
-  run), the environment built, umask 027, `RLIMIT_NPROC`, a timeout that kills the
+  run), the environment built (the account's gems isolated: `GEM_PATH = GEM_HOME`), a
+  task's `needs` checked before it runs and its `produces` after, umask 027, `RLIMIT_NPROC`, a timeout that kills the
   process group, output head and tail, one task per site, the credential sweep and the
   validation afterwards, the exact argv in the audit log. Through the helper's `task_run`
   (the site from the configuration on disk, the account's home created), else as the
