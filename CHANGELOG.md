@@ -1,5 +1,5 @@
 # Changelog
-## 0.1.0-alpha.32 (unreleased)
+## 0.1.0-alpha.32 (2026-09-27)
 
 From the alpha.31 report (the exposure ledger confirmed in every path the tester built):
 
