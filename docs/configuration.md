@@ -1379,7 +1379,10 @@ any site) makes every file in it that others could read 0600 in the same pass an
 its variables in `env/.exposed` (names and fingerprints, never values), so health keeps
 warning "readable by others ... rotate them" for that site until each of those values has
 changed (`site-env-set` with the new value, or `--unset` and `--generate`), and the
-error log has the same warning. Unsetting the last variable removes the file, and the
+error log has the same warning. `site-env-set` answers `still_exposed` with what is still to
+rotate; a deleted site's kept file with such values is a warning in health and named under
+`exposed` in `site-delete`'s answer; entries of a name with neither a site nor a file are
+pruned. Unsetting the last variable removes the file, and the
 answer says so; `site-delete` names the file it keeps only when the site has one. `site-install` generates `SECRET_KEY_BASE` itself when a
 Rails archive came without credentials (never for one with them: an environment value
 would override the application's own secret and sign its users out); `--generate` never

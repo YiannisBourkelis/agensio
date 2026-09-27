@@ -2121,7 +2121,7 @@ static void test_appenv() {
           finding("read.test") == "info fix" && finding("path.test") == "warn fix" && finding("d.test") == "warn fix");
     CHECK(::stat((envdir + "/read.test.env").c_str(), &sb) == 0 && (sb.st_mode & 0777) == 0640);  // read-only: nothing tightened
     bool orphan = false;
-    for (const auto& o : in["orphans"].items()) orphan = orphan || o.str() == envdir + "/gone.test.env";
+    for (const auto& o : in["orphans"].items()) orphan = orphan || o.get("file") == envdir + "/gone.test.env";
     CHECK(orphan && in["orphans"].items().size() == 1);
     const auto hf = control::env_findings(in);
     CHECK(std::count_if(hf.begin(), hf.end(), [](const control::Finding& f) { return f.code == "site_env_unsafe"; }) == 5 &&
@@ -2171,9 +2171,39 @@ static void test_appenv() {
         Change rot;
         rot.set = {{"A", "new"}};
         CHECK(apply(xdir, "wb7.test", me, rot)["ok"].boolean() && wb7().find("B was readable by others") != std::string::npos && wb7().find("A, B") == std::string::npos);
+        // The tool says what is still to rotate (2026-09-27 report, c): B was left alone above.
+        rot = Change{};
+        rot.set = {{"B", "2"}};  // the same value again: still the one others could read
+        json::Value same = apply(xdir, "wb7.test", me, rot);
+        CHECK(same["ok"].boolean() && same["still_exposed"].items().size() == 1 && same["still_exposed"].items()[0].str() == "B");
         rot = Change{};
         rot.unset = {"B"};
-        CHECK(apply(xdir, "wb7.test", me, rot)["ok"].boolean() && wb7().empty());  // every exposed value changed or gone: no warning
+        json::Value gone = apply(xdir, "wb7.test", me, rot);
+        CHECK(gone["ok"].boolean() && gone["still_exposed"].is_null() && wb7().empty());  // every exposed value changed or gone: no warning
+        // a) the rotation fix is a tool call, never "as root"; the chmod fix stays root's.
+        put_file("wb9.test", "K=\"k\"\n", rw | fs::perms::others_read);
+        fs::permissions(xdir, fs::perms::owner_all | fs::perms::others_exec);
+        inspect(xdir, me, {"wb9.test"});  // seen open: recorded
+        fs::permissions(xdir, fs::perms::owner_all);
+        fs::permissions(xdir + "/wb9.test.env", rw);
+        auto fs9 = control::env_findings(inspect(xdir, me, {"wb9.test"}));
+        std::erase_if(fs9, [](const control::Finding& f) { return f.code != "site_env_unsafe"; });  // the other files here are orphans
+        CHECK(fs9.size() == 1 && fs9[0].site == "wb9.test" && fs9[0].severity == "warn" && fs9[0].fix.starts_with("site_env_set wb9.test") &&
+              fs9[0].fix.find("as root") == std::string::npos);
+        // b) the site deleted, its file kept, unrotated: the orphan is a warning naming K.
+        json::Value orph = inspect(xdir, me, {});
+        bool named = false;
+        for (const auto& o : orph["orphans"].items()) named = named || (o.get("site") == "wb9.test" && o["exposed"].items().size() == 1);
+        const auto fo = control::env_findings(orph);
+        CHECK(named && std::any_of(fo.begin(), fo.end(), [](const control::Finding& f) {
+                  return f.code == "site_env_orphan" && f.severity == "warn" && f.message.find("K in it were readable by others and never rotated") != std::string::npos;
+              }));
+        // d) with neither the site nor its file, the ledger entry goes.
+        fs::remove(xdir + "/wb9.test.env");
+        inspect(xdir, me, {});
+        std::ifstream ledger(xdir + "/.exposed");
+        const std::string led((std::istreambuf_iterator<char>(ledger)), std::istreambuf_iterator<char>());
+        CHECK(led.find("wb9.test") == std::string::npos);
         // health itself records what it sees open, so closing the directory by hand keeps the warning too
         put_file("wb8.test", "C=\"3\"\n", rw | fs::perms::others_read);
         fs::permissions(xdir, fs::perms::owner_all | fs::perms::others_exec);

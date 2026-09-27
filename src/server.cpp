@@ -1112,7 +1112,7 @@ void Server::env_async(const json::Value& req, std::function<void(json::Value)> 
     }).detach();
 }
 
-int Server::env_file_state(std::string_view site) {
+int Server::env_file_state(std::string_view site, std::vector<std::string>& exposed) {
     json::Value r;
     if (provisioner_.available()) {
         r = provisioner_.try_request(json::Value::object().set("op", "env_check"));
@@ -1124,6 +1124,7 @@ int Server::env_file_state(std::string_view site) {
 #endif
     }
     if (!r["ok"].boolean()) return -1;
+    for (const auto& n : r["exposed"][site].items()) exposed.emplace_back(n.str());
     for (const auto& p : r["present"].items())
         if (p.str() == site) return 1;
     return 0;

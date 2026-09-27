@@ -103,8 +103,10 @@ json::Value describe(const std::string& dir, std::string_view site, unsigned own
 
 // Health's view, read-only (nothing tightened, nothing created): what a task of each of
 // `sites` would meet in its file, and the `.env` files no site names any more.
-// {"ok": true, "sites": [{"site", "severity", "problem", "fix"?}], "orphans": [paths],
-// "present": [the sites that have a file]}; an absent directory or file is no problem. The
+// {"ok": true, "sites": [{"site", "severity", "problem", "fix"?}], "orphans": [{"file",
+// "site", "exposed"?: [names others could read, never rotated]}], "present": [the sites
+// that have a file], "exposed": {site: [those names]}}; an absent directory or file is no
+// problem. Ledger entries of a name with neither a site nor a file are pruned here. The
 // directory itself is health's own check; a file others can read under a directory open to
 // others is a warning (it may have leaked), under a closed one only info.
 json::Value inspect(const std::string& dir, unsigned owner, const std::vector<std::string>& sites);
@@ -113,7 +115,8 @@ json::Value inspect(const std::string& dir, unsigned owner, const std::vector<st
 // when missing, the file written to a temporary name, synced and renamed into place 0600,
 // and removed when no variable is left. {"ok", "file", "set", "unset", "absent",
 // "generated", "kept", "names", "tightened"?, "removed"? (the file, when no variable is
-// left)} or {"ok": false, "error", "run_as_root"?}:
+// left), "still_exposed"? (names others could read that still hold that value)} or
+// {"ok": false, "error", "run_as_root"?}:
 // names only, a value never appears in the answer.
 json::Value apply(const std::string& dir, std::string_view site, unsigned owner, const Change& change);
 #endif

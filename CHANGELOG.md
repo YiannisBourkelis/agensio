@@ -1,4 +1,21 @@
 # Changelog
+## 0.1.0-alpha.32 (unreleased)
+
+From the alpha.31 report (the exposure ledger confirmed in every path the tester built):
+
+- The fix of a leaked value's warning is a `site_env_set` call and no longer reads "as
+  root: ..." (that steered an agent to hand the user a terminal for a tool call); the
+  `chown`, `chmod` and `rm` fixes keep it.
+- A deleted site's kept environment file whose values others could read and nobody
+  rotated says so: health rates that `site_env_orphan` a warning naming them, and
+  `site_delete`'s answer lists them under `exposed` with a hint to rotate them when the
+  site comes back, instead of "keep it to bring the site back with the same secrets".
+- `site_env_set` answers `still_exposed` (and a warning) with the values still as others
+  could read them, so re-setting a value to itself or rotating one of two says so without
+  a health call.
+- Ledger entries of a name with neither a configured site nor a file are pruned by health,
+  so `env/.exposed` does not grow for ever.
+
 ## 0.1.0-alpha.31 (2026-09-27)
 
 From the alpha.30 report (both alpha.30 changes confirmed on the live host):

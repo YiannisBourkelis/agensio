@@ -734,16 +734,26 @@ json::Value apply(const std::string& dir, std::string_view site, unsigned owner,
     if (!st.notes.empty()) out.set("tightened", names_of(st.notes));
     if (removed) out.set("removed", path);
     // A changed or removed value is no longer the one others could read: its ledger entry goes.
+    // What is still as others could read it is said here, not only by the next health call
+    // (2026-09-27 report: re-setting the same value answered a plain ok).
     if (const int ld = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC); ld >= 0) {
-        ledger_current(ld, owner, site, vars, true);
+        std::vector<std::string> still;
+        for (const auto& e : ledger_current(ld, owner, site, vars, true)) still.push_back(e.name);
+        if (!still.empty()) out.set("still_exposed", names_of(still));
         ::close(ld);
     }  // no variable left: no file (2026-09-27 report: the answer said only names: [])
     return out;
 }
 
 json::Value inspect(const std::string& dir, unsigned owner, const std::vector<std::string>& sites) {
-    json::Value found = json::Value::array(), orphans = json::Value::array(), present = json::Value::array();
-    const json::Value none = json::Value::object().set("ok", true).set("sites", json::Value::array()).set("orphans", json::Value::array()).set("present", json::Value::array());
+    json::Value found = json::Value::array(), orphans = json::Value::array(), present = json::Value::array(), exposed_now = json::Value::object();
+    const json::Value none = json::Value::object().set("ok", true).set("sites", json::Value::array()).set("orphans", json::Value::array())
+                                 .set("present", json::Value::array()).set("exposed", json::Value::object());
+    auto names_json = [](const std::vector<std::string>& v) {
+        json::Value a = json::Value::array();
+        for (const auto& n : v) a.push(n);
+        return a;
+    };
     const int dfd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (dfd < 0) return none;  // absent, or health's own directory check names it
     // A directory open to others (or not the owner's) let others reach every file in it:
@@ -801,10 +811,16 @@ json::Value inspect(const std::string& dir, unsigned owner, const std::vector<st
             // closing (which the next task or site_env does, for any site).
             ledger_record(dfd, owner, site, vars);
             add("warn", path + " is mode " + mode_text(sb.st_mode) + ", readable by others" + leaked, own_command(path, owner, "0600"));
+            std::vector<std::string> all;
+            for (const auto& v : vars) all.push_back(v.name);
+            if (!all.empty()) exposed_now.set(site, names_json(all));
             continue;
         }
         const std::vector<Exposure> exposed = ledger_current(dfd, owner, site, vars, false);
         if (!exposed.empty()) {
+            std::vector<std::string> ns;
+            for (const auto& e : exposed) ns.push_back(e.name);
+            exposed_now.set(site, names_json(ns));
             std::string names;
             long long first = exposed.front().at;
             for (const auto& e : exposed) {
@@ -820,18 +836,49 @@ json::Value inspect(const std::string& dir, unsigned owner, const std::vector<st
             add("info", path + " is mode " + mode_text(sb.st_mode) + ", but its directory is " + whose(owner) +
                             " alone, so nobody else can reach it now: the next task or site_env makes it 0600", own_command(path, owner, "0600"));
     }
-    // The files no configured site names: a deleted site's secrets, kept on purpose or forgotten.
+    // The files no configured site names: a deleted site's secrets, kept on purpose or forgotten,
+    // with what in them others could read and nobody rotated (2026-09-27 report: "keep it to
+    // bring the site back" was advised blindly).
+    std::vector<std::string> with_file;
     if (DIR* d = ::fdopendir(::dup(dfd))) {
         while (const struct dirent* e = ::readdir(d)) {
             const std::string_view name = e->d_name;
             if (name.size() <= 4 || !name.ends_with(".env") || name.front() == '.') continue;
-            const std::string_view site = name.substr(0, name.size() - 4);
-            if (std::find(sites.begin(), sites.end(), site) == sites.end()) orphans.push(dir + "/" + std::string(name));
+            const std::string site(name.substr(0, name.size() - 4));
+            with_file.push_back(site);
+            if (std::find(sites.begin(), sites.end(), site) != sites.end()) continue;
+            json::Value o = json::Value::object().set("file", dir + "/" + std::string(name)).set("site", site);
+            struct stat ob {};
+            const int fd = ::openat(dfd, std::string(name).c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+            if (fd >= 0 && ::fstat(fd, &ob) == 0 && S_ISREG(ob.st_mode) && ob.st_uid == owner && ob.st_nlink == 1 && static_cast<std::size_t>(ob.st_size) <= kMaxFile) {
+                std::string text(static_cast<std::size_t>(ob.st_size), '\0');
+                const ssize_t n = ::read(fd, text.data(), text.size());
+                text.resize(n > 0 ? static_cast<std::size_t>(n) : 0);
+                std::vector<Var> vars;
+                std::string why;
+                if (valid_site(site) && parse(text, vars, why)) {
+                    std::vector<std::string> ns;
+                    for (const auto& x : ledger_current(dfd, owner, site, vars, false)) ns.push_back(x.name);
+                    if (!ns.empty()) o.set("exposed", names_json(ns));
+                }
+            }
+            if (fd >= 0) ::close(fd);
+            orphans.push(std::move(o));
         }
         ::closedir(d);
     }
+    // Ledger entries of a name with neither a configured site nor a file are dropped: nothing
+    // is left to rotate or to warn about, and the ledger does not grow for ever.
+    if (::geteuid() == owner) {
+        std::vector<Exposure> led = ledger_read(dfd, owner), keep;
+        for (auto& e : led)
+            if (std::find(sites.begin(), sites.end(), e.site) != sites.end() || std::find(with_file.begin(), with_file.end(), e.site) != with_file.end())
+                keep.push_back(std::move(e));
+        if (keep.size() != led.size()) ledger_write(dfd, owner, keep);
+    }
     ::close(dfd);
-    return json::Value::object().set("ok", true).set("sites", std::move(found)).set("orphans", std::move(orphans)).set("present", std::move(present));
+    return json::Value::object().set("ok", true).set("sites", std::move(found)).set("orphans", std::move(orphans)).set("present", std::move(present))
+        .set("exposed", std::move(exposed_now));
 }
 
 #endif

@@ -993,9 +993,10 @@ void ControlHandler::site_toggle(Stream& s, std::string_view name, std::string_v
     // now, as the reload below replaces the configuration `cfg` refers to.
     std::optional<std::string> env_file;
     int env_state = -1;
+    std::vector<std::string> env_exposed;
     if (const SiteConfig* site = control::find_site(cfg, name); action == "delete" && site && proxy_app(site->app) && appenv::valid_site(site->server_names.front())) {
         env_file = appenv::dir_of(cfg.config_path) + "/" + site->server_names.front() + ".env";
-        env_state = backend_->env_file_state(site->server_names.front());  // asked while the site is still on disk
+        env_state = backend_->env_file_state(site->server_names.front(), env_exposed);  // asked while the site is still on disk
     }
     const std::filesystem::path file = control::site_file(cfg, name);
     const std::filesystem::path disabled = file.string() + ".disabled";
@@ -1044,7 +1045,12 @@ void ControlHandler::site_toggle(Stream& s, std::string_view name, std::string_v
         body.set("kept", json::Value::array().push("the site's environment " + env + (env_state == 1 ? "" : ", if it has one (the helper was busy and could not tell)") +
                                                     ": its secrets (SECRET_KEY_BASE and the like), kept as the site's directory and account are"))
             .set("run_as_root", json::Value::array().push("rm -f " + env));
-        body.set("hint", "run_as_root removes the environment file once the site is gone for good; keep it to bring the site back with the same secrets");
+        std::string names;
+        for (const auto& n : env_exposed) names += (names.empty() ? "" : ", ") + n;
+        body.set("hint", names.empty() ? "run_as_root removes the environment file once the site is gone for good; keep it to bring the site back with the same secrets"
+                                       : names + " in it were readable by others and never rotated: bringing the site back with this file brings those values "
+                                                 "back, so rotate them then (site_env_set), or remove the file with run_as_root once the site is gone for good");
+        if (!names.empty()) body.set("exposed", strings(env_exposed));
     }
     reply(s, 200, body);
 }
@@ -1352,6 +1358,10 @@ void ControlHandler::site_env_set(Stream& s, std::string_view name, const json::
         log_exposures(r);
         if (!r.get("removed").empty())
             r.set("done", json::Value::array().push("removed " + std::string(r.get("removed")) + ": no variables left (site_env_set creates it again)"));
+        if (!r["still_exposed"].items().empty())
+            r.set("warnings", json::Value::array().push(joined(r["still_exposed"]) + (r["still_exposed"].items().size() == 1 ? " still holds the value" : " still hold the values") +
+                                                         " others could read: give " + (r["still_exposed"].items().size() == 1 ? "it" : "them") +
+                                                         " a new value (generate for a generated secret; change a password where it is used too), and health warns until then"));
         json::Value steps = json::Value::array();
         steps.push("the tasks read it from their next run");
         steps.push("the application reads it when its service restarts: a unit from docs/examples/puma.service loads the file (EnvironmentFile=); as root, systemctl restart " + unit);

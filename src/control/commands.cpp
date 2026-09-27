@@ -855,12 +855,27 @@ std::vector<Finding> env_findings(const json::Value& inspected) {
         out.push_back(Finding{"info", "site_env_unchecked", "", "the sites' environment files could not be checked: " + std::string(inspected.get("error")), ""});
         return out;
     }
-    for (const auto& f : inspected["sites"].items())
+    for (const auto& f : inspected["sites"].items()) {
+        // A site_env_set call is the admin's tool, not a root command: "as root" goes with
+        // the chown, chmod and rm lines only (2026-09-27 report: it steered an agent to hand
+        // the user a terminal for a tool call).
+        const std::string fix(f.get("fix"));
         out.push_back(Finding{std::string(f.get("severity")), "site_env_unsafe", std::string(f.get("site")), std::string(f.get("problem")),
-                              f.get("fix").empty() ? std::string("fix the file as root, or remove it and set the variables again with site_env_set") : "as root: " + std::string(f.get("fix"))});
-    for (const auto& o : inspected["orphans"].items())
-        out.push_back(Finding{"info", "site_env_orphan", "", std::string(o.str()) + " belongs to no configured site (a deleted site's environment: its secrets)",
-                              "as root, when the site is gone for good: rm -f " + std::string(o.str())});
+                              fix.empty() ? std::string("fix the file as root, or remove it and set the variables again with site_env_set")
+                              : fix.starts_with("site_env_set") ? fix : "as root: " + fix});
+    }
+    for (const auto& o : inspected["orphans"].items()) {
+        const std::string file(o.is_string() ? o.str() : o.get("file"));
+        std::string names;
+        for (const auto& n : o["exposed"].items()) names += (names.empty() ? "" : ", ") + std::string(n.str());
+        if (names.empty())
+            out.push_back(Finding{"info", "site_env_orphan", "", file + " belongs to no configured site (a deleted site's environment: its secrets)",
+                                  "as root, when the site is gone for good: rm -f " + file});
+        else
+            out.push_back(Finding{"warn", "site_env_orphan", "", file + " belongs to no configured site, and " + names +
+                                      " in it were readable by others and never rotated: bringing the site back with this file brings those values back",
+                                  "rotate them after bringing the site back (site_env_set), or as root, when the site is gone for good: rm -f " + file});
+    }
     return out;
 }
 

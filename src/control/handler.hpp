@@ -58,7 +58,8 @@ struct ControlBackend {
     virtual void env_async(const json::Value& req, std::function<void(json::Value)> done) = 0;
     // Whether a site has an environment file: 1 yes, 0 no, -1 unknown (the helper is busy
     // with a task; it is never waited for). Milliseconds, on worker 0.
-    virtual int env_file_state(std::string_view site) = 0;
+    // `exposed` receives the names in it that others could read and nobody rotated.
+    virtual int env_file_state(std::string_view site, std::vector<std::string>& exposed) = 0;
 };
 
 class ControlHandler {
