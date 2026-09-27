@@ -1,4 +1,52 @@
 # Changelog
+## 0.1.0-alpha.35 (unreleased)
+
+From the Django report against alpha.33 (Wagtail 8.0 on an `app = "proxy"` site, where
+nothing after `site_create` could run):
+
+- **`app = "django"` and `app = "wagtail"`**, with the site field `project` (the project's
+  Python package, required, asked by `site_create`). agensio serves `/static/` and `/media/`
+  from the project directory and sends the rest to Gunicorn. Uploads get `nosniff` and a
+  script-blocking Content-Security-Policy, and Wagtail's `/media/documents/` is refused.
+  The project's files are 404 at the edge.
+- **Python tasks in a virtualenv of the site's own.** `venv_create`, `pip_install`,
+  `startproject`, `pip_install_requirements`, `django_settings`, `migrate`,
+  `collectstatic`, `createsuperuser` and `check_deploy`. `startproject` runs the preset's
+  own command: `wagtail start` or `django-admin startproject`. Every row runs root's
+  `python3` of `[control] runtimes` under the virtualenv's name, so the program stays
+  root's and the packages are the site's. A Debian host without `python3-venv` is told so
+  before `venv_create` runs, with the package command.
+- **`pip_install` installs any packages, and the user confirms every run in person.** The
+  value can only be package names with extras and versions, passed to pip after `--`. The
+  MCP bridge asks in the client's own dialog (MCP elicitation) before it sends the task;
+  an agent's `confirm` is not enough. A client that cannot show the dialog, or a decline,
+  gets the `agensio ctl` command for the user to run in a terminal, where the warning is
+  printed and `--yes` confirms. The control API refuses the task without either, and the
+  audit log records which it was. `docs/mcp.md` shows how to limit the agent's SSH key to
+  `agensio mcp`, which the confirmation depends on.
+- **The production settings agensio writes.** `django_settings` writes a fixed
+  `agensio_settings.py`: the project's own settings, then `DEBUG` off, the secret from
+  `DJANGO_SECRET_KEY`, the host names and origins from the site, the forwarded https, the
+  served paths, and a database from `DATABASE_URL`. It holds no secret.
+- **The first admin's password never passes through the agent.** It is generated into the
+  site's environment, revealed only on request, and the rendered Gunicorn unit unsets it.
+- **The Gunicorn unit** from `site_service_unit`; `site_service_status`, `site_service_logs`,
+  health and the restart lines cover Django sites as they do Rails sites.
+- **Installs from an archive** of a Django project generate `DJANGO_SECRET_KEY`, list the
+  tasks, and warn when the archive's package is not the site's `project`.
+- `PIP_*`, `VIRTUAL_ENV`, `DJANGO_SETTINGS_MODULE` and `AGENSIO_*` are reserved in a site's
+  environment. The MCP schema no longer advertises the Rails pattern for every `version`.
+- A task's credential patterns follow the site's preset: a Redmine site running a Rails
+  task now gets Redmine's.
+- `tests/wagtail-install.sh` installs Wagtail 8.0 with real pip and Gunicorn behind agensio
+  over TLS and logs into its admin.
+
+- `site_env`'s hint follows the preset. A proxy site without an environment file is told
+  how to set what its application reads and to generate a random secret, and that its
+  unit loads the file with `EnvironmentFile=`. The hint no longer mentions Rails'
+  `SECRET_KEY_BASE` or tasks the site does not have. The refusal for other presets now
+  names `redmine` among the presets that have an environment.
+
 ## 0.1.0-alpha.34 (2026-09-27)
 
 From the alpha.33 report (Redmine 7.0.1 installed and serving through MCP; the service

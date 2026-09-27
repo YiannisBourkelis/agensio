@@ -61,6 +61,7 @@ json::Value SiteSpec::to_json() const {
     v.set("redirect_http", redirect_http).set("hsts", hsts).set("user", user).set("no_user", user.empty()).set("group", group);
     v.set("app", app).set("root", root);
     if (!upstream.empty()) v.set("upstream", upstream);
+    if (!project.empty()) v.set("project", project);
     if (!php_socket.empty()) v.set("php_socket", php_socket);
     if (php_children) v.set("php_children", php_children);
     if (!php_version.empty()) v.set("php_version", php_version);
@@ -87,6 +88,7 @@ bool SiteSpec::from_json(const json::Value& v, SiteSpec& out) {
     out.app = v.get("app");
     out.root = v.get("root");
     out.upstream = v.get("upstream");
+    out.project = v.get("project");
     out.php_socket = v.get("php_socket");
     out.php_children = static_cast<int>(v["php_children"].num());
     out.php_version = v.get("php_version");
@@ -185,9 +187,30 @@ std::string suggest_user(std::string_view domain) {
     return out;
 }
 
+std::string suggest_project(std::string_view domain) {
+    if (domain.starts_with("www.")) domain.remove_prefix(4);
+    std::string out;
+    for (char c : domain.substr(0, domain.find('.'))) {
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) out.push_back(c);
+        else if (c == '-') out.push_back('_');
+        if (out.size() == 32) break;
+    }
+    if (out.empty() || std::isdigit(static_cast<unsigned char>(out[0]))) out = "site" + out;
+    if (!check_project_name(out).empty()) out += "_site";
+    return out;
+}
+
 std::string detect_app(const fs::path& root) {
     std::error_code ec;
     if (!fs::is_directory(root, ec)) return {};
+    if (fs::is_regular_file(root / "manage.py", ec)) {
+        // wagtail start's requirements.txt names wagtail.
+        std::ifstream req(root / "requirements.txt");
+        std::string line;
+        while (req && std::getline(req, line))
+            if (line.starts_with("wagtail") || line.starts_with("Wagtail")) return "wagtail";
+        return "django";
+    }
     if (fs::exists(root / "artisan", ec) || fs::exists(root.parent_path() / "artisan", ec)) return "laravel";
     if (fs::exists(root / "bin" / "grav", ec) && fs::exists(root / "system" / "defines.php", ec)) return "grav";
     if (fs::exists(root / "core" / "lib" / "Drupal.php", ec) || fs::exists(root / "web" / "core" / "lib" / "Drupal.php", ec)) return "drupal";
@@ -203,6 +226,8 @@ std::string detect_app_marker(const std::string& app) {
     if (app == "drupal") return "core/lib/Drupal.php";
     if (app == "wordpress") return "wp-config.php or wp-includes/";
     if (app == "php") return "index.php";
+    if (app == "wagtail") return "manage.py and wagtail in requirements.txt";
+    if (app == "django") return "manage.py";
     return "package.json or Gemfile";
 }
 
@@ -234,6 +259,7 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
     if (has_key(body, "app")) spec.app = body.get("app");
     if (has_key(body, "root")) spec.root = body.get("root");
     if (has_key(body, "upstream")) spec.upstream = body.get("upstream");
+    if (has_key(body, "project")) spec.project = body.get("project");
     if (has_key(body, "group")) spec.group = body.get("group");
     if (has_key(body, "php_socket")) spec.php_socket = body.get("php_socket");
     if (has_key(body, "php_children")) spec.php_children = static_cast<int>(body["php_children"].num());
@@ -304,6 +330,16 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
         error = "root: " + why;
         return needs;
     }
+    if (!spec.project.empty()) {
+        if (!python_app(spec.app) && !spec.app.empty()) {
+            error = "project names a Django project's package: it goes with app = \"django\" or \"wagtail\"";
+            return needs;
+        }
+        if (const std::string bad = check_project_name(spec.project); !bad.empty()) {
+            error = bad;
+            return needs;
+        }
+    }
     for (const auto& f : {spec.cert, spec.key})
         if (!f.empty() && !safe_path(f, why)) {
             error = "https cert/key: " + why;
@@ -332,10 +368,16 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
     // A Rails application lives in app/ beside web/ (docs/design-site-operations.md 2b): its
     // directory holds config/master.key and the databases, and is never a document root.
     if (spec.root.empty() && spec.app != "proxy")
-        needs.push_back(Decision{"root", rails_app(spec.app) ? "Where is the Rails application? (its project directory: tasks run there, nothing is served from it)"
-                                                             : "Where are the site's files? (the document root; for Laravel the project directory)",
+        needs.push_back(Decision{"root", rails_app(spec.app)    ? "Where is the Rails application? (its project directory: tasks run there, nothing is served from it)"
+                                         : python_app(spec.app) ? "Where is the Django project? (its directory, where manage.py lives: tasks run there; only "
+                                                                  "its static/ and media/ are served)"
+                                                                : "Where are the site's files? (the document root; for Laravel the project directory)",
                                  (cfg.control.sites_root.empty() ? std::string("/var/www") : cfg.control.sites_root) + "/" + spec.domain +
-                                     (rails_app(spec.app) ? "/app" : "/web"), {}});
+                                     (service_app(spec.app) ? "/app" : "/web"), {}});
+    if (python_app(spec.app) && spec.project.empty())
+        needs.push_back(Decision{"project", "What is the project's Python package called? (NAME/settings and NAME/wsgi.py; a new project is created "
+                                            "under this name, an installed one must match its own)",
+                                 suggest_project(spec.domain), {}});
     const std::vector<std::string> apps = app_presets();
     if (spec.app.empty()) {
         const std::string detected = spec.root.empty() ? std::string() : detect_app(spec.root);
@@ -371,6 +413,7 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
         if (proxy_app(spec.app)) {
             s += "app = " + toml_string(spec.app) + "\nupstream = " + toml_string(spec.upstream) + "\n";
             if (!spec.root.empty()) s += "root = " + toml_string(spec.root) + "\n";
+            if (python_app(spec.app) && !spec.project.empty()) s += "project = " + toml_string(spec.project) + "\n";
         } else {
             s += "root = " + toml_string(spec.root) + "\n";
             if (!spec.app.empty() && spec.app != "static") s += "app = " + toml_string(spec.app) + "\n";
@@ -574,45 +617,73 @@ std::string php_fpm_reload_command(const Config& cfg, const std::string& version
 json::Value service_unit(const SiteConfig& site, const Config& cfg) {
     json::Value fail = json::Value::object().set("ok", false);
     const std::string name = site.server_names.empty() ? std::string() : site.server_names.front();
-    if (!rails_app(site.app)) return fail.set("error", "a unit is rendered for a Rails site (app = \"rails\" or \"redmine\"); this one has app = \"" + site.app + "\"");
+    const bool python = python_app(site.app);
+    if (!service_app(site.app))
+        return fail.set("error", "a unit is rendered for a Rails or Django site (app = \"rails\", \"redmine\", \"django\" or \"wagtail\"); this one has app = \"" +
+                                     site.app + "\"");
+    const char* server = python ? "Gunicorn" : "Puma";
     if (site.user.empty())
-        return fail.set("error", "the site runs under no account of its own: give it one (site_update with user) first; Puma never runs as the server's account or root");
+        return fail.set("error", std::string("the site runs under no account of its own: give it one (site_update with user) first; ") + server +
+                                     " never runs as the server's account or root");
     const UpstreamAddress& a = site.proxy.address;
     const bool loopback = a.host == "127.0.0.1" || a.host == "::1" || a.host.starts_with("127.");
     if (!site.proxy.configured || a.unix || a.tls || !loopback || a.port == 0)
-        return fail.set("error", "the site's upstream must be http://127.0.0.1:PORT (plain HTTP on loopback) for Puma to bind; site_update with upstream sets it");
+        return fail.set("error", std::string("the site's upstream must be http://127.0.0.1:PORT (plain HTTP on loopback) for ") + server +
+                                     " to bind; site_update with upstream sets it");
     const std::string root = site.project_root.empty() ? site.root : site.project_root;
     const std::string group = site.group.empty() ? site.user : site.group;
-    const std::string ruby = runtime_dir(cfg.control, "ruby");
+    const std::string runtime = runtime_dir(cfg.control, python ? "python3" : "ruby");
     const std::string home = cfg.state_dir + "/" + site.user;
     const std::string env = appenv::dir_of(cfg.config_path) + "/" + name + ".env";
-    const std::string bind = a.host == "::1" ? "tcp://[::1]:" + std::to_string(a.port) : "tcp://" + a.host + ":" + std::to_string(a.port);
+    const std::string port = std::to_string(a.port);
     const std::string unit_name = "agensio-app-" + site.user + ".service";
+    const std::string venv = home + "/venvs/" + name;
+    const AppContext ac = app_context(cfg, site);
     // Plain paths and names only: a newline, a space or a quote could add a line to the unit.
-    for (const std::string* v : {&name, &root, &group, &site.user, &ruby, &home, &env}) {
+    for (const std::string* v : {&name, &root, &group, &site.user, &runtime, &home, &env, &venv}) {
         if (v->empty() || v->find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/@:+-") != std::string::npos)
             return fail.set("error", "'" + v->substr(0, 80) + "' is not a plain path or name (letters, digits, . _ / @ : + -); the unit is not rendered");
     }
+    if (python && (!check_project_name(site.project).empty() ||
+                   (ac.hosts + ac.origins + ac.base_url).find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789.-:/,*") != std::string::npos))
+        return fail.set("error", "the site's project or names are not plain names; the unit is not rendered");
     std::string u;
-    u += "# agensio: the application service of " + name + " (Puma), rendered by `agensio ctl site-unit " + name + "` from the site,\n";
+    u += "# agensio: the application service of " + name + " (" + server + "), rendered by `agensio ctl site-unit " + name + "` from the site,\n";
     u += "# [control] runtimes and the site's environment file, until agensio manages it (roadmap F14). As root:\n";
     u += "#   agensio ctl site-unit " + name + " --raw > /etc/systemd/system/" + unit_name + "\n";
     u += "#   systemctl daemon-reload && systemctl enable --now " + unit_name + "\n";
     u += "[Unit]\n";
-    u += "Description=" + std::string(site.app == "redmine" ? "Redmine" : "Rails application") + " of " + name + " (Puma), behind agensio\n";
+    const std::string what = site.app == "redmine" ? "Redmine" : site.app == "wagtail" ? "Wagtail site" : python ? "Django application" : "Rails application";
+    u += "Description=" + what + " of " + name + " (" + server + "), behind agensio\n";
     u += "After=network.target\n\n";
     u += "[Service]\n";
     u += "User=" + site.user + "\nGroup=" + group + "\n";
     u += "WorkingDirectory=" + root + "\n";
-    u += "Environment=RAILS_ENV=production HOME=" + home + " TMPDIR=" + home + "/tmp LANG=C.UTF-8\n";
-    u += "Environment=BUNDLE_PATH=vendor/bundle BUNDLE_WITHOUT=development:test RAILS_LOG_TO_STDOUT=1\n";
-    u += "Environment=GEM_HOME=" + home + "/gems GEM_PATH=" + home + "/gems\n";
-    u += "# The Ruby the tasks bundled with ([control] runtimes): first on PATH, its bundle in ExecStart.\n";
-    u += "Environment=PATH=" + ruby + ":/usr/local/bin:/usr/bin:/bin\n";
-    u += "EnvironmentFile=-" + env + "\n";
-    u += "ExecStart=" + ruby + "/bundle exec puma -e production -b " + bind + "\n";
+    if (python) {
+        u += "Environment=HOME=" + home + " TMPDIR=" + home + "/tmp LANG=C.UTF-8 PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1 VIRTUAL_ENV=" + venv + "\n";
+        u += "# What agensio_settings.py (site task django_settings) reads: the project, the site's names, the served paths.\n";
+        u += "Environment=DJANGO_SETTINGS_MODULE=agensio_settings AGENSIO_DJANGO_PROJECT=" + site.project + "\n";
+        u += "Environment=AGENSIO_STATIC_ROOT=" + root + "/static AGENSIO_MEDIA_ROOT=" + root + "/media\n";
+        if (!ac.hosts.empty()) u += "Environment=AGENSIO_HOSTS=" + ac.hosts + " AGENSIO_ORIGINS=" + ac.origins + " AGENSIO_BASE_URL=" + ac.base_url + "\n";
+        u += "Environment=PATH=" + runtime + ":/usr/local/bin:/usr/bin:/bin\n";
+        u += "EnvironmentFile=-" + env + "\n";
+        u += "# The admin's password createsuperuser read is never the application's.\n";
+        u += "UnsetEnvironment=DJANGO_SUPERUSER_PASSWORD DJANGO_SUPERUSER_USERNAME DJANGO_SUPERUSER_EMAIL\n";
+        u += "# Root's python3 ([control] runtimes) started under the name of the site's virtualenv, which makes it that virtualenv's.\n";
+        u += "ExecStart=@" + runtime + "/python3 " + venv + "/bin/python -m gunicorn " + site.project + ".wsgi:application --bind 127.0.0.1:" + port +
+             " --workers 2 --timeout 60 --forwarded-allow-ips 127.0.0.1\n";
+    } else {
+        u += "Environment=RAILS_ENV=production HOME=" + home + " TMPDIR=" + home + "/tmp LANG=C.UTF-8\n";
+        u += "Environment=BUNDLE_PATH=vendor/bundle BUNDLE_WITHOUT=development:test RAILS_LOG_TO_STDOUT=1\n";
+        u += "Environment=GEM_HOME=" + home + "/gems GEM_PATH=" + home + "/gems\n";
+        u += "# The Ruby the tasks bundled with ([control] runtimes): first on PATH, its bundle in ExecStart.\n";
+        u += "Environment=PATH=" + runtime + ":/usr/local/bin:/usr/bin:/bin\n";
+        u += "EnvironmentFile=-" + env + "\n";
+        const std::string bind = a.host == "::1" ? "tcp://[::1]:" + port : "tcp://" + a.host + ":" + port;
+        u += "ExecStart=" + runtime + "/bundle exec puma -e production -b " + bind + "\n";
+    }
     u += "Restart=on-failure\nRestartSec=2\nKillMode=mixed\nTimeoutStopSec=30\nUMask=0027\n";
-    u += "# Hardening that costs Puma nothing: it writes only below its own directory and its home.\n";
+    u += std::string("# Hardening that costs ") + server + " nothing: it writes only below its own directory and its home.\n";
     u += "NoNewPrivileges=yes\nPrivateTmp=yes\nProtectSystem=strict\n";
     u += "ReadWritePaths=" + root + " " + home + "\n";
     u += "ProtectHome=yes\nRestrictSUIDSGID=yes\nProtectKernelTunables=yes\nProtectControlGroups=yes\nRestrictRealtime=yes\nLockPersonality=yes\n";
@@ -622,10 +693,12 @@ json::Value service_unit(const SiteConfig& site, const Config& cfg) {
                            .push("agensio ctl site-unit " + name + " --raw > /etc/systemd/system/" + unit_name)
                            .push("systemctl daemon-reload")
                            .push("systemctl enable --now " + unit_name);
+    std::string hint = "root installs it with run_as_root (the unit runs " + std::string(server) + " as " + site.user + ", never as root); after a change to the site's "
+                       "environment" + std::string(python ? ", its names (an alias)" : "") + " or its " + (python ? "Python" : "Ruby") +
+                       ", root renders it again and runs systemctl restart " + unit_name;
+    if (python) hint += "; the tasks it needs first: venv_create, pip_install_requirements, pip_install with packages \"gunicorn\", django_settings, migrate, collectstatic";
     return json::Value::object().set("ok", true).set("site", name).set("unit_name", unit_name).set("path", "/etc/systemd/system/" + unit_name)
-        .set("unit", u).set("run_as_root", cmds)
-        .set("hint", "root installs it with run_as_root (the unit runs Puma as " + site.user + ", never as root); after a change to the site's "
-                     "environment or its Ruby, root renders it again and runs systemctl restart " + unit_name);
+        .set("unit", u).set("run_as_root", cmds).set("hint", hint);
 }
 
 std::vector<std::string> next_steps(const SiteSpec& spec, const Config& cfg) {
@@ -665,6 +738,33 @@ std::vector<std::string> next_steps(const SiteSpec& spec, const Config& cfg) {
             add("load_default_data --param lang=en (once, on a new database)");
             add("assets_precompile");
             cmds.push_back("# Redmine is unpacked: " + (dbyml ? std::string() : env + ", then ") + "site-task " + spec.domain + " " + open + "; " + service);
+        }
+    }
+    if (python_app(spec.app)) {
+        // Django and Wagtail (2026-09-28): the chain still open, by what the project directory
+        // holds (the server reads it through its group; the virtualenv in the account's 0700
+        // home it cannot see, so venv_create is named whenever the packages are).
+        std::error_code ec;
+        auto file = [&](const char* rel) { return !spec.root.empty() && std::filesystem::is_regular_file(spec.root + rel, ec); };
+        const std::string d = spec.domain;
+        const std::string service = "then the service: site-unit " + d + " renders its Gunicorn unit for root, site-service " + d + " shows whether it runs";
+        const std::string settings = "site-env-set " + d + " --generate DJANGO_SECRET_KEY, site-task " + d + " django_settings";
+        const std::string admin = "site-env-set " + d + " --generate DJANGO_SUPERUSER_PASSWORD, site-task " + d +
+                                  " createsuperuser --param username=admin --param email=ADDRESS";
+        if (!file("/manage.py")) {
+            const std::string framework = spec.app == "wagtail" ? "wagtail" : "django";
+            cmds.push_back("# a new " + std::string(spec.app == "wagtail" ? "Wagtail site" : "Django project") + ": site-task " + d +
+                           " venv_create, pip_install --param \"packages=" + framework + " gunicorn\" (you confirm it), startproject (it creates the project " +
+                           spec.project + "), pip_install_requirements; " + settings + "; site-task " + d + " migrate, collectstatic; " + admin + "; " + service +
+                           ". An existing project comes with site-install instead, then venv_create, pip_install_requirements and pip_install gunicorn");
+        } else if (!file("/agensio_settings.py")) {
+            cmds.push_back("# the project is in place: site-task " + d + " venv_create, pip_install_requirements, pip_install --param packages=gunicorn "
+                           "(you confirm it); " + settings + "; site-task " + d + " migrate, collectstatic; " + admin + "; " + service);
+        } else if (!std::filesystem::is_directory(spec.root + "/static", ec)) {
+            cmds.push_back("# the project and its settings are in place: site-task " + d + " migrate, collectstatic; " + admin + " (once); " + service);
+        } else {
+            cmds.push_back("# the project is in place: site-task " + d + " migrate after an upgrade, collectstatic after static changes, "
+                           "pip_install_requirements after a requirements.txt change; restart its service after each");
         }
     }
     if (spec.app == "rails") {

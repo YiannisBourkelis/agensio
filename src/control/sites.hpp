@@ -25,7 +25,8 @@ struct SiteSpec {
     bool no_user = false;       // `no_user: true`: decided, and no account (the same as user null)
     std::string app;  // static | php | laravel | wordpress | proxy
     std::string root;
-    std::string upstream;    // app = proxy
+    std::string upstream;    // app = proxy, rails, redmine, django, wagtail
+    std::string project;     // app = django | wagtail: the project's Python package
     std::string php_socket;  // php without a user: an existing pool
     int php_children = 0;    // generated pool sizing (with a user); the same as settings.children
     std::string php_version;
@@ -57,7 +58,9 @@ bool valid_account(std::string_view name, std::string& why);
 bool safe_path(std::string_view path, std::string& why);
 // A short account name derived from the domain ("www.example.com" -> "example").
 std::string suggest_user(std::string_view domain);
-// The application the files under `root` suggest: laravel, wordpress, php, proxy, static.
+// A project name suggested from the domain ("blog.example.com" -> "blog"), a valid package name.
+std::string suggest_project(std::string_view domain);
+// The application the files under `root` suggest: laravel, wordpress, php, wagtail, django, proxy, static.
 std::string detect_app(const std::filesystem::path& root);
 // What detect_app looked at for that answer, for a message ("bin/grav and system/defines.php").
 std::string detect_app_marker(const std::string& app);
@@ -97,7 +100,8 @@ std::vector<std::string> prerequisites(const SiteSpec& spec, const Config& cfg);
 // What to run after the site is live (generated pool files, php-fpm reload).
 std::vector<std::string> next_steps(const SiteSpec& spec, const Config& cfg);
 
-// The systemd unit that runs a Rails site's Puma until agensio manages it (roadmap F14):
+// The systemd unit that runs a Rails site's Puma or a Django site's Gunicorn until agensio
+// manages it (roadmap F14):
 // rendered from the site (its account, directory, loopback upstream port), [control]
 // runtimes (the Ruby the tasks bundled with) and the site's environment file, never from the
 // caller (2026-09-27 Redmine report: a unit copied from docs/examples/puma.service started

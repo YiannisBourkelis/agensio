@@ -45,7 +45,7 @@ export H3 H3JSON
 sed "s#@WORKERS@#0#g; s#@BENCH@#$ROOT/bench#g; s#@SENDFILE_MIN@#${SENDFILE_MIN:-48KB}#g; s#@ACCESS_LOG@#$ROOT/bench/tmp/access.log#; s#@H3@#$H3LIST#g; s#^tcp_nodelay = true#tcp_nodelay = true\ntrusted_proxies = [\"127.0.0.1\"]#" bench/agensio.toml > bench/tmp/agensio-test.toml
 printf '\n[control]\nsocket = "%s/bench/tmp/control.sock"\naudit = "%s/bench/tmp/audit.log"\nupload_max = "1M"\nruntimes = { ruby = "%s/bench/tmp/rt" }\n' "$ROOT" "$ROOT" "$ROOT" >> bench/tmp/agensio-test.toml
 sed -i "s#^\[server\]#[server]\nstate_dir = \"$ROOT/bench/tmp/state\"#" bench/tmp/agensio-test.toml
-rm -rf bench/tmp/state bench/tmp/inst bench/tmp/env; mkdir -p bench/tmp/state bench/tmp/inst
+rm -rf bench/tmp/state bench/tmp/inst bench/tmp/env bench/tmp/audit.log; mkdir -p bench/tmp/state bench/tmp/inst
 rm -rf bench/tmp/sites.d; mkdir -p bench/tmp/sites.d bench/tmp/sites/created.test/web; echo created > bench/tmp/sites/created.test/web/index.html
 sed -i '1i include = ["sites.d/*.toml"]' bench/tmp/agensio-test.toml
 # Locations (A4) on the plain site: an SPA fallback, an aliased root, an exact match and a
@@ -622,7 +622,7 @@ check "control: unknown site is a 404" "404" "$(curl -sS -o /dev/null -w '%{http
 check "control: validate reads the file on disk" "yes" "$(curl -sS --unix-socket $CS http://control/v1/config/validate | grep -q '"ok":true' && echo yes)"
 curl -sS -o /dev/null http://127.0.0.1:8080/control-probe-404 >/dev/null; sleep 1.2
 check "control: logs finds the 404 just made" "yes" "$(curl -sS --unix-socket $CS 'http://control/v1/logs?since=1m&status=4xx' | grep -q 'control-probe-404' && echo yes)"
-check "control: presets catalogue comes from the preset table" "9 drupal yes" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; d=json.load(sys.stdin); p={x["app"]:x for x in d["presets"]}; print(len(p), "drupal" if "drupal" in p else "-", "yes" if "web/" in p["drupal"]["root"] and "/core/lib/" in p["drupal"]["no_php_under"] and p["laravel"]["php"].startswith("only /index.php") else "no")')"
+check "control: presets catalogue comes from the preset table" "11 drupal yes" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; d=json.load(sys.stdin); p={x["app"]:x for x in d["presets"]}; print(len(p), "drupal" if "drupal" in p else "-", "yes" if "web/" in p["drupal"]["root"] and "/core/lib/" in p["drupal"]["no_php_under"] and p["laravel"]["php"].startswith("only /index.php") else "no")')"
 check "control: health answers with findings" "yes" "$(curl -sS --unix-socket $CS http://control/v1/health | grep -q '"findings":\[' && echo yes)"
 check "control: ctl logs and health through the client" "0 0" "$("$BIN" ctl logs --since 5m --status all --socket $CS > /dev/null; echo -n "$? "; "$BIN" ctl health --socket $CS > /dev/null; echo $?)"
 # Mutations (F3): confirm required, the decision form, create, update, disable, enable, delete, reload.
@@ -731,6 +731,7 @@ check "tasks: the refusal is in the audit log with the task's name" "yes" "$(gre
 check "service: a Rails site without its own account has none (409 with the hint); no task output before a task ran (404)" "409 yes 404" "$(curl -sS -o bench/tmp/svc.json -w '%{http_code}' --unix-socket $CS http://control/v1/sites/rails.test/service) $(python3 -c 'import json; d=json.load(open("bench/tmp/svc.json")); print("yes" if "has no application service" in d["error"] and "site_service_unit" in d["hint"] else d)') $(curl -sS -o /dev/null -w '%{http_code}' --unix-socket $CS http://control/v1/sites/rails.test/task-output)"
 # The site's environment (2026-09-27 Writebook report), here without the helper: the
 # server's own file beside the configuration, under its own account.
+check "env: the hint before a file exists follows the preset: SECRET_KEY_BASE for rails, no Rails advice for a proxy site" "yes 201 yes 200" "$(curl -sS --unix-socket $CS http://control/v1/sites/rails.test/env | python3 -c 'import json,sys; d=json.load(sys.stdin); print("yes" if not d["exists"] and "SECRET_KEY_BASE" in d["hint"] else d)') $(cpost /v1/sites '{"domain":"px.test","https":"none","user":null,"app":"proxy","upstream":"http://127.0.0.1:18098","listen_plain":"127.0.0.1:8096","confirm":true,"reason":"env hint"}') $(curl -sS --unix-socket $CS http://control/v1/sites/px.test/env | python3 -c 'import json,sys; d=json.load(sys.stdin); h=d["hint"]; print("yes" if not d["exists"] and "generate: [NAME]" in h and "EnvironmentFile=" in h and "Rails" not in h and "SECRET_KEY_BASE" not in h else d)') $(cpost /v1/sites/px.test/delete '{"confirm":true,"reason":"env hint"}')"
 check "env: SECRET_KEY_BASE generated into the server's own file (0600 in 0700), named in the answer, its value in neither the answer nor the audit log; a static site has none; a name that chooses a program is refused" "200 SECRET_KEY_BASE 600 700 no 422 400" "$(cpost /v1/sites/rails.test/env '{"generate":["SECRET_KEY_BASE"],"confirm":true,"reason":"env"}') $(python3 -c 'import json; print(",".join(json.load(open("bench/tmp/ctl-reply.json"))["generated"]))') $(stat -c %a bench/tmp/env/rails.test.env) $(stat -c %a bench/tmp/env) $(grep -q "$(sed -n 's/^SECRET_KEY_BASE="\(.*\)"$/\1/p' bench/tmp/env/rails.test.env)" bench/tmp/ctl-reply.json bench/tmp/audit.log && echo yes || echo no) $(cpost /v1/sites/strict.test/env '{"set":{"A":"b"},"confirm":true}') $(cpost /v1/sites/rails.test/env '{"set":{"PATH":"/tmp"},"confirm":true}')"
 check "env: names, lengths and fingerprints by default, never a value; audited by name" "SECRET_KEY_BASE 128 16 False yes" "$(curl -sS --unix-socket $CS http://control/v1/sites/rails.test/env | python3 -c 'import json,sys; v=json.load(sys.stdin)["variables"][0]; print(v["name"], int(v["length"]), len(v["fingerprint"]), "value" in v)') $(grep -q 'sites/rails.test/env: read the names of SECRET_KEY_BASE$' bench/tmp/audit.log && echo yes)"
 check "health: an environment file others could write is named for its site (the server's own files, no helper)" "yes no" "$(chmod 666 bench/tmp/env/rails.test.env; curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; print("yes" if any(f["code"] == "site_env_unsafe" and f.get("site") == "rails.test" for f in json.load(sys.stdin)["findings"]) else "no")'; chmod 600 bench/tmp/env/rails.test.env) $(curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; print("yes" if any(f["code"].startswith("site_env") for f in json.load(sys.stdin)["findings"]) else "no")')"
@@ -739,7 +740,7 @@ check "rails: databases, logs, dumps by their ending and everything under /stora
 check "a request body above the site's limit: 413, and the error log names the site, the size, the limit and the fix" "413 yes" "$(head -c 1200000 /dev/zero | curl -sS -o /dev/null -w '%{http_code}' -H 'Host: rails.test' -H 'Expect: 100-continue' -X POST --data-binary @- http://127.0.0.1:8096/upload) $(grep -q 'site rails.test: a request body of 1.1 MB from 127.0.0.1 refused with 413: its max_body_size is 1 MB (the server.s default); site_update' bench/tmp/error.log && echo yes)"
 check "a chunked HTTP/1.1 body past the limit: 413 and close, not a cut connection; the warning says at least" "413 413 yes" "$(head -c 2000000 /dev/zero | curl -sS -o /dev/null -w '%{http_code}' -H 'Host: rails.test' -H 'Transfer-Encoding: chunked' -X POST --data-binary @- http://127.0.0.1:8096/upload) $(head -c 2000000 /dev/zero | curl -sS -o /dev/null -w '%{http_code}' -H 'Host: rails.test' -H 'Expect: 100-continue' -H 'Transfer-Encoding: chunked' -X POST --data-binary @- http://127.0.0.1:8096/upload) $(grep -q 'site rails.test: a request body of at least 1 MB from 127.0.0.1 refused with 413' bench/tmp/error.log && echo yes)"
 check "tasks: ctl site-task sends the task and --param, without --yes nothing happens (428), a missing task is a usage error" "1 yes 1 2" "$("$BIN" ctl site-task rails.test rails_new --param name=blog --dry-run --yes --socket $CS > bench/tmp/ctl.out 2>&1; echo -n "$? "; grep -q 'the ruby runtime' bench/tmp/ctl.out && echo -n yes; echo -n ' '; "$BIN" ctl site-task rails.test db_prepare --socket $CS > /dev/null 2>&1; echo -n "$? "; "$BIN" ctl site-task rails.test --yes --socket $CS > /dev/null 2>&1; echo $?)"
-check "tasks: the MCP task enum and parameters come from the table; listing reads, running is destructive" "10 lang,name,version True False True" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
+check "tasks: the MCP task enum and parameters come from the table; listing reads, running is destructive" "19 email,lang,name,packages,username,version True False True True ^[A-Z ^[a-z_][a-z0-9_]{0,63}$" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
 import json, subprocess, sys
 p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n"); p.stdin.flush()
@@ -747,14 +748,63 @@ tools = {t["name"]: t for t in json.loads(p.stdout.readline())["result"]["tools"
 run = tools["site_task"]["inputSchema"]["properties"]
 p.stdin.close(); p.wait()
 print(len(run["task"]["enum"]), ",".join(sorted(run["params"]["properties"])), tools["site_tasks_list"]["annotations"]["readOnlyHint"],
-      tools["site_task"]["annotations"]["readOnlyHint"], tools["site_task"]["annotations"]["destructiveHint"])
+      tools["site_task"]["annotations"]["readOnlyHint"], tools["site_task"]["annotations"]["destructiveHint"],
+      # version means a Rails 8 release for one task and any release for the pip rows: no one pattern
+      "pattern" in run["params"]["properties"]["version"], run["params"]["properties"]["username"].get("pattern", "")[:5],
+      tools["site_create"]["inputSchema"]["properties"]["project"]["pattern"])
 PYT
 )"
+# pip_install names any package, so the bridge asks the user in the client's own dialog (MCP
+# elicitation) before it sends the task, and the control API refuses it without that (2026-09-28).
+mkdir -p bench/tmp/sites/dj.test/app
+check "a django site: created with its project" "201" "$(cpost /v1/sites "{\"domain\":\"dj.test\",\"https\":\"none\",\"user\":null,\"app\":\"django\",\"project\":\"blog\",\"root\":\"$ROOT/bench/tmp/sites/dj.test/app\",\"upstream\":\"http://127.0.0.1:18099\",\"listen_plain\":\"127.0.0.1:8096\",\"confirm\":true,\"reason\":\"django\"}")"
+check "mcp: pip_install asks the user in the client's dialog; no dialog, a decline or an unticked box is a refusal with the terminal command; an agent's user_confirmed is dropped; a message during the dialog waits its turn" "refused elicitation/create warn declined unticked 3 9 yes nodialog" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
+import json, subprocess, sys
+def start(caps):
+    p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    send(p, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": caps, "clientInfo": {"name": "test", "version": "1.0"}}})
+    read(p)
+    return p
+def send(p, m): p.stdin.write(json.dumps(m) + "\n"); p.stdin.flush()
+def read(p): return json.loads(p.stdout.readline())
+def text(r): return " ".join(c["text"] for c in r["result"]["content"])
+def call(i, **extra):
+    args = {"name": "dj.test", "task": "pip_install", "params": {"packages": "wagtail"}, "confirm": True, "reason": "t", "user_confirmed": "mcp"}
+    args.update(extra)
+    return {"jsonrpc": "2.0", "id": i, "method": "tools/call", "params": {"name": "site_task", "arguments": args}}
+out = []
+p = start({})
+send(p, call(2)); r = read(p)
+out.append("refused" if r["result"]["isError"] and "cannot ask them" in text(r) and "agensio ctl site-task dj.test pip_install --param 'packages=wagtail' --yes" in text(r) else text(r)[:300])
+p.stdin.close(); p.wait()
+p = start({"elicitation": {}})
+send(p, call(2)); q = read(p)
+out.append(q.get("method", "?"))
+out.append("warn" if "https://pypi.org/project/wagtail/" in q["params"]["message"] and q["params"]["requestedSchema"]["properties"]["install"]["type"] == "boolean" else q)
+send(p, {"jsonrpc": "2.0", "id": q["id"], "result": {"action": "decline"}}); r = read(p)
+out.append("declined" if r["id"] == 2 and r["result"]["isError"] and "declined" in text(r) and "agensio ctl site-task" in text(r) else text(r)[:300])
+send(p, call(4)); q = read(p)
+send(p, {"jsonrpc": "2.0", "id": q["id"], "result": {"action": "accept", "content": {"install": False}}}); r = read(p)
+out.append("unticked" if r["result"]["isError"] and "unticked" in text(r) else text(r)[:300])
+send(p, call(3)); q = read(p)
+send(p, {"jsonrpc": "2.0", "id": 9, "method": "ping"})
+send(p, {"jsonrpc": "2.0", "id": q["id"], "result": {"action": "accept", "content": {"install": True}}})
+r = read(p); r2 = read(p)
+out.append(f'{r["id"]} {r2["id"]}')
+out.append("yes" if "task" in text(r) else text(r)[:300])
+send(p, call(5, dry_run=True)); r = read(p)
+out.append("nodialog" if r["id"] == 5 and "result" in r else r)
+p.stdin.close(); p.wait()
+print(" ".join(out))
+PYT
+)"
+check "the audit log: the accepted run is recorded as the user's confirmation in the client's dialog, the declined ones are not there" "1" "$(grep -c 'sites/dj.test/task (t): running task pip_install packages=wagtail in .*, confirmed by the user in the MCP client.s dialog (test 1.0)' bench/tmp/audit.log)"
+check "the control API refuses pip_install without the user's own confirmation, even with confirm; a dry run through ctl warns of nothing" "428 yes" "$(cpost /v1/sites/dj.test/task '{"task":"pip_install","params":{"packages":"wagtail"},"confirm":true,"reason":"agent"}') $("$BIN" ctl site-task dj.test pip_install --param packages=wagtail --dry-run --yes --socket $CS 2>&1 >/dev/null | grep -q 'WARNING' && echo no || echo yes)"
 # Without the helper, as the server's own account: the template row needs the application's
 # Gemfile first; the unit is refused for a site without an account of its own.
 check "database_config needs the application first; site-unit refuses a site without its own account" "409 yes 409 yes" "$(cpost /v1/sites/rails.test/task '{"task":"database_config","confirm":true,"reason":"t"}') $(grep -q 'Gemfile, which does not exist' bench/tmp/ctl-reply.json && echo yes) $(curl -sS -o bench/tmp/unit.json -w '%{http_code}' --unix-socket $CS http://control/v1/sites/rails.test/unit) $(grep -q 'no account of its own' bench/tmp/unit.json && echo yes)"
 cpost /v1/sites/rails.test/delete '{"confirm":true}' > /dev/null
-check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 160 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
+check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 161 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
 check "secrets: the presets catalogue lists each preset's credential files" "/wp-config.php /sites/default/settings.php" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["wordpress"]["secrets"][0], p["drupal"]["secrets"][0])')"
 check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$("$BIN" ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; "$BIN" ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"

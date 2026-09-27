@@ -576,6 +576,137 @@ agensio ctl site-task pm.example.com assets_precompile --yes --reason redmine
 agensio ctl site-unit pm.example.com --raw > /etc/systemd/system/agensio-app-pm.service   # as root, then enable it
 ```
 
+## 4e. Django and Wagtail: `app = "django"`, `app = "wagtail"`
+
+A Django project runs under Gunicorn on a loopback port; agensio serves its `/static/`
+(what `collectstatic` gathers) and `/media/` (uploads) from the project directory, since
+Gunicorn serves no files, and sends every other request to Gunicorn. `wagtail` is built on
+`django` as `redmine` is on `rails`: the same routing and tasks, plus Wagtail's own. `root`
+is the project directory (where `manage.py` lives) and `project` names the project's Python
+package (`NAME/settings`, `NAME/wsgi.py`), required for both presets: a new project is
+created under that name, an installed one must match its own.
+
+```toml
+[[site]]
+server_name = ["ag8.example.com"]
+listen = ["0.0.0.0:443"]
+tls = "auto"
+app = "wagtail"
+root = "/var/www/ag8.example.com/app"   # the project directory; only static/ and media/ below it are served
+project = "mysite"                       # the Python package: mysite/settings, mysite/wsgi.py
+user = "ag8"
+upstream = "http://127.0.0.1:3008"      # where Gunicorn listens; keep it on loopback
+```
+
+What the preset adds:
+
+| path | answered by |
+|---|---|
+| `/static/` | the file below `<root>/static/`, else 404 (never the application); `Cache-Control: public, max-age=86400`, for Wagtail a year and `immutable`, since its production settings name every file by its hash |
+| `/media/` | the file below `<root>/media/`, else 404; `X-Content-Type-Options: nosniff` and `Content-Security-Policy: script-src 'none'; form-action 'none'; base-uri 'none'`, so an uploaded HTML or SVG page runs no script on the site's origin (no `sandbox`: a browser's PDF viewer refuses a sandboxed document) |
+| `/media/documents/` (wagtail) | 404: Wagtail serves documents through its own view (`/documents/ID/NAME`), which checks a collection's privacy |
+| `/.env`, `/.git/`, `/manage.py`, `/requirements.txt`, `/agensio_settings.py`, `/db.sqlite3`, `/Dockerfile`, `/.dockerignore` | 404 at the edge |
+| a path ending in `.py`, `.pyc`, `.pyo`, `.sqlite3` (and `-wal`, `-shm`, `-journal`), `.log`, `.key`, `.sql`, `.env` | 404, on the application's paths and in the two served directories |
+| everything else | the upstream (Gunicorn) |
+
+Both served directories refuse dot segments and follow no symlink out of the project.
+
+**The virtualenv.** Every task runs in a virtualenv of the site's own,
+`<state_dir>/<account>/venvs/<site>`, outside the served tree and never shared between
+sites (a virtualenv holds one version of each package). `venv_create` makes it with the
+`python3` of `[control] runtimes`; every other task runs that same root-owned `python3`
+under the virtualenv's name (`argv[0]` is `<venv>/bin/python`, which is how Python finds
+its virtualenv), so the packages are the site's while the program executed stays root's,
+as the interpreter rule requires. Debian and Ubuntu ship venv's `ensurepip` apart: without
+`python3-venv` the task list marks the interpreter and names
+`apt-get install -y python3-venv` for root, and `venv_create` is refused before it runs.
+
+**`pip_install` needs the user's own confirmation.** It installs whatever packages it is
+given (one to ten requirement specifiers: a name, extras, version clauses; no URL, path or
+option, each passed to pip after `--`), and their code runs as the site's account, so every
+run is confirmed by the user in person, never by an agent's `confirm`. Through MCP the bridge
+asks in the client's own dialog (MCP elicitation) before it sends the task: the packages, the
+site, the account, the virtualenv, and a warning to check each name on pypi.org, since a
+look-alike name is a common way to get malicious code. A client that cannot show the dialog,
+or a user who declines, gets a refusal carrying the `agensio ctl` command for the user to run
+in a terminal on the server, where the same warning is printed and `--yes` is the
+confirmation. The control API refuses the task without one of the two (428, with the warning
+and the command), and the audit log says how the user confirmed. `pip_install_requirements`
+needs no confirmation: the project's own file names the packages. That the agent cannot run
+`agensio ctl` itself depends on how it reaches the server: give its SSH key
+`command="agensio mcp"` (docs/mcp.md).
+
+**The tasks**, in the order a new Wagtail site takes them:
+
+| task | runs | notes |
+|---|---|---|
+| `venv_create` | `python3 -m venv <venv>` | again keeps what is installed |
+| `pip_install` | `pip install -- PACKAGES` | any packages, `--param "packages=wagtail gunicorn"`; the user confirms every run in person (below); downloads |
+| `startproject` | wagtail: `wagtail start PROJECT .`; django: `django-admin startproject PROJECT .` | the directory must be empty; needs the framework from `pip_install` |
+| `pip_install_requirements` | `pip install -r requirements.txt` | after a new project, an install, a change; downloads |
+| `django_settings` | no program: writes `agensio_settings.py` | a fixed template, `0640`, only when missing; needs `DJANGO_SECRET_KEY` |
+| `migrate` | `manage.py migrate --noinput` | |
+| `collectstatic` | `manage.py collectstatic --noinput` | into `static/`, which agensio serves |
+| `createsuperuser` | `manage.py createsuperuser --noinput --username=U --email=E` | the password from `DJANGO_SUPERUSER_PASSWORD` in the site's environment |
+| `check_deploy` | `manage.py check --deploy` | reports, changes nothing |
+
+Every Python task runs with `DJANGO_SETTINGS_MODULE=agensio_settings`,
+`VIRTUAL_ENV=<venv>`, `PYTHONNOUSERSITE=1` (never the account's user site-packages),
+`PYTHONUNBUFFERED=1`, `PIP_DISABLE_PIP_VERSION_CHECK=1`, `PIP_NO_INPUT=1`, and what
+`agensio_settings.py` reads about the site: `AGENSIO_DJANGO_PROJECT`, `AGENSIO_HOSTS` (the
+site's names, `*.example.com` as Django's `.example.com`), `AGENSIO_ORIGINS` (those names
+with the scheme the site is reached by), `AGENSIO_BASE_URL`, `AGENSIO_STATIC_ROOT` and
+`AGENSIO_MEDIA_ROOT` (`<root>/static`, `<root>/media`). The site's environment cannot set
+any of these (section 15, "The site's environment"), nor `PIP_*`.
+
+**The production settings.** A generated Wagtail project's production settings have no
+`SECRET_KEY` (only its dev settings do) and no `ALLOWED_HOSTS`, so Django refuses every
+request until someone writes them; a plain `startproject` has `DEBUG = True` and no
+`STATIC_ROOT`. `django_settings` writes `agensio_settings.py` from a fixed template:
+it imports the project's own settings (`PROJECT.settings.production` when there is one,
+else `PROJECT.settings`), then sets `DEBUG = False`, `SECRET_KEY` from
+`DJANGO_SECRET_KEY`, `ALLOWED_HOSTS` and `CSRF_TRUSTED_ORIGINS` from the site's names,
+`SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")` (agensio replaces a
+client's `X-Forwarded-Proto` and sets `https` on its TLS listeners, which is what makes
+that setting safe), `STATIC_ROOT` and `MEDIA_ROOT` where agensio serves them,
+`WAGTAILADMIN_BASE_URL` for a Wagtail project, and `DATABASES` from `DATABASE_URL` when
+the site's environment has one (`sqlite:///db.sqlite3`, `postgresql://USER:PASSWORD@HOST/NAME`,
+`mysql://...`; the driver must be in `requirements.txt`). It holds no secret and names no
+host, so a new alias needs no new file, only a new unit. To change it, move it away and
+run the task again. `manage.py` and `wsgi.py` default to the dev settings; agensio always
+sets `DJANGO_SETTINGS_MODULE`, in its tasks and in the unit.
+
+**The first admin.** `site-env-set NAME --generate DJANGO_SUPERUSER_PASSWORD`, then
+`site-task NAME createsuperuser --param username=admin --param email=ADDRESS`: the
+password is made on the server and never passes through the caller; `site-env NAME
+--reveal DJANGO_SUPERUSER_PASSWORD` shows it when the user asks. The rendered unit keeps
+it from the application (`UnsetEnvironment=` for the three `DJANGO_SUPERUSER_*` names).
+
+**The unit.** `agensio ctl site-unit NAME` renders the Gunicorn unit: the site's account
+and directory, the environment above, the site's environment file, and
+`ExecStart=@<runtimes.python3>/python3 <venv>/bin/python -m gunicorn PROJECT.wsgi:application
+--bind 127.0.0.1:PORT --workers 2` (systemd's `@` passes the second word as `argv[0]`: root's
+interpreter as the site's virtualenv), with the hardening of the Rails unit. Root installs
+it with the three commands in its answer; after a change of the site's names or its
+Python, root renders it again. `site-service` and `site-service-logs` read it as for Rails.
+
+An existing project goes in with `site-install` (its `manage.py` at the archive's top); the
+answer generates `DJANGO_SECRET_KEY` into the site's environment, lists the tasks from
+`venv_create` on (`pip_install_requirements`, then `pip_install` for Gunicorn), and warns when the archive's package (the directory holding `wsgi.py`,
+`facts.wsgi_packages`) is not the site's `project`. A new Wagtail site, the whole path,
+which `tests/wagtail-install.sh` runs:
+
+```sh
+agensio ctl site-create --domain ag8.example.com --app wagtail --project mysite --root /var/www/ag8.example.com/app --user ag8 --upstream http://127.0.0.1:3008 --yes --reason wagtail
+agensio ctl site-task ag8.example.com venv_create --yes --reason wagtail
+agensio ctl site-task ag8.example.com pip_install --param "packages=wagtail gunicorn" --yes --reason wagtail   # prints the warning
+for t in startproject pip_install_requirements; do agensio ctl site-task ag8.example.com $t --yes --reason wagtail; done
+agensio ctl site-env-set ag8.example.com --generate DJANGO_SECRET_KEY --generate DJANGO_SUPERUSER_PASSWORD --yes --reason wagtail
+for t in django_settings migrate collectstatic; do agensio ctl site-task ag8.example.com $t --yes --reason wagtail; done
+agensio ctl site-task ag8.example.com createsuperuser --param username=admin --param email=admin@example.com --yes --reason wagtail
+agensio ctl site-unit ag8.example.com --raw > /etc/systemd/system/agensio-app-ag8.service   # as root, then enable it
+```
+
 ## 5. Customising a preset
 
 A preset never overrides what the site writes itself:
@@ -1254,11 +1385,11 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 | `validate` | viewer | loads the file on disk again and runs the hosting rules: `ok`, `errors`, site count, and the restart-only settings that differ from the running server |
 | `logs` | viewer | `--site NAME` (default: all sites plus the error log), `--since 3h` (`m`, `h`, `d`, `w`, seconds, or a local `YYYY-MM-DDThh:mm:ss`; default 1h), `--level error|warn|info` for the error log (default warn = error+warn), `--status 5xx|4xx|all|NNN` for access logs (default 5xx), `--limit N` (default 200, newest). Reads at most 2 MB per file from the end; `truncated` says when that cut in |
 | `uploads` | viewer | the archives stored with `upload` (`file`, `bytes`, `uploaded`), ready for `site-install --file` |
-| `site-unit NAME [--raw]` | viewer | the systemd unit that runs a Rails or Redmine site's Puma, rendered from the site and `[control] runtimes`, with the root commands that install it (`--raw` prints the unit alone, for `> /etc/systemd/system/...`); 409 for a site without its own account or a non-loopback upstream |
-| `site-service NAME` | viewer | whether a Rails or Redmine site's application service runs: `agensio-app-USER.service`, derived from the site's account, read by the provisioning helper with `systemctl show` (`state`: `LoadState`, `ActiveState`, `SubState`, `Result`, `ExecMainStatus`, `MainPID`, the enter timestamps, `MemoryCurrent`, `NRestarts`, `UnitFileState`), with `summary` and `next_steps` (`site-unit` when the unit is missing, `site-service-logs` and `systemctl restart` when it failed, `systemctl enable --now` when it is stopped); 409 for a site without its own account, a non-Rails site or a server without the helper; 503 `busy` while the helper runs a task |
+| `site-unit NAME [--raw]` | viewer | the systemd unit that runs a Rails or Redmine site's Puma, or a Django or Wagtail site's Gunicorn (section 4e), rendered from the site and `[control] runtimes`, with the root commands that install it (`--raw` prints the unit alone, for `> /etc/systemd/system/...`); 409 for a site without its own account or a non-loopback upstream |
+| `site-service NAME` | viewer | whether a Rails, Redmine, Django or Wagtail site's application service runs: `agensio-app-USER.service`, derived from the site's account, read by the provisioning helper with `systemctl show` (`state`: `LoadState`, `ActiveState`, `SubState`, `Result`, `ExecMainStatus`, `MainPID`, the enter timestamps, `MemoryCurrent`, `NRestarts`, `UnitFileState`), with `summary` and `next_steps` (`site-unit` when the unit is missing, `site-service-logs` and `systemctl restart` when it failed, `systemctl enable --now` when it is stopped); 409 for a site without its own account, a non-Rails site or a server without the helper; 503 `busy` while the helper runs a task |
 | `site-service-logs NAME [--lines N] [--since 3h] [--raw]` | admin | the unit's journal (`journalctl -u UNIT -n N -o short-iso`, N from 1 to 1000, 200 by default; `--since` a number and `s`, `m`, `h` or `d`), newest last, the newest 256 KB at most; every read audited; `--raw` prints the lines alone |
 | `site-task-output NAME [--offset N] [--length N] [--raw]` | admin | the whole output of the site's last task (see `site-task`), up to 64 KB per call from `offset`, with `next_offset` (null at the end), `kept_all` (false when the task printed more than the 1 MB kept) and the task's name and time; 404 when no task ran since the server started |
-| `site-tasks NAME` | viewer | the named tasks the site's preset offers (`app = "rails"`: seven; `"redmine"`: eight), each with its summary, its parameters (name, meaning, pattern, required), whether it downloads, whether the directory must be empty, its effective time limit (the row's, capped by `[control] task_limits.timeout`) and its `interpreter`: the program, whether the interpreter rule accepts it and, when not, why and the package command; `run_as_root` at the top lists every missing package once, so root installs them before the first task; the account that runs them (`runs_as`), the directory, the task running now; a site of another preset has none |
+| `site-tasks NAME` | viewer | the named tasks the site's preset offers (`app = "rails"`: seven; `"redmine"`: eight; `"django"` and `"wagtail"`: ten each, with the site's `project` and `virtualenv`), each with its summary, its parameters (name, meaning, pattern, required), whether it downloads, whether the directory must be empty, its effective time limit (the row's, capped by `[control] task_limits.timeout`) and its `interpreter`: the program, whether the interpreter rule accepts it and, when not, why and the package command; `run_as_root` at the top lists every missing package once, so root installs them before the first task; the account that runs them (`runs_as`), the directory, the task running now; a site of another preset has none |
 | `settings [NAME]` | viewer | the per-site limits `site-create` and `site-update` accept under `settings`: for each key its type, unit and spellings, meaning, default and its origin, minimum, the ceiling from `[control] site_limits`, what changing it costs (agensio reload, php-fpm reload) and what it derives; with a site, the current value and whether it comes from the site, the server or a built-in default. `site NAME` reports the same `settings` |
 | `health` | viewer | findings with `severity`, `code`, `site`, `message`, `fix` (also `files_unreadable`: files under a document root, the preset's upload directory first, that the server's account cannot open and that answer 404 with no log line; `php_tmp_missing`; `php_fpm_hard_reload`; `php_pool_resident`, judged from the pool file php-fpm runs; `preset_mismatch`: the files under a site's directory belong to another application than its `app` says, with the application detected and the `app` to set; `archives_in_root`: backup archives and database dumps under a served tree, the directories a preset never answers excepted; `site_env_unsafe`: the site environments' directory is not root's alone, or a site's file is open to others, not root's or has a second link (checked by the helper, read-only), with the `chown`/`chmod` line; `site_env_orphan`: a deleted site's environment file, with its `rm -f`; `site_env_unchecked`: the helper was busy with a task): configuration on disk invalid or failing the hosting rules, restart-only settings changed, running as root, certificate unreadable / still the placeholder / expired / expiring within 14 days (manual), `tls = "auto"` without a plain port-80 site for the names, no http-to-https redirect, application sites sharing the server's account, generated pools out of date, errors in the last 24 hours. `ok` is true when nothing above info level was found |
 
@@ -1269,7 +1400,7 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 |---|---|---|
 | `reload` | operator | the same as `agensio reload`: validate the file on disk, bind, switch; 409 with the reason when refused, nothing changed then |
 | `logs-reopen` | operator | reopen every log file (what `SIGUSR1` does) |
-| `site-create` | admin | writes `sites.d/<domain>.toml`, validates, reloads. Fields: `domain`, `aliases`, `https` (`auto`, `none`, or `{cert, key}`), `redirect_http` (default true), `hsts`, `user` (an account name; `no_user: true` or JSON `null` for none; the words null, none, nil and system accounts are refused, never turned into commands), `group`, `app`, `root`, `upstream`, `php_socket`, `php_children`, `php_version`, `listen_plain`, `listen_tls`. Until `https`, `root` (or `upstream`), `app` and `user` are decided it answers 422 with the open questions and a suggestion each (a user name from the domain, the app the files under root suggest); when the account or the root directory does not exist it answers 409 with the commands to run as root and waits for the same command again. A new site is HTTPS-only: the plain site redirects. |
+| `site-create` | admin | writes `sites.d/<domain>.toml`, validates, reloads. Fields: `domain`, `aliases`, `https` (`auto`, `none`, or `{cert, key}`), `redirect_http` (default true), `hsts`, `user` (an account name; `no_user: true` or JSON `null` for none; the words null, none, nil and system accounts are refused, never turned into commands), `group`, `app`, `root`, `upstream`, `project` (app = django or wagtail: the project's Python package), `php_socket`, `php_children`, `php_version`, `listen_plain`, `listen_tls`. Until `https`, `root` (or `upstream`), `app`, `user` and, for a Django site, `project` are decided it answers 422 with the open questions and a suggestion each (a user name from the domain, the app the files under root suggest); when the account or the root directory does not exist it answers 409 with the commands to run as root and waits for the same command again. A new site is HTTPS-only: the plain site redirects. |
 | `site-create` answers | | 422 with `needs` while decisions are open; 409 `prerequisites missing` with `problems` (every one at once, each with a `code`, a `detail` and its `run_as_root` command: `missing_account`, `missing_group`, `root_missing`, `root_unreadable`, `certificate_missing`) plus the flat `run_as_root` list; 202 `needs_restart` when the site adds a privileged port the dropped server cannot bind by a reload (the file is written and valid, `systemctl restart agensio` serves it); 201 with `next_steps` (separate commands: `agensio pools`, then the php-fpm reload) and `warnings`. `dry_run: true` runs every check and returns the file that would be written without writing or reloading |
 | `site-update NAME` | admin | the same fields on a site `site-create` wrote (the file carries its spec on its first line); a hand-written file is refused with 409, edit it yourself. `settings = {key: value}` (CLI `--set KEY=VALUE`, repeatable) sets the per-site limits: `max_body_size` (any site), and for a PHP site with its own user (a generated pool) `memory_limit`, `max_execution_time`, `max_input_time`, `children`, `pm`, `max_requests`. Each value is checked against `[control] site_limits` and refused above it naming the key, the value and the ceiling; a key outside that list (`extra`, `open_basedir`, any ini name) is refused as unknown, whatever it is. The answer's `done` lists what was written and reloaded: the site file and agensio, and the php-fpm pool and php-fpm when a pool key changed (a php-fpm reload briefly affects every PHP site unless `process_control_timeout` is set) |
 | `site-disable NAME`, `site-enable NAME` | admin | renames the file to `.disabled` and back, reloads |
@@ -1279,8 +1410,8 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 | `uploads-delete NAME` | operator | removes a stored upload |
 | `site-install NAME` | admin | puts an application's files into the site's directory (the `root` as given, above a preset's `public/` or `web/`; `--path SUB` for a subdirectory such as `wp-content/plugins/NAME`, with `--create-path` when it does not exist yet) **as the site's account**, from one source: `--url https://...` (a `.tar.gz`, `.tar` or `.zip`), `--file UPLOAD` (a stored upload), or nothing, which takes the preset's official archive (`presets` lists it under `source`; `--version V` picks a release, default the newest; WordPress and Drupal have one, Laravel is made with composer). `--sha256 HEX` refuses an archive whose digest differs. `--strip 0|1` keeps or unwraps a single top directory (default: unwrap when there is exactly one). `--dry-run` takes the same walk as the real call, as the same account, and answers with the target, the account and `would_create`, or with the refusal the real call would meet; nothing is downloaded or written. Answers 201 with `files`, `bytes`, `sha256`, `unwrapped`, `created` (each directory made, with owner and mode), `facts` for an install into the site's directory itself (`gemfile`, `credentials`: Rails' `config/credentials.yml.enc` or `config/credentials/production.yml.enc`, `ruby_version`: what `.ruby-version` pins), `next_steps` (for `app = "rails"`: the pinned Ruby, then `bundle_install`, `db_prepare`, `assets_precompile` and Puma; for the others the application's own setup in the browser; for every site but a static one its request-body limit), and `done` when a Rails archive without credentials got its `SECRET_KEY_BASE` generated into the site's environment (once: an existing value is kept); 409 with the reason and nothing left behind; 403 when `install = false` and a URL was given; 422 when no source can be found |
 | `site-copy NAME --from SUB --to SUB` | admin | copies one regular file of the site to another path of the same site **as the site's account**: the drop-in files applications ship as templates (`wp-content/db.php` from the SQLite plugin's `db.copy`, `advanced-cache.php` or `object-cache.php` from a caching plugin, Drupal's `sites/default/settings.php` from `default.settings.php`). Both paths are relative to the site's directory and reached by the same walk as an install; `from` must be an existing regular file (no directory, no symlink); the destination's directory must exist (`site-install --create-path` makes one); an existing destination is refused unless `--overwrite`, and the answer then reports the replaced file's size and mtime. The new file gets the directory's pattern (`0640` in a `2750` directory, the execute bits when the source has them), or `0600` when it is one of the preset's credential files (`secured: true`); written under a temporary name and linked or renamed into place, so a refusal leaves nothing; the configuration is validated afterwards (see below). Never across sites, never content from the caller, never a directory, no chmod or chown. `--dry-run` runs the same checks. Answers 201 (200 when replaced) with `from`, `to`, `as`, `bytes`, `mode`, `replaced`; 409 with the reason |
-| `site-task NAME TASK [--param KEY=VALUE]...` | admin | runs one named task of the site's preset **as the site's account** in the site's directory (`root`): a row of the task table, never a command line (below). `--dry-run` answers with the exact argv, the account, the directory, the environment and the limits, and runs nothing. Answers 200 when the task exited 0, 409 when it failed, was stopped at its time limit or was refused, each with `argv` (what ran, the interpreter resolved), `as`, `cwd`, `env` (the site's own variables as `NAME=<site environment>`, never their values), `exit` or `signal`, `timed_out`, `duration_ms`, `summary` when the output has one (`N migrations applied`, `Bundle complete! ...`, `Default configuration data loaded.`, `public/assets holds N files`), `output` (stdout and stderr together: its last 4 KB when the task succeeded, its first 4 KB and last 12 KB when it failed, the cut marked; `truncated`, `output_bytes` and `output_kept`, the part kept for `site-task-output`), `next_steps` with root's restart line of the site's service after `bundle_install`, `db_migrate`, `db_prepare`, `plugins_migrate` or `assets_precompile`, `secured` (credential paths made private), `hint` when the failure has a known cause (Rails' "Missing secret_key_base": generate one into the site's environment; "Your Ruby version is X, but your Gemfile specified Y": a Ruby for one application, below), and `run_as_root` when the interpreter is missing; 400 for an unknown task or a parameter that does not match; 422 for a preset without tasks; 409 while another task runs on the same site |
-| `site-env NAME [--reveal KEY]...` | admin | the site's environment (`app = "rails"` or `"proxy"`): `variables` with each name, its `length` and its `fingerprint` (16 hex digits of a keyed hash: the same fingerprint means the same value), no value; a value only for each `--reveal KEY` (`?reveal=KEY,KEY` on the API), audited as `REVEALED`; `exists` false when the site has no file yet; `tightened` when the helper made the directory or the file private on the way. Every call is audited with the names it returned. 422 for a site of another preset; 409 with `run_as_root` when the directory or the file cannot be trusted |
+| `site-task NAME TASK [--param KEY=VALUE]...` | admin | runs one named task of the site's preset **as the site's account** in the site's directory (`root`): a row of the task table, never a command line (below). `--dry-run` answers with the exact argv, the account, the directory, the environment and the limits, and runs nothing. `pip_install` (Django and Wagtail) runs only on the user's own confirmation (section 4e): ctl prints the warning and the `--yes` typed is the confirmation; without one the answer is 428 with the warning and the command. Answers 200 when the task exited 0, 409 when it failed, was stopped at its time limit or was refused, each with `argv` (what ran, the interpreter resolved), `as`, `cwd`, `env` (the site's own variables as `NAME=<site environment>`, never their values), `exit` or `signal`, `timed_out`, `duration_ms`, `summary` when the output has one (`N migrations applied`, `Bundle complete! ...`, `Default configuration data loaded.`, `public/assets holds N files`), `output` (stdout and stderr together: its last 4 KB when the task succeeded, its first 4 KB and last 12 KB when it failed, the cut marked; `truncated`, `output_bytes` and `output_kept`, the part kept for `site-task-output`), `next_steps` with root's restart line of the site's service after `bundle_install`, `db_migrate`, `db_prepare`, `plugins_migrate` or `assets_precompile`, `secured` (credential paths made private), `hint` when the failure has a known cause (Rails' "Missing secret_key_base": generate one into the site's environment; "Your Ruby version is X, but your Gemfile specified Y": a Ruby for one application, below), and `run_as_root` when the interpreter is missing; 400 for an unknown task or a parameter that does not match; 422 for a preset without tasks; 409 while another task runs on the same site |
+| `site-env NAME [--reveal KEY]...` | admin | the site's environment (`app = "rails"`, `"redmine"`, `"django"`, `"wagtail"` or `"proxy"`): `variables` with each name, its `length` and its `fingerprint` (16 hex digits of a keyed hash: the same fingerprint means the same value), no value; a value only for each `--reveal KEY` (`?reveal=KEY,KEY` on the API), audited as `REVEALED`; `exists` false when the site has no file yet; `tightened` when the helper made the directory or the file private on the way. Every call is audited with the names it returned. 422 for a site of another preset; 409 with `run_as_root` when the directory or the file cannot be trusted |
 | `site-env-set NAME [--set KEY=VALUE]... [--unset KEY]... [--generate KEY]...` | admin | changes the site's environment: `--set` adds or replaces, `--unset` removes, `--generate` puts a random secret (128 hex digits) under a name that is missing and keeps an existing one; a name in both `--unset` and `--generate` is rotated. Answers 200 with the names under `set`, `unset`, `generated`, `kept`, `absent` and `names` (every name now in the file), never a value, and the restart of the application's service as a next step; 400 for a name or value the rules refuse (below), 409 when the helper refuses |
 
 **What `site-task` enforces.** A task is a row of `src/services/tasks.cpp`: a preset, a
@@ -1395,7 +1526,9 @@ to the next.
 environment: a Rails application without credentials (every ONCE application such as
 Writebook, every Kamal or twelve-factor deployment) reads `SECRET_KEY_BASE` there and
 stops with "Missing secret_key_base" without it; others read `DATABASE_URL`, a mail
-password or an API key. A site with `app = "rails"` or `"proxy"` has one file for them,
+password or an API key; a Django project `DJANGO_SECRET_KEY` and its first admin's
+`DJANGO_SUPERUSER_PASSWORD` (section 4e). A site with `app = "rails"`, `"redmine"`,
+`"django"`, `"wagtail"` or `"proxy"` has one file for them,
 `env/<site>.env` beside the main configuration (`/etc/agensio/env/ag6.example.com.env`),
 in systemd's `EnvironmentFile` syntax (`NAME="value"` lines), which the site's tasks get
 after the variables agensio sets and its application service loads
@@ -1425,7 +1558,8 @@ account instead. Names are upper-case letters, digits and `_`, never one agensio
 task or one that changes which program runs or what it loads (`PATH`, `HOME`, `TMPDIR`,
 `LANG`, `RAILS_ENV`, `SECRET_KEY_BASE_DUMMY`, `GEM_*`, `BUNDLE_*` other than a private gem
 source's credentials such as `BUNDLE_GEMS__CONTRIBSYS__COM`, `LD_*`, `DYLD_*`, `RUBYOPT`,
-`RUBYLIB`, `NODE_OPTIONS`, `PYTHON*`, `GIT_*`, `BASH_ENV`, the systemd socket variables);
+`RUBYLIB`, `NODE_OPTIONS`, `PYTHON*`, `PIP_*`, `VIRTUAL_ENV`, `DJANGO_SETTINGS_MODULE`,
+`AGENSIO_*`, `GIT_*`, `BASH_ENV`, the systemd socket variables);
 values are one line of UTF-8, at most 4 KB, 128 variables in all. A file root edits by hand
 is read the way systemd reads it (quoted or not, comments), but a line that goes on over
 the next one or a name the rules refuse stops every task of the site with the reason. The

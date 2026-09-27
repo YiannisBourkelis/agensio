@@ -1680,12 +1680,15 @@ static void test_tasks() {
     for (const auto& r : tasks::rows()) {
         // A program row runs an interpreter by name; a template row writes one fixed file below the site.
         if (r.writes) CHECK(!*r.runtime && !*r.program && r.args.empty() && r.content && std::string_view(r.writes).find("..") == std::string_view::npos && r.writes[0] != '/');
-        else CHECK(std::string_view(r.runtime) == "ruby" && std::string_view(r.program).find('/') == std::string_view::npos && r.timeout >= 600);
+        else CHECK(((std::string_view(r.runtime) == "ruby" && r.timeout >= 600) || (std::string_view(r.runtime) == "python3" && r.timeout >= 300)) &&
+                   std::string_view(r.program).find('/') == std::string_view::npos);
+        // A row that runs under another name runs root's interpreter as the site's virtualenv's python.
+        if (r.argv0) CHECK(std::string_view(r.argv0) == "{venv}/bin/python" && std::string_view(r.runtime) == "python3" && std::string_view(r.program) == "python3");
         CHECK(tasks::find(r.app, r.name) == &r && tasks::family(r.app) != nullptr);
     }
     CHECK(tasks::names("rails").size() == 7 && tasks::names("proxy").empty() && !tasks::has_tasks("wordpress") && tasks::has_tasks("rails"));
     CHECK(tasks::find("rails", "rails_new") && !tasks::find("proxy", "rails_new") && !tasks::find("rails", "sh"));
-    CHECK(tasks::all_names().size() == 10 && tasks::all_params().size() == 3);
+    CHECK(tasks::all_names().size() == 19 && tasks::all_params().size() == 6);
     // Redmine: the Rails rows for an existing application and its own; never the new-application ones.
     const auto redmine = tasks::names("redmine");
     CHECK(redmine.size() == 8 && !tasks::find("redmine", "rails_new") && !tasks::find("redmine", "gem_install_rails") && tasks::find("redmine", "bundle_install") &&
@@ -1732,6 +1735,94 @@ static void test_tasks() {
             fs::remove_all(ar);
         }
         CHECK(std::string_view(tasks::find("redmine", "gemfile_local")->content).find("puma is listed more than once") != std::string_view::npos);
+    }
+    // Django (2026-09-28): root's python3 run under the virtualenv's name, the site's facts in
+    // the environment, the rows a wagtail site gets, the template, the summaries and hints.
+    {
+        const std::size_t npos = std::string::npos;
+        tasks::Context dc;
+        dc.runtime_dir = "/usr/bin";
+        dc.root = "/var/www/w.test/app";
+        dc.home = "/var/lib/agensio/w1";
+        dc.app = "wagtail";
+        dc.site = "w.test";
+        dc.project = "mysite";
+        dc.hosts = "w.test";
+        dc.origins = "https://w.test";
+        dc.base_url = "https://w.test";
+        const std::string venv = "/var/lib/agensio/w1/venvs/w.test";
+        CHECK(tasks::venv_path(dc) == venv);
+        const tasks::Row& mig = *tasks::find("wagtail", "migrate");
+        const tasks::Plan mp = tasks::build(mig, json::Value::object(), dc, "/usr/bin/python3.13");
+        CHECK(mp.exec == "/usr/bin/python3.13" && mp.argv == (std::vector<std::string>{venv + "/bin/python", "manage.py", "migrate", "--noinput"}));
+        auto has_env = [&](const std::string& e) { return std::find(mp.env.begin(), mp.env.end(), e) != mp.env.end(); };
+        CHECK(has_env("DJANGO_SETTINGS_MODULE=agensio_settings") && has_env("AGENSIO_DJANGO_PROJECT=mysite") && has_env("VIRTUAL_ENV=" + venv) &&
+              has_env("AGENSIO_STATIC_ROOT=/var/www/w.test/app/static") && has_env("AGENSIO_MEDIA_ROOT=/var/www/w.test/app/media") && has_env("PYTHONNOUSERSITE=1") &&
+              has_env("AGENSIO_HOSTS=w.test") && has_env("AGENSIO_ORIGINS=https://w.test") && has_env("PIP_NO_INPUT=1"));
+        const tasks::Plan vp = tasks::build(*tasks::find("django", "venv_create"), json::Value::object(), dc, "/usr/bin/python3.13");
+        CHECK(vp.argv == (std::vector<std::string>{"/usr/bin/python3.13", "-m", "venv", venv}) && tasks::find("django", "venv_create")->needs_venv_support);
+        // startproject: one name, the preset's command (wagtail start for wagtail, django-admin for django).
+        const tasks::Row& ws = *tasks::find("wagtail", "startproject");
+        const tasks::Plan wp = tasks::build(ws, json::Value::object(), dc, "/usr/bin/python3.13");
+        CHECK(wp.argv == (std::vector<std::string>{venv + "/bin/python", venv + "/bin/wagtail", "start", "mysite", "."}) && ws.needs_empty &&
+              std::string_view(ws.app) == "wagtail");
+        const tasks::Row& djs = *tasks::find("django", "startproject");
+        CHECK(std::string_view(djs.app) == "django" && tasks::build(djs, json::Value::object(), dc, "/x").argv[1] == venv + "/bin/django-admin");
+        // pip_install: any packages, one argument each after --, shaped as requirement specifiers
+        // only, and confirmed by the user in person (2026-09-28).
+        const tasks::Row& pi = *tasks::find("wagtail", "pip_install");
+        CHECK(pi.user_confirm && tasks::needs_user_confirmation("pip_install") && !tasks::needs_user_confirmation("pip_install_requirements") &&
+              !tasks::needs_user_confirmation("migrate") && !pi.new_app_only && &pi == tasks::find("django", "pip_install"));
+        CHECK(tasks::build(pi, js(R"({"packages":"wagtail==8.0 gunicorn psycopg[binary]>=3.2,<4"})"), dc, "/x").argv ==
+              (std::vector<std::string>{venv + "/bin/python", "-m", "pip", "install", "--", "wagtail==8.0", "gunicorn", "psycopg[binary]>=3.2,<4"}));
+        for (const char* ok : {"wagtail", "Django", "django-taggit", "zope.interface", "psycopg[binary]", "a[b,c]==1.0", "x~=2.0", "x===1.0", "x!=1.*,>=0.9",
+                               "x==1.0rc1", "x==1.0.post1+local", "a b c d e f g h i j"})
+            CHECK(tasks::check_params(pi, json::Value::object().set("packages", ok)).empty());
+        for (const char* bad : {"", "-e", "--index-url=https://evil", "-r", "git+https://x/y", "pkg @ https://x/y.whl", "pkg@https://x", "a;b", "../x",
+                                "/tmp/x.whl", "x.whl ", " x", "a  b", "a b c d e f g h i j k", "x==", "x==-1", "x[", "x[]", "x[a,]", "x>=1,", "x;python_version>'3'",
+                                "x==1 --pre", "wagtail\n", "_x", "x-", "x=1"})
+            if (!tasks::check_params(pi, json::Value::object().set("packages", bad)).empty() == false) {
+                std::printf("pip_install accepted '%s'\n", bad);
+                CHECK(false);
+            }
+        const std::string warn = tasks::confirmation_warning("w.test", "wagtail==8.0 psycopg[binary]", "w1", venv);
+        CHECK(warn.find("https://pypi.org/project/wagtail/") != npos && warn.find("https://pypi.org/project/psycopg/") != npos && warn.find(" w1:") != npos &&
+              warn.find("look-alike") != npos);
+        const tasks::Row& su = *tasks::find("wagtail", "createsuperuser");
+        CHECK(tasks::check_params(su, js(R"({"username":"admin","email":"a@example.com"})")).empty() &&
+              !tasks::check_params(su, js(R"({"username":"-h","email":"a@example.com"})")).empty() &&
+              !tasks::check_params(su, js(R"({"username":"admin","email":"a b@x.com"})")).empty() &&
+              !tasks::check_params(su, js(R"({"username":"admin","email":"-x@x.com"})")).empty() && !tasks::check_params(su, js(R"({"username":"admin"})")).empty());
+        CHECK(tasks::build(su, js(R"({"username":"admin","email":"a@example.com"})"), dc, "/x").argv[4] == "--username=admin" && su.needs_env.size() == 1 &&
+              std::string_view(su.needs_env[0].path) == "DJANGO_SUPERUSER_PASSWORD");
+        CHECK(tasks::names("wagtail").size() == 9 && tasks::names("django").size() == 9);
+        const tasks::Row& ds = *tasks::find("django", "django_settings");
+        const std::string_view tmpl = ds.content;
+        CHECK(std::string_view(ds.writes) == "agensio_settings.py" && ds.mode == 0640 && std::string_view(ds.needs_env[0].path) == "DJANGO_SECRET_KEY" &&
+              tmpl.find("SECRET_KEY = os.environ[\"DJANGO_SECRET_KEY\"]") != npos && tmpl.find("SECURE_PROXY_SSL_HEADER = (\"HTTP_X_FORWARDED_PROTO\", \"https\")") != npos &&
+              tmpl.find("DEBUG = False") != npos && tmpl.find(".settings.production") != npos && tmpl.find("DATABASE_URL") != npos);
+        CHECK(tasks::summarize(mig, "Operations to perform:\n  Applying a.0001_initial... OK\n  Applying b.0001_initial... OK\n", -1) == "2 migrations applied" &&
+              tasks::summarize(mig, "  No migrations to apply.\n", -1) == "no migration was pending");
+        CHECK(tasks::summarize(*tasks::find("django", "collectstatic"), "\n245 static files copied to '/x/static', 612 post-processed.\n", -1) ==
+                  "245 static files copied to '/x/static', 612 post-processed." &&
+              tasks::summarize(*tasks::find("django", "pip_install_requirements"), "Collecting x\nSuccessfully installed Django-6.1.1 wagtail-8.0 pillow-11.0\n", -1) ==
+                  "installed 3 packages into the site's virtualenv" &&
+              tasks::summarize(su, "Superuser created successfully.\n", -1) == "Superuser created successfully.");
+        CHECK(tasks::failure_hint(*tasks::find("django", "venv_create"), "was not created successfully because ensurepip is not\navailable.", dc).find("python3-venv") != npos &&
+              tasks::failure_hint(mig, "ModuleNotFoundError: No module named 'psycopg'", dc).find("psycopg[binary]") != npos &&
+              tasks::failure_hint(mig, "ModuleNotFoundError: No module named 'agensio_settings'", dc).find("django_settings") != npos &&
+              tasks::failure_hint(mig, "KeyError: 'DJANGO_SECRET_KEY'", dc).find("generate") != npos &&
+              tasks::failure_hint(mig, "ModuleNotFoundError: No module named 'taggit'", dc).find("pip_install_requirements") != npos);
+        // An interpreter that cannot make virtualenvs is known before venv_create runs.
+        const fs::path vd = fs::temp_directory_path() / ("agensio-venvsupport-" + std::to_string(::getpid()));
+        fs::create_directories(vd / "bin");
+        fs::create_directories(vd / "lib" / "python3.13");
+        std::string cmd;
+        CHECK(tasks::venv_support((vd / "bin" / "python3.13").string(), cmd).find("ensurepip") != npos);
+        fs::create_directories(vd / "lib" / "python3.13" / "ensurepip");
+        std::ofstream(vd / "lib" / "python3.13" / "ensurepip" / "__init__.py") << "";
+        CHECK(tasks::venv_support((vd / "bin" / "python3.13").string(), cmd).empty() && tasks::venv_support("/opt/custom/python", cmd).empty() && cmd.empty());
+        fs::remove_all(vd);
     }
     const tasks::Row& gem = *tasks::find("rails", "gem_install_rails");
     const tasks::Row& fresh = *tasks::find("rails", "rails_new");
@@ -2053,6 +2144,52 @@ static void test_tasks() {
     CHECK(refused("[[site]]\nlisten = [\"127.0.0.1:1\"]\napp = \"rails\"\nupstream = \"http://127.0.0.1:3000\"\n", "'root' is required"));
     CHECK(refused("[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"app\"\napp = \"rails\"\n", "app = \"rails\" needs upstream"));
     CHECK(refused(rails + "php = { children = 4 }\n", "need a PHP handler"));
+    // Django and Wagtail (2026-09-28): /static/ and /media/ from the project directory, the
+    // rest to Gunicorn; project required and checked; what the settings are told; the unit.
+    {
+        const std::size_t npos = std::string::npos;
+        const std::string wag = "[[site]]\nserver_name = [\"w.test\", \"*.w.test\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"app\"\nuser = \"w1\"\napp = \"wagtail\"\n"
+                                "project = \"mysite\"\nupstream = \"http://127.0.0.1:3008\"\n";
+        write("w.toml", "[control]\nruntimes = { python3 = \"/opt/py/bin\" }\n" + wag);
+        const Config wc = load_config(dir / "w.toml");
+        const SiteConfig& ws = wc.sites[0];
+        CHECK(ws.project == "mysite" && proxy_app("wagtail") && python_app("django") && !python_app("rails") && service_app("wagtail") && service_app("redmine") &&
+              !service_app("proxy"));
+        const LocationConfig& st = Router::location(ws, "/static/css/app.1a2b.css");
+        const LocationConfig& me = Router::location(ws, "/media/original_images/x.png");
+        CHECK(st.kind == HandlerKind::static_ && st.handler == "static" && st.root == ws.root && st.add_headers.size() == 1 &&
+              st.add_headers[0].second.find("immutable") != npos && st.origin == "preset:wagtail");
+        CHECK(me.kind == HandlerKind::static_ && me.add_headers.size() == 2 && me.add_headers[0].second == "nosniff" &&
+              me.add_headers[1].second.find("script-src 'none'") != npos && me.add_headers[1].second.find("sandbox") == npos && me.symlinks_deny);
+        CHECK(Router::location(ws, "/media/documents/report.pdf").handler == "deny" && Router::location(ws, "/manage.py").handler == "deny" &&
+              Router::location(ws, "/agensio_settings.py").handler == "deny" && Router::location(ws, "/admin/login/").kind == HandlerKind::proxy &&
+              Router::location(ws, "/documents/1/report.pdf").kind == HandlerKind::proxy);
+        CHECK(refused_suffix("/media/x.py", me.deny_suffixes) && refused_suffix("/static/db.sqlite3", st.deny_suffixes) &&
+              refused_suffix("/whatever/settings.py", Router::location(ws, "/whatever/settings.py").deny_suffixes) &&
+              !refused_suffix("/media/images/x.png", me.deny_suffixes));
+        const AppContext ac = app_context(wc, ws);
+        CHECK(ac.hosts == "w.test,.w.test" && ac.origins == "http://w.test,http://*.w.test" && ac.base_url == "http://w.test");
+        const json::Value u = control::service_unit(ws, wc);
+        const std::string text(u.get("unit"));
+        const std::string venv = wc.state_dir + "/w1/venvs/w.test";
+        CHECK(u["ok"].boolean() && text.find("ExecStart=@/opt/py/bin/python3 " + venv + "/bin/python -m gunicorn mysite.wsgi:application --bind 127.0.0.1:3008 ") != npos &&
+              text.find("UnsetEnvironment=DJANGO_SUPERUSER_PASSWORD DJANGO_SUPERUSER_USERNAME DJANGO_SUPERUSER_EMAIL\n") != npos &&
+              text.find("Environment=DJANGO_SETTINGS_MODULE=agensio_settings AGENSIO_DJANGO_PROJECT=mysite\n") != npos &&
+              text.find("AGENSIO_HOSTS=w.test,.w.test AGENSIO_ORIGINS=http://w.test,http://*.w.test AGENSIO_BASE_URL=http://w.test\n") != npos &&
+              text.find("VIRTUAL_ENV=" + venv + "\n") != npos && text.find("(Gunicorn)") != npos && text.find("puma") == npos);
+        write("dj.toml", "[[site]]\nserver_name = [\"d.test\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"app\"\napp = \"django\"\nproject = \"blog\"\n"
+                         "upstream = \"http://127.0.0.1:3009\"\n");
+        const Config dc = load_config(dir / "dj.toml");
+        CHECK(Router::location(dc.sites[0], "/static/x.css").add_headers[0].second == "public, max-age=86400" &&
+              Router::location(dc.sites[0], "/media/documents/x.pdf").handler == "static");
+        const std::string django_site = "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"app\"\napp = \"django\"\nupstream = \"http://127.0.0.1:3000\"\n";
+        CHECK(refused(django_site, "needs project = \"NAME\""));
+        CHECK(refused(rails + "project = \"blog\"\n", "goes with app = \"django\""));
+        CHECK(refused(django_site + "project = \"site\"\n", "would shadow"));
+        CHECK(refused(django_site + "project = \"My-Site\"\n", "not a Python package name"));
+        CHECK(check_project_name("mysite").empty() && check_project_name("my_site2").empty() && check_project_name("_x").empty() && !check_project_name("2site").empty() &&
+              !check_project_name("django").empty() && !check_project_name("a.b").empty() && !check_project_name("").empty());
+    }
     fs::remove_all(dir);
 }
 
@@ -2066,6 +2203,11 @@ static void test_appenv() {
                             "BUNDLE_BUILD__NOKOGIRI", "GIT_SSH_COMMAND", "PYTHONPATH", "NODE_OPTIONS", "SECRET_KEY_BASE_DUMMY", "BASH_ENV", "LISTEN_FDS"})
         CHECK(check_name(bad).find("cannot set it") != std::string::npos);
     CHECK(check_name("BUNDLE_GEMS__CONTRIBSYS__COM").empty());  // a private gem source's credentials
+    // Django (2026-09-28): the virtualenv, the settings module, pip's sources and agensio's own
+    // AGENSIO_* are agensio's; the secret key and the admin's password are the site's.
+    CHECK(!check_name("PIP_INDEX_URL").empty() && !check_name("PIP_EXTRA_INDEX_URL").empty() && !check_name("VIRTUAL_ENV").empty() &&
+          !check_name("DJANGO_SETTINGS_MODULE").empty() && !check_name("AGENSIO_HOSTS").empty() && !check_name("PYTHONPATH").empty() &&
+          check_name("DJANGO_SECRET_KEY").empty() && check_name("DJANGO_SUPERUSER_PASSWORD").empty());
     for (const char* bad : {"", "secret", "1ABC", "A-B", "A B", "A=B"}) CHECK(!check_name(bad).empty());
     CHECK(!check_name(std::string(65, 'A')).empty() && check_name(std::string(64, 'A')).empty());
     // Values: one line of UTF-8.
@@ -2910,6 +3052,14 @@ static void test_control_sites() {
     std::ofstream(dir / "artisan") << "#!";
     CHECK(detect_app(dir / "www") == "laravel");
     CHECK(detect_app(dir / "nope").empty());
+    // A Django project by its manage.py, Wagtail's by its requirements (2026-09-28).
+    std::filesystem::create_directories(dir / "dj");
+    std::ofstream(dir / "dj" / "manage.py") << "#!/usr/bin/env python";
+    CHECK(detect_app(dir / "dj") == "django");
+    std::ofstream(dir / "dj" / "requirements.txt") << "Django>=6.1,<6.2\nwagtail>=8.0,<8.1\n";
+    CHECK(detect_app(dir / "dj") == "wagtail" && detect_app_marker("wagtail").find("manage.py") != std::string::npos);
+    CHECK(suggest_project("www.example.com") == "example" && suggest_project("my-blog.example.com") == "my_blog" && suggest_project("123.com") == "site123" &&
+          suggest_project("django.example.com") == "django_site" && check_project_name(suggest_project("test.example.com")).empty());
     // Decisions: everything open, then closed one by one; explicit null user counts as decided.
     Config cfg;
     cfg.config_path = dir / "agensio.toml";
@@ -2934,13 +3084,62 @@ static void test_control_sites() {
     needs = apply_request(body, cfg, spec, err);
     CHECK(err.empty() && needs.empty() && spec.user == "shop" && spec.app == "laravel");
     CHECK(json::parse(R"({"app":"weird"})", body, err) && (apply_request(body, cfg, spec, err), err.find("app must be one of: static, php, laravel, drupal, wordpress, grav, proxy") != std::string::npos));
-    CHECK(app_presets().size() == 9 && app_presets().front() == "static" && app_presets()[5] == "grav" && app_presets()[6] == "proxy" && app_presets()[7] == "rails" &&
-          app_presets().back() == "redmine");
+    CHECK(app_presets().size() == 11 && app_presets().front() == "static" && app_presets()[5] == "grav" && app_presets()[6] == "proxy" && app_presets()[7] == "rails" &&
+          app_presets()[8] == "redmine" && app_presets()[9] == "django" && app_presets().back() == "wagtail");
     const json::Value catalog = preset_catalog();
-    CHECK(catalog["presets"].items().size() == 9 && catalog["presets"].items()[8].get("app") == "redmine" && catalog["presets"].items()[8]["tasks"].items().size() == 8 &&
+    CHECK(catalog["presets"].items().size() == 11 && catalog["presets"].items()[8].get("app") == "redmine" && catalog["presets"].items()[8]["tasks"].items().size() == 8 &&
+          catalog["presets"].items()[9].get("app") == "django" && catalog["presets"].items()[9]["tasks"].items().size() == 9 &&
+          catalog["presets"].items()[10].get("app") == "wagtail" && catalog["presets"].items()[10]["tasks"].items().size() == 9 &&
           catalog["presets"].items()[0].get("app") == "static" && catalog["presets"].items()[5].get("app") == "grav" &&
           catalog["presets"].items()[6].get("app") == "proxy" && catalog["presets"].items()[7].get("app") == "rails" &&
           catalog["presets"].items()[7]["tasks"].items().size() == 7 && catalog["presets"].items()[7]["secrets"].items()[0].str() == "/config/master.key");
+    // A Django or Wagtail site asks for its project, checks it, writes it, and names the tasks
+    // still open by what its directory holds (2026-09-28).
+    {
+        const std::size_t npos = std::string::npos;
+        SiteSpec ds;
+        json::Value b;
+        std::string e;
+        CHECK(json::parse(R"({"domain":"blog.example.com","https":"none","user":"bl","app":"wagtail","upstream":"http://127.0.0.1:3008"})", b, e));
+        auto nd = apply_request(b, cfg, ds, e);
+        std::string project_suggestion, root_question;
+        for (const auto& d : nd) {
+            if (d.field == "project") project_suggestion = d.suggestion;
+            if (d.field == "root") root_question = d.question;
+        }
+        CHECK(e.empty() && project_suggestion == "blog" && root_question.find("Django project") != npos);
+        const std::string proot = (dir / "wagapp").string();
+        CHECK(json::parse(("{\"project\":\"blog\",\"root\":\"" + proot + "\"}").c_str(), b, e));
+        nd = apply_request(b, cfg, ds, e);
+        CHECK(e.empty() && nd.empty() && ds.project == "blog");
+        const std::string file = render_site(ds, "x");
+        SiteSpec back;
+        CHECK(file.find("project = \"blog\"\n") != npos && file.find("app = \"wagtail\"\n") != npos && SiteSpec::from_json(ds.to_json(), back) && back.project == "blog");
+        SiteSpec bad = ds;
+        CHECK(json::parse(R"({"project":"Bad-Name"})", b, e) && (apply_request(b, cfg, bad, e), e.find("not a Python package name") != npos));
+        SiteSpec plain;
+        e.clear();
+        CHECK(json::parse(R"({"domain":"p.example.com","https":"none","no_user":true,"app":"static","root":"/var/www/p","project":"blog"})", b, e) &&
+              (apply_request(b, cfg, plain, e), e.find("goes with app") != npos));
+        auto step = [&] {
+            for (const auto& st : next_steps(ds, cfg))
+                if (st.find("site-task") != npos) return st;
+            return std::string();
+        };
+        std::filesystem::create_directories(proot);
+        CHECK(step().find("a new Wagtail site: site-task blog.example.com venv_create, pip_install --param \"packages=wagtail gunicorn\" (you confirm it), startproject (it creates the project blog)") != npos);
+        std::ofstream(proot + "/manage.py") << "#!";
+        CHECK(step().find("the project is in place: site-task blog.example.com venv_create, pip_install_requirements") != npos &&
+              step().find("--generate DJANGO_SECRET_KEY") != npos && step().find("startproject") == npos && step().find("packages=gunicorn") != npos);
+        std::ofstream(proot + "/agensio_settings.py") << "#";
+        CHECK(step().find("settings are in place: site-task blog.example.com migrate, collectstatic") != npos);
+        std::filesystem::create_directories(proot + "/static");
+        CHECK(step().find("migrate after an upgrade") != npos);
+        ds.app = "django";
+        std::filesystem::remove_all(proot);
+        std::filesystem::create_directories(proot);
+        CHECK(step().find("packages=django gunicorn") != npos);
+    }
     CHECK(catalog["presets"].items()[5]["never_served_directories"].items().size() == 9 && catalog["presets"].items()[5]["never_served_directories"].items()[0].str() == "/logs/" &&
           catalog["presets"].items()[3]["never_served_directories"].items().empty() && catalog["presets"].items()[5].get("source").starts_with("https://getgrav.org/"));
     const json::Value& laravel_row = catalog["presets"].items()[2];

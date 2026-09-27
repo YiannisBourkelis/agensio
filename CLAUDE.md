@@ -284,7 +284,8 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   server_name, ca }`. CGI (D5, `src/upstream/cgi_client.*`, `src/handlers/cgi.*`): the
   exchange's connect step forks the script with a socketpair as stdin/stdout, so the
   shared exchange code does the rest; processes capped and reaped per worker pool.
-- **Presets** (C3): `app = "laravel" | "drupal" | "wordpress" | "grav" | "php" | "static"` on a site expands
+- **Presets** (C3): `app = "laravel" | "drupal" | "wordpress" | "grav" | "php" | "static"` (and the
+  application-server presets `proxy`, `rails`, `redmine`, `django`, `wagtail`) on a site expands
   at load into root, index, try_files and locations (Laravel: only `/index.php` is ever
   executed and any other `.php` is refused with 404, never served as source; Drupal: any
   `.php` runs, front controller for the rest, Drupal's `.htaccess` refusals built in;
@@ -439,11 +440,29 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   restarting stays root's, the answers carry the line. Task answers are a summary plus the
   last 4 KB (success) or first 4 KB and last 12 KB (failure) of up to 1 MB kept per site,
   the rest through `site-task-output` / `site_task_output` (admin). Security page row 30.
+  Django and Wagtail (2026-09-28, design section 16, `docs/configuration.md` 4e): `app =
+  "django"` and `"wagtail"` (built on it, as redmine on rails) with the site field
+  `project` (the Python package, required, `check_project_name`); `/static/` and `/media/`
+  served from the project directory (media with nosniff and a script-blocking CSP, Wagtail's
+  `/media/documents/` refused), the rest to Gunicorn; a virtualenv per site,
+  `<state_dir>/<account>/venvs/<site>`, made by `venv_create` with root's python3; one
+  `pip_install` for any packages (requirement specifiers only, after `--`) that the user
+  confirms in person (`Row::user_confirm`: the MCP bridge's `ask_user` opens an elicitation
+  dialog, else hands back the `agensio ctl` command; the control API refuses without
+  `user_confirmed`; security row 32) and one `startproject` per preset; every
+  other row running that same python3 under the virtualenv's name (`Row::argv0`,
+  `Plan::exec`: Python finds the virtualenv from argv[0], the program executed stays root's);
+  `django_settings` writes the fixed `agensio_settings.py` (the project's settings plus what
+  agensio sets in `AGENSIO_*`: host names from `app_context`, the served paths; the secret
+  from `DJANGO_SECRET_KEY`); `createsuperuser` takes the password from the site's
+  environment and the Gunicorn unit (`ExecStart=@`) unsets it. `venv_support` refuses
+  `venv_create` without ensurepip (Debian's python3-venv). Security page rows 27 to 29, 31, 32.
   `app = "rails"` is the proxy preset plus its tasks and credential
   files; Puma is started by the unit `site-unit` renders until F14. `tests/tasks.sh`
-  (root devbox, fake interpreters), `tests/rails.sh` (real Ruby and rubygems.org, the
-  whole workflow). Rule for every change here: the security page rows 26 to 30 and the
-  MCP texts move with it.
+  (root devbox, fake interpreters, a fake Python 3.13), `tests/rails.sh` (real Ruby and
+  rubygems.org, the whole workflow), `tests/wagtail-install.sh` (the `agensio-devbox:python`
+  image, real pip, Wagtail and Gunicorn behind agensio over TLS). Rule for every change here:
+  the security page rows 26 to 32 and the MCP texts move with it.
 - **Application install** (F9, `src/services/archive.*`, `fetch.*`, `install.*`):
   `agensio ctl site-install NAME [--url | --file | --version]` fills a site's empty
   directory as the site's account from an https archive, an upload (`agensio ctl upload`)

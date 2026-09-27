@@ -604,6 +604,16 @@ const std::vector<const char*> kRailsRefused = {"/config/master.key", "/config/d
 // an application may route a /log/ of its own; the .log ending covers the files.
 const std::vector<std::string> kRailsRefusedEndings = {".sqlite3", ".sqlite3-wal", ".sqlite3-shm", ".sqlite3-journal", ".log", ".key", ".sql"};
 
+// A Django site (2026-09-28, the Wagtail report): nothing of the project is served from disk
+// but /static/ (collectstatic's output) and /media/ (uploads); these paths scanners probe are
+// answered 404 by agensio itself, and the endings (Python source, its bytecode, databases,
+// logs, keys, dumps) wherever they appear, on the application's paths and on the two served
+// directories alike.
+const std::vector<const char*> kDjangoRefused = {"/.env", "/.git/", "/manage.py", "/requirements.txt", "/agensio_settings.py",
+                                                 "/db.sqlite3", "/Dockerfile", "/.dockerignore"};
+const std::vector<std::string> kDjangoRefusedEndings = {".py", ".pyc", ".pyo", ".sqlite3", ".sqlite3-wal", ".sqlite3-shm", ".sqlite3-journal",
+                                                        ".log", ".key", ".sql", ".env"};
+
 const std::vector<std::string> kSourceBackups = {".inc", ".bak", ".orig", ".save", ".swp", ".swo", "~",
                                                  // logs and database dumps (2026-09-23 live report: a Grav site's logs/grav.log
                                                  // named its backup archive; WordPress's wp-content/debug.log is the classic)
@@ -726,7 +736,7 @@ const PhpPreset* php_preset(const std::string& app) {
 std::string preset_names() {
     std::string out;
     for (const auto& p : kPhpPresets) out += std::string(out.empty() ? "" : ", ") + "\"" + p.name + "\"";
-    return out + ", \"proxy\", \"rails\" or \"static\"";
+    return out + ", \"proxy\", \"rails\", \"redmine\", \"django\", \"wagtail\" or \"static\"";
 }
 
 }  // namespace
@@ -778,7 +788,64 @@ void apply_preset(SiteConfig& site, const std::string& where) {
             loc.allow = allow_header(kFcgiMethods);
             loc.origin = "preset:" + site.app;
             if (rails_app(site.app)) loc.deny_suffixes = kRailsRefusedEndings;  // answered 404 by the dispatcher, never proxied
+            if (python_app(site.app)) loc.deny_suffixes = kDjangoRefusedEndings;
             site.locations.push_back(std::move(loc));
+        }
+        if (python_app(site.app)) {
+            // Gunicorn serves no files: collectstatic's output and the uploads come from disk
+            // here, or the admin has no stylesheet (2026-09-28 Wagtail report). The project
+            // directory is the root, so /static/x is <root>/static/x, where the settings agensio
+            // writes put STATIC_ROOT and MEDIA_ROOT. A missing file is a 404, never the
+            // application's.
+            auto served = [&](const char* path, std::vector<std::pair<std::string, std::string>> headers) {
+                if (has(path, false, false)) return;  // a hand-written location wins
+                LocationConfig loc;
+                loc.path = path;
+                loc.root = site.root;
+                loc.index = {};
+                loc.hidden_files = false;  // a dot segment is 404 (.env, .git)
+                loc.symlinks_deny = true;  // nothing outside the project through a link someone put there
+                loc.try_files = parse_try_files({"$uri", "=404"});
+                loc.deny_suffixes = kDjangoRefusedEndings;
+                loc.add_headers = std::move(headers);
+                loc.origin = "preset:" + site.app;
+                site.locations.push_back(std::move(loc));
+            };
+            // Wagtail's production settings name every file by its hash (ManifestStaticFilesStorage)
+            // and its admin versions the rest, so a year is safe there; a plain Django project
+            // keeps StaticFilesStorage, whose names do not change with their content.
+            served("/static/", {{"Cache-Control", site.app == "wagtail" ? "public, max-age=31536000, immutable" : "public, max-age=86400"}});
+            // Uploads are the visitors' and the editors' files on the site's own origin: never
+            // sniffed into another type, and no script in an uploaded HTML or SVG page runs
+            // (script-src 'none'), nor can a form in one post anywhere. Not `sandbox`: a
+            // browser's PDF viewer refuses a sandboxed document.
+            served("/media/", {{"X-Content-Type-Options", "nosniff"},
+                               {"Content-Security-Policy", "script-src 'none'; form-action 'none'; base-uri 'none'"}});
+        }
+        auto refuse = [&](const char* p, const std::string& origin) {
+            const std::string path = p;
+            const bool dir = path.back() == '/';
+            if (has(path, !dir, false)) return;  // a hand-written location wins
+            LocationConfig loc;
+            loc.path = path;
+            loc.exact = !dir;
+            loc.root = site.root;
+            loc.index = site.index;
+            loc.hidden_files = site.hidden_files;
+            loc.symlinks_deny = site.symlinks_deny;
+            loc.try_files = parse_try_files({"=404"});
+            loc.handler = "deny";
+            loc.kind = HandlerKind::static_;
+            loc.methods = kStaticMethods;
+            loc.allow = allow_header(kStaticMethods);
+            loc.origin = origin;
+            site.locations.push_back(std::move(loc));
+        };
+        if (python_app(site.app)) {
+            for (const char* p : kDjangoRefused) refuse(p, "preset:" + site.app);
+            // Wagtail serves documents through its own view (/documents/ID/NAME), which checks
+            // a collection's privacy; the files themselves are never answered from disk.
+            if (site.app == "wagtail") refuse("/media/documents/", "preset:wagtail");
         }
         if (rails_app(site.app))
             for (const char* p : kRailsRefused) {
@@ -1037,6 +1104,15 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     // answers 404 for an empty root), never the configuration directory.
     site.root = root ? resolve_root(base_dir, *root, where) : std::string();
     site.max_body_size = size_node(t["max_body_size"], 0, (where + ".max_body_size").c_str());
+    if (auto p = t["project"].value<std::string>()) {
+        if (!python_app(site.app)) fail(where + ".project names a Django project's package: it goes with app = \"django\" or \"wagtail\"");
+        if (const std::string why = check_project_name(*p); !why.empty()) fail(where + ".project: " + why);
+        site.project = *p;
+    } else if (t.contains("project")) {
+        fail(where + ".project must be a string");
+    }
+    if (python_app(site.app) && site.redirect.empty() && site.project.empty())
+        fail(where + ": app = \"" + site.app + "\" needs project = \"NAME\", the project's Python package (NAME/settings, NAME/wsgi.py)");
     const std::string root_given = site.root;  // the project directory (open_basedir starts there)
     site.project_root = root_given;
     if (const PhpPreset* preset = php_preset(site.app)) {
@@ -1198,8 +1274,46 @@ std::string body_refused_text(const SiteConfig* site, std::string_view remote, s
            "; site_update with settings {max_body_size} raises it, up to [control] site_limits";
 }
 
-bool proxy_app(std::string_view app) noexcept { return app == "proxy" || rails_app(app); }
+bool proxy_app(std::string_view app) noexcept { return app == "proxy" || rails_app(app) || python_app(app); }
 bool rails_app(std::string_view app) noexcept { return app == "rails" || app == "redmine"; }
+bool python_app(std::string_view app) noexcept { return app == "django" || app == "wagtail"; }
+bool service_app(std::string_view app) noexcept { return rails_app(app) || python_app(app); }
+
+std::string check_project_name(std::string_view n) {
+    if (n.empty() || n.size() > 64) return "project is 1 to 64 characters";
+    for (std::size_t i = 0; i < n.size(); ++i) {
+        const char c = n[i];
+        if (!((c >= 'a' && c <= 'z') || c == '_' || (i > 0 && c >= '0' && c <= '9')))
+            return "project '" + std::string(n) + "' is not a Python package name: lower-case letters, digits and '_', not starting with a digit";
+    }
+    // What `django-admin startproject` refuses (a name that shadows an importable module), the
+    // ones a project meets first, and agensio's own settings module.
+    static constexpr std::string_view taken[] = {"django", "wagtail", "gunicorn", "site", "test", "tests", "os", "sys", "io", "json", "email",
+                                                 "http", "logging", "types", "string", "code", "random", "secrets", "select", "signal",
+                                                 "socket", "time", "abc", "array", "agensio_settings", "pip", "setuptools", "venv"};
+    for (std::string_view t : taken)
+        if (n == t) return "project '" + std::string(n) + "' is the name of a module the project would shadow; choose another (mysite, blog, cms)";
+    return "";
+}
+
+AppContext app_context(const Config& cfg, const SiteConfig& site) {
+    AppContext a;
+    const std::string first = site.server_names.empty() ? std::string() : site.server_names.front();
+    bool tls = site.tls.has_value();
+    for (const auto& s : cfg.sites)
+        if (!s.server_names.empty() && s.server_names.front() == first && s.tls) tls = true;
+    const std::string scheme = tls ? "https://" : "http://";
+    for (const auto& n : site.server_names) {
+        if (n == "*") continue;
+        const bool wild = n.starts_with("*.");
+        const std::string host = wild ? n.substr(1) : n;  // Django's ".example.com" matches the domain and its subdomains
+        if (host.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789.-") != std::string::npos) continue;
+        a.hosts += (a.hosts.empty() ? "" : ",") + host;
+        a.origins += (a.origins.empty() ? "" : ",") + scheme + (wild ? "*" + host : host);
+        if (a.base_url.empty() && !wild) a.base_url = scheme + host;
+    }
+    return a;
+}
 
 bool php_app(std::string_view app) { return php_preset(std::string(app)) != nullptr; }
 
@@ -1803,6 +1917,29 @@ json::Value preset_catalog() {
                       .set("source", "https://www.redmine.org/releases/redmine-{version}.tar.gz (site_install with version, e.g. 7.0.1; pass the "
                                      "sha256 redmine.org publishes)"));
     }
+    for (const char* app : {"django", "wagtail"}) {
+        const bool wagtail = std::string_view(app) == "wagtail";
+        json::Value names = json::Value::array(), secrets = json::Value::array(), never = json::Value::array();
+        for (const auto& n : tasks::names(app)) names.push(n);
+        for (const auto& s : preset_secrets(app)) secrets.push(s);
+        for (const char* p : kDjangoRefused) never.push(p);
+        if (wagtail) never.push("/media/documents/");
+        for (const auto& e : kDjangoRefusedEndings) never.push("*" + e);
+        list.push(json::Value::object().set("app", app)
+                      .set("summary", wagtail
+                          ? "Wagtail, the Django CMS: the django preset's routing and tasks, with startproject running wagtail start (venv_create, "
+                            "pip_install wagtail gunicorn, startproject, then the django tasks); Wagtail's documents are served only through its own view, so /media/documents/ "
+                            "is never answered from disk, and /static/ is cached for a year (its names carry their hash)."
+                          : "Django: /static/ (collectstatic's output) and /media/ (uploads) are served from the project directory, everything else "
+                            "goes to the application server (Gunicorn) on the site's upstream. project names the Python package; site_task runs "
+                            "the preset's named commands as the site's account in a virtualenv of the site's own (venv_create, pip_install: any "
+                            "packages, confirmed by the user in person; startproject, pip_install_requirements, django_settings, migrate, "
+                            "collectstatic, createsuperuser, check_deploy).")
+                      .set("root", "the project directory (manage.py); only /static/ and /media/ below it are served")
+                      .set("project", "required: the Python package of the project (NAME/settings, NAME/wsgi.py)")
+                      .set("served_from_disk", json::Value::array().push("/static/").push("/media/"))
+                      .set("php", "none").set("tasks", std::move(names)).set("secrets", std::move(secrets)).set("never_served", std::move(never)));
+    }
     return json::Value::object().set("presets", std::move(list))
         .set("note", "agensio never reads .htaccess; a preset provides the refusals an application's .htaccess would. Hand-written [[site.location]] entries win over a preset's. Every never_served name is refused in any backup spelling too, in its directory, whatever the case: name.bak, name~, name.txt, name-old, stem.bak (wp-config.bak), .name.swp, #name#; nothing to configure, and the bare stem (/readme, /license) stays a permalink.");
 }
@@ -1817,6 +1954,9 @@ std::vector<std::string> preset_secrets(const std::string& app) {
     // Redmine: its database and SMTP settings and the secret generate_secret_token writes.
     if (app == "redmine")
         out = {"/config/database.yml", "/config/configuration.yml", "/config/initializers/secret_token.rb", "/config/master.key", "/config/credentials"};
+    // Django: the SQLite database of the generated settings (the secret key and a database
+    // password live in the site's environment, never in the tree).
+    if (python_app(app)) out = {"/db.sqlite3"};
     return out;
 }
 
@@ -1850,6 +1990,8 @@ std::vector<std::string> app_presets() {
     out.emplace_back("proxy");
     out.emplace_back("rails");
     out.emplace_back("redmine");
+    out.emplace_back("django");
+    out.emplace_back("wagtail");
     return out;
 }
 

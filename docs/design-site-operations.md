@@ -788,3 +788,65 @@ control half, which stays root's until the owner decides otherwise.
   last line, Redmine's default data) or from the tree (`public/assets` counted), so an exit
   0 with nothing printed still says what it did.
 
+
+## 16. Django and Wagtail (2026-09-28, the Django "wall 1" brief against alpha.33)
+
+The brief (Wagtail 8.0 on ag8.edoc.gr, `app = "proxy"`, a Debian 13 host without
+`python3-venv`): nothing after `site_create` could run for a Python application. It proposed
+a `django` preset built the way `rails` was. The owner decided three things: the project's
+package is a site field (`project`, given at `site_create`, not a parameter of every task);
+there are two presets, `django` and `wagtail` built on it as `redmine` is on `rails`; the
+first admin's password is generated into the site's environment, revealed only when the user
+asks, and the rendered unit unsets it (`UnsetEnvironment=`), so the application never holds
+it. What the build changed from the brief, and why:
+
+- **A virtualenv per site, not per account**: `<state_dir>/<account>/venvs/<site>`. A
+  virtualenv holds one version of each package, and one account may run two sites.
+- **Root's interpreter under the virtualenv's name.** Running `<venv>/bin/python` would
+  execute a file the account owns (a symlink it can replace), against row 27's rule. Python
+  finds its virtualenv from `argv[0]` (`pyvenv.cfg` beside the name; verified on Debian's
+  3.13.5 in the devbox), so every row after `venv_create` executes root's checked
+  `python3` with `argv[0]` = `<venv>/bin/python` (`Row::argv0`, `Plan::exec`), and the unit
+  does the same with systemd's `ExecStart=@`. The account's `pyvenv.cfg` can still point
+  Python at other code: the account running its own code as itself, which every task does.
+- **`agensio_settings.py` at the project root, not `NAME/settings/local.py`.** One fixed path
+  for both layouts (a `wagtail start` settings package and a plain `startproject`
+  `settings.py`); it imports `NAME.settings.production` or `NAME.settings` and overrides from
+  the environment. The host names are not written into it: agensio sets `AGENSIO_HOSTS`,
+  `AGENSIO_ORIGINS`, `AGENSIO_BASE_URL` and the served paths for the tasks and in the unit,
+  so an alias added later needs a new unit, never a rewrite of a file agensio does not
+  replace. `DJANGO_SETTINGS_MODULE=agensio_settings` everywhere, since `manage.py` and
+  `wsgi.py` default to the dev settings. Verified against Wagtail 8.0 / Django 6.1.1: its
+  production settings have no `SECRET_KEY` and no `ALLOWED_HOSTS`, as the brief said.
+- **`CSRF_TRUSTED_ORIGINS` is set but is not what makes the login work**: with
+  `SECURE_PROXY_SSL_HEADER` Django compares the Origin with https plus the Host itself.
+  `tests/wagtail-install.sh` logs into Wagtail's admin over https through agensio.
+- **Uploads**: `nosniff` and `script-src 'none'; form-action 'none'; base-uri 'none'`
+  rather than `sandbox`, which a browser's PDF viewer refuses. Static files: a year and
+  `immutable` for Wagtail (hashed names), a day for plain Django (`StaticFilesStorage`).
+- **Reserved first**: `PIP_*`, `VIRTUAL_ENV`, `DJANGO_SETTINGS_MODULE`, `AGENSIO_*`.
+- **Generic tasks, not one per application** (the owner, after the first build): one
+  `pip_install` that takes any package the site's account may install, and one
+  `startproject` whose command the preset picks (`wagtail start` or `django-admin
+  startproject`), instead of `pip_install_wagtail`, `pip_install_django`,
+  `gunicorn_install`, `wagtail_start` and `django_startproject`. An allowlist was weighed
+  and set aside by the owner; instead every `pip_install` run needs the user's own
+  confirmation, which an agent cannot give: the bridge asks in the MCP client's dialog (MCP
+  elicitation) and refuses otherwise, handing back the `agensio ctl` command, and the
+  control API refuses the task without one (security row 32). A free name cannot reach root
+  (pip runs as the site's account); what the confirmation guards against is the agent
+  installing the wrong code: a mistyped, invented or planted name. Client support for the
+  dialog varies (Claude Code's CLI shows it; its VS Code extension declines every question,
+  its desktop app does not offer it), so the terminal is the fallback, not an error. The
+  confirmation binds only while the bridge is the agent's one way in: its SSH key is
+  limited to `command="agensio mcp"`.
+- **One parameter name, several patterns**: the MCP schema advertises a parameter's pattern
+  only when every row that takes it agrees, else each row's in the text (the server checks
+  per row); `version` is now Rails' alone again.
+- A task's family now follows the site's preset (a wagtail site running a django row gets
+  wagtail's credential patterns; before, a redmine site running a rails row got rails').
+
+Not in this step: Node (the brief's look ahead; the same frame, a family and a unit
+renderer per runtime, fits it), a Python other than `[control] runtimes.python3` per site,
+and running the rendered unit under real systemd in the test bed (the devbox has no systemd
+as init; `tests/wagtail-install.sh` starts Gunicorn from the unit's own lines instead).

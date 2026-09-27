@@ -13,9 +13,10 @@ BIN=$(readlink -f "${1:-build/agensio}")
 [ "$(id -u)" = 0 ] || { echo "tasks: needs root; skipped"; exit 0; }
 T=$(mktemp -d /tmp/agensio-tasks.XXXXXX); chmod 755 "$T"
 RT=/opt/agensio-tasks-rt   # not below /tmp: every directory above a runtime must be writable by root alone
+PYRT_TOP=/opt/agensio-tasks-py; PYRT=$PYRT_TOP/bin   # a Python laid out as a distribution's: bin/python3.13, lib/python3.13
 pass=0; fail=0
 check() { if [ "$3" = "$2" ]; then echo "ok   $1"; pass=$((pass+1)); else echo "FAIL $1: expected [$2] got [$3]"; fail=$((fail+1)); fi; }
-cleanup() { for b in systemctl journalctl; do [ -e /usr/bin/$b.agensio-orig ] && mv -f /usr/bin/$b.agensio-orig /usr/bin/$b; done; [ -f "$T/agensio.pid" ] && kill "$(cat "$T/agensio.pid")" 2>/dev/null; sleep 0.3; for u in r1 r2 r3 r4; do pkill -9 -u $u 2>/dev/null; userdel $u 2>/dev/null; done; rm -rf "$T" "$RT"; }
+cleanup() { for b in systemctl journalctl; do [ -e /usr/bin/$b.agensio-orig ] && mv -f /usr/bin/$b.agensio-orig /usr/bin/$b; done; [ -f "$T/agensio.pid" ] && kill "$(cat "$T/agensio.pid")" 2>/dev/null; sleep 0.3; for u in r1 r2 r3 r4 r5; do pkill -9 -u $u 2>/dev/null; userdel $u 2>/dev/null; done; rm -rf "$T" "$RT" "$PYRT_TOP"; }
 trap cleanup EXIT
 id -u agensio >/dev/null 2>&1 || useradd -r -M -s /usr/sbin/nologin agensio
 mkdir -p $T/sites.d $T/logs $T/run $T/state $T/www $T/default $RT; chown agensio:agensio $T/sites.d $T/logs $T/state; chmod 751 $T/state; chmod 755 $RT
@@ -62,6 +63,44 @@ esac
 SH
 chmod 755 $RT/ruby $RT/gem $RT/bundle
 
+# The fake Python (2026-09-28, Django and Wagtail): what venv, pip, wagtail start and manage.py
+# would leave, and the environment each run got. A shebang script cannot see the argv[0] it was
+# started under, so it knows its virtualenv from VIRTUAL_ENV.
+mkdir -p $PYRT $PYRT_TOP/lib/python3.13; chmod 755 $PYRT_TOP $PYRT $PYRT_TOP/lib $PYRT_TOP/lib/python3.13
+cat > $PYRT/python3.13 <<'SH'
+#!/bin/sh
+echo "prog=python args=$*"
+echo "uid=$(id -un) cwd=$(pwd) VIRTUAL_ENV=${VIRTUAL_ENV:-} DSM=${DJANGO_SETTINGS_MODULE:-} HOSTS=${AGENSIO_HOSTS:-} PROJECT=${AGENSIO_DJANGO_PROJECT:-} NOUSER=${PYTHONNOUSERSITE:-} STATIC=${AGENSIO_STATIC_ROOT:-}"
+echo "superuser_password=${DJANGO_SUPERUSER_PASSWORD:+set} secret_key=${DJANGO_SECRET_KEY:+set}"
+case "$1 $2" in
+  "-m venv") mkdir -p "$3/bin" && echo "home = /opt/agensio-tasks-py/bin" > "$3/pyvenv.cfg" && echo '#!' > "$3/bin/pip"; exit 0 ;;
+  "-m pip")
+    case "$*" in *"-r requirements.txt"*) echo "Requirement already satisfied: wagtail"; exit 0 ;; esac
+    shift 3; [ "$1" = "--" ] && shift; done_list=""
+    for p in "$@"; do
+      case "$p" in
+        wagtail*) echo '#!' > "$VIRTUAL_ENV/bin/wagtail"; done_list="$done_list Django-6.1.1 wagtail-8.0" ;;
+        gunicorn*) echo '#!' > "$VIRTUAL_ENV/bin/gunicorn"; done_list="$done_list gunicorn-23.0.0" ;;
+      esac
+    done
+    echo "Successfully installed${done_list}"
+    exit 0 ;;
+esac
+case "$1" in
+  */bin/wagtail)
+    mkdir -p "$3/settings" && echo "print('manage')" > manage.py && printf 'Django>=6.1,<6.2\nwagtail>=8.0,<8.1\n' > requirements.txt
+    echo "from .base import *" > "$3/settings/production.py"; echo '' > "$3/wsgi.py"; echo "Success! $3 has been created" ;;
+  manage.py)
+    case "$2" in
+      migrate) echo "  Applying home.0001_initial... OK"; echo db > db.sqlite3; chmod 644 db.sqlite3 ;;
+      collectstatic) mkdir -p static/css && echo 'body{}' > static/css/site.css && echo "1 static file copied to '$(pwd)/static'." ;;
+      createsuperuser) echo "Superuser created successfully." ;;
+      check) echo "System check identified 2 issues (0 silenced)." ;;
+    esac ;;
+esac
+SH
+chmod 755 $PYRT/python3.13; ln -sf python3.13 $PYRT/python3
+
 write_config() {
 cat > $T/agensio.toml <<CFG
 include = ["sites.d/*.toml"]
@@ -79,7 +118,7 @@ level = "info"
 socket = "$T/run/control.sock"
 audit = "$T/logs/audit.log"
 sites_root = "$T/www"
-runtimes = { ruby = "$RT" }
+runtimes = { ruby = "$RT", python3 = "$PYRT" }
 task_limits = { timeout = 5, processes = 256 }
 $1
 [[site]]
@@ -233,6 +272,41 @@ check "bundle_install with the database configured: ok" "True" "$(ctl site-task 
 check "load_default_data: the fixed rake task with REDMINE_LANG from the typed parameter; a parameter that is not a language is refused" "exec rake redmine:load_default_data REDMINE_LANG=de 1" "$(ctl site-task r4.test load_default_data --param lang=de --dry-run --yes --reason redmine > $T/out; j '" ".join(d["argv"][1:]), [e for e in d["env"] if e.startswith("REDMINE_LANG")][0]') $(ctl site-task r4.test load_default_data --param 'lang=de;id' --dry-run --yes --reason bad > /dev/null; echo $?)"
 check "site-unit renders r4's Puma unit: its account, the runtime's bundle, the loopback port, the environment file; --raw prints the unit alone" "yes yes yes yes" "$(ctl site-unit r4.test > $T/out; j '"yes" if "User=r4" in d["unit"] and "ExecStart='$RT'/bundle exec puma -e production -b tcp://127.0.0.1:18404" in d["unit"] else d') $(j '"yes" if "EnvironmentFile=-'$T'/env/r4.test.env" in d["unit"] else d["unit"]') $(j '"yes" if d["run_as_root"][0] == "agensio ctl site-unit r4.test --raw > /etc/systemd/system/agensio-app-r4.service" else d') $(ctl site-unit r4.test --raw | head -c 9 | grep -q '^# agensio' && echo yes)"
 check "the audit log: each run with the exact argv, the account and the outcome; each refusal with its reason" "yes yes yes" "$(grep -q "sites/r1.test/task (new): ran as r1 in $APP: $RT/ruby $T/state/r1/gems/bin/rails new . --name=blog .* -> exit 0" $T/logs/audit.log && echo yes) $(grep -q "sites/r1.test/task (slow): ran as r1 .* -> stopped at the time limit" $T/logs/audit.log && echo yes) $(grep -q "sites/r2.test/task (owner): refused: .*belongs to uid 0" $T/logs/audit.log && echo yes)"
+# Django and Wagtail (2026-09-28): a Wagtail site with its own account, every task in its own
+# virtualenv, root's python3 run under the virtualenv's name, the settings from the template.
+W5=$T/www/w5.test/app; VENV=$T/state/r5/venvs/w5.test
+check "site-create of a wagtail site without its project: 422, the decision names project with a suggestion" "422 w5" "$(curl -sS -o $T/out -w '%{http_code}' --unix-socket $CS -X POST -d '{"domain":"w5.test","https":"none","user":"r5","app":"wagtail","root":"'$W5'","upstream":"http://127.0.0.1:18405","listen_plain":"127.0.0.1:18399","confirm":true}' http://control/v1/sites) $(j '[n["suggestion"] for n in d["needs"] if n["field"] == "project"][0]')"
+out=$(ctl site-create --domain w5.test --app wagtail --project mysite --root $W5 --user r5 --upstream http://127.0.0.1:18405 --https none --listen-plain 127.0.0.1:18399 --yes --reason py)
+check "site-create: app = wagtail with project mysite, the file names both" "yes yes" "$(echo "$out" | grep -q '"ok":true' && echo yes) $(grep -q '^project = "mysite"' $T/sites.d/w5.test.toml && echo yes)"
+check "site-tasks: nine tasks, the project and the site's virtualenv; venv_create's interpreter refused, Python cannot make virtualenvs, with the package for root" "9 mysite yes False yes yes" "$(ctl site-tasks w5.test > $T/out; j 'len(d["tasks"]), d["project"], "yes" if d["virtualenv"] == "'$VENV'" else d["virtualenv"], [t for t in d["tasks"] if t["task"] == "venv_create"][0]["interpreter"]["ok"]') $(j '"yes" if "ensurepip" in [t for t in d["tasks"] if t["task"] == "venv_create"][0]["interpreter"]["error"] else d') $(j '"yes" if "apt-get install -y python3-venv" in d.get("run_as_root", []) else d.get("run_as_root")')"
+check "venv_create without ensurepip: refused before it runs, dry run or not, with the package command; nothing made" "1 yes no" "$(ctl site-task w5.test venv_create --yes --reason py > $T/out; echo -n "$? "; j '"yes" if "cannot make a virtualenv" in d["error"] and d["run_as_root"] == "apt-get install -y python3-venv" else d') $([ -e $VENV ] && echo yes || echo no)"
+mkdir -p $PYRT_TOP/lib/python3.13/ensurepip; chmod 755 $PYRT_TOP/lib/python3.13/ensurepip; touch $PYRT_TOP/lib/python3.13/ensurepip/__init__.py
+check "venv_create: root's python3 makes the virtualenv in r5's home, outside the served tree" "True $PYRT/python3.13 -m venv $VENV r5 yes" "$(ctl site-task w5.test venv_create --yes --reason py > $T/out; j 'd["ok"], " ".join(d["argv"])') $(stat -c %U $VENV) $([ -f $VENV/pyvenv.cfg ] && echo yes)"
+# pip_install names any package, so the user confirms every run in person (2026-09-28): the
+# control API refuses it without that, whatever the agent's confirm; ctl warns, and --yes is it.
+check "pip_install without the user's own confirmation: 428 with the warning and the terminal command, even with confirm" "428 yes yes" "$(curl -sS -o $T/out -w '%{http_code}' --unix-socket $CS -X POST -d '{"task":"pip_install","params":{"packages":"wagtail"},"confirm":true,"reason":"agent"}' http://control/v1/sites/w5.test/task) $(j '"yes" if "https://pypi.org/project/wagtail/" in d["warning"] else d') $(j '"yes" if d["run_in_terminal"].startswith("agensio ctl site-task w5.test pip_install --param packages=wagtail --yes") else d["run_in_terminal"]')"
+check "pip_install with an option or a URL for a package: refused by its shape, nothing ran" "400 400 no" "$(curl -sS -o /dev/null -w '%{http_code}' --unix-socket $CS -X POST -d '{"task":"pip_install","params":{"packages":"--index-url=https://evil.example/simple wagtail"},"confirm":true,"user_confirmed":"terminal"}' http://control/v1/sites/w5.test/task) $(curl -sS -o /dev/null -w '%{http_code}' --unix-socket $CS -X POST -d '{"task":"pip_install","params":{"packages":"wagtail @ https://evil.example/w.whl"},"confirm":true,"user_confirmed":"terminal"}' http://control/v1/sites/w5.test/task) $([ -e $VENV/bin/wagtail ] && echo yes || echo no)"
+ctl site-task w5.test pip_install --param "packages=wagtail==8.0 gunicorn" --yes --reason py > $T/out 2> $T/err
+check "pip_install through ctl: the warning on the terminal, root's python3.13 under the virtualenv's name, the packages after --, pip's environment, a summary" "yes True $PYRT/python3.13 $VENV/bin/python|-m|pip|install|--|wagtail==8.0|gunicorn VIRTUAL_ENV=$VENV installed 3 packages into the site's virtualenv" "$(grep -q '^WARNING: Install wagtail==8.0 gunicorn into the site w5.test? .*look-alike' $T/err && echo yes) $(j 'd["ok"], d["program"], "|".join(d["argv"])') $(j '[l for l in d["output"].splitlines() if l.startswith("uid=")][0].split()[2]') $(j 'd["summary"]')"
+check "the audit line: the user confirmed it in a terminal; the program and the name it ran under" "yes yes" "$(grep -qF "sites/w5.test/task (py): running task pip_install packages=wagtail==8.0 gunicorn in $W5, confirmed by the user in a terminal (agensio ctl)" $T/logs/audit.log && echo yes) $(grep -qF "sites/w5.test/task (py): ran as r5 in $W5: $PYRT/python3.13 as $VENV/bin/python -m pip install -- wagtail==8.0 gunicorn -> exit 0" $T/logs/audit.log && echo yes)"
+check "startproject on a wagtail site: wagtail start, the project named by the site, in the empty directory (the virtualenv is elsewhere), as r5" "True r5 yes" "$(ctl site-task w5.test startproject --yes --reason py > $T/out; j 'd["ok"]') $(stat -c %U $W5/manage.py) $(j '"yes" if d["argv"][1:] == ["'$VENV'/bin/wagtail", "start", "mysite", "."] else d["argv"]')"
+ctl site-task w5.test pip_install_requirements --yes --reason py > $T/out-pip_install_requirements
+check "pip_install_requirements (no confirmation: the project's own file names the packages); gunicorn is in the virtualenv" "yes yes" "$(python3 -c "import json; d=json.load(open('$T/out-pip_install_requirements')); print('yes' if d['ok'] and d['summary'].startswith('nothing new') else d)") $([ -f $VENV/bin/gunicorn ] && echo yes)"
+check "django_settings without DJANGO_SECRET_KEY: refused naming generate; nothing written" "1 yes no" "$(ctl site-task w5.test django_settings --yes --reason py > $T/out; echo -n "$? "; j '"yes" if "DJANGO_SECRET_KEY" in d["error"] and "generate" in d["error"] else d') $([ -e $W5/agensio_settings.py ] && echo yes || echo no)"
+ctl site-env-set w5.test --generate DJANGO_SECRET_KEY --yes --reason py > /dev/null
+check "django_settings writes agensio_settings.py from the fixed template, as r5, 0640; the environment cannot name the settings module or pip's index" "True r5 640 yes 1 1" "$(ctl site-task w5.test django_settings --yes --reason py > $T/out; j 'd["ok"]') $(stat -c '%U %a' $W5/agensio_settings.py) $(grep -q 'SECRET_KEY = os.environ\["DJANGO_SECRET_KEY"\]' $W5/agensio_settings.py && echo yes) $(ctl site-env-set w5.test --set DJANGO_SETTINGS_MODULE=x --yes --reason py > /dev/null; echo -n $?) $(ctl site-env-set w5.test --set PIP_INDEX_URL=https://evil.example/simple --yes --reason py > /dev/null; echo $?)"
+ctl site-task w5.test migrate --yes --reason py > $T/out
+check "migrate: the settings module agensio's, the site's names and project, no user site-packages, the secret from the site's environment; the database swept to 0600" "True DSM=agensio_settings HOSTS=w5.test PROJECT=mysite NOUSER=1 secret_key=set 1 migration applied 600" "$(j 'd["ok"]') $(j '" ".join([l for l in d["output"].splitlines() if l.startswith("uid=")][0].split()[3:7])') $(j '[l for l in d["output"].splitlines() if l.startswith("superuser")][0].split()[1]') $(j 'd["summary"]') $(stat -c %a $W5/db.sqlite3)"
+check "migrate's answer carries root's restart line for the Gunicorn unit" "yes" "$(j '"yes" if "systemctl restart agensio-app-r5.service" in d["next_steps"][0] else d.get("next_steps")')"
+check "collectstatic: static/ as r5, readable by the server; a summary" "True yes 1 static file copied to '$W5/static'." "$(ctl site-task w5.test collectstatic --yes --reason py > $T/out; j 'd["ok"]') $(su -s /bin/sh agensio -c "cat $W5/static/css/site.css" > /dev/null 2>&1 && echo yes) $(j 'd["summary"]')"
+check "createsuperuser without DJANGO_SUPERUSER_PASSWORD: refused naming generate; with it, the password reaches the task and the answer shows no value" "1 True set yes yes" "$(ctl site-task w5.test createsuperuser --param username=admin --param email=admin@example.com --yes --reason py > $T/out; echo -n "$? "; ctl site-env-set w5.test --generate DJANGO_SUPERUSER_PASSWORD --yes --reason py > /dev/null; ctl site-task w5.test createsuperuser --param username=admin --param email=admin@example.com --yes --reason py > $T/out; j 'd["ok"]') $(j '[l for l in d["output"].splitlines() if l.startswith("superuser")][0].split()[0].split("=")[1]') $(j '"yes" if "DJANGO_SUPERUSER_PASSWORD=<site environment>" in d["env"] else d["env"]') $(j '"yes" if any("reveal" in s for s in d["next_steps"]) else d.get("next_steps")')"
+check "site-unit renders the Gunicorn unit: root's python3 as the virtualenv's python, the project's wsgi, the admin's password unset" "yes yes yes" "$(ctl site-unit w5.test > $T/out; j '"yes" if "ExecStart=@'$PYRT'/python3 '$VENV'/bin/python -m gunicorn mysite.wsgi:application --bind 127.0.0.1:18405" in d["unit"] else d["unit"]') $(j '"yes" if "UnsetEnvironment=DJANGO_SUPERUSER_PASSWORD" in d["unit"] else "no"') $(j '"yes" if "User=r5" in d["unit"] and "AGENSIO_HOSTS=w5.test" in d["unit"] else "no"')"
+mkdir -p $W5/media/documents $W5/media/images; echo pdf > $W5/media/documents/private.pdf; echo png > $W5/media/images/x.png
+chown -R r5:agensio $W5/media; find $W5/media -type d -exec chmod 2750 {} +; find $W5/media -type f -exec chmod 640 {} +
+H5="-H Host:w5.test"
+check "the edge serves /static/ and /media/ from disk with their headers; /media/documents/, manage.py and the settings are 404; the rest goes to Gunicorn (502: none runs)" "200 200 404 404 404 404 502 yes yes" "$(for p in /static/css/site.css /media/images/x.png /media/documents/private.pdf /manage.py /agensio_settings.py /mysite/settings/production.py /admin/; do curl -sS -o /dev/null -w '%{http_code} ' $H5 http://127.0.0.1:18399$p; done)$(curl -sS -D - -o /dev/null $H5 http://127.0.0.1:18399/static/css/site.css | grep -qi '^cache-control: public, max-age=31536000, immutable' && echo -n 'yes ')$(curl -sS -D - -o /dev/null $H5 http://127.0.0.1:18399/media/images/x.png | grep -qi "^content-security-policy: script-src 'none'" && echo yes)"
+check "check_deploy reports and changes nothing; its summary is Django's line" "True System check identified 2 issues (0 silenced)." "$(ctl site-task w5.test check_deploy --yes --reason py > $T/out; j 'd["ok"], d["summary"]')"
+
 # The application service's state and journal through the helper (alpha.33 report): fake
 # systemctl and journalctl stand in, only inside a container whose init is not systemd.
 if [ -f /.dockerenv ] && [ "$(cat /proc/1/comm)" != systemd ]; then

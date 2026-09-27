@@ -133,6 +133,10 @@ struct SiteConfig {
     std::string redirect;
     std::string root;                       // absolute document root, no trailing slash
     std::string project_root;               // the root as given, before a preset appended its public/ or web/ (site-install's target)
+    // app = "django" | "wagtail": the project's Python package (NAME/settings, NAME/wsgi.py),
+    // which the tasks and the rendered unit load (2026-09-28, the owner's decision: a site
+    // field given at site_create, not a parameter of every task).
+    std::string project;
     std::size_t max_body_size = 0;          // this site's request-body limit (413 above; drives the pool's upload sizes); 0 = [server] max_body_size
     std::vector<std::string> index{"index.html"};
     std::vector<TryStep> try_files;  // default for locations that do not set their own
@@ -302,6 +306,23 @@ bool proxy_app(std::string_view app) noexcept;
 // A Rails application preset ("rails", and "redmine" built on it): the Rails refusals, the
 // Rails tasks, the credential files of Rails.
 bool rails_app(std::string_view app) noexcept;
+// A Django application preset ("django", and "wagtail" built on it): /static/ and /media/
+// from disk, the rest to the upstream (Gunicorn); a virtualenv per site; the Python tasks.
+bool python_app(std::string_view app) noexcept;
+// A preset whose application service agensio renders and watches (site_service_unit,
+// site_service_status, health): the Rails and the Django presets.
+bool service_app(std::string_view app) noexcept;
+// A project name `project = "..."` takes: ^[a-z_][a-z0-9_]{0,63}$ and not a module the
+// project would shadow (django, wagtail, site, test, ...). "" or why.
+std::string check_project_name(std::string_view name);
+// What a Django site's settings and unit are told about the site itself: its host names
+// (server_name and aliases, "*.example.com" as Django's ".example.com"), the origins with
+// the scheme it is reached by (https when a block of the site has TLS), and the first
+// origin as the base URL. Comma-separated, no spaces: environment values and unit lines.
+struct AppContext {
+    std::string hosts, origins, base_url;
+};
+AppContext app_context(const Config& cfg, const SiteConfig& site);
 // A PHP preset (a row of the PHP preset table).
 bool php_app(std::string_view app);
 // What each `app` value does, for `agensio ctl presets` and the MCP tool: served root,

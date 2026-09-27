@@ -702,7 +702,7 @@ json::Value Server::health() {
             // Every Rails site's application service (2026-09-27 report: a Puma that did not come
             // up showed only as 502s): one systemctl show for all their units, through the
             // helper, never waited for.
-            if (std::any_of(cfg.sites.begin(), cfg.sites.end(), [](const SiteConfig& s) { return rails_app(s.app) && !s.user.empty(); })) {
+            if (std::any_of(cfg.sites.begin(), cfg.sites.end(), [](const SiteConfig& s) { return service_app(s.app) && !s.user.empty(); })) {
                 const auto more = control::service_findings(provisioner_.try_request(json::Value::object().set("op", "app_check")));
                 extra.insert(extra.end(), more.begin(), more.end());
             }
@@ -1069,6 +1069,12 @@ void Server::task_async(const json::Value& req, std::function<void(json::Value)>
                 tr.ctx.runtime_dir = runtime_dir(ctl, row->runtime);
                 tr.ctx.root = std::string(req.get("root"));
                 tr.ctx.home = cfg_.state_dir + "/" + pw->pw_name;
+                tr.ctx.app = std::string(req.get("app"));
+                tr.ctx.site = std::string(req.get("site"));
+                tr.ctx.project = std::string(req.get("project"));
+                tr.ctx.hosts = std::string(req.get("hosts"));
+                tr.ctx.origins = std::string(req.get("origins"));
+                tr.ctx.base_url = std::string(req.get("base_url"));
                 tr.ctx.timeout = std::min(row->timeout, ctl.task_timeout);
                 tr.ctx.processes = ctl.task_processes;
                 for (auto& v : vars) tr.ctx.app_env.emplace_back(std::move(v.name), std::move(v.value));

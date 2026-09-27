@@ -222,7 +222,25 @@ json::Value app_facts(int dir_fd, const std::string& ruby) {
     json::Value f = json::Value::object().set("gemfile", regular("Gemfile"))
                         .set("credentials", regular("config/credentials.yml.enc") || regular("config/credentials/production.yml.enc"))
                         .set("database_yml", regular("config/database.yml")).set("database_yml_example", regular("config/database.yml.example"))
-                        .set("redmine", regular("lib/redmine/version.rb"));
+                        .set("redmine", regular("lib/redmine/version.rb"))
+                        .set("manage_py", regular("manage.py")).set("requirements_txt", regular("requirements.txt"));
+    // A Django project's package: a top-level directory with wsgi.py (what `project` must name).
+    json::Value packages = json::Value::array();
+    if (const int dd = ::dup(dir_fd); dd >= 0) {
+        if (DIR* d = ::fdopendir(dd)) {
+            std::size_t seen = 0;
+            while (const struct dirent* e = ::readdir(d)) {
+                if (++seen > 4096 || packages.items().size() >= 16) break;
+                const std::string n = e->d_name;
+                if (n == "." || n == ".." || n.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_") != std::string::npos) continue;
+                if (regular((n + "/wsgi.py").c_str())) packages.push(n);
+            }
+            ::closedir(d);
+        } else {
+            ::close(dd);
+        }
+    }
+    f.set("wsgi_packages", std::move(packages));
     const int fd = ::openat(dir_fd, ".ruby-version", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
     if (fd >= 0) {
         struct stat st {};

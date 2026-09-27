@@ -528,7 +528,7 @@ json::Value env_op(const json::Value& req, const Config& cfg) {
     const std::string name(req.get("site"));
     const SiteConfig* site = control::find_site(fresh, name);
     if (!site) return fail("no site " + name + " in the configuration on disk");
-    if (!proxy_app(site->app)) return fail("site " + name + " has app = \"" + site->app + "\"; a site's environment is for applications agensio runs (rails, proxy)");
+    if (!proxy_app(site->app)) return fail("site " + name + " has app = \"" + site->app + "\"; a site's environment is for applications agensio runs (rails, redmine, proxy)");
     const std::string key = site->server_names.front();
     const std::string dir = appenv::dir_of(cfg.config_path);
     if (req.get("op") == "env_read") {
@@ -608,7 +608,7 @@ json::Value app_check(const Config& cfg) {
     std::vector<std::string> units;
     for (const auto& s : fresh.sites) {
         std::string why;
-        if (!rails_app(s.app) || s.user.empty() || s.server_names.empty() || !control::valid_account(s.user, why)) continue;
+        if (!service_app(s.app) || s.user.empty() || s.server_names.empty() || !control::valid_account(s.user, why)) continue;
         const std::string unit = "agensio-app-" + s.user + ".service";
         sites.emplace_back(s.server_names.front(), unit);
         if (std::find(units.begin(), units.end(), unit) == units.end()) units.push_back(unit);
@@ -637,8 +637,8 @@ json::Value app_op(const json::Value& req, const Config& cfg) {
     const SiteConfig* site = control::find_site(fresh, name);
     if (!site) return fail("no site " + name + " in the configuration on disk");
     std::string why;
-    if (!rails_app(site->app) || site->user.empty() || !control::valid_account(site->user, why))
-        return fail("site " + name + " has no application service: a Rails site with its own account has one (agensio-app-<user>.service)");
+    if (!service_app(site->app) || site->user.empty() || !control::valid_account(site->user, why))
+        return fail("site " + name + " has no application service: a Rails or Django site with its own account has one (agensio-app-<user>.service)");
     const std::string unit = "agensio-app-" + site->user + ".service";
     reply.set("site", site->server_names.front()).set("unit", unit);
     if (req.get("op") == "app_status") {
@@ -709,6 +709,14 @@ json::Value task_run(const json::Value& req, const Config& cfg, int helper_fd) {
     tr.ctx.runtime_dir = runtime_dir(fresh.control, row->runtime);
     tr.ctx.root = site_root;
     tr.ctx.home = cfg.state_dir + "/" + account;
+    // What the preset's family and a Django site's settings are told, from the site on disk.
+    tr.ctx.app = app;
+    tr.ctx.site = site->server_names.front();
+    tr.ctx.project = site->project;
+    const AppContext ac = app_context(fresh, *site);
+    tr.ctx.hosts = ac.hosts;
+    tr.ctx.origins = ac.origins;
+    tr.ctx.base_url = ac.base_url;
     tr.ctx.timeout = std::min(row->timeout, fresh.control.task_timeout);
     tr.ctx.processes = fresh.control.task_processes;
     for (auto& v : vars) tr.ctx.app_env.emplace_back(std::move(v.name), std::move(v.value));

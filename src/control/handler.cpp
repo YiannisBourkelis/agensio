@@ -225,8 +225,13 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
                 .set("downloads", cfg.control.task_network).set("timeout_cap", static_cast<double>(cfg.control.task_timeout))
                 .set("runs_as", site->user.empty() ? json::Value("the owner of the site's directory") : json::Value(site->user))
                 .set("directory", site->project_root.empty() ? site->root : site->project_root);
+            if (python_app(app))
+                body.set("project", site->project)
+                    .set("virtualenv", (cfg.state_dir.empty() ? std::string("<state_dir>") : cfg.state_dir) + "/" +
+                                           (site->user.empty() ? std::string("<the server's account>") : site->user) + "/venvs/" + site->server_names.front());
         } else {
-            body.set("hint", "tasks belong to a preset: app = \"rails\" has them. This site's app has none, and agensio runs no other command.");
+            body.set("hint", "tasks belong to a preset: app = \"rails\", \"redmine\", \"django\" and \"wagtail\" have them. This site's app has none, "
+                             "and agensio runs no other command.");
         }
         reply(s, 200, body);
     } else if (path.starts_with("/v1/sites/") && path.ends_with("/task-output")) {
@@ -345,7 +350,8 @@ std::string body_limit_step(const SiteConfig& site, const Config& cfg) {
 
 struct SiteFacts {
     bool rails_root = false;
-    std::string key, ruby_dir, body_step, app;
+    bool python_root = false;  // a Django or Wagtail site's whole project (2026-09-28)
+    std::string key, ruby_dir, body_step, app, project;
 };
 
 // The hosting-rule errors of the configuration on disk, as a set: a writer compares the
@@ -706,6 +712,8 @@ void ControlHandler::site_install(Stream& s, std::string_view name, const json::
     // told to open a browser, and nothing named the 1 MB body limit before the first upload).
     SiteFacts sf;
     sf.rails_root = rails_app(app) && target == site_root;
+    sf.python_root = python_app(app) && target == site_root;
+    sf.project = site->project;
     sf.app = app;
     sf.key = site->server_names.front();
     sf.ruby_dir = runtime_dir(cfg.control, "ruby");
@@ -766,6 +774,27 @@ void ControlHandler::site_install(Stream& s, std::string_view name, const json::
                     steps.push(db + "site_task gemfile_local, bundle_install, db_migrate, load_default_data with params {\"lang\": \"en\"}, assets_precompile; " + unit);
                 else
                     steps.push(db + "site_task bundle_install, then db_prepare and assets_precompile; " + unit);
+            } else if (sf.python_root && facts["manage_py"].boolean()) {
+                // A Django project from an archive: its packages, its settings and its admin through
+                // the preset's tasks; the project's package must be what the site names.
+                steps.push("site_task venv_create, pip_install_requirements" + std::string(facts["requirements_txt"].boolean() ? "" : " (the archive has no requirements.txt: "
+                           "it must bring one, or pip_install gives the packages it needs)") + ", pip_install with packages \"gunicorn\" (the user confirms it), "
+                           "django_settings, migrate, collectstatic; "
+                           "site_env_set with generate: [\"DJANGO_SUPERUSER_PASSWORD\"] and site_task createsuperuser for the first admin; then the "
+                           "application server: site_service_unit gives its systemd unit for root to install");
+                bool found = false;
+                std::string names;
+                for (const auto& p : facts["wsgi_packages"].items()) {
+                    found = found || p.str() == sf.project;
+                    names += (names.empty() ? "" : ", ") + std::string(p.str());
+                }
+                if (!found)
+                    warnings.push("the site's project is " + sf.project + ", but " +
+                                  (names.empty() ? std::string("no top-level directory of the archive holds wsgi.py") : "the archive's package with wsgi.py is " + names) +
+                                  ": site_update with project " + (names.empty() ? std::string("NAME") : names.substr(0, names.find(','))) +
+                                  " before django_settings, or the tasks and the unit load a package that does not exist");
+            } else if (sf.python_root) {
+                steps.push("the archive holds no manage.py at its top: a Django project's directory is the site's root (strip or path place it there)");
             } else {
                 steps.push("open the site in a browser to finish the application's own setup (database, admin account)");
             }
@@ -779,19 +808,25 @@ void ControlHandler::site_install(Stream& s, std::string_view name, const json::
             // environment (every ONCE application, every Kamal deployment): a fresh install
             // gets one, once. Never for an application with credentials, whose own secret an
             // environment value would override, signing its users out.
-            if (sf.rails_root && facts["gemfile"].boolean() && !facts["credentials"].boolean()) {
-                const json::Value change = json::Value::object().set("op", "env_write").set("site", sf.key).set("generate", json::Value::array().push("SECRET_KEY_BASE"));
-                backend_->env_async(change, [this, &s, what, r, warnings, done](json::Value e) mutable {
+            // A Django project's secret key likewise: agensio_settings.py reads DJANGO_SECRET_KEY.
+            const bool rails_secret = sf.rails_root && facts["gemfile"].boolean() && !facts["credentials"].boolean();
+            const bool django_secret = sf.python_root && facts["manage_py"].boolean();
+            if (rails_secret || django_secret) {
+                const std::string name = rails_secret ? "SECRET_KEY_BASE" : "DJANGO_SECRET_KEY";
+                const std::string before_task = rails_secret ? "db_prepare" : "django_settings";
+                const std::string why = rails_secret ? "the application came without Rails credentials, so it reads its secret from the environment"
+                                                     : "agensio_settings.py (django_settings) reads the project's secret key from there";
+                const json::Value change = json::Value::object().set("op", "env_write").set("site", sf.key).set("generate", json::Value::array().push(name));
+                backend_->env_async(change, [this, &s, what, r, warnings, name, before_task, why, done](json::Value e) mutable {
                     json::Value made = json::Value::array();
                     if (!e["ok"].boolean()) {
-                        warnings.push("SECRET_KEY_BASE could not be written into the site's environment (" + std::string(e.get("error")) +
-                                      "); run site_env_set with generate: [\"SECRET_KEY_BASE\"] before db_prepare");
+                        warnings.push(name + " could not be written into the site's environment (" + std::string(e.get("error")) +
+                                      "); run site_env_set with generate: [\"" + name + "\"] before " + before_task);
                     } else if (!e["generated"].items().empty()) {
-                        made.push("SECRET_KEY_BASE generated into " + std::string(e.get("file")) + ": the application came without Rails credentials, "
-                                  "so it reads its secret from the environment; the tasks and its service read that file");
-                        audit_peer(s, what, "generated SECRET_KEY_BASE into " + std::string(e.get("file")));
+                        made.push(name + " generated into " + std::string(e.get("file")) + ": " + why + "; the tasks and its service read that file");
+                        audit_peer(s, what, "generated " + name + " into " + std::string(e.get("file")));
                     } else {
-                        made.push("SECRET_KEY_BASE was already in the site's environment (" + std::string(e.get("file")) + "); kept");
+                        made.push(name + " was already in the site's environment (" + std::string(e.get("file")) + "); kept");
                     }
                     r.set("done", made);
                     if (!warnings.items().empty()) r.set("warnings", warnings);
@@ -1213,7 +1248,8 @@ void ControlHandler::site_task(Stream& s, std::string_view name, const json::Val
     const std::string app = site->app.empty() ? "static" : site->app;
     if (!tasks::has_tasks(app))
         return answer(422, json::Value::object().set("error", "app = \"" + app + "\" has no tasks").set("app", app)
-                               .set("hint", "tasks belong to a preset: app = \"rails\" has them (site_tasks_list shows a site's). agensio runs no other command."));
+                               .set("hint", "tasks belong to a preset: app = \"rails\", \"redmine\", \"django\" and \"wagtail\" have them (site_tasks_list shows a site's). "
+                                       "agensio runs no other command."));
     const std::string task(body.get("task"));
     const tasks::Row* row = tasks::find(app, task);
     if (!row) {
@@ -1231,23 +1267,51 @@ void ControlHandler::site_task(Stream& s, std::string_view name, const json::Val
                                .set("hint", "the site's root is the project directory tasks run in; site_update sets it"));
     const bool dry_run = body["dry_run"].boolean();
     const std::string key = site->server_names.front();
+    // A task whose caller names what gets installed (pip_install) runs only when the user confirmed
+    // it in person (2026-09-28, the owner's decision): the MCP bridge after the client's own dialog
+    // (user_confirmed "mcp"), agensio ctl in a terminal ("terminal"). An agent's confirm is not
+    // enough, and the bridge never passes one of its arguments as this field.
+    std::string confirmed_how;
+    if (row->user_confirm && !dry_run) {
+        const std::string how(body.get("user_confirmed"));
+        if (how != "mcp" && how != "terminal") {
+            std::string given;
+            for (const auto& m : params.members()) given += " --param " + shell_word(m.first + "=" + m.second.str());
+            return answer(428, json::Value::object()
+                                   .set("error", "task " + task + " runs only when the user confirms it in person: the MCP bridge asks in the client's own dialog, "
+                                                 "agensio ctl in the terminal")
+                                   .set("warning", tasks::confirmation_warning(key, params.get("packages"), site->user, ""))
+                                   .set("run_in_terminal", "agensio ctl site-task " + key + " " + task + given + " --yes --reason \"...\""));
+        }
+        std::string client(body.get("client"));
+        client = tasks::clean_text(client.substr(0, 80));
+        for (char& c : client)
+            if (c == '\n' || c == '\r') c = ' ';
+        confirmed_how = how == "mcp" ? "confirmed by the user in the MCP client's dialog" + (client.empty() ? std::string() : " (" + client + ")")
+                                     : std::string("confirmed by the user in a terminal (agensio ctl)");
+    }
     if (!dry_run)
         if (const auto it = running_tasks_.find(key); it != running_tasks_.end())
             return answer(409, json::Value::object().set("error", "a task is already running on this site: " + it->second + "; one task per site at a time").set("running", it->second));
     json::Value req = json::Value::object().set("op", "task_run").set("site", key).set("task", task).set("params", params).set("dry_run", dry_run)
                           .set("app", app).set("root", site_root).set("secrets", site_secrets(*site, site_root));
+    if (python_app(app)) {  // what a Django site's tasks are told (the helper derives the same from the file on disk)
+        const AppContext ac = app_context(cfg, *site);
+        req.set("project", site->project).set("hosts", ac.hosts).set("origins", ac.origins).set("base_url", ac.base_url);
+    }
     if (!dry_run) {
         running_tasks_[key] = task + " (since " + now_stamp() + ")";
         std::string given;
         for (const auto& m : params.members()) given += " " + m.first + "=" + m.second.str();
-        audit_peer(s, what, "running task " + task + given + " in " + site_root);
+        audit_peer(s, what, "running task " + task + given + " in " + site_root + (confirmed_how.empty() ? std::string() : ", " + confirmed_how));
     }
     const std::vector<std::string> before = dry_run ? std::vector<std::string>{} : validation_errors(*backend_);
     // A running Rails application loads its gems, schema and assets at start: after a task
     // that changes them the answer carries root's restart line (alpha.33 report, P3).
     std::string restart;
-    if (rails_app(app) && !site->user.empty())
-        for (const char* t : {"bundle_install", "db_migrate", "db_prepare", "plugins_migrate", "assets_precompile"})
+    if (service_app(app) && !site->user.empty())
+        for (const char* t : {"bundle_install", "db_migrate", "db_prepare", "plugins_migrate", "assets_precompile", "pip_install_requirements",
+                              "pip_install", "django_settings", "migrate", "collectstatic"})
             if (task == t) restart = "agensio-app-" + site->user + ".service";
     backend_->task_async(req, [this, &s, what = std::string(what), key, task, dry_run, before, restart, done](json::Value r) {
         if (!dry_run) running_tasks_.erase(key);
@@ -1292,6 +1356,9 @@ void ControlHandler::site_task(Stream& s, std::string_view name, const json::Val
         } else {
             std::string argv;
             for (const auto& a : r["argv"].items()) argv += (argv.empty() ? "" : " ") + shell_word(a.str());
+            // A row that runs root's interpreter under another name (a site's virtualenv) says both.
+            if (const std::string prog(r.get("program")); !prog.empty() && !r["argv"].items().empty() && r["argv"].items().front().str() != prog)
+                argv = shell_word(prog) + " as " + argv;
             std::string end = r["timed_out"].boolean() ? "stopped at the time limit"
                               : !r["signal"].is_null() ? "signal " + std::to_string(static_cast<int>(r["signal"].num()))
                               : r["exit"].is_null() ? "did not end" : "exit " + std::to_string(static_cast<int>(r["exit"].num()));
@@ -1307,9 +1374,15 @@ void ControlHandler::site_task(Stream& s, std::string_view name, const json::Val
                               .set("errors", fresh).set("hint", "fix what the errors name (health lists them with a fix each), then config_validate"));
         } else {
             if (!before.empty()) r.set("warnings", json::Value::array().push("the configuration already failed validation before this task (health lists the findings); the task itself is fine"));
+            json::Value steps = json::Value::array();
             if (!restart.empty())
-                r.set("next_steps", json::Value::array().push("if " + restart + " already runs (site_service_status " + key + "), as root: systemctl restart " + restart +
-                                                              " (the application loads this change only when it starts)"));
+                steps.push("if " + restart + " already runs (site_service_status " + key + "), as root: systemctl restart " + restart +
+                           " (the application loads this change only when it starts)");
+            if (task == "createsuperuser")
+                steps.push("the admin's password is DJANGO_SUPERUSER_PASSWORD in the site's environment: site_env with reveal: [\"DJANGO_SUPERUSER_PASSWORD\"] "
+                           "shows it, only when the user asks to see it; the unit site_service_unit renders keeps it from the application "
+                           "(UnsetEnvironment=), and the user may change it in the application's admin");
+            if (!steps.items().empty()) r.set("next_steps", std::move(steps));
             reply(s, 200, r);
         }
         done();
@@ -1332,7 +1405,7 @@ const SiteConfig* env_site(const Config& cfg, std::string_view name, int& status
     if (!proxy_app(site->app)) {
         status = 422;
         refusal = json::Value::object().set("error", "site " + std::string(name) + " has app = \"" + (site->app.empty() ? std::string("static") : site->app) +
-                                                         "\"; a site's environment is for applications agensio runs (app = \"rails\" or \"proxy\")")
+                                                         "\"; a site's environment is for applications agensio runs (app = \"rails\", \"redmine\", \"django\", \"wagtail\" or \"proxy\")")
                       .set("app", site->app);
         return nullptr;
     }
@@ -1364,10 +1437,11 @@ void ControlHandler::site_service(Stream& s, std::string_view name, bool logs, s
         done();
         return;
     }
-    if (!rails_app(site->app) || site->user.empty()) {
+    if (!service_app(site->app) || site->user.empty()) {
         reply(s, 409, json::Value::object()
                           .set("error", "site " + site->server_names.front() + " has no application service")
-                          .set("hint", "a Rails site (app = \"rails\" or \"redmine\") with its own user has one, agensio-app-<user>.service, rendered by site_service_unit"));
+                          .set("hint", "a Rails or Django site (app = \"rails\", \"redmine\", \"django\" or \"wagtail\") with its own user has one, "
+                                       "agensio-app-<user>.service, rendered by site_service_unit"));
         done();
         return;
     }
@@ -1469,7 +1543,8 @@ void ControlHandler::site_env_show(Stream& s, std::string_view name, std::functi
         reveal.push(n);
     }
     const std::string key = site->server_names.front();
-    backend_->env_async(json::Value::object().set("op", "env_read").set("site", key).set("reveal", reveal), [this, &s, key, done](json::Value r) {
+    const bool rails = rails_app(site->app), django = python_app(site->app);
+    backend_->env_async(json::Value::object().set("op", "env_read").set("site", key).set("reveal", reveal), [this, &s, key, rails, django, done](json::Value r) {
         const std::string what = "sites/" + key + "/env";
         if (!r["ok"].boolean()) {
             audit_peer(s, what, "read refused: " + std::string(r.get("error")));
@@ -1482,11 +1557,25 @@ void ControlHandler::site_env_show(Stream& s, std::string_view name, std::functi
             if (!r["tightened"].items().empty()) line += "; tightened: " + joined(r["tightened"]);
             audit_peer(s, what, line);
             log_exposures(r);
-            std::string hint = r["exists"].boolean()
-                ? "names, lengths and fingerprints only (the same fingerprint means the same value); a value is returned only when its name is in reveal, "
-                  "and only when the user asked to see it. site_env_set changes them; the tasks read the file on their next run, the application when its "
-                  "service restarts"
-                : "no environment file yet: site_env_set creates it (generate: [\"SECRET_KEY_BASE\"] for a Rails application without credentials)";
+            // The hint follows the preset (Django report against alpha.33: a proxy site was told
+            // about SECRET_KEY_BASE and tasks it does not have).
+            std::string hint;
+            if (r["exists"].boolean())
+                hint = std::string("names, lengths and fingerprints only (the same fingerprint means the same value); a value is returned only when its "
+                                   "name is in reveal, and only when the user asked to see it. site_env_set changes them; ") +
+                       (rails || django ? "the tasks read the file on their next run, the application when its service restarts"
+                                        : "the application reads them when its service restarts, from a unit that loads this file with EnvironmentFile=");
+            else if (django)
+                hint = "no environment file yet: site_env_set creates it (generate: [\"DJANGO_SECRET_KEY\"] for the project's secret key, which "
+                       "django_settings needs; generate: [\"DJANGO_SUPERUSER_PASSWORD\"] before createsuperuser; set: {\"DATABASE_URL\": ...} for "
+                       "a database other than the project's SQLite)";
+            else if (rails)
+                hint = "no environment file yet: site_env_set creates it (generate: [\"SECRET_KEY_BASE\"] for a Rails application without credentials, "
+                       "set: {\"DATABASE_URL\": ...} for its database)";
+            else
+                hint = "no environment file yet: site_env_set creates it with what the application reads from its environment: set: {NAME: value} for a "
+                       "setting or an API key, generate: [NAME] for a random secret (a Django SECRET_KEY, a session secret). The unit that runs the "
+                       "application loads the file with EnvironmentFile=" + std::string(r.get("file"));
             r.set("hint", hint);
             reply(s, 200, r);
         }
@@ -1530,7 +1619,7 @@ void ControlHandler::site_env_set(Stream& s, std::string_view name, const json::
     // The service's restart line (P4 b of the alpha.33 report: it named the example file):
     // a Rails site with its own account has the unit site_service_unit renders; any other
     // proxy site's application is started by whatever root set up for it.
-    const std::string restart = rails_app(site->app) && !site->user.empty()
+    const std::string restart = service_app(site->app) && !site->user.empty()
         ? "the application reads it when its service restarts: the unit site_service_unit renders loads the file (EnvironmentFile=); as root, systemctl restart agensio-app-" + site->user + ".service"
         : std::string("the application reads it when its service restarts: the unit that runs it must load the file (EnvironmentFile=, the file named above); root restarts that unit");
     backend_->env_async(req, [this, &s, what = std::string(what), restart, done](json::Value r) {

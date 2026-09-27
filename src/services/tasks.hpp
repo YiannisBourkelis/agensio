@@ -32,12 +32,13 @@ struct Param {
 };
 
 // One argument of a row's command: literal text, or text holding {placeholders} ({home},
-// {gem_home}, or a parameter's name). `only_if` drops the argument when that parameter was
+// {gem_home}, {venv}, {root}, {project}, or a parameter's name). `only_if` drops the argument when that parameter was
 // not given; `unless` drops it when it was (a default spelled for a caller who gave none).
 struct Arg {
     const char* text;
     const char* only_if = nullptr;
     const char* unless = nullptr;
+    bool split = false;  // the expanded text is several arguments, one per space (pip_install's packages)
 };
 
 // A file a task needs before it runs, or must leave behind when it exits 0: a path relative
@@ -77,7 +78,26 @@ struct Row {
     // Only for making a new application (gem_install_rails, rails_new): not offered to a
     // preset built on this row's app for an application installed from an archive (redmine).
     bool new_app_only = false;
+    // The name the interpreter runs under (argv[0]), when not its own path: "{venv}/bin/python"
+    // makes root's python3 the site's virtualenv (Python finds pyvenv.cfg from argv[0]), so
+    // the program executed stays root's file while the packages are the site's
+    // (2026-09-28, the Wagtail report).
+    const char* argv0 = nullptr;
+    // The interpreter must be able to make a virtualenv (Debian ships ensurepip apart, in
+    // python3-venv): checked before the run and in the listing, with the package command.
+    bool needs_venv_support = false;
+    // The caller names what gets installed (pip_install, 2026-09-28, the owner's decision): any
+    // package the site's account may install, so the user confirms every run themselves, in
+    // the MCP client's own dialog or in a terminal; the agent's confirm is not enough.
+    bool user_confirm = false;
 };
+
+// Whether a task of this name needs the user's own confirmation (the MCP bridge and
+// `agensio ctl` ask before they send it; the control API refuses it without one).
+bool needs_user_confirmation(std::string_view task) noexcept;
+// The warning the user reads before confirming: what is installed, where, as whom, and why a
+// name must be checked first. `account` and `venv` may be empty when not known.
+std::string confirmation_warning(std::string_view site, std::string_view packages, std::string_view account, std::string_view venv);
 
 // What every row of a preset shares: its environment (values may hold {home} and
 // {gem_home}) and the files the sweep makes private after each run on top of the hosting
@@ -123,6 +143,10 @@ struct Context {
     std::string runtime_dir;  // [control] runtimes.<row.runtime>
     std::string root;         // the site's directory: the working directory
     std::string home;         // the account's home (<state_dir>/<account>); TMPDIR is its tmp/
+    std::string app;          // the site's preset: its family's environment and credential patterns
+    std::string site;         // the site's first host name: {venv} is <home>/venvs/<site>
+    std::string project;      // app = django | wagtail: the project's package ({project})
+    std::string hosts, origins, base_url;  // what a Django site's settings are told (config app_context)
     unsigned timeout = 1200;  // effective seconds
     unsigned processes = 512;
     // The site's application environment (services/appenv.*: SECRET_KEY_BASE and the like),
@@ -132,7 +156,8 @@ struct Context {
 };
 
 struct Plan {
-    std::vector<std::string> argv;  // argv[0]: the program exactly as it is executed
+    std::string exec;               // the file executed (root's interpreter, as trusted_program resolved it)
+    std::vector<std::string> argv;  // argv[0]: the program's path, or the name the row runs it under (argv0)
     std::vector<std::string> env;   // NAME=value, the whole environment
     std::string cwd;
     unsigned timeout = 1200;
@@ -174,6 +199,12 @@ std::string trusted_program(const std::string& path, const std::string& sites_ro
 // The command root runs to install a runtime ("apt-get install -y ruby ..."), "" when there
 // is no known one for this system.
 std::string install_hint(std::string_view runtime);
+// Whether the Python at `canonical` (/usr/bin/python3.13) can make a virtualenv: its
+// ensurepip (<prefix>/lib/python3.13/ensurepip) is there. "" when it can or when the path
+// says nothing about a layout; else why, with `run_as_root` the package command.
+std::string venv_support(const std::string& canonical, std::string& run_as_root);
+// The virtualenv of a site: <home>/venvs/<site>.
+std::string venv_path(const Context& ctx);
 
 // The head and the tail of a program's output, bounded: the first `head` bytes and the
 // last `tail`, the total counted, a marker naming what was cut.

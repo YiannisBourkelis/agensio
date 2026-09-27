@@ -95,6 +95,35 @@ On the server itself (an agent running inside an SSH session, or a local machine
 `agensio mcp` finds the socket from the configuration file (the usual search path) or
 takes `--socket PATH`.
 
+### Give the agent's key the bridge and nothing else
+
+What the bridge asks the user in person (the confirmation of `pip_install`, below) binds
+only when the bridge is the agent's one way in. A key that may run any command lets an
+agent that also has a shell on your laptop call `agensio ctl` on the server itself and
+answer for you. Give the agent its own key and limit it in the server account's
+`~/.ssh/authorized_keys`:
+
+```
+command="agensio mcp",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty ssh-ed25519 AAAA... agent@laptop
+```
+
+The MCP entry then needs no `agensio mcp` of its own (the server runs it for that key
+whatever is asked), and your own key, used in a terminal, keeps `agensio ctl`.
+
+### Confirmations the user gives in person
+
+`pip_install` (Django and Wagtail sites) installs any package the site's account may
+install, named by the agent, so the agent's `confirm` is not enough: before it sends the
+task the bridge asks you in the MCP client's own dialog (MCP elicitation), which the model
+neither sees nor answers. The dialog names the packages, the site, the account and the
+virtualenv, links each name on pypi.org and warns that a look-alike name is a common way to
+get malicious code; you tick "Install these packages" to go ahead. A client that cannot show
+the dialog (no elicitation; at the time of writing Claude Code's CLI shows it, its VS Code
+extension declines every question without showing it and its desktop app does not offer it)
+or a decline gets a refusal carrying the `agensio ctl` command for you to run in a terminal
+on the server, where the same warning is printed and `--yes` is your confirmation. The audit
+log records which of the two it was.
+
 ## Tools
 
 | tool | role | what it does |
@@ -113,13 +142,13 @@ takes `--socket PATH`.
 | `site_disable`, `site_enable`, `site_delete` | admin | rename the file away and back; delete it (a `.bak` stays) |
 | `site_install` | admin | put an application's files into a site's empty directory as the site's account: the preset's official archive (`version` optional), any https `url`, or a stored upload (`file`); a plugin or theme goes into `path` with `create_path: true`; `sha256`, `strip`, `dry_run`; the server enforces the fences and reports the source, digest and what it created. For a Rails site the next steps are the bundle tasks, with the Ruby the application pins; a Rails archive without credentials gets its `SECRET_KEY_BASE` generated into the site's environment; every site but a static one is told its request-body limit |
 | `site_copy` | admin | copy one regular file of a site to another path of the same site, as the site's account: the drop-ins applications ship as templates (WordPress's `wp-content/db.php` from the SQLite plugin, Drupal's `settings.php`); `overwrite`, `dry_run`; never across sites, never caller content, never a directory. Like `site_install`, credential files come out `0600` and the configuration is validated before the answer |
-| `site_tasks_list` | viewer | the named tasks of the site's preset (`app = "rails"`: `gem_install_rails`, `rails_new`, `bundle_install`, `db_prepare`, `db_migrate`, `assets_precompile`) with their parameters, whether each downloads, its effective time limit, whether its interpreter is in place (`run_as_root` lists every missing package once, before the first task), the account that runs them and the directory; other presets have none |
+| `site_tasks_list` | viewer | the named tasks of the site's preset (`app = "rails"`: `gem_install_rails`, `rails_new`, `bundle_install`, `db_prepare`, `db_migrate`, `assets_precompile`; `"django"` and `"wagtail"`: `venv_create`, `pip_install` (any packages, confirmed by the user in person), `startproject`, `pip_install_requirements`, `django_settings`, `migrate`, `collectstatic`, `createsuperuser`, `check_deploy`) with their parameters, whether each downloads, its effective time limit, whether its interpreter is in place (`run_as_root` lists every missing package once, before the first task), the account that runs them and the directory; other presets have none |
 | `site_task` | admin | runs one of them as the site's account in the site's directory: a fixed command from the table, typed parameters, never a command line; the answer carries the exact argv, the exit status, a summary (migrations applied, `Bundle complete!`, the files in `public/assets`) and a part of the output (its last 4 KB on success, its first 4 KB and last 12 KB on a failure), and after a task that changes a running application the root line that restarts its service; the credential files are made the site's alone and the configuration is validated; `dry_run` shows the command without running it and meets the same refusals (a missing interpreter as `run_as_root`, a missing result of an earlier task naming the task to run); a task that exits 0 without what the next one needs is a 409; a failure with a known cause carries `hint` (Rails' missing `secret_key_base`, a Gemfile pinning another Ruby); the site's environment reaches the task and shows as `NAME=<site environment>`. Marked destructive, so the host asks |
-| `site_service_unit` | viewer | the systemd unit that runs a Rails or Redmine site's Puma, rendered from the site (account, directory, loopback port) and `[control] runtimes`, with the root commands that install it; the agent shows them, root runs them |
+| `site_service_unit` | viewer | the systemd unit that runs a Rails or Redmine site's Puma, or a Django or Wagtail site's Gunicorn, rendered from the site (account, directory, loopback port, a Django site's project and names) and `[control] runtimes`, with the root commands that install it; the agent shows them, root runs them |
 | `site_service_status` | viewer | whether that unit runs, from `systemctl show` through the root helper: loaded, active, failed, since when, pid, exit status, restarts, enabled at boot, with a summary and the next step (`site_service_unit` when it is missing, `site_service_logs` and root's restart line when it failed) |
 | `site_service_logs` | admin | the unit's journal (`journalctl -u` with fixed options through the helper, `lines` 1 to 1000, `since` like `3h`); audited, since an application may print what it should not |
 | `site_task_output` | admin | the whole output of the site's last task in 64 KB slices (`offset`, `next_offset`), kept until the next task or a restart |
-| `site_env` | admin | a Rails or proxy site's environment: the variables its tasks and its application service get (`SECRET_KEY_BASE`, `DATABASE_URL`) from a root-owned `0600` file, as names, lengths and fingerprints (the same fingerprint means the same value); a value only for the names in `reveal`, which the agent uses only when you ask to see that value, audited as REVEALED; `exists` false when there is no file yet |
+| `site_env` | admin | a Rails, Django or proxy site's environment: the variables its tasks and its application service get (`SECRET_KEY_BASE`, `DJANGO_SECRET_KEY`, `DATABASE_URL`) from a root-owned `0600` file, as names, lengths and fingerprints (the same fingerprint means the same value); a value only for the names in `reveal`, which the agent uses only when you ask to see that value, audited as REVEALED; `exists` false when there is no file yet |
 | `site_env_set` | admin | `set`, `unset`, `generate` (a random secret for a missing name; a name in `unset` and `generate` is rotated) on that file, through the root helper; names that choose a program (`PATH`, `LD_*`, `GEM_*`, `RUBYOPT`, ...) are refused; the answer and the audit log carry names only, and the next step is the application service's restart |
 | `uploads_list` | viewer | archives stored with `agensio ctl upload`, for `site_install` |
 | `upload_delete` | operator | remove a stored upload |
@@ -181,6 +210,17 @@ and redmine.org's sha256, `site_env_set` with `DATABASE_URL`, then `site_task`
 `database_config` (a fixed `config/database.yml` reading that variable), `gemfile_local`
 (Puma, which Redmine keeps in its test group), `bundle_install`, `db_migrate`,
 `load_default_data` with `lang`, `assets_precompile`, and the unit.
+
+A Wagtail site is created with `app: "wagtail"` and `project: "mysite"`, the project's
+Python package, which `site_create` asks for. Every task runs in a virtualenv of the site's
+own, outside the served tree: `venv_create`, `pip_install` with `wagtail gunicorn`,
+`startproject`, `pip_install_requirements`. Then `site_env_set` generates
+`DJANGO_SECRET_KEY`, and `django_settings` writes the settings agensio runs the project
+with. `migrate`, `collectstatic`, then `site_env_set` generates `DJANGO_SUPERUSER_PASSWORD`
+and `createsuperuser` makes the first admin; the password never passes through the
+conversation, and the agent reveals it only when you ask. agensio serves `/static/` and
+`/media/` itself and sends the rest to Gunicorn, whose unit `site_service_unit` renders.
+On Debian the first answer names `apt-get install -y python3-venv` for you to run as root.
 
 An existing application comes as an archive. For Writebook the agent calls
 `site_install` with the GitHub release URL; the answer says the application pins Ruby

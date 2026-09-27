@@ -16,6 +16,7 @@
 #include "control/mcp.hpp"
 #include "control/reference.hpp"
 #include "services/json.hpp"
+#include "services/tasks.hpp"
 #include "server.hpp"
 #include "services/pools.hpp"
 #include "upstream/fcgi_client.hpp"
@@ -45,8 +46,8 @@ void usage() {
                  "                           [--status 5xx|4xx|all] [--limit N]\n"
                  "                      Change (need --yes, take --reason TEXT): reload | logs-reopen |\n"
                  "                      site-create --domain D [--alias A]... [--https auto|none] [--cert F --key F]\n"
-                 "                           [--user U|--no-user] [--group G] [--app static|php|laravel|drupal|wordpress|grav|proxy|rails|redmine]\n"
-                 "                           [--root DIR] [--upstream URL] [--php-socket S] [--php-children N]\n"
+                 "                           [--user U|--no-user] [--group G] [--app static|php|laravel|drupal|wordpress|grav|proxy|rails|redmine|django|wagtail]\n"
+                 "                           [--root DIR] [--upstream URL] [--project NAME] [--php-socket S] [--php-children N]\n"
                  "                           [--no-redirect] [--hsts] [--listen-plain A] [--listen-tls A]\n"
                  "                      site-update NAME (same flags) | site-disable NAME | site-enable NAME |\n"
                  "                      site-delete NAME | cert-renew NAME |\n"
@@ -136,7 +137,7 @@ int main(int argc, char** argv) {
                              "change (each needs --yes, takes --reason TEXT):\n"
                              "        reload | logs-reopen | site-disable NAME | site-enable NAME | site-delete NAME | cert-renew NAME\n"
                              "        site-create --domain D [--alias A]... [--https auto|none] [--cert F --key F] [--user U|--no-user]\n"
-                             "                    [--group G] [--app NAME] [--root DIR] [--upstream URL] [--php-socket S]\n"
+                             "                    [--group G] [--app NAME] [--root DIR] [--upstream URL] [--project NAME] [--php-socket S]\n"
                              "                    [--php-children N] [--php-version V] [--no-redirect] [--hsts] [--listen-plain A] [--listen-tls A]\n"
                              "        site-update NAME (same options as site-create); --dry-run on either checks and shows the\n"
                              "                    file without writing, listing every problem at once\n"
@@ -153,7 +154,11 @@ int main(int argc, char** argv) {
                              "                    wp-content/db.php from a plugin's db.copy); the destination's directory must exist\n"
                              "        site-task NAME TASK [--param KEY=VALUE]... [--dry-run]: runs one named task of the site's\n"
                              "                    preset as the site's account in its directory (app = rails: gem_install_rails,\n"
-                             "                    rails_new --param name=NAME, bundle_install, db_prepare, db_migrate, assets_precompile);\n"
+                             "                    rails_new --param name=NAME, bundle_install, db_prepare, db_migrate, assets_precompile;\n"
+                             "                    app = django | wagtail: venv_create, pip_install --param \"packages=wagtail gunicorn\"\n"
+                             "                    (any packages; it prints a warning, and your --yes is the confirmation), startproject,\n"
+                             "                    pip_install_requirements, django_settings, migrate, collectstatic,\n"
+                             "                    createsuperuser --param username=U --param email=E, check_deploy);\n"
                              "                    `site-tasks NAME` lists them with their parameters. Never a command line.\n"
                              "        site-env-set NAME [--set KEY=VALUE]... [--unset KEY]... [--generate KEY]...: the variables the\n"
                              "                    site's tasks and its application service get (app = rails or proxy), in a file\n"
@@ -206,6 +211,7 @@ int main(int argc, char** argv) {
                 else if (b == "--app") field("app");
                 else if (b == "--root") field("root");
                 else if (b == "--upstream") field("upstream");
+                else if (b == "--project") field("project");
                 else if (b == "--php-socket") field("php_socket");
                 else if (b == "--php-children") { std::string v; value(v); body.set("php_children", std::atoi(v.c_str())); }
                 else if (b == "--php-version") field("php_version");
@@ -301,6 +307,12 @@ int main(int argc, char** argv) {
             if (mutation) {
                 method = "POST";
                 if (yes) body.set("confirm", true);
+            }
+            // pip_install names what gets installed: the user reads the warning here, and the --yes
+            // they typed is their confirmation (the control API refuses the task without one).
+            if (command == "site-task" && agensio::tasks::needs_user_confirmation(body.get("task")) && !body["dry_run"].boolean()) {
+                std::cerr << "WARNING: " << agensio::tasks::confirmation_warning(site_name, body["params"].get("packages"), "", "") << "\n";
+                if (yes) body.set("user_confirmed", "terminal");
             }
             std::string upload_bytes;
             if (upload) {

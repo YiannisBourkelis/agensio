@@ -64,10 +64,14 @@ bool reserved(std::string_view n) noexcept {
         "PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LANGUAGE", "SHELL", "USER", "LOGNAME", "IFS", "ENV", "BASH_ENV", "CDPATH",
         "RAILS_ENV", "SECRET_KEY_BASE_DUMMY", "RUBYOPT", "RUBYLIB", "RUBYSHELL", "NODE_OPTIONS", "NODE_PATH", "PERL5LIB", "PERL5OPT",
         "PERLLIB", "GCONV_PATH", "LOCPATH", "HOSTALIASES", "GLIBC_TUNABLES", "EDITOR", "VISUAL", "PAGER", "SSH_ASKPASS", "SUDO_ASKPASS",
-        "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "NOTIFY_SOCKET", "LISTEN_FDS", "LISTEN_PID", "LISTEN_FDNAMES"};
+        "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "NOTIFY_SOCKET", "LISTEN_FDS", "LISTEN_PID", "LISTEN_FDNAMES",
+        // Django (2026-09-28): the virtualenv and the settings module are agensio's to set.
+        "VIRTUAL_ENV", "DJANGO_SETTINGS_MODULE"};
     for (std::string_view e : exact)
         if (n == e) return true;
-    static constexpr std::string_view prefixes[] = {"LD_", "DYLD_", "GEM_", "PYTHON", "MALLOC_", "GIT_"};
+    // PIP_ chooses where packages come from (PIP_INDEX_URL), as BUNDLE_ and GEM_ do for gems;
+    // AGENSIO_ is what agensio tells an application about its site (AGENSIO_HOSTS).
+    static constexpr std::string_view prefixes[] = {"LD_", "DYLD_", "GEM_", "PYTHON", "MALLOC_", "GIT_", "PIP_", "AGENSIO_"};
     for (std::string_view p : prefixes)
         if (n.starts_with(p)) return true;
     // Bundler's settings choose what is loaded (BUNDLE_PATH, BUNDLE_GEMFILE, BUNDLE_BUILD__*);
@@ -87,7 +91,8 @@ std::string check_name(std::string_view n) {
             return "'" + std::string(n) + "' is not a variable name: upper-case letters, digits and '_', not starting with a digit";
     if (reserved(n))
         return std::string(n) + " is agensio's own or changes which program runs (PATH, HOME, RAILS_ENV, GEM_*, BUNDLE_* other than a gem "
-                                "source's credentials, LD_*, RUBYOPT, NODE_OPTIONS, GIT_*, ...); the site's environment cannot set it";
+                                "source's credentials, LD_*, RUBYOPT, NODE_OPTIONS, GIT_*, PYTHON*, PIP_*, VIRTUAL_ENV, DJANGO_SETTINGS_MODULE, AGENSIO_*, "
+                                "...); the site's environment cannot set it";
     return "";
 }
 
