@@ -1,9 +1,9 @@
 # Fedora / EPEL spec for COPR (builds from the release tarball of the tag).
-%global upstream_version 0.1.0-alpha.32
+%global upstream_version 0.1.0-alpha.33
 
 Name:           agensio
 Version:        0.1.0
-Release:        0.1.alpha.32%{?dist}
+Release:        0.1.alpha.33%{?dist}
 Summary:        Fast web server with PHP, reverse proxy, automatic TLS and an MCP control plane
 License:        MIT
 URL:            https://github.com/YiannisBourkelis/agensio
@@ -61,6 +61,9 @@ exit 0
 %dir /var/www/html
 
 %changelog
+* Sun Sep 27 2026 Yiannis Bourkelis - 0.1.0-0.1.alpha.33
+- Release 0.1.0-alpha.33, see CHANGELOG.md.
+
 * Sun Sep 27 2026 Yiannis Bourkelis - 0.1.0-0.1.alpha.32
 - Release 0.1.0-alpha.32, see CHANGELOG.md.
 

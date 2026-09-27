@@ -1,5 +1,5 @@
 # Changelog
-## 0.1.0-alpha.33 (unreleased)
+## 0.1.0-alpha.33 (2026-09-27)
 
 From "wall 1", Redmine 7.0.1 through MCP alone (its archive ships only
 `config/database.yml.example`, keeps Puma in its test group, and its Gemfile picks the
