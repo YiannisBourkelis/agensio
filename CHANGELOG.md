@@ -1,5 +1,5 @@
 # Changelog
-## 0.1.0-alpha.34 (unreleased)
+## 0.1.0-alpha.34 (2026-09-27)
 
 From the alpha.33 report (Redmine 7.0.1 installed and serving through MCP; the service
 behind it was the blind spot, and task answers were too large for the MCP host):
