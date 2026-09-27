@@ -1,5 +1,5 @@
 # Changelog
-## 0.1.0-alpha.28 (unreleased)
+## 0.1.0-alpha.28 (2026-09-27)
 
 From the alpha.27 report (a second Writebook install on the live host) and what fixing it
 turned up:
