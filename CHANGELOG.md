@@ -1,4 +1,21 @@
 # Changelog
+## 0.1.0-alpha.31 (unreleased)
+
+From the alpha.30 report (both alpha.30 changes confirmed on the live host):
+
+- **The warning to rotate a leaked secret no longer vanishes when the directory is
+  closed.** With the environment directory open to others and a site's file readable,
+  any task or `site_env` call on any other site closed the directory, health then rated
+  the still-readable file as info ("nobody else could reach it") and the next call told the
+  site "nothing to rotate". Now, in the same pass that closes the directory, every file in
+  it that others could read is made 0600, named with "rotate what it holds" under
+  `tightened` and in the error log, and recorded in a ledger beside the fingerprint key
+  (`env/.exposed`: site, variable, the value's fingerprint, when; never a value). Health
+  also records what it sees readable under an open directory, so closing it by hand keeps
+  the fact. `site_env_unsafe` warns "X, Y were readable by others (seen ...) and have not
+  changed since: rotate them" until every such value has changed or gone; a
+  `site_env_set` that changes one drops its entry.
+
 ## 0.1.0-alpha.30 (2026-09-27)
 
 From the alpha.29 report (all three alpha.29 changes confirmed on the live host):

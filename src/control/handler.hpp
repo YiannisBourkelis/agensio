@@ -102,6 +102,9 @@ private:
     void finish_pool(Stream& s, const control::SiteSpec& spec, const Config& cfg, std::string_view what, json::Value& done, std::vector<std::string>& steps);
     void upload_delete(Stream& s, std::string_view name, std::string_view reason);
     void audit_peer(const Stream& s, std::string_view what, std::string_view result);
+    // A site environment's value others could read, reported by the helper under tightened:
+    // a warning in the error log too, so it outlives the answer it came in.
+    void log_exposures(const json::Value& r);
 
     ErrorLog& log_;
     ControlBackend* backend_ = nullptr;

@@ -1173,6 +1173,7 @@ void ControlHandler::site_task(Stream& s, std::string_view name, const json::Val
     const std::vector<std::string> before = dry_run ? std::vector<std::string>{} : validation_errors(*backend_);
     backend_->task_async(req, [this, &s, what = std::string(what), key, dry_run, before, done](json::Value r) {
         if (!dry_run) running_tasks_.erase(key);
+        log_exposures(r);
         const bool ok = r["ok"].boolean();
         if (dry_run) {
             if (ok) reply(s, 200, r.set("hint", "nothing ran; the same call without dry_run runs exactly this"));
@@ -1244,6 +1245,11 @@ std::string joined(const json::Value& names) {
 
 }  // namespace
 
+void ControlHandler::log_exposures(const json::Value& r) {
+    for (const auto& n : r["tightened"].items())
+        if (n.is_string() && n.str().find("rotate what it holds") != std::string_view::npos) log_.warn("site environment: " + std::string(n.str()));
+}
+
 void ControlHandler::site_env_show(Stream& s, std::string_view name, std::function<void()> done) {
     int status = 0;
     json::Value refusal;
@@ -1284,6 +1290,7 @@ void ControlHandler::site_env_show(Stream& s, std::string_view name, std::functi
             if (!r["revealed"].items().empty()) line += "; REVEALED the value of " + joined(r["revealed"]);
             if (!r["tightened"].items().empty()) line += "; tightened: " + joined(r["tightened"]);
             audit_peer(s, what, line);
+            log_exposures(r);
             std::string hint = r["exists"].boolean()
                 ? "names, lengths and fingerprints only (the same fingerprint means the same value); a value is returned only when its name is in reveal, "
                   "and only when the user asked to see it. site_env_set changes them; the tasks read the file on their next run, the application when its "
@@ -1342,6 +1349,7 @@ void ControlHandler::site_env_set(Stream& s, std::string_view name, const json::
             if (!r[k].items().empty()) result += (result.empty() ? "" : "; ") + std::string(k) + " " + joined(r[k]);
         audit_peer(s, what, "environment " + std::string(r.get("file")) + ": " + (result.empty() ? std::string("unchanged") : result) +
                                 (r.get("removed").empty() ? "" : "; removed the file, no variable left"));
+        log_exposures(r);
         if (!r.get("removed").empty())
             r.set("done", json::Value::array().push("removed " + std::string(r.get("removed")) + ": no variables left (site_env_set creates it again)"));
         json::Value steps = json::Value::array();

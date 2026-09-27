@@ -2139,6 +2139,50 @@ static void test_appenv() {
     in = inspect(envdir, me, {"read.test"});
     CHECK(in["sites"].items().size() == 1 && in["sites"].items()[0].get("severity") == "warn" &&
           std::string(in["sites"].items()[0].get("problem")).find("rotate what it holds") != std::string::npos);
+#ifdef AGENSIO_HAS_TLS
+    // The report's sequence (2026-09-27, against alpha.30): the directory open, a file others
+    // could read, then a call on ANOTHER site closes the directory. The file is tightened in
+    // that same pass and recorded; health keeps warning until the values change.
+    {
+        const std::string xdir = (dir / "xenv").string();
+        fs::create_directories(xdir);
+        auto put_file = [&](const char* site, const char* text, fs::perms mode) {
+            std::ofstream(xdir + "/" + site + ".env") << text;
+            fs::permissions(xdir + "/" + site + ".env", mode);
+        };
+        put_file("wb7.test", "A=\"1\"\nB=\"2\"\n", rw | fs::perms::group_read | fs::perms::others_read);
+        put_file("ag6.test", "S=\"x\"\n", rw);
+        fs::permissions(xdir, fs::perms::owner_all | fs::perms::group_all | fs::perms::others_read | fs::perms::others_exec);
+        Status xs;
+        std::vector<Var> xv;
+        CHECK(read(xdir, "ag6.test", me, xv, xs));  // step 2: site_env or a task on another site
+        bool rotate_note = false;
+        for (const auto& n : xs.notes) rotate_note = rotate_note || (n.find("wb7.test.env") != std::string::npos && n.find("rotate what it holds") != std::string::npos);
+        CHECK(rotate_note && ::stat((xdir + "/wb7.test.env").c_str(), &sb) == 0 && (sb.st_mode & 0777) == 0600 && ::stat(xdir.c_str(), &sb) == 0 && (sb.st_mode & 0777) == 0700);
+        auto wb7 = [&] {
+            json::Value r = inspect(xdir, me, {"wb7.test", "ag6.test"});
+            std::string out;
+            for (const auto& f : r["sites"].items()) out += std::string(f.get("site")) + ":" + std::string(f.get("severity")) + ":" + std::string(f.get("problem")) + "|";
+            return out;
+        };
+        const std::string after = wb7();  // step 3: health, the directory now closed
+        CHECK(after.find("wb7.test:warn:") != std::string::npos && after.find("A, B were readable by others") != std::string::npos &&
+              after.find("rotate them") != std::string::npos && after.find("ag6.test") == std::string::npos && after.find("nothing to rotate") == std::string::npos);
+        Change rot;
+        rot.set = {{"A", "new"}};
+        CHECK(apply(xdir, "wb7.test", me, rot)["ok"].boolean() && wb7().find("B was readable by others") != std::string::npos && wb7().find("A, B") == std::string::npos);
+        rot = Change{};
+        rot.unset = {"B"};
+        CHECK(apply(xdir, "wb7.test", me, rot)["ok"].boolean() && wb7().empty());  // every exposed value changed or gone: no warning
+        // health itself records what it sees open, so closing the directory by hand keeps the warning too
+        put_file("wb8.test", "C=\"3\"\n", rw | fs::perms::others_read);
+        fs::permissions(xdir, fs::perms::owner_all | fs::perms::others_exec);
+        CHECK(inspect(xdir, me, {"wb8.test"})["sites"].items()[0].get("severity") == "warn");
+        fs::permissions(xdir, fs::perms::owner_all);
+        const std::string later = std::string(inspect(xdir, me, {"wb8.test"}).dump());
+        CHECK(later.find("C was readable by others") != std::string::npos && later.find("\"warn\"") != std::string::npos);
+    }
+#endif
     fs::remove_all(dir);
 }
 

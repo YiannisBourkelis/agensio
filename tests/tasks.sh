@@ -171,6 +171,17 @@ chown root $RT/bundle
 
 out=$(ctl site-create --domain r2.test --app rails --root $T/www/r2.test/app --user r2 --upstream http://127.0.0.1:18400 --https none --listen-plain 127.0.0.1:18399 --yes --reason tasks)
 check "db_prepare in a directory with no application: refused before anything runs, dry run or not" "1 1 yes" "$(ctl site-task r2.test db_prepare --dry-run --yes --reason noapp > /dev/null; echo -n "$? "; ctl site-task r2.test db_prepare --yes --reason noapp > $T/out; echo -n "$? "; grep -q "needs $T/www/r2.test/app/Gemfile, which does not exist; the site's directory holds no application yet" $T/out && echo yes)"
+# The alpha.30 report: the directory open to others and r1's file readable by them, then a
+# call on ANOTHER site closes the directory. In that same pass r1's file is made 0600 and
+# recorded, and health keeps warning for r1 until its values change.
+chmod 775 $T/env; chmod 644 $T/env/r1.test.env
+ctl site-task r2.test db_prepare --dry-run --yes --reason other-site > $T/out
+check "a call on another site closes the directory, and in the same pass r1's readable file is made 0600 and named for rotation" "700 600 yes" "$(stat -c %a $T/env) $(stat -c %a $T/env/r1.test.env) $(j '"yes" if any("r1.test.env" in n and "rotate what it holds" in n for n in d.get("tightened", [])) else d.get("tightened")')"
+sleep 1.2   # the error log's buffer
+check "health keeps warning for r1 after the directory closed, until the values change; the error log has it too" "yes yes" "$(ctl health > $T/out; j '"yes" if any(f.get("site") == "r1.test" and f["severity"] == "warn" and "readable by others" in f["message"] for f in d["findings"]) else [f for f in d["findings"] if f["code"].startswith("site_env")]') $(grep -q 'site environment: .*r1.test.env.*rotate what it holds' $T/logs/error.log && echo yes)"
+ctl site-env-set r1.test --unset SECRET_KEY_BASE --generate SECRET_KEY_BASE --set DATABASE_URL=sqlite3:storage/rotated.sqlite3 --yes --reason rotate > /dev/null
+check "rotating every value ends the warning" "no" "$(ctl health > $T/out; j '"yes" if any(f.get("site") == "r1.test" and "readable by others" in f["message"] for f in d["findings"]) else "no"')"
+
 # An application from an archive that came without Rails credentials (Writebook): the
 # install generates its SECRET_KEY_BASE and names the steps that fit it.
 mkdir -p $T/wb/writebook-1.2.2/config && echo "source 'https://rubygems.org'" > $T/wb/writebook-1.2.2/Gemfile && echo 3.4.7 > $T/wb/writebook-1.2.2/.ruby-version && echo x > $T/wb/writebook-1.2.2/config/application.rb

@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <mutex>
 
 #ifdef AGENSIO_HAS_TLS
@@ -306,6 +308,153 @@ std::string own_command(const std::string& path, unsigned owner, const char* mod
     return (owner == 0 ? "chown root:root " + path + " && " : std::string()) + "chmod " + mode + " " + path;
 }
 
+bool fingerprint_key(int dfd, unsigned owner, std::string& key, bool create = true);
+
+// ---- the exposure ledger ----
+// `.exposed` beside the key: one line per variable whose value others could read (its
+// site, its name, the value's fingerprint, when), so a warning to rotate outlives the
+// moment the directory was closed (2026-09-27 report: a routine task on another site
+// closed it, and health went from "rotate what it holds" to "nothing to rotate"). An entry
+// stays until that variable's value changes or goes; no value is ever written here.
+struct Exposure {
+    std::string site, name, fp;
+    long long at = 0;
+};
+constexpr const char* kLedger = ".exposed";
+
+std::vector<Exposure> ledger_read(int dfd, unsigned owner) {
+    std::vector<Exposure> out;
+    const int fd = ::openat(dfd, kLedger, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) return out;
+    struct stat sb {};
+    if (::fstat(fd, &sb) != 0 || !S_ISREG(sb.st_mode) || sb.st_uid != owner || sb.st_nlink != 1 || (sb.st_mode & 077) != 0 || sb.st_size > 256 * 1024) {
+        ::close(fd);
+        return out;
+    }
+    std::string text(static_cast<std::size_t>(sb.st_size), '\0');
+    const ssize_t n = ::read(fd, text.data(), text.size());
+    ::close(fd);
+    text.resize(n > 0 ? static_cast<std::size_t>(n) : 0);
+    std::size_t pos = 0;
+    while (pos < text.size()) {
+        std::size_t nl = text.find('\n', pos);
+        if (nl == std::string::npos) nl = text.size();
+        const std::string line = text.substr(pos, nl - pos);
+        pos = nl + 1;
+        if (line.empty() || line[0] == '#') continue;
+        Exposure e;
+        std::size_t a = line.find(' '), b = a == std::string::npos ? a : line.find(' ', a + 1), c = b == std::string::npos ? b : line.find(' ', b + 1);
+        if (c == std::string::npos) continue;
+        e.site = line.substr(0, a);
+        e.name = line.substr(a + 1, b - a - 1);
+        e.fp = line.substr(b + 1, c - b - 1);
+        e.at = std::atoll(line.c_str() + c + 1);
+        if (valid_site(e.site) && env_name(e.name) && e.fp.size() == 16) out.push_back(std::move(e));
+    }
+    return out;
+}
+
+void ledger_write(int dfd, unsigned owner, const std::vector<Exposure>& entries) {
+    if (::geteuid() != owner) return;
+    if (entries.empty()) {
+        ::unlinkat(dfd, kLedger, 0);
+        return;
+    }
+    std::string text = "# values of the sites' environments others could read: site NAME fingerprint unix-time (agensio; no value is kept here)\n";
+    for (const auto& e : entries) text += e.site + " " + e.name + " " + e.fp + " " + std::to_string(e.at) + "\n";
+    const char* tmp = ".exposed.tmp";
+    ::unlinkat(dfd, tmp, 0);
+    const int f = ::openat(dfd, tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (f < 0) return;
+    const bool ok = ::fchmod(f, 0600) == 0 && ::write(f, text.data(), text.size()) == static_cast<ssize_t>(text.size()) && ::fsync(f) == 0;
+    ::close(f);
+    if (!ok || ::renameat(dfd, tmp, dfd, kLedger) != 0) ::unlinkat(dfd, tmp, 0);
+}
+
+// Records every variable of `site` as readable by others, once per value.
+void ledger_record(int dfd, unsigned owner, std::string_view site, const std::vector<Var>& vars) {
+    std::string key;
+    if (vars.empty() || ::geteuid() != owner || !fingerprint_key(dfd, owner, key, true)) return;
+    std::vector<Exposure> led = ledger_read(dfd, owner);
+    bool changed = false;
+    for (const auto& v : vars) {
+        const std::string fp = fingerprint(key, v.value);
+        if (fp.empty()) continue;
+        if (std::none_of(led.begin(), led.end(), [&](const Exposure& e) { return e.site == site && e.name == v.name && e.fp == fp; })) {
+            led.push_back({std::string(site), v.name, fp, static_cast<long long>(std::time(nullptr))});
+            changed = true;
+        }
+    }
+    if (changed) ledger_write(dfd, owner, led);
+}
+
+// The recorded entries of `site` whose value is still the one others could read; with
+// `prune`, the entries of values that changed or went are dropped from the ledger.
+std::vector<Exposure> ledger_current(int dfd, unsigned owner, std::string_view site, const std::vector<Var>& vars, bool prune) {
+    std::vector<Exposure> led = ledger_read(dfd, owner), still, keep;
+    std::string key;
+    if (led.empty() || !fingerprint_key(dfd, owner, key, false)) return still;
+    for (auto& e : led) {
+        if (e.site != site) {
+            keep.push_back(std::move(e));
+            continue;
+        }
+        const auto it = std::find_if(vars.begin(), vars.end(), [&](const Var& v) { return v.name == e.name; });
+        if (it == vars.end() || fingerprint(key, it->value) != e.fp) continue;  // rotated or removed: nothing left to warn about
+        still.push_back(e);
+        keep.push_back(std::move(e));
+    }
+    if (prune && keep.size() != led.size()) ledger_write(dfd, owner, keep);
+    return still;
+}
+
+std::string when_text(long long at) {
+    const std::time_t t = static_cast<std::time_t>(at);
+    std::tm tm {};
+    ::gmtime_r(&t, &tm);
+    char buf[32];
+    std::strftime(buf, sizeof buf, "%Y-%m-%d %H:%M UTC", &tm);
+    return buf;
+}
+
+// The directory was open to others until this pass closed it: every file in it that others
+// could read may have leaked. Each is recorded in the ledger and, unless others could also
+// write it (then refused until replaced), made 0600 now, in the same pass.
+void expose_scan(int dfd, const std::string& dir, unsigned owner, Status& st) {
+    std::vector<std::string> leaves;
+    if (DIR* d = ::fdopendir(::dup(dfd))) {
+        while (const struct dirent* e = ::readdir(d)) {
+            const std::string_view name = e->d_name;
+            if (name.size() > 4 && name.ends_with(".env") && name.front() != '.') leaves.emplace_back(name);
+        }
+        ::closedir(d);
+    }
+    for (const auto& leaf : leaves) {
+        const int fd = ::openat(dfd, leaf.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+        if (fd < 0) continue;
+        struct stat sb {};
+        if (::fstat(fd, &sb) != 0 || !S_ISREG(sb.st_mode) || sb.st_uid != owner || sb.st_nlink != 1 || (sb.st_mode & 044) == 0 ||
+            static_cast<std::size_t>(sb.st_size) > kMaxFile) {
+            ::close(fd);
+            continue;
+        }
+        std::string text(static_cast<std::size_t>(sb.st_size), '\0');
+        const ssize_t n = ::read(fd, text.data(), text.size());
+        text.resize(n > 0 ? static_cast<std::size_t>(n) : 0);
+        std::vector<Var> vars;
+        std::string why;
+        const std::string site = leaf.substr(0, leaf.size() - 4);
+        if (valid_site(site) && parse(text, vars, why)) ledger_record(dfd, owner, site, vars);
+        const std::string path = dir + "/" + leaf;
+        if ((sb.st_mode & 022) == 0 && ::fchmod(fd, 0600) == 0)
+            st.notes.push_back(path + " was mode " + mode_text(sb.st_mode) + " while its directory was open to others, so others could read it; made 0600: "
+                               "rotate what it holds (health warns for " + site + " until the values change)");
+        else
+            st.notes.push_back(path + " was readable and writable by others while its directory was open: replace it and rotate what it held (it is refused until then)");
+        ::close(fd);
+    }
+}
+
 // The open directory, checked: -1 with `st.error` (and `st.fix`), or -2 when it does not
 // exist. A directory that is the owner's but open to its group or others is tightened to
 // 0700 when this process is that owner (2026-09-27 report: a `mkdir -p` under a lax umask
@@ -335,6 +484,7 @@ int open_dir(const std::string& dir, unsigned owner, Status& st) {
         }
         st.notes.push_back(dir + " was mode " + mode_text(sb.st_mode) + ", open to its group or others; made 0700");
         st.dir_was_open = true;
+        expose_scan(fd, dir, owner, st);  // every file others could read, now, before this pass forgets the directory was open
     }
     return fd;
 }
@@ -420,10 +570,10 @@ json::Value failure(const Status& st) {
 // The key of the fingerprints: 32 random bytes in `<dir>/.fingerprint.key`, the owner's,
 // 0600, made on first use. Keyed so a fingerprint of a weak password cannot be looked up
 // in a dictionary; kept so a value keeps its fingerprint across restarts and hosts' eyes.
-bool fingerprint_key(int dfd, unsigned owner, std::string& key) {
+bool fingerprint_key(int dfd, unsigned owner, std::string& key, bool create) {
     const char* leaf = ".fingerprint.key";
     int fd = ::openat(dfd, leaf, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-    if (fd < 0 && errno == ENOENT && ::geteuid() == owner) {
+    if (fd < 0 && errno == ENOENT && create && ::geteuid() == owner) {
         unsigned char bytes[32];
         if (::getentropy(bytes, sizeof bytes) != 0) return false;
         const int w = ::openat(dfd, leaf, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
@@ -582,7 +732,12 @@ json::Value apply(const std::string& dir, std::string_view site, unsigned owner,
     json::Value out = json::Value::object().set("ok", true).set("file", path).set("set", names_of(set)).set("unset", names_of(unset)).set("absent", names_of(absent))
         .set("generated", names_of(generated)).set("kept", names_of(kept)).set("names", names_of(names));
     if (!st.notes.empty()) out.set("tightened", names_of(st.notes));
-    if (removed) out.set("removed", path);  // no variable left: no file (2026-09-27 report: the answer said only names: [])
+    if (removed) out.set("removed", path);
+    // A changed or removed value is no longer the one others could read: its ledger entry goes.
+    if (const int ld = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC); ld >= 0) {
+        ledger_current(ld, owner, site, vars, true);
+        ::close(ld);
+    }  // no variable left: no file (2026-09-27 report: the answer said only names: [])
     return out;
 }
 
@@ -608,6 +763,7 @@ json::Value inspect(const std::string& dir, unsigned owner, const std::vector<st
             if (!fix.empty()) v.set("fix", std::move(fix));
             found.push(std::move(v));
         };
+        const bool readable = (sb.st_mode & 044) != 0;
         if (S_ISLNK(sb.st_mode) || !S_ISREG(sb.st_mode)) {
             add("warn", path + " is a symlink or not a regular file: every task of " + site + " is refused", "rm " + path);
             continue;
@@ -615,16 +771,9 @@ json::Value inspect(const std::string& dir, unsigned owner, const std::vector<st
         if (sb.st_uid != owner || sb.st_nlink != 1 || (sb.st_mode & 022) != 0 || static_cast<std::size_t>(sb.st_size) > kMaxFile) {
             add("warn", path + " is uid " + std::to_string(sb.st_uid) + "'s, mode " + mode_text(sb.st_mode) + ", " + std::to_string(sb.st_nlink) +
                             " link(s): it must be " + whose(owner) + ", 0600, one link; every task of " + site + " is refused" +
-                            (dir_open && (sb.st_mode & 044) != 0 ? leaked : ""),
+                            (dir_open && readable ? leaked : ""),
                 sb.st_uid == owner && sb.st_nlink == 1 ? own_command(path, owner, "0600") + "   # after checking its content" : "rm " + path);
             continue;
-        }
-        if ((sb.st_mode & 077) != 0) {
-            if (dir_open && (sb.st_mode & 044) != 0)
-                add("warn", path + " is mode " + mode_text(sb.st_mode) + ", readable by others" + leaked, own_command(path, owner, "0600"));
-            else
-                add("info", path + " is mode " + mode_text(sb.st_mode) + ", but its directory is " + whose(owner) +
-                                " alone, so nobody else could reach it: the next task or site_env makes it 0600", own_command(path, owner, "0600"));
         }
         // What a task would meet inside it: a line systemd reads otherwise, a refused name.
         const int fd = ::openat(dfd, leaf.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
@@ -639,11 +788,37 @@ json::Value inspect(const std::string& dir, unsigned owner, const std::vector<st
             add("warn", path + ": " + why + "; every task of " + site + " is refused", "");
             continue;
         }
+        bool refused = false;
         for (const auto& v : vars)
             if (std::string bad = check_name(v.name).empty() ? check_value(v.value) : check_name(v.name); !bad.empty()) {
                 add("warn", path + ": " + bad + "; every task of " + site + " is refused", "site_env_set " + site + " with unset: [\"" + v.name + "\"]");
+                refused = true;
                 break;
             }
+        if (refused) continue;
+        if (dir_open && readable) {
+            // Readable by others right now: recorded, so the warning outlives the directory's
+            // closing (which the next task or site_env does, for any site).
+            ledger_record(dfd, owner, site, vars);
+            add("warn", path + " is mode " + mode_text(sb.st_mode) + ", readable by others" + leaked, own_command(path, owner, "0600"));
+            continue;
+        }
+        const std::vector<Exposure> exposed = ledger_current(dfd, owner, site, vars, false);
+        if (!exposed.empty()) {
+            std::string names;
+            long long first = exposed.front().at;
+            for (const auto& e : exposed) {
+                names += (names.empty() ? "" : ", ") + e.name;
+                first = std::min(first, e.at);
+            }
+            add("warn", path + ": " + names + (exposed.size() == 1 ? " was" : " were") + " readable by others (seen " + when_text(first) +
+                            ") and " + (exposed.size() == 1 ? "has" : "have") + " not changed since: rotate " + (exposed.size() == 1 ? "it" : "them"),
+                "site_env_set " + site + " with unset and generate for a generated secret (SECRET_KEY_BASE), set with new values for the others, "
+                "changed where they are used too (a database password in the database); the warning ends when every value has changed");
+        }
+        if ((sb.st_mode & 077) != 0)
+            add("info", path + " is mode " + mode_text(sb.st_mode) + ", but its directory is " + whose(owner) +
+                            " alone, so nobody else can reach it now: the next task or site_env makes it 0600", own_command(path, owner, "0600"));
     }
     // The files no configured site names: a deleted site's secrets, kept on purpose or forgotten.
     if (DIR* d = ::fdopendir(::dup(dfd))) {
