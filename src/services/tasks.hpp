@@ -63,6 +63,20 @@ struct Row {
     unsigned timeout;     // seconds; [control] task_limits.timeout caps it
     std::vector<Need> needs = {};     // checked before it runs, dry run included
     std::vector<Need> produces = {};  // checked after it exited 0
+    // A row that writes one file from a fixed template instead of running a program (no
+    // interpreter, no argv; 2026-09-27 Redmine report: an archive-installed application
+    // ships config/database.yml.example and nothing can make config/database.yml): the path
+    // below the site's directory, its whole content (never the caller's), its mode. Written
+    // as the site's account, never through a symlink, only when the file does not exist.
+    const char* writes = nullptr;
+    const char* content = nullptr;
+    unsigned mode = 0640;
+    // Variables the site's environment must hold first (database_config: DATABASE_URL),
+    // with what to do when one is missing.
+    std::vector<Need> needs_env = {};
+    // Only for making a new application (gem_install_rails, rails_new): not offered to a
+    // preset built on this row's app for an application installed from an archive (redmine).
+    bool new_app_only = false;
 };
 
 // What every row of a preset shares: its environment (values may hold {home} and
@@ -76,6 +90,9 @@ struct Family {
 };
 
 const std::vector<Row>& rows();
+// Whether `app` offers the row: its own rows, and for a preset built on another (redmine on
+// rails) that one's rows too, but not the ones that make a new application.
+bool offered(const Row& row, std::string_view app) noexcept;
 const Row* find(std::string_view app, std::string_view task) noexcept;
 const Family* family(std::string_view app) noexcept;
 bool has_tasks(std::string_view app) noexcept;
@@ -133,6 +150,10 @@ Plan build(const Row& row, const json::Value& params, const Context& ctx, const 
 // (Rails without SECRET_KEY_BASE, a Gemfile pinning another Ruby than [control] runtimes
 // gives): the hint, or "".
 std::string failure_hint(const Row& row, std::string_view output, const Context& ctx);
+// What an exit 0 does not show: output that says the result cannot work (Redmine's Gemfile
+// without config/database.yml leaves the bundle with no database driver). "" when none; else
+// the task answers 409 with it.
+std::string output_problem(const Row& row, std::string_view output);
 
 // The row's `needs` (or, with `after`, its `produces`) against the filesystem, relative
 // paths below `root_fd`: "" when every one exists, else the refusal naming the first

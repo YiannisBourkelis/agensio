@@ -57,11 +57,11 @@ check "the refusal is in the audit log with the uid" "yes" "$(grep -q "uid=$(id 
 check "audit log owned by the server user, 0640 or stricter" "ctlsrv" "$(stat -c %U "$T/logs/audit.log")"
 check "the data plane still serves" "hi" "$(curl -sS http://127.0.0.1:8183/)"
 tools_as() { su -s /bin/sh "$1" -c "printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n' | '$BIN' mcp --socket '$T/run/control.sock'" 2>/dev/null | grep -o '"name":"[a-z_]*"' | wc -l | tr -d ' '; }
-check "mcp: a viewer's tool list has only the read tools" "11" "$(tools_as carol)"
-check "mcp: an operator sees reload, logs-reopen, cert-renew and upload-delete too" "15" "$(tools_as bob)"
-check "mcp: an admin sees everything" "25" "$(tools_as alice)"
+check "mcp: a viewer's tool list has only the read tools" "12" "$(tools_as carol)"
+check "mcp: an operator sees reload, logs-reopen, cert-renew and upload-delete too" "16" "$(tools_as bob)"
+check "mcp: an admin sees everything" "26" "$(tools_as alice)"
 check "a site's environment holds its secrets: a viewer and an operator get 403 naming admin" "403 403 admin" "$(for u in carol bob; do su -s /bin/sh $u -c "curl -sS -o /dev/null -w '%{http_code} ' --unix-socket '$T/run/control.sock' http://control/v1/sites/any.test/env"; done)$(su -s /bin/sh bob -c "curl -sS --unix-socket '$T/run/control.sock' http://control/v1/sites/any.test/env" | sed -n 's/.*"needs":"\([a-z]*\)".*/\1/p')"
-check "mcp: an account without a role sees the read tools but cannot call them" "11 yes" "$(tools_as dave) $(su -s /bin/sh dave -c "printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"server_status\",\"arguments\":{}}}\n' | '$BIN' mcp --socket '$T/run/control.sock'" 2>/dev/null | grep -q '"isError":true' && echo yes)"
+check "mcp: an account without a role sees the read tools but cannot call them" "12 yes" "$(tools_as dave) $(su -s /bin/sh dave -c "printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"server_status\",\"arguments\":{}}}\n' | '$BIN' mcp --socket '$T/run/control.sock'" 2>/dev/null | grep -q '"isError":true' && echo yes)"
 stop
 
 write_config 'admins = "ctladm"'

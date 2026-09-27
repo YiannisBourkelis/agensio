@@ -27,6 +27,7 @@ namespace agensio::tasks {
 namespace {
 
 bool alpha(unsigned char c) noexcept { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+bool rails_family(std::string_view app) noexcept { return app == "rails" || app == "redmine"; }
 bool digit(unsigned char c) noexcept { return c >= '0' && c <= '9'; }
 
 // ^[A-Za-z][A-Za-z0-9_]{0,63}$: a Ruby constant's worth of name, never an option.
@@ -57,6 +58,40 @@ bool rails_version(std::string_view v) noexcept {
     return run > 0 && groups >= 1 && groups <= 3;
 }
 
+// ^[a-z]{2}(-[A-Za-z]{2,4})?$: a Redmine language code (en, de, pt-BR, zh-TW).
+bool redmine_lang(std::string_view v) noexcept {
+    if (v.size() != 2 && (v.size() < 5 || v.size() > 7)) return false;
+    if (!(v[0] >= 'a' && v[0] <= 'z' && v[1] >= 'a' && v[1] <= 'z')) return false;
+    if (v.size() == 2) return true;
+    if (v[2] != '-') return false;
+    for (std::size_t i = 3; i < v.size(); ++i)
+        if (!alpha(static_cast<unsigned char>(v[i]))) return false;
+    return true;
+}
+
+// config/database.yml for an application that ships none (Redmine's is an .example): the
+// database from DATABASE_URL in the site's environment, the adapter derived from its scheme
+// so a Gemfile that reads database.yml (Redmine's, ERB included) bundles the right driver.
+// No password is kept in the tree: it stays in the root-owned environment file.
+constexpr const char* kDatabaseYml =
+    "# Written by agensio (site task database_config). The database comes from DATABASE_URL in the\n"
+    "# site's environment (site_env_set): sqlite3:db/production.sqlite3, postgresql://USER:PASSWORD@HOST/NAME\n"
+    "# or mysql2://USER:PASSWORD@HOST/NAME. No password is kept in this file.\n"
+    "production:\n"
+    "  url: <%= ENV[\"DATABASE_URL\"] %>\n"
+    "  adapter: <%= ENV[\"DATABASE_URL\"].to_s[/\\A[a-z0-9]+/] %>\n";
+
+// Gemfile.local for Redmine (its Gemfile evaluates it): what it needs in production and keeps
+// in another group (Puma is in its test group, which BUNDLE_WITHOUT=development:test skips).
+constexpr const char* kRedmineGemfileLocal =
+    "# Written by agensio (site task gemfile_local): the gems Redmine needs in production that its\n"
+    "# Gemfile keeps elsewhere. Redmine's Gemfile evaluates this file; bundle_install installs them.\n"
+    "gem \"puma\"\n";
+
+constexpr const char* kNoDatabaseUrl =
+    "site_env_set with set: {\"DATABASE_URL\": ...} first: sqlite3:db/production.sqlite3 for SQLite in the application's db/, or "
+    "postgresql://USER:PASSWORD@HOST/NAME, mysql2://USER:PASSWORD@HOST/NAME (the password stays in the site's environment)";
+
 const std::vector<Family>& families() {
     static const std::vector<Family> f = {
         {"rails",
@@ -70,6 +105,13 @@ const std::vector<Family>& families() {
           {"BUNDLE_WITHOUT", "development:test"}},
          {"config/credentials.yml.enc", "config/credentials/*.key", ".env.*", "db/*.sqlite3", "storage/*.sqlite3", "storage/*.sqlite3-wal",
           "storage/*.sqlite3-shm", ".kamal/secrets*"}},
+        // Redmine: a Rails application from an archive, the same environment; its SMTP
+        // settings and the secret generate_secret_token writes are credentials too.
+        {"redmine",
+         {{"RAILS_ENV", "production"}, {"GEM_HOME", "{gem_home}"}, {"GEM_PATH", "{gem_home}"}, {"BUNDLE_PATH", "vendor/bundle"},
+          {"BUNDLE_WITHOUT", "development:test"}},
+         {"config/credentials.yml.enc", ".env.*", "db/*.sqlite3", "db/*.sqlite3-wal", "db/*.sqlite3-shm", "config/configuration.yml",
+          "config/initializers/secret_token.rb"}},
     };
     return f;
 }
@@ -89,7 +131,8 @@ const std::vector<Row>& rows() {
          {{"version", "An exact Rails 8 release, e.g. 8.1.4; default the newest 8.x.", "^8(\\.[0-9]{1,4}){1,3}$", rails_version, false}},
          {},
          true, false, 3600, {},
-         {{"{gem_home}/bin/rails", "gem installed nothing that provides the rails command; the output shows what it resolved"}}},
+         {{"{gem_home}/bin/rails", "gem installed nothing that provides the rails command; the output shows what it resolved"}},
+         nullptr, nullptr, 0640, {}, true},
         // Not --skip-bundle: Rails 8 skips its importmap, Hotwire and Solid Cache/Queue/Cable
         // installers when the bundle is skipped, and the application it leaves behind fails in
         // production. The bundle it installs goes to vendor/bundle (the preset's environment).
@@ -106,7 +149,8 @@ const std::vector<Row>& rows() {
          {{"name", "The application's name (its Ruby module): a letter, then letters, digits and underscores.", "^[A-Za-z][A-Za-z0-9_]{0,63}$", app_name, true}},
          {},
          true, true, 3600,
-         {{"{gem_home}/bin/rails", "run gem_install_rails first: it installs the rails command into the account's own gem directory"}}},
+         {{"{gem_home}/bin/rails", "run gem_install_rails first: it installs the rails command into the account's own gem directory"}},
+         {}, nullptr, nullptr, 0640, {}, true},
         {"rails", "bundle_install",
          "Installs the gems of the application's Gemfile into vendor/bundle (production gems only): after a Gemfile change, or after an "
          "application was installed from an archive. Downloads.",
@@ -120,13 +164,44 @@ const std::vector<Row>& rows() {
         // installed from an archive has no config/master.key (it is never committed).
         {"rails", "assets_precompile", "Builds the assets into public/assets (bin/rails assets:precompile).",
          "ruby", "bundle", {{"exec"}, {"rails"}, {"assets:precompile"}}, {}, {{"SECRET_KEY_BASE_DUMMY", "1"}}, false, false, 3600, {{"Gemfile", kNoGemfile}}},
+        {"rails", "database_config",
+         "Writes config/database.yml from a fixed template that takes the database from DATABASE_URL in the site's environment "
+         "(sqlite3:, postgresql:// or mysql2://), so no password is kept in the tree; only when the file is missing, as with an "
+         "application installed from an archive that ships config/database.yml.example (Redmine). Needs DATABASE_URL set first "
+         "(site_env_set). Then bundle_install: a Gemfile that reads database.yml bundles the matching driver.",
+         "", "", {}, {}, {}, false, false, 60, {{"Gemfile", kNoGemfile}}, {}, "config/database.yml", kDatabaseYml, 0600,
+         {{"DATABASE_URL", kNoDatabaseUrl}}},
+        {"redmine", "gemfile_local",
+         "Writes Gemfile.local, which Redmine's Gemfile evaluates, with what Redmine needs in production and keeps elsewhere (Puma, "
+         "in its test group); only when the file is missing. Then bundle_install.",
+         "", "", {}, {}, {}, false, false, 60, {{"Gemfile", kNoGemfile}}, {}, "Gemfile.local", kRedmineGemfileLocal, 0640},
+        {"redmine", "load_default_data",
+         "Loads Redmine's default configuration (trackers, statuses, roles, workflows) in one language (bundle exec rake "
+         "redmine:load_default_data); after db_migrate, once.",
+         "ruby", "bundle", {{"exec"}, {"rake"}, {"redmine:load_default_data"}},
+         {{"lang", "The language of Redmine's default data: en, de, fr, el, pt-BR, zh-TW and the others Redmine ships.", "^[a-z]{2}(-[A-Za-z]{2,4})?$",
+           redmine_lang, true}},
+         {{"REDMINE_LANG", "{lang}"}}, false, false, 600, {{"Gemfile", kNoGemfile}}},
+        {"redmine", "plugins_migrate",
+         "Runs the migrations of the plugins under plugins/ (bundle exec rake redmine:plugins:migrate): after a plugin's site_install "
+         "(path plugins/NAME) and bundle_install.",
+         "ruby", "bundle", {{"exec"}, {"rake"}, {"redmine:plugins:migrate"}}, {}, {}, false, false, 1800, {{"Gemfile", kNoGemfile}}},
     };
     return r;
 }
 
+// Presets built on another: their own rows plus the base's, except the new-application ones.
+std::string_view base_of(std::string_view app) noexcept { return app == "redmine" ? std::string_view("rails") : std::string_view(); }
+
+bool offered(const Row& row, std::string_view app) noexcept {
+    if (app == row.app) return true;
+    const std::string_view base = base_of(app);
+    return !base.empty() && base == row.app && !row.new_app_only;
+}
+
 const Row* find(std::string_view app, std::string_view task) noexcept {
     for (const auto& r : rows())
-        if (app == r.app && task == r.name) return &r;
+        if (offered(r, app) && task == r.name) return &r;
     return nullptr;
 }
 
@@ -138,14 +213,14 @@ const Family* family(std::string_view app) noexcept {
 
 bool has_tasks(std::string_view app) noexcept {
     for (const auto& r : rows())
-        if (app == r.app) return true;
+        if (offered(r, app)) return true;
     return false;
 }
 
 std::vector<std::string> names(std::string_view app) {
     std::vector<std::string> out;
     for (const auto& r : rows())
-        if (app == r.app) out.emplace_back(r.name);
+        if (offered(r, app)) out.emplace_back(r.name);
     return out;
 }
 
@@ -167,7 +242,7 @@ std::vector<const Param*> all_params() {
 json::Value catalog(std::string_view app, const CatalogContext* ctx) {
     json::Value list = json::Value::array();
     for (const auto& r : rows()) {
-        if (app != r.app) continue;
+        if (!offered(r, app)) continue;
         json::Value params = json::Value::array();
         for (const auto& p : r.params)
             params.push(json::Value::object().set("name", p.name).set("description", p.description).set("pattern", p.pattern).set("required", p.required));
@@ -176,7 +251,14 @@ json::Value catalog(std::string_view app, const CatalogContext* ctx) {
         const unsigned timeout = ctx && ctx->timeout_cap ? std::min(r.timeout, ctx->timeout_cap) : r.timeout;
         json::Value item = json::Value::object().set("task", r.name).set("summary", r.summary).set("runtime", r.runtime).set("params", std::move(params))
                                .set("network", r.network).set("needs_empty", r.needs_empty).set("timeout", static_cast<double>(timeout));
-        if (ctx && ctx->runtime_dir) {
+        if (r.writes) {  // a fixed template, no program: nothing to check for an interpreter
+            char mode[8];
+            std::snprintf(mode, sizeof mode, "0%o", r.mode);
+            item.set("writes", r.writes).set("mode", mode);
+            json::Value env = json::Value::array();
+            for (const auto& n : r.needs_env) env.push(n.path);
+            if (!env.items().empty()) item.set("needs_env", std::move(env));
+        } else if (ctx && ctx->runtime_dir) {
             const std::string path = ctx->runtime_dir(r.runtime) + "/" + r.program;
             std::string canonical;
             bool missing = false;
@@ -274,8 +356,21 @@ Plan build(const Row& row, const json::Value& params, const Context& ctx, const 
     return plan;
 }
 
+std::string output_problem(const Row& row, std::string_view output) {
+    if (!rails_family(row.app)) return "";
+    if (std::string_view(row.name) == "bundle_install" && output.find("Please configure your config/database.yml first") != std::string_view::npos)
+        return "bundle_install exited 0, but the application's Gemfile found no config/database.yml, so the bundle has no database driver: "
+               "site_env_set DATABASE_URL, site_task database_config, then bundle_install again";
+    return "";
+}
+
 std::string failure_hint(const Row& row, std::string_view output, const Context& ctx) {
-    if (std::string_view(row.app) != "rails") return "";
+    if (!rails_family(row.app)) return "";
+    if (output.find("Could not load database configuration. No such file") != std::string_view::npos ||
+        output.find("No such file - [\"config/database.yml\"]") != std::string_view::npos)
+        return "the application has no config/database.yml (one installed from an archive ships database.yml.example): site_env_set "
+               "DATABASE_URL (sqlite3:db/production.sqlite3, or postgresql://USER:PASSWORD@HOST/NAME), then site_task database_config, "
+               "then bundle_install (the driver) and this task again";
     if (output.find("Missing `secret_key_base`") != std::string_view::npos || output.find("Missing secret_key_base") != std::string_view::npos)
         return "the application reads SECRET_KEY_BASE from its environment and has no Rails credentials (every ONCE application, every "
                "Kamal deployment): site_env_set with generate: [\"SECRET_KEY_BASE\"] puts a new secret into the site's environment file, "
@@ -695,6 +790,79 @@ bool own_dir(const std::string& path, bool create, bool& would_create, std::stri
 
 }  // namespace
 
+namespace {
+
+// A template row (database_config, gemfile_local): its fixed content into its path below the
+// site's directory, as this account, when the file does not exist. Every directory on the way
+// is opened without following a symlink and must be this account's; the file is created with
+// O_EXCL, so nothing is ever replaced and nothing outside the site is reached.
+json::Value write_template(const Request& req, const Row& row, int root_fd, const std::string& account) {
+    auto fail = [&](std::string why) {
+        ::close(root_fd);
+        return refusal(std::move(why));
+    };
+    if (std::string bad = check_needs(row, req.params, req.ctx, root_fd); !bad.empty()) return fail(std::move(bad));
+    for (const Need& n : row.needs_env)
+        if (std::none_of(req.ctx.app_env.begin(), req.ctx.app_env.end(), [&](const auto& kv) { return kv.first == n.path; }))
+            return fail("task " + std::string(row.name) + " needs " + n.path + " in the site's environment, which does not hold it: " + n.hint);
+    const std::string rel = row.writes;
+    const std::string path = req.ctx.root + "/" + rel;
+    int dfd = ::dup(root_fd);
+    std::string leaf = rel;
+    for (std::size_t slash; dfd >= 0 && (slash = leaf.find('/')) != std::string::npos;) {
+        const std::string part = leaf.substr(0, slash);
+        leaf.erase(0, slash + 1);
+        const int next = ::openat(dfd, part.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        ::close(dfd);
+        dfd = next;
+        struct stat sb {};
+        if (dfd >= 0 && (::fstat(dfd, &sb) != 0 || sb.st_uid != ::geteuid())) {
+            ::close(dfd);
+            return fail(req.ctx.root + "/" + part + " is not this account's (" + account + "); refused");
+        }
+    }
+    if (dfd < 0) return fail("the directory of " + path + " is missing or a symlink; nothing written");
+    struct stat sb {};
+    if (::fstatat(dfd, leaf.c_str(), &sb, AT_SYMLINK_NOFOLLOW) == 0) {
+        ::close(dfd);
+        return fail(path + " exists; " + row.name + " writes it only when it is missing, so nothing changed");
+    }
+    char mode[8];
+    std::snprintf(mode, sizeof mode, "0%o", row.mode);
+    json::Value r = json::Value::object().set("task", row.name).set("as", account).set("cwd", req.ctx.root).set("argv", json::Value::array())
+                        .set("env", json::Value::array()).set("network", false).set("writes", path).set("mode", mode);
+    if (req.dry_run) {
+        ::close(dfd);
+        ::close(root_fd);
+        return r.set("ok", true).set("dry_run", true);
+    }
+    const int f = ::openat(dfd, leaf.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, row.mode);
+    const std::string_view text = row.content;
+    bool ok = f >= 0 && ::fchmod(f, row.mode) == 0;
+    for (std::size_t off = 0; ok && off < text.size();) {
+        const ssize_t n = ::write(f, text.data() + off, text.size() - off);
+        if (n < 0 && errno == EINTR) continue;
+        ok = n > 0;
+        if (ok) off += static_cast<std::size_t>(n);
+    }
+    ok = ok && ::fsync(f) == 0;
+    const int err = errno;
+    if (f >= 0) ::close(f);
+    if (!ok) {
+        if (f >= 0) ::unlinkat(dfd, leaf.c_str(), 0);
+        ::close(dfd);
+        return fail("write " + path + ": " + std::strerror(err));
+    }
+    ::close(dfd);
+    const Family* fam = family(row.app);
+    const json::Value swept = sweep(root_fd, req.ctx.root, req.secrets, fam ? fam->secret_patterns : std::vector<const char*>{});
+    ::close(root_fd);
+    return r.set("ok", swept["exposed"].items().empty()).set("ran", true).set("wrote", path).set("duration_ms", 0.0)
+        .set("secured", swept["secured"]).set("exposed", swept["exposed"]);
+}
+
+}  // namespace
+
 json::Value execute(const Request& req) {
     if (!req.row) return refusal("no task");
     const Row& row = *req.row;
@@ -734,6 +902,7 @@ json::Value execute(const Request& req) {
                            " entr" + (count == 1 ? "y" : "ies") + " (" + first + (count > 1 ? ", ..." : "") + "); nothing ran");
         }
     }
+    if (row.writes) return write_template(req, row, root_fd, account);
     // The account's home and its tmp/: made by the helper (as root) when this account could
     // not; made here when it can (a server without the helper, in its own state directory).
     bool would_create = false;
@@ -800,10 +969,11 @@ json::Value execute(const Request& req) {
     const bool timed_out = result["timed_out"].boolean();
     const json::Value& exit = result["exit"];
     const bool clean = exit.type() == json::Value::Type::number && exit.num() == 0;
-    const bool ok = clean && !timed_out && swept["exposed"].items().empty() && not_produced.empty();
+    const std::string problem = clean ? output_problem(row, std::string(result.get("output"))) : std::string();
+    const bool ok = clean && !timed_out && swept["exposed"].items().empty() && not_produced.empty() && problem.empty();
     r.set("ok", ok);
     if (!ok && clean && !timed_out && swept["exposed"].items().empty()) {
-        r.set("error", not_produced);  // it exited 0 without what the next task needs
+        r.set("error", not_produced.empty() ? problem : not_produced);  // it exited 0 without what the next task needs, or said it cannot work
     } else if (!ok) {
         std::string what;
         if (timed_out) what = "stopped after its time limit of " + std::to_string(plan.timeout) + " s ([control] task_limits.timeout)";

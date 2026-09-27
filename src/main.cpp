@@ -121,6 +121,7 @@ int main(int argc, char** argv) {
             auto ctl_usage = [] {
                 std::cout << "usage: agensio ctl <command> [options] [--socket PATH] [-c config.toml]\n"
                              "read:   status | sites | site NAME | validate | health | presets | uploads | settings [NAME] | reference |\n"
+                             "        site-unit NAME [--raw] (the Puma unit of a Rails site, rendered for root: --raw prints the unit alone) |\n"
                              "        site-tasks NAME | site-env NAME [--reveal KEY]... (admin: the site's environment as names, lengths\n"
                              "                    and fingerprints; a value only for each --reveal KEY, audited as a secret read) |\n"
                              "        logs [--site NAME] [--since 3h] [--level error|warn|info] [--status 5xx|4xx|all] [--limit N]\n"
@@ -165,6 +166,7 @@ int main(int argc, char** argv) {
                     return 0;
                 }
             std::string command, socket_path, site_name, query, upload_file, reveal;
+            bool raw = false;
             agensio::json::Value body = agensio::json::Value::object();
             agensio::json::Value aliases = agensio::json::Value::array();
             bool yes = false;
@@ -213,6 +215,7 @@ int main(int argc, char** argv) {
                 else if (b == "--to") field("to");
                 else if (b == "--overwrite") body.set("overwrite", true);
                 else if (b == "--reveal") { std::string v; value(v); reveal += (reveal.empty() ? "" : ",") + v; }
+                else if (b == "--raw") raw = true;
                 else if (b == "--unset" || b == "--generate") {
                     std::string v; value(v);
                     const char* key = b == "--unset" ? "unset" : "generate";
@@ -253,7 +256,7 @@ int main(int argc, char** argv) {
             }
             std::string path, method = "GET";
             const bool mutation = command == "reload" || command == "logs-reopen" ||
-                                  (command.starts_with("site-") && command != "site-tasks" && command != "site-env") ||
+                                  (command.starts_with("site-") && command != "site-tasks" && command != "site-env" && command != "site-unit") ||
                                   command == "cert-renew" || command == "uploads-delete";
             const bool upload = command == "upload";
             if (command == "status" || command == "sites" || command == "health" || command == "presets" || command == "uploads") path = "/v1/" + command;
@@ -273,6 +276,7 @@ int main(int argc, char** argv) {
             else if (command == "site-copy" && !site_name.empty()) path = "/v1/sites/" + site_name + "/copy";
             else if (command == "site-task" && !site_name.empty() && !body["task"].is_null()) path = "/v1/sites/" + site_name + "/task";
             else if (command == "site-tasks" && !site_name.empty()) path = "/v1/sites/" + site_name + "/tasks";
+            else if (command == "site-unit" && !site_name.empty()) path = "/v1/sites/" + site_name + "/unit";
             else if ((command == "site-env" || command == "site-env-set") && !site_name.empty())
                 path = "/v1/sites/" + site_name + "/env" + (command == "site-env" && !reveal.empty() ? "?reveal=" + reveal : std::string());
             else if (command == "uploads-delete" && !site_name.empty()) path = "/v1/uploads/" + site_name + "/delete";
@@ -321,6 +325,14 @@ int main(int argc, char** argv) {
             if (reply.status == 428 && !yes) {
                 std::cerr << "this command changes the server: add --yes (and --reason \"why\") to confirm\n";
                 return 1;
+            }
+            if (raw && command == "site-unit" && reply.status == 200) {  // the unit alone, for root to redirect into place
+                agensio::json::Value u;
+                std::string perr;
+                if (agensio::json::parse(reply.body, u, perr)) {
+                    std::cout << u.get("unit");
+                    return 0;
+                }
             }
             std::cout << reply.body;
             return reply.status < 300 ? 0 : 1;

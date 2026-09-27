@@ -509,21 +509,65 @@ upstream = "http://127.0.0.1:3000"      # where Puma listens; keep it on loopbac
 ```
 
 The application server itself is not started by agensio yet (roadmap F14): until then a
-systemd unit runs Puma as the site's account with the environment the tasks use,
-`docs/examples/puma.service`, binding loopback (`-b tcp://127.0.0.1:3000`; the `puma.rb`
-Rails generates binds every address, which would publish the application beside
-agensio, without its TLS and refusals). The unit loads the site's environment file
-(section 15, "The site's environment"), so a secret is written once, through the control
-plane, and the tasks and Puma both see it.
+systemd unit runs Puma as the site's account with the environment the tasks use, rendered
+for the site by `agensio ctl site-unit NAME` (MCP `site_service_unit`): its account, its
+directory, the loopback port of its `upstream`, the Ruby of `[control] runtimes` first on
+`PATH` and in `ExecStart` (the one its bundle was built with), and the site's environment
+file. Root puts it in place:
+
+```sh
+agensio ctl site-unit ag7.example.com --raw > /etc/systemd/system/agensio-app-ag7.service
+systemctl daemon-reload && systemctl enable --now agensio-app-ag7.service
+```
+
+It binds loopback (`-b tcp://127.0.0.1:3007`; the `puma.rb` Rails generates binds every
+address, which would publish the application beside agensio, without its TLS and
+refusals) and loads the site's environment file (section 15, "The site's environment"),
+so a secret is written once, through the control plane, and the tasks and Puma both see
+it. The unit is refused for a site without its own account or whose upstream is not
+plain HTTP on loopback, and every value in it must be a plain path or name, so nothing
+can add a line to it. `docs/examples/puma.service` is the same unit written by hand.
 
 An existing application (a GitHub release tarball, an upload) goes in with `site-install`,
-then `bundle_install`, `db_prepare` and `assets_precompile`; the install's answer says so,
+then `bundle_install`, `db_prepare` and `assets_precompile`. One that ships
+`config/database.yml.example` and no `config/database.yml` first gets its database:
+`site-env-set NAME --set DATABASE_URL=sqlite3:db/production.sqlite3` (or
+`postgresql://USER:PASSWORD@HOST/NAME`, `mysql2://...`), then the task `database_config`,
+which writes `config/database.yml` from a fixed template (the database from
+`DATABASE_URL`, the adapter from its scheme, no password in the tree; `0600`, only when the
+file is missing); `bundle_install` then bundles the matching driver where the Gemfile reads
+`database.yml`, and a `bundle_install` that exits 0 while the application says it found no
+database configuration answers 409. The install's answer says so (its `facts` name
+`database_yml` and `database_yml_example`),
 names the Ruby the application pins in `.ruby-version` when it has one, and, when the
 archive came without Rails credentials (`config/credentials.yml.enc`, as every ONCE
 application such as Writebook and every Kamal deployment), generates `SECRET_KEY_BASE`
 into the site's environment, once. A new site's answer also states its request-body
 limit: 1 MB unless `settings.max_body_size` raises it, and an upload above it is a 413 the
 application never sees (the error log names the site, the size and the limit).
+
+**Redmine: `app = "redmine"`.** The rails preset's routing, refusals and tasks for an
+application installed from an archive (`gem_install_rails` and `rails_new` are not
+offered), plus Redmine's own: `gemfile_local` writes the fixed `Gemfile.local` Redmine's
+Gemfile evaluates, adding Puma (Redmine keeps it in its test group, which the tasks'
+`BUNDLE_WITHOUT` skips); `load_default_data` loads trackers, statuses and roles in one
+language (`--param lang=en`); `plugins_migrate` runs the migrations of `plugins/` after a
+plugin's `site-install --path plugins/NAME --create-path` and `bundle_install`. Its
+credential files are `config/database.yml`, `config/configuration.yml` (SMTP) and
+`config/initializers/secret_token.rb`. `site-install --version 7.0.1` fetches
+`https://www.redmine.org/releases/redmine-7.0.1.tar.gz` (a version is required; pass the
+`--sha256` redmine.org publishes). A Redmine archive installed on a `rails` site is named
+in the answer's warnings. The whole path, which `tests/redmine-install.sh` runs:
+
+```sh
+agensio ctl site-create --domain pm.example.com --app redmine --root /var/www/pm.example.com/app --user pm --upstream http://127.0.0.1:3007 --yes --reason redmine
+agensio ctl site-install pm.example.com --version 7.0.1 --sha256 <redmine.org's> --yes --reason redmine
+agensio ctl site-env-set pm.example.com --set DATABASE_URL=sqlite3:db/production.sqlite3 --yes --reason redmine
+for t in database_config gemfile_local bundle_install db_migrate; do agensio ctl site-task pm.example.com $t --yes --reason redmine; done
+agensio ctl site-task pm.example.com load_default_data --param lang=en --yes --reason redmine
+agensio ctl site-task pm.example.com assets_precompile --yes --reason redmine
+agensio ctl site-unit pm.example.com --raw > /etc/systemd/system/agensio-app-pm.service   # as root, then enable it
+```
 
 ## 5. Customising a preset
 
@@ -1203,7 +1247,8 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 | `validate` | viewer | loads the file on disk again and runs the hosting rules: `ok`, `errors`, site count, and the restart-only settings that differ from the running server |
 | `logs` | viewer | `--site NAME` (default: all sites plus the error log), `--since 3h` (`m`, `h`, `d`, `w`, seconds, or a local `YYYY-MM-DDThh:mm:ss`; default 1h), `--level error|warn|info` for the error log (default warn = error+warn), `--status 5xx|4xx|all|NNN` for access logs (default 5xx), `--limit N` (default 200, newest). Reads at most 2 MB per file from the end; `truncated` says when that cut in |
 | `uploads` | viewer | the archives stored with `upload` (`file`, `bytes`, `uploaded`), ready for `site-install --file` |
-| `site-tasks NAME` | viewer | the named tasks the site's preset offers (`app = "rails"`: six), each with its summary, its parameters (name, meaning, pattern, required), whether it downloads, whether the directory must be empty, its effective time limit (the row's, capped by `[control] task_limits.timeout`) and its `interpreter`: the program, whether the interpreter rule accepts it and, when not, why and the package command; `run_as_root` at the top lists every missing package once, so root installs them before the first task; the account that runs them (`runs_as`), the directory, the task running now; a site of another preset has none |
+| `site-unit NAME [--raw]` | viewer | the systemd unit that runs a Rails or Redmine site's Puma, rendered from the site and `[control] runtimes`, with the root commands that install it (`--raw` prints the unit alone, for `> /etc/systemd/system/...`); 409 for a site without its own account or a non-loopback upstream |
+| `site-tasks NAME` | viewer | the named tasks the site's preset offers (`app = "rails"`: seven; `"redmine"`: eight), each with its summary, its parameters (name, meaning, pattern, required), whether it downloads, whether the directory must be empty, its effective time limit (the row's, capped by `[control] task_limits.timeout`) and its `interpreter`: the program, whether the interpreter rule accepts it and, when not, why and the package command; `run_as_root` at the top lists every missing package once, so root installs them before the first task; the account that runs them (`runs_as`), the directory, the task running now; a site of another preset has none |
 | `settings [NAME]` | viewer | the per-site limits `site-create` and `site-update` accept under `settings`: for each key its type, unit and spellings, meaning, default and its origin, minimum, the ceiling from `[control] site_limits`, what changing it costs (agensio reload, php-fpm reload) and what it derives; with a site, the current value and whether it comes from the site, the server or a built-in default. `site NAME` reports the same `settings` |
 | `health` | viewer | findings with `severity`, `code`, `site`, `message`, `fix` (also `files_unreadable`: files under a document root, the preset's upload directory first, that the server's account cannot open and that answer 404 with no log line; `php_tmp_missing`; `php_fpm_hard_reload`; `php_pool_resident`, judged from the pool file php-fpm runs; `preset_mismatch`: the files under a site's directory belong to another application than its `app` says, with the application detected and the `app` to set; `archives_in_root`: backup archives and database dumps under a served tree, the directories a preset never answers excepted; `site_env_unsafe`: the site environments' directory is not root's alone, or a site's file is open to others, not root's or has a second link (checked by the helper, read-only), with the `chown`/`chmod` line; `site_env_orphan`: a deleted site's environment file, with its `rm -f`; `site_env_unchecked`: the helper was busy with a task): configuration on disk invalid or failing the hosting rules, restart-only settings changed, running as root, certificate unreadable / still the placeholder / expired / expiring within 14 days (manual), `tls = "auto"` without a plain port-80 site for the names, no http-to-https redirect, application sites sharing the server's account, generated pools out of date, errors in the last 24 hours. `ok` is true when nothing above info level was found |
 
@@ -1243,6 +1288,10 @@ other option are simply not expressible. The Rails rows:
 | `bundle_install` | `bundle install` | after a Gemfile change, or an application installed from an archive; downloads |
 | `db_prepare`, `db_migrate` | `bundle exec rails db:prepare` / `db:migrate` | the production databases |
 | `assets_precompile` | `bundle exec rails assets:precompile` | with `SECRET_KEY_BASE_DUMMY=1`, so an application without its master key compiles too |
+| `database_config` | no program: writes `config/database.yml` from a fixed template | the database from `DATABASE_URL` in the site's environment (required first), `0600`, only when the file is missing |
+| `gemfile_local` (redmine) | no program: writes `Gemfile.local` (`gem "puma"`) | only when missing |
+| `load_default_data` (redmine) | `bundle exec rake redmine:load_default_data` with `REDMINE_LANG=LANG` | `lang` a language code (`en`, `pt-BR`) |
+| `plugins_migrate` (redmine) | `bundle exec rake redmine:plugins:migrate` | after a plugin's install and `bundle_install` |
 
 Every Rails task runs with `RAILS_ENV=production`, `BUNDLE_PATH=vendor/bundle` and
 `BUNDLE_WITHOUT=development:test`: the gems of the application live in the project, only

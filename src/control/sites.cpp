@@ -12,6 +12,7 @@
 #include <fstream>
 #include <sstream>
 
+#include "services/appenv.hpp"
 #include "services/pools.hpp"
 
 namespace agensio::control {
@@ -331,10 +332,10 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
     // A Rails application lives in app/ beside web/ (docs/design-site-operations.md 2b): its
     // directory holds config/master.key and the databases, and is never a document root.
     if (spec.root.empty() && spec.app != "proxy")
-        needs.push_back(Decision{"root", spec.app == "rails" ? "Where is the Rails application? (its project directory: tasks run there, nothing is served from it)"
+        needs.push_back(Decision{"root", rails_app(spec.app) ? "Where is the Rails application? (its project directory: tasks run there, nothing is served from it)"
                                                              : "Where are the site's files? (the document root; for Laravel the project directory)",
                                  (cfg.control.sites_root.empty() ? std::string("/var/www") : cfg.control.sites_root) + "/" + spec.domain +
-                                     (spec.app == "rails" ? "/app" : "/web"), {}});
+                                     (rails_app(spec.app) ? "/app" : "/web"), {}});
     const std::vector<std::string> apps = app_presets();
     if (spec.app.empty()) {
         const std::string detected = spec.root.empty() ? std::string() : detect_app(spec.root);
@@ -570,6 +571,63 @@ std::string php_fpm_reload_command(const Config& cfg, const std::string& version
     return "systemctl reload php-fpm";
 }
 
+json::Value service_unit(const SiteConfig& site, const Config& cfg) {
+    json::Value fail = json::Value::object().set("ok", false);
+    const std::string name = site.server_names.empty() ? std::string() : site.server_names.front();
+    if (!rails_app(site.app)) return fail.set("error", "a unit is rendered for a Rails site (app = \"rails\" or \"redmine\"); this one has app = \"" + site.app + "\"");
+    if (site.user.empty())
+        return fail.set("error", "the site runs under no account of its own: give it one (site_update with user) first; Puma never runs as the server's account or root");
+    const UpstreamAddress& a = site.proxy.address;
+    const bool loopback = a.host == "127.0.0.1" || a.host == "::1" || a.host.starts_with("127.");
+    if (!site.proxy.configured || a.unix || a.tls || !loopback || a.port == 0)
+        return fail.set("error", "the site's upstream must be http://127.0.0.1:PORT (plain HTTP on loopback) for Puma to bind; site_update with upstream sets it");
+    const std::string root = site.project_root.empty() ? site.root : site.project_root;
+    const std::string group = site.group.empty() ? site.user : site.group;
+    const std::string ruby = runtime_dir(cfg.control, "ruby");
+    const std::string home = cfg.state_dir + "/" + site.user;
+    const std::string env = appenv::dir_of(cfg.config_path) + "/" + name + ".env";
+    const std::string bind = a.host == "::1" ? "tcp://[::1]:" + std::to_string(a.port) : "tcp://" + a.host + ":" + std::to_string(a.port);
+    const std::string unit_name = "agensio-app-" + site.user + ".service";
+    // Plain paths and names only: a newline, a space or a quote could add a line to the unit.
+    for (const std::string* v : {&name, &root, &group, &site.user, &ruby, &home, &env}) {
+        if (v->empty() || v->find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/@:+-") != std::string::npos)
+            return fail.set("error", "'" + v->substr(0, 80) + "' is not a plain path or name (letters, digits, . _ / @ : + -); the unit is not rendered");
+    }
+    std::string u;
+    u += "# agensio: the application service of " + name + " (Puma), rendered by `agensio ctl site-unit " + name + "` from the site,\n";
+    u += "# [control] runtimes and the site's environment file, until agensio manages it (roadmap F14). As root:\n";
+    u += "#   agensio ctl site-unit " + name + " --raw > /etc/systemd/system/" + unit_name + "\n";
+    u += "#   systemctl daemon-reload && systemctl enable --now " + unit_name + "\n";
+    u += "[Unit]\n";
+    u += "Description=" + std::string(site.app == "redmine" ? "Redmine" : "Rails application") + " of " + name + " (Puma), behind agensio\n";
+    u += "After=network.target\n\n";
+    u += "[Service]\n";
+    u += "User=" + site.user + "\nGroup=" + group + "\n";
+    u += "WorkingDirectory=" + root + "\n";
+    u += "Environment=RAILS_ENV=production HOME=" + home + " TMPDIR=" + home + "/tmp LANG=C.UTF-8\n";
+    u += "Environment=BUNDLE_PATH=vendor/bundle BUNDLE_WITHOUT=development:test RAILS_LOG_TO_STDOUT=1\n";
+    u += "Environment=GEM_HOME=" + home + "/gems GEM_PATH=" + home + "/gems\n";
+    u += "# The Ruby the tasks bundled with ([control] runtimes): first on PATH, its bundle in ExecStart.\n";
+    u += "Environment=PATH=" + ruby + ":/usr/local/bin:/usr/bin:/bin\n";
+    u += "EnvironmentFile=-" + env + "\n";
+    u += "ExecStart=" + ruby + "/bundle exec puma -e production -b " + bind + "\n";
+    u += "Restart=on-failure\nRestartSec=2\nKillMode=mixed\nTimeoutStopSec=30\nUMask=0027\n";
+    u += "# Hardening that costs Puma nothing: it writes only below its own directory and its home.\n";
+    u += "NoNewPrivileges=yes\nPrivateTmp=yes\nProtectSystem=strict\n";
+    u += "ReadWritePaths=" + root + " " + home + "\n";
+    u += "ProtectHome=yes\nRestrictSUIDSGID=yes\nProtectKernelTunables=yes\nProtectControlGroups=yes\nRestrictRealtime=yes\nLockPersonality=yes\n";
+    u += "CapabilityBoundingSet=\nMemoryMax=1G\nTasksMax=256\n\n";
+    u += "[Install]\nWantedBy=multi-user.target\n";
+    json::Value cmds = json::Value::array()
+                           .push("agensio ctl site-unit " + name + " --raw > /etc/systemd/system/" + unit_name)
+                           .push("systemctl daemon-reload")
+                           .push("systemctl enable --now " + unit_name);
+    return json::Value::object().set("ok", true).set("site", name).set("unit_name", unit_name).set("path", "/etc/systemd/system/" + unit_name)
+        .set("unit", u).set("run_as_root", cmds)
+        .set("hint", "root installs it with run_as_root (the unit runs Puma as " + site.user + ", never as root); after a change to the site's "
+                     "environment or its Ruby, root renders it again and runs systemctl restart " + unit_name);
+}
+
 std::vector<std::string> next_steps(const SiteSpec& spec, const Config& cfg) {
     std::vector<std::string> cmds;
     const bool php = php_app(spec.app);
@@ -580,14 +638,35 @@ std::vector<std::string> next_steps(const SiteSpec& spec, const Config& cfg) {
         cmds.push_back(php_fpm_reload_command(cfg, spec.php_version));
     }
     if (spec.https == "auto") cmds.push_back("# make sure " + spec.domain + " resolves to this server and port 80 is reachable; the certificate follows within a minute");
+    if (spec.app == "redmine") {
+        // Redmine from its release archive (2026-09-27 report: the database.yml and Puma walls).
+        std::error_code ec;
+        const bool gemfile = !spec.root.empty() && std::filesystem::is_regular_file(spec.root + "/Gemfile", ec);
+        const bool bundled = gemfile && std::filesystem::is_directory(spec.root + "/vendor/bundle", ec);
+        const std::string chain = "site-env-set " + spec.domain + " --set DATABASE_URL=sqlite3:db/production.sqlite3 (or postgresql://USER:PASSWORD@HOST/NAME), "
+                                  "then site-task " + spec.domain + " database_config, gemfile_local, bundle_install, db_migrate, load_default_data --param lang=en, "
+                                  "assets_precompile; then the service: site-unit " + spec.domain + " renders its unit for root";
+        if (gemfile && bundled)
+            cmds.push_back("# Redmine is in place: site-task " + spec.domain + " db_migrate after an upgrade, plugins_migrate after a plugin (site-install --path "
+                           "plugins/NAME --create-path, then bundle_install); restart its service after each");
+        else if (gemfile)
+            cmds.push_back("# Redmine is unpacked: " + chain);
+        else
+            cmds.push_back("# Redmine: site-install " + spec.domain + " --version 7.0.1 --sha256 <the value redmine.org publishes>, then " + chain);
+    }
     if (spec.app == "rails") {
         // What is on disk decides the chain (2026-09-27 report: an update of a site that held
         // an application repeated "gem_install_rails, then rails_new", which would be refused).
         std::error_code gem_ec, bundle_ec;
         const bool gemfile = !spec.root.empty() && std::filesystem::is_regular_file(spec.root + "/Gemfile", gem_ec);
         const bool bundled = gemfile && std::filesystem::is_directory(spec.root + "/vendor/bundle", bundle_ec);
-        const std::string puma = "run Puma on " + spec.upstream + " (docs/examples/puma.service, which loads the site's environment file)";
-        if (gemfile && bundled)
+        std::error_code db_ec;
+        const bool dbyml = gemfile && std::filesystem::exists(spec.root + "/config/database.yml", db_ec);
+        const std::string puma = "run Puma on " + spec.upstream + " (site-unit " + spec.domain + " renders its unit for root; it loads the site's environment file)";
+        if (gemfile && !dbyml && !bundled)
+            cmds.push_back("# the application is in place without config/database.yml: site-env-set " + spec.domain + " --set DATABASE_URL=sqlite3:db/production.sqlite3 "
+                           "(or postgresql://...), site-task " + spec.domain + " database_config, then bundle_install, db_prepare and assets_precompile; then " + puma);
+        else if (gemfile && bundled)
             cmds.push_back("# the application is in place: site-task " + spec.domain + " db_migrate after new migrations, assets_precompile after asset "
                            "changes, bundle_install after a Gemfile change; restart its service after each");
         else if (gemfile)

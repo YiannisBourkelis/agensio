@@ -79,7 +79,7 @@ task() {  # task NAME [--param k=v]: runs it, prints ok exit seconds, keeps the 
 gem install rails --no-document > $T/system-rails.log 2>&1 || { echo "rails: root's gem install rails failed"; tail -3 $T/system-rails.log; }
 out=$(ctl site-create --domain r5.test --app rails --root $APP --user r5 --upstream http://127.0.0.1:18500 --cert $T/certs/cert.pem --key $T/certs/key.pem --listen-plain 127.0.0.1:18580 --listen-tls 127.0.0.1:18543 --yes --reason live)
 check "site-create: app = rails with its own account, through the helper" "yes r5" "$(echo "$out" | grep -q '"ok":true' && echo yes) $(stat -c %U $APP)"
-check "site-tasks: every interpreter is in place before the first task" "True" "$(ctl site-tasks r5.test | python3 -c 'import json,sys; print(all(t["interpreter"]["ok"] for t in json.load(sys.stdin)["tasks"]))')"
+check "site-tasks: every interpreter is in place before the first task" "True" "$(ctl site-tasks r5.test | python3 -c 'import json,sys; print(all(t["interpreter"]["ok"] for t in json.load(sys.stdin)["tasks"] if "interpreter" in t))')"
 r=$(task gem_install_rails)
 check "gem_install_rails: Rails 8 with its whole tree in the account's gem directory, despite root's system-wide Rails" "True 0 yes" "$(echo $r | cut -d' ' -f1-2) $([ -x $T/state/r5/gems/bin/rails ] && echo yes)"
 echo "     gem_install_rails took $(echo $r | cut -d' ' -f3) s"

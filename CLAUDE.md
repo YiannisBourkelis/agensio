@@ -422,7 +422,15 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   for the names in `reveal` (audited as REVEALED); a lax directory or file is tightened or
   refused with the root line, health `site_env_unsafe`; tasks get it after agensio's variables, names that choose a program
   refused; `site-install` of a Rails archive without credentials generates
-  `SECRET_KEY_BASE` into it; `docs/examples/puma.service` loads it. Security page row 28. `app = "rails"` is the proxy preset plus its tasks and credential
+  `SECRET_KEY_BASE` into it; `docs/examples/puma.service` loads it. Security page row 28.
+  Template rows (2026-09-27, Redmine report): a row with `writes` and fixed `content` and no
+  program (`database_config`: `config/database.yml` reading `DATABASE_URL`; `gemfile_local`),
+  written as the site's account only when missing; `app = "redmine"` is built on `rails`
+  (its rows but the new-application ones, plus `gemfile_local`, `load_default_data`,
+  `plugins_migrate`; `site-install --version`); `agensio ctl site-unit NAME` / MCP
+  `site_service_unit` renders the Puma unit from the site and `[control] runtimes` for root
+  (`control::service_unit`, F14's renderer in read-only form). `tests/redmine-install.sh`
+  installs Redmine 7.0.1 through the control plane. Security page row 29. `app = "rails"` is the proxy preset plus its tasks and credential
   files; Puma is started by `docs/examples/puma.service` until F14. `tests/tasks.sh`
   (root devbox, fake interpreters), `tests/rails.sh` (real Ruby and rubygems.org, the
   whole workflow). Rule for every change here: the security page rows 26 and 27 and the

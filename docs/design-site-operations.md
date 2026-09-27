@@ -719,3 +719,37 @@ default); the Rails refusals cover `/storage/` whole and databases, logs, keys a
 their ending, wherever the application keeps them (`storage/db/production.sqlite3`); the
 configuration document shows how root builds a pinned Ruby under `/opt`. F14 takes the
 report's other facts (section 5, "What a real application adds").
+
+## 14. Redmine through the control plane (2026-09-27, "wall 1" against alpha.32)
+
+Redmine 7.0.1 could not be installed through MCP alone: its archive ships only
+`config/database.yml.example`, its Gemfile chooses the database driver from
+`config/database.yml` (ERB included) and keeps Puma in its test group, and no tool could
+put a file whose content the user chooses into a site. The answer keeps the task model:
+nothing from the caller but a task's name and typed parameters.
+
+- **Template rows.** A task row may write one fixed file instead of running a program
+  (`writes`, `content`, `mode`, `needs_env`): below the site's directory, as the site's
+  account, every directory on the way the account's and opened without following a symlink,
+  created with `O_EXCL`, so it never replaces anything. `database_config` writes
+  `config/database.yml` reading `DATABASE_URL` (the adapter from its scheme); the value
+  comes from the site's environment (section 13), so a password never lands in the tree.
+  Offered to every Rails site, since any archive may lack the file.
+- **`app = "redmine"`**, built on `rails`: the rails rows except the two that make a new
+  application, plus `gemfile_local` (a fixed `Gemfile.local`: Puma), `load_default_data`
+  (`lang`, a language code) and `plugins_migrate`; its release archive by version from
+  redmine.org. A preset is the home of what Redmine needs next (SMTP in
+  `config/configuration.yml`, plugins).
+- **Guidance before the wall**: install facts (`database_yml`, `database_yml_example`,
+  `redmine`), next steps that start with the database, `bundle_install` answering 409 when
+  the application says it found no database configuration, a hint on the "no such file"
+  failure.
+- **The unit, rendered.** `service_unit` renders the Puma unit from the site and `[control]`
+  runtimes (the example had `/usr/bin` hard-coded, and a host whose tasks bundle with
+  `/opt`'s Ruby started Puma with Debian's); it is section 5's renderer in read-only form:
+  text for root, every value a plain path or name. F14 applies the same text through the
+  helper.
+
+Still ahead, as the report lists: starting Puma without root (F14), SMTP settings (a
+typed template row for `config/configuration.yml`, its password from the site's
+environment), and each plugin's `bundle_install` and `plugins_migrate` (the rows exist).

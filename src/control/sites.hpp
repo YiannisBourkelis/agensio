@@ -96,6 +96,15 @@ std::vector<Problem> preflight(const SiteSpec& spec, const Config& cfg, bool pri
 std::vector<std::string> prerequisites(const SiteSpec& spec, const Config& cfg);
 // What to run after the site is live (generated pool files, php-fpm reload).
 std::vector<std::string> next_steps(const SiteSpec& spec, const Config& cfg);
+
+// The systemd unit that runs a Rails site's Puma until agensio manages it (roadmap F14):
+// rendered from the site (its account, directory, loopback upstream port), [control]
+// runtimes (the Ruby the tasks bundled with) and the site's environment file, never from the
+// caller (2026-09-27 Redmine report: a unit copied from docs/examples/puma.service started
+// Debian's Ruby on a bundle built by /opt's). Text for root to put in place; every value in
+// it is checked to be a plain path or name, so nothing can add a line to the unit.
+// {"ok", "site", "unit_name", "path", "unit", "run_as_root": [...], "hint"} or {"ok": false, "error"}.
+json::Value service_unit(const SiteConfig& site, const Config& cfg);
 // "systemctl reload php8.4-fpm" for the pool directory in use (Debian), "php-fpm" (RHEL), brew.
 std::string php_fpm_reload_command(const Config& cfg, const std::string& version);
 

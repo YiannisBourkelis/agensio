@@ -1,4 +1,40 @@
 # Changelog
+## 0.1.0-alpha.33 (unreleased)
+
+From "wall 1", Redmine 7.0.1 through MCP alone (its archive ships only
+`config/database.yml.example`, keeps Puma in its test group, and its Gemfile picks the
+database driver from `database.yml`):
+
+- **`database_config`, a task with no program.** A new kind of task row writes one fixed
+  file below the site's directory as the site's account, only when it is missing, never
+  through a symlink: `database_config` writes `config/database.yml` (0600) from a template
+  that takes the database from `DATABASE_URL` in the site's environment and the adapter
+  from its scheme, so no password is kept in the tree and a Gemfile that reads it bundles
+  the right driver. It needs `DATABASE_URL` set first (`site_env_set`) and says so.
+- **`app = "redmine"`.** Built on `rails` (its tasks for an existing application, its
+  refusals and credential files) plus `gemfile_local` (a fixed `Gemfile.local` adding
+  Puma), `load_default_data` (a typed language parameter as `REDMINE_LANG`) and
+  `plugins_migrate`; `site-install --version 7.0.1` fetches redmine.org's release archive.
+  `tests/redmine-install.sh` installs Redmine 7.0.1 through `agensio ctl` alone and serves
+  its login page over TLS from the rendered unit.
+- **The agent is told before the wall.** `site_install`'s facts name `database_yml`,
+  `database_yml_example` and `redmine`, and its next steps start with `DATABASE_URL` and
+  `database_config` when the archive has no `database.yml`; a Redmine archive on a `rails`
+  site gets a warning to switch it. `bundle_install` that exits 0 while the application
+  says it found no database configuration answers 409 (the bundle has no driver), and a
+  task that fails for the missing `database.yml` carries a hint to `database_config`.
+- **`agensio ctl site-unit NAME` / MCP `site_service_unit`** renders the Puma unit of a
+  Rails or Redmine site from its account, directory, loopback port, `[control] runtimes`
+  (the Ruby its bundle was built with; the example unit hard-coded `/usr/bin`) and its
+  environment file, with the root commands that install it; every value checked to be a
+  plain path or name. Next steps point at it instead of `docs/examples/puma.service`.
+
+From the alpha.32 report (all four alpha.32 changes confirmed on the live host):
+
+- The exposed-orphan texts agree with their count, as the other ledger messages do: "KEY_B
+  in it was readable by others ... brings that value back ... rotate it" for one name,
+  the plural for several, in health's `site_env_orphan` and `site_delete`'s hint.
+
 ## 0.1.0-alpha.32 (2026-09-27)
 
 From the alpha.31 report (the exposure ledger confirmed in every path the tester built):

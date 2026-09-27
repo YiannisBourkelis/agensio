@@ -1678,12 +1678,38 @@ static void test_tasks() {
         return x;
     };
     for (const auto& r : tasks::rows()) {
-        CHECK(std::string_view(r.runtime) == "ruby" && std::string_view(r.program).find('/') == std::string_view::npos);
-        CHECK(tasks::find(r.app, r.name) == &r && tasks::family(r.app) != nullptr && r.timeout >= 600);
+        // A program row runs an interpreter by name; a template row writes one fixed file below the site.
+        if (r.writes) CHECK(!*r.runtime && !*r.program && r.args.empty() && r.content && std::string_view(r.writes).find("..") == std::string_view::npos && r.writes[0] != '/');
+        else CHECK(std::string_view(r.runtime) == "ruby" && std::string_view(r.program).find('/') == std::string_view::npos && r.timeout >= 600);
+        CHECK(tasks::find(r.app, r.name) == &r && tasks::family(r.app) != nullptr);
     }
-    CHECK(tasks::names("rails").size() == 6 && tasks::names("proxy").empty() && !tasks::has_tasks("wordpress") && tasks::has_tasks("rails"));
+    CHECK(tasks::names("rails").size() == 7 && tasks::names("proxy").empty() && !tasks::has_tasks("wordpress") && tasks::has_tasks("rails"));
     CHECK(tasks::find("rails", "rails_new") && !tasks::find("proxy", "rails_new") && !tasks::find("rails", "sh"));
-    CHECK(tasks::all_names().size() == 6 && tasks::all_params().size() == 2);
+    CHECK(tasks::all_names().size() == 10 && tasks::all_params().size() == 3);
+    // Redmine: the Rails rows for an existing application and its own; never the new-application ones.
+    const auto redmine = tasks::names("redmine");
+    CHECK(redmine.size() == 8 && !tasks::find("redmine", "rails_new") && !tasks::find("redmine", "gem_install_rails") && tasks::find("redmine", "bundle_install") &&
+          tasks::find("redmine", "database_config") && tasks::find("redmine", "gemfile_local") && !tasks::find("rails", "gemfile_local"));
+    {
+        const tasks::Row& ld = *tasks::find("redmine", "load_default_data");
+        CHECK(tasks::check_params(ld, js(R"({"lang":"pt-BR"})")).empty() && tasks::check_params(ld, js(R"({"lang":"el"})")).empty() &&
+              !tasks::check_params(ld, js(R"({"lang":"en; rm -rf /"})")).empty() && !tasks::check_params(ld, json::Value()).empty());
+        tasks::Context rc;
+        rc.runtime_dir = "/opt/ruby/bin";
+        rc.root = "/var/www/r.test/app";
+        rc.home = "/var/lib/agensio/r1";
+        const tasks::Plan lp = tasks::build(ld, js(R"({"lang":"de"})"), rc, "/opt/ruby/bin/bundle");
+        CHECK(lp.argv == (std::vector<std::string>{"/opt/ruby/bin/bundle", "exec", "rake", "redmine:load_default_data"}) && lp.env.back() == "REDMINE_LANG=de");
+        const tasks::Row& dbc = *tasks::find("rails", "database_config");
+        CHECK(std::string_view(dbc.writes) == "config/database.yml" && dbc.mode == 0600 && dbc.needs_env.size() == 1 &&
+              std::string_view(dbc.content).find("ENV[\"DATABASE_URL\"]") != std::string_view::npos);
+        // What exit 0 hides, and what a failure means.
+        const tasks::Row& bi = *tasks::find("redmine", "bundle_install");
+        CHECK(tasks::output_problem(bi, "Please configure your config/database.yml first\nBundle complete!").find("database_config") != std::string::npos &&
+              tasks::output_problem(bi, "Bundle complete!").empty());
+        CHECK(tasks::failure_hint(*tasks::find("redmine", "db_migrate"), "Cannot load database configuration:\nCould not load database configuration. No such file - [\"config/database.yml\"]", rc)
+                  .find("database_config") != std::string::npos);
+    }
     const tasks::Row& gem = *tasks::find("rails", "gem_install_rails");
     const tasks::Row& fresh = *tasks::find("rails", "rails_new");
     const tasks::Row& prep = *tasks::find("rails", "db_prepare");
@@ -1733,7 +1759,8 @@ static void test_tasks() {
     CHECK(tasks::failure_hint(gem, "Your Ruby version is 3.3.8, but your Gemfile specified 3.4.7", ctx).find("ruby = \"/opt/ruby/bin\"") != std::string::npos);
     CHECK(tasks::failure_hint(prep, "Could not find gem 'pg'", ctx).empty() && tasks::failure_hint(prep, "Your Ruby version is 3.3.8", ctx).empty());
     const json::Value cat = tasks::catalog("rails");
-    CHECK(cat.items().size() == 6 && cat.items()[1].get("task") == "rails_new" && cat.items()[1]["needs_empty"].boolean() &&
+    CHECK(cat.items().size() == 7 && cat.items()[1].get("task") == "rails_new" && cat.items()[1]["needs_empty"].boolean() &&
+          cat.items()[6].get("writes") == "config/database.yml" && cat.items()[6].get("mode") == "0600" &&
           cat.items()[1]["params"].items()[0].get("name") == "name" && tasks::catalog("static").items().empty());
     // Output: head and tail, the cut named.
     {
@@ -1862,7 +1889,8 @@ static void test_tasks() {
         cc.runtime_dir = [](std::string_view) { return std::string("/nonexistent-agensio-runtime"); };
         cc.sites_root = "/var/www";
         const json::Value listed = tasks::catalog("rails", &cc);
-        CHECK(listed.items().size() == 6 && listed.items()[1].get("task") == "rails_new" && listed.items()[1]["timeout"].num() == 1200 &&
+        CHECK(listed.items().size() == 7 && listed.items()[1].get("task") == "rails_new" && listed.items()[1]["timeout"].num() == 1200 &&
+              listed.items()[6]["interpreter"].is_null() &&  // a template row runs no interpreter
               listed.items()[3]["timeout"].num() == 1200);  // db_prepare's own 1800 is capped too
         const json::Value& in = listed.items()[0]["interpreter"];
         CHECK(in.get("program") == "/nonexistent-agensio-runtime/gem" && !in["ok"].boolean() && !in.get("error").empty());
@@ -1940,6 +1968,32 @@ static void test_tasks() {
     CHECK(body_refused_text(&rs, "192.0.2.7", 2883584, 1048576) ==
           "site r.test: a request body of 2.8 MB from 192.0.2.7 refused with 413: its max_body_size is 1 MB (the server's default); site_update with settings {max_body_size} raises it, up to [control] site_limits");
     CHECK(body_refused_text(nullptr, "-", 5000, 1024) == "a request body of 4.9 KB from - refused with 413: above the server's max_body_size of 1 KB");
+    // The Puma unit rendered for root (2026-09-27 Redmine report): the Ruby of [control]
+    // runtimes on PATH and in ExecStart, the site's account, directory, loopback port and
+    // environment file; refused for a site without its own account or a non-loopback upstream,
+    // and for any value that could add a line to the unit.
+    {
+        const json::Value u = control::service_unit(rs, cfg);
+        const std::string text(u.get("unit"));
+        CHECK(u["ok"].boolean() && u.get("unit_name") == "agensio-app-r1.service" && text.find("User=r1\nGroup=r1\n") != std::string::npos &&
+              text.find("Environment=PATH=/opt/ruby/bin:/usr/local/bin:/usr/bin:/bin\n") != std::string::npos &&
+              text.find("ExecStart=/opt/ruby/bin/bundle exec puma -e production -b tcp://127.0.0.1:3000\n") != std::string::npos &&
+              text.find("WorkingDirectory=" + rs.root + "\n") != std::string::npos && text.find("EnvironmentFile=-" + (dir / "env").string() + "/r.test.env\n") != std::string::npos &&
+              u["run_as_root"].items()[0].str() == "agensio ctl site-unit r.test --raw > /etc/systemd/system/agensio-app-r1.service");
+        SiteConfig nouser = rs;
+        nouser.user.clear();
+        CHECK(control::service_unit(nouser, cfg).get("error").find("no account of its own") != std::string_view::npos);
+        SiteConfig remote = rs;
+        remote.proxy.address.host = "10.0.0.5";
+        CHECK(control::service_unit(remote, cfg).get("error").find("loopback") != std::string_view::npos);
+        SiteConfig odd = rs;
+        odd.root = rs.root + "\nExecStartPre=/bin/sh -c id";
+        if (!odd.project_root.empty()) odd.project_root = odd.root;
+        CHECK(!control::service_unit(odd, cfg)["ok"].boolean() && control::service_unit(odd, cfg).get("unit").empty());
+        SiteConfig php = rs;
+        php.app = "wordpress";
+        CHECK(!control::service_unit(php, cfg)["ok"].boolean());
+    }
     const auto rsec = secret_paths(rs);
     CHECK(std::find(rsec.begin(), rsec.end(), rs.root + "/config/master.key") != rsec.end() && std::find(rsec.begin(), rsec.end(), rs.root + "/storage") != rsec.end());
     write("d.toml", rails);
@@ -2196,8 +2250,15 @@ static void test_appenv() {
         for (const auto& o : orph["orphans"].items()) named = named || (o.get("site") == "wb9.test" && o["exposed"].items().size() == 1);
         const auto fo = control::env_findings(orph);
         CHECK(named && std::any_of(fo.begin(), fo.end(), [](const control::Finding& f) {
-                  return f.code == "site_env_orphan" && f.severity == "warn" && f.message.find("K in it were readable by others and never rotated") != std::string::npos;
+                  return f.code == "site_env_orphan" && f.severity == "warn" && f.message.find("K in it was readable by others and never rotated") != std::string::npos &&
+                         f.message.find("brings that value back") != std::string::npos && f.fix.starts_with("rotate it ");
               }));
+        // One name reads singular, several plural (2026-09-27 report against alpha.32).
+        json::Value two = json::Value::object().set("ok", true).set("sites", json::Value::array())
+                              .set("orphans", json::Value::array().push(json::Value::object().set("file", "/e/x.test.env").set("exposed", json::Value::array().push("A").push("B"))));
+        const auto f2 = control::env_findings(two);
+        CHECK(f2.size() == 1 && f2[0].message.find("A, B in it were readable") != std::string::npos && f2[0].message.find("brings those values back") != std::string::npos &&
+              f2[0].fix.starts_with("rotate them "));
         // d) with neither the site nor its file, the ledger entry goes.
         fs::remove(xdir + "/wb9.test.env");
         inspect(xdir, me, {});
@@ -2823,11 +2884,13 @@ static void test_control_sites() {
     needs = apply_request(body, cfg, spec, err);
     CHECK(err.empty() && needs.empty() && spec.user == "shop" && spec.app == "laravel");
     CHECK(json::parse(R"({"app":"weird"})", body, err) && (apply_request(body, cfg, spec, err), err.find("app must be one of: static, php, laravel, drupal, wordpress, grav, proxy") != std::string::npos));
-    CHECK(app_presets().size() == 8 && app_presets().front() == "static" && app_presets()[5] == "grav" && app_presets()[6] == "proxy" && app_presets().back() == "rails");
+    CHECK(app_presets().size() == 9 && app_presets().front() == "static" && app_presets()[5] == "grav" && app_presets()[6] == "proxy" && app_presets()[7] == "rails" &&
+          app_presets().back() == "redmine");
     const json::Value catalog = preset_catalog();
-    CHECK(catalog["presets"].items().size() == 8 && catalog["presets"].items()[0].get("app") == "static" && catalog["presets"].items()[5].get("app") == "grav" &&
+    CHECK(catalog["presets"].items().size() == 9 && catalog["presets"].items()[8].get("app") == "redmine" && catalog["presets"].items()[8]["tasks"].items().size() == 8 &&
+          catalog["presets"].items()[0].get("app") == "static" && catalog["presets"].items()[5].get("app") == "grav" &&
           catalog["presets"].items()[6].get("app") == "proxy" && catalog["presets"].items()[7].get("app") == "rails" &&
-          catalog["presets"].items()[7]["tasks"].items().size() == 6 && catalog["presets"].items()[7]["secrets"].items()[0].str() == "/config/master.key");
+          catalog["presets"].items()[7]["tasks"].items().size() == 7 && catalog["presets"].items()[7]["secrets"].items()[0].str() == "/config/master.key");
     CHECK(catalog["presets"].items()[5]["never_served_directories"].items().size() == 9 && catalog["presets"].items()[5]["never_served_directories"].items()[0].str() == "/logs/" &&
           catalog["presets"].items()[3]["never_served_directories"].items().empty() && catalog["presets"].items()[5].get("source").starts_with("https://getgrav.org/"));
     const json::Value& laravel_row = catalog["presets"].items()[2];
@@ -3070,6 +3133,10 @@ static void test_control_sites() {
             };
             CHECK(rails_step().find("gem_install_rails, then rails_new") != std::string::npos);
             std::ofstream(rr / "Gemfile") << "source 'https://rubygems.org'\n";
+            // An archive without config/database.yml: the database first (2026-09-27 Redmine report).
+            CHECK(rails_step().find("without config/database.yml") != std::string::npos && rails_step().find("database_config") != std::string::npos);
+            fs::create_directories(rr / "config");
+            std::ofstream(rr / "config" / "database.yml") << "production: {}\n";
             CHECK(rails_step().find("in place: site-task shop.test bundle_install, then db_prepare") != std::string::npos && rails_step().find("rails_new") == std::string::npos);
             fs::create_directories(rr / "vendor" / "bundle");
             CHECK(rails_step().find("db_migrate after new migrations") != std::string::npos && rails_step().find("rails_new") == std::string::npos);

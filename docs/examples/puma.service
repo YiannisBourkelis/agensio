@@ -1,5 +1,7 @@
 # Puma for a site with app = "rails", until agensio manages the application process itself
-# (roadmap F14, docs/design-site-operations.md section 5). Replace ag5 (the site's account,
+# (roadmap F14, docs/design-site-operations.md section 5). `agensio ctl site-unit NAME --raw`
+# renders this unit for a site with its values and the Ruby of [control] runtimes filled in;
+# this file is the same unit by hand. Replace ag5 (the site's account,
 # its `user`), the application's directory (the site's `root`), ag5.edoc.gr in the
 # environment file's name (the site's first host name) and 127.0.0.1:3000 (the site's
 # `upstream`), then, as root:

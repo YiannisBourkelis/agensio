@@ -777,10 +777,10 @@ void apply_preset(SiteConfig& site, const std::string& where) {
             loc.methods = kFcgiMethods;
             loc.allow = allow_header(kFcgiMethods);
             loc.origin = "preset:" + site.app;
-            if (site.app == "rails") loc.deny_suffixes = kRailsRefusedEndings;  // answered 404 by the dispatcher, never proxied
+            if (rails_app(site.app)) loc.deny_suffixes = kRailsRefusedEndings;  // answered 404 by the dispatcher, never proxied
             site.locations.push_back(std::move(loc));
         }
-        if (site.app == "rails")
+        if (rails_app(site.app))
             for (const char* p : kRailsRefused) {
                 const std::string path = p;
                 const bool dir = path.back() == '/';
@@ -1198,7 +1198,8 @@ std::string body_refused_text(const SiteConfig* site, std::string_view remote, s
            "; site_update with settings {max_body_size} raises it, up to [control] site_limits";
 }
 
-bool proxy_app(std::string_view app) noexcept { return app == "proxy" || app == "rails"; }
+bool proxy_app(std::string_view app) noexcept { return app == "proxy" || rails_app(app); }
+bool rails_app(std::string_view app) noexcept { return app == "rails" || app == "redmine"; }
 
 bool php_app(std::string_view app) { return php_preset(std::string(app)) != nullptr; }
 
@@ -1787,6 +1788,21 @@ json::Value preset_catalog() {
                       .set("php", "none").set("tasks", std::move(names)).set("secrets", std::move(secrets))
                       .set("never_served", std::move(never)));
     }
+    {
+        json::Value names = json::Value::array(), secrets = json::Value::array(), never = json::Value::array();
+        for (const auto& n : tasks::names("redmine")) names.push(n);
+        for (const auto& s : preset_secrets("redmine")) secrets.push(s);
+        for (const char* p : kRailsRefused) never.push(p);
+        for (const auto& e : kRailsRefusedEndings) never.push("*" + e);
+        list.push(json::Value::object().set("app", "redmine")
+                      .set("summary", "Redmine, the Rails project tracker, installed from its release archive: the rails preset's routing, refusals "
+                                      "and tasks for an existing application (bundle_install, database_config, db_migrate, assets_precompile), plus "
+                                      "Redmine's own: gemfile_local (Puma, which Redmine keeps in its test group), load_default_data, plugins_migrate.")
+                      .set("root", "the project directory, where Redmine's archive is unpacked (nothing is served from it directly)")
+                      .set("php", "none").set("tasks", std::move(names)).set("secrets", std::move(secrets)).set("never_served", std::move(never))
+                      .set("source", "https://www.redmine.org/releases/redmine-{version}.tar.gz (site_install with version, e.g. 7.0.1; pass the "
+                                     "sha256 redmine.org publishes)"));
+    }
     return json::Value::object().set("presets", std::move(list))
         .set("note", "agensio never reads .htaccess; a preset provides the refusals an application's .htaccess would. Hand-written [[site.location]] entries win over a preset's. Every never_served name is refused in any backup spelling too, in its directory, whatever the case: name.bak, name~, name.txt, name-old, stem.bak (wp-config.bak), .name.swp, #name#; nothing to configure, and the bare stem (/readme, /license) stays a permalink.");
 }
@@ -1798,6 +1814,9 @@ std::vector<std::string> preset_secrets(const std::string& app) {
     // Rails: the key that decrypts the credentials, per-environment keys, the database
     // settings, and storage/ (the SQLite databases and Active Storage's files).
     if (app == "rails") out = {"/config/master.key", "/config/credentials", "/config/database.yml", "/storage"};
+    // Redmine: its database and SMTP settings and the secret generate_secret_token writes.
+    if (app == "redmine")
+        out = {"/config/database.yml", "/config/configuration.yml", "/config/initializers/secret_token.rb", "/config/master.key", "/config/credentials"};
     return out;
 }
 
@@ -1807,6 +1826,14 @@ std::string preset_uploads(const std::string& app) {
 }
 
 std::string preset_source(const std::string& app, const std::string& version) {
+    // Redmine publishes each release at a fixed address; a version is required (there is no
+    // "latest" address) and must be digits and dots, so nothing else can reach the URL.
+    if (app == "redmine") {
+        if (version.empty() || version.size() > 16 || version.find_first_not_of("0123456789.") != std::string::npos || version.front() == '.' ||
+            version.back() == '.' || version.find("..") != std::string::npos)
+            return "";
+        return "https://www.redmine.org/releases/redmine-" + version + ".tar.gz";
+    }
     const PhpPreset* p = php_preset(app);
     if (!p || !*p->source) return "";
     if (version.empty()) return p->source;
@@ -1822,6 +1849,7 @@ std::vector<std::string> app_presets() {
     for (const auto& p : kPhpPresets) out.emplace_back(p.name);
     out.emplace_back("proxy");
     out.emplace_back("rails");
+    out.emplace_back("redmine");
     return out;
 }
 

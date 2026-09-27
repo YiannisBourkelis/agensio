@@ -296,9 +296,12 @@ SiteConfig control_site();
 // Every value `app = "..."` accepts: "static", the PHP presets in table order, "proxy",
 // "rails". The control API and the MCP tool schema list these, so a new preset is exposed at once.
 std::vector<std::string> app_presets();
-// A preset that hands every request to the site's upstream ("proxy", "rails"): no PHP, no
-// document root served, `upstream` required.
+// A preset that hands every request to the site's upstream ("proxy", "rails", "redmine"): no
+// PHP, no document root served, `upstream` required.
 bool proxy_app(std::string_view app) noexcept;
+// A Rails application preset ("rails", and "redmine" built on it): the Rails refusals, the
+// Rails tasks, the credential files of Rails.
+bool rails_app(std::string_view app) noexcept;
 // A PHP preset (a row of the PHP preset table).
 bool php_app(std::string_view app);
 // What each `app` value does, for `agensio ctl presets` and the MCP tool: served root,

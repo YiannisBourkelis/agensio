@@ -871,10 +871,12 @@ std::vector<Finding> env_findings(const json::Value& inspected) {
         if (names.empty())
             out.push_back(Finding{"info", "site_env_orphan", "", file + " belongs to no configured site (a deleted site's environment: its secrets)",
                                   "as root, when the site is gone for good: rm -f " + file});
-        else
-            out.push_back(Finding{"warn", "site_env_orphan", "", file + " belongs to no configured site, and " + names +
-                                      " in it were readable by others and never rotated: bringing the site back with this file brings those values back",
-                                  "rotate them after bringing the site back (site_env_set), or as root, when the site is gone for good: rm -f " + file});
+        else {
+            const bool one = o["exposed"].items().size() == 1;  // "KEY_B in it was ... that value", as the other ledger texts agree
+            out.push_back(Finding{"warn", "site_env_orphan", "", file + " belongs to no configured site, and " + names + " in it " + (one ? "was" : "were") +
+                                      " readable by others and never rotated: bringing the site back with this file brings " + (one ? "that value" : "those values") + " back",
+                                  std::string("rotate ") + (one ? "it" : "them") + " after bringing the site back (site_env_set), or as root, when the site is gone for good: rm -f " + file});
+        }
     }
     return out;
 }

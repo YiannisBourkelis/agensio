@@ -115,6 +115,7 @@ takes `--socket PATH`.
 | `site_copy` | admin | copy one regular file of a site to another path of the same site, as the site's account: the drop-ins applications ship as templates (WordPress's `wp-content/db.php` from the SQLite plugin, Drupal's `settings.php`); `overwrite`, `dry_run`; never across sites, never caller content, never a directory. Like `site_install`, credential files come out `0600` and the configuration is validated before the answer |
 | `site_tasks_list` | viewer | the named tasks of the site's preset (`app = "rails"`: `gem_install_rails`, `rails_new`, `bundle_install`, `db_prepare`, `db_migrate`, `assets_precompile`) with their parameters, whether each downloads, its effective time limit, whether its interpreter is in place (`run_as_root` lists every missing package once, before the first task), the account that runs them and the directory; other presets have none |
 | `site_task` | admin | runs one of them as the site's account in the site's directory: a fixed command from the table, typed parameters, never a command line; the answer carries the exact argv, the exit status and the output (head and tail); the credential files are made the site's alone and the configuration is validated; `dry_run` shows the command without running it and meets the same refusals (a missing interpreter as `run_as_root`, a missing result of an earlier task naming the task to run); a task that exits 0 without what the next one needs is a 409; a failure with a known cause carries `hint` (Rails' missing `secret_key_base`, a Gemfile pinning another Ruby); the site's environment reaches the task and shows as `NAME=<site environment>`. Marked destructive, so the host asks |
+| `site_service_unit` | viewer | the systemd unit that runs a Rails or Redmine site's Puma, rendered from the site (account, directory, loopback port) and `[control] runtimes`, with the root commands that install it; the agent shows them, root runs them |
 | `site_env` | admin | a Rails or proxy site's environment: the variables its tasks and its application service get (`SECRET_KEY_BASE`, `DATABASE_URL`) from a root-owned `0600` file, as names, lengths and fingerprints (the same fingerprint means the same value); a value only for the names in `reveal`, which the agent uses only when you ask to see that value, audited as REVEALED; `exists` false when there is no file yet |
 | `site_env_set` | admin | `set`, `unset`, `generate` (a random secret for a missing name; a name in `unset` and `generate` is rotated) on that file, through the root helper; names that choose a program (`PATH`, `LD_*`, `GEM_*`, `RUBYOPT`, ...) are refused; the answer and the audit log carry names only, and the next step is the application service's restart |
 | `uploads_list` | viewer | archives stored with `agensio ctl upload`, for `site_install` |
@@ -165,8 +166,14 @@ its own user, `root` at `/var/www/example.com/app` and `upstream` at
 `rails_new` with `params: {"name": "shop"}`, `db_prepare` and `assets_precompile`, each as
 the site's account, reading the output when one fails. When Ruby is missing, the first
 answer carries the `apt-get` line for you to run as root. The one step left for a terminal
-is starting Puma, until agensio manages the application process: the agent hands you
-`docs/examples/puma.service` with the account, the directory and the port filled in.
+is starting Puma, until agensio manages the application process: `site_service_unit`
+renders the site's unit and the agent hands you its three root commands.
+
+Redmine goes the same way with `app: "redmine"`: `site_install` with `version: "7.0.1"`
+and redmine.org's sha256, `site_env_set` with `DATABASE_URL`, then `site_task`
+`database_config` (a fixed `config/database.yml` reading that variable), `gemfile_local`
+(Puma, which Redmine keeps in its test group), `bundle_install`, `db_migrate`,
+`load_default_data` with `lang`, `assets_precompile`, and the unit.
 
 An existing application comes as an archive. For Writebook the agent calls
 `site_install` with the GitHub release URL; the answer says the application pins Ruby

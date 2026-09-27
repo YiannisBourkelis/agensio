@@ -213,6 +213,15 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
             body.set("hint", "tasks belong to a preset: app = \"rails\" has them. This site's app has none, and agensio runs no other command.");
         }
         reply(s, 200, body);
+    } else if (path.starts_with("/v1/sites/") && path.ends_with("/unit")) {
+        // The Puma unit of a Rails site, for root to put in place (read-only text; F14 will apply it).
+        const std::string_view name = path.substr(10, path.size() - 10 - 5);
+        const SiteConfig* site = control::find_site(backend_->running(), name);
+        if (!site) reply(s, 404, json::Value::object().set("error", "no such site").set("site", std::string(name)));
+        else {
+            json::Value u = control::service_unit(*site, backend_->running());
+            reply(s, u["ok"].boolean() ? 200 : 409, u);
+        }
     } else if (path.starts_with("/v1/sites/") && path.ends_with("/settings")) {
         const std::string_view name = path.substr(10, path.size() - 10 - 9);
         const SiteConfig* site = control::find_site(backend_->running(), name);
@@ -294,7 +303,7 @@ std::string body_limit_step(const SiteConfig& site, const Config& cfg) {
 
 struct SiteFacts {
     bool rails_root = false;
-    std::string key, ruby_dir, body_step;
+    std::string key, ruby_dir, body_step, app;
 };
 
 // The hosting-rule errors of the configuration on disk, as a set: a writer compares the
@@ -583,7 +592,8 @@ void ControlHandler::site_install(Stream& s, std::string_view name, const json::
         if (url.empty()) {
             reply(s, 422, json::Value::object().set("error", "no source: give url (an https archive) or file (an upload)")
                               .set("hint", app == "laravel" ? "Laravel projects are created with composer, not from an archive; upload the project as a tarball or give the URL of one"
-                                                             : "this preset has no official download; give url or file")
+                                           : app == "redmine" ? "Redmine has no address for the newest release: give version (e.g. 7.0.1, digits and dots) and the sha256 redmine.org publishes"
+                                                              : "this preset has no official download; give url or file")
                               .set("app", app));
             done();
             return;
@@ -646,14 +656,15 @@ void ControlHandler::site_install(Stream& s, std::string_view name, const json::
     if (!file.empty()) req.set("upload", file);
     if (!sha.empty()) req.set("sha256", sha);
     if (!body["strip"].is_null()) req.set("strip", body["strip"]);
-    if (app == "rails" && target == site_root) req.set("ruby_check", true);  // the pinned Ruby against the runtime's (next steps)
+    if (rails_app(app) && target == site_root) req.set("ruby_check", true);  // the pinned Ruby against the runtime's (next steps)
     const std::string source = url.empty() ? "upload " + file : url;
     if (!dry_run) audit_peer(s, what, "installing " + source + " into " + target + (create_path ? " (create_path)" : ""));
     const std::vector<std::string> before = dry_run ? std::vector<std::string>{} : validation_errors(*backend_);
     // What the answer's next steps depend on (2026-09-27 Writebook report: a Rails site was
     // told to open a browser, and nothing named the 1 MB body limit before the first upload).
     SiteFacts sf;
-    sf.rails_root = app == "rails" && target == site_root;
+    sf.rails_root = rails_app(app) && target == site_root;
+    sf.app = app;
     sf.key = site->server_names.front();
     sf.ruby_dir = runtime_dir(cfg.control, "ruby");
     sf.body_step = app == "static" ? std::string() : body_limit_step(*site, cfg);
@@ -703,14 +714,25 @@ void ControlHandler::site_install(Stream& s, std::string_view name, const json::
                                    std::string(facts.get("runtime_ruby_error").empty() ? "the interpreter rule refused it: site_tasks_list says why" : facts.get("runtime_ruby_error")) +
                                    "); when it is another version bundle_install refuses (docs/configuration.md 15)");
                 }
-                steps.push("site_task bundle_install, then db_prepare and assets_precompile; then the application server (docs/examples/puma.service, "
-                           "which loads the site's environment file)");
+                // Redmine and every archive that ships database.yml.example: the database first
+                // (2026-09-27 Redmine report: bundle_install then had no driver, db_prepare failed).
+                const bool no_db = !facts["database_yml"].boolean();
+                const std::string db = no_db ? "site_env_set with set: {\"DATABASE_URL\": \"sqlite3:db/production.sqlite3\"} (or postgresql://USER:PASSWORD@HOST/NAME), "
+                                               "site_task database_config, " : "";
+                const std::string unit = "then the application server: site_service_unit gives its systemd unit for root to install";
+                if (sf.app == "redmine")
+                    steps.push(db + "site_task gemfile_local, bundle_install, db_migrate, load_default_data with params {\"lang\": \"en\"}, assets_precompile; " + unit);
+                else
+                    steps.push(db + "site_task bundle_install, then db_prepare and assets_precompile; " + unit);
             } else {
                 steps.push("open the site in a browser to finish the application's own setup (database, admin account)");
             }
             if (!sf.body_step.empty()) steps.push(sf.body_step);
             if (!file.empty()) steps.push("the upload " + file + " is still stored; delete it with uploads delete " + file + " when no longer needed");
             r.set("next_steps", steps);
+            if (sf.app == "rails" && facts["redmine"].boolean())  // the archive is Redmine: its preset has the tasks it needs
+                warnings.push("this is Redmine (lib/redmine/version.rb): site_update with app \"redmine\" gives the site its tasks (gemfile_local for Puma, "
+                              "load_default_data, plugins_migrate) and its credential files");
             // An application that came without Rails credentials reads SECRET_KEY_BASE from its
             // environment (every ONCE application, every Kamal deployment): a fresh install
             // gets one, once. Never for an application with credentials, whose own secret an
@@ -1047,9 +1069,11 @@ void ControlHandler::site_toggle(Stream& s, std::string_view name, std::string_v
             .set("run_as_root", json::Value::array().push("rm -f " + env));
         std::string names;
         for (const auto& n : env_exposed) names += (names.empty() ? "" : ", ") + n;
+        const bool one = env_exposed.size() == 1;
         body.set("hint", names.empty() ? "run_as_root removes the environment file once the site is gone for good; keep it to bring the site back with the same secrets"
-                                       : names + " in it were readable by others and never rotated: bringing the site back with this file brings those values "
-                                                 "back, so rotate them then (site_env_set), or remove the file with run_as_root once the site is gone for good");
+                                       : names + " in it " + (one ? "was" : "were") + " readable by others and never rotated: bringing the site back with this file brings " +
+                                             (one ? "that value" : "those values") + " back, so rotate " + (one ? "it" : "them") +
+                                             " then (site_env_set), or remove the file with run_as_root once the site is gone for good");
         if (!names.empty()) body.set("exposed", strings(env_exposed));
     }
     reply(s, 200, body);
@@ -1191,6 +1215,9 @@ void ControlHandler::site_task(Stream& s, std::string_view name, const json::Val
         // and how it ended; the output stays in the answer.
         if (!r["ran"].boolean()) {
             audit_peer(s, what, "refused: " + std::string(r.get("error")));
+        } else if (!r.get("wrote").empty()) {  // a template row: a fixed file, no program
+            audit_peer(s, what, "wrote " + std::string(r.get("wrote")) + " (" + std::string(r.get("mode")) + ") as " + std::string(r.get("as")) +
+                                    " from the fixed template of " + std::string(r.get("task")));
         } else {
             std::string argv;
             for (const auto& a : r["argv"].items()) argv += (argv.empty() ? "" : " ") + shell_word(a.str());
