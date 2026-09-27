@@ -1334,7 +1334,10 @@ void ControlHandler::site_env_set(Stream& s, std::string_view name, const json::
         std::string result;
         for (const char* k : {"set", "unset", "generated", "kept", "absent", "tightened"})
             if (!r[k].items().empty()) result += (result.empty() ? "" : "; ") + std::string(k) + " " + joined(r[k]);
-        audit_peer(s, what, "environment " + std::string(r.get("file")) + ": " + (result.empty() ? std::string("unchanged") : result));
+        audit_peer(s, what, "environment " + std::string(r.get("file")) + ": " + (result.empty() ? std::string("unchanged") : result) +
+                                (r.get("removed").empty() ? "" : "; removed the file, no variable left"));
+        if (!r.get("removed").empty())
+            r.set("done", json::Value::array().push("removed " + std::string(r.get("removed")) + ": no variables left (site_env_set creates it again)"));
         json::Value steps = json::Value::array();
         steps.push("the tasks read it from their next run");
         steps.push("the application reads it when its service restarts: a unit from docs/examples/puma.service loads the file (EnvironmentFile=); as root, systemctl restart " + unit);

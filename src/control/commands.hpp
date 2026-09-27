@@ -103,7 +103,12 @@ struct Finding {
 // What an administrator should look at: certificates, redirects, port 80 for ACME,
 // recent errors, pending restart, root, shared accounts, stale pools.
 std::vector<Finding> health_findings(const Config& running, const Config& boot, bool as_root, std::time_t now);
-json::Value health(const Config& running, const Config& boot, bool as_root, std::time_t now);
+// `extra`: findings the caller gathered where this process cannot look (the sites'
+// environment files, through the helper), appended as they are.
+json::Value health(const Config& running, const Config& boot, bool as_root, std::time_t now, const std::vector<Finding>& extra = {});
+// appenv::inspect's answer as findings: a file a task would refuse (warn), one the next task
+// tightens (info), a deleted site's file (info), or that the check could not run.
+std::vector<Finding> env_findings(const json::Value& inspected);
 
 // "a=1&b=x%20y" lookups on a request target's query; "" when absent.
 std::string query_value(std::string_view target, std::string_view key);

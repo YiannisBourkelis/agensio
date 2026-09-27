@@ -32,9 +32,13 @@ public:
     // One request, one reply: {"op": ..., ...} -> {"ok": bool, "error"?: text, "output"?: text}.
     // Synchronous and serialised; the operations take milliseconds.
     json::Value request(const json::Value& req);
+    // The same without waiting: {"ok": false, "busy": true} when another request (a task
+    // that runs for minutes) holds the helper. For the reads a caller must never wait on.
+    json::Value try_request(const json::Value& req);
     void stop() noexcept;
 
 private:
+    json::Value exchange(const json::Value& req);  // one request and its reply; the caller holds mutex_
     int fd_ = -1;
     int pid_ = -1;
     std::mutex mutex_;

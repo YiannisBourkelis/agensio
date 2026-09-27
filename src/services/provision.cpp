@@ -141,7 +141,7 @@ std::string validate(const json::Value& req, const Config& cfg) {
         }
         return "";
     }
-    if (op == "pools_apply" || op == "service_restart" || op == "ping") return "";
+    if (op == "pools_apply" || op == "service_restart" || op == "ping" || op == "env_check") return "";
     return "unknown operation '" + op + "'";
 }
 
@@ -712,6 +712,20 @@ void helper_loop(int fd, const Config& cfg) {
                     reply = task_run(req, cfg, fd);
                 } else if (op == "env_read" || op == "env_write") {
                     reply = env_op(req, cfg);
+                } else if (op == "env_check") {
+                    // Health's read-only pass over the sites' environment files (appenv::inspect),
+                    // the sites from the configuration on disk; no value leaves the helper.
+                    try {
+                        const Config fresh = load_config(cfg.config_path);
+                        std::vector<std::string> sites;
+                        for (const auto& s : fresh.sites)
+                            if (proxy_app(s.app) && !s.server_names.empty() &&
+                                std::find(sites.begin(), sites.end(), s.server_names.front()) == sites.end())
+                                sites.push_back(s.server_names.front());
+                        reply = appenv::inspect(appenv::dir_of(cfg.config_path), 0, sites);
+                    } catch (const std::exception& e) {
+                        reply.set("ok", false).set("error", e.what());
+                    }
                 } else if (op == "service_restart") {
                     const auto now = std::chrono::steady_clock::now();
                     if (now - last_restart < std::chrono::seconds(60)) {
@@ -766,8 +780,18 @@ bool Provisioner::start(const Config& cfg, ErrorLog& log) {
     return true;
 }
 
+json::Value Provisioner::try_request(const json::Value& req) {
+    std::unique_lock lock(mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) return json::Value::object().set("ok", false).set("busy", true);
+    return exchange(req);  // under the lock taken here: nothing can slip in and make this wait
+}
+
 json::Value Provisioner::request(const json::Value& req) {
     std::lock_guard lock(mutex_);
+    return exchange(req);
+}
+
+json::Value Provisioner::exchange(const json::Value& req) {
     json::Value reply = json::Value::object();
     if (fd_ < 0) return reply.set("ok", false).set("error", "no provisioning helper");
     const std::string text = req.dump() + "\n";
@@ -802,6 +826,7 @@ bool Provisioner::start(const Config&, ErrorLog& log) {
     return false;
 }
 json::Value Provisioner::request(const json::Value&) { return json::Value::object().set("ok", false).set("error", "not available"); }
+json::Value Provisioner::try_request(const json::Value&) { return json::Value::object().set("ok", false).set("error", "not available"); }
 void Provisioner::stop() noexcept {}
 #endif
 

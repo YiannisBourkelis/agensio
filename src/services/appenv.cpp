@@ -11,6 +11,7 @@
 #endif
 
 #ifndef _WIN32
+#include <dirent.h>
 #include <fcntl.h>
 #include <sys/random.h>
 #include <sys/stat.h>
@@ -333,6 +334,7 @@ int open_dir(const std::string& dir, unsigned owner, Status& st) {
             return -1;
         }
         st.notes.push_back(dir + " was mode " + mode_text(sb.st_mode) + ", open to its group or others; made 0700");
+        st.dir_was_open = true;
     }
     return fd;
 }
@@ -365,7 +367,11 @@ bool read_at(int dfd, const std::string& dir, std::string_view site, unsigned ow
             ::close(fd);
             return false;
         }
-        st.notes.push_back(path + " was mode " + mode_text(sb.st_mode) + ", readable by others; made 0600 (rotate what it holds if others could log in here)");
+        // Rotation is advice only when others could have reached the file: through a
+        // directory that was open too (2026-09-27 report: advised under a 0700 directory).
+        st.notes.push_back(path + " was mode " + mode_text(sb.st_mode) + "; made 0600" +
+                           (st.dir_was_open ? " (its directory was open to others as well: rotate what it holds)"
+                                            : " (its directory was " + whose(owner) + " alone, so nobody else could reach it; nothing to rotate)"));
     }
     std::string text(static_cast<std::size_t>(sb.st_size), '\0');
     std::size_t got = 0;
@@ -541,11 +547,13 @@ json::Value apply(const std::string& dir, std::string_view site, unsigned owner,
         return fail.set("error", "the environment would hold more than " + std::to_string(kMaxVars) + " variables or 64 KB");
     }
     const bool changed = !set.empty() || !unset.empty() || !generated.empty();
+    bool removed = false;
     if (changed && vars.empty()) {
         if (::unlinkat(dfd, leaf.c_str(), 0) != 0 && errno != ENOENT) {
             ::close(dfd);
             return fail.set("error", "remove " + path + ": " + std::strerror(errno));
         }
+        removed = st.exists;
     } else if (changed) {
         const std::string tmp = leaf + ".tmp";
         ::unlinkat(dfd, tmp.c_str(), 0);  // left by a write that died
@@ -574,7 +582,68 @@ json::Value apply(const std::string& dir, std::string_view site, unsigned owner,
     json::Value out = json::Value::object().set("ok", true).set("file", path).set("set", names_of(set)).set("unset", names_of(unset)).set("absent", names_of(absent))
         .set("generated", names_of(generated)).set("kept", names_of(kept)).set("names", names_of(names));
     if (!st.notes.empty()) out.set("tightened", names_of(st.notes));
+    if (removed) out.set("removed", path);  // no variable left: no file (2026-09-27 report: the answer said only names: [])
     return out;
+}
+
+json::Value inspect(const std::string& dir, unsigned owner, const std::vector<std::string>& sites) {
+    json::Value found = json::Value::array(), orphans = json::Value::array();
+    const json::Value none = json::Value::object().set("ok", true).set("sites", json::Value::array()).set("orphans", json::Value::array());
+    const int dfd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (dfd < 0) return none;  // absent, or health's own directory check names it
+    for (const auto& site : sites) {
+        if (!valid_site(site)) continue;
+        const std::string leaf = site + ".env", path = dir + "/" + leaf;
+        struct stat sb {};
+        if (::fstatat(dfd, leaf.c_str(), &sb, AT_SYMLINK_NOFOLLOW) != 0) continue;  // no file: nothing to meet
+        auto add = [&](const char* severity, std::string problem, std::string fix) {
+            json::Value v = json::Value::object().set("site", site).set("severity", severity).set("problem", std::move(problem));
+            if (!fix.empty()) v.set("fix", std::move(fix));
+            found.push(std::move(v));
+        };
+        if (S_ISLNK(sb.st_mode) || !S_ISREG(sb.st_mode)) {
+            add("warn", path + " is a symlink or not a regular file: every task of " + site + " is refused", "rm " + path);
+            continue;
+        }
+        if (sb.st_uid != owner || sb.st_nlink != 1 || (sb.st_mode & 022) != 0 || static_cast<std::size_t>(sb.st_size) > kMaxFile) {
+            add("warn", path + " is uid " + std::to_string(sb.st_uid) + "'s, mode " + mode_text(sb.st_mode) + ", " + std::to_string(sb.st_nlink) +
+                            " link(s): it must be " + whose(owner) + ", 0600, one link; every task of " + site + " is refused",
+                sb.st_uid == owner && sb.st_nlink == 1 ? own_command(path, owner, "0600") + "   # after checking its content" : "rm " + path);
+            continue;
+        }
+        if ((sb.st_mode & 077) != 0)
+            add("info", path + " is mode " + mode_text(sb.st_mode) + " (readable by others): the next task or site_env makes it 0600", own_command(path, owner, "0600"));
+        // What a task would meet inside it: a line systemd reads otherwise, a refused name.
+        const int fd = ::openat(dfd, leaf.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+        if (fd < 0) continue;
+        std::string text(static_cast<std::size_t>(sb.st_size), '\0');
+        const ssize_t n = ::read(fd, text.data(), text.size());
+        ::close(fd);
+        text.resize(n > 0 ? static_cast<std::size_t>(n) : 0);
+        std::vector<Var> vars;
+        std::string why;
+        if (!parse(text, vars, why)) {
+            add("warn", path + ": " + why + "; every task of " + site + " is refused", "");
+            continue;
+        }
+        for (const auto& v : vars)
+            if (std::string bad = check_name(v.name).empty() ? check_value(v.value) : check_name(v.name); !bad.empty()) {
+                add("warn", path + ": " + bad + "; every task of " + site + " is refused", "site_env_set " + site + " with unset: [\"" + v.name + "\"]");
+                break;
+            }
+    }
+    // The files no configured site names: a deleted site's secrets, kept on purpose or forgotten.
+    if (DIR* d = ::fdopendir(::dup(dfd))) {
+        while (const struct dirent* e = ::readdir(d)) {
+            const std::string_view name = e->d_name;
+            if (name.size() <= 4 || !name.ends_with(".env") || name.front() == '.') continue;
+            const std::string_view site = name.substr(0, name.size() - 4);
+            if (std::find(sites.begin(), sites.end(), site) == sites.end()) orphans.push(dir + "/" + std::string(name));
+        }
+        ::closedir(d);
+    }
+    ::close(dfd);
+    return json::Value::object().set("ok", true).set("sites", std::move(found)).set("orphans", std::move(orphans));
 }
 
 #endif

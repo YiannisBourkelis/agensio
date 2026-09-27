@@ -690,7 +690,26 @@ json::Value Server::health() {
 #else
     const bool as_root = ::geteuid() == 0;
 #endif
-    return control::health(gen_->cfg, cfg_, as_root, std::time(nullptr));
+    // The sites' environment files sit in root's 0700 directory, which this process cannot
+    // look into: the helper checks them (read-only, milliseconds), never waited for while a
+    // task holds it (2026-09-27 report: a 0666 file stopped a site's tasks and health was
+    // silent). Without the helper the files are this process's own.
+    std::vector<control::Finding> extra;
+    const Config& cfg = gen_->cfg;
+    if (std::any_of(cfg.sites.begin(), cfg.sites.end(), [](const SiteConfig& s) { return proxy_app(s.app); })) {
+        if (provisioner_.available()) {
+            extra = control::env_findings(provisioner_.try_request(json::Value::object().set("op", "env_check")));
+        } else {
+#ifndef _WIN32
+            std::vector<std::string> sites;
+            for (const auto& s : cfg.sites)
+                if (proxy_app(s.app) && !s.server_names.empty() && std::find(sites.begin(), sites.end(), s.server_names.front()) == sites.end())
+                    sites.push_back(s.server_names.front());
+            extra = control::env_findings(appenv::inspect(appenv::dir_of(cfg.config_path), ::geteuid(), sites));
+#endif
+        }
+    }
+    return control::health(cfg, cfg_, as_root, std::time(nullptr), extra);
 }
 
 json::Value Server::status() {

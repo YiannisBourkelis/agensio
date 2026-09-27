@@ -81,6 +81,7 @@ struct Status {
     std::string fix;
     std::vector<std::string> notes;
     bool exists = false;
+    bool dir_was_open = false;  // the directory had to be tightened in this pass (others could reach the files)
 };
 
 #ifndef _WIN32
@@ -100,10 +101,17 @@ bool read(const std::string& dir, std::string_view site, unsigned owner, std::ve
 // `<dir>/.fingerprint.key`, `owner`'s, 0600.
 json::Value describe(const std::string& dir, std::string_view site, unsigned owner, const std::vector<std::string>& reveal);
 
+// Health's view, read-only (nothing tightened, nothing created): what a task of each of
+// `sites` would meet in its file, and the `.env` files no site names any more.
+// {"ok": true, "sites": [{"site", "severity", "problem", "fix"?}], "orphans": [paths]}; an
+// absent directory or file is no problem. The directory itself is health's own check.
+json::Value inspect(const std::string& dir, unsigned owner, const std::vector<std::string>& sites);
+
 // Applies a change as the calling process, which is `owner`: the directory is created 0700
 // when missing, the file written to a temporary name, synced and renamed into place 0600,
 // and removed when no variable is left. {"ok", "file", "set", "unset", "absent",
-// "generated", "kept", "names", "tightened"?} or {"ok": false, "error", "run_as_root"?}:
+// "generated", "kept", "names", "tightened"?, "removed"? (the file, when no variable is
+// left)} or {"ok": false, "error", "run_as_root"?}:
 // names only, a value never appears in the answer.
 json::Value apply(const std::string& dir, std::string_view site, unsigned owner, const Change& change);
 #endif

@@ -2088,6 +2088,47 @@ static void test_appenv() {
     r = apply(envdir, "b.test", me, ch);
     CHECK(r["ok"].boolean() && r["tightened"].items().size() == 1);
     CHECK(!rd("../x", me, st) && !apply(envdir, "../x", me, ch)["ok"].boolean());
+    // Rotation is advised only when others could reach the file (2026-09-27 report).
+    fs::permissions(envdir + "/b.test.env", fs::perms::owner_read | fs::perms::owner_write | fs::perms::others_read);
+    CHECK(rd("b.test", me, st) && st.notes.size() == 1 && st.notes[0].find("nothing to rotate") != std::string::npos);
+    fs::permissions(envdir, fs::perms::owner_all | fs::perms::others_exec);
+    fs::permissions(envdir + "/b.test.env", fs::perms::owner_read | fs::perms::owner_write | fs::perms::others_read);
+    CHECK(rd("b.test", me, st) && st.notes.size() == 2 && st.notes[1].find("rotate what it holds") != std::string::npos);
+    // The last variable unset: the file goes, and the answer says so.
+    ch = Change{};
+    ch.unset = {"A"};
+    r = apply(envdir, "b.test", me, ch);
+    CHECK(r["ok"].boolean() && r.get("removed") == envdir + "/b.test.env" && !fs::exists(envdir + "/b.test.env"));
+    // Health's read-only view: nothing tightened, a finding per file a task would meet, orphans.
+    auto write_env = [&](const char* site, const char* text, fs::perms mode) {
+        std::ofstream(envdir + "/" + site + ".env") << text;
+        fs::permissions(envdir + "/" + site + ".env", mode);
+    };
+    const auto rw = fs::perms::owner_read | fs::perms::owner_write;
+    write_env("ok.test", "A=\"1\"\n", rw);
+    write_env("open.test", "A=1\n", rw | fs::perms::others_read | fs::perms::others_write);
+    write_env("read.test", "A=1\n", rw | fs::perms::group_read);
+    write_env("path.test", "PATH=/tmp\n", rw);
+    write_env("gone.test", "A=1\n", rw);
+    json::Value in = inspect(envdir, me, {"ok.test", "open.test", "read.test", "path.test", "none.test", "c.test", "d.test"});
+    auto finding = [&](const char* site) {
+        for (const auto& f : in["sites"].items())
+            if (f.get("site") == site) return std::string(f.get("severity")) + " " + std::string(f.get("problem")).substr(0, 0) + (f.get("fix").empty() ? "nofix" : "fix");
+        return std::string("none");
+    };
+    // c.test (PATH) and d.test (a symlink) are left from above: five in all.
+    CHECK(in["ok"].boolean() && finding("ok.test") == "none" && finding("none.test") == "none" && finding("open.test") == "warn fix" &&
+          finding("read.test") == "info fix" && finding("path.test") == "warn fix" && finding("d.test") == "warn fix");
+    CHECK(::stat((envdir + "/read.test.env").c_str(), &sb) == 0 && (sb.st_mode & 0777) == 0640);  // read-only: nothing tightened
+    bool orphan = false;
+    for (const auto& o : in["orphans"].items()) orphan = orphan || o.str() == envdir + "/gone.test.env";
+    CHECK(orphan && in["orphans"].items().size() == 1);
+    const auto hf = control::env_findings(in);
+    CHECK(std::count_if(hf.begin(), hf.end(), [](const control::Finding& f) { return f.code == "site_env_unsafe"; }) == 5 &&
+          std::count_if(hf.begin(), hf.end(), [](const control::Finding& f) { return f.code == "site_env_orphan" && f.fix.find("rm -f") != std::string::npos; }) == 1);
+    const auto busy = control::env_findings(json::Value::object().set("ok", false).set("busy", true));
+    CHECK(busy.size() == 1 && busy[0].code == "site_env_unchecked" && busy[0].severity == "info");
+    CHECK(inspect(envdir + "-none", me, {"ok.test"})["sites"].items().empty());
     fs::remove_all(dir);
 }
 
@@ -2901,7 +2942,9 @@ static void test_control_sites() {
         CHECK(!v(R"({"op":"log_own","file":"/etc/shadow","group":"shop"})").empty() && !v(R"({"op":"log_own","file":"/var/log/agensio/x.txt","group":"shop"})").empty());
         CHECK(v(R"({"op":"pools_apply"})").empty() && v(R"({"op":"service_restart"})").empty() && !v(R"({"op":"shell","cmd":"id"})").empty());
         // A site's environment: a host name and, for a write, a change the rules accept.
-        CHECK(v(R"({"op":"env_read","site":"a.test"})").empty() && v(R"({"op":"env_write","site":"a.test","generate":["SECRET_KEY_BASE"]})").empty());
+        CHECK(v(R"({"op":"env_read","site":"a.test"})").empty() && v(R"({"op":"env_write","site":"a.test","generate":["SECRET_KEY_BASE"]})").empty() &&
+              v(R"({"op":"env_check"})").empty() && v(R"({"op":"env_read","site":"a.test","reveal":["A_1"]})").empty() &&
+              !v(R"({"op":"env_read","site":"a.test","reveal":["A;B"]})").empty() && !v(R"({"op":"env_read","site":"a.test","reveal":"A"})").empty());
         CHECK(!v(R"({"op":"env_read","site":"../etc"})").empty() && !v(R"({"op":"env_write","site":"a.test"})").empty() &&
               !v(R"({"op":"env_write","site":"a.test","set":{"LD_PRELOAD":"/tmp/x.so"}})").empty() && !v(R"({"op":"env_write","site":"a.test","set":{"A":"x\ny"}})").empty());
         SiteSpec high = missing;

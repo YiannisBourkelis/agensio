@@ -1,4 +1,20 @@
 # Changelog
+## 0.1.0-alpha.29 (unreleased)
+
+From the alpha.28 report (every alpha.28 change confirmed on the live host):
+
+- **Health sees the sites' environment files, not only their directory.** The server
+  cannot look inside root's 0700 directory, so a 0666 file stopped a site's tasks while
+  health said nothing. Health now asks the provisioning helper for a read-only pass
+  (`env_check`: owner, mode, links, and what a task would meet inside) and names each file
+  as `site_env_unsafe` for its site with the root line, a file the next task tightens as
+  info, and a deleted site's file as `site_env_orphan` with its `rm -f`. The helper is
+  never waited for: while a task holds it, health says `site_env_unchecked`.
+- Unsetting a site's last variable removes its file, and the answer now says so under
+  `done`.
+- Rotation is advised when a file readable by others is tightened only if its directory
+  was open to others too; under a 0700 directory the note says nothing could reach it.
+
 ## 0.1.0-alpha.28 (2026-09-27)
 
 From the alpha.27 report (a second Writebook install on the live host) and what fixing it

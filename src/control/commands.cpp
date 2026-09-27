@@ -845,8 +845,28 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
     return out;
 }
 
-json::Value health(const Config& running, const Config& boot, bool as_root, std::time_t now) {
-    const auto findings = health_findings(running, boot, as_root, now);
+std::vector<Finding> env_findings(const json::Value& inspected) {
+    std::vector<Finding> out;
+    if (inspected["busy"].boolean()) {
+        out.push_back(Finding{"info", "site_env_unchecked", "", "the sites' environment files were not checked: the provisioning helper is running a task", "run health_check again when it ends"});
+        return out;
+    }
+    if (!inspected["ok"].boolean()) {
+        out.push_back(Finding{"info", "site_env_unchecked", "", "the sites' environment files could not be checked: " + std::string(inspected.get("error")), ""});
+        return out;
+    }
+    for (const auto& f : inspected["sites"].items())
+        out.push_back(Finding{std::string(f.get("severity")), "site_env_unsafe", std::string(f.get("site")), std::string(f.get("problem")),
+                              f.get("fix").empty() ? std::string("fix the file as root, or remove it and set the variables again with site_env_set") : "as root: " + std::string(f.get("fix"))});
+    for (const auto& o : inspected["orphans"].items())
+        out.push_back(Finding{"info", "site_env_orphan", "", std::string(o.str()) + " belongs to no configured site (a deleted site's environment: its secrets)",
+                              "as root, when the site is gone for good: rm -f " + std::string(o.str())});
+    return out;
+}
+
+json::Value health(const Config& running, const Config& boot, bool as_root, std::time_t now, const std::vector<Finding>& extra) {
+    auto findings = health_findings(running, boot, as_root, now);
+    findings.insert(findings.end(), extra.begin(), extra.end());
     json::Value arr = json::Value::array();
     bool ok = true;
     for (const auto& f : findings) {
