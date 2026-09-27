@@ -1,5 +1,5 @@
 # Changelog
-## 0.1.0-alpha.26 (unreleased)
+## 0.1.0-alpha.26 (2026-09-27)
 
 From the first Rails site built through `site_task` on a live host (report against
 alpha.25):
