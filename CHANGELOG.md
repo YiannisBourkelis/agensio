@@ -1,5 +1,5 @@
 # Changelog
-## 0.1.0-alpha.30 (unreleased)
+## 0.1.0-alpha.30 (2026-09-27)
 
 From the alpha.29 report (all three alpha.29 changes confirmed on the live host):
 
