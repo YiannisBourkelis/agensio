@@ -56,6 +56,9 @@ struct ControlBackend {
     // with a task for minutes), `done` on worker 0. Through the helper, whose files are
     // root's, else as this process's own account in its own directory.
     virtual void env_async(const json::Value& req, std::function<void(json::Value)> done) = 0;
+    // Whether a site has an environment file: 1 yes, 0 no, -1 unknown (the helper is busy
+    // with a task; it is never waited for). Milliseconds, on worker 0.
+    virtual int env_file_state(std::string_view site) = 0;
 };
 
 class ControlHandler {

@@ -992,8 +992,11 @@ void ControlHandler::site_toggle(Stream& s, std::string_view name, std::string_v
     // An application site's environment file, named in a delete's answer; the path is taken
     // now, as the reload below replaces the configuration `cfg` refers to.
     std::optional<std::string> env_file;
-    if (const SiteConfig* site = control::find_site(cfg, name); site && proxy_app(site->app) && appenv::valid_site(site->server_names.front()))
+    int env_state = -1;
+    if (const SiteConfig* site = control::find_site(cfg, name); action == "delete" && site && proxy_app(site->app) && appenv::valid_site(site->server_names.front())) {
         env_file = appenv::dir_of(cfg.config_path) + "/" + site->server_names.front() + ".env";
+        env_state = backend_->env_file_state(site->server_names.front());  // asked while the site is still on disk
+    }
     const std::filesystem::path file = control::site_file(cfg, name);
     const std::filesystem::path disabled = file.string() + ".disabled";
     std::error_code ec;
@@ -1034,10 +1037,13 @@ void ControlHandler::site_toggle(Stream& s, std::string_view name, std::string_v
     json::Value body = json::Value::object().set("ok", true).set("file", file.string()).set("action", std::string(action));
     // A deleted application site's environment stays, as its files do (2026-09-27 report: it
     // holds secrets and nothing said so). The server cannot look inside root's directory.
-    if (action == "delete" && env_file) {
+    // Named when it exists (the helper says; 2026-09-27 report), said as "if it has one" only
+    // when the helper was busy and could not tell, and not at all when there is none.
+    if (env_file && env_state != 0) {
         const std::string& env = *env_file;
-        body.set("kept", json::Value::array().push("the site's environment " + env + ", if it has one (its secrets: SECRET_KEY_BASE and the like), as the "
-                                                    "site's directory and account are kept")).set("run_as_root", json::Value::array().push("rm -f " + env));
+        body.set("kept", json::Value::array().push("the site's environment " + env + (env_state == 1 ? "" : ", if it has one (the helper was busy and could not tell)") +
+                                                    ": its secrets (SECRET_KEY_BASE and the like), kept as the site's directory and account are"))
+            .set("run_as_root", json::Value::array().push("rm -f " + env));
         body.set("hint", "run_as_root removes the environment file once the site is gone for good; keep it to bring the site back with the same secrets");
     }
     reply(s, 200, body);

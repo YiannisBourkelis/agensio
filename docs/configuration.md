@@ -1372,8 +1372,10 @@ under `tightened`; a file others could write, one with a second hard link, or an
 owner is refused with the `chown`/`chmod` line under `run_as_root`, and `health` reports
 `site_env_unsafe`, for the directory and for each site's file (the helper checks the files
 for it, read-only, since the server cannot look inside root's directory), and a deleted
-site's file as `site_env_orphan`. Unsetting the last variable removes the file, and the
-answer says so. `site-install` generates `SECRET_KEY_BASE` itself when a
+site's file as `site_env_orphan`. A file others can read counts as a warning, with the
+advice to rotate what it holds, when its directory is open to others too, and as info when
+the directory is root's alone. Unsetting the last variable removes the file, and the
+answer says so; `site-delete` names the file it keeps only when the site has one. `site-install` generates `SECRET_KEY_BASE` itself when a
 Rails archive came without credentials (never for one with them: an environment value
 would override the application's own secret and sign its users out); `--generate` never
 replaces a value, and rotating one is `--unset NAME --generate NAME` in one call. The file

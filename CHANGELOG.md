@@ -1,4 +1,19 @@
 # Changelog
+## 0.1.0-alpha.30 (unreleased)
+
+From the alpha.29 report (all three alpha.29 changes confirmed on the live host):
+
+- **Health rates a site's environment file by what could reach it.** A file others can
+  read under a directory that is open to others too may have leaked: `site_env_unsafe`
+  is now a warning for that site with the rotation advice, not info beside the
+  directory's warning. Under a 0700 directory it stays info and says nobody else could
+  reach it.
+- **`site_delete` names the environment file only when there is one.** The helper tells
+  the server which sites have a file (`env_check` answers `present`), asked while the site
+  is still on disk and never waited for: the kept line and its `rm -f` appear when the
+  file exists, say "if it has one" only when the helper was busy with a task, and are
+  absent for a site without a file.
+
 ## 0.1.0-alpha.29 (2026-09-27)
 
 From the alpha.28 report (every alpha.28 change confirmed on the live host):

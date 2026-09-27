@@ -587,15 +587,22 @@ json::Value apply(const std::string& dir, std::string_view site, unsigned owner,
 }
 
 json::Value inspect(const std::string& dir, unsigned owner, const std::vector<std::string>& sites) {
-    json::Value found = json::Value::array(), orphans = json::Value::array();
-    const json::Value none = json::Value::object().set("ok", true).set("sites", json::Value::array()).set("orphans", json::Value::array());
+    json::Value found = json::Value::array(), orphans = json::Value::array(), present = json::Value::array();
+    const json::Value none = json::Value::object().set("ok", true).set("sites", json::Value::array()).set("orphans", json::Value::array()).set("present", json::Value::array());
     const int dfd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (dfd < 0) return none;  // absent, or health's own directory check names it
+    // A directory open to others (or not the owner's) let others reach every file in it:
+    // a file others can read there may have leaked, and says so (2026-09-27 report: it was
+    // info beside a warn for the directory, while the helper's own note said to rotate).
+    struct stat db {};
+    const bool dir_open = ::fstat(dfd, &db) == 0 && (db.st_uid != owner || (db.st_mode & 077) != 0);
+    const std::string leaked = "; the directory is open to others as well, so they could read it: rotate what it holds once both are fixed";
     for (const auto& site : sites) {
         if (!valid_site(site)) continue;
         const std::string leaf = site + ".env", path = dir + "/" + leaf;
         struct stat sb {};
         if (::fstatat(dfd, leaf.c_str(), &sb, AT_SYMLINK_NOFOLLOW) != 0) continue;  // no file: nothing to meet
+        present.push(site);
         auto add = [&](const char* severity, std::string problem, std::string fix) {
             json::Value v = json::Value::object().set("site", site).set("severity", severity).set("problem", std::move(problem));
             if (!fix.empty()) v.set("fix", std::move(fix));
@@ -607,12 +614,18 @@ json::Value inspect(const std::string& dir, unsigned owner, const std::vector<st
         }
         if (sb.st_uid != owner || sb.st_nlink != 1 || (sb.st_mode & 022) != 0 || static_cast<std::size_t>(sb.st_size) > kMaxFile) {
             add("warn", path + " is uid " + std::to_string(sb.st_uid) + "'s, mode " + mode_text(sb.st_mode) + ", " + std::to_string(sb.st_nlink) +
-                            " link(s): it must be " + whose(owner) + ", 0600, one link; every task of " + site + " is refused",
+                            " link(s): it must be " + whose(owner) + ", 0600, one link; every task of " + site + " is refused" +
+                            (dir_open && (sb.st_mode & 044) != 0 ? leaked : ""),
                 sb.st_uid == owner && sb.st_nlink == 1 ? own_command(path, owner, "0600") + "   # after checking its content" : "rm " + path);
             continue;
         }
-        if ((sb.st_mode & 077) != 0)
-            add("info", path + " is mode " + mode_text(sb.st_mode) + " (readable by others): the next task or site_env makes it 0600", own_command(path, owner, "0600"));
+        if ((sb.st_mode & 077) != 0) {
+            if (dir_open && (sb.st_mode & 044) != 0)
+                add("warn", path + " is mode " + mode_text(sb.st_mode) + ", readable by others" + leaked, own_command(path, owner, "0600"));
+            else
+                add("info", path + " is mode " + mode_text(sb.st_mode) + ", but its directory is " + whose(owner) +
+                                " alone, so nobody else could reach it: the next task or site_env makes it 0600", own_command(path, owner, "0600"));
+        }
         // What a task would meet inside it: a line systemd reads otherwise, a refused name.
         const int fd = ::openat(dfd, leaf.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
         if (fd < 0) continue;
@@ -643,7 +656,7 @@ json::Value inspect(const std::string& dir, unsigned owner, const std::vector<st
         ::closedir(d);
     }
     ::close(dfd);
-    return json::Value::object().set("ok", true).set("sites", std::move(found)).set("orphans", std::move(orphans));
+    return json::Value::object().set("ok", true).set("sites", std::move(found)).set("orphans", std::move(orphans)).set("present", std::move(present));
 }
 
 #endif

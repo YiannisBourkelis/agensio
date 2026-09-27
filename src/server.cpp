@@ -1112,6 +1112,23 @@ void Server::env_async(const json::Value& req, std::function<void(json::Value)> 
     }).detach();
 }
 
+int Server::env_file_state(std::string_view site) {
+    json::Value r;
+    if (provisioner_.available()) {
+        r = provisioner_.try_request(json::Value::object().set("op", "env_check"));
+    } else {
+#ifndef _WIN32
+        r = appenv::inspect(appenv::dir_of(cfg_.config_path), ::geteuid(), {std::string(site)});
+#else
+        return -1;
+#endif
+    }
+    if (!r["ok"].boolean()) return -1;
+    for (const auto& p : r["present"].items())
+        if (p.str() == site) return 1;
+    return 0;
+}
+
 void Server::restart_later() {
     restart_timer_ = std::make_unique<asio::steady_timer>(workers_[0]->ctx);
     restart_timer_->expires_after(std::chrono::milliseconds(800));  // the reply is on the wire by then

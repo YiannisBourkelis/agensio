@@ -2129,6 +2129,16 @@ static void test_appenv() {
     const auto busy = control::env_findings(json::Value::object().set("ok", false).set("busy", true));
     CHECK(busy.size() == 1 && busy[0].code == "site_env_unchecked" && busy[0].severity == "info");
     CHECK(inspect(envdir + "-none", me, {"ok.test"})["sites"].items().empty());
+    // Which sites have a file (site_delete names the file only then).
+    std::vector<std::string> present;
+    for (const auto& p : in["present"].items()) present.emplace_back(p.str());
+    CHECK(std::find(present.begin(), present.end(), "ok.test") != present.end() && std::find(present.begin(), present.end(), "none.test") == present.end());
+    // A file others can read under a directory open to others may have leaked: a warning with
+    // the rotation advice, not info (2026-09-27 report).
+    fs::permissions(envdir, fs::perms::owner_all | fs::perms::group_read | fs::perms::group_exec | fs::perms::others_read | fs::perms::others_exec);
+    in = inspect(envdir, me, {"read.test"});
+    CHECK(in["sites"].items().size() == 1 && in["sites"].items()[0].get("severity") == "warn" &&
+          std::string(in["sites"].items()[0].get("problem")).find("rotate what it holds") != std::string::npos);
     fs::remove_all(dir);
 }
 

@@ -103,8 +103,10 @@ json::Value describe(const std::string& dir, std::string_view site, unsigned own
 
 // Health's view, read-only (nothing tightened, nothing created): what a task of each of
 // `sites` would meet in its file, and the `.env` files no site names any more.
-// {"ok": true, "sites": [{"site", "severity", "problem", "fix"?}], "orphans": [paths]}; an
-// absent directory or file is no problem. The directory itself is health's own check.
+// {"ok": true, "sites": [{"site", "severity", "problem", "fix"?}], "orphans": [paths],
+// "present": [the sites that have a file]}; an absent directory or file is no problem. The
+// directory itself is health's own check; a file others can read under a directory open to
+// others is a warning (it may have leaked), under a closed one only info.
 json::Value inspect(const std::string& dir, unsigned owner, const std::vector<std::string>& sites);
 
 // Applies a change as the calling process, which is `owner`: the directory is created 0700
