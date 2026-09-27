@@ -1,5 +1,5 @@
 # Changelog
-## 0.1.0-alpha.35 (unreleased)
+## 0.1.0-alpha.35 (2026-09-28)
 
 From the Django report against alpha.33 (Wagtail 8.0 on an `app = "proxy"` site, where
 nothing after `site_create` could run):
