@@ -353,7 +353,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   `[log] access` default; one descriptor per path opened `O_APPEND`, per-worker buffers
   flushed at 32 KB or by a 1 s timer, `SIGUSR1` reopens every file (the replaced
   descriptor is kept until the next reopen so a racing worker never writes to a recycled
-  fd). Error log (`[log] error`, `level`) to stderr or a file. **On by default**
+  fd). A line goes to the request's own site: HTTP/1 keeps it per connection (until
+  2026-09-27 it took the worker's last routed site, so an answer that waited on an origin
+  was logged in another site's file), HTTP/2 and HTTP/3 per stream; a 413 too. Error log (`[log] error`, `level`) to stderr or a file. **On by default**
   (`logs/access.log` next to the config file): measured on Linux, one worker, alternated
   off/on twice, plain 1 KB 2.0 -> 2.0-2.1 us, TLS 1 KB 2.8 -> 2.9-3.0 us, 100 KB rows
   within noise, i.e. 0.1-0.2 us per request, under the 1 us bar the roadmap set. Benchmark
@@ -416,7 +418,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   for `rails` and `proxy` sites, root's 0600 in a root 0700 directory, systemd
   `EnvironmentFile` syntax, written and read by the helper (`env_write`, `env_read`),
   admin-only both ways and audited by name (`site-env`, `site-env-set`, MCP `site_env`,
-  `site_env_set`); tasks get it after agensio's variables, names that choose a program
+  `site_env_set`), a read answering names, lengths and keyed fingerprints and a value only
+  for the names in `reveal` (audited as REVEALED); a lax directory or file is tightened or
+  refused with the root line, health `site_env_unsafe`; tasks get it after agensio's variables, names that choose a program
   refused; `site-install` of a Rails archive without credentials generates
   `SECRET_KEY_BASE` into it; `docs/examples/puma.service` loads it. Security page row 28. `app = "rails"` is the proxy preset plus its tasks and credential
   files; Puma is started by `docs/examples/puma.service` until F14. `tests/tasks.sh`

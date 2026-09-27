@@ -69,18 +69,42 @@ std::string parse_change(const json::Value& body, Change& out);
 // "" when none could be read.
 std::string random_secret();
 
+// A value's fingerprint: the first 16 hex digits of HMAC-SHA256 under `key`, so two
+// values can be compared (is it the same secret?) without either being shown, and a weak
+// one cannot be looked up in a dictionary. "" in a build without OpenSSL.
+std::string fingerprint(std::string_view key, std::string_view value);
+
+// What a read or a write met besides its result: the refusal and the root command that
+// fixes it (a refusal's run_as_root), what was tightened on the way, whether the file exists.
+struct Status {
+    std::string error;
+    std::string fix;
+    std::vector<std::string> notes;
+    bool exists = false;
+};
+
 #ifndef _WIN32
 // A site's variables. No directory or no file: none, and ok. The directory and the file
-// must belong to `owner`, be no symlink and carry no permission for group or others, the
-// file regular and at most kMaxFile bytes, every name pass check_name and every value
-// check_value: otherwise false with `why` saying what to fix.
-bool read(const std::string& dir, std::string_view site, unsigned owner, std::vector<Var>& out, std::string& why);
+// must belong to `owner` and be no symlink; the file regular, with one link, writable by
+// its owner alone, at most kMaxFile bytes, every name passing check_name and every value
+// check_value: otherwise false with `st.error` and, when a command fixes it, `st.fix`. A
+// directory, or a file only readable by others, that is `owner`'s is tightened when this
+// process is `owner`, and said in `st.notes`.
+bool read(const std::string& dir, std::string_view site, unsigned owner, std::vector<Var>& out, Status& st);
+
+// The answer of site_env (2026-09-27, the owner's decision after the alpha.27 report):
+// every variable's name, length and fingerprint, and the value only of the names in
+// `reveal`. {"ok", "site", "file", "exists", "variables": [{"name", "length",
+// "fingerprint", "value"?}], "revealed": [...], "not_found"?: [...], "tightened"?: [...]},
+// or {"ok": false, "error", "run_as_root"?}. The fingerprint key is made on first use,
+// `<dir>/.fingerprint.key`, `owner`'s, 0600.
+json::Value describe(const std::string& dir, std::string_view site, unsigned owner, const std::vector<std::string>& reveal);
 
 // Applies a change as the calling process, which is `owner`: the directory is created 0700
 // when missing, the file written to a temporary name, synced and renamed into place 0600,
 // and removed when no variable is left. {"ok", "file", "set", "unset", "absent",
-// "generated", "kept", "names"} or {"ok": false, "error"}: names only, a value never
-// appears in the answer.
+// "generated", "kept", "names", "tightened"?} or {"ok": false, "error", "run_as_root"?}:
+// names only, a value never appears in the answer.
 json::Value apply(const std::string& dir, std::string_view site, unsigned owner, const Change& change);
 #endif
 

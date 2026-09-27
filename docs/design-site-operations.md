@@ -589,8 +589,11 @@ the files and the trash round it off.
 
 Added 2026-09-27, after the Writebook report against alpha.26 (section 13):
 
-11. A site's environment (section 13) is readable by an admin, values included, every
-    read audited with the names it returned.
+11. A site's environment (section 13) is readable by an admin, every read audited with
+    the names it returned. Revised the same day after the alpha.27 report: a read returns
+    names, lengths and keyed fingerprints, and a value only when asked for by name
+    (`reveal`), audited as REVEALED, because a returned value lives on in the agent's
+    context and transcript.
 12. `site_install` generates `SECRET_KEY_BASE` into the site's environment when a Rails
     archive came without credentials, once, never for an application that has them.
 13. The site's environment ships as its own step before F14; F14's unit then loads it.

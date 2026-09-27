@@ -5,6 +5,11 @@
 #include <cstring>
 #include <mutex>
 
+#ifdef AGENSIO_HAS_TLS
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+#endif
+
 #ifndef _WIN32
 #include <fcntl.h>
 #include <sys/random.h>
@@ -250,6 +255,26 @@ std::string parse_change(const json::Value& body, Change& out) {
     return "";
 }
 
+std::string fingerprint(std::string_view key, std::string_view value) {
+#ifdef AGENSIO_HAS_TLS
+    unsigned char mac[EVP_MAX_MD_SIZE];
+    unsigned int len = 0;
+    if (!::HMAC(EVP_sha256(), key.data(), static_cast<int>(key.size()), reinterpret_cast<const unsigned char*>(value.data()), value.size(), mac, &len) || len < 8)
+        return "";
+    static constexpr char hex[] = "0123456789abcdef";
+    std::string out;
+    for (unsigned i = 0; i < 8; ++i) {
+        out.push_back(hex[mac[i] >> 4]);
+        out.push_back(hex[mac[i] & 15]);
+    }
+    return out;
+#else
+    (void)key;
+    (void)value;
+    return "";
+#endif
+}
+
 std::string random_secret() {
     unsigned char bytes[64];
 #ifndef _WIN32
@@ -272,42 +297,77 @@ std::string random_secret() {
 namespace {
 
 std::string whose(unsigned owner) { return owner == 0 ? "root's" : "uid " + std::to_string(owner) + "'s"; }
+std::string mode_text(mode_t m) {
+    return std::to_string((m >> 6) & 7) + std::to_string((m >> 3) & 7) + std::to_string(m & 7);
+}
+// The command that makes a path its owner's alone, for the refusal's run_as_root.
+std::string own_command(const std::string& path, unsigned owner, const char* mode) {
+    return (owner == 0 ? "chown root:root " + path + " && " : std::string()) + "chmod " + mode + " " + path;
+}
 
-// The open directory, checked: -1 with `why`, or -2 when it does not exist.
-int open_dir(const std::string& dir, unsigned owner, std::string& why) {
+// The open directory, checked: -1 with `st.error` (and `st.fix`), or -2 when it does not
+// exist. A directory that is the owner's but open to its group or others is tightened to
+// 0700 when this process is that owner (2026-09-27 report: a `mkdir -p` under a lax umask
+// left it 0775 and every task of every Rails site on the host stopped); nothing inside is
+// trusted for it, as every file is checked on its own (owner, mode, one link).
+int open_dir(const std::string& dir, unsigned owner, Status& st) {
     const int fd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) {
         if (errno == ENOENT) return -2;
-        why = dir + ": " + (errno == ELOOP || errno == ENOTDIR ? std::string("a symlink or not a directory; refused") : std::strerror(errno));
+        st.error = dir + ": " + (errno == ELOOP || errno == ENOTDIR ? std::string("a symlink or not a directory; refused") : std::strerror(errno));
+        if (errno == ELOOP || errno == ENOTDIR) st.fix = "mv " + dir + " " + dir + ".refused && mkdir -m 0700 " + dir;
         return -1;
     }
-    struct stat st {};
-    if (::fstat(fd, &st) != 0 || st.st_uid != owner || (st.st_mode & 077) != 0) {
-        why = dir + " must be " + whose(owner) + " alone (0700); it is uid " + std::to_string(st.st_uid) + "'s, mode " +
-              std::to_string((st.st_mode >> 6) & 7) + std::to_string((st.st_mode >> 3) & 7) + std::to_string(st.st_mode & 7) + "; refused";
+    struct stat sb {};
+    if (::fstat(fd, &sb) != 0 || sb.st_uid != owner) {
+        st.error = dir + " must be " + whose(owner) + " alone (0700); it is uid " + std::to_string(sb.st_uid) + "'s, mode " + mode_text(sb.st_mode) + "; refused";
+        st.fix = own_command(dir, owner, "0700");
         ::close(fd);
         return -1;
+    }
+    if ((sb.st_mode & 077) != 0) {
+        if (::geteuid() != owner || ::fchmod(fd, 0700) != 0) {
+            st.error = dir + " must be " + whose(owner) + " alone (0700); it is mode " + mode_text(sb.st_mode) + "; refused";
+            st.fix = own_command(dir, owner, "0700");
+            ::close(fd);
+            return -1;
+        }
+        st.notes.push_back(dir + " was mode " + mode_text(sb.st_mode) + ", open to its group or others; made 0700");
     }
     return fd;
 }
 
-bool read_at(int dfd, const std::string& dir, std::string_view site, unsigned owner, std::vector<Var>& out, std::string& why) {
+bool read_at(int dfd, const std::string& dir, std::string_view site, unsigned owner, std::vector<Var>& out, Status& st) {
     const std::string leaf = std::string(site) + ".env";
     const std::string path = dir + "/" + leaf;
     const int fd = ::openat(dfd, leaf.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0) {
         if (errno == ENOENT) return true;
-        why = path + ": " + (errno == ELOOP ? std::string("a symlink; refused") : std::strerror(errno));
+        st.error = path + ": " + (errno == ELOOP ? std::string("a symlink; refused") : std::strerror(errno));
+        st.fix = "rm " + path;
         return false;
     }
-    struct stat st {};
-    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != owner || (st.st_mode & 077) != 0 ||
-        static_cast<std::size_t>(st.st_size) > kMaxFile) {
-        why = path + " must be a regular file, " + whose(owner) + ", mode 0600, at most 64 KB; refused (chown and chmod 600 it, or remove it)";
+    st.exists = true;
+    struct stat sb {};
+    // One link only: with fs.protected_hardlinks off, a link to another root file planted in
+    // a directory that was open to others would be read as this site's environment.
+    if (::fstat(fd, &sb) != 0 || !S_ISREG(sb.st_mode) || sb.st_uid != owner || sb.st_nlink != 1 || (sb.st_mode & 022) != 0 ||
+        static_cast<std::size_t>(sb.st_size) > kMaxFile) {
+        st.error = path + " must be a regular file with one link, " + whose(owner) + ", mode 0600, at most 64 KB; refused";
+        st.fix = sb.st_uid == owner && S_ISREG(sb.st_mode) && sb.st_nlink == 1 ? own_command(path, owner, "0600") + "   # after checking its content" : "rm " + path;
         ::close(fd);
         return false;
     }
-    std::string text(static_cast<std::size_t>(st.st_size), '\0');
+    if ((sb.st_mode & 077) != 0) {  // readable by others, never writable (above): tightened
+        if (::geteuid() != owner || ::fchmod(fd, 0600) != 0) {
+            st.error = path + " must be mode 0600; it is " + mode_text(sb.st_mode) + "; refused";
+            st.fix = own_command(path, owner, "0600");
+            ::close(fd);
+            return false;
+        }
+        st.notes.push_back(path + " was mode " + mode_text(sb.st_mode) + ", readable by others; made 0600 (rotate what it holds if others could log in here)");
+    }
+    std::string text(static_cast<std::size_t>(sb.st_size), '\0');
     std::size_t got = 0;
     while (got < text.size()) {
         const ssize_t n = ::read(fd, text.data() + got, text.size() - got);
@@ -318,20 +378,21 @@ bool read_at(int dfd, const std::string& dir, std::string_view site, unsigned ow
     ::close(fd);
     text.resize(got);
     std::vector<Var> vars;
+    std::string why;
     if (!parse(text, vars, why)) {
-        why = path + ": " + why;
+        st.error = path + ": " + why;
         return false;
     }
     for (const auto& v : vars) {
         std::string bad = check_name(v.name);
         if (bad.empty()) bad = check_value(v.value);
         if (!bad.empty()) {
-            why = path + ": " + bad + " (remove that line, or site_env_set with unset)";
+            st.error = path + ": " + bad + " (remove that line, or site_env_set with unset)";
             return false;
         }
     }
     if (vars.size() > kMaxVars) {
-        why = path + ": more than " + std::to_string(kMaxVars) + " variables";
+        st.error = path + ": more than " + std::to_string(kMaxVars) + " variables";
         return false;
     }
     out = std::move(vars);
@@ -344,20 +405,87 @@ json::Value names_of(const std::vector<std::string>& v) {
     return a;
 }
 
+json::Value failure(const Status& st) {
+    json::Value f = json::Value::object().set("ok", false).set("error", st.error);
+    if (!st.fix.empty()) f.set("run_as_root", json::Value::array().push(st.fix));
+    return f;
+}
+
+// The key of the fingerprints: 32 random bytes in `<dir>/.fingerprint.key`, the owner's,
+// 0600, made on first use. Keyed so a fingerprint of a weak password cannot be looked up
+// in a dictionary; kept so a value keeps its fingerprint across restarts and hosts' eyes.
+bool fingerprint_key(int dfd, unsigned owner, std::string& key) {
+    const char* leaf = ".fingerprint.key";
+    int fd = ::openat(dfd, leaf, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0 && errno == ENOENT && ::geteuid() == owner) {
+        unsigned char bytes[32];
+        if (::getentropy(bytes, sizeof bytes) != 0) return false;
+        const int w = ::openat(dfd, leaf, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (w >= 0) {
+            const bool ok = ::write(w, bytes, sizeof bytes) == static_cast<ssize_t>(sizeof bytes) && ::fsync(w) == 0;
+            ::close(w);
+            if (!ok) {
+                ::unlinkat(dfd, leaf, 0);
+                return false;
+            }
+        }
+        fd = ::openat(dfd, leaf, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);  // ours, or another writer's that won the race
+    }
+    if (fd < 0) return false;
+    struct stat sb {};
+    char buf[32];
+    const bool ok = ::fstat(fd, &sb) == 0 && S_ISREG(sb.st_mode) && sb.st_uid == owner && sb.st_nlink == 1 && (sb.st_mode & 077) == 0 &&
+                    ::read(fd, buf, sizeof buf) == static_cast<ssize_t>(sizeof buf);
+    ::close(fd);
+    if (ok) key.assign(buf, sizeof buf);
+    return ok;
+}
+
 }  // namespace
 
-bool read(const std::string& dir, std::string_view site, unsigned owner, std::vector<Var>& out, std::string& why) {
+bool read(const std::string& dir, std::string_view site, unsigned owner, std::vector<Var>& out, Status& st) {
     out.clear();
     if (!valid_site(site)) {
-        why = "'" + std::string(site) + "' is not a site's host name";
+        st.error = "'" + std::string(site) + "' is not a site's host name";
         return false;
     }
-    const int dfd = open_dir(dir, owner, why);
+    const int dfd = open_dir(dir, owner, st);
     if (dfd == -2) return true;
     if (dfd < 0) return false;
-    const bool ok = read_at(dfd, dir, site, owner, out, why);
+    const bool ok = read_at(dfd, dir, site, owner, out, st);
     ::close(dfd);
     return ok;
+}
+
+json::Value describe(const std::string& dir, std::string_view site, unsigned owner, const std::vector<std::string>& reveal) {
+    Status st;
+    std::vector<Var> vars;
+    if (!read(dir, site, owner, vars, st)) return failure(st);
+    std::string key;
+    if (!vars.empty()) {
+        const int dfd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (dfd >= 0) {
+            fingerprint_key(dfd, owner, key);
+            ::close(dfd);
+        }
+    }
+    json::Value list = json::Value::array(), revealed = json::Value::array(), unknown = json::Value::array();
+    for (const auto& v : vars) {
+        json::Value item = json::Value::object().set("name", v.name).set("length", static_cast<double>(v.value.size()));
+        if (!key.empty()) item.set("fingerprint", fingerprint(key, v.value));
+        if (std::find(reveal.begin(), reveal.end(), v.name) != reveal.end()) {
+            item.set("value", v.value);
+            revealed.push(v.name);
+        }
+        list.push(std::move(item));
+    }
+    for (const auto& r : reveal)
+        if (std::none_of(vars.begin(), vars.end(), [&](const Var& v) { return v.name == r; })) unknown.push(r);
+    json::Value out = json::Value::object().set("ok", true).set("site", std::string(site)).set("file", dir + "/" + std::string(site) + ".env")
+                          .set("exists", st.exists).set("variables", std::move(list)).set("revealed", std::move(revealed));
+    if (!unknown.items().empty()) out.set("not_found", std::move(unknown));
+    if (!st.notes.empty()) out.set("tightened", names_of(st.notes));
+    return out;
 }
 
 json::Value apply(const std::string& dir, std::string_view site, unsigned owner, const Change& change) {
@@ -366,14 +494,17 @@ json::Value apply(const std::string& dir, std::string_view site, unsigned owner,
     json::Value fail = json::Value::object().set("ok", false);
     if (!valid_site(site)) return fail.set("error", "'" + std::string(site) + "' is not a site's host name");
     if (::geteuid() != owner) return fail.set("error", "the environment files are " + whose(owner) + "; this process is not");
-    std::string why;
+    Status st;
     if (::mkdir(dir.c_str(), 0700) != 0 && errno != EEXIST) return fail.set("error", "mkdir " + dir + ": " + std::strerror(errno));
-    const int dfd = open_dir(dir, owner, why);
-    if (dfd < 0) return fail.set("error", dfd == -2 ? dir + " vanished" : why);
+    const int dfd = open_dir(dir, owner, st);
+    if (dfd < 0) {
+        if (dfd == -2) st.error = dir + " vanished";
+        return failure(st);
+    }
     std::vector<Var> vars;
-    if (!read_at(dfd, dir, site, owner, vars, why)) {
+    if (!read_at(dfd, dir, site, owner, vars, st)) {
         ::close(dfd);
-        return fail.set("error", why);
+        return failure(st);
     }
     std::vector<std::string> set, unset, absent, generated, kept;
     for (const auto& name : change.unset) {
@@ -440,8 +571,10 @@ json::Value apply(const std::string& dir, std::string_view site, unsigned owner,
     ::close(dfd);
     std::vector<std::string> names;
     for (const auto& v : vars) names.push_back(v.name);
-    return json::Value::object().set("ok", true).set("file", path).set("set", names_of(set)).set("unset", names_of(unset)).set("absent", names_of(absent))
+    json::Value out = json::Value::object().set("ok", true).set("file", path).set("set", names_of(set)).set("unset", names_of(unset)).set("absent", names_of(absent))
         .set("generated", names_of(generated)).set("kept", names_of(kept)).set("names", names_of(names));
+    if (!st.notes.empty()) out.set("tightened", names_of(st.notes));
+    return out;
 }
 
 #endif

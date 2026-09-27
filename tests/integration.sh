@@ -11,7 +11,7 @@ printf '<html><body>sub index</body></html>\n' > bench/www/sub/index.html
 printf '<html><body>app shell</body></html>\n' > bench/www/app.html
 
 mkdir -p bench/tmp
-rm -f bench/tmp/access.log bench/tmp/access.log.1 bench/tmp/error.log
+rm -f bench/tmp/access.log bench/tmp/access.log.1 bench/tmp/error.log bench/tmp/loga.log bench/tmp/logb.log
 # php-fpm for the FastCGI checks (skipped when not installed): a pool on a unix socket in bench/tmp.
 PHPFPM=$(command -v php-fpm8.4 || command -v php-fpm8.3 || command -v php-fpm || true)
 FPM_PID=""
@@ -338,6 +338,26 @@ proxy = {{ redirects = "pass" }}
 [[site.location]]
 path = "/"
 upstream = "http://127.0.0.1:9107"
+
+# Two sites, each with its own access log, on one listener: an answer that waits on its
+# origin is logged in its own site's file whatever the worker served meanwhile
+# (2026-09-27: HTTP/1 took the worker's last routed site).
+[[site]]
+server_name = ["loga.test"]
+listen = ["127.0.0.1:8086"]
+root = "{root}/bench/www"
+access_log = "{root}/bench/tmp/loga.log"
+proxy = {{ idle_timeout = 1 }}   # the pool of 9107 is proxy.test's: its limits agree
+
+[[site.location]]
+path = "/api/"
+upstream = "http://127.0.0.1:9107/"
+
+[[site]]
+server_name = ["logb.test"]
+listen = ["127.0.0.1:8086"]
+root = "{root}/bench/www"
+access_log = "{root}/bench/tmp/logb.log"
 """
 open(path, "w").write(text)
 PY
@@ -711,9 +731,11 @@ check "tasks: the refusal is in the audit log with the task's name" "yes" "$(gre
 # The site's environment (2026-09-27 Writebook report), here without the helper: the
 # server's own file beside the configuration, under its own account.
 check "env: SECRET_KEY_BASE generated into the server's own file (0600 in 0700), named in the answer, its value in neither the answer nor the audit log; a static site has none; a name that chooses a program is refused" "200 SECRET_KEY_BASE 600 700 no 422 400" "$(cpost /v1/sites/rails.test/env '{"generate":["SECRET_KEY_BASE"],"confirm":true,"reason":"env"}') $(python3 -c 'import json; print(",".join(json.load(open("bench/tmp/ctl-reply.json"))["generated"]))') $(stat -c %a bench/tmp/env/rails.test.env) $(stat -c %a bench/tmp/env) $(grep -q "$(sed -n 's/^SECRET_KEY_BASE="\(.*\)"$/\1/p' bench/tmp/env/rails.test.env)" bench/tmp/ctl-reply.json bench/tmp/audit.log && echo yes || echo no) $(cpost /v1/sites/strict.test/env '{"set":{"A":"b"},"confirm":true}') $(cpost /v1/sites/rails.test/env '{"set":{"PATH":"/tmp"},"confirm":true}')"
-check "env: an admin's read returns the value, audited by name" "SECRET_KEY_BASE 128 yes" "$(curl -sS --unix-socket $CS http://control/v1/sites/rails.test/env | python3 -c 'import json,sys; v=json.load(sys.stdin)["variables"][0]; print(v["name"], len(v["value"]))') $(grep -q 'sites/rails.test/env: read the values of SECRET_KEY_BASE' bench/tmp/audit.log && echo yes)"
+check "env: names, lengths and fingerprints by default, never a value; audited by name" "SECRET_KEY_BASE 128 16 False yes" "$(curl -sS --unix-socket $CS http://control/v1/sites/rails.test/env | python3 -c 'import json,sys; v=json.load(sys.stdin)["variables"][0]; print(v["name"], int(v["length"]), len(v["fingerprint"]), "value" in v)') $(grep -q 'sites/rails.test/env: read the names of SECRET_KEY_BASE$' bench/tmp/audit.log && echo yes)"
+check "env: ?reveal=NAME returns that value, audited as REVEALED; a reveal that is not a name is 400" "128 yes 400" "$(curl -sS --unix-socket $CS 'http://control/v1/sites/rails.test/env?reveal=SECRET_KEY_BASE' | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["variables"][0]["value"]))') $(grep -q 'rails.test/env: read the names of SECRET_KEY_BASE; REVEALED the value of SECRET_KEY_BASE' bench/tmp/audit.log && echo yes) $(curl -sS -o /dev/null -w '%{http_code}' --unix-socket $CS 'http://control/v1/sites/rails.test/env?reveal=A;B')"
 check "rails: databases, logs, dumps by their ending and everything under /storage/ are 404 at the edge; any other path goes to the application (502: none listens)" "404 404 404 404 502" "$(for p in /storage/db/production.sqlite3 /x/production.SQLITE3-wal /log/development.log /backup.sql /books/1; do curl -sS -o /dev/null -w '%{http_code} ' -H 'Host: rails.test' http://127.0.0.1:8096$p; done | sed 's/ $//')"
 check "a request body above the site's limit: 413, and the error log names the site, the size, the limit and the fix" "413 yes" "$(head -c 1200000 /dev/zero | curl -sS -o /dev/null -w '%{http_code}' -H 'Host: rails.test' -H 'Expect: 100-continue' -X POST --data-binary @- http://127.0.0.1:8096/upload) $(grep -q 'site rails.test: a request body of 1.1 MB from 127.0.0.1 refused with 413: its max_body_size is 1 MB (the server.s default); site_update' bench/tmp/error.log && echo yes)"
+check "a chunked HTTP/1.1 body past the limit: 413 and close, not a cut connection; the warning says at least" "413 413 yes" "$(head -c 2000000 /dev/zero | curl -sS -o /dev/null -w '%{http_code}' -H 'Host: rails.test' -H 'Transfer-Encoding: chunked' -X POST --data-binary @- http://127.0.0.1:8096/upload) $(head -c 2000000 /dev/zero | curl -sS -o /dev/null -w '%{http_code}' -H 'Host: rails.test' -H 'Expect: 100-continue' -H 'Transfer-Encoding: chunked' -X POST --data-binary @- http://127.0.0.1:8096/upload) $(grep -q 'site rails.test: a request body of at least 1 MB from 127.0.0.1 refused with 413' bench/tmp/error.log && echo yes)"
 check "tasks: ctl site-task sends the task and --param, without --yes nothing happens (428), a missing task is a usage error" "1 yes 1 2" "$("$BIN" ctl site-task rails.test rails_new --param name=blog --dry-run --yes --socket $CS > bench/tmp/ctl.out 2>&1; echo -n "$? "; grep -q 'the ruby runtime' bench/tmp/ctl.out && echo -n yes; echo -n ' '; "$BIN" ctl site-task rails.test db_prepare --socket $CS > /dev/null 2>&1; echo -n "$? "; "$BIN" ctl site-task rails.test --yes --socket $CS > /dev/null 2>&1; echo $?)"
 check "tasks: the MCP task enum and parameters come from the table; listing reads, running is destructive" "6 name,version True False True" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
 import json, subprocess, sys
@@ -841,6 +863,32 @@ p.stdin.close(); p.wait()
 print(" ".join(out))
 PYT
 )
+# A bridge whose server runs another build says so in the structured answer too, since a
+# host that shows structuredContent never shows the text (2026-09-27 report).
+MCPN=$(python3 - "$BIN" <<'PYT'
+import json, os, socket, subprocess, sys, threading, tempfile
+path = os.path.join(tempfile.mkdtemp(), "fake.sock")
+srv = socket.socket(socket.AF_UNIX); srv.bind(path); srv.listen(8)
+def serve():
+    while True:
+        c, _ = srv.accept(); data = b""
+        while b"\r\n\r\n" not in data:
+            chunk = c.recv(4096)
+            if not chunk: break
+            data += chunk
+        body = json.dumps({"version": "0.0.1-other", "peer": {"role": "admin"}, "sites": []}).encode()
+        c.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Agensio-Version: 0.0.1-other\r\nContent-Length: " + str(len(body)).encode() + b"\r\nConnection: close\r\n\r\n" + body)
+        c.close()
+threading.Thread(target=serve, daemon=True).start()
+p = subprocess.Popen([sys.argv[1], "mcp", "--socket", path], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "server_status", "arguments": {}}}) + "\n"); p.stdin.flush()
+r = json.loads(p.stdout.readline())["result"]
+p.stdin.close(); p.wait()
+b = r["structuredContent"].get("bridge", {})
+print(b.get("server"), "0.0.1-other" in b.get("note", ""), r["content"][0]["text"].startswith("NOTE: this MCP bridge"))
+PYT
+)
+check "mcp: a server of another build: the note leads the text and sits in structuredContent.bridge" "0.0.1-other True True" "$MCPN"
 check "mcp: initialize, tool list with annotations, calls, confirm, decisions, prompts" "agensio 25 True laravel 428 reloaded https,root,app,user -32601 2" "$mcp"
 check "mcp: site_install and the upload tools are exposed with their arguments" "file url,file,version,sha256 True" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
 import json, subprocess, sys
@@ -1346,6 +1394,21 @@ if [ -n "$UP_PID" ]; then
   check "proxy: upstream 404 passed through" "404" "$(code $P/nope)"
   check "proxy: upstream Server and Date replaced by ours" "1 1" "$(curl -sSi $P/json | tr -d '\r' | awk '/^Server:/{s++} /^Date:/{d++} END{print s, d}')"
   check "proxy: POST body forwarded (memory)" "hello proxy" "$(printf 'hello proxy' | curl -sS --data-binary @- $P/echo)"
+  # Each answer in its own site's access log, whatever the worker served while it waited on
+  # its origin (2026-09-27: HTTP/1 logged it under the worker's last routed site), and a 413
+  # for a declared body too, over HTTP/1.1 and HTTP/2 (it was in no access log at all).
+  curl -s -o /dev/null -H 'Host: loga.test' 'http://127.0.0.1:8086/api/slow?ms=400' & LA=$!
+  sleep 0.1; for i in 1 2 3; do curl -s -o /dev/null -H 'Host: logb.test' http://127.0.0.1:8086/; done; wait $LA
+  head -c 2000000 /dev/zero > bench/tmp/two-mb
+  curl -s -o /dev/null -H 'Host: loga.test' --data-binary @bench/tmp/two-mb http://127.0.0.1:8086/api/echo
+  command curl -s --http2-prior-knowledge -o /dev/null -H 'Host: loga.test' --data-binary @bench/tmp/two-mb http://127.0.0.1:8086/api/echo
+  curl -s -o /dev/null -H 'Host: loga.test' -H 'Transfer-Encoding: chunked' --data-binary @bench/tmp/two-mb http://127.0.0.1:8086/api/echo
+  sleep 1.5   # the access logs flush once a second
+  check "access log: a proxied answer that waited on its origin is in its own site's log, not another's; 413s (declared h1 and h2, chunked h1) are logged there too" "1 0 3 2 1" "$(python3 -c '
+import json
+a = [json.loads(l) for l in open("bench/tmp/loga.log")]; b = [json.loads(l) for l in open("bench/tmp/logb.log")]
+n = lambda rows, **k: sum(all(r.get(x) == y for x, y in k.items()) for r in rows)
+print(n(a, target="/api/slow?ms=400"), n(b, target="/api/slow?ms=400"), n(b, target="/", status=200), n(a, target="/api/echo", proto="HTTP/1.1", status=413), n(a, target="/api/echo", proto="HTTP/2.0", status=413))')"
   # A browser's cookie fields over HTTP/2 (one per pair, RFC 9113 8.2.3) reach the origin as
   # ONE Cookie line in the order sent; a second HTTP/1.1 Cookie line is folded the same way
   # (2026-09-27 report: Rack read the first cookie only, and no browser stayed signed in).

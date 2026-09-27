@@ -231,7 +231,8 @@ public:
             else bpos_ += used;
             if (ec) {
                 body_pending_ = false;
-                close();
+                if (ec == make_error_code(BodyError::too_large)) refuse_body();
+                else close();
                 handler(ec, 0);
                 return;
             }
@@ -291,7 +292,11 @@ private:
     // one pointer test. The client address is resolved once per connection, lazily.
     void log_request() {
         request_logged_ = true;
-        const auto* site = static_cast<const SiteConfig*>(worker_.state.site);
+        // The request's own site, kept by this connection: the worker's `site` belongs to
+        // whichever request the worker routed last, and an answer that waited on an origin
+        // or PHP was logged in another site's file (2026-09-27: a proxied a.test request in
+        // b.test's log, a tenant's traffic in another tenant's hands).
+        const SiteConfig* site = site_;
         if (!site) site = listener_->router.default_site();
         if (!site || site->access_log_sink < 0) return;
         if (remote_.empty()) {
@@ -525,11 +530,16 @@ private:
         consumed_ = req.length;
         request_logged_ = false;
         worker_.state.site = nullptr;
+        site_ = nullptr;
         if (req.has_body) {
             body_limit_ = body_limit(req.host);  // the site's own limit, looked up only for requests with a body
             if (!req.chunked && req.content_length > body_limit_) {
-                if constexpr (!IsLocalSocket<Socket>::value) log_body_refused(req.host, req.content_length);
-                fail_request(413);  // refused before the handler runs; the client gets it while it may still be sending
+                const SiteConfig* site = nullptr;
+                if constexpr (!IsLocalSocket<Socket>::value) {
+                    site = listener_->router.site(req.host);
+                    log_body_refused(site, req.content_length, false);
+                }
+                fail_request(413, site);  // refused before the handler runs; the client gets it while it may still be sending
                 return;
             }
             body_pending_ = true;
@@ -640,6 +650,7 @@ private:
     void dispatch() {
         WorkerState& ws = worker_.state;
         const LocationConfig* loc = dispatcher_.route(stream_, listener_->router, ws);
+        site_ = static_cast<const SiteConfig*>(ws.site);
         int hops = 0;
         while (loc) {
             if (loc->kind == HandlerKind::control) {  // the control socket's API (worker 0 only)
@@ -776,12 +787,34 @@ private:
             log->warn("request line did not parse from " + remote_ + ": " + escape_line(std::string_view(in_.data(), in_len_)));
         }
     }
-    // A declared body above the site's limit, in the error log with the fix (config.hpp).
-    void log_body_refused(std::string_view host, std::uint64_t declared) {
+    // A body above the site's limit, in the error log with the fix (config.hpp).
+    void log_body_refused(const SiteConfig* site, std::uint64_t bytes, bool at_least) {
         if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::warn)) {
             fill_connection_info();
-            log->warn(body_refused_text(listener_->router.site(host), remote_, declared, body_limit_));
+            log->warn(body_refused_text(site, remote_, bytes, body_limit_, at_least));
         }
+    }
+    // A chunked body that passed the limit while the handler read it (a declared one is
+    // refused before the handler runs): 413 and close, logged as such, and whatever the
+    // handler answers after the read error is dropped (request_gen_). Before 2026-09-27 the
+    // connection closed with no answer and the access log said 200. When an answer is
+    // already on its way, or the body is being drained after one, closing is all there is.
+    void refuse_body() {
+        if (responding_ || !handler_busy_) {
+            close();
+            return;
+        }
+        if constexpr (!IsLocalSocket<Socket>::value) log_body_refused(site_, body_read_, true);
+        ++request_gen_;
+        if (upstream_) {
+            upstream_->cancel();
+            upstream_.reset();
+        }
+        handler_busy_ = false;
+        worker_.state.now = std::time(nullptr);
+        dispatcher_.static_handler().error(stream_, 413, false);
+        responding_ = true;
+        writer_.write(stream_, worker_.state);
     }
     static std::string escape_line(std::string_view bytes) {
         std::string out;
@@ -795,10 +828,13 @@ private:
         return out;
     }
 
-    void fail_request(int status) {
+    // `site` when the request's site is known (a 413 for its body limit), so the line goes to
+    // that site's access log; a request that did not parse has none.
+    void fail_request(int status, const SiteConfig* site = nullptr) {
         worker_.state.now = std::time(nullptr);
         request_logged_ = false;
-        worker_.state.site = nullptr;
+        worker_.state.site = site;
+        site_ = site;
         dispatcher_.static_handler().error(stream_, status, false);
         consumed_ = in_len_;
         body_pending_ = false;
@@ -934,6 +970,7 @@ private:
     bool trusted_checked_ = false;
     bool trusted_peer_ = false;
     bool request_logged_ = false;
+    const SiteConfig* site_ = nullptr;       // the current request's site (routing), for its access log line
     unsigned request_gen_ = 0;               // bumps per request and on close; guards late upstream callbacks
     std::shared_ptr<UpstreamRequest> upstream_;  // FastCGI/proxy exchange in flight, cancelled on close
     std::unique_ptr<UpstreamConnection> peer_;   // the origin side of a tunnel after a 101

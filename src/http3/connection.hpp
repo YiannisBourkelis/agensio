@@ -349,7 +349,16 @@ private:
                     quic_.stream_consumed(q, take);
                     s.frame_remaining -= take;
                     s.body_received += take;
-                    if (s.body_received > s.body_limit) return deliver_error(s, make_error_code(BodyError::too_large));
+                    if (s.body_received > s.body_limit) {
+                        // As HTTP/2 does: 413 when nothing was answered yet, then the handler
+                        // learns the body ended in an error (its answer, if any, is dropped).
+                        if (!s.responded) {
+                            if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::warn))
+                                log->warn(body_refused_text(s.site, remote_.empty() ? std::string_view("-") : std::string_view(remote_), s.body_received, s.body_limit, true));
+                            fail_stream(s, 413);
+                        }
+                        return deliver_error(s, make_error_code(BodyError::too_large));
+                    }
                     deliver(s, take);
                     continue;
                 }
@@ -433,8 +442,9 @@ private:
             req.body = &s.body_source;
             s.body_limit = body_limit(req.host);
             if (s.length_known && s.content_length > s.body_limit) {
+                s.site = listener_->router.site(req.host);  // the 413 goes to the site's access log
                 if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::warn))
-                    log->warn(body_refused_text(listener_->router.site(req.host), remote_.empty() ? std::string_view("-") : std::string_view(remote_), s.content_length, s.body_limit));
+                    log->warn(body_refused_text(s.site, remote_.empty() ? std::string_view("-") : std::string_view(remote_), s.content_length, s.body_limit));
                 return fail_stream(s, 413);
             }
             quic_.stream_window(q, std::min<std::uint64_t>(std::max<std::uint64_t>(s.body_limit, 1), kStreamWindowMax));

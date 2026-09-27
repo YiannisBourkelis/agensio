@@ -1189,8 +1189,9 @@ std::string size_words_short(std::uint64_t bytes) {
 }
 }  // namespace
 
-std::string body_refused_text(const SiteConfig* site, std::string_view remote, std::uint64_t declared, std::size_t limit) {
-    const std::string sizes = "a request body of " + size_words_short(declared) + " from " + std::string(remote) + " refused with 413: ";
+std::string body_refused_text(const SiteConfig* site, std::string_view remote, std::uint64_t declared, std::size_t limit, bool at_least) {
+    const std::string sizes = "a request body of " + std::string(at_least ? "at least " : "") + size_words_short(declared) + " from " + std::string(remote) +
+                              " refused with 413: ";
     if (!site) return sizes + "above the server's max_body_size of " + size_words_short(limit);
     const std::string name = site->server_names.empty() ? std::string("?") : site->server_names.front();
     return "site " + name + ": " + sizes + "its max_body_size is " + size_words_short(limit) + (site->max_body_size ? "" : " (the server's default)") +

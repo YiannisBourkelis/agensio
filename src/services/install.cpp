@@ -24,6 +24,7 @@
 #include "services/archive.hpp"
 #include "services/fetch.hpp"
 #include "services/pools.hpp"
+#include "services/tasks.hpp"
 
 namespace agensio::install {
 
@@ -213,7 +214,7 @@ namespace {
 // installed it (2026-09-27 Writebook report): a Gemfile, the Ruby a .ruby-version pins, and
 // whether Rails credentials came with it (without them the application reads
 // SECRET_KEY_BASE from its environment, which the control handler then generates).
-json::Value app_facts(int dir_fd) {
+json::Value app_facts(int dir_fd, const std::string& ruby) {
     auto regular = [&](const char* rel) {
         struct stat st {};
         return ::fstatat(dir_fd, rel, &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(st.st_mode);
@@ -232,6 +233,24 @@ json::Value app_facts(int dir_fd) {
         if (v.starts_with("ruby-")) v.erase(0, 5);
         const bool clean = !v.empty() && v.size() <= 32 && v.find_first_not_of("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-_") == std::string::npos;
         if (clean) f.set("ruby_version", v);
+    }
+    // The pin against what the tasks will run (2026-09-27 report: the answer said "when that
+    // is another version" without looking): the interpreter asked for its version, as this
+    // account, in the site's directory, with nothing of ours in its environment.
+    if (!f.get("ruby_version").empty() && !ruby.empty()) {
+        tasks::Plan plan;
+        plan.argv = {ruby, "-e", "print RUBY_VERSION"};
+        plan.env = {"PATH=/usr/bin:/bin", "LANG=C.UTF-8"};
+        plan.timeout = 20;
+        plan.processes = 4096;  // the account's processes count (Puma's threads too); one fork is all this needs
+        plan.term_grace = 2;
+        plan.drain = 1;
+        const json::Value r = tasks::run(plan, dir_fd);
+        std::string out = tasks::clean_text(r.get("output"));
+        while (!out.empty() && (out.back() == '\n' || out.back() == ' ')) out.pop_back();
+        const bool version = !out.empty() && out.size() <= 32 && out.find_first_not_of("0123456789.") == std::string::npos;
+        if (r["exit"].type() == json::Value::Type::number && r["exit"].num() == 0 && version) f.set("runtime_ruby", out);
+        else f.set("runtime_ruby_error", std::string(ruby) + " did not report its version: " + (r.get("error").empty() ? out.substr(0, 200) : std::string(r.get("error"))));
     }
     return f;
 }
@@ -439,7 +458,7 @@ json::Value execute(const Request& req) {
         secured.push(req.target + "/" + rel);
     }
     result.set("secured", secured);
-    if (sub.empty()) result.set("facts", app_facts(dir_fd));
+    if (sub.empty()) result.set("facts", app_facts(dir_fd, req.ruby));
     ::close(dir_fd);
     return result;
 }

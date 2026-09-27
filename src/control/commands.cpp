@@ -3,6 +3,11 @@
 #include "control/settings.hpp"
 #include "control/sites.hpp"
 
+#ifndef _WIN32
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -12,6 +17,7 @@
 #include <sstream>
 
 #include "services/acme.hpp"
+#include "services/appenv.hpp"
 #include "services/pools.hpp"
 
 namespace agensio::control {
@@ -612,6 +618,27 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
     if (as_root && boot.user.empty())
         add("error", "running_as_root", "", "the server runs as root", "set [server] user = \"agensio\" and restart");
     if (running.sites.empty()) add("info", "no_sites", "", "no site is configured", "add a [[site]]");
+#ifndef _WIN32
+    // The site environments' directory (services/appenv.*): open to others, or not its
+    // owner's, it stops the tasks of every rails and proxy site (2026-09-27 report: a mkdir
+    // under a lax umask left it 0775, and no finding said why every task was refused). Its
+    // owner is root when the server drops privileges (the helper writes it), else the server.
+    if (std::any_of(running.sites.begin(), running.sites.end(), [](const SiteConfig& x) { return proxy_app(x.app); })) {
+        const std::string dir = appenv::dir_of(running.config_path);
+        const unsigned owner = boot.user.empty() ? ::geteuid() : 0u;
+        struct stat sb {};
+        const std::string own = owner == 0 ? "root" : "the server's account";
+        if (::lstat(dir.c_str(), &sb) == 0 && !S_ISDIR(sb.st_mode)) {
+            add("error", "site_env_unsafe", "", dir + " is not a directory (a symlink or a file): every task of a rails or proxy site is refused and no site environment can be written",
+                "as root: mv " + dir + " " + dir + ".refused && mkdir -m 0700 " + dir);
+        } else if (::lstat(dir.c_str(), &sb) == 0 && (sb.st_uid != owner || (sb.st_mode & 077) != 0)) {
+            const std::string mode = std::to_string((sb.st_mode >> 6) & 7) + std::to_string((sb.st_mode >> 3) & 7) + std::to_string(sb.st_mode & 7);
+            add("warn", "site_env_unsafe", "", dir + " is uid " + std::to_string(sb.st_uid) + "'s, mode " + mode + "; it must be " + own + "'s alone (0700): " +
+                    (sb.st_uid == owner ? "the next task or site_env call tightens it to 0700 and says so" : "every task of a rails or proxy site is refused until it is"),
+                std::string(owner == 0 ? "as root: chown root:root " + dir + " && " : "") + "chmod 0700 " + dir);
+        }
+    }
+#endif
 
     // Certificates, redirects and port 80.
     auto has_plain = [&](const SiteConfig& tls_site, bool need_redirect, bool need_port_80) {

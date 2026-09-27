@@ -23,6 +23,8 @@ mkdir -p $T/sites.d $T/logs $T/run $T/state $T/www $T/default $RT; chown agensio
 # The fake runtime: root's files in a root-owned directory, as [control] runtimes requires.
 cat > $RT/ruby <<'SH'
 #!/bin/sh
+# the version query of an install (install::app_facts): what the Ruby of [control] runtimes is
+[ "$1" = "-e" ] && [ "$2" = "print RUBY_VERSION" ] && { printf '%s' "$(cat /opt/agensio-tasks-rt/version 2>/dev/null || echo 3.4.7)"; exit 0; }
 echo "prog=ruby"; echo "args=$*"; echo "uid=$(id -un) cwd=$(pwd) umask=$(umask)"; env | sort | sed 's/^/env: /'
 if [ "$2" = new ]; then
   mkdir -p config storage db public bin
@@ -128,12 +130,17 @@ check "site-env-set: DATABASE_URL set, SECRET_KEY_BASE generated; root's file 06
 SKB=$(sed -n 's/^SECRET_KEY_BASE="\(.*\)"$/\1/p' $T/env/r1.test.env)
 ctl site-task r1.test db_migrate --yes --reason withsecret > $T/out
 check "the task gets the site's environment; its answer names the variables and shows no value" "True 128 yes sqlite3:storage/x.sqlite3 yes" "$(j 'd["ok"]') $(echo -n "$SKB" | wc -c | tr -d ' ') $(j '"yes" if "SECRET_KEY_BASE='$SKB'" in d["output"] else "no"') $(j '[l for l in d["output"].splitlines() if l.startswith("appenv")][0].split("DATABASE_URL=")[1]') $(j '"yes" if "SECRET_KEY_BASE=<site environment>" in d["env"] and not any("'$SKB'" in e for e in d["env"]) else d["env"]')"
-check "site-env: an admin reads names and values; the read is audited with the names only" "DATABASE_URL,SECRET_KEY_BASE yes no" "$(ctl site-env r1.test > $T/out; j '",".join(v["name"] for v in d["variables"])') $(grep -q 'sites/r1.test/env: read the values of DATABASE_URL, SECRET_KEY_BASE' $T/logs/audit.log && echo yes) $(grep -q "$SKB" $T/logs/audit.log && echo yes || echo no)"
+check "site-env: names, lengths and fingerprints, no value; audited with the names" "DATABASE_URL,SECRET_KEY_BASE 128 16 False no yes" "$(ctl site-env r1.test > $T/out; j '",".join(v["name"] for v in d["variables"]), int(d["variables"][1]["length"]), len(d["variables"][1]["fingerprint"]), "value" in d["variables"][1]') $(grep -q "$SKB" $T/out && echo yes || echo no) $(grep -q 'sites/r1.test/env: read the names of DATABASE_URL, SECRET_KEY_BASE$' $T/logs/audit.log && echo yes)"
+check "site-env --reveal: that one value, audited as REVEALED, never the value in the audit log" "yes False yes no" "$(ctl site-env r1.test --reveal SECRET_KEY_BASE > $T/out; j '"yes" if d["variables"][1]["value"] == "'$SKB'" else d') $(j '"value" in d["variables"][0]') $(grep -q 'env: read the names of DATABASE_URL, SECRET_KEY_BASE; REVEALED the value of SECRET_KEY_BASE' $T/logs/audit.log && echo yes) $(grep -q "$SKB" $T/logs/audit.log && echo yes || echo no)"
 check "generate keeps an existing secret; unset and generate in one call rotate it" "SECRET_KEY_BASE yes" "$(ctl site-env-set r1.test --generate SECRET_KEY_BASE --yes --reason keep > $T/out; j '",".join(d["kept"])') $(ctl site-env-set r1.test --unset SECRET_KEY_BASE --generate SECRET_KEY_BASE --yes --reason rotate > /dev/null; [ "$(sed -n 's/^SECRET_KEY_BASE="\(.*\)"$/\1/p' $T/env/r1.test.env)" != "$SKB" ] && echo yes)"
 check "site-env-set refuses a name that changes what runs" "1 yes" "$(ctl site-env-set r1.test --set LD_PRELOAD=/tmp/x.so --yes --reason bad > $T/out; echo -n "$? "; grep -q 'LD_PRELOAD is agensio' $T/out && echo yes)"
+chmod 664 $T/env/r1.test.env
+check "an environment file others could write: the task is refused naming it, with the root command; nothing runs" "1 yes yes" "$(ctl site-task r1.test db_migrate --yes --reason unsafe > $T/out; echo -n "$? "; grep -q "r1.test.env must be a regular file with one link, root's, mode 0600" $T/out && echo -n yes; echo -n ' '; j '"yes" if "chmod 0600" in d["run_as_root"][0] else d')"
 chmod 644 $T/env/r1.test.env
-check "an environment file others can read: the task is refused naming it, nothing runs" "1 yes" "$(ctl site-task r1.test db_migrate --yes --reason unsafe > $T/out; echo -n "$? "; grep -q "r1.test.env must be a regular file, root's, mode 0600" $T/out && echo yes)"
-chmod 600 $T/env/r1.test.env; rm -f $APP/nosecret
+check "a file others could only read is made 0600 by the helper, and the task says so" "True 600 yes" "$(ctl site-task r1.test db_migrate --yes --reason readable > $T/out; j 'd["ok"]') $(stat -c %a $T/env/r1.test.env) $(j '"yes" if "made 0600" in d["tightened"][0] else d.get("tightened")')"
+chmod 775 $T/env   # the 2026-09-27 report: a mkdir -p under a lax umask
+check "health names an environment directory open to others; the next task tightens it and says so" "yes True 700 yes" "$(ctl health | grep -q site_env_unsafe && echo yes) $(ctl site-task r1.test db_migrate --yes --reason dir775 > $T/out; j 'd["ok"]') $(stat -c %a $T/env) $(j '"yes" if "made 0700" in " ".join(d["tightened"]) else d.get("tightened")')"
+rm -f $APP/nosecret
 
 touch $APP/fail
 check "a failing task: 409, the exit status and the program's own words come back" "1 False 1 yes" "$(ctl site-task r1.test assets_precompile --yes --reason fail > $T/out; echo -n "$? "; j 'd["ok"], int(d["exit"]), "yes" if "cannot load such file -- bootsnap" in d["output"] and "exited with status 1" in d["error"] else d')"
@@ -167,12 +174,15 @@ check "db_prepare in a directory with no application: refused before anything ru
 mkdir -p $T/wb/writebook-1.2.2/config && echo "source 'https://rubygems.org'" > $T/wb/writebook-1.2.2/Gemfile && echo 3.4.7 > $T/wb/writebook-1.2.2/.ruby-version && echo x > $T/wb/writebook-1.2.2/config/application.rb
 tar -C $T/wb -cf $T/wb.tar writebook-1.2.2
 ctl upload wb.tar $T/wb.tar > /dev/null
+echo 3.3.8 > $RT/version   # the runtime's Ruby, as the fake reports it: not the pinned one
 ctl site-install r2.test --file wb.tar --yes --reason archive > $T/out
-check "site-install of a Rails archive without credentials: SECRET_KEY_BASE generated into the site's environment; next steps name the pinned Ruby, the bundle tasks and the body limit" "yes yes yes yes 600" "$(j '"yes" if any("SECRET_KEY_BASE generated" in x for x in d.get("done", [])) else d') $(j '"yes" if any("pins Ruby 3.4.7" in x for x in d["next_steps"]) else d["next_steps"]') $(j '"yes" if any(x.startswith("site_task bundle_install") for x in d["next_steps"]) else d["next_steps"]') $(j '"yes" if any("up to 1MB, the server" in x for x in d["next_steps"]) else d["next_steps"]') $(stat -c %a $T/env/r2.test.env)"
+rm -f $RT/version
+check "site-install of a Rails archive without credentials: SECRET_KEY_BASE generated into the site's environment; next steps name the pinned Ruby against the runtime's (3.3.8 here), the bundle tasks and the body limit" "yes yes yes yes 600" "$(j '"yes" if any("SECRET_KEY_BASE generated" in x for x in d.get("done", [])) else d') $(j '"yes" if any("pins Ruby 3.4.7 (.ruby-version), but the Ruby of [control] runtimes ('$RT') is 3.3.8" in x for x in d["next_steps"]) else d["next_steps"]') $(j '"yes" if any(x.startswith("site_task bundle_install") for x in d["next_steps"]) else d["next_steps"]') $(j '"yes" if any("up to 1MB, the server" in x for x in d["next_steps"]) else d["next_steps"]') $(stat -c %a $T/env/r2.test.env)"
 check "site-update of a site that holds an application: the next steps are the bundle tasks, not rails_new" "yes no" "$(ctl site-update r2.test --upstream http://127.0.0.1:18401 --yes --reason next > $T/out; j '"yes" if any("in place: site-task r2.test bundle_install" in x for x in d["next_steps"]) else d["next_steps"]') $(grep -q rails_new $T/out && echo yes || echo no)"
 chown root $T/www/r2.test/app
 check "a site directory the site's account does not own: refused before anything runs" "1 yes" "$(ctl site-task r2.test gem_install_rails --yes --reason owner > $T/out; echo -n "$? "; grep -q 'belongs to uid 0, not to r2' $T/out && echo yes)"
 check "the audit log: each run with the exact argv, the account and the outcome; each refusal with its reason" "yes yes yes" "$(grep -q "sites/r1.test/task (new): ran as r1 in $APP: $RT/ruby $T/state/r1/gems/bin/rails new . --name=blog .* -> exit 0" $T/logs/audit.log && echo yes) $(grep -q "sites/r1.test/task (slow): ran as r1 .* -> stopped at the time limit" $T/logs/audit.log && echo yes) $(grep -q "sites/r2.test/task (owner): refused: .*belongs to uid 0" $T/logs/audit.log && echo yes)"
+check "site-delete of a rails site names the environment file it keeps, with the root line that removes it" "yes yes yes" "$(ctl site-delete r2.test --yes --reason gone > $T/out; j '"yes" if "'$T'/env/r2.test.env" in d["kept"][0] else d') $(j '"yes" if d["run_as_root"] == ["rm -f '$T'/env/r2.test.env"] else d') $([ -f $T/env/r2.test.env ] && echo yes)"
 check "health: no PHP finding and no unreadable-files finding for the rails sites (nothing is served from their root); the site file names app = rails" "no yes" "$(ctl health | grep -q 'php_tmp_missing\|pools_stale\|files_unreadable' && echo yes || echo no) $(grep -q '^app = "rails"' $T/sites.d/r1.test.toml && echo yes)"
 
 stop

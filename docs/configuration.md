@@ -489,8 +489,9 @@ scanners probe are answered 404 by agensio itself and never reach the applicatio
 `/Gemfile.lock`, `/log/production.log` and everything below `/storage/` (Rails keeps its
 databases and Active Storage's disk files there and routes none of it; Active Storage
 answers under `/rails/active_storage/`), and any path ending in `.sqlite3`,
-`.sqlite3-wal`, `.sqlite3-shm`, `.sqlite3-journal`, `.log`, `.key` or `.sql`, in any case,
-wherever the application keeps its files (Writebook's database is
+`.sqlite3-wal`, `.sqlite3-shm`, `.sqlite3-journal`, `.log`, `.key` or `.sql`, the ending in
+any case, wherever the application keeps its files (the `/storage/` prefix is matched as
+written, as every path is; `/Storage/db/production.sqlite3` is refused by its ending) (Writebook's database is
 `storage/db/production.sqlite3`). `presets` lists them under `never_served`; a hand-written
 location of the same path wins, and a hand-written `/` location replaces the endings too. Every task prints
 "Using vips to process variants requires the libvips library" until `libvips42` is
@@ -1204,7 +1205,7 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 | `uploads` | viewer | the archives stored with `upload` (`file`, `bytes`, `uploaded`), ready for `site-install --file` |
 | `site-tasks NAME` | viewer | the named tasks the site's preset offers (`app = "rails"`: six), each with its summary, its parameters (name, meaning, pattern, required), whether it downloads, whether the directory must be empty, its effective time limit (the row's, capped by `[control] task_limits.timeout`) and its `interpreter`: the program, whether the interpreter rule accepts it and, when not, why and the package command; `run_as_root` at the top lists every missing package once, so root installs them before the first task; the account that runs them (`runs_as`), the directory, the task running now; a site of another preset has none |
 | `settings [NAME]` | viewer | the per-site limits `site-create` and `site-update` accept under `settings`: for each key its type, unit and spellings, meaning, default and its origin, minimum, the ceiling from `[control] site_limits`, what changing it costs (agensio reload, php-fpm reload) and what it derives; with a site, the current value and whether it comes from the site, the server or a built-in default. `site NAME` reports the same `settings` |
-| `health` | viewer | findings with `severity`, `code`, `site`, `message`, `fix` (also `files_unreadable`: files under a document root, the preset's upload directory first, that the server's account cannot open and that answer 404 with no log line; `php_tmp_missing`; `php_fpm_hard_reload`; `php_pool_resident`, judged from the pool file php-fpm runs; `preset_mismatch`: the files under a site's directory belong to another application than its `app` says, with the application detected and the `app` to set; `archives_in_root`: backup archives and database dumps under a served tree, the directories a preset never answers excepted): configuration on disk invalid or failing the hosting rules, restart-only settings changed, running as root, certificate unreadable / still the placeholder / expired / expiring within 14 days (manual), `tls = "auto"` without a plain port-80 site for the names, no http-to-https redirect, application sites sharing the server's account, generated pools out of date, errors in the last 24 hours. `ok` is true when nothing above info level was found |
+| `health` | viewer | findings with `severity`, `code`, `site`, `message`, `fix` (also `files_unreadable`: files under a document root, the preset's upload directory first, that the server's account cannot open and that answer 404 with no log line; `php_tmp_missing`; `php_fpm_hard_reload`; `php_pool_resident`, judged from the pool file php-fpm runs; `preset_mismatch`: the files under a site's directory belong to another application than its `app` says, with the application detected and the `app` to set; `archives_in_root`: backup archives and database dumps under a served tree, the directories a preset never answers excepted; `site_env_unsafe`: the site environments' directory is not root's alone, with the `chown`/`chmod` line): configuration on disk invalid or failing the hosting rules, restart-only settings changed, running as root, certificate unreadable / still the placeholder / expired / expiring within 14 days (manual), `tls = "auto"` without a plain port-80 site for the names, no http-to-https redirect, application sites sharing the server's account, generated pools out of date, errors in the last 24 hours. `ok` is true when nothing above info level was found |
 
 **Changes** (`POST` with a JSON body; every one needs `"confirm": true`, takes a
 `"reason"` that goes to the audit log, and answers 428 without the confirmation):
@@ -1224,7 +1225,7 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 | `site-install NAME` | admin | puts an application's files into the site's directory (the `root` as given, above a preset's `public/` or `web/`; `--path SUB` for a subdirectory such as `wp-content/plugins/NAME`, with `--create-path` when it does not exist yet) **as the site's account**, from one source: `--url https://...` (a `.tar.gz`, `.tar` or `.zip`), `--file UPLOAD` (a stored upload), or nothing, which takes the preset's official archive (`presets` lists it under `source`; `--version V` picks a release, default the newest; WordPress and Drupal have one, Laravel is made with composer). `--sha256 HEX` refuses an archive whose digest differs. `--strip 0|1` keeps or unwraps a single top directory (default: unwrap when there is exactly one). `--dry-run` takes the same walk as the real call, as the same account, and answers with the target, the account and `would_create`, or with the refusal the real call would meet; nothing is downloaded or written. Answers 201 with `files`, `bytes`, `sha256`, `unwrapped`, `created` (each directory made, with owner and mode), `facts` for an install into the site's directory itself (`gemfile`, `credentials`: Rails' `config/credentials.yml.enc` or `config/credentials/production.yml.enc`, `ruby_version`: what `.ruby-version` pins), `next_steps` (for `app = "rails"`: the pinned Ruby, then `bundle_install`, `db_prepare`, `assets_precompile` and Puma; for the others the application's own setup in the browser; for every site but a static one its request-body limit), and `done` when a Rails archive without credentials got its `SECRET_KEY_BASE` generated into the site's environment (once: an existing value is kept); 409 with the reason and nothing left behind; 403 when `install = false` and a URL was given; 422 when no source can be found |
 | `site-copy NAME --from SUB --to SUB` | admin | copies one regular file of the site to another path of the same site **as the site's account**: the drop-in files applications ship as templates (`wp-content/db.php` from the SQLite plugin's `db.copy`, `advanced-cache.php` or `object-cache.php` from a caching plugin, Drupal's `sites/default/settings.php` from `default.settings.php`). Both paths are relative to the site's directory and reached by the same walk as an install; `from` must be an existing regular file (no directory, no symlink); the destination's directory must exist (`site-install --create-path` makes one); an existing destination is refused unless `--overwrite`, and the answer then reports the replaced file's size and mtime. The new file gets the directory's pattern (`0640` in a `2750` directory, the execute bits when the source has them), or `0600` when it is one of the preset's credential files (`secured: true`); written under a temporary name and linked or renamed into place, so a refusal leaves nothing; the configuration is validated afterwards (see below). Never across sites, never content from the caller, never a directory, no chmod or chown. `--dry-run` runs the same checks. Answers 201 (200 when replaced) with `from`, `to`, `as`, `bytes`, `mode`, `replaced`; 409 with the reason |
 | `site-task NAME TASK [--param KEY=VALUE]...` | admin | runs one named task of the site's preset **as the site's account** in the site's directory (`root`): a row of the task table, never a command line (below). `--dry-run` answers with the exact argv, the account, the directory, the environment and the limits, and runs nothing. Answers 200 when the task exited 0, 409 when it failed, was stopped at its time limit or was refused, each with `argv` (what ran, the interpreter resolved), `as`, `cwd`, `env` (the site's own variables as `NAME=<site environment>`, never their values), `exit` or `signal`, `timed_out`, `duration_ms`, `output` (the first 16 KB and the last 48 KB of stdout and stderr together, `truncated` and `output_bytes` when longer), `secured` (credential paths made private), `hint` when the failure has a known cause (Rails' "Missing secret_key_base": generate one into the site's environment; "Your Ruby version is X, but your Gemfile specified Y": a Ruby for one application, below), and `run_as_root` when the interpreter is missing; 400 for an unknown task or a parameter that does not match; 422 for a preset without tasks; 409 while another task runs on the same site |
-| `site-env NAME` | admin | the site's environment (`app = "rails"` or `"proxy"`): `variables` with each name and value, and the file; every read is audited with the names it returned. 422 for a site of another preset |
+| `site-env NAME [--reveal KEY]...` | admin | the site's environment (`app = "rails"` or `"proxy"`): `variables` with each name, its `length` and its `fingerprint` (16 hex digits of a keyed hash: the same fingerprint means the same value), no value; a value only for each `--reveal KEY` (`?reveal=KEY,KEY` on the API), audited as `REVEALED`; `exists` false when the site has no file yet; `tightened` when the helper made the directory or the file private on the way. Every call is audited with the names it returned. 422 for a site of another preset; 409 with `run_as_root` when the directory or the file cannot be trusted |
 | `site-env-set NAME [--set KEY=VALUE]... [--unset KEY]... [--generate KEY]...` | admin | changes the site's environment: `--set` adds or replaces, `--unset` removes, `--generate` puts a random secret (128 hex digits) under a name that is missing and keeps an existing one; a name in both `--unset` and `--generate` is rotated. Answers 200 with the names under `set`, `unset`, `generated`, `kept`, `absent` and `names` (every name now in the file), never a value, and the restart of the application's service as a next step; 400 for a name or value the rules refuse (below), 409 when the helper refuses |
 
 **What `site-task` enforces.** A task is a row of `src/services/tasks.cpp`: a preset, a
@@ -1337,13 +1338,20 @@ in systemd's `EnvironmentFile` syntax (`NAME="value"` lines), which the site's t
 after the variables agensio sets and its application service loads
 (`EnvironmentFile=-/etc/agensio/env/<site>.env` in `docs/examples/puma.service`). It is
 written through the control plane (`site-env-set`, MCP `site_env_set`) and read back by an
-admin (`site-env`, `site_env`), both audited with names only:
+admin (`site-env`, `site_env`) as names, lengths and fingerprints; a value is returned
+only when asked for by name, because a value returned is in the agent's context and
+transcript from then on:
 
 ```sh
 agensio ctl site-env-set ag6.example.com --generate SECRET_KEY_BASE --set DATABASE_URL=sqlite3:storage/db/production.sqlite3 --yes --reason "Writebook"
-agensio ctl site-env ag6.example.com
+agensio ctl site-env ag6.example.com                              # names, lengths, fingerprints
+agensio ctl site-env ag6.example.com --reveal DATABASE_URL        # that one value, audited as REVEALED
 systemctl restart agensio-app-ag6          # the application reads it at start; the tasks from their next run
 ```
+
+The fingerprint is HMAC-SHA256 under a key kept beside the files (`env/.fingerprint.key`,
+made on first use): two sites or two moments with the same fingerprint hold the same
+value, and a weak password cannot be found from its fingerprint with a dictionary.
 
 The file is root's, `0600`, in a directory root owns alone (`0700`), written and read by the
 provisioning helper: systemd reads an `EnvironmentFile` as root, so a file the site's
@@ -1357,12 +1365,17 @@ source's credentials such as `BUNDLE_GEMS__CONTRIBSYS__COM`, `LD_*`, `DYLD_*`, `
 `RUBYLIB`, `NODE_OPTIONS`, `PYTHON*`, `GIT_*`, `BASH_ENV`, the systemd socket variables);
 values are one line of UTF-8, at most 4 KB, 128 variables in all. A file root edits by hand
 is read the way systemd reads it (quoted or not, comments), but a line that goes on over
-the next one, a name the rules refuse or a file that is not root's `0600` stops every task
-of the site with the reason. `site-install` generates `SECRET_KEY_BASE` itself when a
+the next one or a name the rules refuse stops every task of the site with the reason. The
+directory and the files must be root's: a directory open to others (a `mkdir -p` under a
+lax umask) and a file others could only read are tightened by the helper, which says so
+under `tightened`; a file others could write, one with a second hard link, or another
+owner is refused with the `chown`/`chmod` line under `run_as_root`, and `health` reports
+`site_env_unsafe`. `site-install` generates `SECRET_KEY_BASE` itself when a
 Rails archive came without credentials (never for one with them: an environment value
 would override the application's own secret and sign its users out); `--generate` never
 replaces a value, and rotating one is `--unset NAME --generate NAME` in one call. The file
-stays when the site is deleted, as the site's files do.
+stays when the site is deleted, as the site's files do; `site-delete` names it and gives the
+`rm -f` line.
 
 **What `site-install` enforces.** The account that installs is the site's `user`, or for
 a site without one the owner of the site's directory, which must be a site account

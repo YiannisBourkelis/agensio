@@ -79,7 +79,7 @@ std::string validate(const json::Value& req, const Config& cfg) {
         if (!control::safe_path(site_root, why)) return "app_install: site_root " + why;
         if (!under(site_root, sites_root(cfg)) || site_root == sites_root(cfg)) return "app_install: " + site_root + " is not below " + sites_root(cfg);
         if (!under(target, site_root)) return "app_install: " + target + " is not below the site's directory " + site_root;
-        for (const char* flag : {"create_path", "dry_run"})
+        for (const char* flag : {"create_path", "dry_run", "ruby_check"})
             if (!req[flag].is_null() && req[flag].type() != json::Value::Type::boolean) return std::string("app_install: ") + flag + " must be a boolean";
         if (!user.empty() && !control::valid_account(user, why)) return "app_install: user " + why;
         if (url.empty() == upload.empty()) return "app_install: exactly one of url and upload";
@@ -130,6 +130,11 @@ std::string validate(const json::Value& req, const Config& cfg) {
     if (op == "env_read" || op == "env_write") {
         // A site's name, and for a write the change; the helper finds the site on disk.
         if (!control::valid_domain(req.get("site"))) return op + ": site must be a site's host name";
+        const json::Value& reveal = req["reveal"];
+        if (!reveal.is_null() && (!reveal.is_array() || reveal.items().size() > 128)) return op + ": reveal must be a list of names";
+        for (const auto& r : reveal.items())
+            if (!r.is_string() || r.str().empty() || r.str().size() > 64 || r.str().find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_") != std::string::npos)
+                return op + ": reveal names variables";
         if (op == "env_write") {
             appenv::Change change;
             if (std::string bad = appenv::parse_change(req, change); !bad.empty()) return "env_write: " + bad;
@@ -387,6 +392,18 @@ json::Value app_install(const json::Value& req, const Config& cfg, int helper_fd
     std::string why;
     if (!install_account(cfg, site_root, user, uid, gid, why)) return reply.set("ok", false).set("error", why);
     if (uid == 0) return reply.set("ok", false).set("error", "refusing to install as root");
+    // ruby_check: the Ruby of [control] runtimes in root's file on disk, held to the
+    // interpreter rule here, so the install child asks a trusted program for its version.
+    std::string ruby;
+    if (req["ruby_check"].boolean()) {
+        try {
+            const Config fresh = load_config(cfg.config_path);
+            std::string canonical;
+            bool missing = false;
+            if (tasks::trusted_program(runtime_dir(fresh.control, "ruby") + "/ruby", provision::sites_root(cfg), canonical, missing).empty()) ruby = canonical;
+        } catch (const std::exception&) {
+        }
+    }
     int upload_fd = -1;
     if (!upload.empty()) {
         const std::string path = provision::uploads_dir(cfg) + "/" + upload;
@@ -406,6 +423,7 @@ json::Value app_install(const json::Value& req, const Config& cfg, int helper_fd
         r.strip = req["strip"].is_null() ? -1 : static_cast<int>(req["strip"].num());
         r.allow_private = cfg.control.install_private;
         r.ca_file = cfg.control.install_ca;
+        r.ruby = ruby;
         for (const auto& sec : req["secrets"].items()) r.secrets.push_back(sec.str());
         return install::execute(r);
     });
@@ -499,12 +517,11 @@ json::Value env_op(const json::Value& req, const Config& cfg) {
     const std::string key = site->server_names.front();
     const std::string dir = appenv::dir_of(cfg.config_path);
     if (req.get("op") == "env_read") {
-        std::vector<appenv::Var> vars;
-        std::string why;
-        if (!appenv::read(dir, key, 0, vars, why)) return fail(why);
-        json::Value list = json::Value::array();
-        for (const auto& v : vars) list.push(json::Value::object().set("name", v.name).set("value", v.value));
-        return reply.set("ok", true).set("site", key).set("file", dir + "/" + key + ".env").set("variables", std::move(list));
+        // Names, lengths and fingerprints; a value only when named in reveal (the owner's
+        // decision of 2026-09-27: a secret leaves the helper only when asked for).
+        std::vector<std::string> reveal;
+        for (const auto& r : req["reveal"].items()) reveal.emplace_back(r.str());
+        return appenv::describe(dir, key, 0, reveal);
     }
     appenv::Change change;
     if (std::string bad = appenv::parse_change(req, change); !bad.empty()) return fail(bad);
@@ -550,8 +567,12 @@ json::Value task_run(const json::Value& req, const Config& cfg, int helper_fd) {
     if (!dry_run && !ensure_home(cfg, account, uid, pw->pw_gid, why)) return fail("the account's home: " + why);
     std::vector<appenv::Var> vars;
     // A site named "*" has no environment file (appenv names files by host name).
-    if (appenv::valid_site(site->server_names.front()) && !appenv::read(appenv::dir_of(cfg.config_path), site->server_names.front(), 0, vars, why))
-        return fail("the site's environment: " + why);
+    appenv::Status est;
+    if (appenv::valid_site(site->server_names.front()) && !appenv::read(appenv::dir_of(cfg.config_path), site->server_names.front(), 0, vars, est)) {
+        reply = fail("the site's environment: " + est.error);
+        if (!est.fix.empty()) reply.set("run_as_root", json::Value::array().push(est.fix));
+        return reply;
+    }
     tasks::Request tr;
     tr.row = row;
     tr.params = req["params"];
@@ -566,7 +587,13 @@ json::Value task_run(const json::Value& req, const Config& cfg, int helper_fd) {
         if (provision::under_root(abs, site_root) && abs != site_root) tr.secrets.push_back(abs.substr(site_root.size() + 1));
     tr.network_allowed = fresh.control.task_network;
     tr.dry_run = dry_run;
-    return run_as_account(uid, gid, helper_fd, -1, [&] { return tasks::execute(tr); }, std::chrono::seconds(tr.ctx.timeout + 120));
+    json::Value out = run_as_account(uid, gid, helper_fd, -1, [&] { return tasks::execute(tr); }, std::chrono::seconds(tr.ctx.timeout + 120));
+    if (!est.notes.empty()) {  // the environment's directory or file, tightened on the way: said, not hidden
+        json::Value notes = json::Value::array();
+        for (const auto& n : est.notes) notes.push(n);
+        out.set("tightened", notes);
+    }
+    return out;
 }
 
 // The helper's loop: one JSON line in, one out, until the server closes its end.

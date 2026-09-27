@@ -9,6 +9,7 @@
 #include <cerrno>
 #include <vector>
 #include <memory>
+#include <optional>
 #include <cstring>
 #include <filesystem>
 
@@ -645,6 +646,7 @@ void ControlHandler::site_install(Stream& s, std::string_view name, const json::
     if (!file.empty()) req.set("upload", file);
     if (!sha.empty()) req.set("sha256", sha);
     if (!body["strip"].is_null()) req.set("strip", body["strip"]);
+    if (app == "rails" && target == site_root) req.set("ruby_check", true);  // the pinned Ruby against the runtime's (next steps)
     const std::string source = url.empty() ? "upload " + file : url;
     if (!dry_run) audit_peer(s, what, "installing " + source + " into " + target + (create_path ? " (create_path)" : ""));
     const std::vector<std::string> before = dry_run ? std::vector<std::string>{} : validation_errors(*backend_);
@@ -685,10 +687,22 @@ void ControlHandler::site_install(Stream& s, std::string_view name, const json::
             if (!url.empty()) steps.push("the files came from " + std::string(r.get("url").empty() ? url : std::string(r.get("url"))) + "; sha256 " + std::string(r.get("sha256")));
             const json::Value facts = r["facts"];  // a copy: r.set below may move r's members
             if (sf.rails_root) {
-                if (const std::string_view v = facts.get("ruby_version"); !v.empty())
-                    steps.push("the application pins Ruby " + std::string(v) + " (.ruby-version); the tasks run the Ruby of [control] runtimes (" + sf.ruby_dir +
-                               "): when that is another version bundle_install refuses, and root installs " + std::string(v) +
-                               " under /opt and points runtimes.ruby at its bin directory (docs/configuration.md 15; agensio reload applies it)");
+                if (const std::string pin(facts.get("ruby_version")); !pin.empty()) {
+                    const std::string have(facts.get("runtime_ruby"));
+                    // Bundler reads `ruby file: ".ruby-version"` as exact; a pin of fewer parts
+                    // ("3.4") is matched by any release of it.
+                    const bool same = !have.empty() && (have == pin || have.starts_with(pin + "."));
+                    if (same)
+                        steps.push("the application pins Ruby " + pin + " (.ruby-version), and the Ruby of [control] runtimes (" + sf.ruby_dir + ") is " + have + ": they match");
+                    else if (!have.empty())
+                        steps.push("the application pins Ruby " + pin + " (.ruby-version), but the Ruby of [control] runtimes (" + sf.ruby_dir + ") is " + have +
+                                   ": bundle_install refuses until root installs " + pin + " under /opt and points runtimes.ruby at its bin directory "
+                                   "(docs/configuration.md 15, a Ruby for one application; agensio reload applies it)");
+                    else
+                        steps.push("the application pins Ruby " + pin + " (.ruby-version); the Ruby of [control] runtimes (" + sf.ruby_dir + ") could not be asked for its version (" +
+                                   std::string(facts.get("runtime_ruby_error").empty() ? "the interpreter rule refused it: site_tasks_list says why" : facts.get("runtime_ruby_error")) +
+                                   "); when it is another version bundle_install refuses (docs/configuration.md 15)");
+                }
                 steps.push("site_task bundle_install, then db_prepare and assets_precompile; then the application server (docs/examples/puma.service, "
                            "which loads the site's environment file)");
             } else {
@@ -975,6 +989,11 @@ void ControlHandler::site_update(Stream& s, std::string_view name, const json::V
 
 void ControlHandler::site_toggle(Stream& s, std::string_view name, std::string_view action, std::string_view what) {
     const Config& cfg = backend_->running();
+    // An application site's environment file, named in a delete's answer; the path is taken
+    // now, as the reload below replaces the configuration `cfg` refers to.
+    std::optional<std::string> env_file;
+    if (const SiteConfig* site = control::find_site(cfg, name); site && proxy_app(site->app) && appenv::valid_site(site->server_names.front()))
+        env_file = appenv::dir_of(cfg.config_path) + "/" + site->server_names.front() + ".env";
     const std::filesystem::path file = control::site_file(cfg, name);
     const std::filesystem::path disabled = file.string() + ".disabled";
     std::error_code ec;
@@ -1012,7 +1031,16 @@ void ControlHandler::site_toggle(Stream& s, std::string_view name, std::string_v
         return;
     }
     audit_peer(s, what, std::string(action) + " " + file.string());
-    reply(s, 200, json::Value::object().set("ok", true).set("file", file.string()).set("action", std::string(action)));
+    json::Value body = json::Value::object().set("ok", true).set("file", file.string()).set("action", std::string(action));
+    // A deleted application site's environment stays, as its files do (2026-09-27 report: it
+    // holds secrets and nothing said so). The server cannot look inside root's directory.
+    if (action == "delete" && env_file) {
+        const std::string& env = *env_file;
+        body.set("kept", json::Value::array().push("the site's environment " + env + ", if it has one (its secrets: SECRET_KEY_BASE and the like), as the "
+                                                    "site's directory and account are kept")).set("run_as_root", json::Value::array().push("rm -f " + env));
+        body.set("hint", "run_as_root removes the environment file once the site is gone for good; keep it to bring the site back with the same secrets");
+    }
+    reply(s, 200, body);
 }
 
 // One of the site's files copied to another path of the same site (F9b): the drop-in
@@ -1219,8 +1247,26 @@ void ControlHandler::site_env_show(Stream& s, std::string_view name, std::functi
         done();
         return;
     }
+    // Names, lengths and fingerprints; a value only for the names in ?reveal=A,B (the owner's
+    // decision after the alpha.27 report: a value returned is in the agent's context and
+    // transcript, so it leaves the server only when someone asks for that value).
+    json::Value reveal = json::Value::array();
+    const std::string asked = control::query_value(s.request.target, "reveal");
+    for (std::size_t pos = 0; pos < asked.size();) {
+        std::size_t comma = asked.find(',', pos);
+        if (comma == std::string::npos) comma = asked.size();
+        const std::string n = asked.substr(pos, comma - pos);
+        pos = comma + 1;
+        if (n.empty()) continue;
+        if (n.size() > 64 || n.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_") != std::string::npos) {
+            reply(s, 400, json::Value::object().set("error", "reveal names variables: ?reveal=NAME,NAME"));
+            done();
+            return;
+        }
+        reveal.push(n);
+    }
     const std::string key = site->server_names.front();
-    backend_->env_async(json::Value::object().set("op", "env_read").set("site", key), [this, &s, key, done](json::Value r) {
+    backend_->env_async(json::Value::object().set("op", "env_read").set("site", key).set("reveal", reveal), [this, &s, key, done](json::Value r) {
         const std::string what = "sites/" + key + "/env";
         if (!r["ok"].boolean()) {
             audit_peer(s, what, "read refused: " + std::string(r.get("error")));
@@ -1228,9 +1274,16 @@ void ControlHandler::site_env_show(Stream& s, std::string_view name, std::functi
         } else {
             json::Value names = json::Value::array();
             for (const auto& v : r["variables"].items()) names.push(std::string(v.get("name")));
-            audit_peer(s, what, names.items().empty() ? std::string("read: no variables") : "read the values of " + joined(names));
-            r.set("hint", "values are secrets: show one to the user only when asked. site_env_set changes them; the tasks read the file on their next run, "
-                          "the application when its service restarts");
+            std::string line = names.items().empty() ? std::string("read: no variables") : "read the names of " + joined(names);
+            if (!r["revealed"].items().empty()) line += "; REVEALED the value of " + joined(r["revealed"]);
+            if (!r["tightened"].items().empty()) line += "; tightened: " + joined(r["tightened"]);
+            audit_peer(s, what, line);
+            std::string hint = r["exists"].boolean()
+                ? "names, lengths and fingerprints only (the same fingerprint means the same value); a value is returned only when its name is in reveal, "
+                  "and only when the user asked to see it. site_env_set changes them; the tasks read the file on their next run, the application when its "
+                  "service restarts"
+                : "no environment file yet: site_env_set creates it (generate: [\"SECRET_KEY_BASE\"] for a Rails application without credentials)";
+            r.set("hint", hint);
             reply(s, 200, r);
         }
         done();
@@ -1279,7 +1332,7 @@ void ControlHandler::site_env_set(Stream& s, std::string_view name, const json::
             return;
         }
         std::string result;
-        for (const char* k : {"set", "unset", "generated", "kept", "absent"})
+        for (const char* k : {"set", "unset", "generated", "kept", "absent", "tightened"})
             if (!r[k].items().empty()) result += (result.empty() ? "" : "; ") + std::string(k) + " " + joined(r[k]);
         audit_peer(s, what, "environment " + std::string(r.get("file")) + ": " + (result.empty() ? std::string("unchanged") : result));
         json::Value steps = json::Value::array();

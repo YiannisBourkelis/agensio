@@ -158,7 +158,7 @@ std::vector<Tool> tools() {
                  schema({{"name", prop("string", "A site's host name: adds the current values. Omit for the table alone.")}}, {})});
     t.push_back({"site_tasks_list", "List a site's tasks", "The named tasks site_task can run on this site, from its preset's table: for app = \"rails\" gem_install_rails, rails_new, bundle_install, db_prepare, db_migrate, assets_precompile. Each with what it does, its parameters (name, pattern, required), whether it downloads (refused when root set [control] task_network = false), whether the site's directory must be empty, its effective time limit, and its interpreter: the program it would run, whether the interpreter rule accepts it, and when not the reason and the package command. run_as_root at the top lists every missing package once: call this before the first task and ask the user to install them then, not after a task fails. Also the account that runs the tasks, the directory, and the task running now if any. Sites of other presets have none, and agensio runs no other command.", "GET", "/v1/sites/{name}/tasks", true, false, Role::viewer, schema({{"name", name_arg()}}, {"name"})});
     t.push_back({"presets_list", "Application presets", "What each `app` value does: which directory is served, whether every .php runs or only the front controller, what is refused, which directories never run PHP, which serve certain endings alone (`serves_only`: Grav's user/accounts avatars, user/data media), which files are never served (and, the note says, refused in every backup spelling too: wp-config.php.bak, wp-config.php~, .wp-config.php.swp, wp-config.txt, so a user asking whether a backup of the credentials file is exposed can be answered without a terminal), and `source`: the official archive site_install takes when it has one (wordpress, drupal, grav). Use it to answer 'which applications are supported', to pick app for site_create and to know whether site_install can fetch the application itself; the site_show tool shows the expanded locations of a real site.", "GET", "/v1/presets", true, false, Role::viewer, schema({}, {})});
-    t.push_back({"health_check", "Health check", "What an administrator should look at: certificates, missing redirects, port 80 for ACME, recent errors, settings waiting for a restart, root, shared accounts, stale pools, php-fpm reloading without process_control_timeout (which cuts PHP requests on every site whenever a pool is written), and php_pool_resident: every static or dynamic pool with the PHP processes it keeps while idle and their memory (the answer to 'why so many php-fpm processes' or 'the machine is full': site_update with settings: {pm: \"ondemand\"} frees it; static stays right for a site that must not pay a fork on its first request), judged from the pool file php-fpm runs, so a pool left static on disk after the configuration changed is named as a warning whose fix is agensio pools plus a php-fpm reload. preset_mismatch: the files under a site's directory belong to another application than its app says (Grav on the drupal preset: the borrowed refusals do not fit, and its backup archive was public); the fix is site_update with the detected app. archives_in_root: backup archives and database dumps (.zip, .tar.gz, .sql) inside a served tree, one preset or one path away from public; the fix is moving them out. Each finding has a severity and a fix. Run this first on a server you do not know.", "GET", "/v1/health", true, false, Role::viewer, schema({}, {})});
+    t.push_back({"health_check", "Health check", "What an administrator should look at: certificates, missing redirects, port 80 for ACME, recent errors, settings waiting for a restart, root, shared accounts, stale pools, php-fpm reloading without process_control_timeout (which cuts PHP requests on every site whenever a pool is written), and php_pool_resident: every static or dynamic pool with the PHP processes it keeps while idle and their memory (the answer to 'why so many php-fpm processes' or 'the machine is full': site_update with settings: {pm: \"ondemand\"} frees it; static stays right for a site that must not pay a fork on its first request), judged from the pool file php-fpm runs, so a pool left static on disk after the configuration changed is named as a warning whose fix is agensio pools plus a php-fpm reload. preset_mismatch: the files under a site's directory belong to another application than its app says (Grav on the drupal preset: the borrowed refusals do not fit, and its backup archive was public); the fix is site_update with the detected app. archives_in_root: backup archives and database dumps (.zip, .tar.gz, .sql) inside a served tree, one preset or one path away from public; the fix is moving them out. site_env_unsafe: the directory of the sites' environment files is open to others or not root's (a mkdir under a lax umask), which stops tasks until it is root's alone; the fix is the chown/chmod line (a root-owned one is tightened at the next task). Each finding has a severity and a fix. Run this first on a server you do not know.", "GET", "/v1/health", true, false, Role::viewer, schema({}, {})});
     t.push_back({"reload", "Reload configuration", "Validate the configuration on disk and switch to it without dropping a connection. Refused with the reason when it does not validate; nothing changes then.", "POST", "/v1/reload", false, false, Role::operator_, schema({{"confirm", confirm_arg()}, {"reason", reason_arg()}}, {"confirm", "reason"})});
     t.push_back({"logs_reopen", "Reopen logs", "Reopen every log file after rotation.", "POST", "/v1/logs/reopen", false, false, Role::operator_, schema({{"confirm", confirm_arg()}, {"reason", reason_arg()}}, {"confirm", "reason"})});
     t.push_back({"site_create", "Create a site", "Writes a new site file, validates and reloads. A new site is HTTPS-only with a redirect from http unless https is \"none\". Until https, root (or upstream), app and user are decided the server answers with the open questions and a suggestion each: ask the user each question, then call again with every field. When the server has its provisioning helper (started as root, the default), the account, the directories, the site's log and the php-fpm pool are created by this call and listed under done; only then is nothing left for a terminal. If it answers with commands to run as root instead (no helper, or the helper refused something), show them to the user, wait until they confirm they ran them, then call again with the same fields. The success answer may carry warnings: tell the user each one (for example that the site answers only its own names and a monitor checking the IP address needs the hostname, or a catch-all site with server_name [\"*\"]).", "POST", "/v1/sites", false, false, Role::admin, schema(site_fields(), {"domain", "confirm", "reason"})});
@@ -203,7 +203,11 @@ std::vector<Tool> tools() {
                          {"confirm", confirm_arg()},
                          {"reason", reason_arg()}},
                         {"name", "task", "confirm", "reason"})});
-    t.push_back({"site_env", "Show a site's environment", "The application environment of a site with app = \"rails\" or \"proxy\": the variables its site tasks and its application service get (SECRET_KEY_BASE, DATABASE_URL, an API key), names and values, from the site's environment file (root's, 0600, <directory of the main configuration>/env/<site>.env, read by the root helper). Values are secrets: show one to the user only when they ask for that value, never list them unasked; to check whether a name is set, say that it is. Admin only; every read is written to the audit log with the names returned. site_env_set changes them.", "GET", "/v1/sites/{name}/env", true, false, Role::admin, schema({{"name", name_arg()}}, {"name"})});
+    t.push_back({"site_env", "Show a site's environment", "The application environment of a site with app = \"rails\" or \"proxy\": the variables its site tasks and its application service get (SECRET_KEY_BASE, DATABASE_URL, an API key), from the site's environment file (root's, 0600, <directory of the main configuration>/env/<site>.env, read by the root helper). Each variable comes with its name, its length and a fingerprint (16 hex digits of a keyed hash: the same fingerprint means the same value, so 'is it the same secret?' is answered without showing it), and no value. A value is returned only for the names in reveal, and reveal is used only when the user explicitly asked to see that value: never to check that a name is set, never 'to be sure', never for more names than asked; each revealed value is recorded in the audit log as a secret read, and once shown it is in this conversation. exists: false means the site has no file yet (site_env_set creates it). Admin only; every call is audited with the names returned. site_env_set changes them.", "GET", "/v1/sites/{name}/env", true, false, Role::admin,
+                 schema({{"name", name_arg()},
+                         {"reveal", json::Value::object().set("type", "array").set("items", prop("string", "a variable's name"))
+                                        .set("description", "Names whose values to return, only when the user explicitly asked to see them; omit it otherwise.")}},
+                        {"name"})});
     t.push_back({"site_env_set", "Change a site's environment", "Sets, removes or generates variables of a site's application environment (app = \"rails\" or \"proxy\"): the file its site tasks and its application service read, root's and 0600, written by the root helper. set: {NAME: value} adds or replaces; unset: [NAME] removes; generate: [NAME] puts a random 128-hex-digit secret under a name that is missing and keeps an existing one (to rotate, give the name in both unset and generate; a new SECRET_KEY_BASE signs every user out and invalidates signed links). A Rails application without credentials (config/credentials.yml.enc; every ONCE application such as Writebook, every Kamal deployment) reads SECRET_KEY_BASE from here: site_install generates it once for an archive that came without credentials, and when a task fails with \"Missing secret_key_base\" its answer says to generate it. Names: upper-case letters, digits and _, never one agensio sets or one that changes which program runs (PATH, HOME, RAILS_ENV, GEM_*, BUNDLE_* except a gem source's credentials such as BUNDLE_GEMS__CONTRIBSYS__COM, LD_*, RUBYOPT, NODE_OPTIONS, GIT_*): those are refused with the reason. Values: one line of UTF-8, at most 4 KB. The answer and the audit log carry names only. The tasks read the file from their next run; the application reads it when its service restarts (docs/examples/puma.service loads it with EnvironmentFile=), which is a root step until agensio manages the service: give the user the systemctl restart line from next_steps.", "POST", "/v1/sites/{name}/env", false, false, Role::admin,
                  schema({{"name", name_arg()},
                          {"set", json::Value::object().set("type", "object").set("additionalProperties", json::Value::object().set("type", "string"))
@@ -254,8 +258,8 @@ const char* kInstructions =
     "assets_precompile. A task's answer carries its output and, for a known cause, a hint: read both to explain a "
     "failure. An application's secrets and settings (SECRET_KEY_BASE, DATABASE_URL, API keys) go into the site's "
     "environment with site_env_set, never into a file of the application and never into a unit file by hand: the "
-    "tasks and the application's service read that file (site_env shows it; values are secrets, shown only when "
-    "asked). No tool runs any other command, so never offer one, and never ask the user for a shell command a task "
+    "tasks and the application's service read that file (site_env shows names, lengths and fingerprints; a value only "
+    "with reveal, and reveal only when the user asks to see that value). No tool runs any other command, so never offer one, and never ask the user for a shell command a task "
     "covers. Puma itself is not started by a tool yet: give the user docs/examples/puma.service from the agensio "
     "repository to install as root (it loads the site's environment file), the one step left for a terminal, and say "
     "so, with its restart after an environment change. "
@@ -285,7 +289,7 @@ const char* kInstructions =
     "slower over HTTP/2 here (windows follow the site's body limit), "
     "and the error log carries an info line for every GOAWAY or RST_STREAM the server sends, naming the "
     "client, the stream and the reason, which is where to look when a user reports HTTP/2 trouble. "
-    "If an answer carries a NOTE that this bridge and the server are different versions, tell the user at once and how to fix it (reconnect the MCP server, or restart agensio): tools may be missing and descriptions out of date until then. "
+    "If an answer carries a NOTE that this bridge and the server are different versions (in its text, or as bridge.note in the structured answer), tell the user at once and how to fix it (reconnect the MCP server, or restart agensio): tools may be missing and descriptions out of date until then. "
     "Never invent settings: what a tool does not offer is not configurable here. Host names are "
     "strict: a site answers only the names in server_name, and a listener without a catch-all site "
     "(server_name [\"*\"] or default = true) answers 421 to any other Host, including the IP address; and on "
@@ -455,6 +459,16 @@ private:
                 q += (q.empty() ? "?" : "&") + std::string(k) + "=" + enc;
             }
             path += q;
+        } else if (name == "site_env" && args["reveal"].is_array()) {
+            std::string names;
+            for (const auto& n : args["reveal"].items()) {
+                if (!n.is_string() || n.str().empty() || n.str().find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_") != std::string::npos) {
+                    tool_error(id, "reveal takes variable names (letters, digits, _)");
+                    return;
+                }
+                names += (names.empty() ? "" : ",") + std::string(n.str());
+            }
+            if (!names.empty()) path += "?reveal=" + names;
         }
         ControlReply reply;
         std::string err;
@@ -465,13 +479,19 @@ private:
         json::Value parsed;
         const bool is_json = json::parse(reply.body, parsed, err);
         json::Value content = json::Value::array();
-        content.push(json::Value::object().set("type", "text").set("text", reply.body));
         // The server's version rides on every answer: a bridge left running across an
-        // upgrade says so on the next call, not never.
-        if (const std::string note = version_mismatch_note(AGENSIO_VERSION, reply.version); !note.empty())
-            content.push(json::Value::object().set("type", "text").set("text", note));
+        // upgrade says so on the next call, first in the text and inside the structured
+        // answer too, since a host that shows structuredContent never shows the text
+        // (2026-09-27 report: Claude Code, a bridge left on alpha.26, the note never seen).
+        const std::string note = version_mismatch_note(AGENSIO_VERSION, reply.version);
+        if (!note.empty()) content.push(json::Value::object().set("type", "text").set("text", note));
+        content.push(json::Value::object().set("type", "text").set("text", reply.body));
         json::Value r = json::Value::object().set("content", std::move(content)).set("isError", reply.status >= 400);
-        if (is_json && parsed.is_object()) r.set("structuredContent", parsed);
+        if (is_json && parsed.is_object()) {
+            if (!note.empty())
+                parsed.set("bridge", json::Value::object().set("version", AGENSIO_VERSION).set("server", reply.version).set("note", note));
+            r.set("structuredContent", parsed);
+        }
         result(id, std::move(r));
     }
 

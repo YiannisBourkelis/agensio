@@ -1,4 +1,42 @@
 # Changelog
+## 0.1.0-alpha.28 (unreleased)
+
+From the alpha.27 report (a second Writebook install on the live host) and what fixing it
+turned up:
+
+- **HTTP/1 wrote an answer that waited on its origin into another site's access log.** The
+  line took the site the worker had routed last, so a proxied or PHP request logged under
+  whichever site the same worker served meanwhile: one tenant's traffic in another
+  tenant's file (reproduced with two sites and a 400 ms origin). HTTP/1 now keeps the
+  request's own site, as HTTP/2 and HTTP/3 already did.
+- **Every 413 is in its site's access log.** A body refused for its declared size was in
+  no access log over HTTP/1, HTTP/2 or HTTP/3 (the listener's catch-all, when there was
+  one, got it; alpha.27's "it was in the access log only" was wrong). **A chunked HTTP/1.1
+  body past the limit now gets 413 and Connection: close** instead of a cut connection
+  logged as 200, and HTTP/3 answers 413 mid-body as HTTP/2 did; the warning line says "at
+  least N MB" for a body counted as it arrived.
+- **`site_env` returns names, lengths and fingerprints; a value only on request.** The
+  owner's decision after the report: returned values end up in the agent's context and
+  transcript, so a value leaves the server only for the names in `reveal`
+  (`agensio ctl site-env NAME --reveal KEY`, `?reveal=KEY` on the API), each such read
+  audited as REVEALED. The fingerprint is 16 hex digits of HMAC-SHA256 under a key kept
+  beside the files (`.fingerprint.key`), so the same value has the same fingerprint and a
+  weak one cannot be looked up in a dictionary. `exists` says whether the site has a file.
+- **An environment directory or file with a lax mode no longer stops every task silently.**
+  The helper tightens a root-owned directory open to others (0700) and a root-owned file
+  others could only read (0600), and says so under `tightened`; a file others could write,
+  a second hard link or another owner is refused with the `chown`/`chmod` line under
+  `run_as_root`; health reports `site_env_unsafe`.
+- **The bridge's version note reaches hosts that show structured answers.** It leads the
+  text and sits in `structuredContent.bridge` (Claude Code shows only the latter).
+- **`site_install` asks the runtime's Ruby for its version** when the application pins one
+  and says "they match" or which version differs, instead of "when that is another
+  version".
+- **`site_delete` of a Rails or proxy site names the environment file it keeps**, with the
+  root line that removes it.
+- The Rails refusals by ending apply in any case; `/storage/` is matched as written, as
+  paths are (alpha.27's "in any case" was about the endings).
+
 ## 0.1.0-alpha.27 (2026-09-27)
 
 - **P1: a browser's second cookie reached no application over HTTP/2 or HTTP/3.** A

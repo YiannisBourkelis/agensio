@@ -951,8 +951,9 @@ void Server::prepare_uploads() {
 void Server::install_async(const json::Value& req, std::function<void(json::Value)> done) {
     // Off the worker: the helper's request blocks for the download's duration, and so does
     // the in-process install. The result is posted back to worker 0, where the control
-    // connection lives.
-    std::thread([this, req, done = std::move(done)] {
+    // connection lives. The runtimes key comes from the configuration running now.
+    const std::string ruby_dir = runtime_dir(running().control, "ruby");
+    std::thread([this, req, ruby_dir, done = std::move(done)] {
         json::Value r;
         const bool copy = req.get("op") == "file_copy";
         if (provisioner_.available()) {
@@ -986,6 +987,11 @@ void Server::install_async(const json::Value& req, std::function<void(json::Valu
             ir.strip = req["strip"].is_null() ? -1 : static_cast<int>(req["strip"].num());
             ir.allow_private = cfg_.control.install_private;
             ir.ca_file = cfg_.control.install_ca;
+            if (req["ruby_check"].boolean()) {
+                std::string canonical;
+                bool missing = false;
+                if (tasks::trusted_program(ruby_dir + "/ruby", provision::sites_root(cfg_), canonical, missing).empty()) ir.ruby = canonical;
+            }
             for (const auto& sec : req["secrets"].items()) ir.secrets.push_back(sec.str());
             if (!ir.url.empty() && !cfg_.control.install) {
                 r = json::Value::object().set("ok", false).set("error", "downloads are off ([control] install = false); upload the archive instead");
@@ -1022,13 +1028,14 @@ void Server::task_async(const json::Value& req, std::function<void(json::Value)>
             const tasks::Row* row = tasks::find(req.get("app"), req.get("task"));
             const struct passwd* pw = ::getpwuid(::geteuid());
             std::vector<appenv::Var> vars;
-            std::string why;
+            appenv::Status est;
             if (!row) {
                 r = json::Value::object().set("ok", false).set("error", "no such task");
             } else if (!pw) {
                 r = json::Value::object().set("ok", false).set("error", "this process's account has no name");
-            } else if (appenv::valid_site(req.get("site")) && !appenv::read(appenv::dir_of(cfg_.config_path), req.get("site"), ::geteuid(), vars, why)) {
-                r = json::Value::object().set("ok", false).set("error", "the site's environment: " + why);
+            } else if (appenv::valid_site(req.get("site")) && !appenv::read(appenv::dir_of(cfg_.config_path), req.get("site"), ::geteuid(), vars, est)) {
+                r = json::Value::object().set("ok", false).set("error", "the site's environment: " + est.error);
+                if (!est.fix.empty()) r.set("run_as_root", json::Value::array().push(est.fix));
             } else {
                 tasks::Request tr;
                 tr.row = row;
@@ -1044,6 +1051,11 @@ void Server::task_async(const json::Value& req, std::function<void(json::Value)>
                 tr.network_allowed = ctl.task_network;
                 tr.dry_run = req["dry_run"].boolean();
                 r = tasks::execute(tr);
+                if (!est.notes.empty()) {
+                    json::Value notes = json::Value::array();
+                    for (const auto& n : est.notes) notes.push(n);
+                    r.set("tightened", notes);
+                }
             }
 #else
             r = json::Value::object().set("ok", false).set("error", "not available on this platform");
@@ -1065,15 +1077,9 @@ void Server::env_async(const json::Value& req, std::function<void(json::Value)> 
             const std::string dir = appenv::dir_of(cfg_.config_path);
             const std::string site(req.get("site"));
             if (req.get("op") == "env_read") {
-                std::vector<appenv::Var> vars;
-                std::string why;
-                if (!appenv::read(dir, site, ::geteuid(), vars, why)) {
-                    r = json::Value::object().set("ok", false).set("error", why);
-                } else {
-                    json::Value list = json::Value::array();
-                    for (const auto& v : vars) list.push(json::Value::object().set("name", v.name).set("value", v.value));
-                    r = json::Value::object().set("ok", true).set("site", site).set("file", dir + "/" + site + ".env").set("variables", std::move(list));
-                }
+                std::vector<std::string> reveal;
+                for (const auto& n : req["reveal"].items()) reveal.emplace_back(n.str());
+                r = appenv::describe(dir, site, ::geteuid(), reveal);
             } else {
                 appenv::Change change;
                 const std::string bad = appenv::parse_change(req, change);

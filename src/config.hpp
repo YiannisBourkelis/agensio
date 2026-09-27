@@ -280,7 +280,9 @@ inline std::size_t body_limit_of(const SiteConfig& site, const Config& cfg) noex
 // the limit, naming the site, the sizes and the fix (nginx logs the same case as "client
 // intended to send too large body"): the first upload above a site's limit is otherwise
 // visible in the access log alone (2026-09-27 report). Error path only.
-std::string body_refused_text(const SiteConfig* site, std::string_view remote, std::uint64_t declared, std::size_t limit);
+// `at_least`: a body without a declared length (chunked, or HTTP/2 and HTTP/3 without
+// content-length), counted as it arrived and refused once past the limit.
+std::string body_refused_text(const SiteConfig* site, std::string_view remote, std::uint64_t declared, std::size_t limit, bool at_least = false);
 
 // Parses a try_files list: "$uri", "$uri/", "=403"/"=404", or "/path" (last element only
 // for the latter two). Throws std::invalid_argument.

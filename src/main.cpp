@@ -55,7 +55,7 @@ void usage() {
                  "                      site-copy NAME --from SUB --to SUB [--overwrite] [--dry-run]\n"
                  "                      site-task NAME TASK [--param KEY=VALUE]... [--dry-run] (site-tasks NAME lists them)\n"
                  "                      site-env-set NAME [--set KEY=VALUE]... [--unset KEY]... [--generate KEY]...\n"
-                 "                           (site-env NAME shows the site's environment; admin)\n"
+                 "                           (site-env NAME [--reveal KEY]... shows names, lengths, fingerprints; admin)\n"
                  "                      site-update NAME --set KEY=VALUE ... (settings [NAME] lists the keys and ceilings)\n"
                  "                      Uploads: upload NAME [FILE] (stdin by default) | uploads | uploads-delete NAME\n"
                  "  mcp                 Model Context Protocol server on stdin/stdout for an AI agent host,\n"
@@ -121,7 +121,8 @@ int main(int argc, char** argv) {
             auto ctl_usage = [] {
                 std::cout << "usage: agensio ctl <command> [options] [--socket PATH] [-c config.toml]\n"
                              "read:   status | sites | site NAME | validate | health | presets | uploads | settings [NAME] | reference |\n"
-                             "        site-tasks NAME | site-env NAME (admin: the site's environment, values included; audited) |\n"
+                             "        site-tasks NAME | site-env NAME [--reveal KEY]... (admin: the site's environment as names, lengths\n"
+                             "                    and fingerprints; a value only for each --reveal KEY, audited as a secret read) |\n"
                              "        logs [--site NAME] [--since 3h] [--level error|warn|info] [--status 5xx|4xx|all] [--limit N]\n"
                              "change (each needs --yes, takes --reason TEXT):\n"
                              "        reload | logs-reopen | site-disable NAME | site-enable NAME | site-delete NAME | cert-renew NAME\n"
@@ -163,7 +164,7 @@ int main(int argc, char** argv) {
                     ctl_usage();
                     return 0;
                 }
-            std::string command, socket_path, site_name, query, upload_file;
+            std::string command, socket_path, site_name, query, upload_file, reveal;
             agensio::json::Value body = agensio::json::Value::object();
             agensio::json::Value aliases = agensio::json::Value::array();
             bool yes = false;
@@ -211,6 +212,7 @@ int main(int argc, char** argv) {
                 else if (b == "--from") field("from");
                 else if (b == "--to") field("to");
                 else if (b == "--overwrite") body.set("overwrite", true);
+                else if (b == "--reveal") { std::string v; value(v); reveal += (reveal.empty() ? "" : ",") + v; }
                 else if (b == "--unset" || b == "--generate") {
                     std::string v; value(v);
                     const char* key = b == "--unset" ? "unset" : "generate";
@@ -271,7 +273,8 @@ int main(int argc, char** argv) {
             else if (command == "site-copy" && !site_name.empty()) path = "/v1/sites/" + site_name + "/copy";
             else if (command == "site-task" && !site_name.empty() && !body["task"].is_null()) path = "/v1/sites/" + site_name + "/task";
             else if (command == "site-tasks" && !site_name.empty()) path = "/v1/sites/" + site_name + "/tasks";
-            else if ((command == "site-env" || command == "site-env-set") && !site_name.empty()) path = "/v1/sites/" + site_name + "/env";
+            else if ((command == "site-env" || command == "site-env-set") && !site_name.empty())
+                path = "/v1/sites/" + site_name + "/env" + (command == "site-env" && !reveal.empty() ? "?reveal=" + reveal : std::string());
             else if (command == "uploads-delete" && !site_name.empty()) path = "/v1/uploads/" + site_name + "/delete";
             else if (upload && !site_name.empty()) path = "/v1/uploads/" + site_name;
             else {

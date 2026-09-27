@@ -30,11 +30,16 @@ struct Request {
     bool allow_private = false;
     std::uint64_t max_download = 1ull << 30;
     std::string ca_file;
+    // The Ruby [control] runtimes gives, resolved and checked by the caller (trusted_program),
+    // or "": when the installed tree pins a version (.ruby-version), it is asked for its own
+    // (`ruby -e 'print RUBY_VERSION'`, as the executing account) and facts carries both.
+    std::string ruby;
 };
 
 // {"ok": bool, "error"?, "as", "files", "directories", "bytes", "downloaded", "sha256", "unwrapped"?,
 //  "created": [{"path", "owner", "mode"}], "secured": [paths made 0600], and for an install
-//  into site_root itself "facts": {"gemfile", "credentials" (Rails'), "ruby_version"?}};
+//  into site_root itself "facts": {"gemfile", "credentials" (Rails'), "ruby_version"?,
+//  "runtime_ruby"? (what req.ruby says it is) | "runtime_ruby_error"?}};
 //  a dry run answers {"ok", "dry_run": true, "as", "would_create": [...]}.
 // The walk from site_root to the target opens every component without following symlinks
 // and requires each existing one to belong to the executing account; a refusal at any

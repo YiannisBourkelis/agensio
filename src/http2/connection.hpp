@@ -725,8 +725,9 @@ private:
             req.body = &s.body_source;
             s.body_limit = body_limit(req.host);
             if (s.length_known && s.content_length > s.body_limit) {
+                s.site = listener_->router.site(req.host);  // the 413 goes to the site's access log
                 if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::warn))
-                    log->warn(body_refused_text(listener_->router.site(req.host), remote_text(), s.content_length, s.body_limit));
+                    log->warn(body_refused_text(s.site, remote_text(), s.content_length, s.body_limit));
                 return fail_stream(s, 413);
             }
             // The receive window follows the body limit, so an upload runs at the consumer's pace.
@@ -928,7 +929,11 @@ private:
         if (s->length_known && s->body_received > s->content_length)
             return stream_error(*s, ErrorCode::protocol_error, "more DATA than content-length");
         if (s->body_received > s->body_limit) {
-            if (!s->responded && !s->ready) fail_stream(*s, 413);
+            if (!s->responded && !s->ready) {
+                if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::warn))
+                    log->warn(body_refused_text(s->site, remote_text(), s->body_received, s->body_limit, true));
+                fail_stream(*s, 413);
+            }
             s->body_done = true;  // nothing more is taken from this request
             return_window(*s, static_cast<std::uint32_t>(len), true);
             s->state = StreamState::half_closed_remote;

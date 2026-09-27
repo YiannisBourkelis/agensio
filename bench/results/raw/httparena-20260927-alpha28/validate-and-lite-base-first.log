@@ -1,0 +1,1841 @@
+=== validate new
+=== Frag Results: 9 passed, 0 failed ===
+=== Results: 72 passed, 0 failed ===
+=== base b5fde5e (alpha.27)
+[info] available cores: 24 | threads: 12
+[info] tuning host for benchmark runs
+[info] setting kernel socket limits
+[info] setting UDP buffer sizes for QUIC
+[info] setting loopback MTU to 1500 (realistic Ethernet)
+[info] restarting docker daemon
+[info] dropping kernel caches
+[warn] could not restart docker daemon (no sudo?)
+[info] framework: agensio (agensio, C++)
+[info] subscribed tests: baseline,pipelined,limited-conn,json-tls,static-tls,baseline-h2,static-h2,baseline-h2c,json-h2c,baseline-h3,static-h3
+[info] building image: httparena-agensio
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 1.13kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/debian:trixie
+#2 ...
+
+#3 [internal] load metadata for docker.io/library/debian:trixie-slim
+#3 DONE 1.8s
+
+#2 [internal] load metadata for docker.io/library/debian:trixie
+#2 DONE 1.8s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [build 1/5] FROM docker.io/library/debian:trixie@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c
+#5 resolve docker.io/library/debian:trixie@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c 0.0s done
+#5 DONE 0.0s
+
+#6 [stage-1 1/5] FROM docker.io/library/debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+#6 resolve docker.io/library/debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a 0.0s done
+#6 DONE 0.0s
+
+#7 [internal] load build context
+#7 transferring context: 2.63MB done
+#7 DONE 0.0s
+
+#8 [build 2/5] RUN apt-get update && apt-get install -y --no-install-recommends         build-essential cmake ninja-build git ca-certificates libssl-dev zlib1g-dev     && rm -rf /var/lib/apt/lists/*
+#8 CACHED
+
+#9 [build 3/5] WORKDIR /src
+#9 CACHED
+
+#10 [build 4/5] COPY src.tar.gz /tmp/src.tar.gz
+#10 DONE 0.0s
+
+#11 [build 5/5] RUN tar -xzf /tmp/src.tar.gz -C /src     && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DAGENSIO_TESTS=OFF -DAGENSIO_NATIVE=ON -DAGENSIO_HTTPARENA=ON     && cmake --build build --target agensio
+#11 0.329 -- The CXX compiler identification is GNU 14.2.0
+#11 0.333 -- Detecting CXX compiler ABI info
+#11 0.364 -- Detecting CXX compiler ABI info - done
+#11 0.370 -- Check for working CXX compiler: /usr/bin/c++ - skipped
+#11 0.370 -- Detecting CXX compile features
+#11 0.371 -- Detecting CXX compile features - done
+#11 0.375 -- asio not found on the system, fetching asio-1-38-2 from GitHub
+#11 11.19 -- asio include dir: /src/build/_deps/asio-src/asio/include
+#11 11.19 -- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+#11 11.23 -- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+#11 11.23 -- Found Threads: TRUE
+#11 11.24 -- Found OpenSSL: /usr/lib/x86_64-linux-gnu/libcrypto.so (found version "3.5.7")
+#11 11.24 -- TLS enabled with OpenSSL 3.5.7
+#11 11.24 -- Looking for SSL_set_quic_tls_cbs
+#11 11.31 -- Looking for SSL_set_quic_tls_cbs - found
+#11 11.31 -- HTTP/3 enabled (OpenSSL QUIC TLS API)
+#11 11.32 -- Found ZLIB: /usr/lib/x86_64-linux-gnu/libz.so (found version "1.3.1")
+#11 11.32 -- Configuring done (11.0s)
+#11 11.33 -- Generating done (0.0s)
+#11 11.33 -- Build files have been written to: /src/build
+#11 11.48 [1/45] Building CXX object CMakeFiles/agensio_core.dir/src/http_date.cpp.o
+#11 11.62 [2/45] Building CXX object CMakeFiles/agensio_core.dir/src/mime.cpp.o
+#11 11.64 [3/45] Building CXX object CMakeFiles/agensio_core.dir/src/file.cpp.o
+#11 11.64 /src/src/file.cpp: In function 'agensio::SendFileResult agensio::send_file(int, const File&, uint64_t, uint64_t, const IoSlice*, int)':
+#11 11.64 /src/src/file.cpp:203:41: warning: unused parameter 'headers' [-Wunused-parameter]
+#11 11.64   203 |                          const IoSlice* headers, int header_count) noexcept {
+#11 11.64       |                          ~~~~~~~~~~~~~~~^~~~~~~
+#11 11.70 [4/45] Building CXX object CMakeFiles/agensio_core.dir/src/path.cpp.o
+#11 11.75 [5/45] Building CXX object CMakeFiles/agensio_core.dir/src/http1/parser.cpp.o
+#11 11.86 [6/45] Building CXX object CMakeFiles/agensio_core.dir/src/http/field_codec.cpp.o
+#11 12.05 [7/45] Building CXX object CMakeFiles/agensio_core.dir/src/response.cpp.o
+#11 12.20 [8/45] Building CXX object CMakeFiles/agensio_core.dir/src/quic/tls.cpp.o
+#11 12.38 [9/45] Building CXX object CMakeFiles/agensio_core.dir/src/http2/hpack.cpp.o
+#11 12.48 [10/45] Building CXX object CMakeFiles/agensio_core.dir/src/quic/crypto.cpp.o
+#11 12.49 [11/45] Building CXX object CMakeFiles/agensio_core.dir/src/cache.cpp.o
+#11 12.58 [12/45] Building CXX object CMakeFiles/agensio_core.dir/src/http3/qpack.cpp.o
+#11 12.63 [13/45] Building CXX object CMakeFiles/agensio_core.dir/src/core/router.cpp.o
+#11 13.07 [14/45] Building CXX object CMakeFiles/agensio_core.dir/src/services/log.cpp.o
+#11 13.28 [15/45] Building CXX object CMakeFiles/agensio_core.dir/src/services/archive.cpp.o
+#11 14.35 [16/45] Building CXX object CMakeFiles/agensio_core.dir/src/control/reference.cpp.o
+#11 14.52 [17/45] Building CXX object CMakeFiles/agensio_core.dir/src/services/appenv.cpp.o
+#11 14.56 [18/45] Building CXX object CMakeFiles/agensio_core.dir/src/control/settings.cpp.o
+#11 14.72 [19/45] Building CXX object CMakeFiles/agensio_core.dir/src/services/pools.cpp.o
+#11 14.76 [20/45] Building CXX object CMakeFiles/agensio_core.dir/src/control/sites.cpp.o
+#11 14.77 [21/45] Building CXX object CMakeFiles/agensio_core.dir/src/control/client.cpp.o
+#11 15.06 [22/45] Building CXX object CMakeFiles/agensio_core.dir/src/handlers/static.cpp.o
+#11 15.15 [23/45] Building CXX object CMakeFiles/agensio_core.dir/src/upstream/fcgi_client.cpp.o
+#11 15.28 [24/45] Building CXX object CMakeFiles/agensio_core.dir/src/handlers/httparena.cpp.o
+#11 15.57 [25/45] Building CXX object CMakeFiles/agensio_core.dir/src/handlers/dispatch.cpp.o
+#11 15.58 [26/45] Building CXX object CMakeFiles/agensio_core.dir/src/handlers/cgi.cpp.o
+#11 15.58 [27/45] Building CXX object CMakeFiles/agensio_core.dir/src/handlers/proxy.cpp.o
+#11 15.65 [28/45] Building CXX object CMakeFiles/agensio_core.dir/src/upstream/http_client.cpp.o
+#11 15.82 [29/45] Building CXX object CMakeFiles/agensio_core.dir/src/services/provision.cpp.o
+#11 15.97 [30/45] Building CXX object CMakeFiles/agensio_core.dir/src/services/tasks.cpp.o
+#11 16.00 [31/45] Building CXX object CMakeFiles/agensio_core.dir/src/handlers/upstream_common.cpp.o
+#11 16.03 [32/45] Building CXX object CMakeFiles/agensio_core.dir/src/handlers/fastcgi.cpp.o
+#11 16.10 [33/45] Building CXX object CMakeFiles/agensio_core.dir/src/services/fetch.cpp.o
+#11 16.21 [34/45] Building CXX object CMakeFiles/agensio_core.dir/src/services/install.cpp.o
+#11 16.30 [35/45] Building CXX object CMakeFiles/agensio_core.dir/src/upstream/cgi_client.cpp.o
+#11 17.23 [36/45] Building CXX object CMakeFiles/agensio_core.dir/src/control/commands.cpp.o
+#11 17.26 [37/45] Building CXX object CMakeFiles/agensio_core.dir/src/services/acme.cpp.o
+#11 17.42 [38/45] Building CXX object CMakeFiles/agensio_core.dir/src/control/mcp.cpp.o
+#11 17.58 [39/45] Building CXX object CMakeFiles/agensio.dir/src/main.cpp.o
+#11 19.60 [40/45] Building CXX object CMakeFiles/agensio_core.dir/src/control/handler.cpp.o
+#11 21.54 [41/45] Building CXX object CMakeFiles/agensio_core.dir/src/config.cpp.o
+#11 22.80 [42/45] Building CXX object CMakeFiles/agensio_core.dir/src/upstream/client.cpp.o
+#11 40.66 [43/45] Building CXX object CMakeFiles/agensio_core.dir/src/server.cpp.o
+#11 40.70 [44/45] Linking CXX static library libagensio_core.a
+#11 40.78 [45/45] Linking CXX executable agensio
+#11 DONE 40.8s
+
+#12 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends libssl3t64 zlib1g     && rm -rf /var/lib/apt/lists/*
+#12 CACHED
+
+#13 [stage-1 3/5] COPY --from=build /src/build/agensio /usr/local/bin/agensio
+#13 DONE 0.0s
+
+#14 [stage-1 4/5] COPY agensio.toml start.sh /etc/agensio/
+#14 DONE 0.0s
+
+#15 [stage-1 5/5] RUN chmod 0755 /etc/agensio/start.sh
+#15 DONE 0.2s
+
+#16 exporting to image
+#16 exporting layers
+#16 exporting layers 0.2s done
+#16 exporting manifest sha256:de07efe884a3fa6691e366dbf203e70c6cda2927af9b85b73e323d48dbcb90e4 0.0s done
+#16 exporting config sha256:eeba1f6684efbb76270c48d3784b05d38c2b550fc7857db28582eef2a48a2d4c 0.0s done
+#16 exporting attestation manifest sha256:f2a1b105aa40696f3808a441534408443765c0009b1883f83039542c1104284e 0.0s done
+#16 exporting manifest list sha256:abbf08de2228d3352da6a44b9409dbf79ac30824042516208d206cfee6601cfc 0.0s done
+#16 naming to docker.io/library/httparena-agensio:latest done
+#16 unpacking to docker.io/library/httparena-agensio:latest 0.0s done
+#16 DONE 0.3s
+
+==============================================
+=== agensio / baseline / 512c (tool=gcannon) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+gcannon v0.6.1
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  unlimited (keep-alive)
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency    212us    205us    289us    445us   2.24ms
+
+  12096998 requests in 5.00s, 12096486 responses
+  Throughput: 2.42M req/s
+  Bandwidth:  276.84MB/s
+  Status codes: 2xx=12096486, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 12096486 / 12096486 responses (100.0%)
+  Per-template: 4066856,4031428,3998202
+  Per-template-ok: 4066856,4031428,3998202
+[info] CPU 1096.1% | Mem 56MiB
+
+[run 2/3]
+gcannon v0.6.1
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  unlimited (keep-alive)
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency    210us    207us    288us    433us   2.40ms
+
+  12252182 requests in 5.00s, 12251713 responses
+  Throughput: 2.45M req/s
+  Bandwidth:  280.37MB/s
+  Status codes: 2xx=12251713, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 12251713 / 12251713 responses (100.0%)
+  Per-template: 4091861,4143395,4016457
+  Per-template-ok: 4091861,4143395,4016457
+[info] CPU 1213.3% | Mem 56MiB
+
+[run 3/3]
+gcannon v0.6.1
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  unlimited (keep-alive)
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency    209us    205us    289us    422us   2.15ms
+
+  12196621 requests in 5.00s, 12196109 responses
+  Throughput: 2.44M req/s
+  Bandwidth:  279.12MB/s
+  Status codes: 2xx=12196109, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 12196109 / 12196109 responses (100.0%)
+  Per-template: 4053720,4113534,4028855
+  Per-template-ok: 4053720,4113534,4028855
+[info] CPU 1110.7% | Mem 56MiB
+
+=== Best: 2450342 req/s (CPU: 1213.3%, Mem: 56MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+
+==============================================
+=== agensio / pipelined / 512c (tool=gcannon) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+gcannon v0.6.1
+  Target:    localhost:8080/pipeline
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  16
+  Req/conn:  unlimited (keep-alive)
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   2.38ms   2.28ms   2.74ms   3.11ms   4.70ms
+
+  17283831 requests in 5.00s, 17276343 responses
+  Throughput: 3.45M req/s
+  Bandwidth:  395.37MB/s
+  Status codes: 2xx=17276343, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 17276343 / 17276343 responses (100.0%)
+[info] CPU 1227.8% | Mem 45MiB
+
+[run 2/3]
+gcannon v0.6.1
+  Target:    localhost:8080/pipeline
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  16
+  Req/conn:  unlimited (keep-alive)
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   2.35ms   2.37ms   2.66ms   3.02ms   3.15ms
+
+  17518000 requests in 5.00s, 17510508 responses
+  Throughput: 3.50M req/s
+  Bandwidth:  400.75MB/s
+  Status codes: 2xx=17510508, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 17510508 / 17510508 responses (100.0%)
+[info] CPU 1159.9% | Mem 45MiB
+
+[run 3/3]
+gcannon v0.6.1
+  Target:    localhost:8080/pipeline
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  16
+  Req/conn:  unlimited (keep-alive)
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   2.34ms   2.35ms   2.76ms   2.94ms   3.50ms
+
+  17514698 requests in 5.00s, 17507213 responses
+  Throughput: 3.50M req/s
+  Bandwidth:  400.67MB/s
+  Status codes: 2xx=17507213, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 17507213 / 17507213 responses (100.0%)
+[info] CPU 1231.1% | Mem 45MiB
+
+=== Best: 3502101 req/s (CPU: 1159.9%, Mem: 45MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+
+==============================================
+=== agensio / limited-conn / 512c (tool=gcannon) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+gcannon v0.6.1
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  10
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency    265us    107us    211us   4.23ms   9.47ms
+
+  9516479 requests in 5.00s, 9516015 responses
+  Throughput: 1.90M req/s
+  Bandwidth:  217.75MB/s
+  Status codes: 2xx=9516015, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 9516015 / 9516015 responses (100.0%)
+  Reconnects: 951518
+  Per-template: 3171940,3172017,3172058
+  Per-template-ok: 3171940,3172017,3172058
+[info] CPU 1040.8% | Mem 47MiB
+
+[run 2/3]
+gcannon v0.6.1
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  10
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency    259us    106us    212us   4.01ms   8.87ms
+
+  9726132 requests in 5.00s, 9725674 responses
+  Throughput: 1.94M req/s
+  Bandwidth:  222.58MB/s
+  Status codes: 2xx=9725674, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 9725674 / 9725674 responses (100.0%)
+  Reconnects: 972504
+  Per-template: 3241968,3241826,3241880
+  Per-template-ok: 3241968,3241826,3241880
+[info] CPU 1163.6% | Mem 48MiB
+
+[run 3/3]
+gcannon v0.6.1
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  10
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency    260us    104us    202us   4.26ms   8.87ms
+
+  9683370 requests in 5.00s, 9682910 responses
+  Throughput: 1.94M req/s
+  Bandwidth:  221.61MB/s
+  Status codes: 2xx=9682910, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 9682910 / 9682910 responses (100.0%)
+  Reconnects: 968227
+  Per-template: 3227525,3227610,3227775
+  Per-template-ok: 3227525,3227610,3227775
+[info] CPU 1060.1% | Mem 52MiB
+
+=== Best: 1945134 req/s (CPU: 1163.6%, Mem: 48MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+[info] skip: agensio does not subscribe to json-comp
+[info] skip: agensio does not subscribe to 8gbit
+[info] skip: agensio does not subscribe to async-db
+
+==============================================
+=== agensio / baseline-h2 / 512c (tool=h2load) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+starting benchmark...
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+finished in 5.17s, 11822280.00 req/s, 315.71MB/s
+requests: 59111400 total, 59162600 started, 59111400 done, 59111400 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 59111400 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 1.54GB (1655244640) total, 507.44MB (532093736) headers (space savings 92.50%), 56.37MB (59111400) data
+                     min         max         mean         sd        +/- sd
+time for request:       64us     71.03ms      2.35ms      2.13ms    97.94%
+time for connect:     2.81ms     79.17ms     38.30ms     24.03ms    56.05%
+time to 1st byte:    12.71ms     85.56ms     63.96ms     15.34ms    70.90%
+req/s           :   22410.99    23855.81    23082.59      393.67    62.50%
+[info] CPU 480.8% | Mem 82MiB
+
+[run 2/3]
+starting benchmark...
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+finished in 5.14s, 11790500.00 req/s, 314.86MB/s
+requests: 58952500 total, 59003700 started, 58952500 done, 58952500 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 58952500 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 1.54GB (1650795440) total, 506.08MB (530663636) headers (space savings 92.50%), 56.22MB (58952500) data
+                     min         max         mean         sd        +/- sd
+time for request:     1.00ms     47.69ms      2.19ms       818us    99.45%
+time for connect:     2.31ms     55.61ms     28.29ms     14.93ms    58.98%
+time to 1st byte:     9.95ms     61.25ms     55.19ms      7.86ms    84.38%
+req/s           :   22564.71    23675.40    23019.26      311.34    65.43%
+[info] CPU 438.2% | Mem 82MiB
+
+[run 3/3]
+starting benchmark...
+
+2.
+.
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+finished in 5.17s, 11854580.00 req/s, 316.58MB/s
+requests: 59272900 total, 59324100 started, 59272900 done, 59272900 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 59272900 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 1.55GB (1659766640) total, 508.83MB (533547236) headers (space savings 92.50%), 56.53MB (59272900) data
+                     min         max         mean         sd        +/- sd
+time for request:       94us     25.26ms      2.15ms       484us    91.70%
+time for connect:     1.87ms     34.16ms     14.39ms      8.73ms    61.72%
+time to 1st byte:     9.42ms     39.88ms     28.18ms      9.89ms    64.06%
+req/s           :   22594.75    23846.42    23146.37      351.66    56.64%
+[info] CPU 474.6% | Mem 83MiB
+
+=== Best: 11469357 req/s (CPU: 438.2%, Mem: 82MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+
+==============================================
+=== agensio / static-h2 / 512c (tool=h2load) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+starting benchmark...
+.Warm-up phase is over for thread #6.
+
+4.
+7.
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+. Stopping all clients.
+
+
+finished in 5.16s, 817080.60 req/s, 12.44GB/s
+requests: 4085403 total, 4101787 started, 4085403 done, 4085403 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 4085413 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 62.22GB (66811495413) total, 233.53MB (244873481) headers (space savings 75.13%), 61.91GB (66470987909) data
+                     min         max         mean         sd        +/- sd
+time for request:       47us     98.99ms     18.67ms     11.71ms    69.74%
+time for connect:     2.03ms    346.81ms     46.35ms     59.68ms    87.11%
+time to 1st byte:    15.14ms    382.37ms     77.06ms     61.57ms    86.72%
+req/s           :    1257.37     1999.07     1595.29      154.00    65.23%
+[info] CPU 1071.6% | Mem 319MiB
+
+[run 2/3]
+starting benchmark...
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+2Main benchmark duration is over for thread #9. Stopping all clients.
+0. Stopping all clients.
+. Stopping all clients.
+
+finished in 5.14s, 787216.00 req/s, 11.99GB/s
+requests: 3936080 total, 3952464 started, 3936080 done, 3936080 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 3936084 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 59.95GB (64368517717) total, 225.00MB (235928018) headers (space savings 75.12%), 59.64GB (64040450430) data
+                     min         max         mean         sd        +/- sd
+time for request:       51us     99.24ms     20.31ms     14.07ms    64.95%
+time for connect:     2.02ms    335.14ms     34.32ms     47.66ms    91.99%
+time to 1st byte:     9.15ms    374.20ms     63.05ms     51.38ms    87.70%
+req/s           :    1114.62     1921.80     1537.03      179.88    64.45%
+[info] CPU 1216.5% | Mem 278MiB
+
+[run 3/3]
+starting benchmark...
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+finished in 5.14s, 788171.00 req/s, 12.00GB/s
+requests: 3940855 total, 3957239 started, 3940855 done, 3940855 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 3940861 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 60.02GB (64447367037) total, 225.27MB (236214785) headers (space savings 75.12%), 59.72GB (64118900879) data
+                     min         max         mean         sd        +/- sd
+time for request:       30us    116.85ms     20.11ms     14.28ms    66.74%
+time for connect:     2.29ms    120.14ms     21.91ms     14.15ms    72.85%
+time to 1st byte:     9.10ms    154.89ms     50.23ms     19.51ms    75.98%
+req/s           :     932.79     2171.51     1538.96      294.81    61.33%
+[info] CPU 1120.0% | Mem 269MiB
+
+=== Best: 791746 req/s (CPU: 1071.6%, Mem: 319MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+
+==============================================
+=== agensio / static-tls / 512c (tool=wrk) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   765.29us    0.97ms  25.35ms   94.95%
+    Req/Sec    51.40k     4.60k   82.93k    86.28%
+  3094243 requests in 5.10s, 47.63GB read
+Requests/sec: 606797.96
+Transfer/sec:      9.34GB
+[info] CPU 1075.5% | Mem 86MiB
+
+[run 2/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   707.03us  671.36us  18.38ms   93.81%
+    Req/Sec    52.25k     3.44k   86.74k    86.09%
+  3140623 requests in 5.10s, 48.34GB read
+Requests/sec: 615785.49
+Transfer/sec:      9.48GB
+[info] CPU 1007.1% | Mem 88MiB
+
+[run 3/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   764.42us  787.82us  18.63ms   93.43%
+    Req/Sec    50.56k     3.70k   72.75k    82.73%
+  3060479 requests in 5.10s, 47.11GB read
+Requests/sec: 599727.50
+Transfer/sec:      9.23GB
+[info] CPU 1057.9% | Mem 89MiB
+
+=== Best: 615785 req/s (CPU: 1007.1%, Mem: 88MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+
+==============================================
+=== agensio / json-tls / 512c (tool=wrk) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   381.23us    1.06ms  32.81ms   97.52%
+    Req/Sec    95.02k     6.79k  118.90k    91.79%
+  5759584 requests in 5.10s, 19.56GB read
+Requests/sec: 1129225.47
+Transfer/sec:      3.83GB
+[info] CPU 920.8% | Mem 82MiB
+
+[run 2/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   327.19us  424.10us  16.59ms   96.00%
+    Req/Sec    95.60k     3.97k  110.47k    87.56%
+  5812108 requests in 5.10s, 19.74GB read
+Requests/sec: 1139355.80
+Transfer/sec:      3.87GB
+[info] CPU 995.2% | Mem 84MiB
+
+[run 3/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   333.79us  448.62us  15.77ms   95.88%
+    Req/Sec    95.45k     4.20k  114.61k    88.87%
+  5804318 requests in 5.10s, 19.71GB read
+Requests/sec: 1137821.80
+Transfer/sec:      3.86GB
+[info] CPU 926.5% | Mem 86MiB
+
+=== Best: 1139355 req/s (CPU: 995.2%, Mem: 84MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+
+==============================================
+=== agensio / baseline-h2c / 512c (tool=h2load) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+starting benchmark...
+Application protocol: h2c
+
+finished in 5.16s, 12800360.00 req/s, 329.62MB/s
+requests: 64001800 total, 64053000 started, 64001800 done, 64001800 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 64001800 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 1.61GB (1728162264) total, 488.37MB (512093760) headers (space savings 91.40%), 61.04MB (64001800) data
+                     min         max         mean         sd        +/- sd
+time for request:      210us     54.46ms      2.24ms      2.63ms    98.91%
+time for connect:       27us      1.60ms       652us       422us    58.79%
+time to 1st byte:     1.35ms     55.73ms     27.38ms     11.67ms    80.47%
+req/s           :   24406.93    26352.52    24993.57      531.90    70.12%
+[info] CPU 490.1% | Mem 52MiB
+
+[run 2/3]
+starting benchmark...
+
+10.
+7Main benchmark duration is started for thread #.1.
+
+Application protocol: h2c
+
+finished in 5.16s, 12897600.00 req/s, 332.12MB/s
+requests: 64488000 total, 64539200 started, 64488000 done, 64488000 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 64488000 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 1.62GB (1741289664) total, 492.08MB (515983360) headers (space savings 91.40%), 61.50MB (64488000) data
+                     min         max         mean         sd        +/- sd
+time for request:      736us      8.96ms      1.97ms       284us    79.27%
+time for connect:       27us     41.19ms      1.10ms      3.61ms    99.22%
+time to 1st byte:     1.33ms     46.43ms      4.66ms      3.91ms    99.22%
+req/s           :   24654.42    26449.13    25183.99      450.42    78.13%
+[info] CPU 455.1% | Mem 53MiB
+
+[run 3/3]
+starting benchmark...
+Application protocol: h2c
+
+finished in 5.13s, 12913120.00 req/s, 332.52MB/s
+requests: 64565600 total, 64616800 started, 64565600 done, 64565600 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 64565600 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 1.62GB (1743384864) total, 492.67MB (516604160) headers (space savings 91.40%), 61.57MB (64565600) data
+                     min         max         mean         sd        +/- sd
+time for request:      168us     20.59ms      1.99ms       473us    91.93%
+time for connect:       33us      4.23ms       731us       550us    71.68%
+time to 1st byte:     1.34ms     12.24ms      4.36ms      2.07ms    79.49%
+req/s           :   24233.92    26156.60    25214.69      516.75    65.23%
+[info] CPU 496.3% | Mem 53MiB
+
+=== Best: 12585886 req/s (CPU: 496.3%, Mem: 53MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+
+==============================================
+=== agensio / json-h2c / 512c (tool=h2load) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+starting benchmark...
+progress: Main benchmark duration is started for thread #9.74
+% of clients started
+
+.
+10.7.
+
+Application protocol: h2c
+2. Stopping all clients.Stopped all clients for thread #10
+
+
+
+finished in 5.16s, 2898344.00 req/s, 9.57GB/s
+requests: 14491720 total, 14508104 started, 14491720 done, 14491720 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 14491720 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 47.87GB (51403527558) total, 136.31MB (142928143) headers (space savings 90.30%), 47.50GB (50999714151) data
+                     min         max         mean         sd        +/- sd
+time for request:       33us    237.46ms      5.76ms      6.42ms    99.13%
+time for connect:       26us     40.85ms       479us      1.80ms    99.80%
+time to 1st byte:    25.22ms    237.88ms     75.16ms     46.24ms    81.64%
+req/s           :    4321.20     9484.48     5660.17     1160.04    87.89%
+[info] CPU 1092.8% | Mem 286MiB
+
+[run 2/3]
+starting benchmark...
+
+Application protocol: h2c
+
+
+finished in 5.13s, 2984003.00 req/s, 9.86GB/s
+requests: 14920015 total, 14936399 started, 14920015 done, 14920015 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 14920015 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 49.29GB (52922814648) total, 140.33MB (147146240) headers (space savings 90.30%), 48.90GB (52507073834) data
+                     min         max         mean         sd        +/- sd
+time for request:       31us    206.32ms      5.32ms      4.19ms    81.48%
+time for connect:       27us     29.88ms       727us      2.28ms    98.24%
+time to 1st byte:      875us    207.68ms     27.54ms     40.54ms    86.33%
+req/s           :    3833.02     9435.27     5827.98     1332.52    64.84%
+[info] CPU 1205.1% | Mem 292MiB
+
+[run 3/3]
+starting benchmark...
+progress: Main benchmark duration is started for thread #65% of clients started1
+.
+
+
+9.
+
+3.
+Application protocol: h2c
+
+finished in 5.15s, 2984117.20 req/s, 9.86GB/s
+requests: 14920586 total, 14936970 started, 14920586 done, 14920586 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 14920586 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 49.29GB (52924783898) total, 140.34MB (147155535) headers (space savings 90.30%), 48.90GB (52509023511) data
+                     min         max         mean         sd        +/- sd
+time for request:       31us    203.41ms      5.24ms      3.52ms    74.27%
+time for connect:       30us     57.28ms      1.18ms      5.61ms    99.02%
+time to 1st byte:      710us    206.95ms     16.95ms     29.73ms    88.28%
+req/s           :    3734.27     9286.70     5827.86     1236.17    75.59%
+[info] CPU 1128.4% | Mem 266MiB
+
+=== Best: 2908384 req/s (CPU: 1205.1%, Mem: 292MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+
+==============================================
+=== agensio / baseline-h3 / 64c (tool=h2load-h3) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+starting benchmark...
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Certificate: RSA 2048 bits
+Negotiated Group: x25519
+Resumption: no
+Application protocol: h3
+
+finished in 5.03s, 3991667.20 req/s, 68.47MB/s
+requests: 19958336 total, 19962432 started, 19958336 done, 19958336 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 19958336 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 342.35MB (358975232) total, 171.31MB (179631936) headers (space savings 90.32%), 19.03MB (19959104) data
+UDP datagram: 624823 sent, 623972 received
+                 min         max         median     p95        p99        mean         sd        +/- sd
+request     :       86us     31.16ms      1.03ms     1.37ms     1.52ms      959us       669us    99.05%
+connect     :      831us      6.55ms      3.98ms     5.88ms     6.55ms     3.72ms      1.56ms    60.94%
+TTFB        :     1.87ms      7.74ms      5.46ms     7.32ms     7.74ms     5.05ms      1.61ms    56.25%
+req/s       :   55012.40    71739.18    65714.13   69468.46   71739.18   62361.29     5599.04    56.25%
+min RTT     :       18us       228us        83us      208us      228us       97us        53us    76.56%
+smoothed RTT:      225us       660us       471us      589us      660us      461us        95us    67.19%
+packets sent:       8610       11222       10292      10885      11222    9764.86      875.50    56.25%
+packets recv:       8603       11215       10274      10865      11215    9750.56      874.90    56.25%
+packets lost:          0           0           0          0          0       0.00        0.00   100.00%
+GRO packets :          1           2           2          2          2       2.00        0.02    99.94%
+[info] CPU 222.4% | Mem 79MiB
+
+[run 2/3]
+starting benchmark...
+7Main benchmark duration is started for thread #.5.
+
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Certificate: RSA 2048 bits
+Negotiated Group: x25519
+Resumption: no
+Application protocol: h3
+4.
+
+finished in 5.03s, 4009612.80 req/s, 68.78MB/s
+requests: 20048064 total, 20052160 started, 20048064 done, 20048064 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 20048064 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 343.89MB (360590336) total, 172.08MB (180441216) headers (space savings 90.32%), 19.12MB (20049024) data
+UDP datagram: 627359 sent, 626808 received
+                 min         max         median     p95        p99        mean         sd        +/- sd
+request     :       84us     30.78ms      1.01ms     1.39ms     1.52ms      953us       740us    99.15%
+connect     :      920us      4.81ms      1.97ms     3.93ms     4.81ms     2.22ms       890us    73.44%
+TTFB        :     1.39ms      7.97ms      3.24ms     5.22ms     7.97ms     3.48ms      1.08ms    73.44%
+req/s       :   54849.55    68698.86    66320.25   67465.35   68698.86   62639.12     5497.19    60.94%
+min RTT     :       14us       267us       111us      225us      267us      120us        65us    65.63%
+smoothed RTT:      281us       647us       449us      581us      647us      454us        78us    65.63%
+packets sent:       8583       10746       10386      10572      10746    9804.48      859.48    60.94%
+packets recv:       8577       10740       10369      10548      10740    9794.88      859.31    60.94%
+packets lost:          0           0           0          0          0       0.00        0.00   100.00%
+GRO packets :          1           2           2          2          2       2.00        0.03    99.93%
+[info] CPU 229.7% | Mem 80MiB
+
+[run 3/3]
+starting benchmark...
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Certificate: RSA 2048 bits
+Negotiated Group: x25519
+Resumption: no
+Application protocol: h3
+
+finished in 5.03s, 3994240.00 req/s, 68.51MB/s
+requests: 19971200 total, 19975296 started, 19971200 done, 19971200 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 19971200 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 342.57MB (359206784) total, 171.42MB (179750016) headers (space savings 90.32%), 19.05MB (19972224) data
+UDP datagram: 625206 sent, 624382 received
+                 min         max         median     p95        p99        mean         sd        +/- sd
+request     :       84us     31.02ms      1.02ms     1.39ms     1.53ms      957us       686us    99.07%
+connect     :      734us      4.77ms      2.78ms     4.59ms     4.77ms     2.76ms      1.12ms    59.38%
+TTFB        :     1.75ms      6.25ms      4.05ms     5.70ms     6.25ms     4.13ms      1.15ms    67.19%
+req/s       :   54826.76    67968.85    65990.65   67584.59   67968.85   62399.03     5432.80    60.94%
+min RTT     :       10us       275us        88us      221us      275us      107us        62us    73.44%
+smoothed RTT:      282us       617us       469us      595us      617us      457us        90us    62.50%
+packets sent:       8582       10633       10328      10583      10633    9770.84      849.27    60.94%
+packets recv:       8575       10628       10319      10566      10628    9756.97      849.17    60.94%
+packets lost:          0           0           0          0          0       0.00        0.00   100.00%
+GRO packets :          1           2           2          2          2       2.00        0.02    99.94%
+[info] CPU 249.1% | Mem 80MiB
+
+=== Best: 3985698 req/s (CPU: 229.7%, Mem: 80MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+
+==============================================
+=== agensio / static-h3 / 64c (tool=h2load-h3) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+starting benchmark...
+
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Certificate: RSA 2048 bits
+Negotiated Group: x25519
+Resumption: no
+Application protocol: h3
+
+finished in 5.04s, 590285.40 req/s, 9.00GB/s
+requests: 2951427 total, 2955523 started, 2951427 done, 2951427 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 2954991 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 44.99GB (48306157545) total, 247.13MB (259137131) headers (space savings 59.01%), 44.72GB (48018365099) data
+UDP datagram: 403768 sent, 34246323 received
+                 min         max         median     p95        p99        mean         sd        +/- sd
+request     :      131us     59.40ms      3.86ms    22.76ms    30.93ms     6.88ms      7.08ms    84.14%
+connect     :      903us      5.50ms      2.42ms     4.88ms     5.50ms     2.62ms      1.09ms    73.44%
+TTFB        :     2.29ms      7.12ms      3.91ms     6.48ms     7.12ms     4.20ms      1.22ms    67.19%
+req/s       :    6795.84    11303.21     9637.17   10999.17   11303.21    9221.27     1281.56    64.06%
+min RTT     :        4us        54us        24us       45us       54us       23us        14us    50.00%
+smoothed RTT:      190us      1.05ms       530us      912us     1.05ms      555us       211us    65.63%
+packets sent:       4527        7808        6602       7568       7808    6310.87      932.87    64.06%
+packets recv:     394181      656233      559174     638295     656233  535099.80    74429.90    64.06%
+packets lost:          0           0           0          0          0       0.00        0.00   100.00%
+GRO packets :          1          45           3          9         18       3.41        3.05    89.58%
+[info] CPU 875.4% | Mem 76MiB
+
+[run 2/3]
+starting benchmark...
+3.
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Certificate: RSA 2048 bits
+Negotiated Group: x25519
+Resumption: no
+Application protocol: h3
+
+
+finished in 5.03s, 604354.80 req/s, 9.21GB/s
+requests: 3021774 total, 3025870 started, 3021774 done, 3021774 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 3025370 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 46.06GB (49451795633) total, 248.67MB (260749598) headers (space savings 59.72%), 45.79GB (49162880823) data
+UDP datagram: 412293 sent, 35059901 received
+                 min         max         median     p95        p99        mean         sd        +/- sd
+request     :      136us     64.96ms      3.78ms    22.20ms    30.35ms     6.72ms      6.90ms    84.16%
+connect     :      917us      4.56ms      2.12ms     4.36ms     4.56ms     2.45ms      1.00ms    64.06%
+TTFB        :     2.11ms      6.62ms      3.54ms     6.04ms     6.62ms     3.86ms      1.27ms    65.63%
+req/s       :    7095.57    12907.23     9736.13   12254.48   12907.23    9441.32     1570.39    62.50%
+min RTT     :        3us        52us        30us       46us       52us       25us        15us    54.69%
+smoothed RTT:      213us       912us       407us      701us      912us      437us       153us    64.06%
+packets sent:       4761        8927        6682       8482       8927    6444.08     1138.25    56.25%
+packets recv:     411518      749211      564930     711224     749211  547811.95    91210.96    62.50%
+packets lost:          0           0           0          0          0       0.00        0.00   100.00%
+GRO packets :          1          45           3          9         18       3.41        3.04    89.60%
+[info] CPU 858.6% | Mem 76MiB
+
+[run 3/3]
+starting benchmark...
+
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Certificate: RSA 2048 bits
+Negotiated Group: x25519
+Resumption: no
+Application protocol: h3
+
+finished in 5.05s, 600881.80 req/s, 9.16GB/s
+requests: 3004409 total, 3008505 started, 3004409 done, 3004409 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 3008003 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 45.80GB (49179157609) total, 255.51MB (267918931) headers (space savings 58.37%), 45.53GB (48882287538) data
+UDP datagram: 407823 sent, 34865804 received
+                 min         max         median     p95        p99        mean         sd        +/- sd
+request     :      126us     65.56ms      3.76ms    22.43ms    32.17ms     6.71ms      7.09ms    85.09%
+connect     :      973us      4.38ms      2.37ms     4.11ms     4.38ms     2.46ms       867us    70.31%
+TTFB        :     1.76ms      6.08ms      3.60ms     5.55ms     6.08ms     3.71ms      1.12ms    59.38%
+req/s       :    5859.94    14593.81     9328.40   12818.22   14593.81    9387.29     2162.66    59.38%
+min RTT     :        3us        58us        25us       46us       58us       24us        15us    48.44%
+smoothed RTT:      165us      1.13ms       439us      942us     1.13ms      495us       238us    70.31%
+packets sent:       3807       10096        6342       8841      10096    6374.23     1588.13    59.38%
+packets recv:     339841      847097      541218     743914     847097  544779.19   125602.91    59.38%
+packets lost:          0           0           0          0          0       0.00        0.00   100.00%
+GRO packets :          1          30           3          9         18       3.41        3.02    89.54%
+[info] CPU 848.7% | Mem 77MiB
+
+=== Best: 601465 req/s (CPU: 858.6%, Mem: 76MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+[info] skip: agensio does not subscribe to unary-grpc
+[info] skip: agensio does not subscribe to unary-grpc-tls
+[info] skip: agensio does not subscribe to echo-ws
+[info] done
+[info] restoring loopback MTU to 65536
+exit 0
+=== new (working tree)
+[info] available cores: 24 | threads: 12
+[info] tuning host for benchmark runs
+[info] setting kernel socket limits
+[info] setting UDP buffer sizes for QUIC
+[info] setting loopback MTU to 1500 (realistic Ethernet)
+[info] restarting docker daemon
+[warn] could not restart docker daemon (no sudo?)
+[info] dropping kernel caches
+[info] framework: agensio (agensio, C++)
+[info] subscribed tests: baseline,pipelined,limited-conn,json-tls,static-tls,baseline-h2,static-h2,baseline-h2c,json-h2c,baseline-h3,static-h3
+[info] building image: httparena-agensio
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 1.13kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/debian:trixie-slim
+#2 DONE 0.8s
+
+#3 [internal] load metadata for docker.io/library/debian:trixie
+#3 DONE 0.8s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [build 1/5] FROM docker.io/library/debian:trixie@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c
+#5 resolve docker.io/library/debian:trixie@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c 0.0s done
+#5 DONE 0.0s
+
+#6 [stage-1 1/5] FROM docker.io/library/debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+#6 resolve docker.io/library/debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a 0.0s done
+#6 DONE 0.0s
+
+#7 [internal] load build context
+#7 transferring context: 2.69MB done
+#7 DONE 0.0s
+
+#8 [build 2/5] RUN apt-get update && apt-get install -y --no-install-recommends         build-essential cmake ninja-build git ca-certificates libssl-dev zlib1g-dev     && rm -rf /var/lib/apt/lists/*
+#8 CACHED
+
+#9 [build 3/5] WORKDIR /src
+#9 CACHED
+
+#10 [build 4/5] COPY src.tar.gz /tmp/src.tar.gz
+#10 CACHED
+
+#11 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends libssl3t64 zlib1g     && rm -rf /var/lib/apt/lists/*
+#11 CACHED
+
+#12 [stage-1 3/5] COPY --from=build /src/build/agensio /usr/local/bin/agensio
+#12 CACHED
+
+#13 [build 5/5] RUN tar -xzf /tmp/src.tar.gz -C /src     && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DAGENSIO_TESTS=OFF -DAGENSIO_NATIVE=ON -DAGENSIO_HTTPARENA=ON     && cmake --build build --target agensio
+#13 CACHED
+
+#14 [stage-1 4/5] COPY agensio.toml start.sh /etc/agensio/
+#14 CACHED
+
+#15 [stage-1 5/5] RUN chmod 0755 /etc/agensio/start.sh
+#15 CACHED
+
+#16 exporting to image
+#16 exporting layers done
+#16 exporting manifest sha256:bf008f3c8d68202801b5601302baf3210574dacdc8ffeac8c4fe994be3187370 done
+#16 exporting config sha256:7afca7d2d0941c5d36f46516bace2c1fb44c8af3bdf77713d338d0c1b27b3f2d done
+#16 exporting attestation manifest sha256:179ecdccb7c52e774103124888a1248d641894d6dcaf323ad761a84d7b7f9071 0.0s done
+#16 exporting manifest list sha256:5221195eea504301bcd29aca557a94706faacb0f34dedc770432847849eb80ae 0.0s done
+#16 naming to docker.io/library/httparena-agensio:latest
+#16 naming to docker.io/library/httparena-agensio:latest done
+#16 unpacking to docker.io/library/httparena-agensio:latest 0.0s done
+#16 DONE 0.1s
+
+==============================================
+=== agensio / baseline / 512c (tool=gcannon) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+gcannon v0.6.1
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  unlimited (keep-alive)
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency    214us    207us    291us    470us   2.82ms
+
+  11913307 requests in 5.00s, 11912838 responses
+  Throughput: 2.38M req/s
+  Bandwidth:  272.64MB/s
+  Status codes: 2xx=11912838, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 11912838 / 11912838 responses (100.0%)
+  Per-template: 4002519,3947951,3962368
+  Per-template-ok: 4002519,3947951,3962368
+[info] CPU 1090.2% | Mem 58MiB
+
+[run 2/3]
+gcannon v0.6.1
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  unlimited (keep-alive)
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency    213us    207us    290us    482us   2.65ms
+
+  12047016 requests in 5.00s, 12046547 responses
+  Throughput: 2.41M req/s
+  Bandwidth:  275.70MB/s
+  Status codes: 2xx=12046547, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 12046547 / 12046547 responses (100.0%)
+  Per-template: 3994867,3984120,4067560
+  Per-template-ok: 3994867,3984120,4067560
+[info] CPU 1204.4% | Mem 57MiB
+
+[run 3/3]
+gcannon v0.6.1
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  unlimited (keep-alive)
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency    214us    203us    296us    532us   2.88ms
+
+  11942938 requests in 5.00s, 11942426 responses
+  Throughput: 2.39M req/s
+  Bandwidth:  273.32MB/s
+  Status codes: 2xx=11942426, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 11942426 / 11942426 responses (100.0%)
+  Per-template: 3989041,3952678,4000707
+  Per-template-ok: 3989041,3952678,4000707
+[info] CPU 1075.4% | Mem 58MiB
+
+=== Best: 2409309 req/s (CPU: 1204.4%, Mem: 57MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+
+==============================================
+=== agensio / pipelined / 512c (tool=gcannon) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+gcannon v0.6.1
+  Target:    localhost:8080/pipeline
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  16
+  Req/conn:  unlimited (keep-alive)
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   2.36ms   2.29ms   2.82ms   3.33ms   5.96ms
+
+  17478919 requests in 5.00s, 17471430 responses
+  Throughput: 3.49M req/s
+  Bandwidth:  399.85MB/s
+  Status codes: 2xx=17471430, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 17471430 / 17471430 responses (100.0%)
+[info] CPU 1226.8% | Mem 45MiB
+
+[run 2/3]
+gcannon v0.6.1
+  Target:    localhost:8080/pipeline
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  16
+  Req/conn:  unlimited (keep-alive)
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   2.36ms   2.25ms   2.85ms   3.14ms   3.91ms
+
+  17501280 requests in 5.00s, 17499230 responses
+  Throughput: 3.50M req/s
+  Bandwidth:  400.49MB/s
+  Status codes: 2xx=17499230, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 17499230 / 17499230 responses (100.0%)
+[info] CPU 1158.8% | Mem 46MiB
+
+[run 3/3]
+gcannon v0.6.1
+  Target:    localhost:8080/pipeline
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  16
+  Req/conn:  unlimited (keep-alive)
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency   2.33ms   2.30ms   2.86ms   3.04ms   4.29ms
+
+  17689914 requests in 5.00s, 17682416 responses
+  Throughput: 3.54M req/s
+  Bandwidth:  404.68MB/s
+  Status codes: 2xx=17682416, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 17682416 / 17682416 responses (100.0%)
+[info] CPU 1230.4% | Mem 46MiB
+
+=== Best: 3536483 req/s (CPU: 1230.4%, Mem: 46MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+
+==============================================
+=== agensio / limited-conn / 512c (tool=gcannon) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+gcannon v0.6.1
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  10
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency    271us    102us    207us   4.75ms   8.93ms
+
+  9239402 requests in 5.00s, 9239117 responses
+  Throughput: 1.85M req/s
+  Bandwidth:  211.43MB/s
+  Status codes: 2xx=9239117, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 9239117 / 9239117 responses (100.0%)
+  Reconnects: 923828
+  Per-template: 3079719,3079683,3079715
+  Per-template-ok: 3079719,3079683,3079715
+[info] CPU 1050.8% | Mem 50MiB
+
+[run 2/3]
+gcannon v0.6.1
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  10
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency    263us    106us    217us   4.37ms   8.46ms
+
+  9550813 requests in 5.00s, 9550699 responses
+  Throughput: 1.91M req/s
+  Bandwidth:  218.46MB/s
+  Status codes: 2xx=9550699, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 9550699 / 9550699 responses (100.0%)
+  Reconnects: 955156
+  Per-template: 3183520,3183559,3183620
+  Per-template-ok: 3183520,3183559,3183620
+[info] CPU 1150.9% | Mem 48MiB
+
+[run 3/3]
+gcannon v0.6.1
+  Target:    localhost:8080/
+  Threads:   12
+  Conns:     512 (43/thread)
+  Pipeline:  1
+  Req/conn:  10
+  Templates: 3
+  Expected:  200
+  Duration:  5s
+
+
+  Thread Stats   Avg      p50      p90      p99    p99.9
+    Latency    270us    107us    228us   4.34ms   9.27ms
+
+  9308589 requests in 5.00s, 9308131 responses
+  Throughput: 1.86M req/s
+  Bandwidth:  213.03MB/s
+  Status codes: 2xx=9308131, 3xx=0, 4xx=0, 5xx=0
+  Latency samples: 9308131 / 9308131 responses (100.0%)
+  Reconnects: 930709
+  Per-template: 3102738,3102636,3102757
+  Per-template-ok: 3102738,3102636,3102757
+[info] CPU 1048.2% | Mem 54MiB
+
+=== Best: 1910139 req/s (CPU: 1150.9%, Mem: 48MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+[info] skip: agensio does not subscribe to json-comp
+[info] skip: agensio does not subscribe to 8gbit
+[info] skip: agensio does not subscribe to async-db
+
+==============================================
+=== agensio / baseline-h2 / 512c (tool=h2load) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+starting benchmark...
+
+
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+finished in 5.13s, 11646780.00 req/s, 311.03MB/s
+requests: 58233900 total, 58285100 started, 58233900 done, 58233900 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 58233900 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 1.52GB (1630674640) total, 499.91MB (524196236) headers (space savings 92.50%), 55.54MB (58233900) data
+                     min         max         mean         sd        +/- sd
+time for request:       51us     41.31ms      2.28ms      1.51ms    98.52%
+time for connect:     2.68ms     92.57ms     44.79ms     15.54ms    78.13%
+time to 1st byte:     3.66ms     97.97ms     70.02ms     13.65ms    78.71%
+req/s           :   22243.58    25414.22    22739.42      363.48    74.22%
+[info] CPU 538.0% | Mem 81MiB
+
+[run 2/3]
+starting benchmark...
+1.
+4.
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+finished in 5.14s, 11840920.00 req/s, 316.21MB/s
+requests: 59204600 total, 59255800 started, 59204600 done, 59204600 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 59204600 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 1.54GB (1657854240) total, 508.24MB (532932536) headers (space savings 92.50%), 56.46MB (59204600) data
+                     min         max         mean         sd        +/- sd
+time for request:       82us     17.26ms      2.19ms       532us    92.16%
+time for connect:     1.86ms     26.24ms     12.99ms      6.57ms    58.79%
+time to 1st byte:     9.42ms     31.66ms     25.36ms      5.36ms    85.74%
+req/s           :   22573.42    24204.63    23120.00      490.24    60.35%
+[info] CPU 499.5% | Mem 83MiB
+
+[run 3/3]
+starting benchmark...
+.
+
+3.
+6.
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+finished in 5.13s, 11882620.00 req/s, 317.32MB/s
+requests: 59413100 total, 59464300 started, 59413100 done, 59413100 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 59413100 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 1.55GB (1663692240) total, 510.03MB (534809036) headers (space savings 92.50%), 56.66MB (59413100) data
+                     min         max         mean         sd        +/- sd
+time for request:      241us     19.63ms      2.19ms       524us    95.59%
+time for connect:     2.27ms     33.71ms     15.94ms      8.10ms    62.30%
+time to 1st byte:     5.68ms     39.56ms     29.64ms      6.56ms    55.08%
+req/s           :   22711.95    23948.08    23200.12      349.43    65.63%
+[info] CPU 543.0% | Mem 84MiB
+
+=== Best: 11581500 req/s (CPU: 543.0%, Mem: 84MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+
+==============================================
+=== agensio / static-h2 / 512c (tool=h2load) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+starting benchmark...
+1.
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+finished in 5.14s, 787308.40 req/s, 11.99GB/s
+requests: 3936542 total, 3952926 started, 3936542 done, 3936542 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 3936552 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 59.96GB (64377460822) total, 225.02MB (235954879) headers (space savings 75.12%), 59.65GB (64049355118) data
+                     min         max         mean         sd        +/- sd
+time for request:       48us    115.34ms     20.03ms     14.25ms    65.38%
+time for connect:     1.93ms    501.50ms     82.47ms    114.53ms    81.64%
+time to 1st byte:     8.64ms    548.84ms    105.15ms    124.00ms    81.45%
+req/s           :    1155.73     2212.04     1537.39      208.45    71.88%
+[info] CPU 1113.0% | Mem 273MiB
+
+[run 2/3]
+starting benchmark...
+8Main benchmark duration is started for thread #10.
+.
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+finished in 5.18s, 722139.40 req/s, 11.00GB/s
+requests: 3610697 total, 3627081 started, 3610697 done, 3610697 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 3610706 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 54.99GB (59049009568) total, 206.41MB (216438578) headers (space savings 75.12%), 54.71GB (58748044785) data
+                     min         max         mean         sd        +/- sd
+time for request:       50us    107.29ms     22.41ms     14.98ms    63.79%
+time for connect:     3.45ms    135.70ms     23.89ms     13.42ms    66.80%
+time to 1st byte:    18.22ms    192.66ms     62.45ms     17.82ms    72.07%
+req/s           :     925.76     2174.75     1409.95      253.67    74.80%
+[info] CPU 1218.0% | Mem 269MiB
+
+[run 3/3]
+starting benchmark...
+10.
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+
+finished in 5.14s, 798647.60 req/s, 12.16GB/s
+requests: 3993238 total, 4009622 started, 3993238 done, 3993238 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 3993241 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 60.82GB (65304548976) total, 228.26MB (239352461) headers (space savings 75.12%), 60.51GB (64971719063) data
+                     min         max         mean         sd        +/- sd
+time for request:       45us    118.01ms     20.06ms     14.62ms    68.04%
+time for connect:     4.05ms    503.44ms     47.58ms     71.26ms    91.21%
+time to 1st byte:     9.08ms    550.33ms     81.92ms     73.89ms    91.02%
+req/s           :    1060.98     2796.61     1559.26      421.33    81.45%
+[info] CPU 1111.9% | Mem 271MiB
+
+=== Best: 776895 req/s (CPU: 1111.9%, Mem: 271MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+
+==============================================
+=== agensio / static-tls / 512c (tool=wrk) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     1.01ms    3.21ms  64.29ms   97.97%
+    Req/Sec    49.83k     6.35k   76.16k    91.27%
+  3010360 requests in 5.10s, 46.34GB read
+Requests/sec: 590226.51
+Transfer/sec:      9.08GB
+[info] CPU 1062.4% | Mem 86MiB
+
+[run 2/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   840.44us    0.88ms  15.94ms   92.60%
+    Req/Sec    49.33k     4.46k   78.76k    80.50%
+  2971531 requests in 5.10s, 45.74GB read
+Requests/sec: 582647.54
+Transfer/sec:      8.97GB
+[info] CPU 1003.5% | Mem 87MiB
+
+[run 3/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     0.88ms    0.94ms  20.10ms   92.28%
+    Req/Sec    49.13k     4.29k   82.97k    76.82%
+  2954368 requests in 5.10s, 45.47GB read
+Requests/sec: 579292.39
+Transfer/sec:      8.92GB
+[info] CPU 1067.5% | Mem 89MiB
+
+=== Best: 590226 req/s (CPU: 1062.4%, Mem: 86MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+
+==============================================
+=== agensio / json-tls / 512c (tool=wrk) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   463.36us    1.79ms  50.01ms   97.80%
+    Req/Sec    93.66k     8.46k  120.43k    92.79%
+  5686390 requests in 5.10s, 19.31GB read
+Requests/sec: 1114268.36
+Transfer/sec:      3.78GB
+[info] CPU 906.6% | Mem 83MiB
+
+[run 2/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   335.02us  498.83us  20.66ms   96.03%
+    Req/Sec    95.14k     4.29k  115.98k    86.72%
+  5774386 requests in 5.10s, 19.61GB read
+Requests/sec: 1131522.35
+Transfer/sec:      3.84GB
+[info] CPU 987.0% | Mem 83MiB
+
+[run 3/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   366.70us  617.79us  24.39ms   95.68%
+    Req/Sec    94.44k     4.96k  127.18k    85.08%
+  5733110 requests in 5.10s, 19.47GB read
+Requests/sec: 1123464.04
+Transfer/sec:      3.81GB
+[info] CPU 898.8% | Mem 84MiB
+
+=== Best: 1131522 req/s (CPU: 987.0%, Mem: 83MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+
+==============================================
+=== agensio / baseline-h2c / 512c (tool=h2load) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+starting benchmark...
+8.
+Application protocol: h2c
+10.
+.
+
+finished in 5.15s, 12924640.00 req/s, 332.82MB/s
+requests: 64623200 total, 64674400 started, 64623200 done, 64623200 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 64623200 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 1.63GB (1744940064) total, 493.11MB (517064960) headers (space savings 91.40%), 61.63MB (64623200) data
+                     min         max         mean         sd        +/- sd
+time for request:      334us     72.15ms      2.13ms      2.57ms    99.13%
+time for connect:       28us      4.67ms       961us      1.09ms    91.02%
+time to 1st byte:     1.37ms     73.06ms     26.19ms     17.51ms    58.98%
+req/s           :   24177.15    26615.47    25238.15      552.55    69.73%
+[info] CPU 527.5% | Mem 53MiB
+
+[run 2/3]
+starting benchmark...
+1.
+.Main benchmark duration is started for thread #2.
+
+Application protocol: h2c
+
+
+finished in 5.15s, 12888560.00 req/s, 331.89MB/s
+requests: 64442800 total, 64494000 started, 64442800 done, 64442800 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 64442800 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 1.62GB (1740067309) total, 491.73MB (515619805) headers (space savings 91.40%), 61.46MB (64442800) data
+                     min         max         mean         sd        +/- sd
+time for request:      720us      6.41ms      1.97ms       277us    79.94%
+time for connect:       36us     33.32ms       780us      2.08ms    99.61%
+time to 1st byte:     1.37ms     37.68ms      4.09ms      2.34ms    97.07%
+req/s           :   24595.86    25877.97    25166.90      385.54    59.38%
+[info] CPU 479.4% | Mem 53MiB
+
+[run 3/3]
+starting benchmark...
+10.
+15..
+
+
+Application protocol: h2c
+
+finished in 5.16s, 12899560.00 req/s, 332.18MB/s
+requests: 64497800 total, 64549000 started, 64497800 done, 64497800 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 64497800 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 1.62GB (1741554264) total, 492.15MB (516061760) headers (space savings 91.40%), 61.51MB (64497800) data
+                     min         max         mean         sd        +/- sd
+time for request:      752us     10.72ms      2.00ms       410us    94.12%
+time for connect:       36us      2.08ms       834us       558us    58.98%
+time to 1st byte:     1.47ms     10.95ms      4.95ms      1.57ms    69.14%
+req/s           :   24789.93    26091.03    25186.56      404.24    76.17%
+[info] CPU 517.7% | Mem 54MiB
+
+=== Best: 12548194 req/s (CPU: 527.5%, Mem: 53MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+
+==============================================
+=== agensio / json-h2c / 512c (tool=h2load) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+starting benchmark...
+progress: Main benchmark duration is started for thread #83% of clients started
+2.
+Application protocol: h2c
+
+finished in 5.15s, 2940997.20 req/s, 9.72GB/s
+requests: 14704986 total, 14721370 started, 14704986 done, 14704986 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 14704986 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 48.58GB (52160016268) total, 138.31MB (145027572) headers (space savings 90.30%), 48.20GB (51750264644) data
+                     min         max         mean         sd        +/- sd
+time for request:       29us    213.54ms      5.64ms      5.90ms    99.19%
+time for connect:       26us     81.38ms      6.66ms     21.51ms    92.19%
+time to 1st byte:      926us    213.71ms     72.86ms     42.88ms    81.45%
+req/s           :    4586.26     7803.69     5743.44      750.65    69.92%
+[info] CPU 1094.6% | Mem 282MiB
+
+[run 2/3]
+starting benchmark...
+Application protocol: h2c
+
+
+finished in 5.15s, 3052049.60 req/s, 10.08GB/s
+requests: 15260248 total, 15276632 started, 15260248 done, 15260248 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 15260248 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 50.41GB (54129662190) total, 143.53MB (150503642) headers (space savings 90.30%), 50.02GB (53704439780) data
+                     min         max         mean         sd        +/- sd
+time for request:       31us     73.24ms      5.26ms      2.59ms    63.55%
+time for connect:       38us     32.98ms       859us      3.50ms    98.83%
+time to 1st byte:      781us     74.15ms      9.04ms     10.58ms    91.02%
+req/s           :    4238.05     9972.39     5960.49     1298.40    76.17%
+[info] CPU 1209.9% | Mem 284MiB
+
+[run 3/3]
+starting benchmark...
+Application protocol: h2c
+6.Warm-up phase is over for thread #
+5.
+10.
+
+
+finished in 5.16s, 3014190.80 req/s, 9.96GB/s
+requests: 15070954 total, 15087338 started, 15070954 done, 15070954 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 15070954 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 49.79GB (53458088022) total, 141.75MB (148637735) headers (space savings 90.30%), 49.40GB (53038138811) data
+                     min         max         mean         sd        +/- sd
+time for request:       34us     96.87ms      5.30ms      2.82ms    67.23%
+time for connect:       38us     75.62ms      3.37ms     14.28ms    96.09%
+time to 1st byte:      996us     97.51ms     15.03ms     20.83ms    85.35%
+req/s           :    4406.30     8120.37     5886.07      962.52    71.09%
+[info] CPU 1124.6% | Mem 285MiB
+
+=== Best: 2963154 req/s (CPU: 1209.9%, Mem: 284MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+
+==============================================
+=== agensio / baseline-h3 / 64c (tool=h2load-h3) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+starting benchmark...
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Certificate: RSA 2048 bits
+Negotiated Group: x25519
+Resumption: no
+Application protocol: h3
+
+finished in 5.04s, 3967155.20 req/s, 68.05MB/s
+requests: 19835776 total, 19839872 started, 19835776 done, 19835776 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 19835776 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 340.24MB (356769152) total, 170.26MB (178530048) headers (space savings 90.32%), 18.92MB (19836672) data
+UDP datagram: 621130 sent, 620146 received
+                 min         max         median     p95        p99        mean         sd        +/- sd
+request     :       85us     32.30ms      1.03ms     1.39ms     1.51ms      961us       645us    98.16%
+connect     :      869us      6.79ms      3.11ms     5.65ms     6.79ms     3.28ms      1.29ms    71.88%
+TTFB        :     1.86ms      7.72ms      4.67ms     6.87ms     7.72ms     4.57ms      1.36ms    67.19%
+req/s       :   50778.09    69418.35    65719.60   68505.69   69418.35   61977.05     5753.44    53.13%
+min RTT     :       15us       252us        92us      232us      252us      117us        67us    67.19%
+smoothed RTT:      292us       612us       438us      563us      612us      442us        79us    62.50%
+packets sent:       7947       10896       10299      10718      10896    9707.16      901.98    53.13%
+packets recv:       7941       10854       10276      10710      10854    9690.78      898.74    53.13%
+packets lost:          0           0           0          0          0       0.00        0.00   100.00%
+GRO packets :          1           2           2          2          2       2.00        0.02    99.95%
+[info] CPU 208.8% | Mem 79MiB
+
+[run 2/3]
+starting benchmark...
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Certificate: RSA 2048 bits
+Negotiated Group: x25519
+Resumption: no
+Application protocol: h3
+0Stopped all clients for thread #9
+. Stopping all clients.
+
+finished in 5.03s, 3972723.20 req/s, 68.14MB/s
+requests: 19863616 total, 19867712 started, 19863616 done, 19863616 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 19863616 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 340.72MB (357270272) total, 170.50MB (178780608) headers (space savings 90.32%), 18.94MB (19864512) data
+UDP datagram: 621636 sent, 621051 received
+                 min         max         median     p95        p99        mean         sd        +/- sd
+request     :       83us     30.51ms      1.03ms     1.39ms     1.53ms      961us       698us    99.06%
+connect     :      783us      4.05ms      2.09ms     3.91ms     4.05ms     2.24ms       865us    71.88%
+TTFB        :     1.72ms      5.30ms      3.37ms     5.02ms     5.30ms     3.38ms       881us    68.75%
+req/s       :   54660.64    67754.13    65689.52   66972.67   67754.13   62063.57     5412.77    60.94%
+min RTT     :       16us       226us       110us      217us      226us      115us        63us    65.63%
+smoothed RTT:      283us       635us       489us      608us      635us      469us        92us    64.06%
+packets sent:       8553       10602       10278      10480      10602    9715.06      844.79    60.94%
+packets recv:       8549       10596       10272      10470      10596    9704.92      845.33    60.94%
+packets lost:          0           0           0          0          0       0.00        0.00   100.00%
+GRO packets :          1           2           2          2          2       2.00        0.03    99.94%
+[info] CPU 224.6% | Mem 80MiB
+
+[run 3/3]
+starting benchmark...
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Certificate: RSA 2048 bits
+Negotiated Group: x25519
+Resumption: no
+Application protocol: h3
+
+finished in 5.05s, 3982336.00 req/s, 68.31MB/s
+requests: 19911680 total, 19915776 started, 19911680 done, 19911680 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 19911680 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 341.54MB (358135424) total, 170.91MB (179213184) headers (space savings 90.32%), 18.99MB (19912576) data
+UDP datagram: 623129 sent, 622545 received
+                 min         max         median     p95        p99        mean         sd        +/- sd
+request     :       84us     30.48ms      1.02ms     1.40ms     1.52ms      958us       698us    99.27%
+connect     :      693us      4.38ms      2.25ms     4.06ms     4.38ms     2.36ms       989us    64.06%
+TTFB        :     1.24ms      5.92ms      3.40ms     5.52ms     5.92ms     3.50ms      1.21ms    62.50%
+req/s       :   54672.98    67162.30    65897.92   67027.52   67162.30   62213.90     5342.58    62.50%
+min RTT     :       14us       243us        99us      226us      243us      116us        69us    59.38%
+smoothed RTT:      223us       685us       481us      634us      685us      467us       110us    67.19%
+packets sent:       8558       10511       10320      10485      10511    9738.39      834.09    62.50%
+packets recv:       8553       10502       10302      10480      10502    9728.27      834.94    62.50%
+packets lost:          0           0           0          0          0       0.00        0.00   100.00%
+GRO packets :          1           2           2          2          2       2.00        0.03    99.93%
+[info] CPU 236.9% | Mem 81MiB
+
+=== Best: 3949029 req/s (CPU: 224.6%, Mem: 80MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+
+==============================================
+=== agensio / static-h3 / 64c (tool=h2load-h3) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+starting benchmark...
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Certificate: RSA 2048 bits
+Negotiated Group: x25519
+Resumption: no
+Application protocol: h3
+
+finished in 5.03s, 604073.20 req/s, 9.21GB/s
+requests: 3020366 total, 3024462 started, 3020366 done, 3020366 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 3023976 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 46.04GB (49438435904) total, 257.52MB (270030165) headers (space savings 58.27%), 45.76GB (49139788350) data
+UDP datagram: 415141 sent, 35050620 received
+                 min         max         median     p95        p99        mean         sd        +/- sd
+request     :      111us     52.89ms      3.77ms    22.09ms    29.43ms     6.71ms      6.83ms    83.82%
+connect     :      838us      4.65ms      2.53ms     4.41ms     4.65ms     2.74ms      1.08ms    59.38%
+TTFB        :     1.73ms      6.07ms      4.31ms     5.77ms     6.07ms     4.25ms      1.06ms    65.63%
+req/s       :    7064.36    11795.79     9084.62   11687.76   11795.79    9437.00     1268.45    60.94%
+min RTT     :        3us        56us        25us       49us       56us       26us        13us    67.19%
+smoothed RTT:      221us       636us       449us      625us      636us      431us       109us    65.63%
+packets sent:       4850        8151        6224       8116       8151    6488.58      900.92    57.81%
+packets recv:     409981      684673      527388     678394     684673  547666.94    73659.52    60.94%
+packets lost:          0           0           0          0          0       0.00        0.00   100.00%
+GRO packets :          1          43           3          9         18       3.41        3.04    89.65%
+[info] CPU 811.8% | Mem 75MiB
+
+[run 2/3]
+starting benchmark...
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Certificate: RSA 2048 bits
+Negotiated Group: x25519
+Resumption: no
+Application protocol: h3
+
+finished in 5.04s, 603990.80 req/s, 9.21GB/s
+requests: 3019954 total, 3024050 started, 3019954 done, 3019954 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 3023565 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 46.03GB (49425846890) total, 252.07MB (264310752) headers (space savings 59.14%), 45.76GB (49133179505) data
+UDP datagram: 413848 sent, 35041595 received
+                 min         max         median     p95        p99        mean         sd        +/- sd
+request     :      121us     58.33ms      3.75ms    22.13ms    30.79ms     6.71ms      6.97ms    84.29%
+connect     :      953us      5.81ms      2.05ms     5.57ms     5.81ms     2.51ms      1.35ms    79.69%
+TTFB        :     1.72ms      8.43ms      3.38ms     8.05ms     8.43ms     3.87ms      1.70ms    78.13%
+req/s       :    5982.62    13394.66     9773.79   11756.56   13394.66    9435.46     1727.22    68.75%
+min RTT     :        4us        62us        25us       51us       62us       25us        16us    50.00%
+smoothed RTT:      222us       852us       439us      777us      852us      462us       162us    62.50%
+packets sent:       3967        9242        6728       8115       9242    6468.38     1242.84    68.75%
+packets recv:     346998      777322      567249     682369     777322  547525.92   100306.00    68.75%
+packets lost:          0           0           0          0          0       0.00        0.00   100.00%
+GRO packets :          1          45           3          9         18       3.40        3.04    89.64%
+[info] CPU 838.6% | Mem 77MiB
+
+[run 3/3]
+starting benchmark...
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Certificate: RSA 2048 bits
+Negotiated Group: x25519
+Resumption: no
+Application protocol: h3
+9
+
+finished in 5.02s, 598540.00 req/s, 9.12GB/s
+requests: 2992700 total, 2996796 started, 2992700 done, 2992700 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 2996293 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 45.62GB (48989294802) total, 258.63MB (271188881) headers (space savings 57.70%), 45.35GB (48689931323) data
+UDP datagram: 410265 sent, 34732234 received
+                 min         max         median     p95        p99        mean         sd        +/- sd
+request     :      115us     60.62ms      3.80ms    22.56ms    30.99ms     6.81ms      7.05ms    84.31%
+connect     :      964us      3.65ms      2.06ms     3.31ms     3.65ms     2.12ms       646us    67.19%
+TTFB        :     1.64ms      5.54ms      3.56ms     4.88ms     5.54ms     3.56ms       796us    71.88%
+req/s       :    6206.87    13293.01     9434.79   12001.64   13293.01    9350.61     1658.08    59.38%
+min RTT     :        4us        54us        27us       45us       54us       28us        12us    64.06%
+smoothed RTT:      232us       830us       403us      622us      830us      427us       116us    76.56%
+packets sent:       4208        9267        6535       8358       9267    6412.39     1200.47    59.38%
+packets recv:     360094      771755      547629     696502     771755  542692.16    96317.19    59.38%
+packets lost:          0           0           0          0          0       0.00        0.00   100.00%
+GRO packets :          1          31           3          9         18       3.40        3.02    89.67%
+[info] CPU 764.9% | Mem 77MiB
+
+=== Best: 601188 req/s (CPU: 811.8%, Mem: 75MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+[info] skip: agensio does not subscribe to unary-grpc
+[info] skip: agensio does not subscribe to unary-grpc-tls
+[info] skip: agensio does not subscribe to echo-ws
+[info] done
+[info] restoring loopback MTU to 65536
+exit 0

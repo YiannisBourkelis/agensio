@@ -2027,42 +2027,67 @@ static void test_appenv() {
     const std::string envdir = (dir / "env").string();
     const unsigned me = ::geteuid();
     std::vector<Var> got;
-    CHECK(read(envdir, "a.test", me, got, why) && got.empty());  // nothing yet: none, and ok
+    auto rd = [&](const char* site, unsigned owner, Status& st) { st = Status{}; return read(envdir, site, owner, got, st); };
+    Status st;
+    CHECK(rd("a.test", me, st) && got.empty() && !st.exists);  // nothing yet: none, and ok
     Change ch;
     ch.set = {{"DATABASE_URL", "sqlite3:storage/db.sqlite3"}};
     ch.generate = {"SECRET_KEY_BASE"};
     json::Value r = apply(envdir, "a.test", me, ch);
     CHECK(r["ok"].boolean() && r["generated"].items().size() == 1 && r["set"].items().size() == 1 && r.dump().find("sqlite3:storage") == std::string::npos);
-    struct stat st {};
-    CHECK(::stat(envdir.c_str(), &st) == 0 && (st.st_mode & 0777) == 0700 && ::stat((envdir + "/a.test.env").c_str(), &st) == 0 && (st.st_mode & 0777) == 0600);
-    CHECK(read(envdir, "a.test", me, got, why) && got.size() == 2 && got[1].name == "SECRET_KEY_BASE" && got[1].value.size() == 128);
+    struct stat sb {};
+    CHECK(::stat(envdir.c_str(), &sb) == 0 && (sb.st_mode & 0777) == 0700 && ::stat((envdir + "/a.test.env").c_str(), &sb) == 0 && (sb.st_mode & 0777) == 0600);
+    CHECK(rd("a.test", me, st) && st.exists && got.size() == 2 && got[1].name == "SECRET_KEY_BASE" && got[1].value.size() == 128);
     const std::string first = got[1].value;
+    // What site_env answers: names, lengths, fingerprints; a value only when revealed.
+    json::Value d = describe(envdir, "a.test", me, {});
+    CHECK(d["ok"].boolean() && d["exists"].boolean() && d["variables"].items().size() == 2 && d.dump().find(first) == std::string::npos &&
+          d.dump().find("sqlite3:storage") == std::string::npos && d["variables"].items()[1]["length"].num() == 128 &&
+          d["variables"].items()[1]["value"].is_null() && d["revealed"].items().empty());
+#ifdef AGENSIO_HAS_TLS
+    const std::string fp = std::string(d["variables"].items()[1].get("fingerprint"));
+    CHECK(fp.size() == 16 && fp.find_first_not_of("0123456789abcdef") == std::string::npos && fs::exists(envdir + "/.fingerprint.key") &&
+          describe(envdir, "a.test", me, {})["variables"].items()[1].get("fingerprint") == fp);  // stable: the key is kept
+    CHECK(fingerprint("k1", "v") != fingerprint("k2", "v") && fingerprint("k1", "v") != fingerprint("k1", "w") && fingerprint("k1", "v") == fingerprint("k1", "v"));
+#endif
+    d = describe(envdir, "a.test", me, {"SECRET_KEY_BASE", "NOPE"});
+    CHECK(d["variables"].items()[1].get("value") == first && d["variables"].items()[0]["value"].is_null() && d["revealed"].items().size() == 1 &&
+          d["not_found"].items().size() == 1 && d.dump().find("sqlite3:storage") == std::string::npos);
+    CHECK(!describe(envdir, "z.test", me, {})["exists"].boolean() && describe(envdir, "z.test", me, {})["ok"].boolean());
     ch = Change{};
     ch.generate = {"SECRET_KEY_BASE"};
     r = apply(envdir, "a.test", me, ch);
-    CHECK(r["ok"].boolean() && r["kept"].items().size() == 1 && r["generated"].items().empty() && read(envdir, "a.test", me, got, why) && got[1].value == first);
+    CHECK(r["ok"].boolean() && r["kept"].items().size() == 1 && r["generated"].items().empty() && rd("a.test", me, st) && got[1].value == first);
     ch.unset = {"SECRET_KEY_BASE"};
     r = apply(envdir, "a.test", me, ch);
-    CHECK(r["ok"].boolean() && r["generated"].items().size() == 1 && read(envdir, "a.test", me, got, why) && got.size() == 2 && got[1].value != first);
+    CHECK(r["ok"].boolean() && r["generated"].items().size() == 1 && rd("a.test", me, st) && got.size() == 2 && got[1].value != first);
     ch = Change{};
     ch.unset = {"DATABASE_URL", "SECRET_KEY_BASE", "NOT_THERE"};
     r = apply(envdir, "a.test", me, ch);
     CHECK(r["ok"].boolean() && r["unset"].items().size() == 2 && r["absent"].items().size() == 1 && !fs::exists(envdir + "/a.test.env"));
-    // A file or a directory someone else could have written is never read.
+    // A file others could only read is tightened by its owner; one they could write is never read.
     std::ofstream(envdir + "/b.test.env") << "A=1\n";
     fs::permissions(envdir + "/b.test.env", fs::perms::owner_read | fs::perms::owner_write | fs::perms::group_read);
-    CHECK(!read(envdir, "b.test", me, got, why) && why.find("mode 0600") != std::string::npos);
+    CHECK(rd("b.test", me, st) && got.size() == 1 && st.notes.size() == 1 && ::stat((envdir + "/b.test.env").c_str(), &sb) == 0 && (sb.st_mode & 0777) == 0600);
+    fs::permissions(envdir + "/b.test.env", fs::perms::owner_read | fs::perms::owner_write | fs::perms::group_write);
+    CHECK(!rd("b.test", me, st) && st.error.find("mode 0600") != std::string::npos && st.fix.find("chmod 0600") != std::string::npos);
     fs::permissions(envdir + "/b.test.env", fs::perms::owner_read | fs::perms::owner_write);
-    CHECK(read(envdir, "b.test", me, got, why) && got.size() == 1);
-    CHECK(!read(envdir, "b.test", me + 1, got, why) && why.find("0700") != std::string::npos);  // the directory is not that owner's
+    CHECK(!rd("b.test", me + 1, st) && st.error.find("0700") != std::string::npos && st.fix.find("chmod 0700") != std::string::npos);  // not that owner's
+    CHECK(::link((envdir + "/b.test.env").c_str(), (envdir + "/e.test.env").c_str()) == 0);  // a second link: never read
+    CHECK(!rd("e.test", me, st) && st.error.find("one link") != std::string::npos);
+    ::unlink((envdir + "/e.test.env").c_str());
     std::ofstream(envdir + "/c.test.env") << "PATH=/tmp\n";
     fs::permissions(envdir + "/c.test.env", fs::perms::owner_read | fs::perms::owner_write);
-    CHECK(!read(envdir, "c.test", me, got, why) && why.find("PATH") != std::string::npos);
+    CHECK(!rd("c.test", me, st) && st.error.find("PATH") != std::string::npos);
     fs::create_symlink(envdir + "/b.test.env", envdir + "/d.test.env");
-    CHECK(!read(envdir, "d.test", me, got, why) && why.find("symlink") != std::string::npos);
-    fs::permissions(envdir, fs::perms::owner_all | fs::perms::group_read | fs::perms::group_exec);
-    CHECK(!read(envdir, "b.test", me, got, why) && why.find("0700") != std::string::npos && !apply(envdir, "b.test", me, ch)["ok"].boolean());
-    CHECK(!read(envdir, "../x", me, got, why) && !apply(envdir, "../x", me, ch)["ok"].boolean());
+    CHECK(!rd("d.test", me, st) && st.error.find("symlink") != std::string::npos && st.fix == "rm " + envdir + "/d.test.env");
+    // A directory open to its group (a mkdir under a lax umask): its owner tightens it and says so.
+    fs::permissions(envdir, fs::perms::owner_all | fs::perms::group_all);
+    CHECK(rd("b.test", me, st) && st.notes.size() == 1 && st.notes[0].find("made 0700") != std::string::npos && ::stat(envdir.c_str(), &sb) == 0 && (sb.st_mode & 0777) == 0700);
+    fs::permissions(envdir, fs::perms::owner_all | fs::perms::group_all);
+    r = apply(envdir, "b.test", me, ch);
+    CHECK(r["ok"].boolean() && r["tightened"].items().size() == 1);
+    CHECK(!rd("../x", me, st) && !apply(envdir, "../x", me, ch)["ok"].boolean());
     fs::remove_all(dir);
 }
 
