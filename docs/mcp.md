@@ -111,10 +111,12 @@ takes `--socket PATH`.
 | `cert_renew` | operator | order an automatic certificate again now |
 | `site_create`, `site_update` | admin | write or change a managed site file, validate, reload; answer with open decisions or root commands first; `settings` changes a site's limits within `[control] site_limits` and the answer lists under `done` what was written and reloaded |
 | `site_disable`, `site_enable`, `site_delete` | admin | rename the file away and back; delete it (a `.bak` stays) |
-| `site_install` | admin | put an application's files into a site's empty directory as the site's account: the preset's official archive (`version` optional), any https `url`, or a stored upload (`file`); a plugin or theme goes into `path` with `create_path: true`; `sha256`, `strip`, `dry_run`; the server enforces the fences and reports the source, digest and what it created |
+| `site_install` | admin | put an application's files into a site's empty directory as the site's account: the preset's official archive (`version` optional), any https `url`, or a stored upload (`file`); a plugin or theme goes into `path` with `create_path: true`; `sha256`, `strip`, `dry_run`; the server enforces the fences and reports the source, digest and what it created. For a Rails site the next steps are the bundle tasks, with the Ruby the application pins; a Rails archive without credentials gets its `SECRET_KEY_BASE` generated into the site's environment; every site but a static one is told its request-body limit |
 | `site_copy` | admin | copy one regular file of a site to another path of the same site, as the site's account: the drop-ins applications ship as templates (WordPress's `wp-content/db.php` from the SQLite plugin, Drupal's `settings.php`); `overwrite`, `dry_run`; never across sites, never caller content, never a directory. Like `site_install`, credential files come out `0600` and the configuration is validated before the answer |
 | `site_tasks_list` | viewer | the named tasks of the site's preset (`app = "rails"`: `gem_install_rails`, `rails_new`, `bundle_install`, `db_prepare`, `db_migrate`, `assets_precompile`) with their parameters, whether each downloads, its effective time limit, whether its interpreter is in place (`run_as_root` lists every missing package once, before the first task), the account that runs them and the directory; other presets have none |
-| `site_task` | admin | runs one of them as the site's account in the site's directory: a fixed command from the table, typed parameters, never a command line; the answer carries the exact argv, the exit status and the output (head and tail); the credential files are made the site's alone and the configuration is validated; `dry_run` shows the command without running it and meets the same refusals (a missing interpreter as `run_as_root`, a missing result of an earlier task naming the task to run); a task that exits 0 without what the next one needs is a 409. Marked destructive, so the host asks |
+| `site_task` | admin | runs one of them as the site's account in the site's directory: a fixed command from the table, typed parameters, never a command line; the answer carries the exact argv, the exit status and the output (head and tail); the credential files are made the site's alone and the configuration is validated; `dry_run` shows the command without running it and meets the same refusals (a missing interpreter as `run_as_root`, a missing result of an earlier task naming the task to run); a task that exits 0 without what the next one needs is a 409; a failure with a known cause carries `hint` (Rails' missing `secret_key_base`, a Gemfile pinning another Ruby); the site's environment reaches the task and shows as `NAME=<site environment>`. Marked destructive, so the host asks |
+| `site_env` | admin | a Rails or proxy site's environment: the variables its tasks and its application service get (`SECRET_KEY_BASE`, `DATABASE_URL`), names and values, from a root-owned `0600` file; every read is audited with the names. The agent shows a value only when asked |
+| `site_env_set` | admin | `set`, `unset`, `generate` (a random secret for a missing name; a name in `unset` and `generate` is rotated) on that file, through the root helper; names that choose a program (`PATH`, `LD_*`, `GEM_*`, `RUBYOPT`, ...) are refused; the answer and the audit log carry names only, and the next step is the application service's restart |
 | `uploads_list` | viewer | archives stored with `agensio ctl upload`, for `site_install` |
 | `upload_delete` | operator | remove a stored upload |
 
@@ -165,6 +167,16 @@ the site's account, reading the output when one fails. When Ruby is missing, the
 answer carries the `apt-get` line for you to run as root. The one step left for a terminal
 is starting Puma, until agensio manages the application process: the agent hands you
 `docs/examples/puma.service` with the account, the directory and the port filled in.
+
+An existing application comes as an archive. For Writebook the agent calls
+`site_install` with the GitHub release URL; the answer says the application pins Ruby
+3.4.7 and that `SECRET_KEY_BASE` was generated into the site's environment, since the
+archive has no Rails credentials. When `[control] runtimes` gives another Ruby, the agent
+hands you the build commands of `docs/configuration.md` 15 and the one line for the main
+configuration file, then `agensio reload`. Then `site_task` `bundle_install`,
+`db_prepare` and `assets_precompile`, and the Puma unit, which loads the same
+environment file. A `DATABASE_URL` or an API key goes the same way, with `site_env_set`;
+the agent never writes a secret into a file of the application or into a unit.
 
 ## What it cannot do
 

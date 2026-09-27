@@ -1,0 +1,449 @@
+#include "services/appenv.hpp"
+
+#include <algorithm>
+#include <cerrno>
+#include <cstring>
+#include <mutex>
+
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/random.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
+namespace agensio::appenv {
+
+namespace {
+
+bool upper_name_char(unsigned char c, bool first) noexcept {
+    return (c >= 'A' && c <= 'Z') || c == '_' || (!first && c >= '0' && c <= '9');
+}
+
+// systemd's own rule for a name in an environment file: letters, digits and '_', not
+// starting with a digit. Our write rule (check_name) is narrower.
+bool env_name(std::string_view n) noexcept {
+    if (n.empty() || (n[0] >= '0' && n[0] <= '9')) return false;
+    for (unsigned char c : n)
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_')) return false;
+    return true;
+}
+
+std::string_view trim(std::string_view s) noexcept {
+    while (!s.empty() && (s.front() == ' ' || s.front() == '\t' || s.front() == '\r')) s.remove_prefix(1);
+    while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\r')) s.remove_suffix(1);
+    return s;
+}
+
+bool blank(std::string_view s) noexcept { return trim(s).empty(); }
+
+void put(std::vector<Var>& vars, std::string name, std::string value) {
+    for (auto& v : vars)
+        if (v.name == name) {
+            v.value = std::move(value);
+            return;
+        }
+    vars.push_back({std::move(name), std::move(value)});
+}
+
+}  // namespace
+
+bool reserved(std::string_view n) noexcept {
+    // What a task's environment already holds (tasks::build and the preset's family), and the
+    // names that choose or load a program: the audit line says which program ran, and it
+    // must stay true.
+    static constexpr std::string_view exact[] = {
+        "PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LANGUAGE", "SHELL", "USER", "LOGNAME", "IFS", "ENV", "BASH_ENV", "CDPATH",
+        "RAILS_ENV", "SECRET_KEY_BASE_DUMMY", "RUBYOPT", "RUBYLIB", "RUBYSHELL", "NODE_OPTIONS", "NODE_PATH", "PERL5LIB", "PERL5OPT",
+        "PERLLIB", "GCONV_PATH", "LOCPATH", "HOSTALIASES", "GLIBC_TUNABLES", "EDITOR", "VISUAL", "PAGER", "SSH_ASKPASS", "SUDO_ASKPASS",
+        "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "NOTIFY_SOCKET", "LISTEN_FDS", "LISTEN_PID", "LISTEN_FDNAMES"};
+    for (std::string_view e : exact)
+        if (n == e) return true;
+    static constexpr std::string_view prefixes[] = {"LD_", "DYLD_", "GEM_", "PYTHON", "MALLOC_", "GIT_"};
+    for (std::string_view p : prefixes)
+        if (n.starts_with(p)) return true;
+    // Bundler's settings choose what is loaded (BUNDLE_PATH, BUNDLE_GEMFILE, BUNDLE_BUILD__*);
+    // a private gem source's credentials (BUNDLE_GEMS__CONTRIBSYS__COM for Sidekiq Pro) are
+    // the one kind an application needs, and they name a host with double underscores.
+    if (n.starts_with("BUNDLE_")) {
+        const std::string_view rest = n.substr(7);
+        return rest.find("__") == std::string_view::npos || rest.starts_with("BUILD__");
+    }
+    return false;
+}
+
+std::string check_name(std::string_view n) {
+    if (n.empty() || n.size() > 64) return "a variable's name is 1 to 64 characters";
+    for (std::size_t i = 0; i < n.size(); ++i)
+        if (!upper_name_char(static_cast<unsigned char>(n[i]), i == 0))
+            return "'" + std::string(n) + "' is not a variable name: upper-case letters, digits and '_', not starting with a digit";
+    if (reserved(n))
+        return std::string(n) + " is agensio's own or changes which program runs (PATH, HOME, RAILS_ENV, GEM_*, BUNDLE_* other than a gem "
+                                "source's credentials, LD_*, RUBYOPT, NODE_OPTIONS, GIT_*, ...); the site's environment cannot set it";
+    return "";
+}
+
+std::string check_value(std::string_view v) {
+    if (v.size() > kMaxValue) return "a value is at most " + std::to_string(kMaxValue) + " bytes";
+    for (std::size_t i = 0; i < v.size();) {
+        const unsigned char c = static_cast<unsigned char>(v[i]);
+        if (c < 0x20 || c == 0x7f) return "a value is one line of text: no control characters (newline, tab, NUL)";
+        std::size_t len = c < 0x80 ? 1 : (c & 0xe0) == 0xc0 ? 2 : (c & 0xf0) == 0xe0 ? 3 : (c & 0xf8) == 0xf0 ? 4 : 0;
+        if (len == 0 || i + len > v.size() || (len == 2 && c < 0xc2)) return "a value must be UTF-8 text";
+        for (std::size_t k = 1; k < len; ++k)
+            if ((static_cast<unsigned char>(v[i + k]) & 0xc0) != 0x80) return "a value must be UTF-8 text";
+        i += len;
+    }
+    return "";
+}
+
+bool valid_site(std::string_view s) noexcept {
+    if (s.empty() || s.size() > 253 || s.front() == '.' || s.front() == '-' || s.back() == '.') return false;
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        const char c = s[i];
+        if (c == '.' && s[i - 1] == '.') return false;
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.')) return false;
+    }
+    return true;
+}
+
+std::string render(const std::vector<Var>& vars, std::string_view site) {
+    std::string out = "# The application environment of site " + std::string(site) +
+                      ", written by agensio (site_env_set).\n"
+                      "# Read by the site's tasks and by its application service (EnvironmentFile=). root's, 0600.\n";
+    for (const auto& v : vars) {
+        out += v.name + "=\"";
+        for (char c : v.value) {
+            if (c == '\\' || c == '"' || c == '$' || c == '`') out.push_back('\\');
+            out.push_back(c);
+        }
+        out += "\"\n";
+    }
+    return out;
+}
+
+bool parse(std::string_view text, std::vector<Var>& out, std::string& why) {
+    std::size_t line_no = 0;
+    while (!text.empty()) {
+        const std::size_t nl = text.find('\n');
+        std::string_view line = text.substr(0, nl);
+        text = nl == std::string_view::npos ? std::string_view() : text.substr(nl + 1);
+        ++line_no;
+        line = trim(line);
+        if (line.empty() || line.front() == '#' || line.front() == ';') continue;
+        const std::size_t eq = line.find('=');
+        if (eq == std::string_view::npos) continue;  // systemd ignores such a line
+        const std::string_view name = trim(line.substr(0, eq));
+        const std::string at = "line " + std::to_string(line_no) + ": ";
+        if (!env_name(name)) {
+            why = at + "'" + std::string(name.substr(0, 64)) + "' is not a variable name";
+            return false;
+        }
+        std::string_view rest = trim(line.substr(eq + 1));
+        std::string value;
+        if (!rest.empty() && rest.front() == '\'') {
+            const std::size_t close = rest.find('\'', 1);
+            if (close == std::string_view::npos) {
+                why = at + std::string(name) + "'s single-quoted value does not close on its line";
+                return false;
+            }
+            value.assign(rest.substr(1, close - 1));
+            rest = rest.substr(close + 1);
+        } else if (!rest.empty() && rest.front() == '"') {
+            std::size_t i = 1;
+            bool closed = false;
+            while (i < rest.size()) {
+                const char c = rest[i];
+                if (c == '\\') {
+                    if (i + 1 >= rest.size()) break;  // a continuation line
+                    const char n = rest[i + 1];
+                    if (n == '"' || n == '\\' || n == '`' || n == '$') value.push_back(n);
+                    else {
+                        value.push_back('\\');
+                        value.push_back(n);
+                    }
+                    i += 2;
+                } else if (c == '"') {
+                    closed = true;
+                    ++i;
+                    break;
+                } else {
+                    value.push_back(c);
+                    ++i;
+                }
+            }
+            if (!closed) {
+                why = at + std::string(name) + "'s double-quoted value does not close on its line";
+                return false;
+            }
+            rest = rest.substr(i);
+        } else {
+            for (std::size_t i = 0; i < rest.size(); ++i) {
+                if (rest[i] == '\\') {
+                    if (i + 1 >= rest.size()) {
+                        why = at + std::string(name) + "'s value ends with a backslash, which continues it on the next line";
+                        return false;
+                    }
+                    value.push_back(rest[++i]);
+                } else {
+                    value.push_back(rest[i]);
+                }
+            }
+            rest = {};
+        }
+        if (!blank(rest)) {
+            why = at + "text after " + std::string(name) + "'s quoted value";
+            return false;
+        }
+        put(out, std::string(name), std::move(value));
+    }
+    return true;
+}
+
+std::string dir_of(const std::filesystem::path& config_path) {
+    const std::filesystem::path parent = config_path.parent_path();
+    return ((parent.empty() ? std::filesystem::path(".") : parent) / "env").string();
+}
+
+std::string parse_change(const json::Value& body, Change& out) {
+    out = Change{};
+    const json::Value& set = body["set"];
+    const json::Value& unset = body["unset"];
+    const json::Value& gen = body["generate"];
+    if (!set.is_null() && !set.is_object()) return "set must be an object of NAME: value strings";
+    if (!unset.is_null() && unset.type() != json::Value::Type::array) return "unset must be an array of names";
+    if (!gen.is_null() && gen.type() != json::Value::Type::array) return "generate must be an array of names";
+    // A name once per list, and never both set and removed or generated; unset and generate
+    // together is how a secret is rotated (unset runs first).
+    std::vector<std::string> seen_set, seen_unset, seen_gen;
+    std::size_t count = 0;
+    auto in = [](const std::vector<std::string>& v, const std::string& n) { return std::find(v.begin(), v.end(), n) != v.end(); };
+    auto once = [&](std::vector<std::string>& list, const std::string& n) -> std::string {
+        if (in(list, n)) return n + " appears twice in one list";
+        if (&list != &seen_set && in(seen_set, n)) return n + " is both set and " + (&list == &seen_unset ? "unset" : "generated");
+        if (&list == &seen_set && (in(seen_unset, n) || in(seen_gen, n))) return n + " is both set and unset or generated";
+        list.push_back(n);
+        ++count;
+        return "";
+    };
+    for (const auto& m : set.members()) {
+        if (std::string bad = check_name(m.first); !bad.empty()) return "set: " + bad;
+        if (!m.second.is_string()) return "set: " + m.first + "'s value must be a string";
+        if (std::string bad = check_value(m.second.str()); !bad.empty()) return "set: " + m.first + ": " + bad;
+        if (std::string bad = once(seen_set, m.first); !bad.empty()) return bad;
+        out.set.push_back({m.first, std::string(m.second.str())});
+    }
+    for (const auto& u : unset.items()) {
+        // Any name systemd would read can be removed, a reserved one written by hand included.
+        if (!u.is_string() || !env_name(u.str()) || u.str().size() > 64) return "unset: names are variable names";
+        if (std::string bad = once(seen_unset, std::string(u.str())); !bad.empty()) return bad;
+        out.unset.emplace_back(u.str());
+    }
+    for (const auto& g : gen.items()) {
+        if (!g.is_string()) return "generate: names are strings";
+        if (std::string bad = check_name(g.str()); !bad.empty()) return "generate: " + bad;
+        if (std::string bad = once(seen_gen, std::string(g.str())); !bad.empty()) return bad;
+        out.generate.emplace_back(g.str());
+    }
+    if (out.set.empty() && out.unset.empty() && out.generate.empty()) return "nothing to change: give set, unset or generate";
+    if (count > 64) return "at most 64 names in one change";
+    return "";
+}
+
+std::string random_secret() {
+    unsigned char bytes[64];
+#ifndef _WIN32
+    if (::getentropy(bytes, sizeof bytes) != 0) return "";
+#else
+    return "";
+#endif
+    static constexpr char hex[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(128);
+    for (unsigned char b : bytes) {
+        out.push_back(hex[b >> 4]);
+        out.push_back(hex[b & 15]);
+    }
+    return out;
+}
+
+#ifndef _WIN32
+
+namespace {
+
+std::string whose(unsigned owner) { return owner == 0 ? "root's" : "uid " + std::to_string(owner) + "'s"; }
+
+// The open directory, checked: -1 with `why`, or -2 when it does not exist.
+int open_dir(const std::string& dir, unsigned owner, std::string& why) {
+    const int fd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) {
+        if (errno == ENOENT) return -2;
+        why = dir + ": " + (errno == ELOOP || errno == ENOTDIR ? std::string("a symlink or not a directory; refused") : std::strerror(errno));
+        return -1;
+    }
+    struct stat st {};
+    if (::fstat(fd, &st) != 0 || st.st_uid != owner || (st.st_mode & 077) != 0) {
+        why = dir + " must be " + whose(owner) + " alone (0700); it is uid " + std::to_string(st.st_uid) + "'s, mode " +
+              std::to_string((st.st_mode >> 6) & 7) + std::to_string((st.st_mode >> 3) & 7) + std::to_string(st.st_mode & 7) + "; refused";
+        ::close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+bool read_at(int dfd, const std::string& dir, std::string_view site, unsigned owner, std::vector<Var>& out, std::string& why) {
+    const std::string leaf = std::string(site) + ".env";
+    const std::string path = dir + "/" + leaf;
+    const int fd = ::openat(dfd, leaf.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
+        if (errno == ENOENT) return true;
+        why = path + ": " + (errno == ELOOP ? std::string("a symlink; refused") : std::strerror(errno));
+        return false;
+    }
+    struct stat st {};
+    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != owner || (st.st_mode & 077) != 0 ||
+        static_cast<std::size_t>(st.st_size) > kMaxFile) {
+        why = path + " must be a regular file, " + whose(owner) + ", mode 0600, at most 64 KB; refused (chown and chmod 600 it, or remove it)";
+        ::close(fd);
+        return false;
+    }
+    std::string text(static_cast<std::size_t>(st.st_size), '\0');
+    std::size_t got = 0;
+    while (got < text.size()) {
+        const ssize_t n = ::read(fd, text.data() + got, text.size() - got);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        got += static_cast<std::size_t>(n);
+    }
+    ::close(fd);
+    text.resize(got);
+    std::vector<Var> vars;
+    if (!parse(text, vars, why)) {
+        why = path + ": " + why;
+        return false;
+    }
+    for (const auto& v : vars) {
+        std::string bad = check_name(v.name);
+        if (bad.empty()) bad = check_value(v.value);
+        if (!bad.empty()) {
+            why = path + ": " + bad + " (remove that line, or site_env_set with unset)";
+            return false;
+        }
+    }
+    if (vars.size() > kMaxVars) {
+        why = path + ": more than " + std::to_string(kMaxVars) + " variables";
+        return false;
+    }
+    out = std::move(vars);
+    return true;
+}
+
+json::Value names_of(const std::vector<std::string>& v) {
+    json::Value a = json::Value::array();
+    for (const auto& n : v) a.push(n);
+    return a;
+}
+
+}  // namespace
+
+bool read(const std::string& dir, std::string_view site, unsigned owner, std::vector<Var>& out, std::string& why) {
+    out.clear();
+    if (!valid_site(site)) {
+        why = "'" + std::string(site) + "' is not a site's host name";
+        return false;
+    }
+    const int dfd = open_dir(dir, owner, why);
+    if (dfd == -2) return true;
+    if (dfd < 0) return false;
+    const bool ok = read_at(dfd, dir, site, owner, out, why);
+    ::close(dfd);
+    return ok;
+}
+
+json::Value apply(const std::string& dir, std::string_view site, unsigned owner, const Change& change) {
+    static std::mutex serial;  // two writers in one process never interleave a read and a rename
+    const std::lock_guard lock(serial);
+    json::Value fail = json::Value::object().set("ok", false);
+    if (!valid_site(site)) return fail.set("error", "'" + std::string(site) + "' is not a site's host name");
+    if (::geteuid() != owner) return fail.set("error", "the environment files are " + whose(owner) + "; this process is not");
+    std::string why;
+    if (::mkdir(dir.c_str(), 0700) != 0 && errno != EEXIST) return fail.set("error", "mkdir " + dir + ": " + std::strerror(errno));
+    const int dfd = open_dir(dir, owner, why);
+    if (dfd < 0) return fail.set("error", dfd == -2 ? dir + " vanished" : why);
+    std::vector<Var> vars;
+    if (!read_at(dfd, dir, site, owner, vars, why)) {
+        ::close(dfd);
+        return fail.set("error", why);
+    }
+    std::vector<std::string> set, unset, absent, generated, kept;
+    for (const auto& name : change.unset) {
+        const auto it = std::find_if(vars.begin(), vars.end(), [&](const Var& v) { return v.name == name; });
+        if (it == vars.end()) {
+            absent.push_back(name);
+            continue;
+        }
+        vars.erase(it);
+        unset.push_back(name);
+    }
+    for (const auto& v : change.set) {
+        put(vars, v.name, v.value);
+        set.push_back(v.name);
+    }
+    for (const auto& name : change.generate) {
+        if (std::any_of(vars.begin(), vars.end(), [&](const Var& v) { return v.name == name; })) {
+            kept.push_back(name);
+            continue;
+        }
+        std::string secret = random_secret();
+        if (secret.empty()) {
+            ::close(dfd);
+            return fail.set("error", std::string("no random bytes from the system: ") + std::strerror(errno));
+        }
+        vars.push_back({name, std::move(secret)});
+        generated.push_back(name);
+    }
+    const std::string leaf = std::string(site) + ".env";
+    const std::string path = dir + "/" + leaf;
+    const std::string text = render(vars, site);
+    if (vars.size() > kMaxVars || text.size() > kMaxFile) {
+        ::close(dfd);
+        return fail.set("error", "the environment would hold more than " + std::to_string(kMaxVars) + " variables or 64 KB");
+    }
+    const bool changed = !set.empty() || !unset.empty() || !generated.empty();
+    if (changed && vars.empty()) {
+        if (::unlinkat(dfd, leaf.c_str(), 0) != 0 && errno != ENOENT) {
+            ::close(dfd);
+            return fail.set("error", "remove " + path + ": " + std::strerror(errno));
+        }
+    } else if (changed) {
+        const std::string tmp = leaf + ".tmp";
+        ::unlinkat(dfd, tmp.c_str(), 0);  // left by a write that died
+        const int f = ::openat(dfd, tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        bool ok = f >= 0 && ::fchmod(f, 0600) == 0;
+        for (std::size_t off = 0; ok && off < text.size();) {
+            const ssize_t n = ::write(f, text.data() + off, text.size() - off);
+            if (n < 0 && errno == EINTR) continue;
+            ok = n > 0;
+            if (ok) off += static_cast<std::size_t>(n);
+        }
+        ok = ok && ::fsync(f) == 0;
+        const int err = errno;
+        if (f >= 0) ::close(f);
+        if (!ok || ::renameat(dfd, tmp.c_str(), dfd, leaf.c_str()) != 0) {
+            const int e = ok ? errno : err;
+            ::unlinkat(dfd, tmp.c_str(), 0);
+            ::close(dfd);
+            return fail.set("error", "write " + path + ": " + std::strerror(e));
+        }
+        ::fsync(dfd);
+    }
+    ::close(dfd);
+    std::vector<std::string> names;
+    for (const auto& v : vars) names.push_back(v.name);
+    return json::Value::object().set("ok", true).set("file", path).set("set", names_of(set)).set("unset", names_of(unset)).set("absent", names_of(absent))
+        .set("generated", names_of(generated)).set("kept", names_of(kept)).set("names", names_of(names));
+}
+
+#endif
+
+}  // namespace agensio::appenv

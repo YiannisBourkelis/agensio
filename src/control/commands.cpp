@@ -407,13 +407,9 @@ std::vector<std::string> restart_needed(const Config& fresh, const Config& runni
         out.push_back("cache sizes");
     if (fresh.control.enabled != running.control.enabled || fresh.control.socket != running.control.socket)
         out.push_back("control");
-    // The task keys are read once, by the helper forked at start (and the server's boot copy).
-    const auto& fr = fresh.control.runtimes;
-    const auto& rr = running.control.runtimes;
-    if (fr.ruby != rr.ruby || fr.node != rr.node || fr.php != rr.php || fr.python3 != rr.python3) out.push_back("control.runtimes");
-    if (fresh.control.task_timeout != running.control.task_timeout || fresh.control.task_processes != running.control.task_processes)
-        out.push_back("control.task_limits");
-    if (fresh.control.task_network != running.control.task_network) out.push_back("control.task_network");
+    // Not the task keys (runtimes, task_limits, task_network): the helper reads them from
+    // root's file for every task, and the server from the configuration it runs, so a
+    // reload changes them (2026-09-27 Writebook report: a new Ruby cost every site a restart).
     return out;
 }
 

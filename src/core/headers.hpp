@@ -41,6 +41,11 @@ public:
         if (v.data() >= from && v.data() < from + len) v = std::string_view(to + (v.data() - from), v.size());
     }
     const HeaderField& operator[](std::size_t i) const noexcept { return fields_[i]; }
+    // A field's value replaced in place (the cookie crumbs of HTTP/2 and HTTP/3 joined into
+    // the first one's slot); `value` must outlive the request like every other view.
+    void set_value(std::size_t i, std::string_view value) noexcept {
+        if (i < count_) fields_[i].value = value;
+    }
 
     // First field with this name (case-insensitive), or an empty view.
     std::string_view get(std::string_view name) const noexcept {

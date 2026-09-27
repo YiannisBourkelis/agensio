@@ -11,6 +11,7 @@
 #include "services/install.hpp"
 #include "services/pools.hpp"
 #include "services/provision.hpp"
+#include "services/appenv.hpp"
 #include "services/tasks.hpp"
 
 #ifndef _WIN32
@@ -1008,8 +1009,10 @@ void Server::install_async(const json::Value& req, std::function<void(json::Valu
 void Server::task_async(const json::Value& req, std::function<void(json::Value)> done) {
     // Off the worker: a task runs for minutes (bundle install). With the helper the task runs
     // as the site's account, and the helper is told names only; without it, as this
-    // process's own account, which tasks::execute requires to own the site's directory.
-    std::thread([this, req, done = std::move(done)] {
+    // process's own account, which tasks::execute requires to own the site's directory. The
+    // task keys come from the configuration running now (reloadable), read here on worker 0.
+    const ControlConfig ctl = running().control;
+    std::thread([this, req, ctl, done = std::move(done)] {
         json::Value r;
         if (provisioner_.available()) {
             r = provisioner_.request(json::Value::object().set("op", "task_run").set("site", req["site"]).set("task", req["task"])
@@ -1018,24 +1021,63 @@ void Server::task_async(const json::Value& req, std::function<void(json::Value)>
 #ifndef _WIN32
             const tasks::Row* row = tasks::find(req.get("app"), req.get("task"));
             const struct passwd* pw = ::getpwuid(::geteuid());
+            std::vector<appenv::Var> vars;
+            std::string why;
             if (!row) {
                 r = json::Value::object().set("ok", false).set("error", "no such task");
             } else if (!pw) {
                 r = json::Value::object().set("ok", false).set("error", "this process's account has no name");
+            } else if (appenv::valid_site(req.get("site")) && !appenv::read(appenv::dir_of(cfg_.config_path), req.get("site"), ::geteuid(), vars, why)) {
+                r = json::Value::object().set("ok", false).set("error", "the site's environment: " + why);
             } else {
                 tasks::Request tr;
                 tr.row = row;
                 tr.params = req["params"];
-                tr.ctx.runtime_dir = runtime_dir(cfg_.control, row->runtime);
+                tr.ctx.runtime_dir = runtime_dir(ctl, row->runtime);
                 tr.ctx.root = std::string(req.get("root"));
                 tr.ctx.home = cfg_.state_dir + "/" + pw->pw_name;
-                tr.ctx.timeout = std::min(row->timeout, cfg_.control.task_timeout);
-                tr.ctx.processes = cfg_.control.task_processes;
+                tr.ctx.timeout = std::min(row->timeout, ctl.task_timeout);
+                tr.ctx.processes = ctl.task_processes;
+                for (auto& v : vars) tr.ctx.app_env.emplace_back(std::move(v.name), std::move(v.value));
                 tr.sites_root = provision::sites_root(cfg_);
                 for (const auto& sec : req["secrets"].items()) tr.secrets.push_back(sec.str());
-                tr.network_allowed = cfg_.control.task_network;
+                tr.network_allowed = ctl.task_network;
                 tr.dry_run = req["dry_run"].boolean();
                 r = tasks::execute(tr);
+            }
+#else
+            r = json::Value::object().set("ok", false).set("error", "not available on this platform");
+#endif
+        }
+        asio::post(workers_[0]->ctx, [done, r] { done(r); });
+    }).detach();
+}
+
+void Server::env_async(const json::Value& req, std::function<void(json::Value)> done) {
+    std::thread([this, req, done = std::move(done)] {
+        json::Value r;
+        if (provisioner_.available()) {
+            r = provisioner_.request(req);
+        } else {
+#ifndef _WIN32
+            // Without the helper the files are this account's own, in the same directory: a
+            // server that runs every site as itself (a developer's machine, the suites).
+            const std::string dir = appenv::dir_of(cfg_.config_path);
+            const std::string site(req.get("site"));
+            if (req.get("op") == "env_read") {
+                std::vector<appenv::Var> vars;
+                std::string why;
+                if (!appenv::read(dir, site, ::geteuid(), vars, why)) {
+                    r = json::Value::object().set("ok", false).set("error", why);
+                } else {
+                    json::Value list = json::Value::array();
+                    for (const auto& v : vars) list.push(json::Value::object().set("name", v.name).set("value", v.value));
+                    r = json::Value::object().set("ok", true).set("site", site).set("file", dir + "/" + site + ".env").set("variables", std::move(list));
+                }
+            } else {
+                appenv::Change change;
+                const std::string bad = appenv::parse_change(req, change);
+                r = bad.empty() ? appenv::apply(dir, site, ::geteuid(), change).set("site", site) : json::Value::object().set("ok", false).set("error", bad);
             }
 #else
             r = json::Value::object().set("ok", false).set("error", "not available on this platform");

@@ -94,9 +94,22 @@ r=$(task assets_precompile)
 check "assets_precompile: public/assets built" "True 0 yes" "$(echo $r | cut -d' ' -f1-2) $([ -f $APP/public/assets/.manifest.json ] && echo yes)"
 check "the configuration validates after every task (no hosting rule broken by what Rails wrote)" "true" "$(ctl validate | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["ok"]).lower())')"
 
-# Puma as the site's account, with the environment of docs/examples/puma.service.
+# The application without its Rails credentials, as a ONCE application's archive comes
+# (2026-09-27 Writebook report): its secret comes from the site's environment, which the
+# tasks and Puma both read.
+mv $APP/config/credentials.yml.enc $T/credentials.yml.enc; mv $APP/config/master.key $T/master.key
+r=$(task db_migrate)
+check "without credentials or SECRET_KEY_BASE, db_migrate stops on Rails' missing secret and the answer's hint names the fix" "False 1 yes" "$(echo $r | cut -d' ' -f1-2) $(j '"yes" if "site_env_set with generate" in d.get("hint", "") else d.get("hint")')"
+ctl site-env-set r5.test --generate SECRET_KEY_BASE --yes --reason live > $T/out
+check "site-env-set: SECRET_KEY_BASE generated into root's file, 0600" "SECRET_KEY_BASE root 600" "$(j '",".join(d["generated"])') $(stat -c '%U %a' $T/env/r5.test.env)"
+r=$(task db_migrate)
+check "without Rails credentials, db_migrate runs on the site's environment" "True 0" "$(echo $r | cut -d' ' -f1-2)"
+
+# Puma as the site's account, with the environment of docs/examples/puma.service: its
+# Environment= lines and the site's environment file (EnvironmentFile=), here read by root.
 runuser -u r5 -- /usr/bin/env -i PATH=/usr/bin:/bin HOME=$T/state/r5 TMPDIR=$T/state/r5/tmp LANG=C.UTF-8 RAILS_ENV=production \
-    BUNDLE_PATH=vendor/bundle BUNDLE_WITHOUT=development:test RAILS_LOG_TO_STDOUT=1 \
+    BUNDLE_PATH=vendor/bundle BUNDLE_WITHOUT=development:test RAILS_LOG_TO_STDOUT=1 GEM_HOME=$T/state/r5/gems GEM_PATH=$T/state/r5/gems \
+    $(sed -n 's/^\([A-Z_][A-Z0-9_]*\)="\(.*\)"$/\1=\2/p' $T/env/r5.test.env) \
     /bin/sh -c "cd $APP && umask 027 && exec /usr/bin/bundle exec puma -e production -b tcp://127.0.0.1:18500" > $T/puma.out 2>&1 &
 for _ in $(seq 1 100); do curl -s -o /dev/null http://127.0.0.1:18500/up && break; sleep 0.3; done
 # Whose socket listens on 18500 (0x4844): the uid column of the kernel's table. ss -p and a
@@ -104,12 +117,13 @@ for _ in $(seq 1 100); do curl -s -o /dev/null http://127.0.0.1:18500/up && brea
 PUMA_UID=$(awk '$2 ~ /:4844$/ && $4 == "0A" {print $8; exit}' /proc/net/tcp)
 check "Puma runs as r5 and listens on loopback only" "r5 127.0.0.1:18500" "$(getent passwd "${PUMA_UID:-x}" | cut -d: -f1) $(ss -ltnH 'sport = :18500' | awk '{print $4}' | head -1)"
 H="--resolve r5.test:18543:127.0.0.1 -k"
-check "agensio serves the application over TLS: /up is green" "200 yes" "$(curl -sS $H -o $T/up.html -w '%{http_code}' https://r5.test:18543/up) $(grep -q 'green' $T/up.html && echo yes)"
+check "agensio serves the application over TLS, its secret from the site's environment: /up is green" "200 yes" "$(curl -sS $H -o $T/up.html -w '%{http_code}' https://r5.test:18543/up) $(grep -q 'green' $T/up.html && echo yes)"
 ASSET=$(python3 -c "import json; m=json.load(open('$APP/public/assets/.manifest.json')); v=m[sorted(m)[0]]; print(v if isinstance(v, str) else v['digested_path'])" 2>/dev/null)
 check "a precompiled asset comes through agensio" "200" "$(curl -sS $H -o /dev/null -w '%{http_code}' https://r5.test:18543/assets/$ASSET)"
 check "a credential path is refused by agensio itself, never proxied to Puma (no x-request-id)" "404 no" "$(curl -sS $H -D $T/probe.h -o /dev/null -w '%{http_code}' https://r5.test:18543/config/master.key) $(grep -qi '^x-request-id' $T/probe.h && echo yes || echo no)"
+check "databases and logs by their ending, and all of /storage/, are refused by agensio (no x-request-id)" "404 404 no" "$(curl -sS $H -D $T/probe2.h -o /dev/null -w '%{http_code}' https://r5.test:18543/storage/production.sqlite3) $(curl -sS $H -o /dev/null -w '%{http_code}' https://r5.test:18543/x/y/production.LOG) $(grep -qi '^x-request-id' $T/probe2.h && echo yes || echo no)"
 check "plain http is redirected to https" "301" "$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: r5.test' http://127.0.0.1:18580/up)"
-check "the audit log has each task with the argv that ran" "4" "$(grep -c 'sites/r5.test/task (live): ran as r5 .* -> exit 0' $T/logs/audit.log)"
+check "the audit log has each task with the argv that ran" "5" "$(grep -c 'sites/r5.test/task (live): ran as r5 .* -> exit 0' $T/logs/audit.log)"
 check "health: no PHP finding and no unreadable-files finding for the Rails site" "no" "$(ctl health | grep -q 'php_tmp_missing\|pools_stale\|files_unreadable' && echo yes || echo no)"
 
 echo "rails: $pass passed, $fail failed"

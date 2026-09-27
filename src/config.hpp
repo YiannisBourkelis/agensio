@@ -276,6 +276,11 @@ std::size_t parse_size(std::string_view text);
 inline std::size_t body_limit_of(const SiteConfig& site, const Config& cfg) noexcept {
     return site.max_body_size ? site.max_body_size : cfg.max_body_size;
 }
+// The error-log line for a request refused with 413 because its declared length is above
+// the limit, naming the site, the sizes and the fix (nginx logs the same case as "client
+// intended to send too large body"): the first upload above a site's limit is otherwise
+// visible in the access log alone (2026-09-27 report). Error path only.
+std::string body_refused_text(const SiteConfig* site, std::string_view remote, std::uint64_t declared, std::size_t limit);
 
 // Parses a try_files list: "$uri", "$uri/", "=403"/"=404", or "/path" (last element only
 // for the latter two). Throws std::invalid_argument.

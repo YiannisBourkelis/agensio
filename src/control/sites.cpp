@@ -580,10 +580,32 @@ std::vector<std::string> next_steps(const SiteSpec& spec, const Config& cfg) {
         cmds.push_back(php_fpm_reload_command(cfg, spec.php_version));
     }
     if (spec.https == "auto") cmds.push_back("# make sure " + spec.domain + " resolves to this server and port 80 is reachable; the certificate follows within a minute");
-    if (spec.app == "rails")
-        cmds.push_back("# the application: site-task " + spec.domain + " gem_install_rails, then rails_new --param name=NAME, db_prepare and assets_precompile "
-                       "(site-tasks " + spec.domain + " lists them); then run Puma on " + spec.upstream + " (docs/examples/puma.service)");
-    (void)cfg;
+    if (spec.app == "rails") {
+        // What is on disk decides the chain (2026-09-27 report: an update of a site that held
+        // an application repeated "gem_install_rails, then rails_new", which would be refused).
+        std::error_code gem_ec, bundle_ec;
+        const bool gemfile = !spec.root.empty() && std::filesystem::is_regular_file(spec.root + "/Gemfile", gem_ec);
+        const bool bundled = gemfile && std::filesystem::is_directory(spec.root + "/vendor/bundle", bundle_ec);
+        const std::string puma = "run Puma on " + spec.upstream + " (docs/examples/puma.service, which loads the site's environment file)";
+        if (gemfile && bundled)
+            cmds.push_back("# the application is in place: site-task " + spec.domain + " db_migrate after new migrations, assets_precompile after asset "
+                           "changes, bundle_install after a Gemfile change; restart its service after each");
+        else if (gemfile)
+            cmds.push_back("# the application is in place: site-task " + spec.domain + " bundle_install, then db_prepare and assets_precompile; then " + puma);
+        else if (gem_ec && gem_ec != std::errc::no_such_file_or_directory)
+            cmds.push_back("# a new application: site-task " + spec.domain + " gem_install_rails, then rails_new --param name=NAME, db_prepare and assets_precompile; "
+                           "an application installed from an archive: bundle_install, db_prepare, assets_precompile (site-tasks " + spec.domain + " lists them); then " + puma);
+        else
+            cmds.push_back("# the application: site-task " + spec.domain + " gem_install_rails, then rails_new --param name=NAME, db_prepare and assets_precompile "
+                           "(site-tasks " + spec.domain + " lists them); then " + puma);
+    }
+    // The body limit, before the first upload meets it (2026-09-27 report: a 2.75 MB cover got
+    // 413 on a site nobody had told about the 1 MB default).
+    if (!spec.app.empty() && spec.app != "static") {
+        const bool own = spec.settings.is_object() && spec.settings["max_body_size"].is_string();
+        cmds.push_back("# request bodies (uploads included) above " + (own ? std::string(spec.settings.get("max_body_size")) : size_text(cfg.max_body_size) + ", the server's default,") +
+                       " get 413 before the application sees them; site-update " + spec.domain + " --set max_body_size=100MB raises it, up to [control] site_limits");
+    }
     return cmds;
 }
 

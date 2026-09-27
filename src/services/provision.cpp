@@ -20,6 +20,7 @@
 
 #include "control/commands.hpp"
 #include "control/sites.hpp"
+#include "services/appenv.hpp"
 #include "services/archive.hpp"
 #include "services/fetch.hpp"
 #include "services/install.hpp"
@@ -124,6 +125,15 @@ std::string validate(const json::Value& req, const Config& cfg) {
         for (const auto& m : params.members())
             if (m.first.empty() || m.first.size() > 64 || !m.second.is_string() || m.second.str().size() > 256) return "task_run: parameters are short strings";
         if (!req["dry_run"].is_null() && req["dry_run"].type() != json::Value::Type::boolean) return "task_run: dry_run must be a boolean";
+        return "";
+    }
+    if (op == "env_read" || op == "env_write") {
+        // A site's name, and for a write the change; the helper finds the site on disk.
+        if (!control::valid_domain(req.get("site"))) return op + ": site must be a site's host name";
+        if (op == "env_write") {
+            appenv::Change change;
+            if (std::string bad = appenv::parse_change(req, change); !bad.empty()) return "env_write: " + bad;
+        }
         return "";
     }
     if (op == "pools_apply" || op == "service_restart" || op == "ping") return "";
@@ -469,11 +479,45 @@ bool ensure_home(const Config& cfg, const std::string& name, uid_t uid, gid_t gi
     return true;
 }
 
+// env_read and env_write: a site's application environment (services/appenv.*), the file
+// root's under <config dir>/env/. The site comes from the configuration on disk and must be
+// one agensio runs an application for (app = "rails" or "proxy"); its first host name
+// names the file, so an alias reaches the same one.
+json::Value env_op(const json::Value& req, const Config& cfg) {
+    json::Value reply = json::Value::object();
+    auto fail = [&](std::string why) { return reply.set("ok", false).set("error", std::move(why)); };
+    Config fresh;
+    try {
+        fresh = load_config(cfg.config_path);
+    } catch (const std::exception& e) {
+        return fail(std::string("the configuration on disk does not load: ") + e.what());
+    }
+    const std::string name(req.get("site"));
+    const SiteConfig* site = control::find_site(fresh, name);
+    if (!site) return fail("no site " + name + " in the configuration on disk");
+    if (!proxy_app(site->app)) return fail("site " + name + " has app = \"" + site->app + "\"; a site's environment is for applications agensio runs (rails, proxy)");
+    const std::string key = site->server_names.front();
+    const std::string dir = appenv::dir_of(cfg.config_path);
+    if (req.get("op") == "env_read") {
+        std::vector<appenv::Var> vars;
+        std::string why;
+        if (!appenv::read(dir, key, 0, vars, why)) return fail(why);
+        json::Value list = json::Value::array();
+        for (const auto& v : vars) list.push(json::Value::object().set("name", v.name).set("value", v.value));
+        return reply.set("ok", true).set("site", key).set("file", dir + "/" + key + ".env").set("variables", std::move(list));
+    }
+    appenv::Change change;
+    if (std::string bad = appenv::parse_change(req, change); !bad.empty()) return fail(bad);
+    return appenv::apply(dir, key, 0, change).set("site", key);
+}
+
 // task_run (F13): a named task of the site's preset (services/tasks.*) run by the site's
 // account in a child. What runs is decided here, not by the server: the site (its app,
 // its directory, its user) comes from the configuration file on disk, the command from the
-// task table, the interpreter from this helper's own [control] runtimes and the bounds from
-// its own task_limits; the server sends names and parameters only.
+// task table, the interpreter from root's [control] runtimes and the bounds from its
+// task_limits, both read from that same file for every task (a reload changes them; only
+// root's main file can hold [control], included files carry sites alone), and the site's
+// environment from its root-owned file; the server sends names and parameters only.
 json::Value task_run(const json::Value& req, const Config& cfg, int helper_fd) {
     json::Value reply = json::Value::object();
     auto fail = [&](std::string why) { return reply.set("ok", false).set("error", std::move(why)); };
@@ -504,18 +548,23 @@ json::Value task_run(const json::Value& req, const Config& cfg, int helper_fd) {
     const std::string account = pw->pw_name;
     const bool dry_run = req["dry_run"].boolean();
     if (!dry_run && !ensure_home(cfg, account, uid, pw->pw_gid, why)) return fail("the account's home: " + why);
+    std::vector<appenv::Var> vars;
+    // A site named "*" has no environment file (appenv names files by host name).
+    if (appenv::valid_site(site->server_names.front()) && !appenv::read(appenv::dir_of(cfg.config_path), site->server_names.front(), 0, vars, why))
+        return fail("the site's environment: " + why);
     tasks::Request tr;
     tr.row = row;
     tr.params = req["params"];
-    tr.ctx.runtime_dir = runtime_dir(cfg.control, row->runtime);
+    tr.ctx.runtime_dir = runtime_dir(fresh.control, row->runtime);
     tr.ctx.root = site_root;
     tr.ctx.home = cfg.state_dir + "/" + account;
-    tr.ctx.timeout = std::min(row->timeout, cfg.control.task_timeout);
-    tr.ctx.processes = cfg.control.task_processes;
+    tr.ctx.timeout = std::min(row->timeout, fresh.control.task_timeout);
+    tr.ctx.processes = fresh.control.task_processes;
+    for (auto& v : vars) tr.ctx.app_env.emplace_back(std::move(v.name), std::move(v.value));
     tr.sites_root = provision::sites_root(cfg);
     for (const auto& abs : secret_paths(*site))
         if (provision::under_root(abs, site_root) && abs != site_root) tr.secrets.push_back(abs.substr(site_root.size() + 1));
-    tr.network_allowed = cfg.control.task_network;
+    tr.network_allowed = fresh.control.task_network;
     tr.dry_run = dry_run;
     return run_as_account(uid, gid, helper_fd, -1, [&] { return tasks::execute(tr); }, std::chrono::seconds(tr.ctx.timeout + 120));
 }
@@ -634,6 +683,8 @@ void helper_loop(int fd, const Config& cfg) {
                     reply = file_copy(req, cfg, fd);
                 } else if (op == "task_run") {
                     reply = task_run(req, cfg, fd);
+                } else if (op == "env_read" || op == "env_write") {
+                    reply = env_op(req, cfg);
                 } else if (op == "service_restart") {
                     const auto now = std::chrono::steady_clock::now();
                     if (now - last_restart < std::chrono::seconds(60)) {

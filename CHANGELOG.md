@@ -1,4 +1,69 @@
 # Changelog
+## 0.1.0-alpha.27 (unreleased)
+
+- **P1: a browser's second cookie reached no application over HTTP/2 or HTTP/3.** A
+  browser sends one `cookie` field per cookie there (RFC 9113 8.2.3), and request assembly
+  counted every field after the first but never stored it: the proxy, FastCGI and CGI saw
+  the first cookie alone. A sign-in that sets a second cookie (Rails 8's `session_token`,
+  Django's `csrftoken`) "did nothing" with no error anywhere; curl, which sends one field,
+  never showed it. The fields are now joined with `; ` into one, in the order received,
+  and count against no field limit (16 KB decoded bounds them); the proxy also folds two
+  `Cookie` lines from an HTTP/1.1 client into one (FastCGI already did). Found with
+  Writebook from Firefox and Safari; reproduced against alpha.26 through the benchmark
+  origin (`cookie: _writebook_session=S` alone reached it), and checked in the
+  integration suite through the proxy over HTTP/2 and HTTP/1.1 and into PHP over HTTP/2
+  and HTTP/3.
+
+From Writebook (basecamp, v1.2.2), a real ONCE application installed from its GitHub
+archive on a second Rails site (report against alpha.26):
+
+- **A site's environment.** A Rails application without credentials reads
+  `SECRET_KEY_BASE` from its environment (every ONCE application, every Kamal
+  deployment), and nothing could give it one, so `db_prepare` stopped with "Missing
+  secret_key_base". A site with `app = "rails"` or `"proxy"` now has one file for its
+  variables, `env/<site>.env` beside the main configuration, root's `0600` in a
+  root-owned `0700` directory, in systemd's `EnvironmentFile` syntax: the tasks get it
+  after agensio's own variables and `docs/examples/puma.service` loads it. `agensio ctl
+  site-env-set NAME --set K=V --unset K --generate K` and MCP `site_env_set` change it
+  through the root helper (a generated value is 64 random bytes in hex; an existing one is
+  kept, and `--unset K --generate K` rotates it); `site-env` and `site_env` show it to an
+  admin, values included. Both are admin only and audited with names, never values. Names
+  that agensio sets or that choose or load a program (`PATH`, `RAILS_ENV`, `GEM_*`,
+  `BUNDLE_*` other than a gem source's credentials, `LD_*`, `RUBYOPT`, `GIT_*`, ...) are
+  refused on the way in and on the way out; a file that is not root's `0600` stops the
+  site's tasks with the reason.
+- **An archive install of a Rails application is followed through.** `site_install`
+  reports what it found (a Gemfile, Rails credentials, the Ruby `.ruby-version` pins),
+  generates `SECRET_KEY_BASE` into the site's environment once when the archive came
+  without credentials (never for one with them, whose own secret it would override), and
+  its next steps are `bundle_install`, `db_prepare`, `assets_precompile` and Puma with the
+  pinned Ruby named, instead of "open the site in a browser". A site update picks the
+  Rails chain by what is on disk, and no longer suggests `rails_new` for a site that holds
+  an application.
+- **Known failures carry the fix.** A task that stops on Rails' missing
+  `secret_key_base` answers with the `site_env_set` call that generates one; one that
+  stops on "Your Ruby version is X, but your Gemfile specified Y" names `[control]
+  runtimes`. `docs/configuration.md` 15 shows how root builds a pinned Ruby under `/opt`.
+- **`[control] runtimes`, `task_limits` and `task_network` apply on reload.** The helper
+  reads them from root's file for every task, as it already read the site from it; a new
+  Ruby no longer costs every site a restart.
+- **The request-body limit is said before the first upload meets it.** A new site's next
+  steps and an install's state its limit (1 MB unless set) and the one call that raises
+  it, and every 413 for a declared body above a site's limit writes a warning to the error
+  log naming the site, the client, both sizes and the fix (it was in the access log only).
+- **Rails refusals cover any layout.** Everything under `/storage/` (databases and Active
+  Storage's files) and any path ending in `.sqlite3` (and its `-wal`, `-shm`, `-journal`),
+  `.log`, `.key` or `.sql`, in any case, are 404 at the edge, never proxied: Writebook keeps
+  its database in `storage/db/production.sqlite3`, which the exact list missed. Refused
+  endings on a proxy or FastCGI location (`deny_suffixes`) are now enforced by the
+  dispatcher, not only on static locations.
+- Tests: unit (names, values, the file syntax both ways, the change request, the files and
+  their modes, the task's environment, the hints, next steps by disk state, the reload
+  keys, the 413 line, the endings), `tests/tasks.sh` (the root file, the task's
+  environment, the audited read, rotation, refusals, an archive install generating the
+  secret), `tests/control.sh` (a viewer and an operator get 403 on a site's environment),
+  the integration suite (the same without the helper, the endings, the 413 line).
+
 ## 0.1.0-alpha.26 (2026-09-27)
 
 From the first Rails site built through `site_task` on a live host (report against

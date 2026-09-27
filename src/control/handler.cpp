@@ -23,6 +23,7 @@
 #include "control/settings.hpp"
 #include "control/sites.hpp"
 #include "core/body.hpp"
+#include "services/appenv.hpp"
 #include "services/archive.hpp"
 #include "services/install.hpp"
 #include "services/pools.hpp"
@@ -152,6 +153,16 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
         reply(s, 503, json::Value::object().set("error", "no backend"));
         return false;
     }
+    if (path.starts_with("/v1/sites/") && path.ends_with("/env") && path.size() > 14) {
+        // A site's environment holds its secrets: admin only, every read audited.
+        if (!require(s, Role::admin, path.substr(4))) return false;
+        if (!done) {
+            reply(s, 503, json::Value::object().set("error", "env needs an asynchronous caller"));
+            return false;
+        }
+        site_env_show(s, path.substr(10, path.size() - 10 - 4), done);
+        return true;
+    }
     if (path == "/v1/status") {
         json::Value body = backend_->status();
         body.set("peer", json::Value::object()
@@ -272,6 +283,19 @@ json::Value site_secrets(const SiteConfig& site, const std::string& site_root) {
     return a;
 }
 
+// A site's request-body limit as a next step: the first upload above it is a 413 the
+// application never sees (2026-09-27 report: a 2.75 MB book cover on the 1 MB default).
+std::string body_limit_step(const SiteConfig& site, const Config& cfg) {
+    return "this site accepts request bodies (uploads included) up to " + control::size_text(body_limit_of(site, cfg)) +
+           (site.max_body_size ? "" : ", the server's default") +
+           "; larger ones get 413 before the application sees them: site_update with settings {max_body_size: \"100MB\"} raises it, up to [control] site_limits";
+}
+
+struct SiteFacts {
+    bool rails_root = false;
+    std::string key, ruby_dir, body_step;
+};
+
 // The hosting-rule errors of the configuration on disk, as a set: a writer compares the
 // state before and after what it wrote, so its answer never says ok to a state the
 // validator refuses, and a problem that was there before is not blamed on the call.
@@ -325,7 +349,7 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
     const bool known = path == "/v1/reload" || path == "/v1/sites" || path == "/v1/logs/reopen" ||
                        (site_path && !name.empty() && (action.empty() || action == "disable" || action == "enable" ||
                                                        action == "delete" || action == "renew" || action == "install" || action == "copy" ||
-                                                       action == "task")) ||
+                                                       action == "task" || action == "env")) ||
                        (upload_path && !name.empty() && action == "delete");
     if (!known) {
         reply(s, 404, json::Value::object().set("error", "unknown command").set("path", std::string(path)));
@@ -384,13 +408,14 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
         else reply(s, 409, json::Value::object().set("ok", false).set("error", error));
         return false;
     }
-    if (action == "install" || action == "copy" || action == "task") {
+    if (action == "install" || action == "copy" || action == "task" || action == "env") {
         if (!done) {  // no way to defer: answered synchronously as a refusal
-            reply(s, 503, json::Value::object().set("error", "install, copy and task need an asynchronous caller"));
+            reply(s, 503, json::Value::object().set("error", "install, copy, task and env need an asynchronous caller"));
             return false;
         }
         if (action == "copy") site_copy(s, name, body, what, std::move(done));
         else if (action == "task") site_task(s, name, body, what, std::move(done));
+        else if (action == "env") site_env_set(s, name, body, what, std::move(done));
         else site_install(s, name, body, what, std::move(done));
         return true;
     }
@@ -623,9 +648,16 @@ void ControlHandler::site_install(Stream& s, std::string_view name, const json::
     const std::string source = url.empty() ? "upload " + file : url;
     if (!dry_run) audit_peer(s, what, "installing " + source + " into " + target + (create_path ? " (create_path)" : ""));
     const std::vector<std::string> before = dry_run ? std::vector<std::string>{} : validation_errors(*backend_);
+    // What the answer's next steps depend on (2026-09-27 Writebook report: a Rails site was
+    // told to open a browser, and nothing named the 1 MB body limit before the first upload).
+    SiteFacts sf;
+    sf.rails_root = app == "rails" && target == site_root;
+    sf.key = site->server_names.front();
+    sf.ruby_dir = runtime_dir(cfg.control, "ruby");
+    sf.body_step = app == "static" ? std::string() : body_limit_step(*site, cfg);
     // A dry run takes the same walk as the real call (as the same account) and reports
     // the refusal it would meet or the directories it would create; nothing is written.
-    backend_->install_async(req, [this, &s, what = std::string(what), target, url, file, source, dry_run, before, done](json::Value r) {
+    backend_->install_async(req, [this, &s, what = std::string(what), target, url, file, source, dry_run, before, sf, done](json::Value r) {
         const bool ok = r["ok"].boolean();
         if (dry_run) {
             if (ok) reply(s, 200, r.set("source", source).set("hint", "nothing was written; the same call without dry_run installs"));
@@ -647,12 +679,50 @@ void ControlHandler::site_install(Stream& s, std::string_view name, const json::
             reply(s, 409, r.set("ok", false).set("written", true).set("error", "the files are installed, but the configuration no longer validates; agensio -t and a restart would refuse it")
                               .set("errors", fresh).set("hint", "fix what the errors name (health lists them with a fix each), then config_validate"));
         } else {
-            if (!before.empty()) r.set("warnings", json::Value::array().push("the configuration already failed validation before this call (health lists the findings); the install itself is fine"));
+            json::Value warnings = json::Value::array();
+            if (!before.empty()) warnings.push("the configuration already failed validation before this call (health lists the findings); the install itself is fine");
             json::Value steps = json::Value::array();
             if (!url.empty()) steps.push("the files came from " + std::string(r.get("url").empty() ? url : std::string(r.get("url"))) + "; sha256 " + std::string(r.get("sha256")));
-            steps.push("open the site in a browser to finish the application's own setup (database, admin account)");
+            const json::Value facts = r["facts"];  // a copy: r.set below may move r's members
+            if (sf.rails_root) {
+                if (const std::string_view v = facts.get("ruby_version"); !v.empty())
+                    steps.push("the application pins Ruby " + std::string(v) + " (.ruby-version); the tasks run the Ruby of [control] runtimes (" + sf.ruby_dir +
+                               "): when that is another version bundle_install refuses, and root installs " + std::string(v) +
+                               " under /opt and points runtimes.ruby at its bin directory (docs/configuration.md 15; agensio reload applies it)");
+                steps.push("site_task bundle_install, then db_prepare and assets_precompile; then the application server (docs/examples/puma.service, "
+                           "which loads the site's environment file)");
+            } else {
+                steps.push("open the site in a browser to finish the application's own setup (database, admin account)");
+            }
+            if (!sf.body_step.empty()) steps.push(sf.body_step);
             if (!file.empty()) steps.push("the upload " + file + " is still stored; delete it with uploads delete " + file + " when no longer needed");
             r.set("next_steps", steps);
+            // An application that came without Rails credentials reads SECRET_KEY_BASE from its
+            // environment (every ONCE application, every Kamal deployment): a fresh install
+            // gets one, once. Never for an application with credentials, whose own secret an
+            // environment value would override, signing its users out.
+            if (sf.rails_root && facts["gemfile"].boolean() && !facts["credentials"].boolean()) {
+                const json::Value change = json::Value::object().set("op", "env_write").set("site", sf.key).set("generate", json::Value::array().push("SECRET_KEY_BASE"));
+                backend_->env_async(change, [this, &s, what, r, warnings, done](json::Value e) mutable {
+                    json::Value made = json::Value::array();
+                    if (!e["ok"].boolean()) {
+                        warnings.push("SECRET_KEY_BASE could not be written into the site's environment (" + std::string(e.get("error")) +
+                                      "); run site_env_set with generate: [\"SECRET_KEY_BASE\"] before db_prepare");
+                    } else if (!e["generated"].items().empty()) {
+                        made.push("SECRET_KEY_BASE generated into " + std::string(e.get("file")) + ": the application came without Rails credentials, "
+                                  "so it reads its secret from the environment; the tasks and its service read that file");
+                        audit_peer(s, what, "generated SECRET_KEY_BASE into " + std::string(e.get("file")));
+                    } else {
+                        made.push("SECRET_KEY_BASE was already in the site's environment (" + std::string(e.get("file")) + "); kept");
+                    }
+                    r.set("done", made);
+                    if (!warnings.items().empty()) r.set("warnings", warnings);
+                    reply(s, 201, r);
+                    done();
+                });
+                return;
+            }
+            if (!warnings.items().empty()) r.set("warnings", warnings);
             reply(s, 201, r);
         }
         done();
@@ -1058,7 +1128,7 @@ void ControlHandler::site_task(Stream& s, std::string_view name, const json::Val
     if (!dry_run)
         if (const auto it = running_tasks_.find(key); it != running_tasks_.end())
             return answer(409, json::Value::object().set("error", "a task is already running on this site: " + it->second + "; one task per site at a time").set("running", it->second));
-    json::Value req = json::Value::object().set("op", "task_run").set("site", std::string(name)).set("task", task).set("params", params).set("dry_run", dry_run)
+    json::Value req = json::Value::object().set("op", "task_run").set("site", key).set("task", task).set("params", params).set("dry_run", dry_run)
                           .set("app", app).set("root", site_root).set("secrets", site_secrets(*site, site_root));
     if (!dry_run) {
         running_tasks_[key] = task + " (since " + now_stamp() + ")";
@@ -1100,6 +1170,126 @@ void ControlHandler::site_task(Stream& s, std::string_view name, const json::Val
             if (!before.empty()) r.set("warnings", json::Value::array().push("the configuration already failed validation before this task (health lists the findings); the task itself is fine"));
             reply(s, 200, r);
         }
+        done();
+    });
+}
+
+// A site's application environment (services/appenv.*; 2026-09-27 Writebook report): the
+// variables its tasks and its service get, SECRET_KEY_BASE above all. Admin only both
+// ways; a read is audited with the names it returned, a write with the names it changed,
+// never a value.
+namespace {
+
+const SiteConfig* env_site(const Config& cfg, std::string_view name, int& status, json::Value& refusal) {
+    const SiteConfig* site = control::find_site(cfg, name);
+    if (!site) {
+        status = 404;
+        refusal = json::Value::object().set("error", "no such site").set("site", std::string(name));
+        return nullptr;
+    }
+    if (!proxy_app(site->app)) {
+        status = 422;
+        refusal = json::Value::object().set("error", "site " + std::string(name) + " has app = \"" + (site->app.empty() ? std::string("static") : site->app) +
+                                                         "\"; a site's environment is for applications agensio runs (app = \"rails\" or \"proxy\")")
+                      .set("app", site->app);
+        return nullptr;
+    }
+    if (!appenv::valid_site(site->server_names.front())) {
+        status = 422;
+        refusal = json::Value::object().set("error", "the site's first name (" + site->server_names.front() + ") is not a host name an environment file can carry");
+        return nullptr;
+    }
+    return site;
+}
+
+std::string joined(const json::Value& names) {
+    std::string out;
+    for (const auto& n : names.items()) out += (out.empty() ? "" : ", ") + std::string(n.str());
+    return out;
+}
+
+}  // namespace
+
+void ControlHandler::site_env_show(Stream& s, std::string_view name, std::function<void()> done) {
+    int status = 0;
+    json::Value refusal;
+    const SiteConfig* site = env_site(backend_->running(), name, status, refusal);
+    if (!site) {
+        reply(s, status, refusal);
+        done();
+        return;
+    }
+    const std::string key = site->server_names.front();
+    backend_->env_async(json::Value::object().set("op", "env_read").set("site", key), [this, &s, key, done](json::Value r) {
+        const std::string what = "sites/" + key + "/env";
+        if (!r["ok"].boolean()) {
+            audit_peer(s, what, "read refused: " + std::string(r.get("error")));
+            reply(s, 409, r);
+        } else {
+            json::Value names = json::Value::array();
+            for (const auto& v : r["variables"].items()) names.push(std::string(v.get("name")));
+            audit_peer(s, what, names.items().empty() ? std::string("read: no variables") : "read the values of " + joined(names));
+            r.set("hint", "values are secrets: show one to the user only when asked. site_env_set changes them; the tasks read the file on their next run, "
+                          "the application when its service restarts");
+            reply(s, 200, r);
+        }
+        done();
+    });
+}
+
+void ControlHandler::site_env_set(Stream& s, std::string_view name, const json::Value& body, std::string_view what, std::function<void()> done) {
+    int status = 0;
+    json::Value refusal;
+    const SiteConfig* site = env_site(backend_->running(), name, status, refusal);
+    if (!site) {
+        reply(s, status, refusal);
+        done();
+        return;
+    }
+    appenv::Change change;
+    if (std::string bad = appenv::parse_change(body, change); !bad.empty()) {
+        reply(s, 400, json::Value::object().set("error", bad)
+                          .set("hint", "set: {NAME: value}, unset: [NAME], generate: [NAME] (a random secret for a missing name, e.g. SECRET_KEY_BASE)"));
+        done();
+        return;
+    }
+    const std::string key = site->server_names.front();
+    json::Value req = json::Value::object().set("op", "env_write").set("site", key);
+    for (const char* k : {"set", "unset", "generate"})
+        if (!body[k].is_null()) req.set(k, body[k]);
+    std::string plan;
+    auto list = [&](const char* verb, const std::vector<std::string>& names) {
+        if (names.empty()) return;
+        std::string n;
+        for (const auto& x : names) n += (n.empty() ? "" : ", ") + x;
+        plan += (plan.empty() ? "" : "; ") + std::string(verb) + " " + n;
+    };
+    std::vector<std::string> set_names;
+    for (const auto& v : change.set) set_names.push_back(v.name);
+    list("set", set_names);
+    list("unset", change.unset);
+    list("generate", change.generate);
+    audit_peer(s, what, "changing the environment: " + plan);
+    const std::string unit = site->user.empty() ? std::string("the application's service") : "agensio-app-" + site->user;
+    backend_->env_async(req, [this, &s, what = std::string(what), unit, done](json::Value r) {
+        if (!r["ok"].boolean()) {
+            audit_peer(s, what, "refused: " + std::string(r.get("error")));
+            reply(s, 409, r);
+            done();
+            return;
+        }
+        std::string result;
+        for (const char* k : {"set", "unset", "generated", "kept", "absent"})
+            if (!r[k].items().empty()) result += (result.empty() ? "" : "; ") + std::string(k) + " " + joined(r[k]);
+        audit_peer(s, what, "environment " + std::string(r.get("file")) + ": " + (result.empty() ? std::string("unchanged") : result));
+        json::Value steps = json::Value::array();
+        steps.push("the tasks read it from their next run");
+        steps.push("the application reads it when its service restarts: a unit from docs/examples/puma.service loads the file (EnvironmentFile=); as root, systemctl restart " + unit);
+        r.set("next_steps", steps);
+        if (!r["kept"].items().empty())
+            r.set("hint", "kept " + joined(r["kept"]) + ": generate never replaces a value; to rotate one, unset and generate it in one call "
+                          "(a new SECRET_KEY_BASE signs every user out and invalidates signed links)");
+        reply(s, 200, r);
         done();
     });
 }

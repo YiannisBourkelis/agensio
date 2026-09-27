@@ -24,7 +24,7 @@ struct RequestSeen {
     unsigned pseudo = 0;
     bool regular = false, bad = false, overflow = false, host_field = false;
     unsigned cookies = 0;
-    std::size_t cookie_bytes = 0;
+    std::string_view first_cookie;  // valid during the decode only: copied at the second crumb
     const char* reason = "";
 
     void reset() noexcept { *this = RequestSeen{}; }
@@ -36,8 +36,8 @@ struct RequestSeen {
 
 // The decode sink for a request's fields. Always returns true: a bad field is recorded
 // with its reason and the decode goes on, so the codec's table stays in step with the
-// peer's whatever the request was.
-inline bool sink_field(RequestSeen& seen, Request& req, std::string_view n, std::string_view v, codec::Origin o) noexcept {
+// peer's whatever the request was. `cookie` is the stream's join buffer (below).
+inline bool sink_field(RequestSeen& seen, Request& req, std::string& cookie, std::string_view n, std::string_view v, codec::Origin o) noexcept {
     if (!n.empty() && n.front() == ':') {
         if (seen.regular) { seen.bad = true; seen.reason = "pseudo-header after a regular field"; return true; }
         std::string_view* slot = n == ":method" ? &seen.method : n == ":scheme" ? &seen.scheme
@@ -67,9 +67,24 @@ inline bool sink_field(RequestSeen& seen, Request& req, std::string_view n, std:
         seen.host = v;
     }
     if (n == "cookie") {
-        ++seen.cookies;
-        seen.cookie_bytes += v.size() + 2;
-        if (seen.cookies > 1) return true;  // joined by finish_request
+        // RFC 9113 8.2.3, RFC 9114 4.2.1: a client may send one cookie field per
+        // cookie-pair, and browsers do; they are joined with "; " into one field before any
+        // handler sees them (the proxy's HTTP/1.1 head, FastCGI's HTTP_COOKIE). The first
+        // crumb takes the field's slot; the others go straight into the stream's join
+        // buffer, while their bytes are still the decoder's, and count against no field
+        // limit. Before 2026-09-27 they were counted here and never stored, so every
+        // handler saw the first cookie only and no browser stayed signed in to a proxied
+        // application over HTTP/2.
+        if (++seen.cookies > 1) {
+            try {
+                if (seen.cookies == 2) cookie.assign(seen.first_cookie);
+                cookie.append("; ").append(v);
+            } catch (...) {
+                seen.overflow = true;  // no memory for the join: answered as too large a head
+            }
+            return true;
+        }
+        seen.first_cookie = v;
     }
     if (!req.headers.add(n, v)) seen.overflow = true;
     return true;
@@ -95,19 +110,12 @@ inline Assembled finish_request(RequestSeen& seen, Request& req, std::string& co
         else if (!seen.authority.empty() && !seen.host.empty() && seen.authority != seen.host) seen.bad = true, seen.reason = ":authority and host differ";
     }
     if (seen.bad) return Assembled::malformed;
-    if (seen.cookies > 1) {  // one field, "; " between the crumbs
-        cookie.clear();
-        cookie.reserve(seen.cookie_bytes);
-        Headers joined;
-        for (const HeaderField& f : req.headers) {
-            if (f.name != "cookie") { joined.add(f.name, f.value); continue; }
-            if (!cookie.empty()) cookie.append("; ");
-            cookie.append(f.value);
-        }
-        // The crumbs beyond the first were never added; every cookie value collected here.
-        req.headers = joined;
-        req.headers.add("cookie", cookie);
-    }
+    if (seen.cookies > 1)  // the joined crumbs in the first one's slot, the received order kept
+        for (std::size_t i = 0; i < req.headers.size(); ++i)
+            if (req.headers[i].name == "cookie") {
+                req.headers.set_value(i, cookie);
+                break;
+            }
     req.method_name = seen.method;
     if (!parse_method(seen.method, req.method)) req.method = Method::other;
     req.target = seen.path;

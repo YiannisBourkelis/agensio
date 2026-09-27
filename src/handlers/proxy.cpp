@@ -77,11 +77,25 @@ bool ProxyHandler::build_head(std::string& out, const Stream& s, std::string_vie
         return false;
     };
     std::string_view xff, xfh, forwarded;
+    bool cookie_sent = false;
     for (const HeaderField& h : req.headers) {
         if (http::is_hop_by_hop(h.name) || Headers::iequals(h.name, "expect") ||
             (!connection.empty() && http::connection_lists(connection, h.name)))
             continue;
         if (configured(h.name)) continue;  // set below from the configuration
+        // One Cookie line for the origin, the crumbs in the order received (RFC 6265 5.4:
+        // at most one Cookie field; Rack reads the first line only). HTTP/2 and HTTP/3 join
+        // theirs at assembly (RFC 9113 8.2.3); this folds the second Cookie line an HTTP/1.1
+        // client should not send but may (2026-09-27 report: Writebook's second cookie lost).
+        if (h.name.size() == 6 && Headers::iequals(h.name, "cookie")) {
+            if (cookie_sent) continue;
+            cookie_sent = true;
+            out.append(h.name).append(": ").append(h.value);
+            for (const HeaderField* g = &h + 1; g != req.headers.end(); ++g)
+                if (g->name.size() == 6 && Headers::iequals(g->name, "cookie")) out.append("; ").append(g->value);
+            out.append("\r\n");
+            continue;
+        }
         if (Headers::iequals(h.name, "host")) {
             if (policy.host == "pass") out.append("Host: ").append(h.value).append("\r\n");
             continue;

@@ -207,6 +207,37 @@ std::string open_failure(int parent_fd, const std::string& name, const std::stri
 
 }  // namespace
 
+namespace {
+
+// What the next steps of a whole application's install depend on, seen as the account that
+// installed it (2026-09-27 Writebook report): a Gemfile, the Ruby a .ruby-version pins, and
+// whether Rails credentials came with it (without them the application reads
+// SECRET_KEY_BASE from its environment, which the control handler then generates).
+json::Value app_facts(int dir_fd) {
+    auto regular = [&](const char* rel) {
+        struct stat st {};
+        return ::fstatat(dir_fd, rel, &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(st.st_mode);
+    };
+    json::Value f = json::Value::object().set("gemfile", regular("Gemfile"))
+                        .set("credentials", regular("config/credentials.yml.enc") || regular("config/credentials/production.yml.enc"));
+    const int fd = ::openat(dir_fd, ".ruby-version", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd >= 0) {
+        struct stat st {};
+        char buf[64];
+        const ssize_t n = ::fstat(fd, &st) == 0 && S_ISREG(st.st_mode) ? ::read(fd, buf, sizeof buf) : -1;
+        ::close(fd);
+        std::string v;
+        for (ssize_t i = 0; i < n && buf[i] != '\n' && buf[i] != '\r'; ++i) v.push_back(buf[i]);
+        while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.pop_back();
+        if (v.starts_with("ruby-")) v.erase(0, 5);
+        const bool clean = !v.empty() && v.size() <= 32 && v.find_first_not_of("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-_") == std::string::npos;
+        if (clean) f.set("ruby_version", v);
+    }
+    return f;
+}
+
+}  // namespace
+
 json::Value execute(const Request& req) {
     if (req.url.empty() == (req.upload_fd < 0)) return failure("give exactly one source: a url or an uploaded file");
     if (!req.sha256.empty() && !valid_sha256(req.sha256)) return failure("sha256 must be 64 hex digits");
@@ -408,6 +439,7 @@ json::Value execute(const Request& req) {
         secured.push(req.target + "/" + rel);
     }
     result.set("secured", secured);
+    if (sub.empty()) result.set("facts", app_facts(dir_fd));
     ::close(dir_fd);
     return result;
 }

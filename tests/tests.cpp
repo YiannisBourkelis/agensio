@@ -32,6 +32,8 @@
 #include "services/install.hpp"
 #include "services/json.hpp"
 #include "services/tasks.hpp"
+#include "http/request_assembly.hpp"
+#include "services/appenv.hpp"
 #include <chrono>
 #include <csignal>
 #ifdef AGENSIO_HAS_ZLIB
@@ -1719,6 +1721,17 @@ static void test_tasks() {
     pl = tasks::build(*tasks::find("rails", "assets_precompile"), json::Value(), ctx, "/opt/ruby/bin/bundle");
     CHECK(pl.argv == (std::vector<std::string>{"/opt/ruby/bin/bundle", "exec", "rails", "assets:precompile"}) &&
           pl.env.front() == "PATH=/opt/ruby/bin:/usr/local/bin:/usr/bin:/bin" && pl.env.back() == "SECRET_KEY_BASE_DUMMY=1" && pl.timeout == 300);
+    // The site's environment comes last and never replaces a variable agensio set.
+    ctx.app_env = {{"SECRET_KEY_BASE", "abc"}, {"RAILS_ENV", "development"}, {"DATABASE_URL", "sqlite3:x"}};
+    pl = tasks::build(prep, json::Value(), ctx, "/opt/ruby/bin/bundle");
+    CHECK(pl.env.size() == 11 && pl.env[9] == "SECRET_KEY_BASE=abc" && pl.env[10] == "DATABASE_URL=sqlite3:x" &&
+          std::count(pl.env.begin(), pl.env.end(), std::string("RAILS_ENV=production")) == 1 &&
+          std::none_of(pl.env.begin(), pl.env.end(), [](const std::string& e) { return e == "RAILS_ENV=development"; }));
+    ctx.app_env.clear();
+    // Known causes of a failure get a hint naming the fix (2026-09-27 Writebook report).
+    CHECK(tasks::failure_hint(prep, "ArgumentError: Missing `secret_key_base` for 'production' environment", ctx).find("generate: [\"SECRET_KEY_BASE\"]") != std::string::npos);
+    CHECK(tasks::failure_hint(gem, "Your Ruby version is 3.3.8, but your Gemfile specified 3.4.7", ctx).find("ruby = \"/opt/ruby/bin\"") != std::string::npos);
+    CHECK(tasks::failure_hint(prep, "Could not find gem 'pg'", ctx).empty() && tasks::failure_hint(prep, "Your Ruby version is 3.3.8", ctx).empty());
     const json::Value cat = tasks::catalog("rails");
     CHECK(cat.items().size() == 6 && cat.items()[1].get("task") == "rails_new" && cat.items()[1]["needs_empty"].boolean() &&
           cat.items()[1]["params"].items()[0].get("name") == "name" && tasks::catalog("static").items().empty());
@@ -1915,7 +1928,18 @@ static void test_tasks() {
     CHECK(refused_at("/config/master.key", true) && refused_at("/.env", true) && refused_at("/Gemfile.lock", true) && refused_at("/config/credentials/", false) &&
           refused_at("/.kamal/", false));
     CHECK(Router::location(rs, "/config/master.key").handler == "deny" && Router::location(rs, "/config/credentials/production.key").handler == "deny" &&
-          Router::location(rs, "/config").kind == HandlerKind::proxy && Router::location(rs, "/storage/x.png").kind == HandlerKind::proxy);
+          Router::location(rs, "/config").kind == HandlerKind::proxy && Router::location(rs, "/storage/db/production.sqlite3").handler == "deny" &&
+          Router::location(rs, "/storage/files/ab/cd/abcdef").handler == "deny");
+    // Databases, logs and keys by their ending wherever an application keeps them: the proxy
+    // location carries the endings and the dispatcher answers 404 (2026-09-27 report).
+    const LocationConfig& up = Router::location(rs, "/db/production.sqlite3");
+    CHECK(up.kind == HandlerKind::proxy && refused_suffix("/db/production.sqlite3", up.deny_suffixes) && refused_suffix("/log/development.log", up.deny_suffixes) &&
+          refused_suffix("/db/x.SQLITE3-WAL", up.deny_suffixes) && refused_suffix("/config/credentials/production.key", up.deny_suffixes) &&
+          refused_suffix("/backup.sql", up.deny_suffixes) && !refused_suffix("/books/1-logs", up.deny_suffixes) && !refused_suffix("/rails/active_storage/disk/x/cover.png", up.deny_suffixes));
+    // A refused body names the site, the sizes and the fix in the error log.
+    CHECK(body_refused_text(&rs, "192.0.2.7", 2883584, 1048576) ==
+          "site r.test: a request body of 2.8 MB from 192.0.2.7 refused with 413: its max_body_size is 1 MB (the server's default); site_update with settings {max_body_size} raises it, up to [control] site_limits");
+    CHECK(body_refused_text(nullptr, "-", 5000, 1024) == "a request body of 4.9 KB from - refused with 413: above the server's max_body_size of 1 KB");
     const auto rsec = secret_paths(rs);
     CHECK(std::find(rsec.begin(), rsec.end(), rs.root + "/config/master.key") != rsec.end() && std::find(rsec.begin(), rsec.end(), rs.root + "/storage") != rsec.end());
     write("d.toml", rails);
@@ -1946,6 +1970,99 @@ static void test_tasks() {
     CHECK(refused("[[site]]\nlisten = [\"127.0.0.1:1\"]\napp = \"rails\"\nupstream = \"http://127.0.0.1:3000\"\n", "'root' is required"));
     CHECK(refused("[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"app\"\napp = \"rails\"\n", "app = \"rails\" needs upstream"));
     CHECK(refused(rails + "php = { children = 4 }\n", "need a PHP handler"));
+    fs::remove_all(dir);
+}
+
+// A site's application environment (services/appenv.*; 2026-09-27 Writebook report).
+static void test_appenv() {
+    namespace fs = std::filesystem;
+    using namespace appenv;
+    // Names: upper-case, and never one agensio sets or one that chooses a program.
+    CHECK(check_name("SECRET_KEY_BASE").empty() && check_name("DATABASE_URL").empty() && check_name("_X1").empty() && check_name("RACK_ENV").empty());
+    for (const char* bad : {"PATH", "HOME", "RAILS_ENV", "GEM_HOME", "GEM_PATH", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "RUBYOPT", "BUNDLE_PATH", "BUNDLE_GEMFILE",
+                            "BUNDLE_BUILD__NOKOGIRI", "GIT_SSH_COMMAND", "PYTHONPATH", "NODE_OPTIONS", "SECRET_KEY_BASE_DUMMY", "BASH_ENV", "LISTEN_FDS"})
+        CHECK(check_name(bad).find("cannot set it") != std::string::npos);
+    CHECK(check_name("BUNDLE_GEMS__CONTRIBSYS__COM").empty());  // a private gem source's credentials
+    for (const char* bad : {"", "secret", "1ABC", "A-B", "A B", "A=B"}) CHECK(!check_name(bad).empty());
+    CHECK(!check_name(std::string(65, 'A')).empty() && check_name(std::string(64, 'A')).empty());
+    // Values: one line of UTF-8.
+    CHECK(check_value("").empty() && check_value("postgres://u:p@h/db?x=1&y=$z").empty() && check_value("caf\xc3\xa9 \xe2\x82\xac").empty());
+    for (const char* bad : {"a\nb", "a\tb", "a\rb", "\xff", "\xc3", "\xc0\xaf"}) CHECK(!check_value(bad).empty());
+    CHECK(!check_value(std::string(kMaxValue + 1, 'x')).empty() && check_value(std::string(kMaxValue, 'x')).empty());
+    CHECK(valid_site("ag6.edoc.gr") && valid_site("localhost") && !valid_site("*") && !valid_site("../x") && !valid_site("a/b") && !valid_site(".x") && !valid_site("A.test"));
+    // Render and parse are each other's inverse, in systemd's syntax.
+    const std::vector<Var> vars = {{"A", "plain"}, {"B", "with \"quotes\" and \\ and $HOME and `id`"}, {"C", ""}, {"D", "  spaced  "}, {"E", "caf\xc3\xa9'"}};
+    const std::string text = render(vars, "ag6.edoc.gr");
+    CHECK(text.find("# The application environment of site ag6.edoc.gr") == 0 && text.find("B=\"with \\\"quotes\\\" and \\\\ and \\$HOME and \\`id\\`\"\n") != std::string::npos);
+    std::vector<Var> back;
+    std::string why;
+    CHECK(parse(text, back, why) && back.size() == vars.size());
+    for (std::size_t i = 0; i < vars.size() && i < back.size(); ++i) CHECK(back[i].name == vars[i].name && back[i].value == vars[i].value);
+    // What root may write by hand, read the way systemd reads it.
+    back.clear();
+    CHECK(parse("# comment\n; another\n\n  X = unquoted a\\ b  \nY='single $x \\n'\nZ=\"d \\q \\\"\"\nnot a line\nX=later\n", back, why));
+    CHECK(back.size() == 3 && back[0].name == "X" && back[0].value == "later" && back[1].value == "single $x \\n" && back[2].value == "d \\q \"");
+    for (const char* bad : {"A=\"open\n", "A='open\n", "A=trailing\\\n", "A=\"x\" y\n", "1A=x\n", "A-B=x\n"}) {
+        back.clear();
+        CHECK(!parse(bad, back, why) && why.find("line 1") == 0);
+    }
+    // The change request.
+    json::Value body;
+    std::string err;
+    Change c;
+    CHECK(json::parse(R"({"set":{"DATABASE_URL":"x"},"unset":["OLD"],"generate":["SECRET_KEY_BASE"]})", body, err) && parse_change(body, c).empty() &&
+          c.set.size() == 1 && c.unset.size() == 1 && c.generate.size() == 1);
+    CHECK(json::parse(R"({"unset":["SECRET_KEY_BASE"],"generate":["SECRET_KEY_BASE"]})", body, err) && parse_change(body, c).empty());  // a rotation
+    for (const char* bad : {R"({})", R"({"set":{"A":"x"},"unset":["A"]})", R"({"set":{"A":"x"},"generate":["A"]})", R"({"set":{"PATH":"/tmp"}})",
+                            R"({"generate":["LD_PRELOAD"]})", R"({"set":{"A":5}})", R"({"set":["A"]})", R"({"unset":"A"})", R"({"unset":["a b"]})",
+                            R"({"generate":["A","A"]})", R"({"set":{"A":"x\ny"}})"})
+        CHECK(json::parse(bad, body, err) && !parse_change(body, c).empty());
+    CHECK(json::parse(R"({"unset":["PATH"]})", body, err) && parse_change(body, c).empty());  // a hand-written reserved line can be removed
+    const std::string a = random_secret(), b = random_secret();
+    CHECK(a.size() == 128 && a.find_first_not_of("0123456789abcdef") == std::string::npos && a != b);
+    CHECK(dir_of("/etc/agensio/agensio.toml") == "/etc/agensio/env");
+    // The files, as this account (the helper does the same as root).
+    const fs::path dir = fs::temp_directory_path() / ("agensio-env-" + std::to_string(::getpid()));
+    fs::create_directories(dir);
+    const std::string envdir = (dir / "env").string();
+    const unsigned me = ::geteuid();
+    std::vector<Var> got;
+    CHECK(read(envdir, "a.test", me, got, why) && got.empty());  // nothing yet: none, and ok
+    Change ch;
+    ch.set = {{"DATABASE_URL", "sqlite3:storage/db.sqlite3"}};
+    ch.generate = {"SECRET_KEY_BASE"};
+    json::Value r = apply(envdir, "a.test", me, ch);
+    CHECK(r["ok"].boolean() && r["generated"].items().size() == 1 && r["set"].items().size() == 1 && r.dump().find("sqlite3:storage") == std::string::npos);
+    struct stat st {};
+    CHECK(::stat(envdir.c_str(), &st) == 0 && (st.st_mode & 0777) == 0700 && ::stat((envdir + "/a.test.env").c_str(), &st) == 0 && (st.st_mode & 0777) == 0600);
+    CHECK(read(envdir, "a.test", me, got, why) && got.size() == 2 && got[1].name == "SECRET_KEY_BASE" && got[1].value.size() == 128);
+    const std::string first = got[1].value;
+    ch = Change{};
+    ch.generate = {"SECRET_KEY_BASE"};
+    r = apply(envdir, "a.test", me, ch);
+    CHECK(r["ok"].boolean() && r["kept"].items().size() == 1 && r["generated"].items().empty() && read(envdir, "a.test", me, got, why) && got[1].value == first);
+    ch.unset = {"SECRET_KEY_BASE"};
+    r = apply(envdir, "a.test", me, ch);
+    CHECK(r["ok"].boolean() && r["generated"].items().size() == 1 && read(envdir, "a.test", me, got, why) && got.size() == 2 && got[1].value != first);
+    ch = Change{};
+    ch.unset = {"DATABASE_URL", "SECRET_KEY_BASE", "NOT_THERE"};
+    r = apply(envdir, "a.test", me, ch);
+    CHECK(r["ok"].boolean() && r["unset"].items().size() == 2 && r["absent"].items().size() == 1 && !fs::exists(envdir + "/a.test.env"));
+    // A file or a directory someone else could have written is never read.
+    std::ofstream(envdir + "/b.test.env") << "A=1\n";
+    fs::permissions(envdir + "/b.test.env", fs::perms::owner_read | fs::perms::owner_write | fs::perms::group_read);
+    CHECK(!read(envdir, "b.test", me, got, why) && why.find("mode 0600") != std::string::npos);
+    fs::permissions(envdir + "/b.test.env", fs::perms::owner_read | fs::perms::owner_write);
+    CHECK(read(envdir, "b.test", me, got, why) && got.size() == 1);
+    CHECK(!read(envdir, "b.test", me + 1, got, why) && why.find("0700") != std::string::npos);  // the directory is not that owner's
+    std::ofstream(envdir + "/c.test.env") << "PATH=/tmp\n";
+    fs::permissions(envdir + "/c.test.env", fs::perms::owner_read | fs::perms::owner_write);
+    CHECK(!read(envdir, "c.test", me, got, why) && why.find("PATH") != std::string::npos);
+    fs::create_symlink(envdir + "/b.test.env", envdir + "/d.test.env");
+    CHECK(!read(envdir, "d.test", me, got, why) && why.find("symlink") != std::string::npos);
+    fs::permissions(envdir, fs::perms::owner_all | fs::perms::group_read | fs::perms::group_exec);
+    CHECK(!read(envdir, "b.test", me, got, why) && why.find("0700") != std::string::npos && !apply(envdir, "b.test", me, ch)["ok"].boolean());
+    CHECK(!read(envdir, "../x", me, got, why) && !apply(envdir, "../x", me, ch)["ok"].boolean());
     fs::remove_all(dir);
 }
 
@@ -2140,6 +2257,21 @@ static void test_proxy() {
     st.conn.tls = true;
     UpstreamConfig policy;  // defaults: host pass, x-forwarded, rewrite redirects
     std::string head;
+    {
+        // Two Cookie lines (an HTTP/1.1 client should send one): one line for the origin,
+        // the crumbs in order, at the first one's place (2026-09-27 report).
+        Stream ck;
+        ck.request.method_name = "GET";
+        ck.request.headers.add("Host", "app.example.com");
+        ck.request.headers.add("Cookie", "_app_session=S");
+        ck.request.headers.add("Accept", "*/*");
+        ck.request.headers.add("cookie", "session_token=T");
+        ck.conn.remote_address = "192.0.2.7";
+        ProxyHandler::build_head(head, ck, "/", policy);
+        CHECK(head.find("Cookie: _app_session=S; session_token=T\r\nAccept: */*\r\n") != std::string::npos && head.find("session_token=T\r\n") == head.rfind("session_token=T\r\n") &&
+              head.find("cookie: ") == std::string::npos);
+        head.clear();
+    }
     ProxyHandler::build_head(head, st, st.request.target, policy);
     CHECK(head.starts_with("POST /api/x?y=1 HTTP/1.1\r\n"));
     CHECK(head.find("Host: app.example.com\r\n") != std::string::npos && head.find("Accept: */*\r\n") != std::string::npos);
@@ -2473,6 +2605,13 @@ static void test_control_commands() {
         Config changed = cfg;
         changed.workers = cfg.workers + 3;
         CHECK(restart_needed(changed, cfg) == std::vector<std::string>{"workers"});
+        // The task keys apply on reload: the helper reads them from root's file for every task.
+        Config tasks_changed = cfg;
+        tasks_changed.control.runtimes.ruby = "/opt/ruby-3.4.7/bin";
+        tasks_changed.control.task_timeout = 60;
+        tasks_changed.control.task_processes = 64;
+        tasks_changed.control.task_network = false;
+        CHECK(restart_needed(tasks_changed, cfg).empty());
         const json::Value h = health(cfg, cfg, false, std::time(nullptr));
         CHECK(!h["ok"].boolean() && h["findings"].items().size() == h["count"].num());
         const json::Value s = sites(cfg, std::time(nullptr));
@@ -2736,6 +2875,10 @@ static void test_control_sites() {
         CHECK(v(R"({"op":"log_own","file":"/var/log/agensio/sites/a.test.log","group":"shop"})").empty());
         CHECK(!v(R"({"op":"log_own","file":"/etc/shadow","group":"shop"})").empty() && !v(R"({"op":"log_own","file":"/var/log/agensio/x.txt","group":"shop"})").empty());
         CHECK(v(R"({"op":"pools_apply"})").empty() && v(R"({"op":"service_restart"})").empty() && !v(R"({"op":"shell","cmd":"id"})").empty());
+        // A site's environment: a host name and, for a write, a change the rules accept.
+        CHECK(v(R"({"op":"env_read","site":"a.test"})").empty() && v(R"({"op":"env_write","site":"a.test","generate":["SECRET_KEY_BASE"]})").empty());
+        CHECK(!v(R"({"op":"env_read","site":"../etc"})").empty() && !v(R"({"op":"env_write","site":"a.test"})").empty() &&
+              !v(R"({"op":"env_write","site":"a.test","set":{"LD_PRELOAD":"/tmp/x.so"}})").empty() && !v(R"({"op":"env_write","site":"a.test","set":{"A":"x\ny"}})").empty());
         SiteSpec high = missing;
         high.listen_tls = "0.0.0.0:8443";
         CHECK(preflight(high, loaded, false).size() == 2);  // an unprivileged port is bound by the reload
@@ -2749,7 +2892,37 @@ static void test_control_sites() {
         CHECK(steps.size() >= 2 && steps[0] == "agensio pools" && steps[1] == "systemctl reload php-fpm");
         for (const auto& st : steps) CHECK(st.find("&&") == std::string::npos);
         CHECK(pre[1].find("-type d -exec chown no-such-user-zz:") != std::string::npos && pre[1].find("chmod 2750") != std::string::npos && pre[0].find("/var/www") == std::string::npos);
-        CHECK(next_steps(ok, loaded).size() == 1);  // the port-80 note for auto certificates
+        // The port-80 note for auto certificates, and the body limit before the first upload.
+        CHECK(next_steps(ok, loaded).size() == 2 && next_steps(ok, loaded)[1].find("above 1MB, the server's default, get 413") != std::string::npos);
+        {
+            SiteSpec big = ok;
+            big.settings = json::Value::object().set("max_body_size", "100MB");
+            CHECK(next_steps(big, loaded)[1].find("above 100MB get 413") != std::string::npos);
+            SiteSpec st = ok;
+            st.app = "static";
+            CHECK(next_steps(st, loaded).size() == 1);
+        }
+        // A Rails site's chain follows what is on disk (2026-09-27 report).
+        {
+            namespace fs = std::filesystem;
+            const fs::path rr = fs::temp_directory_path() / ("agensio-railsnext-" + std::to_string(::getpid()));
+            fs::create_directories(rr);
+            SiteSpec rs = ok;
+            rs.app = "rails";
+            rs.root = rr.string();
+            rs.upstream = "http://127.0.0.1:3001";
+            auto rails_step = [&] {
+                for (const auto& st : next_steps(rs, loaded))
+                    if (st.find("site-task") != std::string::npos) return st;
+                return std::string();
+            };
+            CHECK(rails_step().find("gem_install_rails, then rails_new") != std::string::npos);
+            std::ofstream(rr / "Gemfile") << "source 'https://rubygems.org'\n";
+            CHECK(rails_step().find("in place: site-task shop.test bundle_install, then db_prepare") != std::string::npos && rails_step().find("rails_new") == std::string::npos);
+            fs::create_directories(rr / "vendor" / "bundle");
+            CHECK(rails_step().find("db_migrate after new migrations") != std::string::npos && rails_step().find("rails_new") == std::string::npos);
+            fs::remove_all(rr);
+        }
         Config php_cfg = loaded;
         php_cfg.pools_dir = "/etc/php/8.4/fpm/pool.d";
         CHECK(php_fpm_reload_command(php_cfg, "") == "systemctl reload php8.4-fpm");
@@ -3469,6 +3642,65 @@ static std::string tohex(std::string_view s) {
         out.push_back(d[c & 15]);
     }
     return out;
+}
+
+// HTTP/2 and HTTP/3 request assembly: a browser's cookie crumbs (one field per pair) reach
+// every handler as one field, in order (RFC 9113 8.2.3, RFC 9114 4.2.1; 2026-09-27 report:
+// only the first crumb survived, so no browser stayed signed in to a proxied application).
+static void test_request_assembly_cookies() {
+    // `arena` plays the decoder's: reserved once, so the views stay put, and the caller's,
+    // so they outlive the call.
+    auto assemble = [](const std::vector<std::pair<std::string, std::string>>& fields, Request& req, std::string& cookie, http::RequestSeen& seen,
+                       std::string& arena) {
+        arena.clear();
+        arena.reserve(64 * 1024);
+        for (const auto& [n, v] : fields) {
+            const std::size_t a = arena.size();
+            arena.append(n);
+            const std::size_t b = arena.size();
+            arena.append(v);
+            http::sink_field(seen, req, cookie, std::string_view(arena).substr(a, n.size()), std::string_view(arena).substr(b, v.size()), codec::Origin{});
+        }
+        bool known = false;
+        std::uint64_t len = 0;
+        return !seen.overflow && http::finish_request(seen, req, cookie, "HTTP/2.0", known, len) == http::Assembled::ok;
+    };
+    std::string arena;
+    const std::vector<std::pair<std::string, std::string>> base = {{":method", "GET"}, {":scheme", "https"}, {":path", "/"}, {":authority", "a.test"}};
+    {
+        auto f = base;
+        f.insert(f.end(), {{"cookie", "_writebook_session=S"}, {"accept", "*/*"}, {"cookie", "session_token=T"}, {"cookie", "c=3"}});
+        Request req;
+        std::string cookie;
+        http::RequestSeen seen;
+        const bool ok = assemble(f, req, cookie, seen, arena);
+        std::vector<std::string> names;
+        for (const HeaderField& h : req.headers) names.emplace_back(h.name);
+        CHECK(ok && req.headers.get("cookie") == "_writebook_session=S; session_token=T; c=3" &&
+              names == (std::vector<std::string>{"cookie", "accept", "host"}));
+    }
+    {   // one crumb: the field as it came, nothing copied
+        auto f = base;
+        f.push_back({"cookie", "a=1"});
+        Request req;
+        std::string cookie = "stale from the stream's last request";
+        http::RequestSeen seen;
+        const bool ok = assemble(f, req, cookie, seen, arena);
+        CHECK(ok && req.headers.get("cookie") == "a=1" && req.headers.get("cookie").data() >= arena.data() && req.headers.get("cookie").data() < arena.data() + arena.size());
+    }
+    {   // 150 crumbs: one field, never the 100-field limit
+        auto f = base;
+        std::string want;
+        for (int i = 0; i < 150; ++i) {
+            f.push_back({"cookie", "c" + std::to_string(i) + "=v"});
+            want += (i ? "; " : "") + ("c" + std::to_string(i) + "=v");
+        }
+        Request req;
+        std::string cookie;
+        http::RequestSeen seen;
+        const bool ok = assemble(f, req, cookie, seen, arena);
+        CHECK(ok && !seen.overflow && req.headers.size() == 2 && req.headers.get("cookie") == want);
+    }
 }
 
 static void test_h2_frame_and_settings() {
@@ -4422,6 +4654,7 @@ int main() {
     test_fcgi_codec();
     test_pools();
     test_tasks();
+    test_appenv();
     test_hosting_rules();
     test_proxy();
     test_range();
@@ -4436,6 +4669,7 @@ int main() {
     test_backup_of_protected();
     test_h2_frame_and_settings();
     test_hpack();
+    test_request_assembly_cookies();
     test_qpack();
     test_qpack_dynamic();
     test_qpack_encoder();

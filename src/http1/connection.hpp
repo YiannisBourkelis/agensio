@@ -528,6 +528,7 @@ private:
         if (req.has_body) {
             body_limit_ = body_limit(req.host);  // the site's own limit, looked up only for requests with a body
             if (!req.chunked && req.content_length > body_limit_) {
+                if constexpr (!IsLocalSocket<Socket>::value) log_body_refused(req.host, req.content_length);
                 fail_request(413);  // refused before the handler runs; the client gets it while it may still be sending
                 return;
             }
@@ -773,6 +774,13 @@ private:
         if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::warn)) {
             fill_connection_info();
             log->warn("request line did not parse from " + remote_ + ": " + escape_line(std::string_view(in_.data(), in_len_)));
+        }
+    }
+    // A declared body above the site's limit, in the error log with the fix (config.hpp).
+    void log_body_refused(std::string_view host, std::uint64_t declared) {
+        if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::warn)) {
+            fill_connection_info();
+            log->warn(body_refused_text(listener_->router.site(host), remote_, declared, body_limit_));
         }
     }
     static std::string escape_line(std::string_view bytes) {

@@ -398,7 +398,7 @@ private:
         scratch.clear();
         std::uint64_t required = 0;
         const auto r = decoder_.decode(s.section, scratch, live_->max_header_size,
-                                       [&](std::string_view n, std::string_view v, qpack::Origin o) { return http::sink_field(seen, req, n, v, o); },
+                                       [&](std::string_view n, std::string_view v, qpack::Origin o) { return http::sink_field(seen, req, s.cookie, n, v, o); },
                                        required);
         QUIC_TRACE("h3: section stream=%llu bytes=%zu result=%d required=%llu inserts=%llu\n", static_cast<unsigned long long>(s.q.id),
                    s.section.size(), static_cast<int>(r), static_cast<unsigned long long>(required), static_cast<unsigned long long>(decoder_.insert_count()));
@@ -432,7 +432,11 @@ private:
             req.chunked = !s.length_known;  // "length unknown" for the handlers
             req.body = &s.body_source;
             s.body_limit = body_limit(req.host);
-            if (s.length_known && s.content_length > s.body_limit) return fail_stream(s, 413);
+            if (s.length_known && s.content_length > s.body_limit) {
+                if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::warn))
+                    log->warn(body_refused_text(listener_->router.site(req.host), remote_.empty() ? std::string_view("-") : std::string_view(remote_), s.content_length, s.body_limit));
+                return fail_stream(s, 413);
+            }
             quic_.stream_window(q, std::min<std::uint64_t>(std::max<std::uint64_t>(s.body_limit, 1), kStreamWindowMax));
         }
         dispatch(s);

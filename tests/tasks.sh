@@ -44,6 +44,8 @@ cat > $RT/bundle <<'SH'
 echo "prog=bundle"; echo "args=$*"
 echo "uid=$(id -un) cwd=$(pwd) BUNDLE_PATH=$BUNDLE_PATH BUNDLE_WITHOUT=$BUNDLE_WITHOUT RAILS_ENV=$RAILS_ENV DUMMY=${SECRET_KEY_BASE_DUMMY:-}"
 echo "limits=$(awk '/^Max processes/{p=$(NF-2)} /^Max open files/{n=$(NF-2)} /^Max core file size/{c=$(NF-2)} END{print p, n, c}' /proc/self/limits)"
+echo "appenv SECRET_KEY_BASE=${SECRET_KEY_BASE:-} DATABASE_URL=${DATABASE_URL:-}"
+[ -e nosecret ] && [ -z "${SECRET_KEY_BASE:-}" ] && [ "$*" = "exec rails db:migrate" ] && { echo "ArgumentError: Missing \`secret_key_base\` for 'production' environment, set this string with \`bin/rails credentials:edit\`" >&2; exit 1; }
 case "$*" in
   "exec rails db:prepare") echo db > storage/production.sqlite3; chmod 644 storage/production.sqlite3 ;;
   "exec rails assets:precompile")
@@ -118,6 +120,21 @@ check "db_prepare: the SQLite database it made is swept to 0600" "True 600 yes" 
 ctl site-task r1.test assets_precompile --yes --reason assets > $T/out
 check "assets_precompile: SECRET_KEY_BASE_DUMMY set for it alone; assets written" "True DUMMY=1 yes" "$(j 'd["ok"], d["output"].splitlines()[2].split()[-1]') $([ -f $APP/public/assets/app.css ] && echo yes)"
 
+# The site's environment (2026-09-27 Writebook report): a root file the tasks read, admin only.
+touch $APP/nosecret
+check "a task that stops on Rails' missing secret_key_base: 409 with the hint to generate one" "1 yes" "$(ctl site-task r1.test db_migrate --yes --reason nosecret > $T/out; echo -n "$? "; j '"yes" if "generate: [\"SECRET_KEY_BASE\"]" in d.get("hint", "") else d.get("hint")')"
+ctl site-env-set r1.test --set DATABASE_URL=sqlite3:storage/x.sqlite3 --generate SECRET_KEY_BASE --yes --reason env > $T/out
+check "site-env-set: DATABASE_URL set, SECRET_KEY_BASE generated; root's file 0600 in root's 0700 directory; no value in the answer or the audit log" "True DATABASE_URL SECRET_KEY_BASE root 600 root 700 no no" "$(j 'd["ok"], ",".join(d["set"]), ",".join(d["generated"])') $(stat -c '%U %a' $T/env/r1.test.env) $(stat -c '%U %a' $T/env) $(grep -q 'sqlite3:storage' $T/out && echo yes || echo no) $(grep -q 'sqlite3:storage' $T/logs/audit.log && echo yes || echo no)"
+SKB=$(sed -n 's/^SECRET_KEY_BASE="\(.*\)"$/\1/p' $T/env/r1.test.env)
+ctl site-task r1.test db_migrate --yes --reason withsecret > $T/out
+check "the task gets the site's environment; its answer names the variables and shows no value" "True 128 yes sqlite3:storage/x.sqlite3 yes" "$(j 'd["ok"]') $(echo -n "$SKB" | wc -c | tr -d ' ') $(j '"yes" if "SECRET_KEY_BASE='$SKB'" in d["output"] else "no"') $(j '[l for l in d["output"].splitlines() if l.startswith("appenv")][0].split("DATABASE_URL=")[1]') $(j '"yes" if "SECRET_KEY_BASE=<site environment>" in d["env"] and not any("'$SKB'" in e for e in d["env"]) else d["env"]')"
+check "site-env: an admin reads names and values; the read is audited with the names only" "DATABASE_URL,SECRET_KEY_BASE yes no" "$(ctl site-env r1.test > $T/out; j '",".join(v["name"] for v in d["variables"])') $(grep -q 'sites/r1.test/env: read the values of DATABASE_URL, SECRET_KEY_BASE' $T/logs/audit.log && echo yes) $(grep -q "$SKB" $T/logs/audit.log && echo yes || echo no)"
+check "generate keeps an existing secret; unset and generate in one call rotate it" "SECRET_KEY_BASE yes" "$(ctl site-env-set r1.test --generate SECRET_KEY_BASE --yes --reason keep > $T/out; j '",".join(d["kept"])') $(ctl site-env-set r1.test --unset SECRET_KEY_BASE --generate SECRET_KEY_BASE --yes --reason rotate > /dev/null; [ "$(sed -n 's/^SECRET_KEY_BASE="\(.*\)"$/\1/p' $T/env/r1.test.env)" != "$SKB" ] && echo yes)"
+check "site-env-set refuses a name that changes what runs" "1 yes" "$(ctl site-env-set r1.test --set LD_PRELOAD=/tmp/x.so --yes --reason bad > $T/out; echo -n "$? "; grep -q 'LD_PRELOAD is agensio' $T/out && echo yes)"
+chmod 644 $T/env/r1.test.env
+check "an environment file others can read: the task is refused naming it, nothing runs" "1 yes" "$(ctl site-task r1.test db_migrate --yes --reason unsafe > $T/out; echo -n "$? "; grep -q "r1.test.env must be a regular file, root's, mode 0600" $T/out && echo yes)"
+chmod 600 $T/env/r1.test.env; rm -f $APP/nosecret
+
 touch $APP/fail
 check "a failing task: 409, the exit status and the program's own words come back" "1 False 1 yes" "$(ctl site-task r1.test assets_precompile --yes --reason fail > $T/out; echo -n "$? "; j 'd["ok"], int(d["exit"]), "yes" if "cannot load such file -- bootsnap" in d["output"] and "exited with status 1" in d["error"] else d')"
 rm -f $APP/fail; touch $APP/loud
@@ -145,6 +162,14 @@ chown root $RT/bundle
 
 out=$(ctl site-create --domain r2.test --app rails --root $T/www/r2.test/app --user r2 --upstream http://127.0.0.1:18400 --https none --listen-plain 127.0.0.1:18399 --yes --reason tasks)
 check "db_prepare in a directory with no application: refused before anything runs, dry run or not" "1 1 yes" "$(ctl site-task r2.test db_prepare --dry-run --yes --reason noapp > /dev/null; echo -n "$? "; ctl site-task r2.test db_prepare --yes --reason noapp > $T/out; echo -n "$? "; grep -q "needs $T/www/r2.test/app/Gemfile, which does not exist; the site's directory holds no application yet" $T/out && echo yes)"
+# An application from an archive that came without Rails credentials (Writebook): the
+# install generates its SECRET_KEY_BASE and names the steps that fit it.
+mkdir -p $T/wb/writebook-1.2.2/config && echo "source 'https://rubygems.org'" > $T/wb/writebook-1.2.2/Gemfile && echo 3.4.7 > $T/wb/writebook-1.2.2/.ruby-version && echo x > $T/wb/writebook-1.2.2/config/application.rb
+tar -C $T/wb -cf $T/wb.tar writebook-1.2.2
+ctl upload wb.tar $T/wb.tar > /dev/null
+ctl site-install r2.test --file wb.tar --yes --reason archive > $T/out
+check "site-install of a Rails archive without credentials: SECRET_KEY_BASE generated into the site's environment; next steps name the pinned Ruby, the bundle tasks and the body limit" "yes yes yes yes 600" "$(j '"yes" if any("SECRET_KEY_BASE generated" in x for x in d.get("done", [])) else d') $(j '"yes" if any("pins Ruby 3.4.7" in x for x in d["next_steps"]) else d["next_steps"]') $(j '"yes" if any(x.startswith("site_task bundle_install") for x in d["next_steps"]) else d["next_steps"]') $(j '"yes" if any("up to 1MB, the server" in x for x in d["next_steps"]) else d["next_steps"]') $(stat -c %a $T/env/r2.test.env)"
+check "site-update of a site that holds an application: the next steps are the bundle tasks, not rails_new" "yes no" "$(ctl site-update r2.test --upstream http://127.0.0.1:18401 --yes --reason next > $T/out; j '"yes" if any("in place: site-task r2.test bundle_install" in x for x in d["next_steps"]) else d["next_steps"]') $(grep -q rails_new $T/out && echo yes || echo no)"
 chown root $T/www/r2.test/app
 check "a site directory the site's account does not own: refused before anything runs" "1 yes" "$(ctl site-task r2.test gem_install_rails --yes --reason owner > $T/out; echo -n "$? "; grep -q 'belongs to uid 0, not to r2' $T/out && echo yes)"
 check "the audit log: each run with the exact argv, the account and the outcome; each refusal with its reason" "yes yes yes" "$(grep -q "sites/r1.test/task (new): ran as r1 in $APP: $RT/ruby $T/state/r1/gems/bin/rails new . --name=blog .* -> exit 0" $T/logs/audit.log && echo yes) $(grep -q "sites/r1.test/task (slow): ran as r1 .* -> stopped at the time limit" $T/logs/audit.log && echo yes) $(grep -q "sites/r2.test/task (owner): refused: .*belongs to uid 0" $T/logs/audit.log && echo yes)"

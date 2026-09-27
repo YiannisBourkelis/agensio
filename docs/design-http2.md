@@ -418,10 +418,18 @@ Applied while decoding, so nothing invalid ever reaches the dispatcher:
   forbidden; `te` only as `trailers`;
 - `content-length` must match the DATA bytes received (else `PROTOCOL_ERROR`); a length
   above the site's body limit is answered 413 as HTTP/1 does, then the stream is reset;
-- several `cookie` fields are joined with `; ` into one at decode time (RFC 9113 8.2.3),
-  which also defeats "cookie crumbs" as a way around the field count;
-- at most `Headers::kCapacity` (100) fields including the crumbs, 16 KB decoded, 16 KB
-  compressed per block (6.9);
+- several `cookie` fields are joined with `; ` into one at decode time (RFC 9113 8.2.3):
+  the first crumb takes the field's slot and the others are appended to the stream's
+  join buffer while the decoder still holds their bytes, so every handler (the proxy's
+  HTTP/1.1 head, FastCGI's `HTTP_COOKIE`) sees one field in the order received. Until
+  2026-09-27 the crumbs after the first were counted and never stored, so a browser's
+  second cookie never reached an application (the Writebook sign-in report); the
+  integration suite now sends two crumbs through the proxy and into PHP over HTTP/2 and
+  HTTP/3;
+- at most `Headers::kCapacity` (100) fields, the crumbs after the first not among them (a
+  browser sends one per cookie, and a domain with 90 cookies must not get 431 over HTTP/2
+  where HTTP/1.1 carries them on one line); 16 KB decoded, crumbs included, and 16 KB
+  compressed per block (6.9) bound them instead;
 - trailers are accepted (a HEADERS after DATA with END_STREAM), validated, and dropped.
 
 A malformed request is a `RST_STREAM(PROTOCOL_ERROR)` plus an error-log line naming the
@@ -702,7 +710,7 @@ within noise (the "does not affect HTTP/1.1" proof) and the h2 rows recorded.
 | Rapid Reset (CVE-2023-44487) | open streams and reset them at once; the server does the work, the client stays under the concurrency limit | the reset counter (6.9); the upstream exchange is cancelled on the reset so no work is left behind | 128 per second per connection, then close | `h2-attacks.py rapid-reset`: 10,000 streams reset; asserts the close, the CPU and the exchanges cancelled |
 | MadeYouReset (CVE-2025-8671) | provoke the server into resetting streams with invalid frames (a `WINDOW_UPDATE` of 0, a bad PRIORITY, DATA on a half-closed stream) so client-side reset counting never triggers | server-sent resets count in the same counter; each provocation is also a glitch | the same | `h2-attacks.py made-you-reset` |
 | CONTINUATION flood (CVE-2024-27316 etc.) | HEADERS without END_HEADERS followed by CONTINUATION frames for ever | the header block is bounded by compressed bytes and by frame count; over either is a connection error, and the buffer is the 16 KB receive buffer, not a growing string | 16 KB compressed, 8 CONTINUATION frames per block | `h2-attacks.py continuation-flood`; RSS sampled |
-| HPACK bomb (2016) and the HTTP/2 Bomb (CVE-2026-49975) | seed the dynamic table with a large or nearly empty entry and reference it thousands of times, splitting cookies to dodge field counts; hold the result with a zero window and 1-byte updates | decoded size counted per field during decoding, stop at the first byte over 16 KB; cookies joined after the count; a stream held by a zero window with under 1 KB of progress is reset at `idle_timeout`; 1-byte updates are glitches, not progress | 16 KB decoded per request, 100 fields, 4 KB table | `h2-attacks.py hpack-bomb`, `bomb-hold`; asserts memory flat |
+| HPACK bomb (2016) and the HTTP/2 Bomb (CVE-2026-49975) | seed the dynamic table with a large or nearly empty entry and reference it thousands of times, splitting cookies to dodge field counts; hold the result with a zero window and 1-byte updates | decoded size counted per field during decoding, crumbs included, stop at the first byte over 16 KB; the crumbs joined into one field and not counted as fields (the 16 KB is their bound); a stream held by a zero window with under 1 KB of progress is reset at `idle_timeout`; 1-byte updates are glitches, not progress | 16 KB decoded per request, 100 fields, 4 KB table | `h2-attacks.py hpack-bomb`, `bomb-hold`; asserts memory flat |
 | Slow read, zero window (Imperva 2016; CVE-2019-9511 data dribble) | the client stops reading or sets a zero window and never updates it | the write-stall timer; no DATA frame smaller than 1 KB unless it ends the body | `idle_timeout` per stalled stream | `h2-attacks.py slow-read`, `dribble` |
 | Internal data buffering (CVE-2019-9517) | huge window advertised, TCP never read; the server buffers whole responses | responses are pulled from cache, file or origin only when a window and a socket accept them; at most 8 chunks in flight per connection | 512 KB per connection | `h2-attacks.py buffering`; origin bytes read counted |
 | PING flood, SETTINGS flood (CVE-2019-9512, 9515) | frames that each demand a reply | answered, but each beyond 10 per second is a glitch | 100 glitches | `h2-attacks.py ping-flood`, `settings-flood` |

@@ -45,7 +45,7 @@ export H3 H3JSON
 sed "s#@WORKERS@#0#g; s#@BENCH@#$ROOT/bench#g; s#@SENDFILE_MIN@#${SENDFILE_MIN:-48KB}#g; s#@ACCESS_LOG@#$ROOT/bench/tmp/access.log#; s#@H3@#$H3LIST#g; s#^tcp_nodelay = true#tcp_nodelay = true\ntrusted_proxies = [\"127.0.0.1\"]#" bench/agensio.toml > bench/tmp/agensio-test.toml
 printf '\n[control]\nsocket = "%s/bench/tmp/control.sock"\naudit = "%s/bench/tmp/audit.log"\nupload_max = "1M"\nruntimes = { ruby = "%s/bench/tmp/rt" }\n' "$ROOT" "$ROOT" "$ROOT" >> bench/tmp/agensio-test.toml
 sed -i "s#^\[server\]#[server]\nstate_dir = \"$ROOT/bench/tmp/state\"#" bench/tmp/agensio-test.toml
-rm -rf bench/tmp/state bench/tmp/inst; mkdir -p bench/tmp/state bench/tmp/inst
+rm -rf bench/tmp/state bench/tmp/inst bench/tmp/env; mkdir -p bench/tmp/state bench/tmp/inst
 rm -rf bench/tmp/sites.d; mkdir -p bench/tmp/sites.d bench/tmp/sites/created.test/web; echo created > bench/tmp/sites/created.test/web/index.html
 sed -i '1i include = ["sites.d/*.toml"]' bench/tmp/agensio-test.toml
 # Locations (A4) on the plain site: an SPA fallback, an aliased root, an exact match and a
@@ -514,6 +514,9 @@ if [ -n "$FPM_PID" ]; then
 check "php: index via directory URI" "index ok" "$(curl -sS http://127.0.0.1:8080/php/)"
 check "php: status and content type" "200 text/html; charset=UTF-8" "$(curl -sSi http://127.0.0.1:8080/php/ | tr -d '\r' | awk '/^HTTP/{s=$2} tolower($0) ~ /^content-type:/{sub(/^[Cc]ontent-[Tt]ype: /,""); c=$0} END{print s, c}')"
 P=$(curl -sS -H 'X-Test: yes' 'http://127.0.0.1:8080/php/params.php?a=1&b=2')
+# A browser sends one cookie field per pair over HTTP/2 (RFC 9113 8.2.3); PHP gets them in
+# one HTTP_COOKIE, "; " between, in order (2026-09-27 report: only the first arrived).
+check "php: HTTP/2 cookie fields reach HTTP_COOKIE joined, in order; two HTTP/1.1 Cookie lines too" '"HTTP_COOKIE":"a=1; b=2; c=3" "HTTP_COOKIE":"a=1; b=2"' "$(command curl -sS --http2-prior-knowledge -H 'cookie: a=1' -H 'cookie: b=2' -H 'cookie: c=3' http://127.0.0.1:8080/php/params.php | grep -o '"HTTP_COOKIE":"[^"]*"') $(curl -sS -H 'Cookie: a=1' -H 'Cookie: b=2' http://127.0.0.1:8080/php/params.php | grep -o '"HTTP_COOKIE":"[^"]*"')"
 check "php: QUERY_STRING" "yes" "$(echo "$P" | grep -q '"QUERY_STRING":"a=1&b=2"' && echo yes)"
 check "php: SCRIPT_FILENAME under the alias" "yes" "$(echo "$P" | grep -q "\"SCRIPT_FILENAME\":\"$ROOT/tests/php/params.php\"" && echo yes)"
 check "php: REMOTE_ADDR and SERVER_PORT" "yes" "$(echo "$P" | grep -q '"REMOTE_ADDR":"127.0.0.1"' && echo "$P" | grep -q '"SERVER_PORT":"8080"' && echo yes)"
@@ -705,6 +708,12 @@ check "tasks: an interpreter the site's side could have written is refused, dry 
 check "tasks: the listing names each interpreter refused (the runtime directory is not root's) and the effective time limit" "False yes 1200" "$(curl -sS --unix-socket $CS http://control/v1/sites/rails.test/tasks | python3 -c 'import json,sys; d=json.load(sys.stdin); t=d["tasks"][1]; e=t["interpreter"]["error"]; print(t["interpreter"]["ok"], "yes" if "not root" in e or "writable by" in e else e, int(t["timeout"]))')"
 check "control: every answer names the server's version, the one status reports" "same" "$(v=$(curl -sSi --unix-socket $CS http://control/v1/status | tr -d '\r' | awk -F': ' 'tolower($1)=="x-agensio-version"{print $2}'); b=$(curl -sS --unix-socket $CS http://control/v1/status | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])'); [ -n "$v" ] && [ "$v" = "$b" ] && echo same || echo "differ [$v] [$b]")"
 check "tasks: the refusal is in the audit log with the task's name" "yes" "$(grep -q 'sites/rails.test/task (t): refused: the ruby runtime' bench/tmp/audit.log && echo yes)"
+# The site's environment (2026-09-27 Writebook report), here without the helper: the
+# server's own file beside the configuration, under its own account.
+check "env: SECRET_KEY_BASE generated into the server's own file (0600 in 0700), named in the answer, its value in neither the answer nor the audit log; a static site has none; a name that chooses a program is refused" "200 SECRET_KEY_BASE 600 700 no 422 400" "$(cpost /v1/sites/rails.test/env '{"generate":["SECRET_KEY_BASE"],"confirm":true,"reason":"env"}') $(python3 -c 'import json; print(",".join(json.load(open("bench/tmp/ctl-reply.json"))["generated"]))') $(stat -c %a bench/tmp/env/rails.test.env) $(stat -c %a bench/tmp/env) $(grep -q "$(sed -n 's/^SECRET_KEY_BASE="\(.*\)"$/\1/p' bench/tmp/env/rails.test.env)" bench/tmp/ctl-reply.json bench/tmp/audit.log && echo yes || echo no) $(cpost /v1/sites/strict.test/env '{"set":{"A":"b"},"confirm":true}') $(cpost /v1/sites/rails.test/env '{"set":{"PATH":"/tmp"},"confirm":true}')"
+check "env: an admin's read returns the value, audited by name" "SECRET_KEY_BASE 128 yes" "$(curl -sS --unix-socket $CS http://control/v1/sites/rails.test/env | python3 -c 'import json,sys; v=json.load(sys.stdin)["variables"][0]; print(v["name"], len(v["value"]))') $(grep -q 'sites/rails.test/env: read the values of SECRET_KEY_BASE' bench/tmp/audit.log && echo yes)"
+check "rails: databases, logs, dumps by their ending and everything under /storage/ are 404 at the edge; any other path goes to the application (502: none listens)" "404 404 404 404 502" "$(for p in /storage/db/production.sqlite3 /x/production.SQLITE3-wal /log/development.log /backup.sql /books/1; do curl -sS -o /dev/null -w '%{http_code} ' -H 'Host: rails.test' http://127.0.0.1:8096$p; done | sed 's/ $//')"
+check "a request body above the site's limit: 413, and the error log names the site, the size, the limit and the fix" "413 yes" "$(head -c 1200000 /dev/zero | curl -sS -o /dev/null -w '%{http_code}' -H 'Host: rails.test' -H 'Expect: 100-continue' -X POST --data-binary @- http://127.0.0.1:8096/upload) $(grep -q 'site rails.test: a request body of 1.1 MB from 127.0.0.1 refused with 413: its max_body_size is 1 MB (the server.s default); site_update' bench/tmp/error.log && echo yes)"
 check "tasks: ctl site-task sends the task and --param, without --yes nothing happens (428), a missing task is a usage error" "1 yes 1 2" "$("$BIN" ctl site-task rails.test rails_new --param name=blog --dry-run --yes --socket $CS > bench/tmp/ctl.out 2>&1; echo -n "$? "; grep -q 'the ruby runtime' bench/tmp/ctl.out && echo -n yes; echo -n ' '; "$BIN" ctl site-task rails.test db_prepare --socket $CS > /dev/null 2>&1; echo -n "$? "; "$BIN" ctl site-task rails.test --yes --socket $CS > /dev/null 2>&1; echo $?)"
 check "tasks: the MCP task enum and parameters come from the table; listing reads, running is destructive" "6 name,version True False True" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
 import json, subprocess, sys
@@ -832,7 +841,7 @@ p.stdin.close(); p.wait()
 print(" ".join(out))
 PYT
 )
-check "mcp: initialize, tool list with annotations, calls, confirm, decisions, prompts" "agensio 23 True laravel 428 reloaded https,root,app,user -32601 2" "$mcp"
+check "mcp: initialize, tool list with annotations, calls, confirm, decisions, prompts" "agensio 25 True laravel 428 reloaded https,root,app,user -32601 2" "$mcp"
 check "mcp: site_install and the upload tools are exposed with their arguments" "file url,file,version,sha256 True" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
 import json, subprocess, sys
 p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
@@ -1163,6 +1172,7 @@ fi
 if [ "$H3" = 1 ] && curl -V 2>/dev/null | grep -q HTTP3; then
   H3C="--http3-only -k"; base=https://127.0.0.1:8443; p=h3
   check "$p negotiated"            "3 200" "$(command curl -sS $H3C -o /dev/null -w '%{http_version} %{http_code}' $base/)"
+  [ -n "$FPM_PID" ] && check "$p cookie fields reach PHP joined, in order (RFC 9114 4.2.1)" '"HTTP_COOKIE":"a=1; b=2"' "$(command curl -sS $H3C -H 'cookie: a=1' -H 'cookie: b=2' $base/php/params.php | grep -o '"HTTP_COOKIE":"[^"]*"')"
   check "$p index body"            "$IDX" "$(command curl -sS $H3C $base/ | sum)"
   check "$p cached 100KB body"     "$CSS" "$(command curl -sS $H3C $base/style.css | sum)"
   check "$p streamed 10MB body"    "$BIG" "$(command curl -sS $H3C $base/big.bin | sum)"
@@ -1336,6 +1346,11 @@ if [ -n "$UP_PID" ]; then
   check "proxy: upstream 404 passed through" "404" "$(code $P/nope)"
   check "proxy: upstream Server and Date replaced by ours" "1 1" "$(curl -sSi $P/json | tr -d '\r' | awk '/^Server:/{s++} /^Date:/{d++} END{print s, d}')"
   check "proxy: POST body forwarded (memory)" "hello proxy" "$(printf 'hello proxy' | curl -sS --data-binary @- $P/echo)"
+  # A browser's cookie fields over HTTP/2 (one per pair, RFC 9113 8.2.3) reach the origin as
+  # ONE Cookie line in the order sent; a second HTTP/1.1 Cookie line is folded the same way
+  # (2026-09-27 report: Rack read the first cookie only, and no browser stayed signed in).
+  check "proxy: HTTP/2 cookie fields reach the origin as one Cookie line, in order" "1 cookie: _app_session=S; session_token=T" "$(command curl -sS --http2-prior-knowledge -H 'cookie: _app_session=S' -H 'cookie: session_token=T' $P/api/headers | tr -d '\r' > bench/tmp/cookie.h; grep -ci '^cookie:' bench/tmp/cookie.h) $(grep -i '^cookie:' bench/tmp/cookie.h)"
+  check "proxy: two HTTP/1.1 Cookie lines reach the origin as one" "1 Cookie: a=1; b=2" "$(curl -sS -H 'Cookie: a=1' -H 'X-Between: x' -H 'Cookie: b=2' $P/api/headers | tr -d '\r' > bench/tmp/cookie.h; grep -ci '^cookie:' bench/tmp/cookie.h) $(grep -i '^cookie:' bench/tmp/cookie.h)"
   head -c 300000 /dev/urandom > bench/tmp/proxy-blob
   check "proxy: POST 300 KB forwarded (spilled)" "same" "$(curl -sS --data-binary @bench/tmp/proxy-blob $P/echo | cmp -s - bench/tmp/proxy-blob && echo same)"
   check "proxy: chunked request body forwarded with a length" "same" "$(curl -sS -H 'Transfer-Encoding: chunked' --data-binary @bench/tmp/proxy-blob $P/echo | cmp -s - bench/tmp/proxy-blob && echo same)"

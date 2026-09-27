@@ -108,6 +108,10 @@ struct Context {
     std::string home;         // the account's home (<state_dir>/<account>); TMPDIR is its tmp/
     unsigned timeout = 1200;  // effective seconds
     unsigned processes = 512;
+    // The site's application environment (services/appenv.*: SECRET_KEY_BASE and the like),
+    // added after every variable agensio sets and never replacing one; the answer shows the
+    // names, never the values.
+    std::vector<std::pair<std::string, std::string>> app_env;
 };
 
 struct Plan {
@@ -124,6 +128,11 @@ struct Plan {
 // The plan for a row whose params passed check_params; `program` is the interpreter's path
 // as trusted_program resolved it.
 Plan build(const Row& row, const json::Value& params, const Context& ctx, const std::string& program);
+
+// What a failed run's output means when it is a known cause with a fix agensio can name
+// (Rails without SECRET_KEY_BASE, a Gemfile pinning another Ruby than [control] runtimes
+// gives): the hint, or "".
+std::string failure_hint(const Row& row, std::string_view output, const Context& ctx);
 
 // The row's `needs` (or, with `after`, its `produces`) against the filesystem, relative
 // paths below `root_fd`: "" when every one exists, else the refusal naming the first
@@ -189,9 +198,10 @@ struct Request {
     bool network_allowed = true;       // [control] task_network
     bool dry_run = false;
 };
-// {"ok", "task", "as", "cwd", "argv", "env", "network", "limits", then for a run "ran",
-// "exit" | "signal", "timed_out", "duration_ms", "output", "output_bytes", "truncated",
-// "secured", "exposed"; "error" (and "run_as_root" for a missing runtime) when refused}.
+// {"ok", "task", "as", "cwd", "argv", "env" (the site's own variables as NAME=<site
+// environment>), "network", "limits", then for a run "ran", "exit" | "signal", "timed_out",
+// "duration_ms", "output", "output_bytes", "truncated", "secured", "exposed", "hint" when
+// failure_hint knows the cause; "error" (and "run_as_root" for a missing runtime) when refused}.
 json::Value execute(const Request& req);
 
 }  // namespace agensio::tasks

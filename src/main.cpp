@@ -54,6 +54,8 @@ void usage() {
                  "                           [--path SUB] [--create-path] [--strip 0|1] [--dry-run]\n"
                  "                      site-copy NAME --from SUB --to SUB [--overwrite] [--dry-run]\n"
                  "                      site-task NAME TASK [--param KEY=VALUE]... [--dry-run] (site-tasks NAME lists them)\n"
+                 "                      site-env-set NAME [--set KEY=VALUE]... [--unset KEY]... [--generate KEY]...\n"
+                 "                           (site-env NAME shows the site's environment; admin)\n"
                  "                      site-update NAME --set KEY=VALUE ... (settings [NAME] lists the keys and ceilings)\n"
                  "                      Uploads: upload NAME [FILE] (stdin by default) | uploads | uploads-delete NAME\n"
                  "  mcp                 Model Context Protocol server on stdin/stdout for an AI agent host,\n"
@@ -119,7 +121,7 @@ int main(int argc, char** argv) {
             auto ctl_usage = [] {
                 std::cout << "usage: agensio ctl <command> [options] [--socket PATH] [-c config.toml]\n"
                              "read:   status | sites | site NAME | validate | health | presets | uploads | settings [NAME] | reference |\n"
-                             "        site-tasks NAME |\n"
+                             "        site-tasks NAME | site-env NAME (admin: the site's environment, values included; audited) |\n"
                              "        logs [--site NAME] [--since 3h] [--level error|warn|info] [--status 5xx|4xx|all] [--limit N]\n"
                              "change (each needs --yes, takes --reason TEXT):\n"
                              "        reload | logs-reopen | site-disable NAME | site-enable NAME | site-delete NAME | cert-renew NAME\n"
@@ -143,6 +145,9 @@ int main(int argc, char** argv) {
                              "                    preset as the site's account in its directory (app = rails: gem_install_rails,\n"
                              "                    rails_new --param name=NAME, bundle_install, db_prepare, db_migrate, assets_precompile);\n"
                              "                    `site-tasks NAME` lists them with their parameters. Never a command line.\n"
+                             "        site-env-set NAME [--set KEY=VALUE]... [--unset KEY]... [--generate KEY]...: the variables the\n"
+                             "                    site's tasks and its application service get (app = rails or proxy), in a file\n"
+                             "                    root's and 0600; --generate SECRET_KEY_BASE fills a missing name with a random secret\n"
                              "        uploads-delete NAME\n"
                              "upload: upload NAME [FILE]   stores FILE (or stdin) on the server for site-install --file NAME;\n"
                              "                    needs the operator role, no --yes\n"
@@ -206,6 +211,13 @@ int main(int argc, char** argv) {
                 else if (b == "--from") field("from");
                 else if (b == "--to") field("to");
                 else if (b == "--overwrite") body.set("overwrite", true);
+                else if (b == "--unset" || b == "--generate") {
+                    std::string v; value(v);
+                    const char* key = b == "--unset" ? "unset" : "generate";
+                    agensio::json::Value list = body[key].is_array() ? body[key] : agensio::json::Value::array();
+                    list.push(v);
+                    body.set(key, list);
+                }
                 else if (b == "--param") {
                     std::string v; value(v);
                     const std::size_t eq = v.find('=');
@@ -230,8 +242,16 @@ int main(int argc, char** argv) {
                 else { std::cerr << "ctl: unexpected argument " << b << "\n"; return 2; }
             }
             if (!aliases.items().empty()) body.set("aliases", aliases);
+            if (command == "site-env-set" && body["settings"].is_object()) {  // --set KEY=VALUE names variables here, not settings
+                agensio::json::Value nb = agensio::json::Value::object();
+                for (const auto& m : body.members())
+                    if (m.first != "settings") nb.set(m.first, m.second);
+                nb.set("set", body["settings"]);
+                body = nb;
+            }
             std::string path, method = "GET";
-            const bool mutation = command == "reload" || command == "logs-reopen" || (command.starts_with("site-") && command != "site-tasks") ||
+            const bool mutation = command == "reload" || command == "logs-reopen" ||
+                                  (command.starts_with("site-") && command != "site-tasks" && command != "site-env") ||
                                   command == "cert-renew" || command == "uploads-delete";
             const bool upload = command == "upload";
             if (command == "status" || command == "sites" || command == "health" || command == "presets" || command == "uploads") path = "/v1/" + command;
@@ -251,6 +271,7 @@ int main(int argc, char** argv) {
             else if (command == "site-copy" && !site_name.empty()) path = "/v1/sites/" + site_name + "/copy";
             else if (command == "site-task" && !site_name.empty() && !body["task"].is_null()) path = "/v1/sites/" + site_name + "/task";
             else if (command == "site-tasks" && !site_name.empty()) path = "/v1/sites/" + site_name + "/tasks";
+            else if ((command == "site-env" || command == "site-env-set") && !site_name.empty()) path = "/v1/sites/" + site_name + "/env";
             else if (command == "uploads-delete" && !site_name.empty()) path = "/v1/uploads/" + site_name + "/delete";
             else if (upload && !site_name.empty()) path = "/v1/uploads/" + site_name;
             else {

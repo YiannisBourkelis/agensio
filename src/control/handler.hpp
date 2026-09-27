@@ -51,6 +51,11 @@ struct ControlBackend {
     // the rest from the configuration on disk), else on a thread as this process's account
     // with the request's root, app and secrets.
     virtual void task_async(const json::Value& req, std::function<void(json::Value)> done) = 0;
+    // A site's application environment (services/appenv.*): req.op "env_read" or "env_write"
+    // with the site's first host name and the change. Off the worker (the helper may be busy
+    // with a task for minutes), `done` on worker 0. Through the helper, whose files are
+    // root's, else as this process's own account in its own directory.
+    virtual void env_async(const json::Value& req, std::function<void(json::Value)> done) = 0;
 };
 
 class ControlHandler {
@@ -85,6 +90,8 @@ private:
     void site_install(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> done);
     void site_copy(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> done);
     void site_task(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> done);
+    void site_env_show(Stream& s, std::string_view name, std::function<void()> done);
+    void site_env_set(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> done);
     void upload_receive(Stream& s, std::string_view name, std::function<void()> done);
     json::Value uploads_list();
     // The php-fpm pool after a site file changed: through the helper when there is one

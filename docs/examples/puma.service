@@ -1,15 +1,20 @@
 # Puma for a site with app = "rails", until agensio manages the application process itself
 # (roadmap F14, docs/design-site-operations.md section 5). Replace ag5 (the site's account,
-# its `user`), the application's directory (the site's `root`) and 127.0.0.1:3000 (the
-# site's `upstream`), then, as root:
+# its `user`), the application's directory (the site's `root`), ag5.edoc.gr in the
+# environment file's name (the site's first host name) and 127.0.0.1:3000 (the site's
+# `upstream`), then, as root:
 #   cp puma.service /etc/systemd/system/agensio-app-ag5.service
 #   systemctl daemon-reload && systemctl enable --now agensio-app-ag5
 # The environment is the one site_task runs Rails with (production, the bundle in
 # vendor/bundle without the development and test groups, the account's own gems and never
-# the system's), so what the tasks prepared is what Puma loads. WorkingDirectory and the
-# first ReadWritePaths entry are the site's root, whatever it is called. -b binds loopback
-# explicitly: the puma.rb `rails new` writes binds every address, which would publish the
-# application next to agensio, without its TLS and refusals.
+# the system's), so what the tasks prepared is what Puma loads, plus the site's own
+# variables (SECRET_KEY_BASE, DATABASE_URL) from the file `agensio ctl site-env-set` writes
+# (root's, 0600; the "-" makes it optional; restart the unit after a change). With [control]
+# runtimes = { ruby = "/opt/ruby-3.4.7/bin" }, put that directory first on PATH and run its
+# bundle in ExecStart: `bundle exec` starts bin/rails through #!/usr/bin/env ruby.
+# WorkingDirectory and the first ReadWritePaths entry are the site's root, whatever it is
+# called. -b binds loopback explicitly: the puma.rb `rails new` writes binds every address,
+# which would publish the application next to agensio, without its TLS and refusals.
 [Unit]
 Description=Rails application of ag5 (Puma), behind agensio
 After=network.target
@@ -21,6 +26,8 @@ WorkingDirectory=/var/www/ag5.edoc.gr/app
 Environment=RAILS_ENV=production HOME=/var/lib/agensio/ag5 TMPDIR=/var/lib/agensio/ag5/tmp LANG=C.UTF-8
 Environment=BUNDLE_PATH=vendor/bundle BUNDLE_WITHOUT=development:test RAILS_LOG_TO_STDOUT=1
 Environment=GEM_HOME=/var/lib/agensio/ag5/gems GEM_PATH=/var/lib/agensio/ag5/gems
+Environment=PATH=/usr/bin:/usr/local/bin:/bin
+EnvironmentFile=-/etc/agensio/env/ag5.edoc.gr.env
 ExecStart=/usr/bin/bundle exec puma -e production -b tcp://127.0.0.1:3000
 Restart=on-failure
 RestartSec=2

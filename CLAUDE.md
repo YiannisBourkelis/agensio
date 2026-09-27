@@ -410,8 +410,15 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   task's `needs` checked before it runs and its `produces` after, umask 027, `RLIMIT_NPROC`, a timeout that kills the
   process group, output head and tail, one task per site, the credential sweep and the
   validation afterwards, the exact argv in the audit log. Through the helper's `task_run`
-  (the site from the configuration on disk, the account's home created), else as the
-  server's own account. `app = "rails"` is the proxy preset plus its tasks and credential
+  (the site, the runtimes and the limits from the configuration on disk, so the task keys
+  apply on reload; the account's home created), else as the server's own account. The
+  site's environment (2026-09-27, `src/services/appenv.*`): `<config dir>/env/<site>.env`
+  for `rails` and `proxy` sites, root's 0600 in a root 0700 directory, systemd
+  `EnvironmentFile` syntax, written and read by the helper (`env_write`, `env_read`),
+  admin-only both ways and audited by name (`site-env`, `site-env-set`, MCP `site_env`,
+  `site_env_set`); tasks get it after agensio's variables, names that choose a program
+  refused; `site-install` of a Rails archive without credentials generates
+  `SECRET_KEY_BASE` into it; `docs/examples/puma.service` loads it. Security page row 28. `app = "rails"` is the proxy preset plus its tasks and credential
   files; Puma is started by `docs/examples/puma.service` until F14. `tests/tasks.sh`
   (root devbox, fake interpreters), `tests/rails.sh` (real Ruby and rubygems.org, the
   whole workflow). Rule for every change here: the security page rows 26 and 27 and the

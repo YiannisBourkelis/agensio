@@ -324,6 +324,11 @@ service = { runtime = "puma", workers = 2, threads = 5, memory_max = "512M", env
 # upstream is derived: unix:/run/agensio/apps/ag5/app.sock (decision 4)
 ```
 
+The unit loads the site's environment file (section 13) with
+`EnvironmentFile=-<config dir>/env/<site>.env`, so a secret is written once, through the
+control plane, and the tasks and the process both see it; `env` below stays for the
+non-secret knobs the configuration shows (`RAILS_LOG_TO_STDOUT`, `WEB_CONCURRENCY`).
+
 Keys: `runtime` (the templates: `puma` first; then `node`, `next`, `gunicorn`,
 `uvicorn`), `listen` (`"socket"`, the default where the runtime supports it, or a
 loopback TCP port 1024 to 65535, unique across the host's sites, checked at load as
@@ -391,6 +396,26 @@ node `<node dir>/node <entry>` with `PORT` and `HOST=127.0.0.1`; next `<node dir
 start -- -H 127.0.0.1 -p <port>`; gunicorn `<python dir>/python3 -m gunicorn -b
 unix:/run/agensio/apps/<user>/app.sock -w <workers> <module>`. Nothing else reaches the
 file.
+
+**What a real application adds** (the 2026-09-27 Writebook install: web, Redis and
+resque-pool, two hand-written units). Facts the renderer must carry, not tastes:
+
+- `PATH` with the `[control] runtimes` directory first, and that directory's `bundle` in
+  `ExecStart`: `bundle exec` starts `bin/rails` through `#!/usr/bin/env ruby`.
+- The environment file above.
+- Job processes beside the web process, as named templates like the task rows, never a
+  Procfile line (a Procfile is the caller's command line, which this section rules out):
+  `jobs = "solid_queue" | "resque-pool" | "sidekiq" | "good_job"`, each a fixed argv run
+  as the same account with the same environment, one unit each
+  (`agensio-app-<user>-jobs.service`), suggested from `Gemfile.lock`.
+- Ordering after host services the application needs (`redis-server`, `postgresql`),
+  from a list root keeps in the main file (`[control] service_after = ["redis-server",
+  ...]`): `Wants=` starts the unit it names, so a compromised server must not name any
+  unit it likes; `After=` and `Wants=` only for names on that list.
+- `workers` also sets `WEB_CONCURRENCY` (an application's `puma.rb` reads it, Writebook's
+  forks two thirds of the cores otherwise), and `memory_max` scales with it unless set.
+- `prepare = true`: `ExecStartPre` running the `db_prepare` row's fixed argv, what
+  Writebook's own `bin/start-app` does; off by default, since the task does it explicitly.
 
 **Helper operations**: `service_apply` (the `pools_apply` shape: re-reads the
 configuration itself, runs the hosting rules, renders every unit, writes the changed
@@ -526,6 +551,7 @@ must stay flat, since nothing changes without the key.
 |---|---|---|
 | the fix of findings 1 and 2 | done 2026-09-26 | |
 | F13 tasks, the Rails rows, `[control] runtimes`, `app = "rails"` in its first form | done 2026-09-26 (section 12) | |
+| the site's environment, `SECRET_KEY_BASE` for archives, the Writebook report's fixes | done 2026-09-27 (section 13) | F13 |
 | F14 service, puma, the unix socket transport | about 500 lines, golden tests, `tests/services.sh` | F13's runtimes table |
 | section 7 and 2b: `app/`, `root_is_project`, `static`, `@upstream`, the rest of `app = "rails"` | about 350 lines, the `-P` A/B | |
 | section 6: the prober, `upstream_unreachable`, `upstream_exposed` | about 200 lines | |
@@ -560,6 +586,14 @@ the files and the trash round it off.
    never serve it.
 10. A site can be deleted with its files; they go to a root-only recycle bin under
     `sites_root` for `trash_keep` days and can be restored with one command.
+
+Added 2026-09-27, after the Writebook report against alpha.26 (section 13):
+
+11. A site's environment (section 13) is readable by an admin, values included, every
+    read audited with the names it returned.
+12. `site_install` generates `SECRET_KEY_BASE` into the site's environment when a Rails
+    archive came without credentials, once, never for an application that has them.
+13. The site's environment ships as its own step before F14; F14's unit then loads it.
 
 ## 11. Notes for the implementing session
 
@@ -608,8 +642,10 @@ the files and the trash round it off.
   "directories 0700" became this. The installer had the same list and failed on any
   directory in it (`.git` in an archive made every install fail); fixed with the same rule.
 - `task_limits` takes seconds (`timeout = 1200`), like every other duration in the
-  configuration. The three task keys are read by the helper at start, so they are
-  restart-only, and `health` lists them under `restart_needed` when the file differs.
+  configuration. The three task keys were read by the helper at start, so they were
+  restart-only; since 2026-09-27 the helper takes them from root's file on disk for every
+  task (it loads that file for the site anyway, and only the main file can hold
+  `[control]`), so a reload applies a new Ruby without cutting every site.
 - One task per site is kept by the server (a map on worker 0): the helper serves one
   request at a time, so while a task runs every other helper request (a `site_create`, an
   install) waits for it, as installs already made them wait. A helper that runs tasks
@@ -633,3 +669,50 @@ the files and the trash round it off.
   `rails` in the `app` enum came from a bridge started before the upgrade, which nothing
   said. What the report read as agensio serving `public/` was Rails' own static file
   server behind the proxy (no `x-request-id` on those answers); section 7 still stands.
+
+## 13. The site's environment (2026-09-27, the Writebook report against alpha.26)
+
+A Rails application without credentials reads `SECRET_KEY_BASE` from its environment:
+every ONCE application, every Kamal or twelve-factor deployment. Writebook (basecamp,
+v1.2.2, installed from its GitHub archive) stopped `db_prepare` with "Missing
+`secret_key_base`", and the report's operator moved `db:prepare` into a unit's
+`ExecStartPre` under a hand-written environment file: a task the control plane owns,
+run where it cannot see it. `assets_precompile`'s `SECRET_KEY_BASE_DUMMY` is Rails' own
+escape for that task alone; `db:prepare` seeds, and signed ids minted under a dummy
+would be wrong.
+
+- **The file.** `<config dir>/env/<site>.env`, the site's first host name, systemd's
+  `EnvironmentFile` syntax (`NAME="value"`, the four characters systemd unescapes inside
+  double quotes escaped), for sites with `app = "rails"` or `"proxy"`. Root's, `0600`, in a
+  directory root owns alone (`0700`), because systemd reads an `EnvironmentFile` as root:
+  a file under the account's home could be swapped for a link to `/etc/shadow` and hand
+  its lines to the application. Written and read by the helper (`env_write`,
+  `env_read`), which finds the site in the configuration on disk; without the helper the
+  server keeps the same file under its own account.
+- **Names** are upper-case; refused on the way in and on the way out: every name a task's
+  environment already holds and every one that chooses or loads a program (`PATH`,
+  `LD_*`, `RUBYOPT`, `GEM_*`, `BUNDLE_*` except a private gem source's credentials, `GIT_*`,
+  `NODE_OPTIONS`, `PYTHON*`, ...), the list section 5 gave `service.env`. Values: one line
+  of UTF-8, 4 KB.
+- **Tasks** get the variables after agensio's own, never replacing one; the answer and the
+  dry run show them as `NAME=<site environment>`.
+- **Control plane**: `GET /v1/sites/NAME/env` (admin, values included, audited with the
+  names, decision 11), `POST /v1/sites/NAME/env` `{set, unset, generate}` (admin,
+  `confirm`, audited with names); `generate` fills a missing name with 64 random bytes in
+  hex and keeps an existing one, and a name in both `unset` and `generate` is rotated. MCP
+  `site_env` and `site_env_set`; `agensio ctl site-env` and `site-env-set`.
+- **`site_install`** reports `facts` for an install into the site's directory (a Gemfile,
+  Rails credentials, the Ruby `.ruby-version` pins) and, for a Rails archive without
+  credentials, generates `SECRET_KEY_BASE` (decision 12). Its next steps for a Rails site
+  are the bundle tasks with the pinned Ruby named; a site update picks the chain by what
+  is on disk.
+- **Hints**: a task whose output shows Rails' missing secret, or Bundler's "Your Ruby
+  version is X, but your Gemfile specified Y", answers with the fix.
+
+The same report, handled in the same step: the task keys became reloadable (section 12);
+a new site's next steps and the install's state the request-body limit and the error log
+names every 413 with the site, the sizes and the fix (the 2.75 MB cover that met the 1 MB
+default); the Rails refusals cover `/storage/` whole and databases, logs, keys and dumps by
+their ending, wherever the application keeps them (`storage/db/production.sqlite3`); the
+configuration document shows how root builds a pinned Ruby under `/opt`. F14 takes the
+report's other facts (section 5, "What a real application adds").

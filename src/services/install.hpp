@@ -33,7 +33,9 @@ struct Request {
 };
 
 // {"ok": bool, "error"?, "as", "files", "directories", "bytes", "downloaded", "sha256", "unwrapped"?,
-//  "created": [{"path", "owner", "mode"}], "secured": [paths made 0600]} ; a dry run answers {"ok", "dry_run": true, "as", "would_create": [...]}.
+//  "created": [{"path", "owner", "mode"}], "secured": [paths made 0600], and for an install
+//  into site_root itself "facts": {"gemfile", "credentials" (Rails'), "ruby_version"?}};
+//  a dry run answers {"ok", "dry_run": true, "as", "would_create": [...]}.
 // The walk from site_root to the target opens every component without following symlinks
 // and requires each existing one to belong to the executing account; a refusal at any
 // point removes what this call created.

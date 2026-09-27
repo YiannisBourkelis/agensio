@@ -9,6 +9,7 @@
 #include "services/tasks.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <atomic>
 #include <map>
 #include <ostream>
@@ -594,7 +595,14 @@ struct PhpPreset {
 // application routes to; the rest of the URL space stays the application's.
 const std::vector<const char*> kRailsRefused = {"/config/master.key", "/config/database.yml", "/config/credentials.yml.enc", "/config/credentials/",
                                                 "/.env", "/.env.production", "/.kamal/", "/.git/", "/Gemfile", "/Gemfile.lock",
-                                                "/log/production.log", "/storage/production.sqlite3"};
+                                                "/log/production.log", "/storage/"};
+// Endings a Rails site never answers through the application, wherever the files live:
+// databases, logs, keys and dumps (2026-09-27 Writebook report: its database is
+// storage/db/production.sqlite3, not the `rails new` layout the exact list knew). /storage/
+// is refused whole: Rails keeps its databases and Active Storage's disk files there and
+// routes none of it (Active Storage answers under /rails/active_storage/). /log/ is not, as
+// an application may route a /log/ of its own; the .log ending covers the files.
+const std::vector<std::string> kRailsRefusedEndings = {".sqlite3", ".sqlite3-wal", ".sqlite3-shm", ".sqlite3-journal", ".log", ".key", ".sql"};
 
 const std::vector<std::string> kSourceBackups = {".inc", ".bak", ".orig", ".save", ".swp", ".swo", "~",
                                                  // logs and database dumps (2026-09-23 live report: a Grav site's logs/grav.log
@@ -769,6 +777,7 @@ void apply_preset(SiteConfig& site, const std::string& where) {
             loc.methods = kFcgiMethods;
             loc.allow = allow_header(kFcgiMethods);
             loc.origin = "preset:" + site.app;
+            if (site.app == "rails") loc.deny_suffixes = kRailsRefusedEndings;  // answered 404 by the dispatcher, never proxied
             site.locations.push_back(std::move(loc));
         }
         if (site.app == "rails")
@@ -1166,6 +1175,27 @@ std::vector<fs::path> expand_include(const fs::path& base_dir, const std::string
 }
 
 }  // namespace
+
+namespace {
+std::string size_words_short(std::uint64_t bytes) {
+    char buf[32];
+    if (bytes >= (1ull << 30)) std::snprintf(buf, sizeof buf, "%.1f GB", static_cast<double>(bytes) / (1ull << 30));
+    else if (bytes >= (1ull << 20)) std::snprintf(buf, sizeof buf, "%.1f MB", static_cast<double>(bytes) / (1ull << 20));
+    else if (bytes >= 1024) std::snprintf(buf, sizeof buf, "%.1f KB", static_cast<double>(bytes) / 1024);
+    else std::snprintf(buf, sizeof buf, "%llu bytes", static_cast<unsigned long long>(bytes));
+    std::string s = buf;
+    if (const std::size_t dot = s.find(".0 "); dot != std::string::npos) s.erase(dot, 2);  // "1.0 MB" -> "1 MB"
+    return s;
+}
+}  // namespace
+
+std::string body_refused_text(const SiteConfig* site, std::string_view remote, std::uint64_t declared, std::size_t limit) {
+    const std::string sizes = "a request body of " + size_words_short(declared) + " from " + std::string(remote) + " refused with 413: ";
+    if (!site) return sizes + "above the server's max_body_size of " + size_words_short(limit);
+    const std::string name = site->server_names.empty() ? std::string("?") : site->server_names.front();
+    return "site " + name + ": " + sizes + "its max_body_size is " + size_words_short(limit) + (site->max_body_size ? "" : " (the server's default)") +
+           "; site_update with settings {max_body_size} raises it, up to [control] site_limits";
+}
 
 bool proxy_app(std::string_view app) noexcept { return app == "proxy" || app == "rails"; }
 
@@ -1747,6 +1777,7 @@ json::Value preset_catalog() {
         for (const auto& n : tasks::names("rails")) names.push(n);
         for (const auto& s : preset_secrets("rails")) secrets.push(s);
         for (const char* p : kRailsRefused) never.push(p);
+        for (const auto& e : kRailsRefusedEndings) never.push("*" + e);
         list.push(json::Value::object().set("app", "rails")
                       .set("summary", "Ruby on Rails: every request goes to the application server (Puma) on the site's upstream; root is the project "
                                       "directory, where site_task runs the preset's named commands as the site's account (gem_install_rails, rails_new, "

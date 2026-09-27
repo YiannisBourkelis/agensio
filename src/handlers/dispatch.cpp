@@ -112,6 +112,12 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
     }
     const LocationConfig* loc = &Router::location(*site, ws.path);
     if (!check_method(s, *loc, ws)) return nullptr;
+    // Endings refused before an application sees the request (a Rails site's databases,
+    // logs and keys wherever they live): the static handler checks its own locations.
+    if (loc->kind != HandlerKind::static_ && !loc->deny_suffixes.empty() && refused_suffix(ws.path, loc->deny_suffixes)) {
+        static_.error(s, 404, req.keep_alive);
+        return nullptr;
+    }
     // Static locations answer OPTIONS themselves; an application (FastCGI) gets to see it.
     if (req.method == Method::options && loc->kind == HandlerKind::static_) {
         static_.no_content(s, loc->allow);

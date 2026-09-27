@@ -1,0 +1,242 @@
+=== new (working tree)
+[info] available cores: 24 | threads: 12
+[info] tuning host for benchmark runs
+[info] setting kernel socket limits
+[info] setting UDP buffer sizes for QUIC
+[info] setting loopback MTU to 1500 (realistic Ethernet)
+[info] restarting docker daemon
+[warn] could not restart docker daemon (no sudo?)
+[info] dropping kernel caches
+[info] framework: agensio (agensio, C++)
+[info] subscribed tests: baseline,pipelined,limited-conn,json-tls,static-tls,baseline-h2,static-h2,baseline-h2c,json-h2c,baseline-h3,static-h3
+[info] building image: httparena-agensio
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 1.13kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/debian:trixie
+#2 DONE 0.7s
+
+#3 [internal] load metadata for docker.io/library/debian:trixie-slim
+#3 DONE 0.8s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [build 1/5] FROM docker.io/library/debian:trixie@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c
+#5 resolve docker.io/library/debian:trixie@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c 0.0s done
+#5 DONE 0.0s
+
+#6 [stage-1 1/5] FROM docker.io/library/debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+#6 resolve docker.io/library/debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a 0.0s done
+#6 DONE 0.0s
+
+#7 [internal] load build context
+#7 transferring context: 2.62MB done
+#7 DONE 0.0s
+
+#8 [build 4/5] COPY src.tar.gz /tmp/src.tar.gz
+#8 CACHED
+
+#9 [build 3/5] WORKDIR /src
+#9 CACHED
+
+#10 [build 5/5] RUN tar -xzf /tmp/src.tar.gz -C /src     && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DAGENSIO_TESTS=OFF -DAGENSIO_NATIVE=ON -DAGENSIO_HTTPARENA=ON     && cmake --build build --target agensio
+#10 CACHED
+
+#11 [stage-1 3/5] COPY --from=build /src/build/agensio /usr/local/bin/agensio
+#11 CACHED
+
+#12 [build 2/5] RUN apt-get update && apt-get install -y --no-install-recommends         build-essential cmake ninja-build git ca-certificates libssl-dev zlib1g-dev     && rm -rf /var/lib/apt/lists/*
+#12 CACHED
+
+#13 [stage-1 4/5] COPY agensio.toml start.sh /etc/agensio/
+#13 CACHED
+
+#14 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends libssl3t64 zlib1g     && rm -rf /var/lib/apt/lists/*
+#14 CACHED
+
+#15 [stage-1 5/5] RUN chmod 0755 /etc/agensio/start.sh
+#15 CACHED
+
+#16 exporting to image
+#16 exporting layers done
+#16 exporting manifest sha256:34a37bed2988161f82a9759ad1cdd509fdec9fa55f2afd5655c7ecb3521c50d8 done
+#16 exporting config sha256:3d62d6911d01abd7338d77e0d6518c11eafea67bd3e88c45513d5d29928d72c5 done
+#16 exporting attestation manifest sha256:b5414c60decf7ec3761aab3fb6a857d52117832f1c37ea3155349edc6eef14dd 0.0s done
+#16 exporting manifest list sha256:8a4bf970a8e20ccce2d37ff5ed1389d667faebc815822d8151ae1d84c1e09081
+#16 exporting manifest list sha256:8a4bf970a8e20ccce2d37ff5ed1389d667faebc815822d8151ae1d84c1e09081 0.0s done
+#16 naming to docker.io/library/httparena-agensio:latest done
+#16 unpacking to docker.io/library/httparena-agensio:latest done
+#16 DONE 0.1s
+
+==============================================
+=== agensio / static-tls / 512c (tool=wrk) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   811.36us    2.05ms  51.15ms   97.61%
+    Req/Sec    52.77k     5.55k   75.58k    93.07%
+  3181964 requests in 5.10s, 48.98GB read
+Requests/sec: 623871.45
+Transfer/sec:      9.60GB
+[info] CPU 996.9% | Mem 102MiB
+
+[run 2/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   815.52us  808.18us  18.82ms   94.58%
+    Req/Sec    51.69k     4.59k   81.50k    85.15%
+  3118839 requests in 5.10s, 48.01GB read
+Requests/sec: 611505.04
+Transfer/sec:      9.41GB
+[info] CPU 1106.0% | Mem 104MiB
+
+[run 3/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   704.80us  601.25us  12.72ms   94.34%
+    Req/Sec    52.94k     2.70k   68.51k    81.83%
+  3217637 requests in 5.10s, 49.53GB read
+Requests/sec: 630505.44
+Transfer/sec:      9.70GB
+[info] CPU 1053.3% | Mem 107MiB
+
+=== Best: 630505 req/s (CPU: 1053.3%, Mem: 107MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+[info] done
+[info] restoring loopback MTU to 65536
+exit 0
+=== base 26b4801 (alpha.26)
+[info] available cores: 24 | threads: 12
+[info] tuning host for benchmark runs
+[info] setting kernel socket limits
+[info] setting UDP buffer sizes for QUIC
+[info] setting loopback MTU to 1500 (realistic Ethernet)
+[info] restarting docker daemon
+[warn] could not restart docker daemon (no sudo?)
+[info] dropping kernel caches
+[info] framework: agensio (agensio, C++)
+[info] subscribed tests: baseline,pipelined,limited-conn,json-tls,static-tls,baseline-h2,static-h2,baseline-h2c,json-h2c,baseline-h3,static-h3
+[info] building image: httparena-agensio
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 1.13kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/debian:trixie-slim
+#2 DONE 0.2s
+
+#3 [internal] load metadata for docker.io/library/debian:trixie
+#3 DONE 0.2s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [build 1/5] FROM docker.io/library/debian:trixie@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c
+#5 resolve docker.io/library/debian:trixie@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c 0.0s done
+#5 DONE 0.0s
+
+#6 [stage-1 1/5] FROM docker.io/library/debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+#6 resolve docker.io/library/debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a 0.0s done
+#6 DONE 0.0s
+
+#7 [internal] load build context
+#7 transferring context: 2.52MB done
+#7 DONE 0.0s
+
+#8 [build 3/5] WORKDIR /src
+#8 CACHED
+
+#9 [stage-1 4/5] COPY agensio.toml start.sh /etc/agensio/
+#9 CACHED
+
+#10 [build 2/5] RUN apt-get update && apt-get install -y --no-install-recommends         build-essential cmake ninja-build git ca-certificates libssl-dev zlib1g-dev     && rm -rf /var/lib/apt/lists/*
+#10 CACHED
+
+#11 [build 5/5] RUN tar -xzf /tmp/src.tar.gz -C /src     && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DAGENSIO_TESTS=OFF -DAGENSIO_NATIVE=ON -DAGENSIO_HTTPARENA=ON     && cmake --build build --target agensio
+#11 CACHED
+
+#12 [build 4/5] COPY src.tar.gz /tmp/src.tar.gz
+#12 CACHED
+
+#13 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends libssl3t64 zlib1g     && rm -rf /var/lib/apt/lists/*
+#13 CACHED
+
+#14 [stage-1 3/5] COPY --from=build /src/build/agensio /usr/local/bin/agensio
+#14 CACHED
+
+#15 [stage-1 5/5] RUN chmod 0755 /etc/agensio/start.sh
+#15 CACHED
+
+#16 exporting to image
+#16 exporting layers done
+#16 exporting manifest sha256:f1e4a070b0cf2b851368b98254f9b9fd941e4d194c65ba958d9156c095e47257 done
+#16 exporting config sha256:9e2d0e01b82ac5e234a6792f053875b9b5e1c879babfbd9f201968fd6ad5af85 done
+#16 exporting attestation manifest sha256:5befeb0c1715ba1e6904916b3d8cbe77df1397131d564f09d0bd8ccfe25b051e 0.0s done
+#16 exporting manifest list sha256:4b2cbd8b517c360f11284cffbf537d96bc22575fd07c2c5667bc92dd29a21292
+#16 exporting manifest list sha256:4b2cbd8b517c360f11284cffbf537d96bc22575fd07c2c5667bc92dd29a21292 0.0s done
+#16 naming to docker.io/library/httparena-agensio:latest done
+#16 unpacking to docker.io/library/httparena-agensio:latest 0.0s done
+#16 DONE 0.1s
+
+==============================================
+=== agensio / static-tls / 512c (tool=wrk) ===
+==============================================
+[info] waiting for server...
+[info] server ready
+
+[run 1/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   847.83us    1.80ms  48.00ms   97.00%
+    Req/Sec    52.20k     5.09k   64.43k    89.20%
+  3173400 requests in 5.10s, 48.85GB read
+Requests/sec: 621832.20
+Transfer/sec:      9.57GB
+[info] CPU 1021.1% | Mem 101MiB
+
+[run 2/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   773.07us  611.29us  18.88ms   94.06%
+    Req/Sec    52.29k     3.16k   69.35k    80.66%
+  3174690 requests in 5.10s, 48.87GB read
+Requests/sec: 622091.19
+Transfer/sec:      9.58GB
+[info] CPU 1173.8% | Mem 100MiB
+
+[run 3/3]
+Running 5s test @ https://localhost:8081
+  12 threads and 512 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   774.76us  589.66us  13.83ms   92.74%
+    Req/Sec    51.94k     3.73k   84.45k    82.81%
+  3126699 requests in 5.10s, 48.13GB read
+Requests/sec: 613068.86
+Transfer/sec:      9.44GB
+[info] CPU 1081.4% | Mem 104MiB
+
+=== Best: 622091 req/s (CPU: 1173.8%, Mem: 100MiB) ===
+[info] dry-run — not saving (use --save to persist)
+httparena-bench-agensio
+httparena-bench-agensio
+[info] done
+[info] restoring loopback MTU to 65536
+exit 0

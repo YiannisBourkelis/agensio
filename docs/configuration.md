@@ -486,8 +486,13 @@ yet: every request goes to Puma, and Rails' own public file server answers what 
 scanners probe are answered 404 by agensio itself and never reach the application:
 `/config/master.key`, `/config/database.yml`, `/config/credentials.yml.enc`,
 `/config/credentials/`, `/.env`, `/.env.production`, `/.kamal/`, `/.git/`, `/Gemfile`,
-`/Gemfile.lock`, `/log/production.log`, `/storage/production.sqlite3` (`presets` lists them
-under `never_served`; a hand-written location of the same path wins). Every task prints
+`/Gemfile.lock`, `/log/production.log` and everything below `/storage/` (Rails keeps its
+databases and Active Storage's disk files there and routes none of it; Active Storage
+answers under `/rails/active_storage/`), and any path ending in `.sqlite3`,
+`.sqlite3-wal`, `.sqlite3-shm`, `.sqlite3-journal`, `.log`, `.key` or `.sql`, in any case,
+wherever the application keeps its files (Writebook's database is
+`storage/db/production.sqlite3`). `presets` lists them under `never_served`; a hand-written
+location of the same path wins, and a hand-written `/` location replaces the endings too. Every task prints
 "Using vips to process variants requires the libvips library" until `libvips42` is
 installed; only Active Storage's image variants need it.
 
@@ -506,7 +511,18 @@ The application server itself is not started by agensio yet (roadmap F14): until
 systemd unit runs Puma as the site's account with the environment the tasks use,
 `docs/examples/puma.service`, binding loopback (`-b tcp://127.0.0.1:3000`; the `puma.rb`
 Rails generates binds every address, which would publish the application beside
-agensio, without its TLS and refusals).
+agensio, without its TLS and refusals). The unit loads the site's environment file
+(section 15, "The site's environment"), so a secret is written once, through the control
+plane, and the tasks and Puma both see it.
+
+An existing application (a GitHub release tarball, an upload) goes in with `site-install`,
+then `bundle_install`, `db_prepare` and `assets_precompile`; the install's answer says so,
+names the Ruby the application pins in `.ruby-version` when it has one, and, when the
+archive came without Rails credentials (`config/credentials.yml.enc`, as every ONCE
+application such as Writebook and every Kamal deployment), generates `SECRET_KEY_BASE`
+into the site's environment, once. A new site's answer also states its request-body
+limit: 1 MB unless `settings.max_body_size` raises it, and an upload above it is a 413 the
+application never sees (the error log names the site, the size and the limit).
 
 ## 5. Customising a preset
 
@@ -859,6 +875,11 @@ suffix locations cannot rewrite.
   "forwarded"` sends RFC 7239 `Forwarded` instead, `"both"` sends both, `"off"` neither.
 - Every other field except the hop-by-hop ones (`Connection` and whatever it lists,
   `Keep-Alive`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`, `Expect`) and the framing.
+- One `Cookie` line, whatever the client sent: a browser sends one `cookie` field per
+  cookie over HTTP/2 and HTTP/3, and they are joined with `; ` in the order received (RFC
+  9113 8.2.3, RFC 9114 4.2.1), as are two `Cookie` lines from an HTTP/1.1 client, so an
+  origin that reads the first line only (Rack, Puma) sees every cookie. FastCGI and CGI get
+  the same single `HTTP_COOKIE`.
 - The body with a Content-Length when its size is known (also after agensio collected a
   chunked body), chunked otherwise. Keep-alive to the origin, HTTP/1.1: nothing to enable.
 
@@ -1146,7 +1167,7 @@ install_ca = "/etc/ssl/mirror-ca.pem"  # PEM bundle site-install trusts instead 
 upload_max = "512M"                    # the largest archive `agensio ctl upload` may store
 site_limits = { max_body_size = "512MB", memory_limit = "512M", max_execution_time = 300, max_input_time = 300, children = 32, max_requests = 1000000 }
                                        # the ceilings site-create / site-update may raise a site's limits to (these are the defaults)
-runtimes = { ruby = "/usr/bin" }       # where site tasks find ruby, gem and bundle (also node, php, python3); root's files only
+runtimes = { ruby = "/usr/bin" }       # where site tasks find ruby, gem and bundle (also node, php, python3); root's files only; reload applies it
 task_limits = { timeout = 1200, processes = 512 }   # a task's wall-clock seconds and the processes its account may have
 task_network = true                    # tasks that download (gem install, rails new, bundle install) may run
 ```
@@ -1200,9 +1221,11 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 | `cert-renew NAME` | operator | orders the site's automatic certificate again now |
 | `upload NAME [FILE]` | operator | stores FILE (stdin by default) as `<state_dir>/uploads/NAME`, the server's own directory (0700); `PUT /v1/uploads/NAME` with the raw bytes on the socket; no `--yes`; at most `upload_max`; names are plain file names (letters, digits, `.`, `_`, `-`, no leading dot); a partial transfer leaves nothing |
 | `uploads-delete NAME` | operator | removes a stored upload |
-| `site-install NAME` | admin | puts an application's files into the site's directory (the `root` as given, above a preset's `public/` or `web/`; `--path SUB` for a subdirectory such as `wp-content/plugins/NAME`, with `--create-path` when it does not exist yet) **as the site's account**, from one source: `--url https://...` (a `.tar.gz`, `.tar` or `.zip`), `--file UPLOAD` (a stored upload), or nothing, which takes the preset's official archive (`presets` lists it under `source`; `--version V` picks a release, default the newest; WordPress and Drupal have one, Laravel is made with composer). `--sha256 HEX` refuses an archive whose digest differs. `--strip 0|1` keeps or unwraps a single top directory (default: unwrap when there is exactly one). `--dry-run` takes the same walk as the real call, as the same account, and answers with the target, the account and `would_create`, or with the refusal the real call would meet; nothing is downloaded or written. Answers 201 with `files`, `bytes`, `sha256`, `unwrapped`, `created` (each directory made, with owner and mode), `next_steps`; 409 with the reason and nothing left behind; 403 when `install = false` and a URL was given; 422 when no source can be found |
+| `site-install NAME` | admin | puts an application's files into the site's directory (the `root` as given, above a preset's `public/` or `web/`; `--path SUB` for a subdirectory such as `wp-content/plugins/NAME`, with `--create-path` when it does not exist yet) **as the site's account**, from one source: `--url https://...` (a `.tar.gz`, `.tar` or `.zip`), `--file UPLOAD` (a stored upload), or nothing, which takes the preset's official archive (`presets` lists it under `source`; `--version V` picks a release, default the newest; WordPress and Drupal have one, Laravel is made with composer). `--sha256 HEX` refuses an archive whose digest differs. `--strip 0|1` keeps or unwraps a single top directory (default: unwrap when there is exactly one). `--dry-run` takes the same walk as the real call, as the same account, and answers with the target, the account and `would_create`, or with the refusal the real call would meet; nothing is downloaded or written. Answers 201 with `files`, `bytes`, `sha256`, `unwrapped`, `created` (each directory made, with owner and mode), `facts` for an install into the site's directory itself (`gemfile`, `credentials`: Rails' `config/credentials.yml.enc` or `config/credentials/production.yml.enc`, `ruby_version`: what `.ruby-version` pins), `next_steps` (for `app = "rails"`: the pinned Ruby, then `bundle_install`, `db_prepare`, `assets_precompile` and Puma; for the others the application's own setup in the browser; for every site but a static one its request-body limit), and `done` when a Rails archive without credentials got its `SECRET_KEY_BASE` generated into the site's environment (once: an existing value is kept); 409 with the reason and nothing left behind; 403 when `install = false` and a URL was given; 422 when no source can be found |
 | `site-copy NAME --from SUB --to SUB` | admin | copies one regular file of the site to another path of the same site **as the site's account**: the drop-in files applications ship as templates (`wp-content/db.php` from the SQLite plugin's `db.copy`, `advanced-cache.php` or `object-cache.php` from a caching plugin, Drupal's `sites/default/settings.php` from `default.settings.php`). Both paths are relative to the site's directory and reached by the same walk as an install; `from` must be an existing regular file (no directory, no symlink); the destination's directory must exist (`site-install --create-path` makes one); an existing destination is refused unless `--overwrite`, and the answer then reports the replaced file's size and mtime. The new file gets the directory's pattern (`0640` in a `2750` directory, the execute bits when the source has them), or `0600` when it is one of the preset's credential files (`secured: true`); written under a temporary name and linked or renamed into place, so a refusal leaves nothing; the configuration is validated afterwards (see below). Never across sites, never content from the caller, never a directory, no chmod or chown. `--dry-run` runs the same checks. Answers 201 (200 when replaced) with `from`, `to`, `as`, `bytes`, `mode`, `replaced`; 409 with the reason |
-| `site-task NAME TASK [--param KEY=VALUE]...` | admin | runs one named task of the site's preset **as the site's account** in the site's directory (`root`): a row of the task table, never a command line (below). `--dry-run` answers with the exact argv, the account, the directory, the environment and the limits, and runs nothing. Answers 200 when the task exited 0, 409 when it failed, was stopped at its time limit or was refused, each with `argv` (what ran, the interpreter resolved), `as`, `cwd`, `exit` or `signal`, `timed_out`, `duration_ms`, `output` (the first 16 KB and the last 48 KB of stdout and stderr together, `truncated` and `output_bytes` when longer), `secured` (credential paths made private), and `run_as_root` when the interpreter is missing; 400 for an unknown task or a parameter that does not match; 422 for a preset without tasks; 409 while another task runs on the same site |
+| `site-task NAME TASK [--param KEY=VALUE]...` | admin | runs one named task of the site's preset **as the site's account** in the site's directory (`root`): a row of the task table, never a command line (below). `--dry-run` answers with the exact argv, the account, the directory, the environment and the limits, and runs nothing. Answers 200 when the task exited 0, 409 when it failed, was stopped at its time limit or was refused, each with `argv` (what ran, the interpreter resolved), `as`, `cwd`, `env` (the site's own variables as `NAME=<site environment>`, never their values), `exit` or `signal`, `timed_out`, `duration_ms`, `output` (the first 16 KB and the last 48 KB of stdout and stderr together, `truncated` and `output_bytes` when longer), `secured` (credential paths made private), `hint` when the failure has a known cause (Rails' "Missing secret_key_base": generate one into the site's environment; "Your Ruby version is X, but your Gemfile specified Y": a Ruby for one application, below), and `run_as_root` when the interpreter is missing; 400 for an unknown task or a parameter that does not match; 422 for a preset without tasks; 409 while another task runs on the same site |
+| `site-env NAME` | admin | the site's environment (`app = "rails"` or `"proxy"`): `variables` with each name and value, and the file; every read is audited with the names it returned. 422 for a site of another preset |
+| `site-env-set NAME [--set KEY=VALUE]... [--unset KEY]... [--generate KEY]...` | admin | changes the site's environment: `--set` adds or replaces, `--unset` removes, `--generate` puts a random secret (128 hex digits) under a name that is missing and keeps an existing one; a name in both `--unset` and `--generate` is rotated. Answers 200 with the names under `set`, `unset`, `generated`, `kept`, `absent` and `names` (every name now in the file), never a value, and the restart of the application's service as a next step; 400 for a name or value the rules refuse (below), 409 when the helper refuses |
 
 **What `site-task` enforces.** A task is a row of `src/services/tasks.cpp`: a preset, a
 name, an interpreter (a runtime and a program in it), a fixed argument list, typed
@@ -1245,6 +1268,33 @@ install -y ruby ruby-dev ruby-bundler build-essential libyaml-dev`). What the in
 then loads from the site (the Gemfile, `vendor/bundle`, `bin/rails`) is the site's code
 and runs as the site's account.
 
+**A Ruby for one application.** An application whose Gemfile says `ruby file:
+".ruby-version"` (Writebook and most applications made with Rails 7.1 or later) needs
+exactly that version, and `bundle_install` stops at once with "Your Ruby version is 3.3.8,
+but your Gemfile specified 3.4.7" otherwise (its answer's `hint` says what follows here).
+`site-install` names the pinned version in its next steps. Root builds it once under
+`/opt`, then points the key at it; a reload applies it, no restart:
+
+```sh
+apt-get install -y build-essential autoconf libssl-dev libyaml-dev zlib1g-dev libffi-dev libgmp-dev rustc
+cd /usr/local/src
+curl -fsSLO https://cache.ruby-lang.org/pub/ruby/3.4/ruby-3.4.7.tar.gz
+sha256sum ruby-3.4.7.tar.gz                # compare with https://www.ruby-lang.org/en/downloads/
+tar xzf ruby-3.4.7.tar.gz && cd ruby-3.4.7
+./configure --prefix=/opt/ruby-3.4.7 --enable-shared --disable-install-doc
+make -j"$(nproc)" && make install
+# /etc/agensio/agensio.toml, [control]: runtimes = { ruby = "/opt/ruby-3.4.7/bin" }
+agensio reload
+```
+
+`/opt/ruby-3.4.7` is root's and writable by root alone, which is what the interpreter rule
+checks; `site-tasks NAME` then shows every task's interpreter under it with `ok: true`,
+and the tasks run with that directory first on `PATH`, which matters because `bundle
+exec rails` starts `bin/rails` through `#!/usr/bin/env ruby`. The Puma unit needs the same
+directory first on its `PATH` and its `bundle` in `ExecStart` (`docs/examples/puma.service`).
+`rustc` is only for YJIT; one runtime directory serves every site of the host, so sites
+that pin different versions share the newest only when their Gemfiles allow it.
+
 A task runs as the site's `user`, or for a site without one as the owner of the site's
 directory when that is a site account or the server's own, the account rule of
 `site-install`; never as root or a login account. With the provisioning helper the helper
@@ -1253,7 +1303,8 @@ server sends names and parameters only), creates the account's home when it is m
 (`<state_dir>/<user>`, `0700`, with `tmp/`) and runs the task in a child that has become
 the account; without the helper it runs as the server's own account, in a directory that
 account owns. The environment is built, never inherited: `PATH` (the runtime's directory
-first), `HOME`, `TMPDIR`, `LANG=C.UTF-8` and the preset's variables. The working directory
+first), `HOME`, `TMPDIR`, `LANG=C.UTF-8`, the preset's variables, then the site's own from
+its environment file (below), which never replace one of these. The working directory
 is reached without following a symlink; stdin is `/dev/null`; the umask is `027` (files
 `0640`, directories `2750` in the site's tree, readable by the server through its
 group). Limits: `[control] task_limits` (`timeout`, 1200 s by default, after which the
@@ -1261,7 +1312,8 @@ task's process group gets SIGTERM and ten seconds later SIGKILL; `processes`, 51
 `RLIMIT_NPROC` of the account while the task runs, threads included), 4096 open files,
 no core files. When the program exits, whatever it left running in its process group is
 killed. One task per site at a time. `[control] task_network = false` refuses the tasks
-that download. The three keys are read at start (restart-only).
+that download. The three keys apply on reload: the helper reads them from root's file for
+every task (only the main file can hold `[control]`; included files carry sites alone).
 
 After every run the credential sweep makes the preset's credential files the site's
 alone: the hosting rule's list (for Rails `config/master.key`, `config/credentials/`,
@@ -1274,6 +1326,43 @@ directory's group), never through a symlink. Then the configuration is validated
 validator's `errors`. The audit log gets one line before the task starts (the task and its
 parameters) and one after, with the exact argv that ran, the account, the directory and
 how it ended; the output stays in the answer.
+
+**The site's environment.** An application reads settings and secrets from its
+environment: a Rails application without credentials (every ONCE application such as
+Writebook, every Kamal or twelve-factor deployment) reads `SECRET_KEY_BASE` there and
+stops with "Missing secret_key_base" without it; others read `DATABASE_URL`, a mail
+password or an API key. A site with `app = "rails"` or `"proxy"` has one file for them,
+`env/<site>.env` beside the main configuration (`/etc/agensio/env/ag6.example.com.env`),
+in systemd's `EnvironmentFile` syntax (`NAME="value"` lines), which the site's tasks get
+after the variables agensio sets and its application service loads
+(`EnvironmentFile=-/etc/agensio/env/<site>.env` in `docs/examples/puma.service`). It is
+written through the control plane (`site-env-set`, MCP `site_env_set`) and read back by an
+admin (`site-env`, `site_env`), both audited with names only:
+
+```sh
+agensio ctl site-env-set ag6.example.com --generate SECRET_KEY_BASE --set DATABASE_URL=sqlite3:storage/db/production.sqlite3 --yes --reason "Writebook"
+agensio ctl site-env ag6.example.com
+systemctl restart agensio-app-ag6          # the application reads it at start; the tasks from their next run
+```
+
+The file is root's, `0600`, in a directory root owns alone (`0700`), written and read by the
+provisioning helper: systemd reads an `EnvironmentFile` as root, so a file the site's
+account could replace would let it link any root-readable file into its own environment,
+and the server itself cannot read it (a compromised server reads it through the helper,
+as an admin can). A server started without the helper keeps the same file under its own
+account instead. Names are upper-case letters, digits and `_`, never one agensio sets for a
+task or one that changes which program runs or what it loads (`PATH`, `HOME`, `TMPDIR`,
+`LANG`, `RAILS_ENV`, `SECRET_KEY_BASE_DUMMY`, `GEM_*`, `BUNDLE_*` other than a private gem
+source's credentials such as `BUNDLE_GEMS__CONTRIBSYS__COM`, `LD_*`, `DYLD_*`, `RUBYOPT`,
+`RUBYLIB`, `NODE_OPTIONS`, `PYTHON*`, `GIT_*`, `BASH_ENV`, the systemd socket variables);
+values are one line of UTF-8, at most 4 KB, 128 variables in all. A file root edits by hand
+is read the way systemd reads it (quoted or not, comments), but a line that goes on over
+the next one, a name the rules refuse or a file that is not root's `0600` stops every task
+of the site with the reason. `site-install` generates `SECRET_KEY_BASE` itself when a
+Rails archive came without credentials (never for one with them: an environment value
+would override the application's own secret and sign its users out); `--generate` never
+replaces a value, and rotating one is `--unset NAME --generate NAME` in one call. The file
+stays when the site is deleted, as the site's files do.
 
 **What `site-install` enforces.** The account that installs is the site's `user`, or for
 a site without one the owner of the site's directory, which must be a site account

@@ -260,10 +260,31 @@ Plan build(const Row& row, const json::Value& params, const Context& ctx, const 
     if (const Family* f = family(row.app))
         for (const auto& [k, v] : f->env) plan.env.push_back(std::string(k) + "=" + expand(v, params, ctx));
     for (const auto& [k, v] : row.env) plan.env.push_back(std::string(k) + "=" + expand(v, params, ctx));
+    // The site's own variables last, and none replaces one set above (appenv refuses those
+    // names already; this keeps the rule where the environment is made).
+    const std::size_t fixed = plan.env.size();
+    for (const auto& [k, v] : ctx.app_env) {
+        const std::string prefix = k + "=";
+        if (std::none_of(plan.env.begin(), plan.env.begin() + static_cast<std::ptrdiff_t>(fixed), [&](const std::string& e) { return e.starts_with(prefix); }))
+            plan.env.push_back(prefix + v);
+    }
     plan.cwd = ctx.root;
     plan.timeout = std::min(row.timeout, ctx.timeout);
     plan.processes = ctx.processes;
     return plan;
+}
+
+std::string failure_hint(const Row& row, std::string_view output, const Context& ctx) {
+    if (std::string_view(row.app) != "rails") return "";
+    if (output.find("Missing `secret_key_base`") != std::string_view::npos || output.find("Missing secret_key_base") != std::string_view::npos)
+        return "the application reads SECRET_KEY_BASE from its environment and has no Rails credentials (every ONCE application, every "
+               "Kamal deployment): site_env_set with generate: [\"SECRET_KEY_BASE\"] puts a new secret into the site's environment file, "
+               "which the tasks and the application's service read; then run the task again";
+    if (const std::size_t at = output.find("Your Ruby version is "); at != std::string_view::npos && output.find("but your Gemfile specified", at) != std::string_view::npos)
+        return "the application pins another Ruby than the one [control] runtimes gives (ruby = \"" + ctx.runtime_dir +
+               "\"): root installs that version under /opt, points runtimes.ruby at its bin directory in the main configuration file and "
+               "runs agensio reload (docs/configuration.md 15, a Ruby for one application); nothing was installed";
+    return "";
 }
 
 #ifndef _WIN32
@@ -745,7 +766,12 @@ json::Value execute(const Request& req) {
     const Plan plan = build(row, req.params, req.ctx, program);
     json::Value argv = json::Value::array(), env = json::Value::array();
     for (const auto& a : plan.argv) argv.push(a);
-    for (const auto& e : plan.env) env.push(e);
+    for (const auto& e : plan.env) {
+        // The site's own variables are secrets (SECRET_KEY_BASE): the answer names them.
+        const std::string_view name = std::string_view(e).substr(0, e.find('='));
+        const bool own = std::any_of(req.ctx.app_env.begin(), req.ctx.app_env.end(), [&](const auto& kv) { return kv.first == name; });
+        env.push(own ? std::string(name) + "=<site environment>" : e);
+    }
     json::Value r = json::Value::object().set("task", row.name).set("as", account).set("cwd", plan.cwd).set("argv", std::move(argv)).set("env", std::move(env))
                         .set("network", row.network)
                         .set("limits", json::Value::object().set("timeout", static_cast<double>(plan.timeout)).set("processes", static_cast<double>(plan.processes))
@@ -785,6 +811,7 @@ json::Value execute(const Request& req) {
         else if (!clean) what = exit.is_null() ? "did not end after SIGKILL" : "exited with status " + std::to_string(static_cast<int>(exit.num()));
         else what = "ran, but credential files could not be made private: " + swept["exposed"].items().front().str();
         r.set("error", "task " + std::string(row.name) + " " + what + "; the output says why");
+        if (std::string hint = failure_hint(row, std::string(result.get("output")), req.ctx); !hint.empty()) r.set("hint", std::move(hint));
     }
     return r;
 }

@@ -696,7 +696,7 @@ private:
         scratch.clear();
         const auto r = decoder_.decode(block_, scratch, live_->max_header_size,
                                        [&](std::string_view n, std::string_view v, hpack::Decoder::Origin o) {
-                                           return http::sink_field(seen, req, n, v, o);
+                                           return http::sink_field(seen, req, s.cookie, n, v, o);
                                        });
         switch (r) {
             case hpack::Decoder::Result::ok: break;
@@ -724,7 +724,11 @@ private:
             req.chunked = !s.length_known;  // "length unknown" for the handlers
             req.body = &s.body_source;
             s.body_limit = body_limit(req.host);
-            if (s.length_known && s.content_length > s.body_limit) return fail_stream(s, 413);
+            if (s.length_known && s.content_length > s.body_limit) {
+                if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::warn))
+                    log->warn(body_refused_text(listener_->router.site(req.host), remote_text(), s.content_length, s.body_limit));
+                return fail_stream(s, 413);
+            }
             // The receive window follows the body limit, so an upload runs at the consumer's pace.
             const std::uint64_t want = std::min<std::uint64_t>(std::max<std::uint64_t>(s.body_limit, 1), kStreamWindowMax);
             if (want > kDefaultWindow) {
