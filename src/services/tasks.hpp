@@ -154,6 +154,10 @@ std::string failure_hint(const Row& row, std::string_view output, const Context&
 // without config/database.yml leaves the bundle with no database driver). "" when none; else
 // the task answers 409 with it.
 std::string output_problem(const Row& row, std::string_view output);
+// One line that says what a successful run did, from its output or the files it left
+// ("240 migrations applied", Bundler's closing line, "public/assets holds 39 files"); "" when
+// there is nothing to add. `root_fd` the site's directory, or -1.
+std::string summarize(const Row& row, std::string_view output, int root_fd);
 
 // The row's `needs` (or, with `after`, its `produces`) against the filesystem, relative
 // paths below `root_fd`: "" when every one exists, else the refusal naming the first

@@ -430,10 +430,19 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   `plugins_migrate`; `site-install --version`); `agensio ctl site-unit NAME` / MCP
   `site_service_unit` renders the Puma unit from the site and `[control] runtimes` for root
   (`control::service_unit`, F14's renderer in read-only form). `tests/redmine-install.sh`
-  installs Redmine 7.0.1 through the control plane. Security page row 29. `app = "rails"` is the proxy preset plus its tasks and credential
-  files; Puma is started by `docs/examples/puma.service` until F14. `tests/tasks.sh`
+  installs Redmine 7.0.1 through the control plane. Security page row 29. The service in
+  sight (alpha.34, design section 15): `site-service` / MCP `site_service_status` (viewer)
+  and `site-service-logs` / `site_service_logs` (admin, audited) read the site's
+  `agensio-app-USER.service` through the helper (`app_status`, `app_logs`: `systemctl show`
+  and `journalctl -u` with fixed arguments, the unit derived from the account on disk),
+  health's `app_check` gives `site_service_missing` / `_down` / `_failed`; starting and
+  restarting stays root's, the answers carry the line. Task answers are a summary plus the
+  last 4 KB (success) or first 4 KB and last 12 KB (failure) of up to 1 MB kept per site,
+  the rest through `site-task-output` / `site_task_output` (admin). Security page row 30.
+  `app = "rails"` is the proxy preset plus its tasks and credential
+  files; Puma is started by the unit `site-unit` renders until F14. `tests/tasks.sh`
   (root devbox, fake interpreters), `tests/rails.sh` (real Ruby and rubygems.org, the
-  whole workflow). Rule for every change here: the security page rows 26 and 27 and the
+  whole workflow). Rule for every change here: the security page rows 26 to 30 and the
   MCP texts move with it.
 - **Application install** (F9, `src/services/archive.*`, `fetch.*`, `install.*`):
   `agensio ctl site-install NAME [--url | --file | --version]` fills a site's empty

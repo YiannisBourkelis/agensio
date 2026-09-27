@@ -1,4 +1,41 @@
 # Changelog
+## 0.1.0-alpha.34 (unreleased)
+
+From the alpha.33 report (Redmine 7.0.1 installed and serving through MCP; the service
+behind it was the blind spot, and task answers were too large for the MCP host):
+
+- **The application service is visible.** `site_service_status` (viewer; `agensio ctl
+  site-service NAME`) reads a Rails or Redmine site's `agensio-app-USER.service` through the
+  root helper with `systemctl show` and fixed properties (loaded, active, failed, since
+  when, pid, exit status, memory, restarts, enabled at boot), with a summary and next
+  steps: `site_service_unit` when no unit is installed, `site_service_logs` and root's
+  restart line when it failed. `site_service_logs` (admin, audited; `agensio ctl
+  site-service-logs NAME [--lines N] [--since 3h]`) returns the unit's journal
+  (`journalctl -u` with fixed options, 1 to 1000 lines, a bounded `since`). The unit
+  comes from the site's account in the configuration on disk, never from the call.
+  Starting and restarting it stays root's.
+- **Health reports a service that does not run.** One `systemctl show` for every Rails
+  site with its own account (helper op `app_check`, never waited for while a task holds
+  the helper): `site_service_missing` (info), `site_service_down` and
+  `site_service_failed` (warnings with the logs tool and the root line).
+- **Task answers are short.** A task keeps up to 1 MB of its output (its first 256 KB and
+  last 768 KB beyond that). The answer carries the last 4 KB on success, and the first
+  4 KB and last 12 KB on a failure, with `truncated` and a summary where the output has
+  one: the migrations applied, `Bundle complete!`, Redmine's default data, the number of
+  files in `public/assets`. `site_task_output` (admin; `agensio ctl site-task-output NAME
+  [--offset N] [--length N] [--raw]`) reads the whole output in 64 KB slices until the
+  next task or a restart. The alpha.33 run's 68 KB answers overflowed the MCP host.
+- **Restart lines where they apply.** After `bundle_install`, `db_migrate`, `db_prepare`,
+  `plugins_migrate` or `assets_precompile` on a Rails site with its own account,
+  `next_steps` carries `systemctl restart agensio-app-USER.service`. `site_env_set`'s step
+  names the unit `site_service_unit` renders, not `docs/examples/puma.service`.
+- **Smaller fixes from the same report.**
+  - A Redmine site's next steps list only the steps still open on disk: `database.yml`,
+    `Gemfile.local`, `vendor/bundle` and `public/assets` decide.
+  - The body-limit line is gone for a site with its own `max_body_size`.
+  - `Gemfile.local` says why Bundler warns about Puma twice.
+  - `/Gemfile.local` is refused at the edge like `/Gemfile`.
+
 ## 0.1.0-alpha.33 (2026-09-27)
 
 From "wall 1", Redmine 7.0.1 through MCP alone (its archive ships only

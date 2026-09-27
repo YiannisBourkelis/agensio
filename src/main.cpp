@@ -45,7 +45,7 @@ void usage() {
                  "                           [--status 5xx|4xx|all] [--limit N]\n"
                  "                      Change (need --yes, take --reason TEXT): reload | logs-reopen |\n"
                  "                      site-create --domain D [--alias A]... [--https auto|none] [--cert F --key F]\n"
-                 "                           [--user U|--no-user] [--group G] [--app static|php|laravel|drupal|wordpress|grav|proxy|rails]\n"
+                 "                           [--user U|--no-user] [--group G] [--app static|php|laravel|drupal|wordpress|grav|proxy|rails|redmine]\n"
                  "                           [--root DIR] [--upstream URL] [--php-socket S] [--php-children N]\n"
                  "                           [--no-redirect] [--hsts] [--listen-plain A] [--listen-tls A]\n"
                  "                      site-update NAME (same flags) | site-disable NAME | site-enable NAME |\n"
@@ -56,6 +56,9 @@ void usage() {
                  "                      site-task NAME TASK [--param KEY=VALUE]... [--dry-run] (site-tasks NAME lists them)\n"
                  "                      site-env-set NAME [--set KEY=VALUE]... [--unset KEY]... [--generate KEY]...\n"
                  "                           (site-env NAME [--reveal KEY]... shows names, lengths, fingerprints; admin)\n"
+                 "                      Rails service (read): site-unit NAME [--raw] | site-service NAME |\n"
+                 "                           site-service-logs NAME [--lines N] [--since 3h] [--raw] (admin) |\n"
+                 "                           site-task-output NAME [--offset N] [--length N] [--raw] (admin)\n"
                  "                      site-update NAME --set KEY=VALUE ... (settings [NAME] lists the keys and ceilings)\n"
                  "                      Uploads: upload NAME [FILE] (stdin by default) | uploads | uploads-delete NAME\n"
                  "  mcp                 Model Context Protocol server on stdin/stdout for an AI agent host,\n"
@@ -122,6 +125,11 @@ int main(int argc, char** argv) {
                 std::cout << "usage: agensio ctl <command> [options] [--socket PATH] [-c config.toml]\n"
                              "read:   status | sites | site NAME | validate | health | presets | uploads | settings [NAME] | reference |\n"
                              "        site-unit NAME [--raw] (the Puma unit of a Rails site, rendered for root: --raw prints the unit alone) |\n"
+                             "        site-service NAME (whether the Rails site's agensio-app-USER.service runs, from systemctl show) |\n"
+                             "        site-service-logs NAME [--lines N] [--since 30m|3h|2d] [--raw] (admin, audited: its journal;\n"
+                             "                    --raw prints the lines alone) |\n"
+                             "        site-task-output NAME [--offset N] [--length N] [--raw] (admin: the last task's whole output\n"
+                             "                    in slices of up to 64 KB; a task's answer carries only a part) |\n"
                              "        site-tasks NAME | site-env NAME [--reveal KEY]... (admin: the site's environment as names, lengths\n"
                              "                    and fingerprints; a value only for each --reveal KEY, audited as a secret read) |\n"
                              "        logs [--site NAME] [--since 3h] [--level error|warn|info] [--status 5xx|4xx|all] [--limit N]\n"
@@ -176,7 +184,8 @@ int main(int argc, char** argv) {
                 auto field = [&](const char* key) { std::string v; value(v); body.set(key, v); };
                 if (b == "--socket") value(socket_path);
                 else if (b == "-c" || b == "--config") { std::string v; value(v); config_path = v; }
-                else if (b == "--site" || b == "--since" || b == "--level" || b == "--status" || b == "--limit") {
+                else if (b == "--site" || b == "--since" || b == "--level" || b == "--status" || b == "--limit" || b == "--lines" || b == "--offset" ||
+                         b == "--length") {
                     std::string v;
                     value(v);
                     query += (query.empty() ? "?" : "&") + b.substr(2) + "=" + v;
@@ -256,7 +265,8 @@ int main(int argc, char** argv) {
             }
             std::string path, method = "GET";
             const bool mutation = command == "reload" || command == "logs-reopen" ||
-                                  (command.starts_with("site-") && command != "site-tasks" && command != "site-env" && command != "site-unit") ||
+                                  (command.starts_with("site-") && command != "site-tasks" && command != "site-env" && command != "site-unit" &&
+                                   command != "site-service" && command != "site-service-logs" && command != "site-task-output") ||
                                   command == "cert-renew" || command == "uploads-delete";
             const bool upload = command == "upload";
             if (command == "status" || command == "sites" || command == "health" || command == "presets" || command == "uploads") path = "/v1/" + command;
@@ -277,6 +287,9 @@ int main(int argc, char** argv) {
             else if (command == "site-task" && !site_name.empty() && !body["task"].is_null()) path = "/v1/sites/" + site_name + "/task";
             else if (command == "site-tasks" && !site_name.empty()) path = "/v1/sites/" + site_name + "/tasks";
             else if (command == "site-unit" && !site_name.empty()) path = "/v1/sites/" + site_name + "/unit";
+            else if (command == "site-service" && !site_name.empty()) path = "/v1/sites/" + site_name + "/service";
+            else if (command == "site-service-logs" && !site_name.empty()) path = "/v1/sites/" + site_name + "/service/logs" + query;
+            else if (command == "site-task-output" && !site_name.empty()) path = "/v1/sites/" + site_name + "/task-output" + query;
             else if ((command == "site-env" || command == "site-env-set") && !site_name.empty())
                 path = "/v1/sites/" + site_name + "/env" + (command == "site-env" && !reveal.empty() ? "?reveal=" + reveal : std::string());
             else if (command == "uploads-delete" && !site_name.empty()) path = "/v1/uploads/" + site_name + "/delete";
@@ -326,11 +339,12 @@ int main(int argc, char** argv) {
                 std::cerr << "this command changes the server: add --yes (and --reason \"why\") to confirm\n";
                 return 1;
             }
-            if (raw && command == "site-unit" && reply.status == 200) {  // the unit alone, for root to redirect into place
+            if (raw && (command == "site-unit" || command == "site-service-logs" || command == "site-task-output") && reply.status == 200) {
+                // The unit alone, for root to redirect into place; the journal's or the task's lines alone.
                 agensio::json::Value u;
                 std::string perr;
                 if (agensio::json::parse(reply.body, u, perr)) {
-                    std::cout << u.get("unit");
+                    std::cout << u.get(command == "site-unit" ? "unit" : "output");
                     return 0;
                 }
             }

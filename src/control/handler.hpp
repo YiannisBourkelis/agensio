@@ -60,6 +60,10 @@ struct ControlBackend {
     // with a task; it is never waited for). Milliseconds, on worker 0.
     // `exposed` receives the names in it that others could read and nobody rotated.
     virtual int env_file_state(std::string_view site, std::vector<std::string>& exposed) = 0;
+    // One read-only helper request (app_status, app_logs) off the worker, `done` on worker 0;
+    // never waited for while a task holds the helper ({"busy": true} then). Without the
+    // helper: {"ok": false, "error"}.
+    virtual void helper_async(const json::Value& req, std::function<void(json::Value)> done) = 0;
 };
 
 class ControlHandler {
@@ -95,6 +99,9 @@ private:
     void site_copy(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> done);
     void site_task(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> done);
     void site_env_show(Stream& s, std::string_view name, std::function<void()> done);
+    // A Rails site's application service: its unit's state (viewer) or its journal (admin,
+    // audited), through the helper's app_status / app_logs.
+    void site_service(Stream& s, std::string_view name, bool logs, std::function<void()> done);
     void site_env_set(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> done);
     void upload_receive(Stream& s, std::string_view name, std::function<void()> done);
     json::Value uploads_list();
@@ -114,6 +121,15 @@ private:
     // Sites with a task running (F13): one at a time per site. Touched on worker 0 only,
     // where the control connections and the tasks' completions live.
     std::map<std::string, std::string> running_tasks_;
+    // The last task's whole output per site (up to 1 MB, as the task captured it), for
+    // site_task_output: answers carry a short part (2026-09-27 report: 68 KB overflowed an
+    // MCP host). Worker 0 only; gone at a restart.
+    struct TaskOutput {
+        std::string task, at, text;
+        double total = 0;
+        bool cut = false;  // the task kept less than it printed
+    };
+    std::map<std::string, TaskOutput> last_output_;
 };
 
 }  // namespace agensio

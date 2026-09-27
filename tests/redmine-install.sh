@@ -53,6 +53,7 @@ j() { python3 -c "import json,sys; d=json.load(open('$T/out')); print($1)"; }
 APP=$T/www/rm7.test/app
 task() {  # task NAME [--param k=v]: runs it, prints ok exit seconds, keeps the answer in $T/out
     ctl site-task rm7.test "$@" --yes --reason live > $T/out
+    cp $T/out $T/out-$1.json
     j 'd["ok"], d.get("exit"), int(d.get("duration_ms", 0) / 1000)'
     python3 -c "import json; d=json.load(open('$T/out')); o=d.get('output', ''); print(d.get('error', '')); print(o if len(o) < 6000 else o[:3000] + '\n[...]\n' + o[-3000:])" > $T/last-$1.txt
 }
@@ -70,6 +71,9 @@ echo "     bundle_install took $(echo $r | cut -d' ' -f3) s"
 r=$(task db_migrate); check "db_migrate: the production database, 0600" "True 0 600" "$(echo $r | cut -d' ' -f1-2) $(stat -c %a $APP/db/production.sqlite3 2>/dev/null)"
 r=$(task load_default_data --param lang=en); check "load_default_data lang=en: trackers, statuses, roles" "True 0" "$(echo $r | cut -d' ' -f1-2)"
 r=$(task assets_precompile); check "assets_precompile" "True 0" "$(echo $r | cut -d' ' -f1-2)"
+sm() { python3 -c "import json; print(json.load(open('$T/out-$1.json')).get('summary', ''))"; }
+check "the answers lead with a summary: the bundle, the migrations applied, the default data, the assets built" "yes yes yes yes" "$(sm bundle_install | grep -q '^Bundle complete!' && echo yes) $(sm db_migrate | grep -q '^[0-9][0-9]* migrations applied$' && echo yes) $([ "$(sm load_default_data)" = 'Default configuration data loaded.' ] && echo yes) $(sm assets_precompile | grep -q '^public/assets holds [1-9][0-9]* files$' && echo yes)"
+check "a successful task's answer is short, the whole output stays readable" "yes yes" "$(python3 -c "import json; d=json.load(open('$T/out-bundle_install.json')); print('yes' if len(d['output']) <= 4200 else len(d['output']))") $(ctl site-task-output rm7.test > $T/out; python3 -c "import json; d=json.load(open('$T/out')); print('yes' if d['task'] == 'assets_precompile' and d['kept_all'] else d)")"
 
 # Puma with the unit site-unit renders: its Environment lines, its EnvironmentFile (read as
 # root, as systemd does), its WorkingDirectory and ExecStart, as its User.
@@ -83,7 +87,7 @@ runuser -u "$user" -- /usr/bin/env -i $envs $fileenv /bin/sh -c "cd $wd && umask
 for _ in $(seq 1 100); do curl -s -o /dev/null http://127.0.0.1:18607/login && break; sleep 0.3; done
 H="--resolve rm7.test:18643:127.0.0.1 -k"
 check "agensio serves Redmine's login page over TLS" "200 yes" "$(curl -sS $H -o $T/login.html -w '%{http_code}' https://rm7.test:18643/login) $(grep -qi 'redmine' $T/login.html && echo yes)"
-check "Redmine's database and settings are refused at the edge" "404 404" "$(curl -sS $H -o /dev/null -w '%{http_code}' https://rm7.test:18643/config/database.yml) $(curl -sS $H -o /dev/null -w '%{http_code}' https://rm7.test:18643/db/production.sqlite3)"
+check "Redmine's database, settings and Gemfile.local are refused at the edge" "404 404 404" "$(curl -sS $H -o /dev/null -w '%{http_code}' https://rm7.test:18643/config/database.yml) $(curl -sS $H -o /dev/null -w '%{http_code}' https://rm7.test:18643/db/production.sqlite3) $(curl -sS $H -o /dev/null -w '%{http_code}' https://rm7.test:18643/Gemfile.local)"
 check "every task and template is in the audit log" "6" "$(grep -c 'sites/rm7.test/task (live): \(ran as rm7 .* -> exit 0\|wrote \)' $T/logs/audit.log)"
 
 echo "redmine: $pass passed, $fail failed"

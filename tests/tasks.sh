@@ -15,7 +15,7 @@ T=$(mktemp -d /tmp/agensio-tasks.XXXXXX); chmod 755 "$T"
 RT=/opt/agensio-tasks-rt   # not below /tmp: every directory above a runtime must be writable by root alone
 pass=0; fail=0
 check() { if [ "$3" = "$2" ]; then echo "ok   $1"; pass=$((pass+1)); else echo "FAIL $1: expected [$2] got [$3]"; fail=$((fail+1)); fi; }
-cleanup() { [ -f "$T/agensio.pid" ] && kill "$(cat "$T/agensio.pid")" 2>/dev/null; sleep 0.3; for u in r1 r2 r3 r4; do pkill -9 -u $u 2>/dev/null; userdel $u 2>/dev/null; done; rm -rf "$T" "$RT"; }
+cleanup() { for b in systemctl journalctl; do [ -e /usr/bin/$b.agensio-orig ] && mv -f /usr/bin/$b.agensio-orig /usr/bin/$b; done; [ -f "$T/agensio.pid" ] && kill "$(cat "$T/agensio.pid")" 2>/dev/null; sleep 0.3; for u in r1 r2 r3 r4; do pkill -9 -u $u 2>/dev/null; userdel $u 2>/dev/null; done; rm -rf "$T" "$RT"; }
 trap cleanup EXIT
 id -u agensio >/dev/null 2>&1 || useradd -r -M -s /usr/sbin/nologin agensio
 mkdir -p $T/sites.d $T/logs $T/run $T/state $T/www $T/default $RT; chown agensio:agensio $T/sites.d $T/logs $T/state; chmod 751 $T/state; chmod 755 $RT
@@ -150,7 +150,20 @@ touch $APP/fail
 check "a failing task: 409, the exit status and the program's own words come back" "1 False 1 yes" "$(ctl site-task r1.test assets_precompile --yes --reason fail > $T/out; echo -n "$? "; j 'd["ok"], int(d["exit"]), "yes" if "cannot load such file -- bootsnap" in d["output"] and "exited with status 1" in d["error"] else d')"
 rm -f $APP/fail; touch $APP/loud
 check "a loud task: the output is cut to its head and tail, the total counted" "True True yes yes" "$(ctl site-task r1.test assets_precompile --yes --reason loud > $T/out; j 'd["ok"], d["truncated"], "yes" if d["output_bytes"] >= 213000 else d["output_bytes"], "yes" if len(d["output"]) < 66000 and "bytes not shown" in d["output"] else len(d["output"])')"
-rm -f $APP/loud; touch $APP/daemon
+check "a loud task that succeeds answers its last 4 KB, a summary and the restart line; the whole output is kept" "yes yes public/assets holds 1 file yes" "$(j '"yes" if len(d["output"]) < 4300 and d["output"].rstrip().endswith("0123456789") else len(d["output"])') $(j '"yes" if d["output_kept"] >= 213000 else d["output_kept"]') $(j 'd["summary"]') $(j '"yes" if "as root: systemctl restart agensio-app-r1.service" in d["next_steps"][0] else d.get("next_steps")')"
+check "site-task-output reads the whole output in slices of 64 KB, each next_offset leading to the next" "yes 4 assets_precompile" "$(python3 - "$BIN" "$CS" <<'PY'
+import json, subprocess, sys
+off, text, n = 0, "", 0
+while off is not None:
+    d = json.loads(subprocess.run([sys.argv[1], "ctl", "site-task-output", "r1.test", "--offset", str(int(off)), "--socket", sys.argv[2]], capture_output=True, text=True).stdout)
+    text += d["output"]; n += 1; off = d["next_offset"]
+print("yes" if len(text) == d["kept"] and text.count("0123456789012345678901234567890123456789012345678901234567890123456789\n") == 3000 else len(text), n, d["task"])
+PY
+)"
+check "site-task-output --raw prints the slice alone" "prog=bundle" "$(ctl site-task-output r1.test --length 11 --raw)"
+touch $APP/fail
+check "a loud task that fails answers its first 4 KB and its last 12 KB, the error at the end included" "1 yes yes yes" "$(ctl site-task r1.test assets_precompile --yes --reason loudfail > $T/out; echo -n "$? "; j '"yes" if len(d["output"]) < 16700 and d["truncated"] else len(d["output"])') $(j '"yes" if d["output"].startswith("prog=bundle") else d["output"][:40]') $(j '"yes" if "cannot load such file -- bootsnap" in d["output"][-200:] and "site_task_output reads the whole output" in d["output"] else d["output"][-200:]')"
+rm -f $APP/fail $APP/loud; touch $APP/daemon
 check "a task that leaves a process behind: it is killed with the task's process group" "True 0" "$(ctl site-task r1.test assets_precompile --yes --reason daemon > $T/out; j 'd["ok"]') $(pgrep -u r1 -c sleep || true)"
 rm -f $APP/daemon; touch $APP/slow
 ( ctl site-task r1.test assets_precompile --yes --reason slow > $T/slow.out ) &
@@ -220,6 +233,44 @@ check "bundle_install with the database configured: ok" "True" "$(ctl site-task 
 check "load_default_data: the fixed rake task with REDMINE_LANG from the typed parameter; a parameter that is not a language is refused" "exec rake redmine:load_default_data REDMINE_LANG=de 1" "$(ctl site-task r4.test load_default_data --param lang=de --dry-run --yes --reason redmine > $T/out; j '" ".join(d["argv"][1:]), [e for e in d["env"] if e.startswith("REDMINE_LANG")][0]') $(ctl site-task r4.test load_default_data --param 'lang=de;id' --dry-run --yes --reason bad > /dev/null; echo $?)"
 check "site-unit renders r4's Puma unit: its account, the runtime's bundle, the loopback port, the environment file; --raw prints the unit alone" "yes yes yes yes" "$(ctl site-unit r4.test > $T/out; j '"yes" if "User=r4" in d["unit"] and "ExecStart='$RT'/bundle exec puma -e production -b tcp://127.0.0.1:18404" in d["unit"] else d') $(j '"yes" if "EnvironmentFile=-'$T'/env/r4.test.env" in d["unit"] else d["unit"]') $(j '"yes" if d["run_as_root"][0] == "agensio ctl site-unit r4.test --raw > /etc/systemd/system/agensio-app-r4.service" else d') $(ctl site-unit r4.test --raw | head -c 9 | grep -q '^# agensio' && echo yes)"
 check "the audit log: each run with the exact argv, the account and the outcome; each refusal with its reason" "yes yes yes" "$(grep -q "sites/r1.test/task (new): ran as r1 in $APP: $RT/ruby $T/state/r1/gems/bin/rails new . --name=blog .* -> exit 0" $T/logs/audit.log && echo yes) $(grep -q "sites/r1.test/task (slow): ran as r1 .* -> stopped at the time limit" $T/logs/audit.log && echo yes) $(grep -q "sites/r2.test/task (owner): refused: .*belongs to uid 0" $T/logs/audit.log && echo yes)"
+# The application service's state and journal through the helper (alpha.33 report): fake
+# systemctl and journalctl stand in, only inside a container whose init is not systemd.
+if [ -f /.dockerenv ] && [ "$(cat /proc/1/comm)" != systemd ]; then
+  for b in systemctl journalctl; do [ -e /usr/bin/$b ] && [ ! -e /usr/bin/$b.agensio-orig ] && mv /usr/bin/$b /usr/bin/$b.agensio-orig; done
+  cat > /usr/bin/systemctl <<SH
+#!/bin/sh
+echo "\$*" > $T/systemctl.args
+state=\$(cat $T/unit-state 2>/dev/null || echo active)
+for u in "\$@"; do
+  case "\$u" in agensio-app-*) ;; *) continue ;; esac
+  case "\$state" in
+    missing) printf 'Id=%s\nLoadState=not-found\nActiveState=inactive\nSubState=dead\nResult=success\n\n' "\$u" ;;
+    failed) printf 'Id=%s\nLoadState=loaded\nActiveState=failed\nSubState=failed\nResult=exit-code\nExecMainStatus=1\nInactiveEnterTimestamp=Sun 2026-09-27 10:00:00 UTC\nNRestarts=0\nUnitFileState=enabled\n\n' "\$u" ;;
+    *) printf 'Id=%s\nLoadState=loaded\nActiveState=active\nSubState=running\nMainPID=4242\nActiveEnterTimestamp=Sun 2026-09-27 09:00:00 UTC\nUnitFileState=enabled\n\n' "\$u" ;;
+  esac
+done
+SH
+  cat > /usr/bin/journalctl <<SH
+#!/bin/sh
+echo "\$*" > $T/journalctl.args
+echo '2026-09-27T10:00:00+00:00 host puma[42]: Puma starting in single mode...'
+echo '2026-09-27T10:00:01+00:00 host puma[42]: bind(2) for "127.0.0.1" port 18398 (Errno::EADDRINUSE)'
+SH
+  chmod 755 /usr/bin/systemctl /usr/bin/journalctl
+  check "site-service: the unit derived from the site's account, one systemctl show with fixed properties; running, pid, since" "show agensio-app-r4.service --no-pager -p | running (running) since Sun 2026-09-27 09:00:00 UTC, pid 4242" "$(ctl site-service r4.test > $T/out; cut -d, -f1 $T/systemctl.args | sed 's/ Id$//') | $(j 'd["summary"]')"
+  echo failed > $T/unit-state
+  check "a failed service: the summary, site_service_logs and root's restart line; health warns for the site" "yes yes warn" "$(ctl site-service r4.test > $T/out; j '"yes" if d["summary"].startswith("agensio-app-r4.service failed (exit-code, exit status 1)") else d["summary"]') $(j '"yes" if "site_service_logs r4.test" in d["next_steps"][0] and "systemctl restart agensio-app-r4.service" in d["next_steps"][1] else d["next_steps"]') $(ctl health > $T/out; j '[f["severity"] for f in d["findings"] if f["code"] == "site_service_failed" and f.get("site") == "r4.test"][0]')"
+  check "health asks for every Rails site's unit in one systemctl show" "yes" "$(grep -q 'agensio-app-r1.service' $T/systemctl.args && grep -q 'agensio-app-r4.service' $T/systemctl.args && echo yes)"
+  echo missing > $T/unit-state
+  check "no unit installed: the answer points at site_service_unit; health says so as info" "yes info" "$(ctl site-service r4.test > $T/out; j '"yes" if "site_service_unit r4.test" in d["next_steps"][0] else d') $(ctl health > $T/out; j '[f["severity"] for f in d["findings"] if f["code"] == "site_service_missing" and f.get("site") == "r4.test"][0]')"
+  check "site-service-logs: fixed journalctl arguments with the typed lines and since, the journal's lines, the read audited" "-u agensio-app-r4.service -n 20 --no-pager -q -o short-iso --since=-3h | yes yes" "$(ctl site-service-logs r4.test --lines 20 --since 3h > $T/out; cat $T/journalctl.args) | $(j '"yes" if "EADDRINUSE" in d["output"] else d') $(grep -q 'sites/r4.test/service/logs: read 2 lines of the journal of agensio-app-r4.service' $T/logs/audit.log && echo yes)"
+  check "site-service-logs refuses lines out of range and a since that is not a duration, before the helper" "400 400" "$(curl -sS -o /dev/null -w '%{http_code}' --unix-socket $CS 'http://control/v1/sites/r4.test/service/logs?lines=5000') $(curl -sS -o /dev/null -w '%{http_code}' --unix-socket $CS 'http://control/v1/sites/r4.test/service/logs?since=3%20hours')"
+  rm -f /usr/bin/systemctl /usr/bin/journalctl
+  for b in systemctl journalctl; do [ -e /usr/bin/$b.agensio-orig ] && mv /usr/bin/$b.agensio-orig /usr/bin/$b; done
+else
+  echo "tasks: the service checks need a container without systemd as init; skipped"
+fi
+
 # r2's secret readable by others while the directory is open: health records it, then a call
 # on r1 closes the directory; r2 is deleted unrotated.
 chmod 775 $T/env; chmod 644 $T/env/r2.test.env; ctl health > /dev/null; ctl site-env r1.test > /dev/null

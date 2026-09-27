@@ -639,20 +639,33 @@ std::vector<std::string> next_steps(const SiteSpec& spec, const Config& cfg) {
     }
     if (spec.https == "auto") cmds.push_back("# make sure " + spec.domain + " resolves to this server and port 80 is reachable; the certificate follows within a minute");
     if (spec.app == "redmine") {
-        // Redmine from its release archive (2026-09-27 report: the database.yml and Puma walls).
+        // Redmine from its release archive (2026-09-27 report: the database.yml and Puma walls),
+        // the steps still open by what is on disk (alpha.33 report: an update of an installed
+        // Redmine repeated the whole chain from site-install).
         std::error_code ec;
-        const bool gemfile = !spec.root.empty() && std::filesystem::is_regular_file(spec.root + "/Gemfile", ec);
-        const bool bundled = gemfile && std::filesystem::is_directory(spec.root + "/vendor/bundle", ec);
-        const std::string chain = "site-env-set " + spec.domain + " --set DATABASE_URL=sqlite3:db/production.sqlite3 (or postgresql://USER:PASSWORD@HOST/NAME), "
-                                  "then site-task " + spec.domain + " database_config, gemfile_local, bundle_install, db_migrate, load_default_data --param lang=en, "
-                                  "assets_precompile; then the service: site-unit " + spec.domain + " renders its unit for root";
-        if (gemfile && bundled)
+        auto file = [&](const char* rel) { return !spec.root.empty() && std::filesystem::is_regular_file(spec.root + rel, ec); };
+        auto dir = [&](const char* rel) { return !spec.root.empty() && std::filesystem::is_directory(spec.root + rel, ec); };
+        const bool gemfile = file("/Gemfile");
+        const std::string service = "then the service: site-unit " + spec.domain + " renders its unit for root, site-service " + spec.domain + " shows whether it runs";
+        const std::string env = "site-env-set " + spec.domain + " --set DATABASE_URL=sqlite3:db/production.sqlite3 (or postgresql://USER:PASSWORD@HOST/NAME)";
+        if (!gemfile) {
+            cmds.push_back("# Redmine: site-install " + spec.domain + " --version 7.0.1 --sha256 <the value redmine.org publishes>, then " + env + ", then site-task " +
+                           spec.domain + " database_config, gemfile_local, bundle_install, db_migrate, load_default_data --param lang=en, assets_precompile; " + service);
+        } else if (dir("/vendor/bundle") && dir("/public/assets")) {
             cmds.push_back("# Redmine is in place: site-task " + spec.domain + " db_migrate after an upgrade, plugins_migrate after a plugin (site-install --path "
-                           "plugins/NAME --create-path, then bundle_install); restart its service after each");
-        else if (gemfile)
-            cmds.push_back("# Redmine is unpacked: " + chain);
-        else
-            cmds.push_back("# Redmine: site-install " + spec.domain + " --version 7.0.1 --sha256 <the value redmine.org publishes>, then " + chain);
+                           "plugins/NAME --create-path, then bundle_install), assets_precompile after either; restart its service after each");
+        } else {
+            std::string open;
+            auto add = [&](const std::string& step) { open += (open.empty() ? "" : ", ") + step; };
+            const bool dbyml = file("/config/database.yml");
+            if (!dbyml) add("database_config");
+            if (!file("/Gemfile.local")) add("gemfile_local");
+            if (!dir("/vendor/bundle")) add("bundle_install");
+            add("db_migrate");
+            add("load_default_data --param lang=en (once, on a new database)");
+            add("assets_precompile");
+            cmds.push_back("# Redmine is unpacked: " + (dbyml ? std::string() : env + ", then ") + "site-task " + spec.domain + " " + open + "; " + service);
+        }
     }
     if (spec.app == "rails") {
         // What is on disk decides the chain (2026-09-27 report: an update of a site that held
@@ -679,12 +692,11 @@ std::vector<std::string> next_steps(const SiteSpec& spec, const Config& cfg) {
                            "(site-tasks " + spec.domain + " lists them); then " + puma);
     }
     // The body limit, before the first upload meets it (2026-09-27 report: a 2.75 MB cover got
-    // 413 on a site nobody had told about the 1 MB default).
-    if (!spec.app.empty() && spec.app != "static") {
-        const bool own = spec.settings.is_object() && spec.settings["max_body_size"].is_string();
-        cmds.push_back("# request bodies (uploads included) above " + (own ? std::string(spec.settings.get("max_body_size")) : size_text(cfg.max_body_size) + ", the server's default,") +
-                       " get 413 before the application sees them; site-update " + spec.domain + " --set max_body_size=100MB raises it, up to [control] site_limits");
-    }
+    // 413 on a site nobody had told about the 1 MB default); only while the site has none of
+    // its own (alpha.33 report: a site at 100 MB was told how to raise it to 100 MB).
+    if (!spec.app.empty() && spec.app != "static" && !(spec.settings.is_object() && spec.settings["max_body_size"].is_string()))
+        cmds.push_back("# request bodies (uploads included) above " + size_text(cfg.max_body_size) + ", the server's default, get 413 before the application sees "
+                       "them; site-update " + spec.domain + " --set max_body_size=100MB raises it, up to [control] site_limits");
     return cmds;
 }
 

@@ -141,7 +141,19 @@ std::string validate(const json::Value& req, const Config& cfg) {
         }
         return "";
     }
-    if (op == "pools_apply" || op == "service_restart" || op == "ping" || op == "env_check") return "";
+    if (op == "app_status" || op == "app_logs") {
+        // A site's name, and for the journal how much; the helper finds the site on disk and
+        // derives the unit from its account, so no unit name comes from the server.
+        if (!control::valid_domain(req.get("site"))) return op + ": site must be a site's host name";
+        const json::Value& lines = req["lines"];
+        if (!lines.is_null() && (lines.type() != json::Value::Type::number || lines.num() < 1 || lines.num() > 1000)) return op + ": lines is 1 to 1000";
+        const std::string since(req.get("since"));
+        if (!since.empty() && (since.size() < 2 || since.size() > 5 || since.find_first_not_of("0123456789") != since.size() - 1 ||
+                               std::string("smhd").find(since.back()) == std::string::npos))
+            return op + ": since is a number and s, m, h or d (e.g. 3h)";
+        return "";
+    }
+    if (op == "pools_apply" || op == "service_restart" || op == "ping" || op == "env_check" || op == "app_check") return "";
     return "unknown operation '" + op + "'";
 }
 
@@ -152,8 +164,9 @@ std::string validate(const json::Value& req, const Config& cfg) {
 namespace {
 
 // Runs a program by absolute path with a fixed argv and an empty environment; the
-// combined output and the exit status come back. Never a shell.
-int run(const char* path, const std::vector<std::string>& args, std::string& output) {
+// combined output and the exit status come back. Never a shell. At most `cap` bytes of
+// output are kept: the first ones, or with `keep_tail` the last (a journal's newest lines).
+int run(const char* path, const std::vector<std::string>& args, std::string& output, std::size_t cap = 8192, bool keep_tail = false) {
     int pipefd[2];
     if (::pipe(pipefd) != 0) {
         output = std::strerror(errno);
@@ -183,8 +196,10 @@ int run(const char* path, const std::vector<std::string>& args, std::string& out
         const ssize_t n = ::read(pipefd[0], buf, sizeof buf);
         if (n <= 0) break;
         output.append(buf, static_cast<std::size_t>(n));
-        if (output.size() > 8192) break;
+        if (!keep_tail && output.size() > cap) break;
+        if (keep_tail && output.size() > 2 * cap) output.erase(0, output.size() - cap);
     }
+    if (keep_tail && output.size() > cap) output.erase(0, output.size() - cap);
     ::close(pipefd[0]);
     int status = 0;
     ::waitpid(pid, &status, 0);
@@ -528,6 +543,121 @@ json::Value env_op(const json::Value& req, const Config& cfg) {
     return appenv::apply(dir, key, 0, change).set("site", key);
 }
 
+// app_status and app_logs: a Rails site's application service (the unit site_service_unit
+// renders, agensio-app-<user>.service), read-only, root running systemctl and journalctl
+// by absolute path with fixed arguments (2026-09-27 report: when Puma did not come up, its
+// cause was in a journal no tool could read). The unit comes from the site's account in the
+// configuration on disk, never from the request.
+// The state of every unit in `units` from one `systemctl show` (health asks for all of a
+// server's Rails sites at once and must not fork per site): {unit: {property: value}}, or
+// null with `why` when systemctl is missing.
+json::Value unit_states(const std::vector<std::string>& units, std::string& why) {
+    const char* systemctl = find_binary({"/usr/bin/systemctl", "/bin/systemctl"});
+    if (!systemctl) {
+        why = "systemctl not available on this host";
+        return json::Value(nullptr);
+    }
+    std::vector<std::string> args{"show"};
+    args.insert(args.end(), units.begin(), units.end());
+    for (const char* a : {"--no-pager", "-p",
+                          "Id,LoadState,ActiveState,SubState,Result,MainPID,ExecMainStatus,ExecMainCode,ActiveEnterTimestamp,InactiveEnterTimestamp,MemoryCurrent,NRestarts,UnitFileState"})
+        args.emplace_back(a);
+    std::string out;
+    run(systemctl, args, out, 16384 * (units.size() + 1));
+    // Blocks of NAME=value lines separated by a blank line, one per unit, each with its Id.
+    json::Value states = json::Value::object();
+    json::Value block = json::Value::object();
+    auto close_block = [&] {
+        const std::string id(block.get("Id"));
+        if (std::find(units.begin(), units.end(), id) != units.end()) states.set(id, std::move(block));
+        block = json::Value::object();
+    };
+    std::size_t p = 0;
+    while (p < out.size()) {
+        std::size_t nl = out.find('\n', p);
+        if (nl == std::string::npos) nl = out.size();
+        const std::string line = out.substr(p, nl - p);
+        p = nl + 1;
+        if (line.empty()) {
+            close_block();
+            continue;
+        }
+        const std::size_t eq = line.find('=');
+        if (eq != std::string::npos && eq > 0) block.set(line.substr(0, eq), tasks::clean_text(line.substr(eq + 1)));
+    }
+    close_block();
+    if (states.members().empty()) {  // no block at all: systemctl's own words (no systemd as init, no bus)
+        const std::string first = tasks::clean_text(out.substr(0, out.find('\n')));
+        why = "systemctl show answered nothing usable" + (first.empty() ? std::string() : ": " + first);
+        return json::Value(nullptr);
+    }
+    return states;
+}
+
+// app_check: health's pass, every Rails site with its own account in the configuration on
+// disk and its unit's state. {"ok", "services": [{"site", "unit", "state"}]}.
+json::Value app_check(const Config& cfg) {
+    json::Value reply = json::Value::object();
+    Config fresh;
+    try {
+        fresh = load_config(cfg.config_path);
+    } catch (const std::exception& e) {
+        return reply.set("ok", false).set("error", std::string("the configuration on disk does not load: ") + e.what());
+    }
+    std::vector<std::pair<std::string, std::string>> sites;  // site, unit
+    std::vector<std::string> units;
+    for (const auto& s : fresh.sites) {
+        std::string why;
+        if (!rails_app(s.app) || s.user.empty() || s.server_names.empty() || !control::valid_account(s.user, why)) continue;
+        const std::string unit = "agensio-app-" + s.user + ".service";
+        sites.emplace_back(s.server_names.front(), unit);
+        if (std::find(units.begin(), units.end(), unit) == units.end()) units.push_back(unit);
+    }
+    json::Value services = json::Value::array();
+    if (!units.empty()) {
+        std::string why;
+        const json::Value states = unit_states(units, why);
+        if (states.is_null()) return reply.set("ok", false).set("error", why);
+        for (const auto& [site, unit] : sites)
+            if (!states[unit].is_null()) services.push(json::Value::object().set("site", site).set("unit", unit).set("state", states[unit]));
+    }
+    return reply.set("ok", true).set("services", std::move(services));
+}
+
+json::Value app_op(const json::Value& req, const Config& cfg) {
+    json::Value reply = json::Value::object();
+    auto fail = [&](std::string why) { return reply.set("ok", false).set("error", std::move(why)); };
+    Config fresh;
+    try {
+        fresh = load_config(cfg.config_path);
+    } catch (const std::exception& e) {
+        return fail(std::string("the configuration on disk does not load: ") + e.what());
+    }
+    const std::string name(req.get("site"));
+    const SiteConfig* site = control::find_site(fresh, name);
+    if (!site) return fail("no site " + name + " in the configuration on disk");
+    std::string why;
+    if (!rails_app(site->app) || site->user.empty() || !control::valid_account(site->user, why))
+        return fail("site " + name + " has no application service: a Rails site with its own account has one (agensio-app-<user>.service)");
+    const std::string unit = "agensio-app-" + site->user + ".service";
+    reply.set("site", site->server_names.front()).set("unit", unit);
+    if (req.get("op") == "app_status") {
+        json::Value states = unit_states({unit}, why);
+        if (states.is_null()) return fail(why);
+        if (states[unit].is_null()) return fail("systemctl show " + unit + " gave no answer");
+        return reply.set("ok", true).set("state", states[unit]);
+    }
+    const char* journalctl = find_binary({"/usr/bin/journalctl", "/bin/journalctl"});
+    if (!journalctl) return fail("journalctl not available on this host");
+    const int lines = req["lines"].is_null() ? 200 : static_cast<int>(req["lines"].num());
+    std::vector<std::string> args{"-u", unit, "-n", std::to_string(lines), "--no-pager", "-q", "-o", "short-iso"};
+    if (const std::string since(req.get("since")); !since.empty()) args.push_back("--since=-" + since);
+    std::string out;
+    const int rc = run(journalctl, args, out, 256 * 1024, true);
+    if (rc != 0 && out.empty()) return fail("journalctl exited " + std::to_string(rc));
+    return reply.set("ok", true).set("lines", static_cast<double>(lines)).set("output", tasks::clean_text(out));
+}
+
 // task_run (F13): a named task of the site's preset (services/tasks.*) run by the site's
 // account in a child. What runs is decided here, not by the server: the site (its app,
 // its directory, its user) comes from the configuration file on disk, the command from the
@@ -712,6 +842,10 @@ void helper_loop(int fd, const Config& cfg) {
                     reply = task_run(req, cfg, fd);
                 } else if (op == "env_read" || op == "env_write") {
                     reply = env_op(req, cfg);
+                } else if (op == "app_status" || op == "app_logs") {
+                    reply = app_op(req, cfg);
+                } else if (op == "app_check") {
+                    reply = app_check(cfg);
                 } else if (op == "env_check") {
                     // Health's read-only pass over the sites' environment files (appenv::inspect),
                     // the sites from the configuration on disk; no value leaves the helper.

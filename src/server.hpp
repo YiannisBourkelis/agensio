@@ -169,6 +169,7 @@ private:
     void task_async(const json::Value& req, std::function<void(json::Value)> done) override;
     void env_async(const json::Value& req, std::function<void(json::Value)> done) override;
     int env_file_state(std::string_view site, std::vector<std::string>& exposed) override;
+    void helper_async(const json::Value& req, std::function<void(json::Value)> done) override;
     std::string uploads_dir() override { return uploads_dir_; }
     void prepare_uploads();  // <state_dir>/uploads, the server's own, before the privilege drop
     bool privileged() override {

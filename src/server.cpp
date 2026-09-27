@@ -699,6 +699,13 @@ json::Value Server::health() {
     if (std::any_of(cfg.sites.begin(), cfg.sites.end(), [](const SiteConfig& s) { return proxy_app(s.app); })) {
         if (provisioner_.available()) {
             extra = control::env_findings(provisioner_.try_request(json::Value::object().set("op", "env_check")));
+            // Every Rails site's application service (2026-09-27 report: a Puma that did not come
+            // up showed only as 502s): one systemctl show for all their units, through the
+            // helper, never waited for.
+            if (std::any_of(cfg.sites.begin(), cfg.sites.end(), [](const SiteConfig& s) { return rails_app(s.app) && !s.user.empty(); })) {
+                const auto more = control::service_findings(provisioner_.try_request(json::Value::object().set("op", "app_check")));
+                extra.insert(extra.end(), more.begin(), more.end());
+            }
         } else {
 #ifndef _WIN32
             std::vector<std::string> sites;
@@ -1108,6 +1115,15 @@ void Server::env_async(const json::Value& req, std::function<void(json::Value)> 
             r = json::Value::object().set("ok", false).set("error", "not available on this platform");
 #endif
         }
+        asio::post(workers_[0]->ctx, [done, r] { done(r); });
+    }).detach();
+}
+
+void Server::helper_async(const json::Value& req, std::function<void(json::Value)> done) {
+    std::thread([this, req, done = std::move(done)] {
+        json::Value r = provisioner_.available()
+                            ? provisioner_.try_request(req)
+                            : json::Value::object().set("ok", false).set("error", "the application service's state and journal are root's: this needs the provisioning helper (agensio started as root)");
         asio::post(workers_[0]->ctx, [done, r] { done(r); });
     }).detach();
 }

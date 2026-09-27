@@ -595,7 +595,7 @@ struct PhpPreset {
 // application routes to; the rest of the URL space stays the application's.
 const std::vector<const char*> kRailsRefused = {"/config/master.key", "/config/database.yml", "/config/credentials.yml.enc", "/config/credentials/",
                                                 "/.env", "/.env.production", "/.kamal/", "/.git/", "/Gemfile", "/Gemfile.lock",
-                                                "/log/production.log", "/storage/"};
+                                                "/Gemfile.local", "/log/production.log", "/storage/"};
 // Endings a Rails site never answers through the application, wherever the files live:
 // databases, logs, keys and dumps (2026-09-27 Writebook report: its database is
 // storage/db/production.sqlite3, not the `rails new` layout the exact list knew). /storage/

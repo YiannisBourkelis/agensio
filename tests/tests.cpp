@@ -1709,6 +1709,29 @@ static void test_tasks() {
               tasks::output_problem(bi, "Bundle complete!").empty());
         CHECK(tasks::failure_hint(*tasks::find("redmine", "db_migrate"), "Cannot load database configuration:\nCould not load database configuration. No such file - [\"config/database.yml\"]", rc)
                   .find("database_config") != std::string::npos);
+        // The summary a task's answer leads with (alpha.33 report: 68 KB of output to read).
+        CHECK(tasks::summarize(*tasks::find("redmine", "db_migrate"), "== 1 A: migrating\n== 1 A: migrated (0.01s)\n== 2 B: migrated (0.1s)\n", -1) == "2 migrations applied" &&
+              tasks::summarize(*tasks::find("rails", "db_migrate"), "", -1) == "no migration was pending" &&
+              tasks::summarize(*tasks::find("redmine", "plugins_migrate"), "== 3 C: migrated (0.2s)\n", -1) == "1 migration applied");
+        CHECK(tasks::summarize(bi, "Fetching puma\nBundle complete! 60 Gemfile dependencies, 91 gems now installed.\nBundled gems are installed into `./vendor/bundle`\n", -1) ==
+                  "Bundle complete! 60 Gemfile dependencies, 91 gems now installed." &&
+              tasks::summarize(*tasks::find("redmine", "load_default_data"), "Default configuration data loaded.\n", -1) == "Default configuration data loaded." &&
+              tasks::summarize(*tasks::find("rails", "gem_install_rails"), "Successfully installed rails-8.0.2\n", -1).empty());
+        {
+            namespace fs = std::filesystem;
+            const fs::path ar = fs::temp_directory_path() / ("agensio-assets-" + std::to_string(::getpid()));
+            fs::create_directories(ar);
+            const int afd = ::open(ar.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+            const tasks::Row& ap = *tasks::find("redmine", "assets_precompile");
+            CHECK(tasks::summarize(ap, "", afd).starts_with("public/assets holds no file"));
+            fs::create_directories(ar / "public" / "assets" / "plugin_assets");
+            std::ofstream(ar / "public" / "assets" / "application-1f2e.css") << "a";
+            std::ofstream(ar / "public" / "assets" / "plugin_assets" / "x-9a.js") << "b";
+            CHECK(tasks::summarize(ap, "", afd) == "public/assets holds 2 files");
+            ::close(afd);
+            fs::remove_all(ar);
+        }
+        CHECK(std::string_view(tasks::find("redmine", "gemfile_local")->content).find("puma is listed more than once") != std::string_view::npos);
     }
     const tasks::Row& gem = *tasks::find("rails", "gem_install_rails");
     const tasks::Row& fresh = *tasks::find("rails", "rails_new");
@@ -1827,7 +1850,13 @@ static void test_tasks() {
     CHECK(res["exit"].num() == 0 && std::string(res.get("output")) == "done\n" && took < std::chrono::seconds(5));
     sh.argv = {"/bin/sh", "-c", "i=0; while [ $i -lt 2000 ]; do echo 0123456789012345678901234567890123456789012345678901234567890123456789; i=$((i+1)); done"};
     res = tasks::run(sh, site_fd);
-    CHECK(res["output_bytes"].num() == 142000 && res["truncated"].boolean() && std::string(res.get("output")).find("bytes not shown") != std::string::npos);
+    // Up to 1 MB is kept whole (the handler trims the answer and keeps this for site_task_output);
+    // beyond it the first 256 KB and the last 768 KB.
+    CHECK(res["output_bytes"].num() == 142000 && !res["truncated"].boolean() && std::string(res.get("output")).size() == 142000);
+    sh.argv = {"/bin/sh", "-c", "i=0; while [ $i -lt 16000 ]; do echo 0123456789012345678901234567890123456789012345678901234567890123456789; i=$((i+1)); done"};
+    res = tasks::run(sh, site_fd);
+    CHECK(res["output_bytes"].num() == 1136000 && res["truncated"].boolean() && std::string(res.get("output")).find("bytes not shown") != std::string::npos &&
+          std::string(res.get("output")).size() < 1024 * 1024 + 200);
     sh.argv = {"/nonexistent/program"};
     res = tasks::run(sh, site_fd);
     CHECK(res["exit"].num() == 127 && std::string(res.get("output")).find("could not be executed") != std::string::npos);
@@ -2182,6 +2211,27 @@ static void test_appenv() {
           std::count_if(hf.begin(), hf.end(), [](const control::Finding& f) { return f.code == "site_env_orphan" && f.fix.find("rm -f") != std::string::npos; }) == 1);
     const auto busy = control::env_findings(json::Value::object().set("ok", false).set("busy", true));
     CHECK(busy.size() == 1 && busy[0].code == "site_env_unchecked" && busy[0].severity == "info");
+    // The application services health reads through the helper's app_check (alpha.33 report).
+    {
+        auto svc = [](const char* site, const char* load, const char* active, const char* sub) {
+            return json::Value::object().set("site", site).set("unit", std::string("agensio-app-") + site + ".service")
+                .set("state", json::Value::object().set("LoadState", load).set("ActiveState", active).set("SubState", sub).set("Result", "exit-code")
+                                  .set("ExecMainStatus", "1").set("NRestarts", "5"));
+        };
+        const auto sf = control::service_findings(json::Value::object().set("ok", true).set("services", json::Value::array()
+            .push(svc("a", "loaded", "active", "running")).push(svc("b", "not-found", "inactive", "dead")).push(svc("c", "loaded", "failed", "failed"))
+            .push(svc("d", "loaded", "inactive", "dead")).push(svc("e", "loaded", "activating", "auto-restart"))));
+        auto code_of = [&](const char* site) {
+            for (const auto& f : sf)
+                if (f.site == site) return f.severity + " " + f.code;
+            return std::string();
+        };
+        CHECK(sf.size() == 4 && code_of("a").empty() && code_of("b") == "info site_service_missing" && code_of("c") == "warn site_service_failed" &&
+              code_of("d") == "warn site_service_down" && code_of("e") == "warn site_service_failed");
+        for (const auto& f : sf)
+            if (f.site == "c") CHECK(f.fix.find("site_service_logs c") != std::string::npos && f.fix.find("systemctl restart agensio-app-c.service") != std::string::npos);
+        CHECK(control::service_findings(json::Value::object().set("ok", false).set("busy", true)).empty());
+    }
     CHECK(inspect(envdir + "-none", me, {"ok.test"})["sites"].items().empty());
     // Which sites have a file (site_delete names the file only then).
     std::vector<std::string> present;
@@ -3094,6 +3144,13 @@ static void test_control_sites() {
               !v(R"({"op":"env_read","site":"a.test","reveal":["A;B"]})").empty() && !v(R"({"op":"env_read","site":"a.test","reveal":"A"})").empty());
         CHECK(!v(R"({"op":"env_read","site":"../etc"})").empty() && !v(R"({"op":"env_write","site":"a.test"})").empty() &&
               !v(R"({"op":"env_write","site":"a.test","set":{"LD_PRELOAD":"/tmp/x.so"}})").empty() && !v(R"({"op":"env_write","site":"a.test","set":{"A":"x\ny"}})").empty());
+        // The service's state and journal: a site's name and bounded numbers, never a unit or an option.
+        CHECK(v(R"({"op":"app_status","site":"a.test"})").empty() && v(R"({"op":"app_logs","site":"a.test","lines":50,"since":"3h"})").empty() &&
+              v(R"({"op":"app_check"})").empty());
+        CHECK(!v(R"({"op":"app_status","site":"../x"})").empty() && !v(R"({"op":"app_logs","site":"a.test","lines":5000})").empty() &&
+              !v(R"({"op":"app_logs","site":"a.test","lines":"50"})").empty() && !v(R"({"op":"app_logs","site":"a.test","since":"3 hours"})").empty() &&
+              !v(R"({"op":"app_logs","site":"a.test","since":"h"})").empty() && !v(R"({"op":"app_logs","site":"a.test","since":"-1h"})").empty() &&
+              !v(R"({"op":"app_logs","site":"a.test","since":"12345h"})").empty());
         SiteSpec high = missing;
         high.listen_tls = "0.0.0.0:8443";
         CHECK(preflight(high, loaded, false).size() == 2);  // an unprivileged port is bound by the reload
@@ -3110,9 +3167,10 @@ static void test_control_sites() {
         // The port-80 note for auto certificates, and the body limit before the first upload.
         CHECK(next_steps(ok, loaded).size() == 2 && next_steps(ok, loaded)[1].find("above 1MB, the server's default, get 413") != std::string::npos);
         {
+            // A site with its own limit chose it already: no line (alpha.33 report, P4 c).
             SiteSpec big = ok;
             big.settings = json::Value::object().set("max_body_size", "100MB");
-            CHECK(next_steps(big, loaded)[1].find("above 100MB get 413") != std::string::npos);
+            CHECK(next_steps(big, loaded).size() == 1);
             SiteSpec st = ok;
             st.app = "static";
             CHECK(next_steps(st, loaded).size() == 1);
@@ -3140,6 +3198,35 @@ static void test_control_sites() {
             CHECK(rails_step().find("in place: site-task shop.test bundle_install, then db_prepare") != std::string::npos && rails_step().find("rails_new") == std::string::npos);
             fs::create_directories(rr / "vendor" / "bundle");
             CHECK(rails_step().find("db_migrate after new migrations") != std::string::npos && rails_step().find("rails_new") == std::string::npos);
+            fs::remove_all(rr);
+        }
+        // Redmine's open steps follow what is on disk too (alpha.33 report, P4 a).
+        {
+            namespace fs = std::filesystem;
+            const fs::path rr = fs::temp_directory_path() / ("agensio-redminenext-" + std::to_string(::getpid()));
+            fs::create_directories(rr);
+            SiteSpec rs = ok;
+            rs.app = "redmine";
+            rs.root = rr.string();
+            rs.upstream = "http://127.0.0.1:3002";
+            auto step = [&] {
+                for (const auto& st : next_steps(rs, loaded))
+                    if (st.find("Redmine") != std::string::npos) return st;
+                return std::string();
+            };
+            CHECK(step().find("site-install shop.test --version") != std::string::npos);
+            std::ofstream(rr / "Gemfile") << "source 'https://rubygems.org'\n";
+            CHECK(step().find("unpacked: site-env-set shop.test --set DATABASE_URL") != std::string::npos &&
+                  step().find("database_config, gemfile_local, bundle_install, db_migrate") != std::string::npos && step().find("site-install") == std::string::npos);
+            fs::create_directories(rr / "config");
+            std::ofstream(rr / "config" / "database.yml") << "production: {}\n";
+            std::ofstream(rr / "Gemfile.local") << "gem \"puma\"\n";
+            CHECK(step().find("unpacked: site-task shop.test bundle_install, db_migrate") != std::string::npos && step().find("DATABASE_URL") == std::string::npos &&
+                  step().find("gemfile_local") == std::string::npos);
+            fs::create_directories(rr / "vendor" / "bundle");
+            CHECK(step().find("unpacked: site-task shop.test db_migrate, load_default_data") != std::string::npos);
+            fs::create_directories(rr / "public" / "assets");
+            CHECK(step().find("Redmine is in place: site-task shop.test db_migrate after an upgrade") != std::string::npos);
             fs::remove_all(rr);
         }
         Config php_cfg = loaded;

@@ -164,6 +164,22 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
         site_env_show(s, path.substr(10, path.size() - 10 - 4), done);
         return true;
     }
+    if (path.starts_with("/v1/sites/") && (path.ends_with("/service") || path.ends_with("/service/logs"))) {
+        // The application's own journal can carry what it printed of its secrets: admin, audited.
+        const bool logs = path.ends_with("/service/logs");
+        if (logs && !require(s, Role::admin, path.substr(4))) return false;
+        if (!done) {
+            reply(s, 503, json::Value::object().set("error", "service needs an asynchronous caller"));
+            return false;
+        }
+        const std::size_t suffix = logs ? 13 : 8;
+        if (path.size() <= 10 + suffix) {
+            reply(s, 404, json::Value::object().set("error", "no such site"));
+            return false;
+        }
+        site_service(s, path.substr(10, path.size() - 10 - suffix), logs, done);
+        return true;
+    }
     if (path == "/v1/status") {
         json::Value body = backend_->status();
         body.set("peer", json::Value::object()
@@ -213,6 +229,29 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
             body.set("hint", "tasks belong to a preset: app = \"rails\" has them. This site's app has none, and agensio runs no other command.");
         }
         reply(s, 200, body);
+    } else if (path.starts_with("/v1/sites/") && path.ends_with("/task-output")) {
+        // The last task's output in slices (admin, as the task itself).
+        if (!require(s, Role::admin, path.substr(4))) return false;
+        const std::string_view name = path.substr(10, path.size() - 10 - 12);
+        const SiteConfig* site = control::find_site(backend_->running(), name);
+        const auto it = site ? last_output_.find(site->server_names.front()) : last_output_.end();
+        if (!site || it == last_output_.end()) {
+            reply(s, 404, json::Value::object().set("error", site ? "no task output kept for this site since the server started" : "no such site").set("site", std::string(name)));
+            return false;
+        }
+        const TaskOutput& o = it->second;
+        const std::size_t offset = std::min<std::size_t>(o.text.size(), static_cast<std::size_t>(std::strtoull(control::query_value(req.target, "offset").c_str(), nullptr, 10)));
+        std::size_t length = static_cast<std::size_t>(std::strtoull(control::query_value(req.target, "length").c_str(), nullptr, 10));
+        if (length == 0 || length > 65536) length = 65536;
+        std::size_t end = std::min(o.text.size(), offset + length);
+        // A slice ends on a character boundary, so each answer is valid UTF-8 and next_offset
+        // starts the next one on a boundary too.
+        while (end > offset && end < o.text.size() && (static_cast<unsigned char>(o.text[end]) & 0xc0) == 0x80) --end;
+        if (end == offset) end = std::min(o.text.size(), offset + length);
+        reply(s, 200, json::Value::object().set("site", it->first).set("task", o.task).set("at", o.at).set("output_bytes", o.total)
+                          .set("kept", static_cast<double>(o.text.size())).set("kept_all", !o.cut).set("offset", static_cast<double>(offset))
+                          .set("next_offset", end < o.text.size() ? json::Value(static_cast<double>(end)) : json::Value(nullptr))
+                          .set("output", o.text.substr(offset, end - offset)));
     } else if (path.starts_with("/v1/sites/") && path.ends_with("/unit")) {
         // The Puma unit of a Rails site, for root to put in place (read-only text; F14 will apply it).
         const std::string_view name = path.substr(10, path.size() - 10 - 5);
@@ -295,10 +334,13 @@ json::Value site_secrets(const SiteConfig& site, const std::string& site_root) {
 
 // A site's request-body limit as a next step: the first upload above it is a 413 the
 // application never sees (2026-09-27 report: a 2.75 MB book cover on the 1 MB default).
+// Only while the site runs on the server's default: a limit set for the site was a choice
+// already (alpha.33 report: a site at 100 MB was told how to raise it to 100 MB).
 std::string body_limit_step(const SiteConfig& site, const Config& cfg) {
+    if (site.max_body_size) return "";
     return "this site accepts request bodies (uploads included) up to " + control::size_text(body_limit_of(site, cfg)) +
-           (site.max_body_size ? "" : ", the server's default") +
-           "; larger ones get 413 before the application sees them: site_update with settings {max_body_size: \"100MB\"} raises it, up to [control] site_limits";
+           ", the server's default; larger ones get 413 before the application sees them: site_update with settings {max_body_size: \"100MB\"} raises it, "
+           "up to [control] site_limits";
 }
 
 struct SiteFacts {
@@ -1201,8 +1243,37 @@ void ControlHandler::site_task(Stream& s, std::string_view name, const json::Val
         audit_peer(s, what, "running task " + task + given + " in " + site_root);
     }
     const std::vector<std::string> before = dry_run ? std::vector<std::string>{} : validation_errors(*backend_);
-    backend_->task_async(req, [this, &s, what = std::string(what), key, dry_run, before, done](json::Value r) {
+    // A running Rails application loads its gems, schema and assets at start: after a task
+    // that changes them the answer carries root's restart line (alpha.33 report, P3).
+    std::string restart;
+    if (rails_app(app) && !site->user.empty())
+        for (const char* t : {"bundle_install", "db_migrate", "db_prepare", "plugins_migrate", "assets_precompile"})
+            if (task == t) restart = "agensio-app-" + site->user + ".service";
+    backend_->task_async(req, [this, &s, what = std::string(what), key, task, dry_run, before, restart, done](json::Value r) {
         if (!dry_run) running_tasks_.erase(key);
+        // The whole output stays here; the answer carries its end on success, its start and
+        // end on failure, and says how to read the rest.
+        if (!dry_run && r["ran"].boolean() && r.get("wrote").empty()) {
+            TaskOutput& o = last_output_[key];
+            o.task = task;
+            o.at = now_stamp();
+            o.text = std::string(r.get("output"));
+            o.total = r["output_bytes"].num();
+            o.cut = r["truncated"].boolean();
+            const bool success = r["ok"].boolean();
+            const std::size_t head = success ? 0 : 4096, tail = success ? 4096 : 12288;
+            if (o.text.size() > head + tail) {
+                auto boundary = [&](std::size_t at) {  // never inside a UTF-8 character
+                    while (at < o.text.size() && (static_cast<unsigned char>(o.text[at]) & 0xc0) == 0x80) ++at;
+                    return at;
+                };
+                const std::size_t tail_at = boundary(o.text.size() - tail), head_end = boundary(head);
+                const std::string marker = "[... " + std::to_string(tail_at - head_end) + " bytes not shown: site_task_output reads the whole output ...]\n";
+                r.set("output", o.text.substr(0, head_end) + (head_end ? "\n" : "") + marker + o.text.substr(tail_at));
+                r.set("truncated", true);
+            }
+            r.set("output_kept", static_cast<double>(o.text.size()));
+        }
         log_exposures(r);
         const bool ok = r["ok"].boolean();
         if (dry_run) {
@@ -1236,6 +1307,9 @@ void ControlHandler::site_task(Stream& s, std::string_view name, const json::Val
                               .set("errors", fresh).set("hint", "fix what the errors name (health lists them with a fix each), then config_validate"));
         } else {
             if (!before.empty()) r.set("warnings", json::Value::array().push("the configuration already failed validation before this task (health lists the findings); the task itself is fine"));
+            if (!restart.empty())
+                r.set("next_steps", json::Value::array().push("if " + restart + " already runs (site_service_status " + key + "), as root: systemctl restart " + restart +
+                                                              " (the application loads this change only when it starts)"));
             reply(s, 200, r);
         }
         done();
@@ -1281,6 +1355,90 @@ std::string joined(const json::Value& names) {
 void ControlHandler::log_exposures(const json::Value& r) {
     for (const auto& n : r["tightened"].items())
         if (n.is_string() && n.str().find("rotate what it holds") != std::string_view::npos) log_.warn("site environment: " + std::string(n.str()));
+}
+
+void ControlHandler::site_service(Stream& s, std::string_view name, bool logs, std::function<void()> done) {
+    const SiteConfig* site = control::find_site(backend_->running(), name);
+    if (!site) {
+        reply(s, 404, json::Value::object().set("error", "no such site").set("site", std::string(name)));
+        done();
+        return;
+    }
+    if (!rails_app(site->app) || site->user.empty()) {
+        reply(s, 409, json::Value::object()
+                          .set("error", "site " + site->server_names.front() + " has no application service")
+                          .set("hint", "a Rails site (app = \"rails\" or \"redmine\") with its own user has one, agensio-app-<user>.service, rendered by site_service_unit"));
+        done();
+        return;
+    }
+    const std::string key = site->server_names.front();
+    json::Value req = json::Value::object().set("op", logs ? "app_logs" : "app_status").set("site", key);
+    if (logs) {
+        const std::string lines = control::query_value(s.request.target, "lines");
+        const std::string since = control::query_value(s.request.target, "since");
+        if (!lines.empty()) {
+            const long n = lines.size() <= 4 && lines.find_first_not_of("0123456789") == std::string::npos ? std::strtol(lines.c_str(), nullptr, 10) : 0;
+            if (n < 1 || n > 1000) {
+                reply(s, 400, json::Value::object().set("error", "lines is 1 to 1000 (200 when absent)"));
+                done();
+                return;
+            }
+            req.set("lines", static_cast<double>(n));
+        }
+        if (!since.empty()) {
+            if (since.size() < 2 || since.size() > 5 || since.find_first_not_of("0123456789") != since.size() - 1 ||
+                std::string("smhd").find(since.back()) == std::string::npos) {
+                reply(s, 400, json::Value::object().set("error", "since is a number and s, m, h or d, e.g. 30m or 3h"));
+                done();
+                return;
+            }
+            req.set("since", since);
+        }
+    }
+    backend_->helper_async(req, [this, &s, key, logs, done](json::Value r) {
+        if (r["busy"].boolean()) {
+            reply(s, 503, json::Value::object()
+                              .set("error", "the provisioning helper is busy with a task or an install; ask again when it finishes")
+                              .set("busy", true));
+        } else if (!r["ok"].boolean()) {
+            if (logs) audit_peer(s, "sites/" + key + "/service/logs", "refused: " + std::string(r.get("error")));
+            reply(s, 409, r);
+        } else if (logs) {
+            const std::string& out = r["output"].str();
+            const auto count = std::count(out.begin(), out.end(), '\n');
+            audit_peer(s, "sites/" + key + "/service/logs", "read " + std::to_string(count) + " lines of the journal of " + std::string(r.get("unit")));
+            r.set("hint", out.empty() ? "the journal holds nothing for this unit in that window: it never ran, or ran before the window"
+                                      : "the application's own lines as systemd kept them, newest last; a Ruby backtrace or 'Address already in use' "
+                                        "usually names the cause. After a fix, root restarts the unit");
+            reply(s, 200, r);
+        } else {
+            const json::Value& st = r["state"];
+            const std::string unit(r.get("unit")), load(st.get("LoadState")), active(st.get("ActiveState")), sub(st.get("SubState"));
+            json::Value steps = json::Value::array();
+            std::string summary;
+            if (load == "not-found") {
+                summary = "no unit " + unit + " on this host: nothing runs the application";
+                steps.push("site_service_unit " + key + " renders it; root installs it with the three commands in that answer");
+            } else if (active == "active") {
+                summary = "running (" + sub + ") since " + std::string(st.get("ActiveEnterTimestamp")) + ", pid " + std::string(st.get("MainPID"));
+                if (st.get("UnitFileState") != "enabled") steps.push("as root: systemctl enable " + unit + " (it does not start at boot now)");
+            } else if (active == "failed" || (active == "activating" && sub == "auto-restart")) {
+                summary = unit + " failed (" + std::string(st.get("Result")) + ", exit status " + std::string(st.get("ExecMainStatus")) + ")";
+                steps.push("site_service_logs " + key + " shows why");
+                steps.push("after the fix, as root: systemctl restart " + unit);
+            } else if (active == "inactive") {
+                summary = unit + " is stopped";
+                steps.push("as root: systemctl enable --now " + unit);
+                steps.push("site_service_logs " + key + " shows its last run");
+            } else {
+                summary = unit + " is " + active + " (" + sub + ")";
+            }
+            r.set("summary", summary);
+            if (!steps.items().empty()) r.set("next_steps", std::move(steps));
+            reply(s, 200, r);
+        }
+        done();
+    });
 }
 
 void ControlHandler::site_env_show(Stream& s, std::string_view name, std::function<void()> done) {
@@ -1369,8 +1527,13 @@ void ControlHandler::site_env_set(Stream& s, std::string_view name, const json::
     list("unset", change.unset);
     list("generate", change.generate);
     audit_peer(s, what, "changing the environment: " + plan);
-    const std::string unit = site->user.empty() ? std::string("the application's service") : "agensio-app-" + site->user;
-    backend_->env_async(req, [this, &s, what = std::string(what), unit, done](json::Value r) {
+    // The service's restart line (P4 b of the alpha.33 report: it named the example file):
+    // a Rails site with its own account has the unit site_service_unit renders; any other
+    // proxy site's application is started by whatever root set up for it.
+    const std::string restart = rails_app(site->app) && !site->user.empty()
+        ? "the application reads it when its service restarts: the unit site_service_unit renders loads the file (EnvironmentFile=); as root, systemctl restart agensio-app-" + site->user + ".service"
+        : std::string("the application reads it when its service restarts: the unit that runs it must load the file (EnvironmentFile=, the file named above); root restarts that unit");
+    backend_->env_async(req, [this, &s, what = std::string(what), restart, done](json::Value r) {
         if (!r["ok"].boolean()) {
             audit_peer(s, what, "refused: " + std::string(r.get("error")));
             reply(s, 409, r);
@@ -1391,7 +1554,7 @@ void ControlHandler::site_env_set(Stream& s, std::string_view name, const json::
                                                          " a new value (generate for a generated secret; change a password where it is used too), and health warns until then"));
         json::Value steps = json::Value::array();
         steps.push("the tasks read it from their next run");
-        steps.push("the application reads it when its service restarts: a unit from docs/examples/puma.service loads the file (EnvironmentFile=); as root, systemctl restart " + unit);
+        steps.push(restart);
         r.set("next_steps", steps);
         if (!r["kept"].items().empty())
             r.set("hint", "kept " + joined(r["kept"]) + ": generate never replaces a value; to rotate one, unset and generate it in one call "

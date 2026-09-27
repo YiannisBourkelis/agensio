@@ -86,6 +86,8 @@ constexpr const char* kDatabaseYml =
 constexpr const char* kRedmineGemfileLocal =
     "# Written by agensio (site task gemfile_local): the gems Redmine needs in production that its\n"
     "# Gemfile keeps elsewhere. Redmine's Gemfile evaluates this file; bundle_install installs them.\n"
+    "# Bundler then warns that puma is listed more than once (Redmine lists it in its test group):\n"
+    "# harmless, this line is the one production loads.\n"
     "gem \"puma\"\n";
 
 constexpr const char* kNoDatabaseUrl =
@@ -356,6 +358,80 @@ Plan build(const Row& row, const json::Value& params, const Context& ctx, const 
     return plan;
 }
 
+#ifndef _WIN32
+namespace {
+// Regular files below `dir` (relative to the site), never through a symlink, at most 100,000.
+std::size_t count_files(int root_fd, const char* dir) {
+    std::size_t n = 0;
+    std::vector<int> stack;
+    const int top = ::openat(root_fd, dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (top < 0) return 0;
+    stack.push_back(top);
+    while (!stack.empty() && n < 100000) {
+        const int fd = stack.back();
+        stack.pop_back();
+        DIR* d = ::fdopendir(fd);
+        if (!d) {
+            ::close(fd);
+            continue;
+        }
+        while (const struct dirent* e = ::readdir(d)) {
+            const std::string_view name = e->d_name;
+            if (name == "." || name == "..") continue;
+            struct stat sb {};
+            if (::fstatat(::dirfd(d), e->d_name, &sb, AT_SYMLINK_NOFOLLOW) != 0) continue;
+            if (S_ISREG(sb.st_mode)) ++n;
+            else if (S_ISDIR(sb.st_mode) && stack.size() < 64) {
+                const int sub = ::openat(::dirfd(d), e->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+                if (sub >= 0) stack.push_back(sub);
+            }
+        }
+        ::closedir(d);
+    }
+    for (int fd : stack) ::close(fd);
+    return n;
+}
+}  // namespace
+#endif
+
+std::string summarize(const Row& row, std::string_view output, int root_fd) {
+    const std::string_view name = row.name;
+    auto lines_with = [&](std::string_view needle) {
+        std::size_t n = 0;
+        for (std::size_t p = output.find(needle); p != std::string_view::npos; p = output.find(needle, p + needle.size())) ++n;
+        return n;
+    };
+    auto line_starting = [&](std::string_view prefix) -> std::string {
+        for (std::size_t p = 0; p < output.size();) {
+            std::size_t nl = output.find('\n', p);
+            if (nl == std::string_view::npos) nl = output.size();
+            const std::string_view line = output.substr(p, nl - p);
+            if (line.starts_with(prefix)) return std::string(line);
+            p = nl + 1;
+        }
+        return "";
+    };
+    if (name == "db_prepare" || name == "db_migrate" || name == "plugins_migrate") {
+        const std::size_t n = lines_with(": migrated (");
+        return n == 0 ? std::string("no migration was pending") : std::to_string(n) + " migration" + (n == 1 ? "" : "s") + " applied";
+    }
+    if (name == "bundle_install" || name == "rails_new") {
+        if (std::string l = line_starting("Bundle complete!"); !l.empty()) return l;
+    }
+    if (name == "load_default_data") {
+        if (output.find("Default configuration data loaded.") != std::string_view::npos) return "Default configuration data loaded.";
+    }
+#ifndef _WIN32
+    if (name == "assets_precompile" && root_fd >= 0) {  // what exit 0 with no output does not show (2026-09-27 report, d)
+        const std::size_t n = count_files(root_fd, "public/assets");
+        if (n == 0) return "public/assets holds no file: the application builds its assets elsewhere (a Vite or jsbundling setup) or has none to build";
+        return "public/assets holds " + std::to_string(n) + " file" + (n == 1 ? "" : "s");
+    }
+#endif
+    (void)root_fd;
+    return "";
+}
+
 std::string output_problem(const Row& row, std::string_view output) {
     if (!rails_family(row.app)) return "";
     if (std::string_view(row.name) == "bundle_install" && output.find("Please configure your config/database.yml first") != std::string_view::npos)
@@ -597,7 +673,10 @@ json::Value run(const Plan& plan, int cwd_fd) {
     ::close(out[1]);
     if (devnull >= 0) ::close(devnull);
     ::fcntl(out[0], F_SETFL, ::fcntl(out[0], F_GETFL) | O_NONBLOCK);
-    Capture cap;
+    // Up to 1 MB kept (a quarter from the start, the rest from the end): the server keeps it as
+    // the site's last task output and answers with a short part (2026-09-27 report: 68 KB of
+    // migration log overflowed an MCP host's tool-result limit).
+    Capture cap(256 * 1024, 768 * 1024);
     using clock = std::chrono::steady_clock;
     const auto deadline = started + std::chrono::seconds(plan.timeout);
     clock::time_point term_at{}, exit_at{}, kill_at{};
@@ -964,11 +1043,14 @@ json::Value execute(const Request& req) {
     const Family* fam = family(row.app);
     const json::Value swept = sweep(root_fd, req.ctx.root, req.secrets, fam ? fam->secret_patterns : std::vector<const char*>{});
     const std::string not_produced = check_needs(row, req.params, req.ctx, root_fd, true);
-    ::close(root_fd);
-    r.set("secured", swept["secured"]).set("exposed", swept["exposed"]);
     const bool timed_out = result["timed_out"].boolean();
     const json::Value& exit = result["exit"];
     const bool clean = exit.type() == json::Value::Type::number && exit.num() == 0;
+    if (clean) {  // before the directory is closed: a summary may count files in it
+        if (std::string summary = summarize(row, std::string(result.get("output")), root_fd); !summary.empty()) r.set("summary", std::move(summary));
+    }
+    ::close(root_fd);
+    r.set("secured", swept["secured"]).set("exposed", swept["exposed"]);
     const std::string problem = clean ? output_problem(row, std::string(result.get("output"))) : std::string();
     const bool ok = clean && !timed_out && swept["exposed"].items().empty() && not_produced.empty() && problem.empty();
     r.set("ok", ok);

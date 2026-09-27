@@ -266,7 +266,8 @@ row for its framework exists.
   for the account, `RLIMIT_NOFILE` 4,096, `RLIMIT_CORE` 0; `[control] task_limits = {
   timeout = "20m", processes = 512 }` as the ceilings. Output merged and captured up to
   64 KB (the first 16 and the last 48, the cut marked), returned with the exit status and
-  the duration; one task per site at a time (a lock in the helper; a second call is 409
+  the duration (since alpha.34: 1 MB kept, a summary and a 4 KB or 16 KB part in the
+  answer, section 15); one task per site at a time (a lock in the helper; a second call is 409
   naming the running task). `dry_run` reports the argv, the account, the directory, the
   environment names and the limits. Memory and CPU caps come with the second way, once
   F14 brings systemd testing: the same argv as a transient unit (`systemd-run --wait
@@ -753,3 +754,37 @@ nothing from the caller but a task's name and typed parameters.
 Still ahead, as the report lists: starting Puma without root (F14), SMTP settings (a
 typed template row for `config/configuration.yml`, its password from the site's
 environment), and each plugin's `bundle_install` and `plugins_migrate` (the rows exist).
+
+## 15. The service in sight, before F14 (2026-09-27, the alpha.33 report)
+
+Redmine ran through the control plane, and what the agent could not see was the service:
+Puma is root's unit (decision 11), and when it did not come up the cause was in a journal
+no tool could read. Task answers of 68 KB overflowed the MCP host. This step takes the
+read-only half of section 5's control API, with one change of role, and none of its
+control half, which stays root's until the owner decides otherwise.
+
+- **State and journal.** `GET /v1/sites/NAME/service` (viewer) and
+  `GET /v1/sites/NAME/service/logs?lines=&since=` (admin, audited) run through the
+  helper's `app_status` and `app_logs`: `systemctl show` with a fixed property list and
+  `journalctl -u` with section 5's fixed options, the unit derived from the site's account
+  on disk. The journal is admin's, not operator's as decision 7 had it: an operator
+  cannot read the site's environment, and a stack trace prints what the application holds.
+  Relaxing it to operator is a one-line change if the owner wants it. The state comes from
+  `systemctl show`, not the cgroup section 5 planned, because the unit is not agensio's to
+  name in `system.slice` yet, and `LoadState=not-found` tells the agent the unit was never
+  installed. MCP `site_service_status` and `site_service_logs`; `agensio ctl site-service`
+  and `site-service-logs`.
+- **Health** asks the helper once (`app_check`, one `systemctl show` for every Rails site
+  with its own account), without waiting: `site_service_missing` (info),
+  `site_service_down`, `site_service_failed` (warnings). These precede section 5's
+  `service_dead`, which F14 can replace with its cgroup reading.
+- **Restart lines.** After a task that changes what the application loads, and after
+  `site_env_set`, the answer carries `systemctl restart agensio-app-USER.service` for root.
+  No start, stop or restart operation exists.
+- **Task output.** Up to 1 MB kept per site in the server's memory, the answer a summary
+  plus the last 4 KB on success, or the first 4 KB and the last 12 KB on a failure, the rest
+  through `GET /v1/sites/NAME/task-output?offset=&length=` (admin, MCP
+  `site_task_output`). The summary is read from the output (migrations applied, Bundler's
+  last line, Redmine's default data) or from the tree (`public/assets` counted), so an exit
+  0 with nothing printed still says what it did.
+

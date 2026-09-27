@@ -109,6 +109,10 @@ json::Value health(const Config& running, const Config& boot, bool as_root, std:
 // appenv::inspect's answer as findings: a file a task would refuse (warn), one the next task
 // tightens (info), a deleted site's file (info), or that the check could not run.
 std::vector<Finding> env_findings(const json::Value& inspected);
+// The helper's app_check as findings, per site: no unit (info, with site_service_unit),
+// stopped, failed or restarting (warn, with site_service_logs and the root line); nothing
+// when active, and nothing at all for a reply that is not ok (a busy helper).
+std::vector<Finding> service_findings(const json::Value& check);
 
 // "a=1&b=x%20y" lookups on a request target's query; "" when absent.
 std::string query_value(std::string_view target, std::string_view key);

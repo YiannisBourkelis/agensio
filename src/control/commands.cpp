@@ -881,6 +881,31 @@ std::vector<Finding> env_findings(const json::Value& inspected) {
     return out;
 }
 
+std::vector<Finding> service_findings(const json::Value& check) {
+    std::vector<Finding> out;
+    if (!check["ok"].boolean()) return out;  // busy, or no systemctl: nothing to say about it
+    for (const auto& r : check["services"].items()) {
+        const std::string site(r.get("site")), unit(r.get("unit"));
+        const json::Value& st = r["state"];
+        const std::string load(st.get("LoadState")), active(st.get("ActiveState")), sub(st.get("SubState")), result(st.get("Result"));
+        if (load == "not-found") {
+            out.push_back(Finding{"info", "site_service_missing", site, "no unit " + unit + ": nothing runs the application, and every request to it answers 502",
+                                  "site_service_unit " + site + " renders it; root installs it with the commands in its answer"});
+        } else if (active == "failed") {
+            out.push_back(Finding{"warn", "site_service_failed", site, unit + " failed (" + result + ", status " + std::string(st.get("ExecMainStatus")) + ", since " +
+                                                                            std::string(st.get("InactiveEnterTimestamp")) + "): every request to the site answers 502",
+                                  "site_service_logs " + site + " shows why; after the fix, as root: systemctl restart " + unit});
+        } else if (active == "inactive") {
+            out.push_back(Finding{"warn", "site_service_down", site, unit + " is stopped: every request to the site answers 502",
+                                  "as root: systemctl enable --now " + unit + " (site_service_logs " + site + " shows its last run)"});
+        } else if (active == "activating" && sub == "auto-restart") {
+            out.push_back(Finding{"warn", "site_service_failed", site, unit + " keeps failing and systemd restarts it (" + std::string(st.get("NRestarts")) + " restarts)",
+                                  "site_service_logs " + site + " shows why"});
+        }
+    }
+    return out;
+}
+
 json::Value health(const Config& running, const Config& boot, bool as_root, std::time_t now, const std::vector<Finding>& extra) {
     auto findings = health_findings(running, boot, as_root, now);
     findings.insert(findings.end(), extra.begin(), extra.end());
