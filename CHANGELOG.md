@@ -1,5 +1,5 @@
 # Changelog
-## 0.1.0-alpha.27 (unreleased)
+## 0.1.0-alpha.27 (2026-09-27)
 
 - **P1: a browser's second cookie reached no application over HTTP/2 or HTTP/3.** A
   browser sends one `cookie` field per cookie there (RFC 9113 8.2.3), and request assembly
