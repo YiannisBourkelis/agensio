@@ -133,7 +133,8 @@ section of `docs/configuration.md` that explains the key.
 | `server_name` | list of host names | ["*"] | The names this site answers; "*" makes it the listener's catch-all. A name no site lists answers 421. | reload | site-create (domain, aliases) | 1b |
 | `listen` | list of host:port | (required) | The addresses this site listens on; one site per name per address. | reload (a new privileged port needs a restart) | site-create (listen_plain, listen_tls) | 1 |
 | `root` | path | (required unless app = proxy) | The document root, or for a preset the project directory (Laravel's public/, Drupal's web/ are served; for app = rails the application's directory, where site tasks run and nothing is served). | reload | site-create (root) | 1 |
-| `app` | enum: static \| php \| laravel \| drupal \| wordpress \| grav \| proxy \| rails \| redmine \| django \| wagtail | static | The preset: routing, which .php runs, what is refused; presets_list explains each. | reload | site-create (app) | 2 |
+| `app` | enum: static \| php \| laravel \| drupal \| wordpress \| grav \| proxy \| rails \| redmine \| django \| wagtail \| node | static | The preset: routing, which .php runs, what is refused; presets_list explains each. | reload | site-create (app) | 2 |
+| `entry` | string | (none; the unit needs it) | app = node: the file node runs, relative to the project directory (server/server.js); .js, .mjs or .cjs, a plain path. The rendered unit starts it; site_install's facts guess it from package.json. | reload | site-create (entry) | 4f |
 | `project` | string | (none; required for django and wagtail) | app = django or wagtail: the project's Python package (NAME/settings, NAME/wsgi.py), which the tasks and the rendered unit load; lower-case letters, digits and _. | reload | site-create (project) | 4e |
 | `index` | list | ["index.html"] (presets set their own) | Files tried for a directory request. | reload | site file | 1 |
 | `try_files` | list | preset-dependent | What to try for a path: $uri, $uri/, a fallback such as /index.php?$query_string, or =404. | reload | site file | 6 |
@@ -148,7 +149,7 @@ section of `docs/configuration.md` that explains the key.
 | `symlinks` | enum: allow \| deny | allow | deny refuses a file whose real path leaves the root. | reload | site file | 1 |
 | `php` | table | (none) | php = { socket = ... } names an existing php-fpm; with user and no socket the pool is generated and the keys below size it. | reload | site-create (php_socket, php_children, php_version) and settings | 7 |
 | `proxy` | table | (none) | Defaults for the site's proxy locations (host, forwarded, headers, hide, redirects, tls, timeouts). | reload | site file | 12 |
-| `upstream` | URL or list | (none) | app = proxy, rails, redmine, django or wagtail: where the application listens; a list balances round-robin with passive health. | reload | site-create (upstream) | 4b |
+| `upstream` | URL or list | (none) | app = proxy, rails, redmine, django, wagtail or node: where the application listens; a list balances round-robin with passive health. | reload | site-create (upstream) | 4b |
 | `location` | array of tables | (preset-dependent) | [[site.location]] blocks; a hand-written one replaces the preset's at its path, except one that sets only add_headers, which adds its fields to the preset's. | reload | site file | 6 |
 ## `php = {}`
 

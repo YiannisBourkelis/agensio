@@ -29,6 +29,17 @@ namespace {
 bool alpha(unsigned char c) noexcept { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
 bool rails_family(std::string_view app) noexcept { return app == "rails" || app == "redmine"; }
 bool python_family(std::string_view app) noexcept { return app == "django" || app == "wagtail"; }
+bool node_family(std::string_view app) noexcept { return app == "node"; }
+
+// ^[a-z0-9][a-z0-9:._-]{0,63}$: a script of package.json by name (download-dist, build:prod),
+// never an option.
+bool script_name(std::string_view v) noexcept {
+    auto lower_or_digit = [](unsigned char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'); };
+    if (v.empty() || v.size() > 64 || !lower_or_digit(static_cast<unsigned char>(v[0]))) return false;
+    for (unsigned char c : v)
+        if (!lower_or_digit(c) && c != ':' && c != '.' && c != '_' && c != '-') return false;
+    return true;
+}
 bool digit(unsigned char c) noexcept { return c >= '0' && c <= '9'; }
 
 // ^[A-Za-z][A-Za-z0-9_]{0,63}$: a Ruby constant's worth of name, never an option.
@@ -262,6 +273,8 @@ if os.environ.get("DATABASE_URL"):
     DATABASES = {"default": _database(os.environ["DATABASE_URL"])}
 )PY";
 
+constexpr const char* kNoPackageJson = "the site's directory holds no Node application yet: install one with site_install (package.json at its top)";
+
 constexpr const char* kNoVenv = "the site's virtualenv does not exist yet: run venv_create first";
 constexpr const char* kNoManagePy = "the site's directory holds no Django project yet: make one (startproject), or install one with site_install";
 constexpr const char* kNoSettings = "run django_settings first: it writes agensio_settings.py, the settings agensio runs the project with";
@@ -278,6 +291,15 @@ const std::vector<std::pair<const char*, const char*>> kDjangoEnv = {
     {"AGENSIO_MEDIA_ROOT", "{root}/media"}, {"VIRTUAL_ENV", "{venv}"}, {"PYTHONNOUSERSITE", "1"}, {"PYTHONUNBUFFERED", "1"},
     {"PIP_DISABLE_PIP_VERSION_CHECK", "1"}, {"PIP_NO_INPUT", "1"}};
 const std::vector<const char*> kDjangoSecrets = {"db.sqlite3", "*.sqlite3", "*.sqlite3-wal", "*.sqlite3-shm", ".env", ".env.*"};
+
+// Node (2026-09-28, the Uptime Kuma report): npm's cache and user configuration in the
+// account's own home, never the host's; no update notice, no funding or audit chatter; the
+// production environment, so npm ci installs what the application needs to run.
+const std::vector<std::pair<const char*, const char*>> kNodeEnv = {
+    {"NODE_ENV", "production"}, {"NPM_CONFIG_CACHE", "{home}/.npm"}, {"NPM_CONFIG_USERCONFIG", "{home}/.npmrc"},
+    {"NPM_CONFIG_UPDATE_NOTIFIER", "false"}, {"NPM_CONFIG_FUND", "false"}, {"NPM_CONFIG_AUDIT", "false"}};
+const std::vector<const char*> kNodeSecrets = {".env", ".env.*", "*.db", "*.sqlite", "*.sqlite3", "data/*.db", "data/*.db-wal", "data/*.db-shm",
+                                               "data/*.sqlite", "data/*.sqlite3"};
 
 const std::vector<Family>& families() {
     static const std::vector<Family> f = {
@@ -304,6 +326,7 @@ const std::vector<Family>& families() {
         // names and paths; pip neither asks nor checks for its own updates.
         {"django", kDjangoEnv, kDjangoSecrets},
         {"wagtail", kDjangoEnv, kDjangoSecrets},
+        {"node", kNodeEnv, kNodeSecrets},
     };
     return f;
 }
@@ -452,6 +475,24 @@ const std::vector<Row>& rows() {
          "python3", "python3", {{"manage.py"}, {"check"}, {"--deploy"}}, {}, {}, false, false, 300,
          {{"{venv}/pyvenv.cfg", kNoVenv}, {"manage.py", kNoManagePy}, {"agensio_settings.py", kNoSettings}}, {},
          nullptr, nullptr, 0640, {}, false, "{venv}/bin/python"},
+        // Node (2026-09-28): npm as the site's account, from [control] runtimes.node; the project's
+        // package-lock.json pins every package and its integrity hash, so npm_ci installs what the
+        // application shipped (its install scripts run as the account, as a Gemfile's do), and
+        // npm_run runs one of the project's own scripts by name.
+        {"node", "npm_ci",
+         "Installs the application's dependencies exactly as its package-lock.json pins them into node_modules/ (npm ci --omit=dev): "
+         "after site_install, after the lockfile changed. Runs the packages' install scripts as the site's account. Downloads.",
+         "node", "npm", {{"ci"}, {"--omit=dev"}, {"--no-audit"}, {"--no-fund"}}, {}, {}, true, false, 1800,
+         {{"package.json", kNoPackageJson},
+          {"package-lock.json", "npm ci installs what package-lock.json pins, and the project ships none; an application without a lockfile "
+                                "cannot be installed reproducibly (its source repository or release archive should carry it)"}}},
+        {"node", "npm_run",
+         "Runs one script of the project's package.json by name (npm run SCRIPT): a post-install step the application documents, such as "
+         "Uptime Kuma's download-dist (its prebuilt frontend). The script is the project's own code, run as the site's account. May download.",
+         "node", "npm", {{"run"}, {"{script}"}},
+         {{"script", "A script of the project's package.json, by name: download-dist, build. Letters, digits and : . _ -, not starting with -.",
+           "^[a-z0-9][a-z0-9:._-]{0,63}$", script_name, true}},
+         {}, true, false, 1800, {{"package.json", kNoPackageJson}}},
         // The same task name, Wagtail's command: the preset decides what startproject runs.
         {"wagtail", "startproject",
          "Creates a new Wagtail site named by the site's project in the site's directory, which must be empty (wagtail start PROJECT .): "
@@ -765,6 +806,9 @@ std::string summarize(const Row& row, std::string_view output, int root_fd) {
     if (name == "load_default_data") {
         if (output.find("Default configuration data loaded.") != std::string_view::npos) return "Default configuration data loaded.";
     }
+    if (node_family(row.app) && name == "npm_ci")
+        for (std::string_view key : {"added ", "up to date"})  // "added 512 packages in 45s", "up to date in 2s"
+            if (std::string l = line_starting(key); !l.empty()) return l;
     if (python_family(row.app)) {
         if (name == "migrate") {
             const std::size_t n = lines_with("  Applying ");
@@ -872,7 +916,29 @@ std::string python_hint(std::string_view output) {
 }
 }  // namespace
 
+namespace {
+std::string node_hint(std::string_view output, const Context& ctx) {
+    if (output.find("can only install with an existing package-lock.json") != std::string_view::npos ||
+        output.find("package.json and package-lock.json or npm-shrinkwrap.json are in sync") != std::string_view::npos)
+        return "package-lock.json is missing or does not match package.json: npm ci installs only what an up-to-date lockfile pins; the "
+               "application's release should carry a matching one";
+    if (const std::size_t at = output.find("Missing script: "); at != std::string_view::npos) {
+        const std::size_t end = output.find_first_of("\n\r", at);
+        return "package.json has no script " + std::string(output.substr(at + 16, end == std::string_view::npos ? std::string_view::npos : end - at - 16)) +
+               ": the scripts it has are in its \"scripts\" (site_install's facts list them)";
+    }
+    if (output.find("Unsupported engine") != std::string_view::npos || output.find("EBADENGINE") != std::string_view::npos)
+        return "the application asks for another Node than the one [control] runtimes gives (node = \"" + ctx.runtime_dir +
+               "\"): root installs that version (under /opt) and points runtimes.node at its bin directory in the main configuration file, "
+               "then agensio reload";
+    if (output.find("gyp ERR!") != std::string_view::npos)
+        return "a package builds a native module and the host has no compiler: as root, apt-get install -y build-essential python3; then npm_ci again";
+    return "";
+}
+}  // namespace
+
 std::string failure_hint(const Row& row, std::string_view output, const Context& ctx) {
+    if (node_family(row.app)) return node_hint(output, ctx);
     if (python_family(row.app)) return python_hint(output);
     if (!rails_family(row.app)) return "";
     if (output.find("Could not load database configuration. No such file") != std::string_view::npos ||
@@ -970,6 +1036,10 @@ std::string install_hint(std::string_view runtime) {
         // bootsnap, nio4r); libyaml's headers for psych.
         if (::access("/usr/bin/apt-get", X_OK) == 0) return "apt-get install -y ruby ruby-dev ruby-bundler build-essential libyaml-dev";
         if (::access("/usr/bin/dnf", X_OK) == 0) return "dnf install -y ruby ruby-devel rubygem-bundler gcc gcc-c++ make redhat-rpm-config libyaml-devel";
+    }
+    if (runtime == "node") {
+        if (::access("/usr/bin/apt-get", X_OK) == 0) return "apt-get install -y nodejs npm";
+        if (::access("/usr/bin/dnf", X_OK) == 0) return "dnf install -y nodejs npm";
     }
     if (runtime == "python3") {
         // Debian ships venv's ensurepip apart (python3-venv); Fedora's python3 has it.

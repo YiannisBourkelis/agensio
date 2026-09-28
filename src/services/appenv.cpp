@@ -71,7 +71,8 @@ bool reserved(std::string_view n) noexcept {
         if (n == e) return true;
     // PIP_ chooses where packages come from (PIP_INDEX_URL), as BUNDLE_ and GEM_ do for gems;
     // AGENSIO_ is what agensio tells an application about its site (AGENSIO_HOSTS).
-    static constexpr std::string_view prefixes[] = {"LD_", "DYLD_", "GEM_", "PYTHON", "MALLOC_", "GIT_", "PIP_", "AGENSIO_"};
+    // NPM_CONFIG_ chooses npm's registry, cache and scripts' shell (2026-09-28, Node).
+    static constexpr std::string_view prefixes[] = {"LD_", "DYLD_", "GEM_", "PYTHON", "MALLOC_", "GIT_", "PIP_", "AGENSIO_", "NPM_CONFIG_"};
     for (std::string_view p : prefixes)
         if (n.starts_with(p)) return true;
     // Bundler's settings choose what is loaded (BUNDLE_PATH, BUNDLE_GEMFILE, BUNDLE_BUILD__*);
@@ -91,8 +92,22 @@ std::string check_name(std::string_view n) {
             return "'" + std::string(n) + "' is not a variable name: upper-case letters, digits and '_', not starting with a digit";
     if (reserved(n))
         return std::string(n) + " is agensio's own or changes which program runs (PATH, HOME, RAILS_ENV, GEM_*, BUNDLE_* other than a gem "
-                                "source's credentials, LD_*, RUBYOPT, NODE_OPTIONS, GIT_*, PYTHON*, PIP_*, VIRTUAL_ENV, DJANGO_SETTINGS_MODULE, AGENSIO_*, "
+                                "source's credentials, LD_*, RUBYOPT, NODE_OPTIONS, NPM_CONFIG_*, GIT_*, PYTHON*, PIP_*, VIRTUAL_ENV, DJANGO_SETTINGS_MODULE, AGENSIO_*, "
                                 "...); the site's environment cannot set it";
+    return "";
+}
+
+std::string check_change_for_app(std::string_view app, const Change& change) {
+    if (app != "node") return "";
+    auto refused = [](std::string_view n) { return n == "HOST" || n == "PORT" || n == "NODE_ENV"; };
+    auto why = [](std::string_view n) {
+        return std::string(n) + " is set by agensio for a Node site (the application listens on the upstream's loopback address, in "
+                                "production); a value in the site's environment file would override the unit's, so it is refused";
+    };
+    for (const auto& v : change.set)
+        if (refused(v.name)) return why(v.name);
+    for (const auto& n : change.generate)
+        if (refused(n)) return why(n);
     return "";
 }
 

@@ -34,6 +34,9 @@ struct Request {
     // or "": when the installed tree pins a version (.ruby-version), it is asked for its own
     // (`ruby -e 'print RUBY_VERSION'`, as the executing account) and facts carries both.
     std::string ruby;
+    // The node of [control] runtimes, likewise: asked for its version when package.json names
+    // engines.node (2026-09-28).
+    std::string node;
 };
 
 // {"ok": bool, "error"?, "as", "files", "directories", "bytes", "downloaded", "sha256", "unwrapped"?,
@@ -70,5 +73,12 @@ json::Value copy_file(const CopyRequest& req);
 bool valid_upload_name(std::string_view name) noexcept;
 // 64 hex digits (any case).
 bool valid_sha256(std::string_view hex) noexcept;
+// Whether `version` (20.19.2, v20.19.2) satisfies an npm engines range: ">= 20.4.0", "^18 || ^20",
+// "20.x", ">=18 <23", "~20.4", "*". `known` is false for a form this does not read (a hyphen
+// range, a pre-release tag), and the answer then means nothing.
+bool node_range_matches(std::string_view range, std::string_view version, bool& known);
+// What package.json's scripts or main say node runs (the start script "node server/server.js",
+// or one level of "npm run NAME" to it; else main), as a relative path check_entry accepts; "".
+std::string guess_node_entry(const json::Value& package_json);
 
 }  // namespace agensio::install

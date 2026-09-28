@@ -859,3 +859,44 @@ Not in this step: Node (the brief's look ahead; the same frame, a family and a u
 renderer per runtime, fits it), a Python other than `[control] runtimes.python3` per site,
 and running the rendered unit under real systemd in the test bed (the devbox has no systemd
 as init; `tests/wagtail-install.sh` starts Gunicorn from the unit's own lines instead).
+
+## 17. Node.js (2026-09-28, the Node "wall 1" brief against alpha.36)
+
+The brief (Uptime Kuma 2.5.5 on ag9.edoc.gr, an `app = "proxy"` site, Debian 13 without
+nodejs): after `site_install` nothing could run. The owner first asked whether `proxy`
+suffices; the line drawn: `proxy` for an application agensio only forwards to (a container,
+another host, anything with its own service manager), a preset for one agensio installs and
+runs as the site's account. The owner chose a `node` preset, to install Node applications
+through MCP with as little root terminal work as possible. What was built, and why:
+
+- **One generic preset, no `uptime-kuma` preset** (the owner's direction since `pip_install`:
+  generic tasks, not one per application). Two rows: `npm_ci` (the lockfile's packages, no
+  confirmation, like `pip_install_requirements`) and `npm_run` (one script of the project's
+  own `package.json` by a checked name: Kuma's `download-dist` is `npm_run download-dist`).
+  What is Kuma's alone lives in the install answer: the `download-dist` step, `DATA_DIR` in
+  the account's home, `UPTIME_KUMA_DB_TYPE=sqlite` (Kuma 2 otherwise opens a database page
+  the first visitor answers), the first-visit warning.
+- **`entry`, a site field** like Django's `project`: the file root's `node` runs, a plain
+  relative `.js`, `.mjs` or `.cjs` path. Not `npm start`, which runs a shell and wraps the
+  process. Optional in the file, since it is known only once the application is there:
+  `site_install` guesses it from `package.json` (the start script, one level of `npm run
+  NAME`, else `main`), and the unit is refused without it.
+- **Loopback held.** The unit sets `HOST` and `PORT` from the upstream (Kuma reads them as
+  fallbacks for its own names, as do most servers), and systemd lets an environment file
+  override a unit's lines, so a Node site's environment refuses `HOST`, `PORT` and
+  `NODE_ENV`; `NPM_CONFIG_*` is refused everywhere (npm's registry and script shell).
+- **Isolation**: npm's cache and user configuration in the account's home; `node_modules`
+  in the project, where `npm ci` writes it and nothing serves it.
+- **The runtime against the application**: `site_install` asks the runtime's `node --version`
+  and reads `engines.node` with a small range reader (`>=`, `^`, `~`, x-ranges, `||`), saying
+  they match, they do not, or the range is not one it reads.
+- **WebSockets need nothing new**: HTTP/1 upgrades already tunnel with no idle timeout, and
+  browsers open WebSockets over HTTP/1.1 since agensio offers none over HTTP/2.
+  `tests/kuma-install.sh` checks socket.io's polling and its upgrade through TLS.
+
+Not in this step: the first-run window (a site private until its setup wizard is done, by
+basic auth with a generated password or an IP allow-list), which every application with a
+browser setup shares (WordPress, Writebook, Kuma); `npm install` of named packages (would be
+confirmed in person, like `pip_install`); a build on the server (`npm_run build` needs the
+dev dependencies `npm_ci` omits).
+

@@ -978,8 +978,8 @@ void Server::install_async(const json::Value& req, std::function<void(json::Valu
     // Off the worker: the helper's request blocks for the download's duration, and so does
     // the in-process install. The result is posted back to worker 0, where the control
     // connection lives. The runtimes key comes from the configuration running now.
-    const std::string ruby_dir = runtime_dir(running().control, "ruby");
-    std::thread([this, req, ruby_dir, done = std::move(done)] {
+    const std::string ruby_dir = runtime_dir(running().control, "ruby"), node_dir = runtime_dir(running().control, "node");
+    std::thread([this, req, ruby_dir, node_dir, done = std::move(done)] {
         json::Value r;
         const bool copy = req.get("op") == "file_copy";
         if (provisioner_.available()) {
@@ -1017,6 +1017,11 @@ void Server::install_async(const json::Value& req, std::function<void(json::Valu
                 std::string canonical;
                 bool missing = false;
                 if (tasks::trusted_program(ruby_dir + "/ruby", provision::sites_root(cfg_), canonical, missing).empty()) ir.ruby = canonical;
+            }
+            if (req["node_check"].boolean()) {
+                std::string canonical;
+                bool missing = false;
+                if (tasks::trusted_program(node_dir + "/node", provision::sites_root(cfg_), canonical, missing).empty()) ir.node = canonical;
             }
             for (const auto& sec : req["secrets"].items()) ir.secrets.push_back(sec.str());
             if (!ir.url.empty() && !cfg_.control.install) {

@@ -460,12 +460,21 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   from `DJANGO_SECRET_KEY`); `createsuperuser` takes the password from the site's
   environment and the Gunicorn unit (`ExecStart=@`) unsets it. `venv_support` refuses
   `venv_create` without ensurepip (Debian's python3-venv). Security page rows 27 to 29, 31, 32.
+  Node (2026-09-28, design section 17, `docs/configuration.md` 4f): `app = "node"`, every
+  request to the application, the project's manifests, `node_modules/` and databases refused
+  at the edge (`kNodeRefused`, `kNodeRefusedEndings`); `npm_ci` and `npm_run` (a script of
+  package.json by name) from `runtimes.node` with npm's cache and config in the account's
+  home; the site field `entry` (`check_entry`, guessed by `install::guess_node_entry`), the
+  unit running root's node on it with `HOST`/`PORT` from the upstream, which
+  `appenv::check_change_for_app` keeps out of a Node site's environment;
+  `install::node_range_matches` reads `engines.node`. Security page row 33.
+  `tests/kuma-install.sh` (the `agensio-devbox:node` image, real Kuma 2.5.5).
   `app = "rails"` is the proxy preset plus its tasks and credential
   files; Puma is started by the unit `site-unit` renders until F14. `tests/tasks.sh`
   (root devbox, fake interpreters, a fake Python 3.13), `tests/rails.sh` (real Ruby and
   rubygems.org, the whole workflow), `tests/wagtail-install.sh` (the `agensio-devbox:python`
   image, real pip, Wagtail and Gunicorn behind agensio over TLS). Rule for every change here:
-  the security page rows 26 to 32 and the MCP texts move with it.
+  the security page rows 26 to 33 and the MCP texts move with it.
 - **Application install** (F9, `src/services/archive.*`, `fetch.*`, `install.*`):
   `agensio ctl site-install NAME [--url | --file | --version]` fills a site's empty
   directory as the site's account from an https archive, an upload (`agensio ctl upload`)

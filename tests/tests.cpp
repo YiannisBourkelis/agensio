@@ -1681,7 +1681,8 @@ static void test_tasks() {
     for (const auto& r : tasks::rows()) {
         // A program row runs an interpreter by name; a template row writes one fixed file below the site.
         if (r.writes) CHECK(!*r.runtime && !*r.program && r.args.empty() && r.content && std::string_view(r.writes).find("..") == std::string_view::npos && r.writes[0] != '/');
-        else CHECK(((std::string_view(r.runtime) == "ruby" && r.timeout >= 600) || (std::string_view(r.runtime) == "python3" && r.timeout >= 300)) &&
+        else CHECK(((std::string_view(r.runtime) == "ruby" && r.timeout >= 600) || (std::string_view(r.runtime) == "python3" && r.timeout >= 300) ||
+                    (std::string_view(r.runtime) == "node" && std::string_view(r.program) == "npm" && r.timeout >= 600)) &&
                    std::string_view(r.program).find('/') == std::string_view::npos);
         // A row that runs under another name runs root's interpreter as the site's virtualenv's python.
         if (r.argv0) CHECK(std::string_view(r.argv0) == "{venv}/bin/python" && std::string_view(r.runtime) == "python3" && std::string_view(r.program) == "python3");
@@ -1689,7 +1690,7 @@ static void test_tasks() {
     }
     CHECK(tasks::names("rails").size() == 7 && tasks::names("proxy").empty() && !tasks::has_tasks("wordpress") && tasks::has_tasks("rails"));
     CHECK(tasks::find("rails", "rails_new") && !tasks::find("proxy", "rails_new") && !tasks::find("rails", "sh"));
-    CHECK(tasks::all_names().size() == 19 && tasks::all_params().size() == 6);
+    CHECK(tasks::all_names().size() == 21 && tasks::all_params().size() == 7);
     // Redmine: the Rails rows for an existing application and its own; never the new-application ones.
     const auto redmine = tasks::names("redmine");
     CHECK(redmine.size() == 8 && !tasks::find("redmine", "rails_new") && !tasks::find("redmine", "gem_install_rails") && tasks::find("redmine", "bundle_install") &&
@@ -1842,6 +1843,54 @@ static void test_tasks() {
         std::ofstream(vd / "lib" / "python3.13" / "ensurepip" / "__init__.py") << "";
         CHECK(tasks::venv_support((vd / "bin" / "python3.13").string(), cmd).empty() && tasks::venv_support("/opt/custom/python", cmd).empty() && cmd.empty());
         fs::remove_all(vd);
+    }
+    // Node (2026-09-28): npm as the site's account from runtimes.node, the account's own npm cache
+    // and configuration, npm ci from the lockfile, npm run by a checked script name.
+    {
+        const std::size_t npos = std::string::npos;
+        tasks::Context nc;
+        nc.runtime_dir = "/usr/bin";
+        nc.root = "/var/www/n.test/app";
+        nc.home = "/var/lib/agensio/n1";
+        nc.app = "node";
+        nc.site = "n.test";
+        const tasks::Row& ci = *tasks::find("node", "npm_ci");
+        const tasks::Plan cp = tasks::build(ci, json::Value::object(), nc, "/usr/share/nodejs/npm/bin/npm-cli.js");
+        CHECK(cp.argv == (std::vector<std::string>{"/usr/share/nodejs/npm/bin/npm-cli.js", "ci", "--omit=dev", "--no-audit", "--no-fund"}) && ci.network &&
+              !ci.user_confirm && std::string_view(ci.runtime) == "node");
+        auto has = [&](const tasks::Plan& p, const std::string& e) { return std::find(p.env.begin(), p.env.end(), e) != p.env.end(); };
+        CHECK(has(cp, "NODE_ENV=production") && has(cp, "NPM_CONFIG_CACHE=/var/lib/agensio/n1/.npm") && has(cp, "NPM_CONFIG_USERCONFIG=/var/lib/agensio/n1/.npmrc") &&
+              has(cp, "NPM_CONFIG_UPDATE_NOTIFIER=false") && cp.env.front().starts_with("PATH=/usr/bin:"));
+        const tasks::Row& run = *tasks::find("node", "npm_run");
+        CHECK(tasks::build(run, js(R"({"script":"download-dist"})"), nc, "/x").argv == (std::vector<std::string>{"/x", "run", "download-dist"}));
+        for (const char* ok : {"download-dist", "build", "build:prod", "start.server", "a_b"}) CHECK(tasks::check_params(run, json::Value::object().set("script", ok)).empty());
+        for (const char* bad : {"", "-e", "--prefix=/", "Build", "a b", "a;b", "a/b", "$(x)"})
+            CHECK(!tasks::check_params(run, json::Value::object().set("script", bad)).empty());
+        CHECK(!tasks::find("rails", "npm_ci") && !tasks::find("proxy", "npm_ci") && tasks::names("node").size() == 2);
+        // engines.node against the runtime's version, and the entry package.json names.
+        auto m = [](const char* range, const char* v) {
+            bool known = false;
+            const bool ok = install::node_range_matches(range, v, known);
+            return !known ? 2 : ok ? 1 : 0;
+        };
+        CHECK(m(">= 20.4.0", "20.19.2") == 1 && m(">= 20.4.0", "v18.19.0") == 0 && m(">=18 <21", "20.19.2") == 1 && m(">=18 <20", "20.19.2") == 0 &&
+              m("^20.4", "20.19.2") == 1 && m("^20.4", "22.1.0") == 0 && m("^18 || ^20", "20.19.2") == 1 && m("^18 || ^22", "20.19.2") == 0 &&
+              m("20.x", "20.19.2") == 1 && m("20", "21.0.0") == 0 && m("~20.19", "20.19.9") == 1 && m("~20.18", "20.19.2") == 0 && m("*", "20.1.0") == 1 &&
+              m(">20", "20.19.2") == 0 && m(">20", "21.0.0") == 1 && m("<=20", "20.19.2") == 1 && m("=20.19.2", "20.19.2") == 1 && m("^0.2.3", "0.2.9") == 1 &&
+              m("^0.2.3", "0.3.0") == 0 && m("18 - 20", "20.1.0") == 2 && m(">= 20.0.0-rc.1", "20.1.0") == 2 && m(">=20", "20.1") == 2);
+        json::Value pj;
+        std::string perr;
+        CHECK(json::parse(R"({"name":"uptime-kuma","scripts":{"start":"npm run start-server","start-server":"node server/server.js"}})", pj, perr) &&
+              install::guess_node_entry(pj) == "server/server.js");
+        CHECK(json::parse(R"({"scripts":{"start":"node ./index.mjs --port 3"}})", pj, perr) && install::guess_node_entry(pj) == "index.mjs");
+        CHECK(json::parse(R"({"main":"lib/app.js","scripts":{"start":"next start"}})", pj, perr) && install::guess_node_entry(pj) == "lib/app.js");
+        CHECK(json::parse(R"({"main":"../x.js","scripts":{"start":"node /etc/x.js"}})", pj, perr) && install::guess_node_entry(pj).empty());
+        CHECK(tasks::summarize(ci, "npm WARN deprecated x\nadded 512 packages in 45s\n", -1) == "added 512 packages in 45s" &&
+              tasks::summarize(ci, "up to date in 2s\n", -1) == "up to date in 2s");
+        CHECK(tasks::failure_hint(ci, "npm ERR! The `npm ci` command can only install with an existing package-lock.json", nc).find("lockfile") != npos &&
+              tasks::failure_hint(run, "npm ERR! Missing script: \"dist\"\n", nc).find("no script \"dist\"") != npos &&
+              tasks::failure_hint(ci, "npm ERR! notsup Unsupported engine for x", nc).find("runtimes.node") != npos &&
+              tasks::failure_hint(ci, "gyp ERR! stack Error", nc).find("build-essential") != npos);
     }
     const tasks::Row& gem = *tasks::find("rails", "gem_install_rails");
     const tasks::Row& fresh = *tasks::find("rails", "rails_new");
@@ -2263,6 +2312,30 @@ static void test_tasks() {
         write("p.toml", wag);
         const Config pc = load_config(dir / "p.toml");
         CHECK(std::string(control::service_unit(pc.sites[0], pc).get("unit")).find("Environment=PATH=/usr/bin:/usr/local/bin:/bin\n") != npos);
+        // Node (2026-09-28): everything to the upstream, the project's manifests and databases
+        // refused at the edge, an entry checked, the unit running root's node bound to loopback.
+        const std::string nd = "[[site]]\nserver_name = [\"n.test\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"app\"\nuser = \"n1\"\napp = \"node\"\n"
+                               "upstream = \"http://127.0.0.1:3009\"\n";
+        write("n.toml", "[control]\nruntimes = { node = \"/opt/node/bin\" }\n" + nd);
+        const Config nc = load_config(dir / "n.toml");
+        const SiteConfig& ns = nc.sites[0];
+        CHECK(proxy_app("node") && service_app("node") && node_app("node") && !node_app("proxy") && ns.entry.empty());
+        CHECK(Router::location(ns, "/api/status").kind == HandlerKind::proxy && Router::location(ns, "/socket.io/").kind == HandlerKind::proxy &&
+              Router::location(ns, "/node_modules/x/package.json").handler == "deny" && Router::location(ns, "/package-lock.json").handler == "deny" &&
+              Router::location(ns, "/.npmrc").handler == "deny" &&
+              refused_suffix("/data/kuma.db", Router::location(ns, "/data/kuma.db").deny_suffixes) &&
+              !refused_suffix("/assets/index.js", Router::location(ns, "/assets/index.js").deny_suffixes));
+        CHECK(control::service_unit(ns, nc).get("error").find("names no entry") != npos);
+        write("n2.toml", "[control]\nruntimes = { node = \"/opt/node/bin\" }\n" + nd + "entry = \"server/server.js\"\n");
+        const Config nc2 = load_config(dir / "n2.toml");
+        const std::string nu(control::service_unit(nc2.sites[0], nc2).get("unit"));
+        CHECK(nu.find("ExecStart=/opt/node/bin/node " + nc2.sites[0].root + "/server/server.js\n") != npos &&
+              nu.find("Environment=HOST=127.0.0.1 PORT=3009\n") != npos && nu.find("NODE_ENV=production") != npos &&
+              nu.find("Environment=PATH=/opt/node/bin:/usr/local/bin:/usr/bin:/bin\n") != npos && nu.find("(node)") != npos);
+        CHECK(refused(nd + "entry = \"../x.js\"\n", "must be a path relative") && refused(nd + "entry = \"server/run.sh\"\n", ".js, .mjs or .cjs") &&
+              refused(nd + "entry = \"a/.hidden/x.js\"\n", "plain path") && refused(rails + "entry = \"x.js\"\n", "goes with app = \"node\""));
+        CHECK(check_entry("server/server.js").empty() && check_entry("index.mjs").empty() && !check_entry("/abs.js").empty() && !check_entry("a b.js").empty() &&
+              !check_entry("x.ts").empty() && !check_entry("-x.js").empty());
     }
     fs::remove_all(dir);
 }
@@ -2282,6 +2355,19 @@ static void test_appenv() {
     CHECK(!check_name("PIP_INDEX_URL").empty() && !check_name("PIP_EXTRA_INDEX_URL").empty() && !check_name("VIRTUAL_ENV").empty() &&
           !check_name("DJANGO_SETTINGS_MODULE").empty() && !check_name("AGENSIO_HOSTS").empty() && !check_name("PYTHONPATH").empty() &&
           check_name("DJANGO_SECRET_KEY").empty() && check_name("DJANGO_SUPERUSER_PASSWORD").empty());
+    // Node (2026-09-28): npm's settings everywhere; HOST, PORT and NODE_ENV on a Node site, whose
+    // unit sets them (an EnvironmentFile would override the unit's own lines).
+    CHECK(!check_name("NPM_CONFIG_REGISTRY").empty() && check_name("HOST").empty() && check_name("DATA_DIR").empty());
+    {
+        Change nch;
+        nch.set.push_back({"HOST", "0.0.0.0"});
+        Change ok;
+        ok.set.push_back({"DATA_DIR", "/var/lib/agensio/n1/data/"});
+        Change gen;
+        gen.generate.push_back("PORT");
+        CHECK(!check_change_for_app("node", nch).empty() && check_change_for_app("proxy", nch).empty() && check_change_for_app("node", ok).empty() &&
+              !check_change_for_app("node", gen).empty());
+    }
     for (const char* bad : {"", "secret", "1ABC", "A-B", "A B", "A=B"}) CHECK(!check_name(bad).empty());
     CHECK(!check_name(std::string(65, 'A')).empty() && check_name(std::string(64, 'A')).empty());
     // Values: one line of UTF-8.
@@ -3158,10 +3244,11 @@ static void test_control_sites() {
     needs = apply_request(body, cfg, spec, err);
     CHECK(err.empty() && needs.empty() && spec.user == "shop" && spec.app == "laravel");
     CHECK(json::parse(R"({"app":"weird"})", body, err) && (apply_request(body, cfg, spec, err), err.find("app must be one of: static, php, laravel, drupal, wordpress, grav, proxy") != std::string::npos));
-    CHECK(app_presets().size() == 11 && app_presets().front() == "static" && app_presets()[5] == "grav" && app_presets()[6] == "proxy" && app_presets()[7] == "rails" &&
-          app_presets()[8] == "redmine" && app_presets()[9] == "django" && app_presets().back() == "wagtail");
+    CHECK(app_presets().size() == 12 && app_presets().front() == "static" && app_presets()[5] == "grav" && app_presets()[6] == "proxy" && app_presets()[7] == "rails" &&
+          app_presets()[8] == "redmine" && app_presets()[9] == "django" && app_presets()[10] == "wagtail" && app_presets().back() == "node");
     const json::Value catalog = preset_catalog();
-    CHECK(catalog["presets"].items().size() == 11 && catalog["presets"].items()[8].get("app") == "redmine" && catalog["presets"].items()[8]["tasks"].items().size() == 8 &&
+    CHECK(catalog["presets"].items().size() == 12 && catalog["presets"].items()[8].get("app") == "redmine" && catalog["presets"].items()[8]["tasks"].items().size() == 8 &&
+          catalog["presets"].items()[11].get("app") == "node" && catalog["presets"].items()[11]["tasks"].items().size() == 2 &&
           catalog["presets"].items()[9].get("app") == "django" && catalog["presets"].items()[9]["tasks"].items().size() == 9 &&
           catalog["presets"].items()[10].get("app") == "wagtail" && catalog["presets"].items()[10]["tasks"].items().size() == 9 &&
           catalog["presets"].items()[0].get("app") == "static" && catalog["presets"].items()[5].get("app") == "grav" &&
@@ -3213,6 +3300,35 @@ static void test_control_sites() {
         std::filesystem::remove_all(proot);
         std::filesystem::create_directories(proot);
         CHECK(step().find("packages=django gunicorn") != npos);
+    }
+    // A Node site's open steps follow its directory too (2026-09-28).
+    {
+        const std::size_t npos = std::string::npos;
+        const std::string nroot = (dir / "nodeapp").string();
+        SiteSpec ns;
+        ns.domain = "kuma.example.com";
+        ns.https = "none";
+        ns.app = "node";
+        ns.root = nroot;
+        ns.upstream = "http://127.0.0.1:3009";
+        auto first = [&] {
+            for (const auto& st : next_steps(ns, cfg))
+                if (st.find("site-task") != npos || st.find("site-update") != npos || st.find("site-install") != npos) return st;
+            return std::string();
+        };
+        std::filesystem::create_directories(nroot);
+        CHECK(first().find("a Node application: site-install kuma.example.com") != npos && first().find("--entry FILE") != npos);
+        std::ofstream(nroot + "/package.json") << "{}";
+        CHECK(first().find("the application is in place: site-task kuma.example.com npm_ci") != npos);
+        std::filesystem::create_directories(nroot + "/node_modules");
+        CHECK(first().find("its dependencies are installed: site-update kuma.example.com --entry FILE") != npos);
+        ns.entry = "server/server.js";
+        CHECK(first().find("npm_ci after its lockfile changed") != npos && first().find("--entry") == npos);
+        std::string e;
+        SiteSpec bad = ns;
+        json::Value b;
+        CHECK(json::parse(R"({"entry":"../evil.js"})", b, e) && (apply_request(b, cfg, bad, e), e.find("relative") != npos));
+        std::filesystem::remove_all(nroot);
     }
     CHECK(catalog["presets"].items()[5]["never_served_directories"].items().size() == 9 && catalog["presets"].items()[5]["never_served_directories"].items()[0].str() == "/logs/" &&
           catalog["presets"].items()[3]["never_served_directories"].items().empty() && catalog["presets"].items()[5].get("source").starts_with("https://getgrav.org/"));

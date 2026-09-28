@@ -145,6 +145,9 @@ struct SiteConfig {
     // which the tasks and the rendered unit load (2026-09-28, the owner's decision: a site
     // field given at site_create, not a parameter of every task).
     std::string project;
+    // app = "node": the file node runs (relative to the project directory, server/server.js),
+    // which the rendered unit starts; optional in the file, needed for the unit (2026-09-28).
+    std::string entry;
     std::size_t max_body_size = 0;          // this site's request-body limit (413 above; drives the pool's upload sizes); 0 = [server] max_body_size
     std::vector<std::string> index{"index.html"};
     std::vector<TryStep> try_files;  // default for locations that do not set their own
@@ -317,6 +320,11 @@ bool rails_app(std::string_view app) noexcept;
 // A Django application preset ("django", and "wagtail" built on it): /static/ and /media/
 // from disk, the rest to the upstream (Gunicorn); a virtualenv per site; the Python tasks.
 bool python_app(std::string_view app) noexcept;
+// The Node.js preset ("node"): everything to the upstream, npm's tasks, a unit that runs node.
+bool node_app(std::string_view app) noexcept;
+// An entry `entry = "..."` takes: a relative path inside the project directory ending in .js,
+// .mjs or .cjs, of letters, digits and . _ - /, no "..", no "//". "" or why.
+std::string check_entry(std::string_view entry);
 // A preset whose application service agensio renders and watches (site_service_unit,
 // site_service_status, health): the Rails and the Django presets.
 bool service_app(std::string_view app) noexcept;

@@ -64,6 +64,11 @@ struct Change {
     std::vector<std::string> generate;  // a random secret under each name that is missing
 };
 std::string parse_change(const json::Value& body, Change& out);
+// What a preset sets in its unit and its environment file must not override (systemd lets an
+// EnvironmentFile win over Environment=): for app = "node", HOST, PORT and NODE_ENV, which bind
+// the application to the upstream's loopback address. "" or why. The whole change is checked,
+// set and generate names alike.
+std::string check_change_for_app(std::string_view app, const Change& change);
 
 // 128 hex digits from the system's random source (the length of Rails' `bin/rails secret`);
 // "" when none could be read.

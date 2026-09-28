@@ -14,9 +14,10 @@ BIN=$(readlink -f "${1:-build/agensio}")
 T=$(mktemp -d /tmp/agensio-tasks.XXXXXX); chmod 755 "$T"
 RT=/opt/agensio-tasks-rt   # not below /tmp: every directory above a runtime must be writable by root alone
 PYRT_TOP=/opt/agensio-tasks-py; PYRT=$PYRT_TOP/bin   # a Python laid out as a distribution's: bin/python3.13, lib/python3.13
+NODERT=/opt/agensio-tasks-node                           # a node and an npm that report what they were given
 pass=0; fail=0
 check() { if [ "$3" = "$2" ]; then echo "ok   $1"; pass=$((pass+1)); else echo "FAIL $1: expected [$2] got [$3]"; fail=$((fail+1)); fi; }
-cleanup() { for b in systemctl journalctl; do [ -e /usr/bin/$b.agensio-orig ] && mv -f /usr/bin/$b.agensio-orig /usr/bin/$b; done; [ -f "$T/agensio.pid" ] && kill "$(cat "$T/agensio.pid")" 2>/dev/null; sleep 0.3; for u in r1 r2 r3 r4 r5; do pkill -9 -u $u 2>/dev/null; userdel $u 2>/dev/null; done; rm -rf "$T" "$RT" "$PYRT_TOP"; }
+cleanup() { for b in systemctl journalctl; do [ -e /usr/bin/$b.agensio-orig ] && mv -f /usr/bin/$b.agensio-orig /usr/bin/$b; done; [ -f "$T/agensio.pid" ] && kill "$(cat "$T/agensio.pid")" 2>/dev/null; sleep 0.3; for u in r1 r2 r3 r4 r5 r6; do pkill -9 -u $u 2>/dev/null; userdel $u 2>/dev/null; done; rm -rf "$T" "$RT" "$PYRT_TOP" "$NODERT"; }
 trap cleanup EXIT
 id -u agensio >/dev/null 2>&1 || useradd -r -M -s /usr/sbin/nologin agensio
 mkdir -p $T/sites.d $T/logs $T/run $T/state $T/www $T/default $RT; chown agensio:agensio $T/sites.d $T/logs $T/state; chmod 751 $T/state; chmod 755 $RT
@@ -101,6 +102,28 @@ esac
 SH
 chmod 755 $PYRT/python3.13; ln -sf python3.13 $PYRT/python3
 
+# The fake Node (2026-09-28): node reports its version; npm ci leaves node_modules/, npm run
+# download-dist a dist/, and both print what they were given and the environment they got.
+mkdir -p $NODERT; chmod 755 $NODERT
+cat > $NODERT/node <<'SH'
+#!/bin/sh
+[ "$1" = "--version" ] && { echo v20.19.2; exit 0; }
+echo "prog=node args=$*"
+SH
+cat > $NODERT/npm <<'SH'
+#!/bin/sh
+echo "prog=npm args=$*"
+echo "uid=$(id -un) cwd=$(pwd) NODE_ENV=${NODE_ENV:-} CACHE=${NPM_CONFIG_CACHE:-} USERCONFIG=${NPM_CONFIG_USERCONFIG:-}"
+case "$1" in
+  ci) mkdir -p node_modules/socket.io && echo '{}' > node_modules/.package-lock.json && echo "added 3 packages in 1s" ;;
+  run) case "$2" in
+         download-dist) mkdir -p dist && echo '<html>kuma</html>' > dist/index.html && echo "Downloading dist" ;;
+         *) echo "npm ERR! Missing script: \"$2\"" >&2; exit 1 ;;
+       esac ;;
+esac
+SH
+chmod 755 $NODERT/node $NODERT/npm
+
 write_config() {
 cat > $T/agensio.toml <<CFG
 include = ["sites.d/*.toml"]
@@ -118,7 +141,7 @@ level = "info"
 socket = "$T/run/control.sock"
 audit = "$T/logs/audit.log"
 sites_root = "$T/www"
-runtimes = { ruby = "$RT", python3 = "$PYRT" }
+runtimes = { ruby = "$RT", python3 = "$PYRT", node = "$NODERT" }
 task_limits = { timeout = 5, processes = 256 }
 $1
 [[site]]
@@ -309,6 +332,29 @@ chown -R r5:agensio $W5/media; find $W5/media -type d -exec chmod 2750 {} +; fin
 H5="-H Host:w5.test"
 check "the edge serves /static/ (a hashed name a year, any other five minutes) and /media/ from disk with their headers; /media/documents/, manage.py and the settings are 404; the rest goes to Gunicorn (502: none runs)" "200 200 404 404 404 404 502 yes yes" "$(for p in /static/css/site.css /media/images/x.png /media/documents/private.pdf /manage.py /agensio_settings.py /mysite/settings/production.py /admin/; do curl -sS -o /dev/null -w '%{http_code} ' $H5 http://127.0.0.1:18399$p; done)$(curl -sS -D - -o /dev/null $H5 http://127.0.0.1:18399/static/css/site.css | grep -qi '^cache-control: public, max-age=300' && curl -sS -D - -o /dev/null $H5 http://127.0.0.1:18399/static/css/site.0123abcd9876.css | grep -qi '^cache-control: public, max-age=31536000, immutable' && echo -n 'yes ')$(curl -sS -D - -o /dev/null $H5 http://127.0.0.1:18399/media/images/x.png | grep -qi "^content-security-policy: script-src 'none'" && echo yes)"
 check "check_deploy reports and changes nothing; its summary names the checks" "True 2 warnings: security.W004, security.W012" "$(ctl site-task w5.test check_deploy --yes --reason py > $T/out; j 'd["ok"], d["summary"]')"
+
+# Node (2026-09-28): a Node site with its own account, an Uptime Kuma-shaped archive, npm ci
+# and npm run as the account with npm's cache in its home, the entry, the unit, the edge.
+N6=$T/www/n6.test/app
+out=$(ctl site-create --domain n6.test --app node --root $N6 --user r6 --upstream http://127.0.0.1:18406 --https none --listen-plain 127.0.0.1:18399 --yes --reason node)
+check "site-create: app = node with its own account; site-tasks lists npm_ci and npm_run, no entry yet, the interpreter accepted" "yes 2 None True" "$(echo "$out" | grep -q '"ok":true' && echo yes) $(ctl site-tasks n6.test > $T/out; j 'len(d["tasks"]), d["entry"], d["tasks"][0]["interpreter"]["ok"]')"
+mkdir -p $T/kuma/uptime-kuma-2.5.5/server
+cat > $T/kuma/uptime-kuma-2.5.5/package.json <<'JSON'
+{"name": "uptime-kuma", "version": "2.5.5", "engines": {"node": ">= 20.4.0"},
+ "scripts": {"start": "npm run start-server", "start-server": "node server/server.js", "download-dist": "node extra/download-dist.js"}}
+JSON
+echo '{"lockfileVersion": 3}' > $T/kuma/uptime-kuma-2.5.5/package-lock.json; echo 'console.log(1)' > $T/kuma/uptime-kuma-2.5.5/server/server.js
+tar -C $T/kuma -cf $T/kuma.tar uptime-kuma-2.5.5; ctl upload kuma.tar $T/kuma.tar > /dev/null
+ctl site-install n6.test --file kuma.tar --yes --reason node > $T/out
+check "site-install of a Node archive: package.json read (name, the entry it starts, the lockfile), the runtime's node asked and matched against engines" "True uptime-kuma server/server.js True 20.19.2 True" "$(j 'd["ok"], d["facts"]["package_name"], d["facts"]["entry_guess"], d["facts"]["lockfile"], d["facts"]["runtime_node"], d["facts"]["engines_match"]')"
+check "its next steps: the versions match, npm_ci then Kuma's download-dist, DATA_DIR in the account's home, the entry, the unit, the first-visit warning; never 'open the browser'" "yes yes yes yes yes yes no" "$(for k in 'they match' 'site_task npm_ci' 'download-dist' '"DATA_DIR": "'$T'/state/r6/data/"' 'site_update with entry "server/server.js"' 'whoever opens the site first'; do j '"yes" if any('"'$k'"' in x for x in d["next_steps"]) else "no"' | tr '\n' ' '; done)$(j '"yes" if any("open the site in a browser" in x for x in d["next_steps"]) else "no"')"
+ctl site-task n6.test npm_ci --yes --reason node > $T/out
+check "npm_ci: npm from runtimes.node as r6 in the project, npm ci --omit=dev, NODE_ENV and npm's cache and configuration in r6's home; a summary; the restart line" "True ci|--omit=dev|--no-audit|--no-fund uid=r6 NODE_ENV=production CACHE=$T/state/r6/.npm USERCONFIG=$T/state/r6/.npmrc added 3 packages in 1s yes" "$(j 'd["ok"], "|".join(d["argv"][1:])') $(j '" ".join([l for l in d["output"].splitlines() if l.startswith("uid=")][0].split()[i] for i in (0, 2, 3, 4))') $(j 'd["summary"]') $(j '"yes" if "systemctl restart agensio-app-r6.service" in d["next_steps"][0] else d.get("next_steps")')"
+check "npm_run download-dist leaves dist/ as r6; a script name that looks like an option is refused before anything runs; a missing script names the cause" "True r6 400 1 yes" "$(ctl site-task n6.test npm_run --param script=download-dist --yes --reason node > $T/out; j 'd["ok"]') $(stat -c %U $N6/dist/index.html) $(curl -sS -o /dev/null -w '%{http_code}' --unix-socket $CS -X POST -d '{"task":"npm_run","params":{"script":"--prefix=/"},"confirm":true}' http://control/v1/sites/n6.test/task) $(ctl site-task n6.test npm_run --param script=nope --yes --reason node > $T/out; echo -n "$? "; j '"yes" if "no script" in d.get("hint", "") else d')"
+check "a Node site's environment cannot move the application off loopback (HOST, PORT, NODE_ENV) nor set npm's registry; DATA_DIR is its own" "1 1 1 0" "$(for kv in HOST=0.0.0.0 PORT=80 NPM_CONFIG_REGISTRY=https://evil.example DATA_DIR=$T/state/r6/data/; do ctl site-env-set n6.test --set $kv --yes --reason node > /dev/null 2>&1; echo -n "$? "; done | sed 's/ $//')"
+ctl site-update n6.test --entry server/server.js --yes --reason node > /dev/null
+check "site-unit renders the node unit: root's node on the entry, HOST and PORT from the upstream, as r6" "yes yes yes" "$(ctl site-unit n6.test > $T/out; j '"yes" if "ExecStart='$NODERT'/node '$N6'/server/server.js" in d["unit"] else d["unit"]') $(j '"yes" if "Environment=HOST=127.0.0.1 PORT=18406" in d["unit"] else "no"') $(j '"yes" if "User=r6" in d["unit"] else "no"')"
+check "the edge: the project's manifests, node_modules and a database are 404, never forwarded; the rest goes to node (502: none runs)" "404 404 404 404 502 502" "$(for p in /package.json /package-lock.json /node_modules/socket.io/ /data/kuma.db /api/status /socket.io/; do curl -sS -o /dev/null -w '%{http_code} ' -H Host:n6.test http://127.0.0.1:18399$p; done | sed 's/ $//')"
 
 # The application service's state and journal through the helper (alpha.33 report): fake
 # systemctl and journalctl stand in, only inside a container whose init is not systemd.

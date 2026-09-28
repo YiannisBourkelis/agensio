@@ -784,7 +784,7 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
     for (const auto& s : running.sites) {
         if (s.root.empty() || !s.redirect.empty() || s.app.empty() || s.app == "static" || proxy_app(s.app)) continue;
         const std::string detected = detect_app(s.project_root.empty() ? s.root : s.project_root);
-        if (detected.empty() || detected == s.app || detected == "static" || detected == "proxy" || detected == "php") continue;
+        if (detected.empty() || detected == s.app || detected == "static" || detected == "proxy" || detected == "node" || detected == "php") continue;
         add("warn", "preset_mismatch", s.server_names.front(),
             "the files under " + (s.project_root.empty() ? s.root : s.project_root) + " look like " + detected + " (" + detect_app_marker(detected) +
                 "), but app = \"" + s.app + "\": the " + s.app + " preset's refusals do not fit them, and what " + detected +

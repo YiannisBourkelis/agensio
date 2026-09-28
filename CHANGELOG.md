@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.1.0-alpha.38 (unreleased)
+
+From the Node report against alpha.36 (Uptime Kuma 2.5.5 on an `app = "proxy"` site, where
+nothing after `site_install` could run):
+
+- **`app = "node"`**: every request goes to the application (WebSockets included), and
+  agensio answers the project's manifests, `node_modules/`, `.env`, and databases and logs
+  by their ending with a 404 itself. `entry` names the file `node` runs; `site_install`
+  guesses it from `package.json`.
+- **Two tasks, run as the site's account with npm's cache and configuration in its
+  home.** `npm_ci` installs the dependencies exactly as `package-lock.json` pins them.
+  `npm_run` runs one script of the project's `package.json` by name, such as Kuma's
+  `download-dist`. `site_tasks_list` names `apt-get install -y nodejs npm` when the
+  runtime is missing.
+- **The unit** from `site_service_unit` runs root's `node` on the entry, with `HOST` and
+  `PORT` from the upstream. A Node site's environment cannot set `HOST`, `PORT` or
+  `NODE_ENV`, so it cannot move the application off loopback; `NPM_CONFIG_*` is refused
+  on every site. Service status, logs, health and restart lines work as for Rails and
+  Django.
+- **An archive's facts**: its `package.json` name, scripts, lockfile and guessed entry,
+  and the Node it asks for against the runtime's `node --version`. The next steps give the
+  whole chain, never "open the browser" while nothing runs; for Uptime Kuma they add
+  `DATA_DIR` in the account's home, `UPTIME_KUMA_DB_TYPE=sqlite`, and the warning that
+  the first visitor becomes its admin. A Node archive on an `app = "proxy"` site is named
+  in the warnings.
+- `tests/kuma-install.sh` installs Uptime Kuma 2.5.5 with Debian's node and npm and checks
+  its pages, socket.io's polling and its WebSocket upgrade through agensio over TLS.
+
 ## 0.1.0-alpha.37 (2026-09-28)
 
 - presets_list and the reference: a headers-only location joins the preset's; Wagtail's static caching

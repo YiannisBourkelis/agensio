@@ -27,6 +27,7 @@ struct SiteSpec {
     std::string root;
     std::string upstream;    // app = proxy, rails, redmine, django, wagtail
     std::string project;     // app = django | wagtail: the project's Python package
+    std::string entry;       // app = node: the file node runs, relative to root
     std::string php_socket;  // php without a user: an existing pool
     int php_children = 0;    // generated pool sizing (with a user); the same as settings.children
     std::string php_version;

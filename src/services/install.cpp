@@ -25,6 +25,7 @@
 #include "services/fetch.hpp"
 #include "services/pools.hpp"
 #include "services/tasks.hpp"
+#include "config.hpp"
 
 namespace agensio::install {
 
@@ -33,6 +34,128 @@ bool valid_upload_name(std::string_view name) noexcept {
     for (unsigned char c : name)
         if (!(std::isalnum(c) || c == '.' || c == '_' || c == '-')) return false;
     return true;
+}
+
+namespace {
+// "20.4.0", "v20", "20.x": up to three numbers, x/X/* for any; false for anything else
+// (a pre-release tag). `parts` counts the numbers given (an x ends the count).
+bool parse_version(std::string_view v, int (&out)[3], int& parts) {
+    if (!v.empty() && (v[0] == 'v' || v[0] == '=')) v.remove_prefix(1);
+    out[0] = out[1] = out[2] = 0;
+    parts = 0;
+    if (v.empty() || v == "*" || v == "x" || v == "X") return true;
+    for (int i = 0; i < 3; ++i) {
+        const std::size_t dot = v.find('.');
+        const std::string_view seg = v.substr(0, dot);
+        if (seg == "x" || seg == "X" || seg == "*") return dot == std::string_view::npos || v.substr(dot + 1).find_first_not_of("xX*.") == std::string_view::npos;
+        if (seg.empty() || seg.size() > 6 || seg.find_first_not_of("0123456789") != std::string_view::npos) return false;
+        out[i] = std::atoi(std::string(seg).c_str());
+        parts = i + 1;
+        if (dot == std::string_view::npos) return true;
+        v.remove_prefix(dot + 1);
+    }
+    return false;  // more than three parts
+}
+int compare(const int (&a)[3], const int (&b)[3]) {
+    for (int i = 0; i < 3; ++i)
+        if (a[i] != b[i]) return a[i] < b[i] ? -1 : 1;
+    return 0;
+}
+}  // namespace
+
+bool node_range_matches(std::string_view range, std::string_view version, bool& known) {
+    known = false;
+    int have[3], have_parts = 0;
+    if (!parse_version(version, have, have_parts) || have_parts != 3) return false;
+    bool any = false;
+    for (std::size_t p = 0; p <= range.size();) {
+        std::size_t bar = range.find("||", p);
+        if (bar == std::string_view::npos) bar = range.size();
+        std::string_view alt = range.substr(p, bar - p);
+        p = bar + 2;
+        // Comparators separated by spaces; ">= 20.4.0" is one comparator in two words.
+        std::vector<std::string> comps;
+        std::string pending;
+        for (std::size_t q = 0; q < alt.size();) {
+            while (q < alt.size() && alt[q] == ' ') ++q;
+            std::size_t e = q;
+            while (e < alt.size() && alt[e] != ' ') ++e;
+            if (e > q) {
+                std::string word(alt.substr(q, e - q));
+                if (word == "-") return false;  // a hyphen range: not read
+                if (word.find_first_not_of("<>=^~") == std::string::npos) pending += word;
+                else {
+                    comps.push_back(pending + word);
+                    pending.clear();
+                }
+            }
+            q = e;
+        }
+        if (!pending.empty()) return false;
+        bool ok = true;
+        for (const auto& c : comps) {
+            std::size_t op_len = 0;
+            for (std::string_view op : {">=", "<=", ">", "<", "=", "^", "~"})
+                if (std::string_view(c).starts_with(op)) {
+                    op_len = op.size();
+                    break;
+                }
+            const std::string op = c.substr(0, op_len);
+            int v[3], parts = 0;
+            if (!parse_version(std::string_view(c).substr(op_len), v, parts)) return false;
+            int hi[3] = {v[0], v[1], v[2]};  // the first version past a partial one (20 -> 21.0.0, 20.4 -> 20.5.0)
+            if (parts == 1) hi[0] += 1, hi[1] = hi[2] = 0;
+            else if (parts == 2) hi[1] += 1, hi[2] = 0;
+            if (parts == 0) continue;  // "*": anything
+            bool pass = false;
+            if (op == ">=") pass = compare(have, v) >= 0;
+            else if (op == ">") pass = parts == 3 ? compare(have, v) > 0 : compare(have, hi) >= 0;
+            else if (op == "<") pass = compare(have, v) < 0;
+            else if (op == "<=") pass = parts == 3 ? compare(have, v) <= 0 : compare(have, hi) < 0;
+            else if (op == "^") {
+                int top[3] = {v[0] + 1, 0, 0};
+                if (v[0] == 0 && parts >= 2) top[0] = 0, top[1] = v[1] + 1, top[2] = 0;
+                if (v[0] == 0 && v[1] == 0 && parts == 3) top[1] = 0, top[2] = v[2] + 1;
+                pass = compare(have, v) >= 0 && compare(have, top) < 0;
+            } else if (op == "~") {
+                int top[3] = {v[0], v[1] + 1, 0};
+                if (parts == 1) top[0] = v[0] + 1, top[1] = 0;
+                pass = compare(have, v) >= 0 && compare(have, top) < 0;
+            } else {  // "=" or none: exact, or the whole partial range
+                pass = parts == 3 ? compare(have, v) == 0 : compare(have, v) >= 0 && compare(have, hi) < 0;
+            }
+            ok = ok && pass;
+        }
+        any = any || ok;
+        if (bar == range.size()) break;
+    }
+    known = true;
+    return any;
+}
+
+std::string guess_node_entry(const json::Value& pj) {
+    auto node_file = [](std::string_view cmd) -> std::string {
+        while (!cmd.empty() && cmd.front() == ' ') cmd.remove_prefix(1);
+        if (!cmd.starts_with("node ")) return "";
+        cmd.remove_prefix(5);
+        while (!cmd.empty() && cmd.front() == ' ') cmd.remove_prefix(1);
+        std::string file(cmd.substr(0, cmd.find(' ')));
+        if (file.starts_with("./")) file.erase(0, 2);
+        return check_entry(file).empty() ? file : "";
+    };
+    const json::Value& scripts = pj["scripts"];
+    std::string guess = node_file(scripts.get("start"));
+    if (guess.empty() && scripts.get("start").starts_with("npm run ")) {
+        std::string_view name = scripts.get("start").substr(8);
+        name = name.substr(0, name.find(' '));
+        guess = node_file(scripts.get(name));
+    }
+    if (guess.empty() && pj["main"].is_string()) {
+        std::string m(pj.get("main"));
+        if (m.starts_with("./")) m.erase(0, 2);
+        if (check_entry(m).empty()) guess = m;
+    }
+    return guess;
 }
 
 bool valid_sha256(std::string_view hex) noexcept {
@@ -214,7 +337,7 @@ namespace {
 // installed it (2026-09-27 Writebook report): a Gemfile, the Ruby a .ruby-version pins, and
 // whether Rails credentials came with it (without them the application reads
 // SECRET_KEY_BASE from its environment, which the control handler then generates).
-json::Value app_facts(int dir_fd, const std::string& ruby) {
+json::Value app_facts(int dir_fd, const std::string& ruby, const std::string& node) {
     auto regular = [&](const char* rel) {
         struct stat st {};
         return ::fstatat(dir_fd, rel, &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(st.st_mode);
@@ -271,6 +394,52 @@ json::Value app_facts(int dir_fd, const std::string& ruby) {
         const bool version = !out.empty() && out.size() <= 32 && out.find_first_not_of("0123456789.") == std::string::npos;
         if (r["exit"].type() == json::Value::Type::number && r["exit"].num() == 0 && version) f.set("runtime_ruby", out);
         else f.set("runtime_ruby_error", std::string(ruby) + " did not report its version: " + (r.get("error").empty() ? out.substr(0, 200) : std::string(r.get("error"))));
+    }
+    // A Node application (2026-09-28, the Uptime Kuma report): its package.json's name, the Node
+    // it asks for, its scripts, whether a lockfile ships, and the file node would run.
+    if (regular("package.json")) {
+        std::string text;
+        const int pf = ::openat(dir_fd, "package.json", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+        if (pf >= 0) {
+            char buf[16384];
+            for (ssize_t n; (n = ::read(pf, buf, sizeof buf)) > 0 && text.size() < 256 * 1024;) text.append(buf, static_cast<std::size_t>(n));
+            ::close(pf);
+        }
+        json::Value pj;
+        std::string err;
+        f.set("package_json", true).set("lockfile", regular("package-lock.json") || regular("npm-shrinkwrap.json"));
+        if (text.size() < 256 * 1024 && json::parse(text, pj, err) && pj.is_object()) {
+            const std::string name = tasks::clean_text(std::string(pj.get("name")).substr(0, 100));
+            if (!name.empty()) f.set("package_name", name);
+            if (const std::string_view eng = pj["engines"].get("node"); !eng.empty()) f.set("engines_node", tasks::clean_text(std::string(eng.substr(0, 100))));
+            json::Value scripts = json::Value::array();
+            for (const auto& m : pj["scripts"].members())
+                if (scripts.items().size() < 64) scripts.push(tasks::clean_text(m.first.substr(0, 64)));
+            f.set("scripts", std::move(scripts));
+            if (const std::string guess = guess_node_entry(pj); !guess.empty()) f.set("entry_guess", guess);
+        }
+        if (!f.get("engines_node").empty() && !node.empty()) {
+            tasks::Plan plan;
+            plan.argv = {node, "--version"};
+            plan.env = {"PATH=/usr/bin:/bin", "LANG=C.UTF-8"};
+            plan.timeout = 20;
+            plan.processes = 4096;
+            plan.term_grace = 2;
+            plan.drain = 1;
+            const json::Value r = tasks::run(plan, dir_fd);
+            std::string out = tasks::clean_text(r.get("output"));
+            while (!out.empty() && (out.back() == '\n' || out.back() == ' ')) out.pop_back();
+            if (out.starts_with("v")) out.erase(0, 1);
+            const bool version = !out.empty() && out.size() <= 32 && out.find_first_not_of("0123456789.") == std::string::npos;
+            if (r["exit"].type() == json::Value::Type::number && r["exit"].num() == 0 && version) {
+                f.set("runtime_node", out);
+                bool known = false;
+                const bool match = node_range_matches(f.get("engines_node"), out, known);
+                f.set("engines_match", known ? json::Value(match) : json::Value(nullptr));
+            } else {
+                f.set("runtime_node_error", node + " did not report its version: " + (r.get("error").empty() ? out.substr(0, 200) : std::string(r.get("error"))));
+            }
+        }
     }
     return f;
 }
@@ -478,7 +647,7 @@ json::Value execute(const Request& req) {
         secured.push(req.target + "/" + rel);
     }
     result.set("secured", secured);
-    if (sub.empty()) result.set("facts", app_facts(dir_fd, req.ruby));
+    if (sub.empty()) result.set("facts", app_facts(dir_fd, req.ruby, req.node));
     ::close(dir_fd);
     return result;
 }

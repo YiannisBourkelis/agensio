@@ -79,7 +79,7 @@ std::string validate(const json::Value& req, const Config& cfg) {
         if (!control::safe_path(site_root, why)) return "app_install: site_root " + why;
         if (!under(site_root, sites_root(cfg)) || site_root == sites_root(cfg)) return "app_install: " + site_root + " is not below " + sites_root(cfg);
         if (!under(target, site_root)) return "app_install: " + target + " is not below the site's directory " + site_root;
-        for (const char* flag : {"create_path", "dry_run", "ruby_check"})
+        for (const char* flag : {"create_path", "dry_run", "ruby_check", "node_check"})
             if (!req[flag].is_null() && req[flag].type() != json::Value::Type::boolean) return std::string("app_install: ") + flag + " must be a boolean";
         if (!user.empty() && !control::valid_account(user, why)) return "app_install: user " + why;
         if (url.empty() == upload.empty()) return "app_install: exactly one of url and upload";
@@ -409,16 +409,18 @@ json::Value app_install(const json::Value& req, const Config& cfg, int helper_fd
     if (uid == 0) return reply.set("ok", false).set("error", "refusing to install as root");
     // ruby_check: the Ruby of [control] runtimes in root's file on disk, held to the
     // interpreter rule here, so the install child asks a trusted program for its version.
-    std::string ruby;
-    if (req["ruby_check"].boolean()) {
-        try {
-            const Config fresh = load_config(cfg.config_path);
-            std::string canonical;
-            bool missing = false;
-            if (tasks::trusted_program(runtime_dir(fresh.control, "ruby") + "/ruby", provision::sites_root(cfg), canonical, missing).empty()) ruby = canonical;
-        } catch (const std::exception&) {
+    std::string ruby, node;
+    for (const char* runtime : {"ruby", "node"})
+        if (req[std::string(runtime) + "_check"].boolean()) {
+            try {
+                const Config fresh = load_config(cfg.config_path);
+                std::string canonical;
+                bool missing = false;
+                if (tasks::trusted_program(runtime_dir(fresh.control, runtime) + "/" + runtime, provision::sites_root(cfg), canonical, missing).empty())
+                    (std::string_view(runtime) == "ruby" ? ruby : node) = canonical;
+            } catch (const std::exception&) {
+            }
         }
-    }
     int upload_fd = -1;
     if (!upload.empty()) {
         const std::string path = provision::uploads_dir(cfg) + "/" + upload;
@@ -439,6 +441,7 @@ json::Value app_install(const json::Value& req, const Config& cfg, int helper_fd
         r.allow_private = cfg.control.install_private;
         r.ca_file = cfg.control.install_ca;
         r.ruby = ruby;
+        r.node = node;
         for (const auto& sec : req["secrets"].items()) r.secrets.push_back(sec.str());
         return install::execute(r);
     });
@@ -528,7 +531,7 @@ json::Value env_op(const json::Value& req, const Config& cfg) {
     const std::string name(req.get("site"));
     const SiteConfig* site = control::find_site(fresh, name);
     if (!site) return fail("no site " + name + " in the configuration on disk");
-    if (!proxy_app(site->app)) return fail("site " + name + " has app = \"" + site->app + "\"; a site's environment is for applications agensio runs (rails, redmine, proxy)");
+    if (!proxy_app(site->app)) return fail("site " + name + " has app = \"" + site->app + "\"; a site's environment is for applications agensio runs (rails, redmine, django, wagtail, node, proxy)");
     const std::string key = site->server_names.front();
     const std::string dir = appenv::dir_of(cfg.config_path);
     if (req.get("op") == "env_read") {
@@ -540,6 +543,7 @@ json::Value env_op(const json::Value& req, const Config& cfg) {
     }
     appenv::Change change;
     if (std::string bad = appenv::parse_change(req, change); !bad.empty()) return fail(bad);
+    if (std::string bad = appenv::check_change_for_app(site->app, change); !bad.empty()) return fail(bad);
     return appenv::apply(dir, key, 0, change).set("site", key);
 }
 

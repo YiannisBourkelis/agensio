@@ -225,6 +225,7 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
                 .set("downloads", cfg.control.task_network).set("timeout_cap", static_cast<double>(cfg.control.task_timeout))
                 .set("runs_as", site->user.empty() ? json::Value("the owner of the site's directory") : json::Value(site->user))
                 .set("directory", site->project_root.empty() ? site->root : site->project_root);
+            if (node_app(app)) body.set("entry", site->entry.empty() ? json::Value(nullptr) : json::Value(site->entry));
             if (python_app(app))
                 body.set("project", site->project)
                     .set("virtualenv", (cfg.state_dir.empty() ? std::string("<state_dir>") : cfg.state_dir) + "/" +
@@ -351,7 +352,8 @@ std::string body_limit_step(const SiteConfig& site, const Config& cfg) {
 struct SiteFacts {
     bool rails_root = false;
     bool python_root = false;  // a Django or Wagtail site's whole project (2026-09-28)
-    std::string key, ruby_dir, body_step, app, project;
+    bool node_root = false;    // a Node site's whole application (2026-09-28)
+    std::string key, ruby_dir, node_dir, body_step, app, project, entry, home;
 };
 
 // The hosting-rule errors of the configuration on disk, as a set: a writer compares the
@@ -705,6 +707,7 @@ void ControlHandler::site_install(Stream& s, std::string_view name, const json::
     if (!sha.empty()) req.set("sha256", sha);
     if (!body["strip"].is_null()) req.set("strip", body["strip"]);
     if (rails_app(app) && target == site_root) req.set("ruby_check", true);  // the pinned Ruby against the runtime's (next steps)
+    if (node_app(app) && target == site_root) req.set("node_check", true);   // engines.node against the runtime's node
     const std::string source = url.empty() ? "upload " + file : url;
     if (!dry_run) audit_peer(s, what, "installing " + source + " into " + target + (create_path ? " (create_path)" : ""));
     const std::vector<std::string> before = dry_run ? std::vector<std::string>{} : validation_errors(*backend_);
@@ -714,6 +717,10 @@ void ControlHandler::site_install(Stream& s, std::string_view name, const json::
     sf.rails_root = rails_app(app) && target == site_root;
     sf.python_root = python_app(app) && target == site_root;
     sf.project = site->project;
+    sf.node_root = node_app(app) && target == site_root;
+    sf.entry = site->entry;
+    sf.node_dir = runtime_dir(cfg.control, "node");
+    if (!site->user.empty() && !cfg.state_dir.empty()) sf.home = cfg.state_dir + "/" + site->user;
     sf.app = app;
     sf.key = site->server_names.front();
     sf.ruby_dir = runtime_dir(cfg.control, "ruby");
@@ -795,12 +802,53 @@ void ControlHandler::site_install(Stream& s, std::string_view name, const json::
                                   " before django_settings, or the tasks and the unit load a package that does not exist");
             } else if (sf.python_root) {
                 steps.push("the archive holds no manage.py at its top: a Django project's directory is the site's root (strip or path place it there)");
+            } else if (sf.node_root && facts["package_json"].boolean()) {
+                // A Node application from an archive (2026-09-28, the Uptime Kuma report: the answer
+                // said to open a browser while nothing ran).
+                const bool kuma = facts.get("package_name") == "uptime-kuma";
+                if (const std::string want(facts.get("engines_node")), have(facts.get("runtime_node")); !want.empty() && !have.empty()) {
+                    const json::Value& m = facts["engines_match"];
+                    steps.push("the application asks for node " + want + " (package.json engines) and the node of [control] runtimes (" + sf.node_dir + ") is " + have +
+                               (m.is_null() ? std::string(": that range is not one agensio reads, so check it by hand")
+                                : m.boolean() ? std::string(": they match")
+                                              : std::string(": they do not match, and npm_ci or the application may refuse; root installs a Node that fits (under /opt) "
+                                                            "and points runtimes.node at its bin directory (docs/configuration.md 4f), then agensio reload")));
+                } else if (!want.empty() && !facts.get("runtime_node_error").empty()) {
+                    steps.push("the application asks for node " + want + "; the node of [control] runtimes could not be asked for its version (" +
+                               std::string(facts.get("runtime_node_error")) + "): site_tasks_list shows whether it is installed");
+                }
+                std::string scripts;
+                for (const auto& n : facts["scripts"].items()) scripts += (scripts.empty() ? "" : ", ") + std::string(n.str());
+                steps.push("site_task npm_ci (the dependencies its package-lock.json pins), then " +
+                           (kuma ? std::string("npm_run with params {\"script\": \"download-dist\"} (Uptime Kuma's prebuilt frontend, from its GitHub release)")
+                                 : "the post-install steps the application documents, through npm_run with the script's name" +
+                                       (scripts.empty() ? std::string() : " (its scripts: " + scripts + ")")));
+                if (kuma && !sf.home.empty())
+                    steps.push("site_env_set with set: {\"DATA_DIR\": \"" + sf.home + "/data/\", \"UPTIME_KUMA_DB_TYPE\": \"sqlite\"}: DATA_DIR keeps kuma.db, "
+                               "which holds the credentials of every monitored service, out of the project, in the site account's own home (Kuma "
+                               "makes the directory); the database type skips Kuma's database page, which the first visitor would otherwise answer");
+                const std::string guess(facts.get("entry_guess"));
+                if (!guess.empty() && guess != sf.entry)
+                    steps.push("site_update with entry \"" + guess + "\": the file node runs (package.json's start script names it)");
+                else if (guess.empty() && sf.entry.empty())
+                    steps.push("site_update with entry: the file node runs, relative to the project (package.json names none in its start script or main)");
+                steps.push("then the application server: site_service_unit gives its systemd unit for root to install");
+                if (kuma)
+                    steps.push("Uptime Kuma creates its admin account in the browser on the first visit: whoever opens the site first becomes its "
+                               "admin, so the user opens https://" + sf.key + "/ right after the service starts");
+                if (!facts["lockfile"].boolean())
+                    warnings.push("the archive has no package-lock.json: npm_ci installs only what a lockfile pins, and the application's release should carry one");
+            } else if (sf.node_root) {
+                steps.push("the archive holds no package.json at its top: a Node application's directory is the site's root (strip or path place it there)");
             } else {
                 steps.push("open the site in a browser to finish the application's own setup (database, admin account)");
             }
             if (!sf.body_step.empty()) steps.push(sf.body_step);
             if (!file.empty()) steps.push("the upload " + file + " is still stored; delete it with uploads delete " + file + " when no longer needed");
             r.set("next_steps", steps);
+            if (sf.app == "proxy" && facts["package_json"].boolean() && !facts["gemfile"].boolean())
+                warnings.push("this is a Node application (package.json): site_update with app \"node\" gives the site npm_ci, npm_run and a unit that runs it; "
+                              "app = \"proxy\" only forwards to an application that something else runs");
             if (sf.app == "rails" && facts["redmine"].boolean())  // the archive is Redmine: its preset has the tasks it needs
                 warnings.push("this is Redmine (lib/redmine/version.rb): site_update with app \"redmine\" gives the site its tasks (gemfile_local for Puma, "
                               "load_default_data, plugins_migrate) and its credential files");
@@ -1312,7 +1360,7 @@ void ControlHandler::site_task(Stream& s, std::string_view name, const json::Val
     std::string restart;
     if (service_app(app) && !site->user.empty())
         for (const char* t : {"bundle_install", "db_migrate", "db_prepare", "plugins_migrate", "assets_precompile", "pip_install_requirements",
-                              "pip_install", "django_settings", "migrate", "collectstatic"})
+                              "pip_install", "django_settings", "migrate", "collectstatic", "npm_ci", "npm_run"})
             if (task == t) restart = "agensio-app-" + site->user + ".service";
     backend_->task_async(req, [this, &s, what = std::string(what), key, task, dry_run, before, restart, done](json::Value r) {
         if (!dry_run) running_tasks_.erase(key);
@@ -1407,7 +1455,7 @@ const SiteConfig* env_site(const Config& cfg, std::string_view name, int& status
     if (!proxy_app(site->app)) {
         status = 422;
         refusal = json::Value::object().set("error", "site " + std::string(name) + " has app = \"" + (site->app.empty() ? std::string("static") : site->app) +
-                                                         "\"; a site's environment is for applications agensio runs (app = \"rails\", \"redmine\", \"django\", \"wagtail\" or \"proxy\")")
+                                                         "\"; a site's environment is for applications agensio runs (app = \"rails\", \"redmine\", \"django\", \"wagtail\", \"node\" or \"proxy\")")
                       .set("app", site->app);
         return nullptr;
     }
@@ -1471,8 +1519,8 @@ void ControlHandler::site_service(Stream& s, std::string_view name, bool logs, s
             req.set("since", since);
         }
     }
-    const bool python = python_app(site->app);
-    backend_->helper_async(req, [this, &s, key, logs, python, done](json::Value r) {
+    const bool python = python_app(site->app), node = node_app(site->app);
+    backend_->helper_async(req, [this, &s, key, logs, python, node, done](json::Value r) {
         if (r["busy"].boolean()) {
             reply(s, 503, json::Value::object()
                               .set("error", "the provisioning helper is busy with a task or an install; ask again when it finishes")
@@ -1489,6 +1537,8 @@ void ControlHandler::site_service(Stream& s, std::string_view name, bool logs, s
                                             (python ? "a Python traceback (its last line names the exception: ModuleNotFoundError, "
                                                       "ImproperlyConfigured, OperationalError), 'Address already in use' or a Gunicorn "
                                                       "'Worker failed to boot'"
+                                             : node ? "a Node stack trace (Error: Cannot find module, EADDRINUSE, EACCES), or the application's own "
+                                                      "last words before it exited"
                                                     : "a Ruby backtrace or 'Address already in use'") +
                                             " usually names the cause. After a fix, root restarts the unit");
             reply(s, 200, r);
@@ -1550,8 +1600,8 @@ void ControlHandler::site_env_show(Stream& s, std::string_view name, std::functi
         reveal.push(n);
     }
     const std::string key = site->server_names.front();
-    const bool rails = rails_app(site->app), django = python_app(site->app);
-    backend_->env_async(json::Value::object().set("op", "env_read").set("site", key).set("reveal", reveal), [this, &s, key, rails, django, done](json::Value r) {
+    const bool rails = rails_app(site->app), django = python_app(site->app), node = node_app(site->app);
+    backend_->env_async(json::Value::object().set("op", "env_read").set("site", key).set("reveal", reveal), [this, &s, key, rails, django, node, done](json::Value r) {
         const std::string what = "sites/" + key + "/env";
         if (!r["ok"].boolean()) {
             audit_peer(s, what, "read refused: " + std::string(r.get("error")));
@@ -1570,8 +1620,12 @@ void ControlHandler::site_env_show(Stream& s, std::string_view name, std::functi
             if (r["exists"].boolean())
                 hint = std::string("names, lengths and fingerprints only (the same fingerprint means the same value); a value is returned only when its "
                                    "name is in reveal, and only when the user asked to see it. site_env_set changes them; ") +
-                       (rails || django ? "the tasks read the file on their next run, the application when its service restarts"
+                       (rails || django || node ? "the tasks read the file on their next run, the application when its service restarts"
                                         : "the application reads them when its service restarts, from a unit that loads this file with EnvironmentFile=");
+            else if (node)
+                hint = "no environment file yet: site_env_set creates it with what the application reads from its environment (an API key, a "
+                       "session secret with generate, Uptime Kuma's DATA_DIR); HOST, PORT and NODE_ENV are agensio's (the unit binds the application to "
+                       "the upstream's loopback address) and refused. The unit site_service_unit renders loads the file";
             else if (django)
                 hint = "no environment file yet: site_env_set creates it (generate: [\"DJANGO_SECRET_KEY\"] for the project's secret key, which "
                        "django_settings needs; generate: [\"DJANGO_SUPERUSER_PASSWORD\"] before createsuperuser; set: {\"DATABASE_URL\": ...} for "
@@ -1603,6 +1657,11 @@ void ControlHandler::site_env_set(Stream& s, std::string_view name, const json::
     if (std::string bad = appenv::parse_change(body, change); !bad.empty()) {
         reply(s, 400, json::Value::object().set("error", bad)
                           .set("hint", "set: {NAME: value}, unset: [NAME], generate: [NAME] (a random secret for a missing name, e.g. SECRET_KEY_BASE)"));
+        done();
+        return;
+    }
+    if (std::string bad = appenv::check_change_for_app(site->app, change); !bad.empty()) {
+        reply(s, 400, json::Value::object().set("error", bad));
         done();
         return;
     }

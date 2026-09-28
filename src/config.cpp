@@ -622,6 +622,15 @@ const std::vector<const char*> kDjangoRefused = {"/.env", "/.git/", "/manage.py"
 const std::vector<std::string> kDjangoRefusedEndings = {".py", ".pyc", ".pyo", ".sqlite3", ".sqlite3-wal", ".sqlite3-shm", ".sqlite3-journal",
                                                         ".log", ".key", ".sql", ".env"};
 
+// A Node site (2026-09-28, the Uptime Kuma report): every request goes to the application,
+// which serves its own files; these paths and endings scanners probe are answered 404 by
+// agensio itself, never proxied (the project's dependencies and manifests, its secrets, and
+// databases and logs wherever they are: Kuma keeps kuma.db in data/).
+const std::vector<const char*> kNodeRefused = {"/.env", "/.git/", "/.npmrc", "/node_modules/", "/package.json", "/package-lock.json",
+                                               "/npm-shrinkwrap.json", "/yarn.lock", "/pnpm-lock.yaml"};
+const std::vector<std::string> kNodeRefusedEndings = {".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sqlite3", ".sqlite3-wal",
+                                                      ".sqlite3-shm", ".sqlite3-journal", ".log", ".key", ".sql", ".env"};
+
 const std::vector<std::string> kSourceBackups = {".inc", ".bak", ".orig", ".save", ".swp", ".swo", "~",
                                                  // logs and database dumps (2026-09-23 live report: a Grav site's logs/grav.log
                                                  // named its backup archive; WordPress's wp-content/debug.log is the classic)
@@ -744,7 +753,7 @@ const PhpPreset* php_preset(const std::string& app) {
 std::string preset_names() {
     std::string out;
     for (const auto& p : kPhpPresets) out += std::string(out.empty() ? "" : ", ") + "\"" + p.name + "\"";
-    return out + ", \"proxy\", \"rails\", \"redmine\", \"django\", \"wagtail\" or \"static\"";
+    return out + ", \"proxy\", \"rails\", \"redmine\", \"django\", \"wagtail\", \"node\" or \"static\"";
 }
 
 }  // namespace
@@ -797,6 +806,7 @@ void apply_preset(SiteConfig& site, const std::string& where) {
             loc.origin = "preset:" + site.app;
             if (rails_app(site.app)) loc.deny_suffixes = kRailsRefusedEndings;  // answered 404 by the dispatcher, never proxied
             if (python_app(site.app)) loc.deny_suffixes = kDjangoRefusedEndings;
+            if (node_app(site.app)) loc.deny_suffixes = kNodeRefusedEndings;
             site.locations.push_back(std::move(loc));
         }
         if (python_app(site.app)) {
@@ -862,6 +872,8 @@ void apply_preset(SiteConfig& site, const std::string& where) {
             // a collection's privacy; the files themselves are never answered from disk.
             if (site.app == "wagtail") refuse("/media/documents/", "preset:wagtail");
         }
+        if (node_app(site.app))
+            for (const char* p : kNodeRefused) refuse(p, "preset:node");
         if (rails_app(site.app))
             for (const char* p : kRailsRefused) {
                 const std::string path = p;
@@ -1126,6 +1138,13 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     } else if (t.contains("project")) {
         fail(where + ".project must be a string");
     }
+    if (auto e = t["entry"].value<std::string>()) {
+        if (!node_app(site.app)) fail(where + ".entry names the file node runs: it goes with app = \"node\"");
+        if (const std::string why = check_entry(*e); !why.empty()) fail(where + ".entry: " + why);
+        site.entry = *e;
+    } else if (t.contains("entry")) {
+        fail(where + ".entry must be a string");
+    }
     if (python_app(site.app) && site.redirect.empty() && site.project.empty())
         fail(where + ": app = \"" + site.app + "\" needs project = \"NAME\", the project's Python package (NAME/settings, NAME/wsgi.py)");
     const std::string root_given = site.root;  // the project directory (open_basedir starts there)
@@ -1328,10 +1347,22 @@ std::string body_refused_text(const SiteConfig* site, std::string_view remote, s
            "; site_update with settings {max_body_size} raises it, up to [control] site_limits";
 }
 
-bool proxy_app(std::string_view app) noexcept { return app == "proxy" || rails_app(app) || python_app(app); }
+bool proxy_app(std::string_view app) noexcept { return app == "proxy" || rails_app(app) || python_app(app) || node_app(app); }
 bool rails_app(std::string_view app) noexcept { return app == "rails" || app == "redmine"; }
 bool python_app(std::string_view app) noexcept { return app == "django" || app == "wagtail"; }
-bool service_app(std::string_view app) noexcept { return rails_app(app) || python_app(app); }
+bool service_app(std::string_view app) noexcept { return rails_app(app) || python_app(app) || node_app(app); }
+bool node_app(std::string_view app) noexcept { return app == "node"; }
+
+std::string check_entry(std::string_view e) {
+    if (e.empty() || e.size() > 255) return "entry is 1 to 255 characters";
+    if (e.front() == '/' || e.front() == '.' || e.front() == '-') return "entry '" + std::string(e) + "' must be a path relative to the project directory (server/server.js)";
+    if (e.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/") != std::string_view::npos)
+        return "entry '" + std::string(e) + "' holds a character that is not a letter, digit, '.', '_', '-' or '/'";
+    if (e.find("//") != std::string_view::npos || e.find("/.") != std::string_view::npos || e.back() == '/')
+        return "entry '" + std::string(e) + "' must be a plain path: no '//', no segment starting with '.'";
+    if (!e.ends_with(".js") && !e.ends_with(".mjs") && !e.ends_with(".cjs")) return "entry '" + std::string(e) + "' must be a .js, .mjs or .cjs file";
+    return "";
+}
 
 std::string check_project_name(std::string_view n) {
     if (n.empty() || n.size() > 64) return "project is 1 to 64 characters";
@@ -2007,6 +2038,20 @@ json::Value preset_catalog() {
                       .set("served_from_disk", json::Value::array().push("/static/").push("/media/"))
                       .set("php", "none").set("tasks", std::move(names)).set("secrets", std::move(secrets)).set("never_served", std::move(never)));
     }
+    {
+        json::Value names = json::Value::array(), never = json::Value::array();
+        for (const auto& n : tasks::names("node")) names.push(n);
+        for (const char* p : kNodeRefused) never.push(p);
+        for (const auto& e : kNodeRefusedEndings) never.push("*" + e);
+        list.push(json::Value::object().set("app", "node")
+                      .set("summary", "Node.js: every request goes to the application on the site's upstream (it serves its own files, WebSockets "
+                                      "included); root is the project directory (package.json), where site_task runs npm as the site's account "
+                                      "(npm_ci from the lockfile, npm_run for a script of package.json); entry names the file the rendered "
+                                      "unit starts with root's node, bound to the upstream's loopback address (HOST and PORT).")
+                      .set("root", "the project directory (package.json; nothing is served from it directly: every request goes to the upstream)")
+                      .set("entry", "the file node runs, relative to root (server/server.js); site_install's facts guess it from package.json")
+                      .set("php", "none").set("tasks", std::move(names)).set("never_served", std::move(never)));
+    }
     return json::Value::object().set("presets", std::move(list))
         .set("note", "agensio never reads .htaccess; a preset provides the refusals an application's .htaccess would. A hand-written [[site.location]] with the path of a preset's location replaces it, except one that sets only add_headers: that one adds its fields to the preset's location (a field of the same name replacing the preset's value). Every never_served name is refused in any backup spelling too, in its directory, whatever the case: name.bak, name~, name.txt, name-old, stem.bak (wp-config.bak), .name.swp, #name#; nothing to configure, and the bare stem (/readme, /license) stays a permalink.");
 }
@@ -2059,6 +2104,7 @@ std::vector<std::string> app_presets() {
     out.emplace_back("redmine");
     out.emplace_back("django");
     out.emplace_back("wagtail");
+    out.emplace_back("node");
     return out;
 }
 

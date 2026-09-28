@@ -62,6 +62,7 @@ json::Value SiteSpec::to_json() const {
     v.set("app", app).set("root", root);
     if (!upstream.empty()) v.set("upstream", upstream);
     if (!project.empty()) v.set("project", project);
+    if (!entry.empty()) v.set("entry", entry);
     if (!php_socket.empty()) v.set("php_socket", php_socket);
     if (php_children) v.set("php_children", php_children);
     if (!php_version.empty()) v.set("php_version", php_version);
@@ -89,6 +90,7 @@ bool SiteSpec::from_json(const json::Value& v, SiteSpec& out) {
     out.root = v.get("root");
     out.upstream = v.get("upstream");
     out.project = v.get("project");
+    out.entry = v.get("entry");
     out.php_socket = v.get("php_socket");
     out.php_children = static_cast<int>(v["php_children"].num());
     out.php_version = v.get("php_version");
@@ -216,7 +218,8 @@ std::string detect_app(const fs::path& root) {
     if (fs::exists(root / "core" / "lib" / "Drupal.php", ec) || fs::exists(root / "web" / "core" / "lib" / "Drupal.php", ec)) return "drupal";
     if (fs::exists(root / "wp-config.php", ec) || fs::is_directory(root / "wp-includes", ec)) return "wordpress";
     if (fs::exists(root / "index.php", ec)) return "php";
-    if (fs::exists(root / "package.json", ec) || fs::exists(root / "Gemfile", ec)) return "proxy";
+    if (fs::exists(root / "Gemfile", ec)) return "proxy";
+    if (fs::exists(root / "package.json", ec)) return "node";
     return "static";
 }
 
@@ -228,7 +231,8 @@ std::string detect_app_marker(const std::string& app) {
     if (app == "php") return "index.php";
     if (app == "wagtail") return "manage.py and wagtail in requirements.txt";
     if (app == "django") return "manage.py";
-    return "package.json or Gemfile";
+    if (app == "node") return "package.json";
+    return "Gemfile";
 }
 
 std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, SiteSpec& spec, std::string& error) {
@@ -260,6 +264,7 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
     if (has_key(body, "root")) spec.root = body.get("root");
     if (has_key(body, "upstream")) spec.upstream = body.get("upstream");
     if (has_key(body, "project")) spec.project = body.get("project");
+    if (has_key(body, "entry")) spec.entry = body.get("entry");
     if (has_key(body, "group")) spec.group = body.get("group");
     if (has_key(body, "php_socket")) spec.php_socket = body.get("php_socket");
     if (has_key(body, "php_children")) spec.php_children = static_cast<int>(body["php_children"].num());
@@ -340,6 +345,16 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
             return needs;
         }
     }
+    if (!spec.entry.empty()) {
+        if (!node_app(spec.app) && !spec.app.empty()) {
+            error = "entry names the file node runs: it goes with app = \"node\"";
+            return needs;
+        }
+        if (const std::string bad = check_entry(spec.entry); !bad.empty()) {
+            error = bad;
+            return needs;
+        }
+    }
     for (const auto& f : {spec.cert, spec.key})
         if (!f.empty() && !safe_path(f, why)) {
             error = "https cert/key: " + why;
@@ -371,6 +386,8 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
         needs.push_back(Decision{"root", rails_app(spec.app)    ? "Where is the Rails application? (its project directory: tasks run there, nothing is served from it)"
                                          : python_app(spec.app) ? "Where is the Django project? (its directory, where manage.py lives: tasks run there; only "
                                                                   "its static/ and media/ are served)"
+                                         : node_app(spec.app) ? "Where is the Node application? (its project directory, where package.json lives: npm runs "
+                                                                "there, nothing is served from it)"
                                                                 : "Where are the site's files? (the document root; for Laravel the project directory)",
                                  (cfg.control.sites_root.empty() ? std::string("/var/www") : cfg.control.sites_root) + "/" + spec.domain +
                                      (service_app(spec.app) ? "/app" : "/web"), {}});
@@ -414,6 +431,7 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
             s += "app = " + toml_string(spec.app) + "\nupstream = " + toml_string(spec.upstream) + "\n";
             if (!spec.root.empty()) s += "root = " + toml_string(spec.root) + "\n";
             if (python_app(spec.app) && !spec.project.empty()) s += "project = " + toml_string(spec.project) + "\n";
+            if (node_app(spec.app) && !spec.entry.empty()) s += "entry = " + toml_string(spec.entry) + "\n";
         } else {
             s += "root = " + toml_string(spec.root) + "\n";
             if (!spec.app.empty() && spec.app != "static") s += "app = " + toml_string(spec.app) + "\n";
@@ -617,11 +635,15 @@ std::string php_fpm_reload_command(const Config& cfg, const std::string& version
 json::Value service_unit(const SiteConfig& site, const Config& cfg) {
     json::Value fail = json::Value::object().set("ok", false);
     const std::string name = site.server_names.empty() ? std::string() : site.server_names.front();
-    const bool python = python_app(site.app);
+    const bool python = python_app(site.app), node = node_app(site.app);
     if (!service_app(site.app))
-        return fail.set("error", "a unit is rendered for a Rails or Django site (app = \"rails\", \"redmine\", \"django\" or \"wagtail\"); this one has app = \"" +
-                                     site.app + "\"");
-    const char* server = python ? "Gunicorn" : "Puma";
+        return fail.set("error", "a unit is rendered for a Rails, Django or Node site (app = \"rails\", \"redmine\", \"django\", \"wagtail\" or \"node\"); this one "
+                                 "has app = \"" + site.app + "\"");
+    const char* server = python ? "Gunicorn" : node ? "node" : "Puma";
+    if (node && site.entry.empty())
+        return fail.set("error", "the site names no entry, the file node runs: site_update with entry (server/server.js; site_install's facts guess it from "
+                                 "package.json)");
+    if (node && !check_entry(site.entry).empty()) return fail.set("error", "entry: " + check_entry(site.entry));
     if (site.user.empty())
         return fail.set("error", std::string("the site runs under no account of its own: give it one (site_update with user) first; ") + server +
                                      " never runs as the server's account or root");
@@ -632,7 +654,7 @@ json::Value service_unit(const SiteConfig& site, const Config& cfg) {
                                      " to bind; site_update with upstream sets it");
     const std::string root = site.project_root.empty() ? site.root : site.project_root;
     const std::string group = site.group.empty() ? site.user : site.group;
-    const std::string runtime = runtime_dir(cfg.control, python ? "python3" : "ruby");
+    const std::string runtime = runtime_dir(cfg.control, python ? "python3" : node ? "node" : "ruby");
     const std::string home = cfg.state_dir + "/" + site.user;
     const std::string env = appenv::dir_of(cfg.config_path) + "/" + name + ".env";
     const std::string port = std::to_string(a.port);
@@ -658,13 +680,24 @@ json::Value service_unit(const SiteConfig& site, const Config& cfg) {
     u += "#   agensio ctl site-unit " + name + " --raw > /etc/systemd/system/" + unit_name + "\n";
     u += "#   systemctl daemon-reload && systemctl enable --now " + unit_name + "\n";
     u += "[Unit]\n";
-    const std::string what = site.app == "redmine" ? "Redmine" : site.app == "wagtail" ? "Wagtail site" : python ? "Django application" : "Rails application";
+    const std::string what = site.app == "redmine" ? "Redmine" : site.app == "wagtail" ? "Wagtail site" : python ? "Django application"
+                             : node                  ? "Node.js application"
+                                                     : "Rails application";
     u += "Description=" + what + " of " + name + " (" + server + "), behind agensio\n";
     u += "After=network.target\n\n";
     u += "[Service]\n";
     u += "User=" + site.user + "\nGroup=" + group + "\n";
     u += "WorkingDirectory=" + root + "\n";
-    if (python) {
+    if (node) {
+        // Where it listens: the upstream's loopback address, as HOST and PORT (what Express,
+        // Uptime Kuma and most servers read); the site's environment cannot override them.
+        u += "Environment=HOME=" + home + " TMPDIR=" + home + "/tmp LANG=C.UTF-8 NODE_ENV=production\n";
+        u += "Environment=HOST=" + std::string(a.host == "::1" ? "::1" : a.host) + " PORT=" + port + "\n";
+        u += "Environment=PATH=" + path + "\n";
+        u += "EnvironmentFile=-" + env + "\n";
+        u += "# Root's node ([control] runtimes) on the application's entry.\n";
+        u += "ExecStart=" + runtime + "/node " + root + "/" + site.entry + "\n";
+    } else if (python) {
         u += "Environment=HOME=" + home + " TMPDIR=" + home + "/tmp LANG=C.UTF-8 PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1 VIRTUAL_ENV=" + venv + "\n";
         u += "# What agensio_settings.py (site task django_settings) reads: the project, the site's names, the served paths.\n";
         u += "Environment=DJANGO_SETTINGS_MODULE=agensio_settings AGENSIO_DJANGO_PROJECT=" + site.project + "\n";
@@ -705,6 +738,7 @@ json::Value service_unit(const SiteConfig& site, const Config& cfg) {
                        "environment" + std::string(python ? ", its names (an alias)" : "") + " or its " + (python ? "Python" : "Ruby") +
                        ", root renders it again and runs systemctl restart " + unit_name;
     if (python) hint += "; the tasks it needs first: venv_create, pip_install_requirements, pip_install with packages \"gunicorn\", django_settings, migrate, collectstatic";
+    if (node) hint += "; the tasks it needs first: npm_ci, and the application's own post-install scripts through npm_run (Uptime Kuma: download-dist)";
     return json::Value::object().set("ok", true).set("site", name).set("unit_name", unit_name).set("path", "/etc/systemd/system/" + unit_name)
         .set("unit", u).set("run_as_root", cmds).set("hint", hint);
 }
@@ -747,6 +781,29 @@ std::vector<std::string> next_steps(const SiteSpec& spec, const Config& cfg) {
             add("assets_precompile");
             cmds.push_back("# Redmine is unpacked: " + (dbyml ? std::string() : env + ", then ") + "site-task " + spec.domain + " " + open + "; " + service);
         }
+    }
+    if (node_app(spec.app)) {
+        // Node (2026-09-28): the steps still open, by what the project directory holds.
+        std::error_code ec;
+        auto file = [&](const char* rel) { return !spec.root.empty() && std::filesystem::is_regular_file(spec.root + rel, ec); };
+        const std::string d = spec.domain;
+        const std::string service = "then the service: site-unit " + d + " renders its unit for root (root's node on the entry, bound to " +
+                                    (spec.upstream.empty() ? std::string("the upstream") : spec.upstream) + "), site-service " + d + " shows whether it runs";
+        const std::string entry = spec.entry.empty() ? "site-update " + d + " --entry FILE (the file node runs: package.json's start script names it; "
+                                                                           "site-install's facts guess it), "
+                                                     : std::string();
+        if (!file("/package.json"))
+            cmds.push_back("# a Node application: site-install " + d + " with its release archive (package.json and package-lock.json at its top), "
+                           "then site-task " + d + " npm_ci and the post-install scripts it documents with npm_run (Uptime Kuma: download-dist); " + entry +
+                           service);
+        else if (!std::filesystem::is_directory(spec.root + "/node_modules", ec))
+            cmds.push_back("# the application is in place: site-task " + d + " npm_ci, then the post-install scripts it documents with npm_run (Uptime "
+                           "Kuma: download-dist); " + entry + service);
+        else if (spec.entry.empty())
+            cmds.push_back("# its dependencies are installed: " + entry + service);
+        else
+            cmds.push_back("# the application is in place: site-task " + d + " npm_ci after its lockfile changed (an upgrade), npm_run for the steps "
+                           "an upgrade documents; restart its service after each");
     }
     if (python_app(spec.app)) {
         // Django and Wagtail (2026-09-28): the chain still open, by what the project directory

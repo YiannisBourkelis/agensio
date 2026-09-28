@@ -716,6 +716,80 @@ agensio ctl site-task ag8.example.com createsuperuser --param username=admin --p
 agensio ctl site-unit ag8.example.com --raw > /etc/systemd/system/agensio-app-ag8.service   # as root, then enable it
 ```
 
+## 4f. Node.js: `app = "node"`
+
+A Node application runs as the site's account under root's `node` (`[control] runtimes.node`)
+on a loopback port; agensio forwards every request to it, WebSocket upgrades included (it
+serves its own files), and answers these itself with a 404, never forwarded: `/.env`,
+`/.git/`, `/.npmrc`, `/node_modules/`, `/package.json`, `/package-lock.json`,
+`/npm-shrinkwrap.json`, `/yarn.lock`, `/pnpm-lock.yaml`, and any path ending in `.db`,
+`.db-wal`, `.db-shm`, `.db-journal`, `.sqlite`, `.sqlite3` (and its `-wal`, `-shm`,
+`-journal`), `.log`, `.key`, `.sql` or `.env`. `root` is the project directory (where
+`package.json` lives) and `entry` the file `node` runs, relative to it. `entry` may wait
+until the application is installed: `site-install`'s facts guess it from `package.json`
+(the start script, one level of `npm run NAME`, else `main`).
+
+```toml
+[[site]]
+server_name = ["ag9.example.com"]
+listen = ["0.0.0.0:443"]
+tls = "auto"
+app = "node"
+root = "/var/www/ag9.example.com/app"   # the project directory: npm runs here, nothing is served from it
+entry = "server/server.js"               # the file node runs
+user = "ag9"
+upstream = "http://127.0.0.1:3009"      # where it listens; keep it on loopback
+```
+
+**The tasks**, as the site's account in the project directory:
+
+| task | runs | notes |
+|---|---|---|
+| `npm_ci` | `npm ci --omit=dev --no-audit --no-fund` | the dependencies exactly as `package-lock.json` pins them, into `node_modules/`; their install scripts run as the account; needs the lockfile; downloads |
+| `npm_run` | `npm run SCRIPT` | one script of the project's `package.json` by name (`--param script=download-dist`): a post-install step the application documents; the project's own code; may download |
+
+Every task runs with `NODE_ENV=production` and npm's cache and user configuration in the
+account's own home (`NPM_CONFIG_CACHE=<home>/.npm`, `NPM_CONFIG_USERCONFIG=<home>/.npmrc`),
+no update notice, no funding or audit chatter; never the host's `~/.npmrc` or a global
+install. The site's environment cannot set `NPM_CONFIG_*` on any site, and on a Node site not
+`HOST`, `PORT` or `NODE_ENV` either (section 15, "The site's environment"): systemd lets an
+environment file override a unit's own lines, and those three bind the application to its
+upstream. `site-tasks` names the missing runtime with `apt-get install -y nodejs npm` for
+root. A task that fails names the cause when it is a known one: no lockfile, a lockfile out
+of step with `package.json`, a missing script, an engine the runtime's Node does not satisfy,
+a native module that needs a compiler.
+
+**The unit.** `agensio ctl site-unit NAME` renders it: the site's account and directory,
+`NODE_ENV=production`, `HOST` and `PORT` from the upstream (what Express, Uptime Kuma and most
+servers read), the site's environment file, and `ExecStart=<runtimes.node>/node <root>/<entry>`,
+with the hardening of the Rails unit. It is refused without `entry`. `site-service`,
+`site-service-logs`, `health` and the restart lines after `npm_ci` and `npm_run` work as for
+Rails and Django.
+
+**An application from an archive.** `site-install`'s answer reads `package.json`: its name,
+the Node it asks for (`engines.node`, compared with the runtime's `node --version`: they
+match, they do not, or the range is not one agensio reads), its scripts, whether a lockfile
+ships, and the entry it guesses; the next steps are `npm_ci`, the post-install steps through
+`npm_run`, the `entry`, and the unit. A Node archive installed on an `app = "proxy"` site is
+named in the answer's warnings. Uptime Kuma, the whole path (the setup script Kuma documents is
+`npm ci --omit dev` and `npm run download-dist`; `DATA_DIR` keeps `kuma.db`, which holds every
+monitored service's credentials, in the account's own home, and `UPTIME_KUMA_DB_TYPE=sqlite`
+skips Kuma 2's database page, which the first visitor would otherwise answer):
+
+```sh
+agensio ctl site-create --domain ag9.example.com --app node --root /var/www/ag9.example.com/app --user ag9 --upstream http://127.0.0.1:3009 --yes --reason kuma
+agensio ctl site-install ag9.example.com --url https://codeload.github.com/louislam/uptime-kuma/tar.gz/refs/tags/2.5.5 --yes --reason kuma
+agensio ctl site-task ag9.example.com npm_ci --yes --reason kuma
+agensio ctl site-task ag9.example.com npm_run --param script=download-dist --yes --reason kuma
+agensio ctl site-env-set ag9.example.com --set DATA_DIR=/var/lib/agensio/ag9/data/ --set UPTIME_KUMA_DB_TYPE=sqlite --yes --reason kuma
+agensio ctl site-update ag9.example.com --entry server/server.js --yes --reason kuma
+agensio ctl site-unit ag9.example.com --raw > /etc/systemd/system/agensio-app-ag9.service   # as root, then enable it
+```
+
+Kuma, like WordPress's installer and Writebook's first run, creates its admin in the browser
+on the first visit: whoever opens the site first becomes its admin, so open it right after
+the service starts.
+
 ## 5. Customising a preset
 
 A preset never overrides what the site writes itself:
@@ -1402,11 +1476,11 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 | `validate` | viewer | loads the file on disk again and runs the hosting rules: `ok`, `errors`, site count, and the restart-only settings that differ from the running server |
 | `logs` | viewer | `--site NAME` (default: all sites plus the error log), `--since 3h` (`m`, `h`, `d`, `w`, seconds, or a local `YYYY-MM-DDThh:mm:ss`; default 1h), `--level error|warn|info` for the error log (default warn = error+warn), `--status 5xx|4xx|all|NNN` for access logs (default 5xx), `--limit N` (default 200, newest). Reads at most 2 MB per file from the end; `truncated` says when that cut in |
 | `uploads` | viewer | the archives stored with `upload` (`file`, `bytes`, `uploaded`), ready for `site-install --file` |
-| `site-unit NAME [--raw]` | viewer | the systemd unit that runs a Rails or Redmine site's Puma, or a Django or Wagtail site's Gunicorn (section 4e), rendered from the site and `[control] runtimes`, with the root commands that install it (`--raw` prints the unit alone, for `> /etc/systemd/system/...`); 409 for a site without its own account or a non-loopback upstream |
-| `site-service NAME` | viewer | whether a Rails, Redmine, Django or Wagtail site's application service runs: `agensio-app-USER.service`, derived from the site's account, read by the provisioning helper with `systemctl show` (`state`: `LoadState`, `ActiveState`, `SubState`, `Result`, `ExecMainStatus`, `MainPID`, the enter timestamps, `MemoryCurrent`, `NRestarts`, `UnitFileState`), with `summary` and `next_steps` (`site-unit` when the unit is missing, `site-service-logs` and `systemctl restart` when it failed, `systemctl enable --now` when it is stopped); 409 for a site without its own account, a non-Rails site or a server without the helper; 503 `busy` while the helper runs a task |
+| `site-unit NAME [--raw]` | viewer | the systemd unit that runs a Rails or Redmine site's Puma, a Django or Wagtail site's Gunicorn (section 4e), or a Node site's node (section 4f), rendered from the site and `[control] runtimes`, with the root commands that install it (`--raw` prints the unit alone, for `> /etc/systemd/system/...`); 409 for a site without its own account or a non-loopback upstream |
+| `site-service NAME` | viewer | whether a Rails, Redmine, Django, Wagtail or Node site's application service runs: `agensio-app-USER.service`, derived from the site's account, read by the provisioning helper with `systemctl show` (`state`: `LoadState`, `ActiveState`, `SubState`, `Result`, `ExecMainStatus`, `MainPID`, the enter timestamps, `MemoryCurrent`, `NRestarts`, `UnitFileState`), with `summary` and `next_steps` (`site-unit` when the unit is missing, `site-service-logs` and `systemctl restart` when it failed, `systemctl enable --now` when it is stopped); 409 for a site without its own account, a non-Rails site or a server without the helper; 503 `busy` while the helper runs a task |
 | `site-service-logs NAME [--lines N] [--since 3h] [--raw]` | admin | the unit's journal (`journalctl -u UNIT -n N -o short-iso`, N from 1 to 1000, 200 by default; `--since` a number and `s`, `m`, `h` or `d`), newest last, the newest 256 KB at most; every read audited; `--raw` prints the lines alone |
 | `site-task-output NAME [--offset N] [--length N] [--raw]` | admin | the whole output of the site's last task (see `site-task`), up to 64 KB per call from `offset`, with `next_offset` (null at the end), `kept_all` (false when the task printed more than the 1 MB kept) and the task's name and time; 404 when no task ran since the server started |
-| `site-tasks NAME` | viewer | the named tasks the site's preset offers (`app = "rails"`: seven; `"redmine"`: eight; `"django"` and `"wagtail"`: ten each, with the site's `project` and `virtualenv`), each with its summary, its parameters (name, meaning, pattern, required), whether it downloads, whether the directory must be empty, its effective time limit (the row's, capped by `[control] task_limits.timeout`) and its `interpreter`: the program, whether the interpreter rule accepts it and, when not, why and the package command; `run_as_root` at the top lists every missing package once, so root installs them before the first task; the account that runs them (`runs_as`), the directory, the task running now; a site of another preset has none |
+| `site-tasks NAME` | viewer | the named tasks the site's preset offers (`app = "rails"`: seven; `"redmine"`: eight; `"django"` and `"wagtail"`: nine each, with the site's `project` and `virtualenv`; `"node"`: two, with its `entry`), each with its summary, its parameters (name, meaning, pattern, required), whether it downloads, whether the directory must be empty, its effective time limit (the row's, capped by `[control] task_limits.timeout`) and its `interpreter`: the program, whether the interpreter rule accepts it and, when not, why and the package command; `run_as_root` at the top lists every missing package once, so root installs them before the first task; the account that runs them (`runs_as`), the directory, the task running now; a site of another preset has none |
 | `settings [NAME]` | viewer | the per-site limits `site-create` and `site-update` accept under `settings`: for each key its type, unit and spellings, meaning, default and its origin, minimum, the ceiling from `[control] site_limits`, what changing it costs (agensio reload, php-fpm reload) and what it derives; with a site, the current value and whether it comes from the site, the server or a built-in default. `site NAME` reports the same `settings` |
 | `health` | viewer | findings with `severity`, `code`, `site`, `message`, `fix` (also `files_unreadable`: files under a document root, the preset's upload directory first, that the server's account cannot open and that answer 404 with no log line; `php_tmp_missing`; `php_fpm_hard_reload`; `php_pool_resident`, judged from the pool file php-fpm runs; `preset_mismatch`: the files under a site's directory belong to another application than its `app` says, with the application detected and the `app` to set; `archives_in_root`: backup archives and database dumps under a served tree, the directories a preset never answers excepted; `site_env_unsafe`: the site environments' directory is not root's alone, or a site's file is open to others, not root's or has a second link (checked by the helper, read-only), with the `chown`/`chmod` line; `site_env_orphan`: a deleted site's environment file, with its `rm -f`; `site_env_unchecked`: the helper was busy with a task): configuration on disk invalid or failing the hosting rules, restart-only settings changed, running as root, certificate unreadable / still the placeholder / expired / expiring within 14 days (manual), `tls = "auto"` without a plain port-80 site for the names, no http-to-https redirect, application sites sharing the server's account, generated pools out of date, errors in the last 24 hours. `ok` is true when nothing above info level was found |
 
@@ -1428,7 +1502,7 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 | `site-install NAME` | admin | puts an application's files into the site's directory (the `root` as given, above a preset's `public/` or `web/`; `--path SUB` for a subdirectory such as `wp-content/plugins/NAME`, with `--create-path` when it does not exist yet) **as the site's account**, from one source: `--url https://...` (a `.tar.gz`, `.tar` or `.zip`), `--file UPLOAD` (a stored upload), or nothing, which takes the preset's official archive (`presets` lists it under `source`; `--version V` picks a release, default the newest; WordPress and Drupal have one, Laravel is made with composer). `--sha256 HEX` refuses an archive whose digest differs. `--strip 0|1` keeps or unwraps a single top directory (default: unwrap when there is exactly one). `--dry-run` takes the same walk as the real call, as the same account, and answers with the target, the account and `would_create`, or with the refusal the real call would meet; nothing is downloaded or written. Answers 201 with `files`, `bytes`, `sha256`, `unwrapped`, `created` (each directory made, with owner and mode), `facts` for an install into the site's directory itself (`gemfile`, `credentials`: Rails' `config/credentials.yml.enc` or `config/credentials/production.yml.enc`, `ruby_version`: what `.ruby-version` pins), `next_steps` (for `app = "rails"`: the pinned Ruby, then `bundle_install`, `db_prepare`, `assets_precompile` and Puma; for the others the application's own setup in the browser; for every site but a static one its request-body limit), and `done` when a Rails archive without credentials got its `SECRET_KEY_BASE` generated into the site's environment (once: an existing value is kept); 409 with the reason and nothing left behind; 403 when `install = false` and a URL was given; 422 when no source can be found |
 | `site-copy NAME --from SUB --to SUB` | admin | copies one regular file of the site to another path of the same site **as the site's account**: the drop-in files applications ship as templates (`wp-content/db.php` from the SQLite plugin's `db.copy`, `advanced-cache.php` or `object-cache.php` from a caching plugin, Drupal's `sites/default/settings.php` from `default.settings.php`). Both paths are relative to the site's directory and reached by the same walk as an install; `from` must be an existing regular file (no directory, no symlink); the destination's directory must exist (`site-install --create-path` makes one); an existing destination is refused unless `--overwrite`, and the answer then reports the replaced file's size and mtime. The new file gets the directory's pattern (`0640` in a `2750` directory, the execute bits when the source has them), or `0600` when it is one of the preset's credential files (`secured: true`); written under a temporary name and linked or renamed into place, so a refusal leaves nothing; the configuration is validated afterwards (see below). Never across sites, never content from the caller, never a directory, no chmod or chown. `--dry-run` runs the same checks. Answers 201 (200 when replaced) with `from`, `to`, `as`, `bytes`, `mode`, `replaced`; 409 with the reason |
 | `site-task NAME TASK [--param KEY=VALUE]...` | admin | runs one named task of the site's preset **as the site's account** in the site's directory (`root`): a row of the task table, never a command line (below). `--dry-run` answers with the exact argv, the account, the directory, the environment and the limits, and runs nothing. `pip_install` (Django and Wagtail) runs only on the user's own confirmation (section 4e): ctl prints the warning and the `--yes` typed is the confirmation; without one the answer is 428 with the warning and the command. Answers 200 when the task exited 0, 409 when it failed, was stopped at its time limit or was refused, each with `argv` (what ran, the interpreter resolved), `as`, `cwd`, `env` (the site's own variables as `NAME=<site environment>`, never their values), `exit` or `signal`, `timed_out`, `duration_ms`, `summary` when the output has one (`N migrations applied`, `Bundle complete! ...`, `Default configuration data loaded.`, `public/assets holds N files`), `output` (stdout and stderr together: its last 4 KB when the task succeeded, its first 4 KB and last 12 KB when it failed, the cut marked; `truncated`, `output_bytes` and `output_kept`, the part kept for `site-task-output`), `next_steps` with root's restart line of the site's service after `bundle_install`, `db_migrate`, `db_prepare`, `plugins_migrate` or `assets_precompile`, `secured` (credential paths made private), `hint` when the failure has a known cause (Rails' "Missing secret_key_base": generate one into the site's environment; "Your Ruby version is X, but your Gemfile specified Y": a Ruby for one application, below), and `run_as_root` when the interpreter is missing; 400 for an unknown task or a parameter that does not match; 422 for a preset without tasks; 409 while another task runs on the same site |
-| `site-env NAME [--reveal KEY]...` | admin | the site's environment (`app = "rails"`, `"redmine"`, `"django"`, `"wagtail"` or `"proxy"`): `variables` with each name, its `length` and its `fingerprint` (16 hex digits of a keyed hash: the same fingerprint means the same value), no value; a value only for each `--reveal KEY` (`?reveal=KEY,KEY` on the API), audited as `REVEALED`; `exists` false when the site has no file yet; `tightened` when the helper made the directory or the file private on the way. Every call is audited with the names it returned. 422 for a site of another preset; 409 with `run_as_root` when the directory or the file cannot be trusted |
+| `site-env NAME [--reveal KEY]...` | admin | the site's environment (`app = "rails"`, `"redmine"`, `"django"`, `"wagtail"`, `"node"` or `"proxy"`): `variables` with each name, its `length` and its `fingerprint` (16 hex digits of a keyed hash: the same fingerprint means the same value), no value; a value only for each `--reveal KEY` (`?reveal=KEY,KEY` on the API), audited as `REVEALED`; `exists` false when the site has no file yet; `tightened` when the helper made the directory or the file private on the way. Every call is audited with the names it returned. 422 for a site of another preset; 409 with `run_as_root` when the directory or the file cannot be trusted |
 | `site-env-set NAME [--set KEY=VALUE]... [--unset KEY]... [--generate KEY]...` | admin | changes the site's environment: `--set` adds or replaces, `--unset` removes, `--generate` puts a random secret (128 hex digits) under a name that is missing and keeps an existing one; a name in both `--unset` and `--generate` is rotated. Answers 200 with the names under `set`, `unset`, `generated`, `kept`, `absent` and `names` (every name now in the file), never a value, and the restart of the application's service as a next step; 400 for a name or value the rules refuse (below), 409 when the helper refuses |
 
 **What `site-task` enforces.** A task is a row of `src/services/tasks.cpp`: a preset, a
@@ -1545,7 +1619,7 @@ Writebook, every Kamal or twelve-factor deployment) reads `SECRET_KEY_BASE` ther
 stops with "Missing secret_key_base" without it; others read `DATABASE_URL`, a mail
 password or an API key; a Django project `DJANGO_SECRET_KEY` and its first admin's
 `DJANGO_SUPERUSER_PASSWORD` (section 4e). A site with `app = "rails"`, `"redmine"`,
-`"django"`, `"wagtail"` or `"proxy"` has one file for them,
+`"django"`, `"wagtail"`, `"node"` or `"proxy"` has one file for them,
 `env/<site>.env` beside the main configuration (`/etc/agensio/env/ag6.example.com.env`),
 in systemd's `EnvironmentFile` syntax (`NAME="value"` lines), which the site's tasks get
 after the variables agensio sets and its application service loads
@@ -1575,8 +1649,9 @@ account instead. Names are upper-case letters, digits and `_`, never one agensio
 task or one that changes which program runs or what it loads (`PATH`, `HOME`, `TMPDIR`,
 `LANG`, `RAILS_ENV`, `SECRET_KEY_BASE_DUMMY`, `GEM_*`, `BUNDLE_*` other than a private gem
 source's credentials such as `BUNDLE_GEMS__CONTRIBSYS__COM`, `LD_*`, `DYLD_*`, `RUBYOPT`,
-`RUBYLIB`, `NODE_OPTIONS`, `PYTHON*`, `PIP_*`, `VIRTUAL_ENV`, `DJANGO_SETTINGS_MODULE`,
-`AGENSIO_*`, `GIT_*`, `BASH_ENV`, the systemd socket variables);
+`RUBYLIB`, `NODE_OPTIONS`, `NPM_CONFIG_*`, `PYTHON*`, `PIP_*`, `VIRTUAL_ENV`, `DJANGO_SETTINGS_MODULE`,
+`AGENSIO_*`, `GIT_*`, `BASH_ENV`, the systemd socket variables; on a Node site also `HOST`,
+`PORT` and `NODE_ENV`, which its unit sets);
 values are one line of UTF-8, at most 4 KB, 128 variables in all. A file root edits by hand
 is read the way systemd reads it (quoted or not, comments), but a line that goes on over
 the next one or a name the rules refuse stops every task of the site with the reason. The
