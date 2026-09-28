@@ -230,6 +230,15 @@ MEDIA_URL = "/media/"
 MEDIA_ROOT = os.environ["AGENSIO_MEDIA_ROOT"]
 if os.environ.get("AGENSIO_BASE_URL") and "WAGTAILADMIN_BASE_URL" in globals():
     WAGTAILADMIN_BASE_URL = os.environ["AGENSIO_BASE_URL"]
+# A site agensio serves over TLS sends its session and CSRF cookies over https only.
+SESSION_COOKIE_SECURE = CSRF_COOKIE_SECURE = os.environ.get("AGENSIO_BASE_URL", "").startswith("https://")
+# What agensio does at the edge, where Django's deployment checks cannot see it: the redirect
+# of plain http to https (security.W008) and Strict-Transport-Security on every answer of a
+# site with hsts (security.W004). Silenced only when the site has them, so a warning left in
+# `manage.py check --deploy` means something.
+SILENCED_SYSTEM_CHECKS = list(globals().get("SILENCED_SYSTEM_CHECKS", [])) + [
+    _name for _name, _on in (("security.W008", os.environ.get("AGENSIO_HTTPS_REDIRECT") == "1"),
+                             ("security.W004", os.environ.get("AGENSIO_HSTS") == "1")) if _on]
 
 
 def _database(url):
@@ -264,7 +273,8 @@ constexpr const char* kNoDatabaseUrl =
 
 const std::vector<std::pair<const char*, const char*>> kDjangoEnv = {
     {"DJANGO_SETTINGS_MODULE", "agensio_settings"}, {"AGENSIO_DJANGO_PROJECT", "{project}"}, {"AGENSIO_HOSTS", "{hosts}"},
-    {"AGENSIO_ORIGINS", "{origins}"}, {"AGENSIO_BASE_URL", "{base_url}"}, {"AGENSIO_STATIC_ROOT", "{root}/static"},
+    {"AGENSIO_ORIGINS", "{origins}"}, {"AGENSIO_BASE_URL", "{base_url}"}, {"AGENSIO_HTTPS_REDIRECT", "{https_redirect}"},
+    {"AGENSIO_HSTS", "{hsts}"}, {"AGENSIO_STATIC_ROOT", "{root}/static"},
     {"AGENSIO_MEDIA_ROOT", "{root}/media"}, {"VIRTUAL_ENV", "{venv}"}, {"PYTHONNOUSERSITE", "1"}, {"PYTHONUNBUFFERED", "1"},
     {"PIP_DISABLE_PIP_VERSION_CHECK", "1"}, {"PIP_NO_INPUT", "1"}};
 const std::vector<const char*> kDjangoSecrets = {"db.sqlite3", "*.sqlite3", "*.sqlite3-wal", "*.sqlite3-shm", ".env", ".env.*"};
@@ -409,10 +419,13 @@ const std::vector<Row>& rows() {
         {"django", "django_settings",
          "Writes agensio_settings.py, the settings agensio runs the project with: the project's own (its settings.production when it has "
          "one) plus DEBUG off, the secret key from DJANGO_SECRET_KEY in the site's environment, ALLOWED_HOSTS and CSRF_TRUSTED_ORIGINS "
-         "from the site's names, the forwarded https, STATIC_ROOT and MEDIA_ROOT where agensio serves them, DATABASES from DATABASE_URL "
-         "when set; a fixed template, only when the file is missing. Needs DJANGO_SECRET_KEY first (site_env_set generate).",
+         "from the site's names, the forwarded https, https-only cookies on a TLS site, STATIC_ROOT and MEDIA_ROOT where agensio serves "
+         "them, DATABASES from DATABASE_URL when set, and check --deploy's warnings for what agensio does at the edge (the https redirect, "
+         "HSTS) silenced only where the site has them. A fixed template, written when the file is missing or still agensio's own earlier "
+         "version (kept as agensio_settings.py.bak); a file someone else wrote is left alone. Needs DJANGO_SECRET_KEY first "
+         "(site_env_set generate).",
          "", "", {}, {}, {}, false, false, 60, {{"manage.py", kNoManagePy}}, {}, "agensio_settings.py", kAgensioSettings, 0640,
-         {{"DJANGO_SECRET_KEY", kNoSecretKey}}},
+         {{"DJANGO_SECRET_KEY", kNoSecretKey}}, false, nullptr, false, false, true},
         {"django", "migrate", "Applies the project's database migrations (manage.py migrate --noinput).",
          "python3", "python3", {{"manage.py"}, {"migrate"}, {"--noinput"}}, {}, {}, false, false, 1800,
          {{"{venv}/pyvenv.cfg", kNoVenv}, {"manage.py", kNoManagePy}, {"agensio_settings.py", kNoSettings}}, {},
@@ -623,6 +636,8 @@ std::string expand(std::string_view text, const json::Value& params, const Conte
         else if (key == "hosts") out += ctx.hosts;
         else if (key == "origins") out += ctx.origins;
         else if (key == "base_url") out += ctx.base_url;
+        else if (key == "https_redirect") out += ctx.https_redirect ? "1" : "";
+        else if (key == "hsts") out += ctx.hsts ? "1" : "";
         else out += params.get(key);
         i = close + 1;
     }
@@ -763,8 +778,38 @@ std::string summarize(const Row& row, std::string_view output, int root_fd) {
                     return std::string(output.substr(start == std::string_view::npos ? 0 : start + 1, (end == std::string_view::npos ? output.size() : end) - (start == std::string_view::npos ? 0 : start + 1)));
                 }
         if (name == "createsuperuser" && output.find("Superuser created successfully.") != std::string_view::npos) return "Superuser created successfully.";
-        if (name == "check_deploy")
-            if (std::string l = line_starting("System check identified "); !l.empty()) return l;
+        if (name == "check_deploy") {
+            // The checks by their ids (alpha.35 report: the summary was Django's first line,
+            // "System check identified some issues:"): "4 warnings: security.W004, ...".
+            std::vector<std::string> warnings, errors;
+            for (std::size_t p = output.find(": ("); p != std::string_view::npos; p = output.find(": (", p + 3)) {
+                const std::size_t end = output.find(')', p + 3);
+                if (end == std::string_view::npos || end - p > 48) continue;
+                const std::string id(output.substr(p + 3, end - p - 3));
+                // "security.W004": a check's name, a dot, its level (Critical, Error, Warning) and three digits.
+                const std::size_t dot = id.find('.');
+                if (dot == std::string::npos || dot == 0 || id.size() != dot + 5) continue;
+                const char level = id[dot + 1];
+                if ((level != 'E' && level != 'C' && level != 'W') || !digit(static_cast<unsigned char>(id[dot + 2])) ||
+                    !digit(static_cast<unsigned char>(id[dot + 3])) || !digit(static_cast<unsigned char>(id[dot + 4])))
+                    continue;
+                auto& list = level == 'W' ? warnings : errors;
+                if (std::find(list.begin(), list.end(), id) == list.end()) list.push_back(id);
+            }
+            auto named = [](const std::vector<std::string>& ids, const char* what) {
+                std::string out = std::to_string(ids.size()) + " " + what + (ids.size() == 1 ? "" : "s") + ":";
+                for (std::size_t i = 0; i < ids.size(); ++i) out += (i ? ", " : " ") + ids[i];
+                return out;
+            };
+            if (!errors.empty() || !warnings.empty())
+                return errors.empty() ? named(warnings, "warning") : warnings.empty() ? named(errors, "error") : named(errors, "error") + "; " + named(warnings, "warning");
+            if (std::string l = line_starting("System check identified no issues"); !l.empty()) return l;
+            // Neither ids nor "no issues": Django's closing line, whatever it says.
+            std::string last;
+            for (std::size_t p = output.find("System check identified "); p != std::string_view::npos; p = output.find("System check identified ", p + 1))
+                last = std::string(output.substr(p, output.find('\n', p) == std::string_view::npos ? std::string_view::npos : output.find('\n', p) - p));
+            if (!last.empty()) return last;
+        }
         if (name.starts_with("pip_install")) {
             // pip's closing line names every package; the count says enough, the line is in the output.
             if (std::string l = line_starting("Successfully installed "); !l.empty()) {
@@ -1323,9 +1368,29 @@ json::Value write_template(const Request& req, const Row& row, int root_fd, cons
     }
     if (dfd < 0) return fail("the directory of " + path + " is missing or a symlink; nothing written");
     struct stat sb {};
+    bool replacing = false;
     if (::fstatat(dfd, leaf.c_str(), &sb, AT_SYMLINK_NOFOLLOW) == 0) {
-        ::close(dfd);
-        return fail(path + " exists; " + row.name + " writes it only when it is missing, so nothing changed");
+        // django_settings replaces agensio's own earlier version, so a site gets the template's
+        // later fixes; anything else, or a link, is left alone.
+        // agensio's own file, whichever version: it starts with the marker every version carries.
+        const std::string first = "# Written by agensio (site task " + std::string(row.name) + ")";
+        std::string head;
+        if (row.replace_own && S_ISREG(sb.st_mode) && sb.st_uid == ::geteuid() && sb.st_nlink == 1) {
+            const int old = ::openat(dfd, leaf.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+            if (old >= 0) {
+                head.resize(first.size());
+                const ssize_t n = ::read(old, head.data(), head.size());
+                head.resize(n > 0 ? static_cast<std::size_t>(n) : 0);
+                ::close(old);
+            }
+        }
+        const bool ours = head == first;
+        if (!ours) {
+            ::close(dfd);
+            return fail(path + " exists; " + row.name + " writes it only when it is missing" +
+                        (row.replace_own ? " or still agensio's own earlier version, and this one is not" : std::string()) + ", so nothing changed");
+        }
+        replacing = true;
     }
     char mode[8];
     std::snprintf(mode, sizeof mode, "0%o", row.mode);
@@ -1334,9 +1399,13 @@ json::Value write_template(const Request& req, const Row& row, int root_fd, cons
     if (req.dry_run) {
         ::close(dfd);
         ::close(root_fd);
-        return r.set("ok", true).set("dry_run", true);
+        return r.set("ok", true).set("dry_run", true).set("would_replace", replacing);
     }
-    const int f = ::openat(dfd, leaf.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, row.mode);
+    // A replacement goes to a new name first and is renamed over the old one (kept as NAME.bak),
+    // so the application never reads half a file and a link planted meanwhile is replaced, not followed.
+    const std::string tmp = "." + leaf + ".agensio-new";
+    if (replacing) ::unlinkat(dfd, tmp.c_str(), 0);
+    const int f = ::openat(dfd, (replacing ? tmp : leaf).c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, row.mode);
     const std::string_view text = row.content;
     bool ok = f >= 0 && ::fchmod(f, row.mode) == 0;
     for (std::size_t off = 0; ok && off < text.size();) {
@@ -1349,9 +1418,19 @@ json::Value write_template(const Request& req, const Row& row, int root_fd, cons
     const int err = errno;
     if (f >= 0) ::close(f);
     if (!ok) {
-        if (f >= 0) ::unlinkat(dfd, leaf.c_str(), 0);
+        if (f >= 0) ::unlinkat(dfd, (replacing ? tmp : leaf).c_str(), 0);
         ::close(dfd);
         return fail("write " + path + ": " + std::strerror(err));
+    }
+    if (replacing) {
+        const std::string bak = leaf + ".bak";
+        if (::renameat(dfd, leaf.c_str(), dfd, bak.c_str()) != 0 || ::renameat(dfd, tmp.c_str(), dfd, leaf.c_str()) != 0) {
+            const int e = errno;
+            ::unlinkat(dfd, tmp.c_str(), 0);
+            ::close(dfd);
+            return fail("replace " + path + ": " + std::strerror(e));
+        }
+        r.set("replaced", "agensio's earlier version, kept as " + path + ".bak");
     }
     ::close(dfd);
     const Family* fam = family_for(row, req.ctx);

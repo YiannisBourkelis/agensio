@@ -529,7 +529,7 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
         // Exactly one strong reference is taken for the duration of the response.
         EntryPtr ref = fetched ? std::move(fetched) : *local;
         serve_entry(s, std::move(ref));
-        add_headers(s, loc);
+        add_headers(s, loc, ws.path);
         return Outcome::done;
     }
 
@@ -570,7 +570,7 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
         if (canonical) ws.local.insert(key, canonical);
         else canonical = std::move(entry);  // cache full for this size class: serve once, uncached
         serve_entry(s, std::move(canonical));
-        add_headers(s, loc);
+        add_headers(s, loc, ws.path);
         return Outcome::done;
     }
 
@@ -587,19 +587,34 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
         if (canonical) {
             ws.local.insert(key, canonical);
             serve_entry(s, std::move(canonical));
-            add_headers(s, loc);
+            add_headers(s, loc, ws.path);
             return Outcome::done;
         }
         f = std::move(entry->fd);  // store refused it: serve once from the open file
     }
     serve_file(s, std::move(f), fi, ws);
-    add_headers(s, loc);
+    add_headers(s, loc, ws.path);
     return Outcome::done;
 }
 
+bool content_hashed(std::string_view path) noexcept {
+    const std::size_t slash = path.rfind('/');
+    const std::string_view name = slash == std::string_view::npos ? path : path.substr(slash + 1);
+    const std::size_t ext = name.rfind('.');
+    if (ext == std::string_view::npos || ext == 0 || ext + 1 == name.size()) return false;
+    const std::size_t dot = name.rfind('.', ext - 1);
+    if (dot == std::string_view::npos || dot == 0) return false;
+    const std::string_view hash = name.substr(dot + 1, ext - dot - 1);
+    if (hash.size() < 8 || hash.size() > 64) return false;
+    for (char c : hash)
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+    return true;
+}
+
 // Configured response fields (add_headers) on 200 and 304; the values live in the config.
-void StaticHandler::add_headers(Stream& s, const LocationConfig& loc) {
-    for (const auto& h : loc.add_headers)
+void StaticHandler::add_headers(Stream& s, const LocationConfig& loc, std::string_view path) {
+    const auto& fields = !loc.hashed_headers.empty() && content_hashed(path) ? loc.hashed_headers : loc.add_headers;
+    for (const auto& h : fields)
         s.response.headers.add(h.first, h.second);
 }
 

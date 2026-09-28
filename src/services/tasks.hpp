@@ -90,6 +90,10 @@ struct Row {
     // package the site's account may install, so the user confirms every run themselves, in
     // the MCP client's own dialog or in a terminal; the agent's confirm is not enough.
     bool user_confirm = false;
+    // A template row may replace a file that is still agensio's own earlier version (it starts
+    // with the template's first line): django_settings, so a site gets the new template's fixes
+    // (2026-09-28: secure cookies); the previous file is kept beside it as NAME.bak.
+    bool replace_own = false;
 };
 
 // Whether a task of this name needs the user's own confirmation (the MCP bridge and
@@ -147,6 +151,7 @@ struct Context {
     std::string site;         // the site's first host name: {venv} is <home>/venvs/<site>
     std::string project;      // app = django | wagtail: the project's package ({project})
     std::string hosts, origins, base_url;  // what a Django site's settings are told (config app_context)
+    bool https_redirect = false, hsts = false;  // what agensio does at the edge for the site
     unsigned timeout = 1200;  // effective seconds
     unsigned processes = 512;
     // The site's application environment (services/appenv.*: SECRET_KEY_BASE and the like),

@@ -1075,6 +1075,8 @@ void Server::task_async(const json::Value& req, std::function<void(json::Value)>
                 tr.ctx.hosts = std::string(req.get("hosts"));
                 tr.ctx.origins = std::string(req.get("origins"));
                 tr.ctx.base_url = std::string(req.get("base_url"));
+                tr.ctx.https_redirect = req["https_redirect"].boolean();
+                tr.ctx.hsts = req["hsts"].boolean();
                 tr.ctx.timeout = std::min(row->timeout, ctl.task_timeout);
                 tr.ctx.processes = ctl.task_processes;
                 for (auto& v : vars) tr.ctx.app_env.emplace_back(std::move(v.name), std::move(v.value));

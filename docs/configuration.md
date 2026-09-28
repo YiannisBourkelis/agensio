@@ -602,7 +602,7 @@ What the preset adds:
 
 | path | answered by |
 |---|---|
-| `/static/` | the file below `<root>/static/`, else 404 (never the application); `Cache-Control: public, max-age=86400`, for Wagtail a year and `immutable`, since its production settings name every file by its hash |
+| `/static/` | the file below `<root>/static/`, else 404 (never the application); a name that carries its content's hash (`base.85e6f9d19e42.css`, what `ManifestStaticFilesStorage` writes, Wagtail's production default) gets `Cache-Control: public, max-age=31536000, immutable`, any other name `public, max-age=300`, then revalidation by `ETag`, so an upgrade reaches browsers |
 | `/media/` | the file below `<root>/media/`, else 404; `X-Content-Type-Options: nosniff` and `Content-Security-Policy: script-src 'none'; form-action 'none'; base-uri 'none'`, so an uploaded HTML or SVG page runs no script on the site's origin (no `sandbox`: a browser's PDF viewer refuses a sandboxed document) |
 | `/media/documents/` (wagtail) | 404: Wagtail serves documents through its own view (`/documents/ID/NAME`), which checks a collection's privacy |
 | `/.env`, `/.git/`, `/manage.py`, `/requirements.txt`, `/agensio_settings.py`, `/db.sqlite3`, `/Dockerfile`, `/.dockerignore` | 404 at the edge |
@@ -669,11 +669,20 @@ else `PROJECT.settings`), then sets `DEBUG = False`, `SECRET_KEY` from
 `SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")` (agensio replaces a
 client's `X-Forwarded-Proto` and sets `https` on its TLS listeners, which is what makes
 that setting safe), `STATIC_ROOT` and `MEDIA_ROOT` where agensio serves them,
-`WAGTAILADMIN_BASE_URL` for a Wagtail project, and `DATABASES` from `DATABASE_URL` when
+`WAGTAILADMIN_BASE_URL` for a Wagtail project, `SESSION_COOKIE_SECURE` and
+`CSRF_COOKIE_SECURE` on a site with TLS, and `DATABASES` from `DATABASE_URL` when
 the site's environment has one (`sqlite:///db.sqlite3`, `postgresql://USER:PASSWORD@HOST/NAME`,
-`mysql://...`; the driver must be in `requirements.txt`). It holds no secret and names no
-host, so a new alias needs no new file, only a new unit. To change it, move it away and
-run the task again. `manage.py` and `wsgi.py` default to the dev settings; agensio always
+`mysql://...`; the driver must be in `requirements.txt`). `manage.py check --deploy`
+cannot see what agensio does at the edge, so the file silences `security.W008` (the
+redirect of plain http) when the site redirects to https and `security.W004`
+(Strict-Transport-Security) when the site has `hsts`, and nothing else: a warning left
+means something (on a TLS site without `hsts`, W004 stays until `site_update` with
+`hsts: true` sends the header on every answer; `check_deploy` sees the change at once). It
+holds no secret and names no host, so a new alias needs no new file, only a new unit.
+Running `django_settings` again replaces agensio's own earlier version of the file (it
+starts with `# Written by agensio (site task django_settings)`), keeping it as
+`agensio_settings.py.bak`, so a site gets a later template's fixes; a file without that
+marker is left alone. `manage.py` and `wsgi.py` default to the dev settings; agensio always
 sets `DJANGO_SETTINGS_MODULE`, in its tasks and in the unit.
 
 **The first admin.** `site-env-set NAME --generate DJANGO_SUPERUSER_PASSWORD`, then
@@ -716,6 +725,14 @@ A preset never overrides what the site writes itself:
 - `php = { ... }`: every option in it reaches the preset's FastCGI location(s).
 - A `[[site.location]]` with the same `path` and `match` as a preset location replaces it
   entirely. Other locations coexist under the normal precedence.
+- A `[[site.location]]` that sets nothing but `path` (a prefix) and `add_headers` joins
+  the location the preset, or the implicit `/`, makes at that path: its fields are added,
+  a field of the same name replacing the preset's value, and everything else of the
+  preset's location stays. This is how `hsts = true` on a managed site reaches every
+  answer (its file carries such a `/` location). Before 0.1.0-alpha.36 it replaced the
+  preset's location: a proxy preset's site (`proxy`, `rails`, `redmine`, `django`,
+  `wagtail`) with `hsts` served its `root` from disk instead of the application, source
+  files included, and a PHP preset's site lost its front controller.
 
 Example, Laravel with streaming responses (server-sent events) and a shorter asset cache:
 

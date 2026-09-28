@@ -19,6 +19,10 @@
 
 namespace agensio {
 
+// Whether the last segment of `path` carries a content hash: name.<8 to 64 lower-case hex>.ext
+// (Django's ManifestStaticFilesStorage: base.85e6f9d19e42.css), a name that changes with its content.
+bool content_hashed(std::string_view path) noexcept;
+
 // The refused-endings rule: a path ends with one of `deny` when its last characters match
 // case-insensitively, trailing dots ignored (`x.PHP`, `x.PhP`, `x.php.` are all `x.php`;
 // Drupal's .htaccess spells the same rule). `x.php.jpg` is a .jpg and passes. Pure, so
@@ -112,7 +116,9 @@ private:
     Lookup index_lookup(const LocationConfig& loc, WorkerState& ws, File& f, FileInfo& fi);
 
     void serve_entry(Stream& s, EntryPtr e);  // takes ownership of the ref; picks a twin by Accept-Encoding
-    static void add_headers(Stream& s, const LocationConfig& loc);
+    // loc.add_headers, or loc.hashed_headers for a name with a content hash (`path` is the
+    // normalised request path; one emptiness test for every location without them).
+    static void add_headers(Stream& s, const LocationConfig& loc, std::string_view path);
     // Metadata and prebuilt header blocks shared by memory, descriptor and twin entries:
     // `coding` names the twin's Content-Encoding, `vary` adds Vary: Accept-Encoding.
     void fill_entry(CacheEntry& e, const FileInfo& fi, std::string_view path, std::string_view content_type,

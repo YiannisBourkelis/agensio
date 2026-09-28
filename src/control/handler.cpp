@@ -1297,7 +1297,8 @@ void ControlHandler::site_task(Stream& s, std::string_view name, const json::Val
                           .set("app", app).set("root", site_root).set("secrets", site_secrets(*site, site_root));
     if (python_app(app)) {  // what a Django site's tasks are told (the helper derives the same from the file on disk)
         const AppContext ac = app_context(cfg, *site);
-        req.set("project", site->project).set("hosts", ac.hosts).set("origins", ac.origins).set("base_url", ac.base_url);
+        req.set("project", site->project).set("hosts", ac.hosts).set("origins", ac.origins).set("base_url", ac.base_url)
+            .set("https_redirect", ac.https_redirect).set("hsts", ac.hsts);
     }
     if (!dry_run) {
         running_tasks_[key] = task + " (since " + now_stamp() + ")";
@@ -1352,7 +1353,8 @@ void ControlHandler::site_task(Stream& s, std::string_view name, const json::Val
             audit_peer(s, what, "refused: " + std::string(r.get("error")));
         } else if (!r.get("wrote").empty()) {  // a template row: a fixed file, no program
             audit_peer(s, what, "wrote " + std::string(r.get("wrote")) + " (" + std::string(r.get("mode")) + ") as " + std::string(r.get("as")) +
-                                    " from the fixed template of " + std::string(r.get("task")));
+                                    " from the fixed template of " + std::string(r.get("task")) +
+                                    (r.get("replaced").empty() ? std::string() : ", replacing " + std::string(r.get("replaced"))));
         } else {
             std::string argv;
             for (const auto& a : r["argv"].items()) argv += (argv.empty() ? "" : " ") + shell_word(a.str());
@@ -1469,7 +1471,8 @@ void ControlHandler::site_service(Stream& s, std::string_view name, bool logs, s
             req.set("since", since);
         }
     }
-    backend_->helper_async(req, [this, &s, key, logs, done](json::Value r) {
+    const bool python = python_app(site->app);
+    backend_->helper_async(req, [this, &s, key, logs, python, done](json::Value r) {
         if (r["busy"].boolean()) {
             reply(s, 503, json::Value::object()
                               .set("error", "the provisioning helper is busy with a task or an install; ask again when it finishes")
@@ -1482,8 +1485,12 @@ void ControlHandler::site_service(Stream& s, std::string_view name, bool logs, s
             const auto count = std::count(out.begin(), out.end(), '\n');
             audit_peer(s, "sites/" + key + "/service/logs", "read " + std::to_string(count) + " lines of the journal of " + std::string(r.get("unit")));
             r.set("hint", out.empty() ? "the journal holds nothing for this unit in that window: it never ran, or ran before the window"
-                                      : "the application's own lines as systemd kept them, newest last; a Ruby backtrace or 'Address already in use' "
-                                        "usually names the cause. After a fix, root restarts the unit");
+                                      : std::string("the application's own lines as systemd kept them, newest last; ") +
+                                            (python ? "a Python traceback (its last line names the exception: ModuleNotFoundError, "
+                                                      "ImproperlyConfigured, OperationalError), 'Address already in use' or a Gunicorn "
+                                                      "'Worker failed to boot'"
+                                                    : "a Ruby backtrace or 'Address already in use'") +
+                                            " usually names the cause. After a fix, root restarts the unit");
             reply(s, 200, r);
         } else {
             const json::Value& st = r["state"];
@@ -1622,7 +1629,8 @@ void ControlHandler::site_env_set(Stream& s, std::string_view name, const json::
     const std::string restart = service_app(site->app) && !site->user.empty()
         ? "the application reads it when its service restarts: the unit site_service_unit renders loads the file (EnvironmentFile=); as root, systemctl restart agensio-app-" + site->user + ".service"
         : std::string("the application reads it when its service restarts: the unit that runs it must load the file (EnvironmentFile=, the file named above); root restarts that unit");
-    backend_->env_async(req, [this, &s, what = std::string(what), restart, done](json::Value r) {
+    const bool django = python_app(site->app);
+    backend_->env_async(req, [this, &s, what = std::string(what), restart, django, done](json::Value r) {
         if (!r["ok"].boolean()) {
             audit_peer(s, what, "refused: " + std::string(r.get("error")));
             reply(s, 409, r);
@@ -1642,8 +1650,21 @@ void ControlHandler::site_env_set(Stream& s, std::string_view name, const json::
                                                          " others could read: give " + (r["still_exposed"].items().size() == 1 ? "it" : "them") +
                                                          " a new value (generate for a generated secret; change a password where it is used too), and health warns until then"));
         json::Value steps = json::Value::array();
-        steps.push("the tasks read it from their next run");
-        steps.push(restart);
+        // The first admin's DJANGO_SUPERUSER_* names are createsuperuser's alone: the unit unsets
+        // them, so no restart hands them to the application (alpha.35 report, P4 c).
+        std::size_t superuser = 0, changed = 0;
+        for (const char* k : {"set", "unset", "generated", "kept"})
+            for (const auto& n : r[k].items()) {
+                ++changed;
+                if (n.str().starts_with("DJANGO_SUPERUSER_")) ++superuser;
+            }
+        if (django && superuser)
+            steps.push("DJANGO_SUPERUSER_PASSWORD (and _USERNAME, _EMAIL) are read by site_task createsuperuser alone; the unit site_service_unit "
+                       "renders removes them from the application's environment (UnsetEnvironment=), so they need no restart");
+        if (!django || superuser < changed) {
+            steps.push("the tasks read it from their next run");
+            steps.push(restart);
+        }
         r.set("next_steps", steps);
         if (!r["kept"].items().empty())
             r.set("hint", "kept " + joined(r["kept"]) + ": generate never replaces a value; to rotate one, unset and generate it in one call "

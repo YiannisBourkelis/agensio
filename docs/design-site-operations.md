@@ -822,8 +822,17 @@ it. What the build changed from the brief, and why:
   `SECURE_PROXY_SSL_HEADER` Django compares the Origin with https plus the Host itself.
   `tests/wagtail-install.sh` logs into Wagtail's admin over https through agensio.
 - **Uploads**: `nosniff` and `script-src 'none'; form-action 'none'; base-uri 'none'`
-  rather than `sandbox`, which a browser's PDF viewer refuses. Static files: a year and
-  `immutable` for Wagtail (hashed names), a day for plain Django (`StaticFilesStorage`).
+  rather than `sandbox`, which a browser's PDF viewer refuses. Static files (after the
+  alpha.35 report): a year and `immutable` for a name that carries its content's hash,
+  five minutes and `ETag` revalidation for any other, decided per request by the name
+  (`LocationConfig::hashed_headers`, one emptiness test for every other location), not by
+  forcing `ManifestStaticFilesStorage` on every project, whose strict mode fails
+  `collectstatic` on a stylesheet that names a missing file.
+- **The edge's work in `check_deploy`** (after the alpha.35 report): HSTS stays agensio's
+  (Django setting it too would send the header twice on proxied answers), so the settings
+  silence `security.W004` and `security.W008` only where the site has HSTS and the https
+  redirect, and make the cookies https-only on a TLS site. `django_settings` replaces its
+  own earlier file so an existing site gets later template fixes.
 - **Reserved first**: `PIP_*`, `VIRTUAL_ENV`, `DJANGO_SETTINGS_MODULE`, `AGENSIO_*`.
 - **Generic tasks, not one per application** (the owner, after the first build): one
   `pip_install` that takes any package the site's account may install, and one

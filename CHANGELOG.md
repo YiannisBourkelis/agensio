@@ -1,4 +1,38 @@
 # Changelog
+## 0.1.0-alpha.36 (unreleased)
+
+Found while fixing the alpha.35 report:
+
+- **A site with `hsts` behind a proxy preset served its project directory from disk.** A
+  managed site file carries HSTS as a hand-written `/` location with `add_headers`, and a
+  hand-written location replaced the preset's location at the same path. For `rails`,
+  `redmine`, `django` and `wagtail` that meant the application was never reached, and the
+  project's files were answered from disk, source included (a `settings.py` came back
+  200). `app = "proxy"` sites lost their application the same way, and a PHP preset lost
+  its front controller (WordPress permalinks and Laravel routes answered 404). A
+  hand-written location that sets only `add_headers` now joins the preset's location at
+  its path. Site files on disk are read the new way at once; nothing needs rewriting.
+  The alpha.35 site of the report had no `hsts` and was not affected.
+
+From the alpha.35 report (Wagtail 8.0 installed and serving through MCP, end to end):
+
+- **`/static/` caching follows the name.** A name that carries its content's hash
+  (`base.85e6f9d19e42.css`, Django's `ManifestStaticFilesStorage`) is cached for a year and
+  `immutable`; any other name for five minutes, then revalidated by `ETag`. Before, every
+  file was pinned for a year, and a plain Django project's upgrade never reached browsers.
+  A/B against alpha.35 flat (`ab-20260927-234745.md`, 0.979 to 1.006).
+- **Secure cookies and a meaningful `check_deploy`.** `agensio_settings.py` makes the
+  session and CSRF cookies https-only on a TLS site. It silences `security.W008` when the
+  site redirects to https and `security.W004` when it has `hsts`, since agensio does both
+  at the edge and Django's check cannot see it. `django_settings` run again replaces
+  agensio's own earlier version of the file (kept as `.bak`), so an existing site gets
+  this with one task.
+- `check_deploy`'s summary names the checks: "4 warnings: security.W004, ...".
+- `site_service_logs`' hint speaks of a Python traceback on a Django site.
+- `site_env_set` of `DJANGO_SUPERUSER_PASSWORD` says only `createsuperuser` reads it and
+  no restart is needed.
+- The rendered unit names each `PATH` directory once.
+
 ## 0.1.0-alpha.35 (2026-09-28)
 
 From the Django report against alpha.33 (Wagtail 8.0 on an `app = "proxy"` site, where

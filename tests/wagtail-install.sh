@@ -76,7 +76,7 @@ r=$(task django_settings); check "django_settings: agensio_settings.py from the 
 r=$(task migrate); check "migrate: the database, 0600" "True 0 600" "$(echo $r | cut -d' ' -f1-2) $(stat -c %a $APP/db.sqlite3 2>/dev/null)"
 r=$(task collectstatic); check "collectstatic: static/ holds the admin's files" "True 0 yes" "$(echo $r | cut -d' ' -f1-2) $([ -d $APP/static/wagtailadmin ] && echo yes)"
 r=$(task createsuperuser --param username=admin --param email=admin@example.com); check "createsuperuser with the password from the site's environment" "True 0" "$(echo $r | cut -d' ' -f1-2)"
-r=$(task check_deploy); check "check_deploy runs against the production settings" "0" "$(echo $r | cut -d' ' -f2)"
+r=$(task check_deploy); check "check_deploy on agensio's settings: the site redirects to https and its cookies are https-only, so only the missing HSTS is left" "0 1 warning: security.W004" "$(echo $r | cut -d' ' -f2) $(python3 -c "import json; print(json.load(open('$T/out-check_deploy.json')).get('summary', ''))")"
 sm() { python3 -c "import json; print(json.load(open('$T/out-$1.json')).get('summary', ''))"; }
 check "the answers lead with a summary: packages, migrations, static files, the admin" "yes yes yes yes" "$(sm pip_install | grep -q '^installed [0-9]* packages' && echo yes) $(sm migrate | grep -q '^[0-9][0-9]* migrations applied$' && echo yes) $(sm collectstatic | grep -q 'static files copied' && echo yes) $([ "$(sm createsuperuser)" = 'Superuser created successfully.' ] && echo yes)"
 
@@ -102,7 +102,7 @@ check "agensio serves Wagtail's welcome page over TLS through Gunicorn" "200 yes
 css=$(grep -o 'href="/static/[^"]*\.css"' $T/home.html | head -1 | sed 's/href="//; s/"$//')
 check "a stylesheet the page names comes from disk under /static/, cached a year" "200 text/css yes" "$(curl -sS $H -D $T/css.h -o /dev/null -w '%{http_code} %{content_type}' "https://w8.test:18843$css" | sed 's/;.*//') $(grep -qi '^cache-control: public, max-age=31536000, immutable' $T/css.h && echo yes)"
 J=$T/cookies; rm -f $J
-check "the admin's login page, through Gunicorn" "200" "$(curl -sS $H -c $J -b $J -o $T/login.html -w '%{http_code}' https://w8.test:18843/admin/login/)"
+check "the admin's login page, through Gunicorn; its CSRF cookie is https-only on this TLS site" "200 yes" "$(curl -sS $H -c $J -b $J -D $T/login.h -o $T/login.html -w '%{http_code}' https://w8.test:18843/admin/login/) $(grep -qi '^set-cookie: csrftoken=.*; secure' $T/login.h && echo yes)"
 token=$(grep -o 'name="csrfmiddlewaretoken" value="[^"]*"' $T/login.html | head -1 | sed 's/.*value="//; s/"$//')
 pw=$(ctl site-env w8.test --reveal DJANGO_SUPERUSER_PASSWORD | python3 -c 'import json,sys; print([v for v in json.load(sys.stdin)["variables"] if v["name"] == "DJANGO_SUPERUSER_PASSWORD"][0]["value"])')
 check "the admin logs in over https: Django's CSRF check accepts the origin (X-Forwarded-Proto from agensio), a redirect to /admin/" "302 /admin/" "$(curl -sS $H -c $J -b $J -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Origin: https://w8.test:18843' -e https://w8.test:18843/admin/login/ --data-urlencode "csrfmiddlewaretoken=$token" --data-urlencode 'username=admin' --data-urlencode "password=$pw" --data-urlencode 'next=/admin/' https://w8.test:18843/admin/login/ | sed 's#https://w8.test:18843##')"

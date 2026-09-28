@@ -393,6 +393,11 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now) {
             for (const auto& [n, val] : l.add_headers) h.set(n, val);
             loc.set("add_headers", std::move(h));
         }
+        if (!l.hashed_headers.empty()) {
+            json::Value h = json::Value::object();
+            for (const auto& [n, val] : l.hashed_headers) h.set(n, val);
+            loc.set("add_headers_hashed_names", std::move(h));
+        }
         locs.push(std::move(loc));
     }
     v.set("locations", std::move(locs));

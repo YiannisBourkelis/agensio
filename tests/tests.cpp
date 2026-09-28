@@ -1170,8 +1170,9 @@ static void test_presets() {
     const LocationConfig& other = Router::location(s, "/other.php");
     CHECK(other.kind == HandlerKind::static_ && std::find(other.deny_suffixes.begin(), other.deny_suffixes.end(), ".php") != other.deny_suffixes.end());
     const LocationConfig& build = Router::location(s, "/build/app.js");
-    // The hand-written /build/ location wins over the preset's.
-    CHECK(build.origin.empty() && build.add_headers.size() == 1 && build.add_headers[0].second == "no-store");
+    // A hand-written /build/ location that only sets fields joins the preset's: its value wins,
+    // the preset's location stays (2026-09-28; before, it replaced the preset's location).
+    CHECK(build.origin == "preset:laravel" && build.add_headers.size() == 1 && build.add_headers[0].second == "no-store");
     CHECK(Router::location(s, "/").try_files.size() == 3);
     std::ostringstream explain;
     explain_config(cfg, explain);
@@ -1803,6 +1804,24 @@ static void test_tasks() {
               tmpl.find("DEBUG = False") != npos && tmpl.find(".settings.production") != npos && tmpl.find("DATABASE_URL") != npos);
         CHECK(tasks::summarize(mig, "Operations to perform:\n  Applying a.0001_initial... OK\n  Applying b.0001_initial... OK\n", -1) == "2 migrations applied" &&
               tasks::summarize(mig, "  No migrations to apply.\n", -1) == "no migration was pending");
+        // check_deploy names its checks (alpha.35 report, P4 a).
+        const tasks::Row& cd = *tasks::find("django", "check_deploy");
+        CHECK(tasks::summarize(cd, "System check identified some issues:\n\nWARNINGS:\n?: (security.W004) You have not set...\n?: (security.W008) Your "
+                                   "SECURE_SSL_REDIRECT...\n?: (security.W012) SESSION_COOKIE_SECURE...\n?: (security.W016) You have...\n\n"
+                                   "System check identified 4 issues (0 silenced).\n", -1) ==
+                  "4 warnings: security.W004, security.W008, security.W012, security.W016" &&
+              tasks::summarize(cd, "ERRORS:\n?: (security.E100) x\nWARNINGS:\n?: (security.W004) y\n", -1) == "1 error: security.E100; 1 warning: security.W004" &&
+              tasks::summarize(cd, "System check identified no issues (2 silenced).\n", -1) == "System check identified no issues (2 silenced).");
+        // The settings: https-only cookies on a TLS site, the edge's own checks silenced only where they apply (P3 b);
+        // django_settings replaces agensio's own earlier version.
+        CHECK(tmpl.find("SESSION_COOKIE_SECURE = CSRF_COOKIE_SECURE = os.environ.get(\"AGENSIO_BASE_URL\", \"\").startswith(\"https://\")") != npos &&
+              tmpl.find("(\"security.W008\", os.environ.get(\"AGENSIO_HTTPS_REDIRECT\") == \"1\")") != npos &&
+              tmpl.find("(\"security.W004\", os.environ.get(\"AGENSIO_HSTS\") == \"1\")") != npos && ds.replace_own &&
+              !tasks::find("rails", "database_config")->replace_own);
+        dc.https_redirect = true;
+        const std::vector<std::string> redirect_env = tasks::build(mig, json::Value::object(), dc, "/x").env;
+        CHECK(has_env("AGENSIO_HSTS=") && std::find(redirect_env.begin(), redirect_env.end(), "AGENSIO_HTTPS_REDIRECT=1") != redirect_env.end());
+        dc.https_redirect = false;
         CHECK(tasks::summarize(*tasks::find("django", "collectstatic"), "\n245 static files copied to '/x/static', 612 post-processed.\n", -1) ==
                   "245 static files copied to '/x/static', 612 post-processed." &&
               tasks::summarize(*tasks::find("django", "pip_install_requirements"), "Collecting x\nSuccessfully installed Django-6.1.1 wagtail-8.0 pillow-11.0\n", -1) ==
@@ -2158,7 +2177,13 @@ static void test_tasks() {
         const LocationConfig& st = Router::location(ws, "/static/css/app.1a2b.css");
         const LocationConfig& me = Router::location(ws, "/media/original_images/x.png");
         CHECK(st.kind == HandlerKind::static_ && st.handler == "static" && st.root == ws.root && st.add_headers.size() == 1 &&
-              st.add_headers[0].second.find("immutable") != npos && st.origin == "preset:wagtail");
+              st.add_headers[0].second == "public, max-age=300" && st.hashed_headers.size() == 1 &&
+              st.hashed_headers[0].second == "public, max-age=31536000, immutable" && st.origin == "preset:wagtail");
+        // Immutable only for a name that carries its content's hash (alpha.35 report, P3 a).
+        CHECK(content_hashed("/static/css/welcome_page.85e6f9d19e42.css") && content_hashed("/static/x.0123abcd.js") &&
+              !content_hashed("/static/admin/css/base.css") && !content_hashed("/static/jquery.min.js") && !content_hashed("/static/a.0123ABCD.js") &&
+              !content_hashed("/static/a.0123abc.js") && !content_hashed("/static/.0123abcd.js") && !content_hashed("/static/a.0123abcd.") &&
+              !content_hashed("/static/0123abcd.js") && !content_hashed(""));
         CHECK(me.kind == HandlerKind::static_ && me.add_headers.size() == 2 && me.add_headers[0].second == "nosniff" &&
               me.add_headers[1].second.find("script-src 'none'") != npos && me.add_headers[1].second.find("sandbox") == npos && me.symlinks_deny);
         CHECK(Router::location(ws, "/media/documents/report.pdf").handler == "deny" && Router::location(ws, "/manage.py").handler == "deny" &&
@@ -2180,7 +2205,8 @@ static void test_tasks() {
         write("dj.toml", "[[site]]\nserver_name = [\"d.test\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"app\"\napp = \"django\"\nproject = \"blog\"\n"
                          "upstream = \"http://127.0.0.1:3009\"\n");
         const Config dc = load_config(dir / "dj.toml");
-        CHECK(Router::location(dc.sites[0], "/static/x.css").add_headers[0].second == "public, max-age=86400" &&
+        CHECK(Router::location(dc.sites[0], "/static/x.css").add_headers[0].second == "public, max-age=300" &&
+              !Router::location(dc.sites[0], "/static/x.css").hashed_headers.empty() &&
               Router::location(dc.sites[0], "/media/documents/x.pdf").handler == "static");
         const std::string django_site = "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"app\"\napp = \"django\"\nupstream = \"http://127.0.0.1:3000\"\n";
         CHECK(refused(django_site, "needs project = \"NAME\""));
@@ -2189,6 +2215,54 @@ static void test_tasks() {
         CHECK(refused(django_site + "project = \"My-Site\"\n", "not a Python package name"));
         CHECK(check_project_name("mysite").empty() && check_project_name("my_site2").empty() && check_project_name("_x").empty() && !check_project_name("2site").empty() &&
               !check_project_name("django").empty() && !check_project_name("a.b").empty() && !check_project_name("").empty());
+        // A managed site file's HSTS "/" location (only add_headers) joins the preset's "/":
+        // before 2026-09-28 it replaced it, so a proxy preset's site served its project
+        // directory from disk (source included) and a PHP preset lost its front controller.
+        const std::string hsts_loc = "\n[[site.location]]\npath = \"/\"\nadd_headers = { \"Strict-Transport-Security\" = \"max-age=31536000\" }\n";
+        write("h.toml", "[[site]]\nserver_name = [\"h.test\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"app\"\napp = \"django\"\nproject = \"blog\"\n"
+                        "upstream = \"http://127.0.0.1:3009\"\n" + hsts_loc);
+        const Config hc = load_config(dir / "h.toml");
+        const LocationConfig& hr = Router::location(hc.sites[0], "/blog/settings.py");
+        CHECK(hr.kind == HandlerKind::proxy && hr.origin == "preset:django" && refused_suffix("/blog/settings.py", hr.deny_suffixes) &&
+              hr.add_headers.size() == 1 && hr.add_headers[0].first == "Strict-Transport-Security");
+        CHECK(app_context(hc, hc.sites[0]).hsts && !app_context(hc, hc.sites[0]).https_redirect);
+        write("hr.toml", rails + hsts_loc);
+        CHECK(Router::location(load_config(dir / "hr.toml").sites[0], "/app/models/user.rb").kind == HandlerKind::proxy);
+        fs::create_directories(dir / "wp");
+        write("hw.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"wp\"\napp = \"wordpress\"\nphp = { socket = \"unix:/tmp/x.sock\" }\n" + hsts_loc);
+        const Config hw = load_config(dir / "hw.toml");
+        const LocationConfig& wr = Router::location(hw.sites[0], "/hello-world/");
+        CHECK(wr.try_files.size() == 3 && wr.try_files[2].target == "/index.php" && wr.add_headers.size() == 1);
+        // A "/" that names a handler, a root or an upstream is still the user's own, and wins.
+        write("hs.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"app\"\napp = \"django\"\nproject = \"blog\"\nupstream = \"http://127.0.0.1:3009\"\n"
+                         "\n[[site.location]]\npath = \"/\"\nhandler = \"static\"\nadd_headers = { \"X-A\" = \"1\" }\n");
+        CHECK(Router::location(load_config(dir / "hs.toml").sites[0], "/x").kind == HandlerKind::static_);
+        // A site written by site-create with https, the redirect and hsts: all three reach the settings.
+        {
+            control::SiteSpec hs;
+            hs.domain = "h.test";
+            hs.https = "manual";
+            fs::create_directories(dir / "c");
+            std::ofstream(dir / "c" / "c.pem") << "x";
+            std::ofstream(dir / "c" / "k.pem") << "x";
+            hs.cert = (dir / "c" / "c.pem").string();
+            hs.key = (dir / "c" / "k.pem").string();
+            hs.redirect_http = true;
+            hs.hsts = true;
+            hs.user_decided = true;
+            hs.app = "django";
+            hs.project = "blog";
+            hs.root = (dir / "app").string();
+            hs.upstream = "http://127.0.0.1:3009";
+            hs.listen_plain = "127.0.0.1:1";
+            hs.listen_tls = "127.0.0.1:2";
+            const std::string file = control::render_site(hs, "x");
+            CHECK(file.find("Strict-Transport-Security") != npos);
+        }
+        // The unit: PATH names each directory once (alpha.35 report, P4 d).
+        write("p.toml", wag);
+        const Config pc = load_config(dir / "p.toml");
+        CHECK(std::string(control::service_unit(pc.sites[0], pc).get("unit")).find("Environment=PATH=/usr/bin:/usr/local/bin:/bin\n") != npos);
     }
     fs::remove_all(dir);
 }

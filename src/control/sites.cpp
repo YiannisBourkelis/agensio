@@ -639,6 +639,11 @@ json::Value service_unit(const SiteConfig& site, const Config& cfg) {
     const std::string unit_name = "agensio-app-" + site.user + ".service";
     const std::string venv = home + "/venvs/" + name;
     const AppContext ac = app_context(cfg, site);
+    // The runtime's directory first, the system's after it, none twice (alpha.35 report, P4 d:
+    // /usr/bin:/usr/local/bin:/usr/bin:/bin).
+    std::string path = runtime;
+    for (const char* d : {"/usr/local/bin", "/usr/bin", "/bin"})
+        if (d != runtime) path += std::string(":") + d;
     // Plain paths and names only: a newline, a space or a quote could add a line to the unit.
     for (const std::string* v : {&name, &root, &group, &site.user, &runtime, &home, &env, &venv}) {
         if (v->empty() || v->find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/@:+-") != std::string::npos)
@@ -665,7 +670,10 @@ json::Value service_unit(const SiteConfig& site, const Config& cfg) {
         u += "Environment=DJANGO_SETTINGS_MODULE=agensio_settings AGENSIO_DJANGO_PROJECT=" + site.project + "\n";
         u += "Environment=AGENSIO_STATIC_ROOT=" + root + "/static AGENSIO_MEDIA_ROOT=" + root + "/media\n";
         if (!ac.hosts.empty()) u += "Environment=AGENSIO_HOSTS=" + ac.hosts + " AGENSIO_ORIGINS=" + ac.origins + " AGENSIO_BASE_URL=" + ac.base_url + "\n";
-        u += "Environment=PATH=" + runtime + ":/usr/local/bin:/usr/bin:/bin\n";
+        if (ac.https_redirect || ac.hsts)
+            u += "Environment=" + std::string(ac.https_redirect ? "AGENSIO_HTTPS_REDIRECT=1" : "") + (ac.https_redirect && ac.hsts ? " " : "") +
+                 (ac.hsts ? "AGENSIO_HSTS=1" : "") + "\n";
+        u += "Environment=PATH=" + path + "\n";
         u += "EnvironmentFile=-" + env + "\n";
         u += "# The admin's password createsuperuser read is never the application's.\n";
         u += "UnsetEnvironment=DJANGO_SUPERUSER_PASSWORD DJANGO_SUPERUSER_USERNAME DJANGO_SUPERUSER_EMAIL\n";
@@ -677,7 +685,7 @@ json::Value service_unit(const SiteConfig& site, const Config& cfg) {
         u += "Environment=BUNDLE_PATH=vendor/bundle BUNDLE_WITHOUT=development:test RAILS_LOG_TO_STDOUT=1\n";
         u += "Environment=GEM_HOME=" + home + "/gems GEM_PATH=" + home + "/gems\n";
         u += "# The Ruby the tasks bundled with ([control] runtimes): first on PATH, its bundle in ExecStart.\n";
-        u += "Environment=PATH=" + runtime + ":/usr/local/bin:/usr/bin:/bin\n";
+        u += "Environment=PATH=" + path + "\n";
         u += "EnvironmentFile=-" + env + "\n";
         const std::string bind = a.host == "::1" ? "tcp://[::1]:" + port : "tcp://" + a.host + ":" + port;
         u += "ExecStart=" + runtime + "/bundle exec puma -e production -b " + bind + "\n";

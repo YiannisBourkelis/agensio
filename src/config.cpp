@@ -420,6 +420,14 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
     loc.symlinks_deny = symlinks_deny_of(t["symlinks"], site.symlinks_deny, where);
     if (auto ht = t["add_headers"].as_table()) loc.add_headers = headers_of(ht, where);
     else if (t.contains("add_headers")) fail(where + ": 'add_headers' must be a table");
+    {
+        bool only = !loc.add_headers.empty() && match == "prefix";
+        for (const auto& [key, value] : t) {
+            (void)value;
+            only = only && (key.str() == "path" || key.str() == "add_headers" || key.str() == "match");
+        }
+        loc.headers_only = only;
+    }
     // `upstream = "http://host:port"` (or unix:/path) makes a proxy location; `proxy = { ... }`
     // carries the options (the same keys as php/fastcgi) and may name the upstream too.
     // The site's `proxy = { ... }` is the default; the location's table refines it. A
@@ -814,7 +822,14 @@ void apply_preset(SiteConfig& site, const std::string& where) {
             // Wagtail's production settings name every file by its hash (ManifestStaticFilesStorage)
             // and its admin versions the rest, so a year is safe there; a plain Django project
             // keeps StaticFilesStorage, whose names do not change with their content.
-            served("/static/", {{"Cache-Control", site.app == "wagtail" ? "public, max-age=31536000, immutable" : "public, max-age=86400"}});
+            served("/static/", {{"Cache-Control", "public, max-age=300"}});
+            // A name that carries its content's hash (collectstatic with ManifestStaticFilesStorage,
+            // Wagtail's default: base.85e6f9d19e42.css) never changes content: a year and
+            // immutable. Any other name is revalidated after five minutes (ETag, 304), so an
+            // upgrade reaches browsers (2026-09-28 report: every file was pinned for a year).
+            for (auto& l : site.locations)
+                if (l.path == "/static/" && l.origin == "preset:" + site.app && l.hashed_headers.empty())
+                    l.hashed_headers = {{"Cache-Control", "public, max-age=31536000, immutable"}};
             // Uploads are the visitors' and the editors' files on the site's own origin: never
             // sniffed into another type, and no script in an uploaded HTML or SVG page runs
             // (script-src 'none'), nor can a form in one post anywhere. Not `sandbox`: a
@@ -1206,8 +1221,47 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     } else if (t.contains("location")) {
         fail(where + ": 'location' must be an array of tables ([[site.location]])");
     }
+    // A hand-written location that only adds response fields (a managed file's HSTS "/") joins
+    // the location the preset or the implicit "/" makes at its path; before 2026-09-28 it
+    // replaced it, so a proxy preset's site served its project directory from disk and a PHP
+    // preset lost its front controller.
+    std::vector<LocationConfig> additions;
+    for (auto it = site.locations.begin(); it != site.locations.end();)
+        if (it->headers_only) {
+            additions.push_back(std::move(*it));
+            it = site.locations.erase(it);
+        } else {
+            ++it;
+        }
+    auto merge_into = [](LocationConfig& into, const LocationConfig& add) {
+        auto merge = [&](std::vector<std::pair<std::string, std::string>>& list) {
+            for (const auto& h : add.add_headers) {
+                auto same = std::find_if(list.begin(), list.end(), [&](const auto& x) { return Headers::iequals(x.first, h.first); });
+                if (same != list.end()) same->second = h.second;  // the hand-written value wins
+                else list.push_back(h);
+            }
+        };
+        merge(into.add_headers);
+        if (!into.hashed_headers.empty()) merge(into.hashed_headers);
+    };
+    auto find_at = [&](const std::string& path) -> LocationConfig* {
+        for (auto& l : site.locations)
+            if (l.path == path && !l.exact && !l.suffix) return &l;
+        return nullptr;
+    };
     apply_preset(site, where);
+    std::vector<LocationConfig> for_root;  // "/" additions wait for the implicit "/" when the preset made none
+    for (auto& add : additions) {
+        if (LocationConfig* into = find_at(add.path)) merge_into(*into, add);
+        else if (add.path == "/") for_root.push_back(std::move(add));
+        else {  // nothing there to join: it stands as written
+            add.headers_only = false;
+            site.locations.push_back(std::move(add));
+        }
+    }
     finalize_site(site);
+    for (const auto& add : for_root)
+        if (LocationConfig* into = find_at("/")) merge_into(*into, add);
     cfg.sites.push_back(std::move(site));
 }
 
@@ -1300,8 +1354,14 @@ AppContext app_context(const Config& cfg, const SiteConfig& site) {
     AppContext a;
     const std::string first = site.server_names.empty() ? std::string() : site.server_names.front();
     bool tls = site.tls.has_value();
-    for (const auto& s : cfg.sites)
-        if (!s.server_names.empty() && s.server_names.front() == first && s.tls) tls = true;
+    for (const auto& s : cfg.sites) {
+        if (s.server_names.empty() || s.server_names.front() != first) continue;
+        if (s.tls) tls = true;
+        if (s.redirect == "https" || s.redirect.starts_with("https://")) a.https_redirect = true;
+        for (const auto& l : s.locations)
+            for (const auto& h : l.add_headers)
+                if (Headers::iequals(h.first, "Strict-Transport-Security")) a.hsts = true;
+    }
     const std::string scheme = tls ? "https://" : "http://";
     for (const auto& n : site.server_names) {
         if (n == "*") continue;
@@ -1490,6 +1550,12 @@ void explain_config(const Config& cfg, std::ostream& out) {
                 for (std::size_t i = 0; i < loc.add_headers.size(); ++i)
                     out << (i ? ", " : " ") << '"' << loc.add_headers[i].first << "\" = \""
                         << loc.add_headers[i].second << '"';
+                out << " }\n";
+            }
+            if (!loc.hashed_headers.empty()) {
+                out << "# for a name with a content hash (name.<hex>.ext) instead:\n# add_headers = {";
+                for (std::size_t i = 0; i < loc.hashed_headers.size(); ++i)
+                    out << (i ? ", " : " ") << '"' << loc.hashed_headers[i].first << "\" = \"" << loc.hashed_headers[i].second << '"';
                 out << " }\n";
             }
         }

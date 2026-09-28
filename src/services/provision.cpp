@@ -717,6 +717,8 @@ json::Value task_run(const json::Value& req, const Config& cfg, int helper_fd) {
     tr.ctx.hosts = ac.hosts;
     tr.ctx.origins = ac.origins;
     tr.ctx.base_url = ac.base_url;
+    tr.ctx.https_redirect = ac.https_redirect;
+    tr.ctx.hsts = ac.hsts;
     tr.ctx.timeout = std::min(row->timeout, fresh.control.task_timeout);
     tr.ctx.processes = fresh.control.task_processes;
     for (auto& v : vars) tr.ctx.app_env.emplace_back(std::move(v.name), std::move(v.value));

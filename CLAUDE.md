@@ -444,7 +444,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   "django"` and `"wagtail"` (built on it, as redmine on rails) with the site field
   `project` (the Python package, required, `check_project_name`); `/static/` and `/media/`
   served from the project directory (media with nosniff and a script-blocking CSP, Wagtail's
-  `/media/documents/` refused), the rest to Gunicorn; a virtualenv per site,
+  `/media/documents/` refused; `/static/` a year and immutable only for a name with a content
+  hash, `LocationConfig::hashed_headers` and `content_hashed`, else five minutes), the rest
+  to Gunicorn; a hand-written location with only `add_headers` joins the preset's at its path
+  (`headers_only`: before alpha.36 a managed file's HSTS `/` replaced a proxy preset's `/`); a virtualenv per site,
   `<state_dir>/<account>/venvs/<site>`, made by `venv_create` with root's python3; one
   `pip_install` for any packages (requirement specifiers only, after `--`) that the user
   confirms in person (`Row::user_confirm`: the MCP bridge's `ask_user` opens an elicitation

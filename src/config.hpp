@@ -78,6 +78,14 @@ struct LocationConfig {
     std::string handler = "static";  // "static" or "fastcgi" ("proxy" arrives in phase D)
     HandlerKind kind = HandlerKind::static_;
     std::vector<std::pair<std::string, std::string>> add_headers;  // response fields added on 200/304
+    // Used instead of add_headers for a file whose name carries a content hash
+    // (name.<8-64 hex>.ext: a name that changes with its content), when not empty: a Django
+    // site's /static/ caches those for a year, the rest briefly (2026-09-28 report).
+    std::vector<std::pair<std::string, std::string>> hashed_headers;
+    // Written by hand with nothing but path and add_headers: it adds its fields to the location
+    // a preset (or the implicit "/") makes at the same path instead of replacing it (a managed
+    // site file's HSTS "/" location replaced a proxy preset's "/", 2026-09-28).
+    bool headers_only = false;
     std::string origin;  // "" when configured by hand, else the preset that generated it (explain)
     FcgiConfig fastcgi;                        // handler = "fastcgi": upstream and options
     UpstreamConfig proxy;                      // handler = "proxy": the origin (`upstream = "http://..."`) and options
@@ -321,6 +329,8 @@ std::string check_project_name(std::string_view name);
 // origin as the base URL. Comma-separated, no spaces: environment values and unit lines.
 struct AppContext {
     std::string hosts, origins, base_url;
+    bool https_redirect = false;  // a plain-http block of the site redirects to https
+    bool hsts = false;            // a block of the site sends Strict-Transport-Security (add_headers)
 };
 AppContext app_context(const Config& cfg, const SiteConfig& site);
 // A PHP preset (a row of the PHP preset table).
