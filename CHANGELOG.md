@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.38 (unreleased)
+## 0.1.0-alpha.38 (2026-09-28)
 
 From the Node report against alpha.36 (Uptime Kuma 2.5.5 on an `app = "proxy"` site, where
 nothing after `site_install` could run):
