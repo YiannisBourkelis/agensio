@@ -1,5 +1,5 @@
 # Changelog
-## 0.1.0-alpha.36 (unreleased)
+## 0.1.0-alpha.36 (2026-09-28)
 
 Found while fixing the alpha.35 report:
 
