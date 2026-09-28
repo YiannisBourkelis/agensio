@@ -149,7 +149,7 @@ section of `docs/configuration.md` that explains the key.
 | `php` | table | (none) | php = { socket = ... } names an existing php-fpm; with user and no socket the pool is generated and the keys below size it. | reload | site-create (php_socket, php_children, php_version) and settings | 7 |
 | `proxy` | table | (none) | Defaults for the site's proxy locations (host, forwarded, headers, hide, redirects, tls, timeouts). | reload | site file | 12 |
 | `upstream` | URL or list | (none) | app = proxy, rails, redmine, django or wagtail: where the application listens; a list balances round-robin with passive health. | reload | site-create (upstream) | 4b |
-| `location` | array of tables | (preset-dependent) | [[site.location]] blocks; hand-written ones win over a preset's. | reload | site file | 6 |
+| `location` | array of tables | (preset-dependent) | [[site.location]] blocks; a hand-written one replaces the preset's at its path, except one that sets only add_headers, which adds its fields to the preset's. | reload | site file | 6 |
 ## `php = {}`
 
 | key | type | default | meaning | applies | via | doc |

@@ -305,7 +305,7 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   preset; `/build/` gets an immutable Cache-Control via `add_headers`; WordPress: any
   `.php` runs, `wp-content/uploads` and `wp-includes` are `final` prefix locations, nginx
   `^~`, with `deny_suffixes` so PHP there is 404 and never executed); hand-written
-  locations win over the preset's. `agensio -t --explain` prints the effective configuration;
+  locations win over the preset's (one that sets only `add_headers` joins it instead). `agensio -t --explain` prints the effective configuration;
   `docs/configuration.md` documents each preset's expansion and every option (keep it
   current when a key or preset changes);
   `-t` connects to every FastCGI upstream once and warns, with the reason, if it cannot.

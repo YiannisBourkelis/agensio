@@ -85,7 +85,7 @@ const std::vector<KeyDef>& key_defs() {
         {"[[site]]", "php", "table", "(none)", "php = { socket = ... } names an existing php-fpm; with user and no socket the pool is generated and the keys below size it.", "reload", "site-create (php_socket, php_children, php_version) and settings", "7"},
         {"[[site]]", "proxy", "table", "(none)", "Defaults for the site's proxy locations (host, forwarded, headers, hide, redirects, tls, timeouts).", "reload", "site file", "12"},
         {"[[site]]", "upstream", "URL or list", "(none)", "app = proxy, rails, redmine, django or wagtail: where the application listens; a list balances round-robin with passive health.", "reload", "site-create (upstream)", "4b"},
-        {"[[site]]", "location", "array of tables", "(preset-dependent)", "[[site.location]] blocks; hand-written ones win over a preset's.", "reload", "site file", "6"},
+        {"[[site]]", "location", "array of tables", "(preset-dependent)", "[[site.location]] blocks; a hand-written one replaces the preset's at its path, except one that sets only add_headers, which adds its fields to the preset's.", "reload", "site file", "6"},
         {"php = {}", "socket", "unix:/path or host:port", "(generated with user)", "An existing php-fpm pool to use.", "reload", "site-create (php_socket)", "7"},
         {"php = {}", "children", "int", "8", "pm.max_children of the generated pool; also the FastCGI connection budget.", "reload + php-fpm reload", "settings (children) / site-create (php_children)", "7"},
         {"php = {}", "pm", "enum: ondemand | dynamic | static", "ondemand", "The pool's process manager: ondemand keeps nothing resident while idle, static keeps every child (benchmarks).", "reload + php-fpm reload", "settings", "7"},

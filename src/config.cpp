@@ -1995,7 +1995,8 @@ json::Value preset_catalog() {
                       .set("summary", wagtail
                           ? "Wagtail, the Django CMS: the django preset's routing and tasks, with startproject running wagtail start (venv_create, "
                             "pip_install wagtail gunicorn, startproject, then the django tasks); Wagtail's documents are served only through its own view, so /media/documents/ "
-                            "is never answered from disk, and /static/ is cached for a year (its names carry their hash)."
+                            "is never answered from disk. /static/ caches a name that carries its content's hash for a year, any other name for five "
+                            "minutes."
                           : "Django: /static/ (collectstatic's output) and /media/ (uploads) are served from the project directory, everything else "
                             "goes to the application server (Gunicorn) on the site's upstream. project names the Python package; site_task runs "
                             "the preset's named commands as the site's account in a virtualenv of the site's own (venv_create, pip_install: any "
@@ -2007,7 +2008,7 @@ json::Value preset_catalog() {
                       .set("php", "none").set("tasks", std::move(names)).set("secrets", std::move(secrets)).set("never_served", std::move(never)));
     }
     return json::Value::object().set("presets", std::move(list))
-        .set("note", "agensio never reads .htaccess; a preset provides the refusals an application's .htaccess would. Hand-written [[site.location]] entries win over a preset's. Every never_served name is refused in any backup spelling too, in its directory, whatever the case: name.bak, name~, name.txt, name-old, stem.bak (wp-config.bak), .name.swp, #name#; nothing to configure, and the bare stem (/readme, /license) stays a permalink.");
+        .set("note", "agensio never reads .htaccess; a preset provides the refusals an application's .htaccess would. A hand-written [[site.location]] with the path of a preset's location replaces it, except one that sets only add_headers: that one adds its fields to the preset's location (a field of the same name replacing the preset's value). Every never_served name is refused in any backup spelling too, in its directory, whatever the case: name.bak, name~, name.txt, name-old, stem.bak (wp-config.bak), .name.swp, #name#; nothing to configure, and the bare stem (/readme, /license) stays a permalink.");
 }
 
 std::vector<std::string> preset_secrets(const std::string& app) {
