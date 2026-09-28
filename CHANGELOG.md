@@ -1,4 +1,9 @@
 # Changelog
+
+## 0.1.0-alpha.37 (2026-09-28)
+
+- presets_list and the reference: a headers-only location joins the preset's; Wagtail's static caching
+
 ## 0.1.0-alpha.36 (2026-09-28)
 
 Found while fixing the alpha.35 report:
