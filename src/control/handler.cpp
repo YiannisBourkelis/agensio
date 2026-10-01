@@ -289,8 +289,18 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
     } else if (path.starts_with("/v1/sites/")) {
         bool found = false;
         json::Value body = backend_->site(path.substr(10), found);
-        if (found) reply(s, 200, body);
-        else reply(s, 404, json::Value::object().set("error", "no such site").set("site", std::string(path.substr(10))));
+        if (found) {
+            // A managed site's rules (control/sites.hpp), as data: the locations they render
+            // are in the listing, this says which ones the rules made.
+            control::SiteSpec spec;
+            if (const SiteConfig* site = control::find_site(backend_->running(), path.substr(10));
+                site && control::read_managed(control::site_file(backend_->running(), site->server_names.front()), spec) && spec.rules.is_object() &&
+                !spec.rules.members().empty())
+                body.set("rules", spec.rules);
+            reply(s, 200, body);
+        } else {
+            reply(s, 404, json::Value::object().set("error", "no such site").set("site", std::string(path.substr(10))));
+        }
     } else if (path == "/v1/config/validate") {
         reply(s, 200, backend_->validate());
     } else if (path == "/v1/logs") {
@@ -368,6 +378,7 @@ struct SiteFacts {
     bool python_root = false;  // a Django or Wagtail site's whole project (2026-09-28)
     bool node_root = false;    // a Node site's whole application (2026-09-28)
     std::string key, ruby_dir, node_dir, body_step, app, project, entry, home;
+    std::string served_sub;    // the served root's path below the project directory (Laravel's public), "" when they are one
 };
 
 // The hosting-rule errors of the configuration on disk, as a set: a writer compares the
@@ -928,6 +939,7 @@ void ControlHandler::site_install(Stream& s, std::string_view name, const json::
     sf.python_root = python_app(app) && target == site_root;
     sf.project = site->project;
     sf.node_root = node_app(app) && target == site_root;
+    if (site->root.size() > site_root.size() && site->root.starts_with(site_root + "/")) sf.served_sub = site->root.substr(site_root.size() + 1);
     sf.entry = site->entry;
     sf.node_dir = runtime_dir(cfg.control, "node");
     if (!site->user.empty() && !cfg.state_dir.empty()) sf.home = cfg.state_dir + "/" + site->user;
@@ -1052,6 +1064,23 @@ void ControlHandler::site_install(Stream& s, std::string_view name, const json::
                 steps.push("the archive holds no package.json at its top: a Node application's directory is the site's root (strip or path place it there)");
             } else {
                 steps.push("open the site in a browser to finish the application's own setup (database, admin account)");
+            }
+            // The directories the application's own .htaccess files deny, as the matching rule
+            // (2026-10-01): under the served root only, the project directory's subdirectory
+            // of a Laravel or Drupal root stripped.
+            if ((php_app(sf.app) || sf.app == "static") && !facts["htaccess_denied"].items().empty()) {
+                std::string list;
+                for (const auto& d : facts["htaccess_denied"].items()) {
+                    std::string rel(d.str());
+                    if (sf.served_sub.empty() || rel.starts_with(sf.served_sub + "/")) {
+                        if (!sf.served_sub.empty()) rel.erase(0, sf.served_sub.size() + 1);
+                        list += (list.empty() ? "" : ", ") + std::string("\"/") + rel + "/\"";
+                    }
+                }
+                if (!list.empty())
+                    steps.push("the application's own .htaccess files deny " + list + " to the web (Apache's rule; agensio never reads .htaccess when serving): "
+                               "site_update with rules: {\"private\": [" + list + "]} denies them here, and rules.entry_points names the only .php files that "
+                               "run when its documentation lists them");
             }
             if (!sf.body_step.empty()) steps.push(sf.body_step);
             if (!file.empty()) steps.push("the upload " + file + " is still stored; delete it with uploads delete " + file + " when no longer needed");

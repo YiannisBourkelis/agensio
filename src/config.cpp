@@ -395,7 +395,9 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
     if (t.contains("deny_suffixes")) {
         loc.deny_suffixes = string_list(t["deny_suffixes"], (where + ".deny_suffixes").c_str());
         for (const auto& d : loc.deny_suffixes)
-            if (d.size() < 2 || d[0] != '.') fail(where + ".deny_suffixes: entries are endings such as \".php\"");
+            // "~" alone is the one ending without a dot: an editor's backup (name~), refused by every
+            // PHP preset and by the cache rule of a managed site (2026-10-01).
+            if (d != "~" && (d.size() < 2 || d[0] != '.')) fail(where + ".deny_suffixes: entries are endings such as \".php\" (or \"~\")");
     }
     // The inverse: a directory that serves its media and nothing else (Grav's user/data).
     if (t.contains("allow_suffixes")) {
@@ -520,8 +522,13 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
         loc.methods = kFcgiMethods;  // every method an application may see
         loc.allow = allow_header(kFcgiMethods);
         loc.priority = t["priority"].value_or(false);
+    } else if (loc.handler == "deny") {
+        // 404 whatever exists, the way a preset refuses a path (2026-10-01: a site's rules
+        // write these into the managed file); the static handler answers without a lookup.
+        loc.kind = HandlerKind::static_;
+        loc.try_files = parse_try_files({"=404"});
     } else {
-        fail(where + ": handler \"" + loc.handler + "\" is not available (\"static\", \"fastcgi\", \"proxy\" or \"cgi\")");
+        fail(where + ": handler \"" + loc.handler + "\" is not available (\"static\", \"fastcgi\", \"proxy\", \"cgi\" or \"deny\")");
     }
     if (loc.kind == HandlerKind::fastcgi) loc.fastcgi.params_prefix = FcgiHandler::prebuild_params(site, loc);
     if (t.contains("methods")) {
@@ -634,7 +641,10 @@ const std::vector<std::string> kNodeRefusedEndings = {".db", ".db-wal", ".db-shm
 const std::vector<std::string> kSourceBackups = {".inc", ".bak", ".orig", ".save", ".swp", ".swo", "~",
                                                  // logs and database dumps (2026-09-23 live report: a Grav site's logs/grav.log
                                                  // named its backup archive; WordPress's wp-content/debug.log is the classic)
-                                                 ".log", ".sql"};
+                                                 ".log", ".sql",
+                                                 // SQLite files (2026-10-01, the Kanboard proposal: under app = "php" its
+                                                 // data/db.sqlite was downloadable; drupal refused them already)
+                                                 ".sqlite", ".sqlite3", ".db"};
 
 // Grav's own nginx recipe (webserver-configs/nginx.conf) and its user-folder-exposure
 // guidance (learn.getgrav.org/2/security/user-folder-exposure): below system/ and vendor/
@@ -685,8 +695,8 @@ ProtectedName protected_name(std::string path) {
 
 const std::vector<PhpPreset> kPhpPresets = {
     // Plain PHP: any script runs, missing paths are 404, no front controller.
-    {"php", "Plain PHP: every .php under the root runs, missing paths are 404, no front controller; .inc and editor backups are refused.",
-     "", false, {"index.php", "index.html"}, false, true, kSourceBackups, {}, {}, "", "", {}, "", {}},
+    {"php", "Plain PHP: every .php under the root runs, missing paths are 404, no front controller; .inc, editor backups, logs, dumps and SQLite files are refused, web.config never served. An application's own rules (which .php run, private directories, cached assets, nice URLs) come as the site's `rules`.",
+     "", false, {"index.php", "index.html"}, false, true, kSourceBackups, {}, {"/web.config"}, "", "", {}, "", {}},
     // Laravel (and Statamic): one entry point; any other .php is refused, never served as
     // source (2026-09-19); Vite's hashed build output cached for a year.
     {"laravel", "Laravel and Statamic: the project directory is given, its public/ is served; only index.php ever runs, any other .php is refused; Vite's build/ is cached for a year.",
@@ -1407,6 +1417,8 @@ AppContext app_context(const Config& cfg, const SiteConfig& site) {
 }
 
 bool php_app(std::string_view app) { return php_preset(std::string(app)) != nullptr; }
+const std::vector<std::string>& php_suffixes() { return kPhpSuffixes; }
+const std::vector<std::string>& source_backup_suffixes() { return kSourceBackups; }
 
 std::string runtime_dir(const ControlConfig& control, std::string_view runtime) {
     if (runtime == "ruby") return control.runtimes.ruby;

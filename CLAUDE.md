@@ -487,6 +487,27 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   `[control] trash_keep` (60 days) with worker 0's hourly `arm_trash_expiry`;
   `LogRegistry::unmark_all` so a deleted site's log is not recreated on reload. Security
   page row 34, `tests/trash.sh` (root devbox).
+- **Application rules** (2026-10-01, the Kanboard proposal, design section 19,
+  `docs/configuration.md` 15): a managed PHP or static site carries `rules` (`private`
+  paths, `entry_points`, `cache` directories with a `max_age`, `front_controller`), one
+  bounded object `control::check_rules` validates against the preset (entry points and the
+  front controller on PHP presets only, the controller one of the entry points, a cache on
+  PHP and static sites, nothing under a private path, counts and path syntax bounded, `/`
+  refused) and `render_site` turns into ordinary locations marked `# rules:` (`handler =
+  "deny"` is the one new site-file value: 404 whatever exists; a denying `.php` suffix
+  location when entry points are named; the cached directory `final` with every PHP ending
+  and source backup in `deny_suffixes`, `"~"` now accepted there), so a rule only ever
+  narrows the site and the request path is unchanged; kept rules are re-checked on every
+  later change, so an `app` they no longer fit is refused until `rules: {}`. The php preset
+  refuses `.sqlite`, `.sqlite3`, `.db` (`kSourceBackups`, so every PHP preset) and
+  `/web.config`. `install::htaccess_denies_all` reads an archive's `.htaccess` files once,
+  at install, for whole-directory denials outside `<Files>` blocks (`<IfVersion>` and
+  `<IfModule>` transparent); `facts.htaccess_denied` and a next step suggest the `private`
+  rule, never applied by the server, never read when serving. `agensio ctl site-update
+  --private / --entry-point / --cache PATH=SECONDS / --front-controller / --no-rules`, MCP
+  `site_update` `rules`, `site_show` shows them. `tests/kanboard-install.sh` (the
+  `agensio-devbox:php` image: agensio-devbox plus php8.4-sqlite3, mbstring, gd, xml, zip,
+  curl) installs Kanboard 1.2.54 through the control plane. Security page row 35.
 - **Application install** (F9, `src/services/archive.*`, `fetch.*`, `install.*`):
   `agensio ctl site-install NAME [--url | --file | --version]` fills a site's empty
   directory as the site's account from an https archive, an upload (`agensio ctl upload`)

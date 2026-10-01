@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.1.0-alpha.40 (unreleased)
+
+An application's own server guidelines through the control plane (the Kanboard proposal
+against alpha.39, `docs/design-site-operations.md` section 19). A managed PHP or static
+site carries `rules`: `private` paths answered 404 whatever exists, `entry_points` (the
+only `.php` files that run; every other `.php` is 404, never served as source), `cache`
+(directories served from disk with `Cache-Control: public, max-age=N`, nothing running
+there, no source backup served) and a `front_controller` (one of the entry points, reached
+by every missing path with its query string). The object is validated against the preset
+(and again on every later change, so an `app` the rules no longer fit is refused until
+`rules: {}`) and rendered into ordinary locations marked `# rules:` in the site file, so a
+rule can only narrow what the preset serves and `--explain` shows the result; `handler =
+"deny"` is the one new site-file value. `agensio ctl site-create` / `site-update` take
+`--private`, `--entry-point`, `--cache PATH=SECONDS`, `--front-controller`, `--no-rules`;
+MCP `site_create` / `site_update` take `rules`; `site_show` reports them.
+
+`site-install` reads an archive's `.htaccess` files once, for whole-directory denials
+(`Require all denied` / `Deny from all` outside `<Files>` blocks, `<IfVersion>` and
+`<IfModule>` transparent, which is how Kanboard writes them), reports the directories as
+`facts.htaccess_denied` and suggests the matching `private` rule in its next steps; the
+server never applies it by itself and never reads `.htaccess` when serving.
+
+The php preset refuses `.sqlite`, `.sqlite3`, `.db` (every PHP preset's root and shields,
+through `kSourceBackups`) and `/web.config`: under alpha.39 Kanboard's `data/db.sqlite` was
+downloadable. `deny_suffixes` accepts `"~"` (an editor's `name~` backup), the one ending
+without a dot, which the presets already refused internally.
+
+Tests: unit (every accepted and refused rule shape, render and load back, the router's
+answers, the `.htaccess` parser), `tests/integration.sh` (a php site with rules on the
+wire, the refusals, `site_show`), `tests/kanboard-install.sh` (Kanboard 1.2.54 through the
+control plane in the `agensio-devbox:php` image: the bare preset runs `app/Core/Base.php`,
+the rules stop it, login page, jsonrpc, healthcheck, cached assets, nice URLs, the database
+private). Security page row 35. No request-path change.
+
 ## 0.1.0-alpha.39 (2026-10-01)
 
 Deleting a site with its files (F12b of `docs/design-site-operations.md`, the owner's

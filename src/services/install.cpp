@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <ctime>
 #include <string_view>
 #include <vector>
@@ -131,6 +132,48 @@ bool node_range_matches(std::string_view range, std::string_view version, bool& 
     }
     known = true;
     return any;
+}
+
+bool htaccess_denies_all(std::string_view text) noexcept {
+    auto lower = [](std::string_view v) {
+        std::string out(v);
+        for (char& c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return out;
+    };
+    auto squeeze = [](std::string_view v) {  // trimmed, inner whitespace runs as one space
+        std::string out;
+        bool space = false;
+        for (unsigned char c : v) {
+            if (c == ' ' || c == '\t' || c == '\r') {
+                space = !out.empty();
+                continue;
+            }
+            if (space) out.push_back(' ');
+            space = false;
+            out.push_back(static_cast<char>(c));
+        }
+        return out;
+    };
+    int scoped = 0;  // depth of blocks that narrow the directive to some files or methods
+    for (std::size_t p = 0; p < text.size();) {
+        std::size_t nl = text.find('\n', p);
+        if (nl == std::string_view::npos) nl = text.size();
+        const std::string line = lower(squeeze(text.substr(p, nl - p)));
+        p = nl + 1;
+        if (line.empty() || line[0] == '#') continue;
+        if (line[0] == '<') {
+            const bool closing = line.size() > 1 && line[1] == '/';
+            std::string tag = line.substr(closing ? 2 : 1);
+            tag = tag.substr(0, tag.find_first_of(" >"));
+            const bool transparent = tag == "ifmodule" || tag == "ifversion" || tag == "ifdefine";
+            if (!transparent) scoped += closing ? -1 : 1;
+            if (scoped < 0) scoped = 0;
+            continue;
+        }
+        if (scoped > 0) continue;
+        if (line == "require all denied" || line == "deny from all") return true;
+    }
+    return false;
 }
 
 std::string guess_node_entry(const json::Value& pj) {
@@ -331,8 +374,6 @@ std::string open_failure(int parent_fd, const std::string& name, const std::stri
 
 }  // namespace
 
-namespace {
-
 // What the next steps of a whole application's install depend on, seen as the account that
 // installed it (2026-09-27 Writebook report): a Gemfile, the Ruby a .ruby-version pins, and
 // whether Rails credentials came with it (without them the application reads
@@ -441,8 +482,62 @@ json::Value app_facts(int dir_fd, const std::string& ruby, const std::string& no
             }
         }
     }
+    // Directories the application's own .htaccess files deny to the web (2026-10-01, the
+    // Kanboard proposal): read once, here, never at request time; the control plane proposes
+    // the matching rules. Three levels deep, never through a symlink, parents cover children.
+    {
+        json::Value denied = json::Value::array();
+        std::function<void(int, const std::string&, int)> walk = [&](int fd, const std::string& rel, int depth) {
+            if (depth > 3 || denied.items().size() >= 32) return;
+            if (!rel.empty()) {
+                const int hf = ::openat(fd, ".htaccess", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+                if (hf >= 0) {
+                    struct stat hs {};
+                    std::string text;
+                    if (::fstat(hf, &hs) == 0 && S_ISREG(hs.st_mode) && hs.st_size <= 65536) {
+                        char buf[8192];
+                        for (ssize_t n; (n = ::read(hf, buf, sizeof buf)) > 0;) text.append(buf, static_cast<std::size_t>(n));
+                    }
+                    ::close(hf);
+                    if (htaccess_denies_all(text)) {
+                        denied.push(rel);
+                        return;  // the parent covers what is below
+                    }
+                }
+            }
+            // A fresh description of the same directory: a dup would share the offset the listing
+            // above left at the end, and the walk would see no subdirectory at all.
+            const int dd = ::openat(fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+            DIR* d = dd >= 0 ? ::fdopendir(dd) : nullptr;
+            if (!d) {
+                if (dd >= 0) ::close(dd);
+                return;
+            }
+            std::vector<std::string> subs;
+            std::size_t seen = 0;
+            while (const struct dirent* e = ::readdir(d)) {
+                if (++seen > 4096) break;
+                const std::string n = e->d_name;
+                if (n == "." || n == ".." || n[0] == '.' || n.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-") != std::string::npos) continue;
+                struct stat st {};
+                if (::fstatat(::dirfd(d), n.c_str(), &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISDIR(st.st_mode)) subs.push_back(n);
+            }
+            ::closedir(d);
+            std::sort(subs.begin(), subs.end());
+            for (const auto& n : subs) {
+                const int sub = ::openat(fd, n.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+                if (sub < 0) continue;
+                walk(sub, rel.empty() ? n : rel + "/" + n, depth + 1);
+                ::close(sub);
+            }
+        };
+        walk(dir_fd, "", 0);
+        if (!denied.items().empty()) f.set("htaccess_denied", std::move(denied));
+    }
     return f;
 }
+
+namespace {
 
 }  // namespace
 

@@ -145,6 +145,9 @@ int main(int argc, char** argv) {
                              "                    [--php-children N] [--php-version V] [--no-redirect] [--hsts] [--listen-plain A] [--listen-tls A]\n"
                              "        site-update NAME (same options as site-create); --dry-run on either checks and shows the\n"
                              "                    file without writing, listing every problem at once\n"
+                             "        --private PATH, --entry-point /x.php, --cache PATH=SECONDS, --front-controller /x.php\n"
+                             "                    (site-create and site-update, repeatable): an application's own rules, which only\n"
+                             "                    make the site serve less; given together they replace the site's rules; --no-rules clears\n"
                              "        --set KEY=VALUE (site-create and site-update, repeatable): a per-site limit, e.g.\n"
                              "                    --set max_body_size=200MB --set memory_limit=512M; `settings NAME` lists the keys,\n"
                              "                    their units, the current value and the ceiling [control] site_limits allows\n"
@@ -219,6 +222,29 @@ int main(int argc, char** argv) {
                 else if (b == "--project") field("project");
                 else if (b == "--entry") field("entry");
                 else if (b == "--files") body.set("files", true);
+                else if (b == "--private" || b == "--entry-point") {
+                    std::string v; value(v);
+                    const char* key = b == "--private" ? "private" : "entry_points";
+                    agensio::json::Value rules = body["rules"].is_object() ? body["rules"] : agensio::json::Value::object();
+                    agensio::json::Value list = rules[key].is_array() ? rules[key] : agensio::json::Value::array();
+                    list.push(v);
+                    rules.set(key, list);
+                    body.set("rules", rules);
+                } else if (b == "--cache") {
+                    std::string v; value(v);
+                    const std::size_t eq = v.find('=');
+                    if (eq == std::string::npos || eq == 0) { std::cerr << "ctl: --cache needs PATH=SECONDS\n"; return 2; }
+                    agensio::json::Value rules = body["rules"].is_object() ? body["rules"] : agensio::json::Value::object();
+                    agensio::json::Value list = rules["cache"].is_array() ? rules["cache"] : agensio::json::Value::array();
+                    list.push(agensio::json::Value::object().set("path", v.substr(0, eq)).set("max_age", static_cast<double>(std::atol(v.c_str() + eq + 1))));
+                    rules.set("cache", list);
+                    body.set("rules", rules);
+                } else if (b == "--front-controller") {
+                    std::string v; value(v);
+                    agensio::json::Value rules = body["rules"].is_object() ? body["rules"] : agensio::json::Value::object();
+                    rules.set("front_controller", v);
+                    body.set("rules", rules);
+                } else if (b == "--no-rules") body.set("rules", agensio::json::Value::object());
                 else if (b == "--php-socket") field("php_socket");
                 else if (b == "--php-children") { std::string v; value(v); body.set("php_children", std::atoi(v.c_str())); }
                 else if (b == "--php-version") field("php_version");

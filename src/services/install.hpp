@@ -77,6 +77,16 @@ bool valid_sha256(std::string_view hex) noexcept;
 // "20.x", ">=18 <23", "~20.4", "*". `known` is false for a form this does not read (a hyphen
 // range, a pre-release tag), and the answer then means nothing.
 bool node_range_matches(std::string_view range, std::string_view version, bool& known);
+// Whether an .htaccess denies its whole directory to the web: a `Require all denied` or `Deny
+// from all` outside any <Files>, <FilesMatch>, <Location>, <Directory> or <Limit> block (inside
+// one it means those files, not the directory); <IfModule> and <IfVersion> are looked through,
+// since both Apache versions of the rule sit in them (Kanboard's data/.htaccess, 2026-10-01).
+bool htaccess_denies_all(std::string_view text) noexcept;
+// What the installed tree says about itself (the install answer's `facts`): the manifests
+// found, the runtime an application pins against the one installed, the entry a Node
+// application starts, and `htaccess_denied`, the directories whose own .htaccess denies them
+// whole (three levels deep, a parent covering its children). Exposed for the unit tests.
+json::Value app_facts(int dir_fd, const std::string& ruby, const std::string& node);
 // What package.json's scripts or main say node runs (the start script "node server/server.js",
 // or one level of "npm run NAME" to it; else main), as a relative path check_entry accepts; "".
 std::string guess_node_entry(const json::Value& package_json);

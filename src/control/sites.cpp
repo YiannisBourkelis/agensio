@@ -67,6 +67,7 @@ json::Value SiteSpec::to_json() const {
     if (php_children) v.set("php_children", php_children);
     if (!php_version.empty()) v.set("php_version", php_version);
     if (settings.is_object() && !settings.members().empty()) v.set("settings", settings);
+    if (rules.is_object() && !rules.members().empty()) v.set("rules", rules);
     if (!access_log.empty()) v.set("access_log", access_log);
     v.set("listen_plain", listen_plain).set("listen_tls", listen_tls);
     return v;
@@ -95,6 +96,7 @@ bool SiteSpec::from_json(const json::Value& v, SiteSpec& out) {
     out.php_children = static_cast<int>(v["php_children"].num());
     out.php_version = v.get("php_version");
     if (v["settings"].is_object()) out.settings = v["settings"];
+    if (v["rules"].is_object()) out.rules = v["rules"];
     if (out.settings["children"].type() == json::Value::Type::number) out.php_children = static_cast<int>(out.settings["children"].num());
     out.access_log = v.get("access_log");
     if (has_key(v, "listen_plain")) out.listen_plain = v.get("listen_plain");
@@ -235,6 +237,103 @@ std::string detect_app_marker(const std::string& app) {
     return "Gemfile";
 }
 
+namespace {
+
+// A rule's path: a URL path below the root, plain characters, normalised, never "/" alone.
+std::string rule_path(const json::Value& v, std::string& out) {
+    if (!v.is_string()) return "a rule's path must be a string";
+    const std::string p(v.str());
+    if (p.empty() || p[0] != '/') return "'" + p.substr(0, 80) + "' must start with '/'";
+    if (p.size() > 255) return "'" + p.substr(0, 80) + "...' is longer than 255 characters";
+    if (p.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/") != std::string::npos)
+        return "'" + p + "' holds a character that is not a letter, digit, '.', '_', '-' or '/'";
+    if (p.find("//") != std::string::npos || p.find("/../") != std::string::npos || p.ends_with("/..") || p.find("/./") != std::string::npos || p.ends_with("/."))
+        return "'" + p + "' must be a normalised path: no '//', no '.' or '..' segments";
+    if (p == "/") return "'/' cannot be a rule: it is the whole site";
+    out = p;
+    return "";
+}
+
+bool php_ending(const std::string& p) {
+    for (const auto& e : php_suffixes())
+        if (p.size() > e.size() && p.ends_with(e)) return true;
+    return false;
+}
+
+}  // namespace
+
+std::string check_rules(const json::Value& given, const SiteSpec& spec, json::Value& normalised) {
+    normalised = json::Value::object();
+    if (!given.is_object()) return "rules must be an object: {\"private\": [...], \"entry_points\": [...], \"cache\": [...], \"front_controller\": \"/index.php\"}";
+    for (const auto& m : given.members())
+        if (m.first != "private" && m.first != "entry_points" && m.first != "cache" && m.first != "front_controller")
+            return "rules: unknown key '" + m.first + "' (private, entry_points, cache, front_controller)";
+    const bool php = php_app(spec.app), static_site = spec.app.empty() || spec.app == "static";
+    std::vector<std::string> priv, entries;
+    std::string why, p;
+    if (!given["private"].is_null()) {
+        if (!given["private"].is_array()) return "rules.private must be a list of paths";
+        if (given["private"].items().size() > 64) return "rules.private: at most 64 paths";
+        for (const auto& v : given["private"].items()) {
+            if (!(why = rule_path(v, p)).empty()) return "rules.private: " + why;
+            if (std::find(priv.begin(), priv.end(), p) == priv.end()) priv.push_back(p);
+        }
+    }
+    if (!given["entry_points"].is_null()) {
+        if (!given["entry_points"].is_array()) return "rules.entry_points must be a list of .php paths";
+        if (given["entry_points"].items().size() > 16) return "rules.entry_points: at most 16 files";
+        if (!given["entry_points"].items().empty() && !php)
+            return "rules.entry_points name the .php files that run: they apply to a PHP preset (app = php, laravel, drupal, wordpress, grav), not to app = \"" +
+                   (spec.app.empty() ? std::string("static") : spec.app) + "\"";
+        for (const auto& v : given["entry_points"].items()) {
+            if (!(why = rule_path(v, p)).empty()) return "rules.entry_points: " + why;
+            if (p.back() == '/' || !php_ending(p)) return "rules.entry_points: '" + p + "' is not a .php file";
+            if (std::find(entries.begin(), entries.end(), p) == entries.end()) entries.push_back(p);
+        }
+    }
+    for (const auto& e : entries)
+        for (const auto& pr : priv)
+            if (e == pr || (pr.back() == '/' && e.starts_with(pr))) return "rules: the entry point " + e + " lies under the private path " + pr;
+    json::Value cache = json::Value::array();
+    if (!given["cache"].is_null()) {
+        if (!given["cache"].is_array()) return "rules.cache must be a list of {\"path\": \"/assets/\", \"max_age\": 604800}";
+        if (given["cache"].items().size() > 16) return "rules.cache: at most 16 directories";
+        if (!given["cache"].items().empty() && !php && !static_site)
+            return "rules.cache serves a directory from disk: it applies to a PHP or static preset, never to app = \"" + spec.app +
+                   "\", whose root is the application's directory";
+        for (const auto& c : given["cache"].items()) {
+            if (!c.is_object()) return "rules.cache: each entry is {\"path\": \"/assets/\", \"max_age\": 604800}";
+            if (!(why = rule_path(c["path"], p)).empty()) return "rules.cache: " + why;
+            if (p.back() != '/') return "rules.cache: '" + p + "' must be a directory (ending in '/')";
+            const json::Value& age = c["max_age"];
+            if (age.type() != json::Value::Type::number || age.num() < 0 || age.num() > 31536000 || age.num() != static_cast<double>(static_cast<long>(age.num())))
+                return "rules.cache: max_age for " + p + " must be a whole number of seconds, 0 to 31536000";
+            for (const auto& pr : priv)
+                if (p == pr || (pr.back() == '/' && p.starts_with(pr))) return "rules: the cached directory " + p + " lies under the private path " + pr;
+            cache.push(json::Value::object().set("path", p).set("max_age", age.num()));
+        }
+    }
+    std::string front;
+    if (!given["front_controller"].is_null()) {
+        if (given["front_controller"].is_string() && given["front_controller"].str().empty()) {
+        } else {
+            if (!(why = rule_path(given["front_controller"], front)).empty()) return "rules.front_controller: " + why;
+            if (!php) return "rules.front_controller routes missing paths to a .php file: it applies to a PHP preset, not to app = \"" +
+                             (spec.app.empty() ? std::string("static") : spec.app) + "\"";
+            if (std::find(entries.begin(), entries.end(), front) == entries.end())
+                return "rules.front_controller must be one of rules.entry_points (" + front + " is not), so a missing path never reaches a script the rules do not name";
+        }
+    }
+    json::Value pv = json::Value::array(), ev = json::Value::array();
+    for (const auto& x : priv) pv.push(x);
+    for (const auto& x : entries) ev.push(x);
+    if (!priv.empty()) normalised.set("private", pv);
+    if (!entries.empty()) normalised.set("entry_points", ev);
+    if (!cache.items().empty()) normalised.set("cache", cache);
+    if (!front.empty()) normalised.set("front_controller", front);
+    return "";
+}
+
 std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, SiteSpec& spec, std::string& error) {
     std::vector<Decision> needs;
     if (has_key(body, "domain")) spec.domain = body.get("domain");
@@ -292,6 +391,17 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
     } else if (has_key(body, "php_children") && spec.php_children) {
         if (!spec.settings.is_object()) spec.settings = json::Value::object();
         spec.settings.set("children", static_cast<double>(spec.php_children));
+    }
+    // The application's own rules: given whole (an empty object clears them), checked against
+    // the preset as it stands after this request; kept rules are checked again below, so an app
+    // change can never leave a rule that would widen the site.
+    if (has_key(body, "rules")) {
+        json::Value normalised;
+        if (const std::string bad = check_rules(body["rules"], spec, normalised); !bad.empty()) {
+            error = bad;
+            return needs;
+        }
+        spec.rules = normalised;
     }
     if (has_key(body, "access_log")) spec.access_log = body.get("access_log");
     if (has_key(body, "listen_plain")) spec.listen_plain = body.get("listen_plain");
@@ -360,6 +470,13 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
             error = "https cert/key: " + why;
             return needs;
         }
+    if (spec.rules.is_object() && !spec.rules.members().empty()) {
+        json::Value again;
+        if (const std::string bad = check_rules(spec.rules, spec, again); !bad.empty()) {
+            error = "the site's rules no longer fit its app: " + bad + " (send rules: {} to clear them)";
+            return needs;
+        }
+    }
     const bool user_decided = spec.user_decided || !spec.user.empty();
     // A site with its own user gets its own access log next to the server's: sites of
     // different users never share a log (rule 5), and the file is made theirs to read.
@@ -441,6 +558,8 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
         if (!spec.user.empty() && !spec.access_log.empty()) s += "access_log = " + toml_string(spec.access_log) + "\n";
         const bool php = php_app(spec.app);
         if (spec.settings.is_object() && spec.settings["max_body_size"].is_string()) s += "max_body_size = " + toml_string(spec.settings.get("max_body_size")) + "\n";
+        if (const std::string fc(spec.rules.get("front_controller")); !fc.empty())
+            s += "try_files = [\"$uri\", \"$uri/\", " + toml_string(fc + "?$query_string") + "]   # rules: nice URLs\n";
         if (php) {
             if (!spec.php_socket.empty()) s += "php = { socket = " + toml_string(spec.php_socket) + " }\n";
             else if (spec.php_children || !spec.php_version.empty() || (spec.settings.is_object() && !spec.settings.members().empty())) {
@@ -459,9 +578,34 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
             }
         }
     };
+    // The application's rules as locations (2026-10-01): deny for the private paths (final
+    // prefixes, so nothing below them reaches PHP), fastcgi for the named entry points with
+    // every other .php denied, a static shield for each cached directory where no PHP spelling
+    // and no backup ending is served. Hand-written in the file's terms, so the loader needs
+    // nothing new; the comments say where they come from.
+    auto rules_locations = [&](std::string& s) {
+        const json::Value& r = spec.rules;
+        if (!r.is_object()) return;
+        for (const auto& p : r["private"].items()) {
+            const std::string path(p.str());
+            s += "\n[[site.location]]   # rules: private\npath = " + toml_string(path) + "\n" + (path.back() == '/' ? "final = true\n" : "match = \"exact\"\n") +
+                 "handler = \"deny\"\n";
+        }
+        for (const auto& e : r["entry_points"].items())
+            s += "\n[[site.location]]   # rules: an entry point\npath = " + toml_string(std::string(e.str())) + "\nmatch = \"exact\"\nhandler = \"fastcgi\"\n";
+        if (!r["entry_points"].items().empty()) s += "\n[[site.location]]   # rules: no other PHP runs\npath = \".php\"\nmatch = \"suffix\"\nhandler = \"deny\"\n";
+        for (const auto& c : r["cache"].items()) {
+            std::vector<std::string> deny = php_suffixes();
+            for (const auto& b : source_backup_suffixes())
+                if (std::find(deny.begin(), deny.end(), b) == deny.end()) deny.push_back(b);
+            s += "\n[[site.location]]   # rules: cached, nothing runs here\npath = " + toml_string(std::string(c.get("path"))) + "\nfinal = true\ndeny_suffixes = " + toml_list(deny) +
+                 "\nadd_headers = { \"Cache-Control\" = \"public, max-age=" + std::to_string(static_cast<long>(c["max_age"].num())) + "\" }\n";
+        }
+    };
     if (!tls || !spec.redirect_http) {
         out += "\n[[site]]\nserver_name = " + toml_list(names) + "\nlisten = " + toml_list({spec.listen_plain}) + "\n";
         site_body(out);
+        rules_locations(out);
     } else {
         out += "\n[[site]]\nserver_name = " + toml_list(names) + "\nlisten = " + toml_list({spec.listen_plain}) +
                "\nredirect = \"https\"\n";
@@ -471,6 +615,7 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
         site_body(out);
         if (spec.https == "auto") out += "tls = \"auto\"\n";
         else out += "tls = { cert = " + toml_string(spec.cert) + ", key = " + toml_string(spec.key) + " }\n";
+        rules_locations(out);
         if (spec.hsts)
             out += "\n[[site.location]]\npath = \"/\"\nadd_headers = { \"Strict-Transport-Security\" = \"max-age=31536000\" }\n";
     }

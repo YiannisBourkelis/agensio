@@ -828,6 +828,11 @@ Two things a preset does not let you change: under `app = "laravel"` the web roo
 always `public/` and only `/index.php` runs. A project that needs otherwise uses
 `app = "php"` or explicit locations.
 
+An application with server guidelines of its own and no preset (Kanboard, say) runs under
+`app = "php"` with the site's `rules` (section 15: private paths, the `.php` files that
+run, cached directories, a front controller), which the control plane renders into the
+locations below, each marked `# rules: ...`; they can only narrow what the preset serves.
+
 ## 6. Locations, the reference
 
 Precedence: `exact` matches first, then `suffix` locations (an ending such as `.php`,
@@ -841,11 +846,11 @@ matched at the end of the path or before a `/`), then the longest `prefix`; an i
 | `root` | file = root + path (default: the site's root) |
 | `alias` | file = alias + (path minus the location prefix); prefix locations ending in `/` only |
 | `index`, `try_files`, `hidden_files`, `symlinks` | as on the site; the location's value wins |
-| `handler` | `"static"` (default) or `"fastcgi"` |
+| `handler` | `"static"` (default), `"fastcgi"`, `"proxy"`, `"cgi"`, or `"deny"` (404 for every path here whatever exists, as hidden files are; what a managed site's `rules.private` renders) |
 | `fastcgi = { ... }` | overrides the site's `php = { ... }` for this location (section 7) |
 | `methods` | narrows what the handler serves, e.g. `["GET", "HEAD"]`; the rest get 405 with `Allow` |
 | `final` | prefix only: nginx `^~` |
-| `deny_suffixes` | endings answered with 404 (like hidden files: a refusal never confirms a file exists), e.g. `[".php"]` under an uploads directory |
+| `deny_suffixes` | endings answered with 404 (like hidden files: a refusal never confirms a file exists), e.g. `[".php"]` under an uploads directory; `"~"` (an editor's `name~` backup) is the one entry without a dot |
 | `allow_suffixes` | when set, the only endings served here; every other path, directories and bare names included, is 404 whatever exists (Grav's `user/data`: public media beside private data) |
 | `add_headers` | response fields added on 200 and 304, e.g. `{ "Cache-Control" = "..." }` |
 | `priority` | may use the FastCGI pool slots reserved by `priority_reserve` |
@@ -1493,7 +1498,7 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 |---|---|---|
 | `reload` | operator | the same as `agensio reload`: validate the file on disk, bind, switch; 409 with the reason when refused, nothing changed then |
 | `logs-reopen` | operator | reopen every log file (what `SIGUSR1` does) |
-| `site-create` | admin | writes `sites.d/<domain>.toml`, validates, reloads. Fields: `domain`, `aliases`, `https` (`auto`, `none`, or `{cert, key}`), `redirect_http` (default true), `hsts`, `user` (an account name; `no_user: true` or JSON `null` for none; the words null, none, nil and system accounts are refused, never turned into commands), `group`, `app`, `root`, `upstream`, `project` (app = django or wagtail: the project's Python package), `php_socket`, `php_children`, `php_version`, `listen_plain`, `listen_tls`. Until `https`, `root` (or `upstream`), `app`, `user` and, for a Django site, `project` are decided it answers 422 with the open questions and a suggestion each (a user name from the domain, the app the files under root suggest); when the account or the root directory does not exist it answers 409 with the commands to run as root and waits for the same command again. A new site is HTTPS-only: the plain site redirects. |
+| `site-create` | admin | writes `sites.d/<domain>.toml`, validates, reloads. Fields: `domain`, `aliases`, `https` (`auto`, `none`, or `{cert, key}`), `redirect_http` (default true), `hsts`, `user` (an account name; `no_user: true` or JSON `null` for none; the words null, none, nil and system accounts are refused, never turned into commands), `group`, `app`, `root`, `upstream`, `project` (app = django or wagtail: the project's Python package), `php_socket`, `php_children`, `php_version`, `listen_plain`, `listen_tls`, `rules` (an application's own server guidelines as bounded rules, below). Until `https`, `root` (or `upstream`), `app`, `user` and, for a Django site, `project` are decided it answers 422 with the open questions and a suggestion each (a user name from the domain, the app the files under root suggest); when the account or the root directory does not exist it answers 409 with the commands to run as root and waits for the same command again. A new site is HTTPS-only: the plain site redirects. |
 | `site-create` answers | | 422 with `needs` while decisions are open; 409 `prerequisites missing` with `problems` (every one at once, each with a `code`, a `detail` and its `run_as_root` command: `missing_account`, `missing_group`, `root_missing`, `root_unreadable`, `certificate_missing`) plus the flat `run_as_root` list; 202 `needs_restart` when the site adds a privileged port the dropped server cannot bind by a reload (the file is written and valid, `systemctl restart agensio` serves it); 201 with `next_steps` (separate commands: `agensio pools`, then the php-fpm reload) and `warnings`. `dry_run: true` runs every check and returns the file that would be written without writing or reloading |
 | `site-update NAME` | admin | the same fields on a site `site-create` wrote (the file carries its spec on its first line); a hand-written file is refused with 409, edit it yourself. `settings = {key: value}` (CLI `--set KEY=VALUE`, repeatable) sets the per-site limits: `max_body_size` (any site), and for a PHP site with its own user (a generated pool) `memory_limit`, `max_execution_time`, `max_input_time`, `children`, `pm`, `max_requests`. Each value is checked against `[control] site_limits` and refused above it naming the key, the value and the ceiling; a key outside that list (`extra`, `open_basedir`, any ini name) is refused as unknown, whatever it is. The answer's `done` lists what was written and reloaded: the site file and agensio, and the php-fpm pool and php-fpm when a pool key changed (a php-fpm reload briefly affects every PHP site unless `process_control_timeout` is set) |
 | `site-disable NAME`, `site-enable NAME` | admin | renames the file to `.disabled` and back, reloads |
@@ -1509,6 +1514,42 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 | `site-task NAME TASK [--param KEY=VALUE]...` | admin | runs one named task of the site's preset **as the site's account** in the site's directory (`root`): a row of the task table, never a command line (below). `--dry-run` answers with the exact argv, the account, the directory, the environment and the limits, and runs nothing. `pip_install` (Django and Wagtail) runs only on the user's own confirmation (section 4e): ctl prints the warning and the `--yes` typed is the confirmation; without one the answer is 428 with the warning and the command. Answers 200 when the task exited 0, 409 when it failed, was stopped at its time limit or was refused, each with `argv` (what ran, the interpreter resolved), `as`, `cwd`, `env` (the site's own variables as `NAME=<site environment>`, never their values), `exit` or `signal`, `timed_out`, `duration_ms`, `summary` when the output has one (`N migrations applied`, `Bundle complete! ...`, `Default configuration data loaded.`, `public/assets holds N files`), `output` (stdout and stderr together: its last 4 KB when the task succeeded, its first 4 KB and last 12 KB when it failed, the cut marked; `truncated`, `output_bytes` and `output_kept`, the part kept for `site-task-output`), `next_steps` with root's restart line of the site's service after `bundle_install`, `db_migrate`, `db_prepare`, `plugins_migrate` or `assets_precompile`, `secured` (credential paths made private), `hint` when the failure has a known cause (Rails' "Missing secret_key_base": generate one into the site's environment; "Your Ruby version is X, but your Gemfile specified Y": a Ruby for one application, below), and `run_as_root` when the interpreter is missing; 400 for an unknown task or a parameter that does not match; 422 for a preset without tasks; 409 while another task runs on the same site |
 | `site-env NAME [--reveal KEY]...` | admin | the site's environment (`app = "rails"`, `"redmine"`, `"django"`, `"wagtail"`, `"node"` or `"proxy"`): `variables` with each name, its `length` and its `fingerprint` (16 hex digits of a keyed hash: the same fingerprint means the same value), no value; a value only for each `--reveal KEY` (`?reveal=KEY,KEY` on the API), audited as `REVEALED`; `exists` false when the site has no file yet; `tightened` when the helper made the directory or the file private on the way. Every call is audited with the names it returned. 422 for a site of another preset; 409 with `run_as_root` when the directory or the file cannot be trusted |
 | `site-env-set NAME [--set KEY=VALUE]... [--unset KEY]... [--generate KEY]...` | admin | changes the site's environment: `--set` adds or replaces, `--unset` removes, `--generate` puts a random secret (128 hex digits) under a name that is missing and keeps an existing one; a name in both `--unset` and `--generate` is rotated. Answers 200 with the names under `set`, `unset`, `generated`, `kept`, `absent` and `names` (every name now in the file), never a value, and the restart of the application's service as a next step; 400 for a name or value the rules refuse (below), 409 when the helper refuses |
+
+**Application rules** (`rules`, 2026-10-01). A PHP application without a preset of its own
+ships server guidelines (Kanboard: "deny `app/` and `data/`, run only `index.php` and
+`jsonrpc.php`"; its `.htaccess` files say the same to Apache). A managed site under
+`app = "php"` (or `"static"`) carries them as one bounded object the control plane checks
+and renders into ordinary locations, so the file stays one `--explain` can show and no
+hand-written location or root edit is needed:
+
+```json
+"rules": {
+  "private": ["/app/", "/data/", "/libs/", "/vendor/", "/cli", "/web.config"],
+  "entry_points": ["/index.php", "/jsonrpc.php", "/healthcheck.php"],
+  "cache": [{"path": "/assets/", "max_age": 604800}],
+  "front_controller": "/index.php"
+}
+```
+
+`private` paths (a directory with a trailing `/`, or one file) answer 404 whatever exists
+there, before any suffix location (`final = true`, `handler = "deny"`). `entry_points`
+(PHP presets only) are the only `.php` files that run; every other `.php` anywhere under
+the root is 404, never served as source (the preset's `.php` suffix location is replaced
+by a denying one). `cache` (PHP and static sites) names directories served straight from
+disk with `Cache-Control: public, max-age=N` (0 to a year), where nothing runs and no
+source backup is served (`deny_suffixes` = the PHP endings plus `.inc`, `.bak`, `~`,
+`.log`, `.sql`, `.sqlite`, `.sqlite3`, `.db`). `front_controller` (one of
+`entry_points`) makes a missing path reach that script with the query string (Kanboard's
+nice URLs). Every rule only narrows what the bare preset serves: a path under a private
+one cannot be an entry point or cached, at most 64 private paths, 16 entry points and 16
+cached directories, a path is `/`-rooted plain characters without `..`, and `/` itself is
+refused. `rules` replaces the whole object (`{}` clears it); a later `app` change the rules
+no longer fit is refused until they are cleared. `site-install` reports the directories an
+archive's own `.htaccess` files deny whole (`Require all denied`, `Deny from all`, outside
+`<Files>` blocks) as `facts.htaccess_denied` and suggests the matching `private` rule in
+its next steps; agensio never reads `.htaccess` when serving and never applies the rule
+on its own. On the command line: `--private PATH`, `--entry-point /x.php`, `--cache
+PATH=SECONDS` (repeatable), `--front-controller /x.php`, `--no-rules`.
 
 **What `site-task` enforces.** A task is a row of `src/services/tasks.cpp`: a preset, a
 name, an interpreter (a runtime and a program in it), a fixed argument list, typed

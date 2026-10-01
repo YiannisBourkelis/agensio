@@ -32,6 +32,11 @@ struct SiteSpec {
     int php_children = 0;    // generated pool sizing (with a user); the same as settings.children
     std::string php_version;
     json::Value settings;    // the allowlisted per-site limits (control/settings.hpp), normalised: {key: value}
+    // An application's own server rules (2026-10-01, the Kanboard proposal), bounded so a
+    // caller can only make the site serve less: {"private": [paths], "entry_points": [the
+    // only .php that run], "cache": [{"path", "max_age"}], "front_controller": "/index.php"};
+    // normalised by check_rules, rendered as locations of the managed file.
+    json::Value rules;
     std::string access_log;  // a site with a user gets its own (rule: nothing shared between users)
     std::string listen_plain = "0.0.0.0:80";
     std::string listen_tls = "0.0.0.0:443";
@@ -65,6 +70,15 @@ std::string suggest_project(std::string_view domain);
 std::string detect_app(const std::filesystem::path& root);
 // What detect_app looked at for that answer, for a message ("bin/grav and system/defines.php").
 std::string detect_app_marker(const std::string& app);
+
+// A site's rules against the preset they apply to: every path a URL path below the root
+// (plain characters, no "..", no "//", never "/" alone); `private` prefixes (ending in "/")
+// and exact paths; `entry_points` exact .php paths, PHP presets only; `cache` prefixes with a
+// max_age of 0 to 31536000, PHP and static presets only (a proxy preset's root is the
+// application's directory, which must never be served); `front_controller` one of the entry
+// points, PHP presets only. An entry point under a private path is a contradiction, refused.
+// "" with `normalised` filled, else why. An empty object clears the rules.
+std::string check_rules(const json::Value& given, const SiteSpec& spec, json::Value& normalised);
 
 // Applies `body` onto `spec` (fields present win; absent ones keep what spec had) and
 // lists the decisions still open. `error` names a value that is wrong outright.

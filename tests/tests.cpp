@@ -1258,7 +1258,7 @@ static void test_presets() {
     CHECK(Router::location(w, "/wp-content/plugins/x/ajax.php").kind == HandlerKind::fastcgi);
     const LocationConfig& up = Router::location(w, "/wp-content/uploads/2026/shell.php");
     CHECK(up.path == "/wp-content/uploads/" && up.final && up.kind == HandlerKind::static_);
-    CHECK(up.deny_suffixes.size() == 22 && up.add_headers.size() == 1 && up.origin == "preset:wordpress");
+    CHECK(up.deny_suffixes.size() == 25 && up.add_headers.size() == 1 && up.origin == "preset:wordpress");
     CHECK(Router::location(w, "/wp-includes/js/x.js").final);
     CHECK(Router::location(w, "/wp-admin/").path == "/");
     CHECK(rejects("badfinal.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n"
@@ -1882,6 +1882,39 @@ static void test_tasks() {
         std::string perr;
         CHECK(json::parse(R"({"name":"uptime-kuma","scripts":{"start":"npm run start-server","start-server":"node server/server.js"}})", pj, perr) &&
               install::guess_node_entry(pj) == "server/server.js");
+        // An .htaccess that denies its whole directory (2026-10-01): Kanboard's two forms inside
+        // <IfVersion>, not one inside <Files>, not the root's rewrite rules.
+        CHECK(install::htaccess_denies_all("<IfVersion >= 2.3>\n    Require all denied\n</IfVersion>\n<IfVersion < 2.3>\n    Order allow,deny\n    Deny from all\n</IfVersion>\n") &&
+              install::htaccess_denies_all("deny from all\n") && install::htaccess_denies_all("  REQUIRE   ALL   DENIED  \r\n") &&
+              install::htaccess_denies_all("<IfModule mod_authz_core.c>\nRequire all denied\n</IfModule>\n") &&
+              !install::htaccess_denies_all("<Files \"*.log\">\nRequire all denied\n</Files>\n") &&
+              !install::htaccess_denies_all("<FilesMatch \"\\.(ini|log)$\">\n  Deny from all\n</FilesMatch>\nOptions -Indexes\n") &&
+              !install::htaccess_denies_all("RewriteEngine On\nRewriteRule ^ index.php [QSA,L]\n") && !install::htaccess_denies_all("# Require all denied\n") &&
+              !install::htaccess_denies_all("Require all granted\n") && !install::htaccess_denies_all(""));
+        // app_facts walks the installed tree for them: a parent covers its children, dot directories
+        // and <Files> blocks are skipped, the root's own .htaccess is not a directory denial.
+        {
+            const std::filesystem::path ft = std::filesystem::temp_directory_path() / ("agensio-facts-" + std::to_string(::getpid()));
+            std::filesystem::remove_all(ft);
+            for (const char* d : {"app/Core", "assets", "data", "vendor/sub", ".hidden", "plain"}) std::filesystem::create_directories(ft / d);
+            const char* deny = "<IfVersion >= 2.3>\n    Require all denied\n</IfVersion>\n<IfVersion < 2.3>\n    Order allow,deny\n    Deny from all\n</IfVersion>\n";
+            std::ofstream(ft / ".htaccess") << "RewriteEngine On\nRewriteRule ^ index.php [QSA,L]\n";
+            std::ofstream(ft / "app" / ".htaccess") << deny;
+            std::ofstream(ft / "app" / "Core" / ".htaccess") << deny;
+            std::ofstream(ft / "data" / ".htaccess") << deny;
+            std::ofstream(ft / "vendor" / "sub" / ".htaccess") << "Deny from all\n";
+            std::ofstream(ft / ".hidden" / ".htaccess") << deny;
+            std::ofstream(ft / "assets" / ".htaccess") << "<Files \"*.log\">\nRequire all denied\n</Files>\n";
+            std::ofstream(ft / "index.php") << "<?php\n";
+            const int ffd = ::open(ft.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+            CHECK(ffd >= 0);
+            const json::Value facts = install::app_facts(ffd, "", "");
+            ::close(ffd);
+            std::string got;
+            for (const auto& x : facts["htaccess_denied"].items()) got += std::string(x.str()) + " ";
+            CHECK(got == "app data vendor/sub ");
+            std::filesystem::remove_all(ft);
+        }
         CHECK(json::parse(R"({"scripts":{"start":"node ./index.mjs --port 3"}})", pj, perr) && install::guess_node_entry(pj) == "index.mjs");
         CHECK(json::parse(R"({"main":"lib/app.js","scripts":{"start":"next start"}})", pj, perr) && install::guess_node_entry(pj) == "lib/app.js");
         CHECK(json::parse(R"({"main":"../x.js","scripts":{"start":"node /etc/x.js"}})", pj, perr) && install::guess_node_entry(pj).empty());
@@ -3358,6 +3391,15 @@ static void test_control_sites() {
           catalog["presets"].items()[3]["never_served_directories"].items().empty() && catalog["presets"].items()[5].get("source").starts_with("https://getgrav.org/"));
     const json::Value& laravel_row = catalog["presets"].items()[2];
     CHECK(laravel_row.get("app") == "laravel" && !laravel_row.get("summary").empty() && laravel_row.get("php").starts_with("only /index.php"));
+    // The php preset refuses SQLite files and web.config (2026-10-01, the Kanboard proposal: data/db.sqlite was downloadable).
+    {
+        const json::Value& php_row = catalog["presets"].items()[1];
+        std::string refused, never;
+        for (const auto& r : php_row["refused_suffixes"].items()) refused += std::string(r.str()) + " ";
+        for (const auto& r : php_row["never_served"].items()) never += std::string(r.str()) + " ";
+        CHECK(php_row.get("app") == "php" && refused.find(".sqlite ") != std::string::npos && refused.find(".sqlite3 ") != std::string::npos &&
+              refused.find(".db ") != std::string::npos && never == "/web.config ");
+    }
     CHECK(catalog["presets"].items()[3]["never_served"].items().size() == 9 && catalog["presets"].items()[3]["no_php_under"].items().size() == 5);
     err.clear();
     CHECK(json::parse(R"({"aliases":["bad host"]})", body, err) && (apply_request(body, cfg, spec, err), err.find("alias") != std::string::npos));
@@ -3593,6 +3635,87 @@ static void test_control_sites() {
             SiteSpec big = ok;
             big.settings = json::Value::object().set("max_body_size", "100MB");
             CHECK(next_steps(big, loaded).size() == 1);
+        }
+        // The application's own rules (2026-10-01, the Kanboard proposal): checked against the
+        // preset, rendered as locations the loader already knows, only ever narrowing the site.
+        {
+            const std::size_t npos = std::string::npos;
+            SiteSpec kb = ok;
+            kb.app = "php";
+            kb.php_socket = "unix:/run/php/fpm.sock";
+            json::Value n;
+            auto rules = [&](const char* text, SiteSpec* sp = nullptr) {
+                json::Value r;
+                std::string e;
+                CHECK(json::parse(text, r, e));
+                return check_rules(r, sp ? *sp : kb, n);
+            };
+            CHECK(rules(R"({"private":["/app/","/data/","/cli","/composer.json"],"entry_points":["/index.php","/jsonrpc.php"],"cache":[{"path":"/assets/","max_age":604800}],"front_controller":"/index.php"})").empty() &&
+                  n["private"].items().size() == 4 && n["entry_points"].items().size() == 2 && n["cache"].items()[0]["max_age"].num() == 604800 && n.get("front_controller") == "/index.php");
+            CHECK(rules(R"({})").empty() && n.members().empty());
+            CHECK(rules(R"({"private":["/app/","/app/"]})").empty() && n["private"].items().size() == 1);
+            for (const char* bad : {R"({"private":["app/"]})", R"({"private":["/"]})", R"({"private":["/a//b"]})", R"({"private":["/a/../b"]})", R"({"private":["/a b/"]})",
+                                    R"({"private":["/x;y"]})", R"({"rewrite":["x"]})", R"({"private":"/app/"})", R"({"entry_points":["/index.html"]})", R"({"entry_points":["/x/"]})",
+                                    R"({"cache":[{"path":"/assets","max_age":10}]})", R"({"cache":[{"path":"/assets/","max_age":-1}]})", R"({"cache":[{"path":"/assets/","max_age":40000000}]})",
+                                    R"({"cache":[{"path":"/assets/","max_age":1.5}]})", R"({"cache":["/assets/"]})", R"({"front_controller":"/index.php"})",
+                                    R"({"entry_points":["/x.php"],"front_controller":"/index.php"})", R"({"private":["/api/"],"entry_points":["/api/x.php"]})",
+                                    R"({"private":["/static/"],"cache":[{"path":"/static/js/","max_age":1}]})"})
+                if (rules(bad).empty()) std::printf("rules accepted %s\n", bad);
+            CHECK(!rules(R"({"private":["/"]})").empty() && !rules(R"({"entry_points":["/x.php"],"front_controller":"/index.php"})").empty());
+            // Only PHP presets name entry points and a front controller; only PHP and static ones cache a directory from disk.
+            SiteSpec sst = ok;
+            sst.app = "static";
+            SiteSpec px = ok;
+            px.app = "rails";
+            px.upstream = "http://127.0.0.1:3000";
+            CHECK(rules(R"({"private":["/app/"],"cache":[{"path":"/assets/","max_age":60}]})", &sst).empty() && !rules(R"({"entry_points":["/index.php"]})", &sst).empty() &&
+                  rules(R"({"private":["/storage/"]})", &px).empty() && !rules(R"({"cache":[{"path":"/public/","max_age":60}]})", &px).empty() &&
+                  !rules(R"({"entry_points":["/index.php"],"front_controller":"/index.php"})", &px).empty());
+            // Through apply_request: the whole object replaces, {} clears, and a rule that no longer fits the app refuses the change.
+            json::Value b;
+            std::string e;
+            SiteSpec rs = ok;
+            rs.app = "php";
+            rs.php_socket = "unix:/run/php/fpm.sock";
+            // apply_request sets the error only when it refuses, so each call starts clean, as the handler's does.
+            auto apply = [&](const char* text, SiteSpec& sp) {
+                e.clear();
+                CHECK(json::parse(text, b, e));
+                apply_request(b, loaded, sp, e);
+                return e;
+            };
+            CHECK(apply(R"({"rules":{"private":["/data/"],"entry_points":["/index.php"],"cache":[{"path":"/assets/","max_age":3600}]}})", rs).empty() && rs.rules["private"].items().size() == 1);
+            CHECK(apply(R"({"app":"proxy","upstream":"http://127.0.0.1:9000"})", rs).find("no longer fit") != npos);
+            CHECK(apply(R"({"rules":{}})", rs).empty() && rs.rules.members().empty());
+            // Rendered and loaded back: deny locations, the entry points, the .php refusal, the cache shield, the front controller.
+            SiteSpec full = ok;
+            full.app = "php";
+            full.php_socket = "unix:/run/php/fpm.sock";
+            full.https = "none";
+            full.root = (dir / "kb").string();
+            std::filesystem::create_directories(dir / "kb");
+            CHECK(apply(R"({"rules":{"private":["/app/","/data/","/cli","/web.config"],"entry_points":["/index.php","/jsonrpc.php"],"cache":[{"path":"/assets/","max_age":604800}],"front_controller":"/index.php"}})", full).empty());
+            const std::string text = render_site(full, "x");
+            CHECK(text.find("handler = \"deny\"") != npos && text.find("try_files = [\"$uri\", \"$uri/\", \"/index.php?$query_string\"]") != npos &&
+                  text.find("path = \".php\"\nmatch = \"suffix\"\nhandler = \"deny\"") != npos && text.find("max-age=604800") != npos);
+            std::ofstream(dir / "kb.toml") << text;
+            SiteSpec back;
+            CHECK(read_managed(dir / "kb.toml", back) && back.rules["entry_points"].items().size() == 2 && back.rules["cache"].items().size() == 1);
+            const Config kc = load_config(dir / "kb.toml");
+            const SiteConfig& ks = kc.sites[0];
+            CHECK(Router::location(ks, "/app/Core/Base.php").handler == "deny" && Router::location(ks, "/data/db.sqlite").handler == "deny" &&
+                  Router::location(ks, "/cli").handler == "deny" && Router::location(ks, "/web.config").handler == "deny" && Router::location(ks, "/clients").handler != "deny");
+            CHECK(Router::location(ks, "/index.php").kind == HandlerKind::fastcgi && Router::location(ks, "/jsonrpc.php").kind == HandlerKind::fastcgi &&
+                  Router::location(ks, "/other.php").handler == "deny" && Router::location(ks, "/libs/x.php").handler == "deny");
+            const LocationConfig& ca = Router::location(ks, "/assets/css/app.css");
+            CHECK(ca.kind == HandlerKind::static_ && ca.final && ca.add_headers.size() == 1 && ca.add_headers[0].second == "public, max-age=604800" &&
+                  refused_suffix("/assets/x.php", ca.deny_suffixes) && refused_suffix("/assets/x.phtml", ca.deny_suffixes) && refused_suffix("/assets/x.bak", ca.deny_suffixes) &&
+                  !refused_suffix("/assets/app.css", ca.deny_suffixes));
+            const LocationConfig& root = Router::location(ks, "/board/1");
+            CHECK(root.try_files.size() == 3 && root.try_files[2].kind == TryStep::Kind::fallback && root.try_files[2].target == "/index.php");
+            std::ostringstream ex;
+            explain_config(kc, ex);
+            CHECK(ex.str().find("handler = \"deny\"") != npos);
             SiteSpec st = ok;
             st.app = "static";
             CHECK(next_steps(st, loaded).size() == 1);

@@ -347,6 +347,11 @@ struct AppContext {
 AppContext app_context(const Config& cfg, const SiteConfig& site);
 // A PHP preset (a row of the PHP preset table).
 bool php_app(std::string_view app);
+// The endings a PHP engine would run (.php, .phtml, .phar, ...) and the ones every PHP preset
+// refuses besides them (.inc, editor backups, logs, dumps, SQLite files): what a site's rules
+// (control/sites.hpp) refuse below a cached directory.
+const std::vector<std::string>& php_suffixes();
+const std::vector<std::string>& source_backup_suffixes();
 // What each `app` value does, for `agensio ctl presets` and the MCP tool: served root,
 // which .php runs, front controller, refused suffixes, shielded directories, files never served.
 json::Value preset_catalog();

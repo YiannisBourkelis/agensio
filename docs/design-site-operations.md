@@ -931,3 +931,47 @@ site remove its files?" (it did not: `site_delete` left every file):
 Not built: `health`'s `trash_size`; the first-run window (section 3b's neighbours) is
 still open.
 
+## 19. An application's own rules (2026-10-01, the Kanboard proposal against alpha.39)
+
+The owner installed Kanboard through the MCP server and could not meet its security
+requirements there: Kanboard has no preset, its documentation says "deny `app/`, `data/`,
+`vendor/`..., run only `index.php` and `jsonrpc.php`", its `.htaccess` files say the same to
+Apache, and under the bare `app = "php"` preset `app/Core/Base.php` ran, `data/db.sqlite`
+was downloadable and `web.config` served. The options were a root-written site file with
+hand-written locations (what the owner was ready to do), a Kanboard preset (another row
+for every application, against the owner's rule of generic operations), reading
+`.htaccess` at request time (Apache's model: a file an attacker writes into the tree
+changes the server), or a bounded `rules` object on the managed site. The owner agreed to
+the last, with `.htaccess` detected at install time and suggested, never applied or read
+when serving.
+
+- **`rules` only narrows.** The four keys (`private`, `entry_points`, `cache`,
+  `front_controller`) each remove something the bare preset serves or runs; none can add a
+  handler, a root, an alias or a header beyond `Cache-Control` on a cached directory. The
+  renderer turns them into locations the loader already knows (`handler = "deny"` is the
+  one addition to the site-file grammar: a location that answers 404 whatever exists),
+  each marked `# rules: ...`, so `--explain` shows what the file does and nothing moves at
+  request time: the router, the handlers and the hot path are unchanged (no A/B).
+- **Validated against the preset, twice.** `check_rules` runs on the request against the
+  app as it stands after the request; `apply_request` runs it again on the kept rules at
+  the end of every later change, so a site switched from `php` to `proxy` is refused until
+  its PHP-only rules are cleared (`rules: {}`), never left with a rule that means something
+  else under the new preset.
+- **`.htaccess` as a hint.** `install::htaccess_denies_all` recognises one shape, a
+  whole-directory denial outside `<Files>`/`<FilesMatch>`/`<Location>` blocks
+  (`<IfModule>`/`<IfVersion>`/`<IfDefine>` are transparent, which is how Kanboard writes
+  it); `app_facts` reports the directories as `htaccess_denied`, three levels deep, and the
+  install answer suggests the `private` rule in its next steps. Rewrite rules, `Options`,
+  per-file denials and everything else are ignored on purpose: a hint the user acts on,
+  not a second configuration language.
+- **The preset itself moved too.** `.sqlite`, `.sqlite3` and `.db` joined `kSourceBackups`
+  (so every PHP preset's root and shields refuse them) and `/web.config` the php row's
+  `never`, because a database file under a served tree is wrong for every application.
+- **Not done, by choice:** reading `.htaccess` when serving, applying the suggestion
+  without the user, rules with a handler or a root, regular expressions, per-application
+  presets for applications that fit `php` plus rules. What is still missing for PHP
+  applications through MCP after this step: PHP-side tasks (composer, an application's
+  console), more pool settings, security headers as a site field, cron, rate limits.
+
+Security page row 35; `tests/kanboard-install.sh` (the `agensio-devbox:php` image) is the
+live proof.
