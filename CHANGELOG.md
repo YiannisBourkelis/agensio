@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.39 (unreleased)
+## 0.1.0-alpha.39 (2026-10-01)
 
 Deleting a site with its files (F12b of `docs/design-site-operations.md`, the owner's
 decisions of 2026-09-30):
