@@ -139,7 +139,8 @@ log records which of the two it was.
 | `reload`, `logs_reopen` | operator | reload without dropping connections; reopen logs after rotation |
 | `cert_renew` | operator | order an automatic certificate again now |
 | `site_create`, `site_update` | admin | write or change a managed site file, validate, reload; answer with open decisions or root commands first; `settings` changes a site's limits within `[control] site_limits` and the answer lists under `done` what was written and reloaded |
-| `site_disable`, `site_enable`, `site_delete` | admin | rename the file away and back; delete it (a `.bak` stays) |
+| `site_disable`, `site_enable`, `site_delete` | admin | rename the file away and back; delete it (a `.bak` stays), or with `files: true` move everything of the site (directory, account state, logs, environment file, the configuration's text) into root's trash for `trash_keep` days; refused while the site's service runs |
+| `trash_list`, `site_restore`, `trash_delete` | admin | what the trash holds (site, account and whether it is still in use, size, expiry, pieces); a site brought back into an empty place, its configuration with it; an entry removed for good |
 | `site_install` | admin | put an application's files into a site's empty directory as the site's account: the preset's official archive (`version` optional), any https `url`, or a stored upload (`file`); a plugin or theme goes into `path` with `create_path: true`; `sha256`, `strip`, `dry_run`; the server enforces the fences and reports the source, digest and what it created. For a Rails site the next steps are the bundle tasks, with the Ruby the application pins; a Rails archive without credentials gets its `SECRET_KEY_BASE` generated into the site's environment; every site but a static one is told its request-body limit |
 | `site_copy` | admin | copy one regular file of a site to another path of the same site, as the site's account: the drop-ins applications ship as templates (WordPress's `wp-content/db.php` from the SQLite plugin, Drupal's `settings.php`); `overwrite`, `dry_run`; never across sites, never caller content, never a directory. Like `site_install`, credential files come out `0600` and the configuration is validated before the answer |
 | `site_tasks_list` | viewer | the named tasks of the site's preset (`app = "rails"`: `gem_install_rails`, `rails_new`, `bundle_install`, `db_prepare`, `db_migrate`, `assets_precompile`; `"django"` and `"wagtail"`: `venv_create`, `pip_install` (any packages, confirmed by the user in person), `startproject`, `pip_install_requirements`, `django_settings`, `migrate`, `collectstatic`, `createsuperuser`, `check_deploy`; `"node"`: `npm_ci`, `npm_run`) with their parameters, whether each downloads, its effective time limit, whether its interpreter is in place (`run_as_root` lists every missing package once, before the first task), the account that runs them and the directory; other presets have none |
@@ -249,6 +250,8 @@ as the site's account, with an interpreter only root could have put there), inst
 for a `[server]`, `[cache]`, `[log]` or `[control]` key the agent tells you the exact line
 and whether a reload or a restart follows, from `config_reference`), run anything as
 root, reach other machines except to download an archive you named into a site (and
-never a private address), carry files itself. Those are yours, on purpose. On a server with the helper
+never a private address), carry files itself, remove an account, or delete a site's files
+except into the trash, from which `site_restore` brings them back for `trash_keep` days.
+Those are yours, on purpose. On a server with the helper
 it creates site accounts, restarts the service after a change that needs it and installs
 applications as the site's account; without the helper it hands the commands back.

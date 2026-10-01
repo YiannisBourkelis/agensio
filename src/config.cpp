@@ -1932,6 +1932,12 @@ Config load_config(const fs::path& path) {
             fail("control.task_limits must be a table: { timeout = 1200, processes = 512 }");
         }
         cfg.control.task_network = (*ct)["task_network"].value_or(true);
+        if (auto v = (*ct)["trash_keep"].value<std::int64_t>()) {
+            if (*v < 0 || *v > 3650) fail("control.trash_keep must be 0 to 3650 days (0: entries stay until trash-delete)");
+            cfg.control.trash_keep = static_cast<unsigned>(*v);
+        } else if ((*ct).contains("trash_keep")) {
+            fail("control.trash_keep must be a number of days");
+        }
         if (auto a = (*ct)["audit"].value<std::string>()) cfg.control.audit = resolve(base_dir, *a).string();
         else if (cfg.log.error != "stderr") cfg.control.audit = (fs::path(cfg.log.error).parent_path() / "audit.log").string();
         else cfg.control.audit = resolve(base_dir, "logs/audit.log").string();

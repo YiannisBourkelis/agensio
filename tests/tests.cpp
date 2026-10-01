@@ -2336,6 +2336,30 @@ static void test_tasks() {
               refused(nd + "entry = \"a/.hidden/x.js\"\n", "plain path") && refused(rails + "entry = \"x.js\"\n", "goes with app = \"node\""));
         CHECK(check_entry("server/server.js").empty() && check_entry("index.mjs").empty() && !check_entry("/abs.js").empty() && !check_entry("a b.js").empty() &&
               !check_entry("x.ts").empty() && !check_entry("-x.js").empty());
+        // The trash (F12b): what a files-delete moves, and [control] trash_keep.
+        {
+            fs::create_directories(dir / "www" / "a.test" / "app");
+            fs::create_directories(dir / "www" / "a.test" / "other");
+            fs::create_directories(dir / "www" / "b.test" / "web");
+            fs::create_directories(dir / "elsewhere");
+            const std::string www = fs::canonical(dir / "www").string();
+            write("tr.toml", "[control]\nsites_root = \"" + www + "\"\ntrash_keep = 30\n"
+                             "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www/a.test/app\"\nuser = \"t1\"\napp = \"rails\"\nupstream = \"http://127.0.0.1:3000\"\n"
+                             "[[site]]\nserver_name = [\"b.test\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www/b.test/web\"\n"
+                             "[[site]]\nserver_name = [\"c.test\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"elsewhere\"\n");
+            const Config tc = load_config(dir / "tr.toml");
+            CHECK(tc.control.trash_keep == 30 && provision::trash_dir(tc) == www + "/.trash");
+            std::string why;
+            // The whole domain directory when the site alone lives under it, the root alone when another site does.
+            CHECK(provision::site_tree(tc, tc.sites[0], why) == www + "/a.test" && provision::site_tree(tc, tc.sites[1], why) == www + "/b.test");
+            CHECK(provision::site_tree(tc, tc.sites[2], why).empty() && why.find("not below sites_root") != npos);
+            write("tr2.toml", "[control]\nsites_root = \"" + www + "\"\n"
+                              "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www/a.test/app\"\n"
+                              "[[site]]\nserver_name = [\"d.test\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www/a.test/other\"\n");
+            const Config tc2 = load_config(dir / "tr2.toml");
+            CHECK(provision::site_tree(tc2, tc2.sites[0], why) == www + "/a.test/app" && tc2.control.trash_keep == 60);
+            CHECK(refused("[control]\ntrash_keep = 5000\n" + rails, "0 to 3650") && refused("[control]\ntrash_keep = \"a month\"\n" + rails, "number of days"));
+        }
     }
     fs::remove_all(dir);
 }
@@ -3536,6 +3560,15 @@ static void test_control_sites() {
         // The service's state and journal: a site's name and bounded numbers, never a unit or an option.
         CHECK(v(R"({"op":"app_status","site":"a.test"})").empty() && v(R"({"op":"app_logs","site":"a.test","lines":50,"since":"3h"})").empty() &&
               v(R"({"op":"app_check"})").empty());
+        // The trash (F12b): a site's name, or an entry's name of the form <domain>-<date>-<time>.
+        CHECK(v(R"({"op":"site_trash","site":"a.test"})").empty() && v(R"({"op":"site_restore","entry":"a.test-20260930-101500"})").empty() &&
+              v(R"({"op":"trash_delete","entry":"a.test-20260930-101500"})").empty() && v(R"({"op":"trash_list"})").empty() && v(R"({"op":"trash_expire"})").empty());
+        CHECK(!v(R"({"op":"site_trash","site":"../x"})").empty() && !v(R"({"op":"site_restore","entry":"../x-20260930-101500"})").empty() &&
+              !v(R"({"op":"site_restore","entry":"a.test"})").empty() && !v(R"({"op":"trash_delete","entry":"a.test-2026093-101500"})").empty() &&
+              !v(R"({"op":"trash_delete","entry":"a.test-20260930-1015000"})").empty() && !v(R"({"op":"trash_delete","entry":"A.test-20260930-101500"})").empty() &&
+              !v(R"({"op":"trash_delete","entry":"a.test-20260930-10150a"})").empty() && !v(R"({"op":"trash_delete","entry":""})").empty());
+        CHECK(provision::valid_trash_entry("shop.example.com-20260930-235959") && !provision::valid_trash_entry("shop.example.com-20260930-235959/") &&
+              !provision::valid_trash_entry(".-20260930-235959") && !provision::valid_trash_entry("-20260930-235959"));
         CHECK(!v(R"({"op":"app_status","site":"../x"})").empty() && !v(R"({"op":"app_logs","site":"a.test","lines":5000})").empty() &&
               !v(R"({"op":"app_logs","site":"a.test","lines":"50"})").empty() && !v(R"({"op":"app_logs","site":"a.test","since":"3 hours"})").empty() &&
               !v(R"({"op":"app_logs","site":"a.test","since":"h"})").empty() && !v(R"({"op":"app_logs","site":"a.test","since":"-1h"})").empty() &&

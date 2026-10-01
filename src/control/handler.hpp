@@ -64,6 +64,10 @@ struct ControlBackend {
     // never waited for while a task holds the helper ({"busy": true} then). Without the
     // helper: {"ok": false, "error"}.
     virtual void helper_async(const json::Value& req, std::function<void(json::Value)> done) = 0;
+    // One helper request that waits its turn (the trash operations of F12b: a rename, a
+    // removal of a tree, a listing), off the worker, `done` on worker 0. Without the helper:
+    // {"ok": false, "error"}.
+    virtual void provision_async(const json::Value& req, std::function<void(json::Value)> done) = 0;
 };
 
 class ControlHandler {
@@ -102,6 +106,11 @@ private:
     // A Rails site's application service: its unit's state (viewer) or its journal (admin,
     // audited), through the helper's app_status / app_logs.
     void site_service(Stream& s, std::string_view name, bool logs, std::function<void()> done);
+    // The trash (F12b): a site deleted with its files, the entries, a restore, a removal.
+    void site_trash(Stream& s, std::string_view name, std::string_view what, std::function<void()> done);
+    void trash_list(Stream& s, std::function<void()> done);
+    void trash_restore(Stream& s, std::string_view entry, std::string_view what, std::function<void()> done);
+    void trash_delete(Stream& s, std::string_view entry, std::string_view what, std::function<void()> done);
     void site_env_set(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> done);
     void upload_receive(Stream& s, std::string_view name, std::function<void()> done);
     json::Value uploads_list();

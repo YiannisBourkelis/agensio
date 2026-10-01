@@ -1,6 +1,7 @@
 #include "services/provision.hpp"
 
 #ifndef _WIN32
+#include <dirent.h>
 #include <fcntl.h>
 #include <grp.h>
 #include <pwd.h>
@@ -16,6 +17,10 @@
 #include <functional>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <ctime>
+#include <algorithm>
 #include <sstream>
 
 #include "control/commands.hpp"
@@ -41,6 +46,35 @@ std::string logs_root(const Config& cfg) {
 }
 
 std::string uploads_dir(const Config& cfg) { return cfg.state_dir + "/uploads"; }
+std::string trash_dir(const Config& cfg) { return sites_root(cfg) + "/.trash"; }
+
+bool valid_trash_entry(std::string_view name) noexcept {
+    // <domain>-YYYYMMDD-HHMMSS: the domain lower-case letters, digits, dots and hyphens.
+    if (name.size() < 1 + 1 + 8 + 1 + 6 || name.size() > 253 + 16) return false;
+    const std::size_t stamp = name.size() - 16;
+    if (name[stamp] != '-' || name[stamp + 9] != '-') return false;
+    for (std::size_t i = stamp + 1; i < name.size(); ++i)
+        if (i != stamp + 9 && !(name[i] >= '0' && name[i] <= '9')) return false;
+    return control::valid_domain(name.substr(0, stamp));
+}
+
+std::string site_tree(const Config& cfg, const SiteConfig& site, std::string& why) {
+    const std::string root = site.project_root.empty() ? site.root : site.project_root;
+    const std::string base = sites_root(cfg);
+    if (root.empty() || !under_root(root, base) || root == base) {
+        why = "the site's directory " + (root.empty() ? std::string("(none)") : root) + " is not below sites_root " + base + "; remove its files by hand";
+        return "";
+    }
+    const std::size_t slash = root.find('/', base.size() + 1);
+    const std::string top = slash == std::string::npos ? root : root.substr(0, slash);
+    bool shared = false;
+    for (const auto& s : cfg.sites) {
+        if (&s == &site) continue;
+        const std::string other = s.project_root.empty() ? s.root : s.project_root;
+        if (!other.empty() && under_root(other, top) && !(s.server_names == site.server_names)) shared = true;
+    }
+    return shared ? root : top;
+}
 
 bool under_root(const std::string& path, const std::string& root) {
     return path == root || (path.size() > root.size() && path.compare(0, root.size(), root) == 0 && path[root.size()] == '/');
@@ -153,7 +187,17 @@ std::string validate(const json::Value& req, const Config& cfg) {
             return op + ": since is a number and s, m, h or d (e.g. 3h)";
         return "";
     }
-    if (op == "pools_apply" || op == "service_restart" || op == "ping" || op == "env_check" || op == "app_check") return "";
+    if (op == "site_trash") {
+        if (!control::valid_domain(req.get("site"))) return "site_trash: site must be a site's host name";
+        return "";
+    }
+    if (op == "site_restore" || op == "trash_delete") {
+        if (!valid_trash_entry(req.get("entry"))) return op + ": entry must be a trash entry's name (<domain>-<date>-<time>)";
+        return "";
+    }
+    if (op == "pools_apply" || op == "service_restart" || op == "ping" || op == "env_check" || op == "app_check" || op == "trash_list" ||
+        op == "trash_expire")
+        return "";
     return "unknown operation '" + op + "'";
 }
 
@@ -740,6 +784,639 @@ json::Value task_run(const json::Value& req, const Config& cfg, int helper_fd) {
     return out;
 }
 
+// ---- the trash (F12b, 2026-09-30): a site deleted with its files ----
+//
+// Everything of a site goes into <sites_root>/.trash/<domain>-<stamp>/, root's alone (0700), by
+// rename, so nothing is copied and a tenant cannot read another tenant's deleted files: the
+// site's directory (its tree below sites_root), the account's state directory when no other
+// site uses the account (else the site's virtualenv alone), its access log with its rotations,
+// its environment file, and the text of its site file in the manifest. A piece on another
+// filesystem (the state directory, a log) goes to a trash beside it (<state_dir>/.trash,
+// <logs_root>/.trash) or, a small file, is copied. The account is kept (the owner's decision:
+// the files carry its uid, and a restore needs it). Restore moves everything back only where
+// nothing new stands (an empty directory at most), rewrites the site file, and the caller
+// reloads. Expiry after [control] trash_keep days, hourly from worker 0.
+namespace {
+using provision::logs_root;
+using provision::sites_root;
+using provision::site_tree;
+using provision::trash_dir;
+using provision::under_root;
+using provision::valid_trash_entry;
+
+std::string iso_time(std::time_t t) {
+    std::tm tm{};
+    ::gmtime_r(&t, &tm);
+    char buf[32];
+    std::strftime(buf, sizeof buf, "%Y-%m-%dT%H:%M:%SZ", &tm);
+    return buf;
+}
+
+std::time_t parse_iso(const std::string& s) {
+    std::tm tm{};
+    if (s.size() != 20 || !::strptime(s.c_str(), "%Y-%m-%dT%H:%M:%SZ", &tm)) return 0;
+    return ::timegm(&tm);
+}
+
+// Opens `dir` as a directory that is root's alone, never through a symlink, creating it 0700
+// when `create` and missing. -1 with why.
+int open_private_dir(const std::string& dir, bool create, std::string& why) {
+    int fd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0 && errno == ENOENT && create) {
+        if (::mkdir(dir.c_str(), 0700) != 0 && errno != EEXIST) {
+            why = dir + ": " + std::strerror(errno);
+            return -1;
+        }
+        fd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    }
+    if (fd < 0) {
+        why = dir + ": " + (errno == ELOOP || errno == ENOTDIR ? std::string("a symlink or not a directory; refused") : std::strerror(errno));
+        return -1;
+    }
+    struct stat st {};
+    if (::fstat(fd, &st) != 0 || st.st_uid != 0 || (st.st_mode & 077)) {
+        if (st.st_uid == 0 && ::fchmod(fd, 0700) == 0) return fd;  // ours, opened too wide: closed
+        ::close(fd);
+        why = dir + " must be root's alone (0700); refused";
+        return -1;
+    }
+    return fd;
+}
+
+// Removes dir_fd/name whatever it is, never following a symlink, never leaving the tree:
+// every directory is entered through its own descriptor and emptied before it is removed.
+bool remove_tree(int dir_fd, const std::string& name, std::string& why) {
+    struct stat st {};
+    if (::fstatat(dir_fd, name.c_str(), &st, AT_SYMLINK_NOFOLLOW) != 0) return errno == ENOENT || (why = name + ": " + std::strerror(errno), false);
+    if (!S_ISDIR(st.st_mode)) {
+        if (::unlinkat(dir_fd, name.c_str(), 0) != 0 && errno != ENOENT) {
+            why = name + ": " + std::strerror(errno);
+            return false;
+        }
+        return true;
+    }
+    const int fd = ::openat(dir_fd, name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) {
+        why = name + ": " + std::strerror(errno);
+        return false;
+    }
+    DIR* d = ::fdopendir(fd);
+    if (!d) {
+        ::close(fd);
+        why = name + ": " + std::strerror(errno);
+        return false;
+    }
+    std::vector<std::string> children;
+    while (const struct dirent* e = ::readdir(d))
+        if (std::string_view(e->d_name) != "." && std::string_view(e->d_name) != "..") children.emplace_back(e->d_name);
+    for (const auto& c : children)
+        if (!remove_tree(::dirfd(d), c, why)) {
+            ::closedir(d);
+            return false;
+        }
+    ::closedir(d);
+    if (::unlinkat(dir_fd, name.c_str(), AT_REMOVEDIR) != 0 && errno != ENOENT) {
+        why = name + ": " + std::strerror(errno);
+        return false;
+    }
+    return true;
+}
+
+// Bytes of the regular files below `path` (a file's own size when it is one), and their count.
+void tree_size(const std::string& path, std::uint64_t& bytes, std::uint64_t& files, int depth = 0) {
+    struct stat st {};
+    if (depth > 64 || files > 500000 || ::lstat(path.c_str(), &st) != 0) return;
+    if (S_ISREG(st.st_mode)) {
+        bytes += static_cast<std::uint64_t>(st.st_size);
+        ++files;
+        return;
+    }
+    if (!S_ISDIR(st.st_mode)) return;
+    if (DIR* d = ::opendir(path.c_str())) {
+        std::vector<std::string> children;
+        while (const struct dirent* e = ::readdir(d))
+            if (std::string_view(e->d_name) != "." && std::string_view(e->d_name) != "..") children.emplace_back(e->d_name);
+        ::closedir(d);
+        for (const auto& c : children) tree_size(path + "/" + c, bytes, files, depth + 1);
+    }
+}
+
+// Copies a regular file (never through a symlink) with its mode and owner, then removes the
+// original: the way a small file crosses a filesystem boundary (a log, an environment file).
+bool copy_then_remove(const std::string& from, const std::string& to, std::string& why) {
+    const int in = ::open(from.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    struct stat st {};
+    if (in < 0 || ::fstat(in, &st) != 0 || !S_ISREG(st.st_mode)) {
+        if (in >= 0) ::close(in);
+        why = from + ": not a regular file";
+        return false;
+    }
+    const int out = ::open(to.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, st.st_mode & 0777);
+    if (out < 0) {
+        ::close(in);
+        why = to + ": " + std::strerror(errno);
+        return false;
+    }
+    char buf[65536];
+    bool ok = true;
+    for (ssize_t n; ok && (n = ::read(in, buf, sizeof buf)) != 0;) {
+        if (n < 0) {
+            ok = errno == EINTR;
+            continue;
+        }
+        for (ssize_t off = 0; ok && off < n;) {
+            const ssize_t w = ::write(out, buf + off, static_cast<std::size_t>(n - off));
+            if (w < 0 && errno == EINTR) continue;
+            ok = w > 0;
+            if (ok) off += w;
+        }
+    }
+    ok = ok && ::fchown(out, st.st_uid, st.st_gid) == 0 && ::fsync(out) == 0;
+    const int e = errno;
+    ::close(in);
+    ::close(out);
+    if (!ok) {
+        ::unlink(to.c_str());
+        why = "copy " + from + ": " + std::strerror(e);
+        return false;
+    }
+    if (::unlink(from.c_str()) != 0) {
+        why = "remove " + from + " after copying: " + std::strerror(errno);
+        return false;
+    }
+    return true;
+}
+
+// Moves `from` to `to`, whose parent must exist: by rename, or a copy for a regular file on
+// another filesystem. A directory on another filesystem is EXDEV to the caller.
+bool move_path(const std::string& from, const std::string& to, std::string& why, bool& exdev) {
+    exdev = false;
+    if (::rename(from.c_str(), to.c_str()) == 0) return true;
+    if (errno != EXDEV) {
+        why = "move " + from + " to " + to + ": " + std::strerror(errno);
+        return false;
+    }
+    struct stat st {};
+    if (::lstat(from.c_str(), &st) == 0 && S_ISREG(st.st_mode)) return copy_then_remove(from, to, why);
+    exdev = true;
+    why = "move " + from + ": another filesystem";
+    return false;
+}
+
+// The manifest of an entry, read from <entry dir>/manifest.json; null with why.
+json::Value read_manifest(const std::string& entry_dir, std::string& why) {
+    const int fd = ::open((entry_dir + "/manifest.json").c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) {
+        why = entry_dir + "/manifest.json: " + std::strerror(errno);
+        return json::Value(nullptr);
+    }
+    std::string text;
+    char buf[8192];
+    for (ssize_t n; (n = ::read(fd, buf, sizeof buf)) > 0 && text.size() < 4u << 20;) text.append(buf, static_cast<std::size_t>(n));
+    ::close(fd);
+    json::Value m;
+    std::string err;
+    if (!json::parse(text, m, err) || !m.is_object() || !control::valid_domain(m.get("site"))) {
+        why = entry_dir + "/manifest.json does not parse (" + err + ")";
+        return json::Value(nullptr);
+    }
+    return m;
+}
+
+// The places other than the primary entry directory a piece may sit in: a trash beside the
+// state directory or the logs, named <base>/.trash/<entry>; nothing else is ever removed.
+bool secondary_location_ok(const Config& cfg, const std::string& entry, const std::string& to) {
+    for (const std::string base : {cfg.state_dir, logs_root(cfg)})
+        if (!base.empty() && under_root(to, base + "/.trash/" + entry) && to != base + "/.trash/" + entry) return true;
+    return false;
+}
+
+// Removes one entry: its directory under the trash, and every piece the manifest put beside
+// the state directory or the logs. `why` on the first failure.
+bool remove_entry(const Config& cfg, const std::string& entry, std::string& why) {
+    const std::string tdir = trash_dir(cfg);
+    const int tfd = open_private_dir(tdir, false, why);
+    if (tfd < 0) return false;
+    if (const json::Value m = read_manifest(tdir + "/" + entry, why); !m.is_null())
+        for (const auto& p : m["pieces"].items()) {
+            const std::string to(p.get("to"));
+            if (!under_root(to, tdir + "/" + entry) && secondary_location_ok(cfg, entry, to)) {
+                const std::string parent = to.substr(0, to.rfind('/')), leaf = to.substr(to.rfind('/') + 1);
+                std::string w;
+                const int pfd = open_private_dir(parent, false, w);
+                if (pfd >= 0) {
+                    remove_tree(pfd, leaf, w);
+                    ::close(pfd);
+                    ::rmdir(parent.c_str());  // the per-entry directory beside the state or the logs, once empty
+                }
+            }
+        }
+    const bool ok = remove_tree(tfd, entry, why);
+    ::close(tfd);
+    return ok;
+}
+
+// The entry's expiry from its manifest and the trash_keep in force (0: never).
+std::time_t expires_at(const json::Value& manifest, unsigned keep_days) {
+    if (keep_days == 0) return 0;
+    const std::time_t deleted = parse_iso(std::string(manifest.get("deleted_at")));
+    return deleted ? deleted + static_cast<std::time_t>(keep_days) * 86400 : 0;
+}
+
+// A directory that is missing or empty: the one place a restore puts files back into.
+bool absent_or_empty_dir(const std::string& path, bool& exists) {
+    struct stat st {};
+    exists = ::lstat(path.c_str(), &st) == 0;
+    if (!exists) return true;
+    if (!S_ISDIR(st.st_mode)) return false;
+    DIR* d = ::opendir(path.c_str());
+    if (!d) return false;
+    bool empty = true;
+    while (const struct dirent* e = ::readdir(d))
+        if (std::string_view(e->d_name) != "." && std::string_view(e->d_name) != "..") empty = false;
+    ::closedir(d);
+    return empty;
+}
+
+// Creates the missing directories above `path` (root's, 0755; the logs' parent 0750 with the
+// server's group, which reads its logs through it).
+bool ensure_parent(const std::string& path, gid_t server_gid, bool logs, std::string& why) {
+    const std::string parent = path.substr(0, path.rfind('/'));
+    if (parent.empty()) return true;
+    struct stat st {};
+    if (::lstat(parent.c_str(), &st) == 0) return S_ISDIR(st.st_mode) || (why = parent + " is not a directory", false);
+    if (!ensure_parent(parent, server_gid, logs, why)) return false;
+    if (::mkdir(parent.c_str(), logs ? 0750 : 0755) != 0 && errno != EEXIST) {
+        why = parent + ": " + std::strerror(errno);
+        return false;
+    }
+    if (logs) (void)::chown(parent.c_str(), 0, server_gid);
+    return true;
+}
+
+json::Value site_trash(const json::Value& req, const Config& cfg) {
+    json::Value reply = json::Value::object();
+    auto fail = [&](std::string why) { return reply.set("ok", false).set("error", std::move(why)); };
+    Config fresh;
+    try {
+        fresh = load_config(cfg.config_path);
+    } catch (const std::exception& e) {
+        return fail(std::string("the configuration on disk does not load: ") + e.what());
+    }
+    const std::string name(req.get("site"));
+    const SiteConfig* site = control::find_site(fresh, name);
+    if (!site) return fail("no site " + name + " in the configuration on disk");
+    const std::string domain = site->server_names.front();
+    if (!control::valid_domain(domain)) return fail("site " + domain + " has no host name a trash entry can carry");
+    std::string why;
+    const std::string tree = site_tree(fresh, *site, why);
+    if (tree.empty()) return fail(why);
+    const std::string tdir = trash_dir(fresh);
+    for (const auto& s : fresh.sites) {
+        const std::string r = s.project_root.empty() ? s.root : s.project_root;
+        if (!r.empty() && under_root(r, tdir)) return fail("a site's directory (" + r + ") lies inside the trash directory " + tdir + "; refused");
+    }
+    // The site file, whose text the manifest keeps (the server removes the file afterwards).
+    const fs::path sfile = control::site_file(fresh, domain);
+    std::string site_file_path, site_file_text;
+    for (const fs::path& candidate : {sfile, fs::path(sfile.string() + ".disabled")}) {
+        std::ifstream in(candidate);
+        if (!in) continue;
+        site_file_path = candidate.string();
+        site_file_text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        break;
+    }
+    if (site_file_path.empty()) return fail("no managed site file for " + domain + " under " + control::sites_dir(fresh).string() + " (a hand-written site is removed by hand)");
+    // A running service would keep writing into the trash: root stops it first.
+    json::Value root_cmds = json::Value::array();
+    if (service_app(site->app) && !site->user.empty()) {
+        const std::string unit = "agensio-app-" + site->user + ".service";
+        std::string w;
+        const json::Value states = unit_states({unit}, w);
+        if (!states.is_null() && !states[unit].is_null()) {
+            const std::string active(states[unit].get("ActiveState")), load(states[unit].get("LoadState"));
+            if (active == "active" || active == "activating" || active == "reloading" || active == "deactivating")
+                return reply.set("ok", false)
+                    .set("error", "the site's service " + unit + " is " + active + ": its files cannot be moved while it runs from them")
+                    .set("run_as_root", json::Value::array().push("systemctl disable --now " + unit).push("rm /etc/systemd/system/" + unit).push("systemctl daemon-reload"));
+            if (load != "not-found") root_cmds.push("systemctl disable " + unit).push("rm /etc/systemd/system/" + unit).push("systemctl daemon-reload");
+        }
+    }
+    // The account and the pieces.
+    uid_t uid = 0;
+    gid_t gid = 0;
+    bool account_shared = false;
+    if (!site->user.empty()) {
+        if (!site_account(fresh, site->user, uid, gid, why)) return fail(why);
+        for (const auto& s : fresh.sites)
+            if (s.user == site->user && !(s.server_names == site->server_names)) account_shared = true;
+    } else {
+        struct stat st {};
+        if (::lstat(tree.c_str(), &st) == 0) {
+            uid = st.st_uid;
+            gid = st.st_gid;
+        }
+    }
+    struct Piece {
+        std::string kind, from, name;
+    };
+    std::vector<Piece> pieces;
+    {
+        struct stat st {};
+        if (::lstat(tree.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) return fail("the site's directory " + tree + " is missing or not a directory; nothing moved");
+        pieces.push_back({"site", tree, "site"});
+    }
+    if (!site->user.empty() && !fresh.state_dir.empty()) {
+        const std::string state = fresh.state_dir + "/" + site->user;
+        struct stat st {};
+        if (!account_shared && ::lstat(state.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) pieces.push_back({"state", state, "state"});
+        else if (const std::string venv = state + "/venvs/" + domain; ::lstat(venv.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) pieces.push_back({"venv", venv, "venv"});
+    }
+    if (!site->access_log.empty() && under_root(site->access_log, logs_root(fresh))) {
+        const fs::path log = site->access_log;
+        std::error_code ec;
+        for (const auto& e : fs::directory_iterator(log.parent_path(), ec)) {
+            const std::string n = e.path().filename().string();
+            if ((n == log.filename().string() || n.starts_with(log.filename().string() + ".")) && e.is_regular_file(ec) && !e.is_symlink(ec))
+                pieces.push_back({"log", e.path().string(), "logs/" + n});
+        }
+    }
+    if (appenv::valid_site(domain)) {
+        const std::string env = appenv::dir_of(fresh.config_path) + "/" + domain + ".env";
+        struct stat st {};
+        if (::lstat(env.c_str(), &st) == 0 && S_ISREG(st.st_mode)) pieces.push_back({"env", env, "env/" + domain + ".env"});
+    }
+    // The entry: <domain>-<stamp>, root's 0700, in the trash (created likewise).
+    const int tfd = open_private_dir(tdir, true, why);
+    if (tfd < 0) return fail(why);
+    const std::time_t now = std::time(nullptr);
+    std::tm tm{};
+    ::gmtime_r(&now, &tm);
+    char stamp[32];
+    std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &tm);
+    std::string entry = domain + "-" + stamp;
+    if (::mkdirat(tfd, entry.c_str(), 0700) != 0) {
+        const int e = errno;
+        ::close(tfd);
+        return fail(tdir + "/" + entry + ": " + std::strerror(e));
+    }
+    ::close(tfd);
+    const std::string edir = tdir + "/" + entry;
+    for (const char* sub : {"logs", "env"}) ::mkdir((edir + "/" + sub).c_str(), 0700);
+    json::Value moved = json::Value::array();
+    std::vector<std::pair<std::string, std::string>> done;  // to, from: undone on a failure
+    for (const auto& p : pieces) {
+        std::string to = edir + "/" + p.name;
+        bool exdev = false;
+        if (!move_path(p.from, to, why, exdev)) {
+            if (!exdev) break;
+            // A directory on another filesystem (the account's state directory, usually): a trash
+            // beside it, <base>/.trash/<entry>/<name>, root's alone as well.
+            const std::string base = p.kind == "state" || p.kind == "venv" ? fresh.state_dir : logs_root(fresh);
+            const std::string side = base + "/.trash";
+            std::string w;
+            const int sfd = open_private_dir(side, true, w);
+            if (sfd < 0 || (::mkdirat(sfd, entry.c_str(), 0700) != 0 && errno != EEXIST)) {
+                if (sfd >= 0) ::close(sfd);
+                why = w.empty() ? side + "/" + entry + ": " + std::strerror(errno) : w;
+                break;
+            }
+            ::close(sfd);
+            to = side + "/" + entry + "/" + p.name.substr(p.name.rfind('/') == std::string::npos ? 0 : p.name.rfind('/') + 1);
+            if (!move_path(p.from, to, why, exdev)) break;
+        }
+        why.clear();
+        done.emplace_back(to, p.from);
+        moved.push(json::Value::object().set("kind", p.kind).set("from", p.from).set("to", to));
+    }
+    if (!why.empty()) {  // put back what was moved, remove the entry, report
+        for (auto it = done.rbegin(); it != done.rend(); ++it) ::rename(it->first.c_str(), it->second.c_str());
+        std::string w;
+        remove_entry(fresh, entry, w);
+        return fail(why + "; nothing was moved");
+    }
+    json::Value manifest = json::Value::object()
+                               .set("site", domain).set("app", site->app.empty() ? "static" : site->app).set("account", site->user)
+                               .set("uid", static_cast<double>(uid)).set("gid", static_cast<double>(gid)).set("deleted_at", iso_time(now))
+                               .set("trash_keep", static_cast<double>(fresh.control.trash_keep))
+                               .set("site_file", json::Value::object().set("path", site_file_path).set("text", site_file_text))
+                               .set("pieces", moved);
+    {
+        const std::string text = manifest.dump();
+        const int mf = ::open((edir + "/manifest.json").c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        bool ok = mf >= 0;
+        for (std::size_t off = 0; ok && off < text.size();) {
+            const ssize_t n = ::write(mf, text.data() + off, text.size() - off);
+            if (n < 0 && errno == EINTR) continue;
+            ok = n > 0;
+            if (ok) off += static_cast<std::size_t>(n);
+        }
+        ok = ok && ::fsync(mf) == 0;
+        if (mf >= 0) ::close(mf);
+        if (!ok) {
+            const int e = errno;
+            for (auto it = done.rbegin(); it != done.rend(); ++it) ::rename(it->first.c_str(), it->second.c_str());
+            std::string w;
+            remove_entry(fresh, entry, w);
+            return fail("manifest: " + std::string(std::strerror(e)) + "; nothing was moved");
+        }
+    }
+    reply.set("ok", true).set("entry", entry).set("directory", edir).set("site", domain).set("account", site->user)
+        .set("account_shared", account_shared).set("pieces", moved).set("site_file", site_file_path).set("site_file_text", site_file_text)
+        .set("deleted_at", iso_time(now));
+    if (const std::time_t exp = expires_at(manifest, fresh.control.trash_keep)) reply.set("expires_at", iso_time(exp));
+    else reply.set("expires_at", json::Value(nullptr));
+    if (!root_cmds.items().empty()) reply.set("run_as_root", root_cmds);
+    return reply;
+}
+
+json::Value site_restore(const json::Value& req, const Config& cfg) {
+    json::Value reply = json::Value::object();
+    auto fail = [&](std::string why) { return reply.set("ok", false).set("error", std::move(why)); };
+    Config fresh;
+    try {
+        fresh = load_config(cfg.config_path);
+    } catch (const std::exception& e) {
+        return fail(std::string("the configuration on disk does not load: ") + e.what());
+    }
+    const std::string entry(req.get("entry"));
+    const std::string tdir = trash_dir(fresh), edir = tdir + "/" + entry;
+    std::string why;
+    const int tfd = open_private_dir(tdir, false, why);
+    if (tfd < 0) return fail("the trash is empty (" + why + ")");
+    ::close(tfd);
+    const json::Value m = read_manifest(edir, why);
+    if (m.is_null()) return fail("no trash entry " + entry + (why.empty() ? "" : " (" + why + ")"));
+    const std::string domain(m.get("site")), account(m.get("account"));
+    if (!entry.starts_with(domain + "-")) return fail("entry " + entry + " does not belong to " + domain);
+    // The site must not exist again, and its file's place must be free.
+    if (control::find_site(fresh, domain)) return fail("a site " + domain + " exists again; delete it first, or restore under another name by hand");
+    const fs::path sfile = control::site_file(fresh, domain);
+    std::error_code ec;
+    if (fs::exists(sfile, ec) || fs::exists(sfile.string() + ".disabled", ec)) return fail(sfile.string() + " exists; the restore would overwrite it");
+    // The account, with the uid the files carry.
+    const uid_t uid = static_cast<uid_t>(m["uid"].num());
+    if (!account.empty()) {
+        const struct passwd* pw = ::getpwnam(account.c_str());
+        if (!pw)
+            return reply.set("ok", false)
+                .set("error", "the account " + account + " no longer exists, and the files belong to uid " + std::to_string(uid))
+                .set("run_as_root", json::Value::array().push("useradd --system --no-create-home --home-dir " + fresh.state_dir + "/" + account +
+                                                              " --shell /usr/sbin/nologin --uid " + std::to_string(uid) + " " + account));
+        if (pw->pw_uid != uid)
+            return fail("the account " + account + " has uid " + std::to_string(pw->pw_uid) + " now, but the files belong to uid " + std::to_string(uid) +
+                        "; a restore needs the same uid (chown the trash entry by hand, or recreate the account with --uid " + std::to_string(uid) + ")");
+    }
+    // Every piece's original place must be free: missing, or an empty directory (the owner's
+    // rule: never merge into files that appeared since).
+    for (const auto& p : m["pieces"].items()) {
+        const std::string from(p.get("from")), to(p.get("to"));
+        if (!under_root(to, edir) && !secondary_location_ok(fresh, entry, to)) return fail("the manifest names a piece outside the trash (" + to + "); refused");
+        bool exists = false;
+        if (!absent_or_empty_dir(from, exists)) return fail(from + " exists and is not empty: the site is restored only into an empty place");
+    }
+    gid_t server_gid = 0;
+    if (const struct group* gr = ::getgrnam((fresh.group.empty() ? fresh.user : fresh.group).c_str())) server_gid = gr->gr_gid;
+    else if (const struct passwd* pw = ::getpwnam(fresh.user.c_str())) server_gid = pw->pw_gid;
+    std::vector<std::pair<std::string, std::string>> done;  // from, to (as moved back): undone on a failure
+    json::Value restored = json::Value::array();
+    for (const auto& p : m["pieces"].items()) {
+        const std::string from(p.get("from")), to(p.get("to")), kind(p.get("kind"));
+        bool exists = false;
+        absent_or_empty_dir(from, exists);
+        if (exists) ::rmdir(from.c_str());
+        if (!ensure_parent(from, server_gid, kind == "log", why)) break;
+        bool exdev = false;
+        if (!move_path(to, from, why, exdev)) break;
+        done.emplace_back(to, from);
+        restored.push(json::Value::object().set("kind", kind).set("path", from));
+    }
+    if (!why.empty()) {
+        for (auto it = done.rbegin(); it != done.rend(); ++it) ::rename(it->second.c_str(), it->first.c_str());
+        return fail(why + "; nothing was restored");
+    }
+    // The site file back, owned as its directory is (the server's account), 0640.
+    {
+        struct stat st {};
+        const fs::path dir = control::sites_dir(fresh);
+        if (::stat(dir.c_str(), &st) != 0) {
+            for (auto it = done.rbegin(); it != done.rend(); ++it) ::rename(it->second.c_str(), it->first.c_str());
+            return fail(dir.string() + ": " + std::strerror(errno) + "; nothing was restored");
+        }
+        const std::string text(m["site_file"].get("text"));
+        const int f = ::open(sfile.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0640);
+        bool ok = f >= 0;
+        for (std::size_t off = 0; ok && off < text.size();) {
+            const ssize_t n = ::write(f, text.data() + off, text.size() - off);
+            if (n < 0 && errno == EINTR) continue;
+            ok = n > 0;
+            if (ok) off += static_cast<std::size_t>(n);
+        }
+        ok = ok && ::fchown(f, st.st_uid, st.st_gid) == 0 && ::fsync(f) == 0;
+        const int e = errno;
+        if (f >= 0) ::close(f);
+        if (!ok) {
+            ::unlink(sfile.c_str());
+            for (auto it = done.rbegin(); it != done.rend(); ++it) ::rename(it->second.c_str(), it->first.c_str());
+            return fail("write " + sfile.string() + ": " + std::strerror(e) + "; nothing was restored");
+        }
+    }
+    std::string w;
+    remove_entry(fresh, entry, w);  // the manifest and the empty directories
+    return reply.set("ok", true).set("entry", entry).set("site", domain).set("account", account).set("site_file", sfile.string()).set("restored", restored)
+        .set("app", m.get("app"));
+}
+
+json::Value trash_list(const Config& cfg) {
+    json::Value reply = json::Value::object();
+    Config fresh;
+    try {
+        fresh = load_config(cfg.config_path);
+    } catch (const std::exception& e) {
+        return reply.set("ok", false).set("error", std::string("the configuration on disk does not load: ") + e.what());
+    }
+    json::Value entries = json::Value::array();
+    const std::string tdir = trash_dir(fresh);
+    std::string why;
+    const int tfd = open_private_dir(tdir, false, why);
+    if (tfd < 0) return reply.set("ok", true).set("entries", entries).set("directory", tdir).set("trash_keep", static_cast<double>(fresh.control.trash_keep));
+    std::vector<std::string> names;
+    if (DIR* d = ::fdopendir(tfd)) {
+        while (const struct dirent* e = ::readdir(d))
+            if (valid_trash_entry(e->d_name)) names.emplace_back(e->d_name);
+        ::closedir(d);
+    } else {
+        ::close(tfd);
+    }
+    std::sort(names.begin(), names.end());
+    const std::time_t now = std::time(nullptr);
+    for (const auto& n : names) {
+        std::string w;
+        const json::Value m = read_manifest(tdir + "/" + n, w);
+        json::Value item = json::Value::object().set("entry", n);
+        if (m.is_null()) {
+            entries.push(item.set("error", w));
+            continue;
+        }
+        std::uint64_t bytes = 0, files = 0;
+        for (const auto& p : m["pieces"].items()) tree_size(std::string(p.get("to")), bytes, files);
+        const std::string account(m.get("account"));
+        bool in_use = false;
+        for (const auto& s : fresh.sites) in_use = in_use || (!account.empty() && s.user == account);
+        const std::time_t exp = expires_at(m, fresh.control.trash_keep);
+        item.set("site", m.get("site")).set("app", m.get("app")).set("account", account).set("account_in_use", in_use)
+            .set("deleted_at", m.get("deleted_at")).set("expires_at", exp ? json::Value(iso_time(exp)) : json::Value(nullptr))
+            .set("expired", exp != 0 && exp <= now).set("bytes", static_cast<double>(bytes)).set("files", static_cast<double>(files));
+        json::Value pieces = json::Value::array();
+        for (const auto& p : m["pieces"].items()) pieces.push(json::Value::object().set("kind", p.get("kind")).set("from", p.get("from")));
+        item.set("pieces", std::move(pieces));
+        entries.push(std::move(item));
+    }
+    return reply.set("ok", true).set("entries", entries).set("directory", tdir).set("trash_keep", static_cast<double>(fresh.control.trash_keep));
+}
+
+json::Value trash_delete(const json::Value& req, const Config& cfg) {
+    json::Value reply = json::Value::object();
+    Config fresh;
+    try {
+        fresh = load_config(cfg.config_path);
+    } catch (const std::exception& e) {
+        return reply.set("ok", false).set("error", std::string("the configuration on disk does not load: ") + e.what());
+    }
+    const std::string entry(req.get("entry"));
+    std::string why;
+    struct stat st {};
+    if (::lstat((trash_dir(fresh) + "/" + entry).c_str(), &st) != 0) return reply.set("ok", false).set("error", "no trash entry " + entry);
+    if (!remove_entry(fresh, entry, why)) return reply.set("ok", false).set("error", why);
+    return reply.set("ok", true).set("entry", entry).set("removed", true);
+}
+
+json::Value trash_expire(const Config& cfg) {
+    json::Value reply = json::Value::object();
+    const json::Value list = trash_list(cfg);
+    if (!list["ok"].boolean()) return list;
+    Config fresh;
+    try {
+        fresh = load_config(cfg.config_path);
+    } catch (const std::exception& e) {
+        return reply.set("ok", false).set("error", e.what());
+    }
+    json::Value removed = json::Value::array(), failed = json::Value::array();
+    std::size_t kept = 0;
+    for (const auto& e : list["entries"].items()) {
+        if (!e["expired"].boolean()) {
+            ++kept;
+            continue;
+        }
+        std::string why;
+        if (remove_entry(fresh, std::string(e.get("entry")), why)) removed.push(std::string(e.get("entry")));
+        else failed.push(std::string(e.get("entry")) + ": " + why);
+    }
+    return reply.set("ok", true).set("removed", removed).set("failed", failed).set("kept", static_cast<double>(kept));
+}
+
+}  // namespace
+
 // The helper's loop: one JSON line in, one out, until the server closes its end.
 void helper_loop(int fd, const Config& cfg) {
     // A root process that must not inherit the listeners or anything else: only the socket
@@ -860,6 +1537,16 @@ void helper_loop(int fd, const Config& cfg) {
                     reply = app_op(req, cfg);
                 } else if (op == "app_check") {
                     reply = app_check(cfg);
+                } else if (op == "site_trash") {
+                    reply = site_trash(req, cfg);
+                } else if (op == "site_restore") {
+                    reply = site_restore(req, cfg);
+                } else if (op == "trash_list") {
+                    reply = trash_list(cfg);
+                } else if (op == "trash_delete") {
+                    reply = trash_delete(req, cfg);
+                } else if (op == "trash_expire") {
+                    reply = trash_expire(cfg);
                 } else if (op == "env_check") {
                     // Health's read-only pass over the sites' environment files (appenv::inspect),
                     // the sites from the configuration on disk; no value leaves the helper.

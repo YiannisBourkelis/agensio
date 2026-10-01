@@ -202,6 +202,10 @@ struct ControlConfig {
     unsigned task_timeout = 1200;   // seconds before SIGTERM; a task row's own limit is capped by it
     unsigned task_processes = 512;  // RLIMIT_NPROC of the site's account while a task runs
     bool task_network = true;
+    // How long a site deleted with its files stays in the trash (<sites_root>/.trash, root's
+    // alone) before the hourly expiry removes it; 0 keeps entries until trash_delete (F12b,
+    // 2026-09-30, the owner's 60 days).
+    unsigned trash_keep = 60;  // days
 };
 
 // The directory [control] runtimes names for a runtime ("ruby"), "" for an unknown one.

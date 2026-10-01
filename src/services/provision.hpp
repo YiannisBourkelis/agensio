@@ -57,6 +57,15 @@ std::string logs_root(const Config& cfg);
 std::string uploads_dir(const Config& cfg);
 // `path` is `root` or lies below it, textually (both normalised).
 bool under_root(const std::string& path, const std::string& root);
+// <sites_root>/.trash: where a site deleted with its files goes (F12b), root's alone.
+std::string trash_dir(const Config& cfg);
+// A trash entry's name: <domain>-<YYYYMMDD>-<HHMMSS>, nothing else (no '/', no '.', no '..').
+bool valid_trash_entry(std::string_view name) noexcept;
+// The directory a files-delete moves for a site: the first directory below sites_root on
+// the root's path (/var/www/example.com for /var/www/example.com/app), unless another
+// site's root lies under it, then the root alone; "" with `why` when the root is not below
+// sites_root.
+std::string site_tree(const Config& cfg, const SiteConfig& site, std::string& why);
 }  // namespace provision
 
 }  // namespace agensio

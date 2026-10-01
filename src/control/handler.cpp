@@ -12,6 +12,7 @@
 #include <optional>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 
 #ifndef _WIN32
 #include <fcntl.h>
@@ -28,6 +29,7 @@
 #include "services/archive.hpp"
 #include "services/install.hpp"
 #include "services/pools.hpp"
+#include "services/provision.hpp"
 #include "services/tasks.hpp"
 
 namespace agensio {
@@ -139,7 +141,8 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
     // The read commands (F2): every one is a GET, every one needs the viewer role.
     const bool read_command = path == "/v1/status" || path == "/v1/sites" || path.starts_with("/v1/sites/") ||
                               path == "/v1/config/validate" || path == "/v1/logs" || path == "/v1/health" ||
-                              path == "/v1/presets" || path == "/v1/uploads" || path == "/v1/settings" || path == "/v1/config/reference";
+                              path == "/v1/presets" || path == "/v1/uploads" || path == "/v1/settings" || path == "/v1/config/reference" ||
+                              path == "/v1/trash";
     if (!read_command) {
         reply(s, 404, json::Value::object().set("error", "unknown command").set("path", std::string(path)));
         return false;
@@ -178,6 +181,17 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
             return false;
         }
         site_service(s, path.substr(10, path.size() - 10 - suffix), logs, done);
+        return true;
+    }
+    if (path == "/v1/trash") {
+        // What a deleted site left: its pieces' sizes and origins, the account it had. Admin: a
+        // site's directory names are a tenant's, and a restore needs the same role.
+        if (!require(s, Role::admin, path.substr(4))) return false;
+        if (!done) {
+            reply(s, 503, json::Value::object().set("error", "trash needs an asynchronous caller"));
+            return false;
+        }
+        trash_list(s, done);
         return true;
     }
     if (path == "/v1/status") {
@@ -391,9 +405,10 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
     (void)ws;
     const bool site_path = path.starts_with("/v1/sites/");
     const bool upload_path = path.starts_with("/v1/uploads/");
+    const bool trash_path = path.starts_with("/v1/trash/");
     std::string_view name, action;
-    if (site_path || upload_path) {
-        name = path.substr(site_path ? 10 : 12);
+    if (site_path || upload_path || trash_path) {
+        name = path.substr(site_path ? 10 : upload_path ? 12 : 10);
         const std::size_t slash = name.find('/');
         if (slash != std::string_view::npos) {
             action = name.substr(slash + 1);
@@ -410,7 +425,8 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
                        (site_path && !name.empty() && (action.empty() || action == "disable" || action == "enable" ||
                                                        action == "delete" || action == "renew" || action == "install" || action == "copy" ||
                                                        action == "task" || action == "env")) ||
-                       (upload_path && !name.empty() && action == "delete");
+                       (upload_path && !name.empty() && action == "delete") || (trash_path && !name.empty() && (action == "restore" || action == "delete")) ||
+                       path == "/v1/trash/expire";
     if (!known) {
         reply(s, 404, json::Value::object().set("error", "unknown command").set("path", std::string(path)));
         return false;
@@ -448,6 +464,29 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
         reply(s, 200, json::Value::object().set("ok", true));
         return false;
     }
+    if (trash_path || path == "/v1/trash/expire") {
+        if (!done) {
+            reply(s, 503, json::Value::object().set("error", "the trash needs an asynchronous caller"));
+            return false;
+        }
+        if (path == "/v1/trash/expire") {
+            backend_->provision_async(json::Value::object().set("op", "trash_expire"), [this, &s, what, done](json::Value r) {
+                audit_peer(s, what, r["ok"].boolean() ? "removed " + std::to_string(r["removed"].items().size()) + " expired entr" +
+                                                                (r["removed"].items().size() == 1 ? "y" : "ies")
+                                                          : "failed: " + std::string(r.get("error")));
+                reply(s, r["ok"].boolean() ? 200 : 409, r);
+                done();
+            });
+            return true;
+        }
+        if (!provision::valid_trash_entry(name)) {
+            reply(s, 400, json::Value::object().set("error", "not a trash entry's name (trash lists them: <domain>-<date>-<time>)"));
+            return false;
+        }
+        if (action == "restore") trash_restore(s, name, what, std::move(done));
+        else trash_delete(s, name, what, std::move(done));
+        return true;
+    }
     if (path == "/v1/sites") {
         site_create(s, body, what);
         return false;
@@ -479,8 +518,179 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
         else site_install(s, name, body, what, std::move(done));
         return true;
     }
+    if (action == "delete" && body["files"].boolean()) {
+        // With its files (F12b): everything into the trash, then the site file goes and the
+        // configuration reloads; deferred like an install, since the helper does the moves.
+        if (!done) {
+            reply(s, 503, json::Value::object().set("error", "delete with files needs an asynchronous caller"));
+            return false;
+        }
+        site_trash(s, name, what, std::move(done));
+        return true;
+    }
     site_toggle(s, name, action, what);
     return false;
+}
+
+// ---- the trash (F12b) ----
+
+namespace {
+
+std::string size_words(double bytes) {
+    char buf[32];
+    if (bytes >= 1024.0 * 1024 * 1024) std::snprintf(buf, sizeof buf, "%.1f GB", bytes / (1024.0 * 1024 * 1024));
+    else if (bytes >= 1024.0 * 1024) std::snprintf(buf, sizeof buf, "%.1f MB", bytes / (1024.0 * 1024));
+    else if (bytes >= 1024.0) std::snprintf(buf, sizeof buf, "%.0f KB", bytes / 1024.0);
+    else std::snprintf(buf, sizeof buf, "%.0f bytes", bytes);
+    return buf;
+}
+
+}  // namespace
+
+// A site deleted with its files: the helper moves the site's directory, the account's state
+// directory (or the site's virtualenv), its logs and its environment file into the trash and
+// keeps the site file's text in the manifest; then the site file goes and the configuration
+// reloads. A reload that fails brings everything back. The account is kept.
+void ControlHandler::site_trash(Stream& s, std::string_view name, std::string_view what, std::function<void()> done) {
+    const Config& cfg = backend_->running();
+    const SiteConfig* site = control::find_site(cfg, name);
+    if (!site) {
+        reply(s, 404, json::Value::object().set("error", "no such site").set("site", std::string(name)));
+        done();
+        return;
+    }
+    if (!backend_->provision_available()) {
+        reply(s, 409, json::Value::object()
+                          .set("error", "deleting a site with its files needs the provisioning helper (agensio started as root with [control] provision), which moves them into root's trash")
+                          .set("hint", "site_delete without files removes the configuration alone; the files are then removed by hand"));
+        done();
+        return;
+    }
+    const std::string key = site->server_names.front();
+    const std::filesystem::path file = control::site_file(cfg, key);
+    const bool php_pool = php_app(site->app) && !site->user.empty() && site->pool.generated;
+    audit_peer(s, what, "moving the site's files into the trash");
+    backend_->provision_async(json::Value::object().set("op", "site_trash").set("site", key), [this, &s, what = std::string(what), key, file, php_pool, done](json::Value r) {
+        if (!r["ok"].boolean()) {
+            audit_peer(s, what, "refused: " + std::string(r.get("error")));
+            reply(s, 409, r);
+            done();
+            return;
+        }
+        // The files are in the trash: the site file goes, the configuration reloads.
+        std::error_code ec;
+        const std::string site_file(r.get("site_file"));
+        std::filesystem::remove(file, ec);
+        std::filesystem::remove(file.string() + ".disabled", ec);
+        std::string error;
+        if (!backend_->reload_now(error)) {
+            // Put the file back and the files with it, so nothing is half done.
+            if (!site_file.empty()) {
+                std::ofstream out(site_file, std::ios::trunc);
+                out << std::string(r.get("site_file_text"));
+            }
+            const std::string entry(r.get("entry"));
+            const json::Value back = backend_->provision(json::Value::object().set("op", "site_restore").set("entry", entry));
+            audit_peer(s, what, "reload refused (" + error + "); files " + (back["ok"].boolean() ? "restored" : "NOT restored: " + std::string(back.get("error"))));
+            reply(s, 409, json::Value::object().set("ok", false).set("error", "reload refused; the site and its files were put back").set("detail", error)
+                              .set("files_restored", back["ok"].boolean()));
+            done();
+            return;
+        }
+        std::string moved;
+        for (const auto& p : r["pieces"].items()) moved += (moved.empty() ? "" : ", ") + std::string(p.get("from"));
+        audit_peer(s, what, "deleted with its files: " + moved + " -> " + std::string(r.get("directory")) + "; the account " +
+                                (r.get("account").empty() ? std::string("(none)") : std::string(r.get("account")) + " kept"));
+        json::Value body = json::Value::object().set("ok", true).set("action", "delete").set("files", true).set("site", key).set("entry", r["entry"])
+                               .set("trash", r["directory"]).set("pieces", r["pieces"]).set("deleted_at", r["deleted_at"]).set("expires_at", r["expires_at"]);
+        json::Value steps = json::Value::array();
+        steps.push("site_restore " + std::string(r.get("entry")) + " brings the site and every file back, into an empty place only; trash_list shows what the trash holds");
+        if (r["expires_at"].is_null()) steps.push("the entry stays until trash_delete removes it ([control] trash_keep = 0)");
+        else steps.push("the entry is removed on " + std::string(r.get("expires_at")) + " ([control] trash_keep); trash_delete removes it sooner");
+        if (!r.get("account").empty())
+            steps.push("the account " + std::string(r.get("account")) + " is kept (a restore needs its uid); once the entry is gone" +
+                       (r["account_shared"].boolean() ? ", other sites still use it" : ", root may remove it: userdel " + std::string(r.get("account"))));
+        json::Value done_now = json::Value::array();
+        if (php_pool) {
+            const json::Value pool = backend_->provision(json::Value::object().set("op", "pools_apply"));
+            if (pool["ok"].boolean()) done_now.push("php-fpm pools: " + std::string(pool.get("output")));
+            else steps.push("# the helper could not apply the pools (" + std::string(pool.get("error")) + "); run: agensio pools");
+        }
+        if (!r["run_as_root"].items().empty()) body.set("run_as_root", r["run_as_root"]);
+        body.set("next_steps", steps);
+        if (!done_now.items().empty()) body.set("done", done_now);
+        reply(s, 200, body);
+        done();
+    });
+}
+
+void ControlHandler::trash_list(Stream& s, std::function<void()> done) {
+    backend_->helper_async(json::Value::object().set("op", "trash_list"), [this, &s, done](json::Value r) {
+        if (r["busy"].boolean()) {
+            reply(s, 503, json::Value::object().set("error", "the provisioning helper is busy with a task or an install; ask again when it finishes").set("busy", true));
+        } else if (!r["ok"].boolean()) {
+            reply(s, 409, r);
+        } else {
+            double total = 0;
+            for (const auto& e : r["entries"].items()) total += e["bytes"].num();
+            r.set("total_bytes", total).set("total", size_words(total));
+            r.set("hint", r["entries"].items().empty()
+                              ? std::string("the trash is empty: site_delete with files: true puts a site's directory, logs, environment and account state here")
+                              : "site_restore ENTRY brings one back into an empty place; trash_delete ENTRY removes it now; entries expire after [control] trash_keep days "
+                                "(the hourly expiry, or agensio ctl trash-expire); an account_in_use of false means no site uses that account any more, and root may "
+                                "remove it once the entry is gone (userdel)");
+            reply(s, 200, r);
+        }
+        done();
+    });
+}
+
+void ControlHandler::trash_restore(Stream& s, std::string_view entry, std::string_view what, std::function<void()> done) {
+    if (!backend_->provision_available()) {
+        reply(s, 409, json::Value::object().set("error", "the trash is the provisioning helper's (agensio started as root with [control] provision)"));
+        done();
+        return;
+    }
+    audit_peer(s, what, "restoring from the trash");
+    backend_->provision_async(json::Value::object().set("op", "site_restore").set("entry", std::string(entry)), [this, &s, what = std::string(what), done](json::Value r) {
+        if (!r["ok"].boolean()) {
+            audit_peer(s, what, "refused: " + std::string(r.get("error")));
+            reply(s, 409, r);
+            done();
+            return;
+        }
+        std::string error;
+        const bool reloaded = backend_->reload_now(error);
+        std::string back;
+        for (const auto& p : r["restored"].items()) back += (back.empty() ? "" : ", ") + std::string(p.get("path"));
+        audit_peer(s, what, "restored " + std::string(r.get("site")) + ": " + back + (reloaded ? "" : "; reload refused: " + error));
+        json::Value steps = json::Value::array();
+        if (php_app(r.get("app")) && !r.get("account").empty() && backend_->provision_available()) {
+            const json::Value pool = backend_->provision(json::Value::object().set("op", "pools_apply"));
+            if (!pool["ok"].boolean()) steps.push("# the helper could not apply the pools (" + std::string(pool.get("error")) + "); run: agensio pools");
+        }
+        if (service_app(r.get("app")) && !r.get("account").empty())
+            steps.push("the application's service was removed with the site: site_service_unit " + std::string(r.get("site")) + " renders it again for root");
+        r.set("next_steps", steps);
+        if (!reloaded)
+            reply(s, 409, r.set("ok", false).set("error", "the files and the site file are back, but the reload was refused; health lists what to fix").set("detail", error));
+        else
+            reply(s, 200, r);
+        done();
+    });
+}
+
+void ControlHandler::trash_delete(Stream& s, std::string_view entry, std::string_view what, std::function<void()> done) {
+    if (!backend_->provision_available()) {
+        reply(s, 409, json::Value::object().set("error", "the trash is the provisioning helper's (agensio started as root with [control] provision)"));
+        done();
+        return;
+    }
+    backend_->provision_async(json::Value::object().set("op", "trash_delete").set("entry", std::string(entry)), [this, &s, what = std::string(what), done](json::Value r) {
+        audit_peer(s, what, r["ok"].boolean() ? "removed for good" : "refused: " + std::string(r.get("error")));
+        reply(s, r["ok"].boolean() ? 200 : 409, r);
+        done();
+    });
 }
 
 // ---- uploads and installs (F9) ----

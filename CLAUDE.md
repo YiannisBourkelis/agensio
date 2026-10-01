@@ -475,6 +475,18 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   rubygems.org, the whole workflow), `tests/wagtail-install.sh` (the `agensio-devbox:python`
   image, real pip, Wagtail and Gunicorn behind agensio over TLS). Rule for every change here:
   the security page rows 26 to 33 and the MCP texts move with it.
+- **The trash** (F12b, 2026-09-30, design section 18, `docs/configuration.md` 15): `site-delete
+  NAME --files` / MCP `site_delete` with `files: true` moves the site's tree below
+  `sites_root`, the account's state directory (the site's virtualenv alone when another
+  site shares the account), its access log with rotations and its environment file into
+  `<sites_root>/.trash/<domain>-<stamp>/` (root's, 0700) by rename, the site file's text into
+  the manifest; the helper's `site_trash`, `site_restore`, `trash_list`, `trash_delete`,
+  `trash_expire` (`provision.cpp`: `remove_tree` with `openat`/`O_NOFOLLOW`, `open_private_dir`,
+  `valid_trash_entry`, `site_tree`); refused while the unit is active; restore only into an
+  empty place with the account at the files' uid; the account is never removed;
+  `[control] trash_keep` (60 days) with worker 0's hourly `arm_trash_expiry`;
+  `LogRegistry::unmark_all` so a deleted site's log is not recreated on reload. Security
+  page row 34, `tests/trash.sh` (root devbox).
 - **Application install** (F9, `src/services/archive.*`, `fetch.*`, `install.*`):
   `agensio ctl site-install NAME [--url | --file | --version]` fills a site's empty
   directory as the site's account from an https archive, an upload (`agensio ctl upload`)

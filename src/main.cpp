@@ -50,7 +50,7 @@ void usage() {
                  "                           [--root DIR] [--upstream URL] [--project NAME] [--entry FILE] [--php-socket S] [--php-children N]\n"
                  "                           [--no-redirect] [--hsts] [--listen-plain A] [--listen-tls A]\n"
                  "                      site-update NAME (same flags) | site-disable NAME | site-enable NAME |\n"
-                 "                      site-delete NAME | cert-renew NAME |\n"
+                 "                      site-delete NAME [--files] | site-restore ENTRY | trash-delete ENTRY | trash | cert-renew NAME |\n"
                  "                      site-install NAME [--url https://... | --file UPLOAD | --version V] [--sha256 H]\n"
                  "                           [--path SUB] [--create-path] [--strip 0|1] [--dry-run]\n"
                  "                      site-copy NAME --from SUB --to SUB [--overwrite] [--dry-run]\n"
@@ -124,7 +124,7 @@ int main(int argc, char** argv) {
         else if (a == "ctl" && i == 1) {
             auto ctl_usage = [] {
                 std::cout << "usage: agensio ctl <command> [options] [--socket PATH] [-c config.toml]\n"
-                             "read:   status | sites | site NAME | validate | health | presets | uploads | settings [NAME] | reference |\n"
+                             "read:   status | sites | site NAME | validate | health | presets | uploads | settings [NAME] | reference | trash |\n"
                              "        site-unit NAME [--raw] (the Puma unit of a Rails site, rendered for root: --raw prints the unit alone) |\n"
                              "        site-service NAME (whether the Rails site's agensio-app-USER.service runs, from systemctl show) |\n"
                              "        site-service-logs NAME [--lines N] [--since 30m|3h|2d] [--raw] (admin, audited: its journal;\n"
@@ -135,7 +135,11 @@ int main(int argc, char** argv) {
                              "                    and fingerprints; a value only for each --reveal KEY, audited as a secret read) |\n"
                              "        logs [--site NAME] [--since 3h] [--level error|warn|info] [--status 5xx|4xx|all] [--limit N]\n"
                              "change (each needs --yes, takes --reason TEXT):\n"
-                             "        reload | logs-reopen | site-disable NAME | site-enable NAME | site-delete NAME | cert-renew NAME\n"
+                             "        reload | logs-reopen | site-disable NAME | site-enable NAME | cert-renew NAME\n"
+                             "        site-delete NAME [--files]: the configuration alone (a .bak stays), or with --files everything of the\n"
+                             "                    site (directory, account state, logs, environment file) into root's trash, <sites_root>/.trash,\n"
+                             "                    for [control] trash_keep days; the account is kept\n"
+                             "        site-restore ENTRY | trash-delete ENTRY | trash-expire (the trash's entries: `trash` lists them)\n"
                              "        site-create --domain D [--alias A]... [--https auto|none] [--cert F --key F] [--user U|--no-user]\n"
                              "                    [--group G] [--app NAME] [--root DIR] [--upstream URL] [--project NAME] [--entry FILE] [--php-socket S]\n"
                              "                    [--php-children N] [--php-version V] [--no-redirect] [--hsts] [--listen-plain A] [--listen-tls A]\n"
@@ -214,6 +218,7 @@ int main(int argc, char** argv) {
                 else if (b == "--upstream") field("upstream");
                 else if (b == "--project") field("project");
                 else if (b == "--entry") field("entry");
+                else if (b == "--files") body.set("files", true);
                 else if (b == "--php-socket") field("php_socket");
                 else if (b == "--php-children") { std::string v; value(v); body.set("php_children", std::atoi(v.c_str())); }
                 else if (b == "--php-version") field("php_version");
@@ -259,7 +264,7 @@ int main(int argc, char** argv) {
                 else if (command.empty()) command = b;
                 else if (site_name.empty() && command.starts_with("site") && command != "sites") site_name = b;
                 else if (command == "site-task" && body["task"].is_null()) body.set("task", b);
-                else if (site_name.empty() && (command == "cert-renew" || command == "upload" || command == "uploads-delete" || command == "settings")) site_name = b;
+                else if (site_name.empty() && (command == "cert-renew" || command == "upload" || command == "uploads-delete" || command == "settings" || command == "trash-delete")) site_name = b;
                 else if (command == "upload" && upload_file.empty()) upload_file = b;
                 else { std::cerr << "ctl: unexpected argument " << b << "\n"; return 2; }
             }
@@ -275,9 +280,12 @@ int main(int argc, char** argv) {
             const bool mutation = command == "reload" || command == "logs-reopen" ||
                                   (command.starts_with("site-") && command != "site-tasks" && command != "site-env" && command != "site-unit" &&
                                    command != "site-service" && command != "site-service-logs" && command != "site-task-output") ||
-                                  command == "cert-renew" || command == "uploads-delete";
+                                  command == "cert-renew" || command == "uploads-delete" || command == "trash-delete" || command == "trash-expire";
             const bool upload = command == "upload";
-            if (command == "status" || command == "sites" || command == "health" || command == "presets" || command == "uploads") path = "/v1/" + command;
+            if (command == "status" || command == "sites" || command == "health" || command == "presets" || command == "uploads" || command == "trash") path = "/v1/" + command;
+            else if (command == "site-restore" && !site_name.empty()) path = "/v1/trash/" + site_name + "/restore";
+            else if (command == "trash-delete" && !site_name.empty()) path = "/v1/trash/" + site_name + "/delete";
+            else if (command == "trash-expire") path = "/v1/trash/expire";
             else if (command == "settings") path = site_name.empty() ? "/v1/settings" : "/v1/sites/" + site_name + "/settings";
             else if (command == "reference") path = "/v1/config/reference";
             else if (command == "site" && !site_name.empty()) path = "/v1/sites/" + site_name;

@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.1.0-alpha.39 (unreleased)
+
+Deleting a site with its files (F12b of `docs/design-site-operations.md`, the owner's
+decisions of 2026-09-30):
+
+- **`site_delete` with `files: true`** (`agensio ctl site-delete NAME --files`) moves
+  everything of a site into root's trash, `<sites_root>/.trash/<domain>-<date>-<time>/`
+  (0700): its directory, the account's state directory (or the site's virtualenv alone when
+  another site shares the account), its access log with its rotations, its environment file
+  with its secrets, and the site file's text in the entry's manifest. Everything moves by
+  rename; nothing is copied or deleted. The account is kept. Refused while the site's
+  service runs, with the `systemctl` lines for root. Without `files` the delete is what it
+  was: the configuration alone.
+- **`trash_list`, `site_restore`, `trash_delete`** (`agensio ctl trash`, `site-restore ENTRY`,
+  `trash-delete ENTRY`). A restore puts every piece and the site file back, into an empty
+  place only, and needs the account at the uid the files carry. `trash_list` shows each
+  entry's size, expiry and whether its account is still in use.
+- **`[control] trash_keep`**, 60 days by default: worker 0 removes expired entries every
+  hour; `agensio ctl trash-expire` does it now; 0 keeps entries until `trash-delete`.
+- A deleted site's access log is no longer recreated, empty, at every reload: the log
+  registry now opens only the files the configuration names.
+- A files-delete of a PHP site applies the php-fpm pools through the helper, so the
+  account's pool file goes with the site.
+
 ## 0.1.0-alpha.38 (2026-09-28)
 
 From the Node report against alpha.36 (Uptime Kuma 2.5.5 on an `app = "proxy"` site, where

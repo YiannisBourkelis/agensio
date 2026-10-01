@@ -128,15 +128,21 @@ Server::~Server() {
 
 // The error log first so startup messages have somewhere to go.
 void Server::open_logs() {
-    const int error_sink = logs_.add(cfg_.log.error);
+    error_sink_ = logs_.add(cfg_.log.error);
     LogLevel level = LogLevel::warn;
     parse_log_level(cfg_.log.level, level);
-    error_log_.configure(&logs_, error_sink, level);
+    error_log_.configure(&logs_, error_sink_, level);
 }
 
 // One sink per distinct path, shared across generations (the registry keeps a path's
 // descriptor as long as the process runs).
 void Server::assign_log_sinks(Config& cfg) {
+    // Only the files this configuration names are opened and reopened from now on: the
+    // server's own two, and every site's. A deleted site's sink keeps its descriptor and is
+    // left alone (before 2026-09-30 every reload recreated its file, empty).
+    logs_.unmark_all();
+    for (int own : {error_sink_, audit_sink_})
+        if (own >= 0) logs_.sink(own).set_wanted(true);
     for (auto& site : cfg.sites) {
         site.access_log_sink = logs_.add(site.access_log);
         if (site.access_log_sink >= 0) access_logging_ = true;
@@ -887,6 +893,7 @@ void Server::run() {
     if (cfg_.control.enabled && cfg_.control.provision) provisioner_.start(gen_->cfg, error_log_);
     drop_privileges();  // ports are bound and logs open: nothing else needs root
     for (auto& w : workers_) w->gen = gen_;
+    arm_trash_expiry();
 #ifdef AGENSIO_HAS_TLS
     // Automatic certificates: orders run on the manager's thread, the result comes back
     // through reload() so the new certificate is picked up without touching a request.
@@ -1130,6 +1137,37 @@ void Server::env_async(const json::Value& req, std::function<void(json::Value)> 
         }
         asio::post(workers_[0]->ctx, [done, r] { done(r); });
     }).detach();
+}
+
+void Server::provision_async(const json::Value& req, std::function<void(json::Value)> done) {
+    std::thread([this, req, done = std::move(done)] {
+        json::Value r = provisioner_.available()
+                            ? provisioner_.request(req)
+                            : json::Value::object().set("ok", false).set("error", "this needs the provisioning helper (agensio started as root with [control] provision)");
+        asio::post(workers_[0]->ctx, [done, r] { done(r); });
+    }).detach();
+}
+
+// Expired trash entries (F12b): once an hour on worker 0, through the helper, never waited
+// for (a task holding the helper only delays it to the next hour).
+void Server::arm_trash_expiry() {
+    if (!provisioner_.available()) return;
+    if (!trash_timer_) trash_timer_ = std::make_unique<asio::steady_timer>(workers_[0]->ctx);
+    trash_timer_->expires_after(std::chrono::hours(1));
+    trash_timer_->async_wait([this](const asio::error_code& ec) {
+        if (ec || stopping_) return;
+        std::thread([this] {
+            const json::Value r = provisioner_.try_request(json::Value::object().set("op", "trash_expire"));
+            if (r["ok"].boolean() && !r["removed"].items().empty()) {
+                std::string names;
+                for (const auto& n : r["removed"].items()) names += (names.empty() ? "" : ", ") + std::string(n.str());
+                error_log_.info("trash: expired entries removed: " + names);
+            } else if (!r["ok"].boolean() && !r["busy"].boolean()) {
+                error_log_.warn("trash: expiry failed: " + std::string(r.get("error")));
+            }
+            asio::post(workers_[0]->ctx, [this] { arm_trash_expiry(); });
+        }).detach();
+    });
 }
 
 void Server::helper_async(const json::Value& req, std::function<void(json::Value)> done) {

@@ -44,19 +44,27 @@ public:
     void write(std::string_view data) noexcept;
 
     const std::string& path() const noexcept { return path_; }
+    // Whether the configuration in force names this file. A sink of a site that is gone keeps
+    // its descriptor (a worker may still flush a line to it) but is never opened again:
+    // before 2026-09-30 every reload recreated a deleted site's log, empty, which then stood in
+    // the way of restoring the site from the trash.
+    bool wanted() const noexcept { return wanted_; }
+    void set_wanted(bool w) noexcept { wanted_ = w; }
     bool is_open() const noexcept { return fd_.load(std::memory_order_acquire) >= 0; }
 
 private:
     std::string path_;
     std::atomic<int> fd_{-1};
     int previous_ = -1;  // descriptor replaced by the last reopen, closed at the next one
+    bool wanted_ = true;
 };
 
 // Sinks by path: sites that log to the same file share one descriptor.
 class LogRegistry {
 public:
     // Returns the sink id for `path` (adding it if new); "" and "off" give -1 (no logging).
-    int add(const std::string& path);
+    int add(const std::string& path);  // marks the sink wanted
+    void unmark_all() noexcept;        // before a configuration's sinks are added again
     LogFile& sink(int id) noexcept { return *sinks_[static_cast<std::size_t>(id)]; }
     std::size_t size() const noexcept { return sinks_.size(); }
     // Opens every sink; on failure returns false and names the path in `error`.

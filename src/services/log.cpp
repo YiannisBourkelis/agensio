@@ -146,13 +146,21 @@ void LogFile::write(std::string_view data) noexcept {
 int LogRegistry::add(const std::string& path) {
     if (path.empty() || path == "off") return -1;
     for (std::size_t i = 0; i < sinks_.size(); ++i)
-        if (sinks_[i]->path() == path) return static_cast<int>(i);
+        if (sinks_[i]->path() == path) {
+            sinks_[i]->set_wanted(true);
+            return static_cast<int>(i);
+        }
     sinks_.push_back(std::make_unique<LogFile>(path));
     return static_cast<int>(sinks_.size() - 1);
 }
 
+void LogRegistry::unmark_all() noexcept {
+    for (auto& s : sinks_) s->set_wanted(false);
+}
+
 bool LogRegistry::open_all(std::string& error) noexcept {
     for (auto& s : sinks_) {
+        if (!s->wanted()) continue;
         if (!s->open()) {
             error = "cannot open log file " + s->path() + ": " + std::strerror(errno);
             return false;
@@ -163,7 +171,7 @@ bool LogRegistry::open_all(std::string& error) noexcept {
 
 void LogRegistry::reopen_all() noexcept {
     for (auto& s : sinks_)
-        s->reopen();  // a failed reopen keeps writing to the previous descriptor
+        if (s->wanted()) s->reopen();  // a failed reopen keeps writing to the previous descriptor
 }
 
 // ---- WorkerLogs ----

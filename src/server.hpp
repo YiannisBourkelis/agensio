@@ -170,6 +170,7 @@ private:
     void env_async(const json::Value& req, std::function<void(json::Value)> done) override;
     int env_file_state(std::string_view site, std::vector<std::string>& exposed) override;
     void helper_async(const json::Value& req, std::function<void(json::Value)> done) override;
+    void provision_async(const json::Value& req, std::function<void(json::Value)> done) override;
     std::string uploads_dir() override { return uploads_dir_; }
     void prepare_uploads();  // <state_dir>/uploads, the server's own, before the privilege drop
     bool privileged() override {
@@ -198,6 +199,8 @@ private:
     Provisioner provisioner_;
     std::string uploads_dir_;
     std::unique_ptr<asio::steady_timer> restart_timer_;
+    std::unique_ptr<asio::steady_timer> trash_timer_;  // worker 0, hourly: expired trash entries removed through the helper
+    void arm_trash_expiry();
     std::vector<std::unique_ptr<Worker>> workers_;
     std::vector<std::unique_ptr<Acceptor>> acceptors_;
     std::unique_ptr<H3Endpoints> h3_;
@@ -212,6 +215,7 @@ private:
     RoleGroups control_groups_;
     long server_uid_ = -1;
     int audit_sink_ = -1;
+    int error_sink_ = -1;
     std::chrono::system_clock::time_point started_ = std::chrono::system_clock::now();
 };
 

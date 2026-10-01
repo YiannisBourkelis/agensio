@@ -900,3 +900,34 @@ browser setup shares (WordPress, Writebook, Kuma); `npm install` of named packag
 confirmed in person, like `pip_install`); a build on the server (`npm_run build` needs the
 dev dependencies `npm_ci` omits).
 
+## 18. The trash built (2026-09-30)
+
+F12b, from section 3b, built with the owner's changes after the question "does deleting a
+site remove its files?" (it did not: `site_delete` left every file):
+
+- **The account is kept**, not removed at expiry as 3b planned: the moved files carry its
+  uid, and a restore needs it; `trash_list` says when no site uses an account any more, so
+  root can remove it with `userdel` when wanted. Orphaned accounts are the price.
+- **Restore only into an empty place** (the owner's rule): every original path must be
+  missing or an empty directory; nothing is ever merged. A site whose account's state
+  directory sits in another entry (the last site of the account took it) restores that
+  entry first.
+- **`trash_keep` is 60 days**, from root's file and applied to what is in the trash when
+  it changes (the manifest keeps `deleted_at`, not an expiry), 0 for never.
+- **Refused while the service runs**: a renamed working directory keeps a running Puma or
+  node writing into the trash, so the helper asks `systemctl` first and hands root the
+  `disable --now` line.
+- **What moves**: the site's tree as 3b said, the state directory only when no other site
+  uses the account (else the site's virtualenv alone), the access log with its rotations,
+  the environment file; the site file's text goes into the manifest and the server removes
+  the file. Pieces on another filesystem: a directory to a side trash beside its base, a
+  file by copy. Everything else by rename.
+- **Two things found on the way.** The registry of log sinks reopened every sink it had
+  ever known on each reload, `O_CREAT` included, so a deleted site's log came back empty
+  at every reload and stood in the way of a restore; it now opens only the sinks the
+  configuration names. And `site_delete` left the account's php-fpm pool until the next
+  `agensio pools`; a files-delete applies the pools through the helper.
+
+Not built: `health`'s `trash_size`; the first-run window (section 3b's neighbours) is
+still open.
+

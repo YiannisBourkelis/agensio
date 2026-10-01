@@ -1444,6 +1444,7 @@ site_limits = { max_body_size = "512MB", memory_limit = "512M", max_execution_ti
 runtimes = { ruby = "/usr/bin" }       # where site tasks find ruby, gem and bundle (also node, php, python3); root's files only; reload applies it
 task_limits = { timeout = 1200, processes = 512 }   # a task's wall-clock seconds and the processes its account may have
 task_network = true                    # tasks that download (gem install, rails new, bundle install) may run
+trash_keep = 60                        # days a site deleted with its files stays in <sites_root>/.trash; 0 keeps entries until trash-delete
 ```
 
 The control API is how `agensio ctl`, the MCP bridge (`agensio mcp`) and any local tool
@@ -1476,6 +1477,7 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 | `validate` | viewer | loads the file on disk again and runs the hosting rules: `ok`, `errors`, site count, and the restart-only settings that differ from the running server |
 | `logs` | viewer | `--site NAME` (default: all sites plus the error log), `--since 3h` (`m`, `h`, `d`, `w`, seconds, or a local `YYYY-MM-DDThh:mm:ss`; default 1h), `--level error|warn|info` for the error log (default warn = error+warn), `--status 5xx|4xx|all|NNN` for access logs (default 5xx), `--limit N` (default 200, newest). Reads at most 2 MB per file from the end; `truncated` says when that cut in |
 | `uploads` | viewer | the archives stored with `upload` (`file`, `bytes`, `uploaded`), ready for `site-install --file` |
+| `trash` | admin | the sites deleted with their files, one entry each (`<domain>-<date>-<time>`): site, preset, account and whether any site still uses it, deleted and expiry times, size and file count, the pieces with their original paths; the whole is read by the helper, so 503 `busy` while a task runs |
 | `site-unit NAME [--raw]` | viewer | the systemd unit that runs a Rails or Redmine site's Puma, a Django or Wagtail site's Gunicorn (section 4e), or a Node site's node (section 4f), rendered from the site and `[control] runtimes`, with the root commands that install it (`--raw` prints the unit alone, for `> /etc/systemd/system/...`); 409 for a site without its own account or a non-loopback upstream |
 | `site-service NAME` | viewer | whether a Rails, Redmine, Django, Wagtail or Node site's application service runs: `agensio-app-USER.service`, derived from the site's account, read by the provisioning helper with `systemctl show` (`state`: `LoadState`, `ActiveState`, `SubState`, `Result`, `ExecMainStatus`, `MainPID`, the enter timestamps, `MemoryCurrent`, `NRestarts`, `UnitFileState`), with `summary` and `next_steps` (`site-unit` when the unit is missing, `site-service-logs` and `systemctl restart` when it failed, `systemctl enable --now` when it is stopped); 409 for a site without its own account, a non-Rails site or a server without the helper; 503 `busy` while the helper runs a task |
 | `site-service-logs NAME [--lines N] [--since 3h] [--raw]` | admin | the unit's journal (`journalctl -u UNIT -n N -o short-iso`, N from 1 to 1000, 200 by default; `--since` a number and `s`, `m`, `h` or `d`), newest last, the newest 256 KB at most; every read audited; `--raw` prints the lines alone |
@@ -1495,7 +1497,10 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 | `site-create` answers | | 422 with `needs` while decisions are open; 409 `prerequisites missing` with `problems` (every one at once, each with a `code`, a `detail` and its `run_as_root` command: `missing_account`, `missing_group`, `root_missing`, `root_unreadable`, `certificate_missing`) plus the flat `run_as_root` list; 202 `needs_restart` when the site adds a privileged port the dropped server cannot bind by a reload (the file is written and valid, `systemctl restart agensio` serves it); 201 with `next_steps` (separate commands: `agensio pools`, then the php-fpm reload) and `warnings`. `dry_run: true` runs every check and returns the file that would be written without writing or reloading |
 | `site-update NAME` | admin | the same fields on a site `site-create` wrote (the file carries its spec on its first line); a hand-written file is refused with 409, edit it yourself. `settings = {key: value}` (CLI `--set KEY=VALUE`, repeatable) sets the per-site limits: `max_body_size` (any site), and for a PHP site with its own user (a generated pool) `memory_limit`, `max_execution_time`, `max_input_time`, `children`, `pm`, `max_requests`. Each value is checked against `[control] site_limits` and refused above it naming the key, the value and the ceiling; a key outside that list (`extra`, `open_basedir`, any ini name) is refused as unknown, whatever it is. The answer's `done` lists what was written and reloaded: the site file and agensio, and the php-fpm pool and php-fpm when a pool key changed (a php-fpm reload briefly affects every PHP site unless `process_control_timeout` is set) |
 | `site-disable NAME`, `site-enable NAME` | admin | renames the file to `.disabled` and back, reloads |
-| `site-delete NAME` | admin | removes the file (a `.bak` stays), reloads; never touches the root or the account |
+| `site-delete NAME [--files]` | admin | removes the file (a `.bak` stays), reloads; never touches the root or the account. With `--files` (`files: true`) everything of the site goes into root's trash first (below): its directory, the account's state directory (or the site's virtualenv when another site shares the account), its access log with its rotations, its environment file, and the site file's text into the entry's manifest; refused while the site's service runs (with the `systemctl` lines for root) or when the directory is not below `sites_root`; a reload that fails afterwards puts everything back. The account is kept |
+| `site-restore ENTRY` | admin | brings an entry of the trash back: every piece to its original path, the site file from the manifest, a reload; only into an empty place (refused when the site exists again, its file is there, or any original path exists and is not empty), and only with the account at the uid the files carry (else the `useradd --uid` line for root). The application's service is not restored: `site-unit` renders it again |
+| `trash-delete ENTRY` | admin | removes one entry now, for good |
+| `trash-expire` | admin | removes the entries older than `trash_keep` now (worker 0 does it every hour) |
 | `cert-renew NAME` | operator | orders the site's automatic certificate again now |
 | `upload NAME [FILE]` | operator | stores FILE (stdin by default) as `<state_dir>/uploads/NAME`, the server's own directory (0700); `PUT /v1/uploads/NAME` with the raw bytes on the socket; no `--yes`; at most `upload_max`; names are plain file names (letters, digits, `.`, `_`, `-`, no leading dot); a partial transfer leaves nothing |
 | `uploads-delete NAME` | operator | removes a stored upload |
@@ -1612,6 +1617,28 @@ first 256 KB and last 768 KB beyond that) in the server's memory until the site'
 task or a restart; `agensio ctl site-task-output NAME [--offset N] [--length N] [--raw]`
 (admin, MCP `site_task_output`) reads it in slices of up to 64 KB, `next_offset` leading
 to the next.
+
+**Deleting a site with its files.** `site-delete NAME --files` (MCP `site_delete` with
+`files: true`) moves everything of a site into `<sites_root>/.trash/<domain>-<date>-<time>/`,
+a directory root owns alone (`0700`), so no account and not the server can read another
+tenant's deleted files: the site's directory (the first directory below `sites_root` on its
+root's path, `/var/www/example.com` for `/var/www/example.com/app`, unless another site's root
+lies under it), the account's state directory `<state_dir>/<user>` (its gems, virtualenvs,
+sessions; the site's virtualenv alone when another site shares the account), its access log
+with its rotations, its environment file with its secrets, and the text of its site file in
+the entry's `manifest.json`. Everything moves by rename, so nothing is copied; a piece on
+another filesystem goes to a trash beside it (`<state_dir>/.trash`, `<logs>/.trash`) or, a
+small file, is copied. The account is kept, because the files carry its uid and a restore
+needs it; `trash` says when no site uses an account any more, for root's `userdel`. The
+delete is refused while the site's application service runs (a process whose directory is
+renamed keeps writing into the trash): the answer carries `systemctl disable --now` for root.
+`site-restore ENTRY` puts every piece back and the site file with it, then reloads, but only
+into an empty place: never over files that appeared since. Entries expire after `[control]
+trash_keep` days (60 by default, applied to what is in the trash when it changes; 0 never),
+removed by worker 0's hourly check or `trash-expire`; `trash-delete ENTRY` removes one now.
+Without `--files` `site-delete` removes the configuration alone and leaves every file where
+it is, as before. The whole is the provisioning helper's: a server started without it
+answers 409 and the files are removed by hand.
 
 **The site's environment.** An application reads settings and secrets from its
 environment: a Rails application without credentials (every ONCE application such as

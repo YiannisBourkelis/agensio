@@ -63,6 +63,7 @@ const std::vector<KeyDef>& key_defs() {
         {"[control]", "site_limits", "table", "{ max_body_size = \"512MB\", memory_limit = \"512M\", max_execution_time = 300, max_input_time = 300, children = 32, max_requests = 1000000 }", "The ceilings a site's settings may be raised to through the control plane; root moves them here.", "reload", "file", "15"},
         {"[control]", "runtimes", "table { ruby, node, php, python3 } of directories", "{ ruby = \"/usr/bin\", node = \"/usr/bin\", php = \"/usr/bin\", python3 = \"/usr/bin\" }", "Where site tasks find their interpreters (ruby, gem and bundle for app = \"rails\"). The program, the file it resolves to and every directory above both must be root's and writable by root alone, outside sites_root, or the task is refused: a site never supplies its own interpreter. Point it at a root-owned installation under /opt when the distribution's is too old or an application pins another version (a Gemfile with ruby file: \".ruby-version\"); docs/configuration.md 15 shows the build. A reload applies it.", "reload", "file", "15"},
         {"[control]", "task_limits", "table { timeout, processes }", "{ timeout = 1200, processes = 512 }", "The bounds of every site task; the two keys are below.", "reload", "file", "15"},
+        {"[control]", "trash_keep", "days", "60", "How long a site deleted with its files (site-delete --files) stays in <sites_root>/.trash before the hourly expiry removes it; 0 keeps entries until trash-delete. The account is never removed.", "reload", "file", "15"},
         {"[control]", "task_network", "bool", "true", "Site tasks that download (gem_install_rails, rails_new, bundle_install) may run; false refuses them, for a host that installs archives carrying vendor/bundle instead.", "reload", "file", "15"},
         {"task_limits = {}", "timeout", "seconds", "1200", "Wall-clock limit of one site task: SIGTERM to its process group, SIGKILL ten seconds later; a task's own limit is capped by it. 5 to 86400.", "reload", "file", "15"},
         {"task_limits = {}", "processes", "int", "512", "RLIMIT_NPROC of the site's account while a task runs, so a runaway build stops there. 16 to 65536.", "reload", "file", "15"},
@@ -259,6 +260,7 @@ json::Value running_value(const Config& c, const std::string& table, const std::
         if (key == "task_limits")
             return V::object().set("timeout", static_cast<double>(c.control.task_timeout)).set("processes", static_cast<double>(c.control.task_processes));
         if (key == "task_network") return V(c.control.task_network);
+        if (key == "trash_keep") return V(static_cast<double>(c.control.trash_keep));
     } else if (table == "task_limits = {}") {
         if (!c.control.enabled) return V("(no [control] table)");
         if (key == "timeout") return V(static_cast<double>(c.control.task_timeout));
