@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.43 (unreleased)
+## 0.1.0-alpha.43 (2026-10-02)
 
 Host protection rendered, never applied (hardening step 2 of CLAUDE.md, item 6;
 `docs/configuration.md` 18; design section 21). Per-address limits are the firewall's and
