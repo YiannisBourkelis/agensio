@@ -10,7 +10,9 @@ path with the start of its query (`/?controller=AuthController&action=check` for
 `/?_task=login` for Roundcube, `/ucp.php?mode=login` for phpBB), matched from the query's
 start; `protection_show` lists only the file count of a jail that is not agensio's (a Samba
 jail with 1,976 logs made an 86 KB answer); `logs_query` for a site that does not exist is a
-404 rather than an empty answer.
+404 rather than an empty answer. From the addendum: a site change that leaves the installed
+jail file or the kept ruleset older than the sites (a login path added, a new public port)
+puts root's re-render line into the answer's `next_steps`, where before only health said so.
 
 ## 0.1.0-alpha.43 (2026-10-02)
 

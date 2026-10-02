@@ -113,6 +113,10 @@ private:
     // host, and what the kernel's firewall and fail2ban do now, through the helper's
     // host_protection (read-only).
     void protection_show(Stream& s, std::function<void()> done);
+    // After a change to the sites: the root lines that bring the installed host protection
+    // back in step with them (the fail2ban jail file, the kept ruleset), empty when nothing
+    // is installed or nothing changed for them.
+    std::vector<std::string> protection_steps();
     void trash_restore(Stream& s, std::string_view entry, std::string_view what, std::function<void()> done);
     void trash_delete(Stream& s, std::string_view entry, std::string_view what, std::function<void()> done);
     void site_env_set(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> done);

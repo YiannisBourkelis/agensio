@@ -667,6 +667,7 @@ void ControlHandler::site_trash(Stream& s, std::string_view name, std::string_vi
             else steps.push("# the helper could not apply the pools (" + std::string(pool.get("error")) + "); run: agensio pools");
         }
         if (!r["run_as_root"].items().empty()) body.set("run_as_root", r["run_as_root"]);
+        for (const auto& p : protection_steps()) steps.push(p);
         body.set("next_steps", steps);
         if (!done_now.items().empty()) body.set("done", done_now);
         reply(s, 200, body);
@@ -701,6 +702,22 @@ void ControlHandler::protection_show(Stream& s, std::function<void()> done) {
         finish(json::Value::object().set("ok", false).set("error", in.exposed ? "[control] host_protection = \"off\": the host is not checked" : "every listener is on loopback: nothing to check"));
     else
         backend_->helper_async(json::Value::object().set("op", "host_protection"), finish);
+}
+
+// 2026-10-02 alpha.43 addendum: a login path added through site_update was not counted until
+// root rendered the jail again, and the answer said nothing. Only files root installed are
+// judged: the jail at /etc/fail2ban/jail.d/agensio.conf against the rendering for the sites as
+// they are now, the kept ruleset <config dir>/firewall.nft against its rendering (a new
+// public port); a host without them hears it from health instead.
+std::vector<std::string> ControlHandler::protection_steps() {
+    std::vector<std::string> out;
+    const control::ProtectionInput in = control::protection_input(backend_->running());
+    if (const auto jail = read_whole_file(std::string(control::kJailFile)); jail && *jail != control::render_jail(in))
+        out.push_back("the fail2ban jail on disk is older than this change (the sites' login paths, logs or ports): until root renders it again the new paths are not counted; as root: agensio ctl protection --jail > " +
+                      std::string(control::kJailFile) + "; fail2ban-client reload");
+    if (const auto nft = read_whole_file(in.firewall_file); nft && *nft != control::render_nft(in))
+        out.push_back("the firewall ruleset on disk is older than this change (the public ports): as root: agensio ctl protection --nft > " + in.firewall_file + "; nft -f " + in.firewall_file);
+    return out;
 }
 
 void ControlHandler::trash_list(Stream& s, std::function<void()> done) {
@@ -750,6 +767,7 @@ void ControlHandler::trash_restore(Stream& s, std::string_view entry, std::strin
         }
         if (service_app(r.get("app")) && !r.get("account").empty())
             steps.push("the application's service was removed with the site: site_service_unit " + std::string(r.get("site")) + " renders it again for root");
+        for (const auto& p : protection_steps()) steps.push(p);
         r.set("next_steps", steps);
         if (!reloaded)
             reply(s, 409, r.set("ok", false).set("error", "the files and the site file are back, but the reload was refused; health lists what to fix").set("detail", error));
@@ -1341,6 +1359,7 @@ void ControlHandler::site_create(Stream& s, const json::Value& body, std::string
                            "; as root: chown " + std::string(cfg.user.empty() ? "agensio" : cfg.user) + ":" + group + " " + spec.access_log + " && chmod 0640 " + spec.access_log);
     }
     finish_pool(s, spec, cfg, what, done, steps);
+    for (const auto& p : protection_steps()) steps.push_back(p);
     reply(s, 201, json::Value::object().set("ok", true).set("file", file.string()).set("spec", spec.to_json())
                       .set("done", done).set("next_steps", strings(steps)).set("warnings", warnings));
 }
@@ -1444,6 +1463,7 @@ void ControlHandler::site_update(Stream& s, std::string_view name, const json::V
     done_now.push("site file " + file.string() + " written, agensio reloaded");
     std::vector<std::string> steps = control::next_steps(spec, cfg);
     finish_pool(s, spec, cfg, what, done_now, steps);
+    for (const auto& p : protection_steps()) steps.push_back(p);
     reply(s, 200, json::Value::object().set("ok", true).set("file", file.string()).set("spec", spec.to_json())
                       .set("done", done_now).set("next_steps", strings(steps)));
 }
@@ -1516,6 +1536,7 @@ void ControlHandler::site_toggle(Stream& s, std::string_view name, std::string_v
     for (const auto& f : set_aside) aside_note += (aside_note.empty() ? "" : ", ") + f + " -> " + f + ".bak";
     audit_peer(s, what, std::string(action) + " " + file.string() + (aside_note.empty() ? "" : "; root additions set aside: " + aside_note));
     json::Value body = json::Value::object().set("ok", true).set("file", file.string()).set("action", std::string(action));
+    if (const auto ps = protection_steps(); !ps.empty()) body.set("next_steps", strings(ps));
     if (!set_aside.empty()) {
         std::vector<std::string> baks;
         for (const auto& f : set_aside) baks.push_back(f + ".bak");
