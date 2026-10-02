@@ -22,6 +22,7 @@
 #include "services/acme.hpp"
 #include "control/roles.hpp"
 #include "control/commands.hpp"
+#include "control/protection.hpp"
 #include "control/reference.hpp"
 #include "control/mcp.hpp"
 #include "control/settings.hpp"
@@ -4559,6 +4560,246 @@ static void test_refusal_finding() {
     CHECK(refusal_finding(load).fix.starts_with("legitimate load"));
 }
 
+// Host protection (2026-10-02, docs/configuration.md 18): the input from a configuration (the
+// public ports, QUIC's, the logs, the presets' and the sites' login paths, loopback left out),
+// the renderers held to the shipped files in packaging/, the helper's answer read (nft's JSON,
+// the unit states, fail2ban's status text) and the findings for every state.
+static void test_protection() {
+    namespace fs = std::filesystem;
+    using namespace control;
+    // The input from a configuration.
+    const fs::path dir = fs::temp_directory_path() / ("agensio-prot-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "www");
+    std::ofstream(dir / "a.toml") << "[server]\nworkers = 1\n[log]\naccess = \"access.log\"\n[control]\nsocket = \"ctl.sock\"\nhost_protection = \"external\"\n"
+                                     "[[site]]\nserver_name = [\"wp.test\"]\nlisten = [\"0.0.0.0:8080\", \"[::]:8443\"]\nroot = \"www\"\napp = \"wordpress\"\n"
+                                     "php = { socket = \"unix:/run/php/x.sock\" }\nlogin_paths = [\"/login\", \"/login\", \"/api/token\"]\n"
+                                     "[[site]]\nserver_name = [\"lo.test\"]\nlisten = [\"127.0.0.1:8081\"]\nroot = \"www\"\nlogin_paths = \"/one\"\naccess_log = \"off\"\n";
+    {
+        const Config cfg = load_config(dir / "a.toml");
+        CHECK(cfg.control.host_protection == "external" && (cfg.sites[0].login_paths == std::vector<std::string>{"/login", "/api/token"}) &&
+              (cfg.sites[1].login_paths == std::vector<std::string>{"/one"}));
+        const ProtectionInput in = protection_input(cfg);
+        CHECK(in.exposed && (in.tcp_ports == std::vector<unsigned>{8080, 8443}) && in.udp_ports.empty() && in.combined && in.host_protection == "external");
+        CHECK((in.logs == std::vector<std::string>{(dir / "access.log").string()}) && (in.unlogged == std::vector<std::string>{"lo.test"}));
+        CHECK((in.login_paths == std::vector<std::string>{"/api/token", "/login", "/one", "/wp-login.php"}) && in.firewall_file == (dir / "firewall.nft").string());
+        // A loopback-only host is not exposed; QUIC adds the TLS port to the UDP list.
+        Config lo = cfg;
+        lo.sites.erase(lo.sites.begin());
+        CHECK(!protection_input(lo).exposed && protection_input(lo).tcp_ports.empty());
+        Config h3 = cfg;
+        h3.sites[0].tls = TlsConfig{};
+        h3.sites[0].h3 = true;
+        CHECK((protection_input(h3).udp_ports == std::vector<unsigned>{8080, 8443}));
+    }
+    for (const char* bad : {"login_paths = [\"login\"]", "login_paths = [\"/a//b\"]", "login_paths = [\"/a/../b\"]", "login_paths = [\"/\"]", "login_paths = [\"/a?b=1\"]", "login_paths = 7"}) {
+        std::ofstream(dir / "b.toml") << "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n" << bad << "\n";
+        bool refused = false;
+        try {
+            load_config(dir / "b.toml");
+        } catch (const std::exception&) {
+            refused = true;
+        }
+        if (!refused) std::printf("login_paths accepted %s\n", bad);
+        CHECK(refused);
+    }
+    {
+        std::ofstream(dir / "c.toml") << "[control]\nhost_protection = \"maybe\"\n[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n";
+        bool refused = false;
+        try {
+            load_config(dir / "c.toml");
+        } catch (const std::exception&) {
+            refused = true;
+        }
+        CHECK(refused);
+    }
+    CHECK((preset_login_paths("wordpress") == std::vector<std::string>{"/wp-login.php"}) && preset_login_paths("wagtail").size() == 2 && preset_login_paths("php").empty() &&
+          (preset_login_paths("redmine") == std::vector<std::string>{"/login"}) && preset_login_paths("rails").empty());
+    CHECK(check_login_path("/x.y-z_1/").empty() && !check_login_path("/x y").empty() && !check_login_path("").empty());
+    // The shipped files are the renderers' output for the default host.
+    auto file = [](const char* rel) {
+        std::ifstream f(std::string(AGENSIO_SOURCE_DIR) + "/" + rel);
+        return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    };
+    const ProtectionInput def = default_protection_input();
+    CHECK((def.tcp_ports == std::vector<unsigned>{80, 443}) && (def.udp_ports == std::vector<unsigned>{443}) && def.exposed && def.login_paths.size() == 7);
+    CHECK(render_nft(def) == file("packaging/firewall/agensio.nft"));
+    CHECK(render_jail(def) == file("packaging/fail2ban/jail.d/agensio.conf"));
+    CHECK(render_firewall_unit(def) == file("packaging/agensio-firewall.service"));
+    for (const auto& f : protection_filters()) CHECK(std::string(f.text) == file(("packaging/fail2ban/filter.d/" + std::string(f.name) + ".conf").c_str()));
+    CHECK(protection_filters().size() == 4);
+    // What a host's rendering says: its ports, its logs, its paths (escaped for the regex), the
+    // QUIC rule only with h3, the login jail disabled without a path.
+    ProtectionInput in;
+    in.tcp_ports = {80, 443};
+    in.udp_ports = {443};
+    in.logs = {"/var/log/agensio/access.log", "/var/log/agensio/wp.log"};
+    in.login_paths = {"/login", "/wp-login.php"};
+    in.exposed = true;
+    in.firewall_file = "/etc/agensio/firewall.nft";
+    {
+        const std::string nft = render_nft(in), jail = render_jail(in);
+        CHECK(nft.find("tcp dport { 80, 443 } ct state new update @new4") != std::string::npos && nft.find("udp dport { 443 } @th,64,8 & 0xc0 == 0xc0") != std::string::npos &&
+              nft.starts_with("#!/usr/sbin/nft -f\n") && nft.find("table inet agensio\ndelete table inet agensio\ntable inet agensio {") != std::string::npos);
+        CHECK(jail.find("filter    = agensio-login[paths=\"/login|/wp-login\\.php\"]") != std::string::npos &&
+              jail.find("logpath   = /var/log/agensio/access.log\n            /var/log/agensio/wp.log\n") != std::string::npos && jail.find("port      = 80,443") != std::string::npos);
+        ProtectionInput nol = in;
+        nol.udp_ports.clear();
+        nol.login_paths.clear();
+        nol.tcp_ports = {8080};
+        CHECK(render_nft(nol).find("quic") == std::string::npos && render_nft(nol).find("tcp dport { 8080 }") != std::string::npos);
+        CHECK(render_jail(nol).find("[agensio-login]\n# Credentials posted to a login path: ten in ten minutes bans for an hour.\n# No login path is known") != std::string::npos &&
+              render_jail(nol).find("enabled   = false") != std::string::npos && render_jail(nol).find("filter    = agensio-login\n") != std::string::npos);
+        ProtectionInput js = in;
+        js.combined = false;
+        CHECK(render_jail(js).find("NOTE: this host's access logs are JSON") != std::string::npos);
+        CHECK(firewall_trial_commands(in).size() == 3 && firewall_trial_commands(in)[2].starts_with("systemd-run --on-active=10min --unit agensio-firewall-trial") &&
+              (firewall_keep_commands(in) == std::vector<std::string>{"systemctl stop agensio-firewall-trial.timer", "systemctl enable --now agensio-firewall.service"}));
+        ProtectionInput odd = in;
+        odd.firewall_file = "/srv/agensio/firewall.nft";
+        CHECK(firewall_keep_commands(odd).size() == 4 && firewall_keep_commands(odd)[1] == "agensio ctl protection --unit > /etc/systemd/system/agensio-firewall.service");
+        CHECK(fail2ban_install_commands().size() == 3 && fail2ban_install_commands()[0].find("filter.d/agensio-post.conf /etc/fail2ban/filter.d/") != std::string::npos);
+    }
+    // The helper's answer, read: nft's JSON (our table with counters, a foreign rule through a
+    // named port set), the units, fail2ban's status texts.
+    const char* reply_text = R"json({"ok": true,
+      "nft": {"available": true, "terse": false, "ruleset": {"nftables": [
+        {"metainfo": {"version": "1.1.3"}},
+        {"table": {"family": "inet", "name": "agensio", "handle": 17}},
+        {"chain": {"family": "inet", "table": "agensio", "name": "input", "hook": "input", "prio": -10, "policy": "accept"}},
+        {"rule": {"family": "inet", "table": "agensio", "chain": "input", "handle": 9, "comment": "agensio: new connections per IPv4 address",
+                  "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": {"set": [80, 443]}}},
+                           {"match": {"op": "in", "left": {"ct": {"key": "state"}}, "right": "new"}},
+                           {"set": {"op": "update", "elem": {"payload": {"protocol": "ip", "field": "saddr"}}, "set": "@new4", "stmt": [{"limit": {"rate": 30, "burst": 60, "per": "second", "inv": true}}]}},
+                           {"counter": {"packets": 12, "bytes": 720}}, {"drop": null}]}},
+        {"rule": {"family": "inet", "table": "agensio", "chain": "input", "handle": 10, "comment": "agensio: connections held per IPv4 address",
+                  "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": {"set": [80, 443]}}},
+                           {"set": {"op": "add", "elem": {"payload": {"protocol": "ip", "field": "saddr"}}, "set": "@held4", "stmt": [{"ct count": {"val": 200, "inv": true}}]}},
+                           {"counter": {"packets": 0, "bytes": 0}}, {"reject": {"type": "tcp reset"}}]}},
+        {"rule": {"family": "inet", "table": "agensio", "chain": "input", "handle": 11, "comment": "agensio: QUIC handshakes per IPv4 address",
+                  "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "udp", "field": "dport"}}, "right": 443}},
+                           {"set": {"op": "update", "elem": {"payload": {"protocol": "ip", "field": "saddr"}}, "set": "@quic4", "stmt": [{"limit": {"rate": 50, "burst": 100, "per": "second", "inv": true}}]}},
+                           {"counter": {"packets": 3, "bytes": 3600}}, {"drop": null}]}},
+        {"table": {"family": "inet", "name": "panel", "handle": 20}},
+        {"set": {"family": "inet", "name": "web", "table": "panel", "type": "inet_service", "elem": [8080, {"range": [8443, 8445]}]}},
+        {"rule": {"family": "inet", "table": "panel", "chain": "in", "handle": 21,
+                  "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": "@web"}},
+                           {"set": {"op": "add", "elem": {"payload": {"protocol": "ip", "field": "saddr"}}, "set": "@c", "stmt": [{"ct count": {"val": 50, "inv": true}}]}}, {"drop": null}]}},
+        {"rule": {"family": "inet", "table": "panel", "chain": "in", "handle": 22,
+                  "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 22}}, {"accept": null}]}}
+      ]}},
+      "units": {"agensio-firewall.service": {"Id": "agensio-firewall.service", "LoadState": "loaded", "ActiveState": "active", "UnitFileState": "enabled"},
+                "agensio-firewall-trial.timer": {"Id": "agensio-firewall-trial.timer", "LoadState": "not-found", "ActiveState": "inactive"},
+                "fail2ban.service": {"Id": "fail2ban.service", "LoadState": "loaded", "ActiveState": "active"},
+                "nftables.service": {"Id": "nftables.service", "LoadState": "loaded", "ActiveState": "active"},
+                "firewalld.service": {"Id": "firewalld.service", "LoadState": "not-found", "ActiveState": "inactive"}},
+      "fail2ban": {"available": true, "status": "Status\n|- Number of jail:\t2\n`- Jail list:\tsshd, agensio-login", "jails": [
+        {"name": "sshd", "status": "Status for the jail: sshd\n|- Filter\n|  |- Currently failed:\t0\n|  |- Total failed:\t0\n|  `- File list:\t/var/log/auth.log\n`- Actions\n   |- Currently banned:\t0\n   |- Total banned:\t0\n   `- Banned IP list:\t"},
+        {"name": "agensio-login", "status": "Status for the jail: agensio-login\n|- Filter\n|  |- Currently failed:\t2\n|  |- Total failed:\t12\n|  `- File list:\t/var/log/agensio/access.log /var/log/agensio/wp.log\n`- Actions\n   |- Currently banned:\t1\n   |- Total banned:\t3\n   `- Banned IP list:\t203.0.113.9"}]}})json";
+    json::Value reply;
+    std::string perr;
+    CHECK(json::parse(reply_text, reply, perr));
+    const ProtectionProbe probe = read_probe(reply, in);
+    CHECK(probe.checked && probe.nft_available && probe.table);
+    CHECK((probe.limited_tcp == std::vector<unsigned>{80, 443, 8080, 8443, 8444, 8445}) && (probe.limited_udp == std::vector<unsigned>{443}));
+    CHECK(probe.rules.size() == 3 && probe.rules[0].comment == "agensio: new connections per IPv4 address" && probe.rules[0].packets == 12 && probe.rules[2].packets == 3);
+    CHECK(probe.firewall_unit == "enabled" && !probe.trial_running && probe.units_why.empty() && probe.managers.size() == 1 && probe.managers[0].first == "nftables.service");
+    CHECK(probe.fail2ban_available && probe.fail2ban_service == "active" && probe.jails.size() == 2 && !probe.jails[0].ours && probe.jails[1].ours &&
+          probe.jails[1].files.size() == 2 && probe.jails[1].banned == 1 && probe.jails[1].total_banned == 3);
+    // Everything in place: no finding, a summary that says so, and the report's shape.
+    ProtectionFiles files;
+    files.installed_jail = render_jail(in);
+    files.firewall_file = render_nft(in);
+    auto codes = [&](const ProtectionInput& i, const ProtectionProbe& p, const ProtectionFiles& f) {
+        std::string out;
+        for (const auto& x : protection_findings(i, p, f)) out += (out.empty() ? "" : " ") + x.severity + ":" + x.code;
+        return out;
+    };
+    CHECK(codes(in, probe, files).empty());
+    {
+        const json::Value r = protection_report(in, probe, files);
+        CHECK(r["ok"].boolean() && r["exposed"].boolean() && r["ports"]["tcp"].items().size() == 2 && r["firewall"]["detected"]["covered"].boolean() &&
+              r["firewall"]["detected"]["table_loaded"].boolean() && r["firewall"]["detected"].get("unit_state") == "enabled" && r["firewall"]["detected"]["rules"].items().size() == 3 &&
+              r["firewall"]["trial"].items().size() == 3 && r["firewall"]["file_current"].boolean() && r["fail2ban"].get("installed_jail") == "same" &&
+              r["fail2ban"]["detected"]["covered"].boolean() && r["fail2ban"]["detected"]["banned"].num() == 1 && r["fail2ban"]["filters"]["agensio-login"].is_string() &&
+              r["findings"].items().empty());
+        CHECK(r.get("summary") == "the firewall limits are loaded and enabled at boot; fail2ban reads the access logs (1 address(es) banned now, 3 since start)");
+    }
+    // The states, one by one.
+    ProtectionFiles stale = files;
+    stale.installed_jail = "[agensio-login]\nenabled = true\n";
+    CHECK(codes(in, probe, stale) == "info:fail2ban_jail_stale");
+    ProtectionFiles nojail = files;
+    nojail.installed_jail.reset();
+    CHECK(codes(in, probe, nojail).empty());  // the jails that read our logs are someone else's file: fine
+    ProtectionProbe p2 = probe;
+    p2.firewall_unit = "disabled";
+    CHECK(codes(in, p2, files) == "warn:firewall_limits_unsaved" && protection_findings(in, p2, files)[0].fix == "as root: systemctl stop agensio-firewall-trial.timer; systemctl enable --now agensio-firewall.service");
+    p2.trial_running = true;
+    CHECK(codes(in, p2, files) == "info:firewall_limits_trial");
+    p2.trial_running = false;
+    p2.firewall_unit = "";
+    p2.units_why = "systemctl not available on this host";
+    CHECK(codes(in, p2, files) == "info:firewall_limits_unsaved" && protection_findings(in, p2, files)[0].message.find("could not be told: systemctl not available") != std::string::npos);
+    ProtectionProbe p3 = probe;
+    p3.limited_udp.clear();
+    CHECK(codes(in, p3, files) == "info:firewall_quic_unlimited");
+    ProtectionProbe none = probe;
+    none.table = false;
+    none.limited_tcp = {8080};
+    none.limited_udp.clear();
+    none.rules.clear();
+    none.jails.clear();
+    {
+        const auto f = protection_findings(in, none, files);
+        CHECK(codes(in, none, files) == "warn:firewall_limits_missing warn:fail2ban_missing");
+        CHECK(f[0].message.starts_with("no per-address limit on the web ports (80, 443) in the kernel's firewall") &&
+              f[0].fix.find("agensio ctl protection --nft > /etc/agensio/firewall.nft; nft -f /etc/agensio/firewall.nft; systemd-run --on-active=10min") != std::string::npos &&
+              f[0].fix.find("then keep it: systemctl stop agensio-firewall-trial.timer; systemctl enable --now agensio-firewall.service") != std::string::npos);
+        CHECK(f[1].message.starts_with("no fail2ban jail reads agensio's access logs (/var/log/agensio/access.log, /var/log/agensio/wp.log)") && f[1].message.find("/login, /wp-login.php") != std::string::npos &&
+              f[1].fix.find("agensio ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf; fail2ban-client reload") != std::string::npos);
+        ProtectionInput ext = in;
+        ext.host_protection = "external";
+        CHECK(codes(ext, none, files) == "info:firewall_limits_missing info:fail2ban_missing" && protection_findings(ext, none, files)[0].message.find("managed outside agensio") != std::string::npos);
+        ext.host_protection = "off";
+        CHECK(codes(ext, none, files).empty() && protection_report(ext, none, files).get("summary").starts_with("[control] host_protection = \"off\""));
+        ProtectionInput lo = in;
+        lo.exposed = false;
+        CHECK(codes(lo, none, files).empty() && protection_report(lo, none, files).get("summary").starts_with("every listener is on loopback"));
+        CHECK(protection_report(in, none, files).get("summary") == "no per-address limit on port(s) 80, 443; no fail2ban jail reads the access logs");
+    }
+    // Our table loaded for other ports than the listeners have now: render again.
+    ProtectionProbe moved = probe;
+    moved.limited_tcp = {80};
+    CHECK(codes(in, moved, files) == "warn:firewall_limits_missing" && protection_findings(in, moved, files)[0].message.starts_with("the agensio firewall table is loaded but covers no limit on port(s) 443"));
+    // Another table's limits count; fail2ban down; the tools absent; the helper away; JSON logs.
+    ProtectionProbe theirs = probe;
+    theirs.table = false;
+    theirs.rules.clear();
+    CHECK(codes(in, theirs, files).empty() && protection_report(in, theirs, files).get("summary").starts_with("per-address limits on the web ports exist in another table"));
+    ProtectionProbe down = probe;
+    down.fail2ban_service = "inactive";
+    down.jails.clear();
+    CHECK(codes(in, down, files) == "warn:fail2ban_missing" && protection_findings(in, down, files)[0].message.starts_with("fail2ban is installed but not running") &&
+          protection_findings(in, down, files)[0].fix.find("systemctl enable --now fail2ban") != std::string::npos);
+    json::Value bare = json::Value::object().set("ok", true).set("nft", json::Value::object().set("available", false).set("why", "nft is not installed (package nftables)"))
+                           .set("units", json::Value(nullptr)).set("units_why", "systemctl not available on this host")
+                           .set("fail2ban", json::Value::object().set("available", false).set("why", "fail2ban is not installed (package fail2ban)"));
+    const ProtectionProbe absent = read_probe(bare, in);
+    CHECK(absent.checked && !absent.nft_available && !absent.fail2ban_available && codes(in, absent, files) == "warn:firewall_limits_missing warn:fail2ban_missing" &&
+          protection_findings(in, absent, files)[0].message.starts_with("nft is not installed") && protection_findings(in, absent, files)[1].fix.starts_with("install fail2ban, then as root:"));
+    const ProtectionProbe busy = read_probe(json::Value::object().set("ok", false).set("busy", true), in);
+    CHECK(!busy.checked && codes(in, busy, files) == "info:protection_unchecked" && protection_findings(in, busy, files)[0].message.find("the helper is busy") != std::string::npos);
+    const ProtectionProbe nohelper = read_probe(json::Value(nullptr), in);
+    CHECK(!nohelper.checked && nohelper.why.find("provisioning helper") != std::string::npos);
+    ProtectionInput js = in;
+    js.combined = false;
+    CHECK(codes(js, probe, files) == "warn:fail2ban_log_format");
+    ProtectionInput blind = in;
+    blind.unlogged = {"quiet.test"};
+    CHECK(codes(blind, probe, files) == "info:fail2ban_blind");
+    fs::remove_all(dir);
+}
+
 // The configuration reference (F11) is held to the parser and to the reference document:
 // every key the parser reads is a row, every row's section exists, docs/keys.md is what the
 // binary prints (the integration suite diffs it), and the JSON carries running values.
@@ -5672,6 +5913,7 @@ int main() {
 #endif
     test_config_reference();
     test_refusal_finding();
+    test_protection();
     test_install();
 #ifdef AGENSIO_HAS_TLS
     test_acme();

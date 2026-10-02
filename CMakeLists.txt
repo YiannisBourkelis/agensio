@@ -118,6 +118,7 @@ add_library(agensio_core STATIC
   src/services/appenv.cpp
   src/control/handler.cpp
   src/control/commands.cpp
+  src/control/protection.cpp
   src/control/sites.cpp
   src/control/settings.cpp
   src/control/reference.cpp
@@ -240,6 +241,11 @@ install(FILES packaging/etc/sites.d/default.toml DESTINATION /etc/agensio/sites.
 install(FILES packaging/agensio.logrotate DESTINATION /etc/logrotate.d RENAME agensio)
 install(FILES packaging/agensio.service DESTINATION /usr/lib/systemd/system)
 install(FILES packaging/www/index.html DESTINATION ${CMAKE_INSTALL_DATADIR}/agensio/www)
+# Host protection (docs/configuration.md 18): the firewall ruleset, the fail2ban jails and filters,
+# and the unit that loads the ruleset at boot; shipped inactive, root installs them by hand.
+install(FILES packaging/firewall/agensio.nft DESTINATION ${CMAKE_INSTALL_DATADIR}/agensio/firewall)
+install(DIRECTORY packaging/fail2ban/ DESTINATION ${CMAKE_INSTALL_DATADIR}/agensio/fail2ban)
+install(FILES packaging/agensio-firewall.service DESTINATION /usr/lib/systemd/system)
 install(FILES README.md CHANGELOG.md LICENSE docs/configuration.md docs/keys.md docs/install.md docs/mcp.md
               docs/security-control-plane.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
 install(DIRECTORY docs/examples DESTINATION ${CMAKE_INSTALL_DOCDIR})

@@ -1,0 +1,36 @@
+#!/usr/sbin/nft -f
+# agensio: per-address limits on the web ports, in a table of its own (docs/configuration.md 18).
+# Rendered by `agensio ctl protection --nft` for this host's listeners; the packaged copy at
+# /usr/share/agensio/firewall/agensio.nft is the rendering for ports 80 and 443.
+# Nothing outside `table inet agensio` is touched: no other table, chain or rule, no policy, so
+# the distribution's firewall, a panel's rules, ufw and firewalld keep theirs and this keeps its own.
+#   trial:  nft -f THIS_FILE          (in the kernel only; `nft delete table inet agensio` or a reboot removes it)
+#   keep:   systemctl enable --now agensio-firewall.service   (loads /etc/agensio/firewall.nft at boot)
+table inet agensio
+delete table inet agensio
+table inet agensio {
+    # Per-source state: new connections in the last minute, connections held, QUIC handshakes.
+    # IPv6 is counted per /64, one subscriber.
+    set new4 { type ipv4_addr; flags dynamic; timeout 1m; }
+    set new6 { type ipv6_addr; flags dynamic; timeout 1m; }
+    set held4 { type ipv4_addr; flags dynamic; }
+    set held6 { type ipv6_addr; flags dynamic; }
+    set quic4 { type ipv4_addr; flags dynamic; timeout 1m; }
+    set quic6 { type ipv6_addr; flags dynamic; timeout 1m; }
+    chain input {
+        type filter hook input priority filter - 10; policy accept;
+        # Loopback and the packets of connections already accepted are not this chain's business.
+        iif "lo" return
+        ct state established,related return
+        # More than 30 new connections a second from one address (bursts of 60 allowed): dropped.
+        tcp dport { 80, 443 } ct state new update @new4 { ip saddr limit rate over 30/second burst 60 packets } counter drop comment "agensio: new connections per IPv4 address"
+        tcp dport { 80, 443 } ct state new update @new6 { ip6 saddr & ffff:ffff:ffff:ffff:: limit rate over 30/second burst 60 packets } counter drop comment "agensio: new connections per IPv6 /64"
+        # More than 200 connections held by one address: the next one is refused with a reset.
+        tcp dport { 80, 443 } ct state new add @held4 { ip saddr ct count over 200 } counter reject with tcp reset comment "agensio: connections held per IPv4 address"
+        tcp dport { 80, 443 } ct state new add @held6 { ip6 saddr & ffff:ffff:ffff:ffff:: ct count over 200 } counter reject with tcp reset comment "agensio: connections held per IPv6 /64"
+        # QUIC: more than 50 handshakes a second from one address (long-header packets, the first
+        # byte's top two bits set, RFC 9000 17.2); the data packets of a connection are never limited here.
+        udp dport { 443 } @th,64,8 & 0xc0 == 0xc0 update @quic4 { ip saddr limit rate over 50/second burst 100 packets } counter drop comment "agensio: QUIC handshakes per IPv4 address"
+        udp dport { 443 } @th,64,8 & 0xc0 == 0xc0 update @quic6 { ip6 saddr & ffff:ffff:ffff:ffff:: limit rate over 50/second burst 100 packets } counter drop comment "agensio: QUIC handshakes per IPv6 /64"
+    }
+}

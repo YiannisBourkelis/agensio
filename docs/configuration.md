@@ -2050,3 +2050,107 @@ belongs:
   nginx's so their stock filters apply, banning through the firewall for a while.
 - Slow and idle clients, protocol abuse (HTTP/2 reset floods, QUIC address validation):
   agensio's own timeouts and budgets, which only the server can judge (sections 16 and 17).
+
+**Shipped: the ruleset, the jails, and the check** (2026-10-02). agensio does not apply any of
+this, but it renders both pieces for the host it runs on and reads back whether they are in
+place. `agensio ctl protection` (the MCP tool `protection_show`, and `agensio protection -c
+FILE` with no server running) answers with the files, root's commands and what the kernel
+and fail2ban do now; `--nft`, `--jail`, `--unit` and `--filter NAME` print one file alone,
+for root to redirect into place. The packaged copies under `/usr/share/agensio/` are the
+rendering for ports 80 and 443 (`agensio protection --defaults`); nothing is installed into
+the live firewall or into `/etc/fail2ban` by a package, ever.
+
+*The firewall.* The ruleset lives in a table of its own, `table inet agensio`, with the
+host's public ports (every listener not on loopback; QUIC's UDP port when `h3` is on): per
+source address, more than 30 new connections a second are dropped (bursts of 60 allowed),
+the 201st connection held is refused with a reset, and more than 50 QUIC handshakes a second
+(long-header packets, the first byte's top two bits, RFC 9000 17.2) are dropped, while a
+connection's data packets are never limited; IPv6 is counted per /64, one subscriber.
+Nothing outside that table is touched, no other table, chain or policy, so the
+distribution's firewall, a panel's rules, ufw and firewalld keep theirs and this keeps its
+own, and `nft delete table inet agensio` removes every trace. Loading the file twice is
+harmless (it deletes and recreates its own table). Root applies it the way network gear
+does, commit-confirmed, so a mistake undoes itself:
+
+```sh
+agensio ctl protection --nft > /etc/agensio/firewall.nft          # the ruleset for this host's ports
+nft -f /etc/agensio/firewall.nft                                     # in the kernel only; a reboot drops it
+systemd-run --on-active=10min --unit agensio-firewall-trial /usr/sbin/nft delete table inet agensio
+#   ... the site answers, this SSH session is alive, `agensio ctl protection` says covered ...
+systemctl stop agensio-firewall-trial.timer                          # keep it: cancel the undo
+systemctl enable --now agensio-firewall.service                      # and load it at every boot
+```
+
+`agensio-firewall.service` (packaged) is a oneshot that runs `nft -f /etc/agensio/firewall.nft`
+after the distribution's firewall and before agensio; `--unit` renders it for a
+configuration kept elsewhere. A manual `systemctl restart nftables` on Debian runs
+`/etc/nftables.conf`, which usually begins with `flush ruleset`: `systemctl restart
+agensio-firewall` puts the table back, or add `include "/etc/agensio/firewall.nft"` to that
+file instead of the unit.
+
+*fail2ban.* Four jails over agensio's access logs (combined format; the filters do not read
+JSON logs), rendered for this host's logs, ports and sites: `agensio-login` counts
+credentials posted to the sites' login paths, ten in ten minutes bans for an hour (a failed
+and a successful login look alike in an access log, so this counts attempts: no one types
+ten passwords in ten minutes, every tool does); `agensio-auth` bursts of 401 and 403;
+`agensio-scan` bursts of 404 (forty in five minutes); `agensio-post` bursts of POST to any
+path (120 in two minutes), the catch-all for a login nobody named, with an `ignore`
+parameter for an API posted to that often (`filter = agensio-post[ignore="/api/|/jsonrpc\.php"]`).
+Bans go through nftables into fail2ban's own table (`banaction = nftables-multiport`); a
+host whose firewall is managed otherwise overrides that in a `jail.local`. The four filters
+are static and shipped; the jail file carries what is the host's:
+
+```sh
+install -m 644 /usr/share/agensio/fail2ban/filter.d/agensio-*.conf /etc/fail2ban/filter.d/
+agensio ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf     # this host's logs, ports, login paths
+fail2ban-client reload
+```
+
+The login paths come from two places. A preset knows its application's: `wordpress`
+`/wp-login.php`, `drupal` `/user/login`, `laravel` `/login` and `/cp/auth/login`, `grav`
+`/admin`, `redmine` `/login`, `django` and `wagtail` `/admin/login/`. A site whose preset
+cannot know (`php`, `rails`, `node`, `proxy`, `static`) names its own with `login_paths`,
+a `[[site]]` key the control plane also writes (`site_update` `login_paths`, `agensio ctl
+site-update NAME --login-path /login`, `--no-login-paths`): plain URL paths, at most 16,
+nothing served or refused by them, so an agent can set them from the application's
+documentation after asking the user. `site_show` lists the effective ones. The jail file is
+rendered from the sites that exist, so adding a site, a log or a login path makes the
+installed file stale; health says so (`fail2ban_jail_stale`) and the two lines above
+refresh it.
+
+```toml
+[[site]]
+server_name = ["kanboard.example.com"]
+app = "php"
+login_paths = ["/login"]      # Kanboard's form; the jail counts attempts here
+```
+
+*The check.* On a host with a public listener, `health` asks the root helper (nft needs
+`CAP_NET_ADMIN`, fail2ban's socket is root's) what is in place, with fixed arguments: `nft
+-j list ruleset`, `systemctl show` of the two agensio units and the firewall services, and
+`fail2ban-client status` per jail. The findings and their fixes: `firewall_limits_missing`
+(no per-source limit on a public port in any table; a panel's or the administrator's own
+counts as protection, so a host that already limits is never nagged), `firewall_limits_trial`
+(loaded, the timer pending), `firewall_limits_unsaved` (loaded, not enabled at boot, or
+unknowable without systemd), `firewall_quic_unlimited` (the table predates `h3`),
+`fail2ban_missing` (not installed, not running, or no jail reads agensio's logs),
+`fail2ban_jail_stale`, `fail2ban_log_format` (JSON logs), `fail2ban_blind` (a site without
+an access log), `protection_unchecked` (no helper). Nothing is reported for a host whose
+listeners are all on loopback. `agensio ctl protection` shows the same with the detail: the
+ports each table limits, each of agensio's rules with its hit counter, the jails with the
+files they read and the addresses banned now and since start.
+
+```toml
+[control]
+host_protection = "check"    # "external": a panel manages the firewall and fail2ban, findings
+                             # are informational; "off": no probe, the files still render
+```
+
+*Hosting panels.* On a host a panel runs, the panel owns the firewall and fail2ban; agensio
+behaves like any other service there: a jail drop-in with its filters, the shape Postfix,
+Dovecot and sshd ship, which appears in the panel's fail2ban page; a firewall table that
+coexists with the panel's rules; detection that counts the panel's own limits; the
+renderer and the check reachable without the MCP bridge (`agensio ctl protection`, the
+control API's `GET /v1/protection`, `agensio protection -c FILE` offline), so a panel that
+writes the site files itself can script the install, trial step included; and
+`host_protection = "external"` to say the panel has it.

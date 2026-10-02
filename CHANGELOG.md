@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.1.0-alpha.43 (unreleased)
+
+Host protection rendered, never applied (hardening step 2 of CLAUDE.md, item 6;
+`docs/configuration.md` 18; design section 21). Per-address limits are the firewall's and
+brute force fail2ban's, so agensio now ships both for its host and checks them: `agensio ctl
+protection`, the MCP tool `protection_show` and the offline `agensio protection -c FILE`
+render an nftables ruleset in a table of its own (`inet agensio`, over the public ports:
+more than 30 new connections a second from one address dropped, the 201st connection held
+refused, more than 50 QUIC handshakes a second dropped, IPv6 per /64; no policy, nothing
+outside the table touched, so it cannot lock root out and coexists with a panel's rules) with
+root's commit-confirmed commands (a trial that a `systemd-run` timer undoes in ten minutes,
+then `agensio-firewall.service` for boot), and four fail2ban jails over the access logs
+(`agensio-login` counts credentials posted to the login paths, ten in ten minutes bans an
+hour; `agensio-auth` 401/403, `agensio-scan` 404, `agensio-post` any POST, the catch-all)
+with four static filters. The login paths come from the presets (wordpress, drupal,
+laravel, grav, redmine, django, wagtail) and from a new `[[site]]` key `login_paths`, which
+`site_create`/`site_update` (`--login-path`) write for an application without a preset of
+its own, after the agent asked the user. Health asks the root helper's new read-only
+`host_protection` (fixed arguments: `nft -j list ruleset`, `systemctl show`, `fail2ban-client
+status`) and reports `firewall_limits_missing` (a per-source limit in any table counts: a
+panel's host is never nagged), `firewall_limits_trial`, `firewall_limits_unsaved`,
+`firewall_quic_unlimited`, `fail2ban_missing`, `fail2ban_jail_stale` (a site added since the
+jail was installed), `fail2ban_log_format`, `fail2ban_blind` and `protection_unchecked`, each
+with root's commands; `[control] host_protection = "external"` makes them informational on a
+host a panel protects, `"off"` skips the probe; nothing is reported for loopback-only
+listeners. Packaged inactive under `/usr/share/agensio/firewall/`, `/usr/share/agensio/fail2ban/`
+and `/usr/lib/systemd/system/agensio-firewall.service`; the unit test holds the shipped files
+to the renderers. `tests/protection.sh` runs the real nft and fail2ban in the
+`agensio-devbox:host` image. Security page row 37.
+
 ## 0.1.0-alpha.42 (2026-10-02)
 
 A connection ceiling per worker (`server.max_connections`, hardening item 5 of CLAUDE.md,

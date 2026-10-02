@@ -21,6 +21,7 @@
 #endif
 
 #include "control/commands.hpp"
+#include "control/protection.hpp"
 #include "control/reference.hpp"
 #include "control/settings.hpp"
 #include "control/sites.hpp"
@@ -142,7 +143,7 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
     const bool read_command = path == "/v1/status" || path == "/v1/sites" || path.starts_with("/v1/sites/") ||
                               path == "/v1/config/validate" || path == "/v1/logs" || path == "/v1/health" ||
                               path == "/v1/presets" || path == "/v1/uploads" || path == "/v1/settings" || path == "/v1/config/reference" ||
-                              path == "/v1/trash";
+                              path == "/v1/trash" || path == "/v1/protection";
     if (!read_command) {
         reply(s, 404, json::Value::object().set("error", "unknown command").set("path", std::string(path)));
         return false;
@@ -181,6 +182,16 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
             return false;
         }
         site_service(s, path.substr(10, path.size() - 10 - suffix), logs, done);
+        return true;
+    }
+    if (path == "/v1/protection") {
+        // Host protection: viewer, since it reveals the ports, log paths and login paths that
+        // status, site_show and the reference reveal already, and nothing root alone knows.
+        if (!done) {
+            reply(s, 503, json::Value::object().set("error", "protection needs an asynchronous caller"));
+            return false;
+        }
+        protection_show(s, done);
         return true;
     }
     if (path == "/v1/trash") {
@@ -656,6 +667,35 @@ void ControlHandler::site_trash(Stream& s, std::string_view name, std::string_vi
         reply(s, 200, body);
         done();
     });
+}
+
+// A world-readable file the server reads itself (the kept ruleset, the installed jail), up to
+// 1 MB; nullopt when absent or unreadable.
+static std::optional<std::string> read_whole_file(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return std::nullopt;
+    std::string text;
+    char buf[65536];
+    while (in.read(buf, sizeof buf) || in.gcount() > 0) {
+        text.append(buf, static_cast<std::size_t>(in.gcount()));
+        if (text.size() > (1u << 20)) break;
+    }
+    return text;
+}
+
+void ControlHandler::protection_show(Stream& s, std::function<void()> done) {
+    const control::ProtectionInput in = control::protection_input(backend_->running());
+    auto finish = [this, &s, done, in](json::Value probe_reply) {
+        control::ProtectionFiles files;
+        files.firewall_file = read_whole_file(in.firewall_file);
+        files.installed_jail = read_whole_file(std::string(control::kJailFile));
+        reply(s, 200, control::protection_report(in, control::read_probe(probe_reply, in), files));
+        done();
+    };
+    if (!in.exposed || in.host_protection == "off")
+        finish(json::Value::object().set("ok", false).set("error", in.exposed ? "[control] host_protection = \"off\": the host is not checked" : "every listener is on loopback: nothing to check"));
+    else
+        backend_->helper_async(json::Value::object().set("op", "host_protection"), finish);
 }
 
 void ControlHandler::trash_list(Stream& s, std::function<void()> done) {

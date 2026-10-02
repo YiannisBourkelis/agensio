@@ -53,7 +53,14 @@ exit 0
 %config(noreplace) %{_sysconfdir}/agensio/sites.d/default.toml
 %config(noreplace) %{_sysconfdir}/logrotate.d/agensio
 %{_unitdir}/agensio.service
+%{_unitdir}/agensio-firewall.service
 %{_datadir}/agensio/www/index.html
+%{_datadir}/agensio/firewall/agensio.nft
+%{_datadir}/agensio/fail2ban/jail.d/agensio.conf
+%{_datadir}/agensio/fail2ban/filter.d/agensio-login.conf
+%{_datadir}/agensio/fail2ban/filter.d/agensio-auth.conf
+%{_datadir}/agensio/fail2ban/filter.d/agensio-scan.conf
+%{_datadir}/agensio/fail2ban/filter.d/agensio-post.conf
 %dir %attr(0750,root,agensio) %{_sysconfdir}/agensio
 %dir %attr(0750,agensio,agensio) %{_sysconfdir}/agensio/sites.d
 %dir %attr(0750,agensio,agensio) /var/log/agensio

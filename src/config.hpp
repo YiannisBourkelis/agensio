@@ -164,6 +164,11 @@ struct SiteConfig {
     // each location marked origin "root:<file>"; root's alone, never written or read by the
     // control plane, so a site the tools manage keeps root's freedom.
     std::vector<std::string> root_additions;
+    // The paths a login form or an authenticating API is posted to (`login_paths`,
+    // 2026-10-02, docs/configuration.md 18), on top of the preset's own
+    // (preset_login_paths): what the rendered fail2ban jail counts attempts on. Never read
+    // when serving; a site without a preset of its own names them here.
+    std::vector<std::string> login_paths;
     std::string access_log;    // absolute path, or "" for no access log (site `access_log`, default [log] access)
     int access_log_sink = -1;  // set by the Server: index into its log registry
 };
@@ -211,6 +216,12 @@ struct ControlConfig {
     // alone) before the hourly expiry removes it; 0 keeps entries until trash_delete (F12b,
     // 2026-09-30, the owner's 60 days).
     unsigned trash_keep = 60;  // days
+    // Host protection (2026-10-02, docs/configuration.md 18): whether health looks for the
+    // per-address limits in the kernel's firewall and a fail2ban jail over the access logs.
+    // "check" warns when they are missing on a host with a public listener; "external" says
+    // a panel or the administrator manages them, so the findings are informational;
+    // "off" skips the probe.
+    std::string host_protection = "check";
 };
 
 // The directory [control] runtimes names for a runtime ("ruby"), "" for an unknown one.
@@ -391,6 +402,12 @@ std::string preset_source(const std::string& app, const std::string& version);
 // hosting rules require to be unreadable by the server's group and what every write path
 // creates 0600. A subset of the preset's never-served list. Empty for presets without one.
 std::vector<std::string> preset_secrets(const std::string& app);
+// The login paths a preset's application is known to post credentials to (wordpress:
+// /wp-login.php, drupal: /user/login, ...), for the rendered fail2ban jail; empty for a preset
+// whose applications differ (php, rails, node, proxy, static).
+std::vector<std::string> preset_login_paths(const std::string& app);
+// A `login_paths` entry: "/"-rooted, plain characters, no "..", no "//", at most 255; "" or why not.
+std::string check_login_path(const std::string& path);
 // Where the preset's application keeps what users upload, relative to the served root
 // ("/wp-content/uploads"); "" when the preset has no such place.
 std::string preset_uploads(const std::string& app);

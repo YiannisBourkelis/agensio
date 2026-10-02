@@ -3,6 +3,12 @@
 - `agensio.service`, `agensio.logrotate`: installed by every package (`/lib/systemd/system`, `/etc/logrotate.d`).
 - `etc/`: the packaged `/etc/agensio/agensio.toml` and `sites.d/default.toml` (serves `/var/www/html`).
 - `www/index.html`: the placeholder page, copied into an empty `/var/www/html` at install.
+- `firewall/agensio.nft`, `fail2ban/jail.d/agensio.conf`, `fail2ban/filter.d/agensio-*.conf`,
+  `agensio-firewall.service`: the host protection of `docs/configuration.md` 18, installed
+  inactive under `/usr/share/agensio/` (the unit under `/usr/lib/systemd/system/`); root
+  applies them by hand, trial first. All but the filters are `build/agensio protection
+  --defaults --nft | --jail | --unit` (ports 80 and 443), the filters `--filter NAME`; the
+  unit test holds the files to the renderers, so regenerate them after a change there.
 - `deb/`: maintainer scripts for the `.deb` that CPack builds (`cpack -G DEB` in the build directory).
 - `rpm/agensio.spec`: for COPR (builds from the tag's tarball); CPack also builds an `.rpm` with the same scripts.
 - `arch/`: `PKGBUILD` and install hooks; the release workflow's `arch` job builds the binary

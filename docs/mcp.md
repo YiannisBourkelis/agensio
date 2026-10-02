@@ -128,7 +128,8 @@ log records which of the two it was.
 
 | tool | role | what it does |
 |---|---|---|
-| `health_check` | viewer | findings with a fix each: certificates, missing redirects, port 80 for ACME, recent errors, connections refused at a worker's ceiling (`connections_refused`: raise the limit, or let the firewall and fail2ban deal with the source), settings waiting for a restart, root, shared accounts, stale pools, every `static` or `dynamic` pool with the PHP processes it keeps resident and their memory (`php_pool_resident`, fix: `settings: {pm: "ondemand"}`; judged from the pool file php-fpm runs, so a pool left `static` on disk after the configuration changed is a warning fixed by `agensio pools`), a site whose files belong to another application than its `app` says (`preset_mismatch`, fix: the detected `app`), backup archives and database dumps under a served tree (`archives_in_root`) |
+| `health_check` | viewer | findings with a fix each: certificates, missing redirects, port 80 for ACME, recent errors, connections refused at a worker's ceiling (`connections_refused`: raise the limit, or let the firewall and fail2ban deal with the source), settings waiting for a restart, root, shared accounts, stale pools, every `static` or `dynamic` pool with the PHP processes it keeps resident and their memory (`php_pool_resident`, fix: `settings: {pm: "ondemand"}`; judged from the pool file php-fpm runs, so a pool left `static` on disk after the configuration changed is a warning fixed by `agensio pools`), a site whose files belong to another application than its `app` says (`preset_mismatch`, fix: the detected `app`), backup archives and database dumps under a served tree (`archives_in_root`); on a host with a public listener, whether the kernel's firewall limits the web ports per address and a fail2ban jail reads the access logs (`firewall_limits_missing`, `firewall_limits_trial`, `firewall_limits_unsaved`, `firewall_quic_unlimited`, `fail2ban_missing`, `fail2ban_jail_stale`, `fail2ban_log_format`, `fail2ban_blind`, `protection_unchecked`; `protection_show` has the files and root's commands; informational under `[control] host_protection = "external"`) |
+| `protection_show` | viewer | the host protection agensio does not apply itself (`docs/configuration.md` 18), rendered for this host and checked: the nftables ruleset (a table of its own over the public ports, per-address connection rate and count, QUIC handshakes) with root's commit-confirmed commands (a trial a timer undoes in ten minutes, then keep), the four fail2ban jails over the access logs with the sites' login paths (the presets' and each site's `login_paths`) and the install commands, and what is in place now through the root helper: which ports any table limits (a panel's count), whether the agensio table is loaded, on trial or enabled at boot with each rule's hit counter, which jails read the logs and how many addresses they banned, whether the installed jail file is stale |
 | `server_status` | viewer | version, pid, uptime, workers, connections, the per-worker connection ceiling (`max_connections`), the `connections_refused` at it since start and `connections_idle`, per worker the refused addresses and listeners and when (`workers_detail`), listeners with their `protocols` (`h2` and `h1` on TLS, `h3` too when QUIC is on, `h2c` when enabled on plain), sites, the caller's role |
 | `sites_list`, `site_show` | viewer | sites with their certificate state; one site with its effective locations (each saying where it came from: a preset, the `rules`, `root:<file>`, or nothing for a hand-written one) and, for a managed site, its `rules` and `root_additions`: the root-owned file beside the managed one where root extends the site with locations no field covers, named before it exists |
 | `config_validate` | viewer | the file on disk: errors and restart-only differences |
@@ -258,13 +259,25 @@ configuration file, then `agensio reload`. Then `site_task` `bundle_install`,
 environment file. A `DATABASE_URL` or an API key goes the same way, with `site_env_set`;
 the agent never writes a secret into a file of the application or into a unit.
 
+> **You:** someone is hammering the login page. Are we protected?
+>
+> **Agent:** calls `health_check` and `protection_show`. The host has a public listener and
+> neither the firewall limits nor a fail2ban jail: it explains the split (the server's
+> ceiling refused the overflow, the firewall and fail2ban are root's), shows the three trial
+> commands exactly, says that the timer undoes them in ten minutes unless kept, and asks you
+> to check the site and your SSH session, then shows the two keep commands and the
+> fail2ban install. For the Kanboard site, whose preset cannot know the login path, it asks
+> where the form posts and sets `login_paths` with `site_update` before rendering the jail.
+> Afterwards `protection_show` reports the table loaded and enabled, the jail reading the
+> logs, and the first address banned.
+
 ## What it cannot do
 
 Run a command of its choosing (`site_task` runs only the named tasks of the site's preset,
 as the site's account, with an interpreter only root could have put there), install packages, edit hand-written site files, a site's root additions file or the main configuration file (root's:
 for a `[server]`, `[cache]`, `[log]` or `[control]` key the agent tells you the exact line
 and whether a reload or a restart follows, from `config_reference`), run anything as
-root, reach other machines except to download an archive you named into a site (and
+root, change the host's firewall or fail2ban (it renders the files and the commands, root applies them, with a trial first), reach other machines except to download an archive you named into a site (and
 never a private address), carry files itself, remove an account, or delete a site's files
 except into the trash, from which `site_restore` brings them back for `trash_keep` days.
 Those are yours, on purpose. On a server with the helper

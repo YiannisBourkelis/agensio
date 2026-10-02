@@ -598,6 +598,7 @@ struct PhpPreset {
     const char* uploads;              // where the application puts what users upload, relative to the served root ("" = unknown); health looks there first
     std::vector<const char*> never_dirs;  // directories answered 404 whole, whatever is in them (Grav's logs/, backup/): a preset that
                                           // borrowed another's rules could never supply these (2026-09-23 live report)
+    std::vector<const char*> login_paths; // where the application's login form posts (the fail2ban jail counts attempts there, 2026-10-02)
 };
 
 // What every PHP preset refuses besides PHP itself, on its root and under its shields: the
@@ -699,12 +700,12 @@ ProtectedName protected_name(std::string path) {
 const std::vector<PhpPreset> kPhpPresets = {
     // Plain PHP: any script runs, missing paths are 404, no front controller.
     {"php", "Plain PHP: every .php under the root runs, missing paths are 404, no front controller; .inc, editor backups, logs, dumps and SQLite files are refused, web.config never served. An application's own rules (which .php run, private directories, cached assets, nice URLs) come as the site's `rules`.",
-     "", false, {"index.php", "index.html"}, false, true, kSourceBackups, {}, {"/web.config"}, "", "", {}, "", {}},
+     "", false, {"index.php", "index.html"}, false, true, kSourceBackups, {}, {"/web.config"}, "", "", {}, "", {}, {}},
     // Laravel (and Statamic): one entry point; any other .php is refused, never served as
     // source (2026-09-19); Vite's hashed build output cached for a year.
     {"laravel", "Laravel and Statamic: the project directory is given, its public/ is served; only index.php ever runs, any other .php is refused; Vite's build/ is cached for a year.",
      "public", true, {"index.php"}, true, false, kSourceBackups,
-     {{"/build/", "public, max-age=31536000, immutable"}}, {}, "", "", {}, "/storage", {}},
+     {{"/build/", "public, max-age=31536000, immutable"}}, {}, "", "", {}, "/storage", {}, {"/login", "/cp/auth/login"}},
     // Drupal: many entry points (index.php, core/install.php, update.php); what its
     // .htaccess protects is refused natively, since .htaccess is never read.
     {"drupal", "Drupal (and other PHP applications with several entry points): the project directory is given, its web/ is served when present; any .php runs, missing paths reach index.php (also below sites/default/files, where Drupal makes image-style derivatives and aggregated css/js on first request), and what Drupal's .htaccess protects is refused natively.",
@@ -716,7 +717,7 @@ const std::vector<PhpPreset> kPhpPresets = {
       "/web.config", "/update.php.bak"},
      "https://www.drupal.org/download-latest/tar.gz", "https://ftp.drupal.org/files/projects/drupal-{version}.tar.gz",
      {"/sites/default/settings.php", "/sites/default/settings.local.php", "/sites/default/services.yml"},
-     "/sites/default/files", {}},
+     "/sites/default/files", {}, {"/user/login"}},
     // WordPress: any .php runs (wp-login.php, wp-admin/*, wp-cron.php, plugin endpoints),
     // pretty permalinks fall back to index.php, nothing under uploads or wp-includes is
     // ever executed and their files are cacheable (modestly: WordPress versions assets by
@@ -733,7 +734,7 @@ const std::vector<PhpPreset> kPhpPresets = {
      {"/wp-config.php", "/wp-config-sample.php", "/readme.html", "/license.txt",
       "/wp-content/db.php", "/wp-content/advanced-cache.php", "/wp-content/object-cache.php"},
      "https://wordpress.org/latest.tar.gz", "https://wordpress.org/wordpress-{version}.tar.gz",
-     {"/wp-config.php"}, "/wp-content/uploads", {}},
+     {"/wp-config.php"}, "/wp-content/uploads", {}, {"/wp-login.php"}},
     // Grav (flat-file CMS; 2026-09-23 live report: run on the borrowed drupal preset, its
     // logs/grav.log named a backup archive under backup/ that held the admin account and
     // the signing salt, and both were served). Only index.php runs; logs/, backup/, cache/,
@@ -754,7 +755,7 @@ const std::vector<PhpPreset> kPhpPresets = {
      "https://getgrav.org/download/core/grav-admin/latest", "https://getgrav.org/download/core/grav-admin/{version}",
      {"/user/config/security.yaml"}, "/user/pages",
      {"/logs/", "/backup/", "/cache/", "/bin/", "/tests/", "/tmp/", "/webserver-configs/", "/user/config/",
-      "/user/env/"}},
+      "/user/env/"}, {"/admin"}},
 };
 
 const PhpPreset* php_preset(const std::string& app) {
@@ -1209,6 +1210,16 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     }
     if (python_app(site.app) && site.redirect.empty() && site.project.empty())
         fail(where + ": app = \"" + site.app + "\" needs project = \"NAME\", the project's Python package (NAME/settings, NAME/wsgi.py)");
+    // The paths credentials are posted to, for the fail2ban jail `agensio ctl protection`
+    // renders (2026-10-02): on top of the preset's own; never read when serving.
+    if (t.contains("login_paths")) {
+        if (!t["login_paths"].is_array() && !t["login_paths"].is_string()) fail(where + ".login_paths must be a list of URL paths (\"/login\")");
+        for (const auto& p : string_list(t["login_paths"], (where + ".login_paths").c_str())) {
+            if (const std::string why = check_login_path(p); !why.empty()) fail(where + ".login_paths: " + why);
+            if (std::find(site.login_paths.begin(), site.login_paths.end(), p) == site.login_paths.end()) site.login_paths.push_back(p);
+        }
+        if (site.login_paths.size() > 16) fail(where + ".login_paths: at most 16 paths");
+    }
     const std::string root_given = site.root;  // the project directory (open_basedir starts there)
     site.project_root = root_given;
     if (const PhpPreset* preset = php_preset(site.app)) {
@@ -1606,6 +1617,7 @@ void explain_config(const Config& cfg, std::ostream& out) {
         out << "hidden_files = " << (site.hidden_files ? "true" : "false") << "\nsymlinks = \""
             << (site.symlinks_deny ? "deny" : "allow") << "\"\n";
         out << "access_log = \"" << (site.access_log.empty() ? "off" : site.access_log) << "\"\n";
+        if (!site.login_paths.empty()) print_list(out, "login_paths", site.login_paths);
         for (const auto& loc : site.locations)
             if (!loc.protects.empty()) {
                 out << "# the names the deny locations below never serve are refused in every backup spelling too\n"
@@ -2036,6 +2048,13 @@ Config load_config(const fs::path& path) {
         } else if ((*ct).contains("trash_keep")) {
             fail("control.trash_keep must be a number of days");
         }
+        if (auto v = (*ct)["host_protection"].value<std::string>()) {
+            if (*v != "check" && *v != "external" && *v != "off")
+                fail("control.host_protection must be \"check\" (health warns when the firewall limits or the fail2ban jail are missing), \"external\" (a panel or the administrator manages them: informational) or \"off\"");
+            cfg.control.host_protection = *v;
+        } else if ((*ct).contains("host_protection")) {
+            fail("control.host_protection must be a string: \"check\", \"external\" or \"off\"");
+        }
         if (auto a = (*ct)["audit"].value<std::string>()) cfg.control.audit = resolve(base_dir, *a).string();
         else if (cfg.log.error != "stderr") cfg.control.audit = (fs::path(cfg.log.error).parent_path() / "audit.log").string();
         else cfg.control.audit = resolve(base_dir, "logs/audit.log").string();
@@ -2198,6 +2217,32 @@ std::string preset_source(const std::string& app, const std::string& version) {
     const std::size_t at = url.find("{version}");
     if (at != std::string::npos) url.replace(at, 9, version);
     return url;
+}
+
+std::vector<std::string> preset_login_paths(const std::string& app) {
+    std::vector<std::string> out;
+    if (const PhpPreset* p = php_preset(app))
+        for (const char* l : p->login_paths) out.emplace_back(l);
+    // The proxy family: Redmine's and Django's are fixed by the application; a plain rails,
+    // node or proxy site names its own (login_paths), as does a plain php one.
+    if (app == "redmine") out.emplace_back("/login");
+    if (app == "django") out.emplace_back("/admin/login/");
+    if (app == "wagtail") {
+        out.emplace_back("/admin/login/");
+        out.emplace_back("/django-admin/login/");
+    }
+    return out;
+}
+
+std::string check_login_path(const std::string& p) {
+    if (p.empty() || p[0] != '/') return "'" + p.substr(0, 80) + "' must start with '/'";
+    if (p.size() > 255) return "'" + p.substr(0, 80) + "...' is longer than 255 characters";
+    if (p.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/") != std::string::npos)
+        return "'" + p + "' holds a character that is not a letter, digit, '.', '_', '-' or '/'";
+    if (p.find("//") != std::string::npos || p.find("/../") != std::string::npos || p.ends_with("/..") || p.find("/./") != std::string::npos || p.ends_with("/."))
+        return "'" + p + "' must be a normalised path: no '//', no '.' or '..' segments";
+    if (p == "/") return "'/' is every request, not a login path";
+    return "";
 }
 
 std::vector<std::string> app_presets() {

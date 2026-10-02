@@ -196,7 +196,7 @@ std::string validate(const json::Value& req, const Config& cfg) {
         return "";
     }
     if (op == "pools_apply" || op == "service_restart" || op == "ping" || op == "env_check" || op == "app_check" || op == "trash_list" ||
-        op == "trash_expire")
+        op == "trash_expire" || op == "host_protection")
         return "";
     return "unknown operation '" + op + "'";
 }
@@ -670,6 +670,81 @@ json::Value app_check(const Config& cfg) {
             if (!states[unit].is_null()) services.push(json::Value::object().set("site", site).set("unit", unit).set("state", states[unit]));
     }
     return reply.set("ok", true).set("services", std::move(services));
+}
+
+// host_protection (2026-10-02, docs/configuration.md 18): health's read-only look at what the
+// kernel's firewall and fail2ban do for the web ports, which only root can see (nft needs
+// CAP_NET_ADMIN, fail2ban's socket is root's). Three programs by absolute path with fixed
+// arguments: `nft -j list ruleset` (again with -t, without set contents, when the full listing
+// does not fit the 8 MB kept), `systemctl show` over six unit names, and `fail2ban-client
+// status` plus `fail2ban-client status <jail>` for each jail the first answer named (a plain
+// name of up to 64 characters, at most 64 jails). The answers travel raw; the server reads
+// them (control::read_probe), so the parsing is unit-tested and nothing here interprets.
+json::Value host_protection() {
+    auto printable = [](std::string s) {
+        for (char& c : s)
+            if ((static_cast<unsigned char>(c) < 32 && c != '\n' && c != '\t') || c == 127) c = ' ';
+        return s;
+    };
+    json::Value reply = json::Value::object().set("ok", true);
+    json::Value nft = json::Value::object();
+    if (const char* bin = find_binary({"/usr/sbin/nft", "/sbin/nft", "/usr/bin/nft"})) {
+        std::string out;
+        int rc = run(bin, {"-j", "list", "ruleset"}, out, 8u << 20);
+        json::Value rs;
+        std::string err;
+        bool terse = false;
+        if (rc != 0 || !json::parse(out, rs, err)) {
+            out.clear();
+            rc = run(bin, {"-j", "-t", "list", "ruleset"}, out, 8u << 20);
+            terse = true;
+        }
+        if (rc != 0) nft.set("available", false).set("why", "nft list ruleset failed: " + printable(out.substr(0, 200)));
+        else if (!json::parse(out, rs, err)) nft.set("available", false).set("why", "nft's listing could not be read: " + err);
+        else nft.set("available", true).set("ruleset", std::move(rs)).set("terse", terse);
+    } else {
+        nft.set("available", false).set("why", "nft is not installed (package nftables)");
+    }
+    reply.set("nft", std::move(nft));
+    std::string why;
+    const json::Value units = unit_states({"agensio-firewall.service", "agensio-firewall-trial.timer", "fail2ban.service", "nftables.service", "firewalld.service", "ufw.service"}, why);
+    reply.set("units", units);
+    if (!why.empty()) reply.set("units_why", why);
+    json::Value f2b = json::Value::object();
+    if (const char* client = find_binary({"/usr/bin/fail2ban-client", "/usr/local/bin/fail2ban-client"})) {
+        std::string status;
+        const int rc = run(client, {"status"}, status, 65536);
+        f2b.set("available", true);
+        json::Value jails = json::Value::array();
+        if (rc == 0) {
+            // "|- Jail list:\tsshd, agensio-login"
+            if (const std::size_t at = status.find("Jail list:"); at != std::string::npos) {
+                const std::size_t nl = status.find('\n', at);
+                const std::string list = status.substr(at + 10, nl == std::string::npos ? std::string::npos : nl - at - 10);
+                std::size_t i = 0;
+                while (i <= list.size() && jails.items().size() < 64) {
+                    const std::size_t comma = list.find(',', i);
+                    std::string name = list.substr(i, comma == std::string::npos ? std::string::npos : comma - i);
+                    while (!name.empty() && (name.front() == ' ' || name.front() == '\t')) name.erase(0, 1);
+                    while (!name.empty() && (name.back() == ' ' || name.back() == '\t' || name.back() == '\r')) name.pop_back();
+                    if (!name.empty() && name.size() <= 64 && name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-") == std::string::npos) {
+                        std::string js;
+                        run(client, {"status", name}, js, 65536);
+                        jails.push(json::Value::object().set("name", name).set("status", printable(js)));
+                    }
+                    if (comma == std::string::npos) break;
+                    i = comma + 1;
+                }
+            }
+        } else {
+            f2b.set("error", "fail2ban-client status failed (not running?): " + printable(status.substr(0, 200)));
+        }
+        f2b.set("status", printable(status)).set("jails", std::move(jails));
+    } else {
+        f2b.set("available", false).set("why", "fail2ban is not installed (package fail2ban)");
+    }
+    reply.set("fail2ban", std::move(f2b));
+    return reply;
 }
 
 json::Value app_op(const json::Value& req, const Config& cfg) {
@@ -1544,6 +1619,8 @@ void helper_loop(int fd, const Config& cfg) {
                     reply = app_op(req, cfg);
                 } else if (op == "app_check") {
                     reply = app_check(cfg);
+                } else if (op == "host_protection") {
+                    reply = host_protection();
                 } else if (op == "site_trash") {
                     reply = site_trash(req, cfg);
                 } else if (op == "site_restore") {

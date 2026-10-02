@@ -832,7 +832,7 @@ check "the control API refuses pip_install without the user's own confirmation, 
 # Gemfile first; the unit is refused for a site without an account of its own.
 check "database_config needs the application first; site-unit refuses a site without its own account" "409 yes 409 yes" "$(cpost /v1/sites/rails.test/task '{"task":"database_config","confirm":true,"reason":"t"}') $(grep -q 'Gemfile, which does not exist' bench/tmp/ctl-reply.json && echo yes) $(curl -sS -o bench/tmp/unit.json -w '%{http_code}' --unix-socket $CS http://control/v1/sites/rails.test/unit) $(grep -q 'no account of its own' bench/tmp/unit.json && echo yes)"
 cpost /v1/sites/rails.test/delete '{"confirm":true}' > /dev/null
-check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 165 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
+check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 167 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
 check "secrets: the presets catalogue lists each preset's credential files" "/wp-config.php /sites/default/settings.php" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["wordpress"]["secrets"][0], p["drupal"]["secrets"][0])')"
 check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$("$BIN" ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; "$BIN" ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
@@ -912,6 +912,28 @@ PYT
 check "boundaries: every split of the request line on plain and TLS, 240 keep-alive requests, two in one write, a request after a slow exchange" "plain-splits=ok tls-splits=ok keepalive-wrong=0 pipelined=ok after-slow=ok" "$boundary"
 check "boundaries: an unrecognised method is 405 and the line is logged, escaped; a malformed line is 400 and logged" "405 400 yes yes" "$(printf 'GETGET /x HTTP/1.1\r\nHost: localhost\r\n\r\n' | ncq 127.0.0.1 8080 | head -1 | awk '{print $2}') $(printf 'GET\x01 /x HTTP/1.1\r\nHost: localhost\r\n\r\n' | ncq 127.0.0.1 8080 | head -1 | awk '{print $2}') $(grep -q "unrecognised method 'GETGET' for /x from 127.0.0.1 (405)" bench/tmp/error.log && echo yes) $(grep -q 'request line did not parse from 127.0.0.1: GET\\x01 /x HTTP/1.1' bench/tmp/error.log && echo yes)"
 
+# Host protection (2026-10-02, docs/configuration.md 18): the firewall ruleset and the fail2ban
+# jails rendered for this host, read without a helper; every listener here is loopback, so
+# nothing is exposed and health stays quiet; the packaged copies are the renderer's default
+# output; login_paths through the control plane and the command line.
+check "protection: rendered for this host; loopback only, so nothing is exposed and health has no protection finding; one file alone with --nft, --jail, --filter; the packaged copies are the renderer's default output" "200 False [] combined loopback 0 0 #!/usr/sbin/nft -f 4 1 same same same same" "$(curl -sS -o bench/tmp/prot.json -w '%{http_code}' --unix-socket $CS http://control/v1/protection) $(python3 -c 'import json; d=json.load(open("bench/tmp/prot.json")); print(d["exposed"], d["ports"]["tcp"], d["log_format"], "loopback" if d["summary"].startswith("every listener is on loopback") else d["summary"], len(d["findings"]))') $(curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len([f for f in d["findings"] if f["code"].startswith(("firewall_", "fail2ban_", "protection_"))]))') $("$BIN" ctl protection --nft --socket $CS | head -1) $("$BIN" ctl protection --jail --socket $CS | grep -c '^\[agensio-') $("$BIN" ctl protection --filter agensio-auth --socket $CS | grep -c '^failregex') $(diff -q <("$BIN" protection --defaults --nft) packaging/firewall/agensio.nft > /dev/null && echo same) $(diff -q <("$BIN" protection --defaults --jail) packaging/fail2ban/jail.d/agensio.conf > /dev/null && echo same) $(diff -q <("$BIN" protection --defaults --unit) packaging/agensio-firewall.service > /dev/null && echo same) $(for f in agensio-login agensio-auth agensio-scan agensio-post; do diff -q <("$BIN" protection --defaults --filter $f) packaging/fail2ban/filter.d/$f.conf > /dev/null || echo differ; done; echo same)"
+mkdir -p bench/tmp/sites/lp.test/www
+check "login_paths: through site_create and --login-path, into the managed file, site_show and the rendered jail; a bad path is refused; [] clears" "201 2 1 yes 1 400 yes 200 none" "$(cpost /v1/sites "{\"domain\":\"lp.test\",\"https\":\"none\",\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/bench/tmp/sites/lp.test/www\",\"listen_plain\":\"127.0.0.1:8096\",\"login_paths\":[\"/login\",\"/api/token\"],\"confirm\":true,\"reason\":\"lp\"}") $(curl -sS --unix-socket $CS http://control/v1/sites/lp.test | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["login_paths"]))') $(grep -c '^login_paths = \["/login", "/api/token"\]' bench/tmp/sites.d/lp.test.toml) $("$BIN" ctl protection --jail --socket $CS | grep -q 'paths=".*/api/token|' && echo yes) $("$BIN" ctl site-update lp.test --login-path /signin --login-path /signin --yes --reason lp --socket $CS > /dev/null && grep -c '^login_paths = \["/signin"\]' bench/tmp/sites.d/lp.test.toml) $(cpost /v1/sites/lp.test '{"login_paths":["signin"],"confirm":true}') $(grep -q "must start with '/'" bench/tmp/ctl-reply.json && echo yes) $("$BIN" ctl site-update lp.test --no-login-paths --yes --reason lp --socket $CS > /dev/null; grep -c '^login_paths' bench/tmp/sites.d/lp.test.toml | sed 's/^0$/200/') $(curl -sS --unix-socket $CS http://control/v1/sites/lp.test | python3 -c 'import json,sys; print(json.load(sys.stdin).get("login_paths", "none"))')"
+cpost /v1/sites/lp.test/delete '{"confirm":true,"reason":"lp"}' > /dev/null
+check "mcp: protection_show is a read-only viewer tool and answers the rendering" "True False 4" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
+import json, subprocess, sys
+p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n"); p.stdin.flush()
+tools = {t["name"]: t for t in json.loads(p.stdout.readline())["result"]["tools"]}
+out = [str(tools["protection_show"]["annotations"]["readOnlyHint"])]
+p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "protection_show", "arguments": {}}}) + "\n"); p.stdin.flush()
+r = json.loads(p.stdout.readline())["result"]["structuredContent"]
+out += [str(r["exposed"]), str(len(r["fail2ban"]["filters"]))]
+p.stdin.close(); p.wait()
+print(" ".join(out))
+PYT
+)"
+
 # Static rules of the control plane (F7): nothing there spawns a process or opens a port.
 check "control: no process spawning anywhere under src/control" "0" "$(grep -E 'system\(|popen\(|execv|execl|fork\(|posix_spawn' src/control/*.cpp src/control/*.hpp | wc -l | tr -d ' ')"
 check "control: no TCP listener in the control plane" "0" "$(grep -E 'ip::tcp::acceptor' src/control/*.cpp src/control/*.hpp | wc -l | tr -d ' ')"
@@ -972,7 +994,7 @@ print(b.get("server"), "0.0.1-other" in b.get("note", ""), r["content"][0]["text
 PYT
 )
 check "mcp: a server of another build: the note leads the text and sits in structuredContent.bridge" "0.0.1-other True True" "$MCPN"
-check "mcp: initialize, tool list with annotations, calls, confirm, decisions, prompts" "agensio 32 True laravel 428 reloaded https,root,app,user -32601 2" "$mcp"
+check "mcp: initialize, tool list with annotations, calls, confirm, decisions, prompts" "agensio 33 True laravel 428 reloaded https,root,app,user -32601 2" "$mcp"
 check "mcp: site_install and the upload tools are exposed with their arguments" "file url,file,version,sha256 True" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
 import json, subprocess, sys
 p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)

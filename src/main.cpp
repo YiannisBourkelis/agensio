@@ -14,6 +14,7 @@
 #include "config.hpp"
 #include "control/client.hpp"
 #include "control/mcp.hpp"
+#include "control/protection.hpp"
 #include "control/reference.hpp"
 #include "services/json.hpp"
 #include "services/tasks.hpp"
@@ -41,7 +42,7 @@ void usage() {
                  "  reload              validate the configuration, then signal the running server\n"
                  "                      (server.pid_file, SIGHUP) to switch to it without a restart\n"
                  "  ctl                 talk to the running server's control socket ([control]) as the\n"
-                 "                      invoking user. Read: status | sites | site NAME | validate | health |\n"
+                 "                      invoking user. Read: status | sites | site NAME | validate | health | protection |\n"
                  "                      logs [--site NAME] [--since 3h] [--level error|warn|info]\n"
                  "                           [--status 5xx|4xx|all] [--limit N]\n"
                  "                      Change (need --yes, take --reason TEXT): reload | logs-reopen |\n"
@@ -61,10 +62,17 @@ void usage() {
                  "                           site-service-logs NAME [--lines N] [--since 3h] [--raw] (admin) |\n"
                  "                           site-task-output NAME [--offset N] [--length N] [--raw] (admin)\n"
                  "                      site-update NAME --set KEY=VALUE ... (settings [NAME] lists the keys and ceilings)\n"
+                 "                      site-update NAME --login-path /login ... (where the fail2ban jail counts attempts)\n"
+                 "                      protection [--nft | --jail | --unit | --filter NAME]: the firewall ruleset and the\n"
+                 "                           fail2ban jails rendered for this host, with what is in place (--nft and the\n"
+                 "                           others print one file alone, for root to redirect into place)\n"
                  "                      Uploads: upload NAME [FILE] (stdin by default) | uploads | uploads-delete NAME\n"
                  "  mcp                 Model Context Protocol server on stdin/stdout for an AI agent host,\n"
                  "                      exposing the control commands as tools as the invoking user\n"
                  "                      (spawn it locally or over SSH: ssh admin@host agensio mcp)\n"
+                 "  protection          render the host protection files from the configuration alone, no server\n"
+                 "                      needed: --nft | --jail | --unit | --filter NAME print one file; --defaults renders\n"
+                 "                      the packaged copies (ports 80 and 443) instead of this configuration's listeners\n"
                  "  pools               write the php-fpm pool of every site with `user` into the pool\n"
                  "                      directory (server.pools or the distro's); exit 3 when files changed\n"
                  "                      (reload php-fpm), 0 when up to date; --dry-run only reports\n";
@@ -103,6 +111,40 @@ int main(int argc, char** argv) {
             else std::cout << agensio::control::config_reference(nullptr).dump() << "\n";
             return 0;
         }
+        else if (a == "protection" && i == 1) {  // the host protection files, rendered from the configuration alone
+            std::string part, filter;
+            bool defaults = false;
+            for (int j = i + 1; j < argc; ++j) {
+                std::string b = argv[j];
+                if ((b == "-c" || b == "--config") && j + 1 < argc) config_path = argv[++j];
+                else if (b == "--nft" || b == "--jail" || b == "--unit") part = b.substr(2);
+                else if (b == "--filter" && j + 1 < argc) { part = "filter"; filter = argv[++j]; }
+                else if (b == "--defaults") defaults = true;
+                else { std::cerr << "protection: unexpected argument " << b << "\n"; return 2; }
+            }
+            agensio::control::ProtectionInput in;
+            if (defaults) in = agensio::control::default_protection_input();
+            else {
+                try {
+                    in = agensio::control::protection_input(agensio::load_config(config_path.empty() ? default_config() : config_path));
+                } catch (const std::exception& e) {
+                    std::cerr << "protection: " << e.what() << "\n";
+                    return 1;
+                }
+            }
+            if (part == "nft") std::cout << agensio::control::render_nft(in);
+            else if (part == "jail") std::cout << agensio::control::render_jail(in);
+            else if (part == "unit") std::cout << agensio::control::render_firewall_unit(in);
+            else if (part == "filter") {
+                for (const auto& f : agensio::control::protection_filters())
+                    if (filter == f.name) { std::cout << f.text; return 0; }
+                std::cerr << "protection: no filter " << filter << " (agensio-login, agensio-auth, agensio-scan, agensio-post)\n";
+                return 2;
+            } else {
+                std::cout << agensio::control::protection_report(in, agensio::control::read_probe(agensio::json::Value(nullptr), in), {}).dump() << "\n";
+            }
+            return 0;
+        }
         else if (a == "mcp" && i == 1) {
             std::string socket_path;
             for (int j = i + 1; j < argc; ++j) {
@@ -125,6 +167,10 @@ int main(int argc, char** argv) {
             auto ctl_usage = [] {
                 std::cout << "usage: agensio ctl <command> [options] [--socket PATH] [-c config.toml]\n"
                              "read:   status | sites | site NAME | validate | health | presets | uploads | settings [NAME] | reference | trash |\n"
+                             "        protection [--nft | --jail | --unit | --filter NAME] (the firewall ruleset and the fail2ban jails rendered\n"
+                             "                    for this host's listeners, logs and login paths, the root commands that try, keep and remove\n"
+                             "                    them, and what the kernel and fail2ban do now; one file alone with --nft, --jail, --unit or\n"
+                             "                    --filter agensio-login|agensio-auth|agensio-scan|agensio-post, for root to redirect into place) |\n"
                              "        site-unit NAME [--raw] (the Puma unit of a Rails site, rendered for root: --raw prints the unit alone) |\n"
                              "        site-service NAME (whether the Rails site's agensio-app-USER.service runs, from systemctl show) |\n"
                              "        site-service-logs NAME [--lines N] [--since 30m|3h|2d] [--raw] (admin, audited: its journal;\n"
@@ -145,6 +191,9 @@ int main(int argc, char** argv) {
                              "                    [--php-children N] [--php-version V] [--no-redirect] [--hsts] [--listen-plain A] [--listen-tls A]\n"
                              "        site-update NAME (same options as site-create); --dry-run on either checks and shows the\n"
                              "                    file without writing, listing every problem at once\n"
+                             "        --login-path PATH (site-create and site-update, repeatable): where the application posts\n"
+                             "                    credentials, on top of the preset's known paths; the fail2ban jail counts attempts there;\n"
+                             "                    given together they replace the site's list; --no-login-paths clears\n"
                              "        --private PATH, --entry-point /x.php, --cache PATH=SECONDS, --front-controller /x.php\n"
                              "                    (site-create and site-update, repeatable): an application's own rules, which only\n"
                              "                    make the site serve less; given together they replace the site's rules; --no-rules clears\n"
@@ -186,7 +235,7 @@ int main(int argc, char** argv) {
                     ctl_usage();
                     return 0;
                 }
-            std::string command, socket_path, site_name, query, upload_file, reveal;
+            std::string command, socket_path, site_name, query, upload_file, reveal, raw_part, raw_filter;
             bool raw = false;
             agensio::json::Value body = agensio::json::Value::object();
             agensio::json::Value aliases = agensio::json::Value::array();
@@ -245,6 +294,14 @@ int main(int argc, char** argv) {
                     rules.set("front_controller", v);
                     body.set("rules", rules);
                 } else if (b == "--no-rules") body.set("rules", agensio::json::Value::object());
+                else if (b == "--login-path") {
+                    std::string v; value(v);
+                    agensio::json::Value list = body["login_paths"].is_array() ? body["login_paths"] : agensio::json::Value::array();
+                    list.push(v);
+                    body.set("login_paths", list);
+                } else if (b == "--no-login-paths") body.set("login_paths", agensio::json::Value::array());
+                else if (b == "--nft" || b == "--jail" || b == "--unit") { raw = true; raw_part = b.substr(2); }
+                else if (b == "--filter") { raw = true; raw_part = "filter"; value(raw_filter); }
                 else if (b == "--php-socket") field("php_socket");
                 else if (b == "--php-children") { std::string v; value(v); body.set("php_children", std::atoi(v.c_str())); }
                 else if (b == "--php-version") field("php_version");
@@ -308,7 +365,8 @@ int main(int argc, char** argv) {
                                    command != "site-service" && command != "site-service-logs" && command != "site-task-output") ||
                                   command == "cert-renew" || command == "uploads-delete" || command == "trash-delete" || command == "trash-expire";
             const bool upload = command == "upload";
-            if (command == "status" || command == "sites" || command == "health" || command == "presets" || command == "uploads" || command == "trash") path = "/v1/" + command;
+            if (command == "status" || command == "sites" || command == "health" || command == "presets" || command == "uploads" || command == "trash" || command == "protection")
+                path = "/v1/" + command;
             else if (command == "site-restore" && !site_name.empty()) path = "/v1/trash/" + site_name + "/restore";
             else if (command == "trash-delete" && !site_name.empty()) path = "/v1/trash/" + site_name + "/delete";
             else if (command == "trash-expire") path = "/v1/trash/expire";
@@ -393,6 +451,25 @@ int main(int argc, char** argv) {
                 std::string perr;
                 if (agensio::json::parse(reply.body, u, perr)) {
                     std::cout << u.get(command == "site-unit" ? "unit" : "output");
+                    return 0;
+                }
+            }
+            if (raw && command == "protection" && reply.status == 200) {
+                // One of the host protection files alone (--nft, --jail, --unit, --filter NAME), for root
+                // to redirect into place.
+                agensio::json::Value u;
+                std::string perr;
+                if (agensio::json::parse(reply.body, u, perr)) {
+                    if (raw_part == "nft") std::cout << u["firewall"].get("ruleset");
+                    else if (raw_part == "unit") std::cout << u["firewall"].get("unit_text");
+                    else if (raw_part == "jail") std::cout << u["fail2ban"].get("jail");
+                    else if (raw_part == "filter") {
+                        if (u["fail2ban"]["filters"].get(raw_filter).empty()) {
+                            std::cerr << "protection: no filter " << raw_filter << " (agensio-login, agensio-auth, agensio-scan, agensio-post)\n";
+                            return 2;
+                        }
+                        std::cout << u["fail2ban"]["filters"].get(raw_filter);
+                    }
                     return 0;
                 }
             }

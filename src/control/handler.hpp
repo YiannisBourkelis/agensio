@@ -109,6 +109,10 @@ private:
     // The trash (F12b): a site deleted with its files, the entries, a restore, a removal.
     void site_trash(Stream& s, std::string_view name, std::string_view what, std::function<void()> done);
     void trash_list(Stream& s, std::function<void()> done);
+    // Host protection (docs/configuration.md 18): the ruleset and the jails rendered for this
+    // host, and what the kernel's firewall and fail2ban do now, through the helper's
+    // host_protection (read-only).
+    void protection_show(Stream& s, std::function<void()> done);
     void trash_restore(Stream& s, std::string_view entry, std::string_view what, std::function<void()> done);
     void trash_delete(Stream& s, std::string_view entry, std::string_view what, std::function<void()> done);
     void site_env_set(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> done);

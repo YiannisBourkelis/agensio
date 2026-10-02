@@ -520,6 +520,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   moves it with the site (piece `root`); the MCP texts send the agent there, never to the
   managed file. Security page row 36. Layers 2 and 3 of that discussion (root-curated
   snippets, typed `headers` and `redirects`) are not built.
+- **Host protection** (2026-10-02, hardening item 6 below): `login_paths` on a site and
+  `[control] host_protection`; `control/protection.*` renders the nftables table and the
+  fail2ban jails for the host and reads the helper's `host_protection` probe; the shipped
+  copies live in `packaging/firewall/`, `packaging/fail2ban/` and `packaging/agensio-firewall.service`.
 - **Application install** (F9, `src/services/archive.*`, `fetch.*`, `install.*`):
   `agensio ctl site-install NAME [--url | --file | --version]` fills a site's empty
   directory as the site's account from an https archive, an upload (`agensio ctl upload`)
@@ -969,8 +973,24 @@ Each item was benchmarked before and after on the reduced matrix (`bench/run.sh 
    firewall's and fail2ban's, not the server's (`docs/configuration.md` 18); the server owns
    what only it can see (timeouts, protocol budgets, its own descriptor budget).
 
-Still to do (roadmap phases E and H): per-address limits as a shipped nftables ruleset and
-fail2ban jail with a health finding when neither is active (decided 2026-10-02), request-body
+6. **Host protection rendered, never applied** (2026-10-02, hardening step 2, `src/control/protection.*`,
+   `docs/configuration.md` 18, design section 21): `agensio ctl protection` / MCP `protection_show` /
+   `agensio protection -c FILE` render, for this host's public ports, logs and sites, an nftables
+   ruleset in a table of its own (`inet agensio`: per-source new-connection rate, connections held,
+   QUIC handshakes; no policy, nothing else touched) with root's commit-confirmed commands (a
+   trial a `systemd-run` timer undoes in ten minutes, then `agensio-firewall.service`), and four
+   fail2ban jails over the access logs (`agensio-login` on the presets' login paths plus each
+   site's `login_paths`, `-auth`, `-scan`, `-post`) with static shipped filters; the packaged
+   copies under `/usr/share/agensio/` are `--defaults` and the unit test holds them to the
+   renderers. Health (and the tool) read what is in place through the helper's read-only
+   `host_protection` (`nft -j list ruleset`, `systemctl show`, `fail2ban-client status`, fixed
+   arguments): a limit in any table counts, a jail reading our logs counts; findings
+   `firewall_limits_missing`/`_trial`/`_unsaved`, `firewall_quic_unlimited`, `fail2ban_missing`,
+   `fail2ban_jail_stale`, `fail2ban_log_format`, `fail2ban_blind`, `protection_unchecked`;
+   `[control] host_protection = "external"` for a panel host, `"off"` to skip. Security page
+   row 37; `tests/protection.sh` (the `agensio-devbox:host` image with `--cap-add NET_ADMIN`).
+
+Still to do (roadmap phases E and H): request-body
 limits and timeouts once bodies exist, security response headers option (HSTS,
 nosniff), TLS ticket key rotation and OCSP, access log with fail2ban-friendly format,
 privilege drop, fuzz targets for every new parser (chunked, FastCGI), h1 compliance suite.

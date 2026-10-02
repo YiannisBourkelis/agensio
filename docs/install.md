@@ -55,6 +55,7 @@ are separate accounts (section 3).
 | site content | `/var/www/<domain>/` (section 3) | site user | convention |
 | systemd unit | `/usr/lib/systemd/system/agensio.service` (package) or `/etc/systemd/system/agensio.service` | root 0644 | today (package, `packaging/agensio.service`) |
 | logrotate | `/etc/logrotate.d/agensio` (`postrotate: kill -USR1 $(cat /run/agensio.pid)`) | root 0644 | today (package) |
+| host protection, shipped inactive | `/usr/share/agensio/firewall/agensio.nft`, `/usr/share/agensio/fail2ban/{jail.d,filter.d}/`, `/usr/lib/systemd/system/agensio-firewall.service`; once root applies them: `/etc/agensio/firewall.nft`, `/etc/fail2ban/jail.d/agensio.conf`, `/etc/fail2ban/filter.d/agensio-*.conf` | root 0644 | today (package; `agensio ctl protection`, configuration.md 18) |
 
 ### macOS (Homebrew)
 

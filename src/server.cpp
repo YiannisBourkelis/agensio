@@ -8,6 +8,7 @@
 #include "core/cpus.hpp"
 #include "control/commands.hpp"
 #include "control/peer.hpp"
+#include "control/protection.hpp"
 #include "services/install.hpp"
 #include "services/pools.hpp"
 #include "services/provision.hpp"
@@ -30,6 +31,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <optional>
 #include <functional>
 #include <csignal>
 #include <iostream>
@@ -729,6 +732,23 @@ json::Value Server::health() {
     // shape of the refusals, so the fix follows from it: one address (the firewall's), idle
     // connections filling the workers (slow or stuck clients), or load (a higher limit).
     if (const control::RefusalReport rr = refusal_report(); rr.refused) extra.push_back(control::refusal_finding(rr));
+    // Host protection (docs/configuration.md 18): whether the kernel's firewall limits the web
+    // ports per address and a fail2ban jail reads the access logs, through the helper (nft and
+    // fail2ban's socket are root's), never waited for; nothing for loopback-only listeners.
+    if (const control::ProtectionInput in = control::protection_input(cfg); in.exposed && in.host_protection != "off") {
+        const json::Value probe = provisioner_.available() ? provisioner_.try_request(json::Value::object().set("op", "host_protection")) : json::Value(nullptr);
+        control::ProtectionFiles files;
+        auto read_text = [](const std::string& path) -> std::optional<std::string> {
+            std::ifstream f(path, std::ios::binary);
+            if (!f) return std::nullopt;
+            std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            return text.size() > (1u << 20) ? text.substr(0, 1u << 20) : text;
+        };
+        files.firewall_file = read_text(in.firewall_file);
+        files.installed_jail = read_text(std::string(control::kJailFile));
+        const auto more = control::protection_findings(in, control::read_probe(probe, in), files);
+        extra.insert(extra.end(), more.begin(), more.end());
+    }
     return control::health(cfg, cfg_, as_root, std::time(nullptr), extra);
 }
 

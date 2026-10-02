@@ -1,0 +1,17 @@
+[Unit]
+Description=agensio firewall limits (per-address limits on the web ports, table inet agensio)
+Documentation=https://github.com/YiannisBourkelis/agensio/blob/main/docs/configuration.md
+# After the distribution's firewall, whose own start may flush the ruleset; before the web server.
+After=network-pre.target nftables.service firewalld.service ufw.service
+Before=agensio.service
+ConditionPathExists=/etc/agensio/firewall.nft
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/agensio/firewall.nft
+ExecReload=/usr/sbin/nft -f /etc/agensio/firewall.nft
+ExecStop=/usr/sbin/nft delete table inet agensio
+
+[Install]
+WantedBy=multi-user.target

@@ -1028,3 +1028,33 @@ Decisions:
   owner's second request of this step: the agent suggests the manual entry it cannot do.
 
 Security page row 36; `tests/trash.sh` and the integration suite are the proof.
+
+## 21. Host protection rendered, never applied (2026-10-02, hardening step 2)
+
+The decision of `docs/configuration.md` 18 was that per-address limits are the firewall's and
+brute force fail2ban's; this step ships both without making agensio their owner. The agent's
+part is a tool, `protection_show`, that answers with the files rendered for this host and the
+commands root runs; the server's part is a read-only look, through the helper, at what the
+kernel and fail2ban do now, so health can say "missing", "on trial", "loaded but gone at
+reboot" or nothing. Four choices shaped it:
+
+- **A table of its own, commit-confirmed.** `table inet agensio` over the public ports alone,
+  no policy, so it cannot cut root off and coexists with a panel's rules; root applies it as a
+  trial that a `systemd-run` timer undoes in ten minutes, then keeps it. The owner's question
+  was how to avoid locking root out: the answer is both, a ruleset that cannot, and a
+  procedure that undoes itself.
+- **Login paths as data.** fail2ban counts attempts, not failures (an access log cannot tell
+  them apart), on paths a preset knows or a site names in `login_paths`, a `[[site]]` key the
+  control plane writes. For an application without a preset the agent asks the user, which
+  is the Kanboard pattern of section 19 again: the application's documentation, typed by the
+  agent, checked by the server, never guessed. The jail is rendered per host, so a new site
+  makes the installed file stale and health says so.
+- **Detection counts anyone's limits.** The nft JSON is searched for a per-source limit on
+  each public port in any table, and a jail counts when it reads one of agensio's logs,
+  whatever its name: a host a panel protects is never nagged, and `[control]
+  host_protection = "external"` says so outright.
+- **Panels are first-class.** The pieces are what every service ships (a jail drop-in with
+  filters, a firewall table), the renderer and the check answer over the control API and
+  offline (`agensio protection -c FILE`), so a panel can script the install.
+
+Security page row 37; `tests/protection.sh` runs the real nft and fail2ban in the devbox.

@@ -68,6 +68,7 @@ json::Value SiteSpec::to_json() const {
     if (!php_version.empty()) v.set("php_version", php_version);
     if (settings.is_object() && !settings.members().empty()) v.set("settings", settings);
     if (rules.is_object() && !rules.members().empty()) v.set("rules", rules);
+    if (!login_paths.empty()) v.set("login_paths", strings(login_paths));
     if (!access_log.empty()) v.set("access_log", access_log);
     v.set("listen_plain", listen_plain).set("listen_tls", listen_tls);
     return v;
@@ -97,6 +98,7 @@ bool SiteSpec::from_json(const json::Value& v, SiteSpec& out) {
     out.php_version = v.get("php_version");
     if (v["settings"].is_object()) out.settings = v["settings"];
     if (v["rules"].is_object()) out.rules = v["rules"];
+    out.login_paths = string_list(v["login_paths"]);
     if (out.settings["children"].type() == json::Value::Type::number) out.php_children = static_cast<int>(out.settings["children"].num());
     out.access_log = v.get("access_log");
     if (has_key(v, "listen_plain")) out.listen_plain = v.get("listen_plain");
@@ -414,6 +416,31 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
         }
         spec.rules = normalised;
     }
+    // The login paths (2026-10-02): given whole, each a plain URL path (check_login_path), at
+    // most 16, [] clears them. They change no location: the fail2ban jail counts attempts there.
+    if (has_key(body, "login_paths")) {
+        if (!body["login_paths"].is_array()) {
+            error = "login_paths must be a list of URL paths: [\"/login\"] ([] clears them)";
+            return needs;
+        }
+        if (body["login_paths"].items().size() > 16) {
+            error = "login_paths: at most 16 paths";
+            return needs;
+        }
+        std::vector<std::string> lp;
+        for (const auto& p : body["login_paths"].items()) {
+            if (!p.is_string()) {
+                error = "login_paths: each entry is a string path (\"/login\")";
+                return needs;
+            }
+            if (const std::string why = check_login_path(std::string(p.str())); !why.empty()) {
+                error = "login_paths: " + why;
+                return needs;
+            }
+            if (std::find(lp.begin(), lp.end(), std::string(p.str())) == lp.end()) lp.emplace_back(p.str());
+        }
+        spec.login_paths = lp;
+    }
     if (has_key(body, "access_log")) spec.access_log = body.get("access_log");
     if (has_key(body, "listen_plain")) spec.listen_plain = body.get("listen_plain");
     if (has_key(body, "listen_tls")) spec.listen_tls = body.get("listen_tls");
@@ -567,6 +594,7 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
         if (!spec.user.empty()) s += "user = " + toml_string(spec.user) + "\n";
         if (!spec.group.empty()) s += "group = " + toml_string(spec.group) + "\n";
         if (!spec.user.empty() && !spec.access_log.empty()) s += "access_log = " + toml_string(spec.access_log) + "\n";
+        if (!spec.login_paths.empty()) s += "login_paths = " + toml_list(spec.login_paths) + "   # fail2ban counts login attempts here (agensio ctl protection)\n";
         const bool php = php_app(spec.app);
         if (spec.settings.is_object() && spec.settings["max_body_size"].is_string()) s += "max_body_size = " + toml_string(spec.settings.get("max_body_size")) + "\n";
         if (const std::string fc(spec.rules.get("front_controller")); !fc.empty())

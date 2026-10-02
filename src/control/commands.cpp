@@ -377,6 +377,14 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now) {
         v.set("php", std::move(php));
     }
     if (s.proxy.configured) v.set("upstream", upstream_json(s.proxy));
+    // The login paths the rendered fail2ban jail counts attempts on (docs/configuration.md 18):
+    // the preset's known ones and the site's own `login_paths`.
+    {
+        std::vector<std::string> lp = preset_login_paths(s.app);
+        for (const auto& p : s.login_paths)
+            if (std::find(lp.begin(), lp.end(), p) == lp.end()) lp.push_back(p);
+        if (!lp.empty()) v.set("login_paths", strings(lp));
+    }
     // The locations a managed site's rules render are hand-written to the loader; labelled
     // "rules" here, beside preset:<app> and root:<file>, so an agent can tell them apart
     // (2026-10-02 report: 17 of a Kanboard site's 19 locations said nothing).
@@ -955,8 +963,8 @@ Finding refusal_finding(const RefusalReport& r) {
     const std::uint64_t top = r.addresses.empty() ? 0 : r.addresses.front().second;
     std::string fix;
     if (r.refused >= 2 && top * 2 >= r.refused)
-        fix = "most refusals came from " + r.addresses.front().first + ": the ceiling did its job; limit that address in the firewall (nftables, ct count per source) and let fail2ban "
-              "ban repeat offenders from the access log; nothing to raise (docs/configuration.md 18)";
+        fix = "most refusals came from " + r.addresses.front().first + ": the ceiling did its job; limit that address in the firewall (the per-address limits protection_show renders: "
+              "nftables, ct count per source) and let fail2ban ban repeat offenders from the access log; nothing to raise (docs/configuration.md 18)";
     else if (capacity && r.connections * 10 >= capacity * 9 && r.idle * 2 >= r.connections)
         fix = "the workers are full of idle connections: slow or stuck clients, or a client keeping connections open; compare with the request rate (logs_query on the access log), "
               "lower server.idle_timeout (15 s by default), and limit connections per address in the firewall (docs/configuration.md 18)";

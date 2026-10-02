@@ -37,6 +37,10 @@ struct SiteSpec {
     // only .php that run], "cache": [{"path", "max_age"}], "front_controller": "/index.php"};
     // normalised by check_rules, rendered as locations of the managed file.
     json::Value rules;
+    // Where the application's login form or authenticating API is posted to, on top of the
+    // preset's known paths (2026-10-02): the rendered fail2ban jail counts attempts there;
+    // nothing is served or refused by it. Plain paths (check_login_path), at most 16.
+    std::vector<std::string> login_paths;
     std::string access_log;  // a site with a user gets its own (rule: nothing shared between users)
     std::string listen_plain = "0.0.0.0:80";
     std::string listen_tls = "0.0.0.0:443";
