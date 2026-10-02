@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.41 (unreleased)
+## 0.1.0-alpha.41 (2026-10-02)
 
 From the alpha.40 report (Kanboard secured through MCP alone, the rules verified end to
 end): `site_show` labels the locations a managed site's rules render with `from: "rules"`
