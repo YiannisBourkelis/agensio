@@ -832,7 +832,7 @@ check "the control API refuses pip_install without the user's own confirmation, 
 # Gemfile first; the unit is refused for a site without an account of its own.
 check "database_config needs the application first; site-unit refuses a site without its own account" "409 yes 409 yes" "$(cpost /v1/sites/rails.test/task '{"task":"database_config","confirm":true,"reason":"t"}') $(grep -q 'Gemfile, which does not exist' bench/tmp/ctl-reply.json && echo yes) $(curl -sS -o bench/tmp/unit.json -w '%{http_code}' --unix-socket $CS http://control/v1/sites/rails.test/unit) $(grep -q 'no account of its own' bench/tmp/unit.json && echo yes)"
 cpost /v1/sites/rails.test/delete '{"confirm":true}' > /dev/null
-check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 164 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
+check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 165 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
 check "secrets: the presets catalogue lists each preset's credential files" "/wp-config.php /sites/default/settings.php" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["wordpress"]["secrets"][0], p["drupal"]["secrets"][0])')"
 check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$("$BIN" ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; "$BIN" ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
@@ -1651,5 +1651,44 @@ print(data.split(b"\r\n")[0].decode(), closed, "within 4s" if time.time() - t0 <
 PY
 )
 check "body timeout: response served, then the server closes" "HTTP/1.1 200 OK closed within 4s" "$slow"
+# The connection ceiling (2026-10-02, hardening item 5): a second instance on ports of its own
+# (with reuse_port two agensio processes of one account can share a port, and the kernel would
+# spread the connections over both) with
+# max_connections = 3 and one worker; the fourth plain connection gets 503 and is closed, the
+# fourth over TLS is closed before the handshake, a freed slot serves again; status, health
+# and the error log say what happened.
+mkdir -p bench/tmp/limit
+printf '[server]\nworkers = 1\nmax_connections = 3\n[log]\naccess = "off"\nerror = "%s/bench/tmp/limit/error.log"\nlevel = "info"\n[control]\nsocket = "%s/bench/tmp/limit/control.sock"\naudit = "%s/bench/tmp/limit/audit.log"\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8061"]\nroot = "%s/bench/www"\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8461"]\nroot = "%s/bench/www"\ntls = { cert = "%s/bench/certs/cert.pem", key = "%s/bench/certs/key.pem" }\n' "$ROOT" "$ROOT" "$ROOT" "$ROOT" "$ROOT" "$ROOT" "$ROOT" > bench/tmp/limit/agensio.toml
+rm -f bench/tmp/limit/error.log bench/tmp/limit/control.sock
+"$BIN" -c bench/tmp/limit/agensio.toml > bench/tmp/limit/server.out 2>&1 & LPID=$!
+for _ in $(seq 1 50); do nc -z 127.0.0.1 8061 2>/dev/null && [ -S bench/tmp/limit/control.sock ] && break; sleep 0.1; done
+check "connection ceiling: the fourth plain connection is answered 503 with Retry-After and closed, the fourth TLS connection is closed before the handshake, a freed slot serves again" "HTTP/1.1 503 Service Unavailable retry eof closed HTTP/1.1 200 OK" "$(python3 - <<'PY'
+import socket, ssl, time
+held = [socket.create_connection(("127.0.0.1", 8061)) for _ in range(3)]
+time.sleep(0.3)
+s = socket.create_connection(("127.0.0.1", 8061)); s.settimeout(3)
+data = b""
+while True:
+    chunk = s.recv(4096)
+    if not chunk: break
+    data += chunk
+first = data.split(b"\r\n")[0].decode()
+retry = "retry" if b"Retry-After: 2" in data and b"Connection: close" in data else "no-retry"
+ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+t = socket.create_connection(("127.0.0.1", 8461)); t.settimeout(3)
+try:
+    ctx.wrap_socket(t); tls = "handshake"
+except (ssl.SSLError, ConnectionError, OSError, TimeoutError):
+    tls = "closed"
+held[0].close(); time.sleep(0.4)
+s2 = socket.create_connection(("127.0.0.1", 8061)); s2.settimeout(3)
+s2.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+ok = s2.recv(4096).split(b"\r\n")[0].decode()
+print(first, retry, "eof", tls, ok)
+PY
+)"
+check "connection ceiling: status shows the ceiling and the two refusals, health reports them with the fixes, the error log said so once" "3 2 warn yes 1" "$(curl -sS --unix-socket bench/tmp/limit/control.sock http://control/v1/status | python3 -c 'import json,sys; d=json.load(sys.stdin); print(int(d["max_connections"]), int(d["connections_refused"]))') $(curl -sS --unix-socket bench/tmp/limit/control.sock http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); f=[x for x in d["findings"] if x["code"] == "connections_refused"]; print(f[0]["severity"] if f else "none", "yes" if f and "firewall" in f[0]["fix"] and "2 connection(s) refused" in f[0]["message"] else f)') $(grep -c 'at its connection ceiling (3)' bench/tmp/limit/error.log)"
+check "connection ceiling: the derived default is logged at start with the open-file limit" "yes" "$(grep -q 'connection ceiling 3 per worker (1 worker(s), open-file limit [0-9]*, server.max_connections)' bench/tmp/limit/error.log && echo yes)"
+kill $LPID; wait $LPID 2>/dev/null
 kill $PID; wait $PID 2>/dev/null
 [ $fails -eq 0 ] && echo "integration: all passed" || { echo "integration: $fails failure(s):$failed_names"; exit 1; }

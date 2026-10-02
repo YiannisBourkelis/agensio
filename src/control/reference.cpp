@@ -8,6 +8,7 @@ const std::vector<KeyDef>& key_defs() {
     static const std::vector<KeyDef> defs = {
         {"[server]", "workers", "int", "0: one per CPU the process may run on", "Worker threads; each owns an event loop and, on Linux, its own accepting socket (SO_REUSEPORT). 0 counts the CPUs of the affinity mask, so a container's cpuset or a taskset gives its own count. Fewer workers than cores leave room for PHP and the database on the same machine; one worker already serves hundreds of thousands of requests a second on static files.", "restart", "file", "1"},
         {"[server]", "idle_timeout", "seconds", "15", "How long a keep-alive connection may sit idle before the server closes it.", "reload", "file", "1"},
+        {"[server]", "max_connections", "int", "0 = (open-file limit - 2048) / workers, at least 128", "Connections one worker holds at most, TCP and QUIC together: above it a plain listener answers 503 with Retry-After and closes, a TLS listener closes before any handshake work; server_status shows the ceiling and the refusals, health reports refusals. The descriptor budget's guard, not a per-address limit: those belong to the firewall and fail2ban (docs/configuration.md 18).", "reload", "file", "18"},
         {"[server]", "max_requests_per_connection", "int", "1000", "Requests served on one connection before the server answers Connection: close (0 = unlimited).", "reload", "file", "1"},
         {"[server]", "max_header_size", "size", "16KB", "The request head (request line and headers) may not exceed this: 431 above it.", "reload", "file", "1"},
         {"[server]", "max_body_size", "size", "1MB", "The request-body limit every site takes unless it sets its own (413 above it); it also drives the generated php-fpm pools' upload sizes. Per site: the site's max_body_size, settable through the control plane.", "reload", "file", "7"},
@@ -198,6 +199,7 @@ json::Value running_value(const Config& c, const std::string& table, const std::
         if (key == "workers") return V(static_cast<double>(c.workers));
         if (key == "idle_timeout") return V(static_cast<double>(c.idle_timeout_s));
         if (key == "max_requests_per_connection") return V(static_cast<double>(c.max_requests_per_connection));
+        if (key == "max_connections") return V(static_cast<double>(c.max_connections));
         if (key == "max_header_size") return V(size_words(c.max_header_size));
         if (key == "max_body_size") return V(size_words(c.max_body_size));
         if (key == "body_timeout") return V(static_cast<double>(c.body_timeout_s));

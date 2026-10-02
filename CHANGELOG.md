@@ -9,6 +9,16 @@ end): `site_show` labels the locations a managed site's rules render with `from:
 `.htaccess` rules advice first in its next steps, ahead of "open the site in a browser",
 since the site is exposed until the rule runs.
 
+A connection ceiling per worker (`server.max_connections`, hardening item 5 of CLAUDE.md,
+`docs/configuration.md` 18): by default `(open-file limit - 2048) / workers`, at least 128,
+so a worker can never run itself out of descriptors. A connection accepted above it is
+refused at once, a plain client with a prebuilt 503 and `Retry-After: 2`, a TLS client by a
+close before any handshake work; the error log says so once per worker per ten seconds,
+`server_status` shows `max_connections` and `connections_refused`, health reports
+`connections_refused` with the two fixes. Decided with it: per-address connection and rate
+limits are the firewall's and fail2ban's job, not the server's; section 18 says where each
+limit belongs.
+
 ## 0.1.0-alpha.40 (2026-10-02)
 
 An application's own server guidelines through the control plane (the Kanboard proposal

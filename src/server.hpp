@@ -42,6 +42,8 @@ struct Worker {
     asio::steady_timer flush_timer{ctx};  // access log buffers, once per second
     UpstreamPool upstream_pool{ctx};      // this worker's FastCGI and origin connections
     std::atomic<std::uint64_t> connections{0};
+    std::atomic<std::uint64_t> refused{0};                    // connections refused at the ceiling since start (status, health)
+    std::chrono::steady_clock::time_point refusal_logged{};  // the last ceiling log line (this thread only)
     unsigned sheds = 0;  // connections that dropped their idle buffers or closed since the last trim (this thread only)
     // The configuration this worker hands to new connections and to connections at their
     // next request. Written only by a handler posted to this worker's loop (reload).
@@ -133,6 +135,10 @@ private:
     std::size_t open_acceptor(const Listener& listener, Worker& worker, bool reuse_port);
     void open_acceptor_socket(Acceptor& acc, const Listener& listener, bool reuse_port);
     void start_accept(std::size_t acceptor_index);
+    // A connection accepted while its worker is at the ceiling: counted, a plain client told
+    // 503 with Retry-After, a TLS one closed before any handshake work, one log line per
+    // worker per ten seconds. Runs on the worker's own loop.
+    void refuse_connection(asio::ip::tcp::socket& sock, bool tls, Worker& w);
     void open_logs();
     void assign_log_sinks(Config& cfg);  // site access logs into the registry (opened by open_all)
     void own_site_logs(const Config& cfg);  // per-site logs: agensio:<site group> 0640, when we can chown
@@ -207,6 +213,8 @@ private:
     std::vector<std::unique_ptr<asio::executor_work_guard<asio::io_context::executor_type>>> guards_;
     std::vector<std::thread> threads_;  // joined in run(); not jthread: libc++ has it only as experimental
     std::atomic<unsigned> next_worker_{0};
+    std::uint64_t fd_limit_ = 0;                        // the open-file limit after run() raised it
+    std::atomic<std::uint64_t> max_connections_{0};     // the per-worker ceiling in force (connection_ceiling)
     bool reuse_port_ = false;
     std::atomic<bool> stopping_{false};
 #ifdef ASIO_HAS_LOCAL_SOCKETS

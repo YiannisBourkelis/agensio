@@ -724,6 +724,16 @@ json::Value Server::health() {
 #endif
         }
     }
+    // Connections refused at a worker's ceiling since start (hardening item 5): legitimate
+    // load wants a higher limit, a flood wants the firewall; either way someone should know.
+    std::uint64_t refused = 0;
+    for (const auto& w : workers_) refused += w->refused.load(std::memory_order_relaxed);
+    if (refused)
+        extra.push_back(control::Finding{"warn", "connections_refused", "",
+                                         std::to_string(refused) + " connection(s) refused since start: a worker was at its ceiling of " +
+                                             std::to_string(max_connections_.load(std::memory_order_relaxed)) + " connections (server.max_connections, from the open-file limit when unset)",
+                                         "legitimate load: raise the open-file limit (LimitNOFILE in the unit) or server.max_connections, then reload; a flood from few addresses: limit "
+                                         "connections per address in the firewall and ban repeat offenders from the access log (docs/configuration.md 18)"});
     return control::health(cfg, cfg_, as_root, std::time(nullptr), extra);
 }
 
@@ -734,9 +744,14 @@ json::Value Server::status() {
     v.set("uptime_s", static_cast<double>(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now() - started_).count()));
     v.set("config", gen_->cfg.config_path.string());
     v.set("workers", static_cast<double>(workers_.size()));
-    std::uint64_t conns = 0;
-    for (const auto& w : workers_) conns += w->connections.load(std::memory_order_relaxed);
+    std::uint64_t conns = 0, refused = 0;
+    for (const auto& w : workers_) {
+        conns += w->connections.load(std::memory_order_relaxed);
+        refused += w->refused.load(std::memory_order_relaxed);
+    }
     v.set("connections", static_cast<double>(conns));
+    v.set("max_connections", static_cast<double>(max_connections_.load(std::memory_order_relaxed)));  // per worker
+    v.set("connections_refused", static_cast<double>(refused));
     v.set("user", cfg_.user);
     json::Value listeners = json::Value::array();
     for (const auto& l : gen_->listeners) {
@@ -821,6 +836,28 @@ void Server::open_acceptor_socket(Acceptor& acc, const Listener& listener, bool 
     if (ec) throw std::runtime_error("cannot listen on " + listener.address + ": " + ec.message());
 }
 
+namespace {
+// What a plain client gets at the ceiling: one send, no connection object, no allocation.
+constexpr std::string_view kConnectionLimitAnswer = "HTTP/1.1 503 Service Unavailable\r\nServer: agensio\r\nContent-Type: text/plain\r\nContent-Length: 82\r\nConnection: close\r\nRetry-After: 2\r\n\r\n503 Service Unavailable: the server is at its connection limit, try again shortly\n";
+}  // namespace
+
+void Server::refuse_connection(asio::ip::tcp::socket& sock, bool tls, Worker& w) {
+    w.refused.fetch_add(1, std::memory_order_relaxed);
+    asio::error_code ignored;
+    if (!tls) {  // a TLS client is closed before the handshake: a flood must not buy CPU with it
+        sock.non_blocking(true, ignored);
+        sock.send(asio::buffer(kConnectionLimitAnswer), 0, ignored);
+    }
+    sock.close(ignored);
+    const auto now = std::chrono::steady_clock::now();
+    if (now - w.refusal_logged >= std::chrono::seconds(10)) {
+        w.refusal_logged = now;
+        error_log_.warn("worker " + std::to_string(w.id) + " at its connection ceiling (" + std::to_string(max_connections_.load(std::memory_order_relaxed)) +
+                        "): refusing new connections, " + std::to_string(w.refused.load(std::memory_order_relaxed)) +
+                        " refused since start (server.max_connections and the open-file limit set the ceiling; per-address limits are the firewall's, docs/configuration.md 18)");
+    }
+}
+
 void Server::start_accept(std::size_t index) {
     Acceptor& acc = *acceptors_[index];
     if (!acc.open) return;
@@ -851,6 +888,8 @@ void Server::start_accept(std::size_t index) {
                 if (!l) {  // the address left the configuration a moment ago: nothing to serve
                     asio::error_code ignored;
                     sock.close(ignored);
+                } else if (target.connections.load(std::memory_order_relaxed) >= max_connections_.load(std::memory_order_relaxed)) {
+                    refuse_connection(sock, l->tls, target);  // the ceiling: the descriptor budget's guard (hardening item 5)
                 } else if (l->tls) {
 #ifdef AGENSIO_HAS_TLS
                     auto c = std::make_shared<Http1Connection<TlsStream>>(TlsStream(std::move(sock), *l->ssl), target,
@@ -870,7 +909,10 @@ void Server::start_accept(std::size_t index) {
 }
 
 void Server::run() {
-    raise_open_file_limit();
+    fd_limit_ = raise_open_file_limit();
+    max_connections_.store(connection_ceiling(gen_->cfg, fd_limit_, static_cast<unsigned>(workers_.size())), std::memory_order_relaxed);
+    error_log_.info("connection ceiling " + std::to_string(max_connections_.load(std::memory_order_relaxed)) + " per worker (" + std::to_string(workers_.size()) +
+                    " worker(s), open-file limit " + std::to_string(fd_limit_) + (gen_->cfg.max_connections ? ", server.max_connections)" : ")"));
 #ifndef _WIN32
     // A peer that closes mid-response must surface as EPIPE from send()/sendfile(), not kill
     // the process. Asio passes MSG_NOSIGNAL (Linux) or sets SO_NOSIGPIPE (BSD/macOS) on its
@@ -1289,6 +1331,7 @@ bool Server::reload(std::string& error) {
     // Switch: every worker takes the generation on its own loop; connections pick it up at
     // their next request, exchanges in flight keep the old one alive until they finish.
     gen_ = gen;
+    max_connections_.store(connection_ceiling(gen->cfg, fd_limit_, static_cast<unsigned>(workers_.size())), std::memory_order_relaxed);
     for (auto& w : workers_) asio::post(w->ctx, [w = w.get(), gen] { w->gen = gen; });
     reload_h3(gen->cfg);
     sync_h3(gen);

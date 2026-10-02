@@ -953,7 +953,18 @@ Each item was benchmarked before and after on the reduced matrix (`bench/run.sh 
    default; 1M in the benchmark template for parity) sends `Connection: close` on the last
    allowed response.
 
-Still to do (roadmap phases E and H): per-IP connection and rate limits, request-body
+5. **Connection ceiling per worker** (2026-10-02): `server.max_connections`, by default
+   `(open-file limit - 2048) / workers` (at least 128), checked in the accept handler with
+   one relaxed load against the worker's existing connection counter; above it a plain
+   client gets a prebuilt 503 with `Retry-After` in one send and a TLS client is closed
+   before the handshake, no connection object, no allocation (`Server::refuse_connection`).
+   Status shows the ceiling and `connections_refused`, health reports refusals, the error
+   log says so once per worker per ten seconds. Decided with it: per-address limits are the
+   firewall's and fail2ban's, not the server's (`docs/configuration.md` 18); the server owns
+   what only it can see (timeouts, protocol budgets, its own descriptor budget).
+
+Still to do (roadmap phases E and H): per-address limits as a shipped nftables ruleset and
+fail2ban jail with a health finding when neither is active (decided 2026-10-02), request-body
 limits and timeouts once bodies exist, security response headers option (HSTS,
 nosniff), TLS ticket key rotation and OCSP, access log with fail2ban-friendly format,
 privilege drop, fuzz targets for every new parser (chunked, FastCGI), h1 compliance suite.

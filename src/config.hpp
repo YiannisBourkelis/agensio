@@ -229,6 +229,10 @@ struct Config {
     unsigned workers = 0;  // 0 = hardware threads
     std::uint32_t idle_timeout_s = 15;
     std::uint32_t max_requests_per_connection = 1000;  // then Connection: close (0 = unlimited)
+    // Connections one worker holds at most, TCP and QUIC together; 0 = from the open-file
+    // limit at start (connection_ceiling below). Above it a plain listener answers 503 and
+    // closes, a TLS one closes before any handshake work (2026-10-02, hardening item 5).
+    std::uint32_t max_connections = 0;
     std::size_t max_header_size = 16 * 1024;
     std::size_t max_body_size = 1024 * 1024;  // request bodies above this get 413 (nginx client_max_body_size)
     std::uint32_t body_timeout_s = 60;        // between two reads of a request body (nginx client_body_timeout)
@@ -299,6 +303,17 @@ struct Config {
     };
     std::vector<OrphanAdditions> orphan_additions;
 };
+
+// The per-worker connection ceiling in force: the configured value, else from the open-file
+// limit the server raised at start, (limit - 2048 kept for the cache's descriptors, logs and
+// upstream connections) / workers, never below 128 (128 too when the limit is unknown).
+// Per-address limits are the firewall's (docs/configuration.md 18).
+inline std::uint64_t connection_ceiling(const Config& cfg, std::uint64_t fd_limit, unsigned workers) noexcept {
+    if (cfg.max_connections) return cfg.max_connections;
+    const std::uint64_t spare = fd_limit > 2048 + 128 ? fd_limit - 2048 : 128;
+    const std::uint64_t per = spare / (workers ? workers : 1);
+    return per < 128 ? 128 : per;
+}
 
 // The file beside a managed site's where root extends it: sites.d/<domain>.root.toml.
 inline constexpr std::string_view kRootAdditionsSuffix = ".root.toml";

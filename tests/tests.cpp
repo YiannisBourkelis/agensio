@@ -3804,6 +3804,24 @@ static void test_control_sites() {
                 fs::remove(ra / "sites.d" / "link.root.toml");
                 CHECK(load_config(ra / "agensio.toml").sites[1].root_additions.size() == 1);
             }
+            // The connection ceiling (2026-10-02, hardening item 5): the key, its bounds, the derivation.
+            {
+                Config cc;
+                CHECK(cc.max_connections == 0 && connection_ceiling(cc, 524288, 12) == 43520 && connection_ceiling(cc, 1024, 1) == 128 && connection_ceiling(cc, 0, 4) == 128 &&
+                      connection_ceiling(cc, 65536, 0) == 63488 && connection_ceiling(cc, 2176, 1) == 128 && connection_ceiling(cc, 2177, 1) == 129);
+                cc.max_connections = 10;
+                CHECK(connection_ceiling(cc, 524288, 12) == 10);
+                std::ofstream(dir / "mc.toml") << "[server]\nmax_connections = 7\n[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n";
+                CHECK(load_config(dir / "mc.toml").max_connections == 7);
+                std::ofstream(dir / "mc.toml") << "[server]\nmax_connections = -1\n[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n";
+                bool refused = false;
+                try {
+                    load_config(dir / "mc.toml");
+                } catch (const std::exception& e) {
+                    refused = std::string(e.what()).find("server.max_connections must be between 0") != npos;
+                }
+                CHECK(refused);
+            }
             SiteSpec st = ok;
             st.app = "static";
             CHECK(next_steps(st, loaded).size() == 1);

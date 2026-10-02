@@ -1735,6 +1735,10 @@ Config load_config(const fs::path& path) {
         if (*m < 0) fail("server.max_requests_per_connection must not be negative");
         cfg.max_requests_per_connection = static_cast<std::uint32_t>(*m);
     }
+    if (auto m = server["max_connections"].value<std::int64_t>()) {
+        if (*m < 0 || *m > 16777216) fail("server.max_connections must be between 0 (from the open-file limit) and 16777216");
+        cfg.max_connections = static_cast<std::uint32_t>(*m);
+    }
     cfg.max_header_size = size_node(server["max_header_size"], cfg.max_header_size, "server.max_header_size");
     if (cfg.max_header_size < 1024) fail("server.max_header_size must be at least 1024");
     cfg.max_body_size = size_node(server["max_body_size"], cfg.max_body_size, "server.max_body_size");

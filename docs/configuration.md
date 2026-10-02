@@ -2006,3 +2006,39 @@ HTTP/3 connections GOAWAY and closes them with H3_NO_ERROR, then closes its UDP 
 a reload that adds h3 to a TLS listener opens them. Not yet (the design's I1b to I4):
 request bodies from unbuffered upstreams over h3, 0-RTT, ECN, NEW_TOKEN for later
 connections.
+
+## 18. Connection limits
+
+**The server's part: a ceiling per worker.** `[server] max_connections` is the number of
+connections one worker holds at once, TCP (HTTP/1, HTTP/2) and QUIC together. Unset (0),
+it comes from the open-file limit the server raises at start: `(limit - 2048) / workers`,
+never below 128, so a worker can never run itself out of descriptors (2048 are kept for the
+cache's open files, the logs and the connections to php-fpm and origins). A connection
+accepted above the ceiling is refused at once: a plain listener answers `503 Service
+Unavailable` with `Retry-After: 2` and closes, a TLS listener closes before any handshake
+work, so a flood buys no CPU. The error log says so once per worker per ten seconds,
+`server_status` shows `max_connections` and `connections_refused`, and health reports
+`connections_refused` with the two possible fixes. Set it when the derived value is wrong
+for the host: smaller to cap memory (an idle HTTP/1 connection costs about 13 KB, HTTP/2
+19 KB), larger only with a larger `LimitNOFILE`.
+
+```toml
+[server]
+max_connections = 20000   # per worker; 0 = from the open-file limit
+```
+
+**What the server does not do: per-address limits.** Counting connections or requests per
+client address across workers would cost on the accept path exactly where agensio saves
+its microseconds, and the kernel already keeps that table. Put those limits where each
+belongs:
+
+- Connections and connection rate per address, SYN floods: the firewall. With nftables, a
+  rule such as `tcp dport { 80, 443 } ct state new meter per-ip { ip saddr limit rate over
+  30/second } drop` and `ct count over 200` per source address stop a single client before a
+  byte reaches the server; your provider's DDoS protection or a CDN handles what fills the
+  pipe.
+- Brute force on logins and APIs (`wp-login.php`, `xmlrpc.php`, Kanboard's `jsonrpc.php`):
+  fail2ban or CrowdSec reading the access log, whose combined format and escaping are
+  nginx's so their stock filters apply, banning through the firewall for a while.
+- Slow and idle clients, protocol abuse (HTTP/2 reset floods, QUIC address validation):
+  agensio's own timeouts and budgets, which only the server can judge (sections 16 and 17).
