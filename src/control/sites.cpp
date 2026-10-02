@@ -334,6 +334,17 @@ std::string check_rules(const json::Value& given, const SiteSpec& spec, json::Va
     return "";
 }
 
+std::vector<RuleLocation> rule_locations(const SiteSpec& spec) {
+    std::vector<RuleLocation> out;
+    const json::Value& r = spec.rules;
+    if (!r.is_object()) return out;
+    for (const auto& p : r["private"].items()) out.push_back({RuleLocation::Kind::private_, std::string(p.str()), p.str().back() != '/', false, 0});
+    for (const auto& e : r["entry_points"].items()) out.push_back({RuleLocation::Kind::entry, std::string(e.str()), true, false, 0});
+    if (!r["entry_points"].items().empty()) out.push_back({RuleLocation::Kind::no_other_php, ".php", false, true, 0});
+    for (const auto& c : r["cache"].items()) out.push_back({RuleLocation::Kind::cache, std::string(c.get("path")), false, false, static_cast<long>(c["max_age"].num())});
+    return out;
+}
+
 std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, SiteSpec& spec, std::string& error) {
     std::vector<Decision> needs;
     if (has_key(body, "domain")) spec.domain = body.get("domain");
@@ -584,23 +595,25 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
     // and no backup ending is served. Hand-written in the file's terms, so the loader needs
     // nothing new; the comments say where they come from.
     auto rules_locations = [&](std::string& s) {
-        const json::Value& r = spec.rules;
-        if (!r.is_object()) return;
-        for (const auto& p : r["private"].items()) {
-            const std::string path(p.str());
-            s += "\n[[site.location]]   # rules: private\npath = " + toml_string(path) + "\n" + (path.back() == '/' ? "final = true\n" : "match = \"exact\"\n") +
-                 "handler = \"deny\"\n";
-        }
-        for (const auto& e : r["entry_points"].items())
-            s += "\n[[site.location]]   # rules: an entry point\npath = " + toml_string(std::string(e.str())) + "\nmatch = \"exact\"\nhandler = \"fastcgi\"\n";
-        if (!r["entry_points"].items().empty()) s += "\n[[site.location]]   # rules: no other PHP runs\npath = \".php\"\nmatch = \"suffix\"\nhandler = \"deny\"\n";
-        for (const auto& c : r["cache"].items()) {
-            std::vector<std::string> deny = php_suffixes();
-            for (const auto& b : source_backup_suffixes())
-                if (std::find(deny.begin(), deny.end(), b) == deny.end()) deny.push_back(b);
-            s += "\n[[site.location]]   # rules: cached, nothing runs here\npath = " + toml_string(std::string(c.get("path"))) + "\nfinal = true\ndeny_suffixes = " + toml_list(deny) +
-                 "\nadd_headers = { \"Cache-Control\" = \"public, max-age=" + std::to_string(static_cast<long>(c["max_age"].num())) + "\" }\n";
-        }
+        for (const RuleLocation& rl : rule_locations(spec)) switch (rl.kind) {
+                case RuleLocation::Kind::private_:
+                    s += "\n[[site.location]]   # rules: private\npath = " + toml_string(rl.path) + "\n" + (rl.exact ? "match = \"exact\"\n" : "final = true\n") + "handler = \"deny\"\n";
+                    break;
+                case RuleLocation::Kind::entry:
+                    s += "\n[[site.location]]   # rules: an entry point\npath = " + toml_string(rl.path) + "\nmatch = \"exact\"\nhandler = \"fastcgi\"\n";
+                    break;
+                case RuleLocation::Kind::no_other_php:
+                    s += "\n[[site.location]]   # rules: no other PHP runs\npath = \".php\"\nmatch = \"suffix\"\nhandler = \"deny\"\n";
+                    break;
+                case RuleLocation::Kind::cache: {
+                    std::vector<std::string> deny = php_suffixes();
+                    for (const auto& b : source_backup_suffixes())
+                        if (std::find(deny.begin(), deny.end(), b) == deny.end()) deny.push_back(b);
+                    s += "\n[[site.location]]   # rules: cached, nothing runs here\npath = " + toml_string(rl.path) + "\nfinal = true\ndeny_suffixes = " + toml_list(deny) +
+                         "\nadd_headers = { \"Cache-Control\" = \"public, max-age=" + std::to_string(rl.max_age) + "\" }\n";
+                    break;
+                }
+            }
     };
     if (!tls || !spec.redirect_http) {
         out += "\n[[site]]\nserver_name = " + toml_list(names) + "\nlisten = " + toml_list({spec.listen_plain}) + "\n";

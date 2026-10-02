@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.0-alpha.41 (unreleased)
+
+From the alpha.40 report (Kanboard secured through MCP alone, the rules verified end to
+end): `site_show` labels the locations a managed site's rules render with `from: "rules"`
+(they said nothing, like hand-written ones, beside `preset:<app>` and `root:<file>`), through
+`control::rule_locations`, which the renderer now uses too; and `site_install` puts the
+`.htaccess` rules advice first in its next steps, ahead of "open the site in a browser",
+since the site is exposed until the rule runs.
+
 ## 0.1.0-alpha.40 (2026-10-02)
 
 An application's own server guidelines through the control plane (the Kanboard proposal

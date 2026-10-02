@@ -377,6 +377,11 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now) {
         v.set("php", std::move(php));
     }
     if (s.proxy.configured) v.set("upstream", upstream_json(s.proxy));
+    // The locations a managed site's rules render are hand-written to the loader; labelled
+    // "rules" here, beside preset:<app> and root:<file>, so an agent can tell them apart
+    // (2026-10-02 report: 17 of a Kanboard site's 19 locations said nothing).
+    std::vector<RuleLocation> ruled;
+    if (SiteSpec spec; read_managed(site_file(cfg, s.server_names.front()), spec)) ruled = rule_locations(spec);
     json::Value locs = json::Value::array();
     for (const auto& l : s.locations) {
         json::Value loc = json::Value::object().set("path", l.path);
@@ -384,6 +389,12 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now) {
         if (!l.deny_suffixes.empty()) loc.set("refuses", strings(l.deny_suffixes));  // endings answered 404 here
         if (!l.allow_suffixes.empty()) loc.set("serves_only", strings(l.allow_suffixes));  // no other ending is
         if (!l.origin.empty()) loc.set("from", l.origin);
+        else
+            for (const RuleLocation& rl : ruled)
+                if (rl.path == l.path && rl.exact == l.exact && rl.suffix == l.suffix) {
+                    loc.set("from", "rules");
+                    break;
+                }
         if (!l.alias.empty()) loc.set("alias", l.alias);
         else if (l.root != s.root) loc.set("root", l.root);
         if (l.kind == HandlerKind::proxy) loc.set("upstream", upstream_json(l.proxy));

@@ -1100,10 +1100,15 @@ void ControlHandler::site_install(Stream& s, std::string_view name, const json::
                         list += (list.empty() ? "" : ", ") + std::string("\"/") + rel + "/\"";
                     }
                 }
-                if (!list.empty())
-                    steps.push("the application's own .htaccess files deny " + list + " to the web (Apache's rule; agensio never reads .htaccess when serving): "
-                               "site_update with rules: {\"private\": [" + list + "]} denies them here, and rules.entry_points names the only .php files that "
-                               "run when its documentation lists them");
+                if (!list.empty()) {
+                    // First of the steps (2026-10-02 report): the site is exposed until the rule runs.
+                    json::Value first = json::Value::array().push(
+                        "first, before the site is opened: the application's own .htaccess files deny " + list +
+                        " to the web (Apache's rule; agensio never reads .htaccess when serving): site_update with rules: {\"private\": [" + list +
+                        "]} denies them here, and rules.entry_points names the only .php files that run when its documentation lists them");
+                    for (const auto& x : steps.items()) first.push(x);
+                    steps = std::move(first);
+                }
             }
             if (!sf.body_step.empty()) steps.push(sf.body_step);
             if (!file.empty()) steps.push("the upload " + file + " is still stored; delete it with uploads delete " + file + " when no longer needed");

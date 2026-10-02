@@ -87,6 +87,16 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
 // The TOML for the spec, with the managed header that carries the spec as JSON.
 constexpr std::string_view kManagedMarker = "# agensio:managed ";
 std::string render_site(const SiteSpec& spec, std::string_view stamp);
+// The locations a site's rules render, as the loader will see them (a suffix location's path
+// without its leading slash): the renderer writes them, site_show labels them "rules"
+// (2026-10-02 report: they said nothing, like hand-written ones).
+struct RuleLocation {
+    enum class Kind { private_, entry, no_other_php, cache } kind;
+    std::string path;
+    bool exact = false, suffix = false;
+    long max_age = 0;  // cache only
+};
+std::vector<RuleLocation> rule_locations(const SiteSpec& spec);
 // Reads the spec back from a managed file; false for a hand-written file.
 bool read_managed(const std::filesystem::path& file, SiteSpec& out);
 

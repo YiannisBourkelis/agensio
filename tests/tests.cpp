@@ -3689,6 +3689,7 @@ static void test_control_sites() {
             CHECK(apply(R"({"rules":{}})", rs).empty() && rs.rules.members().empty());
             // Rendered and loaded back: deny locations, the entry points, the .php refusal, the cache shield, the front controller.
             SiteSpec full = ok;
+            full.domain = "kb.test";  // its own name: shop.test's managed file (no rules) is what site_show would read otherwise
             full.app = "php";
             full.php_socket = "unix:/run/php/fpm.sock";
             full.https = "none";
@@ -3716,6 +3717,25 @@ static void test_control_sites() {
             std::ostringstream ex;
             explain_config(kc, ex);
             CHECK(ex.str().find("handler = \"deny\"") != npos);
+            // The rule-made locations as the loader sees them, and site_show's "rules" label on
+            // exactly those (2026-10-02 report), a managed file in sites.d standing for the site.
+            const std::vector<RuleLocation> rl = rule_locations(full);
+            CHECK(rl.size() == 8 && rl[0].kind == RuleLocation::Kind::private_ && !rl[0].exact && rl[2].path == "/cli" && rl[2].exact && rl[4].kind == RuleLocation::Kind::entry && rl[4].exact &&
+                  rl[6].kind == RuleLocation::Kind::no_other_php && rl[6].suffix && rl[6].path == ".php" && rl[7].kind == RuleLocation::Kind::cache && rl[7].max_age == 604800);
+            std::ofstream(dir / "sites.d" / "kb.test.toml") << text;
+            const json::Value shown = control::site(kc, ks, std::time(nullptr));
+            std::filesystem::remove(dir / "sites.d" / "kb.test.toml");
+            std::size_t ruled = 0, unlabelled = 0;
+            for (const auto& l : shown["locations"].items()) {
+                if (l.get("from") == "rules") ++ruled;
+                if (l["from"].is_null()) ++unlabelled;
+            }
+            CHECK(ruled == 8 && unlabelled == 0);  // "/" is the php preset's front controller (preset:php): every location says where it is from
+            if (ruled != 8 || unlabelled != 0) {
+                std::printf("rules label: ruled %zu unlabelled %zu of %zu\n", ruled, unlabelled, shown["locations"].items().size());
+                for (const auto& l : shown["locations"].items()) std::printf("  %s %s from=%s\n", std::string(l.get("path")).c_str(), std::string(l.get("match")).c_str(), std::string(l.get("from")).c_str());
+            }
+            CHECK(rule_locations(ok).empty());
             // Root additions (2026-10-02, design section 20): root's [[location]] tables beside a
             // managed site's file, merged as hand-written locations; every refused file shape.
             {
