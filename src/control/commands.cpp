@@ -804,6 +804,17 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
                 (a.seen >= 2000 ? ", the first 2000 files looked at" : ""),
             "move backups and dumps out of the document root (a backup plugin's directory too) and delete stale ones; nothing served should hold a copy of the site");
     }
+    // Root additions whose site is gone (disabled or deleted, design section 20): the loader
+    // keeps them with a warning; this says what to do.
+    for (const auto& o : running.orphan_additions) {
+        std::error_code ec;
+        const fs::path f = o.file;
+        const bool disabled = fs::exists(f.parent_path() / (o.site + ".toml.disabled"), ec);
+        add("warn", "root_additions_orphan", o.site,
+            o.file + " holds root additions for site " + o.site + ", which is " + (disabled ? "disabled" : "not in the configuration") + ": its locations are ignored",
+            disabled ? "site-enable " + o.site + " brings the site back with its additions; or remove the file"
+                     : "remove the file (rm " + o.file + "), or create the site again under that name");
+    }
     // Files the server cannot read under a document root (2026-09-20: every upload of every
     // site with a user was 0640 user:user after move_uploaded_file, 404 with no log line).
     {

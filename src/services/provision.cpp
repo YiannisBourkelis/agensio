@@ -1146,6 +1146,13 @@ json::Value site_trash(const json::Value& req, const Config& cfg) {
         struct stat st {};
         if (::lstat(env.c_str(), &st) == 0 && S_ISREG(st.st_mode)) pieces.push_back({"env", env, "env/" + domain + ".env"});
     }
+    // Root's additions to the site (sites.d/<domain>.root.toml, design section 20) go with the
+    // site file and come back with it: only the files beside the site file, as the loader found them.
+    for (const auto& f : site->root_additions) {
+        struct stat st {};
+        if (fs::path(f).parent_path() == fs::path(site_file_path).parent_path() && ::lstat(f.c_str(), &st) == 0 && S_ISREG(st.st_mode))
+            pieces.push_back({"root", f, "root/" + fs::path(f).filename().string()});
+    }
     // The entry: <domain>-<stamp>, root's 0700, in the trash (created likewise).
     const int tfd = open_private_dir(tdir, true, why);
     if (tfd < 0) return fail(why);
@@ -1162,7 +1169,7 @@ json::Value site_trash(const json::Value& req, const Config& cfg) {
     }
     ::close(tfd);
     const std::string edir = tdir + "/" + entry;
-    for (const char* sub : {"logs", "env"}) ::mkdir((edir + "/" + sub).c_str(), 0700);
+    for (const char* sub : {"logs", "env", "root"}) ::mkdir((edir + "/" + sub).c_str(), 0700);
     json::Value moved = json::Value::array();
     std::vector<std::pair<std::string, std::string>> done;  // to, from: undone on a failure
     for (const auto& p : pieces) {

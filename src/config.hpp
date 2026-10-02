@@ -159,6 +159,11 @@ struct SiteConfig {
     bool symlinks_deny = false;  // refuse files whose canonical path leaves the root (realpath per cache miss)
     // Sorted for Router::location: exact before prefix, longer before shorter, "/" last.
     std::vector<LocationConfig> locations;
+    // Root additions (docs/design-site-operations.md 20): the files beside the managed site
+    // file (sites.d/<domain>.root.toml) whose [[location]] tables were merged into this site,
+    // each location marked origin "root:<file>"; root's alone, never written or read by the
+    // control plane, so a site the tools manage keeps root's freedom.
+    std::vector<std::string> root_additions;
     std::string access_log;    // absolute path, or "" for no access log (site `access_log`, default [log] access)
     int access_log_sink = -1;  // set by the Server: index into its log registry
 };
@@ -287,7 +292,16 @@ struct Config {
 
     std::filesystem::path config_path;  // the file this came from
     std::vector<std::string> includes;  // the `include` patterns as written (site_create checks sites.d is covered)
+    // Root additions files whose site is not in the configuration (disabled or deleted): the
+    // load succeeds, their locations are ignored, -t, the error log and health say so.
+    struct OrphanAdditions {
+        std::string file, site;
+    };
+    std::vector<OrphanAdditions> orphan_additions;
 };
+
+// The file beside a managed site's where root extends it: sites.d/<domain>.root.toml.
+inline constexpr std::string_view kRootAdditionsSuffix = ".root.toml";
 
 // Parses "4MB", "256k", "1G", "65536". Throws std::invalid_argument.
 std::size_t parse_size(std::string_view text);

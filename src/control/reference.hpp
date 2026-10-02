@@ -16,7 +16,7 @@
 namespace agensio::control {
 
 struct KeyDef {
-    const char* table;    // "[server]", "[cache]", "[log]", "[control]", "[server] acme", "[[site]]", "php = {}", "proxy = {}", "[[site.location]]", "cgi = {}", "top level"
+    const char* table;    // "[server]", "[cache]", "[log]", "[control]", "[server] acme", "[[site]]", "php = {}", "proxy = {}", "[[site.location]]", "cgi = {}", "root additions file" (its `site` key), "top level"
     const char* key;
     const char* type;     // int, seconds, size, bool, string, path, list, table, or "enum: a | b"
     const char* def;      // the default, in words

@@ -293,10 +293,33 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
             // A managed site's rules (control/sites.hpp), as data: the locations they render
             // are in the listing, this says which ones the rules made.
             control::SiteSpec spec;
-            if (const SiteConfig* site = control::find_site(backend_->running(), path.substr(10));
-                site && control::read_managed(control::site_file(backend_->running(), site->server_names.front()), spec) && spec.rules.is_object() &&
-                !spec.rules.members().empty())
-                body.set("rules", spec.rules);
+            const Config& running = backend_->running();
+            if (const SiteConfig* site = control::find_site(running, path.substr(10));
+                site && control::read_managed(control::site_file(running, site->server_names.front()), spec)) {
+                if (spec.rules.is_object() && !spec.rules.members().empty()) body.set("rules", spec.rules);
+                // Root additions (design section 20): the root-owned file beside the managed one
+                // where root extends the site with locations no field covers; named before it
+                // exists too, so an agent knows where the block it hands root belongs.
+                const std::string& domain = site->server_names.front();
+                const std::filesystem::path file = control::site_file(running, domain).parent_path() / (domain + std::string(kRootAdditionsSuffix));
+                json::Value paths = json::Value::array();
+                for (const auto& l : site->locations)
+                    if (l.origin.starts_with("root:")) paths.push(l.path + (l.exact ? " (exact)" : l.suffix ? " (suffix)" : ""));
+                json::Value ra = json::Value::object()
+                                     .set("file", file.string())
+                                     .set("present", !site->root_additions.empty())
+                                     .set("locations", static_cast<double>(paths.items().size()))
+                                     .set("paths", std::move(paths));
+                if (!site->root_additions.empty()) {
+                    json::Value files = json::Value::array();
+                    for (const auto& f : site->root_additions) files.push(f);
+                    ra.set("files", std::move(files));
+                }
+                ra.set("note", "root's file (0644), never written by the control plane: `site = \"" + domain +
+                                   "\"` on its first line, then [[location]] tables with any key config_reference lists for [[site.location]]; "
+                                   "agensio reload applies it and the site stays managed; a location at a path the site file already has is refused at reload");
+                body.set("root_additions", std::move(ra));
+            }
             reply(s, 200, body);
         } else {
             reply(s, 404, json::Value::object().set("error", "no such site").set("site", std::string(path.substr(10))));
@@ -1303,7 +1326,9 @@ void ControlHandler::site_update(Stream& s, std::string_view name, const json::V
     const auto file = control::site_file(cfg, existing->server_names.front());
     if (!control::read_managed(file, spec)) {
         reply(s, 409, json::Value::object().set("error", "this site is not managed by agensio ctl (hand-written or edited)")
-                          .set("file", file.string()).set("hint", "edit the file by hand and reload"));
+                          .set("file", file.string())
+                          .set("hint", "edit the file by hand and reload; a site the tools manage takes root's extra locations in " +
+                                           std::string(kRootAdditionsSuffix) + " beside its file instead (site_show: root_additions), so it stays managed"));
         return;
     }
     std::string error;

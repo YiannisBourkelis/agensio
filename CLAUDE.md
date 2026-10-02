@@ -508,6 +508,18 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   `site_update` `rules`, `site_show` shows them. `tests/kanboard-install.sh` (the
   `agensio-devbox:php` image: agensio-devbox plus php8.4-sqlite3, mbstring, gd, xml, zip,
   curl) installs Kanboard 1.2.54 through the control plane. Security page row 35.
+- **Root additions** (2026-10-02, design section 20, `docs/configuration.md` 15): a root-owned
+  `sites.d/<domain>.root.toml` (top-level `site = "<domain>"`, then `[[location]]` tables with
+  any location key) extends a managed site with what no field covers, the ISPConfig
+  "directives" idea placed with root: the loader sorts include files by content, merges the
+  additions into the site before its preset as hand-written locations (`origin = "root:<file>"`,
+  `SiteConfig::root_additions`), refuses a symlink, a file not owned by the main
+  configuration's owner or writable by group or others, and keeps an orphan (site disabled
+  or deleted) as `Config::orphan_additions` with a warning at `-t`, in the error log and in
+  health (`root_additions_orphan`); `site_show` names the file before it exists; the trash
+  moves it with the site (piece `root`); the MCP texts send the agent there, never to the
+  managed file. Security page row 36. Layers 2 and 3 of that discussion (root-curated
+  snippets, typed `headers` and `redirects`) are not built.
 - **Application install** (F9, `src/services/archive.*`, `fetch.*`, `install.*`):
   `agensio ctl site-install NAME [--url | --file | --version]` fills a site's empty
   directory as the site's account from an https archive, an upload (`agensio ctl upload`)

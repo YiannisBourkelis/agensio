@@ -20,6 +20,9 @@
 #include <thread>
 
 #include <toml.hpp>
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 
 namespace agensio {
 
@@ -1112,7 +1115,56 @@ static void resolve_protocols(std::vector<std::string>& protocols, bool& h2, boo
 #endif
 }
 
-void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, const std::string& where) {
+// Root additions (2026-10-02, docs/design-site-operations.md 20): a file in an include whose
+// top level says `site = "<domain>"` holds [[location]] tables for that site, merged before
+// its preset expands so they count as hand-written and win at their path. It is root's
+// freedom on a site the control plane manages (which regenerates the managed file and never
+// touches this one), so it must be a regular file owned by the owner of the main
+// configuration file (root in production) and writable by nobody else: the server's own
+// account, which writes the managed files, cannot make one.
+struct RootAdditions {
+    toml::table table;
+    fs::path file;
+    std::string site, label;
+    bool used = false;
+};
+
+void check_additions_file(const fs::path& file, const fs::path& main_file, const std::string& label) {
+#ifndef _WIN32
+    struct stat fst {}, mst {};
+    if (::lstat(file.c_str(), &fst) != 0) fail(label + ": " + std::strerror(errno));
+    if (!S_ISREG(fst.st_mode)) fail(label + ": a root additions file must be a regular file, not a symlink");
+    if (::stat(main_file.c_str(), &mst) != 0) fail(main_file.string() + ": " + std::strerror(errno));
+    if (fst.st_uid != mst.st_uid)
+        fail(label + ": a root additions file must belong to the owner of " + main_file.filename().string() + " (uid " + std::to_string(mst.st_uid) +
+             "), this one is uid " + std::to_string(fst.st_uid) + "'s: only root extends a managed site this way; chown it, or remove it");
+    if (fst.st_mode & (S_IWGRP | S_IWOTH))
+        fail(label + ": a root additions file must not be writable by its group or by others (chmod 0644 " + file.string() + ")");
+#else
+    (void)file;
+    (void)main_file;
+    (void)label;
+#endif
+}
+
+RootAdditions parse_root_additions(toml::table tbl, const fs::path& file, const fs::path& main_file) {
+    RootAdditions a;
+    a.file = file;
+    a.label = file.filename().string();
+    a.site = to_lower(tbl["site"].value_or(std::string()));
+    if (a.site.empty()) fail(a.label + ": site = \"<domain>\" names the managed site these [[location]] tables extend");
+    for (const auto& [k, v] : tbl) {
+        const std::string key(k.str());
+        if (key != "site" && key != "location")
+            fail(a.label + ": a root additions file holds site = \"<domain>\" and [[location]] tables only, not '" + key + "' (a [[site]] goes in a file of its own)");
+    }
+    if (tbl.contains("location") && !tbl["location"].is_array_of_tables()) fail(a.label + ": 'location' must be an array of tables ([[location]])");
+    check_additions_file(file, main_file, a.label);
+    a.table = std::move(tbl);
+    return a;
+}
+
+void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, const std::string& where, std::vector<RootAdditions>* root_adds = nullptr) {
     SiteConfig site;
     for (auto& n : string_list(t["server_name"], (where + ".server_name").c_str()))
         site.server_names.push_back(to_lower(n));
@@ -1250,6 +1302,27 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     } else if (t.contains("location")) {
         fail(where + ": 'location' must be an array of tables ([[site.location]])");
     }
+    // Root additions for this site: parsed as hand-written locations after the file's own, so
+    // they win over the preset's at their path and a headers-only one joins like any other;
+    // the origin names the file for --explain and site_show. The same path twice (the managed
+    // file's rules and the additions) is the duplicate the check in parse_location refuses.
+    if (root_adds)
+        for (RootAdditions& a : *root_adds) {
+            if (a.site != to_lower(site.server_names.front())) continue;
+            a.used = true;
+            if (auto arr = a.table["location"].as_array()) {
+                std::size_t idx = 0;
+                for (auto& node : *arr) {
+                    auto* lt = node.as_table();
+                    if (!lt) fail(a.label + ": each [[location]] must be a table");
+                    const std::size_t before = site.locations.size();
+                    parse_location(*lt, a.file.parent_path(), site, a.label + " [[location]] #" + std::to_string(idx + 1));
+                    for (std::size_t i = before; i < site.locations.size(); ++i) site.locations[i].origin = "root:" + a.label;
+                    ++idx;
+                }
+            }
+            site.root_additions.push_back(a.file.string());
+        }
     // A hand-written location that only adds response fields (a managed file's HSTS "/") joins
     // the location the preset or the implicit "/" makes at its path; before 2026-09-28 it
     // replaced it, so a proxy preset's site served its project directory from disk and a PHP
@@ -1294,13 +1367,13 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     cfg.sites.push_back(std::move(site));
 }
 
-void parse_sites_from(const toml::table& tbl, const fs::path& base_dir, Config& cfg, const std::string& file_label) {
+void parse_sites_from(const toml::table& tbl, const fs::path& base_dir, Config& cfg, const std::string& file_label, std::vector<RootAdditions>* root_adds) {
     if (auto arr = tbl["site"].as_array()) {
         std::size_t idx = 0;
         for (auto& node : *arr) {
             auto* t = node.as_table();
             if (!t) fail(file_label + ": each [[site]] must be a table");
-            parse_site(*t, base_dir, cfg, file_label + " [[site]] #" + std::to_string(idx + 1));
+            parse_site(*t, base_dir, cfg, file_label + " [[site]] #" + std::to_string(idx + 1), root_adds);
             ++idx;
         }
     } else if (tbl.contains("site")) {
@@ -1772,8 +1845,12 @@ Config load_config(const fs::path& path) {
     if (cfg.log.level != "error" && cfg.log.level != "warn" && cfg.log.level != "info")
         fail("log.level must be \"error\", \"warn\" or \"info\"");
 
-    parse_sites_from(root, base_dir, cfg, path.filename().string());
-
+    // The included files are read first and sorted into site files and root additions (a
+    // top-level `site = "<domain>"` string), so an additions file is at hand when its site is
+    // parsed, whichever file defines the site; the sites themselves are parsed in the old
+    // order: the main file's, then each include's.
+    std::vector<RootAdditions> additions;
+    std::vector<std::pair<toml::table, fs::path>> site_files;
     for (auto& pattern : string_list(root["include"], "include")) {
         cfg.includes.push_back(pattern);
         for (auto& file : expand_include(base_dir, pattern)) {
@@ -1783,9 +1860,14 @@ Config load_config(const fs::path& path) {
             } catch (const toml::parse_error& e) {
                 fail(file.string() + ":" + std::to_string(e.source().begin.line) + ": " + std::string(e.description()));
             }
-            parse_sites_from(sub, file.parent_path(), cfg, file.filename().string());
+            if (sub["site"].is_string()) additions.push_back(parse_root_additions(std::move(sub), file, cfg.config_path));
+            else site_files.emplace_back(std::move(sub), file);
         }
     }
+    parse_sites_from(root, base_dir, cfg, path.filename().string(), &additions);
+    for (auto& [sub, file] : site_files) parse_sites_from(sub, file.parent_path(), cfg, file.filename().string(), &additions);
+    for (const auto& a : additions)
+        if (!a.used) cfg.orphan_additions.push_back({a.file.string(), a.site});
 
     if (cfg.sites.empty()) fail(path.string() + ": no [[site]] defined");
 

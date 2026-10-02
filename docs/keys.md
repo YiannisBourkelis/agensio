@@ -238,6 +238,11 @@ section of `docs/configuration.md` that explains the key.
 | `upstream` | URL or list | (none) | Proxy this location to an origin. | reload | site file | 12 |
 | `proxy` | table | the site's | Proxy policy for this location. | reload | site file | 12 |
 | `cgi` | table { interpreter, env } | (none) | Run scripts here as CGI processes (interpreter, extra environment). | reload | site file | 13 |
+## `root additions file`
+
+| key | type | default | meaning | applies | via | doc |
+|---|---|---|---|---|---|---|
+| `site` | string | (required) | sites.d/<domain>.root.toml beside a managed site's file: the site these [[location]] tables extend (its domain). Root's freedom on a site the tools manage: any [[site.location]] key, merged before the preset so the additions win at their path; the file must belong to the owner of the main configuration and be writable by nobody else; the control plane never writes it, site_show names it. | reload | root additions | 15 |
 ## `tls = {}`
 
 | key | type | default | meaning | applies | via | doc |

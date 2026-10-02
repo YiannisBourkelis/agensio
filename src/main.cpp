@@ -468,6 +468,9 @@ int main(int argc, char** argv) {
         if (!hosting_errors.empty()) return 1;
         for (const auto& w : agensio::check_upstreams(cfg))
             std::cerr << "warning: " << w << "\n";
+        for (const auto& o : cfg.orphan_additions)
+            std::cerr << "warning: " << o.file << " holds root additions for site " << o.site
+                      << ", which is not in the configuration (disabled or deleted): ignored\n";
         std::cout << "configuration " << cfg.config_path.string() << " is OK (" << cfg.sites.size() << " site(s))\n";
         return 0;
     }

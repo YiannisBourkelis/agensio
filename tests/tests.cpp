@@ -3716,6 +3716,74 @@ static void test_control_sites() {
             std::ostringstream ex;
             explain_config(kc, ex);
             CHECK(ex.str().find("handler = \"deny\"") != npos);
+            // Root additions (2026-10-02, design section 20): root's [[location]] tables beside a
+            // managed site's file, merged as hand-written locations; every refused file shape.
+            {
+                namespace fs = std::filesystem;
+                const fs::path ra = dir / "ra";
+                fs::create_directories(ra / "sites.d" / "shop");
+                fs::create_directories(ra / "www");
+                const auto rw_r_r = fs::perms::owner_read | fs::perms::owner_write | fs::perms::group_read | fs::perms::others_read;
+                auto put = [&](const fs::path& f, const std::string& text) {
+                    std::ofstream(f) << text;
+                    fs::permissions(f, rw_r_r);
+                };
+                put(ra / "agensio.toml", "include = [\"sites.d/*.toml\"]\n[[site]]\nserver_name = [\"*\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n");
+                put(ra / "sites.d" / "shop.test.toml",
+                    "[[site]]\nserver_name = [\"shop.test\"]\nlisten = [\"127.0.0.1:1\"]\napp = \"wordpress\"\nroot = \"shop\"\nphp = { socket = \"127.0.0.1:9000\" }\n"
+                    "[[site.location]]\npath = \"/own/\"\nadd_headers = { \"X-Own\" = \"1\" }\n");
+                const fs::path frag = ra / "sites.d" / "shop.test.root.toml";
+                auto load_fails = [&](const char* needle) {
+                    try {
+                        load_config(ra / "agensio.toml");
+                    } catch (const std::exception& e) {
+                        if (std::string(e.what()).find(needle) != npos) return true;
+                        std::printf("root additions: %s\n", e.what());
+                    }
+                    return false;
+                };
+                put(frag, "site = \"shop.test\"\n\n[[location]]\npath = \"/wp-content/uploads/\"\nadd_headers = { \"X-Up\" = \"1\" }\n\n[[location]]\npath = \"/wp-includes/\"\nfinal = true\n"
+                          "try_files = [\"$uri\", \"=404\"]\n\n[[location]]\npath = \"/extra/\"\nalias = \"../www/\"\n\n[[location]]\npath = \"/one\"\nmatch = \"exact\"\n");
+                const Config rc = load_config(ra / "agensio.toml");
+                const SiteConfig& rs = rc.sites[1];
+                CHECK(rs.server_names.front() == "shop.test" && rs.root_additions.size() == 1 && rs.root_additions[0] == frag.string() && rc.orphan_additions.empty());
+                const LocationConfig& up = Router::location(rs, "/wp-content/uploads/x.jpg");  // headers only: joins the preset's shield
+                bool xup = false;
+                for (const auto& h : up.add_headers) xup = xup || h.first == "X-Up";
+                CHECK(up.origin == "preset:wordpress" && xup && !up.deny_suffixes.empty());
+                const LocationConfig& inc = Router::location(rs, "/wp-includes/js/x.js");  // more than headers: replaces the preset's
+                CHECK(inc.origin == "root:shop.test.root.toml" && inc.deny_suffixes.empty() && inc.final);
+                CHECK(Router::location(rs, "/extra/f").origin == "root:shop.test.root.toml" && Router::location(rs, "/extra/f").alias.find("www") != npos &&
+                      Router::location(rs, "/one").exact && Router::location(rs, "/one").origin == "root:shop.test.root.toml" &&
+                      Router::location(rs, "/own/x").origin.empty() && rc.sites[0].root_additions.empty());
+                std::ostringstream rex;
+                explain_config(rc, rex);
+                CHECK(rex.str().find("# from root:shop.test.root.toml") != npos);
+                // An orphan (its site disabled or deleted) is kept with a warning, never an error.
+                put(ra / "sites.d" / "gone.test.root.toml", "site = \"gone.test\"\n[[location]]\npath = \"/x/\"\n");
+                const Config oc = load_config(ra / "agensio.toml");
+                CHECK(oc.sites.size() == 2 && oc.orphan_additions.size() == 1 && oc.orphan_additions[0].site == "gone.test" && oc.orphan_additions[0].file.ends_with("gone.test.root.toml"));
+                fs::remove(ra / "sites.d" / "gone.test.root.toml");
+                // Refused: a key that is not site or location, no site, location not a table array,
+                // a duplicate of the site file's own path, a writable file, a symlink.
+                put(ra / "sites.d" / "bad.root.toml", "site = \"shop.test\"\nfoo = 1\n");
+                CHECK(load_fails("bad.root.toml: a root additions file holds site = \"<domain>\" and [[location]] tables only, not 'foo'"));
+                put(ra / "sites.d" / "bad.root.toml", "site = \"\"\n");
+                CHECK(load_fails("names the managed site"));
+                put(ra / "sites.d" / "bad.root.toml", "site = \"shop.test\"\nlocation = 1\n");
+                CHECK(load_fails("'location' must be an array of tables"));
+                fs::remove(ra / "sites.d" / "bad.root.toml");
+                put(frag, "site = \"shop.test\"\n[[location]]\npath = \"/own/\"\nfinal = true\n");
+                CHECK(load_fails("shop.test.root.toml [[location]] #1: duplicate location '/own/'"));
+                put(frag, "site = \"shop.test\"\n[[location]]\npath = \"/x/\"\n");
+                fs::permissions(frag, fs::perms::group_write, fs::perm_options::add);
+                CHECK(load_fails("must not be writable by its group or by others"));
+                fs::permissions(frag, rw_r_r);
+                fs::create_symlink("shop.test.root.toml", ra / "sites.d" / "link.root.toml");
+                CHECK(load_fails("link.root.toml: a root additions file must be a regular file, not a symlink"));
+                fs::remove(ra / "sites.d" / "link.root.toml");
+                CHECK(load_config(ra / "agensio.toml").sites[1].root_additions.size() == 1);
+            }
             SiteSpec st = ok;
             st.app = "static";
             CHECK(next_steps(st, loaded).size() == 1);

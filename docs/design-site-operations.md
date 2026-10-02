@@ -975,3 +975,52 @@ when serving.
 
 Security page row 35; `tests/kanboard-install.sh` (the `agensio-devbox:php` image) is the
 live proof.
+
+## 20. Root additions to a managed site (2026-10-02, the ISPConfig question)
+
+The owner asked whether agensio should have what ISPConfig calls "nginx directives": a
+free-form text on a site that the panel appends to the generated vhost, so the admin has
+more freedom than the typed fields give. The answer was three layers, of which this step
+builds the first:
+
+1. **Root additions** (built): a root-owned file beside the managed one with the whole
+   location grammar. ISPConfig's directives are root's power in all but name (the panel
+   runs as root), and agensio's admin role is deliberately weaker than root, so the raw
+   grammar stays with root at the shell and the managed workflow stops being all or nothing.
+2. **Root-curated snippets** (not built): named, parameterised location templates root
+   defines, which the admin role picks by name through `site_update`; ISPConfig's own
+   "directive snippets" model, typed. Worth building when a second host-specific need
+   appears that no typed field covers.
+3. **Typed fields** (next): `headers` and `redirects` as site fields, which with `rules`
+   and `settings` cover what people actually paste into ISPConfig directives.
+
+Raw TOML through the control socket, even behind an opt-in, was rejected: a free-form
+location block hands the admin role `alias` anywhere the server reads, `handler = "cgi"` as
+the server's account, another tenant's php-fpm socket and any internal upstream; validating
+that grammar for "cannot escape" would have to be redone for every new location key.
+
+Decisions:
+
+- **Detected by content, not by name.** A file in an include whose top level is
+  `site = "<domain>"` is an additions file; `<domain>.root.toml` is the convention `site_show`
+  reports and the trash follows, not a rule, so a hand-written site file can never be
+  mistaken for one and a site whose domain ends in `.root` collides with nothing.
+- **Ownership is the trust rule.** The file must be a regular file owned by the owner of
+  the main configuration (root in production) and writable by nobody else. The server's
+  account writes the managed files but cannot produce a root-owned one, and the handler
+  writes only rendered content, so the additions can only come from whoever already holds
+  root. In a development setup where one account owns everything, that account is root here.
+- **Merged as hand-written locations**, before the preset expands: the existing rules do
+  the rest (a location at a preset's path replaces it, a headers-only one joins it, a path
+  the managed file has is a duplicate). The duplicate is an error, not a silent override,
+  so a `site_update` that renders a rule at a path root took is refused and undone with the
+  file named, and nobody is surprised by which of the two won.
+- **An orphan is a warning.** Disabling or deleting a site must not break the next reload,
+  so a file whose site is gone is kept and ignored, said at `-t`, in the error log and by
+  health with the fix (`site-enable`, or remove the file).
+- **The MCP side knows its limits.** `site_show` names the file before it exists, with the
+  first line it needs; the tool texts and the instructions say that what no field covers
+  goes there, as a block the agent hands root, and never into the managed file. That is the
+  owner's second request of this step: the agent suggests the manual entry it cannot do.
+
+Security page row 36; `tests/trash.sh` and the integration suite are the proof.

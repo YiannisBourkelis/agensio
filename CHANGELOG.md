@@ -34,6 +34,20 @@ control plane in the `agensio-devbox:php` image: the bare preset runs `app/Core/
 the rules stop it, login page, jsonrpc, healthcheck, cached assets, nice URLs, the database
 private). Security page row 35. No request-path change.
 
+Root additions to a managed site (`sites.d/<domain>.root.toml`, design section 20, the
+owner's question about ISPConfig's nginx directives): a root-owned file beside the managed
+one, `site = "<domain>"` on its first line and `[[location]]` tables with any location key,
+merged into the site before its preset as hand-written locations, so root has the whole
+location grammar on a site the tools manage while `site-update` keeps regenerating only its
+own file. The loader refuses a symlink, a file not owned by the main configuration's owner
+or writable by others, and a path the site file already has; a file whose site is disabled
+or deleted is kept and ignored with a warning (`-t`, the error log, health
+`root_additions_orphan`). `--explain` marks the locations `# from root:<file>`; `site-show`
+and MCP `site_show` report `root_additions` (the file, present or not, what it added); the
+trash moves the file with the site and restore brings it back; the MCP texts send an agent
+asked for what no field covers to that file, never to the managed one. A reference row for
+the file's `site` key.
+
 ## 0.1.0-alpha.39 (2026-10-01)
 
 Deleting a site with its files (F12b of `docs/design-site-operations.md`, the owner's

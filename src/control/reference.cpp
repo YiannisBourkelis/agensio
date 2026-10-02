@@ -162,6 +162,7 @@ const std::vector<KeyDef>& key_defs() {
         {"[[site.location]]", "upstream", "URL or list", "(none)", "Proxy this location to an origin.", "reload", "site file", "12"},
         {"[[site.location]]", "proxy", "table", "the site's", "Proxy policy for this location.", "reload", "site file", "12"},
         {"[[site.location]]", "cgi", "table { interpreter, env }", "(none)", "Run scripts here as CGI processes (interpreter, extra environment).", "reload", "site file", "13"},
+        {"root additions file", "site", "string", "(required)", "sites.d/<domain>.root.toml beside a managed site's file: the site these [[location]] tables extend (its domain). Root's freedom on a site the tools manage: any [[site.location]] key, merged before the preset so the additions win at their path; the file must belong to the owner of the main configuration and be writable by nobody else; the control plane never writes it, site_show names it.", "reload", "root additions", "15"},
         {"tls = {}", "cert", "path", "(required with key)", "The certificate chain (PEM) a site presents; tls = \"auto\" obtains one instead.", "reload", "site-create (https = { cert, key })", "14"},
         {"tls = {}", "key", "path", "(required with cert)", "The private key (PEM) of that certificate; 0600, root's or the server's.", "reload", "site-create (https = { cert, key })", "14"},
         {"proxy tls = {}", "verify", "bool", "true", "Verify the origin's certificate (a self-signed origin needs false, or ca).", "reload", "site file", "12"},
@@ -286,6 +287,7 @@ json::Value config_reference(const Config* running) {
         .set("how_to_change", json::Value::object()
                                   .set("file", "root edits the main configuration file (running rows say which) and runs `agensio reload`, or `systemctl restart agensio` when applies says restart; the control plane never writes that file")
                                   .set("site file", "a site file under sites.d: a managed one (written by site-create) is rewritten by site-update, so hand edits need the managed marker removed; a hand-written one is edited by hand and reloaded")
+                                  .set("root additions", "root's file beside a managed site's, sites.d/<domain>.root.toml (site_show names it): `site = \"<domain>\"` on its first line, then [[location]] tables with any [[site.location]] key; owned by the main configuration's owner, 0644; `agensio reload` applies it and the site stays managed")
                                   .set("site-create", "a field of site_create / site_update (the name in parentheses)")
                                   .set("settings", "site_update's settings object, within the ceilings [control] site_limits sets; site_settings_list has units, current values and ceilings"))
         .set("note", "Every key agensio reads is here, from the same table as docs/keys.md; a key that is not here does not exist.");

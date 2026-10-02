@@ -87,6 +87,8 @@ Server::Server(Config cfg)
     std::string err;
     if (!logs_.open_all(err)) throw std::runtime_error(err);
     own_site_logs(gen->cfg);
+    for (const auto& o : gen->cfg.orphan_additions)
+        error_log_.warn(o.file + " holds root additions for site " + o.site + ", which is not in the configuration (disabled or deleted): ignored");
     warm_response_tables();
     prepare_acme(gen->cfg);
     build_listeners(*gen);
@@ -1311,6 +1313,8 @@ bool Server::reload(std::string& error) {
     error_log_.warn("reloaded " + cfg_.config_path.string() + ": " + std::to_string(gen->cfg.sites.size()) +
                     " site(s), " + std::to_string(gen->listeners.size()) + " listener(s), " +
                     std::to_string(opened.size()) + " bound, " + std::to_string(removed) + " closed");
+    for (const auto& o : gen->cfg.orphan_additions)
+        error_log_.warn(o.file + " holds root additions for site " + o.site + ", which is not in the configuration (disabled or deleted): ignored");
     return true;
 }
 
