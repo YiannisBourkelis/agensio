@@ -746,6 +746,7 @@ json::Value Server::health() {
         };
         files.firewall_file = read_text(in.firewall_file);
         files.installed_jail = read_text(std::string(control::kJailFile));
+        for (const auto& f : control::installed_filter_paths()) files.installed_filters.push_back(read_text(f));
         const auto more = control::protection_findings(in, control::read_probe(probe, in), files);
         extra.insert(extra.end(), more.begin(), more.end());
     }

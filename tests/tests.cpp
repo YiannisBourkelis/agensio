@@ -4682,9 +4682,18 @@ static void test_protection() {
         kb.tcp_ports = {443};
         kb.login_paths = {"/?controller=AuthController&action=check", "/ucp.php?mode=login", "/x+y"};
         kb.exposed = true;
-        CHECK(render_jail(kb).find("filter    = agensio-login[paths=\"/\\?controller=AuthController&action=check|/ucp\\.php\\?mode=login|/x\\+y\"]") != std::string::npos);
-        CHECK(std::string(protection_filters()[0].text).find("\"POST (?:<paths>)(?:[?&]\\S*)? HTTP/\\S+\" \\d{3} ") != std::string::npos &&
-              std::string(protection_filters()[0].text).find("/xmlrpc\\.php|") != std::string::npos);
+        // The jail's regex for a path covers every spelling (the alpha.44 report): "/x" exactly,
+        // a query entry's parameters as lookaheads, never a '%' (the jail file is configparser's).
+        const std::string slash = "/+(?:(?:\\.|[^/?\\s]+/+\\.\\.)/+)*";
+        CHECK(spelling_regex("/x") == "(?:" + slash + "index(?:\\.|\\x252E)php(?:" + slash + "(?:x|\\x2578))?|" + slash + "(?:x|\\x2578))(?:(?:\\.|\\x252E)[a-z0-9]{1,8})?/*(?:[?&]\\S*)?");
+        const std::string kbr = spelling_regex("/?controller=Auth&a=1");
+        CHECK(kbr.find("(?=\\S*[?&](?:c|\\x2563)(?:o|\\x256F)(?:n|\\x256E)(?:t|\\x2574)(?:r|\\x2572)(?:o|\\x256F)(?:l|\\x256C)(?:l|\\x256C)(?:e|\\x2565)(?:r|\\x2572)=(?:A|\\x2541)(?:u|\\x2575)(?:t|\\x2574)(?:h|\\x2568)(?:[&\\s]|$))") != std::string::npos &&
+              kbr.find("(?=\\S*[?&](?:a|\\x2561)=(?:1|\\x2531)(?:[&\\s]|$))\\?\\S*") != std::string::npos && kbr.find('%') == std::string::npos && kbr.starts_with("(?:" + slash + "index"));
+        CHECK(render_jail(kb).find("filter    = agensio-login[paths=\"" + spelling_regex("/?controller=AuthController&action=check") + "|" + spelling_regex("/ucp.php?mode=login") + "|" + spelling_regex("/x+y") + "\"]") != std::string::npos &&
+              render_jail(kb).find('%') == std::string::npos);
+        CHECK(protection_filters()[0].text.find("failregex = (?i)^<HOST> \\S+ \\S+ \\[\\] \"POST (?:<paths>) HTTP/\\S+\" \\d{3} ") != std::string::npos &&
+              protection_filters()[0].text.find("paths = " + spelling_regex("/admin") + "|") != std::string::npos &&
+              protection_filters()[0].text.find(spelling_regex("/xmlrpc.php")) != std::string::npos && protection_filters()[0].text.find('%') == std::string::npos);
     }
     // The shipped files are the renderers' output for the default host.
     auto file = [](const char* rel) {
@@ -4696,7 +4705,7 @@ static void test_protection() {
     CHECK(render_nft(def) == file("packaging/firewall/agensio.nft"));
     CHECK(render_jail(def) == file("packaging/fail2ban/jail.d/agensio.conf"));
     CHECK(render_firewall_unit(def) == file("packaging/agensio-firewall.service"));
-    for (const auto& f : protection_filters()) CHECK(std::string(f.text) == file(("packaging/fail2ban/filter.d/" + std::string(f.name) + ".conf").c_str()));
+    for (const auto& f : protection_filters()) CHECK(f.text == file(("packaging/fail2ban/filter.d/" + std::string(f.name) + ".conf").c_str()));
     CHECK(protection_filters().size() == 4);
     // What a host's rendering says: its ports, its logs, its paths (escaped for the regex), the
     // QUIC rule only with h3, the login jail disabled without a path.
@@ -4711,7 +4720,7 @@ static void test_protection() {
         const std::string nft = render_nft(in), jail = render_jail(in);
         CHECK(nft.find("tcp dport { 80, 443 } ct state new update @new4") != std::string::npos && nft.find("udp dport { 443 } @th,64,8 & 0xc0 == 0xc0") != std::string::npos &&
               nft.starts_with("#!/usr/sbin/nft -f\n") && nft.find("table inet agensio\ndelete table inet agensio\ntable inet agensio {") != std::string::npos);
-        CHECK(jail.find("filter    = agensio-login[paths=\"/login|/wp-login\\.php\"]") != std::string::npos &&
+        CHECK(jail.find("filter    = agensio-login[paths=\"" + spelling_regex("/login") + "|" + spelling_regex("/wp-login.php") + "\"]") != std::string::npos &&
               jail.find("logpath   = /var/log/agensio/access.log\n            /var/log/agensio/wp.log\n") != std::string::npos && jail.find("port      = 80,443") != std::string::npos);
         ProtectionInput nol = in;
         nol.udp_ports.clear();
@@ -4780,6 +4789,7 @@ static void test_protection() {
     ProtectionFiles files;
     files.installed_jail = render_jail(in);
     files.firewall_file = render_nft(in);
+    for (const auto& f : protection_filters()) files.installed_filters.emplace_back(f.text);
     auto codes = [&](const ProtectionInput& i, const ProtectionProbe& p, const ProtectionFiles& f) {
         std::string out;
         for (const auto& x : protection_findings(i, p, f)) out += (out.empty() ? "" : " ") + x.severity + ":" + x.code;
@@ -4801,7 +4811,30 @@ static void test_protection() {
     // The states, one by one.
     ProtectionFiles stale = files;
     stale.installed_jail = "[agensio-login]\nenabled = true\n";
-    CHECK(codes(in, probe, stale) == "info:fail2ban_jail_stale");
+    CHECK(codes(in, probe, stale) == "info:fail2ban_jail_stale" && protection_findings(in, probe, stale)[0].fix.starts_with("as root: agensio ctl protection --jail"));
+    // An upgrade changed a shipped filter (the alpha.44 report): the installed copy is stale, the
+    // install line leads every fix, the report says which; a missing filter counts too.
+    ProtectionFiles oldf = files;
+    oldf.installed_filters[0] = "[Definition]\nfailregex = old\n";
+    {
+        const auto f = protection_findings(in, probe, oldf);
+        CHECK(codes(in, probe, oldf) == "warn:fail2ban_filter_stale" && f[0].message.starts_with("the installed filter(s) agensio-login in /etc/fail2ban/filter.d/ differ") &&
+              f[0].fix == "as root: install -m 644 /usr/share/agensio/fail2ban/filter.d/agensio-login.conf /usr/share/agensio/fail2ban/filter.d/agensio-auth.conf "
+                          "/usr/share/agensio/fail2ban/filter.d/agensio-scan.conf /usr/share/agensio/fail2ban/filter.d/agensio-post.conf /etc/fail2ban/filter.d/; fail2ban-client reload");
+        const json::Value r = protection_report(in, probe, oldf);
+        CHECK(r["fail2ban"]["installed_filters"].get("state") == "stale" && r["fail2ban"]["installed_filters"]["stale"].items().size() == 1 &&
+              r.get("summary").find("the installed filter(s) agensio-login are older than the shipped text") != std::string_view::npos);
+        oldf.installed_jail = "[agensio-login]\nenabled = true\n";
+        const auto g = protection_findings(in, probe, oldf);
+        CHECK(codes(in, probe, oldf) == "warn:fail2ban_filter_stale info:fail2ban_jail_stale" && g[0].fix.find("; agensio ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf; fail2ban-client reload") != std::string::npos &&
+              g[1].fix.starts_with("as root: install -m 644 "));
+        ProtectionFiles none = files;
+        none.installed_filters.clear();
+        CHECK(protection_report(in, probe, none)["fail2ban"]["installed_filters"].get("state") == "missing" && codes(in, probe, none).empty());  // a panel's own jails read our logs: nothing to say
+        ProtectionFiles part = files;
+        part.installed_filters[3].reset();
+        CHECK(protection_report(in, probe, part)["fail2ban"]["installed_filters"].get("state") == "partial" && protection_findings(in, probe, part)[0].message.find("agensio-post are not installed") != std::string::npos);
+    }
     ProtectionFiles nojail = files;
     nojail.installed_jail.reset();
     CHECK(codes(in, probe, nojail).empty());  // the jails that read our logs are someone else's file: fine

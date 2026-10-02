@@ -44,9 +44,16 @@ std::string render_jail(const ProtectionInput& in);
 std::string render_firewall_unit(const ProtectionInput& in);
 struct ProtectionFilter {
     const char* name;  // agensio-login, agensio-auth, agensio-scan, agensio-post
-    const char* text;
+    std::string text;
 };
 const std::vector<ProtectionFilter>& protection_filters();
+// One login path as the regex the jail matches it with, in every spelling the server and the
+// applications accept (2026-10-02 alpha.44 report, the owner's call that this is the
+// filter's work): each character literal or percent-encoded (written \x25XX, so no '%'
+// reaches configparser), slashes repeated, "./" and "seg/../" segments, an optional
+// /index.php front controller, a trailing slash, a .format suffix, and for a query entry its
+// parameters in any order with others allowed; case-insensitive through the filter's (?i).
+std::string spelling_regex(const std::string& login_path);
 
 constexpr std::string_view kProtectionShippedDir = "/usr/share/agensio";
 constexpr std::string_view kFirewallTable = "inet agensio";
@@ -100,7 +107,15 @@ ProtectionProbe read_probe(const json::Value& reply, const ProtectionInput& in);
 struct ProtectionFiles {
     std::optional<std::string> firewall_file;
     std::optional<std::string> installed_jail;
+    // /etc/fail2ban/filter.d/<name>.conf for each shipped filter, in protection_filters() order;
+    // nullopt when absent (2026-10-02 alpha.44 report: an upgrade changed a filter's text and
+    // nothing said the installed copy was old).
+    std::vector<std::optional<std::string>> installed_filters;
 };
+// The installed filter files' paths, in protection_filters() order (what the server reads).
+std::vector<std::string> installed_filter_paths();
+// Root's line that installs the shipped filters.
+std::string filter_install_command();
 
 // The answer of GET /v1/protection (agensio ctl protection, MCP protection_show).
 json::Value protection_report(const ProtectionInput& in, const ProtectionProbe& probe, const ProtectionFiles& files);

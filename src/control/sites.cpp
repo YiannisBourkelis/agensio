@@ -1,5 +1,7 @@
 #include "control/sites.hpp"
 
+#include "control/commands.hpp"
+
 #include "control/settings.hpp"
 
 #include <sys/stat.h>
@@ -938,7 +940,16 @@ std::vector<std::string> next_steps(const SiteSpec& spec, const Config& cfg) {
         cmds.push_back("agensio pools");
         cmds.push_back(php_fpm_reload_command(cfg, spec.php_version));
     }
-    if (spec.https == "auto") cmds.push_back("# make sure " + spec.domain + " resolves to this server and port 80 is reachable; the certificate follows within a minute");
+    // Only while the certificate is still to come: an update of a site whose certificate is
+    // issued said this too, and an agent passed it on as a task (2026-10-02 alpha.44 report).
+    if (spec.https == "auto") {
+        bool issued = false;
+        if (const SiteConfig* existing = find_site(cfg, spec.domain); existing && existing->tls) {
+            const CertificateState st = certificate_state(*existing->tls, std::time(nullptr));
+            issued = st.present && !st.placeholder;
+        }
+        if (!issued) cmds.push_back("# make sure " + spec.domain + " resolves to this server and port 80 is reachable; the certificate follows within a minute");
+    }
     if (spec.app == "redmine") {
         // Redmine from its release archive (2026-09-27 report: the database.yml and Puma walls),
         // the steps still open by what is on disk (alpha.33 report: an update of an installed

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.0-alpha.45 (unreleased)
+From the alpha.44 report: the installed fail2ban filters are compared with the text this
+build ships (`installed_filters`, `fail2ban_filter_stale`, and the install line ahead of
+every re-render when they differ), since an upgrade had changed `agensio-login` and the old
+copy ran on; and `site_update` of a site whose certificate is issued no longer tells the
+user to make the name resolve and open port 80. The login jail matches every spelling of a
+login path (the report's eleven evasions: percent-encoding, repeated slashes, dot segments,
+case, a trailing slash, `/index.php`, a `.format` suffix, query order): the renderer turns
+each path into a regex of its spellings (`spelling_regex`, `%` written `\x25`), the filter
+is case-insensitive, and the decision stayed fail2ban's, the owner's call, with nothing
+added to the server.
+
 ## 0.1.0-alpha.44 (2026-10-02)
 From the alpha.43 report on the live host: the access log escapes every byte from 0x7F up as
 `\xHH` in the combined format (nginx's `ngx_http_log_escape`) and a JSON line writes a byte

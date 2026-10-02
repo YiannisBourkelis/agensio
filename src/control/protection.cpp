@@ -32,43 +32,95 @@ std::string port_list(const std::vector<unsigned>& ports) {
     return out;
 }
 
-// A login path as a regex alternative: of the characters check_login_path admits only '.',
-// '?' and '+' mean anything to a regex, and they are escaped (nothing else is let through,
-// so this is the whole grammar; '%' is kept out because the jail file is configparser's).
-std::string regex_literal(const std::string& p) {
+std::string shipped(std::string_view sub) { return std::string(kProtectionShippedDir) + "/" + std::string(sub); }
+
+// One character of a login path: literal (escaped when the regex would read it) or its
+// percent-encoding, the '%' written \x25 so the jail file's configparser never sees one.
+std::string spelled(char c) {
+    static constexpr char kHex[] = "0123456789ABCDEF";
+    const unsigned char u = static_cast<unsigned char>(c);
+    std::string out = "(?:";
+    if (c == '.' || c == '?' || c == '+' || c == '/' || c == '~') out += '\\';
+    out += c;
+    out += "|\\x25";
+    out += kHex[u >> 4];
+    out += kHex[u & 15];
+    return out + ")";
+}
+
+// A slash as a client may write it: repeated, with "./" and "seg/../" segments between.
+constexpr const char* kSlash = "/+(?:(?:\\.|[^/?\\s]+/+\\.\\.)/+)*";
+
+std::string spelled(const std::string& s) {
     std::string out;
-    for (char c : p) {
-        if (c == '.' || c == '?' || c == '+') out += '\\';
-        out += c;
-    }
+    for (char c : s) out += spelled(c);
     return out;
 }
 
-std::string shipped(std::string_view sub) { return std::string(kProtectionShippedDir) + "/" + std::string(sub); }
+}  // namespace
+
+std::string spelling_regex(const std::string& login) {
+    const std::size_t q = login.find('?');
+    const std::string path = login.substr(0, q);
+    std::string body;
+    std::size_t i = 0;
+    while (i < path.size()) {
+        while (i < path.size() && path[i] == '/') ++i;
+        if (i >= path.size()) break;
+        const std::size_t end = path.find('/', i);
+        body += kSlash + spelled(path.substr(i, end == std::string::npos ? std::string::npos : end - i));
+        i = end == std::string::npos ? path.size() : end;
+    }
+    if (body.empty()) body = kSlash;  // the root: "/" or "/index.php" alone
+    std::string out = "(?:" + std::string(kSlash) + "index" + spelled('.') + "php(?:" + body + ")?|" + body + ")(?:" + spelled('.') + "[a-z0-9]{1,8})?/*";
+    if (q == std::string::npos) return out + "(?:[?&]\\S*)?";
+    // Every parameter of the entry present, in any order, with others allowed.
+    const std::string query = login.substr(q + 1);
+    std::size_t p = 0;
+    while (p <= query.size()) {
+        const std::size_t amp = query.find('&', p);
+        const std::string pair = query.substr(p, amp == std::string::npos ? std::string::npos : amp - p);
+        if (!pair.empty()) {
+            const std::size_t eq = pair.find('=');
+            out += "(?=\\S*[?&]" + spelled(pair.substr(0, eq)) + (eq == std::string::npos ? std::string() : "=" + spelled(pair.substr(eq + 1))) + "(?:[&\\s]|$))";
+        }
+        if (amp == std::string::npos) break;
+        p = amp + 1;
+    }
+    return out + "\\?\\S*";
+}
+
+namespace {
 
 // The four jails share the shape; the text is one place so the shipped copy and the host's
 // rendering never drift.
-const char* kFilterLogin =
-    "# fail2ban filter for agensio (docs/configuration.md 18): credentials posted to a login path.\n"
-    "# The access log is in the combined format, the client address its first field (behind a\n"
-    "# trusted proxy, the one X-Forwarded-For named). A form login is a POST; a failed and a\n"
-    "# successful one look alike in an access log, so this counts attempts: no one types ten\n"
-    "# passwords in ten minutes, every brute-force tool does. The jail passes this host's login\n"
-    "# paths as `paths` (agensio ctl protection --jail renders them from the sites' presets and\n"
-    "# their login_paths); the default below is every preset's. A path may carry the start of its\n"
-    "# query (/\\?controller=AuthController&action=check); whatever follows the path, or that\n"
-    "# query, is allowed.\n"
-    "\n"
-    "[INCLUDES]\n"
-    "before = common.conf\n"
-    "\n"
-    "[Init]\n"
-    "paths = /wp-login\\.php|/xmlrpc\\.php|/user/login|/login|/cp/auth/login|/admin|/admin/login/|/django-admin/login/\n"
-    "\n"
-    "[Definition]\n"
-    "failregex = ^<HOST> \\S+ \\S+ \\[\\] \"POST (?:<paths>)(?:[?&]\\S*)? HTTP/\\S+\" \\d{3} \n"
-    "ignoreregex =\n"
-    "datepattern = ^[^\\[]*\\[({DATE})\n";
+std::string login_filter_text() {
+    std::string paths;
+    for (const auto& p : default_protection_input().login_paths) paths += (paths.empty() ? "" : "|") + spelling_regex(p);
+    return "# fail2ban filter for agensio (docs/configuration.md 18): credentials posted to a login path.\n"
+           "# The access log is in the combined format, the client address its first field (behind a\n"
+           "# trusted proxy, the one X-Forwarded-For named). A form login is a POST; a failed and a\n"
+           "# successful one look alike in an access log, so this counts attempts: no one types ten\n"
+           "# passwords in ten minutes, every brute-force tool does. The jail passes this host's login\n"
+           "# paths as `paths` (agensio ctl protection --jail renders them from the sites' presets and\n"
+           "# their login_paths); the default below is every preset's. Each path is written in every\n"
+           "# spelling the server and the applications accept, since the log holds the request as the\n"
+           "# client sent it: every character literal or percent-encoded (the percent written \\x25), repeated\n"
+           "# slashes, ./ and seg/../ segments, an optional /index.php front controller, a trailing slash,\n"
+           "# a .format suffix, any case, and for a login routed through the query string its parameters\n"
+           "# in any order with others allowed. agensio ctl protection renders the same from a path.\n"
+           "\n"
+           "[INCLUDES]\n"
+           "before = common.conf\n"
+           "\n"
+           "[Init]\n"
+           "paths = " + paths + "\n"
+           "\n"
+           "[Definition]\n"
+           "failregex = (?i)^<HOST> \\S+ \\S+ \\[\\] \"POST (?:<paths>) HTTP/\\S+\" \\d{3} \n"
+           "ignoreregex =\n"
+           "datepattern = ^[^\\[]*\\[({DATE})\n";
+}
 
 const char* kFilterAuth =
     "# fail2ban filter for agensio (docs/configuration.md 18): requests refused with 401 or 403.\n"
@@ -113,8 +165,11 @@ const char* kFilterPost =
     "ignoreregex = ^<HOST> \\S+ \\S+ \\[\\] \"POST (?:<ignore>)\n"
     "datepattern = ^[^\\[]*\\[({DATE})\n";
 
-const std::vector<ProtectionFilter> kFilters = {
-    {"agensio-login", kFilterLogin}, {"agensio-auth", kFilterAuth}, {"agensio-scan", kFilterScan}, {"agensio-post", kFilterPost}};
+const std::vector<ProtectionFilter>& shipped_filters() {
+    static const std::vector<ProtectionFilter> kFilters = {
+        {"agensio-login", login_filter_text()}, {"agensio-auth", kFilterAuth}, {"agensio-scan", kFilterScan}, {"agensio-post", kFilterPost}};
+    return kFilters;
+}
 
 // ---- the helper's answer ----
 
@@ -312,7 +367,7 @@ std::string render_jail(const ProtectionInput& in) {
     std::string logpath;
     for (std::size_t i = 0; i < logs.size(); ++i) logpath += (i ? "\n            " : "") + logs[i];
     std::string paths;
-    for (std::size_t i = 0; i < in.login_paths.size(); ++i) paths += (i ? "|" : "") + regex_literal(in.login_paths[i]);
+    for (std::size_t i = 0; i < in.login_paths.size(); ++i) paths += (i ? "|" : "") + spelling_regex(in.login_paths[i]);
     std::string s;
     s += "# agensio: fail2ban jails over its access logs (docs/configuration.md 18), rendered by\n";
     s += "# `agensio ctl protection --jail` for this host: its web ports, its access logs and the login\n";
@@ -394,7 +449,7 @@ std::string render_firewall_unit(const ProtectionInput& in) {
     return s;
 }
 
-const std::vector<ProtectionFilter>& protection_filters() { return kFilters; }
+const std::vector<ProtectionFilter>& protection_filters() { return shipped_filters(); }
 
 std::vector<std::string> firewall_trial_commands(const ProtectionInput& in) {
     return {"agensio ctl protection --nft > " + in.firewall_file, "nft -f " + in.firewall_file,
@@ -415,11 +470,20 @@ std::vector<std::string> firewall_remove_commands() {
     return {"systemctl disable --now " + std::string(kFirewallUnit), "nft delete table inet agensio"};
 }
 
-std::vector<std::string> fail2ban_install_commands() {
+std::string filter_install_command() {
     std::string filters = "install -m 644";
-    for (const auto& f : kFilters) filters += " " + shipped("fail2ban/filter.d/" + std::string(f.name) + ".conf");
-    filters += " /etc/fail2ban/filter.d/";
-    return {filters, "agensio ctl protection --jail > " + std::string(kJailFile), "fail2ban-client reload"};
+    for (const auto& f : shipped_filters()) filters += " " + shipped("fail2ban/filter.d/" + std::string(f.name) + ".conf");
+    return filters + " /etc/fail2ban/filter.d/";
+}
+
+std::vector<std::string> installed_filter_paths() {
+    std::vector<std::string> out;
+    for (const auto& f : shipped_filters()) out.push_back("/etc/fail2ban/filter.d/" + std::string(f.name) + ".conf");
+    return out;
+}
+
+std::vector<std::string> fail2ban_install_commands() {
+    return {filter_install_command(), "agensio ctl protection --jail > " + std::string(kJailFile), "fail2ban-client reload"};
 }
 
 ProtectionProbe read_probe(const json::Value& reply, const ProtectionInput& in) {
@@ -520,6 +584,8 @@ struct Verdict {
     bool f2b_down = false;         // installed, not running
     bool f2b_ours = false;         // a jail reads one of our logs
     std::string jail_state;        // "same" | "stale" | "missing" (our jail file on disk against the rendering)
+    std::string filters_state;     // "same" | "stale" | "missing" | "partial" (the installed filters against the shipped text)
+    std::vector<std::string> stale_filters, missing_filters;
     std::uint64_t banned = 0, total_banned = 0;
 };
 
@@ -545,6 +611,12 @@ Verdict judge(const ProtectionInput& in, const ProtectionProbe& probe, const Pro
         }
     if (!files.installed_jail) v.jail_state = "missing";
     else v.jail_state = *files.installed_jail == render_jail(in) ? "same" : "stale";
+    for (std::size_t i = 0; i < shipped_filters().size(); ++i) {
+        const std::optional<std::string>* got = i < files.installed_filters.size() ? &files.installed_filters[i] : nullptr;
+        if (!got || !*got) v.missing_filters.emplace_back(shipped_filters()[i].name);
+        else if (**got != shipped_filters()[i].text) v.stale_filters.emplace_back(shipped_filters()[i].name);
+    }
+    v.filters_state = !v.stale_filters.empty() ? "stale" : v.missing_filters.size() == shipped_filters().size() ? "missing" : v.missing_filters.empty() ? "same" : "partial";
     return v;
 }
 
@@ -585,8 +657,9 @@ json::Value protection_report(const ProtectionInput& in, const ProtectionProbe& 
     json::Value fb = json::Value::object();
     fb.set("file", std::string(kJailFile)).set("shipped", shipped("fail2ban")).set("jail", render_jail(in));
     json::Value filters = json::Value::object();
-    for (const auto& f : kFilters) filters.set(f.name, f.text);
+    for (const auto& f : shipped_filters()) filters.set(f.name, f.text);
     fb.set("filters", std::move(filters)).set("install", strings_json(fail2ban_install_commands())).set("installed_jail", v.jail_state);
+    fb.set("installed_filters", json::Value::object().set("state", v.filters_state).set("stale", strings_json(v.stale_filters)).set("missing", strings_json(v.missing_filters)));
     json::Value fdet = json::Value::object().set("checked", probe.checked);
     if (!probe.checked) fdet.set("why", probe.why);
     else {
@@ -629,6 +702,7 @@ json::Value protection_report(const ProtectionInput& in, const ProtectionProbe& 
         summary += v.f2b_ours ? "fail2ban reads the access logs (" + std::to_string(v.banned) + " address(es) banned now, " + std::to_string(v.total_banned) + " since start" +
                                     (v.jail_state == "stale" ? "; the installed jail file is older than this rendering" : "") + ")"
                               : v.f2b_missing ? "fail2ban is not installed" : v.f2b_down ? "fail2ban is installed but not running" : "no fail2ban jail reads the access logs";
+        if (v.f2b_ours && v.filters_state == "stale") summary += "; the installed filter(s) " + join(v.stale_filters, ", ") + " are older than the shipped text";
     }
     r.set("summary", summary);
     return r;
@@ -686,9 +760,21 @@ std::vector<Finding> protection_findings(const ProtectionInput& in, const Protec
                                   ": nothing bans an address that tries passwords against " + (in.login_paths.empty() ? std::string("the sites") : join(in.login_paths, ", ")) + " or scans for files" +
                                   (in.host_protection == "external" ? " ([control] host_protection = \"external\": managed outside agensio)" : ""),
                               "as root: " + f2b + (v.f2b_down ? "; systemctl enable --now fail2ban" : "") + " (protection_show has the jails and the filters)"});
-    } else if (v.jail_state == "stale") {
-        out.push_back(Finding{"info", "fail2ban_jail_stale", "", std::string(kJailFile) + " is older than this host's rendering (a site, a log or a login path was added since)",
-                              "as root: agensio ctl protection --jail > " + std::string(kJailFile) + "; fail2ban-client reload"});
+    } else {
+        // The jails are agensio's: the filter files and the jail file against what this build
+        // ships and renders (alpha.44 report: an upgrade changed a filter and the old copy ran on).
+        const std::string reinstall = v.filters_state == "stale" || v.filters_state == "partial" ? filter_install_command() + "; " : std::string();
+        // All four absent is a host whose own jails read our logs (a panel's): nothing to say.
+        if (v.filters_state == "stale" || v.filters_state == "partial")
+            out.push_back(Finding{"warn", "fail2ban_filter_stale", "",
+                                  (v.stale_filters.empty() ? std::string() : "the installed filter(s) " + join(v.stale_filters, ", ") + " in /etc/fail2ban/filter.d/ differ from the text this build ships") +
+                                      (v.stale_filters.empty() || v.missing_filters.empty() ? "" : "; ") +
+                                      (v.missing_filters.empty() ? std::string() : "the filter(s) " + join(v.missing_filters, ", ") + " are not installed") +
+                                      ": the jails run with what an older build matched",
+                                  "as root: " + filter_install_command() + "; " + (v.jail_state == "stale" ? "agensio ctl protection --jail > " + std::string(kJailFile) + "; " : std::string()) + "fail2ban-client reload"});
+        if (v.jail_state == "stale")
+            out.push_back(Finding{"info", "fail2ban_jail_stale", "", std::string(kJailFile) + " is older than this host's rendering (a site, a log or a login path was added since)",
+                                  "as root: " + reinstall + "agensio ctl protection --jail > " + std::string(kJailFile) + "; fail2ban-client reload"});
     }
     if (!in.unlogged.empty() && v.f2b_ours)
         out.push_back(Finding{"info", "fail2ban_blind", "", "site(s) without an access log: " + join(in.unlogged, ", ") + "; fail2ban cannot see their requests",

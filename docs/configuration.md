@@ -2124,7 +2124,14 @@ from the application's documentation after asking the user. An application that 
 login through the query string is named with it, and the jail matches the query from its
 start, whatever follows: Kanboard `/?controller=AuthController&action=check`, Roundcube
 `/?_task=login`, phpBB `/ucp.php?mode=login`; the bare `/` is refused, since every form
-post of such an application goes there. A query holds letters, digits and `._~/=&+:-`. `site_show` lists the effective ones. The jail file is
+post of such an application goes there. A query holds letters, digits and `._~/=&+:-`.
+The jail matches each path in every spelling the server and the applications accept, since
+the log holds the request as the client sent it (the alpha.44 report found eleven spellings
+of the login URLs that reached the form and escaped the jail): every character literal or
+percent-encoded, repeated slashes, `./` and `seg/../` segments, an optional `/index.php`
+front controller, a trailing slash, a `.format` suffix, any case, and for a login routed
+through the query string its parameters in any order with others allowed. The rendered
+regex spells `%` as `\x25`, so the jail file never meets configparser's interpolation. `site_show` lists the effective ones. The jail file is
 rendered from the sites that exist, so adding a site, a log or a login path makes the
 installed file stale; health says so (`fail2ban_jail_stale`) and the two lines above
 refresh it.
@@ -2145,7 +2152,9 @@ counts as protection, so a host that already limits is never nagged), `firewall_
 (loaded, the timer pending), `firewall_limits_unsaved` (loaded, not enabled at boot, or
 unknowable without systemd), `firewall_quic_unlimited` (the table predates `h3`),
 `fail2ban_missing` (not installed, not running, or no jail reads agensio's logs),
-`fail2ban_jail_stale`, `fail2ban_log_format` (JSON logs), `fail2ban_blind` (a site without
+`fail2ban_jail_stale`, `fail2ban_filter_stale` (an upgrade changed a shipped filter and the
+installed copy is the old one: the jails match what the older build matched, so the install
+line comes first), `fail2ban_log_format` (JSON logs), `fail2ban_blind` (a site without
 an access log), `protection_unchecked` (no helper). Nothing is reported for a host whose
 listeners are all on loopback. `agensio ctl protection` shows the same with the detail: the
 ports each table limits, each of agensio's rules with its hit counter, the jails with the
