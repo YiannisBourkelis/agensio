@@ -56,7 +56,9 @@ $1
 server_name = ["*"]
 listen = ["0.0.0.0:18880"]
 root = "$T/www"
-login_paths = ["/login"]
+app = "php"
+php = { socket = "unix:$T/run/none.sock" }
+login_paths = ["/login", "/?controller=AuthController&action=check"]
 CFG
 }
 write_config ""
@@ -69,7 +71,7 @@ prot() { ctl protection > $T/prot.json; python3 -c "import json; d=json.load(ope
 
 # 1. Nothing in place: both missing, with root's commands.
 check "health: a public listener without firewall limits or a fail2ban jail: both missing (fail2ban installed but not running), the fixes are root's trial and install commands" "warn:firewall_limits_missing warn:fail2ban_missing yes yes" "$(codes) $(ctl health | grep -q "nft -f $T/firewall.nft; systemd-run --on-active=10min --unit agensio-firewall-trial" && echo yes) $(ctl health | grep -q 'fail2ban is installed but not running' && echo yes)"
-check "protection: checked through the helper; nft present, no table, port 18880 uncovered; fail2ban present; the rendered files name the host's port, log and login path; the trial writes the config directory's firewall.nft; the unit's keep step renders the unit for that path" "True True False False [18880] True no-limit yes yes yes 4" "$(prot 'd["firewall"]["detected"]["checked"], d["firewall"]["detected"]["nft_available"], d["firewall"]["detected"]["table_loaded"], d["firewall"]["detected"]["covered"], d["firewall"]["detected"]["uncovered_tcp_ports"], d["fail2ban"]["detected"]["fail2ban_available"], "no-limit" if d["summary"].startswith("no per-address limit on port(s) 18880") else d["summary"]') $(grep -q 'tcp dport { 18880 }' <(ctl protection --nft) && echo yes) $(ctl protection --jail | grep -q "^logpath   = $T/logs/access.log" && ctl protection --jail | grep -qF 'agensio-login[paths="' && ctl protection --jail | grep -qF '(?:l|\x256C)(?:o|\x256F)(?:g|\x2567)(?:i|\x2569)(?:n|\x256E)' && echo yes) $(ctl protection --unit | grep -q "ConditionPathExists=$T/firewall.nft" && echo yes) $(prot 'len(d["firewall"]["keep"])')"
+check "protection: checked through the helper; nft present, no table, port 18880 uncovered; fail2ban present; the rendered files name the host's port, log and login path; the trial writes the config directory's firewall.nft; the unit's keep step renders the unit for that path" "True True False False [18880] True no-limit yes yes yes 4" "$(prot 'd["firewall"]["detected"]["checked"], d["firewall"]["detected"]["nft_available"], d["firewall"]["detected"]["table_loaded"], d["firewall"]["detected"]["covered"], d["firewall"]["detected"]["uncovered_tcp_ports"], d["fail2ban"]["detected"]["fail2ban_available"], "no-limit" if d["summary"].startswith("no per-address limit on port(s) 18880") else d["summary"]') $(grep -q 'tcp dport { 18880 }' <(ctl protection --nft) && echo yes) $(ctl protection --jail | grep -q "^logpath   = $T/logs/access.log" && ctl protection --jail | grep -qF 'agensio-login[paths="' && ctl protection --jail | grep -qF '(?:l|\x256C|\x254C)(?:o|\x256F|\x254F)(?:g|\x2567|\x2547)(?:i|\x2569|\x2549)(?:n|\x256E|\x254E)' && echo yes) $(ctl protection --unit | grep -q "ConditionPathExists=$T/firewall.nft" && echo yes) $(prot 'len(d["firewall"]["keep"])')"
 
 # 2. The ruleset loaded (twice: the file is idempotent): covered; a reboot's fate unknown here.
 ctl protection --nft > $T/firewall.nft
@@ -100,13 +102,23 @@ check "a second site on another port with its own login paths (one through the q
 # rendered filter must match every spelling the server and the applications accept.
 : > $T/spell.log; i=0
 for p in '/?controller=AuthController&action=check' '/index.php?controller=AuthController&action=check' '/?controller=Auth%43ontroller&action=check' '/?action=check&controller=AuthController' \
-         '/?controller=AuthController&action=check&csrf=1' '/login.html' '/LOGIN' '//login' '/./login' '/x/../login' '/login?next=/' '/signin/' '/%73ignin' '/index.php/signin'; do
+         '/?controller=AuthController&action=check&csrf=1' '/?controller=%61uthController&action=%43HECK' '/LOGIN' '//login' '/./login' '/x/../login' '/x/%2e%2e/login' '/%4Cogin' '/%2Flogin' \
+         '/login?next=/' '/index.php/login' '/signin/' '/%73ignin'; do
   i=$((i+1)); printf '203.0.113.9 - - [02/Oct/2026:10:00:%02d +0000] "POST %s HTTP/1.1" 302 0 "-" "x"\n' $i "$p" >> $T/spell.log; done
-for p in '/signinx' '/?controller=TaskController&action=save' '/signin/reset' '/loginx.html'; do
+for p in '/login.html' '/login/x' '/signinx' '/?controller=TaskController&action=save' '/signin/reset' '/index.php' '/index.php?option=com_content&task=article.save' '/index.php?controller=BoardAjaxController&action=save'; do
   i=$((i+1)); printf '203.0.113.9 - - [02/Oct/2026:10:00:%02d +0000] "POST %s HTTP/1.1" 302 0 "-" "x"\n' $i "$p" >> $T/spell.log; done
 printf '203.0.113.9 - - [02/Oct/2026:10:00:40 +0000] "GET /login HTTP/1.1" 200 0 "-" "x"\n' >> $T/spell.log
 PATHS=$(ctl protection --jail | sed -n 's/^filter    = agensio-login\[paths="\(.*\)"\]$/\1/p' | head -1)
-check "the rendered login filter matches all fourteen spellings of the sites' logins (percent-encoding, repeated slashes, dot segments, case, trailing slash, index.php, a format suffix, query order and extra parameters) and none of the five that are not logins" "14 matched, 5 missed" "$(fail2ban-regex $T/spell.log "agensio-login[paths=\"$PATHS\"]" 2>&1 | sed -n 's/^Lines: [0-9]* lines, [0-9]* ignored, \([0-9]* matched, [0-9]* missed\)$/\1/p')"
+check "the rendered login filter matches all seventeen spellings of the sites' logins (percent-encoding in either case, encoded slashes and dots, repeated slashes, dot segments, case, trailing slash, the PHP front controller before the path, query order and extra parameters) and none of the nine that are not logins (a format suffix or path info on a plain path, index.php alone or with another query)" "17 matched, 9 missed" "$(fail2ban-regex $T/spell.log "agensio-login[paths=\"$PATHS\"]" 2>&1 | sed -n 's/^Lines: [0-9]* lines, [0-9]* ignored, \([0-9]* matched, [0-9]* missed\)$/\1/p')"
+# The alpha.45 report's pathological lines: "./" repeated to 4, 8 and 16 KB and "a/../" to 16 KB before
+# the login path; the grammar is unambiguous, so all four match within the time limit (2.3 s and worse before).
+python3 - "$T/slow.log" <<'PYT'
+import sys
+lines = ["/" + "./" * 2048 + "login", "/" + "./" * 4096 + "login", "/" + "./" * 8192 + "login", "/" + "a/../" * 3277 + "login"]
+with open(sys.argv[1], "w") as f:
+    for i, p in enumerate(lines): f.write('203.0.113.9 - - [02/Oct/2026:10:01:%02d +0000] "POST %s HTTP/1.1" 302 0 "-" "x"\n' % (i, p))
+PYT
+check "four request lines of 4 to 16 KB of dot segments before the login path match within 5 s, linear time, where the first grammar took seconds each" "4 matched, 0 missed" "$(timeout 5 fail2ban-regex $T/slow.log "agensio-login[paths=\"$PATHS\"]" 2>&1 | sed -n 's/^Lines: [0-9]* lines, [0-9]* ignored, \([0-9]* matched, [0-9]* missed\)$/\1/p')"
 ctl protection --nft > $T/firewall.nft && nft -f $T/firewall.nft
 ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload > /dev/null
 sleep 0.5

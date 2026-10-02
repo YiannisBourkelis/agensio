@@ -2126,12 +2126,20 @@ start, whatever follows: Kanboard `/?controller=AuthController&action=check`, Ro
 `/?_task=login`, phpBB `/ucp.php?mode=login`; the bare `/` is refused, since every form
 post of such an application goes there. A query holds letters, digits and `._~/=&+:-`.
 The jail matches each path in every spelling the server and the applications accept, since
-the log holds the request as the client sent it (the alpha.44 report found eleven spellings
-of the login URLs that reached the form and escaped the jail): every character literal or
-percent-encoded, repeated slashes, `./` and `seg/../` segments, an optional `/index.php`
-front controller, a trailing slash, a `.format` suffix, any case, and for a login routed
-through the query string its parameters in any order with others allowed. The rendered
-regex spells `%` as `\x25`, so the jail file never meets configparser's interpolation. `site_show` lists the effective ones. The jail file is
+the log holds the request as the client sent it (the alpha.44 and alpha.45 reports found
+twenty spellings of the login URLs that reached the form and escaped a literal match): every
+character literal or percent-encoded in either case's code, slashes and dots literal or
+encoded, repeated slashes, `./` and `seg/../` segments, any case, for a PHP preset's path
+an optional `/index.php` front controller before it and path info after a `.php` file, for
+a Rails or Redmine path an optional `.format` suffix, and for a login routed through the
+query string its parameters in any order with others allowed. Nothing more: `/index.php`
+alone or with another query is no login, nor is `/admin.php` on a Grav site, so an
+application's ordinary form posts are never counted. The grammar is unambiguous, so a 16 KB
+request line of dot segments costs linear time (the first grammar took seconds). The
+rendered regex spells `%` as `\x25`, so the jail file never meets configparser's
+interpolation. There is one login jail per access log, `agensio-login` for the server-wide
+log and `agensio-login-<site>` for a site's own, each with the login paths of the sites
+writing that file, so one application's paths are not counted on another's log. `site_show` lists the effective ones. The jail file is
 rendered from the sites that exist, so adding a site, a log or a login path makes the
 installed file stale; health says so (`fail2ban_jail_stale`) and the two lines above
 refresh it.

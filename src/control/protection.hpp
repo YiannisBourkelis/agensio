@@ -20,12 +20,31 @@
 
 namespace agensio::control {
 
+// A login path with what its application allows around it: a PHP preset's front controller
+// (/index.php before the path, path info after a .php file), a Rails application's optional
+// .format suffix (2026-10-02 alpha.45 report: allowed everywhere, these counted Joomla's and
+// Kanboard's ordinary form posts as logins).
+struct LoginPath {
+    std::string path;
+    bool php = false;
+    bool format = false;
+};
+// One agensio-login jail per access log: the login paths of the sites writing into it, so
+// Grav's /admin is not counted on a Wagtail site's log (alpha.45 report).
+struct LoginJail {
+    std::string name;  // agensio-login for the server-wide log, agensio-login-<site> for a site's own
+    std::string log;
+    std::vector<std::string> sites;
+    std::vector<LoginPath> paths;
+};
+
 // What the files are rendered from.
 struct ProtectionInput {
     std::vector<unsigned> tcp_ports;          // every listener's port the world can reach (plain and TLS), ascending
     std::vector<unsigned> udp_ports;          // the TLS ports that also speak h3 (QUIC)
     std::vector<std::string> logs;            // the access logs fail2ban reads, ascending
     std::vector<std::string> login_paths;     // the presets' and the sites' own, ascending, unique
+    std::vector<LoginJail> login_jails;       // per access log, the server-wide log's first
     std::vector<std::string> unlogged;        // sites without an access log (fail2ban cannot see them)
     bool combined = true;                     // [log] format = "combined": the filters read that format only
     bool exposed = false;                     // at least one listener is not loopback
@@ -53,7 +72,9 @@ const std::vector<ProtectionFilter>& protection_filters();
 // reaches configparser), slashes repeated, "./" and "seg/../" segments, an optional
 // /index.php front controller, a trailing slash, a .format suffix, and for a query entry its
 // parameters in any order with others allowed; case-insensitive through the filter's (?i).
-std::string spelling_regex(const std::string& login_path);
+std::string spelling_regex(const LoginPath& login_path);
+// The alternatives of a jail's paths joined, the `paths` parameter of the agensio-login filter.
+std::string login_paths_regex(const std::vector<LoginPath>& paths);
 
 constexpr std::string_view kProtectionShippedDir = "/usr/share/agensio";
 constexpr std::string_view kFirewallTable = "inet agensio";

@@ -4636,6 +4636,14 @@ static void test_protection() {
         CHECK(in.exposed && (in.tcp_ports == std::vector<unsigned>{8080, 8443}) && in.udp_ports.empty() && in.combined && in.host_protection == "external");
         CHECK((in.logs == std::vector<std::string>{(dir / "access.log").string()}) && (in.unlogged == std::vector<std::string>{"lo.test"}));
         CHECK((in.login_paths == std::vector<std::string>{"/api/token", "/login", "/one", "/wp-login.php", "/xmlrpc.php"}) && in.firewall_file == (dir / "firewall.nft").string());
+        CHECK(in.login_jails.size() == 1 && in.login_jails[0].name == "agensio-login" && in.login_jails[0].log == (dir / "access.log").string() && in.login_jails[0].paths.size() == 4 &&
+              in.login_jails[0].paths[0].path == "/api/token" && in.login_jails[0].paths[0].php && !in.login_jails[0].paths[0].format && (in.login_jails[0].sites == std::vector<std::string>{"wp.test"}));
+        Config own = cfg;
+        own.sites[1].access_log = (dir / "lo.log").string();
+        own.sites[1].app = "redmine";
+        const ProtectionInput two = protection_input(own);
+        CHECK(two.login_jails.size() == 2 && two.login_jails[1].name == "agensio-login-lo-test" && two.login_jails[1].log == (dir / "lo.log").string() && two.login_jails[1].paths.size() == 2 &&
+              two.login_jails[1].paths[0].path == "/login" && two.login_jails[1].paths[0].format && !two.login_jails[1].paths[0].php && two.login_jails[1].paths[1].path == "/one");
         // A loopback-only host is not exposed; QUIC adds the TLS port to the UDP list.
         Config lo = cfg;
         lo.sites.erase(lo.sites.begin());
@@ -4684,16 +4692,25 @@ static void test_protection() {
         kb.exposed = true;
         // The jail's regex for a path covers every spelling (the alpha.44 report): "/x" exactly,
         // a query entry's parameters as lookaheads, never a '%' (the jail file is configparser's).
-        const std::string slash = "/+(?:(?:\\.|[^/?\\s]+/+\\.\\.)/+)*";
-        CHECK(spelling_regex("/x") == "(?:" + slash + "index(?:\\.|\\x252E)php(?:" + slash + "(?:x|\\x2578))?|" + slash + "(?:x|\\x2578))(?:(?:\\.|\\x252E)[a-z0-9]{1,8})?/*(?:[?&]\\S*)?");
-        const std::string kbr = spelling_regex("/?controller=Auth&a=1");
-        CHECK(kbr.find("(?=\\S*[?&](?:c|\\x2563)(?:o|\\x256F)(?:n|\\x256E)(?:t|\\x2574)(?:r|\\x2572)(?:o|\\x256F)(?:l|\\x256C)(?:l|\\x256C)(?:e|\\x2565)(?:r|\\x2572)=(?:A|\\x2541)(?:u|\\x2575)(?:t|\\x2574)(?:h|\\x2568)(?:[&\\s]|$))") != std::string::npos &&
-              kbr.find("(?=\\S*[?&](?:a|\\x2561)=(?:1|\\x2531)(?:[&\\s]|$))\\?\\S*") != std::string::npos && kbr.find('%') == std::string::npos && kbr.starts_with("(?:" + slash + "index"));
-        CHECK(render_jail(kb).find("filter    = agensio-login[paths=\"" + spelling_regex("/?controller=AuthController&action=check") + "|" + spelling_regex("/ucp.php?mode=login") + "|" + spelling_regex("/x+y") + "\"]") != std::string::npos &&
-              render_jail(kb).find('%') == std::string::npos);
+        const std::string sl = "(?:/|\\x252F)+", dot = "(?:\\.|\\x252E)";
+        const std::string sep = sl + "(?:(?:" + dot + sl + "|[^/?\\s.\\x25][^/?\\s\\x25]*" + sl + dot + dot + sl + "))*";
+        const std::string x = "(?:x|\\x2578|\\x2558)";
+        // A letter under both cases' codes; the front controller only before a PHP preset's path,
+        // never alone; the format suffix only for Rails; path info only after a .php file.
+        CHECK(spelling_regex({"/x", true, false}) == "(?:" + sep + "index" + dot + "php)?" + sep + x + "(?:/|\\x252F)*(?:[?&]\\S*)?");
+        CHECK(spelling_regex({"/x", false, true}) == sep + x + "(?:" + dot + "[a-z0-9]{1,8})?(?:/|\\x252F)*(?:[?&]\\S*)?");
+        CHECK(spelling_regex({"/x.php", true, false}) == "(?:" + sep + "index" + dot + "php)?" + sep + x + dot + "(?:p|\\x2570|\\x2550)(?:h|\\x2568|\\x2548)(?:p|\\x2570|\\x2550)(?:" + sl + "\\S*)?(?:[?&]\\S*)?");
+        const std::string kbr = spelling_regex({"/?controller=Auth&a=1", true, false});
+        CHECK(kbr.starts_with("(?:" + sep + "index" + dot + "php|" + sep + ")(?:/|\\x252F)*(?=\\S*[?&](?:c|\\x2563|\\x2543)") &&
+              kbr.find("=(?:A|\\x2541|\\x2561)(?:u|\\x2575|\\x2555)(?:t|\\x2574|\\x2554)(?:h|\\x2568|\\x2548)(?:[&\\s]|$))") != std::string::npos &&
+              kbr.ends_with("(?=\\S*[?&](?:a|\\x2561|\\x2541)=(?:1|\\x2531)(?:[&\\s]|$))\\?\\S*") && kbr.find('%') == std::string::npos);
+        CHECK(spelling_regex({"/?x=1", false, false}).starts_with(sep + "(?:/|\\x252F)*(?=") && spelling_regex({"/a/b", false, false}) == sep + "(?:a|\\x2561|\\x2541)" + sep + "(?:b|\\x2562|\\x2542)(?:/|\\x252F)*(?:[?&]\\S*)?");
+        kb.login_jails = {LoginJail{"agensio-login", "/var/log/agensio/access.log", {"kb.test"}, {{"/?controller=AuthController&action=check", true, false}, {"/ucp.php?mode=login", true, false}, {"/x+y", false, false}}}};
+        CHECK(render_jail(kb).find("filter    = agensio-login[paths=\"" + login_paths_regex(kb.login_jails[0].paths) + "\"]") != std::string::npos && render_jail(kb).find('%') == std::string::npos &&
+              render_jail(kb).find("# Credentials posted to a login path of kb.test: ten in ten minutes bans for an hour.") != std::string::npos);
         CHECK(protection_filters()[0].text.find("failregex = (?i)^<HOST> \\S+ \\S+ \\[\\] \"POST (?:<paths>) HTTP/\\S+\" \\d{3} ") != std::string::npos &&
-              protection_filters()[0].text.find("paths = " + spelling_regex("/admin") + "|") != std::string::npos &&
-              protection_filters()[0].text.find(spelling_regex("/xmlrpc.php")) != std::string::npos && protection_filters()[0].text.find('%') == std::string::npos);
+              protection_filters()[0].text.find("paths = " + login_paths_regex(default_protection_input().login_jails[0].paths) + "\n") != std::string::npos &&
+              protection_filters()[0].text.find('%') == std::string::npos);
     }
     // The shipped files are the renderers' output for the default host.
     auto file = [](const char* rel) {
@@ -4701,7 +4718,8 @@ static void test_protection() {
         return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     };
     const ProtectionInput def = default_protection_input();
-    CHECK((def.tcp_ports == std::vector<unsigned>{80, 443}) && (def.udp_ports == std::vector<unsigned>{443}) && def.exposed && def.login_paths.size() == 8);
+    CHECK((def.tcp_ports == std::vector<unsigned>{80, 443}) && (def.udp_ports == std::vector<unsigned>{443}) && def.exposed && def.login_paths.size() == 8 &&
+          def.login_jails.size() == 1 && def.login_jails[0].paths.size() == 8 && def.login_jails[0].paths[0].path == "/admin" && def.login_jails[0].paths[0].php);
     CHECK(render_nft(def) == file("packaging/firewall/agensio.nft"));
     CHECK(render_jail(def) == file("packaging/fail2ban/jail.d/agensio.conf"));
     CHECK(render_firewall_unit(def) == file("packaging/agensio-firewall.service"));
@@ -4714,20 +4732,22 @@ static void test_protection() {
     in.udp_ports = {443};
     in.logs = {"/var/log/agensio/access.log", "/var/log/agensio/wp.log"};
     in.login_paths = {"/login", "/wp-login.php"};
+    in.login_jails = {LoginJail{"agensio-login", "/var/log/agensio/access.log", {"a.test", "b.test"}, {{"/login", false, false}, {"/wp-login.php", true, false}}}};
     in.exposed = true;
     in.firewall_file = "/etc/agensio/firewall.nft";
     {
         const std::string nft = render_nft(in), jail = render_jail(in);
         CHECK(nft.find("tcp dport { 80, 443 } ct state new update @new4") != std::string::npos && nft.find("udp dport { 443 } @th,64,8 & 0xc0 == 0xc0") != std::string::npos &&
               nft.starts_with("#!/usr/sbin/nft -f\n") && nft.find("table inet agensio\ndelete table inet agensio\ntable inet agensio {") != std::string::npos);
-        CHECK(jail.find("filter    = agensio-login[paths=\"" + spelling_regex("/login") + "|" + spelling_regex("/wp-login.php") + "\"]") != std::string::npos &&
+        CHECK(jail.find("filter    = agensio-login[paths=\"" + login_paths_regex(in.login_jails[0].paths) + "\"]") != std::string::npos &&
               jail.find("logpath   = /var/log/agensio/access.log\n            /var/log/agensio/wp.log\n") != std::string::npos && jail.find("port      = 80,443") != std::string::npos);
         ProtectionInput nol = in;
         nol.udp_ports.clear();
         nol.login_paths.clear();
+        nol.login_jails.clear();
         nol.tcp_ports = {8080};
         CHECK(render_nft(nol).find("quic") == std::string::npos && render_nft(nol).find("tcp dport { 8080 }") != std::string::npos);
-        CHECK(render_jail(nol).find("[agensio-login]\n# Credentials posted to a login path: ten in ten minutes bans for an hour.\n# No login path is known") != std::string::npos &&
+        CHECK(render_jail(nol).find("[agensio-login]\n# Credentials posted to a login path: ten in ten minutes bans for an hour.\n# No login path is known for the site(s)") != std::string::npos &&
               render_jail(nol).find("enabled   = false") != std::string::npos && render_jail(nol).find("filter    = agensio-login\n") != std::string::npos);
         ProtectionInput js = in;
         js.combined = false;

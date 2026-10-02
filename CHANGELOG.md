@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.0-alpha.46 (unreleased)
+
+From the alpha.45 report on the login jail's regex: its dot-segment grammar was ambiguous
+and a 16 KB request line of `./` cost 2.3 s of fail2ban's time, so the branches are disjoint
+now and such a line costs linear time (a timed check in the root suite); a letter is matched
+under either case's percent code and slashes and dots encoded too, which closes nine more
+spellings; `/index.php` is an optional prefix of a PHP preset's login path and never a login
+by itself, path info is allowed only after a `.php` file and a `.format` suffix only on Rails
+and Redmine paths, so Joomla's and Kanboard's ordinary form posts are not counted; and there
+is one `agensio-login` jail per access log with the paths of the sites writing it
+(`login_jails` in `protection_show`), so one application's paths are not counted on another
+site's log.
+
 ## 0.1.0-alpha.45 (2026-10-02)
 From the alpha.44 report: the installed fail2ban filters are compared with the text this
 build ships (`installed_filters`, `fail2ban_filter_stale`, and the install line ahead of

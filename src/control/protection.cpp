@@ -1,6 +1,7 @@
 #include "control/protection.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <map>
 #include <set>
 
@@ -34,22 +35,24 @@ std::string port_list(const std::vector<unsigned>& ports) {
 
 std::string shipped(std::string_view sub) { return std::string(kProtectionShippedDir) + "/" + std::string(sub); }
 
-// One character of a login path: literal (escaped when the regex would read it) or its
-// percent-encoding, the '%' written \x25 so the jail file's configparser never sees one.
-std::string spelled(char c) {
+std::string hex2(unsigned char u) {
     static constexpr char kHex[] = "0123456789ABCDEF";
+    return std::string{kHex[u >> 4], kHex[u & 15]};
+}
+
+// One character of a login path: literal (escaped when the regex would read it) or
+// percent-encoded, a letter under either case's code (the server decodes %55 and %75 alike,
+// the applications take either case; alpha.45 report); the '%' written \x25 so the jail
+// file's configparser never sees one, and the filter's (?i) covers the hex digits' case.
+std::string spelled(char c) {
     const unsigned char u = static_cast<unsigned char>(c);
     std::string out = "(?:";
     if (c == '.' || c == '?' || c == '+' || c == '/' || c == '~') out += '\\';
     out += c;
-    out += "|\\x25";
-    out += kHex[u >> 4];
-    out += kHex[u & 15];
+    out += "|\\x25" + hex2(u);
+    if (std::isalpha(u)) out += "|\\x25" + hex2(static_cast<unsigned char>(std::isupper(u) ? std::tolower(u) : std::toupper(u)));
     return out + ")";
 }
-
-// A slash as a client may write it: repeated, with "./" and "seg/../" segments between.
-constexpr const char* kSlash = "/+(?:(?:\\.|[^/?\\s]+/+\\.\\.)/+)*";
 
 std::string spelled(const std::string& s) {
     std::string out;
@@ -57,25 +60,44 @@ std::string spelled(const std::string& s) {
     return out;
 }
 
+// Slashes and dots as a client may write them, literal or encoded (the server decodes %2F
+// and %2E before it normalises).
+const std::string kSlashes = "(?:/|\\x252F)+";
+const std::string kSlashOpt = "(?:/|\\x252F)*";
+const std::string kDot = "(?:\\.|\\x252E)";
+// Between two segments, and before the first: slashes, then any number of "./" runs and
+// "seg/../" pops. The two branches are disjoint (a run starts with a dot, a pop with a plain
+// character that is neither a dot nor a percent sign) and each consumes its tokens in one way
+// only, so a 16 KB line of "./" costs linear time (alpha.45 report: the first grammar let "."
+// start both branches, and such a line took the jail's thread 2.3 s).
+const std::string kSep = kSlashes + "(?:(?:" + kDot + kSlashes + "|[^/?\\s.\\x25][^/?\\s\\x25]*" + kSlashes + kDot + kDot + kSlashes + "))*";
+
 }  // namespace
 
-std::string spelling_regex(const std::string& login) {
-    const std::size_t q = login.find('?');
-    const std::string path = login.substr(0, q);
+std::string spelling_regex(const LoginPath& lp) {
+    const std::size_t q = lp.path.find('?');
+    const std::string path = lp.path.substr(0, q);
     std::string body;
     std::size_t i = 0;
     while (i < path.size()) {
         while (i < path.size() && path[i] == '/') ++i;
         if (i >= path.size()) break;
         const std::size_t end = path.find('/', i);
-        body += kSlash + spelled(path.substr(i, end == std::string::npos ? std::string::npos : end - i));
+        body += kSep + spelled(path.substr(i, end == std::string::npos ? std::string::npos : end - i));
         i = end == std::string::npos ? path.size() : end;
     }
-    if (body.empty()) body = kSlash;  // the root: "/" or "/index.php" alone
-    std::string out = "(?:" + std::string(kSlash) + "index" + spelled('.') + "php(?:" + body + ")?|" + body + ")(?:" + spelled('.') + "[a-z0-9]{1,8})?/*";
+    // A PHP preset's front controller may stand before the path (/index.php/user/login,
+    // /index.php?controller=...), never alone: the path itself is what makes a login.
+    const std::string index = kSep + "index" + kDot + "php";
+    std::string out;
+    if (body.empty()) out = lp.php ? "(?:" + index + "|" + kSep + ")" : kSep;  // the root, a query login
+    else out = (lp.php ? "(?:" + index + ")?" : std::string()) + body;
+    if (lp.format) out += "(?:" + kDot + "[a-z0-9]{1,8})?";            // Rails' optional format
+    if (lp.php && path.size() > 4 && path.ends_with(".php")) out += "(?:" + kSlashes + "\\S*)?";  // path info after the script
+    else out += kSlashOpt;
     if (q == std::string::npos) return out + "(?:[?&]\\S*)?";
     // Every parameter of the entry present, in any order, with others allowed.
-    const std::string query = login.substr(q + 1);
+    const std::string query = lp.path.substr(q + 1);
     std::size_t p = 0;
     while (p <= query.size()) {
         const std::size_t amp = query.find('&', p);
@@ -90,13 +112,20 @@ std::string spelling_regex(const std::string& login) {
     return out + "\\?\\S*";
 }
 
+std::string login_paths_regex(const std::vector<LoginPath>& paths) {
+    std::string out;
+    for (std::size_t i = 0; i < paths.size(); ++i) out += (i ? "|" : "") + spelling_regex(paths[i]);
+    return out;
+}
+
 namespace {
 
 // The four jails share the shape; the text is one place so the shipped copy and the host's
 // rendering never drift.
 std::string login_filter_text() {
     std::string paths;
-    for (const auto& p : default_protection_input().login_paths) paths += (paths.empty() ? "" : "|") + spelling_regex(p);
+    const ProtectionInput def = default_protection_input();
+    if (!def.login_jails.empty()) paths = login_paths_regex(def.login_jails.front().paths);
     return "# fail2ban filter for agensio (docs/configuration.md 18): credentials posted to a login path.\n"
            "# The access log is in the combined format, the client address its first field (behind a\n"
            "# trusted proxy, the one X-Forwarded-For named). A form login is a POST; a failed and a\n"
@@ -106,9 +135,12 @@ std::string login_filter_text() {
            "# their login_paths); the default below is every preset's. Each path is written in every\n"
            "# spelling the server and the applications accept, since the log holds the request as the\n"
            "# client sent it: every character literal or percent-encoded (the percent written \\x25), repeated\n"
-           "# slashes, ./ and seg/../ segments, an optional /index.php front controller, a trailing slash,\n"
-           "# a .format suffix, any case, and for a login routed through the query string its parameters\n"
-           "# in any order with others allowed. agensio ctl protection renders the same from a path.\n"
+           "# slashes (encoded too), ./ and seg/../ segments, any case, for a PHP preset an optional\n"
+           "# /index.php front controller before the path and path info after a .php file, for a Rails\n"
+           "# application an optional .format suffix, and for a login routed through the query string its\n"
+           "# parameters in any order with others allowed. The grammar is unambiguous, so a long request\n"
+           "# line costs linear time. agensio ctl protection renders the same from each site's paths, one\n"
+           "# agensio-login jail per access log.\n"
            "\n"
            "[INCLUDES]\n"
            "before = common.conf\n"
@@ -286,18 +318,56 @@ ProtectionInput protection_input(const Config& cfg) {
             add_unique(in.tcp_ports, port);
             if (s.tls && s.h3) add_unique(in.udp_ports, port);
         }
+        const std::string name = s.server_names.empty() ? std::string() : s.server_names.front();
+        LoginJail* jail = nullptr;
         if (s.access_log.empty()) {
-            if (!s.server_names.empty()) add_unique(in.unlogged, s.server_names.front());
+            if (!name.empty()) add_unique(in.unlogged, name);
         } else {
             add_unique(in.logs, s.access_log);
+            auto it = std::find_if(in.login_jails.begin(), in.login_jails.end(), [&](const LoginJail& j) { return j.log == s.access_log; });
+            if (it == in.login_jails.end()) {
+                in.login_jails.push_back(LoginJail{"", s.access_log, {}, {}});
+                it = in.login_jails.end() - 1;
+            }
+            if (!name.empty()) add_unique(it->sites, name);
+            jail = &*it;
         }
-        for (const auto& p : preset_login_paths(s.app)) add_unique(in.login_paths, p);
-        for (const auto& p : s.login_paths) add_unique(in.login_paths, p);
+        const bool php = php_app(s.app), format = rails_app(s.app);
+        auto add_path = [&](const std::string& p) {
+            add_unique(in.login_paths, p);
+            if (!jail) return;
+            auto found = std::find_if(jail->paths.begin(), jail->paths.end(), [&](const LoginPath& lp) { return lp.path == p; });
+            if (found == jail->paths.end()) jail->paths.push_back(LoginPath{p, php, format});
+            else {
+                found->php = found->php || php;
+                found->format = found->format || format;
+            }
+        };
+        for (const auto& p : preset_login_paths(s.app)) add_path(p);
+        for (const auto& p : s.login_paths) add_path(p);
     }
     std::sort(in.tcp_ports.begin(), in.tcp_ports.end());
     std::sort(in.udp_ports.begin(), in.udp_ports.end());
     std::sort(in.logs.begin(), in.logs.end());
     std::sort(in.login_paths.begin(), in.login_paths.end());
+    // The server-wide log's jail first, then one per site log, named after the first site writing it.
+    std::stable_sort(in.login_jails.begin(), in.login_jails.end(), [&](const LoginJail& a, const LoginJail& b) {
+        const bool da = a.log == cfg.log.access, db = b.log == cfg.log.access;
+        return da != db ? da : a.log < b.log;
+    });
+    std::vector<std::string> taken;
+    for (auto& j : in.login_jails) {
+        std::sort(j.paths.begin(), j.paths.end(), [](const LoginPath& a, const LoginPath& b) { return a.path < b.path; });
+        std::string base = "agensio-login";
+        if (j.log != cfg.log.access && !j.sites.empty()) {
+            base += "-";
+            for (char c : j.sites.front()) base += std::isalnum(static_cast<unsigned char>(c)) ? static_cast<char>(std::tolower(static_cast<unsigned char>(c))) : '-';
+        }
+        std::string name = base;
+        for (unsigned n = 2; std::find(taken.begin(), taken.end(), name) != taken.end(); ++n) name = base + "-" + std::to_string(n);
+        taken.push_back(name);
+        j.name = name;
+    }
     return in;
 }
 
@@ -306,9 +376,20 @@ ProtectionInput default_protection_input() {
     in.tcp_ports = {80, 443};
     in.udp_ports = {443};
     in.logs = {"/var/log/agensio/access.log"};
+    LoginJail jail{"agensio-login", in.logs.front(), {}, {}};
     for (const auto& app : app_presets())
-        for (const auto& p : preset_login_paths(app)) add_unique(in.login_paths, p);
+        for (const auto& p : preset_login_paths(app)) {
+            add_unique(in.login_paths, p);
+            auto found = std::find_if(jail.paths.begin(), jail.paths.end(), [&](const LoginPath& lp) { return lp.path == p; });
+            if (found == jail.paths.end()) jail.paths.push_back(LoginPath{p, php_app(app), rails_app(app)});
+            else {
+                found->php = found->php || php_app(app);
+                found->format = found->format || rails_app(app);
+            }
+        }
     std::sort(in.login_paths.begin(), in.login_paths.end());
+    std::sort(jail.paths.begin(), jail.paths.end(), [](const LoginPath& a, const LoginPath& b) { return a.path < b.path; });
+    in.login_jails.push_back(std::move(jail));
     in.exposed = true;
     in.firewall_file = std::string(kDefaultFirewallFile);
     return in;
@@ -366,12 +447,10 @@ std::string render_jail(const ProtectionInput& in) {
     const std::vector<std::string> logs = in.logs.empty() ? std::vector<std::string>{"/var/log/agensio/access.log"} : in.logs;
     std::string logpath;
     for (std::size_t i = 0; i < logs.size(); ++i) logpath += (i ? "\n            " : "") + logs[i];
-    std::string paths;
-    for (std::size_t i = 0; i < in.login_paths.size(); ++i) paths += (i ? "|" : "") + spelling_regex(in.login_paths[i]);
     std::string s;
     s += "# agensio: fail2ban jails over its access logs (docs/configuration.md 18), rendered by\n";
     s += "# `agensio ctl protection --jail` for this host: its web ports, its access logs and the login\n";
-    s += "# paths of its sites (each preset's, plus every site's login_paths). Install as\n";
+    s += "# paths of its sites (each preset's, plus every site's login_paths), one login jail per log. Install as\n";
     s += "# " + std::string(kJailFile) + " with the filters from " + shipped("fail2ban/filter.d") + ", then\n";
     s += "# `fail2ban-client reload`; render again when a site is added (health says when this file is stale).\n";
     s += "# The logs are in the combined format: the client address is the first field (behind a trusted\n";
@@ -379,22 +458,29 @@ std::string render_jail(const ProtectionInput& in) {
     s += "# a host whose firewall is managed otherwise sets banaction in its jail.local.\n";
     if (!in.combined)
         s += "#\n# NOTE: this host's access logs are JSON ([log] format = \"json\"); these filters read the combined\n# format only, so nothing here matches until the format is combined.\n";
-    s += "\n[agensio-login]\n";
-    s += "# Credentials posted to a login path: ten in ten minutes bans for an hour.\n";
-    if (in.login_paths.empty()) {
-        s += "# No login path is known for this host's sites: name them with the sites' login_paths\n";
-        s += "# (site_update, agensio ctl site-update NAME --login-path /login), then render this file again.\n";
-        s += "enabled   = false\n";
-    } else {
-        s += "enabled   = true\n";
+    // One login jail per access log, with the paths of the sites that write it, in every
+    // spelling; a host without a known login path gets the jail disabled with the reason.
+    std::vector<LoginJail> jails = in.login_jails;
+    if (jails.empty()) jails.push_back(LoginJail{"agensio-login", "", {}, {}});
+    for (const auto& j : jails) {
+        const std::string paths = login_paths_regex(j.paths);
+        s += "\n[" + j.name + "]\n";
+        s += "# Credentials posted to a login path" + (j.sites.empty() ? std::string() : " of " + join(j.sites, ", ")) + ": ten in ten minutes bans for an hour.\n";
+        if (paths.empty()) {
+            s += "# No login path is known for the site(s) writing this log: name them with the sites' login_paths\n";
+            s += "# (site_update, agensio ctl site-update NAME --login-path /login), then render this file again.\n";
+            s += "enabled   = false\n";
+        } else {
+            s += "enabled   = true\n";
+        }
+        s += "port      = " + ports + "\n";
+        s += "filter    = agensio-login" + (paths.empty() ? std::string() : "[paths=\"" + paths + "\"]") + "\n";
+        s += "logpath   = " + (j.log.empty() ? logpath : j.log) + "\n";
+        s += "banaction = nftables-multiport\n";
+        s += "maxretry  = 10\n";
+        s += "findtime  = 10m\n";
+        s += "bantime   = 1h\n";
     }
-    s += "port      = " + ports + "\n";
-    s += "filter    = agensio-login" + (paths.empty() ? std::string() : "[paths=\"" + paths + "\"]") + "\n";
-    s += "logpath   = " + logpath + "\n";
-    s += "banaction = nftables-multiport\n";
-    s += "maxretry  = 10\n";
-    s += "findtime  = 10m\n";
-    s += "bantime   = 1h\n";
     s += "\n[agensio-auth]\n";
     s += "# Requests refused with 401 or 403: ten in ten minutes bans for an hour.\n";
     s += "enabled   = true\n";
@@ -628,6 +714,13 @@ json::Value protection_report(const ProtectionInput& in, const ProtectionProbe& 
     r.set("ports", json::Value::object().set("tcp", ports_json(in.tcp_ports)).set("udp", ports_json(in.udp_ports)));
     r.set("logs", strings_json(in.logs)).set("log_format", in.combined ? "combined" : "json").set("login_paths", strings_json(in.login_paths));
     if (!in.unlogged.empty()) r.set("unlogged_sites", strings_json(in.unlogged));
+    json::Value ljs = json::Value::array();
+    for (const auto& j : in.login_jails) {
+        json::Value paths = json::Value::array();
+        for (const auto& p : j.paths) paths.push(p.path);
+        ljs.push(json::Value::object().set("name", j.name).set("log", j.log).set("sites", strings_json(j.sites)).set("paths", std::move(paths)));
+    }
+    r.set("login_jails", std::move(ljs));
     // The firewall
     json::Value fw = json::Value::object();
     fw.set("table", std::string(kFirewallTable)).set("file", in.firewall_file).set("shipped", shipped("firewall/agensio.nft")).set("unit", std::string(kFirewallUnit));
