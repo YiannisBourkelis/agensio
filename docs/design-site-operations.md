@@ -1017,7 +1017,11 @@ Decisions:
   file named, and nobody is surprised by which of the two won.
 - **An orphan is a warning.** Disabling or deleting a site must not break the next reload,
   so a file whose site is gone is kept and ignored, said at `-t`, in the error log and by
-  health with the fix (`site-enable`, or remove the file).
+  health with the fix (`site-enable`, or remove the file). A plain `site-delete` does not
+  leave one behind: it renames the additions file `.bak` beside the site file's `.bak`
+  (the owner's decision, 2026-10-02: the configuration going means the whole configuration),
+  still root's, named in the answer, put back if the reload refuses; the delete with files
+  moves it into the trash.
 - **The MCP side knows its limits.** `site_show` names the file before it exists, with the
   first line it needs; the tool texts and the instructions say that what no field covers
   goes there, as a block the agent hands root, and never into the managed file. That is the

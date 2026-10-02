@@ -44,9 +44,10 @@ or writable by others, and a path the site file already has; a file whose site i
 or deleted is kept and ignored with a warning (`-t`, the error log, health
 `root_additions_orphan`). `--explain` marks the locations `# from root:<file>`; `site-show`
 and MCP `site_show` report `root_additions` (the file, present or not, what it added); the
-trash moves the file with the site and restore brings it back; the MCP texts send an agent
-asked for what no field covers to that file, never to the managed one. A reference row for
-the file's `site` key.
+trash moves the file with the site and restore brings it back; a plain `site-delete` sets
+it aside as `.bak` beside the site file's `.bak` (still root's, `root_additions_set_aside` in
+the answer, so no orphan is left behind); the MCP texts send an agent asked for what no field
+covers to that file, never to the managed one. A reference row for the file's `site` key.
 
 ## 0.1.0-alpha.39 (2026-10-01)
 

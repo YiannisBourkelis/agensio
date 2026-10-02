@@ -1413,6 +1413,18 @@ void ControlHandler::site_toggle(Stream& s, std::string_view name, std::string_v
     const std::filesystem::path disabled = file.string() + ".disabled";
     std::error_code ec;
     std::string error;
+    // Root's additions to the site (design section 20) go aside with the site file on a plain
+    // delete, each as <file>.bak beside the site file's .bak: the loader ignores .bak files, so
+    // no orphan warning follows, and a rename keeps the file root's. The running site names
+    // the files the loader merged; the canonical name covers a site deleted while disabled.
+    std::vector<std::string> set_aside;
+    if (action == "delete") {
+        if (const SiteConfig* site = control::find_site(cfg, name))
+            for (const auto& f : site->root_additions)
+                if (std::filesystem::path(f).parent_path() == file.parent_path() && std::filesystem::exists(f, ec)) set_aside.push_back(f);
+        const std::string canonical = (file.parent_path() / (std::string(name) + std::string(kRootAdditionsSuffix))).string();
+        if (std::find(set_aside.begin(), set_aside.end(), canonical) == set_aside.end() && std::filesystem::exists(canonical, ec)) set_aside.push_back(canonical);
+    }
     if (action == "disable") {
         if (!std::filesystem::exists(file, ec)) {
             reply(s, 404, json::Value::object().set("error", "no site file " + file.string()));
@@ -1432,6 +1444,8 @@ void ControlHandler::site_toggle(Stream& s, std::string_view name, std::string_v
         }
         if (std::filesystem::exists(file, ec)) std::filesystem::rename(file, file.string() + ".bak", ec);
         std::filesystem::remove(disabled, ec);
+        for (const auto& f : set_aside)
+            if (!ec) std::filesystem::rename(f, f + ".bak", ec);
     }
     if (ec) {
         reply(s, 500, json::Value::object().set("error", ec.message()));
@@ -1440,13 +1454,24 @@ void ControlHandler::site_toggle(Stream& s, std::string_view name, std::string_v
     if (!backend_->reload_now(error)) {
         if (action == "disable") std::filesystem::rename(disabled, file, ec);
         else if (action == "enable") std::filesystem::rename(file, disabled, ec);
-        else std::filesystem::rename(file.string() + ".bak", file, ec);
+        else {
+            std::filesystem::rename(file.string() + ".bak", file, ec);
+            for (const auto& f : set_aside) std::filesystem::rename(f + ".bak", f, ec);
+        }
         audit_peer(s, what, "refused: " + error);
         reply(s, 409, json::Value::object().set("error", "reload refused; file restored").set("detail", error));
         return;
     }
-    audit_peer(s, what, std::string(action) + " " + file.string());
+    std::string aside_note;
+    for (const auto& f : set_aside) aside_note += (aside_note.empty() ? "" : ", ") + f + " -> " + f + ".bak";
+    audit_peer(s, what, std::string(action) + " " + file.string() + (aside_note.empty() ? "" : "; root additions set aside: " + aside_note));
     json::Value body = json::Value::object().set("ok", true).set("file", file.string()).set("action", std::string(action));
+    if (!set_aside.empty()) {
+        std::vector<std::string> baks;
+        for (const auto& f : set_aside) baks.push_back(f + ".bak");
+        body.set("root_additions_set_aside", strings(baks))
+            .set("root_additions_note", "root's additions to the site were renamed .bak beside the site file's .bak, still root's; rename both back to bring the site back with them, or remove them once the site is gone for good");
+    }
     // A deleted application site's environment stays, as its files do (2026-09-27 report: it
     // holds secrets and nothing said so). The server cannot look inside root's directory.
     // Named when it exists (the helper says; 2026-09-27 report), said as "if it has one" only
