@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.42 (unreleased)
+## 0.1.0-alpha.42 (2026-10-02)
 
 A connection ceiling per worker (`server.max_connections`, hardening item 5 of CLAUDE.md,
 `docs/configuration.md` 18): by default `(open-file limit - 2048) / workers`, at least 128,
