@@ -1,5 +1,7 @@
 #include "services/log.hpp"
 
+#include "core/strings.hpp"
+
 #include <cerrno>
 #include <charconv>
 #include <cstdio>
@@ -61,11 +63,13 @@ inline void append_uint(std::string& s, std::uint64_t v) {
     s.append(buf, r.ptr);
 }
 
-// nginx-style escaping for the combined format: '"', '\\' and control bytes as \xHH.
+// nginx-style escaping for the combined format (ngx_http_log_escape): '"', '\\', control
+// bytes and every byte from 0x7F up as \xHH, so a line is always ASCII whatever a client
+// sent (2026-10-02 alpha.43 report: raw bytes 0x80-0xFF made logs_query's answer invalid text).
 void append_escaped(std::string& out, std::string_view v) {
     static constexpr char kHex[] = "0123456789ABCDEF";
     for (unsigned char c : v) {
-        if (c == '"' || c == '\\' || c < 0x20 || c == 0x7f) {
+        if (c == '"' || c == '\\' || c < 0x20 || c >= 0x7f) {
             out.append("\\x");
             out.push_back(kHex[c >> 4]);
             out.push_back(kHex[c & 15]);
@@ -75,11 +79,28 @@ void append_escaped(std::string& out, std::string_view v) {
     }
 }
 
-// JSON string escaping (RFC 8259); bytes >= 0x80 pass through as UTF-8.
+// JSON string escaping (RFC 8259); well-formed UTF-8 passes through, a byte that is not part
+// of one is written as the text \xHH (the combined format's spelling), so a line is always
+// valid text.
 void append_json(std::string& out, std::string_view v) {
     static constexpr char kHex[] = "0123456789abcdef";
     out.push_back('"');
-    for (unsigned char c : v) {
+    for (std::size_t i = 0; i < v.size();) {
+        const unsigned char c = static_cast<unsigned char>(v[i]);
+        if (c >= 0x80) {
+            const std::size_t n = utf8_sequence(v, i);
+            if (n) {
+                out.append(v.data() + i, n);
+                i += n;
+            } else {
+                out.append("\\\\x");
+                out.push_back(kHex[c >> 4]);
+                out.push_back(kHex[c & 15]);
+                ++i;
+            }
+            continue;
+        }
+        ++i;
         switch (c) {
             case '"': out.append("\\\""); break;
             case '\\': out.append("\\\\"); break;

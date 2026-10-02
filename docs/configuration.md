@@ -903,7 +903,12 @@ level = "warn"               # error | warn | info
 ```
 
 A site sets `access_log = "path"` or `"off"` to differ. Logs are buffered per worker and
-flushed every second; `kill -USR1 <pid>` reopens all files after rotation.
+flushed every second; `kill -USR1 <pid>` reopens all files after rotation. The escaping is
+nginx's (`ngx_http_log_escape`): in the combined format `"`, `\`, control bytes and every
+byte from 0x7F up are written `\xHH`, so a line is ASCII whatever a client sent; a JSON line
+keeps well-formed UTF-8 and writes a stray byte as `\xHH` too (a TLS ClientHello sent to
+port 80 used to land raw, 2026-10-02). `agensio ctl logs` and `logs_query` escape the same
+way when they read, so older files are answered as valid text as well.
 
 ## 9. php-fpm in a container
 
@@ -2107,13 +2112,19 @@ fail2ban-client reload
 ```
 
 The login paths come from two places. A preset knows its application's: `wordpress`
-`/wp-login.php`, `drupal` `/user/login`, `laravel` `/login` and `/cp/auth/login`, `grav`
-`/admin`, `redmine` `/login`, `django` and `wagtail` `/admin/login/`. A site whose preset
-cannot know (`php`, `rails`, `node`, `proxy`, `static`) names its own with `login_paths`,
-a `[[site]]` key the control plane also writes (`site_update` `login_paths`, `agensio ctl
-site-update NAME --login-path /login`, `--no-login-paths`): plain URL paths, at most 16,
-nothing served or refused by them, so an agent can set them from the application's
-documentation after asking the user. `site_show` lists the effective ones. The jail file is
+`/wp-login.php` and `/xmlrpc.php` (one `system.multicall` tries hundreds of passwords; a
+client that posts there more than ten times in ten minutes, the WordPress mobile application
+without Jetpack, is banned for an hour), `drupal` `/user/login`, `laravel` `/login` and
+`/cp/auth/login`, `grav` `/admin`, `redmine` `/login`, `django` and `wagtail` `/admin/login/`.
+A site whose preset cannot know (`php`, `rails`, `node`, `proxy`, `static`) names its own
+with `login_paths`, a `[[site]]` key the control plane also writes (`site_update`
+`login_paths`, `agensio ctl site-update NAME --login-path /login`, `--no-login-paths`):
+plain URL paths, at most 16, nothing served or refused by them, so an agent can set them
+from the application's documentation after asking the user. An application that routes its
+login through the query string is named with it, and the jail matches the query from its
+start, whatever follows: Kanboard `/?controller=AuthController&action=check`, Roundcube
+`/?_task=login`, phpBB `/ucp.php?mode=login`; the bare `/` is refused, since every form
+post of such an application goes there. A query holds letters, digits and `._~/=&+:-`. `site_show` lists the effective ones. The jail file is
 rendered from the sites that exist, so adding a site, a log or a login path makes the
 installed file stale; health says so (`fail2ban_jail_stale`) and the two lines above
 refresh it.
@@ -2122,7 +2133,7 @@ refresh it.
 [[site]]
 server_name = ["kanboard.example.com"]
 app = "php"
-login_paths = ["/login"]      # Kanboard's form; the jail counts attempts here
+login_paths = ["/?controller=AuthController&action=check"]   # where Kanboard's form posts
 ```
 
 *The check.* On a host with a public listener, `health` asks the root helper (nft needs

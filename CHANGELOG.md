@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.0-alpha.44 (unreleased)
+From the alpha.43 report on the live host: the access log escapes every byte from 0x7F up as
+`\xHH` in the combined format (nginx's `ngx_http_log_escape`) and a JSON line writes a byte
+that is not well-formed UTF-8 the same way, and `logs_query` escapes what it reads, so its
+answer is valid text whatever a client sent (a TLS ClientHello to port 80 broke a 1.7 MB
+answer); the WordPress preset's login paths include `/xmlrpc.php`; `login_paths` accepts a
+path with the start of its query (`/?controller=AuthController&action=check` for Kanboard,
+`/?_task=login` for Roundcube, `/ucp.php?mode=login` for phpBB), matched from the query's
+start; `protection_show` lists only the file count of a jail that is not agensio's (a Samba
+jail with 1,976 logs made an 86 KB answer); `logs_query` for a site that does not exist is a
+404 rather than an empty answer.
+
 ## 0.1.0-alpha.43 (2026-10-02)
 
 Host protection rendered, never applied (hardening step 2 of CLAUDE.md, item 6;

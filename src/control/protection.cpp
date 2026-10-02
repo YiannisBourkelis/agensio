@@ -32,12 +32,13 @@ std::string port_list(const std::vector<unsigned>& ports) {
     return out;
 }
 
-// A login path as a regex alternative: every character check_login_path admits is literal
-// but '.', which is escaped (the path set is plain, so this is the whole grammar).
+// A login path as a regex alternative: of the characters check_login_path admits only '.',
+// '?' and '+' mean anything to a regex, and they are escaped (nothing else is let through,
+// so this is the whole grammar; '%' is kept out because the jail file is configparser's).
 std::string regex_literal(const std::string& p) {
     std::string out;
     for (char c : p) {
-        if (c == '.') out += '\\';
+        if (c == '.' || c == '?' || c == '+') out += '\\';
         out += c;
     }
     return out;
@@ -54,16 +55,18 @@ const char* kFilterLogin =
     "# successful one look alike in an access log, so this counts attempts: no one types ten\n"
     "# passwords in ten minutes, every brute-force tool does. The jail passes this host's login\n"
     "# paths as `paths` (agensio ctl protection --jail renders them from the sites' presets and\n"
-    "# their login_paths); the default below is every preset's.\n"
+    "# their login_paths); the default below is every preset's. A path may carry the start of its\n"
+    "# query (/\\?controller=AuthController&action=check); whatever follows the path, or that\n"
+    "# query, is allowed.\n"
     "\n"
     "[INCLUDES]\n"
     "before = common.conf\n"
     "\n"
     "[Init]\n"
-    "paths = /wp-login\\.php|/user/login|/login|/cp/auth/login|/admin|/admin/login/|/django-admin/login/\n"
+    "paths = /wp-login\\.php|/xmlrpc\\.php|/user/login|/login|/cp/auth/login|/admin|/admin/login/|/django-admin/login/\n"
     "\n"
     "[Definition]\n"
-    "failregex = ^<HOST> \\S+ \\S+ \\[\\] \"POST (?:<paths>)(?:\\?\\S*)? HTTP/\\S+\" \\d{3} \n"
+    "failregex = ^<HOST> \\S+ \\S+ \\[\\] \"POST (?:<paths>)(?:[?&]\\S*)? HTTP/\\S+\" \\d{3} \n"
     "ignoreregex =\n"
     "datepattern = ^[^\\[]*\\[({DATE})\n";
 
@@ -591,9 +594,14 @@ json::Value protection_report(const ProtectionInput& in, const ProtectionProbe& 
         if (!probe.fail2ban_available) fdet.set("why", probe.fail2ban_why);
         fdet.set("service", probe.fail2ban_service.empty() ? json::Value(nullptr) : json::Value(probe.fail2ban_service));
         json::Value jails = json::Value::array();
-        for (const auto& j : probe.jails)
-            jails.push(json::Value::object().set("name", j.name).set("files", strings_json(j.files)).set("reads_agensio_logs", j.ours)
-                           .set("banned", static_cast<double>(j.banned)).set("total_banned", static_cast<double>(j.total_banned)));
+        for (const auto& j : probe.jails) {
+            // A jail of someone else's lists its file count alone (2026-10-02 report: a Samba
+            // jail read 1,976 per-client logs and the answer was 86 KB of their names).
+            json::Value jv = json::Value::object().set("name", j.name).set("reads_agensio_logs", j.ours);
+            if (j.ours) jv.set("files", strings_json(j.files));
+            else jv.set("files_count", static_cast<double>(j.files.size()));
+            jails.push(jv.set("banned", static_cast<double>(j.banned)).set("total_banned", static_cast<double>(j.total_banned)));
+        }
         fdet.set("jails", std::move(jails)).set("covered", v.f2b_ours).set("banned", static_cast<double>(v.banned)).set("total_banned", static_cast<double>(v.total_banned));
     }
     fb.set("detected", std::move(fdet));

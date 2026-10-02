@@ -338,7 +338,12 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
     } else if (path == "/v1/config/validate") {
         reply(s, 200, backend_->validate());
     } else if (path == "/v1/logs") {
-        reply(s, 200, backend_->logs(req.target));
+        // A site that does not exist is a 404, as for the other site commands: a mistyped name
+        // answered "count 0" read as "no errors" (2026-10-02 alpha.43 report).
+        if (const std::string site = control::query_value(req.target, "site"); !site.empty() && !control::find_site(backend_->running(), site))
+            reply(s, 404, json::Value::object().set("error", "no such site").set("site", site));
+        else
+            reply(s, 200, backend_->logs(req.target));
     } else if (path == "/v1/presets") {
         reply(s, 200, preset_catalog());
     } else if (path == "/v1/uploads") {

@@ -1,5 +1,7 @@
 #include "control/commands.hpp"
 
+#include "core/strings.hpp"
+
 #include "control/settings.hpp"
 #include "control/sites.hpp"
 
@@ -172,6 +174,31 @@ bool parse_since(std::string_view text, std::time_t now, std::time_t& out) {
     return true;
 }
 
+std::string utf8_escaped(std::string_view line) {
+    static constexpr char kHex[] = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(line.size());
+    for (std::size_t i = 0; i < line.size();) {
+        const unsigned char c = static_cast<unsigned char>(line[i]);
+        if (c < 0x80) {
+            out.push_back(static_cast<char>(c));
+            ++i;
+            continue;
+        }
+        const std::size_t n = utf8_sequence(line, i);
+        if (n) {
+            out.append(line.data() + i, n);
+            i += n;
+        } else {
+            out.append("\\x");
+            out.push_back(kHex[c >> 4]);
+            out.push_back(kHex[c & 15]);
+            ++i;
+        }
+    }
+    return out;
+}
+
 void scan_log(const fs::path& file, std::string_view source, const LogQuery& q, std::vector<LogLine>& out,
               bool& truncated) {
     std::ifstream in(file, std::ios::binary);
@@ -219,6 +246,7 @@ void scan_log(const fs::path& file, std::string_view source, const LogQuery& q, 
             l.source = std::string(source);
             if (l.status < q.status_min) continue;
         }
+        l.text = utf8_escaped(l.text);  // older files and the error log may hold a client's raw bytes
         found.push_back(std::move(l));
     }
     std::reverse(found.begin(), found.end());

@@ -734,7 +734,7 @@ const std::vector<PhpPreset> kPhpPresets = {
      {"/wp-config.php", "/wp-config-sample.php", "/readme.html", "/license.txt",
       "/wp-content/db.php", "/wp-content/advanced-cache.php", "/wp-content/object-cache.php"},
      "https://wordpress.org/latest.tar.gz", "https://wordpress.org/wordpress-{version}.tar.gz",
-     {"/wp-config.php"}, "/wp-content/uploads", {}, {"/wp-login.php"}},
+     {"/wp-config.php"}, "/wp-content/uploads", {}, {"/wp-login.php", "/xmlrpc.php"}},
     // Grav (flat-file CMS; 2026-09-23 live report: run on the borrowed drupal preset, its
     // logs/grav.log named a backup archive under backup/ that held the admin account and
     // the signing salt, and both were served). Only index.php runs; logs/, backup/, cache/,
@@ -2237,11 +2237,25 @@ std::vector<std::string> preset_login_paths(const std::string& app) {
 std::string check_login_path(const std::string& p) {
     if (p.empty() || p[0] != '/') return "'" + p.substr(0, 80) + "' must start with '/'";
     if (p.size() > 255) return "'" + p.substr(0, 80) + "...' is longer than 255 characters";
-    if (p.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/") != std::string::npos)
-        return "'" + p + "' holds a character that is not a letter, digit, '.', '_', '-' or '/'";
-    if (p.find("//") != std::string::npos || p.find("/../") != std::string::npos || p.ends_with("/..") || p.find("/./") != std::string::npos || p.ends_with("/."))
+    // PATH?QUERY (2026-10-02 alpha.43 report): Kanboard posts its login to
+    // /?controller=AuthController&action=check, Roundcube to /?_task=login, phpBB to
+    // /ucp.php?mode=login; the jail matches the query from its start, further parameters may
+    // follow. The query's alphabet leaves out what the jail file or the regex would read
+    // ('%' is configparser's, quotes and spaces break the parameter, '?' would nest).
+    const std::size_t q = p.find('?');
+    const std::string path = p.substr(0, q);
+    if (path.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/") != std::string::npos)
+        return "'" + p + "' holds a character that is not a letter, digit, '.', '_', '-' or '/' in its path";
+    if (path.find("//") != std::string::npos || path.find("/../") != std::string::npos || path.ends_with("/..") || path.find("/./") != std::string::npos || path.ends_with("/."))
         return "'" + p + "' must be a normalised path: no '//', no '.' or '..' segments";
-    if (p == "/") return "'/' is every request, not a login path";
+    if (q == std::string::npos) {
+        if (p == "/") return "'/' is every request, not a login path (a login posted to / with a query is written with it: /?controller=AuthController&action=check)";
+        return "";
+    }
+    const std::string query = p.substr(q + 1);
+    if (query.empty()) return "'" + p + "' has a '?' with no query after it";
+    if (query.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._~/=&+:-") != std::string::npos)
+        return "'" + p + "': the query may hold letters, digits and ._~/=&+:- only (no second '?', no '%', spaces or quotes)";
     return "";
 }
 

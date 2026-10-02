@@ -23,6 +23,7 @@
 #include "control/roles.hpp"
 #include "control/commands.hpp"
 #include "control/protection.hpp"
+#include "core/strings.hpp"
 #include "control/reference.hpp"
 #include "control/mcp.hpp"
 #include "control/settings.hpp"
@@ -3253,6 +3254,15 @@ static void test_control_commands() {
         CHECK(r["count"].num() == 1 && r["lines"].items()[0].get("text").find("203.0.113.9") != std::string_view::npos);
         r = logs(cfg, all);
         CHECK(r["count"].num() == 4);
+        // A client's raw bytes in an older file are answered as valid text; well-formed UTF-8 stays.
+        CHECK(utf8_escaped("caf\xC3\xA9 \xE9-\xEE\xFF ok") == "caf\xC3\xA9 \\xE9-\\xEE\\xFF ok" && utf8_escaped("plain") == "plain" &&
+              utf8_escaped("\xE2\x82\xAC \xF0\x9F\x98\x80 \xED\xA0\x80 \xC0\xAF \xF4\x90\x80\x80") == "\xE2\x82\xAC \xF0\x9F\x98\x80 \\xED\\xA0\\x80 \\xC0\\xAF \\xF4\\x90\\x80\\x80");
+        CHECK(utf8_sequence("a", 0) == 1 && utf8_sequence("\xC3\xA9", 0) == 2 && utf8_sequence("\xC3", 0) == 0 && utf8_sequence("\x80", 0) == 0 && utf8_sequence("\xE0\x9F\xBF", 0) == 0 &&
+              utf8_sequence("\xE0\xA0\x80", 0) == 3 && utf8_sequence("\xF0\x90\x80\x80", 0) == 4 && utf8_sequence("\xF0\x8F\xBF\xBF", 0) == 0 && utf8_sequence("\xF5\x80\x80\x80", 0) == 0);
+        std::ofstream(own) << "192.0.2.9 - - [02/Oct/2026:10:00:04 +0000] \"GET /caf\xE9-\xEE\xFF HTTP/1.1\" 404 0 \"-\" \"x\"\n";
+        one.site = "a.test";
+        r = logs(cfg, one);
+        CHECK(r["count"].num() == 1 && r["lines"].items()[0].get("text").find("/caf\\xE9-\\xEE\\xFF HTTP") != std::string_view::npos);
     }
     // Health: a manual TLS site with a missing certificate, no redirect, two application sites without users.
     {
@@ -4625,7 +4635,7 @@ static void test_protection() {
         const ProtectionInput in = protection_input(cfg);
         CHECK(in.exposed && (in.tcp_ports == std::vector<unsigned>{8080, 8443}) && in.udp_ports.empty() && in.combined && in.host_protection == "external");
         CHECK((in.logs == std::vector<std::string>{(dir / "access.log").string()}) && (in.unlogged == std::vector<std::string>{"lo.test"}));
-        CHECK((in.login_paths == std::vector<std::string>{"/api/token", "/login", "/one", "/wp-login.php"}) && in.firewall_file == (dir / "firewall.nft").string());
+        CHECK((in.login_paths == std::vector<std::string>{"/api/token", "/login", "/one", "/wp-login.php", "/xmlrpc.php"}) && in.firewall_file == (dir / "firewall.nft").string());
         // A loopback-only host is not exposed; QUIC adds the TLS port to the UDP list.
         Config lo = cfg;
         lo.sites.erase(lo.sites.begin());
@@ -4635,7 +4645,7 @@ static void test_protection() {
         h3.sites[0].h3 = true;
         CHECK((protection_input(h3).udp_ports == std::vector<unsigned>{8080, 8443}));
     }
-    for (const char* bad : {"login_paths = [\"login\"]", "login_paths = [\"/a//b\"]", "login_paths = [\"/a/../b\"]", "login_paths = [\"/\"]", "login_paths = [\"/a?b=1\"]", "login_paths = 7"}) {
+    for (const char* bad : {"login_paths = [\"login\"]", "login_paths = [\"/a//b\"]", "login_paths = [\"/a/../b\"]", "login_paths = [\"/\"]", "login_paths = [\"/a?\"]", "login_paths = [\"/a?b=%20\"]", "login_paths = 7"}) {
         std::ofstream(dir / "b.toml") << "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n" << bad << "\n";
         bool refused = false;
         try {
@@ -4656,16 +4666,33 @@ static void test_protection() {
         }
         CHECK(refused);
     }
-    CHECK((preset_login_paths("wordpress") == std::vector<std::string>{"/wp-login.php"}) && preset_login_paths("wagtail").size() == 2 && preset_login_paths("php").empty() &&
+    CHECK((preset_login_paths("wordpress") == std::vector<std::string>{"/wp-login.php", "/xmlrpc.php"}) && preset_login_paths("wagtail").size() == 2 && preset_login_paths("php").empty() &&
           (preset_login_paths("redmine") == std::vector<std::string>{"/login"}) && preset_login_paths("rails").empty());
     CHECK(check_login_path("/x.y-z_1/").empty() && !check_login_path("/x y").empty() && !check_login_path("").empty());
+    // A login routed through the query string (the alpha.43 report: Kanboard, Roundcube, phpBB).
+    for (const char* ok : {"/?controller=AuthController&action=check", "/?_task=login", "/ucp.php?mode=login", "/a/b?x=1&y=two+three:4~/"})
+        if (!check_login_path(ok).empty()) std::printf("login path refused %s: %s\n", ok, check_login_path(ok).c_str());
+    for (const char* bad : {"/login?", "/?", "/a?b?c", "/a?x=%20", "/x y?a=1", "/a?x=\"1\"", "/a//b?x=1", "/"})
+        if (check_login_path(bad).empty()) std::printf("login path accepted %s\n", bad);
+    CHECK(check_login_path("/?controller=AuthController&action=check").empty() && check_login_path("/ucp.php?mode=login").empty() && !check_login_path("/login?").empty() &&
+          !check_login_path("/?").empty() && !check_login_path("/a?b?c").empty() && !check_login_path("/a?x=%20").empty() && !check_login_path("/x y?a=1").empty() &&
+          !check_login_path("/a//b?x=1").empty() && check_login_path("/").find("written with it") != std::string::npos);
+    {
+        ProtectionInput kb;
+        kb.tcp_ports = {443};
+        kb.login_paths = {"/?controller=AuthController&action=check", "/ucp.php?mode=login", "/x+y"};
+        kb.exposed = true;
+        CHECK(render_jail(kb).find("filter    = agensio-login[paths=\"/\\?controller=AuthController&action=check|/ucp\\.php\\?mode=login|/x\\+y\"]") != std::string::npos);
+        CHECK(std::string(protection_filters()[0].text).find("\"POST (?:<paths>)(?:[?&]\\S*)? HTTP/\\S+\" \\d{3} ") != std::string::npos &&
+              std::string(protection_filters()[0].text).find("/xmlrpc\\.php|") != std::string::npos);
+    }
     // The shipped files are the renderers' output for the default host.
     auto file = [](const char* rel) {
         std::ifstream f(std::string(AGENSIO_SOURCE_DIR) + "/" + rel);
         return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     };
     const ProtectionInput def = default_protection_input();
-    CHECK((def.tcp_ports == std::vector<unsigned>{80, 443}) && (def.udp_ports == std::vector<unsigned>{443}) && def.exposed && def.login_paths.size() == 7);
+    CHECK((def.tcp_ports == std::vector<unsigned>{80, 443}) && (def.udp_ports == std::vector<unsigned>{443}) && def.exposed && def.login_paths.size() == 8);
     CHECK(render_nft(def) == file("packaging/firewall/agensio.nft"));
     CHECK(render_jail(def) == file("packaging/fail2ban/jail.d/agensio.conf"));
     CHECK(render_firewall_unit(def) == file("packaging/agensio-firewall.service"));
@@ -4766,6 +4793,9 @@ static void test_protection() {
               r["firewall"]["trial"].items().size() == 3 && r["firewall"]["file_current"].boolean() && r["fail2ban"].get("installed_jail") == "same" &&
               r["fail2ban"]["detected"]["covered"].boolean() && r["fail2ban"]["detected"]["banned"].num() == 1 && r["fail2ban"]["filters"]["agensio-login"].is_string() &&
               r["findings"].items().empty());
+        // A jail of someone else's: its file count, not its files (the Samba jail of the report).
+        const json::Value& jails = r["fail2ban"]["detected"]["jails"];
+        CHECK(jails.items().size() == 2 && jails.items()[0]["files"].is_null() && jails.items()[0]["files_count"].num() == 1 && jails.items()[1]["files"].items().size() == 2);
         CHECK(r.get("summary") == "the firewall limits are loaded and enabled at boot; fail2ban reads the access logs (1 address(es) banned now, 3 since start)");
     }
     // The states, one by one.
