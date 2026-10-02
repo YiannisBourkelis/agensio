@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.44 (unreleased)
+## 0.1.0-alpha.44 (2026-10-02)
 From the alpha.43 report on the live host: the access log escapes every byte from 0x7F up as
 `\xHH` in the combined format (nginx's `ngx_http_log_escape`) and a JSON line writes a byte
 that is not well-formed UTF-8 the same way, and `logs_query` escapes what it reads, so its
