@@ -2016,9 +2016,17 @@ never below 128, so a worker can never run itself out of descriptors (2048 are k
 cache's open files, the logs and the connections to php-fpm and origins). A connection
 accepted above the ceiling is refused at once: a plain listener answers `503 Service
 Unavailable` with `Retry-After: 2` and closes, a TLS listener closes before any handshake
-work, so a flood buys no CPU. The error log says so once per worker per ten seconds,
-`server_status` shows `max_connections` and `connections_refused`, and health reports
-`connections_refused` with the two possible fixes. Set it when the derived value is wrong
+work, so a flood buys no CPU. What happened is kept for whoever investigates, without a
+shell: the error log line (once per worker per ten seconds) says how many connections the
+worker holds and how many of those have been idle for two seconds or more, how many it
+refused since the last line and since start, from which addresses (the most refused first)
+and on which listener; `server_status` shows `max_connections`, `connections_refused`,
+`connections_idle` and, per worker under `workers_detail`, the same addresses, listeners
+and times; health reports `connections_refused` with a fix that follows from the shape:
+most refusals from one address (the firewall's job, nothing to raise), workers full of
+connections idle for two seconds or more (slow or stuck clients: compare with the access
+log's request rate, lower `idle_timeout`), or many addresses with busy workers (raise the
+limit). Set it when the derived value is wrong
 for the host: smaller to cap memory (an idle HTTP/1 connection costs about 13 KB, HTTP/2
 19 KB), larger only with a larger `LimitNOFILE`.
 

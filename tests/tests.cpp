@@ -4523,6 +4523,42 @@ static void test_server_account_and_rules() {
 // incomplete until the head is whole, and the whole parses to the same fields whether or
 // not shorter prefixes were tried first (a live "GETGET" line, 2026-09-20, was a buffer
 // bug in the connection, not here; this pins the parser's half of the invariant).
+// The ceiling's health finding (hardening item 5): the fix follows from the refusals' shape.
+static void test_refusal_finding() {
+    using namespace control;
+    CHECK(ago_text(3) == "3 s" && ago_text(59.9) == "59 s" && ago_text(720) == "12 min" && ago_text(7200) == "2 h" && ago_text(200000) == "2 d");
+    RefusalReport one;
+    one.refused = 100;
+    one.connections = 300;
+    one.idle = 10;
+    one.ceiling = 100;
+    one.workers = 3;
+    one.first_s_ago = 720;
+    one.last_s_ago = 3;
+    one.addresses = {{"203.0.113.7", 90}, {"198.51.100.2", 10}};
+    one.listeners = {{"0.0.0.0:443", 100}};
+    Finding f = refusal_finding(one);
+    CHECK(f.severity == "warn" && f.code == "connections_refused" && f.site.empty());
+    CHECK(f.message.find("100 connection(s) refused at the ceiling since start (first 12 min ago, last 3 s ago) on 0.0.0.0:443, from 203.0.113.7 x90, 198.51.100.2 x10; the workers hold 300 of 300 connections, 10 idle") != std::string::npos);
+    CHECK(f.fix.starts_with("most refusals came from 203.0.113.7") && f.fix.find("firewall") != std::string::npos);
+    RefusalReport stuck = one;
+    stuck.addresses = {{"a", 5}, {"b", 5}, {"c", 5}, {"d", 5}, {"e", 5}};
+    stuck.more_addresses = true;
+    stuck.refused = 25;
+    stuck.idle = 280;
+    stuck.listeners = {{"0.0.0.0:443", 20}, {"0.0.0.0:80", 5}};
+    f = refusal_finding(stuck);
+    CHECK(f.message.find("on 0.0.0.0:443 x20, 0.0.0.0:80 x5, from a x5, b x5, c x5 and 2 more addresses;") != std::string::npos && f.fix.starts_with("the workers are full of idle connections") &&
+          f.fix.find("idle_timeout") != std::string::npos);
+    RefusalReport load = stuck;
+    load.idle = 20;
+    load.addresses = {{"a", 5}, {"b", 5}, {"c", 5}};
+    f = refusal_finding(load);
+    CHECK(f.message.find("from a x5, b x5, c x5 and more addresses;") != std::string::npos && f.fix.starts_with("legitimate load") && f.fix.find("LimitNOFILE") != std::string::npos);
+    load.connections = 100;  // workers far from full and no address dominating: still load
+    CHECK(refusal_finding(load).fix.starts_with("legitimate load"));
+}
+
 // The configuration reference (F11) is held to the parser and to the reference document:
 // every key the parser reads is a row, every row's section exists, docs/keys.md is what the
 // binary prints (the integration suite diffs it), and the JSON carries running values.
@@ -5635,6 +5671,7 @@ int main() {
     test_quic_stateless();
 #endif
     test_config_reference();
+    test_refusal_finding();
     test_install();
 #ifdef AGENSIO_HAS_TLS
     test_acme();

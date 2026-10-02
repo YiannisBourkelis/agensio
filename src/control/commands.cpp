@@ -933,6 +933,38 @@ std::vector<Finding> service_findings(const json::Value& check) {
     return out;
 }
 
+std::string ago_text(double s) {
+    if (s < 60) return std::to_string(static_cast<long>(s)) + " s";
+    if (s < 3600) return std::to_string(static_cast<long>(s / 60)) + " min";
+    if (s < 86400) return std::to_string(static_cast<long>(s / 3600)) + " h";
+    return std::to_string(static_cast<long>(s / 86400)) + " d";
+}
+
+Finding refusal_finding(const RefusalReport& r) {
+    std::string from;
+    for (std::size_t i = 0; i < r.addresses.size() && i < 3; ++i) from += (i ? ", " : "") + r.addresses[i].first + " x" + std::to_string(r.addresses[i].second);
+    if (r.addresses.size() > 3) from += " and " + std::to_string(r.addresses.size() - 3) + " more address" + (r.addresses.size() > 4 ? "es" : "");
+    else if (r.more_addresses) from += " and more addresses";
+    std::string on;
+    for (const auto& l : r.listeners) on += (on.empty() ? "" : ", ") + l.first + (r.listeners.size() > 1 ? " x" + std::to_string(l.second) : "");
+    const std::uint64_t capacity = r.ceiling * r.workers;
+    const std::string msg = std::to_string(r.refused) + " connection(s) refused at the ceiling since start (first " + ago_text(r.first_s_ago) + " ago, last " + ago_text(r.last_s_ago) +
+                            " ago)" + (on.empty() ? "" : " on " + on) + (from.empty() ? "" : ", from " + from) + "; the workers hold " + std::to_string(r.connections) + " of " +
+                            std::to_string(capacity) + " connections, " + std::to_string(r.idle) + " idle for 2 s or more (server.max_connections " + std::to_string(r.ceiling) +
+                            " per worker)";
+    const std::uint64_t top = r.addresses.empty() ? 0 : r.addresses.front().second;
+    std::string fix;
+    if (r.refused >= 2 && top * 2 >= r.refused)
+        fix = "most refusals came from " + r.addresses.front().first + ": the ceiling did its job; limit that address in the firewall (nftables, ct count per source) and let fail2ban "
+              "ban repeat offenders from the access log; nothing to raise (docs/configuration.md 18)";
+    else if (capacity && r.connections * 10 >= capacity * 9 && r.idle * 2 >= r.connections)
+        fix = "the workers are full of idle connections: slow or stuck clients, or a client keeping connections open; compare with the request rate (logs_query on the access log), "
+              "lower server.idle_timeout (15 s by default), and limit connections per address in the firewall (docs/configuration.md 18)";
+    else
+        fix = "legitimate load from many addresses: raise the open-file limit (LimitNOFILE in the unit) or server.max_connections, then reload (docs/configuration.md 18)";
+    return Finding{"warn", "connections_refused", "", msg, fix};
+}
+
 json::Value health(const Config& running, const Config& boot, bool as_root, std::time_t now, const std::vector<Finding>& extra) {
     auto findings = health_findings(running, boot, as_root, now);
     findings.insert(findings.end(), extra.begin(), extra.end());

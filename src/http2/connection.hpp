@@ -86,6 +86,7 @@ public:
     Http2Connection& operator=(const Http2Connection&) = delete;
     ~Http2Connection() override {
         worker_.connections.fetch_sub(1, std::memory_order_relaxed);
+        if (idle_counted_) worker_.idle.fetch_sub(1, std::memory_order_relaxed);
         ++worker_.sheds;  // freed buffers: the worker's next trim gives the pages back
     }
 
@@ -223,6 +224,10 @@ private:
     void on_read(const asio::error_code& ec, std::size_t n) {
         read_pending_ = false;
         if (closed_) return;
+        if (idle_counted_ && !ec) {  // bytes after an idle spell: no longer idle
+            idle_counted_ = false;
+            worker_.idle.fetch_sub(1, std::memory_order_relaxed);
+        }
         if (shedding_) {  // the idle tick cancelled this read to drop the buffer
             shedding_ = false;
             if (ec == asio::error::operation_aborted) {
@@ -273,6 +278,10 @@ private:
     // what ten thousand sockets cost, not ten thousand times 40 KB.
     void shed() {
         ++worker_.sheds;
+        if (!idle_counted_) {  // counted idle for status and the ceiling's diagnosis until bytes arrive
+            idle_counted_ = true;
+            worker_.idle.fetch_add(1, std::memory_order_relaxed);
+        }
         streams_.shed();
         std::string().swap(decode_scratch_);
         writer_.shed();
@@ -1283,6 +1292,7 @@ private:
     std::size_t in_len_ = 0;
     bool read_pending_ = false;
     bool shedding_ = false;  // the pending read was cancelled to drop the receive buffer
+    bool idle_counted_ = false;  // in the worker's idle count since the last shed
     unsigned inline_reads_ = 0;
     bool preface_seen_ = false;
     bool settings_seen_ = false;

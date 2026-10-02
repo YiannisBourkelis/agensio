@@ -1687,7 +1687,18 @@ ok = s2.recv(4096).split(b"\r\n")[0].decode()
 print(first, retry, "eof", tls, ok)
 PY
 )"
-check "connection ceiling: status shows the ceiling and the two refusals, health reports them with the fixes, the error log said so once" "3 2 warn yes 1" "$(curl -sS --unix-socket bench/tmp/limit/control.sock http://control/v1/status | python3 -c 'import json,sys; d=json.load(sys.stdin); print(int(d["max_connections"]), int(d["connections_refused"]))') $(curl -sS --unix-socket bench/tmp/limit/control.sock http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); f=[x for x in d["findings"] if x["code"] == "connections_refused"]; print(f[0]["severity"] if f else "none", "yes" if f and "firewall" in f[0]["fix"] and "2 connection(s) refused" in f[0]["message"] else f)') $(grep -c 'at its connection ceiling (3)' bench/tmp/limit/error.log)"
+check "connection ceiling: status shows the ceiling, the two refusals and per worker who was refused where; health names the address and sends it to the firewall; the error log line carries the same context, once" "3 2 127.0.0.1 2 8061,8461 warn yes 1" "$(curl -sS --unix-socket bench/tmp/limit/control.sock http://control/v1/status | python3 -c 'import json,sys; d=json.load(sys.stdin); w=d["workers_detail"][0]; print(int(d["max_connections"]), int(d["connections_refused"]), w["refused_addresses"][0]["address"], int(w["refused_addresses"][0]["count"]), ",".join(sorted(l["address"].split(":")[1] for l in w["refused_listeners"])))') $(curl -sS --unix-socket bench/tmp/limit/control.sock http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); f=[x for x in d["findings"] if x["code"] == "connections_refused"]; print(f[0]["severity"] if f else "none", "yes" if f and f[0]["fix"].startswith("most refusals came from 127.0.0.1") and "firewall" in f[0]["fix"] and "2 connection(s) refused at the ceiling since start" in f[0]["message"] and "from 127.0.0.1 x2" in f[0]["message"] else f)') $(grep -c 'at its connection ceiling: 3 of 3 connections open, 0 idle 2 s or more; the first refusal, 1 since start, from 127.0.0.1 x1, on 127.0.0.1:8061 (' bench/tmp/limit/error.log)"
+check "connection ceiling: connections idle for 2 s or more are counted (HTTP/1), for the diagnosis of a full worker" "2 2 0" "$(python3 - <<'PY'
+import socket, time, json, subprocess
+held = [socket.create_connection(("127.0.0.1", 8061)) for _ in range(2)]
+time.sleep(2.6)
+d = json.loads(subprocess.run(["curl", "-sS", "--unix-socket", "bench/tmp/limit/control.sock", "http://control/v1/status"], capture_output=True, text=True).stdout)
+idle = int(d["connections_idle"]), int(d["workers_detail"][0]["idle"])
+held[0].sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"); held[0].settimeout(3); held[0].recv(4096); time.sleep(0.3)
+d = json.loads(subprocess.run(["curl", "-sS", "--unix-socket", "bench/tmp/limit/control.sock", "http://control/v1/status"], capture_output=True, text=True).stdout)
+print(idle[0], idle[1], int(d["connections_idle"]) - 1)  # the one that spoke is busy again; the other still idle
+PY
+)"
 check "connection ceiling: the derived default is logged at start with the open-file limit" "yes" "$(grep -q 'connection ceiling 3 per worker (1 worker(s), open-file limit [0-9]*, server.max_connections)' bench/tmp/limit/error.log && echo yes)"
 kill $LPID; wait $LPID 2>/dev/null
 kill $PID; wait $PID 2>/dev/null

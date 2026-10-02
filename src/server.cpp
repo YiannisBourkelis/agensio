@@ -222,6 +222,7 @@ void Server::drop_privileges() {
 
 #if defined(__GLIBC__)
 #include <malloc.h>
+#include <map>
 #endif
 static void trim_heap() noexcept {
 #if defined(__GLIBC__)
@@ -724,16 +725,10 @@ json::Value Server::health() {
 #endif
         }
     }
-    // Connections refused at a worker's ceiling since start (hardening item 5): legitimate
-    // load wants a higher limit, a flood wants the firewall; either way someone should know.
-    std::uint64_t refused = 0;
-    for (const auto& w : workers_) refused += w->refused.load(std::memory_order_relaxed);
-    if (refused)
-        extra.push_back(control::Finding{"warn", "connections_refused", "",
-                                         std::to_string(refused) + " connection(s) refused since start: a worker was at its ceiling of " +
-                                             std::to_string(max_connections_.load(std::memory_order_relaxed)) + " connections (server.max_connections, from the open-file limit when unset)",
-                                         "legitimate load: raise the open-file limit (LimitNOFILE in the unit) or server.max_connections, then reload; a flood from few addresses: limit "
-                                         "connections per address in the firewall and ban repeat offenders from the access log (docs/configuration.md 18)"});
+    // Connections refused at a worker's ceiling since start (hardening item 5), with the
+    // shape of the refusals, so the fix follows from it: one address (the firewall's), idle
+    // connections filling the workers (slow or stuck clients), or load (a higher limit).
+    if (const control::RefusalReport rr = refusal_report(); rr.refused) extra.push_back(control::refusal_finding(rr));
     return control::health(cfg, cfg_, as_root, std::time(nullptr), extra);
 }
 
@@ -744,14 +739,42 @@ json::Value Server::status() {
     v.set("uptime_s", static_cast<double>(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now() - started_).count()));
     v.set("config", gen_->cfg.config_path.string());
     v.set("workers", static_cast<double>(workers_.size()));
-    std::uint64_t conns = 0, refused = 0;
-    for (const auto& w : workers_) {
-        conns += w->connections.load(std::memory_order_relaxed);
-        refused += w->refused.load(std::memory_order_relaxed);
+    // The connection ceiling and what happened at it (hardening item 5), per worker too, so
+    // an agent can see who was refused, where and when, and whether the held connections are idle.
+    const control::RefusalReport rr = refusal_report();
+    v.set("connections", static_cast<double>(rr.connections));
+    v.set("connections_idle", static_cast<double>(rr.idle));  // HTTP/1 and HTTP/2 connections idle 2 s or more
+    v.set("max_connections", static_cast<double>(rr.ceiling));  // per worker
+    v.set("connections_refused", static_cast<double>(rr.refused));
+    {
+        using tp = std::chrono::steady_clock::time_point;
+        const tp now = std::chrono::steady_clock::now();
+        json::Value details = json::Value::array();
+        for (const auto& w : workers_) {
+            json::Value d = json::Value::object()
+                                .set("id", static_cast<double>(w->id))
+                                .set("connections", static_cast<double>(w->connections.load(std::memory_order_relaxed)))
+                                .set("idle", static_cast<double>(w->idle.load(std::memory_order_relaxed)))
+                                .set("refused", static_cast<double>(w->refused.load(std::memory_order_relaxed)));
+            std::lock_guard<std::mutex> lock(w->refusal_mutex);
+            const RefusalSample& s = w->refusals;
+            if (s.last != tp{}) {
+                d.set("first_refusal_s_ago", std::chrono::duration<double>(now - s.first).count()).set("last_refusal_s_ago", std::chrono::duration<double>(now - s.last).count());
+                std::vector<const RefusalSample::Address*> top;
+                for (const auto& a : s.addresses)
+                    if (a.count) top.push_back(&a);
+                std::sort(top.begin(), top.end(), [](const RefusalSample::Address* x, const RefusalSample::Address* y) { return x->count > y->count; });
+                json::Value addrs = json::Value::array();
+                for (const auto* a : top) addrs.push(json::Value::object().set("address", a->addr.to_string()).set("count", static_cast<double>(a->count)));
+                d.set("refused_addresses", std::move(addrs)).set("refused_addresses_partial", s.unsampled > 0);
+                json::Value ls = json::Value::array();
+                for (const auto& [name, count] : s.listeners) ls.push(json::Value::object().set("address", name).set("count", static_cast<double>(count)));
+                d.set("refused_listeners", std::move(ls));
+            }
+            details.push(std::move(d));
+        }
+        v.set("workers_detail", std::move(details));
     }
-    v.set("connections", static_cast<double>(conns));
-    v.set("max_connections", static_cast<double>(max_connections_.load(std::memory_order_relaxed)));  // per worker
-    v.set("connections_refused", static_cast<double>(refused));
     v.set("user", cfg_.user);
     json::Value listeners = json::Value::array();
     for (const auto& l : gen_->listeners) {
@@ -841,21 +864,114 @@ namespace {
 constexpr std::string_view kConnectionLimitAnswer = "HTTP/1.1 503 Service Unavailable\r\nServer: agensio\r\nContent-Type: text/plain\r\nContent-Length: 82\r\nConnection: close\r\nRetry-After: 2\r\n\r\n503 Service Unavailable: the server is at its connection limit, try again shortly\n";
 }  // namespace
 
-void Server::refuse_connection(asio::ip::tcp::socket& sock, bool tls, Worker& w) {
-    w.refused.fetch_add(1, std::memory_order_relaxed);
-    asio::error_code ignored;
-    if (!tls) {  // a TLS client is closed before the handshake: a flood must not buy CPU with it
+void Server::refuse_connection(asio::ip::tcp::socket& sock, const Listener& l, Worker& w) {
+    asio::error_code ec, ignored;
+    const asio::ip::tcp::endpoint peer = sock.remote_endpoint(ec);  // who, before the close
+    if (!l.tls) {  // a TLS client is closed before the handshake: a flood must not buy CPU with it
         sock.non_blocking(true, ignored);
         sock.send(asio::buffer(kConnectionLimitAnswer), 0, ignored);
     }
     sock.close(ignored);
+    w.refused.fetch_add(1, std::memory_order_relaxed);
     const auto now = std::chrono::steady_clock::now();
-    if (now - w.refusal_logged >= std::chrono::seconds(10)) {
-        w.refusal_logged = now;
-        error_log_.warn("worker " + std::to_string(w.id) + " at its connection ceiling (" + std::to_string(max_connections_.load(std::memory_order_relaxed)) +
-                        "): refusing new connections, " + std::to_string(w.refused.load(std::memory_order_relaxed)) +
-                        " refused since start (server.max_connections and the open-file limit set the ceiling; per-address limits are the firewall's, docs/configuration.md 18)");
+    std::string line;
+    {
+        std::lock_guard<std::mutex> lock(w.refusal_mutex);
+        RefusalSample& s = w.refusals;
+        if (s.first == std::chrono::steady_clock::time_point{}) s.first = now;
+        s.last = now;
+        ++s.window;
+        if (!ec) {
+            RefusalSample::Address* slot = nullptr;
+            for (auto& a : s.addresses)
+                if (a.count && a.addr == peer.address()) {
+                    slot = &a;
+                    break;
+                }
+            if (!slot)
+                for (auto& a : s.addresses)
+                    if (!a.count) {
+                        slot = &a;
+                        break;
+                    }
+            if (!slot) {  // every slot taken: the least recently refused address gives way
+                slot = &s.addresses[0];
+                for (auto& a : s.addresses)
+                    if (a.last < slot->last) slot = &a;
+                s.unsampled += slot->count;
+                slot->count = 0;
+                slot->addr = peer.address();
+            }
+            if (!slot->count) slot->addr = peer.address();
+            ++slot->count;
+            slot->last = now;
+        }
+        bool known = false;
+        for (auto& [name, count] : s.listeners)
+            if (name == l.address) {
+                ++count;
+                known = true;
+                break;
+            }
+        if (!known) s.listeners.emplace_back(l.address, 1);
+        if (s.window_start == std::chrono::steady_clock::time_point{} || now - s.window_start >= std::chrono::seconds(10)) {
+            line = ceiling_line(w, s, now);
+            s.window = 0;
+            s.window_start = now;
+        }
     }
+    if (!line.empty()) error_log_.warn(line);
+}
+
+std::string Server::ceiling_line(const Worker& w, const RefusalSample& s, std::chrono::steady_clock::time_point now) const {
+    std::vector<const RefusalSample::Address*> top;
+    for (const auto& a : s.addresses)
+        if (a.count) top.push_back(&a);
+    std::sort(top.begin(), top.end(), [](const RefusalSample::Address* x, const RefusalSample::Address* y) { return x->count > y->count; });
+    std::string from;
+    for (std::size_t i = 0; i < top.size() && i < 3; ++i) from += (i ? ", " : "") + top[i]->addr.to_string() + " x" + std::to_string(top[i]->count);
+    if (top.size() > 3 || s.unsampled) from += " and more";
+    if (from.empty()) from = "an address the socket no longer told";
+    std::string on;
+    for (const auto& [name, count] : s.listeners) on += (on.empty() ? "" : ", ") + name + (s.listeners.size() > 1 ? " x" + std::to_string(count) : "");
+    const bool first = s.window_start == std::chrono::steady_clock::time_point{};
+    const long secs = first ? 0 : std::max<long>(1, std::chrono::duration_cast<std::chrono::seconds>(now - s.window_start).count());
+    return "worker " + std::to_string(w.id) + " at its connection ceiling: " + std::to_string(w.connections.load(std::memory_order_relaxed)) + " of " +
+           std::to_string(max_connections_.load(std::memory_order_relaxed)) + " connections open, " + std::to_string(w.idle.load(std::memory_order_relaxed)) +
+           " idle 2 s or more; " + (first ? std::string("the first refusal") : std::to_string(s.window) + " refused in the last " + std::to_string(secs) + " s") + ", " +
+           std::to_string(w.refused.load(std::memory_order_relaxed)) + " since start, from " + from + ", on " + on +
+           " (server.max_connections and the open-file limit set the ceiling; per-address limits are the firewall's, docs/configuration.md 18)";
+}
+
+control::RefusalReport Server::refusal_report() const {
+    using tp = std::chrono::steady_clock::time_point;
+    control::RefusalReport r;
+    r.ceiling = max_connections_.load(std::memory_order_relaxed);
+    r.workers = static_cast<unsigned>(workers_.size());
+    const tp now = std::chrono::steady_clock::now();
+    std::map<std::string, std::uint64_t> addresses, listeners;
+    tp first{}, last{};
+    for (const auto& w : workers_) {
+        r.refused += w->refused.load(std::memory_order_relaxed);
+        r.connections += w->connections.load(std::memory_order_relaxed);
+        r.idle += w->idle.load(std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lock(w->refusal_mutex);
+        const RefusalSample& s = w->refusals;
+        if (s.first != tp{} && (first == tp{} || s.first < first)) first = s.first;
+        if (s.last > last) last = s.last;
+        for (const auto& a : s.addresses)
+            if (a.count) addresses[a.addr.to_string()] += a.count;
+        if (s.unsampled) r.more_addresses = true;
+        for (const auto& [name, count] : s.listeners) listeners[name] += count;
+    }
+    if (first != tp{}) {
+        r.first_s_ago = std::chrono::duration<double>(now - first).count();
+        r.last_s_ago = std::chrono::duration<double>(now - last).count();
+    }
+    for (const auto& [a, c] : addresses) r.addresses.emplace_back(a, c);
+    std::sort(r.addresses.begin(), r.addresses.end(), [](const auto& x, const auto& y) { return x.second > y.second; });
+    for (const auto& [n, c] : listeners) r.listeners.emplace_back(n, c);
+    return r;
 }
 
 void Server::start_accept(std::size_t index) {
@@ -889,7 +1005,7 @@ void Server::start_accept(std::size_t index) {
                     asio::error_code ignored;
                     sock.close(ignored);
                 } else if (target.connections.load(std::memory_order_relaxed) >= max_connections_.load(std::memory_order_relaxed)) {
-                    refuse_connection(sock, l->tls, target);  // the ceiling: the descriptor budget's guard (hardening item 5)
+                    refuse_connection(sock, *l, target);  // the ceiling: the descriptor budget's guard (hardening item 5)
                 } else if (l->tls) {
 #ifdef AGENSIO_HAS_TLS
                     auto c = std::make_shared<Http1Connection<TlsStream>>(TlsStream(std::move(sock), *l->ssl), target,

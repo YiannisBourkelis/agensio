@@ -100,6 +100,22 @@ struct Finding {
     std::string message;
     std::string fix;       // what to do, "" when nothing
 };
+// The refusals at the workers' connection ceiling since start (Server::refusal_report),
+// merged over the workers, for one health finding whose fix follows from their shape
+// (2026-10-02: an agent must tell an attack from a low ceiling from stuck clients).
+struct RefusalReport {
+    std::uint64_t refused = 0, connections = 0, idle = 0, ceiling = 0;
+    unsigned workers = 0;
+    double first_s_ago = 0, last_s_ago = 0;
+    std::vector<std::pair<std::string, std::uint64_t>> addresses;  // most refused first
+    bool more_addresses = false;                                   // a worker's sample was partial
+    std::vector<std::pair<std::string, std::uint64_t>> listeners;  // refusals per listener address
+};
+// "3 s", "12 min", "2 h", "3 d", for a message.
+std::string ago_text(double seconds);
+// One address behind most refusals: the firewall's job. Workers full of connections idle
+// for 2 s or more: slow or stuck clients. Else legitimate load wanting a higher limit.
+Finding refusal_finding(const RefusalReport& r);
 // What an administrator should look at: certificates, redirects, port 80 for ACME,
 // recent errors, pending restart, root, shared accounts, stale pools.
 std::vector<Finding> health_findings(const Config& running, const Config& boot, bool as_root, std::time_t now);

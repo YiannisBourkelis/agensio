@@ -958,8 +958,14 @@ Each item was benchmarked before and after on the reduced matrix (`bench/run.sh 
    one relaxed load against the worker's existing connection counter; above it a plain
    client gets a prebuilt 503 with `Retry-After` in one send and a TLS client is closed
    before the handshake, no connection object, no allocation (`Server::refuse_connection`).
-   Status shows the ceiling and `connections_refused`, health reports refusals, the error
-   log says so once per worker per ten seconds. Decided with it: per-address limits are the
+   Each worker keeps a sample of the refused addresses (eight slots, no allocation), the
+   listeners and the times under a mutex taken only on the refusal path, and counts its
+   connections idle 2 s or more at the shed hooks of HTTP/1 and HTTP/2 (`Worker::idle`,
+   nothing on the request path). Status shows the ceiling, `connections_refused`,
+   `connections_idle` and `workers_detail`; health's `connections_refused` fix follows from
+   the shape (`control::refusal_finding`: one address behind most refusals, workers full of
+   idle connections, or load); the error log line carries the same context once per worker
+   per ten seconds. Decided with it: per-address limits are the
    firewall's and fail2ban's, not the server's (`docs/configuration.md` 18); the server owns
    what only it can see (timeouts, protocol budgets, its own descriptor budget).
 

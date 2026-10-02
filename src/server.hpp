@@ -1,7 +1,11 @@
 // Workers, listeners and the accept loop.
 #pragma once
 
+#include "control/commands.hpp"
+
+#include <array>
 #include <atomic>
+#include <mutex>
 #include <map>
 #include <memory>
 #include <string>
@@ -34,6 +38,26 @@ namespace agensio {
 
 struct Generation;
 
+// What the refusals at a worker's ceiling looked like (hardening item 5; the 2026-10-02
+// question: an agent must tell an attack from a low ceiling from stuck clients without a
+// shell): the addresses refused most, the listeners, when. Written on refusals by the
+// worker's own thread and read by status and health from worker 0, under a mutex: the
+// refusal path is the overload path, not the request path. Addresses are kept as values,
+// so a refusal allocates nothing.
+struct RefusalSample {
+    struct Address {
+        asio::ip::address addr;
+        std::uint64_t count = 0;
+        std::chrono::steady_clock::time_point last{};
+    };
+    std::array<Address, 8> addresses{};  // when every slot is taken the least recently refused address gives way
+    std::uint64_t unsampled = 0;         // refusals an evicted address had: the sample is partial then
+    std::vector<std::pair<std::string, std::uint64_t>> listeners;  // refusals per listener address
+    std::chrono::steady_clock::time_point first{}, last{};
+    std::uint64_t window = 0;  // refusals since the last log line
+    std::chrono::steady_clock::time_point window_start{};
+};
+
 struct Worker {
     explicit Worker(unsigned id_) : id(id_) {}
     unsigned id;
@@ -42,8 +66,10 @@ struct Worker {
     asio::steady_timer flush_timer{ctx};  // access log buffers, once per second
     UpstreamPool upstream_pool{ctx};      // this worker's FastCGI and origin connections
     std::atomic<std::uint64_t> connections{0};
-    std::atomic<std::uint64_t> refused{0};                    // connections refused at the ceiling since start (status, health)
-    std::chrono::steady_clock::time_point refusal_logged{};  // the last ceiling log line (this thread only)
+    std::atomic<std::uint64_t> refused{0};  // connections refused at the ceiling since start (status, health)
+    std::atomic<std::uint32_t> idle{0};     // HTTP/1 and HTTP/2 connections idle 2 s or more (buffers shed); this thread writes
+    mutable std::mutex refusal_mutex;
+    RefusalSample refusals;
     unsigned sheds = 0;  // connections that dropped their idle buffers or closed since the last trim (this thread only)
     // The configuration this worker hands to new connections and to connections at their
     // next request. Written only by a handler posted to this worker's loop (reload).
@@ -138,7 +164,11 @@ private:
     // A connection accepted while its worker is at the ceiling: counted, a plain client told
     // 503 with Retry-After, a TLS one closed before any handshake work, one log line per
     // worker per ten seconds. Runs on the worker's own loop.
-    void refuse_connection(asio::ip::tcp::socket& sock, bool tls, Worker& w);
+    void refuse_connection(asio::ip::tcp::socket& sock, const Listener& l, Worker& w);
+    // The error log line for a worker at its ceiling, from its sample (under refusal_mutex).
+    std::string ceiling_line(const Worker& w, const RefusalSample& s, std::chrono::steady_clock::time_point now) const;
+    // Every worker's refusals merged, for status and health.
+    control::RefusalReport refusal_report() const;
     void open_logs();
     void assign_log_sinks(Config& cfg);  // site access logs into the registry (opened by open_all)
     void own_site_logs(const Config& cfg);  // per-site logs: agensio:<site group> 0640, when we can chown

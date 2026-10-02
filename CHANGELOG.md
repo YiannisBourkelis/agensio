@@ -1,13 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.41 (2026-10-02)
-
-From the alpha.40 report (Kanboard secured through MCP alone, the rules verified end to
-end): `site_show` labels the locations a managed site's rules render with `from: "rules"`
-(they said nothing, like hand-written ones, beside `preset:<app>` and `root:<file>`), through
-`control::rule_locations`, which the renderer now uses too; and `site_install` puts the
-`.htaccess` rules advice first in its next steps, ahead of "open the site in a browser",
-since the site is exposed until the rule runs.
+## 0.1.0-alpha.42 (unreleased)
 
 A connection ceiling per worker (`server.max_connections`, hardening item 5 of CLAUDE.md,
 `docs/configuration.md` 18): by default `(open-file limit - 2048) / workers`, at least 128,
@@ -17,7 +10,24 @@ close before any handshake work; the error log says so once per worker per ten s
 `server_status` shows `max_connections` and `connections_refused`, health reports
 `connections_refused` with the two fixes. Decided with it: per-address connection and rate
 limits are the firewall's and fail2ban's job, not the server's; section 18 says where each
-limit belongs.
+limit belongs. The refusals carry their context (the owner's question: an agent must be able
+to tell an attack from a low ceiling from a bug): each worker keeps the addresses it refused
+most, the listeners and the times, with no allocation on the refusal path; the log line says
+how many connections the worker holds and how many have been idle for two seconds or more
+(counted when a connection sheds its buffers, so the request path pays nothing), the
+refusals since the last line and since start, the addresses and the listener; `server_status`
+adds `connections_idle` and `workers_detail`; the health finding's fix follows from the
+shape: one address behind most refusals (the firewall), workers full of idle connections
+(slow or stuck clients), or load from many addresses (raise the limit).
+
+## 0.1.0-alpha.41 (2026-10-02)
+
+From the alpha.40 report (Kanboard secured through MCP alone, the rules verified end to
+end): `site_show` labels the locations a managed site's rules render with `from: "rules"`
+(they said nothing, like hand-written ones, beside `preset:<app>` and `root:<file>`), through
+`control::rule_locations`, which the renderer now uses too; and `site_install` puts the
+`.htaccess` rules advice first in its next steps, ahead of "open the site in a browser",
+since the site is exposed until the rule runs.
 
 ## 0.1.0-alpha.40 (2026-10-02)
 

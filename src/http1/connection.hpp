@@ -83,6 +83,7 @@ public:
     Http1Connection& operator=(const Http1Connection&) = delete;
     ~Http1Connection() {
         worker_.connections.fetch_sub(1, std::memory_order_relaxed);
+        if (shed_) worker_.idle.fetch_sub(1, std::memory_order_relaxed);
         ++worker_.sheds;  // freed buffers: the worker's next trim gives the pages back
     }
 
@@ -374,6 +375,7 @@ private:
     void shed() {
         if (responding_ || handler_busy_ || body_pending_ || tunnel_ || upstream_ || in_len_ > 0 || !read_pending_ || shedding_) return;
         shed_ = true;
+        worker_.idle.fetch_add(1, std::memory_order_relaxed);  // counted idle for status and the ceiling's diagnosis
         ++worker_.sheds;
         std::vector<char>().swap(body_buf_);
         std::vector<char>().swap(drain_);
@@ -395,7 +397,10 @@ private:
                 return;
             }
             self->in_.resize(self->cfg_.max_header_size);
-            self->shed_ = false;
+            if (self->shed_) {
+                self->shed_ = false;
+                self->worker_.idle.fetch_sub(1, std::memory_order_relaxed);
+            }
             self->last_activity_ = std::chrono::steady_clock::now();
             self->arm_read();
         });
@@ -455,7 +460,10 @@ private:
                 wait_readable();
                 return;
             }
-            shed_ = false;  // bytes arrived first: served as usual, the buffer stays
+            if (shed_) {  // bytes arrived first: served as usual, the buffer stays
+                shed_ = false;
+                worker_.idle.fetch_sub(1, std::memory_order_relaxed);
+            }
         }
         if (tunnel_) {
             if (ec) return tunnel_client_eof();
