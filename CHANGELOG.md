@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.45 (unreleased)
+## 0.1.0-alpha.45 (2026-10-02)
 From the alpha.44 report: the installed fail2ban filters are compared with the text this
 build ships (`installed_filters`, `fail2ban_filter_stale`, and the install line ahead of
 every re-render when they differ), since an upgrade had changed `agensio-login` and the old
