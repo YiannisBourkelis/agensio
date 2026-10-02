@@ -200,7 +200,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   unconsumed bytes in the buffer.
 - **Request target**: percent-decode, reject control characters, normalise (`.`/`..`
   segments, duplicate slashes), then join with the document root and verify the result stays
-  under it. Query string is stripped before the cache lookup.
+  under it. Query string is stripped before the cache lookup. A separator spelled as a
+  percent escape (`%2F`, `%5C`) is 404 for every handler that resolves paths on disk,
+  Apache's `AllowEncodedSlashes Off`; a proxied application receives the raw target and
+  decides itself, as nginx hands it on (2026-10-02, the alpha.45 report).
 - **Cache**: two layers. `FileCache` is the shared store (mutex taken only on miss, insert,
   evict) owning the bytes as `shared_ptr<CacheEntry>`. `LocalIndex` is a per-worker map of
   key to that same `shared_ptr`, so a hit is lock-free and memory is never duplicated.
@@ -942,7 +945,12 @@ Each item was benchmarked before and after on the reduced matrix (`bench/run.sh 
 2. **Path policies** (`handler.cpp`, `path.cpp`): `hidden_files = false` per site (default)
    answers 404 for any dot-segment (`.env`, `.git/`); `symlinks = "deny"` checks the
    realpath stays under the root on each cache miss (default `allow`, like nginx, because
-   Laravel's `public/storage` link points outside `public/`); Windows path rules
+   Laravel's `public/storage` link points outside `public/`); an encoded separator in the
+   path (`%2F`, `%5C`, `WorkerState::encoded_separator` from `normalize_target`) is 404 on
+   every filesystem-backed location, so `/x%2F..%2Fwp-login.php` never reaches a script
+   (2026-10-02 alpha.45 report; a proxy location passes the raw target; the site key
+   `encoded_slashes = "allow"` restores the lookup for an application that encodes slashes
+   inside path segments, Apache's `NoDecode`); Windows path rules
    (`windows_path_ok`: backslash, `:`/ADS, trailing dot or space, reserved device names)
    applied on Windows and unit-tested everywhere.
 3. **Memory safety**: `AGENSIO_HARDEN=ON` (default) adds `-fstack-protector-strong`,

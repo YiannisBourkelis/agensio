@@ -157,6 +157,12 @@ struct SiteConfig {
     bool is_default = false;
     bool hidden_files = false;   // serve paths with a segment starting with '.' (.env, .git, .htaccess)
     bool symlinks_deny = false;  // refuse files whose canonical path leaves the root (realpath per cache miss)
+    // `encoded_slashes = "allow"`: a path spelling a separator as a percent escape (%2F, %5C)
+    // is decoded and looked up as before 2026-10-02, Apache's AllowEncodedSlashes NoDecode
+    // in effect for a front controller that reads REQUEST_URI; the default ("deny") answers
+    // 404 on every filesystem-backed location, Apache's Off. Proxy locations pass the raw
+    // target either way.
+    bool encoded_slashes_allow = false;
     // Sorted for Router::location: exact before prefix, longer before shorter, "/" last.
     std::vector<LocationConfig> locations;
     // Root additions (docs/design-site-operations.md 20): the files beside the managed site

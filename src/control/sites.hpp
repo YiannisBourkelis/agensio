@@ -20,6 +20,7 @@ struct SiteSpec {
     std::string cert, key;  // manual
     bool redirect_http = true;
     bool hsts = false;
+    std::string encoded_slashes;  // "" (deny, the default) | "allow": a %2F or %5C in the path decoded and looked up (2026-10-02)
     std::string user, group;
     bool user_decided = false;  // "user" was given (possibly as none); a managed file always has it
     bool no_user = false;       // `no_user: true`: decided, and no account (the same as user null)

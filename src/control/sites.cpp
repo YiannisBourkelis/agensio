@@ -61,6 +61,7 @@ json::Value SiteSpec::to_json() const {
     v.set("domain", domain).set("aliases", strings(aliases)).set("https", https);
     if (https == "manual") v.set("cert", cert).set("key", key);
     v.set("redirect_http", redirect_http).set("hsts", hsts).set("user", user).set("no_user", user.empty()).set("group", group);
+    if (encoded_slashes == "allow") v.set("encoded_slashes", encoded_slashes);
     v.set("app", app).set("root", root);
     if (!upstream.empty()) v.set("upstream", upstream);
     if (!project.empty()) v.set("project", project);
@@ -86,6 +87,7 @@ bool SiteSpec::from_json(const json::Value& v, SiteSpec& out) {
     out.key = v.get("key");
     if (has_key(v, "redirect_http")) out.redirect_http = v["redirect_http"].boolean();
     if (has_key(v, "hsts")) out.hsts = v["hsts"].boolean();
+    out.encoded_slashes = v.get("encoded_slashes") == "allow" ? "allow" : "";
     out.user = v.get("user");
     out.user_decided = true;
     out.no_user = out.user.empty();
@@ -374,6 +376,14 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
     }
     if (has_key(body, "redirect_http")) spec.redirect_http = body["redirect_http"].boolean();
     if (has_key(body, "hsts")) spec.hsts = body["hsts"].boolean();
+    if (has_key(body, "encoded_slashes")) {
+        const std::string_view es = body.get("encoded_slashes");
+        if (es != "deny" && es != "allow") {
+            error = "encoded_slashes must be \"deny\" (a %2F or %5C in the path is 404 on the site's files) or \"allow\" (decoded and looked up, for an application that encodes a slash inside a path segment)";
+            return needs;
+        }
+        spec.encoded_slashes = es == "allow" ? "allow" : "";
+    }
     if (has_key(body, "app")) spec.app = body.get("app");
     if (has_key(body, "root")) spec.root = body.get("root");
     if (has_key(body, "upstream")) spec.upstream = body.get("upstream");
@@ -597,6 +607,7 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
         if (!spec.group.empty()) s += "group = " + toml_string(spec.group) + "\n";
         if (!spec.user.empty() && !spec.access_log.empty()) s += "access_log = " + toml_string(spec.access_log) + "\n";
         if (!spec.login_paths.empty()) s += "login_paths = " + toml_list(spec.login_paths) + "   # fail2ban counts login attempts here (agensio ctl protection)\n";
+        if (spec.encoded_slashes == "allow") s += "encoded_slashes = \"allow\"   # a %2F in the path is decoded and looked up (Apache's NoDecode), not 404\n";
         const bool php = php_app(spec.app);
         if (spec.settings.is_object() && spec.settings["max_body_size"].is_string()) s += "max_body_size = " + toml_string(spec.settings.get("max_body_size")) + "\n";
         if (const std::string fc(spec.rules.get("front_controller")); !fc.empty())

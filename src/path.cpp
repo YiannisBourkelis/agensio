@@ -27,7 +27,8 @@ std::size_t plain_path(std::string_view target) noexcept {
 }
 }  // namespace
 
-bool normalize_target(std::string_view target, std::string& out) {
+bool normalize_target(std::string_view target, std::string& out, bool* encoded_separator) {
+    if (encoded_separator) *encoded_separator = false;
     out.clear();
     if (target.empty() || target[0] != '/') return false;
     if (const std::size_t n = plain_path(target); n != std::string_view::npos) {  // as it is
@@ -50,6 +51,7 @@ bool normalize_target(std::string_view target, std::string& out) {
             int hi = hex_val(target[i + 1]), lo = hex_val(target[i + 2]);
             if (hi < 0 || lo < 0) return false;
             c = static_cast<char>((hi << 4) | lo);
+            if ((c == '/' || c == '\\') && encoded_separator) *encoded_separator = true;
             i += 2;
         }
         unsigned char uc = static_cast<unsigned char>(c);

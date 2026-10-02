@@ -1298,6 +1298,13 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     site.is_default = t["default"].value_or(false);
     site.hidden_files = t["hidden_files"].value_or(false);
     site.symlinks_deny = symlinks_deny_of(t["symlinks"], false, where);
+    if (auto es = t["encoded_slashes"].value<std::string>()) {
+        const std::string v = to_lower(*es);
+        if (v != "deny" && v != "allow") fail(where + ".encoded_slashes must be \"deny\" (a %2F or %5C in the path is 404 on this site's files, Apache's AllowEncodedSlashes Off) or \"allow\" (decoded and looked up, for an application that encodes a slash inside a path segment)");
+        site.encoded_slashes_allow = v == "allow";
+    } else if (t.contains("encoded_slashes")) {
+        fail(where + ".encoded_slashes must be a string: \"deny\" or \"allow\"");
+    }
     if (auto a = t["access_log"].value<std::string>())
         site.access_log = (*a == "off" || a->empty()) ? std::string() : resolve(base_dir, *a).string();
     else site.access_log = cfg.log.access;
@@ -1618,6 +1625,7 @@ void explain_config(const Config& cfg, std::ostream& out) {
             << (site.symlinks_deny ? "deny" : "allow") << "\"\n";
         out << "access_log = \"" << (site.access_log.empty() ? "off" : site.access_log) << "\"\n";
         if (!site.login_paths.empty()) print_list(out, "login_paths", site.login_paths);
+        if (site.encoded_slashes_allow) out << "encoded_slashes = \"allow\"\n";
         for (const auto& loc : site.locations)
             if (!loc.protects.empty()) {
                 out << "# the names the deny locations below never serve are refused in every backup spelling too\n"

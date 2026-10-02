@@ -78,7 +78,7 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
         static_.no_content(s, Router::location(*site, "/").allow);
         return nullptr;
     }
-    if (!normalize_target(req.target, ws.path)) {
+    if (!normalize_target(req.target, ws.path, &ws.encoded_separator)) {
         static_.error(s, 400, false);
         return nullptr;
     }
@@ -111,6 +111,17 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
         return nullptr;
     }
     const LocationConfig* loc = &Router::location(*site, ws.path);
+    // A separator spelled as a percent escape (%2F, %5C) never names a file: 404 before any
+    // handler that resolves paths on disk runs, Apache's AllowEncodedSlashes Off (2026-10-02
+    // alpha.45 report: /x%2F..%2Fwp-login.php reached the script). A proxied application
+    // gets the raw target as nginx hands it on, undecoded, and decides itself (GitLab's API
+    // encodes group%2Fproject inside a path segment). One predictable test per request; the
+    // site's encoded_slashes = "allow" (Apache's NoDecode, for a front controller that reads
+    // REQUEST_URI) is read only once the escape was seen.
+    if (ws.encoded_separator && loc->kind != HandlerKind::proxy && !site->encoded_slashes_allow) {
+        static_.error(s, 404, req.keep_alive);
+        return nullptr;
+    }
     if (!check_method(s, *loc, ws)) return nullptr;
     // Endings refused before an application sees the request (a Rails site's databases,
     // logs and keys wherever they live): the static handler checks its own locations.

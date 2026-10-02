@@ -11,7 +11,13 @@ namespace agensio {
 // slashes, preserves a trailing slash. Returns false if the target is invalid:
 // does not start with '/', bad percent escape, contains control characters or NUL,
 // or tries to climb above the root. `out` is reused; capacity is kept between calls.
-bool normalize_target(std::string_view target, std::string& out);
+// `encoded_separator`, when given, is set when a percent escape decoded to '/' or '\\'
+// (%2F, %5C): the request spelled a separator the client did not write as one, so a
+// handler that resolves paths on the filesystem answers 404 (Apache's AllowEncodedSlashes
+// Off; nginx hands %2F to an origin undecoded), while a proxied application receives the
+// raw target and decides itself (2026-10-02 alpha.45 report: /x%2F..%2Fwp-login.php
+// reached the file). Cleared on entry, set only inside the escape branch.
+bool normalize_target(std::string_view target, std::string& out, bool* encoded_separator = nullptr);
 
 // True if any path segment starts with '.', i.e. a dotfile or dot-directory (".env",
 // "/.git/config", "/a/.hidden/b"). Input is a normalised path.

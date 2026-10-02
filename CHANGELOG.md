@@ -11,7 +11,14 @@ by itself, path info is allowed only after a `.php` file and a `.format` suffix 
 and Redmine paths, so Joomla's and Kanboard's ordinary form posts are not counted; and there
 is one `agensio-login` jail per access log with the paths of the sites writing it
 (`login_jails` in `protection_show`), so one application's paths are not counted on another
-site's log.
+site's log. And, as the report suggested and the owner agreed: a separator spelled as a
+percent escape in the path (`%2F`, `%5C`) is 404 on every location that resolves paths on
+disk, Apache's `AllowEncodedSlashes Off`, so `/x%2F..%2Fwp-login.php` never reaches the
+script; a proxied location hands the raw target to its origin undecoded, as nginx does
+(docs/configuration.md 1, CLAUDE.md hardening item 2). The site key `encoded_slashes =
+"allow"` (`site_update`, `--encoded-slashes`) restores the lookup for a PHP application
+behind a front controller that encodes a slash inside a path segment and reads
+`REQUEST_URI`, Apache's `NoDecode` in effect; nginx has no such switch.
 
 ## 0.1.0-alpha.45 (2026-10-02)
 From the alpha.44 report: the installed fail2ban filters are compared with the text this

@@ -189,6 +189,8 @@ int main(int argc, char** argv) {
                              "        site-create --domain D [--alias A]... [--https auto|none] [--cert F --key F] [--user U|--no-user]\n"
                              "                    [--group G] [--app NAME] [--root DIR] [--upstream URL] [--project NAME] [--entry FILE] [--php-socket S]\n"
                              "                    [--php-children N] [--php-version V] [--no-redirect] [--hsts] [--listen-plain A] [--listen-tls A]\n"
+                             "                    [--encoded-slashes deny|allow] (allow: a %2F in the path is decoded and looked up, Apache's NoDecode,\n"
+                             "                    for an application that encodes a slash inside a path segment; deny, the default, answers 404)\n"
                              "        site-update NAME (same options as site-create); --dry-run on either checks and shows the\n"
                              "                    file without writing, listing every problem at once\n"
                              "        --login-path PATH (site-create and site-update, repeatable): where the application posts\n"
@@ -307,6 +309,7 @@ int main(int argc, char** argv) {
                 else if (b == "--php-version") field("php_version");
                 else if (b == "--no-redirect") body.set("redirect_http", false);
                 else if (b == "--hsts") body.set("hsts", true);
+                else if (b == "--encoded-slashes") field("encoded_slashes");
                 else if (b == "--listen-plain") field("listen_plain");
                 else if (b == "--listen-tls") field("listen_tls");
                 else if (b == "--url") field("url");

@@ -98,6 +98,22 @@ static std::string norm(std::string_view t) {
 
 static void test_path() {
     CHECK_EQ(norm("/"), "/");
+    // An encoded separator is reported (2026-10-02 alpha.45 report): %2F and %5C in either
+    // case, never a plain slash or another escape; the path itself still decodes.
+    {
+        std::string out;
+        bool enc = true;
+        CHECK(normalize_target("/a/b%20c", out, &enc) && !enc && out == "/a/b c");
+        enc = false;
+        CHECK(normalize_target("/x%2F..%2Fwp-login.php", out, &enc) && enc && out == "/wp-login.php");
+        enc = false;
+        CHECK(normalize_target("/a%2fb", out, &enc) && enc && out == "/a/b");
+        enc = false;
+        CHECK(normalize_target("/a%5Cb", out, &enc) && enc);
+        enc = false;
+        CHECK(normalize_target("/a%2Eb/%2e%2e/c", out, &enc) && !enc && out == "/c");
+        CHECK(normalize_target("/plain/%2F", out) && out == "/plain/");  // without the flag: as before
+    }
     CHECK_EQ(norm("/index.html"), "/index.html");
     CHECK_EQ(norm("/a/b/c"), "/a/b/c");
     CHECK_EQ(norm("/a/b/"), "/a/b/");
@@ -4652,6 +4668,32 @@ static void test_protection() {
         h3.sites[0].tls = TlsConfig{};
         h3.sites[0].h3 = true;
         CHECK((protection_input(h3).udp_ports == std::vector<unsigned>{8080, 8443}));
+    }
+    {
+        std::ofstream(dir / "e.toml") << "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\nencoded_slashes = \"Allow\"\n[[site]]\nlisten = [\"127.0.0.1:2\"]\nroot = \"www\"\n";
+        const Config e = load_config(dir / "e.toml");
+        CHECK(e.sites[0].encoded_slashes_allow && !e.sites[1].encoded_slashes_allow);
+        bool refused = false;
+        std::ofstream(dir / "e2.toml") << "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\nencoded_slashes = \"maybe\"\n";
+        try {
+            load_config(dir / "e2.toml");
+        } catch (const std::exception&) {
+            refused = true;
+        }
+        CHECK(refused);
+        control::SiteSpec sp;
+        sp.domain = "es.test";
+        sp.https = "none";
+        sp.app = "static";
+        sp.root = "/srv/es";
+        sp.user_decided = true;
+        sp.encoded_slashes = "allow";
+        const std::string text = control::render_site(sp, "now");
+        CHECK(text.find("\nencoded_slashes = \"allow\"") != std::string::npos);
+        control::SiteSpec back;
+        CHECK(control::SiteSpec::from_json(sp.to_json(), back) && back.encoded_slashes == "allow");
+        sp.encoded_slashes.clear();
+        CHECK(control::render_site(sp, "now").find("encoded_slashes") == std::string::npos && control::SiteSpec::from_json(sp.to_json(), back) && back.encoded_slashes.empty());
     }
     for (const char* bad : {"login_paths = [\"login\"]", "login_paths = [\"/a//b\"]", "login_paths = [\"/a/../b\"]", "login_paths = [\"/\"]", "login_paths = [\"/a?\"]", "login_paths = [\"/a?b=%20\"]", "login_paths = 7"}) {
         std::ofstream(dir / "b.toml") << "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n" << bad << "\n";

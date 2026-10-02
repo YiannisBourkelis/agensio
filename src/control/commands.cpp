@@ -441,6 +441,7 @@ json::Value site_summary(const SiteConfig& s, std::time_t now) {
     json::Value v = json::Value::object();
     v.set("server_name", strings(s.server_names)).set("listen", strings(s.listen));
     v.set("root", s.root).set("app", s.app).set("user", s.user).set("group", s.group);
+    v.set("encoded_slashes", s.encoded_slashes_allow ? "allow" : "deny");
     if (!s.redirect.empty()) v.set("redirect", s.redirect);
     v.set("catch_all", is_catch_all(s));
     v.set("access_log", s.access_log);

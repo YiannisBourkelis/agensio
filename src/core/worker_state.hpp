@@ -21,6 +21,7 @@ struct WorkerState {
     std::string h2_date_insert;    // HTTP/2: the date field as an inserting literal, refreshed per second
     std::time_t h2_date_time = 0;
     std::string path;     // normalised request path
+    bool encoded_separator = false;  // the target spelled a '/' or '\\' as a percent escape (%2F, %5C): filesystem handlers answer 404
     std::string fs_path;  // filesystem path being served
     const void* site = nullptr;  // the SiteConfig chosen for the current request (for the access log)
     bool method_allowed = true;  // the current location accepts the request method (else only a try_files fallback may)

@@ -62,6 +62,28 @@ redirect, routed again through the locations; a `?$query_string` suffix is accep
 ignored for static files). Without `try_files` the rule is: file, directory index (403 if
 there is none), 301 to the slash form for a directory, else 404.
 
+**Encoded separators.** A request whose path spells a slash or a backslash as a percent
+escape (`%2F`, `%5C`, in either case) is answered 404 by every location that resolves paths
+on disk, static, FastCGI and CGI alike, before anything is looked up: it is Apache's
+`AllowEncodedSlashes Off`, and it closes spellings such as `/x%2F..%2Fwp-login.php`, which
+decoded and normalised to the script (2026-10-02). Every other escape decodes as before
+(`/style%2Ecss` is `/style.css`). A proxied location hands the raw target to its origin
+undecoded, as nginx does, so an application that encodes a slash inside a path segment
+(GitLab's `group%2Fproject`) keeps working behind `app = "proxy"`. A PHP application behind a
+front controller that does the same and reads `REQUEST_URI` itself gets `encoded_slashes =
+"allow"` on its site (Apache's `NoDecode` in effect: the escape is decoded for the lookup,
+`try_files` reaches `index.php`, PHP sees the raw `REQUEST_URI`); `site_update` sets it,
+`agensio ctl site-update NAME --encoded-slashes allow`. nginx has no such switch: it decodes
+`%2F` for files and locations always, and passes it untouched only through a plain
+`proxy_pass`.
+
+```toml
+[[site]]
+server_name = ["wiki.example.com"]
+app = "php"
+encoded_slashes = "allow"      # the application encodes slashes inside path segments
+```
+
 ## 1b. Which site answers a request
 
 A site answers the names in its `server_name`, compared case-insensitively and without
