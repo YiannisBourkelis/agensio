@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.40 (unreleased)
+## 0.1.0-alpha.40 (2026-10-02)
 
 An application's own server guidelines through the control plane (the Kanboard proposal
 against alpha.39, `docs/design-site-operations.md` section 19). A managed PHP or static
