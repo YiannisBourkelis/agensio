@@ -27,9 +27,10 @@ struct LogQuery {
 
 struct LogLine {
     std::time_t time = 0;
-    std::string source;  // "error" or the site name
+    std::string source;  // "error", "access" (the server-wide access log) or a site's name (its own log)
     std::string level;   // error | warn | info, or "" for access lines
     int status = 0;      // access lines
+    std::string host;    // JSON access lines: the Host asked for; "" for combined lines, which carry none
     std::string text;    // the line without its newline
 };
 

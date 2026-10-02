@@ -121,6 +121,8 @@ bool parse_log_line(std::string_view line, LogLine& out) {
             return false;
         out.time = utc_to_time(y, mo - 1, d, h, mi, s) - off;
         out.status = static_cast<int>(v["status"].num());
+        out.host = lower(v.get("host"));
+        if (const std::size_t colon = out.host.rfind(':'); colon != std::string::npos && out.host.find(']') == std::string::npos) out.host.erase(colon);
         return true;
     }
     // Combined: remote - - [18/Sep/2026:21:44:39 +0300] "GET / HTTP/1.1" 404 153 "-" "-"
@@ -227,21 +229,87 @@ json::Value logs(const Config& cfg, const LogQuery& q) {
     std::vector<LogLine> lines;
     bool truncated = false;
     json::Value files = json::Value::array();
+    json::Value sources = json::Value::array();
     std::vector<std::string> seen;
+    // Who writes into which access log. The [log] access default is the server-wide file:
+    // every site without an access_log of its own writes there (the catch-all, the redirects,
+    // scanners hitting the bare address), so its lines carry the source "access", never a
+    // site's name; a site is named only on a file it alone writes to (2026-10-02 report
+    // against alpha.42: 292 lines of the port-80 catch-all were labelled with the first site
+    // that shared the default, and a reader took that site for the one being scanned).
+    std::vector<std::pair<std::string, std::vector<std::string>>> writers;
+    for (const auto& s : cfg.sites) {
+        if (s.access_log.empty() || s.server_names.empty()) continue;
+        auto it = std::find_if(writers.begin(), writers.end(), [&](const auto& w) { return w.first == s.access_log; });
+        if (it == writers.end()) writers.emplace_back(s.access_log, std::vector<std::string>{s.server_names.front()});
+        else if (std::find(it->second.begin(), it->second.end(), s.server_names.front()) == it->second.end()) it->second.push_back(s.server_names.front());
+    }
+    auto sites_of = [&](const std::string& path) -> const std::vector<std::string>* {
+        for (const auto& w : writers)
+            if (w.first == path) return &w.second;
+        return nullptr;
+    };
+    auto label = [&](const std::string& path) -> std::string {
+        const auto* w = sites_of(path);
+        if (path == cfg.log.access || !w || w->size() != 1) return "access";
+        return w->front();
+    };
     auto scan = [&](const std::string& path, std::string_view source) {
         if (path.empty() || path == "stderr" || path == "off") return;
         if (std::find(seen.begin(), seen.end(), path) != seen.end()) return;
         seen.push_back(path);
         files.push(path);
+        json::Value src = json::Value::object().set("file", path).set("source", std::string(source));
+        if (const auto* w = sites_of(path)) {
+            json::Value names = json::Value::array();
+            for (const auto& n : *w) names.push(n);
+            src.set("sites", std::move(names));
+        }
+        sources.push(std::move(src));
         scan_log(path, source, q, lines, truncated);
     };
+    json::Value out = json::Value::object();
     if (q.site.empty()) {
         scan(cfg.log.error, "error");
-        for (const auto& s : cfg.sites) scan(s.access_log, s.server_names.front());
+        scan(cfg.log.access, "access");
+        for (const auto& s : cfg.sites) scan(s.access_log, label(s.access_log));
     } else {
         const SiteConfig* s = find_site(cfg, q.site);
         if (s) {
-            scan(s->access_log, s->server_names.front());
+            const std::string source = label(s->access_log);
+            scan(s->access_log, source);
+            if (source == "access" && !s->access_log.empty()) {
+                // A shared file: JSON lines carry the Host and are kept for this site's names
+                // (a catch-all keeps what no other site's name claims); combined lines carry no
+                // host, so they stay, labelled honestly, with the note.
+                const std::vector<std::string>* w = sites_of(s->access_log);
+                std::vector<std::string> others;
+                if (w)
+                    for (const auto& n : *w)
+                        if (n != s->server_names.front()) others.push_back(n);
+                std::vector<std::string> other_names;  // every name of every other site on the file
+                for (const auto& o : cfg.sites)
+                    if (&o != s && o.access_log == s->access_log)
+                        for (const auto& n : o.server_names) other_names.push_back(n);
+                const bool catch_all = is_catch_all(*s);
+                const bool json_lines = std::any_of(lines.begin(), lines.end(), [](const LogLine& l) { return !l.host.empty(); });
+                if (json_lines)
+                    lines.erase(std::remove_if(lines.begin(), lines.end(),
+                                               [&](const LogLine& l) {
+                                                   if (l.host.empty()) return false;
+                                                   const bool mine = std::find(s->server_names.begin(), s->server_names.end(), l.host) != s->server_names.end();
+                                                   const bool theirs = std::find(other_names.begin(), other_names.end(), l.host) != other_names.end();
+                                                   return !(mine || (catch_all && !theirs));
+                                               }),
+                                lines.end());
+                json::Value shared = json::Value::array();
+                for (const auto& o : others) shared.push(o);
+                out.set("shared", true).set("shared_with", std::move(shared));
+                out.set("note", s->server_names.front() + " has no access log of its own: it writes into the server-wide log " + s->access_log + " with " +
+                                    std::to_string(others.size()) + " other site(s)" + (json_lines ? ", whose JSON lines carry the host, so these are the lines for its names" + std::string(catch_all ? " and for every host no other site claims" : "")
+                                                                                                   : "; the combined format carries no host name, so these lines cannot be attributed to this site alone") +
+                                    ". A site with its own access_log (site_update access_log, or the key in its file) is queried alone" + (json_lines ? "." : "; [log] format = \"json\" puts the host into every line."));
+            }
             // The error log's lines about this site name.
             std::vector<LogLine> err;
             if (!cfg.log.error.empty() && cfg.log.error != "stderr") {
@@ -254,8 +322,8 @@ json::Value logs(const Config& cfg, const LogQuery& q) {
     }
     std::stable_sort(lines.begin(), lines.end(), [](const LogLine& a, const LogLine& b) { return a.time < b.time; });
     if (lines.size() > q.limit) lines.erase(lines.begin(), lines.end() - static_cast<std::ptrdiff_t>(q.limit));
-    json::Value out = json::Value::object();
     out.set("files", std::move(files));
+    out.set("sources", std::move(sources));
     out.set("since", static_cast<double>(q.since));
     out.set("truncated", truncated);
     json::Value arr = json::Value::array();

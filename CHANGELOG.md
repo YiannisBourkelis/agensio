@@ -30,6 +30,14 @@ and `/usr/lib/systemd/system/agensio-firewall.service`; the unit test holds the 
 to the renderers. `tests/protection.sh` runs the real nft and fail2ban in the
 `agensio-devbox:host` image. Security page row 37.
 
+`logs_query` labels the server-wide access log honestly (the alpha.42 report: 292 lines of the
+port-80 catch-all and the redirects carried the first site's name, so a reader took that site
+for the one being scanned). Lines of the `[log] access` file, which every site without an
+`access_log` of its own writes into, have the source `access`; a site's name appears only on a
+file it alone writes; `sources` lists every file read with the sites writing into it; a query
+for a site that shares the server-wide file answers `shared: true` with a note, its JSON
+lines filtered to the site's host names, combined lines (no host in them) left as they are.
+
 ## 0.1.0-alpha.42 (2026-10-02)
 
 A connection ceiling per worker (`server.max_connections`, hardening item 5 of CLAUDE.md,

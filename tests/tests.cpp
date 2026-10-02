@@ -3210,6 +3210,50 @@ static void test_control_commands() {
     q.since = l.time;
     scan_log(dir / "error.log", "error", q, out, truncated);
     CHECK(out.size() == 1 && out[0].text.ends_with("four"));
+    // The sources of logs(): the server-wide access log is "access" whoever shares it, a site's
+    // own file carries its name, a site on the shared file is answered with the note; JSON lines
+    // are filtered to the site's names (2026-10-02 report against alpha.42).
+    {
+        const std::string shared = (dir / "shared.log").string(), own = (dir / "a.log").string();
+        std::ofstream(shared) << "203.0.113.5 - - [02/Oct/2026:10:00:01 +0000] \"GET /wp-login.php HTTP/1.1\" 404 150 \"-\" \"scan\"\n"
+                                 "203.0.113.5 - - [02/Oct/2026:10:00:02 +0000] \"GET /.env HTTP/1.1\" 404 150 \"-\" \"scan\"\n"
+                                 "198.51.100.2 - - [02/Oct/2026:10:00:03 +0000] \"GET / HTTP/1.1\" 301 0 \"-\" \"x\"\n";
+        std::ofstream(own) << "192.0.2.9 - - [02/Oct/2026:10:00:04 +0000] \"POST /login HTTP/1.1\" 401 0 \"-\" \"x\"\n";
+        std::ofstream(dir / "l.toml") << "[log]\naccess = \"" << shared << "\"\n[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:8080\"]\nroot = \"" << dir.string()
+                                      << "\"\naccess_log = \"" << own << "\"\n[[site]]\nserver_name = [\"b.test\"]\nlisten = [\"127.0.0.1:8080\"]\nroot = \"" << dir.string()
+                                      << "\"\n[[site]]\nserver_name = [\"*\"]\nlisten = [\"127.0.0.1:8080\"]\nroot = \"" << dir.string() << "\"\n";
+        const Config cfg = load_config(dir / "l.toml");
+        LogQuery all;
+        all.status_min = 300;
+        all.since = 0;
+        json::Value r = logs(cfg, all);
+        std::string by_source;
+        for (const auto& l : r["lines"].items()) by_source += std::string(l.get("source")) + " ";
+        CHECK(by_source == "access access access a.test " && r["sources"].items().size() == 2);
+        CHECK(r["sources"].items()[0].get("file") == shared && r["sources"].items()[0].get("source") == "access" && r["sources"].items()[0]["sites"].items().size() == 2 &&
+              r["sources"].items()[1].get("source") == "a.test" && r["sources"].items()[1]["sites"].items().size() == 1);
+        LogQuery one = all;
+        one.site = "a.test";
+        r = logs(cfg, one);
+        CHECK(r["count"].num() == 1 && r["lines"].items()[0].get("source") == "a.test" && r["shared"].is_null());
+        one.site = "b.test";
+        r = logs(cfg, one);
+        CHECK(r["count"].num() == 3 && r["lines"].items()[0].get("source") == "access" && r["shared"].boolean() && r["shared_with"].items().size() == 1 &&
+              r["shared_with"].items()[0].str() == "*" && r.get("note").find("combined format carries no host name") != std::string_view::npos);
+        // JSON lines carry the host: b.test gets its own, the catch-all gets what no other site claims.
+        std::ofstream(shared) << "{\"time\":\"2026-10-02T10:00:01+00:00\",\"remote\":\"203.0.113.5\",\"host\":\"b.test\",\"method\":\"GET\",\"target\":\"/x\",\"proto\":\"HTTP/1.1\",\"status\":404,\"bytes\":1}\n"
+                                 "{\"time\":\"2026-10-02T10:00:02+00:00\",\"remote\":\"203.0.113.5\",\"host\":\"203.0.113.9:80\",\"method\":\"GET\",\"target\":\"/\",\"proto\":\"HTTP/1.1\",\"status\":404,\"bytes\":1}\n"
+                                 "{\"time\":\"2026-10-02T10:00:03+00:00\",\"remote\":\"203.0.113.5\",\"host\":\"B.test:8080\",\"method\":\"GET\",\"target\":\"/y\",\"proto\":\"HTTP/1.1\",\"status\":500,\"bytes\":1}\n";
+        r = logs(cfg, one);
+        CHECK(r["count"].num() == 2 && r["lines"].items()[0].get("text").find("/x") != std::string_view::npos && r["lines"].items()[1].get("text").find("/y") != std::string_view::npos &&
+              r.get("note").find("JSON lines carry the host") != std::string_view::npos);
+        one.site = "*";
+        CHECK(find_site(cfg, "*") != nullptr);
+        r = logs(cfg, one);
+        CHECK(r["count"].num() == 1 && r["lines"].items()[0].get("text").find("203.0.113.9") != std::string_view::npos);
+        r = logs(cfg, all);
+        CHECK(r["count"].num() == 4);
+    }
     // Health: a manual TLS site with a missing certificate, no redirect, two application sites without users.
     {
         std::ofstream(dir / "www.html") << "x";
