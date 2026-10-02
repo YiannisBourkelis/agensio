@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.46 (unreleased)
+## 0.1.0-alpha.46 (2026-10-02)
 
 From the alpha.45 report on the login jail's regex: its dot-segment grammar was ambiguous
 and a 16 KB request line of `./` cost 2.3 s of fail2ban's time, so the branches are disjoint
