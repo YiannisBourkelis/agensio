@@ -247,7 +247,7 @@ install(FILES packaging/firewall/agensio.nft DESTINATION ${CMAKE_INSTALL_DATADIR
 install(DIRECTORY packaging/fail2ban/ DESTINATION ${CMAKE_INSTALL_DATADIR}/agensio/fail2ban)
 install(FILES packaging/agensio-firewall.service DESTINATION /usr/lib/systemd/system)
 install(FILES README.md CHANGELOG.md LICENSE docs/configuration.md docs/keys.md docs/install.md docs/mcp.md
-              docs/security-control-plane.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
+              docs/security-control-plane.md docs/fail2ban.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
 install(DIRECTORY docs/examples DESTINATION ${CMAKE_INSTALL_DOCDIR})
 
 set(CPACK_PACKAGE_NAME agensio)

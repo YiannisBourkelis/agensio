@@ -997,6 +997,12 @@ Each item was benchmarked before and after on the reduced matrix (`bench/run.sh 
    `fail2ban_jail_stale`, `fail2ban_log_format`, `fail2ban_blind`, `protection_unchecked`;
    `[control] host_protection = "external"` for a panel host, `"off"` to skip. Security page
    row 37; `tests/protection.sh` (the `agensio-devbox:host` image with `--cap-add NET_ADMIN`).
+   The login jail matches every spelling of a path (`spelling_regex`, the filter's `<sep>`
+   variable), one jail per access log; the failure tier (`FailureJail`, `kFailureTiers`:
+   WordPress through the WP fail2ban plugin, Drupal through its Syslog module) is rendered
+   enabled only when its filter and log exist, else with the user's steps; agensio installs
+   no plugin and changes no application, it suggests (2026-10-03). `docs/fail2ban.md` is the
+   administrator's guide: the jails, what each application type gets, what to add.
 
 Still to do (roadmap phases E and H): request-body
 limits and timeouts once bodies exist, security response headers option (HSTS,

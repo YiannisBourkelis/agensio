@@ -1,6 +1,8 @@
 #include "control/protection.hpp"
 
 #include <algorithm>
+#include <filesystem>
+#include <initializer_list>
 #include <cctype>
 #include <map>
 #include <set>
@@ -42,15 +44,23 @@ std::string hex2(unsigned char u) {
 
 // One character of a login path: literal (escaped when the regex would read it) or
 // percent-encoded, a letter under either case's code (the server decodes %55 and %75 alike,
-// the applications take either case; alpha.45 report); the '%' written \x25 so the jail
-// file's configparser never sees one, and the filter's (?i) covers the hex digits' case.
+// the applications take either case; alpha.45 report). The two codes of a letter differ in
+// the first hex digit alone (0x41-0x5A against 0x61-0x7A), so they are one class:
+// (?:c|\x25[46]3). The '%' is written \x25 so the jail file's configparser never sees one,
+// and the filter's (?i) covers the hex digits' case.
 std::string spelled(char c) {
+    static constexpr char kHex[] = "0123456789ABCDEF";
     const unsigned char u = static_cast<unsigned char>(c);
     std::string out = "(?:";
     if (c == '.' || c == '?' || c == '+' || c == '/' || c == '~') out += '\\';
     out += c;
-    out += "|\\x25" + hex2(u);
-    if (std::isalpha(u)) out += "|\\x25" + hex2(static_cast<unsigned char>(std::isupper(u) ? std::tolower(u) : std::toupper(u)));
+    out += "|\\x25";
+    if (std::isalpha(u)) {
+        const unsigned char upper = static_cast<unsigned char>(std::toupper(u));
+        out += std::string("[") + kHex[upper >> 4] + kHex[(upper >> 4) + 2] + "]" + kHex[u & 15];
+    } else {
+        out += hex2(u);
+    }
     return out + ")";
 }
 
@@ -69,8 +79,12 @@ const std::string kDot = "(?:\\.|\\x252E)";
 // "seg/../" pops. The two branches are disjoint (a run starts with a dot, a pop with a plain
 // character that is neither a dot nor a percent sign) and each consumes its tokens in one way
 // only, so a 16 KB line of "./" costs linear time (alpha.45 report: the first grammar let "."
-// start both branches, and such a line took the jail's thread 2.3 s).
-const std::string kSep = kSlashes + "(?:(?:" + kDot + kSlashes + "|[^/?\\s.\\x25][^/?\\s\\x25]*" + kSlashes + kDot + kDot + kSlashes + "))*";
+// start both branches, and such a line took the jail's thread 2.3 s). The group is written
+// once, as the filter's `sep` variable, and every path refers to it as <sep>: fail2ban
+// substitutes its tags in a jail's filter parameter too, so a path's entry is a hundred
+// characters instead of five hundred (the owner's objection to the first rendering).
+const std::string kSepText = kSlashes + "(?:(?:" + kDot + kSlashes + "|[^/?\\s.\\x25][^/?\\s\\x25]*" + kSlashes + kDot + kDot + kSlashes + "))*";
+const std::string kSep = "<sep>";
 
 }  // namespace
 
@@ -90,13 +104,25 @@ std::string spelling_regex(const LoginPath& lp) {
     // /index.php?controller=...), never alone: the path itself is what makes a login.
     const std::string index = kSep + "index" + kDot + "php";
     std::string out;
-    if (body.empty()) out = lp.php ? "(?:" + index + "|" + kSep + ")" : kSep;  // the root, a query login
-    else out = (lp.php ? "(?:" + index + ")?" : std::string()) + body;
-    if (lp.format) out += "(?:" + kDot + "[a-z0-9]{1,8})?";            // Rails' optional format
-    if (lp.php && path.size() > 4 && path.ends_with(".php")) out += "(?:" + kSlashes + "\\S*)?";  // path info after the script
-    else out += kSlashOpt;
+    if (body.empty()) {
+        // The root, a query login: the separator run is the whole path and nothing may follow
+        // it but the query, so no trailing-slash quantifier after it (alpha.46 report: the run
+        // split two ways against two lookaheads scanned before the '?' made a 10 KB line of
+        // slashes cost minutes, with the GIL held, every jail of the daemon standing still).
+        out = lp.php ? "(?:" + index + "|" + kSep + ")" : kSep;
+    } else {
+        out = (lp.php ? "(?:" + index + ")?" : std::string()) + body;
+        if (lp.format) out += "(?:" + kDot + "[a-z0-9]{1,8})?";  // Rails' optional format
+        // Path info after a .php script, never across a '?', so the query starts where the
+        // first '?' is and the parameters are looked for once.
+        if (lp.php && path.size() > 4 && path.ends_with(".php")) out += "(?:" + kSlashes + "[^?\\s]*)?";
+        else out += kSlashOpt;
+    }
     if (q == std::string::npos) return out + "(?:[?&]\\S*)?";
-    // Every parameter of the entry present, in any order, with others allowed.
+    // The literal '?' first, so a line without a query fails here at once; then every
+    // parameter of the entry present after it, in any order, with others allowed: each
+    // lookahead runs once, from the '?', and scans the query a single time.
+    out += "\\?";
     const std::string query = lp.path.substr(q + 1);
     std::size_t p = 0;
     while (p <= query.size()) {
@@ -104,18 +130,82 @@ std::string spelling_regex(const LoginPath& lp) {
         const std::string pair = query.substr(p, amp == std::string::npos ? std::string::npos : amp - p);
         if (!pair.empty()) {
             const std::size_t eq = pair.find('=');
-            out += "(?=\\S*[?&]" + spelled(pair.substr(0, eq)) + (eq == std::string::npos ? std::string() : "=" + spelled(pair.substr(eq + 1))) + "(?:[&\\s]|$))";
+            out += "(?=(?:\\S*&)?" + spelled(pair.substr(0, eq)) + (eq == std::string::npos ? std::string() : "=" + spelled(pair.substr(eq + 1))) + "(?:[&\\s]|$))";
         }
         if (amp == std::string::npos) break;
         p = amp + 1;
     }
-    return out + "\\?\\S*";
+    return out + "\\S*";
 }
 
 std::string login_paths_regex(const std::vector<LoginPath>& paths) {
     std::string out;
     for (std::size_t i = 0; i < paths.size(); ++i) out += (i ? "|" : "") + spelling_regex(paths[i]);
     return out;
+}
+
+namespace {
+
+// The failure tier's rows: what fail2ban and the application communities use (2026-10-03
+// research: fail2ban ships drupal-auth over Drupal's syslog module; WordPress's standard is
+// the WP fail2ban plugin logging to the auth facility with its own wordpress-hard and
+// wordpress-soft filters). A new application is a row.
+struct FailureTier {
+    const char* app;
+    const char* jail;
+    const char* filter;
+    bool auth_log;  // the auth facility's file; else the system log
+    unsigned maxretry;
+    const char* findtime;
+    const char* bantime;
+    const char* source;
+};
+const FailureTier kFailureTiers[] = {
+    {"wordpress", "agensio-wordpress-soft", "wordpress-soft", true, 5, "10m", "1h",
+     "failed WordPress logins, form and XML-RPC, as the WP fail2ban plugin logs them to the auth log (\"Authentication failure for admin from ...\")"},
+    {"wordpress", "agensio-wordpress-hard", "wordpress-hard", true, 1, "10m", "1d",
+     "what the WP fail2ban plugin logs as hostile at the first hit (blocked user names, pingback errors)"},
+    {"drupal", "agensio-drupal-auth", "drupal-auth", false, 5, "10m", "1h",
+     "failed Drupal logins as its Syslog module logs them (\"Login attempt failed for ...\"), with fail2ban's own drupal-auth filter"},
+};
+
+std::string first_existing(std::initializer_list<const char*> candidates, bool& present) {
+    std::error_code ec;
+    for (const char* c : candidates)
+        if (std::filesystem::is_regular_file(c, ec)) {
+            present = true;
+            return c;
+        }
+    present = false;
+    return *candidates.begin();
+}
+
+std::vector<std::string> tier_needs(const std::string& app, const std::string& root, const std::string& log, bool log_present) {
+    std::vector<std::string> out;
+    if (app == "wordpress") {
+        out.push_back("install and activate the WP fail2ban plugin from the WordPress admin panel (Plugins > Add New, \"WP fail2ban\"); it logs every failed login to the system's auth log; agensio installs no plugin");
+        out.push_back("as root, copy the plugin's filters: install -m 644 " + root + "/wp-content/plugins/wp-fail2ban/filters.d/wordpress-hard.conf " + root +
+                      "/wp-content/plugins/wp-fail2ban/filters.d/wordpress-soft.conf /etc/fail2ban/filter.d/");
+    } else if (app == "drupal") {
+        out.push_back("enable Drupal's Syslog module in the site (Extend > Syslog) so that failed logins reach the system log; the drupal-auth filter ships with fail2ban; agensio changes nothing in the application");
+    }
+    if (!log_present) out.push_back("the log " + log + " is not on this host (journald only?): install rsyslog so the lines reach a file fail2ban can read");
+    out.push_back("then render the jail again, as root: agensio ctl protection --jail > " + std::string(kJailFile) + "; fail2ban-client reload");
+    return out;
+}
+
+}  // namespace
+
+std::vector<std::string> failure_tier_steps(const std::string& app, const std::string& root) {
+    for (const auto& t : kFailureTiers)
+        if (app == t.app) {
+            bool present = false;
+            const std::string log = t.auth_log ? first_existing({"/var/log/auth.log", "/var/log/secure"}, present) : first_existing({"/var/log/syslog", "/var/log/messages"}, present);
+            std::vector<std::string> out{"fail2ban counts this site's failed logins, not only the attempts at its login paths, once the application's side is in place:"};
+            for (const auto& n : tier_needs(app, root, log, present)) out.push_back(n);
+            return out;
+        }
+    return {};
 }
 
 namespace {
@@ -146,6 +236,9 @@ std::string login_filter_text() {
            "before = common.conf\n"
            "\n"
            "[Init]\n"
+           "# <sep>: a path separator as a client may write it: slashes, literal or encoded, then any\n"
+           "# number of ./ runs and seg/../ pops; unambiguous, so a long line costs linear time.\n"
+           "sep = " + kSepText + "\n"
            "paths = " + paths + "\n"
            "\n"
            "[Definition]\n"
@@ -355,6 +448,30 @@ ProtectionInput protection_input(const Config& cfg) {
         const bool da = a.log == cfg.log.access, db = b.log == cfg.log.access;
         return da != db ? da : a.log < b.log;
     });
+    // The failure tier: one jail per row whose preset a site uses, the sites listed, the host's
+    // log and filter files looked for now (enabled only with both).
+    for (const auto& t : kFailureTiers) {
+        FailureJail fj;
+        std::string root;
+        for (const auto& s : cfg.sites)
+            if (s.app == t.app && !s.server_names.empty()) {
+                add_unique(fj.sites, s.server_names.front());
+                if (root.empty()) root = s.root;
+            }
+        if (fj.sites.empty()) continue;
+        fj.name = t.jail;
+        fj.app = t.app;
+        fj.filter = t.filter;
+        fj.maxretry = t.maxretry;
+        fj.findtime = t.findtime;
+        fj.bantime = t.bantime;
+        fj.source = t.source;
+        fj.log = t.auth_log ? first_existing({"/var/log/auth.log", "/var/log/secure"}, fj.log_present) : first_existing({"/var/log/syslog", "/var/log/messages"}, fj.log_present);
+        std::error_code ec;
+        fj.filter_installed = std::filesystem::is_regular_file("/etc/fail2ban/filter.d/" + fj.filter + ".conf", ec);
+        fj.needs = tier_needs(fj.app, root, fj.log, fj.log_present);
+        in.failure_jails.push_back(std::move(fj));
+    }
     std::vector<std::string> taken;
     for (auto& j : in.login_jails) {
         std::sort(j.paths.begin(), j.paths.end(), [](const LoginPath& a, const LoginPath& b) { return a.path < b.path; });
@@ -450,7 +567,9 @@ std::string render_jail(const ProtectionInput& in) {
     std::string s;
     s += "# agensio: fail2ban jails over its access logs (docs/configuration.md 18), rendered by\n";
     s += "# `agensio ctl protection --jail` for this host: its web ports, its access logs and the login\n";
-    s += "# paths of its sites (each preset's, plus every site's login_paths), one login jail per log. Install as\n";
+    s += "# paths of its sites (each preset's, plus every site's login_paths), one login jail per log, and for a\n";
+    s += "# preset whose application logs its failed logins (WordPress with the WP fail2ban plugin, Drupal with its\n";
+    s += "# Syslog module) a jail over that log, counting failures rather than attempts. Install as\n";
     s += "# " + std::string(kJailFile) + " with the filters from " + shipped("fail2ban/filter.d") + ", then\n";
     s += "# `fail2ban-client reload`; render again when a site is added (health says when this file is stale).\n";
     s += "# The logs are in the combined format: the client address is the first field (behind a trusted\n";
@@ -480,6 +599,28 @@ std::string render_jail(const ProtectionInput& in) {
         s += "maxretry  = 10\n";
         s += "findtime  = 10m\n";
         s += "bantime   = 1h\n";
+    }
+    // The failure tier: failures the application logged itself, read with the filter fail2ban
+    // or the application ships; enabled only when the filter file and the log exist, since
+    // fail2ban refuses a configuration that names either when missing.
+    for (const auto& f : in.failure_jails) {
+        s += "\n[" + f.name + "]\n";
+        s += "# " + f.source + ", for " + join(f.sites, ", ") + ": " + std::to_string(f.maxretry) + " in " + f.findtime + " ban" + (f.maxretry == 1 ? "s" : "") + " for " + f.bantime + ".\n";
+        if (!f.enabled()) {
+            s += "# Disabled: " + std::string(!f.filter_installed ? "the filter " + f.filter + " is not in /etc/fail2ban/filter.d/" : "") +
+                 (!f.filter_installed && !f.log_present ? "; " : "") + std::string(!f.log_present ? "the log " + f.log + " is not on this host" : "") + ". Needs:\n";
+            for (const auto& n : f.needs) s += "#   " + n + "\n";
+            s += "enabled   = false\n";
+        } else {
+            s += "enabled   = true\n";
+        }
+        s += "port      = " + ports + "\n";
+        s += "filter    = " + f.filter + "\n";
+        s += "logpath   = " + f.log + "\n";
+        s += "banaction = nftables-multiport\n";
+        s += "maxretry  = " + std::to_string(f.maxretry) + "\n";
+        s += "findtime  = " + f.findtime + "\n";
+        s += "bantime   = " + f.bantime + "\n";
     }
     s += "\n[agensio-auth]\n";
     s += "# Requests refused with 401 or 403: ten in ten minutes bans for an hour.\n";
@@ -721,6 +862,11 @@ json::Value protection_report(const ProtectionInput& in, const ProtectionProbe& 
         ljs.push(json::Value::object().set("name", j.name).set("log", j.log).set("sites", strings_json(j.sites)).set("paths", std::move(paths)));
     }
     r.set("login_jails", std::move(ljs));
+    json::Value fjs = json::Value::array();
+    for (const auto& f : in.failure_jails)
+        fjs.push(json::Value::object().set("name", f.name).set("app", f.app).set("sites", strings_json(f.sites)).set("filter", f.filter).set("log", f.log)
+                     .set("enabled", f.enabled()).set("filter_installed", f.filter_installed).set("log_present", f.log_present).set("source", f.source).set("needs", strings_json(f.needs)));
+    r.set("failure_jails", std::move(fjs));
     // The firewall
     json::Value fw = json::Value::object();
     fw.set("table", std::string(kFirewallTable)).set("file", in.firewall_file).set("shipped", shipped("firewall/agensio.nft")).set("unit", std::string(kFirewallUnit));
@@ -868,6 +1014,29 @@ std::vector<Finding> protection_findings(const ProtectionInput& in, const Protec
         if (v.jail_state == "stale")
             out.push_back(Finding{"info", "fail2ban_jail_stale", "", std::string(kJailFile) + " is older than this host's rendering (a site, a log or a login path was added since)",
                                   "as root: " + reinstall + "agensio ctl protection --jail > " + std::string(kJailFile) + "; fail2ban-client reload"});
+    }
+    // The failure tier a preset offers but the host does not have in place yet: the
+    // application's plugin or module, root's filter copy, the log (informational: the attempt
+    // tier counts meanwhile; agensio installs nothing, it says what to install).
+    if (v.f2b_ours) {
+        std::vector<std::string> apps;
+        for (const auto& f : in.failure_jails)
+            if (!f.enabled() && std::find(apps.begin(), apps.end(), f.app) == apps.end()) apps.push_back(f.app);
+        for (const auto& app : apps) {  // one finding per application, its jails named
+            std::string jails, why, sites;
+            std::vector<std::string> needs;
+            for (const auto& f : in.failure_jails) {
+                if (f.app != app || f.enabled()) continue;
+                jails += (jails.empty() ? "" : ", ") + f.name;
+                if (sites.empty()) sites = join(f.sites, ", ");
+                if (needs.empty()) needs = f.needs;
+                for (const std::string reason : {!f.filter_installed ? "the filter " + f.filter + " is not in /etc/fail2ban/filter.d/" : std::string(), !f.log_present ? "the log " + f.log + " is not on this host" : std::string()})
+                    if (!reason.empty() && why.find(reason) == std::string::npos) why += (why.empty() ? "" : "; ") + reason;
+            }
+            out.push_back(Finding{"info", "fail2ban_failures_unseen", "",
+                                  sites + " (" + app + "): failed logins are counted only as attempts at the login paths; the jail(s) " + jails + " over the application's own log are rendered disabled: " + why,
+                                  join(needs, "; ")});
+        }
     }
     if (!in.unlogged.empty() && v.f2b_ours)
         out.push_back(Finding{"info", "fail2ban_blind", "", "site(s) without an access log: " + join(in.unlogged, ", ") + "; fail2ban cannot see their requests",

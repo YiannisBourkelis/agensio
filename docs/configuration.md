@@ -2080,7 +2080,8 @@ belongs:
 
 **Shipped: the ruleset, the jails, and the check** (2026-10-02). agensio does not apply any of
 this, but it renders both pieces for the host it runs on and reads back whether they are in
-place. `agensio ctl protection` (the MCP tool `protection_show`, and `agensio protection -c
+place. The administrator's guide to the fail2ban side, with what each application type gets
+and what to add in the application, is `docs/fail2ban.md`. `agensio ctl protection` (the MCP tool `protection_show`, and `agensio protection -c
 FILE` with no server running) answers with the files, root's commands and what the kernel
 and fail2ban do now; `--nft`, `--jail`, `--unit` and `--filter NAME` print one file alone,
 for root to redirect into place. The packaged copies under `/usr/share/agensio/` are the
@@ -2157,9 +2158,34 @@ a Rails or Redmine path an optional `.format` suffix, and for a login routed thr
 query string its parameters in any order with others allowed. Nothing more: `/index.php`
 alone or with another query is no login, nor is `/admin.php` on a Grav site, so an
 application's ordinary form posts are never counted. The grammar is unambiguous, so a 16 KB
-request line of dot segments costs linear time (the first grammar took seconds). The
+request line of slashes or dot segments costs linear time whether the login path is plain or
+routed through the query (the first grammars took seconds and minutes; fail2ban's regex
+holds the daemon's lock while it matches, so every jail would have waited). The
 rendered regex spells `%` as `\x25`, so the jail file never meets configparser's
-interpolation. There is one login jail per access log, `agensio-login` for the server-wide
+interpolation; the separator grammar is written once, as the filter's `sep` variable that
+every path refers to as `<sep>`, and a letter's two percent codes are one hex class, so a
+path's entry is about a hundred characters. This is the attempt-counting tier that needs
+nothing from the application.
+
+*The failure tier.* An application that logs its own failed logins gives fail2ban the better
+signal: failures, not attempts, with the client address in the line and no URL spelling to
+match. Where a preset's application does, `agensio ctl protection --jail` renders a jail over
+that log with the filter fail2ban or the application ships: WordPress through the WP fail2ban
+plugin, which logs every failed login, form and XML-RPC, to the auth facility
+(`/var/log/auth.log`, `/var/log/secure` on RHEL) and brings its own `wordpress-soft` and
+`wordpress-hard` filters, rendered as `agensio-wordpress-soft` (five failures in ten minutes
+ban for an hour) and `agensio-wordpress-hard` (what the plugin logs as hostile at the first
+hit, a day); Drupal through its core Syslog module (`/var/log/syslog`, `/var/log/messages` on
+RHEL) with fail2ban's own `drupal-auth` filter, `agensio-drupal-auth`. Each such jail is
+rendered enabled only when its filter file and its log exist on the host, since fail2ban
+refuses a configuration naming either when missing; otherwise it is written disabled with its
+`needs`: the plugin installed and activated from the WordPress admin panel and root's copy of
+its two filter files into `/etc/fail2ban/filter.d/`, Drupal's Syslog module enabled under
+Extend, rsyslog where only journald runs, then the jail rendered again. agensio installs no
+plugin and changes no application: `site_install` of WordPress or Drupal puts those steps in
+its `next_steps`, health reports `fail2ban_failures_unseen` while they are open, and
+`protection_show` lists the jails under `failure_jails`. The attempt tier keeps counting
+meanwhile. There is one login jail per access log, `agensio-login` for the server-wide
 log and `agensio-login-<site>` for a site's own, each with the login paths of the sites
 writing that file, so one application's paths are not counted on another's log. `site_show` lists the effective ones. The jail file is
 rendered from the sites that exist, so adding a site, a log or a login path makes the

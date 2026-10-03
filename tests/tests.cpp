@@ -4654,6 +4654,40 @@ static void test_protection() {
         CHECK((in.login_paths == std::vector<std::string>{"/api/token", "/login", "/one", "/wp-login.php", "/xmlrpc.php"}) && in.firewall_file == (dir / "firewall.nft").string());
         CHECK(in.login_jails.size() == 1 && in.login_jails[0].name == "agensio-login" && in.login_jails[0].log == (dir / "access.log").string() && in.login_jails[0].paths.size() == 4 &&
               in.login_jails[0].paths[0].path == "/api/token" && in.login_jails[0].paths[0].php && !in.login_jails[0].paths[0].format && (in.login_jails[0].sites == std::vector<std::string>{"wp.test"}));
+        // The failure tier: the WordPress site brings the plugin's two jails, enabled only with the
+        // filter and the log on the host (both looked for; here neither is asserted, the flags are
+        // set by hand below), the needs naming the admin panel and root's copy, never an install.
+        CHECK(in.failure_jails.size() == 2 && in.failure_jails[0].name == "agensio-wordpress-soft" && in.failure_jails[0].filter == "wordpress-soft" && in.failure_jails[0].maxretry == 5 &&
+              in.failure_jails[1].name == "agensio-wordpress-hard" && in.failure_jails[1].maxretry == 1 && in.failure_jails[1].bantime == "1d" &&
+              (in.failure_jails[0].sites == std::vector<std::string>{"wp.test"}) && in.failure_jails[0].needs.size() >= 3 &&
+              in.failure_jails[0].needs[0].find("WordPress admin panel") != std::string::npos && in.failure_jails[0].needs[0].find("agensio installs no plugin") != std::string::npos &&
+              in.failure_jails[0].needs[1].find("install -m 644 " + (dir / "www").string() + "/wp-content/plugins/wp-fail2ban/filters.d/wordpress-hard.conf") != std::string::npos &&
+              in.failure_jails[0].needs.back().find("agensio ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf; fail2ban-client reload") != std::string::npos);
+        {
+            ProtectionInput fi = in;
+            fi.failure_jails[0].filter_installed = false;
+            fi.failure_jails[0].log_present = true;
+            fi.failure_jails[0].log = "/var/log/auth.log";
+            std::string jail = render_jail(fi);
+            CHECK(jail.find("\n[agensio-wordpress-soft]\n") != std::string::npos && jail.find("# Disabled: the filter wordpress-soft is not in /etc/fail2ban/filter.d/. Needs:\n#   install and activate the WP fail2ban plugin") != std::string::npos &&
+                  jail.find("[agensio-wordpress-soft]\n# failed WordPress logins") != std::string::npos);
+            fi.failure_jails[0].filter_installed = true;
+            jail = render_jail(fi);
+            const std::size_t at = jail.find("\n[agensio-wordpress-soft]\n");
+            CHECK(at != std::string::npos && jail.find("enabled   = true\nport      = 8080,8443\nfilter    = wordpress-soft\nlogpath   = /var/log/auth.log\nbanaction = nftables-multiport\nmaxretry  = 5\nfindtime  = 10m\nbantime   = 1h\n", at) != std::string::npos);
+            const json::Value r = protection_report(fi, read_probe(json::Value(nullptr), fi), {});
+            CHECK(r["failure_jails"].items().size() == 2 && r["failure_jails"].items()[0]["enabled"].boolean() && r["failure_jails"].items()[1].get("name") == "agensio-wordpress-hard");
+        }
+        Config dru = cfg;
+        dru.sites[1].app = "drupal";
+        dru.sites[1].php.configured = true;
+        {
+            const ProtectionInput di = protection_input(dru);
+            CHECK(di.failure_jails.size() == 3 && di.failure_jails[2].name == "agensio-drupal-auth" && di.failure_jails[2].filter == "drupal-auth" && (di.failure_jails[2].sites == std::vector<std::string>{"lo.test"}) &&
+                  di.failure_jails[2].needs[0].find("Syslog module") != std::string::npos && (di.failure_jails[2].log == "/var/log/syslog" || di.failure_jails[2].log == "/var/log/messages"));
+        }
+        CHECK(failure_tier_steps("wordpress", "/srv/wp").size() >= 4 && failure_tier_steps("wordpress", "/srv/wp")[0].starts_with("fail2ban counts this site's failed logins") &&
+              failure_tier_steps("drupal", "/srv/d")[1].find("Extend > Syslog") != std::string::npos && failure_tier_steps("laravel", "/srv/l").empty() && failure_tier_steps("static", "").empty());
         Config own = cfg;
         own.sites[1].access_log = (dir / "lo.log").string();
         own.sites[1].app = "redmine";
@@ -4735,18 +4769,25 @@ static void test_protection() {
         // The jail's regex for a path covers every spelling (the alpha.44 report): "/x" exactly,
         // a query entry's parameters as lookaheads, never a '%' (the jail file is configparser's).
         const std::string sl = "(?:/|\\x252F)+", dot = "(?:\\.|\\x252E)";
-        const std::string sep = sl + "(?:(?:" + dot + sl + "|[^/?\\s.\\x25][^/?\\s\\x25]*" + sl + dot + dot + sl + "))*";
-        const std::string x = "(?:x|\\x2578|\\x2558)";
+        const std::string sep_text = sl + "(?:(?:" + dot + sl + "|[^/?\\s.\\x25][^/?\\s\\x25]*" + sl + dot + dot + sl + "))*";
+        const std::string sep = "<sep>";  // the filter's variable; fail2ban substitutes it in the jail's parameter too
+        const std::string x = "(?:x|\\x25[57]8)";
         // A letter under both cases' codes; the front controller only before a PHP preset's path,
         // never alone; the format suffix only for Rails; path info only after a .php file.
         CHECK(spelling_regex({"/x", true, false}) == "(?:" + sep + "index" + dot + "php)?" + sep + x + "(?:/|\\x252F)*(?:[?&]\\S*)?");
         CHECK(spelling_regex({"/x", false, true}) == sep + x + "(?:" + dot + "[a-z0-9]{1,8})?(?:/|\\x252F)*(?:[?&]\\S*)?");
-        CHECK(spelling_regex({"/x.php", true, false}) == "(?:" + sep + "index" + dot + "php)?" + sep + x + dot + "(?:p|\\x2570|\\x2550)(?:h|\\x2568|\\x2548)(?:p|\\x2570|\\x2550)(?:" + sl + "\\S*)?(?:[?&]\\S*)?");
+        CHECK(spelling_regex({"/x.php", true, false}) == "(?:" + sep + "index" + dot + "php)?" + sep + x + dot + "(?:p|\\x25[57]0)(?:h|\\x25[46]8)(?:p|\\x25[57]0)(?:" + sl + "[^?\\s]*)?(?:[?&]\\S*)?");
+        // A query login (the alpha.46 report): the root's run with nothing after it, the literal
+        // '?' before the parameters' lookaheads, each anchored after it.
         const std::string kbr = spelling_regex({"/?controller=Auth&a=1", true, false});
-        CHECK(kbr.starts_with("(?:" + sep + "index" + dot + "php|" + sep + ")(?:/|\\x252F)*(?=\\S*[?&](?:c|\\x2563|\\x2543)") &&
-              kbr.find("=(?:A|\\x2541|\\x2561)(?:u|\\x2575|\\x2555)(?:t|\\x2574|\\x2554)(?:h|\\x2568|\\x2548)(?:[&\\s]|$))") != std::string::npos &&
-              kbr.ends_with("(?=\\S*[?&](?:a|\\x2561|\\x2541)=(?:1|\\x2531)(?:[&\\s]|$))\\?\\S*") && kbr.find('%') == std::string::npos);
-        CHECK(spelling_regex({"/?x=1", false, false}).starts_with(sep + "(?:/|\\x252F)*(?=") && spelling_regex({"/a/b", false, false}) == sep + "(?:a|\\x2561|\\x2541)" + sep + "(?:b|\\x2562|\\x2542)(?:/|\\x252F)*(?:[?&]\\S*)?");
+        CHECK(kbr.starts_with("(?:" + sep + "index" + dot + "php|" + sep + ")\\?(?=(?:\\S*&)?(?:c|\\x25[46]3)") &&
+              kbr.find("=(?:A|\\x25[46]1)(?:u|\\x25[57]5)(?:t|\\x25[57]4)(?:h|\\x25[46]8)(?:[&\\s]|$))") != std::string::npos &&
+              kbr.ends_with("(?=(?:\\S*&)?(?:a|\\x25[46]1)=(?:1|\\x2531)(?:[&\\s]|$))\\S*") && kbr.find('%') == std::string::npos && kbr.find("(?:/|\\x252F)*") == std::string::npos);
+        CHECK(spelling_regex({"/?x=1", false, false}).starts_with(sep + "\\?(?=(?:\\S*&)?") && spelling_regex({"/a/b", false, false}) == sep + "(?:a|\\x25[46]1)" + sep + "(?:b|\\x25[46]2)(?:/|\\x252F)*(?:[?&]\\S*)?");
+        CHECK(spelling_regex({"/ucp.php?mode=login", true, false}).find("(?:" + sl + "[^?\\s]*)?\\?(?=(?:\\S*&)?(?:m|\\x25[46]D)") != std::string::npos);
+        // The filter carries the separator once; a path's entry stays around a hundred characters.
+        CHECK(protection_filters()[0].text.find("\nsep = " + sep_text + "\n") != std::string::npos && spelling_regex({"/wp-login.php", true, false}).size() < 260 &&
+              spelling_regex({"/wp-login.php", true, false}).find(sep_text) == std::string::npos);
         kb.login_jails = {LoginJail{"agensio-login", "/var/log/agensio/access.log", {"kb.test"}, {{"/?controller=AuthController&action=check", true, false}, {"/ucp.php?mode=login", true, false}, {"/x+y", false, false}}}};
         CHECK(render_jail(kb).find("filter    = agensio-login[paths=\"" + login_paths_regex(kb.login_jails[0].paths) + "\"]") != std::string::npos && render_jail(kb).find('%') == std::string::npos &&
               render_jail(kb).find("# Credentials posted to a login path of kb.test: ten in ten minutes bans for an hour.") != std::string::npos);
@@ -4966,6 +5007,28 @@ static void test_protection() {
     ProtectionInput blind = in;
     blind.unlogged = {"quiet.test"};
     CHECK(codes(blind, probe, files) == "info:fail2ban_blind");
+    // A failure jail not yet in place: informational while our jails run, with the user's steps.
+    ProtectionInput unseen = in;
+    FailureJail fj;
+    fj.name = "agensio-wordpress-soft";
+    fj.app = "wordpress";
+    fj.sites = {"wp.test"};
+    fj.filter = "wordpress-soft";
+    fj.log = "/var/log/auth.log";
+    fj.log_present = true;
+    fj.needs = {"install the plugin from the admin panel", "root copies the filters", "render again"};
+    unseen.failure_jails.push_back(fj);
+    ProtectionFiles ufiles = files;
+    ufiles.installed_jail = render_jail(unseen);  // the jail on disk is this rendering, so only the tier's finding remains
+    CHECK(codes(unseen, probe, ufiles) == "info:fail2ban_failures_unseen" && protection_findings(unseen, probe, ufiles)[0].message.starts_with("wp.test (wordpress): failed logins are counted only as attempts at the login paths; the jail(s) agensio-wordpress-soft over") &&
+          protection_findings(unseen, probe, ufiles)[0].message.find("the filter wordpress-soft is not in /etc/fail2ban/filter.d/") != std::string::npos &&
+          protection_findings(unseen, probe, ufiles)[0].fix == "install the plugin from the admin panel; root copies the filters; render again");
+    unseen.failure_jails[0].filter_installed = true;
+    ufiles.installed_jail = render_jail(unseen);
+    CHECK(codes(unseen, probe, ufiles).empty());
+    unseen.failure_jails[0].filter_installed = false;
+    ufiles.installed_jail = render_jail(unseen);
+    CHECK(codes(unseen, none, ufiles) == "warn:firewall_limits_missing warn:fail2ban_missing");  // without our jails running, fail2ban_missing says it all
     fs::remove_all(dir);
 }
 

@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.1.0-alpha.47
+
+From the alpha.46 report: the login jail's regex for a path routed through the query string
+(`/?controller=AuthController&action=check`) still backtracked, with the cube of the line's
+length, since the root's separator run met a trailing-slash quantifier and two lookaheads
+scanned before the literal `?`; a 10 KB line of slashes cost minutes with fail2ban's lock
+held, every jail standing still. The run is the whole path now with nothing after it, the
+literal `?` comes first so a line without a query fails at once, the parameters are looked
+for once after it, and path info after a `.php` script stops at a `?`; the root suite times
+ten pathological lines, with and without a query, under five seconds. The rendered login
+regex is a quarter of its size (the owner's objection): the separator grammar is the
+filter's `sep` variable, referenced as `<sep>` from the shipped default and from every
+host's jail parameter, which fail2ban substitutes, and a letter's two percent codes are one
+hex class (`(?:c|\x25[46]3)`); coverage unchanged, proven by the same spelling and timing
+checks. The failure tier (research into what fail2ban ships and the application communities
+use): for a preset whose application logs its own failed logins, the jail file carries a jail
+over that log with the filter fail2ban or the application ships, counting failures rather
+than attempts: `agensio-wordpress-soft` and `-hard` over the auth log with the WP fail2ban
+plugin's filters, `agensio-drupal-auth` over the system log with fail2ban's own filter; each
+enabled only when its filter file and its log exist, else disabled with the user's steps
+(the plugin from the WordPress admin panel and root's copy of its filters, Drupal's Syslog
+module), which `site_install` puts in `next_steps` and health reports as
+`fail2ban_failures_unseen`; agensio installs no plugin and changes no application, the
+owner's rule. `docs/fail2ban.md` is the administrator's guide to all of it: how agensio uses
+fail2ban, the two tiers, what each application type gets and what to add in the application
+(the WP fail2ban plugin, Drupal's Syslog module and flood control, django-axes, Kanboard's
+lockout), the local overrides and the limits; shipped with the package.
+
 ## 0.1.0-alpha.46 (2026-10-02)
 
 From the alpha.45 report on the login jail's regex: its dot-segment grammar was ambiguous

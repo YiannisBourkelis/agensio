@@ -38,6 +38,32 @@ struct LoginJail {
     std::vector<LoginPath> paths;
 };
 
+// The failure tier (2026-10-03): a jail over the lines an application writes itself when a
+// login fails, read with the filter fail2ban or the application ships, so failures are
+// counted rather than attempts and no URL spelling matters. Rendered per preset present on
+// the host; enabled only when its filter file and its log exist, since fail2ban refuses a
+// configuration naming either when missing. What the application's side needs is said in
+// `needs`: agensio installs no plugin and changes no application, it suggests (the owner's
+// rule).
+struct FailureJail {
+    std::string name;    // agensio-wordpress-soft, agensio-wordpress-hard, agensio-drupal-auth
+    std::string app;
+    std::vector<std::string> sites;
+    std::string filter;  // wordpress-soft (the WP fail2ban plugin's), drupal-auth (fail2ban's own)
+    std::string log;     // /var/log/auth.log or /var/log/secure; /var/log/syslog or /var/log/messages
+    unsigned maxretry = 5;
+    std::string findtime = "10m", bantime = "1h";
+    std::string source;  // one line: what writes the log lines
+    std::vector<std::string> needs;  // the administrator's steps, in order
+    bool filter_installed = false;   // /etc/fail2ban/filter.d/<filter>.conf exists
+    bool log_present = false;
+    bool enabled() const noexcept { return filter_installed && log_present; }
+};
+// The steps an administrator takes so that a site's failed logins are counted (the
+// application's plugin or module, root's filter copy, the re-render); empty for a preset
+// without a failure tier. What site_install's next_steps carry for wordpress and drupal.
+std::vector<std::string> failure_tier_steps(const std::string& app, const std::string& root);
+
 // What the files are rendered from.
 struct ProtectionInput {
     std::vector<unsigned> tcp_ports;          // every listener's port the world can reach (plain and TLS), ascending
@@ -45,6 +71,7 @@ struct ProtectionInput {
     std::vector<std::string> logs;            // the access logs fail2ban reads, ascending
     std::vector<std::string> login_paths;     // the presets' and the sites' own, ascending, unique
     std::vector<LoginJail> login_jails;       // per access log, the server-wide log's first
+    std::vector<FailureJail> failure_jails;   // per preset present, over the application's own log
     std::vector<std::string> unlogged;        // sites without an access log (fail2ban cannot see them)
     bool combined = true;                     // [log] format = "combined": the filters read that format only
     bool exposed = false;                     // at least one listener is not loopback
