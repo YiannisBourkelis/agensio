@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.47
+## 0.1.0-alpha.47 (2026-10-03)
 
 From the alpha.46 report: the login jail's regex for a path routed through the query string
 (`/?controller=AuthController&action=check`) still backtracked, with the cube of the line's
