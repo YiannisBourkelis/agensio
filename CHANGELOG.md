@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.50
+## 0.1.0-alpha.50 (2026-10-05)
 
 From the alpha.49 report (security, medium): the failure jails reading the journal matched on
 `SYSLOG_IDENTIFIER`, which is whatever a writer passes to `openlog()` or `logger -t`, so any
