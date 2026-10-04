@@ -1162,7 +1162,7 @@ void ControlHandler::site_install(Stream& s, std::string_view name, const json::
             // application so that failed logins are counted, never done by agensio (the owner's
             // rule: it suggests, its own work ends at its files).
             if (const SiteConfig* fsite = control::find_site(backend_->running(), sf.key))
-                for (const auto& step : control::failure_tier_steps(sf.app, fsite->root)) steps.push(step);
+                for (const auto& step : control::failure_tier_steps(sf.app, fsite->root, fsite->user.empty() ? sf.key : std::string())) steps.push(step);
             // The directories the application's own .htaccess files deny, as the matching rule
             // (2026-10-01): under the served root only, the project directory's subdirectory
             // of a Laravel or Drupal root stripped.

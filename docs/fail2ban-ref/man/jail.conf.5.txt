@@ -1,0 +1,659 @@
+JAIL.CONF(5)		     Fail2Ban Configuration		   JAIL.CONF(5)
+
+NAME
+       jail.conf - configuration for the fail2ban server
+
+SYNOPSIS
+       fail2ban.conf fail2ban.d/*.conf fail2ban.local fail2ban.d/*.local
+
+       jail.conf jail.d/*.conf jail.local jail.d/*.local
+
+       action.d/*.conf action.d/*.local action.d/*.py
+
+       filter.d/*.conf filter.d/*.local
+
+DESCRIPTION
+       Fail2ban has four configuration file types:
+
+       fail2ban.conf
+	      Fail2Ban global configuration (such as logging)
+
+       filter.d/*.conf
+	      Filters specifying how to detect authentication failures
+
+       action.d/*.conf
+	      Actions defining the commands for banning and unbanning of IP ad‐
+	      dress
+
+       jail.conf
+	      Jails defining combinations of Filters with Actions.
+
+CONFIGURATION FILES FORMAT
+       *.conf files are distributed by Fail2Ban.  It is recommended that *.conf
+       files  should  remain unchanged to ease upgrades.  If needed, customiza‐
+       tions should be provided in *.local files.  For example,	 if  you  would
+       like  to	 enable	 the  [ssh-iptables-ipset] jail specified in jail.conf,
+       create jail.local containing
+
+       jail.local
+	      [ssh-iptables-ipset]
+
+	      enabled = true
+
+       In .local files specify only the settings you would like to  change  and
+       the  rest  of  the  configuration  will then come from the corresponding
+       .conf file which is parsed first.
+
+       jail.d/ and fail2ban.d/
+
+	      In addition to .local, for jail.conf or fail2ban.conf file  there
+	      can  be a corresponding .d/ directory containing additional .conf
+	      files. The order e.g. for jail configuration would be:
+
+	      jail.conf
+	      jail.d/*.conf (in alphabetical order)
+	      jail.local
+	      jail.d/*.local (in alphabetical order).
+
+	      i.e. all .local files are parsed after .conf files in the	 origi‐
+	      nal configuration file and files under .d directory.  Settings in
+	      the  file	 parsed later take precedence over identical entries in
+	      previously parsed files.	Files are ordered alphabetically, e.g.
+
+	      fail2ban.d/01_custom_log.conf - to use a different log path
+	      jail.d/01_enable.conf - to enable a specific jail
+	      jail.d/02_custom_port.conf - to change the port(s) of a jail.
+
+       Configuration files have sections, those specified with [section	 name],
+       and  name  =  value pairs. For those name items that can accept multiple
+       values, specify the values separated by spaces,	or  in	separate  lines
+       space indented at the beginning of the line before the second value.
+
+       Configuration  files  can include other (defining common variables) con‐
+       figuration files, which is often used in Filters and Actions.  Such  in‐
+       clusions are defined in a section called [INCLUDES]:
+
+       before indicates that the specified file is to be parsed before the cur‐
+	      rent file.
+
+       after  indicates	 that the specified file is to be parsed after the cur‐
+	      rent file.
+
+       Using Python "string interpolation" mechanisms,	other  definitions  are
+       allowed and can later be used within other definitions as %(name)s.
+
+       Fail2ban	 has  more  advanced syntax (similar python extended interpola‐
+       tion). This extended interpolation is using %(section/parameter)s to de‐
+       note a value from a foreign section.
+       Besides cross section interpolation the value of parameter in  [DEFAULT]
+       section can be retrieved with %(default/parameter)s.
+       Fail2ban	 supports also another feature named %(known/parameter)s (means
+       last known option with name parameter). This interpolation makes	 possi‐
+       ble  to extend a stock filter or jail regexp in .local file (opposite to
+       simply set failregex/ignoreregex that overwrites it), e.g.
+
+	      baduseragents = IE|wget|%(my-settings/baduseragents)s
+	      failregex = %(known/failregex)s
+			  useragent=%(baduseragents)s
+
+       Additionally to interpolation %(known/parameter)s, that does  not  works
+       for  filter/action  init parameters, an interpolation tag <known/parame‐
+       ter> can be used (means last known init definition of filters or actions
+       with name parameter). This interpolation makes possible to extend a  pa‐
+       rameters	  of   stock   filter	or   action  directly  in  jail	 inside
+       jail.conf/jail.local file without creating a separately filter.d/*.local
+       file, e.g.
+
+	      # filter.d/test.conf:
+	      [Init]
+	      test.method = GET
+	      baduseragents = IE|wget
+	      [Definition]
+	      failregex = ^%(__prefix_line)\s+"<test.method>"\s+test\s+regexp\s+-\s+useragent=(?:<baduseragents>)
+
+	      # jail.local:
+	      [test]
+	      # use filter "test", overwrite method to "POST" and extend known bad agents with "badagent":
+	      filter = test[test.method=POST, baduseragents="badagent|<known/baduseragents>"]
+
+       Comments: use '#' for comment lines and '; ' (space  is	important)  for
+       inline comments.
+
+FAIL2BAN CONFIGURATION FILE(S) (fail2ban.conf)
+       The items that can be set in section [Definition] are:
+
+       loglevel
+	      verbosity	 level of log output: CRITICAL, ERROR, WARNING, NOTICE,
+	      INFO, DEBUG,  TRACEDEBUG,	 HEAVYDEBUG  or	 corresponding	numeric
+	      value (50-5). Default: INFO (equal 20)
+
+       logtarget
+	      log  target:  filename, SYSLOG, STDERR or STDOUT. Default: STDOUT
+	      if not set in fail2ban.conf/fail2ban.local
+	      Note. If fail2ban running as systemd-service, for logging to  the
+	      systemd-journal, the logtarget could be set to STDOUT
+	      Only a single log target can be specified.  If you change logtar‐
+	      get  from	 the  default value and you are using logrotate -- also
+	      adjust or disable rotation  in  the  corresponding  configuration
+	      file (e.g. /etc/logrotate.d/fail2ban on Debian systems).
+
+       socket socket filename.	Default: /var/run/fail2ban/fail2ban.sock
+	      This  is	used for communication with the fail2ban server daemon.
+	      Do not remove this file when Fail2ban is running. It will not  be
+	      possible to communicate with the server afterwards.
+
+       pidfile
+	      PID filename.  Default: /var/run/fail2ban/fail2ban.pid
+	      This is used to store the process ID of the fail2ban server.
+
+       allowipv6
+	      option  to  allow	 IPv6 interface - auto, yes (on, true, 1) or no
+	      (off, false, 0).	Default: auto
+	      This value can be used to declare fail2ban whether  IPv6	is  al‐
+	      lowed or not.
+
+       dbfile Database filename. Default: /var/lib/fail2ban/fail2ban.sqlite3
+	      This  defines  where  the persistent data for fail2ban is stored.
+	      This persistent data allows bans to be  reinstated  and  continue
+	      reading  log  files  from the last read position when fail2ban is
+	      restarted. A value of None disables this feature.
+
+       dbmaxmatches
+	      Max number of matches stored in database per ticket. Default: 10
+	      This option sets the max number of  matched  log-lines  could  be
+	      stored  per  ticket in the database. This also affects values re‐
+	      solvable via tags <ipmatches> and <ipjailmatches> in actions.
+
+       dbpurgeage
+	      Database purge age in seconds. Default: 86400 (24hours)
+	      This sets the age at which bans should be purged from  the  data‐
+	      base.
+
+       The config parameters of section [Thread] are:
+
+       stacksize
+	      Stack  size  of  each thread in fail2ban. Default: 0 (platform or
+	      configured default)
+	      This specifies the stack size (in KiB)  to  be  used  for	 subse‐
+	      quently  created	threads,  and  must  be 0 or a positive integer
+	      value of at least 32.
+
+JAIL CONFIGURATION FILE(S) (jail.conf)
+       The following options are applicable to any jail. They appear in a  sec‐
+       tion  specifying the jail name or in the [DEFAULT] section which defines
+       default values to be used if not specified in the individual section.
+
+       filter name   of	  the	filter	 --   filename	 of   the   filter   in
+	      /etc/fail2ban/filter.d/ without the .conf/.local extension.
+	      Only one filter can be specified.
+
+       logpath
+	      filename(s)  of  the  log files to be monitored, separated by new
+	      lines.
+	      Globs -- paths containing * and ? or [0-9] -- can be used however
+	      only the files that exist at start up matching this glob	pattern
+	      will be considered.
+
+	      Optional space separated option 'tail' can be added to the end of
+	      the  path to cause the log file to be read from the end, else de‐
+	      fault 'head' option reads file from the beginning
+
+	      Ensure syslog or the program that generates the  log  file  isn't
+	      configured  to  compress	repeated log messages to "*last message
+	      repeated 5 time*s" otherwise it will  fail  to  detect.  This  is
+	      called RepeatedMsgReduction in rsyslog and should be Off.
+
+       logencoding
+	      encoding	of log files used for decoding. Default value of "auto"
+	      uses current system locale.
+
+       logtimezone
+	      Force the time zone for log lines that don't have one.
+
+	      If this option is not specified, log lines from which no explicit
+	      time zone has been found are interpreted by fail2ban in  its  own
+	      system  time  zone,  and that may turn to be inappropriate. While
+	      the best practice is to configure the monitored  applications  to
+	      include  explicit	 offsets,  this option is meant to handle cases
+	      where that is not possible.
+
+	      The supported time zones in this option are those with fixed off‐
+	      set: Z, UTC[+-]hhmm (you can also use GMT as an alias to UTC).
+
+	      This option has no effect on log lines on which an explicit  time
+	      zone has been found.  Examples:
+
+		      logtimezone = UTC
+		      logtimezone = UTC+0200
+		      logtimezone = GMT-0100
+
+       banaction
+	      banning  action  (default iptables-multiport) typically specified
+	      in the [DEFAULT] section for all jails.
+	      This parameter will be used by the standard substitution	of  ac‐
+	      tion and can be redefined central in the [DEFAULT] section inside
+	      jail.local  (to  apply  it to all jails at once) or separately in
+	      each jail, where this substitution will be used.
+
+       banaction_allports
+	      the same as banaction but for some "allports"  jails  like  "pam-
+	      generic" or "recidive" (default iptables-allports).
+
+       action action(s)	 from  /etc/fail2ban/action.d/ without the .conf/.local
+	      extension.
+	      Arguments can be passed to actions to override the default values
+	      from the [Init] section in the action file. Arguments are	 speci‐
+	      fied by:
+
+		     [name=value,name2=value,name3="values,values"]
+
+	      Values  can  also be quoted (required when value includes a ",").
+	      More that one action can be specified (in separate lines).
+
+       ignoreself
+	      boolean value (default true) indicates the banning of own IP  ad‐
+	      dresses should be prevented
+
+       ignoreip
+	      list  of	IPs  not to ban. They can include a DNS resp. CIDR mask
+	      too. The option affects additionally to ignoreself (if true)  and
+	      don't need to contain own DNS resp. IPs of the running host.
+
+       ignorecommand
+	      command that is executed to determine if the current candidate IP
+	      for  banning  (or	 failure-ID  for raw IDs) should not be banned.
+	      This option operates alongside the ignoreself  and  ignoreip  op‐
+	      tions.  It  is executed first, only if neither ignoreself nor ig‐
+	      noreip match the criteria.
+	      IP will not be banned if command returns successfully (exit  code
+	      0).  Like ACTION FILES, tags like <ip> are can be included in the
+	      ignorecommand value and will be substituted before execution.
+
+       ignorecache
+	      provide  cache  parameters  (default disabled) for ignore failure
+	      check (caching of the result from ignoreip,  ignoreself  and  ig‐
+	      norecommand), syntax:
+
+		      ignorecache = key="<F-USER>@<ip-host>", max-count=100, max-time=5m
+		      ignorecommand = if [ "<F-USER>" = "technical" ] && [ "<ip-host>" = "my-host.example.com" ]; then exit 0; fi;
+				      exit 1
+	      This will cache the result of ignorecommand (does not call it re‐
+	      peatedly)	 for  5	 minutes  (cache  time) for maximal 100 entries
+	      (cache size), using values substituted like "user@host" as cache-
+	      keys.  Set option ignorecache to empty value disables the cache.
+
+       bantime
+	      effective ban duration (in seconds or time abbreviation format).
+
+       findtime
+	      time interval (in seconds or time abbreviation format) before the
+	      current time where failures will count towards a ban.
+
+       maxretry
+	      number of failures that have to occur in the last	 findtime  sec‐
+	      onds to ban the IP.
+
+       backend
+	      backend to be used to detect changes in the logpath.
+	      It  defaults  to "auto" which will try "pyinotify", "systemd" be‐
+	      fore "polling". Any of these can	be  specified.	"pyinotify"  is
+	      only  valid  on  Linux  systems  with  the "pyinotify" Python li‐
+	      braries.
+
+       usedns use DNS to resolve HOST names that appear in the logs. By default
+	      it is "warn" which will resolve hostnames to IPs however it  will
+	      also log a warning. If you are using DNS here you could be block‐
+	      ing  the	wrong  IPs  due to the asymmetric nature of reverse DNS
+	      (that the application used to write the domain name to log)  com‐
+	      pared  to	 forward DNS that fail2ban uses to resolve this back to
+	      an IP (but not necessarily the same one). Ideally you should con‐
+	      figure your applications to log a real IP. This  can  be	set  to
+	      "yes" to prevent warnings in the log or "no" to disable DNS reso‐
+	      lution  altogether  (thus ignoring entries where hostname, not an
+	      IP is logged)..
+
+       prefregex
+	      regex (Python regular expression) to parse a common part contain‐
+	      ing in every message (see prefregex in section FILTER  FILES  for
+	      details).
+
+       failregex
+	      regex  (Python  regular  expression)  to be added to the filter's
+	      failregexes (see failregex in section FILTER FILES for  details).
+	      If  this is useful for others using your application please share
+	      you regular expression with the fail2ban developers by  reporting
+	      an issue (see REPORTING BUGS below).
+
+       ignoreregex
+	      regex  which,  if	 the log line matches, would cause Fail2Ban not
+	      consider that line.  This line will be ignored even if it matches
+	      a failregex of the jail or any of its filters.
+
+       maxmatches
+	      max number of matched log-lines the jail would hold in memory per
+	      ticket. By default it is the same value as maxretry of  jail  (or
+	      default).	  This	option	also  affects values resolvable via tag
+	      <matches> in actions.
+
+   Backends
+       Available options are listed below.
+
+       pyinotify
+	      requires pyinotify (a file alteration monitor) to	 be  installed.
+	      If pyinotify is not installed, Fail2ban will use auto.
+
+       polling
+	      uses  a  polling	algorithm  which  does not require external li‐
+	      braries.
+
+       systemd
+	      uses systemd python library to access the systemd journal. Speci‐
+	      fying logpath is not valid for this backend and instead  utilises
+	      journalmatch  from  the  jails associated filter config. Multiple
+	      systemd-specific flags can be passed to  the  backend,  including
+	      journalpath and journalfiles, to explicitly set the path to a di‐
+	      rectory  or set of files. journalflags, which by default is 4 and
+	      excludes user session files, can be  set	to  include  them  with
+	      journalflags=1,  see  the	 python-systemd documentation for other
+	      settings and further details. Examples:
+
+	      backend = systemd[journalpath=/run/log/journal/machine-1]
+	      backend = systemd[journalfiles="/path/to/system.journal, /path/to/user.journal"]
+	      backend = systemd[journalflags=1]
+
+   Actions
+       Each jail can be configured with only a single filter, but may have mul‐
+       tiple actions. By default, the name of a action is the action  filename,
+       and in the case of Python actions, the ".py" file extension is stripped.
+       Where multiple of the same action are to be used, the actname option can
+       be assigned to the action to avoid duplication e.g.:
+
+       [ssh-iptables-ipset]
+       enabled = true
+       action = smtp.py[dest=chris@example.com, actname=smtp-chris]
+		smtp.py[dest=sally@example.com, actname=smtp-sally]
+
+TIME ABBREVIATION FORMAT
+       The  time  entries  in fail2ban configuration (like findtime or bantime)
+       can be provided as integer in seconds or as string using special	 abbre‐
+       viation format (e. g. 600 is the same as 10m).
+
+       Abbreviation tokens:
+
+	      years?, yea?, yy?
+	      months?, mon?
+	      weeks?, wee?, ww?
+	      days?, da, dd?
+	      hours?, hou?, hh?
+	      minutes?, min?, mm?
+	      seconds?, sec?, ss?
+
+	      The question mark (?) means the optional character, so day as well as days can be used.
+
+       You  can	 combine  multiple tokens in format (separated with space resp.
+       without separator), e. g.: 1y 6mo or 1d12h30m.
+       Note that tokens m as well as mm means minutes, for month use  abbrevia‐
+       tion mo or mon.
+
+       The time format can be tested using fail2ban-client:
+
+	      fail2ban-client --str2sec 1d12h
+
+ACTION CONFIGURATION FILES (action.d/*.conf)
+       Action  files specify which commands are executed to ban and unban an IP
+       address.
+
+       Like with jail.conf files, if you desire local changes  create  an  [ac‐
+       tionname].local	file  in the /etc/fail2ban/action.d directory and over‐
+       ride the required settings.
+
+       Action files have two sections, Definition and Init .
+
+       The   [Init]    section	  enables    action-specific	settings.    In
+       jail.conf/jail.local  these  can	 be overridden for a particular jail as
+       options of the action's specification in that jail.
+
+       The following commands can be present in the [Definition] section.
+
+       actionstart
+	      command(s) executed when the jail starts.
+
+       actionstop
+	      command(s) executed when the jail stops.
+
+       actioncheck
+	      command(s) ran before any other action. It aims to verify if  the
+	      environment is still ok.
+
+       actionban
+	      command(s)  that	bans  the  IP  address after maxretry log lines
+	      matches within last findtime seconds.
+
+       actionunban
+	      command(s) that unbans the IP address after bantime.
+
+       The   [Init]   section	allows	 for   action-specific	 settings.   In
+       jail.conf/jail.local  these  can be overwritten for a particular jail as
+       options to the jail. The following are special tags which can be set  in
+       the [Init] section:
+
+       timeout
+	      The  maximum  period  of	time in seconds that a command can exe‐
+	      cuted, before being killed.
+
+       Commands specified in the [Definition] section are  executed  through  a
+       system  shell  so  shell redirection and process control is allowed. The
+       commands should return 0, otherwise error would be logged.  Moreover  if
+       actioncheck  exits  with	 non-0	status,	 it is taken as indication that
+       firewall status has changed and fail2ban needs  to  reinitialize	 itself
+       (i.e.  issue actionstop and actionstart commands).  Tags are enclosed in
+       <>.  All the elements of [Init] are tags that are replaced in all action
+       commands.  Tags can be added  by	 the  fail2ban-client  using  the  "set
+       <JAIL>  action  <ACT>"  command. <br> is a tag that is always a new line
+       (\n).
+
+       More than a single command is allowed  to  be  specified.  Each	command
+       needs  to  be on a separate line and indented with whitespace(s) without
+       blank lines. The following example defines two commands to be executed.
+
+	actionban = iptables -I fail2ban-<name> --source <ip> -j DROP
+		    echo     ip=<ip>,	  match=<match>,     time=<time>     >>
+       /var/log/fail2ban.log
+
+   Action Tags
+       The following tags are substituted in the actionban, actionunban and ac‐
+       tioncheck (when called before actionban/actionunban) commands.
+
+       ip     IPv4 IP address to be banned. e.g. 192.168.0.2
+
+       failures
+	      number of times the failure occurred in the log file. e.g. 3
+
+       ipfailures
+	      As  per  failures,  but total of all failures for that ip address
+	      across all jails from the fail2ban persistent database. Therefore
+	      the database must be set for this tag to function.
+
+       ipjailfailures
+	      As per ipfailures, but total based on the IPs  failures  for  the
+	      current jail.
+
+       time   UNIX (epoch) time of the ban. e.g. 1357508484
+
+       matches
+	      concatenated  string  of	the  log file lines of the matches that
+	      generated the ban. Many characters interpreted by shell  get  es‐
+	      caped to prevent injection, nevertheless use with caution.
+
+       ipmatches
+	      As  per matches, but includes all lines for the IP which are con‐
+	      tained with the fail2ban persistent database. Therefore the data‐
+	      base must be set for this tag to function.
+
+       ipjailmatches
+	      As per ipmatches, but matches are limited for the IP and for  the
+	      current jail.
+
+PYTHON ACTION FILES
+       Python  based actions can also be used, where the file name must be [ac‐
+       tionname].py. The Python file  must  contain  a	variable  Action  which
+       points to Python class. This class must implement a minimum interface as
+       described  by  fail2ban.server.action.ActionBase, which can be inherited
+       from to ease implementation.
+
+FILTER FILES (filter.d/*.conf)
+       Filter definitions are those in /etc/fail2ban/filter.d/*.conf  and  fil‐
+       ter.d/*.local.
+
+       These  are  used to identify failed authentication attempts in log files
+       and to extract the host IP address (or hostname if usedns is true).
+
+       Like action files, filter files are ini files. The main section	is  the
+       [Definition] section.
+
+       There  are  several standard filter definitions used in the [Definition]
+       section:
+
+       prefregex
+	      is the regex (regular expression) to parse a common part contain‐
+	      ing in every message, which is applied after datepattern found  a
+	      match,  before  the search for any failregex or ignoreregex would
+	      start.
+	      If this regex doesn't match the process is  starting  immediately
+	      with next message and search for any failregex does not occur.
+	      If  prefregex  contains  <F-CONTENT>...</F-CONTENT>,  the part of
+	      message enclosed between this tags will be extracted and herafter
+	      used as whole message for search with failregex or ignoreregex.
+
+	      For example:
+		      prefregex = ^%(__prefix_line)s (?:ERROR|FAILURE) <F-CONTENT>.+</F-CONTENT>$
+		      failregex = ^user not found
+				  ^authentication failed
+				  ^unknown authentication method
+
+	      You can use prefregex in order to:
+
+		     - specify 1 common regex to match some common part present
+		     in every messages (do avoid unneeded match in every  fail‐
+		     regex if you have more as one);
+
+		     -	to  cut	 some interesting part of message only (to sim‐
+		     plify failregex) enclosed	between	 tags  <F-CONTENT>  and
+		     </F-CONTENT>;
+
+		     -	to  gather  some  failure identifier (e. g. some prefix
+		     matched by <F-MLFID>...<F-MLFID/> tag) to identify several
+		     messages belonging to same session, where a  connect  mes‐
+		     sage containing IP followed by failure message(s) that are
+		     not  contain  IP;	this  provides a new multi-line parsing
+		     method as replacement for old (slow  an  ugly)  multi-line
+		     parsing   using   buffering   window  (maxlines  >	 1  and
+		     <SKIPLINES>);
+
+		     - to ignore some wrong, too long or even unneeded messages
+		     (a.k.a. parasite log traffic) which can be also present in
+		     journal, before failregex search would take place.
+
+       failregex
+	      is the regex (regular expression)	 that  will  match  failed  at‐
+	      tempts.  The standard replacement tags can be used as part of the
+	      regex:
+
+		     <HOST> - common regex for IP addresses and	 hostnames  (if
+		     usedns  is	 enabled).  Fail2Ban will work out which one of
+		     these it actually is.
+
+		     <ADDR> - regex for IP addresses (both families).
+
+		     <IP4> - regex for IPv4 addresses.
+
+		     <IP6> - regex for IPv6 addresses.
+
+		     <DNS> - regex to match hostnames.
+
+		     <CIDR> - helper regex to match CIDR (simple  integer  form
+		     of net-mask).
+
+		     <SUBNET>  -  regex	 to match sub-net addresses (in form of
+		     IP/CIDR, also single IP is matched, so part /CIDR	is  op‐
+		     tional).
+
+		     <F-ID>...</F-ID>  -  free	regex capturing group targeting
+		     identifier used for ban (instead of IP  address  or  host‐
+		     name).
+
+		     <F-*>...</F-*>  -	free regex capturing named group stored
+		     in ticket, which can be used in action.
+		     For example <F-USER>[^@]+</F-USER> matches and stores a user name, that can be used in action with interpolation tag <F-USER>.
+
+		     <F-ALT_*n>...</F-ALT_*n> - free regex capturing alternative named group stored in ticket.
+		     For example first found matched value defined in regex as <F-ALT_USER>, <F-ALT_USER1> or <F-ALT_USER2> would be stored as <F-USER> (if direct match is not found or empty).
+
+	      Every of abovementioned tags can be specified in prefregex and in failregex, thereby if specified in both, the value matched in failregex overwrites a value matched in prefregex.
+	      All standard tags like IP4 or IP6 can be also specified with custom regex using <F-*>...</F-*> syntax, for example (?:ip4:<F-IP4>\S+</F-IP4>|ip6:<F-IP6>\S+</F-IP6>).
+	      Tags <ADDR>, <HOST> and <SUBNET> would also match the IP address enclosed in square brackets.
+
+	      NOTE: the failregex will be applied to the remaining part of message after prefregex processing (if specified), which in turn takes place after datepattern processing (whereby the string of timestamp matching the best pattern, cut out from the message).
+
+	      For multiline regexs (parsing with maxlines greater that 1) the tag <SKIPLINES> can be used to separate lines. This allows lines between the matched lines to continue to be searched for other failures. The tag can be used multiple times.
+	      This is an obsolete handling and if the lines contain some common identifier, better would be to use new handling (with tags <F-MLFID>...<F-MLFID/>).
+
+       ignoreregex
+	      is the regex to identify log entries that should be ignored by Fail2Ban, even if they match failregex.
+
+       maxlines
+	      specifies the maximum number of lines to buffer to match multi-line regexs. For some log formats this will not required to be changed. Other logs may require to increase this value if a particular log file is frequently written to.
+
+       datepattern
+	      specifies a custom date pattern/regex as an alternative to the default date detectors e.g. %%Y-%%m-%%d %%H:%%M(?::%%S)?.
+	      For a list of valid format directives, see Python library documentation for strptime behaviour.
+	      NOTE: due to config file string substitution, that %'s must be escaped by an % in config files.
+	      Also, special values of Epoch (UNIX Timestamp), TAI64N and ISO8601 can be used as datepattern.
+	      Normally the regexp generated for datepattern additionally gets word-start and word-end boundaries to avoid accidental match inside of some word in a message.
+	      There are several prefixes and words with special meaning that could be specified with custom datepattern to control resulting regex:
+
+		     {DEFAULT} - can be used to add default date patterns of fail2ban.
+
+		     {DATE} - can be used as part of regex that will be replaced with default date patterns.
+
+		     {^LN-BEG} - prefix (similar to ^) changing word-start boundary to line-start boundary (ignoring up to 2 characters). If used as value (not as a prefix), it will also set all default date patterns (similar to {DEFAULT}), but anchored at begin of message line.
+
+		     {UNB} - prefix to disable automatic word boundaries in regex.
+
+		     {NONE} - value would allow one to find failures totally without date-time in log message. Filter will use now as a timestamp (or last known timestamp from previous line with timestamp).
+
+       journalmatch
+	      specifies the systemd journal match used to filter the journal entries. See journalctl(1) and systemd.journal-fields(7) for matches syntax and more details on special journal fields. This option is only valid for the systemd backend.
+
+       Similar to actions, filters may have an [Init] section also (optional since v.0.10). All parameters of both sections [Definition] and [Init] can be overridden (redefined or extended) in jail.conf or jail.local (or in related filter.d/filter-name.local).
+       Every option supplied in the jail to the filter overwrites the value specified in [Init] section, which in turm would overwrite the value in [Definition] section.
+       Besides the standard settings of filter both sections can be used to initialize filter-specific options.
+
+       Filters can also have a section called [INCLUDES]. This is used to read other configuration files.
+
+       before indicates that this file is read before the [Definition] section.
+
+       after  indicates that this file is read after the [Definition] section.
+
+AUTHOR
+       Fail2ban	    was	    originally	   written     by     Cyril	Jaquier
+       <cyril.jaquier@fail2ban.org>.   At  the moment it is maintained and fur‐
+       ther developed by Yaroslav O. Halchenko <debian@onerussian.com>,	 Daniel
+       Black   <daniel.subs@internode.on.net>	and  Steven  Hiscocks  <steven-
+       fail2ban@hiscocks.me.uk> along  with  a	number	of  contributors.   See
+       THANKS  file shipped with Fail2Ban for a full list.  Manual page written
+       by Daniel Black and Yaroslav Halchenko.
+
+REPORTING BUGS
+       Report bugs to https://github.com/fail2ban/fail2ban/issues
+
+COPYRIGHT
+       Copyright © 2013 the Fail2Ban Team
+       Copyright of modifications held by their respective authors.
+       Licensed under the GNU General Public License v2 (GPL) or (at  your  op‐
+       tion) any later version.
+
+SEE ALSO
+       fail2ban-server(1)
+
+Fail2Ban			 November 2015			   JAIL.CONF(5)

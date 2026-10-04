@@ -101,8 +101,31 @@ daemon writes files (rsyslog or syslog-ng, told by their pid files under `/run`)
 read those files. On a host that runs journald alone, Debian 13's default, there is no
 `/var/log/syslog`, and an `auth.log` left over from an earlier install stays empty while the
 lines go to the journal; so there the jails are rendered with `backend = systemd` and a
-`journalmatch`, `SYSLOG_IDENTIFIER=drupal` for Drupal, the php-fpm unit or the plugin's
-identity `wordpress(<site name>)` for WordPress, and no log file is needed or asked for.
+`journalmatch` naming each site account's uid: `SYSLOG_IDENTIFIER=drupal _UID=<uid>` for a
+Drupal site, `_SYSTEMD_UNIT=<php-fpm unit> _UID=<uid>` for a WordPress site, one group per
+account with `+` (or) between them, and no log file is needed or asked for. The uid is a
+field journald sets from the sender's credentials. The identity alone is never matched: it
+is whatever a writer passes to `openlog()` or `logger -t`, so five forged lines from any
+account on the host (another site's compromised plugin, a shell user) would have banned any
+address, a visitor's or Let's Encrypt's (the alpha.49 report). The plugin's own identity
+`wordpress(<host>)` carries the client's Host header and is not matched either; the filter
+still requires it in the line. A site without an account of its own (`user`) has no trusted
+field: the jail lists it as not read, health says so with the account as the fix, and only
+the sites with accounts are counted. With a syslog daemon the files carry no uid, which is
+the usual fail2ban position and the reason the journal is the better log here.
+
+Three facts from fail2ban's own documentation (`docs/fail2ban-ref/`) shape these lines.
+fail2ban's `drupal-auth` filter pins no identity of its own (it keeps `common.conf`'s default
+`_daemon = \S*`), so the `SYSLOG_IDENTIFIER=drupal` word of the match is what selects Drupal's
+lines, and `drupal` is the Syslog module's default identity: a site that changes it in the
+module's settings leaves the jail reading nothing. The WP fail2ban filters do pin theirs,
+`_daemon = (?:wordpress|wp)`, so a line must still carry `wordpress(<host>)` to match. And
+fail2ban's systemd backend opens the system journal alone by default (`journalflags` 4), while
+journald files the lines of a process with an ordinary uid, 1000 or above, under that user's
+own journal; so a jail over such an account (a hosting panel's web user, not the system
+accounts agensio creates) is rendered `backend = systemd[journalflags=1]`, the fix the
+project's wiki gives for exactly this plugin. Debian's and Fedora's `fail2ban` packages depend
+on `python3-systemd`, which the backend needs.
 
 Each jail is rendered enabled only when its filter file exists, and with a syslog daemon
 its log too, because fail2ban refuses a configuration that names either when missing. Until
@@ -114,12 +137,11 @@ application's admin panel and as root. The attempt tier keeps counting meanwhile
 On a journald-only host the Drupal jail is enabled at once, since fail2ban ships its filter
 and the journal is always there, and the WordPress jails as soon as their filters are in
 place; neither says whether the application writes anything yet. So health asks the journal
-itself, through the helper, for one line under the jail's identity (`SYSLOG_IDENTIFIER=drupal`,
-`wordpress(<site name>)`; not the php-fpm unit, whose own notices would count) from the last
-30 days, and keeps `fail2ban_failures_unseen` while there is none: the Syslog module is still
-off, or the plugin is not active yet (or nobody has logged in since, or its lines carry
-another spelling of the host, which the jail still reads through the unit). `agensio ctl
-protection` and `protection_show` report it as `journal_seen` per jail.
+itself, through the helper, for one line matching the jail's own `journalmatch` (the trusted
+fields above) from the last 30 days, and keeps `fail2ban_failures_unseen` while there is
+none: the Syslog module is still off, or the plugin is not active yet (or nobody has logged
+in since). `agensio ctl protection` and `protection_show` report it as `journal_seen` per
+jail and the sites it cannot read as `unidentified`.
 
 ## 3. What each application type gets, and what to add
 
@@ -276,6 +298,22 @@ bantime  = 1h
 
 Test a filter against a log before trusting it: `fail2ban-regex /path/to/log redmine-auth`.
 
+**Testing and reading what fail2ban runs.** `fail2ban-regex` takes a log file, one line in
+quotes, or the journal; a journal jail is tested with the same words agensio rendered:
+
+```sh
+fail2ban-regex 'Oct  4 10:00:01 host wordpress(example.org)[123]: Authentication failure for admin from 203.0.113.9' wordpress-soft
+fail2ban-regex systemd-journal[journalflags=1] drupal-auth -m 'SYSLOG_IDENTIFIER=drupal _UID=997'
+fail2ban-regex -v /var/log/agensio/access.log 'agensio-login[paths="/wp-login\.php"]'   # -v shows which line matched which regex
+fail2ban-client -d | grep agensio-drupal-auth     # the merged configuration the server loaded, journal matches included
+fail2ban-client -vvv -x start                     # when the service will not start: which jail, filter or action
+```
+
+`Found` lines in `/var/log/fail2ban.log` without a `Ban` mean `maxretry` within `findtime`
+was not reached. The reference set in `docs/fail2ban-ref/` holds the manuals (`jail.conf(5)`,
+`fail2ban-regex(1)`, `fail2ban-client(1)`), the shipped jails, filters and nftables actions,
+the journal backend's source and the project wiki's pages on regexes and troubleshooting.
+
 **A panel host.** When a hosting panel manages fail2ban, agensio's jail file is one drop-in
 among the panel's, which appears in its fail2ban page like Postfix's or Dovecot's. Set
 `[control] host_protection = "external"` so that health reports the missing pieces as
@@ -291,3 +329,14 @@ application's lockout or captcha to stop, which is why the application-level mea
 are listed next to the jails. Per-address connection limits and QUIC are the firewall's
 (`docs/configuration.md` 18), and bans never reach the UDP side. And fail2ban reads files:
 a site whose `access_log` is off, or a host whose logs are JSON, gives it nothing to read.
+
+## 6. References
+
+`docs/fail2ban-ref/` is fail2ban as its authors document it, kept in the tree the way
+`docs/rfc/` keeps the protocol specifications: the 1.1.0 manuals rendered as text, the shipped
+`jail.conf`, path, filter and nftables action files, the systemd backend's source
+(`filtersystemd.py`: how `journalmatch` is parsed and how a journal entry becomes the line a
+filter sees), the project wiki's pages on developing regexes, best practice, troubleshooting
+and the 0.10.5 `journalflags` change, and the WP fail2ban plugin's three filters. Its README
+maps each file to the renderer or section here that depends on it and lists the facts that
+bind them. Read it before changing a jail or a filter; cite it when you do.

@@ -64,6 +64,10 @@ Read the section there before writing or reviewing protocol code, cite it by num
 section in comments and design notes (`RFC 9000 8.1`), and add the RFC first when a new
 protocol feature starts. The design documents (`docs/design-http2.md`,
 `docs/design-http3.md`) say what was decided and why; the RFCs say what is required.
+`docs/fail2ban-ref/` does the same for host protection: fail2ban's manuals, shipped
+configuration, the journal backend's source, the wiki pages that matter and the WP fail2ban
+plugin's filters, with a README mapping each to `src/control/protection.*` and
+`docs/fail2ban.md`. Read it before changing a jail, a filter or the probe, and cite the file.
 
 ## Working agreement with the agent
 
@@ -995,6 +999,9 @@ Each item was benchmarked before and after on the reduced matrix (`bench/run.sh 
    `journalctl` for one line of each failure jail that reads the journal, fixed arguments): a
    limit in any table counts, a jail reading our logs counts, and a journal-mode jail over a
    journal without the application's lines keeps `fail2ban_failures_unseen` (alpha.48 report);
+   a journal-mode jail matches each site account's `_UID` with the php-fpm unit or Drupal's
+   identity, never `SYSLOG_IDENTIFIER` alone, which any process may claim, and a site without
+   an account of its own is listed as `unidentified`, not read (alpha.49 report);
    findings
    `firewall_limits_missing`/`_trial`/`_unsaved`, `firewall_quic_unlimited`, `fail2ban_missing`,
    `fail2ban_jail_stale`, `fail2ban_log_format`, `fail2ban_blind`, `protection_unchecked`;

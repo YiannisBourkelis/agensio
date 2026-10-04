@@ -9,6 +9,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -54,8 +55,19 @@ struct FailureJail {
     // A host where no syslog daemon writes files (journald only: Debian 13 by default) reads
     // the journal instead, backend = systemd with this match, so neither application needs
     // rsyslog and a stale file that nothing writes never passes for a log (alpha.47 report).
+    // The match names each site account's uid, `_UID`, a field journald sets from the sender's
+    // credentials (with the php-fpm unit for WordPress, Drupal's identity for Drupal), never
+    // the identity alone, which any process may claim with openlog() or `logger -t` (alpha.49
+    // report: five forged lines from any account would have banned any address). A site
+    // without an account of its own has no trusted field and is not read: `unidentified`.
     bool journal = false;
-    std::string journalmatch;
+    std::string journalmatch;               // "FIELD=v FIELD=v + FIELD=v ...": and within a group, "+" (or) between accounts
+    std::vector<std::string> unidentified;  // journal mode: "<site> (<why>)" for the sites the jail cannot read
+    // fail2ban's systemd backend reads the system journal alone by default (journalflags 4,
+    // docs/fail2ban-ref/filtersystemd.py) and journald files a process of an ordinary uid under
+    // the user's own journal: an account of uid 1000 or above needs journalflags=1 (the wiki's
+    // page on WP fail2ban and 0.10.5, docs/fail2ban-ref/wiki/); a system account does not.
+    bool user_journals = false;
     std::string silent;  // what a journal with no such line means: the module off, the plugin not active yet
     unsigned maxretry = 5;
     std::string findtime = "10m", bantime = "1h";
@@ -63,12 +75,16 @@ struct FailureJail {
     std::vector<std::string> needs;  // the administrator's steps, in order
     bool filter_installed = false;   // /etc/fail2ban/filter.d/<filter>.conf exists
     bool log_present = false;        // file mode only
-    bool enabled() const noexcept { return filter_installed && (journal || log_present); }
+    bool enabled() const noexcept { return filter_installed && (journal ? !journalmatch.empty() : log_present); }
 };
 // The steps an administrator takes so that a site's failed logins are counted (the
-// application's plugin or module, root's filter copy, the re-render); empty for a preset
+// application's plugin or module, root's filter copy, on a journald-only host an account of
+// the site's own when `site_without_account` names it, the re-render); empty for a preset
 // without a failure tier. What site_install's next_steps carry for wordpress and drupal.
-std::vector<std::string> failure_tier_steps(const std::string& app, const std::string& root);
+std::vector<std::string> failure_tier_steps(const std::string& app, const std::string& root, const std::string& site_without_account = "");
+// Whether a syslog daemon writes files on this host (rsyslog's, syslog-ng's or syslogd's pid
+// file under /run); without one the journal is the log and the failure jails read it.
+bool syslog_daemon_present();
 
 // What the files are rendered from.
 struct ProtectionInput {
@@ -84,7 +100,11 @@ struct ProtectionInput {
     std::string firewall_file;                // where this host keeps the ruleset: <config dir>/firewall.nft
     std::string host_protection = "check";    // [control] host_protection
 };
-ProtectionInput protection_input(const Config& cfg);
+// The uid of an account on this host, nullopt when it does not exist: the server asks
+// getpwnam, the tests describe a machine. `journal` forces the mode (the tests again); by
+// default it follows the syslog daemons' pid files.
+using UidLookup = std::function<std::optional<unsigned>(const std::string&)>;
+ProtectionInput protection_input(const Config& cfg, const UidLookup& uid_of = {}, std::optional<bool> journal = std::nullopt);
 // The shipped files: ports 80 and 443 with QUIC on 443, /var/log/agensio/access.log, every
 // preset's login paths, the packaged configuration directory.
 ProtectionInput default_protection_input();
@@ -108,11 +128,6 @@ const std::vector<ProtectionFilter>& protection_filters();
 std::string spelling_regex(const LoginPath& login_path);
 // The alternatives of a jail's paths joined, the `paths` parameter of the agensio-login filter.
 std::string login_paths_regex(const std::vector<LoginPath>& paths);
-// The SYSLOG_IDENTIFIER words of a failure jail's journalmatch, " + "-joined: what the helper
-// asks the journal for (alpha.48 report). The _SYSTEMD_UNIT word stays with the jail, where it
-// catches a plugin line tagged with another spelling of the host; here it would count php-fpm's
-// own notices as the application's.
-std::string journal_identity(const std::string& journalmatch);
 
 constexpr std::string_view kProtectionShippedDir = "/usr/share/agensio";
 constexpr std::string_view kFirewallTable = "inet agensio";

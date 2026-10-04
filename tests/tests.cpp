@@ -4689,39 +4689,84 @@ static void test_protection() {
             CHECK(r["failure_jails"].items().size() == 2 && r["failure_jails"].items()[0]["enabled"].boolean() && r["failure_jails"].items()[1].get("name") == "agensio-wordpress-hard" &&
                   !r["failure_jails"].items()[0]["journal"].boolean());
             // A journald-only host (the alpha.47 report: a stale auth.log passed for a log): the
-            // jail reads the journal, matched on the pool's unit or the plugin's identity for every
-            // name of the WordPress sites, and needs no log file.
+            // jail reads the journal, matched on the pool's unit and the site account's uid, and
+            // needs no log file.
             fi.failure_jails[0].journal = true;
             fi.failure_jails[0].log_present = false;
-            fi.failure_jails[0].journalmatch = "_SYSTEMD_UNIT=php8.4-fpm.service + SYSLOG_IDENTIFIER=wordpress(wp.test)";
+            fi.failure_jails[0].journalmatch = "_SYSTEMD_UNIT=php8.4-fpm.service _UID=996";
             fi.failure_jails[0].needs = tier_needs_for_test(fi.failure_jails[0]);
             jail = render_jail(fi);
             const std::size_t jat = jail.find("\n[agensio-wordpress-soft]\n");
             CHECK(fi.failure_jails[0].enabled() && jat != std::string::npos && jail.find("# Reads the journal: no syslog daemon writes files on this host", jat) != std::string::npos &&
-                  jail.find("enabled   = true\nport      = 8080,8443\nfilter    = wordpress-soft\nbackend   = systemd\njournalmatch = _SYSTEMD_UNIT=php8.4-fpm.service + SYSLOG_IDENTIFIER=wordpress(wp.test)\nbanaction", jat) != std::string::npos &&
+                  jail.find("enabled   = true\nport      = 8080,8443\nfilter    = wordpress-soft\nbackend   = systemd\njournalmatch = _SYSTEMD_UNIT=php8.4-fpm.service _UID=996\nbanaction", jat) != std::string::npos &&
                   jail.find("logpath   =", jat) > jail.find("\n[agensio-wordpress-hard]", jat));  // no log file in this jail's section; the next jail may keep its file
-            CHECK(protection_report(fi, read_probe(json::Value(nullptr), fi), {})["failure_jails"].items()[0].get("journalmatch") == "_SYSTEMD_UNIT=php8.4-fpm.service + SYSLOG_IDENTIFIER=wordpress(wp.test)");
+            CHECK(protection_report(fi, read_probe(json::Value(nullptr), fi), {})["failure_jails"].items()[0].get("journalmatch") == "_SYSTEMD_UNIT=php8.4-fpm.service _UID=996");
         }
-        // The journal match as the input builds it: Drupal's identity; WordPress's pool unit and site names.
+        // The journal match as the input builds it (alpha.49 report): a group per site account's
+        // uid, a trusted field, never the identity alone; a site without an account, or with one
+        // not on this host, is listed as not read, and a jail with no readable site is disabled.
+        const UidLookup fake = [](const std::string& u) -> std::optional<unsigned> {
+            if (u == "web1") return 997u;
+            if (u == "web3") return 995u;
+            return std::nullopt;
+        };
         {
-            ProtectionInput probe_in = protection_input(cfg);
-            for (auto& f : probe_in.failure_jails)
-                if (f.journal) {
-                    CHECK(f.journalmatch.find("SYSLOG_IDENTIFIER=wordpress(wp.test)") != std::string::npos);
-                    CHECK(f.journalmatch.find("_SYSTEMD_UNIT=php") == 0 || f.journalmatch.starts_with("SYSLOG_IDENTIFIER=wordpress("));
-                }
+            Config users = cfg;
+            users.sites[0].user = "web1";
+            const ProtectionInput ui = protection_input(users, fake, true);
+            const std::string& m = ui.failure_jails[0].journalmatch;
+            CHECK(ui.failure_jails.size() == 2 && ui.failure_jails[0].journal && (m == "_UID=997" || (m.starts_with("_SYSTEMD_UNIT=php") && m.ends_with("-fpm.service _UID=997"))) &&
+                  m.find("SYSLOG_IDENTIFIER") == std::string::npos && ui.failure_jails[0].unidentified.empty() && ui.failure_jails[1].journalmatch == m &&
+                  ui.failure_jails[0].enabled() == ui.failure_jails[0].filter_installed);
+            const ProtectionInput nu = protection_input(cfg, fake, true);  // wp.test without an account: not read, the jail disabled
+            CHECK(nu.failure_jails[0].journalmatch.empty() && !nu.failure_jails[0].enabled() &&
+                  (nu.failure_jails[0].unidentified == std::vector<std::string>{"wp.test (no account of its own: the site's user is not set)"}) &&
+                  nu.failure_jails[0].needs.size() == 4 && nu.failure_jails[0].needs[2].starts_with("give wp.test (no account of its own: the site's user is not set) an account of its own (site_update with user"));
+            const std::string njail = render_jail(nu);
+            CHECK(njail.find("# Not read, no trusted field tells their lines apart: wp.test (no account of its own: the site's user is not set).\n") != std::string::npos &&
+                  njail.find("# Disabled: the filter wordpress-soft is not in /etc/fail2ban/filter.d/; no site of this jail has an account of its own on this host, so no trusted journal field (_UID) tells its lines from any other process's. Needs:\n") != std::string::npos &&
+                  njail.find("\nbackend   = systemd\nbanaction") != std::string::npos && njail.find("journalmatch = \n") == std::string::npos);
+            const ProtectionInput fm = protection_input(cfg, fake, false);  // file mode: accounts play no part
+            CHECK(!fm.failure_jails[0].journal && fm.failure_jails[0].journalmatch.empty() && fm.failure_jails[0].unidentified.empty() && fm.failure_jails[0].needs.size() >= 3 &&
+                  fm.failure_jails[0].needs[2].find("an account of its own") == std::string::npos);
         }
         Config dru = cfg;
         dru.sites[1].app = "drupal";
         dru.sites[1].php.configured = true;
+        dru.sites[1].user = "web3";
         {
-            const ProtectionInput di = protection_input(dru);
+            const ProtectionInput di = protection_input(dru, fake, true);
             CHECK(di.failure_jails.size() == 3 && di.failure_jails[2].name == "agensio-drupal-auth" && di.failure_jails[2].filter == "drupal-auth" && (di.failure_jails[2].sites == std::vector<std::string>{"lo.test"}) &&
                   di.failure_jails[2].needs[0].find("Syslog module") != std::string::npos && (di.failure_jails[2].log == "/var/log/syslog" || di.failure_jails[2].log == "/var/log/messages") &&
-                  (!di.failure_jails[2].journal || di.failure_jails[2].journalmatch == "SYSLOG_IDENTIFIER=drupal"));
+                  di.failure_jails[2].journalmatch == "SYSLOG_IDENTIFIER=drupal _UID=995" && di.failure_jails[2].unidentified.empty());
+            // Two more Drupal sites: one on an account the host does not have (listed), one on
+            // web1 (a second group); two sites of one account make one group.
+            Config more = dru;
+            more.sites.push_back(more.sites[1]);
+            more.sites.back().server_names = {"d2.test"};
+            more.sites.back().user = "ghost";
+            more.sites.push_back(more.sites[1]);
+            more.sites.back().server_names = {"d3.test"};
+            more.sites.back().user = "web1";
+            more.sites.push_back(more.sites[1]);
+            more.sites.back().server_names = {"d4.test"};
+            const ProtectionInput dm = protection_input(more, fake, true);
+            CHECK(dm.failure_jails[2].journalmatch == "SYSLOG_IDENTIFIER=drupal _UID=995 + SYSLOG_IDENTIFIER=drupal _UID=997" &&
+                  (dm.failure_jails[2].unidentified == std::vector<std::string>{"d2.test (the account ghost does not exist on this host)"}) &&
+                  (dm.failure_jails[2].sites == std::vector<std::string>{"lo.test", "d2.test", "d3.test", "d4.test"}) && dm.failure_jails[2].enabled() == dm.failure_jails[2].filter_installed &&
+                  !dm.failure_jails[2].user_journals && render_jail(dm).find("\nbackend   = systemd\njournalmatch = SYSLOG_IDENTIFIER=drupal _UID=995 + ") != std::string::npos);
+            // An account of an ordinary uid (a panel's web user): journald files its lines under
+            // the user's journal, which fail2ban's backend skips by default, so the jail asks for
+            // every local journal (docs/fail2ban-ref/wiki, the 0.10.5 page).
+            const UidLookup panel = [](const std::string& u) -> std::optional<unsigned> { return u == "web3" ? std::optional<unsigned>(5003u) : std::nullopt; };
+            const ProtectionInput pj = protection_input(dru, panel, true);
+            CHECK(pj.failure_jails[2].user_journals && pj.failure_jails[2].journalmatch == "SYSLOG_IDENTIFIER=drupal _UID=5003" &&
+                  render_jail(pj).find("\nbackend   = systemd[journalflags=1]\njournalmatch = SYSLOG_IDENTIFIER=drupal _UID=5003\n") != std::string::npos);
         }
         CHECK(failure_tier_steps("wordpress", "/srv/wp").size() >= 4 && failure_tier_steps("wordpress", "/srv/wp")[0].starts_with("fail2ban counts this site's failed logins") &&
-              failure_tier_steps("drupal", "/srv/d")[1].find("Extend > Syslog") != std::string::npos && failure_tier_steps("laravel", "/srv/l").empty() && failure_tier_steps("static", "").empty());
+              failure_tier_steps("drupal", "/srv/d")[1].find("Extend > Syslog") != std::string::npos && failure_tier_steps("laravel", "/srv/l").empty() &&
+              (syslog_daemon_present() ? failure_tier_steps("drupal", "/srv/d", "d.test").size() == failure_tier_steps("drupal", "/srv/d").size()
+                                       : failure_tier_steps("drupal", "/srv/d", "d.test")[2].starts_with("give d.test (no account of its own: the site's user is not set) an account of its own")) && failure_tier_steps("static", "").empty());
         Config own = cfg;
         own.sites[1].access_log = (dir / "lo.log").string();
         own.sites[1].app = "redmine";
@@ -5071,19 +5116,16 @@ static void test_protection() {
     CHECK(codes(unseen, probe, ufiles).empty());
     // A journald-only host (alpha.48 report): the jail is enabled, since the journal always
     // exists, and the finding stays while the journal holds no line of the application; a
-    // probe that could not ask claims nothing. The helper asks under the identity words alone.
-    CHECK(journal_identity("_SYSTEMD_UNIT=php8.4-fpm.service + SYSLOG_IDENTIFIER=wordpress(a.test) + SYSLOG_IDENTIFIER=wordpress(b.test)") ==
-              "SYSLOG_IDENTIFIER=wordpress(a.test) + SYSLOG_IDENTIFIER=wordpress(b.test)" &&
-          journal_identity("SYSLOG_IDENTIFIER=drupal") == "SYSLOG_IDENTIFIER=drupal" && journal_identity("_SYSTEMD_UNIT=php8.4-fpm.service").empty());
+    // probe that could not ask claims nothing.
     unseen.failure_jails[0].journal = true;
-    unseen.failure_jails[0].journalmatch = "SYSLOG_IDENTIFIER=wordpress(wp.test)";
+    unseen.failure_jails[0].journalmatch = "_SYSTEMD_UNIT=php8.4-fpm.service _UID=996";
     unseen.failure_jails[0].silent = "the plugin is not active yet";
     ufiles.installed_jail = render_jail(unseen);
     ProtectionProbe silent = probe;
     silent.journal_seen = {{"agensio-wordpress-soft", false}};
     CHECK(codes(unseen, silent, ufiles) == "info:fail2ban_failures_unseen" &&
           protection_findings(unseen, silent, ufiles)[0].message ==
-              "wp.test (wordpress): failed logins are counted only as attempts at the login paths; the jail(s) agensio-wordpress-soft read the journal and it holds no line matching SYSLOG_IDENTIFIER=wordpress(wp.test) from the last 30 days, so the plugin is not active yet" &&
+              "wp.test (wordpress): failed logins are counted only as attempts at the login paths; the jail(s) agensio-wordpress-soft read the journal and it holds no line matching _SYSTEMD_UNIT=php8.4-fpm.service _UID=996 from the last 30 days, so the plugin is not active yet" &&
           protection_findings(unseen, silent, ufiles)[0].fix == "install the plugin from the admin panel");
     CHECK(protection_report(unseen, silent, ufiles)["failure_jails"].items()[0]["journal_seen"].boolean() == false &&
           protection_report(unseen, probe, ufiles)["failure_jails"].items()[0]["journal_seen"].is_null());
@@ -5102,6 +5144,22 @@ static void test_protection() {
           protection_findings(unseen, silent, ufiles)[0].message.find("the jail(s) agensio-wordpress-hard over the application's own log are rendered disabled: the filter wordpress-hard is not in /etc/fail2ban/filter.d/; the jail(s) agensio-wordpress-soft read the journal and it holds no line") != std::string::npos &&
           protection_findings(unseen, silent, ufiles)[0].fix == "install the plugin from the admin panel; root copies the filters; render again");
     unseen.failure_jails.pop_back();
+    // A site the enabled jail cannot read (no account of its own): named, with the account step
+    // as the fix; the journal's answer about the other sites does not hide it.
+    unseen.failure_jails[0].unidentified = {"wp2.test (no account of its own: the site's user is not set)"};
+    unseen.failure_jails[0].needs = {"install the plugin from the admin panel", "root copies the filters", "give wp2.test (no account of its own: the site's user is not set) an account of its own", "render again"};
+    ufiles.installed_jail = render_jail(unseen);
+    silent.journal_seen = {{"agensio-wordpress-soft", true}};
+    CHECK(codes(unseen, silent, ufiles) == "info:fail2ban_failures_unseen" &&
+          protection_findings(unseen, silent, ufiles)[0].message ==
+              "wp.test (wordpress): failed logins are counted only as attempts at the login paths; the jail(s) agensio-wordpress-soft read no line of wp2.test (no account of its own: the site's user is not set), which no trusted journal field tells from any other process's" &&
+          protection_findings(unseen, silent, ufiles)[0].fix == "give wp2.test (no account of its own: the site's user is not set) an account of its own" &&
+          protection_report(unseen, silent, ufiles)["failure_jails"].items()[0]["unidentified"].items().size() == 1);
+    silent.journal_seen = {{"agensio-wordpress-soft", false}};  // silent and unread: both said, the application's step first
+    CHECK(protection_findings(unseen, silent, ufiles)[0].message.find("read the journal and it holds no line matching _SYSTEMD_UNIT=php8.4-fpm.service _UID=996 from the last 30 days, so the plugin is not active yet; the jail(s) agensio-wordpress-soft read no line of wp2.test") != std::string::npos &&
+          protection_findings(unseen, silent, ufiles)[0].fix == "install the plugin from the admin panel");
+    unseen.failure_jails[0].unidentified.clear();
+    unseen.failure_jails[0].needs = {"install the plugin from the admin panel", "root copies the filters", "render again"};
     unseen.failure_jails[0].journal = false;
     unseen.failure_jails[0].journalmatch.clear();
     unseen.failure_jails[0].filter_installed = false;

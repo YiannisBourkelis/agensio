@@ -680,18 +680,22 @@ json::Value app_check(const Config& cfg) {
 // does not fit the 8 MB kept), `systemctl show` over six unit names, `fail2ban-client
 // status` plus `fail2ban-client status <jail>` for each jail the first answer named (a plain
 // name of up to 64 characters, at most 64 jails), and, for each failure jail that reads the
-// journal, `journalctl -q -n 1 -o cat --since=-30d` with the jail's match words, built here
-// from the configuration on disk (alpha.48 report: an enabled jail over a journal the
+// journal, `journalctl -q -n 1 -o cat --since=-30d` with the jail's own match words, built
+// here from the configuration on disk (alpha.48 report: an enabled jail over a journal the
 // application never wrote to said nothing). The answers travel raw; the server reads them
 // (control::read_probe), so the parsing is unit-tested and nothing here interprets.
-// A journalctl match word of a rendered jail: the identity field and a value of the characters
-// a site's identity has ("drupal", "wordpress(<site name>)"), nothing else reaches the argument
-// list. The unit word of the WordPress jail is not asked for: php-fpm's own notices would count.
+// A journalctl match word of a rendered jail: "+" (or), the site account's uid, the php-fpm
+// unit or the fixed identity, each a field name and a value of plain characters; nothing else
+// reaches the argument list (alpha.49 report: the match is the trusted _UID, as the jail's).
 bool journal_term_ok(const std::string& term) {
-    if (!term.starts_with("SYSLOG_IDENTIFIER=")) return false;
-    const std::string value = term.substr(18);
+    if (term == "+") return true;
+    if (term.starts_with("_UID=")) return term.size() > 5 && term.size() <= 15 && term.find_first_not_of("0123456789", 5) == std::string::npos;
+    std::string value;
+    if (term.starts_with("SYSLOG_IDENTIFIER=")) value = term.substr(18);
+    else if (term.starts_with("_SYSTEMD_UNIT=")) value = term.substr(14);
+    else return false;
     return !value.empty() && value.size() <= 256 &&
-           value.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._()-") == std::string::npos;
+           value.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._()@-") == std::string::npos;
 }
 
 json::Value host_protection(const Config& cfg) {
@@ -765,18 +769,17 @@ json::Value host_protection(const Config& cfg) {
             json::Value jails = json::Value::array();
             for (const auto& f : control::protection_input(fresh).failure_jails) {
                 if (!f.journal) continue;
-                const std::string identity = control::journal_identity(f.journalmatch);
-                json::Value row = json::Value::object().set("name", f.name).set("match", identity);
+                if (f.journalmatch.empty()) continue;  // no site with an account of its own: the jail is disabled, nothing to ask
+                json::Value row = json::Value::object().set("name", f.name).set("match", f.journalmatch);
                 std::vector<std::string> args{"-q", "-n", "1", "-o", "cat", "--no-pager", "--since=-30d"};
-                bool ok = !identity.empty();
-                for (std::size_t i = 0; ok && i <= identity.size();) {
-                    const std::size_t sp = identity.find(" + ", i);
-                    const std::string term = identity.substr(i, sp == std::string::npos ? std::string::npos : sp - i);
-                    if (!(ok = journal_term_ok(term))) break;
-                    if (i != 0) args.push_back("+");  // fail2ban's and journalctl's "or"
-                    args.push_back(term);
+                bool ok = true;
+                for (std::size_t i = 0; ok && i <= f.journalmatch.size();) {  // the words as the jail has them: and within a group, "+" between
+                    const std::size_t sp = f.journalmatch.find(' ', i);
+                    const std::string word = f.journalmatch.substr(i, sp == std::string::npos ? std::string::npos : sp - i);
+                    if (!(ok = journal_term_ok(word))) break;
+                    args.push_back(word);
                     if (sp == std::string::npos) break;
-                    i = sp + 3;
+                    i = sp + 1;
                 }
                 if (!ok) {
                     jails.push(std::move(row.set("why", "the jail's match is not of the expected form")));

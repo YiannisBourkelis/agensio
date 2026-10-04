@@ -2179,9 +2179,14 @@ hit, a day); Drupal through its core Syslog module (`/var/log/syslog`, `/var/log
 RHEL) with fail2ban's own `drupal-auth` filter, `agensio-drupal-auth`. On a host where no
 syslog daemon writes files (journald only, Debian 13's default; told by the daemons' pid
 files under `/run`) the jail reads the journal instead, `backend = systemd` with a
-`journalmatch` on Drupal's identity or on the php-fpm unit and the plugin's identity per
-site name, so neither application needs rsyslog and a stale file that nothing writes never
-passes for a log. Each such jail is rendered enabled only when its filter file exists, and
+`journalmatch` on each site account's uid (`_UID`, a field journald sets from the sender's
+credentials, with Drupal's identity or the php-fpm unit beside it; never the identity alone,
+which any process may claim, the alpha.49 report), so neither application needs rsyslog and
+a stale file that nothing writes never passes for a log; a site without an account of its
+own has no trusted field and is listed as `unidentified`, not read, until it gets one; an
+account of an ordinary uid (1000 or above, a panel's web user) gets `backend =
+systemd[journalflags=1]`, since journald files its lines under the user's journal, which
+fail2ban reads only with that flag (`docs/fail2ban-ref/`). Each such jail is rendered enabled only when its filter file exists, and
 with a syslog daemon its log too, since fail2ban refuses a configuration naming either when
 missing; otherwise it is written disabled with its `needs`: the plugin installed and
 activated from the WordPress admin panel and root's copy of its two filter files into
@@ -2192,9 +2197,8 @@ plugin and changes no application: `site_install` of WordPress or Drupal puts th
 its `next_steps`, health reports `fail2ban_failures_unseen` while they are open, and
 `protection_show` lists the jails under `failure_jails`. On a journald-only host, where a
 jail is enabled before the application writes anything, the helper asks the journal for one
-line under the jail's identity (`SYSLOG_IDENTIFIER=drupal`, `wordpress(<site name>)`; not
-the php-fpm unit, whose own notices would count) from the last 30 days, `journalctl` with
-fixed arguments, and the finding stays while there is none, with the application's step as
+line matching the jail's own `journalmatch` from the last 30 days, `journalctl` with fixed
+arguments, and the finding stays while there is none, with the application's step as
 its fix (`journal_seen` in `protection_show`). The attempt tier keeps counting
 meanwhile. There is one login jail per access log, `agensio-login` for the server-wide
 log and `agensio-login-<site>` for a site's own, each with the login paths of the sites

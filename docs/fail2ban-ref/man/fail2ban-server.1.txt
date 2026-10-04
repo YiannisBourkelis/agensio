@@ -1,0 +1,79 @@
+FAIL2BAN-SERVER(1)		 User Commands		     FAIL2BAN-SERVER(1)
+
+NAME
+       fail2ban-server - start the server
+
+SYNOPSIS
+       fail2ban-server [OPTIONS]
+
+DESCRIPTION
+       Fail2Ban v1.1.0 reads log file that contains password failure report and
+       bans the corresponding IP addresses using firewall rules.
+
+OPTIONS
+       -c, --conf <DIR>
+	      configuration directory
+
+       -s, --socket <FILE>
+	      socket path
+
+       -p, --pidfile <FILE>
+	      pidfile path
+
+       --pname <NAME>
+	      name  of	the process (main thread) to identify instance (default
+	      fail2ban-server)
+
+       --loglevel <LEVEL>
+	      logging level
+
+       --logtarget <TARGET>
+	      logging target,  use  file-name  or  stdout,  stderr,  syslog  or
+	      sysout.
+
+       --syslogsocket auto|<FILE>
+
+       -d     dump configuration. For debugging
+
+       --dp, --dump-pretty
+	      dump the configuration using more human readable representation
+
+       -t, --test
+	      test configuration (can be also specified with start parameters)
+
+       -i     interactive mode
+
+       -v     increase verbosity
+
+       -q     decrease verbosity
+
+       -x     force execution of the server (remove socket file)
+
+       -b     start server in background (default)
+
+       -f     start server in foreground
+
+       --async
+	      start  server  in async mode (for internal usage only, don't read
+	      configuration)
+
+       --timeout
+	      timeout to wait for the server (for internal  usage  only,  don't
+	      read configuration)
+
+       --str2sec <STRING>
+	      convert time abbreviation format to seconds
+
+       -h, --help
+	      display this help message
+
+       -V, --version
+	      print the version (-V returns machine-readable short format)
+
+REPORTING BUGS
+       Report bugs to https://github.com/fail2ban/fail2ban/issues
+
+SEE ALSO
+       fail2ban-client(1)
+
+Fail2Ban v1.1.0			   April 2024		     FAIL2BAN-SERVER(1)

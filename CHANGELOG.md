@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.1.0-alpha.50
+
+From the alpha.49 report (security, medium): the failure jails reading the journal matched on
+`SYSLOG_IDENTIFIER`, which is whatever a writer passes to `openlog()` or `logger -t`, so any
+account on the host (another site's compromised plugin, a shell user) could have fed five
+forged Drupal lines and had any address banned from the web ports for an hour, a visitor's or
+Let's Encrypt's; the WordPress match was an `or` of the php-fpm unit and the plugin's identity,
+and the 30-day `journal_seen` check trusted the same field. The match is now a group per site
+account, `SYSLOG_IDENTIFIER=drupal _UID=<uid>` for Drupal and `_SYSTEMD_UNIT=<php-fpm unit>
+_UID=<uid>` for WordPress (the uid a field journald sets from the sender's credentials; the
+plugin's identity, which carries the client's Host header, is left to the filter), groups
+joined with `+`; the helper's probe asks the journal with the same words. A site without an
+account of its own, or whose account is not on the host, has no trusted field: the jail lists
+it as not read (`unidentified` in `protection_show`), is disabled when no site has one, and
+health's `fail2ban_failures_unseen` names it with the account as the fix, and `site_install`'s
+next steps for such a site say so too. With a syslog daemon the files carry no uid, fail2ban's
+usual position; `docs/fail2ban.md` says so.
+
+fail2ban's own documentation is in the tree now, `docs/fail2ban-ref/` (the 1.1.0 manuals as
+text, the shipped `jail.conf`, path and filter files, the nftables actions, the journal
+backend's source, the project wiki's pages on regexes, best practice and troubleshooting, and
+the WP fail2ban plugin's three filters), with a README mapping each to agensio's renderers and
+the facts that bind them, the way `docs/rfc/` serves the protocol layers. Two of those facts
+changed the rendering: fail2ban's systemd backend reads the system journal alone by default
+(`journalflags` 4) and journald files the lines of an account with an ordinary uid under that
+user's journal, so a failure jail over such an account is rendered `backend =
+systemd[journalflags=1]` (a system account as agensio creates them needs nothing); and
+fail2ban's `drupal-auth` filter pins no identity itself, so the `SYSLOG_IDENTIFIER=drupal` word
+of the match is what selects Drupal's lines, the WP fail2ban filters requiring theirs in the
+line (`_daemon = (?:wordpress|wp)`). `docs/fail2ban.md` gained a section on testing a filter
+with `fail2ban-regex` and reading fail2ban's merged configuration.
+
 ## 0.1.0-alpha.49 (2026-10-04)
 
 From the alpha.48 report: on a journald-only host the Drupal failure jail was rendered enabled
