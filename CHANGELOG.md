@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.0-alpha.48
+
+From the alpha.47 report on the live host: on a host where no syslog daemon writes files
+(journald only, Debian 13's default; a left-over `auth.log` that nothing writes had passed
+for a log) the failure jails read the journal, `backend = systemd` with a `journalmatch` on
+Drupal's identity or on the php-fpm unit and the WP fail2ban plugin's identity per site
+name, so neither application needs rsyslog and `agensio-drupal-auth` is enabled at once
+there; `protection_show` reports `journal` and `journalmatch` per jail. The WordPress filter
+files are taken from the plugin's release on wordpress.org rather than from the site's
+directory, which the site's account can write (a planted filter bans whom it likes or
+carries a regex that freezes fail2ban); reading the site's copies first is the alternative.
+`docs/fail2ban.md` and `docs/configuration.md` 18 say which host gets which.
+
 ## 0.1.0-alpha.47 (2026-10-03)
 
 From the alpha.46 report: the login jail's regex for a path routed through the query string

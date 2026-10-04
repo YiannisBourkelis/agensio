@@ -2176,12 +2176,18 @@ plugin, which logs every failed login, form and XML-RPC, to the auth facility
 `wordpress-hard` filters, rendered as `agensio-wordpress-soft` (five failures in ten minutes
 ban for an hour) and `agensio-wordpress-hard` (what the plugin logs as hostile at the first
 hit, a day); Drupal through its core Syslog module (`/var/log/syslog`, `/var/log/messages` on
-RHEL) with fail2ban's own `drupal-auth` filter, `agensio-drupal-auth`. Each such jail is
-rendered enabled only when its filter file and its log exist on the host, since fail2ban
-refuses a configuration naming either when missing; otherwise it is written disabled with its
-`needs`: the plugin installed and activated from the WordPress admin panel and root's copy of
-its two filter files into `/etc/fail2ban/filter.d/`, Drupal's Syslog module enabled under
-Extend, rsyslog where only journald runs, then the jail rendered again. agensio installs no
+RHEL) with fail2ban's own `drupal-auth` filter, `agensio-drupal-auth`. On a host where no
+syslog daemon writes files (journald only, Debian 13's default; told by the daemons' pid
+files under `/run`) the jail reads the journal instead, `backend = systemd` with a
+`journalmatch` on Drupal's identity or on the php-fpm unit and the plugin's identity per
+site name, so neither application needs rsyslog and a stale file that nothing writes never
+passes for a log. Each such jail is rendered enabled only when its filter file exists, and
+with a syslog daemon its log too, since fail2ban refuses a configuration naming either when
+missing; otherwise it is written disabled with its `needs`: the plugin installed and
+activated from the WordPress admin panel and root's copy of its two filter files into
+`/etc/fail2ban/filter.d/`, taken from the plugin's release rather than from the site's
+directory, which the site's account can write; Drupal's Syslog module enabled under Extend;
+then the jail rendered again. agensio installs no
 plugin and changes no application: `site_install` of WordPress or Drupal puts those steps in
 its `next_steps`, health reports `fail2ban_failures_unseen` while they are open, and
 `protection_show` lists the jails under `failure_jails`. The attempt tier keeps counting

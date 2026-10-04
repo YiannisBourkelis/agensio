@@ -92,16 +92,24 @@ a preset's application does, the jail file carries a jail over that log:
 
 | jail | application | log | filter | threshold |
 |---|---|---|---|---|
-| `agensio-wordpress-soft` | WordPress with the WP fail2ban plugin | the auth log (`/var/log/auth.log`, `/var/log/secure` on RHEL) | the plugin's `wordpress-soft` | 5 failed logins in 10 min, 1 h |
+| `agensio-wordpress-soft` | WordPress with the WP fail2ban plugin | the auth log (`/var/log/auth.log`, `/var/log/secure` on RHEL), or the journal | the plugin's `wordpress-soft` | 5 failed logins in 10 min, 1 h |
 | `agensio-wordpress-hard` | the same | the same | the plugin's `wordpress-hard` | 1 hit (blocked user names, pingback errors), 1 day |
-| `agensio-drupal-auth` | Drupal with its Syslog module | the system log (`/var/log/syslog`, `/var/log/messages` on RHEL) | fail2ban's own `drupal-auth` | 5 in 10 min, 1 h |
+| `agensio-drupal-auth` | Drupal with its Syslog module | the system log (`/var/log/syslog`, `/var/log/messages` on RHEL), or the journal | fail2ban's own `drupal-auth` | 5 in 10 min, 1 h |
 
-Each of these is rendered enabled only when its filter file and its log exist on the host,
-because fail2ban refuses a configuration that names either when missing. Until then the jail
-is written disabled with its `needs` as comments, health reports `fail2ban_failures_unseen`
-for the application, and `site_install` of such a site lists the steps. agensio installs no
-plugin and changes no application: those steps are yours, in the application's admin panel
-and as root. The attempt tier keeps counting meanwhile.
+**Files or the journal.** Both applications log through syslog. On a host where a syslog
+daemon writes files (rsyslog or syslog-ng, told by their pid files under `/run`) the jails
+read those files. On a host that runs journald alone, Debian 13's default, there is no
+`/var/log/syslog`, and an `auth.log` left over from an earlier install stays empty while the
+lines go to the journal; so there the jails are rendered with `backend = systemd` and a
+`journalmatch`, `SYSLOG_IDENTIFIER=drupal` for Drupal, the php-fpm unit or the plugin's
+identity `wordpress(<site name>)` for WordPress, and no log file is needed or asked for.
+
+Each jail is rendered enabled only when its filter file exists, and with a syslog daemon
+its log too, because fail2ban refuses a configuration that names either when missing. Until
+then the jail is written disabled with its `needs` as comments, health reports
+`fail2ban_failures_unseen` for the application, and `site_install` of such a site lists the
+steps. agensio installs no plugin and changes no application: those steps are yours, in the
+application's admin panel and as root. The attempt tier keeps counting meanwhile.
 
 ## 3. What each application type gets, and what to add
 
@@ -114,17 +122,22 @@ and as root. The attempt tier keeps counting meanwhile.
 - Failure tier: install and activate the **WP fail2ban** plugin from the WordPress admin
   panel (Plugins, Add New, "WP fail2ban"). It writes every failed login, form and XML-RPC,
   to the system's auth log as `wordpress(example.com)[pid]: Authentication failure for admin
-  from 203.0.113.9`, and it ships its own filters. Root copies them once per host, then
-  renders the jail again:
+  from 203.0.113.9`, and it ships its own filters. Root installs those two filter files once
+  per host, then renders the jail again. Take them from the plugin's release, not from the
+  site's directory: that directory belongs to the site's account, and whoever takes over the
+  WordPress site could plant a filter that bans your own address or carries a regex that
+  freezes fail2ban. Or read the site's copies before installing them.
 
   ```sh
-  install -m 644 /var/www/example.com/wp-content/plugins/wp-fail2ban/filters.d/wordpress-hard.conf \
-                 /var/www/example.com/wp-content/plugins/wp-fail2ban/filters.d/wordpress-soft.conf /etc/fail2ban/filter.d/
+  cd /tmp && curl -fsSLO https://downloads.wordpress.org/plugin/wp-fail2ban.latest-stable.zip \
+    && unzip -o -j wp-fail2ban.latest-stable.zip wp-fail2ban/filters.d/wordpress-hard.conf \
+                                               wp-fail2ban/filters.d/wordpress-soft.conf -d /etc/fail2ban/filter.d/
   agensio ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload
   ```
 
   Behind a trusted proxy the plugin needs `WP_FAIL2BAN_PROXIES` in `wp-config.php` so that
-  it logs the client, not the proxy.
+  it logs the client, not the proxy. On a journald-only host nothing else is needed; the
+  jails read the journal.
 - Also worth doing in the application: disable XML-RPC when nothing uses it (a one-line
   plugin, or the WP fail2ban setting that blocks it); an application-level lockout plugin
   such as Limit Login Attempts Reloaded, which stops password guessing per account and so
@@ -136,9 +149,9 @@ and as root. The attempt tier keeps counting meanwhile.
 
 - Attempt tier: `/user/login`.
 - Failure tier: enable the core **Syslog** module (Extend, Syslog). Drupal then writes
-  `...|user|203.0.113.9|...|Login attempt failed for admin.` to the system log, which
-  fail2ban's own `drupal-auth` filter reads; nothing to copy. On a host that runs only
-  journald there is no `/var/log/syslog`; install `rsyslog` so the lines reach a file.
+  `...|user|203.0.113.9|...|Login attempt failed for admin.` to syslog, which fail2ban's own
+  `drupal-auth` filter reads from the system log or, on a journald-only host, from the
+  journal under the identity `drupal`; nothing to copy or install.
 - Drupal's own flood control is on by default: 50 failed logins per address per hour and 5
   per account in six hours block further attempts. The Flood Control module gives those
   numbers a settings page; the Login Security module adds notifications and per-account

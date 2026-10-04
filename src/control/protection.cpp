@@ -1,5 +1,7 @@
 #include "control/protection.hpp"
 
+#include "control/sites.hpp"
+
 #include <algorithm>
 #include <filesystem>
 #include <initializer_list>
@@ -180,16 +182,29 @@ std::string first_existing(std::initializer_list<const char*> candidates, bool& 
     return *candidates.begin();
 }
 
-std::vector<std::string> tier_needs(const std::string& app, const std::string& root, const std::string& log, bool log_present) {
+// Whether a syslog daemon writes files on this host; without one the journal is the log.
+bool syslog_daemon_present() {
+    std::error_code ec;
+    for (const char* pid : {"/run/rsyslogd.pid", "/run/syslog-ng.pid", "/run/syslogd.pid"})
+        if (std::filesystem::exists(pid, ec)) return true;
+    return false;
+}
+
+std::vector<std::string> tier_needs(const std::string& app, const std::string& root, const std::string& log, bool log_present, bool journal) {
     std::vector<std::string> out;
     if (app == "wordpress") {
         out.push_back("install and activate the WP fail2ban plugin from the WordPress admin panel (Plugins > Add New, \"WP fail2ban\"); it logs every failed login to the system's auth log; agensio installs no plugin");
-        out.push_back("as root, copy the plugin's filters: install -m 644 " + root + "/wp-content/plugins/wp-fail2ban/filters.d/wordpress-hard.conf " + root +
-                      "/wp-content/plugins/wp-fail2ban/filters.d/wordpress-soft.conf /etc/fail2ban/filter.d/");
+        // The plugin's filter files sit in the site's tree, which the site's account can write
+        // (alpha.47 report: a planted filter bans whom it likes or freezes fail2ban): root takes
+        // them from the plugin's release, or reads the site's copies first.
+        out.push_back("as root, take the plugin's two filters from its release, not from the site's directory, which the site's account can write: cd /tmp && curl -fsSLO "
+                      "https://downloads.wordpress.org/plugin/wp-fail2ban.latest-stable.zip && unzip -o -j wp-fail2ban.latest-stable.zip wp-fail2ban/filters.d/wordpress-hard.conf "
+                      "wp-fail2ban/filters.d/wordpress-soft.conf -d /etc/fail2ban/filter.d/ (or read " + root + "/wp-content/plugins/wp-fail2ban/filters.d/wordpress-hard.conf and "
+                      "wordpress-soft.conf first, then install -m 644 them into /etc/fail2ban/filter.d/)");
     } else if (app == "drupal") {
         out.push_back("enable Drupal's Syslog module in the site (Extend > Syslog) so that failed logins reach the system log; the drupal-auth filter ships with fail2ban; agensio changes nothing in the application");
     }
-    if (!log_present) out.push_back("the log " + log + " is not on this host (journald only?): install rsyslog so the lines reach a file fail2ban can read");
+    if (!journal && !log_present) out.push_back("the log " + log + " is not on this host although a syslog daemon runs: have it write that file, or stop the daemon and the jail reads the journal");
     out.push_back("then render the jail again, as root: agensio ctl protection --jail > " + std::string(kJailFile) + "; fail2ban-client reload");
     return out;
 }
@@ -202,7 +217,7 @@ std::vector<std::string> failure_tier_steps(const std::string& app, const std::s
             bool present = false;
             const std::string log = t.auth_log ? first_existing({"/var/log/auth.log", "/var/log/secure"}, present) : first_existing({"/var/log/syslog", "/var/log/messages"}, present);
             std::vector<std::string> out{"fail2ban counts this site's failed logins, not only the attempts at its login paths, once the application's side is in place:"};
-            for (const auto& n : tier_needs(app, root, log, present)) out.push_back(n);
+            for (const auto& n : tier_needs(app, root, log, present, !syslog_daemon_present())) out.push_back(n);
             return out;
         }
     return {};
@@ -467,9 +482,28 @@ ProtectionInput protection_input(const Config& cfg) {
         fj.bantime = t.bantime;
         fj.source = t.source;
         fj.log = t.auth_log ? first_existing({"/var/log/auth.log", "/var/log/secure"}, fj.log_present) : first_existing({"/var/log/syslog", "/var/log/messages"}, fj.log_present);
+        fj.journal = !syslog_daemon_present();
+        if (fj.journal) {
+            // Drupal's Syslog module logs under the identity "drupal"; the WP fail2ban plugin
+            // under "wordpress(<host>)" from php-fpm, so the pool's unit and every name of the
+            // WordPress sites are matched, either one enough (fail2ban's '+' is "or").
+            if (t.app == "drupal") fj.journalmatch = "SYSLOG_IDENTIFIER=drupal";
+            else {
+                const std::string reload = php_fpm_reload_command(cfg, "");
+                if (const std::size_t at = reload.find("systemctl reload "); at != std::string::npos) {
+                    std::string unit = reload.substr(at + 17);
+                    unit = unit.substr(0, unit.find(' '));
+                    if (!unit.empty()) fj.journalmatch = "_SYSTEMD_UNIT=" + unit + ".service";
+                }
+                for (const auto& s : cfg.sites)
+                    if (s.app == t.app)
+                        for (const auto& n : s.server_names)
+                            if (n != "*") fj.journalmatch += (fj.journalmatch.empty() ? "" : " + ") + std::string("SYSLOG_IDENTIFIER=wordpress(") + n + ")";
+            }
+        }
         std::error_code ec;
         fj.filter_installed = std::filesystem::is_regular_file("/etc/fail2ban/filter.d/" + fj.filter + ".conf", ec);
-        fj.needs = tier_needs(fj.app, root, fj.log, fj.log_present);
+        fj.needs = tier_needs(fj.app, root, fj.log, fj.log_present, fj.journal);
         in.failure_jails.push_back(std::move(fj));
     }
     std::vector<std::string> taken;
@@ -606,9 +640,10 @@ std::string render_jail(const ProtectionInput& in) {
     for (const auto& f : in.failure_jails) {
         s += "\n[" + f.name + "]\n";
         s += "# " + f.source + ", for " + join(f.sites, ", ") + ": " + std::to_string(f.maxretry) + " in " + f.findtime + " ban" + (f.maxretry == 1 ? "s" : "") + " for " + f.bantime + ".\n";
+        if (f.journal) s += "# Reads the journal: no syslog daemon writes files on this host, so a log file would stay empty.\n";
         if (!f.enabled()) {
             s += "# Disabled: " + std::string(!f.filter_installed ? "the filter " + f.filter + " is not in /etc/fail2ban/filter.d/" : "") +
-                 (!f.filter_installed && !f.log_present ? "; " : "") + std::string(!f.log_present ? "the log " + f.log + " is not on this host" : "") + ". Needs:\n";
+                 (!f.filter_installed && !f.journal && !f.log_present ? "; " : "") + std::string(!f.journal && !f.log_present ? "the log " + f.log + " is not on this host" : "") + ". Needs:\n";
             for (const auto& n : f.needs) s += "#   " + n + "\n";
             s += "enabled   = false\n";
         } else {
@@ -616,7 +651,12 @@ std::string render_jail(const ProtectionInput& in) {
         }
         s += "port      = " + ports + "\n";
         s += "filter    = " + f.filter + "\n";
-        s += "logpath   = " + f.log + "\n";
+        if (f.journal) {
+            s += "backend   = systemd\n";
+            s += "journalmatch = " + f.journalmatch + "\n";
+        } else {
+            s += "logpath   = " + f.log + "\n";
+        }
         s += "banaction = nftables-multiport\n";
         s += "maxretry  = " + std::to_string(f.maxretry) + "\n";
         s += "findtime  = " + f.findtime + "\n";
@@ -865,7 +905,8 @@ json::Value protection_report(const ProtectionInput& in, const ProtectionProbe& 
     json::Value fjs = json::Value::array();
     for (const auto& f : in.failure_jails)
         fjs.push(json::Value::object().set("name", f.name).set("app", f.app).set("sites", strings_json(f.sites)).set("filter", f.filter).set("log", f.log)
-                     .set("enabled", f.enabled()).set("filter_installed", f.filter_installed).set("log_present", f.log_present).set("source", f.source).set("needs", strings_json(f.needs)));
+                     .set("enabled", f.enabled()).set("filter_installed", f.filter_installed).set("log_present", f.log_present).set("journal", f.journal)
+                     .set("journalmatch", f.journal ? json::Value(f.journalmatch) : json::Value(nullptr)).set("source", f.source).set("needs", strings_json(f.needs)));
     r.set("failure_jails", std::move(fjs));
     // The firewall
     json::Value fw = json::Value::object();
@@ -1030,7 +1071,7 @@ std::vector<Finding> protection_findings(const ProtectionInput& in, const Protec
                 jails += (jails.empty() ? "" : ", ") + f.name;
                 if (sites.empty()) sites = join(f.sites, ", ");
                 if (needs.empty()) needs = f.needs;
-                for (const std::string reason : {!f.filter_installed ? "the filter " + f.filter + " is not in /etc/fail2ban/filter.d/" : std::string(), !f.log_present ? "the log " + f.log + " is not on this host" : std::string()})
+                for (const std::string reason : {!f.filter_installed ? "the filter " + f.filter + " is not in /etc/fail2ban/filter.d/" : std::string(), !f.journal && !f.log_present ? "the log " + f.log + " is not on this host" : std::string()})
                     if (!reason.empty() && why.find(reason) == std::string::npos) why += (why.empty() ? "" : "; ") + reason;
             }
             out.push_back(Finding{"info", "fail2ban_failures_unseen", "",

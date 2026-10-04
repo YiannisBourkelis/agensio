@@ -4634,6 +4634,13 @@ static void test_refusal_finding() {
 // public ports, QUIC's, the logs, the presets' and the sites' login paths, loopback left out),
 // the renderers held to the shipped files in packaging/, the helper's answer read (nft's JSON,
 // the unit states, fail2ban's status text) and the findings for every state.
+// The needs of a failure jail as the renderer writes them, for a hand-built jail in the tests.
+static std::vector<std::string> tier_needs_for_test(const control::FailureJail& f) {
+    std::vector<std::string> steps = control::failure_tier_steps(f.app, "/srv/x");
+    if (!steps.empty()) steps.erase(steps.begin());  // the headline line
+    return steps;
+}
+
 static void test_protection() {
     namespace fs = std::filesystem;
     using namespace control;
@@ -4661,13 +4668,16 @@ static void test_protection() {
               in.failure_jails[1].name == "agensio-wordpress-hard" && in.failure_jails[1].maxretry == 1 && in.failure_jails[1].bantime == "1d" &&
               (in.failure_jails[0].sites == std::vector<std::string>{"wp.test"}) && in.failure_jails[0].needs.size() >= 3 &&
               in.failure_jails[0].needs[0].find("WordPress admin panel") != std::string::npos && in.failure_jails[0].needs[0].find("agensio installs no plugin") != std::string::npos &&
-              in.failure_jails[0].needs[1].find("install -m 644 " + (dir / "www").string() + "/wp-content/plugins/wp-fail2ban/filters.d/wordpress-hard.conf") != std::string::npos &&
+              in.failure_jails[0].needs[1].find("https://downloads.wordpress.org/plugin/wp-fail2ban.latest-stable.zip") != std::string::npos &&
+              in.failure_jails[0].needs[1].find("or read " + (dir / "www").string() + "/wp-content/plugins/wp-fail2ban/filters.d/wordpress-hard.conf") != std::string::npos &&
               in.failure_jails[0].needs.back().find("agensio ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf; fail2ban-client reload") != std::string::npos);
         {
             ProtectionInput fi = in;
             fi.failure_jails[0].filter_installed = false;
             fi.failure_jails[0].log_present = true;
             fi.failure_jails[0].log = "/var/log/auth.log";
+            fi.failure_jails[0].journal = false;
+            fi.failure_jails[1].journal = false;
             std::string jail = render_jail(fi);
             CHECK(jail.find("\n[agensio-wordpress-soft]\n") != std::string::npos && jail.find("# Disabled: the filter wordpress-soft is not in /etc/fail2ban/filter.d/. Needs:\n#   install and activate the WP fail2ban plugin") != std::string::npos &&
                   jail.find("[agensio-wordpress-soft]\n# failed WordPress logins") != std::string::npos);
@@ -4676,7 +4686,30 @@ static void test_protection() {
             const std::size_t at = jail.find("\n[agensio-wordpress-soft]\n");
             CHECK(at != std::string::npos && jail.find("enabled   = true\nport      = 8080,8443\nfilter    = wordpress-soft\nlogpath   = /var/log/auth.log\nbanaction = nftables-multiport\nmaxretry  = 5\nfindtime  = 10m\nbantime   = 1h\n", at) != std::string::npos);
             const json::Value r = protection_report(fi, read_probe(json::Value(nullptr), fi), {});
-            CHECK(r["failure_jails"].items().size() == 2 && r["failure_jails"].items()[0]["enabled"].boolean() && r["failure_jails"].items()[1].get("name") == "agensio-wordpress-hard");
+            CHECK(r["failure_jails"].items().size() == 2 && r["failure_jails"].items()[0]["enabled"].boolean() && r["failure_jails"].items()[1].get("name") == "agensio-wordpress-hard" &&
+                  !r["failure_jails"].items()[0]["journal"].boolean());
+            // A journald-only host (the alpha.47 report: a stale auth.log passed for a log): the
+            // jail reads the journal, matched on the pool's unit or the plugin's identity for every
+            // name of the WordPress sites, and needs no log file.
+            fi.failure_jails[0].journal = true;
+            fi.failure_jails[0].log_present = false;
+            fi.failure_jails[0].journalmatch = "_SYSTEMD_UNIT=php8.4-fpm.service + SYSLOG_IDENTIFIER=wordpress(wp.test)";
+            fi.failure_jails[0].needs = tier_needs_for_test(fi.failure_jails[0]);
+            jail = render_jail(fi);
+            const std::size_t jat = jail.find("\n[agensio-wordpress-soft]\n");
+            CHECK(fi.failure_jails[0].enabled() && jat != std::string::npos && jail.find("# Reads the journal: no syslog daemon writes files on this host", jat) != std::string::npos &&
+                  jail.find("enabled   = true\nport      = 8080,8443\nfilter    = wordpress-soft\nbackend   = systemd\njournalmatch = _SYSTEMD_UNIT=php8.4-fpm.service + SYSLOG_IDENTIFIER=wordpress(wp.test)\nbanaction", jat) != std::string::npos &&
+                  jail.find("logpath   =", jat) > jail.find("\n[agensio-wordpress-hard]", jat));  // no log file in this jail's section; the next jail may keep its file
+            CHECK(protection_report(fi, read_probe(json::Value(nullptr), fi), {})["failure_jails"].items()[0].get("journalmatch") == "_SYSTEMD_UNIT=php8.4-fpm.service + SYSLOG_IDENTIFIER=wordpress(wp.test)");
+        }
+        // The journal match as the input builds it: Drupal's identity; WordPress's pool unit and site names.
+        {
+            ProtectionInput probe_in = protection_input(cfg);
+            for (auto& f : probe_in.failure_jails)
+                if (f.journal) {
+                    CHECK(f.journalmatch.find("SYSLOG_IDENTIFIER=wordpress(wp.test)") != std::string::npos);
+                    CHECK(f.journalmatch.find("_SYSTEMD_UNIT=php") == 0 || f.journalmatch.starts_with("SYSLOG_IDENTIFIER=wordpress("));
+                }
         }
         Config dru = cfg;
         dru.sites[1].app = "drupal";
@@ -4684,7 +4717,8 @@ static void test_protection() {
         {
             const ProtectionInput di = protection_input(dru);
             CHECK(di.failure_jails.size() == 3 && di.failure_jails[2].name == "agensio-drupal-auth" && di.failure_jails[2].filter == "drupal-auth" && (di.failure_jails[2].sites == std::vector<std::string>{"lo.test"}) &&
-                  di.failure_jails[2].needs[0].find("Syslog module") != std::string::npos && (di.failure_jails[2].log == "/var/log/syslog" || di.failure_jails[2].log == "/var/log/messages"));
+                  di.failure_jails[2].needs[0].find("Syslog module") != std::string::npos && (di.failure_jails[2].log == "/var/log/syslog" || di.failure_jails[2].log == "/var/log/messages") &&
+                  (!di.failure_jails[2].journal || di.failure_jails[2].journalmatch == "SYSLOG_IDENTIFIER=drupal"));
         }
         CHECK(failure_tier_steps("wordpress", "/srv/wp").size() >= 4 && failure_tier_steps("wordpress", "/srv/wp")[0].starts_with("fail2ban counts this site's failed logins") &&
               failure_tier_steps("drupal", "/srv/d")[1].find("Extend > Syslog") != std::string::npos && failure_tier_steps("laravel", "/srv/l").empty() && failure_tier_steps("static", "").empty());

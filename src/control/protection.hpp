@@ -51,13 +51,18 @@ struct FailureJail {
     std::vector<std::string> sites;
     std::string filter;  // wordpress-soft (the WP fail2ban plugin's), drupal-auth (fail2ban's own)
     std::string log;     // /var/log/auth.log or /var/log/secure; /var/log/syslog or /var/log/messages
+    // A host where no syslog daemon writes files (journald only: Debian 13 by default) reads
+    // the journal instead, backend = systemd with this match, so neither application needs
+    // rsyslog and a stale file that nothing writes never passes for a log (alpha.47 report).
+    bool journal = false;
+    std::string journalmatch;
     unsigned maxretry = 5;
     std::string findtime = "10m", bantime = "1h";
     std::string source;  // one line: what writes the log lines
     std::vector<std::string> needs;  // the administrator's steps, in order
     bool filter_installed = false;   // /etc/fail2ban/filter.d/<filter>.conf exists
-    bool log_present = false;
-    bool enabled() const noexcept { return filter_installed && log_present; }
+    bool log_present = false;        // file mode only
+    bool enabled() const noexcept { return filter_installed && (journal || log_present); }
 };
 // The steps an administrator takes so that a site's failed logins are counted (the
 // application's plugin or module, root's filter copy, the re-render); empty for a preset
