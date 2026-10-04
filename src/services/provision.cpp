@@ -24,6 +24,7 @@
 #include <sstream>
 
 #include "control/commands.hpp"
+#include "control/protection.hpp"
 #include "control/sites.hpp"
 #include "services/appenv.hpp"
 #include "services/archive.hpp"
@@ -676,11 +677,24 @@ json::Value app_check(const Config& cfg) {
 // kernel's firewall and fail2ban do for the web ports, which only root can see (nft needs
 // CAP_NET_ADMIN, fail2ban's socket is root's). Three programs by absolute path with fixed
 // arguments: `nft -j list ruleset` (again with -t, without set contents, when the full listing
-// does not fit the 8 MB kept), `systemctl show` over six unit names, and `fail2ban-client
+// does not fit the 8 MB kept), `systemctl show` over six unit names, `fail2ban-client
 // status` plus `fail2ban-client status <jail>` for each jail the first answer named (a plain
-// name of up to 64 characters, at most 64 jails). The answers travel raw; the server reads
-// them (control::read_probe), so the parsing is unit-tested and nothing here interprets.
-json::Value host_protection() {
+// name of up to 64 characters, at most 64 jails), and, for each failure jail that reads the
+// journal, `journalctl -q -n 1 -o cat --since=-30d` with the jail's match words, built here
+// from the configuration on disk (alpha.48 report: an enabled jail over a journal the
+// application never wrote to said nothing). The answers travel raw; the server reads them
+// (control::read_probe), so the parsing is unit-tested and nothing here interprets.
+// A journalctl match word of a rendered jail: the identity field and a value of the characters
+// a site's identity has ("drupal", "wordpress(<site name>)"), nothing else reaches the argument
+// list. The unit word of the WordPress jail is not asked for: php-fpm's own notices would count.
+bool journal_term_ok(const std::string& term) {
+    if (!term.starts_with("SYSLOG_IDENTIFIER=")) return false;
+    const std::string value = term.substr(18);
+    return !value.empty() && value.size() <= 256 &&
+           value.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._()-") == std::string::npos;
+}
+
+json::Value host_protection(const Config& cfg) {
     auto printable = [](std::string s) {
         for (char& c : s)
             if ((static_cast<unsigned char>(c) < 32 && c != '\n' && c != '\t') || c == 127) c = ' ';
@@ -744,6 +758,44 @@ json::Value host_protection() {
         f2b.set("available", false).set("why", "fail2ban is not installed (package fail2ban)");
     }
     reply.set("fail2ban", std::move(f2b));
+    json::Value journal = json::Value::object();
+    if (const char* journalctl = find_binary({"/usr/bin/journalctl", "/bin/journalctl"})) {
+        try {
+            const Config fresh = load_config(cfg.config_path);
+            json::Value jails = json::Value::array();
+            for (const auto& f : control::protection_input(fresh).failure_jails) {
+                if (!f.journal) continue;
+                const std::string identity = control::journal_identity(f.journalmatch);
+                json::Value row = json::Value::object().set("name", f.name).set("match", identity);
+                std::vector<std::string> args{"-q", "-n", "1", "-o", "cat", "--no-pager", "--since=-30d"};
+                bool ok = !identity.empty();
+                for (std::size_t i = 0; ok && i <= identity.size();) {
+                    const std::size_t sp = identity.find(" + ", i);
+                    const std::string term = identity.substr(i, sp == std::string::npos ? std::string::npos : sp - i);
+                    if (!(ok = journal_term_ok(term))) break;
+                    if (i != 0) args.push_back("+");  // fail2ban's and journalctl's "or"
+                    args.push_back(term);
+                    if (sp == std::string::npos) break;
+                    i = sp + 3;
+                }
+                if (!ok) {
+                    jails.push(std::move(row.set("why", "the jail's match is not of the expected form")));
+                    continue;
+                }
+                std::string out;
+                const int rc = run(journalctl, args, out, 4096);
+                if (rc != 0) row.set("why", "journalctl exited " + std::to_string(rc) + ": " + printable(out.substr(0, 200)));
+                else row.set("seen", out.find_first_not_of(" \t\r\n") != std::string::npos);
+                jails.push(std::move(row));
+            }
+            journal.set("available", true).set("jails", std::move(jails));
+        } catch (const std::exception& e) {
+            journal.set("available", false).set("why", std::string("the configuration on disk does not load: ") + e.what());
+        }
+    } else {
+        journal.set("available", false).set("why", "journalctl is not installed on this host");
+    }
+    reply.set("journal", std::move(journal));
     return reply;
 }
 
@@ -1620,7 +1672,7 @@ void helper_loop(int fd, const Config& cfg) {
                 } else if (op == "app_check") {
                     reply = app_check(cfg);
                 } else if (op == "host_protection") {
-                    reply = host_protection();
+                    reply = host_protection(cfg);
                 } else if (op == "site_trash") {
                     reply = site_trash(req, cfg);
                 } else if (op == "site_restore") {

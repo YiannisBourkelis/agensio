@@ -2190,7 +2190,12 @@ directory, which the site's account can write; Drupal's Syslog module enabled un
 then the jail rendered again. agensio installs no
 plugin and changes no application: `site_install` of WordPress or Drupal puts those steps in
 its `next_steps`, health reports `fail2ban_failures_unseen` while they are open, and
-`protection_show` lists the jails under `failure_jails`. The attempt tier keeps counting
+`protection_show` lists the jails under `failure_jails`. On a journald-only host, where a
+jail is enabled before the application writes anything, the helper asks the journal for one
+line under the jail's identity (`SYSLOG_IDENTIFIER=drupal`, `wordpress(<site name>)`; not
+the php-fpm unit, whose own notices would count) from the last 30 days, `journalctl` with
+fixed arguments, and the finding stays while there is none, with the application's step as
+its fix (`journal_seen` in `protection_show`). The attempt tier keeps counting
 meanwhile. There is one login jail per access log, `agensio-login` for the server-wide
 log and `agensio-login-<site>` for a site's own, each with the login paths of the sites
 writing that file, so one application's paths are not counted on another's log. `site_show` lists the effective ones. The jail file is

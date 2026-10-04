@@ -147,6 +147,16 @@ rm -f /var/log/auth.log /var/log/syslog /run/rsyslogd.pid
 # failure jails read the journal, drupal-auth enabled at once since fail2ban ships its filter, the
 # WordPress jails waiting for the plugin's filters, which root takes from the plugin's release.
 check "a journald-only host: the failure jails read the journal (backend systemd; Drupal's identity, the php-fpm unit or the plugin's identity per site name), drupal-auth is enabled at once, the WordPress ones wait for the plugin's filters taken from its release" "3 yes yes True False yes" "$(ctl protection --jail | grep -c '^backend   = systemd') $(ctl protection --jail | grep -q '^journalmatch = SYSLOG_IDENTIFIER=drupal$' && echo yes) $(ctl protection --jail | grep -q '^journalmatch = _SYSTEMD_UNIT=php.*-fpm.service + SYSLOG_IDENTIFIER=wordpress(wp.test)$' && echo yes) $(prot '[f["enabled"] for f in d["failure_jails"] if f["app"] == "drupal"][0], [f["enabled"] for f in d["failure_jails"] if f["app"] == "wordpress"][0]') $(ctl protection --jail | grep -q 'https://downloads.wordpress.org/plugin/wp-fail2ban.latest-stable.zip' && echo yes)"
+# The journal itself (alpha.48 report): drupal-auth is enabled before the Syslog module is, so
+# health asks the journal through the helper for one line of the application; none here (the
+# container has no journal), so the finding stays with the module's step; a journalctl that
+# answers a line (a script standing in for it) ends it.
+drupal_unseen() { ctl health | python3 -c 'import json,sys; d=json.load(sys.stdin); f=[x for x in d["findings"] if x["code"] == "fail2ban_failures_unseen" and "(drupal)" in x["message"]]; print(len(f), "journal" if f and "read the journal and it holds no line matching SYSLOG_IDENTIFIER=drupal from the last 30 days, so Drupal" in f[0]["message"] else "-", "module" if f and f[0]["fix"].startswith("enable Drupal") and "render the jail again" not in f[0]["fix"] else "-")'; }
+check "journald-only host, nothing from Drupal in the journal: the enabled drupal-auth jail keeps the finding, with the Syslog module alone as the fix; protection says journal_seen false; two findings, one per application" "1 journal module False 2" "$(drupal_unseen) $(prot '[f["journal_seen"] for f in d["failure_jails"] if f["app"] == "drupal"][0]') $(codes | tr ' ' '\n' | grep -c fail2ban_failures_unseen)"
+mv /usr/bin/journalctl /usr/bin/journalctl.real
+printf '#!/bin/sh\ncase "$*" in *SYSLOG_IDENTIFIER=drupal*) echo "https://dr.test|1696327202|user|203.0.113.9|https://dr.test/user/login|https://dr.test/user/login|0||Login attempt failed for admin.";; esac\n' > /usr/bin/journalctl; chmod 755 /usr/bin/journalctl
+check "a journal with one Drupal line: the finding is gone and journal_seen is true; the WordPress jails still wait for their filters" "0 - - True 1" "$(drupal_unseen) $(prot '[f["journal_seen"] for f in d["failure_jails"] if f["app"] == "drupal"][0]') $(codes | tr ' ' '\n' | grep -c fail2ban_failures_unseen)"
+mv /usr/bin/journalctl.real /usr/bin/journalctl
 # With a syslog daemon present (its pid file here), the jails read the files, absent for now.
 touch /run/rsyslogd.pid
 ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload > /dev/null; sleep 0.5

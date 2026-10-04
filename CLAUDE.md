@@ -991,8 +991,11 @@ Each item was benchmarked before and after on the reduced matrix (`bench/run.sh 
    site's `login_paths`, `-auth`, `-scan`, `-post`) with static shipped filters; the packaged
    copies under `/usr/share/agensio/` are `--defaults` and the unit test holds them to the
    renderers. Health (and the tool) read what is in place through the helper's read-only
-   `host_protection` (`nft -j list ruleset`, `systemctl show`, `fail2ban-client status`, fixed
-   arguments): a limit in any table counts, a jail reading our logs counts; findings
+   `host_protection` (`nft -j list ruleset`, `systemctl show`, `fail2ban-client status`, and
+   `journalctl` for one line of each failure jail that reads the journal, fixed arguments): a
+   limit in any table counts, a jail reading our logs counts, and a journal-mode jail over a
+   journal without the application's lines keeps `fail2ban_failures_unseen` (alpha.48 report);
+   findings
    `firewall_limits_missing`/`_trial`/`_unsaved`, `firewall_quic_unlimited`, `fail2ban_missing`,
    `fail2ban_jail_stale`, `fail2ban_log_format`, `fail2ban_blind`, `protection_unchecked`;
    `[control] host_protection = "external"` for a panel host, `"off"` to skip. Security page

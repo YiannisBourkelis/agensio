@@ -4916,6 +4916,15 @@ static void test_protection() {
     std::string perr;
     CHECK(json::parse(reply_text, reply, perr));
     const ProtectionProbe probe = read_probe(reply, in);
+    {   // the journal answer (alpha.48 report): one entry per jail answered, none for a jail with a reason
+        json::Value jr = reply;
+        json::Value jails = json::Value::array();
+        jails.push(json::Value::object().set("name", "agensio-drupal-auth").set("match", "SYSLOG_IDENTIFIER=drupal").set("seen", false));
+        jails.push(json::Value::object().set("name", "agensio-wordpress-soft").set("why", "journalctl exited 1"));
+        jr.set("journal", json::Value::object().set("available", true).set("jails", std::move(jails)));
+        const ProtectionProbe jp = read_probe(jr, in);
+        CHECK(jp.journal_seen.size() == 1 && jp.journal_seen[0].first == "agensio-drupal-auth" && !jp.journal_seen[0].second && probe.journal_seen.empty());
+    }
     CHECK(probe.checked && probe.nft_available && probe.table);
     CHECK((probe.limited_tcp == std::vector<unsigned>{80, 443, 8080, 8443, 8444, 8445}) && (probe.limited_udp == std::vector<unsigned>{443}));
     CHECK(probe.rules.size() == 3 && probe.rules[0].comment == "agensio: new connections per IPv4 address" && probe.rules[0].packets == 12 && probe.rules[2].packets == 3);
@@ -5060,6 +5069,41 @@ static void test_protection() {
     unseen.failure_jails[0].filter_installed = true;
     ufiles.installed_jail = render_jail(unseen);
     CHECK(codes(unseen, probe, ufiles).empty());
+    // A journald-only host (alpha.48 report): the jail is enabled, since the journal always
+    // exists, and the finding stays while the journal holds no line of the application; a
+    // probe that could not ask claims nothing. The helper asks under the identity words alone.
+    CHECK(journal_identity("_SYSTEMD_UNIT=php8.4-fpm.service + SYSLOG_IDENTIFIER=wordpress(a.test) + SYSLOG_IDENTIFIER=wordpress(b.test)") ==
+              "SYSLOG_IDENTIFIER=wordpress(a.test) + SYSLOG_IDENTIFIER=wordpress(b.test)" &&
+          journal_identity("SYSLOG_IDENTIFIER=drupal") == "SYSLOG_IDENTIFIER=drupal" && journal_identity("_SYSTEMD_UNIT=php8.4-fpm.service").empty());
+    unseen.failure_jails[0].journal = true;
+    unseen.failure_jails[0].journalmatch = "SYSLOG_IDENTIFIER=wordpress(wp.test)";
+    unseen.failure_jails[0].silent = "the plugin is not active yet";
+    ufiles.installed_jail = render_jail(unseen);
+    ProtectionProbe silent = probe;
+    silent.journal_seen = {{"agensio-wordpress-soft", false}};
+    CHECK(codes(unseen, silent, ufiles) == "info:fail2ban_failures_unseen" &&
+          protection_findings(unseen, silent, ufiles)[0].message ==
+              "wp.test (wordpress): failed logins are counted only as attempts at the login paths; the jail(s) agensio-wordpress-soft read the journal and it holds no line matching SYSLOG_IDENTIFIER=wordpress(wp.test) from the last 30 days, so the plugin is not active yet" &&
+          protection_findings(unseen, silent, ufiles)[0].fix == "install the plugin from the admin panel");
+    CHECK(protection_report(unseen, silent, ufiles)["failure_jails"].items()[0]["journal_seen"].boolean() == false &&
+          protection_report(unseen, probe, ufiles)["failure_jails"].items()[0]["journal_seen"].is_null());
+    silent.journal_seen = {{"agensio-wordpress-soft", true}};
+    CHECK(codes(unseen, silent, ufiles).empty() && protection_report(unseen, silent, ufiles)["failure_jails"].items()[0]["journal_seen"].boolean());
+    CHECK(codes(unseen, probe, ufiles).empty());
+    // One jail disabled and the other enabled over a silent journal: one finding, both named, the full steps.
+    FailureJail hard = unseen.failure_jails[0];
+    hard.name = "agensio-wordpress-hard";
+    hard.filter = "wordpress-hard";
+    hard.filter_installed = false;
+    unseen.failure_jails.push_back(hard);
+    silent.journal_seen = {{"agensio-wordpress-soft", false}};
+    ufiles.installed_jail = render_jail(unseen);
+    CHECK(codes(unseen, silent, ufiles) == "info:fail2ban_failures_unseen" &&
+          protection_findings(unseen, silent, ufiles)[0].message.find("the jail(s) agensio-wordpress-hard over the application's own log are rendered disabled: the filter wordpress-hard is not in /etc/fail2ban/filter.d/; the jail(s) agensio-wordpress-soft read the journal and it holds no line") != std::string::npos &&
+          protection_findings(unseen, silent, ufiles)[0].fix == "install the plugin from the admin panel; root copies the filters; render again");
+    unseen.failure_jails.pop_back();
+    unseen.failure_jails[0].journal = false;
+    unseen.failure_jails[0].journalmatch.clear();
     unseen.failure_jails[0].filter_installed = false;
     ufiles.installed_jail = render_jail(unseen);
     CHECK(codes(unseen, none, ufiles) == "warn:firewall_limits_missing warn:fail2ban_missing");  // without our jails running, fail2ban_missing says it all

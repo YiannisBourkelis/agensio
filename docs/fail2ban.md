@@ -111,6 +111,16 @@ then the jail is written disabled with its `needs` as comments, health reports
 steps. agensio installs no plugin and changes no application: those steps are yours, in the
 application's admin panel and as root. The attempt tier keeps counting meanwhile.
 
+On a journald-only host the Drupal jail is enabled at once, since fail2ban ships its filter
+and the journal is always there, and the WordPress jails as soon as their filters are in
+place; neither says whether the application writes anything yet. So health asks the journal
+itself, through the helper, for one line under the jail's identity (`SYSLOG_IDENTIFIER=drupal`,
+`wordpress(<site name>)`; not the php-fpm unit, whose own notices would count) from the last
+30 days, and keeps `fail2ban_failures_unseen` while there is none: the Syslog module is still
+off, or the plugin is not active yet (or nobody has logged in since, or its lines carry
+another spelling of the host, which the jail still reads through the unit). `agensio ctl
+protection` and `protection_show` report it as `journal_seen` per jail.
+
 ## 3. What each application type gets, and what to add
 
 ### WordPress (`app = "wordpress"`)

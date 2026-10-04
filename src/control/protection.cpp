@@ -161,14 +161,18 @@ struct FailureTier {
     const char* findtime;
     const char* bantime;
     const char* source;
+    const char* silent;  // a journal with no line of the application: what that means
 };
 const FailureTier kFailureTiers[] = {
     {"wordpress", "agensio-wordpress-soft", "wordpress-soft", true, 5, "10m", "1h",
-     "failed WordPress logins, form and XML-RPC, as the WP fail2ban plugin logs them to the auth log (\"Authentication failure for admin from ...\")"},
+     "failed WordPress logins, form and XML-RPC, as the WP fail2ban plugin logs them to the auth log (\"Authentication failure for admin from ...\")",
+     "the WP fail2ban plugin is not active on the site yet, no login has happened since, or its lines carry another spelling of the host"},
     {"wordpress", "agensio-wordpress-hard", "wordpress-hard", true, 1, "10m", "1d",
-     "what the WP fail2ban plugin logs as hostile at the first hit (blocked user names, pingback errors)"},
+     "what the WP fail2ban plugin logs as hostile at the first hit (blocked user names, pingback errors)",
+     "the WP fail2ban plugin is not active on the site yet, no login has happened since, or its lines carry another spelling of the host"},
     {"drupal", "agensio-drupal-auth", "drupal-auth", false, 5, "10m", "1h",
-     "failed Drupal logins as its Syslog module logs them (\"Login attempt failed for ...\"), with fail2ban's own drupal-auth filter"},
+     "failed Drupal logins as its Syslog module logs them (\"Login attempt failed for ...\"), with fail2ban's own drupal-auth filter",
+     "Drupal's Syslog module is not enabled on the site yet"},
 };
 
 std::string first_existing(std::initializer_list<const char*> candidates, bool& present) {
@@ -210,6 +214,18 @@ std::vector<std::string> tier_needs(const std::string& app, const std::string& r
 }
 
 }  // namespace
+
+std::string journal_identity(const std::string& journalmatch) {
+    std::string out;
+    for (std::size_t i = 0; i <= journalmatch.size();) {
+        const std::size_t sp = journalmatch.find(" + ", i);
+        const std::string term = journalmatch.substr(i, sp == std::string::npos ? std::string::npos : sp - i);
+        if (term.starts_with("SYSLOG_IDENTIFIER=")) out += (out.empty() ? "" : " + ") + term;
+        if (sp == std::string::npos) break;
+        i = sp + 3;
+    }
+    return out;
+}
 
 std::vector<std::string> failure_tier_steps(const std::string& app, const std::string& root) {
     for (const auto& t : kFailureTiers)
@@ -481,6 +497,7 @@ ProtectionInput protection_input(const Config& cfg) {
         fj.findtime = t.findtime;
         fj.bantime = t.bantime;
         fj.source = t.source;
+        fj.silent = t.silent;
         fj.log = t.auth_log ? first_existing({"/var/log/auth.log", "/var/log/secure"}, fj.log_present) : first_existing({"/var/log/syslog", "/var/log/messages"}, fj.log_present);
         fj.journal = !syslog_daemon_present();
         if (fj.journal) {
@@ -833,6 +850,13 @@ ProtectionProbe read_probe(const json::Value& reply, const ProtectionInput& in) 
         jail.total_banned = number_after(status, "Total banned");
         p.jails.push_back(std::move(jail));
     }
+    // The journal, one answer per failure jail in journal mode (alpha.48 report).
+    const json::Value& jr = reply["journal"];
+    if (jr.is_object()) {
+        p.journal_why = jr.get("why");
+        for (const auto& j : jr["jails"].items())
+            if (!j["seen"].is_null()) p.journal_seen.emplace_back(std::string(j.get("name")), j["seen"].boolean());
+    }
     return p;
 }
 
@@ -903,10 +927,15 @@ json::Value protection_report(const ProtectionInput& in, const ProtectionProbe& 
     }
     r.set("login_jails", std::move(ljs));
     json::Value fjs = json::Value::array();
-    for (const auto& f : in.failure_jails)
+    for (const auto& f : in.failure_jails) {
+        json::Value seen(nullptr);  // journal mode: whether the journal holds a line of the application (alpha.48 report)
+        for (const auto& [name, s] : probe.journal_seen)
+            if (name == f.name) seen = json::Value(static_cast<bool>(s));
         fjs.push(json::Value::object().set("name", f.name).set("app", f.app).set("sites", strings_json(f.sites)).set("filter", f.filter).set("log", f.log)
                      .set("enabled", f.enabled()).set("filter_installed", f.filter_installed).set("log_present", f.log_present).set("journal", f.journal)
-                     .set("journalmatch", f.journal ? json::Value(f.journalmatch) : json::Value(nullptr)).set("source", f.source).set("needs", strings_json(f.needs)));
+                     .set("journalmatch", f.journal ? json::Value(f.journalmatch) : json::Value(nullptr)).set("journal_seen", std::move(seen))
+                     .set("source", f.source).set("needs", strings_json(f.needs)));
+    }
     r.set("failure_jails", std::move(fjs));
     // The firewall
     json::Value fw = json::Value::object();
@@ -1060,23 +1089,43 @@ std::vector<Finding> protection_findings(const ProtectionInput& in, const Protec
     // application's plugin or module, root's filter copy, the log (informational: the attempt
     // tier counts meanwhile; agensio installs nothing, it says what to install).
     if (v.f2b_ours) {
+        // On a journald-only host a jail whose filter fail2ban ships is enabled at once, since
+        // the journal is always there, and said nothing while the application wrote nothing
+        // into it (alpha.48 report: the Drupal note vanished with the Syslog module still off);
+        // the helper asks the journal for one line matching the jail from the last 30 days, and
+        // a jail it could not ask about claims nothing.
+        auto journal_silent = [&](const FailureJail& f) {
+            if (!f.enabled() || !f.journal) return false;
+            for (const auto& [name, seen] : probe.journal_seen)
+                if (name == f.name) return !seen;
+            return false;
+        };
         std::vector<std::string> apps;
         for (const auto& f : in.failure_jails)
-            if (!f.enabled() && std::find(apps.begin(), apps.end(), f.app) == apps.end()) apps.push_back(f.app);
+            if ((!f.enabled() || journal_silent(f)) && std::find(apps.begin(), apps.end(), f.app) == apps.end()) apps.push_back(f.app);
         for (const auto& app : apps) {  // one finding per application, its jails named
-            std::string jails, why, sites;
+            std::string disabled, why, silent, silent_why, sites;
             std::vector<std::string> needs;
+            bool full = false;  // the whole list of steps (a jail disabled), not only the application's
             for (const auto& f : in.failure_jails) {
-                if (f.app != app || f.enabled()) continue;
-                jails += (jails.empty() ? "" : ", ") + f.name;
+                if (f.app != app) continue;
                 if (sites.empty()) sites = join(f.sites, ", ");
-                if (needs.empty()) needs = f.needs;
-                for (const std::string reason : {!f.filter_installed ? "the filter " + f.filter + " is not in /etc/fail2ban/filter.d/" : std::string(), !f.journal && !f.log_present ? "the log " + f.log + " is not on this host" : std::string()})
-                    if (!reason.empty() && why.find(reason) == std::string::npos) why += (why.empty() ? "" : "; ") + reason;
+                if (!f.enabled()) {
+                    disabled += (disabled.empty() ? "" : ", ") + f.name;
+                    if (!full) needs = f.needs, full = true;
+                    for (const std::string reason : {!f.filter_installed ? "the filter " + f.filter + " is not in /etc/fail2ban/filter.d/" : std::string(), !f.journal && !f.log_present ? "the log " + f.log + " is not on this host" : std::string()})
+                        if (!reason.empty() && why.find(reason) == std::string::npos) why += (why.empty() ? "" : "; ") + reason;
+                } else if (journal_silent(f)) {
+                    silent += (silent.empty() ? "" : ", ") + f.name;
+                    if (silent_why.empty()) silent_why = "it holds no line matching " + journal_identity(f.journalmatch) + " from the last 30 days, so " + f.silent;
+                    if (needs.empty() && !f.needs.empty()) needs = {f.needs.front()};  // the application's step; the filter and the jail are in place
+                }
             }
+            std::string what;
+            if (!disabled.empty()) what = "the jail(s) " + disabled + " over the application's own log are rendered disabled: " + why;
+            if (!silent.empty()) what += (what.empty() ? "" : "; ") + ("the jail(s) " + silent + " read the journal and " + silent_why);
             out.push_back(Finding{"info", "fail2ban_failures_unseen", "",
-                                  sites + " (" + app + "): failed logins are counted only as attempts at the login paths; the jail(s) " + jails + " over the application's own log are rendered disabled: " + why,
-                                  join(needs, "; ")});
+                                  sites + " (" + app + "): failed logins are counted only as attempts at the login paths; " + what, join(needs, "; ")});
         }
     }
     if (!in.unlogged.empty() && v.f2b_ours)

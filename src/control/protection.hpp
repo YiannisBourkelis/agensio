@@ -56,6 +56,7 @@ struct FailureJail {
     // rsyslog and a stale file that nothing writes never passes for a log (alpha.47 report).
     bool journal = false;
     std::string journalmatch;
+    std::string silent;  // what a journal with no such line means: the module off, the plugin not active yet
     unsigned maxretry = 5;
     std::string findtime = "10m", bantime = "1h";
     std::string source;  // one line: what writes the log lines
@@ -107,6 +108,11 @@ const std::vector<ProtectionFilter>& protection_filters();
 std::string spelling_regex(const LoginPath& login_path);
 // The alternatives of a jail's paths joined, the `paths` parameter of the agensio-login filter.
 std::string login_paths_regex(const std::vector<LoginPath>& paths);
+// The SYSLOG_IDENTIFIER words of a failure jail's journalmatch, " + "-joined: what the helper
+// asks the journal for (alpha.48 report). The _SYSTEMD_UNIT word stays with the jail, where it
+// catches a plugin line tagged with another spelling of the host; here it would count php-fpm's
+// own notices as the application's.
+std::string journal_identity(const std::string& journalmatch);
 
 constexpr std::string_view kProtectionShippedDir = "/usr/share/agensio";
 constexpr std::string_view kFirewallTable = "inet agensio";
@@ -152,6 +158,12 @@ struct ProtectionProbe {
         bool ours = false;                    // reads one of this host's access logs
     };
     std::vector<Jail> jails;
+    // The journal, for the failure jails in journal mode (alpha.48 report: an enabled jail over
+    // a journal the application never writes to said nothing): whether one line matching the
+    // jail's journalmatch exists from the last 30 days; a jail is absent when the helper could
+    // not ask (`journal_why`), and nothing is claimed then.
+    std::vector<std::pair<std::string, bool>> journal_seen;  // jail name, seen
+    std::string journal_why;
 };
 ProtectionProbe read_probe(const json::Value& reply, const ProtectionInput& in);
 

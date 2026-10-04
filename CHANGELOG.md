@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.0-alpha.49
+
+From the alpha.48 report: on a journald-only host the Drupal failure jail was rendered enabled
+at once (fail2ban ships its filter and the journal is always there), so health stopped saying
+that the Syslog module was still off. The helper's `host_protection` now asks the journal,
+with fixed arguments, for one line under each journal-reading jail's identity
+(`SYSLOG_IDENTIFIER=drupal`, `wordpress(<site>)`; not the php-fpm unit, whose own notices
+would count) from the last 30 days; while there is none, `fail2ban_failures_unseen` stays,
+saying that Drupal's Syslog module is not enabled or the WP fail2ban plugin not active yet,
+with the application's step as the fix; `protection_show` reports `journal_seen` per jail.
+
+The same report confirmed alpha.48's fix on the live host (no freeze with a vanished client
+over TLS and plain, WebSocket and a 6 MB download, the worker in `epoll_wait`, every socket
+`O_NONBLOCK`) and its watcher's capture of the third stall under alpha.47 shows the path the
+fix changed: the only worker thread inside `write(2)` of one 16,406-byte TLS record under
+`sk_stream_wait_memory`, the peer silent for 648 s with 128 KB queued, the accept queue
+growing to 17.
+
 ## 0.1.0-alpha.48 (2026-10-04)
 
 A stalled TLS client no longer stops the server (2026-10-04 live incident: a phone vanished
