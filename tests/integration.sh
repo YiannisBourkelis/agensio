@@ -52,6 +52,10 @@ sed -i '1i include = ["sites.d/*.toml"]' bench/tmp/agensio-test.toml
 # try_files status. Inserted after the site's `default = true` line.
 mkdir -p bench/tmp/certs-b
 [ -f bench/tmp/certs-b/cert.pem ] || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout bench/tmp/certs-b/key.pem -out bench/tmp/certs-b/cert.pem -days 30 -subj "/CN=b.test" >/dev/null 2>&1
+# The stalled WebSocket client's site (ws.test): a TLS connection is authoritative only for the
+# names of its certificate, so with localhost's the request is 421 and the client never sees a frame.
+mkdir -p bench/tmp/certs-ws
+[ -f bench/tmp/certs-ws/cert.pem ] || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout bench/tmp/certs-ws/key.pem -out bench/tmp/certs-ws/cert.pem -days 30 -subj "/CN=ws.test" >/dev/null 2>&1
 # A SAN certificate covering a.test and b.test (connection coalescing), a wildcard one, and
 # a copy of b's to swap back after the renewal-during-a-connection check.
 mkdir -p bench/tmp/certs-ab bench/tmp/certs-wild bench/tmp/certs-live
@@ -925,6 +929,54 @@ check "logs: a site that does not exist is a 404, not an empty answer" "404 yes"
 printf 'GET /caf\xe9-\xee\xff HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' | nc -w 2 127.0.0.1 8080 > /dev/null 2>&1; sleep 1.2
 check "logs: a client's raw bytes are written \\xHH in the access log, as nginx does, and the logs answer is valid text" "1 yes" "$(grep -c 'caf\\xE9-\\xEE\\xFF' bench/tmp/access.log) $(curl -sS --unix-socket $CS 'http://control/v1/logs?since=1m&status=all' | python3 -c 'import sys,json; d=json.loads(sys.stdin.buffer.read().decode("utf-8", "strict")); print("yes" if any("caf\\xE9-\\xEE\\xFF" in x["text"] for x in d["lines"]) else "no")')"
 check "an encoded separator in the path (%2F, %2f, %5C) is 404 on a filesystem-backed site, Apache's AllowEncodedSlashes Off, while an encoded dot still decodes and a proxied site hands the raw target to its origin (the origin's own 404, as JSON)" "404 404 404 200 application/json" "$(code 'http://127.0.0.1:8080/%2Fstyle.css') $(code 'http://127.0.0.1:8080/x%2f..%2fstyle.css') $(code 'http://127.0.0.1:8080/sub%5Cstyle.css') $(code 'http://127.0.0.1:8080/style%2Ecss') $(curl -sS -o /dev/null -w '%{content_type}' 'http://127.0.0.1:8091/api/x%2Fy')"
+# A stalled TLS WebSocket client must not stop the server (2026-10-04 live incident: every accepted
+# socket ran in blocking mode, since Asio 1.38 passes MSG_DONTWAIT to its own receive and send calls
+# and never sets O_NONBLOCK on the socket, which Linux's accept does not inherit; OpenSSL's write(2) of the next tunnel record
+# then slept until the kernel gave the dead connection up, 15 minutes, and with one worker every site
+# stopped). A backend that streams 64 KB frames sixty times a second fills the send buffer within a
+# second once the client stops reading.
+mkdir -p bench/tmp/ws
+python3 - > bench/tmp/ws/backend.log 2>&1 <<'PYT' &
+import socket, struct, threading, time
+def handle(c):
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        d = c.recv(4096)
+        if not d: return
+        buf += d
+    c.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n")
+    frame = b"\x82\x7f" + struct.pack(">Q", 65536) + b"x" * 65536
+    try:
+        while True:
+            c.sendall(frame); time.sleep(1 / 60)
+    except OSError:
+        pass
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1", 18990)); s.listen(8)
+while True:
+    c, _ = s.accept(); threading.Thread(target=handle, args=(c,), daemon=True).start()
+PYT
+WSB=$!
+cpost /v1/sites "{\"domain\":\"ws.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-ws/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-ws/key.pem\"},\"redirect_http\":false,\"user\":null,\"app\":\"proxy\",\"upstream\":\"http://127.0.0.1:18990\",\"listen_plain\":\"127.0.0.1:8096\",\"listen_tls\":\"127.0.0.1:18447\",\"confirm\":true,\"reason\":\"ws\"}" > /dev/null
+python3 - > bench/tmp/ws/client.log 2>&1 <<'PYT' &
+import socket, ssl, time
+raw = socket.socket(); raw.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096); raw.connect(("127.0.0.1", 18447))
+ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE; ctx.set_alpn_protocols(["http/1.1"])
+s = ctx.wrap_socket(raw, server_hostname="ws.test")
+s.sendall(b"GET /ws HTTP/1.1\r\nHost: ws.test\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
+data = b""
+while len(data) < 3000:
+    d = s.recv(4096)
+    if not d: break
+    data += d
+print("read", len(data), flush=True)
+time.sleep(60)
+PYT
+WSC=$!
+for _ in $(seq 1 50); do grep -q '^read' bench/tmp/ws/client.log 2>/dev/null && break; sleep 0.2; done  # the handshake and the first frames
+sleep 3  # the client reads nothing more: the send buffers fill, the tunnel's next write cannot complete
+check "a TLS WebSocket client that stops reading (the 2026-10-04 incident): the tunnel's writes wait in the loop instead of sleeping in write(2), a plain request is answered within 3 s meanwhile, and every socket of the server carries O_NONBLOCK" "200 yes all-nonblocking" "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:8080/) $(grep -q '^read' bench/tmp/ws/client.log && echo yes) $(bad=0; for f in /proc/$PID/fd/*; do case "$(readlink "$f" 2>/dev/null)" in socket*) grep -qE '^flags:[[:space:]]*[0-7]*[4-7][0-7]{3}$' /proc/$PID/fdinfo/$(basename "$f") || bad=$((bad+1));; esac; done; [ $bad = 0 ] && echo all-nonblocking || echo "$bad blocking")"
+kill $WSC $WSB 2>/dev/null; wait $WSC $WSB 2>/dev/null
+cpost /v1/sites/ws.test/delete '{"confirm":true,"reason":"ws"}' > /dev/null
 check "encoded_slashes = allow on a site (site_create, then --encoded-slashes deny through ctl): the escape is decoded and looked up, then 404 again; a bad value is refused; site_show says which" "201 200 404 allow 404 deny 400" "$(cpost /v1/sites "{\"domain\":\"es.test\",\"https\":\"none\",\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/bench/www\",\"listen_plain\":\"127.0.0.1:8096\",\"encoded_slashes\":\"allow\",\"confirm\":true,\"reason\":\"es\"}") $(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: es.test' 'http://127.0.0.1:8096/x%2F..%2Fstyle.css') $(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: es.test' 'http://127.0.0.1:8096/x%2F..%2Fnothing.css') $(curl -sS --unix-socket $CS http://control/v1/sites/es.test | python3 -c 'import json,sys; print(json.load(sys.stdin)["encoded_slashes"])') $("$BIN" ctl site-update es.test --encoded-slashes deny --yes --reason es --socket $CS > /dev/null; curl -sS -o /dev/null -w '%{http_code}' -H 'Host: es.test' 'http://127.0.0.1:8096/x%2F..%2Fstyle.css') $(curl -sS --unix-socket $CS http://control/v1/sites/es.test | python3 -c 'import json,sys; print(json.load(sys.stdin)["encoded_slashes"])') $(cpost /v1/sites/es.test '{"encoded_slashes":"maybe","confirm":true}')"
 cpost /v1/sites/es.test/delete '{"confirm":true,"reason":"es"}' > /dev/null
 check "mcp: protection_show is a read-only viewer tool and answers the rendering" "True False 4" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'

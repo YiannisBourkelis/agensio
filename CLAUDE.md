@@ -1004,6 +1004,23 @@ Each item was benchmarked before and after on the reduced matrix (`bench/run.sh 
    no plugin and changes no application, it suggests (2026-10-03). `docs/fail2ban.md` is the
    administrator's guide: the jails, what each application type gets, what to add.
 
+7. **Every accepted socket is non-blocking at accept** (2026-10-04, after a live freeze):
+   Asio 1.38 passes `MSG_DONTWAIT` to each of its own receive and send calls and never sets
+   `O_NONBLOCK` on a stream socket on Linux (`needs_non_blocking` false where the flag exists;
+   `async_wait` asks for nothing), and Linux's `accept(2)` does not inherit the listener's
+   flag as BSD does, so accepted sockets ran in blocking mode without anyone noticing;
+   OpenSSL's socket BIO (`write(2)`, no flags) and
+   `sendfile(2)` rely on the flag and slept when a client's send buffer was full. A phone that
+   vanished mid-WebSocket over TLS blocked the worker's loop on the tunnel's next record for the
+   kernel's fifteen minutes of retransmission, and with one worker every site stopped.
+   `Server::start_accept` and the control acceptor call `native_non_blocking(true)` on every
+   accepted socket; the integration suite holds a stalled TLS WebSocket client against a plain
+   request answered meanwhile and checks every socket's flags. Rule: a descriptor handed to
+   anything that is not one of our `MSG_DONTWAIT` syscalls (OpenSSL, sendfile, a library) must
+   carry `O_NONBLOCK`, set explicitly, never assumed from Asio. Two follow-ups from the
+   report are open: a per-tunnel write timeout for a client that takes no byte for N seconds
+   while data is pending, and a loop watchdog logging a worker that has not turned for seconds.
+
 Still to do (roadmap phases E and H): request-body
 limits and timeouts once bodies exist, security response headers option (HSTS,
 nosniff), TLS ticket key rotation and OCSP, access log with fail2ban-friendly format,

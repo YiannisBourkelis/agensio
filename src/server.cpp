@@ -648,6 +648,8 @@ void Server::start_accept_control() {
     control_acceptor_->async_accept(w.ctx, [this, &w](const asio::error_code& ec, asio::local::stream_protocol::socket sock) {
         if (ec == asio::error::operation_aborted || stopping_) return;
         if (!ec) {
+            asio::error_code nb;
+            sock.native_non_blocking(true, nb);  // every accepted socket, as in start_accept (2026-10-04)
             long uid = -1, gid = -1;
             Role role = Role::none;
             if (peer_credentials(sock.native_handle(), uid, gid))
@@ -1015,10 +1017,20 @@ void Server::start_accept(std::size_t index) {
                 return;
             }
             if (!ec) {
-                if (cfg_.tcp_nodelay) {
-                    asio::error_code ignored;
-                    sock.set_option(asio::ip::tcp::no_delay(true), ignored);
-                }
+                // The accepted socket is made non-blocking here, explicitly. Asio 1.38 never sets
+                // O_NONBLOCK on a stream socket on Linux: its receive and send operations pass
+                // MSG_DONTWAIT per call (reactive_socket_service_base.hpp: needs_non_blocking is
+                // false where MSG_DONTWAIT exists), async_wait asks for nothing, and Linux's
+                // accept(2) does not inherit the listener's flag as BSD does. So every accepted
+                // socket ran in blocking mode. Asio's own operations never noticed; OpenSSL's
+                // socket BIO (write(2), no flags) and sendfile(2) do notice when the send buffer
+                // is full, and slept there. 2026-10-04 live incident:
+                // a phone vanished mid-WebSocket over TLS, the tunnel's next record blocked the
+                // worker's loop for the kernel's 15 minutes of retransmission (tcp_retries2), and
+                // with one worker every site stopped.
+                asio::error_code ignored;
+                sock.native_non_blocking(true, ignored);
+                if (cfg_.tcp_nodelay) sock.set_option(asio::ip::tcp::no_delay(true), ignored);
                 // This handler runs on `target`'s loop, so its generation is safe to read.
                 std::shared_ptr<const Generation> gen = target.gen;
                 const Listener* l = gen ? gen->find(acc.address) : nullptr;

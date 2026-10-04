@@ -2,6 +2,18 @@
 
 ## 0.1.0-alpha.48
 
+A stalled TLS client no longer stops the server (2026-10-04 live incident: a phone vanished
+mid-WebSocket over TLS and every site on the host stopped answering for fifteen minutes,
+until the kernel gave the dead connection up). Every accepted socket ran in blocking mode:
+Asio 1.38 passes `MSG_DONTWAIT` to each of its own receive and send calls and so never sets
+`O_NONBLOCK` on a stream socket on Linux (`needs_non_blocking` is false there), and Linux's
+`accept(2)` does not inherit the listener's flag as BSD does. Asio's own operations never
+noticed; OpenSSL's socket BIO (`write(2)`, no flags) and `sendfile(2)` do notice when the
+send buffer is full, and slept in the worker's loop. Every
+accepted socket, TCP and the control socket's, is now made non-blocking at accept, one
+`ioctl` per connection; the integration suite holds a TLS WebSocket client that stops reading
+against a plain request answered meanwhile and checks every socket's flags.
+
 From the alpha.47 report on the live host: on a host where no syslog daemon writes files
 (journald only, Debian 13's default; a left-over `auth.log` that nothing writes had passed
 for a log) the failure jails read the journal, `backend = systemd` with a `journalmatch` on
