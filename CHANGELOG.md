@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.48
+## 0.1.0-alpha.48 (2026-10-04)
 
 A stalled TLS client no longer stops the server (2026-10-04 live incident: a phone vanished
 mid-WebSocket over TLS and every site on the host stopped answering for fifteen minutes,
