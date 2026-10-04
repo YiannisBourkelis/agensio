@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.49
+## 0.1.0-alpha.49 (2026-10-04)
 
 From the alpha.48 report: on a journald-only host the Drupal failure jail was rendered enabled
 at once (fail2ban ships its filter and the journal is always there), so health stopped saying
