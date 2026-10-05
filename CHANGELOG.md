@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.0-alpha.51
+
+`docs/mariadb.md`: a short guide for the administrator who installs MariaDB on the same
+Debian 13 VPS as agensio, from MariaDB's Knowledge Base and Debian's package notes: what the
+package already secures (root over the unix socket, loopback only, no test database, and why
+`mariadb-secure-installation` is not needed there), a hardening file, the few parameters worth
+tuning with sizes for a shared VPS, a database and an account per site for WordPress and the
+other PHP presets, everyday commands, nightly dumps and what to look at when something is
+wrong. Documentation only; nothing in the server changed.
+
 ## 0.1.0-alpha.50 (2026-10-05)
 
 From the alpha.49 report (security, medium): the failure jails reading the journal matched on
