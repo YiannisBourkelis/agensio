@@ -1099,8 +1099,63 @@ if [ $H3 = 1 ]; then
 fi
 if [ -n "$PHPFPM" ]; then
   check "access: a PHP file under a restricted path is refused before it runs" "403 0" "$(ah $A/php/params.php) $(curl -sS -H 'Host: access.test' $A/php/params.php | grep -c REMOTE_ADDR)"
+  check "access: wordpress: with /wp-admin restricted, the login page's own files under wp-admin/css, js and images stay open (wp-login.php loads them; WooCommerce's password meter too)" "200 200 200 403" "$(code -H 'Host: wpr.test' http://127.0.0.1:8104/wp-admin/css/login.css) $(code -H 'Host: wpr.test' http://127.0.0.1:8104/wp-admin/js/user-profile.js) $(code -H 'Host: wpr.test' http://127.0.0.1:8104/wp-admin/images/w-logo-blue.png) $(code -H 'Host: wpr.test' http://127.0.0.1:8104/wp-admin/options.php)"
+  # The openings serve WordPress's static files only: a script planted in one of them is 404 and
+  # never runs, while /wp-admin is restricted (the opening would otherwise run it for anyone).
+  check "access: wordpress: a .php under the opened wp-admin/css, js and images is 404 and never runs" "404 404 404 0" "$(for d in css js images; do printf '<?php echo "LEAK";' > tests/wordpress/wp-admin/$d/planted.php; done; for d in css js images; do code -H 'Host: wpr.test' http://127.0.0.1:8104/wp-admin/$d/planted.php; echo -n ' '; done; for d in css js images; do curl -sS -H 'Host: wpr.test' http://127.0.0.1:8104/wp-admin/$d/planted.php; done | grep -c 'LEAK\|<?php'; rm -f tests/wordpress/wp-admin/{css,js,images}/planted.php)"
   check "access: wordpress: /wp-admin and /wp-login.php refused, admin-ajax.php kept open by the preset for the public front end" "403 403 403 200 yes" "$(code -H 'Host: wpr.test' http://127.0.0.1:8104/wp-admin/) $(code -H 'Host: wpr.test' http://127.0.0.1:8104/wp-admin/post.php) $(code -H 'Host: wpr.test' http://127.0.0.1:8104/wp-login.php) $(code -H 'Host: wpr.test' http://127.0.0.1:8104/wp-admin/admin-ajax.php) $(grep -q 'preset:wordpress.*admin-ajax' <<< "$("$BIN" -t --explain -c bench/tmp/agensio-test.toml 2>/dev/null)" && echo yes)"
 fi
+# The error log's access lines (alpha.52 report, finding 1): report mode has a limiter of its
+# own, keyed by rule and client, so each client it would refuse is named; refusals held back are
+# counted "since the last line" and written after a quiet second without another refusal. One
+# keep-alive connection, so every request meets the same worker's limiters; only the part of
+# the error log written by each test is read.
+acclog() {  # what: pair | burst | clients
+  python3 - "$1" <<'PYT'
+import os, re, socket, sys, time
+what = sys.argv[1]
+log = "bench/tmp/error.log"
+time.sleep(2.2)  # a fresh second for this worker's limiters, and counts held by earlier checks flushed
+start = os.path.getsize(log)
+s = socket.create_connection(("127.0.0.1", 8102)); s.settimeout(5)
+def get(path, xff=None):
+    extra = "X-Forwarded-For: %s\r\n" % xff if xff else ""
+    s.sendall(("GET %s HTTP/1.1\r\nHost: access.test\r\n%s\r\n" % (path, extra)).encode())
+    d = b""
+    while b"\r\n\r\n" not in d: d += s.recv(65536)
+    head, body = d.split(b"\r\n\r\n", 1)
+    n = int([l for l in head.split(b"\r\n") if l.lower().startswith(b"content-length")][0].split(b":")[1])
+    while len(body) < n: body += s.recv(65536)
+    return head.split(b" ")[1].decode()
+if what == "pair":
+    # The report request from a client of its own: 127.0.0.1 met /report earlier in the suite,
+    # and report mode names a rule and client once a minute (a held line here is that, not a bug).
+    codes = [get("/admin/limiter-a"), get("/report/limiter-b", "198.51.100.31")]
+elif what == "burst":
+    codes = [get("/admin/burst-%d" % i) for i in range(20)]
+else:
+    codes = [get("/report/c1", "198.51.100.21"), get("/report/c2", "198.51.100.22"), get("/report/c3", "198.51.100.21")]
+time.sleep(2.5)  # past the second, and the flush tick that writes what was held
+with open(log, "rb") as f:
+    f.seek(start)
+    new = f.read().decode("utf-8", "replace")
+if what == "pair":
+    print(" ".join(sorted(set(codes))), "refused" if re.search(r"access refused: .*/admin/limiter-a", new) else "-",
+          "report" if re.search(r"access would refuse: .*/report/limiter-b", new) else "-")
+elif what == "burst":
+    written = len(re.findall(r"access refused: site .*/admin/burst-", new))
+    held = sum(int(n) for n in re.findall(r"(\d+) more refusals since the last such line", new))  # inline on a written line, or the closing line
+    print(" ".join(sorted(set(codes))), written + held, "closing" if re.search(r"access refused: \d+ more refusals since the last such line", new) else "-",
+          "old-wording" if "in the last second" in new else "-")
+else:
+    named = [c for c in ("198.51.100.21", "198.51.100.22") if len(re.findall(r"access would refuse: .*client %s " % re.escape(c), new)) == 1]
+    print(" ".join(sorted(set(codes))), " ".join(named))
+PYT
+}
+check "access: a refusal and a report-mode line in the same second are both written (each has its own limiter)" "403 404 refused report" "$(acclog pair)"
+check "access: twenty quick refusals: the lines written and the ones counted add up to 20, the count is written after a quiet second without another refusal, worded since the last line" "403 20 closing -" "$(acclog burst)"
+check "access: report mode names every client it would refuse once a minute, not one a second per worker" "404 198.51.100.21 198.51.100.22" "$(acclog clients)"
+
 # What -t refuses: an empty list, a zone id, an unknown set, an unknown key, a path that is not
 # normalised, "any" next to addresses.
 acc_t() { printf '[[site]]\nlisten = ["127.0.0.1:1"]\nroot = "%s/bench/www"\n[[site.access]]\n%b' "$ROOT" "$1" > bench/tmp/acc-bad.toml; "$BIN" -t -c bench/tmp/acc-bad.toml > /dev/null 2>&1 && echo accepted || echo refused; }
@@ -1111,6 +1166,7 @@ mkdir -p bench/tmp/sites/acc.test/www; echo acc > bench/tmp/sites/acc.test/www/i
 cpost /v1/sites "{\"domain\":\"acc.test\",\"https\":\"none\",\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/bench/tmp/sites/acc.test/www\",\"listen_plain\":\"127.0.0.1:8096\",\"confirm\":true,\"reason\":\"acc\"}" > /dev/null
 check "access: managed site: rules.restricted through site_update is written, enforced and shown; a bad entry is refused" "200 1 403 1 400" "$(cpost /v1/sites/acc.test '{"rules":{"restricted":[{"path":"/","allow":["10.0.0.0/8"]}]},"confirm":true,"reason":"acc"}') $(grep -c '^\[\[site.access\]\]' bench/tmp/sites.d/acc.test.toml) $(code -H 'Host: acc.test' http://127.0.0.1:8096/) $(curl -sS --unix-socket $CS http://control/v1/sites/acc.test | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["rules"]["restricted"]))') $(cpost /v1/sites/acc.test '{"rules":{"restricted":[{"path":"/","allow":[]}]},"confirm":true,"reason":"acc"}')"
 check "access: an unknown set is refused with the sets that exist; config_reference shows root's sets with their entries and the trusted proxies' ranges" "400 yes 127.0.0.1,::1 127.0.0.1/32" "$(cpost /v1/sites/acc.test '{"rules":{"restricted":[{"path":"/","allow":["@nosuch"]}]},"confirm":true,"reason":"acc"}') $(grep -q 'the sets are @loop' bench/tmp/ctl-reply.json && echo yes) $(curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; k={(x["table"],x["key"]):x for x in json.load(sys.stdin)["keys"]}; print(",".join(k[("top level","addresses")]["running"]["loop"]), ",".join(k[("[server]","trusted_proxies")]["running"]))')"
+check "access: site_update's answer carries the notes -t prints for the rules (a site restricted as a whole)" "200 yes" "$(cpost /v1/sites/acc.test '{"rules":{"restricted":[{"path":"/","allow":["10.0.0.0/8"]}]},"dry_run":true,"confirm":true,"reason":"acc"}') $(python3 -c 'import json; w=json.load(open("bench/tmp/ctl-reply.json")).get("warnings") or []; print("yes" if any("restricted as a whole" in x for x in w) else "no")')"
 check "access: access-check answers refused and allowed with the deciding rule" "refused allowed" "$("$BIN" ctl access-check acc.test / 127.0.0.1 --socket $CS | grep -o '^refused') $("$BIN" ctl access-check acc.test /x 10.1.2.3 --socket $CS | grep -o '^allowed')"
 check "access: ctl --restrict sets a rule, --no-restrict clears it" "1 0" "$("$BIN" ctl site-update acc.test --restrict /admin=127.0.0.1,10.0.0.0/8 --yes --reason acc --socket $CS > /dev/null; grep -c 'path = "/admin"' bench/tmp/sites.d/acc.test.toml) $("$BIN" ctl site-update acc.test --no-restrict --yes --reason acc --socket $CS > /dev/null; grep -c '^\[\[site.access\]\]' bench/tmp/sites.d/acc.test.toml)"
 check "mcp: access_check is a read-only viewer tool and answers the decision; the instructions, site_update and the new_site prompt tell the agent about rules.restricted" "True refused /wp-admin yes yes yes" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
@@ -1127,13 +1183,23 @@ out += [r["decision"], r["rule"]["path"]]
 p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 3, "method": "prompts/get", "params": {"name": "new_site"}}) + "\n"); p.stdin.flush()
 prompt = json.loads(p.stdout.readline())["result"]["messages"][0]["content"]["text"]
 out += ["yes" if "rules.restricted" in instructions and "access_check" in instructions else "no",
-        "yes" if "restricted" in tools["site_update"]["description"] and "restricted" in json.dumps(tools["site_update"]["inputSchema"]) else "no",
+        "yes" if "restricted" in tools["site_update"]["description"] and "restricted" in json.dumps(tools["site_update"]["inputSchema"]) and "languages" in json.dumps(tools["site_update"]["inputSchema"]) else "no",
         "yes" if "rules.restricted" in prompt else "no"]
 p.stdin.close(); p.wait()
 print(" ".join(out))
 PYT
 )"
 cpost /v1/sites/acc.test/delete '{"confirm":true,"reason":"acc"}' > /dev/null
+# rules.admin on a managed WordPress site (2026-10-07): the admin paths in one field, the
+# login page only on request, what the public site needs below /wp-admin kept open.
+if [ -n "$PHPFPM" ]; then
+  wpm() { code -H 'Host: wpm.test' "http://127.0.0.1:8096$1"; }
+  cpost /v1/sites "{\"domain\":\"wpm.test\",\"https\":\"none\",\"user\":null,\"app\":\"wordpress\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"root\":\"$ROOT/tests/wordpress\",\"listen_plain\":\"127.0.0.1:8096\",\"confirm\":true,\"reason\":\"adm\"}" > /dev/null
+  check "access: rules.admin on a managed WordPress site refuses the admin, keeps admin-ajax.php, the login page and its files open" "200 1 403 200 200 200" "$(cpost /v1/sites/wpm.test '{"rules":{"admin":{"allow":["10.0.0.0/8"]}},"confirm":true,"reason":"adm"}') $(grep -c '^\[\[site.access\]\]   # rules: admin' bench/tmp/sites.d/wpm.test.toml) $(wpm /wp-admin/) $(wpm /wp-admin/admin-ajax.php) $(wpm /wp-login.php) $(wpm /wp-admin/css/login.css)"
+  check "access: rules.admin with login: true refuses the login page too; access-check names the admin rule; cleared, the admin answers again" "200 403 refused 200 200" "$(cpost /v1/sites/wpm.test '{"rules":{"admin":{"allow":["10.0.0.0/8"],"login":true}},"confirm":true,"reason":"adm"}') $(wpm /wp-login.php) $("$BIN" ctl access-check wpm.test /wp-login.php 127.0.0.1 --socket $CS | grep -o '^refused') $(cpost /v1/sites/wpm.test '{"rules":{},"confirm":true,"reason":"adm"}') $(wpm /wp-admin/)"
+  cpost /v1/sites/wpm.test/delete '{"confirm":true,"reason":"adm"}' > /dev/null
+fi
+check "access: the presets catalogue lists each preset's admin paths, the login one marked" "/wp-admin /wp-login.php|login /admin /user/login|login" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; f=lambda a: " ".join(x["path"]+("|login" if x.get("login") else "") for x in p[a]["admin_paths"] if x["path"] in ("/wp-admin","/wp-login.php","/admin","/user/login")); print(f("wordpress"), f("drupal"))')"
 
 # Static rules of the control plane (F7): nothing there spawns a process or opens a port.
 check "control: no process spawning anywhere under src/control" "0" "$(grep -E 'system\(|popen\(|execv|execl|fork\(|posix_spawn' src/control/*.cpp src/control/*.hpp | wc -l | tr -d ' ')"
@@ -1269,7 +1335,7 @@ if [ -n "$FPM_PID" ]; then
   check "drupal: a .sqlite dump and composer files are refused" "404 404" "$(code $D/data.sqlite) $(code $D/composer.json)"
   check "drupal: plain static files still serve" "public readme" "$(curl -sS $D/README.txt)"
   # What site-show reports as "deny" answers 404; what it reports as "static" with no refusal serves the file.
-  check "drupal: every location reported as deny answers 404; the reported names are exact" "9 9 static" "$(curl -sS --unix-socket bench/tmp/control.sock http://control/v1/sites/drupal.test | python3 -c '
+  check "drupal: every location reported as deny answers 404; the reported names are exact" "13 13 static" "$(curl -sS --unix-socket bench/tmp/control.sock http://control/v1/sites/drupal.test | python3 -c '
 import json,sys,urllib.request
 locs=json.load(sys.stdin)["locations"]
 deny=[l["path"] for l in locs if l["handler"]=="deny"]
@@ -1282,6 +1348,12 @@ for p in deny:
 readme=[l for l in locs if l["path"]=="/" and l["handler"]=="static"]
 print(len(deny), n404, readme[0]["handler"] if readme else "-")')"
   check "drupal: a missing .php is a 404 before php-fpm" "404" "$(code $D/nothere.php)"
+  # Drupal's own .htaccess (10.5 and 11, core/assets/scaffold/files/htaccess): PHP runs only
+  # directly under the root (autoload.php excepted), directly under /core/, and in its named
+  # front controllers; any other .php below a directory is refused, and its FilesMatch
+  # protects .sh, package.json, package-lock.json and yarn.lock (2026-10-07).
+  check "drupal: PHP below a module directory is refused and never runs; core's own entry points and statistics.php run; PATH_INFO after a root script still runs" "404 no-source drupal rebuild entry point ok drupal statistics front controller ok drupal front /index.php/extra" "$(code $D/modules/custom/demo/evil.php) $(no_source $D/modules/custom/demo/evil.php) $(curl -sS $D/core/rebuild.php) $(curl -sS $D/core/modules/statistics/statistics.php) $(curl -sS $D/index.php/extra)"
+  check "drupal: autoload.php, package.json, yarn.lock and a .sh script are 404, as Drupal's .htaccess refuses them" "404 no-source 404 404 404" "$(code $D/autoload.php) $(no_source $D/autoload.php) $(code $D/package.json) $(code $D/yarn.lock) $(code $D/deploy.sh)"
   W=http://127.0.0.1:8096
   check "wordpress: front controller and pretty permalink" "wordpress front / wordpress front /hello-world/" "$(curl -sS $W/) $(curl -sS $W/hello-world/)"
   check "wordpress: wp-login.php executes, no source" "wp-login ok no-source" "$(curl -sS $W/wp-login.php) $(no_source $W/wp-login.php)"
@@ -1290,6 +1362,9 @@ print(len(deny), n404, readme[0]["handler"] if readme else "-")')"
   check "wordpress: readme.html and license.txt (the version fingerprint) are 404 although present" "404 404 yes" "$(code $W/readme.html) $(code $W/license.txt) $([ -f tests/wordpress/readme.html ] && echo yes)"
   check "wordpress: the wp-content drop-ins (db.php, advanced-cache.php, object-cache.php) are 404, never executed; the SQLite file is hidden" "404 404 404 404 no" "$(code $W/wp-content/db.php) $(code $W/wp-content/advanced-cache.php) $(code $W/wp-content/object-cache.php) $(code $W/wp-content/database/.ht.sqlite) $(curl -sS $W/wp-content/db.php | grep -q 'drop-in ran' && echo yes || echo no)"
   check "wordpress: PHP under uploads and wp-includes refused, assets served" "404 404 200" "$(code $W/wp-content/uploads/shell.php) $(code $W/wp-includes/x.php) $(code $W/wp-includes/wp.js)"
+  # WordPress's hardening guide (developer.wordpress.org/advanced-administration/security/hardening):
+  # wp-admin/includes/ and wp-includes/theme-compat/ are refused outright (2026-10-07).
+  check "wordpress: wp-admin/includes/ and wp-includes/theme-compat/ are 404 and never run, as WordPress's hardening guide refuses them" "404 no-source 404 no-source" "$(code $W/wp-admin/includes/file.php) $(no_source $W/wp-admin/includes/file.php) $(code $W/wp-includes/theme-compat/header.php) $(no_source $W/wp-includes/theme-compat/header.php)"
   shield_check "wordpress uploads/" $W/wp-content/uploads tests/wordpress/wp-content/uploads
   shield_check "wordpress wp-includes/" $W/wp-includes tests/wordpress/wp-includes
   shield_check "wordpress root" $W tests/wordpress
@@ -1600,6 +1675,11 @@ curl -sS -o /dev/null http://127.0.0.1:8080/style.css; sleep 1.2
 check "access log: SIGUSR1 reopens the file" "yes" "$([ -s bench/tmp/access.log ] && grep -q '"GET /style.css HTTP/1.1" 200 ' bench/tmp/access.log && echo yes)"
 curl -sS -o /dev/null -H 'X-Forwarded-For: 198.51.100.7' http://127.0.0.1:8080/style.css; sleep 1.2
 check "access log: client address from a trusted proxy" "yes" "$(grep -q '^198.51.100.7 - - .*"GET /style.css' bench/tmp/access.log && echo yes)"
+# An X-Forwarded-For entry with a port, as some load balancers write it (alpha.52 report,
+# finding 3): the address without the port, for IPv4 and for a bracketed IPv6.
+curl -sS -o /dev/null -H 'X-Forwarded-For: 198.51.100.9:1234' 'http://127.0.0.1:8080/style.css?xff-port4'
+curl -sS -o /dev/null -H 'X-Forwarded-For: [2001:db8::9]:443' 'http://127.0.0.1:8080/style.css?xff-port6'; sleep 1.2
+check "access log: an X-Forwarded-For entry with a port is the address without it (IPv4, [IPv6])" "198.51.100.9 2001:db8::9" "$(grep -F 'xff-port4' bench/tmp/access.log | tail -1 | cut -d' ' -f1) $(grep -F 'xff-port6' bench/tmp/access.log | tail -1 | cut -d' ' -f1)"
 # A dual-stack listener records an IPv4 client as IPv4, never as ::ffff:127.0.0.1 (2026-10-07),
 # and an IPv6 client as itself; a mapped X-Forwarded-For entry is unmapped too.
 # A server of its own, because a listener on [::] is public and the main configuration's

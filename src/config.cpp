@@ -600,6 +600,10 @@ struct PhpPreset {
     std::vector<const char*> never_dirs;  // directories answered 404 whole, whatever is in them (Grav's logs/, backup/): a preset that
                                           // borrowed another's rules could never supply these (2026-09-23 live report)
     std::vector<const char*> login_paths; // where the application's login form posts (the fail2ban jail counts attempts there, 2026-10-02)
+    // With any_php: where a script may sit, directly ("/" the root, "/core/"); empty = anywhere.
+    // Drupal's .htaccess refuses PHP below every other directory (2026-10-07).
+    std::vector<const char*> php_dirs = {};
+    std::vector<const char*> entries = {};  // further exact .php entry points (Drupal 10's statistics.php)
 };
 
 // What every PHP preset refuses besides PHP itself, on its root and under its shields: the
@@ -676,7 +680,10 @@ const std::vector<std::string> kGravPublicMedia = {".jpg", ".jpeg", ".png",  ".g
 const std::vector<std::string> kDrupalSource = [] {
     std::vector<std::string> v = kSourceBackups;
     for (const char* s : {".install", ".module", ".theme", ".engine", ".profile", ".make", ".po", ".twig", ".yml", ".yaml",
-                          ".sqlite", ".sqlite3", ".db", ".tpl", ".xtmpl"})
+                          ".sqlite", ".sqlite3", ".db", ".tpl", ".xtmpl",
+                          // the rest of its FilesMatch (10.5 and 11): shell scripts, and these names in any
+                          // directory (a module's or a theme's own package.json too)
+                          ".sh", "/composer.json", "/composer.lock", "/package.json", "/package-lock.json", "/yarn.lock", "/web.config"})
         v.emplace_back(s);
     return v;
 }();
@@ -709,16 +716,20 @@ const std::vector<PhpPreset> kPhpPresets = {
      {{"/build/", "public, max-age=31536000, immutable"}}, {}, "", "", {}, "/storage", {}, {"/login", "/cp/auth/login"}},
     // Drupal: many entry points (index.php, core/install.php, update.php); what its
     // .htaccess protects is refused natively, since .htaccess is never read.
-    {"drupal", "Drupal (and other PHP applications with several entry points): the project directory is given, its web/ is served when present; any .php runs, missing paths reach index.php (also below sites/default/files, where Drupal makes image-style derivatives and aggregated css/js on first request), and what Drupal's .htaccess protects is refused natively.",
+    {"drupal", "Drupal: the project directory is given, its web/ is served when present; PHP runs where Drupal's own .htaccess lets it (a script directly in the root, autoload.php excepted, or directly in /core/, and the statistics front controller), any other .php below a directory is refused, missing paths reach index.php (also below sites/default/files, where Drupal makes image-style derivatives and aggregated css/js on first request), and what Drupal's .htaccess protects is refused natively.",
      "web", false, {"index.php"}, true, true, kDrupalSource,
      {{"/core/lib/", nullptr}, {"/core/includes/", nullptr}, {"/vendor/", nullptr}, {"/node_modules/", nullptr},
       {"/sites/default/files/", nullptr, true}},
      {"/sites/default/settings.php", "/sites/default/settings.local.php", "/sites/default/default.settings.php",
       "/sites/default/services.yml", "/sites/default/default.services.yml", "/composer.json", "/composer.lock",
-      "/web.config", "/update.php.bak"},
+      "/web.config", "/update.php.bak", "/autoload.php", "/package.json", "/package-lock.json", "/yarn.lock"},
      "https://www.drupal.org/download-latest/tar.gz", "https://ftp.drupal.org/files/projects/drupal-{version}.tar.gz",
      {"/sites/default/settings.php", "/sites/default/settings.local.php", "/sites/default/services.yml"},
-     "/sites/default/files", {}, {"/user/login"}},
+     "/sites/default/files", {}, {"/user/login"},
+     // Drupal's .htaccess: "Allow access to PHP files in /core (like authorize.php or install.php)",
+     // the statistics front controller (10.5), any other PHP below a directory refused; its two
+     // test front controllers stay closed here.
+     {"/", "/core/"}, {"/core/modules/statistics/statistics.php"}},
     // WordPress: any .php runs (wp-login.php, wp-admin/*, wp-cron.php, plugin endpoints),
     // pretty permalinks fall back to index.php, nothing under uploads or wp-includes is
     // ever executed and their files are cacheable (modestly: WordPress versions assets by
@@ -729,13 +740,19 @@ const std::vector<PhpPreset> kPhpPresets = {
     // inside WordPress's own bootstrap and are never fetched over HTTP. Backups of any of
     // these (wp-config.php~, .bak, .txt, .wp-config.php.swp) are the same 404: `never`
     // names are protected in every backup spelling (backup_of_protected).
-    {"wordpress", "WordPress: any .php runs, pretty permalinks reach index.php, nothing under wp-content/uploads or wp-includes ever executes; wp-config.php, readme.html and license.txt (the version fingerprint) and the wp-content drop-ins (db.php, advanced-cache.php, object-cache.php) are never answered, in any backup spelling.",
+    {"wordpress", "WordPress: any .php runs, pretty permalinks reach index.php, nothing under wp-content/uploads or wp-includes ever executes, wp-admin/includes and wp-includes/theme-compat are never answered (WordPress's hardening guide); wp-config.php, readme.html and license.txt (the version fingerprint) and the wp-content drop-ins (db.php, advanced-cache.php, object-cache.php) are never answered, in any backup spelling.",
      "", false, {"index.php"}, true, true, kSourceBackups,
-     {{"/wp-content/uploads/", "public, max-age=604800"}, {"/wp-includes/", "public, max-age=2592000"}},
+     // wp-admin's css/, js/ and images/ hold WordPress's own static files (the login page loads
+     // them, so finalize_site keeps them open when /wp-admin is restricted): nothing runs there.
+     {{"/wp-content/uploads/", "public, max-age=604800"}, {"/wp-includes/", "public, max-age=2592000"},
+      {"/wp-admin/css/", nullptr}, {"/wp-admin/js/", nullptr}, {"/wp-admin/images/", nullptr}},
      {"/wp-config.php", "/wp-config-sample.php", "/readme.html", "/license.txt",
       "/wp-content/db.php", "/wp-content/advanced-cache.php", "/wp-content/object-cache.php"},
      "https://wordpress.org/latest.tar.gz", "https://wordpress.org/wordpress-{version}.tar.gz",
-     {"/wp-config.php"}, "/wp-content/uploads", {}, {"/wp-login.php", "/xmlrpc.php"}},
+     {"/wp-config.php"}, "/wp-content/uploads",
+     // WordPress's hardening guide (developer.wordpress.org/advanced-administration/security/
+     // hardening): "RewriteRule ^wp-admin/includes/ - [F,L]" and "^wp-includes/theme-compat/ - [F,L]".
+     {"/wp-admin/includes/", "/wp-includes/theme-compat/"}, {"/wp-login.php", "/xmlrpc.php"}},
     // Grav (flat-file CMS; 2026-09-23 live report: run on the borrowed drupal preset, its
     // logs/grav.log named a backup archive under backup/ that held the admin account and
     // the signing salt, and both were served). Only index.php runs; logs/, backup/, cache/,
@@ -934,7 +951,19 @@ void apply_preset(SiteConfig& site, const std::string& where) {
                                                  : parse_try_files({"$uri", "$uri/", "=404"});
     // What runs: every .php through FastCGI, or the front controller alone.
     if (preset.any_php) {
-        if (!has(".php", false, true)) site.locations.push_back(fcgi_location(".php", false, true));
+        if (!has(".php", false, true)) {
+            if (preset.php_dirs.empty()) {
+                site.locations.push_back(fcgi_location(".php", false, true));
+            } else {
+                for (const char* dir : preset.php_dirs) {
+                    LocationConfig l = fcgi_location(".php", false, true);
+                    l.script_dir = dir;
+                    site.locations.push_back(std::move(l));
+                }
+            }
+        }
+        for (const char* e : preset.entries)
+            if (!has(e, true, false)) site.locations.push_back(fcgi_location(e, true, false));
     } else if (!has("/index.php", true, false)) {
         site.locations.push_back(fcgi_location("/index.php", true, false));
     }
@@ -1705,6 +1734,7 @@ void explain_config(const Config& cfg, std::ostream& out) {
             out << "\n";
             const char* match = loc.exact ? "exact" : loc.suffix ? "suffix" : "prefix";
             out << "path = \"" << loc.path << "\"\nmatch = \"" << match << "\"\n";
+            if (!loc.script_dir.empty()) out << "# only a script directly in " << loc.script_dir << " (the application's own rule)\n";
             if (loc.final) out << "final = true\n";
             if (!loc.deny_suffixes.empty()) print_list(out, "deny_suffixes", loc.deny_suffixes);
             if (!loc.allow_suffixes.empty()) print_list(out, "allow_suffixes", loc.allow_suffixes);
@@ -1877,26 +1907,41 @@ void finalize_site(SiteConfig& site) {
     static std::atomic<std::uint64_t> next_id{1};
     for (auto& loc : site.locations)
         if (loc.id == 0) loc.id = next_id.fetch_add(1, std::memory_order_relaxed);
-    // [[site.access]]: WordPress's public front end calls /wp-admin/admin-ajax.php (search,
-    // carts, comment forms), so a rule on /wp-admin alone keeps that file open to anyone
-    // unless a rule names it; a rule on "/" (the whole site) keeps it closed with the rest.
+    // [[site.access]]: with /wp-admin alone restricted (not the whole site), what the public
+    // site still needs below it stays open to anyone: admin-ajax.php, which the front end
+    // calls (search, carts, comment forms; the hardening guide's own caveat), and the login
+    // page's files, since wp-login.php loads /wp-admin/css/login.css, forms.css, l10n.css and
+    // /wp-admin/js/user-profile.js and password-strength-meter.js (wp-includes/script-loader.php;
+    // WooCommerce's account pages load the meter too) with the logo from /wp-admin/images/.
+    // A rule the site names for one of these paths wins.
     if (site.app == "wordpress" && !site.access.empty()) {
-        constexpr std::string_view ajax = "/wp-admin/admin-ajax.php";
-        const AccessRule* best = nullptr;
         bool whole = false;
-        for (const auto& r : site.access) {
-            if (!r.exact && r.path == "/") whole = true;
-            if (access::covers(r, ajax) && (!best || r.path.size() > best->path.size() || (r.exact && !best->exact))) best = &r;
-        }
-        if (best && !whole && !best->exact && !best->any && best->path.size() == 9 && access::iequal_prefix(best->path, "/wp-admin")) {
+        for (const auto& r : site.access) whole = whole || (!r.exact && r.path == "/");
+        struct Opening {
+            const char* path;
+            bool exact;
+            const char* probe;
+        };
+        static constexpr Opening kOpen[] = {{"/wp-admin/admin-ajax.php", true, "/wp-admin/admin-ajax.php"},
+                                            {"/wp-admin/css", false, "/wp-admin/css/x.css"},
+                                            {"/wp-admin/js", false, "/wp-admin/js/x.js"},
+                                            {"/wp-admin/images", false, "/wp-admin/images/x.png"}};
+        std::vector<AccessRule> add;
+        for (const Opening& o : kOpen) {
+            if (whole) break;
+            const AccessRule* best = nullptr;
+            for (const auto& r : site.access)
+                if (access::covers(r, o.probe) && (!best || r.path.size() > best->path.size() || (r.exact && !best->exact))) best = &r;
+            if (!best || best->exact || best->any || best->path.size() != 9 || !access::iequal_prefix(best->path, "/wp-admin")) continue;
             AccessRule open;
-            open.path = std::string(ajax);
-            open.exact = true;
+            open.path = o.path;
+            open.exact = o.exact;
             open.any = true;
             open.allow_text = {"any"};
             open.origin = "preset:wordpress";
-            site.access.push_back(std::move(open));
+            add.push_back(std::move(open));
         }
+        for (auto& r : add) site.access.push_back(std::move(r));
     }
     std::stable_sort(site.access.begin(), site.access.end(), [](const AccessRule& a, const AccessRule& b) {
         if (a.path.size() != b.path.size()) return a.path.size() > b.path.size();
@@ -2291,7 +2336,14 @@ json::Value preset_catalog() {
         json::Value v = json::Value::object().set("app", p.name).set("summary", p.summary);
         v.set("root", *p.subdir ? std::string("the project directory; its ") + p.subdir + "/ is served" + (p.subdir_required ? "" : " when it holds index.php")
                                  : std::string("the document root"));
-        v.set("php", p.any_php ? "every .php runs through FastCGI" : "only /index.php runs; any other .php is refused (404)");
+        if (!p.any_php) v.set("php", "only /index.php runs; any other .php is refused (404)");
+        else if (p.php_dirs.empty()) v.set("php", "every .php runs through FastCGI");
+        else {
+            std::string dirs;
+            for (const char* d : p.php_dirs) dirs += std::string(dirs.empty() ? "" : " and ") + d;
+            for (const char* e : p.entries) dirs += std::string(", and ") + e;
+            v.set("php", "a .php runs only directly in " + dirs + "; any other .php below a directory is refused (404), as the application's own server rules say");
+        }
         v.set("front_controller", p.front_controller);
         json::Value refused = json::Value::array();
         for (const auto& s : p.refuse) refused.push(s);
@@ -2323,6 +2375,15 @@ json::Value preset_catalog() {
         v.set("secrets", std::move(secrets));
         v.set("uploads", *p.uploads ? json::Value(p.uploads) : json::Value(nullptr));
         v.set("source", *p.source ? json::Value(p.source) : json::Value(nullptr));
+        if (const auto admin = preset_admin_paths(p.name); !admin.empty()) {  // what rules.admin restricts, on request only
+            json::Value paths = json::Value::array();
+            for (const auto& a : admin) {
+                json::Value e = json::Value::object().set("path", a.path).set("match", a.exact ? "exact" : "prefix");
+                if (a.login) e.set("login", true);
+                paths.push(std::move(e));
+            }
+            v.set("admin_paths", std::move(paths));
+        }
         list.push(std::move(v));
     }
     list.push(json::Value::object().set("app", "proxy").set("summary", "Reverse proxy: every request goes to the site's upstream (Node, Rails, Go, Java, WebSockets); no root needed.")
@@ -2436,6 +2497,18 @@ std::string preset_source(const std::string& app, const std::string& version) {
     const std::size_t at = url.find("{version}");
     if (at != std::string::npos) url.replace(at, 9, version);
     return url;
+}
+
+std::vector<AdminPath> preset_admin_paths(const std::string& app) {
+    // WordPress: the dashboard directory, and the login page (WordPress's hardening guide
+    // protects /wp-admin/; admin-ajax.php and the login page's files stay open, finalize_site).
+    if (app == "wordpress") return {{"/wp-admin", false, false}, {"/wp-login.php", true, true}};
+    // Drupal: its admin routes and the PHP entry points the community's hardening advice
+    // restricts (update.php, core/install.php, core/authorize.php, core/rebuild.php), and the login.
+    if (app == "drupal")
+        return {{"/admin", false, false},        {"/update.php", true, false},  {"/core/install.php", true, false},
+                {"/core/authorize.php", true, false}, {"/core/rebuild.php", true, false}, {"/user/login", false, true}};
+    return {};
 }
 
 std::vector<std::string> preset_login_paths(const std::string& app) {

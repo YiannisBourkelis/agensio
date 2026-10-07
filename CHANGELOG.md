@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.1.0-alpha.53
+
+From the alpha.52 report (a live host and a private instance: the client-address fixes and the
+access rules confirmed, twenty spellings of a restricted path refused, report mode and the
+managed rules as documented), three findings, each reproduced by a test that failed first:
+
+- **Report mode could hide the clients it exists to name.** Its lines shared the refusal
+  limiter of one line a second per worker, so a refusal elsewhere in the same second, or a
+  second client, left them unwritten. Report mode has a limiter of its own now: each rule and
+  client is named once a minute (32 remembered per worker, at most 16 new lines a second, the
+  rest counted), with the requests it made since its last line. The refusals held back are
+  counted "since the last such line" (the line said "in the last second" about counts seconds
+  old), and the count is written by the worker's one-second tick when no refusal follows; before,
+  it waited for the next refusal, perhaps for ever. Three integration checks.
+- **site_update said nothing of what -t notes about a site's access rules**: a dry run of a
+  whole-site rule answered `warnings: null`. `site_create` and `site_update` (dry run and real)
+  now answer the same notes as warnings: a site restricted as a whole, an entry that holds a
+  trusted proxy or loopback, an IPv4-only list on an IPv6 listener, a single IPv6 address.
+- **An X-Forwarded-For entry with a port** (`198.51.100.7:1234`, as some load balancers write
+  it) was garbage, so the client became the proxy itself. `a.b.c.d:port` and `[v6]:port` (or
+  `[v6]`) are the address alone now; a bad port still stops the walk. Unit test and an
+  integration check.
+
+The WordPress and Drupal presets after the access rules (design section 23), following each
+application's own documents; an admin panel stays reachable from anywhere until its owner
+restricts it. Each change was reproduced by a test that failed first:
+
+- **Drupal runs PHP where Drupal's own `.htaccess` lets it** (security): a script directly in
+  the web root, directly in `core/`, and `core/modules/statistics/statistics.php`. Any other
+  `.php` (a module's, a theme's, a library's) ran before, as in most nginx recipes for Drupal;
+  it is 404 now and never reaches php-fpm. `autoload.php` is refused by name, and the names
+  its `FilesMatch` protects in any directory are refused too: `.sh` scripts, `composer.json`,
+  `composer.lock`, `package.json`, `package-lock.json`, `yarn.lock`, `web.config` (the root's
+  `package.json`, `yarn.lock` and a `deploy.sh` were served). `--explain` shows the rule as `#
+  only a script directly in /`; `presets_list` says it. A module that documents a script of
+  its own gets an exact location in the site's root additions.
+- **WordPress refuses `wp-admin/includes/` and `wp-includes/theme-compat/`**, as WordPress's
+  hardening guide does: library scripts that print errors with paths when run directly.
+- **With `/wp-admin` restricted, the login page kept its look**: `/wp-admin/css/`,
+  `/wp-admin/js/` and `/wp-admin/images/` stay open beside `admin-ajax.php` (wp-login.php
+  loads its styles, scripts and logo from there; WooCommerce's password meter too). Those
+  three directories run no script, so a `.php` planted there is 404, restricted or not.
+- **`rules.admin`**: restricting an admin panel by address is one field on a managed WordPress
+  or Drupal site, `{"allow": ["@office"]}` with optional `"login": true` (the login page too),
+  `"languages": ["fr"]` (Drupal's URL prefixes: `/fr/admin` answers like `/admin`) and
+  `"mode": "report"`, rendered from the preset's administration paths (WordPress `/wp-admin`,
+  `/wp-login.php`; Drupal `/admin`, `update.php`, `core/install.php`, `core/authorize.php`,
+  `core/rebuild.php`, `/user/login`), which `presets_list` lists as `admin_paths`. Never set
+  by default; the MCP texts tell an agent to apply it only on request, after `access_check`
+  with the user's own address, in report mode first. `agensio ctl site-update
+  --restrict-admin ADDR,... [--admin-login] [--admin-language L] / --no-restrict-admin`.
+
 ## 0.1.0-alpha.52 (2026-10-07)
 
 Three bugs in how agensio decides who the client is, found by the research behind the coming

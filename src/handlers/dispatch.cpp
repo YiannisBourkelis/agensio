@@ -33,27 +33,84 @@ bool Dispatcher::admit(Stream& s, const SiteConfig& site, std::string_view path,
     if (!d.rule) return true;
     const std::string text = address().to_string();
     if (log_ && log_->enabled(LogLevel::warn)) {
-        if (ws.now != ws.access_logged) {
-            std::string line = d.refuse() ? "access refused: site " : "access would refuse: site ";
-            line.append(site.server_names.front()).append(" rule ").append(d.rule->path);
-            if (d.rule->exact) line.append(" (exact)");
-            line.append(" allows ");
-            for (std::size_t i = 0; i < d.rule->allow_text.size(); ++i) line.append(i ? ", " : "").append(d.rule->allow_text[i]);
-            line.append("; client ").append(text);
+        auto line = [&](std::string_view head) {
+            std::string l(head);
+            l.append(site.server_names.front()).append(" rule ").append(d.rule->path);
+            if (d.rule->exact) l.append(" (exact)");
+            l.append(" allows ");
+            for (std::size_t i = 0; i < d.rule->allow_text.size(); ++i) l.append(i ? ", " : "").append(d.rule->allow_text[i]);
+            l.append("; client ").append(text);
             if (!s.conn.client_address.empty() && s.conn.peer)
-                line.append(" (from X-Forwarded-For; peer ").append(s.conn.peer->peer_ip().to_string()).append(")");
-            line.append(" ").append(s.request.method_name).append(" ").append(path.substr(0, 200));
-            if (ws.access_skipped) line.append(" (").append(std::to_string(ws.access_skipped)).append(" more in the last second not written)");
-            log_->warn(line);
-            ws.access_logged = ws.now;
-            ws.access_skipped = 0;
+                l.append(" (from X-Forwarded-For; peer ").append(s.conn.peer->peer_ip().to_string()).append(")");
+            l.append(" ").append(s.request.method_name).append(" ").append(path.substr(0, 200));
+            return l;
+        };
+        WorkerState::AccessLog& al = ws.access_log;
+        if (d.refuse()) {
+            if (ws.now != al.refused_at) {
+                std::string l = line("access refused: site ");
+                if (al.refused_held) l.append(" (").append(std::to_string(al.refused_held)).append(" more refusals since the last such line, not written)");
+                log_->warn(l);
+                al.refused_at = ws.now;
+                al.refused_held = 0;
+            } else {
+                ++al.refused_held;
+            }
         } else {
-            ++ws.access_skipped;
+            // Report mode: named once a minute per rule and client, at most 16 lines a second.
+            const Cidr::Key key = Cidr::key_of(address());
+            WorkerState::AccessLog::Seen* slot = nullptr;
+            WorkerState::AccessLog::Seen* oldest = &al.seen[0];
+            for (auto& e : al.seen) {
+                if (e.rule == d.rule && e.client.v6 == key.v6 && e.client.hi == key.hi && e.client.lo == key.lo) slot = &e;
+                if (e.at < oldest->at) oldest = &e;
+            }
+            if (slot && ws.now - slot->at < 60) {
+                ++slot->repeats;
+            } else {
+                if (ws.now != al.report_second) {
+                    al.report_second = ws.now;
+                    al.report_in_second = 0;
+                }
+                if (al.report_in_second < 16) {
+                    ++al.report_in_second;
+                    std::string l = line("access would refuse: site ");
+                    if (slot && slot->repeats)
+                        l.append(" (").append(std::to_string(slot->repeats)).append(" more requests from this client since its last line)");
+                    log_->warn(l);
+                    if (!slot) slot = oldest;
+                    slot->rule = d.rule;
+                    slot->client = key;
+                    slot->at = ws.now;
+                    slot->repeats = 0;
+                } else {
+                    ++al.report_unnamed;
+                }
+            }
         }
     }
     if (!d.refuse()) return true;
     refuse_access(s, text);
     return false;
+}
+
+void Dispatcher::access_log_tick(WorkerState& ws, std::time_t now) {
+    WorkerState::AccessLog& al = ws.access_log;
+    if (!log_ || !log_->enabled(LogLevel::warn)) {
+        al.refused_held = al.report_unnamed = 0;
+        return;
+    }
+    if (al.refused_held && now != al.refused_at) {
+        log_->warn("access refused: " + std::to_string(al.refused_held) +
+                   " more refusals since the last such line, not written (the access log has each 403 with its client)");
+        al.refused_held = 0;
+        al.refused_at = now;
+    }
+    if (al.report_unnamed && now != al.report_second) {
+        log_->warn("access would refuse: " + std::to_string(al.report_unnamed) +
+                   " more requests in report mode since the last such line, not named (more than 16 new clients a second)");
+        al.report_unnamed = 0;
+    }
 }
 
 // 403 with the address that was tested, so a user whose address changed can say which one the

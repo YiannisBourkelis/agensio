@@ -3508,7 +3508,7 @@ static void test_control_sites() {
         CHECK(php_row.get("app") == "php" && refused.find(".sqlite ") != std::string::npos && refused.find(".sqlite3 ") != std::string::npos &&
               refused.find(".db ") != std::string::npos && never == "/web.config ");
     }
-    CHECK(catalog["presets"].items()[3]["never_served"].items().size() == 9 && catalog["presets"].items()[3]["no_php_under"].items().size() == 5);
+    CHECK(catalog["presets"].items()[3]["never_served"].items().size() == 13 && catalog["presets"].items()[3]["no_php_under"].items().size() == 5);
     err.clear();
     CHECK(json::parse(R"({"aliases":["bad host"]})", body, err) && (apply_request(body, cfg, spec, err), err.find("alias") != std::string::npos));
     err.clear();
@@ -5358,6 +5358,12 @@ static void test_forwarded_lines() {
     CHECK_EQ(client({{"X-Forwarded-For", "203.0.113.9, 127.0.0.1"}}), std::string("203.0.113.9"));
     // Garbage stops the walk across lines too: nothing left of it is believed.
     CHECK_EQ(client({{"X-Forwarded-For", "10.66.66.66"}, {"X-Forwarded-For", "nonsense, 127.0.0.1"}}), std::string("127.0.0.1"));
+    // An entry with a port (some load balancers write one): the address without it.
+    CHECK_EQ(client({{"X-Forwarded-For", "198.51.100.7:1234"}}), std::string("198.51.100.7"));
+    CHECK_EQ(client({{"X-Forwarded-For", "[2001:db8::1]:443"}}), std::string("2001:db8::1"));
+    CHECK_EQ(client({{"X-Forwarded-For", "[2001:db8::1]"}}), std::string("2001:db8::1"));
+    CHECK_EQ(client({{"X-Forwarded-For", "2001:db8::1"}}), std::string("2001:db8::1"));
+    CHECK_EQ(client({{"X-Forwarded-For", "203.0.113.1, 198.51.100.7:x"}}), std::string(""));  // a bad port: garbage, nothing believed
     // X-Forwarded-Proto: the last line's last value, not a client's earlier "https".
     bool https = true;
     (void)client({{"X-Forwarded-For", "203.0.113.9"}, {"X-Forwarded-Proto", "https"}, {"X-Forwarded-Proto", "http"}}, &https);
@@ -5484,6 +5490,17 @@ static void test_access_rules() {
         Config w = wp("[[site.access]]\npath = \"/wp-admin\"\nallow = [\"10.0.0.0/8\"]\n");
         const AccessRule* r = access::rule_for(w.sites[0], "/wp-admin/admin-ajax.php");
         CHECK(r && r->any && r->exact && r->origin == "preset:wordpress");
+        // wp-login.php loads /wp-admin/css/login.css, forms.css, l10n.css and /wp-admin/js/user-profile.js,
+        // password-strength-meter.js (wp-includes/script-loader.php): those stay open too.
+        for (const char* open : {"/wp-admin/css/login.css", "/wp-admin/js/user-profile.js", "/wp-admin/images/w-logo-blue.png"}) {
+            const AccessRule* o = access::rule_for(w.sites[0], open);
+            CHECK(o && o->any && o->origin == "preset:wordpress");
+        }
+        r = access::rule_for(w.sites[0], "/wp-admin/options.php");
+        CHECK(r && !r->any && r->path == "/wp-admin");
+        // WordPress's hardening guide: wp-admin/includes/ and wp-includes/theme-compat/ refused whole.
+        CHECK(Router::location(w.sites[0], "/wp-admin/includes/file.php").handler == "deny");
+        CHECK(Router::location(w.sites[0], "/wp-includes/theme-compat/header.php").handler == "deny");
         Config whole = wp("[[site.access]]\npath = \"/\"\nallow = [\"10.0.0.0/8\"]\n[[site.access]]\npath = \"/wp-admin\"\nallow = [\"10.0.0.0/8\"]\n");
         r = access::rule_for(whole.sites[0], "/wp-admin/admin-ajax.php");
         CHECK(r && !r->any && r->path == "/wp-admin");
@@ -5534,6 +5551,58 @@ static void test_access_rules() {
         CHECK(text.find("[[site.access]]   # rules: restricted\npath = \"/admin\"\nallow = [\"203.0.113.7\", \"@office\"]\n") != std::string::npos);
         CHECK(text.find("path = \"/\"\nallow = [\"any\"]\nmode = \"report\"\n") != std::string::npos && text.find("path = \"/x.php\"\nmatch = \"exact\"\n") != std::string::npos);
     }
+    // rules.admin (2026-10-07): the preset's admin paths in one field, off unless the user
+    // asks; the login page only with login: true; Drupal's language prefixes named.
+    {
+        auto norm = [&](SiteSpec& sp, const char* text, std::string& why) {
+            json::Value g, n;
+            std::string e;
+            if (!json::parse(text, g, e)) return json::Value();
+            why = check_rules(g, sp, n, &cfg);
+            return n;
+        };
+        SiteSpec wp;
+        wp.domain = "w.test";
+        wp.app = "wordpress";
+        wp.https = "none";
+        wp.root = "/var/www/w";
+        wp.no_user = true;
+        std::string why;
+        wp.rules = norm(wp, R"({"admin":{"allow":["@office"]}})", why);
+        CHECK(why.empty() && wp.rules["admin"]["allow"].items().size() == 1);
+        std::string text = render_site(wp, "x");
+        if (const std::size_t at = text.find("# rules: admin"); at != std::string::npos && text.find("[[site.access]]   # rules: admin\npath = \"/wp-admin\"\nallow = [\"@office\"]\n") == std::string::npos)
+            std::printf("rules.admin rendered:\n%s\n", text.substr(at > 40 ? at - 40 : 0, 400).c_str());
+        else if (at == std::string::npos) std::printf("rules.admin rendered nothing:\n%s\n", text.c_str());
+        CHECK(text.find("[[site.access]]   # rules: admin\npath = \"/wp-admin\"\nallow = [\"@office\"]\n") != std::string::npos);
+        CHECK(text.find("/wp-login.php") == std::string::npos);
+        wp.rules = norm(wp, R"({"admin":{"allow":["10.0.0.0/8"],"login":true,"mode":"report"}})", why);
+        text = render_site(wp, "x");
+        CHECK(why.empty() && text.find("path = \"/wp-login.php\"\nmatch = \"exact\"\nallow = [\"10.0.0.0/8\"]\nmode = \"report\"\n") != std::string::npos);
+        SiteSpec dr = wp;
+        dr.app = "drupal";
+        dr.rules = norm(dr, R"({"admin":{"allow":["10.0.0.0/8"],"login":true,"languages":["fr","pt-br"]}})", why);
+        text = render_site(dr, "x");
+        CHECK(why.empty());
+        for (const char* p : {"\"/admin\"", "\"/fr/admin\"", "\"/pt-br/admin\"", "\"/update.php\"", "\"/core/install.php\"", "\"/core/authorize.php\"",
+                              "\"/core/rebuild.php\"", "\"/user/login\"", "\"/fr/user/login\"", "\"/pt-br/user/login\""})
+            CHECK(text.find(std::string("path = ") + p) != std::string::npos);
+        // What is refused: an app without known admin paths, languages on WordPress, a bad
+        // language code, an empty list, a path restricted twice.
+        SiteSpec st = wp;
+        st.app = "static";
+        (void)norm(st, R"({"admin":{"allow":["10.0.0.1"]}})", why);
+        CHECK(!why.empty());
+        (void)norm(wp, R"({"admin":{"allow":["10.0.0.1"],"languages":["fr"]}})", why);
+        CHECK(!why.empty());
+        (void)norm(dr, R"({"admin":{"allow":["10.0.0.1"],"languages":["FR"]}})", why);
+        CHECK(!why.empty());
+        (void)norm(dr, R"({"admin":{"allow":[]}})", why);
+        CHECK(!why.empty());
+        (void)norm(wp, R"({"admin":{"allow":["10.0.0.1"]},"restricted":[{"path":"/wp-admin","allow":["10.0.0.2"]}]})", why);
+        CHECK(!why.empty());
+        CHECK(preset_admin_paths("wordpress").size() == 2 && preset_admin_paths("drupal").size() == 6 && preset_admin_paths("static").empty());
+    }
     // access-check: the decision, the rule, the summary; a bad path or address is an error.
     {
         std::string err;
@@ -5577,6 +5646,31 @@ static void test_packaged_docs() {
         CHECK(installed);
     }
     CHECK(guides >= 7);
+}
+
+// The Drupal preset follows Drupal's own .htaccess (10.5 and 11): PHP runs directly under the
+// root (autoload.php excepted), directly under /core/ and in the named front controllers; any
+// other .php below a directory is refused (2026-10-07; before, every .php outside the shields ran).
+static void test_drupal_php_rule() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-drupal-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "web" / "core");
+    std::ofstream(dir / "web" / "index.php") << "<?php";
+    std::ofstream(dir / "d.toml") << "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \".\"\napp = \"drupal\"\nphp = { socket = \"unix:/run/php/fpm.sock\" }\n";
+    const Config cfg = load_config(dir / "d.toml");
+    fs::remove_all(dir);
+    const SiteConfig& s = cfg.sites[0];
+    auto kind = [&](std::string_view path) {
+        const LocationConfig& l = Router::location(s, path);
+        return std::string(l.kind == HandlerKind::fastcgi ? "fastcgi" : l.handler == "deny" ? "deny" : "static");
+    };
+    CHECK(kind("/index.php") == "fastcgi" && kind("/update.php") == "fastcgi" && kind("/index.php/node/1") == "fastcgi");
+    CHECK(kind("/core/install.php") == "fastcgi" && kind("/core/authorize.php") == "fastcgi" && kind("/core/rebuild.php") == "fastcgi");
+    CHECK(kind("/core/modules/statistics/statistics.php") == "fastcgi");
+    CHECK(kind("/modules/custom/x/evil.php") == "static" && kind("/themes/t/x.php") == "static" && kind("/core/modules/node/x.php") == "static");
+    CHECK(kind("/autoload.php") == "deny" && kind("/package.json") == "deny" && kind("/package-lock.json") == "deny" && kind("/yarn.lock") == "deny");
+    const LocationConfig& root = Router::location(s, "/deploy.sh");
+    CHECK(std::find(root.deny_suffixes.begin(), root.deny_suffixes.end(), ".sh") != root.deny_suffixes.end());
 }
 
 // The refused-endings rule, with the spellings a live host served as source.
@@ -6499,7 +6593,7 @@ static void test_backup_of_protected() {
     write("d.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"wp\"\napp = \"drupal\"\nphp = { socket = \"unix:/run/php/fpm.sock\" }\n[[site]]\nlisten = [\"127.0.0.1:18081\"]\nroot = \"wp\"\n");
     Config dcfg = load_config(dir / "d.toml");
     const LocationConfig& droot = Router::location(dcfg.sites[0], "/x.txt");
-    CHECK(droot.protects.size() == 9 && backup_of_protected("/sites/default/settings.php.bak", droot.protects) && backup_of_protected("/sites/default/settings.bak", droot.protects) &&
+    CHECK(droot.protects.size() == 13 && backup_of_protected("/sites/default/settings.php.bak", droot.protects) && backup_of_protected("/sites/default/settings.bak", droot.protects) &&
           backup_of_protected("/composer.json~", droot.protects) && backup_of_protected("/web.config.old", droot.protects) && !backup_of_protected("/sites/default/files/settings.php.bak", droot.protects));
     CHECK(Router::location(dcfg.sites[1], "/x.txt").protects.empty());
     // Every PHP preset's root refuses PHP in the spellings the suffix location does not take
@@ -6636,6 +6730,7 @@ int main() {
     test_address_forms();
     test_access_rules();
     test_packaged_docs();
+    test_drupal_php_rule();
     test_refusal_finding();
     test_protection();
     test_install();

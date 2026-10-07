@@ -199,7 +199,8 @@ request for any other `.php` under `public/`, existing or not, answers 404 from 
 static handler before anything is read from disk, so a stray or uploaded `.php` file is
 neither a code-execution path nor a download of its source (2026-09-19: before this
 rule an existing second `.php` was served as a file). An application with several
-entry points is not Laravel; use `app = "drupal"` (section 4c) or `app = "php"`.
+entry points is not Laravel; use `app = "php"` (with `rules.entry_points` on a managed
+site, section 15), or `app = "drupal"` for Drupal (section 4c).
 Dotfiles (`.env`) stay hidden by the site default. `public/storage` is a symlink into the project, which is
 why `symlinks = "allow"` is the default; set `symlinks = "deny"` on sites that have no
 such link.
@@ -256,10 +257,24 @@ final = true
 deny_suffixes = [...the same list...]
 try_files = ["$uri", "=404"]
 add_headers = { "Cache-Control" = "public, max-age=2592000" }
+
+[[site.location]]        # WordPress's hardening guide: never reached from the web
+path = "/wp-admin/includes/"
+final = true
+handler = "deny"         # 404 whatever exists; likewise /wp-includes/theme-compat/
+
+[[site.location]]        # the admin's static files: served, nothing runs (no Cache-Control added);
+path = "/wp-admin/css/"  # likewise /wp-admin/js/ and /wp-admin/images/
+final = true
+deny_suffixes = [...the same list...]
+try_files = ["$uri", "=404"]
 ```
 
-`wp-content/plugins` is deliberately not shielded: some plugins expose PHP endpoints
-there. `wp-config.php`, `wp-config-sample.php`, `readme.html`, `license.txt` and the
+`wp-admin/includes/` and `wp-includes/theme-compat/` answer 404 and never run (since
+alpha.53), the two directories WordPress's "Hardening WordPress" guide blocks besides
+`wp-includes/` itself: their scripts are libraries loaded by WordPress, and run directly
+they print errors that name paths. `wp-content/plugins` is deliberately not shielded: some
+plugins expose PHP endpoints there. `wp-config.php`, `wp-config-sample.php`, `readme.html`, `license.txt` and the
 `wp-content` drop-ins `db.php`, `advanced-cache.php` and `object-cache.php` are answered
 404 by exact locations the preset adds (`try_files = ["=404"]`): the credentials file is
 never executed nor shown, whereas nginx recipes usually execute it (it prints nothing);
@@ -280,7 +295,7 @@ are untouched, and `/readme`, `/license` and `/license-agreement` stay permalink
 password and the salts in them; the exact name was 404). The presets catalogue
 (`agensio ctl presets`, MCP `presets_list`) states the rule.
 
-## 4c. Drupal and other multi-entry-point PHP applications: `app = "drupal"`
+## 4c. Drupal: `app = "drupal"`
 
 ```toml
 [[site]]
@@ -298,16 +313,28 @@ root = "/var/www/drupal/web"
 index = ["index.php"]
 try_files = ["$uri", "$uri/", "/index.php?$query_string"]   # pretty paths reach the front controller
 
-[[site.location]]        # any .php runs: index.php, core/install.php, update.php, core/rebuild.php
+[[site.location]]        # Drupal's own rule: a script directly in / runs (index.php, update.php)
+path = ".php"            # (shown by --explain as "only a script directly in /"; a preset rule,
+match = "suffix"         #  not a key a hand-written site can set)
+handler = "fastcgi"
+
+[[site.location]]        # and a script directly in /core/ (install.php, authorize.php, rebuild.php)
 path = ".php"
 match = "suffix"
+handler = "fastcgi"      # "only a script directly in /core/"
+
+[[site.location]]        # the one deeper script Drupal's .htaccess lets run
+path = "/core/modules/statistics/statistics.php"
+match = "exact"
 handler = "fastcgi"
 
 [[site.location]]        # what Drupal's .htaccess protects, refused natively (404): PHP source in its
 path = "/"               # other spellings, templates, translations, dumps, editor backups
 deny_suffixes = [".inc", ".bak", ".orig", ".save", ".swp", ".swo", "~", ".log", ".sql",   # the shared list (below)
                  ".install", ".module", ".theme", ".engine", ".profile", ".make", ".po", ".twig", ".yml", ".yaml",
-                 ".sqlite", ".sqlite3", ".db", ".tpl", ".xtmpl"]                             # Drupal's own
+                 ".sqlite", ".sqlite3", ".db", ".tpl", ".xtmpl", ".sh",                      # Drupal's own
+                 "/composer.json", "/composer.lock", "/package.json", "/package-lock.json",  # these names in any
+                 "/yarn.lock", "/web.config"]                                                # directory
 
 # final prefixes (nginx ^~): nothing PHP-like under library, vendor and upload directories
 [[site.location]]  path = "/core/lib/"             final = true  try_files = ["$uri", "=404"]  deny_suffixes = [...php and the list above...]
@@ -319,11 +346,26 @@ deny_suffixes = [".inc", ".bak", ".orig", ".save", ".swp", ".swo", "~", ".log", 
 # never answered, whatever is on disk (404, existence not disclosed)
 [[site.location]]  path = "/sites/default/settings.php"  match = "exact"  try_files = ["=404"]
 # likewise settings.local.php, default.settings.php, services.yml, default.services.yml,
-# composer.json, composer.lock, web.config
+# composer.json, composer.lock, package.json, package-lock.json, yarn.lock, web.config,
+# and autoload.php (Drupal's .htaccess refuses it by name: it is a script directly in /)
 ```
+
+**Which PHP runs is Drupal's own rule** (since alpha.53, from the `.htaccess` that Drupal 10
+and 11 ship): a script directly in the web root (`index.php`, `update.php`), a script
+directly in `core/` (`install.php`, `authorize.php`, `rebuild.php`) and
+`core/modules/statistics/statistics.php`; `autoload.php` and every other `.php` (a
+module's, a theme's, a library's, anything a plugin left under `modules/` or `themes/`) is
+refused with 404 and never reaches php-fpm, in any case spelling. PATH_INFO after a script
+that runs still works (`/index.php/node/1`). Before alpha.53 any `.php` ran, as most nginx
+recipes for Drupal do; a module's stray script was then executable from the web. A module
+whose documentation asks for a script of its own to be reachable (Drupal's `.htaccess`
+says to copy the statistics line for it) gets an exact `handler = "fastcgi"` location in
+the site's root additions (section 15).
 
 `.htaccess`, `.ht.sqlite` (Drupal's SQLite database), `.env` and `.git/` are dotfiles and
 stay hidden by the site default. A `.php` that does not exist answers 404 before php-fpm.
+`composer.json`, `package.json`, `yarn.lock`, `web.config` and `.sh` scripts are refused in
+any directory, as the `FilesMatch` of Drupal's `.htaccess` refuses them.
 
 **agensio never reads `.htaccess`.** Applications that ship one (Drupal, WordPress,
 Joomla, most PHP software) rely on it for exactly these refusals under Apache; under
@@ -332,8 +374,10 @@ provide its own. The list above is the subset of Drupal's `.htaccess` that matte
 source disclosure and execution of files that are not entry points. Drupal's other
 rules (canonical redirects, caching headers) are optional and can be added as locations.
 
-The preset fits any application with a front controller *and* several real `.php` entry
-points; the deny list is Drupal's, harmless elsewhere.
+The preset is Drupal's. An application with a front controller and several `.php` entry
+points of its own that are not where Drupal keeps them (Kanboard, phpBB) takes `app =
+"php"`, where any `.php` runs, narrowed with `rules.entry_points` on a managed site
+(section 15).
 
 A file below `sites/default/files/` that exists is served statically, cached like any
 asset; one that does **not** exist reaches `index.php` with its query string, because
@@ -962,7 +1006,8 @@ client address in the access log and `REMOTE_ADDR`, and `X-Forwarded-Proto: http
 `HTTPS` and `REQUEST_SCHEME` for PHP. Unset, the headers are ignored, so nothing can be
 spoofed from the open internet.
 
-Several `X-Forwarded-For` lines are one list in order, read from the end of the last line,
+An entry may carry a port, as some load balancers write it: `198.51.100.7:1234` and
+`[2001:db8::7]:443` are the address alone. Several `X-Forwarded-For` lines are one list in order, read from the end of the last line,
 so a proxy that adds a line of its own (HAProxy's `option forwardfor`) decides, and a line
 the client wrote before it is reached only through hops you trust. `X-Forwarded-Proto`
 counts the last value of its last line. An entry that is not an address stops the walk.
@@ -1598,6 +1643,15 @@ restricted`; `path` may be `/` (the whole site). `--restrict PATH=ADDR[,ADDR...]
 `--restrict-exact` replace that list and keep the other rules, `--no-restrict` clears it;
 `access-check SITE PATH ADDRESS` (MCP `access_check`) says what the rules decide for one
 client before they are applied.
+
+**Admin panels by address** (`rules.admin`, 2026-10-07, section 19): on `app = "wordpress"`
+and `"drupal"`, `{"allow": ["@office"]}` with optional `"login": true` (the login page too),
+`"languages": ["fr"]` (Drupal's URL prefixes, at most 16) and `"mode": "report"` restricts the
+preset's administration paths, which `presets` lists as `admin_paths`, rendered as
+`[[site.access]]` tables marked `# rules: admin`. Nothing restricts an admin by default.
+`--restrict-admin ADDR[,ADDR...]`, `--admin-login`, `--admin-language L` (repeatable) and
+`--no-restrict-admin` replace that object and keep the other rules; refused on another app,
+and on a path `rules.restricted` names too.
 
 **Root additions to a managed site** (`sites.d/<domain>.root.toml`, 2026-10-02). A site the
 control plane manages is regenerated by every `site-update`, so a location added to its file
@@ -2311,9 +2365,37 @@ decodes twice), and the path after a script (`/index.php/admin` reaches the rout
 a front controller).
 
 **WordPress.** Its public pages call `/wp-admin/admin-ajax.php` (search, carts, comment
-forms), so when `/wp-admin` is restricted and the whole site is not, the preset keeps that
-file open to anyone (`agensio -t --explain` shows the rule, `# from preset:wordpress`). Write
-your own rule for the path to change that.
+forms), and the login page loads its styles, scripts and logo from `/wp-admin/css/`,
+`/wp-admin/js/` and `/wp-admin/images/` (WordPress's `script-loader.php`; WooCommerce's
+account page takes the password meter from there too), so when `/wp-admin` is restricted and
+the whole site is not, the preset keeps that file and those three directories open to anyone
+(`agensio -t --explain` shows the rules, `# from preset:wordpress`). They hold WordPress's own
+static files, the same on every installation, and the preset runs no script there (section
+4), so the openings serve files and nothing else. Write your own rule for one of those paths
+to change that.
+
+**Admin panels.** A site's administration is open to everyone by default, as WordPress and
+Drupal ship it: their own login, the fail2ban jails (section 18) and the firewall's limits
+protect it, and agensio never restricts it on its own. Keeping it to some addresses is the
+site owner's choice, one field on a managed WordPress or Drupal site, `rules.admin` (section
+15):
+
+```json
+"rules": {"admin": {"allow": ["@office", "2001:db8:5::/64"]}}
+```
+
+renders the preset's administration paths as `[[site.access]]` tables marked `# rules:
+admin`. WordPress: the prefix `/wp-admin` (with the openings above), and with `"login": true`
+the exact `/wp-login.php`. Drupal: the prefix `/admin`, the scripts `/update.php`,
+`/core/install.php`, `/core/authorize.php` and `/core/rebuild.php`, and with `"login": true`
+the prefix `/user/login`; `"languages": ["fr", "pt-br"]` adds `/fr/admin`, `/fr/user/login`
+and so on for a site that negotiates the language by URL prefix, because Drupal answers its
+routes under every prefix and a rule on `/admin` alone would leave `/fr/admin` open. `"mode":
+"report"` tries it first. The presets catalogue (`agensio ctl presets`, MCP `presets_list`)
+lists each preset's `admin_paths`, the login one marked. Two things the login rule does not
+cover: WordPress also accepts a password at `/xmlrpc.php` (the mobile app and Jetpack use it;
+restrict it with `rules.restricted` when nothing does), and a Drupal "User login" block placed
+on public pages posts to those pages (remove the block when the login is restricted).
 
 **Which address.** The connection's peer, or behind `[server] trusted_proxies` the forwarded
 client (section 10). An IPv4 client of a `[::]` listener is matched as IPv4. Behind a CDN or
@@ -2326,12 +2408,16 @@ mean "through my account".
 **The answer.** `403 Forbidden`, with `Cache-Control: no-store` (it differs per client) and a
 line naming the address that was tested, so a user whose address changed can say which one the
 server saw. The error log gets one `warn` line a second per worker, `access refused: site S
-rule /wp-admin allows @office; client 198.51.100.4 GET /wp-admin/`, with the count of lines not
-written since; the access log has the 403 as usual, and the `agensio-auth` fail2ban jail
-(section 18) bans an address that keeps hitting a restricted path from outside.
+rule /wp-admin allows @office; client 198.51.100.4 GET /wp-admin/`; the refusals held back are
+counted, `(N more refusals since the last such line, not written)`, written with the next line
+or on its own once the second is over. The access log has every 403 with its client as usual,
+and the `agensio-auth` fail2ban jail (section 18) bans an address that keeps hitting a
+restricted path from outside.
 
 **Trying a rule first.** `mode = "report"` serves everyone and logs `access would refuse:`
-for each client the rule would refuse. `agensio ctl access-check SITE PATH ADDRESS` (MCP
+for each client the rule would refuse: every rule and client once a minute, whatever else is
+refused, with the requests it made since its last line; past 16 new clients a second per worker
+the rest are counted on a closing line. `agensio ctl access-check SITE PATH ADDRESS` (MCP
 `access_check`) answers what the rules decide for one client without sending a request:
 `refused by /wp-admin (allow @office): 198.51.100.4 is in none of its entries`. Check your own
 address before you restrict a path you use.
@@ -2339,7 +2425,11 @@ address before you restrict a path you use.
 **Managed sites.** `site_update` takes the same rules as `rules.restricted` (section 15):
 `[{"path": "/wp-admin", "allow": ["@office"]}]`, with optional `"match": "exact"` and `"mode":
 "report"`; `agensio ctl site-update SITE --restrict /wp-admin=@office,203.0.113.7` (and
-`--restrict-exact`, `--no-restrict`) changes that list and keeps the site's other rules. The
+`--restrict-exact`, `--no-restrict`) changes that list and keeps the site's other rules, and
+`--restrict-admin @office,203.0.113.7` (with `--admin-login`, `--admin-language fr`,
+`--no-restrict-admin`) does the same for `rules.admin`. A path in both lists is refused, and
+together they hold at most 32 rules. `site_create` and `site_update` answer with the notes
+`-t` would give for the new rules (`access: ...`). The
 sets themselves are root's, in the main file; `config_reference` (MCP and `agensio ctl
 reference`) shows each with its entries under the key `addresses`, and the trusted proxies'
 ranges under `trusted_proxies`. The MCP server's instructions tell an agent to check the user's

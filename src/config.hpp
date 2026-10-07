@@ -68,6 +68,10 @@ struct LocationConfig {
     bool exact = false;
     bool suffix = false;
     bool final = false;  // prefix only (nginx ^~): when it is the longest prefix match, suffix locations are skipped
+    // Suffix only: the script (the path up to the ending) must sit directly in this directory,
+    // "/" for the root, "/core/" for Drupal's core entry points; "" = anywhere. The Drupal
+    // preset sets it, after Drupal's own .htaccess, which refuses PHP below any other directory.
+    std::string script_dir;
     std::vector<std::string> deny_suffixes;  // request paths ending with one of these get 404 (".php" under uploads)
     std::vector<std::string> allow_suffixes;  // when set, only paths ending with one of these are served (else 404)
     std::vector<ProtectedName> protects;     // names the site never serves: any backup spelling of them gets 404 here (preset `never`)
@@ -455,6 +459,15 @@ std::vector<std::string> preset_secrets(const std::string& app);
 // /wp-login.php, drupal: /user/login, ...), for the rendered fail2ban jail; empty for a preset
 // whose applications differ (php, rails, node, proxy, static).
 std::vector<std::string> preset_login_paths(const std::string& app);
+// The paths of a preset's administration (2026-10-07), what `rules.admin` restricts when the user
+// asks; nothing restricts them by default. `login` marks the login page, which visitors use too
+// on a shop or a members site, so it joins only on request.
+struct AdminPath {
+    std::string path;
+    bool exact = false;
+    bool login = false;
+};
+std::vector<AdminPath> preset_admin_paths(const std::string& app);
 // A `login_paths` entry: "/"-rooted, plain characters, no "..", no "//", at most 255; "" or why not.
 std::string check_login_path(const std::string& path);
 // Where the preset's application keeps what users upload, relative to the served root

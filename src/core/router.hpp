@@ -42,13 +42,26 @@ public:
             if (loc.exact) {
                 if (path == loc.path) return loc;
             } else if (loc.suffix) {
-                if (!suffix && suffix_hit(path, loc.path)) suffix = &loc;
+                if (!suffix && suffix_hit(path, loc.path) && (loc.script_dir.empty() || script_in(path, loc.path, loc.script_dir))) suffix = &loc;
             } else if (path.starts_with(loc.path)) {
                 if (loc.final || !suffix) return loc;
                 return *suffix;
             }
         }
         return suffix ? *suffix : site.locations.back();
+    }
+
+    // The script a suffix names (the path up to its first hit at the end or before a '/', as
+    // FastCGI splits PATH_INFO) sits directly in `dir`: "/index.php" and "/index.php/x" in "/",
+    // "/core/install.php" in "/core/", never "/modules/x/evil.php".
+    static bool script_in(std::string_view path, std::string_view suffix, std::string_view dir) noexcept {
+        for (std::size_t p = path.find(suffix); p != std::string_view::npos; p = path.find(suffix, p + 1)) {
+            const std::size_t end = p + suffix.size();
+            if (end != path.size() && path[end] != '/') continue;
+            const std::string_view script = path.substr(0, end);
+            return script.starts_with(dir) && script.find('/', dir.size()) == std::string_view::npos;
+        }
+        return false;
     }
 
     // A suffix matches at the end of the path or before a '/' ("/index.php/extra": PATH_INFO).

@@ -1166,3 +1166,103 @@ What the research changed, and the owner's answers (2026-10-07), as built:
 - **Cost.** The bitmap of first bytes after the leading `/`, so a page no rule can cover pays one
   bit test, and the address is read only when a rule covers the path. `bench/ab.sh <ref> -A`
   adds the rows for a site with rules.
+
+## 23. The WordPress and Drupal presets with access rules (2026-10-07, built in alpha.53)
+
+The owner asked, after the alpha.52 report, whether the presets can be hardened now that
+access rules exist. What the applications' own sources say, and what follows:
+
+- **WordPress's login page loads files from `/wp-admin/`.** `wp-login.php` enqueues the `login`
+  style (`/wp-admin/css/login.css`, which depends on `/wp-admin/css/forms.css` and
+  `/wp-admin/css/l10n.css`) and the `user-profile` script (`/wp-admin/js/user-profile.js`, which
+  needs `/wp-admin/js/password-strength-meter.js`) (wp-login.php and wp-includes/script-loader.php
+  on WordPress's master branch). With `/wp-admin` restricted and `/wp-login.php` open, the login,
+  password-reset and registration pages reach outsiders unstyled and without their scripts;
+  WooCommerce's account and checkout pages load the same password meter. The alpha.52 exception
+  (`admin-ajax.php` alone) misses this.
+- **`admin-post.php` is a public endpoint by design** for front-end forms
+  (`admin_post_nopriv_{action}`); restricting `/wp-admin` stops those forms for visitors, a
+  reported side effect of every guide that locks the directory.
+- **Drupal's admin is not only under `/admin`.** With URL language negotiation the same pages
+  answer under every language prefix (`/fr/admin/...`, Drupal issue 3613327 shows one), and a
+  path alias can name any internal path, an admin page included. A rule on `/admin` is therefore
+  incomplete on a multilingual Drupal site. Drupal's other entry points, `update.php`,
+  `core/install.php`, `core/authorize.php` and `core/rebuild.php`, run as PHP files of their own.
+
+Proposed, in the order of value:
+
+1. **WordPress's exception, completed** (a fix of alpha.52's): when `/wp-admin` alone is
+   restricted, `/wp-admin/css/`, `/wp-admin/js/` and `/wp-admin/images/` stay open with
+   `admin-ajax.php`, and the preset shields those three directories so no PHP ever runs there
+   (`final`, the PHP endings refused), whatever the rules.
+2. **Admin paths as preset data and one field for them.** A table like `preset_login_paths`:
+   WordPress `/wp-admin` (with the exceptions above), Drupal `/admin`, `/user/login`,
+   `/update.php`, `/core/install.php`, `/core/authorize.php`, `/core/rebuild.php`, Grav `/admin`,
+   Statamic `/cp`, Django and Wagtail `/admin/` and `/django-admin/`; shown by `presets_list` and
+   `site_show`; and `rules.admin = {"allow": ["@office"]}` on `site_update`, rendered as the
+   preset's `[[site.access]]` rules, so "keep the admin to the office" is one field an agent
+   cannot get half right. `/wp-login.php` only when the user says no visitor logs in there (a
+   shop or a members site does).
+3. **Drupal's language prefixes.** Either a whole-segment wildcard in rule paths (`/*/admin`,
+   one segment, matched like a prefix; a site with one pays the scan on every request, since
+   the first-byte bitmap cannot skip it), or documentation and agent guidance: ask whether the
+   site is multilingual, restrict the login paths in every prefix the site uses, and say that
+   aliases stay Drupal's permissions' job. The wildcard is the robust one; it is a matcher
+   change and gets its own A/B.
+4. **`xmlrpc.php`** offered as a restricted or refused path when the user does not use Jetpack
+   or the mobile app; never by default.
+5. **Report mode first** in the agent's guidance for every preset: apply the admin rule with
+   `mode = "report"`, let the user browse the public site, read `logs_query` for `access would
+   refuse:` lines from visitors (a front-end form posting to `admin-post.php`, a plugin's asset
+   under `/wp-admin/`), then enforce.
+
+Not proposed: refusing `core/install.php` by default (an install in progress needs it, and the
+server cannot tell from the request whether the site is installed; item 2 covers it once the
+admin rule is applied).
+
+**Built (alpha.53).** The owner's conditions: follow WordPress's and Drupal's own guidelines,
+and an admin panel stays reachable from anywhere until the user restricts it. So nothing below
+restricts an admin by default; the presets follow the applications' documents, and the admin
+restriction is one field the user asks for.
+
+- **Drupal's own PHP rule.** The `.htaccess` Drupal 10.5 and 11 ship lets a script run only
+  directly in the web root (`autoload.php` refused by name), directly in `core/`, and the
+  statistics front controller; any other `.php` below a directory is 403 there. The preset had
+  let any `.php` run, as nginx recipes do. Now: one `.php` suffix location per directory with
+  `LocationConfig::script_dir` (`Router::script_in`: the script's directory is exactly that
+  one; set by the preset only, shown by `--explain` as a comment), the statistics script as an
+  exact location, and a module's stray script 404 (never source: the root refuses the PHP
+  endings). Its `FilesMatch` names joined the deny list in any directory: `.sh`,
+  `composer.json`, `composer.lock`, `package.json`, `package-lock.json`, `yarn.lock`,
+  `web.config` (as `deny_suffixes` entries beginning with `/`, so the whole name matches). The
+  two test front controllers it allows (`core/modules/system/tests/http.php`, `https.php`) stay
+  closed: they exist for Drupal's test runner. A module that documents a script of its own
+  gets an exact location in root's additions file (section 20).
+- **WordPress's hardening guide.** `wp-admin/includes/` and `wp-includes/theme-compat/` are
+  refused whole (`never_dirs`), the two blocks the guide adds to `wp-includes/` itself.
+- **Item 1, the exception completed.** `finalize_site` opens `/wp-admin/css`, `/wp-admin/js`
+  and `/wp-admin/images` beside `admin-ajax.php` when the best rule over them is `/wp-admin`
+  itself and the site is not restricted whole; the three directories are shields of the
+  WordPress row, so the openings serve WordPress's files and a planted script there is 404
+  (the integration check ran it with 200 for any address before).
+- **Item 2, admin paths and `rules.admin`.** `preset_admin_paths` (config.cpp): WordPress
+  `/wp-admin` and the login `/wp-login.php`; Drupal `/admin`, `/update.php`,
+  `/core/install.php`, `/core/authorize.php`, `/core/rebuild.php` and the login
+  `/user/login`. `presets_list` shows them as `admin_paths`. `rules.admin = {"allow": [...],
+  "login": bool, "languages": [...], "mode": "report"}` on a WordPress or Drupal site renders
+  them as `[[site.access]]` tables marked `# rules: admin` (the login path only with `login`),
+  checked with the same allow-list code as `rules.restricted`, refused on another app or on a
+  path `restricted` names, both lists together at most 32. `agensio ctl site-update
+  --restrict-admin / --admin-login / --admin-language / --no-restrict-admin`. Grav, Statamic,
+  Django and Wagtail were left out: their admin paths are settings of the application (Grav's
+  `admin.route`, Statamic's `cp.route`, Django's urls), so a fixed table would be wrong as
+  often as right; `rules.restricted` names them.
+- **Item 3, Drupal's language prefixes,** as data instead of a matcher change: `languages`
+  adds `/<code>/admin` and `/<code>/user/login` for every prefix the user names (lower case,
+  at most 16), never for the PHP entry points, which no prefix reaches. No wildcard, so the
+  first-byte bitmap and the request path are unchanged. Aliases stay Drupal's permissions' job,
+  and the MCP text says so.
+- **Items 4 and 5** are guidance: the documentation (configuration.md 19) names `xmlrpc.php`
+  and Drupal's login block as what the login rule does not cover, and the MCP text offers
+  report mode first.
+

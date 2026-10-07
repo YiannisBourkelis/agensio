@@ -1,11 +1,13 @@
 // Per-worker scratch state. One instance per worker thread, never shared.
 #pragma once
 
+#include <array>
 #include <ctime>
 #include <string>
 
 #include "cache.hpp"
 #include "http_date.hpp"
+#include "net/cidr.hpp"
 #include "services/log.hpp"
 
 namespace agensio {
@@ -29,11 +31,26 @@ struct WorkerState {
     std::string scratch;         // handler scratch (capacity retained)
     std::string params_tail;     // FastCGI per-request params (capacity retained)
     // Access by client address (core/access.hpp): the other readings of a path a site's rules
-    // test, and the error log's limit of one access line a second per worker with the count of
-    // those not written since (a scanner hammering a restricted path must not flood the log).
+    // test, and the error log's limits for its lines (Dispatcher::admit, access_log_tick).
     std::string access_scratch;
-    std::time_t access_logged = 0;
-    unsigned access_skipped = 0;
+    struct AccessLog {
+        // Refusals: one line a second; the access log has every 403 with its client, so the
+        // ones held back are only counted, and the count is written when the second is over.
+        std::time_t refused_at = 0;
+        unsigned refused_held = 0;
+        // Report mode exists to name who a rule would lock out: each rule and client written at
+        // least once a minute (32 remembered), at most 16 lines a second; past that, counted.
+        struct Seen {
+            const void* rule = nullptr;
+            Cidr::Key client;
+            std::time_t at = 0;
+            unsigned repeats = 0;  // requests from it since its line
+        };
+        std::array<Seen, 32> seen{};
+        std::time_t report_second = 0;
+        unsigned report_in_second = 0;
+        unsigned report_unnamed = 0;
+    } access_log;
 };
 
 }  // namespace agensio

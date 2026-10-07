@@ -480,11 +480,17 @@ json::Value access_rule_json(const AccessRule& r, const std::string& from) {
 // added it, "" for a rule written by hand.
 std::string access_rule_from(const AccessRule& r, const SiteSpec* managed) {
     if (!r.origin.empty()) return r.origin;
-    if (managed && managed->rules.is_object())
+    if (managed && managed->rules.is_object()) {
         for (const auto& m : managed->rules["restricted"].items()) {
             std::string p(m.get("path"));
             if ((m.get("match") == "exact") == r.exact && p.size() == r.path.size() && access::iequal_prefix(p, r.path)) return "rules";
         }
+        const json::Value admin = admin_rules(*managed);  // kept alive for the loop: items() refers into it
+        for (const auto& m : admin.items()) {
+            std::string p(m.get("path"));
+            if ((m.get("match") == "exact") == r.exact && p.size() == r.path.size() && access::iequal_prefix(p, r.path)) return "rules.admin";
+        }
+    }
     return "";
 }
 
@@ -560,6 +566,7 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now) {
     for (const auto& l : s.locations) {
         json::Value loc = json::Value::object().set("path", l.path);
         loc.set("match", l.exact ? "exact" : l.suffix ? "suffix" : "prefix").set("handler", l.handler);
+        if (!l.script_dir.empty()) loc.set("scripts_only_directly_in", l.script_dir);  // Drupal: PHP below any other directory refused
         if (!l.deny_suffixes.empty()) loc.set("refuses", strings(l.deny_suffixes));  // endings answered 404 here
         if (!l.allow_suffixes.empty()) loc.set("serves_only", strings(l.allow_suffixes));  // no other ending is
         if (!l.origin.empty()) loc.set("from", l.origin);

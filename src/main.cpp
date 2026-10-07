@@ -64,6 +64,8 @@ void usage() {
                  "                      site-update NAME --set KEY=VALUE ... (settings [NAME] lists the keys and ceilings)\n"
                  "                      site-update NAME --login-path /login ... (where the fail2ban jail counts attempts)\n"
                  "                      site-update NAME --restrict PATH=ADDR[,ADDR...] ... (only those addresses reach PATH)\n"
+                 "                      site-update NAME --restrict-admin ADDR[,ADDR...] [--admin-login] [--admin-language L]...\n"
+                 "                           (WordPress, Drupal: only those addresses reach the admin; --no-restrict-admin)\n"
                  "                      access-check NAME PATH ADDRESS: what the site's access rules decide for that client\n"
                  "                      protection [--nft | --jail | --unit | --filter NAME]: the firewall ruleset and the\n"
                  "                           fail2ban jails rendered for this host, with what is in place (--nft and the\n"
@@ -207,6 +209,12 @@ int main(int argc, char** argv) {
                              "                    or any (reopens a path below a restricted one); \"/\" restricts the whole site; others\n"
                              "                    get 403. Given together they replace the site's restricted list and keep its other\n"
                              "                    rules; --no-restrict clears the list. Try first: access-check NAME PATH ADDRESS\n"
+                             "        --restrict-admin ADDR[,ADDR...] (site-update, app = wordpress or drupal): only those clients\n"
+                             "                    reach the preset's administration (WordPress /wp-admin, with admin-ajax.php and the login\n"
+                             "                    page's files kept open; Drupal /admin, update.php, core/install.php, authorize.php,\n"
+                             "                    rebuild.php); --admin-login adds the login page, --admin-language L (Drupal, repeatable)\n"
+                             "                    the admin and login under /L/; --no-restrict-admin removes it. The admin is open to\n"
+                             "                    everyone until this is set. `presets` lists each preset's admin paths\n"
                              "        access-check NAME PATH ADDRESS: which access rule decides PATH for a client at ADDRESS,\n"
                              "                    allowed or refused (viewer); the path as the client sends it, the address as the\n"
                              "                    server sees it (the 403 page shows it)\n"
@@ -252,6 +260,8 @@ int main(int argc, char** argv) {
             std::string check_path, check_address;  // access-check NAME PATH ADDRESS
             agensio::json::Value restrict_rules = agensio::json::Value::array();  // --restrict / --restrict-exact
             bool restrict_given = false;  // --restrict, --restrict-exact or --no-restrict: rules.restricted is replaced
+            agensio::json::Value admin_rule = agensio::json::Value::object();  // --restrict-admin, --admin-login, --admin-language
+            bool admin_given = false;  // rules.admin is replaced (--no-restrict-admin: removed)
             bool raw = false;
             agensio::json::Value body = agensio::json::Value::object();
             agensio::json::Value aliases = agensio::json::Value::array();
@@ -326,6 +336,25 @@ int main(int argc, char** argv) {
                     restrict_rules.push(rule);
                     restrict_given = true;
                 } else if (b == "--no-restrict") restrict_given = true;
+                else if (b == "--restrict-admin") {
+                    std::string v; value(v);
+                    agensio::json::Value allow = agensio::json::Value::array();
+                    for (std::size_t from = 0; from <= v.size();) {
+                        std::size_t comma = v.find(',', from);
+                        if (comma == std::string::npos) comma = v.size();
+                        if (comma > from) allow.push(v.substr(from, comma - from));
+                        from = comma + 1;
+                    }
+                    admin_rule.set("allow", allow);
+                    admin_given = true;
+                } else if (b == "--admin-login") { admin_rule.set("login", true); admin_given = true; }
+                else if (b == "--admin-language") {
+                    std::string v; value(v);
+                    agensio::json::Value langs = admin_rule["languages"].is_array() ? admin_rule["languages"] : agensio::json::Value::array();
+                    langs.push(v);
+                    admin_rule.set("languages", langs);
+                    admin_given = true;
+                } else if (b == "--no-restrict-admin") { admin_rule = agensio::json::Value::object(); admin_given = true; }
                 else if (b == "--login-path") {
                     std::string v; value(v);
                     agensio::json::Value list = body["login_paths"].is_array() ? body["login_paths"] : agensio::json::Value::array();
@@ -489,9 +518,13 @@ int main(int argc, char** argv) {
             // --restrict / --no-restrict change rules.restricted alone: the site's other rules
             // (private paths, entry points, cache) are read and sent back with it, since the
             // server takes the rules object whole.
-            if (restrict_given) {
+            if (restrict_given || admin_given) {
                 if (command != "site-update" || site_name.empty()) {
-                    std::cerr << "ctl: --restrict, --restrict-exact and --no-restrict go with site-update NAME\n";
+                    std::cerr << "ctl: --restrict, --restrict-exact, --no-restrict and the --restrict-admin flags go with site-update NAME\n";
+                    return 2;
+                }
+                if (admin_given && !admin_rule.members().empty() && admin_rule["allow"].is_null()) {
+                    std::cerr << "ctl: --admin-login and --admin-language go with --restrict-admin ADDR[,ADDR...]\n";
                     return 2;
                 }
                 agensio::ControlReply current;
@@ -508,9 +541,10 @@ int main(int argc, char** argv) {
                 }
                 agensio::json::Value merged = agensio::json::Value::object();
                 for (const auto& m : site_json["rules"].members())
-                    if (m.first != "restricted") merged.set(m.first, m.second);
+                    if (!(restrict_given && m.first == "restricted") && !(admin_given && m.first == "admin")) merged.set(m.first, m.second);
                 for (const auto& m : body["rules"].members()) merged.set(m.first, m.second);  // other rule flags of this command
                 if (!restrict_rules.items().empty()) merged.set("restricted", restrict_rules);
+                if (admin_given && !admin_rule.members().empty()) merged.set("admin", admin_rule);
                 body.set("rules", merged);
             }
             agensio::ControlReply reply;

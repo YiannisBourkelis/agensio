@@ -24,6 +24,13 @@
 
 namespace agensio {
 
+inline bool all_digits(std::string_view s) noexcept {
+    if (s.empty() || s.size() > 5) return false;
+    for (const char c : s)
+        if (c < '0' || c > '9') return false;
+    return true;
+}
+
 // `storage` keeps the chosen address alive for the request (conn.client_address views it).
 inline void resolve_forwarded(const Request& req, const std::vector<Cidr>& trusted, ConnectionInfo& conn,
                               std::string& storage) {
@@ -39,6 +46,24 @@ inline void resolve_forwarded(const Request& req, const std::vector<Cidr>& trust
             while (!entry.empty() && (entry.front() == ' ' || entry.front() == '\t')) entry.remove_prefix(1);
             while (!entry.empty() && (entry.back() == ' ' || entry.back() == '\t')) entry.remove_suffix(1);
             if (entry.empty()) continue;
+            // With a port, as some load balancers write it: "198.51.100.7:1234" and
+            // "[2001:db8::1]:443" (or bracketed without a port) are the address alone; a bare IPv6
+            // address has several colons and is taken as it is (alpha.52 report).
+            if (entry.front() == '[') {
+                const std::size_t close = entry.find(']');
+                const std::string_view port = close == std::string_view::npos ? std::string_view() : entry.substr(close + 1);
+                if (close == std::string_view::npos || !(port.empty() || (port.size() > 1 && port[0] == ':' && all_digits(port.substr(1))))) {
+                    done = true;
+                    break;
+                }
+                entry = entry.substr(1, close - 1);
+            } else if (const std::size_t colon = entry.find(':'); colon != std::string_view::npos && entry.find(':', colon + 1) == std::string_view::npos) {
+                if (!all_digits(entry.substr(colon + 1))) {
+                    done = true;
+                    break;
+                }
+                entry = entry.substr(0, colon);
+            }
             asio::error_code ec;
             const auto given = asio::ip::make_address(std::string(entry), ec);
             if (ec || entry.find('%') != std::string_view::npos) {  // garbage or a zone id: trust nothing further left

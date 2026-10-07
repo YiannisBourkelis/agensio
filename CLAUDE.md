@@ -296,8 +296,11 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
 - **Presets** (C3): `app = "laravel" | "drupal" | "wordpress" | "grav" | "php" | "static"` (and the
   application-server presets `proxy`, `rails`, `redmine`, `django`, `wagtail`) on a site expands
   at load into root, index, try_files and locations (Laravel: only `/index.php` is ever
-  executed and any other `.php` is refused with 404, never served as source; Drupal: any
-  `.php` runs, front controller for the rest, Drupal's `.htaccess` refusals built in;
+  executed and any other `.php` is refused with 404, never served as source; Drupal: a
+  `.php` runs only where Drupal's own `.htaccess` lets it (directly in the root or in
+  `core/`, and the statistics script: `PhpPreset::php_dirs` and `entries`, one suffix
+  location per directory with `LocationConfig::script_dir`, `Router::script_in`, alpha.53),
+  front controller for the rest, Drupal's `.htaccess` refusals built in;
   the PHP presets are rows of `kPhpPresets` in `config.cpp` (served subdirectory, index,
   front controller, any `.php` or only one, refused suffixes, shielded directories,
   files answered 404, which are also refused in every backup spelling: `name.bak`,
@@ -544,12 +547,15 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   longest rule decides, `"any"` reopens a subtree, the other readings of a path (a `;` segment
   parameter, a second decoding, the path after a script) are judged when the path holds those
   characters. Allow lists only; 403 with `Cache-Control: no-store` naming the address tested; one
-  `warn` line a second per worker (`WorkerState::access_logged`); `mode = "report"`. The address:
+  `warn` line a second per worker, held refusals counted and written by the flush tick
+  (`WorkerState::access_log`, `Dispatcher::access_log_tick`); `mode = "report"` names each rule
+  and client once a minute with a limiter of its own. The address:
   `ConnectionInfo::client_ip` behind `trusted_proxies`, else the connection's `PeerSource`
-  (HTTP/1 reads the socket only then). WordPress keeps `/wp-admin/admin-ajax.php` open under a
-  `/wp-admin` rule. `SiteConfig::access_first` (a bit per first byte after `/`) makes an
+  (HTTP/1 reads the socket only then). WordPress keeps `/wp-admin/admin-ajax.php` and the login page's
+  `/wp-admin/css`, `js`, `images` (shields: nothing runs there) open under a `/wp-admin` rule. `SiteConfig::access_first` (a bit per first byte after `/`) makes an
   uncovered path one bit test. Managed: `rules.restricted`, `ctl --restrict`, `access-check` /
-  MCP `access_check`; `access_notices` feeds `-t`, the error log and health. Gate: `bench/ab.sh
+  MCP `access_check`; `rules.admin` (WordPress, Drupal: `preset_admin_paths`, `login`,
+  Drupal's `languages`; admins open unless the user asks, design section 23); `access_notices` feeds `-t`, the error log and health. Gate: `bench/ab.sh
   <ref> -A`. Security page row 38.
 - **Application install** (F9, `src/services/archive.*`, `fetch.*`, `install.*`):
   `agensio ctl site-install NAME [--url | --file | --version]` fills a site's empty

@@ -45,6 +45,10 @@ public:
     // try_files fallback routed to (ws.path is the new target). `hops` bounds the chain.
     const LocationConfig* serve_static(Stream& s, const LocationConfig& loc, WorkerState& ws, int& hops);
 
+    // Once a second from the worker's flush timer: the counts of access lines held back in a
+    // second that is over (refusals, report-mode clients past the per-second cap) are written.
+    void access_log_tick(WorkerState& ws, std::time_t now);
+
 private:
     // Applies loc's method policy. False when a 405 was produced. A method the static
     // handler cannot serve is let through when the location's try_files has a fallback,

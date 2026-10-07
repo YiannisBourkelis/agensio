@@ -103,6 +103,14 @@ struct RuleLocation {
     long max_age = 0;  // cache only
 };
 std::vector<RuleLocation> rule_locations(const SiteSpec& spec);
+// rules.admin expanded into restricted-shaped rules ({path, allow, match?, mode?}): the preset's
+// administration paths, the login page with login: true, Drupal's language prefixes.
+json::Value admin_rules(const SiteSpec& spec);
+// What -t would note about a managed site's rules.restricted (config.hpp access_notices): a site
+// restricted as a whole, an entry holding a trusted proxy or loopback, an IPv4-only list on an
+// IPv6 listener, a single IPv6 address. site_create and site_update answer them as warnings,
+// so the agent relays them before the user confirms (alpha.52 report).
+std::vector<AccessNotice> access_notices_for(const SiteSpec& spec, const Config& cfg);
 // Reads the spec back from a managed file; false for a hand-written file.
 bool read_managed(const std::filesystem::path& file, SiteSpec& out);
 

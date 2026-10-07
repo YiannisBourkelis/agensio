@@ -1321,6 +1321,9 @@ void ControlHandler::site_create(Stream& s, const json::Value& body, std::string
             warnings.push("requests to " + address + " with a Host this site does not list answer 421 Misdirected Request "
                           "(also by IP address); add a site with server_name = [\"*\"] on it for a catch-all");
     }
+    // What -t would note about the site's access rules (a site restricted as a whole, an entry
+    // that holds a trusted proxy, ...): the agent relays it before the user confirms.
+    for (const auto& n : control::access_notices_for(spec, cfg)) warnings.push("access: " + n.text);
     if (dry_run) {
         reply(s, 200, json::Value::object().set("ok", !blocking).set("dry_run", true).set("file", file.string())
                           .set("would_write", rendered).set("problems", problems_json(problems))
@@ -1439,10 +1442,14 @@ void ControlHandler::site_update(Stream& s, std::string_view name, const json::V
     const auto problems = control::preflight(spec, cfg, backend_->privileged());
     bool blocking = false;
     for (const auto& p : problems) blocking = blocking || p.blocks;
+    // What -t would note about the site's access rules, for the agent to relay before the user
+    // confirms (alpha.52 report: a whole-site rule's dry run answered warnings: null).
+    json::Value warnings = json::Value::array();
+    for (const auto& n : control::access_notices_for(spec, cfg)) warnings.push("access: " + n.text);
     if (body["dry_run"].boolean()) {
         reply(s, 200, json::Value::object().set("ok", !blocking).set("dry_run", true).set("file", file.string())
                           .set("would_write", control::render_site(spec, now_stamp())).set("problems", problems_json(problems))
-                          .set("run_as_root", commands_of(problems, false)).set("spec", spec.to_json()));
+                          .set("run_as_root", commands_of(problems, false)).set("spec", spec.to_json()).set("warnings", warnings));
         return;
     }
     json::Value done = json::Value::array();
@@ -1491,7 +1498,7 @@ void ControlHandler::site_update(Stream& s, std::string_view name, const json::V
     finish_pool(s, spec, cfg, what, done_now, steps);
     for (const auto& p : protection_steps()) steps.push_back(p);
     reply(s, 200, json::Value::object().set("ok", true).set("file", file.string()).set("spec", spec.to_json())
-                      .set("done", done_now).set("next_steps", strings(steps)));
+                      .set("done", done_now).set("next_steps", strings(steps)).set("warnings", warnings));
 }
 
 void ControlHandler::site_toggle(Stream& s, std::string_view name, std::string_view action, std::string_view what) {

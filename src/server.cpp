@@ -239,6 +239,7 @@ void Server::arm_flush(Worker& w) {
     w.flush_timer.expires_after(std::chrono::seconds(1));
     w.flush_timer.async_wait([this, &w](const asio::error_code& ec) {
         if (ec) return;
+        dispatcher_.access_log_tick(w.state, std::time(nullptr));  // held-back access lines, counted
         w.state.logs.flush();
         // Buffers shed by idle connections and those of closed connections are freed, but
         // glibc keeps freed chunks of that size mapped: a trim once a second, only when
