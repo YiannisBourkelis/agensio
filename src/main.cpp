@@ -63,6 +63,8 @@ void usage() {
                  "                           site-task-output NAME [--offset N] [--length N] [--raw] (admin)\n"
                  "                      site-update NAME --set KEY=VALUE ... (settings [NAME] lists the keys and ceilings)\n"
                  "                      site-update NAME --login-path /login ... (where the fail2ban jail counts attempts)\n"
+                 "                      site-update NAME --restrict PATH=ADDR[,ADDR...] ... (only those addresses reach PATH)\n"
+                 "                      access-check NAME PATH ADDRESS: what the site's access rules decide for that client\n"
                  "                      protection [--nft | --jail | --unit | --filter NAME]: the firewall ruleset and the\n"
                  "                           fail2ban jails rendered for this host, with what is in place (--nft and the\n"
                  "                           others print one file alone, for root to redirect into place)\n"
@@ -199,6 +201,15 @@ int main(int argc, char** argv) {
                              "        --private PATH, --entry-point /x.php, --cache PATH=SECONDS, --front-controller /x.php\n"
                              "                    (site-create and site-update, repeatable): an application's own rules, which only\n"
                              "                    make the site serve less; given together they replace the site's rules; --no-rules clears\n"
+                             "        --restrict PATH=ADDR[,ADDR...], --restrict-exact PATH=ADDR[,...] (site-update, repeatable): only\n"
+                             "                    those clients reach PATH and everything below it (or PATH alone); ADDR is an address,\n"
+                             "                    a range (203.0.113.0/24, 2001:db8:5::/64), a set root named in [addresses] (@office),\n"
+                             "                    or any (reopens a path below a restricted one); \"/\" restricts the whole site; others\n"
+                             "                    get 403. Given together they replace the site's restricted list and keep its other\n"
+                             "                    rules; --no-restrict clears the list. Try first: access-check NAME PATH ADDRESS\n"
+                             "        access-check NAME PATH ADDRESS: which access rule decides PATH for a client at ADDRESS,\n"
+                             "                    allowed or refused (viewer); the path as the client sends it, the address as the\n"
+                             "                    server sees it (the 403 page shows it)\n"
                              "        --set KEY=VALUE (site-create and site-update, repeatable): a per-site limit, e.g.\n"
                              "                    --set max_body_size=200MB --set memory_limit=512M; `settings NAME` lists the keys,\n"
                              "                    their units, the current value and the ceiling [control] site_limits allows\n"
@@ -238,6 +249,9 @@ int main(int argc, char** argv) {
                     return 0;
                 }
             std::string command, socket_path, site_name, query, upload_file, reveal, raw_part, raw_filter;
+            std::string check_path, check_address;  // access-check NAME PATH ADDRESS
+            agensio::json::Value restrict_rules = agensio::json::Value::array();  // --restrict / --restrict-exact
+            bool restrict_given = false;  // --restrict, --restrict-exact or --no-restrict: rules.restricted is replaced
             bool raw = false;
             agensio::json::Value body = agensio::json::Value::object();
             agensio::json::Value aliases = agensio::json::Value::array();
@@ -296,6 +310,22 @@ int main(int argc, char** argv) {
                     rules.set("front_controller", v);
                     body.set("rules", rules);
                 } else if (b == "--no-rules") body.set("rules", agensio::json::Value::object());
+                else if (b == "--restrict" || b == "--restrict-exact") {
+                    std::string v; value(v);
+                    const std::size_t eq = v.find('=');
+                    if (eq == std::string::npos || eq == 0 || eq + 1 == v.size()) { std::cerr << "ctl: " << b << " needs PATH=ADDRESS[,ADDRESS...] (addresses, ranges, @sets or any)\n"; return 2; }
+                    agensio::json::Value allow = agensio::json::Value::array();
+                    for (std::size_t from = eq + 1; from <= v.size();) {
+                        std::size_t comma = v.find(',', from);
+                        if (comma == std::string::npos) comma = v.size();
+                        if (comma > from) allow.push(v.substr(from, comma - from));
+                        from = comma + 1;
+                    }
+                    agensio::json::Value rule = agensio::json::Value::object().set("path", v.substr(0, eq)).set("allow", allow);
+                    if (b == "--restrict-exact") rule.set("match", "exact");
+                    restrict_rules.push(rule);
+                    restrict_given = true;
+                } else if (b == "--no-restrict") restrict_given = true;
                 else if (b == "--login-path") {
                     std::string v; value(v);
                     agensio::json::Value list = body["login_paths"].is_array() ? body["login_paths"] : agensio::json::Value::array();
@@ -351,6 +381,9 @@ int main(int argc, char** argv) {
                 else if (site_name.empty() && command.starts_with("site") && command != "sites") site_name = b;
                 else if (command == "site-task" && body["task"].is_null()) body.set("task", b);
                 else if (site_name.empty() && (command == "cert-renew" || command == "upload" || command == "uploads-delete" || command == "settings" || command == "trash-delete")) site_name = b;
+                else if (command == "access-check" && site_name.empty()) site_name = b;
+                else if (command == "access-check" && check_path.empty()) check_path = b;
+                else if (command == "access-check" && check_address.empty()) check_address = b;
                 else if (command == "upload" && upload_file.empty()) upload_file = b;
                 else { std::cerr << "ctl: unexpected argument " << b << "\n"; return 2; }
             }
@@ -376,6 +409,21 @@ int main(int argc, char** argv) {
             else if (command == "settings") path = site_name.empty() ? "/v1/settings" : "/v1/sites/" + site_name + "/settings";
             else if (command == "reference") path = "/v1/config/reference";
             else if (command == "site" && !site_name.empty()) path = "/v1/sites/" + site_name;
+            else if (command == "access-check") {
+                if (site_name.empty() || check_path.empty() || check_address.empty()) {
+                    std::cerr << "ctl: access-check NAME PATH ADDRESS (for example: access-check example.com /wp-admin/ 203.0.113.7)\n";
+                    return 2;
+                }
+                auto enc = [](const std::string& t) {
+                    std::string o;
+                    for (const char c : t) {
+                        if (std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-' || c == '_' || c == ':') o.push_back(c);
+                        else { char h[4]; std::snprintf(h, sizeof h, "%%%02X", static_cast<unsigned char>(c)); o += h; }
+                    }
+                    return o;
+                };
+                path = "/v1/sites/" + site_name + "/access?path=" + enc(check_path) + "&address=" + enc(check_address);
+            }
             else if (command == "validate") path = "/v1/config/validate";
             else if (command == "logs") path = "/v1/logs" + query;
             else if (command == "reload") path = "/v1/reload";
@@ -438,6 +486,33 @@ int main(int argc, char** argv) {
                     socket_path = agensio::default_control_socket();  // the file may be unreadable for this user
                 }
             }
+            // --restrict / --no-restrict change rules.restricted alone: the site's other rules
+            // (private paths, entry points, cache) are read and sent back with it, since the
+            // server takes the rules object whole.
+            if (restrict_given) {
+                if (command != "site-update" || site_name.empty()) {
+                    std::cerr << "ctl: --restrict, --restrict-exact and --no-restrict go with site-update NAME\n";
+                    return 2;
+                }
+                agensio::ControlReply current;
+                std::string err;
+                if (!agensio::control_request(socket_path, "GET", "/v1/sites/" + site_name, std::string(), current, err)) {
+                    std::cerr << err << "\n";
+                    return 1;
+                }
+                agensio::json::Value site_json;
+                std::string perr;
+                if (current.status != 200 || !agensio::json::parse(current.body, site_json, perr)) {
+                    std::cerr << "ctl: cannot read the site's current rules (" << current.status << "): " << current.body << "\n";
+                    return 1;
+                }
+                agensio::json::Value merged = agensio::json::Value::object();
+                for (const auto& m : site_json["rules"].members())
+                    if (m.first != "restricted") merged.set(m.first, m.second);
+                for (const auto& m : body["rules"].members()) merged.set(m.first, m.second);  // other rule flags of this command
+                if (!restrict_rules.items().empty()) merged.set("restricted", restrict_rules);
+                body.set("rules", merged);
+            }
             agensio::ControlReply reply;
             std::string error;
             if (!agensio::control_request(socket_path, method, path, upload ? upload_bytes : mutation ? body.dump() : std::string(), reply, error)) {
@@ -475,6 +550,11 @@ int main(int argc, char** argv) {
                     }
                     return 0;
                 }
+            }
+            if (command == "access-check" && reply.status == 200) {  // the verdict first, the details after
+                agensio::json::Value u;
+                std::string perr;
+                if (agensio::json::parse(reply.body, u, perr)) std::cout << u.get("summary") << "\n";
             }
             std::cout << reply.body;
             return reply.status < 300 ? 0 : 1;
@@ -551,6 +631,8 @@ int main(int argc, char** argv) {
         for (const auto& o : cfg.orphan_additions)
             std::cerr << "warning: " << o.file << " holds root additions for site " << o.site
                       << ", which is not in the configuration (disabled or deleted): ignored\n";
+        for (const auto& n : agensio::access_notices(cfg))
+            std::cerr << (n.severity == "warning" ? "warning: " : "note: ") << n.text << "\n";
         std::cout << "configuration " << cfg.config_path.string() << " is OK (" << cfg.sites.size() << " site(s))\n";
         return 0;
     }

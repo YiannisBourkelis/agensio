@@ -1,5 +1,6 @@
 #include "control/commands.hpp"
 
+#include "core/access.hpp"
 #include "core/strings.hpp"
 
 #include "control/settings.hpp"
@@ -464,6 +465,72 @@ json::Value sites(const Config& cfg, std::time_t now) {
     return json::Value::object().set("count", static_cast<double>(cfg.sites.size())).set("sites", std::move(arr));
 }
 
+namespace {
+
+json::Value access_rule_json(const AccessRule& r, const std::string& from) {
+    json::Value allow = json::Value::array();
+    for (const auto& a : r.allow_text) allow.push(a);
+    json::Value v = json::Value::object().set("path", r.path).set("match", r.exact ? "exact" : "prefix").set("allow", std::move(allow));
+    v.set("mode", r.report ? "report" : "enforce");
+    if (!from.empty()) v.set("from", from);
+    return v;
+}
+
+// "rules" when the managed site's rules.restricted wrote it, the preset's name when a preset
+// added it, "" for a rule written by hand.
+std::string access_rule_from(const AccessRule& r, const SiteSpec* managed) {
+    if (!r.origin.empty()) return r.origin;
+    if (managed && managed->rules.is_object())
+        for (const auto& m : managed->rules["restricted"].items()) {
+            std::string p(m.get("path"));
+            if ((m.get("match") == "exact") == r.exact && p.size() == r.path.size() && access::iequal_prefix(p, r.path)) return "rules";
+        }
+    return "";
+}
+
+std::string access_rule_text(const AccessRule& r) {
+    std::string t = r.path + (r.exact ? " (exact)" : "") + " (allow ";
+    for (std::size_t i = 0; i < r.allow_text.size(); ++i) t += (i ? ", " : "") + r.allow_text[i];
+    return t + ")";
+}
+
+}  // namespace
+
+json::Value access_check(const Config& cfg, const SiteConfig& site, std::string_view raw_path, std::string_view address_text, std::string& error) {
+    std::string path;
+    if (raw_path.empty() || !normalize_target(raw_path, path)) {
+        error = "path must be a request path starting with '/', such as /wp-admin/post.php";
+        return {};
+    }
+    asio::error_code ec;
+    const asio::ip::address given = asio::ip::make_address(std::string(address_text), ec);
+    if (ec || address_text.find('%') != std::string_view::npos) {
+        error = "address must be an IPv4 or IPv6 address, such as 203.0.113.7 or 2001:db8::7";
+        return {};
+    }
+    const asio::ip::address a = unmapped(given);
+    SiteSpec managed;
+    const bool is_managed = read_managed(site_file(cfg, site.server_names.front()), managed);
+    std::string scratch;
+    const access::Decision d = access::decide(site, path, [&]() -> const asio::ip::address& { return a; }, scratch);
+    json::Value v = json::Value::object().set("site", site.server_names.front()).set("path", path).set("address", a.to_string());
+    std::string summary;
+    if (d.rule) {
+        v.set("decision", d.refuse() ? "refused" : "report").set("rule", access_rule_json(*d.rule, access_rule_from(*d.rule, is_managed ? &managed : nullptr)));
+        const bool other = !access::covers(*d.rule, path);  // the path as an origin may read it fell under the rule
+        summary = std::string(d.refuse() ? "refused by " : "report (served, logged as refused) by ") + access_rule_text(*d.rule) + ": " + a.to_string() +
+                  " is in none of its entries" + (other ? ", for the way an origin may read " + path + " (a ;parameter, a second decoding or the path after a script)" : "");
+    } else if (const AccessRule* r = access::rule_for(site, path)) {
+        v.set("decision", "allowed").set("rule", access_rule_json(*r, access_rule_from(*r, is_managed ? &managed : nullptr)));
+        summary = "allowed by " + access_rule_text(*r) + (r->any ? ": open to anyone" : ": " + a.to_string() + " is in it");
+    } else {
+        v.set("decision", "allowed");
+        summary = "allowed: no access rule covers " + path;
+    }
+    v.set("summary", summary);
+    return v;
+}
+
 json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now) {
     json::Value v = site_summary(s, now);
     v.set("index", strings(s.index));
@@ -486,7 +553,9 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now) {
     // "rules" here, beside preset:<app> and root:<file>, so an agent can tell them apart
     // (2026-10-02 report: 17 of a Kanboard site's 19 locations said nothing).
     std::vector<RuleLocation> ruled;
-    if (SiteSpec spec; read_managed(site_file(cfg, s.server_names.front()), spec)) ruled = rule_locations(spec);
+    SiteSpec managed;
+    const bool is_managed = read_managed(site_file(cfg, s.server_names.front()), managed);
+    if (is_managed) ruled = rule_locations(managed);
     json::Value locs = json::Value::array();
     for (const auto& l : s.locations) {
         json::Value loc = json::Value::object().set("path", l.path);
@@ -517,6 +586,14 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now) {
         locs.push(std::move(loc));
     }
     v.set("locations", std::move(locs));
+    // Access by client address: the rules in force, longest path first, each with where it
+    // comes from (rules = the managed site's rules.restricted, preset:<app>, or nothing for a
+    // hand-written one).
+    if (!s.access.empty()) {
+        json::Value acc = json::Value::array();
+        for (const auto& r : s.access) acc.push(access_rule_json(r, access_rule_from(r, is_managed ? &managed : nullptr)));
+        v.set("access", std::move(acc));
+    }
     (void)cfg;
     return v;
 }
@@ -922,6 +999,16 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
     }
     // Root additions whose site is gone (disabled or deleted, design section 20): the loader
     // keeps them with a warning; this says what to do.
+    // Access by client address (docs/configuration.md 19): what the rules may not do as meant.
+    for (const auto& n : access_notices(running)) {
+        std::string fix;
+        if (n.code == "access_allows_proxy") fix = "allow the clients' own addresses and ranges, not the proxy's: behind a trusted proxy the rule judges the X-Forwarded-For client";
+        else if (n.code == "access_loopback") fix = "add the local proxy or tunnel to [server] trusted_proxies (127.0.0.1, ::1) so the client it carries is judged, or drop the loopback entry";
+        else if (n.code == "access_ipv4_only") fix = "add the client's IPv6 range (its /64) to the rule or to its address set, if it has one";
+        else if (n.code == "access_single_ipv6") fix = "allow the /64 the address belongs to";
+        else if (n.code == "access_site_restricted") fix = "meant for a staging copy or an internal site; site_update with the rule on / removed when it goes public";
+        add(n.severity == "warning" ? "warn" : "info", n.code, n.site, n.text, fix);
+    }
     for (const auto& o : running.orphan_additions) {
         std::error_code ec;
         const fs::path f = o.file;

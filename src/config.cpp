@@ -1,5 +1,6 @@
 #include "config.hpp"
 
+#include "core/access.hpp"
 #include "core/cpus.hpp"
 #include "handlers/httparena.hpp"
 
@@ -1165,6 +1166,59 @@ RootAdditions parse_root_additions(toml::table tbl, const fs::path& file, const 
     return a;
 }
 
+// [[site.access]] (2026-10-07, docs/configuration.md 19): who may fetch a path by client
+// address. Unknown keys are refused, since a misspelt one would leave the path open.
+void parse_access(const toml::node_view<const toml::node>& n, const Config& cfg, SiteConfig& site, const std::string& where) {
+    const auto* arr = n.as_array();
+    if (!arr) fail(where + ": 'access' must be an array of tables ([[site.access]])");
+    std::size_t idx = 0;
+    for (const auto& node : *arr) {
+        const std::string w = where + " [[access]] #" + std::to_string(++idx);
+        const auto* t = node.as_table();
+        if (!t) fail(w + ": each [[site.access]] must be a table");
+        for (const auto& [k, v] : *t) {
+            const std::string_view key = k.str();
+            if (key != "path" && key != "match" && key != "allow" && key != "mode")
+                fail(w + ": unknown key '" + std::string(key) + "' (path, match, allow, mode); a misspelt key would leave the path open");
+        }
+        AccessRule r;
+        const auto path = (*t)["path"].value<std::string>();
+        if (!path) fail(w + ".path is required: the path the rule covers, such as \"/wp-admin\", or \"/\" for the whole site");
+        if (const std::string why = check_access_path(*path); !why.empty()) fail(w + ".path: " + why);
+        r.path = *path;
+        if (const auto m = (*t)["match"].value<std::string>()) {
+            if (*m == "exact") r.exact = true;
+            else if (*m != "prefix") fail(w + ".match must be \"prefix\" (the path and everything below it) or \"exact\" (this path alone)");
+        } else if (t->contains("match")) {
+            fail(w + ".match must be a string");
+        }
+        if (!r.exact && r.path.size() > 1 && r.path.back() == '/') r.path.pop_back();  // "/admin/" covers what "/admin" does
+        if (const auto m = (*t)["mode"].value<std::string>()) {
+            if (*m == "report") r.report = true;
+            else if (*m != "enforce") fail(w + ".mode must be \"enforce\" (refuse with 403) or \"report\" (log who would be refused, refuse nobody)");
+        } else if (t->contains("mode")) {
+            fail(w + ".mode must be a string");
+        }
+        const auto* allow = (*t)["allow"].as_array();
+        if (!allow) fail(w + ".allow is required: addresses and ranges (\"203.0.113.7\", \"2001:db8:5::/64\"), named sets (\"@office\") or [\"any\"]");
+        if (allow->empty()) fail(w + ".allow is empty: an empty list is not \"everyone\" or \"no one\" here; name the addresses, or [\"any\"]");
+        for (const auto& e : *allow) {
+            const auto text = e.value<std::string>();
+            if (!text) fail(w + ".allow: every entry is a string");
+            if (const std::string why = access_entry(*text, cfg, r.allow, r.any); !why.empty()) fail(w + ".allow: " + why);
+            r.allow_text.push_back(*text);
+        }
+        if (r.any && r.allow_text.size() > 1) fail(w + ".allow: \"any\" admits everyone, so it stands alone");
+        if (r.allow.size() > 64)
+            fail(w + ".allow: " + std::to_string(r.allow.size()) + " addresses and ranges once the sets are expanded, at most 64; a longer list belongs in the firewall (docs/configuration.md 18)");
+        for (const auto& o : site.access)
+            if (o.exact == r.exact && o.path.size() == r.path.size() && access::iequal_prefix(o.path, r.path))
+                fail(w + ": a second rule for " + r.path + (r.exact ? " (exact)" : "") + "; one rule per path");
+        site.access.push_back(std::move(r));
+    }
+    if (site.access.size() > 32) fail(where + ": " + std::to_string(site.access.size()) + " access rules, at most 32");
+}
+
 void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, const std::string& where, std::vector<RootAdditions>* root_adds = nullptr) {
     SiteConfig site;
     for (auto& n : string_list(t["server_name"], (where + ".server_name").c_str()))
@@ -1320,6 +1374,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     } else if (t.contains("location")) {
         fail(where + ": 'location' must be an array of tables ([[site.location]])");
     }
+    if (t.contains("access")) parse_access(t["access"], cfg, site, where);
     // Root additions for this site: parsed as hand-written locations after the file's own, so
     // they win over the preset's at their path and a headers-only one joins like any other;
     // the origin names the file for --explain and site_show. The same path twice (the managed
@@ -1632,6 +1687,17 @@ void explain_config(const Config& cfg, std::ostream& out) {
                        "# (name.bak, name~, name.txt, stem.bak, .name.swp, #name#), whatever hidden_files says\n";
                 break;
             }
+        for (const auto& r : site.access) {
+            out << "\n[[site.access]]";
+            if (r.origin == "preset:wordpress") out << "   # from preset:wordpress: " << r.path << " stays open for the public front end";
+            else if (!r.origin.empty()) out << "   # from " << r.origin;
+            out << "\npath = \"" << r.path << "\"\n";
+            if (r.exact) out << "match = \"exact\"\n";
+            out << "allow = [";
+            for (std::size_t i = 0; i < r.allow_text.size(); ++i) out << (i ? ", " : "") << "\"" << r.allow_text[i] << "\"";
+            out << "]\n";
+            if (r.report) out << "mode = \"report\"\n";
+        }
         for (const auto& loc : site.locations) {
             out << "\n[[site.location]]";
             if (!loc.origin.empty()) out << "  # from " << loc.origin;
@@ -1698,6 +1764,100 @@ void explain_config(const Config& cfg, std::ostream& out) {
     }
 }
 
+std::string check_access_path(std::string_view p) {
+    if (p.empty() || p[0] != '/') return "'" + std::string(p.substr(0, 80)) + "' must start with '/'";
+    if (p.size() > 255) return "'" + std::string(p.substr(0, 80)) + "...' is longer than 255 characters";
+    for (const unsigned char c : p)
+        if (c < 0x20 || c == 0x7f || c == '?' || c == '#' || c == '%' || c == ';' || c == '\\')
+            return "'" + std::string(p) + "' holds a control character, '?', '#', '%', ';' or '\\'; write the path as it reads decoded";
+    if (p.find("//") != std::string_view::npos || p.find("/./") != std::string_view::npos || p.find("/../") != std::string_view::npos ||
+        p.ends_with("/.") || p.ends_with("/.."))
+        return "'" + std::string(p) + "' must be a normalised path: no '//', no '.' or '..' segments";
+    return "";
+}
+
+std::string access_entry(std::string_view text, const Config& cfg, std::vector<Cidr>& out, bool& any) {
+    if (text == "any") {
+        any = true;
+        return "";
+    }
+    if (!text.empty() && text[0] == '@') {
+        const auto it = cfg.address_sets.find(std::string(text.substr(1)));
+        if (it == cfg.address_sets.end()) {
+            std::string known;
+            for (const auto& [name, list] : cfg.address_sets) known += (known.empty() ? " (" : ", ") + ("@" + name);
+            return "no address set '" + std::string(text) + "' in [addresses]" + (known.empty() ? std::string(" (none defined)") : known + ")");
+        }
+        for (const auto& member : it->second) {
+            Cidr c;
+            std::string err;
+            if (parse_cidr(member, c, err)) out.push_back(c);
+        }
+        return "";
+    }
+    Cidr c;
+    std::string err;
+    if (!parse_cidr(text, c, err)) return err + " (an address, a range such as 203.0.113.0/24, a set such as @office, or any)";
+    out.push_back(c);
+    return "";
+}
+
+namespace {
+bool overlaps(const Cidr& a, const Cidr& b) noexcept {
+    if (a.v6 != b.v6) return false;
+    unsigned bits = std::min(a.prefix, b.prefix);
+    for (std::size_t i = 0; i < a.bytes.size() && bits > 0; ++i) {
+        const unsigned take = bits >= 8 ? 8 : bits;
+        const unsigned char mask = static_cast<unsigned char>(0xffu << (8 - take));
+        if ((a.bytes[i] & mask) != (b.bytes[i] & mask)) return false;
+        bits -= take;
+    }
+    return true;
+}
+}  // namespace
+
+std::vector<AccessNotice> access_notices(const Config& cfg) {
+    std::vector<AccessNotice> out;
+    Cidr loop4, loop6;
+    std::string err;
+    parse_cidr("127.0.0.1", loop4, err);
+    parse_cidr("::1", loop6, err);
+    const bool loopback_trusted = in_any(cfg.trusted_proxies, asio::ip::make_address("127.0.0.1")) ||
+                                  in_any(cfg.trusted_proxies, asio::ip::make_address("::1"));
+    for (const auto& site : cfg.sites) {
+        const std::string& name = site.server_names.front();
+        bool v6_listener = false;
+        for (const auto& l : site.listen) v6_listener = v6_listener || std::count(l.begin(), l.end(), ':') > 1;  // stored unbracketed: "::1:443"
+        for (const auto& r : site.access) {
+            const std::string rule = "rule " + r.path + (r.exact ? " (exact)" : "");
+            if (!r.exact && r.path == "/")
+                out.push_back({"access_site_restricted", "info", name, name + " is restricted as a whole (" + rule + "): only the addresses it allows reach any page"});
+            if (r.any || r.allow.empty()) continue;
+            bool v4 = false, v6 = false, warned_proxy = false, warned_loop = false;
+            for (const auto& c : r.allow) {
+                (c.v6 ? v6 : v4) = true;
+                for (const auto& t : cfg.trusted_proxies)
+                    if (!warned_proxy && overlaps(c, t)) {
+                        out.push_back({"access_allows_proxy", "warning", name, name + " " + rule + " allows " + c.text() + ", which holds the trusted proxy " + t.text() +
+                                       ": a request the proxy sends without X-Forwarded-For is judged by the proxy's own address and passes; allow the clients, not the proxy"});
+                        warned_proxy = true;
+                    }
+                if (!warned_loop && !loopback_trusted && (overlaps(c, loop4) || overlaps(c, loop6))) {
+                    out.push_back({"access_loopback", "warning", name, name + " " + rule + " allows " + c.text() +
+                                   ": a local proxy or tunnel (cloudflared, an SSH forward, a sidecar) makes every client it carries look local and pass; trust it in server.trusted_proxies so the real client is judged"});
+                    warned_loop = true;
+                }
+                if (c.v6 && c.prefix == 128)
+                    out.push_back({"access_single_ipv6", "info", name, name + " " + rule + " allows the single IPv6 address " + c.text() +
+                                   ": IPv6 privacy addresses change daily; the office's /64 is the stable form"});
+            }
+            if (v4 && !v6 && v6_listener)
+                out.push_back({"access_ipv4_only", "info", name, name + " " + rule + " allows IPv4 addresses only, and the site listens on IPv6 too: a client that arrives over IPv6 is refused; add its IPv6 range if it has one"});
+        }
+    }
+    return out;
+}
+
 void finalize_site(SiteConfig& site) {
     bool has_root_prefix = false;
     for (const auto& loc : site.locations)
@@ -1717,6 +1877,36 @@ void finalize_site(SiteConfig& site) {
     static std::atomic<std::uint64_t> next_id{1};
     for (auto& loc : site.locations)
         if (loc.id == 0) loc.id = next_id.fetch_add(1, std::memory_order_relaxed);
+    // [[site.access]]: WordPress's public front end calls /wp-admin/admin-ajax.php (search,
+    // carts, comment forms), so a rule on /wp-admin alone keeps that file open to anyone
+    // unless a rule names it; a rule on "/" (the whole site) keeps it closed with the rest.
+    if (site.app == "wordpress" && !site.access.empty()) {
+        constexpr std::string_view ajax = "/wp-admin/admin-ajax.php";
+        const AccessRule* best = nullptr;
+        bool whole = false;
+        for (const auto& r : site.access) {
+            if (!r.exact && r.path == "/") whole = true;
+            if (access::covers(r, ajax) && (!best || r.path.size() > best->path.size() || (r.exact && !best->exact))) best = &r;
+        }
+        if (best && !whole && !best->exact && !best->any && best->path.size() == 9 && access::iequal_prefix(best->path, "/wp-admin")) {
+            AccessRule open;
+            open.path = std::string(ajax);
+            open.exact = true;
+            open.any = true;
+            open.allow_text = {"any"};
+            open.origin = "preset:wordpress";
+            site.access.push_back(std::move(open));
+        }
+    }
+    std::stable_sort(site.access.begin(), site.access.end(), [](const AccessRule& a, const AccessRule& b) {
+        if (a.path.size() != b.path.size()) return a.path.size() > b.path.size();
+        return a.exact && !b.exact;
+    });
+    site.access_first = {};
+    for (const auto& r : site.access) {
+        if (!r.exact && r.path == "/") site.access_first.fill(~std::uint64_t{0});
+        else access::mark_first(site.access_first, access::first_byte(r.path));
+    }
     // Exact matches first, then suffixes, then prefixes; within a kind the longest first.
     auto rank = [](const LocationConfig& l) { return l.exact ? 0 : l.suffix ? 1 : 2; };
     std::stable_sort(site.locations.begin(), site.locations.end(),
@@ -1887,6 +2077,27 @@ Config load_config(const fs::path& path) {
             if (sub["site"].is_string()) additions.push_back(parse_root_additions(std::move(sub), file, cfg.config_path));
             else site_files.emplace_back(std::move(sub), file);
         }
+    }
+    // [addresses] (2026-10-07): named address sets for the sites' access rules ("@office").
+    if (const auto* sets = root["addresses"].as_table()) {
+        for (const auto& [k, v] : *sets) {
+            const std::string name(k.str());
+            bool ok = !name.empty() && name.size() <= 32 && ((name[0] >= 'a' && name[0] <= 'z') || (name[0] >= '0' && name[0] <= '9'));
+            for (const char c : name) ok = ok && ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-');
+            if (!ok) fail("addresses." + name + ": a set's name is lower-case letters, digits, '_' and '-', at most 32");
+            std::vector<std::string> list = string_list(root["addresses"][name], ("addresses." + name).c_str());
+            if (list.empty()) fail("addresses." + name + " is empty: a set names the addresses it stands for");
+            if (list.size() > 64) fail("addresses." + name + ": at most 64 entries; a longer list belongs in the firewall (docs/configuration.md 18)");
+            for (const auto& e : list) {
+                Cidr c;
+                std::string err;
+                if (e == "any" || (!e.empty() && e[0] == '@')) fail("addresses." + name + ": '" + e + "': a set holds addresses and ranges only");
+                if (!parse_cidr(e, c, err)) fail("addresses." + name + ": " + err);
+            }
+            cfg.address_sets[name] = std::move(list);
+        }
+    } else if (root.contains("addresses")) {
+        fail("'addresses' must be a table: [addresses] office = [\"203.0.113.7\", \"2001:db8:5::/64\"]");
     }
     parse_sites_from(root, base_dir, cfg, path.filename().string(), &additions);
     for (auto& [sub, file] : site_files) parse_sites_from(sub, file.parent_path(), cfg, file.filename().string(), &additions);

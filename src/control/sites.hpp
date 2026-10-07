@@ -83,7 +83,8 @@ std::string detect_app_marker(const std::string& app);
 // application's directory, which must never be served); `front_controller` one of the entry
 // points, PHP presets only. An entry point under a private path is a contradiction, refused.
 // "" with `normalised` filled, else why. An empty object clears the rules.
-std::string check_rules(const json::Value& given, const SiteSpec& spec, json::Value& normalised);
+// `cfg`, when given, also checks that every "@set" a restricted rule names is in [addresses].
+std::string check_rules(const json::Value& given, const SiteSpec& spec, json::Value& normalised, const Config* cfg = nullptr);
 
 // Applies `body` onto `spec` (fields present win; absent ones keep what spec had) and
 // lists the decisions still open. `error` names a value that is wrong outright.

@@ -25,7 +25,7 @@ const std::vector<KeyDef>& key_defs() {
         {"http3 = {}", "retry", "\"auto\" | \"always\" | \"never\"", "\"auto\"", "Whether a new HTTP/3 client must prove its address with a Retry round trip before it gets a connection (RFC 9000 8.1.2; the token is bound to the address and valid ten seconds). \"auto\" sends Retry once a worker has 512 handshakes in progress and drops further Initials at 1024; \"always\" is for a host under a handshake flood; \"never\" for a benchmark that must not pay the round trip. Everything else HTTP/3 derives from the HTTP/2 and connection limits.", "reload", "file", "17"},
         {"http3 = {}", "alt_svc", "bool", "true", "Whether every HTTP/1 and HTTP/2 answer of a TLS listener that also speaks h3 carries alt-svc (h3=\":port\"; ma=86400), which is how browsers learn to switch to HTTP/3 on their next connection; off, clients that know the port (curl --http3-only, h2load) still connect over QUIC.", "reload", "file", "17"},
         {"[server]", "server_header", "string", "agensio", "The Server response header; \"\" sends none.", "reload", "file", "1"},
-        {"[server]", "trusted_proxies", "list of CIDRs", "[] (headers ignored)", "Proxies or load balancers in front of agensio whose X-Forwarded-For and X-Forwarded-Proto are believed: the client address in logs and REMOTE_ADDR, and the scheme for PHP (HTTPS, REQUEST_SCHEME), come from them.", "reload", "file", "10"},
+        {"[server]", "trusted_proxies", "list of CIDRs", "[] (headers ignored)", "Proxies or load balancers in front of agensio whose X-Forwarded-For and X-Forwarded-Proto are believed: the client address in logs and REMOTE_ADDR, and the scheme for PHP (HTTPS, REQUEST_SCHEME), come from them. Several X-Forwarded-For lines are one list read from the end of the last line (the rightmost hop not on this list is the client); an IPv4 client of a [::] listener is recorded as IPv4; zone ids are refused.", "reload", "file", "10"},
         {"[server]", "user", "string", "\"\" (stay the starting account)", "Start as root, bind the ports and open the logs, then run as this account. Required for hosting with per-site users and for the provisioning helper.", "restart", "file", "11"},
         {"[server]", "group", "string", "the user's primary group", "The group the server runs as; per-site sockets and directories grant it access.", "restart", "file", "11"},
         {"[server]", "pools", "path", "detected per distro (/etc/php/<v>/fpm/pool.d, /etc/php-fpm.d)", "Where agensio pools writes the generated php-fpm pool files.", "reload", "file", "11"},
@@ -38,6 +38,7 @@ const std::vector<KeyDef>& key_defs() {
         {"[server] acme", "ca", "path", "\"\" (system store)", "A PEM bundle to verify the CA's own TLS with (test beds, private CAs).", "reload", "file", "14"},
         {"[server] acme", "storage", "path", "<state_dir>/acme", "Where the account key and every site's key.pem and fullchain.pem live.", "reload", "file", "14"},
         {"top level", "include", "list of globs", "[]", "Further configuration files, relative to this one: include = [\"sites.d/*.toml\"] is what site-create needs.", "reload", "file", "15"},
+        {"top level", "addresses", "table of address lists", "{}", "Named address sets: [addresses] office = [\"203.0.113.7\", \"2001:db8:5::/64\"], named \"@office\" in the sites' access rules, so one edit reaches every site that names it. Addresses and ranges only, at most 64 a set.", "reload", "file", "19"},
         {"[cache]", "max_file_size", "size", "4MB", "Files up to this size are held in memory; larger ones keep an open descriptor and stream.", "restart", "file", "1"},
         {"[cache]", "max_size", "size", "256MB", "Total bytes of file content the cache may hold before it evicts.", "restart", "file", "1"},
         {"[cache]", "evict_fraction", "float", "0.2", "How much of the cache an eviction pass frees.", "reload", "file", "1"},
@@ -172,6 +173,10 @@ const std::vector<KeyDef>& key_defs() {
         {"proxy tls = {}", "verify", "bool", "true", "Verify the origin's certificate (a self-signed origin needs false, or ca).", "reload", "site file", "12"},
         {"proxy tls = {}", "ca", "path", "\"\" (system store)", "A PEM bundle to verify the origin with.", "reload", "site file", "12"},
         {"proxy tls = {}", "server_name", "string", "the origin's host", "The SNI name and verification name for the origin.", "reload", "site file", "12"},
+        {"[[site.access]]", "path", "string", "(required)", "The path the rule covers: a prefix covers it and everything below it on a segment boundary (/wp-admin: /wp-admin and /wp-admin/x, never /wp-administrator), in any capitalisation; \"/\" is the whole site. Checked before the locations, so whichever one would serve the path (a .php file, a proxy) is covered.", "reload", "site file, site-create (rules.restricted)", "19"},
+        {"[[site.access]]", "match", "enum: prefix | exact", "prefix", "exact: this path alone.", "reload", "site file, site-create (rules.restricted)", "19"},
+        {"[[site.access]]", "allow", "list", "(required)", "Who reaches the path: addresses (203.0.113.7), ranges (203.0.113.0/24, 2001:db8:5::/64), sets from [addresses] (@office), or [\"any\"] to reopen a path below a restricted one. Everyone else gets 403 naming the address the server saw (behind trusted_proxies, the forwarded client). The longest rule covering a path decides; at most 32 rules of 64 addresses.", "reload", "site file, site-create (rules.restricted)", "19"},
+        {"[[site.access]]", "mode", "enum: enforce | report", "enforce", "report: everyone is served and the error log names who would have been refused, to try a rule before it locks anyone out.", "reload", "site file, site-create (rules.restricted)", "19"},
         {"cgi = {}", "interpreter", "path", "(the script itself)", "The program that runs the script (e.g. /usr/bin/python3).", "reload", "site file", "13"},
         {"cgi = {}", "env", "table", "{}", "Environment variables added for the script.", "reload", "site file", "13"},
     };
@@ -211,7 +216,11 @@ json::Value running_value(const Config& c, const std::string& table, const std::
         if (key == "sendfile") return V(c.sendfile);
         if (key == "sendfile_max_chunk") return V(size_words(c.sendfile_max_chunk));
         if (key == "server_header") return V(c.server_header);
-        if (key == "trusted_proxies") return V(static_cast<double>(c.trusted_proxies.size()));
+        if (key == "trusted_proxies") {  // the ranges themselves: an access rule that allows one of them passes what the proxy sends without X-Forwarded-For
+            std::vector<std::string> ranges;
+            for (const auto& t : c.trusted_proxies) ranges.push_back(t.text());
+            return strings(ranges);
+        }
         if (key == "user") return V(c.user);
         if (key == "group") return V(c.group);
         if (key == "pools") return V(c.pools_dir);
@@ -227,6 +236,11 @@ json::Value running_value(const Config& c, const std::string& table, const std::
         if (key == "storage") return V(c.acme.storage);
     } else if (table == "top level") {
         if (key == "include") return strings(c.includes);
+        if (key == "addresses") {  // root's sets with their entries, so an agent can name the right one in rules.restricted
+            V sets = V::object();
+            for (const auto& [name, list] : c.address_sets) sets.set(name, strings(list));
+            return sets;
+        }
     } else if (table == "[cache]") {
         if (key == "max_file_size") return V(size_words(c.cache_max_file_size));
         if (key == "max_size") return V(size_words(c.cache_max_size));

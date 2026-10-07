@@ -34,7 +34,9 @@ the sanitizer and fuzz runs listed in `docs/security-control-plane.md`, and
   it counts. Proxy code (`src/upstream/http*`, `src/handlers/proxy*`, phase D) is gated
   with `bench/ab.sh <base-ref> -P`, which adds the proxy rows through the benchmark
   upstream (`bench/upstream/`, D0); `bench/proxy/run.sh` is the comparison against nginx
-  and Caddy. HTTP/2 code (`src/http2/`) is gated with `bench/ab.sh <base-ref> -2`, which
+  and Caddy. Access rules (`src/core/access.hpp`, the access step of
+  `handlers/dispatch.cpp`) are gated with `bench/ab.sh <base-ref> -A`, which adds two rows for
+  sites with rules. HTTP/2 code (`src/http2/`) is gated with `bench/ab.sh <base-ref> -2`, which
   adds four h2load rows, and `bench/h2/run.sh` is its comparison against nginx and Caddy;
   the static rows of that A/B must stay flat. Linux-only work (kTLS, io_uring, Landlock, FUSE behaviour) is developed there.
   Never trade throughput for convenience on the hot path (no allocations per request that
@@ -534,6 +536,21 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   `[control] host_protection`; `control/protection.*` renders the nftables table and the
   fail2ban jails for the host and reads the helper's `host_protection` probe; the shipped
   copies live in `packaging/firewall/`, `packaging/fail2ban/` and `packaging/agensio-firewall.service`.
+- **Access by client address** (2026-10-07, `src/core/access.hpp`, `docs/configuration.md` 19,
+  design section 22): `[[site.access]]` (`path`, `match`, `allow`, `mode`) and root's named sets
+  `[addresses]` (`@office`); `Dispatcher::admit` runs after the site is found and before
+  `Router::location`, and on `try_files` fallback targets, so no location (a `.php` suffix, a
+  proxy) steps around a rule; prefix rules cover whole segments in any capitalisation, the
+  longest rule decides, `"any"` reopens a subtree, the other readings of a path (a `;` segment
+  parameter, a second decoding, the path after a script) are judged when the path holds those
+  characters. Allow lists only; 403 with `Cache-Control: no-store` naming the address tested; one
+  `warn` line a second per worker (`WorkerState::access_logged`); `mode = "report"`. The address:
+  `ConnectionInfo::client_ip` behind `trusted_proxies`, else the connection's `PeerSource`
+  (HTTP/1 reads the socket only then). WordPress keeps `/wp-admin/admin-ajax.php` open under a
+  `/wp-admin` rule. `SiteConfig::access_first` (a bit per first byte after `/`) makes an
+  uncovered path one bit test. Managed: `rules.restricted`, `ctl --restrict`, `access-check` /
+  MCP `access_check`; `access_notices` feeds `-t`, the error log and health. Gate: `bench/ab.sh
+  <ref> -A`. Security page row 38.
 - **Application install** (F9, `src/services/archive.*`, `fetch.*`, `install.*`):
   `agensio ctl site-install NAME [--url | --file | --version]` fills a site's empty
   directory as the site's account from an https archive, an upload (`agensio ctl upload`)

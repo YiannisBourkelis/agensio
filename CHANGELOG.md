@@ -1,5 +1,102 @@
 # Changelog
 
+## 0.1.0-alpha.52
+
+Three bugs in how agensio decides who the client is, found by the research behind the coming
+access-by-address feature (`reports/Web server IP access control.md`). Each was reproduced by
+a test that failed first; they matter today for the access log, PHP's `REMOTE_ADDR` and what
+fail2ban bans, and would have decided the coming address rules.
+
+- **Several `X-Forwarded-For` lines** (security): behind a trusted proxy only the first line
+  was read. A proxy that adds a line of its own, as HAProxy's `option forwardfor` does, puts
+  the client it saw on the last line, so the client's own first line chose the address agensio
+  logged and handed to PHP. The lines are now one list (RFC 9110 5.3) read from the end of the
+  last line; `X-Forwarded-Proto` counts the last value of its last line, so a client's earlier
+  `https` no longer turns `HTTPS` on; a proxy location forwards a trusted chain whole, every
+  line in order, where it kept only the last line (a field the client listed in `Connection`
+  is still dropped). Unit test, and integration checks over HTTP/1, HTTP/2 and the proxy.
+- **IPv4 clients of a `[::]` listener** were recorded as `::ffff:a.b.c.d` in the logs and in
+  `REMOTE_ADDR`, and an IPv6 entry with zero leading bits (`::/8`) matched every IPv4 client.
+  The address is unmapped once per connection over HTTP/1, HTTP/2 and HTTP/3 and in
+  `X-Forwarded-For` entries; an entry written in mapped form means its IPv4 range; zone ids
+  (`fe80::1%eth0`) are refused in address lists. Found with it: HTTP/1 filled the peer's text
+  in two places, and when the access log filled it first a later forwarded step judged the
+  peer from an unset address; one function sets text, port and address together now.
+- **A reload that changes `trusted_proxies`** did not reach connections already open: each
+  cached its verdict on its peer for its life, so a proxy taken off the list kept choosing the
+  client address (HTTP/1, HTTP/2, HTTP/3), and with the list emptied an HTTP/1 connection kept
+  the previous request's forwarded address. Three reload-suite checks, failing before.
+
+From the alpha.51 report (a live host and a private instance; the alpha.51 fixes confirmed:
+the reference's defaults, TLS 1.2 renegotiation refused, the JSON range answered `-32700
+number out of range` with the bridge going on, the connection limits applied on reload over
+HTTP/1 and HTTP/2, nothing active cut), two low findings, each reproduced by a test first:
+
+- **A kept HTTP/1 connection kept its old idle deadline after a reload** that shortened
+  `idle_timeout`. alpha.51 said a kept connection takes the timeouts at its next request; it
+  took the value, but the timer armed before the reload (the 2 s shed tick arms it for the rest
+  of the old limit) still fired at the old deadline: 15 s to 2 s, a request after the reload,
+  closed 10.5 s later where HTTP/2 closed after 2 s. A shorter limit now re-arms the timer from
+  that request (only at a reload boundary). Reload-suite check: 10.3 s before, under 3.5 s now.
+- **`docs/mariadb.md` was not in the package**, so the administrator it is written for could
+  not read it on the host. It is installed with the other guides now, and a unit test holds
+  every guide in `docs/` to the install list (developer documents are named in the test). The
+  package suite checks the installed file; it also tests the newest `.deb` in `build/` (an older
+  one sorted first and was the one installed) and had two stale expectations, `/var/lib/agensio`
+  0750 (0751 since site users traverse to their state directories) and the version `alpha.1`,
+  which it now reads from the package.
+
+**Access by client address** (`docs/configuration.md` 19, design section 22, the security
+audit's first feature gap): a path, or a whole site, answered only to some client addresses,
+everyone else getting `403`.
+
+```toml
+[addresses]
+office = ["203.0.113.7", "2001:db8:5::/64"]
+
+[[site.access]]
+path = "/wp-admin"
+allow = ["@office"]
+```
+
+- Checked on the normalised path after the site is found and before any location is chosen,
+  so whichever location would serve the request (a `.php` suffix, a proxy, a `try_files`
+  fallback) is covered: the trap where nginx's `allow` in `location /wp-admin/` is bypassed
+  by `location ~ \.php$` cannot happen. A prefix covers whole segments in any capitalisation;
+  the longest rule decides; `allow = ["any"]` reopens a path below; `match = "exact"`;
+  `path = "/"` restricts a site. The other ways an origin may read the same path are judged
+  too: a `;parameter` segment (Tomcat's `..;/`), a second decoding, the path after a script.
+- Allow lists only; an empty list, an unknown key (a misspelt one would leave the path open), an
+  unknown `@set`, a zone id and an unnormalised path are refused at load. At most 32 rules a
+  site and 64 addresses a rule; longer lists are the firewall's.
+- WordPress: with `/wp-admin` restricted (and not the whole site), the preset keeps
+  `/wp-admin/admin-ajax.php` open for the public pages that call it.
+- The refusal is a `403` with `Cache-Control: no-store` naming the address that was tested;
+  the error log gets one `warn` line a second per worker naming the site, the rule and the
+  client, with the count of lines not written; `mode = "report"` logs `access would refuse:`
+  and serves everyone.
+- Managed sites: `rules.restricted` through `site_update` (admin), `agensio ctl site-update
+  --restrict PATH=ADDR,... / --restrict-exact / --no-restrict` (the other rules kept);
+  `access-check SITE PATH ADDRESS` and the MCP tool `access_check` (viewer) say what the rules
+  decide for one client; `site_show` lists the rules in force with where each comes from;
+  `config_reference` shows root's address sets with their entries and the trusted proxies'
+  ranges (it showed a count); an unknown `@set` in `site_update` is answered with the sets that
+  exist. The MCP server's instructions, `site_create`, `site_update`, `logs_query` and the
+  `new_site` prompt tell an agent when to offer a restriction, to check the user's own address
+  first, and where refusals appear.
+- `-t`, the error log and health warn about an entry that holds a trusted proxy, a loopback
+  entry with no local proxy trusted, IPv4-only lists on IPv6 listeners, single IPv6 addresses,
+  and a site restricted as a whole.
+- Cost: a site without rules pays one test per request; a page no rule can cover, one bit
+  test; the client's address is read only when a rule covers the path. `bench/ab.sh <ref> -A`
+  adds the two rows for sites with rules.
+- A server before this one ignores `[[site.access]]` without a word (the suite's sixteen
+  checks all failed on it, PHP under a restricted path ran): after an upgrade, `agensio -t
+  --explain` lists the rules.
+
+The new `-t --explain` check captures the output before `grep -q`, the pipefail trap found in
+alpha.51 (the writer of a long output dies of SIGPIPE when grep stops at its match).
+
 ## 0.1.0-alpha.51 (2026-10-07)
 
 `docs/mariadb.md`: a short guide for the administrator who installs MariaDB on the same

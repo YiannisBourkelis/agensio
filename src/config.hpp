@@ -1,9 +1,11 @@
 // Configuration model and TOML loader.
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <ostream>
 #include <optional>
 #include <string>
@@ -119,6 +121,22 @@ struct PhpPool {
     std::vector<std::pair<std::string, std::string>> extra;    // php_admin_value passthrough
 };
 
+// [[site.access]] (2026-10-07, docs/configuration.md 19, docs/design-site-operations.md 22):
+// who may fetch a path of the site, by client address. Checked on the normalised path after
+// the site is found and before a location is chosen, so whichever location would serve the
+// request (a .php suffix, a proxy, a static file) the rule has already applied; this is
+// where nginx's per-location allow/deny is bypassed by a regex location. The longest rule
+// covering a path decides; every rule is an allow list, so nothing is open by omission.
+struct AccessRule {
+    std::string path;     // a prefix covers whole segments ("/admin": /admin, /admin/x, never /administrator); "/" covers the site
+    bool exact = false;   // match = "exact": this path alone
+    bool any = false;     // allow = ["any"]: everyone (reopens a subtree of a restricted path)
+    bool report = false;  // mode = "report": log who would be refused, refuse nobody
+    std::vector<Cidr> allow;              // the entries with named sets expanded
+    std::vector<std::string> allow_text;  // as written ("@office", "10.0.0.0/8"): --explain, site_show, the log
+    std::string origin;   // "" written in the site file, "preset:wordpress" added by a preset
+};
+
 struct SiteConfig {
     std::vector<std::string> server_names;  // lower-case host names, "*" matches anything
     std::string user;   // hosting: PHP runs as this user in its own pool, logs are owned by it
@@ -177,6 +195,12 @@ struct SiteConfig {
     std::vector<std::string> login_paths;
     std::string access_log;    // absolute path, or "" for no access log (site `access_log`, default [log] access)
     int access_log_sink = -1;  // set by the Server: index into its log registry
+    // [[site.access]], longest path first (an exact rule before a prefix of the same path);
+    // empty, a request pays one test. `access_first` has a bit per byte that follows the
+    // leading '/' of a rule's path (bit 0 for "/" itself, every bit for a rule on "/"), so a
+    // request whose path starts with no such byte skips the scan.
+    std::vector<AccessRule> access;
+    std::array<std::uint64_t, 4> access_first{};
 };
 
 // [log]
@@ -280,6 +304,9 @@ struct Config {
     // rightmost untrusted address becomes the client (REMOTE_ADDR, access log) and the
     // scheme sets HTTPS / REQUEST_SCHEME for FastCGI. Empty (default): headers are ignored.
     std::vector<Cidr> trusted_proxies;
+    // [addresses] (2026-10-07): named address sets the sites' access rules name as "@name", so
+    // one edit reaches every site that uses them; checked and expanded at load.
+    std::map<std::string, std::vector<std::string>> address_sets;
     // Hosting (C3b): the group agensio runs as (pool sockets grant it access; "" = the
     // process's group), where `agensio pools` writes pool files ("" = detected per distro),
     // where generated pools listen, and the per-user state directories.
@@ -356,6 +383,22 @@ std::vector<TryStep> parse_try_files(const std::vector<std::string>& items);
 // Appends the implicit "/" location from the site's own settings if none is configured
 // and sorts the locations for Router::location. The loader calls it; exposed for tests.
 void finalize_site(SiteConfig& site);
+
+// Access by client address (2026-10-07): the checks the loader, site_update's rules.restricted
+// and the access-check command share. "" when fine, else why not.
+std::string check_access_path(std::string_view path);
+// One allow entry: "any", "@set" (from cfg.address_sets) or an address or range; appended to
+// `out` (a set's members) unless it is "any".
+std::string access_entry(std::string_view text, const Config& cfg, std::vector<Cidr>& out, bool& any);
+// What -t, the error log at start and reload, and health say about the sites' access rules:
+// an entry that holds a trusted proxy, a loopback entry with no local proxy trusted, an IPv4-only
+// list on a site reachable over IPv6, a single IPv6 address, a whole site restricted.
+struct AccessNotice {
+    std::string code;      // access_allows_proxy, access_loopback, access_ipv4_only, access_single_ipv6, access_site_restricted
+    std::string severity;  // "warning" or "info"
+    std::string site, text;
+};
+std::vector<AccessNotice> access_notices(const Config& cfg);
 // The synthetic site the control listener routes to: one location of kind `control`.
 SiteConfig control_site();
 // Every value `app = "..."` accepts: "static", the PHP presets in table order, "proxy",

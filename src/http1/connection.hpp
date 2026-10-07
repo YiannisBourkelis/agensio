@@ -52,7 +52,7 @@ struct IsLocalSocket : std::false_type {};
 #endif
 
 template <class Socket>
-class Http1Connection : public std::enable_shared_from_this<Http1Connection<Socket>> {
+class Http1Connection : public std::enable_shared_from_this<Http1Connection<Socket>>, public PeerSource {
 public:
     Http1Connection(Socket&& socket, Worker& worker, std::shared_ptr<const Generation> gen, const Listener* listener,
                     const Config& cfg, Dispatcher& dispatcher)
@@ -72,6 +72,14 @@ public:
           body_source_(*this),
           writer_(socket_, *this, worker.ctx, cfg) {
         worker_.connections.fetch_add(1, std::memory_order_relaxed);
+        stream_.conn.peer = this;
+    }
+
+    // An access rule asks for the peer's address (core/stream.hpp PeerSource): the socket is
+    // asked once per connection, then.
+    const asio::ip::address& peer_ip() override {
+        ensure_remote();
+        return remote_addr_;
     }
 
     // Control socket: the peer's credentials and role, decided at accept (F0).
@@ -302,15 +310,7 @@ private:
         const SiteConfig* site = site_;
         if (!site) site = listener_->router.default_site();
         if (!site || site->access_log_sink < 0) return;
-        if (remote_.empty()) {
-            if constexpr (IsLocalSocket<Socket>::value) {
-                remote_ = "local";
-            } else {
-                asio::error_code ec;
-                const auto ep = lowest().remote_endpoint(ec);
-                remote_ = ec ? std::string("-") : ep.address().to_string();
-            }
-        }
+        ensure_remote();
         const Request& req = stream_.request;
         AccessRecord rec;
         rec.remote = stream_.conn.client_address.empty() ? std::string_view(remote_) : stream_.conn.client_address;
@@ -508,12 +508,30 @@ private:
         gen_ = worker_.gen;
         listener_ = l;
         live_ = &gen_->cfg;
+        // trusted_proxies may have changed (2026-10-07): the peer is judged again, and the
+        // last request's forwarded address does not outlive a list that is now empty (the
+        // forwarded step, which clears it, runs only while the list has entries).
+        trusted_checked_ = false;
+        stream_.conn.client_address = {};
+        stream_.conn.forwarded_https = false;
+        stream_.conn.trusted_peer = false;
         // The timeouts follow the reload from the next request on; the receive buffer's size
         // follows at the next idle shed, when the buffer is empty.
         const bool idle_in_effect = timeout_ == idle_timeout_;
+        const auto previous_idle = idle_timeout_;
         idle_timeout_ = std::chrono::seconds(live_->idle_timeout_s);
         body_timeout_ = std::chrono::seconds(live_->body_timeout_s);
-        if (idle_in_effect) timeout_ = idle_timeout_;
+        if (idle_in_effect) {
+            timeout_ = idle_timeout_;
+            // A shorter limit: the timer armed under the old one would fire at the old deadline
+            // (alpha.51 VPS report: 15 s to 2 s, the connection closed 10.5 s after this
+            // request), so it is armed again from now. Only at a reload boundary; a longer limit
+            // needs nothing, the early tick re-arms from timeout_.
+            if (idle_timeout_ < previous_idle) {
+                timer_.cancel();
+                arm_timer(next_tick(std::chrono::steady_clock::now() - last_activity_));
+            }
+        }
     }
 
     void process() {
@@ -778,19 +796,27 @@ private:
             stream_.conn.tls = IsTlsStream<Socket>::value;
             stream_.conn.cert = cert_names_.get();
         }
-        if (remote_.empty()) {
-            if constexpr (IsLocalSocket<Socket>::value) {
-                remote_ = "local";
-            } else {
-                asio::error_code ec;
-                const auto ep = lowest().remote_endpoint(ec);
-                remote_ = ec ? std::string("-") : ep.address().to_string();
-                remote_port_ = ec ? 0 : ep.port();
-                if (!ec) remote_addr_ = ep.address();
-            }
-        }
+        ensure_remote();
         stream_.conn.remote_address = remote_;
         stream_.conn.remote_port = remote_port_;
+    }
+
+    // The peer, once per connection: its text for the logs, its port and its parsed address
+    // together, whichever asks first (the access log asks for a request that needed nothing
+    // else; before 2026-10-07 it filled the text alone, and a later forwarded step found the
+    // text set and judged the peer from an unset address).
+    void ensure_remote() {
+        if (!remote_.empty()) return;
+        if constexpr (IsLocalSocket<Socket>::value) {
+            remote_ = "local";
+        } else {
+            asio::error_code ec;
+            const auto ep = lowest().remote_endpoint(ec);
+            // An IPv4 client of a dual-stack listener is its IPv4 address (net/cidr.hpp unmapped).
+            if (!ec) remote_addr_ = unmapped(ep.address());
+            remote_ = ec ? std::string("-") : remote_addr_.to_string();
+            remote_port_ = ec ? 0 : ep.port();
+        }
     }
 
     // Protocol-level error: answer, drop whatever is buffered, close.

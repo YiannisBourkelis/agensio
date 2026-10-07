@@ -69,6 +69,10 @@ const SiteConfig* find_site(const Config& cfg, std::string_view name);
 bool is_catch_all(const SiteConfig& s);
 bool listener_has_catch_all(const Config& cfg, const std::string& address);
 json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now);
+// Access by client address (docs/configuration.md 19): what the site's rules decide for one
+// path and one client address, with the deciding rule and a one-line summary. `error` set
+// (and nothing answered) when the path or the address does not parse.
+json::Value access_check(const Config& cfg, const SiteConfig& site, std::string_view path, std::string_view address, std::string& error);
 
 // ---- validation and health ----
 

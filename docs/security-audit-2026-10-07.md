@@ -218,6 +218,9 @@ control plane), with the nginx feature each stands in for.
    common nginx `allow` use; `net/cidr.hpp` and `trusted_proxies` give the matcher and
    the client-address rule (behind a proxy the rightmost untrusted hop). One list per
    location, checked after routing, no cost on a location without one. Small step.
+   Built 2026-10-07 (`docs/configuration.md` 19, design section 22): a site-level rule checked
+   before routing, since a per-location list repeats nginx's `.php` pitfall; the research
+   behind it is `reports/Web server IP access control.md`.
 2. **Basic authentication.** Not built. A staging site or an admin tool in front of an
    application that has no login (`uptime-kuma`'s metrics, a `proxy` site). htpasswd
    formats bcrypt and sha-crypt through the platform's `crypt_r` (OpenSSL is in already;

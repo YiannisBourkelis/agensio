@@ -92,6 +92,8 @@ Server::Server(Config cfg)
     own_site_logs(gen->cfg);
     for (const auto& o : gen->cfg.orphan_additions)
         error_log_.warn(o.file + " holds root additions for site " + o.site + ", which is not in the configuration (disabled or deleted): ignored");
+    for (const auto& n : access_notices(gen->cfg))
+        if (n.severity == "warning") error_log_.warn(n.text);
     warm_response_tables();
     prepare_acme(gen->cfg);
     build_listeners(*gen);
@@ -1507,6 +1509,8 @@ bool Server::reload(std::string& error) {
                     std::to_string(opened.size()) + " bound, " + std::to_string(removed) + " closed");
     for (const auto& o : gen->cfg.orphan_additions)
         error_log_.warn(o.file + " holds root additions for site " + o.site + ", which is not in the configuration (disabled or deleted): ignored");
+    for (const auto& n : access_notices(gen->cfg))
+        if (n.severity == "warning") error_log_.warn(n.text);
     return true;
 }
 

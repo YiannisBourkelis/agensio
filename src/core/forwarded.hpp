@@ -1,7 +1,14 @@
 // Behind a trusted proxy (server.trusted_proxies): the client is the rightmost
 // X-Forwarded-For entry that is not itself a trusted proxy, and X-Forwarded-Proto says
-// whether it used TLS. Shared by the HTTP/1 and HTTP/2 connections; called only when the
-// list is configured and the peer is on it.
+// whether it used TLS. Shared by the HTTP/1, HTTP/2 and HTTP/3 connections; called only when
+// the list is configured and the peer is on it.
+//
+// Several X-Forwarded-For lines are one list in order (RFC 9110 5.3), so the walk starts at
+// the end of the last line: a proxy that adds a line of its own (HAProxy's option forwardfor)
+// puts the hop it saw there, and a client's own line before it is reached only through hops
+// the server trusts. Until 2026-10-07 only the first line was read, which let a client
+// behind such a proxy choose the address agensio logs and hands to PHP. The nearest proxy's
+// X-Forwarded-Proto counts the same way: the last value of the last line.
 #pragma once
 
 #include <string>
@@ -20,23 +27,45 @@ namespace agensio {
 // `storage` keeps the chosen address alive for the request (conn.client_address views it).
 inline void resolve_forwarded(const Request& req, const std::vector<Cidr>& trusted, ConnectionInfo& conn,
                               std::string& storage) {
-    std::string_view xff = req.headers.get("x-forwarded-for");
-    while (!xff.empty()) {
-        const std::size_t comma = xff.rfind(',');
-        std::string_view entry = comma == std::string_view::npos ? xff : xff.substr(comma + 1);
-        xff = comma == std::string_view::npos ? std::string_view() : xff.substr(0, comma);
-        while (!entry.empty() && (entry.front() == ' ' || entry.front() == '\t')) entry.remove_prefix(1);
-        while (!entry.empty() && (entry.back() == ' ' || entry.back() == '\t')) entry.remove_suffix(1);
-        if (entry.empty()) continue;
-        asio::error_code ec;
-        const auto a = asio::ip::make_address(std::string(entry), ec);
-        if (ec) break;  // garbage: trust nothing further left
-        storage = entry;
-        conn.client_address = storage;
-        if (!in_any(trusted, a)) break;  // first hop that is not one of ours
+    const Headers& h = req.headers;
+    bool done = false;
+    for (std::size_t i = h.size(); i-- > 0 && !done;) {
+        if (!Headers::iequals(h[i].name, "x-forwarded-for")) continue;
+        std::string_view xff = h[i].value;
+        while (!xff.empty()) {
+            const std::size_t comma = xff.rfind(',');
+            std::string_view entry = comma == std::string_view::npos ? xff : xff.substr(comma + 1);
+            xff = comma == std::string_view::npos ? std::string_view() : xff.substr(0, comma);
+            while (!entry.empty() && (entry.front() == ' ' || entry.front() == '\t')) entry.remove_prefix(1);
+            while (!entry.empty() && (entry.back() == ' ' || entry.back() == '\t')) entry.remove_suffix(1);
+            if (entry.empty()) continue;
+            asio::error_code ec;
+            const auto given = asio::ip::make_address(std::string(entry), ec);
+            if (ec || entry.find('%') != std::string_view::npos) {  // garbage or a zone id: trust nothing further left
+                done = true;
+                break;
+            }
+            const asio::ip::address a = unmapped(given);
+            if (a == given) storage = entry;
+            else storage = a.to_string();  // ::ffff:a.b.c.d is recorded as a.b.c.d
+            conn.client_address = storage;
+            conn.client_ip = a;
+            if (!in_any(trusted, a)) {  // first hop that is not one of ours
+                done = true;
+                break;
+            }
+        }
     }
-    const std::string_view proto = req.headers.get("x-forwarded-proto");
-    conn.forwarded_https = Headers::iequals(proto, "https");
+    conn.forwarded_https = false;
+    for (std::size_t i = h.size(); i-- > 0;) {
+        if (!Headers::iequals(h[i].name, "x-forwarded-proto")) continue;
+        std::string_view proto = h[i].value;
+        if (const std::size_t comma = proto.rfind(','); comma != std::string_view::npos) proto = proto.substr(comma + 1);
+        while (!proto.empty() && (proto.front() == ' ' || proto.front() == '\t')) proto.remove_prefix(1);
+        while (!proto.empty() && (proto.back() == ' ' || proto.back() == '\t')) proto.remove_suffix(1);
+        conn.forwarded_https = Headers::iequals(proto, "https");
+        break;
+    }
 }
 
 }  // namespace agensio

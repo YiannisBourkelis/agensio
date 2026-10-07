@@ -39,7 +39,7 @@
 
 namespace agensio::h3 {
 
-class Http3Connection final : public std::enable_shared_from_this<Http3Connection>, private BodyOwner {
+class Http3Connection final : public std::enable_shared_from_this<Http3Connection>, private BodyOwner, public PeerSource {
 public:
     using Quic = quic::QuicConnection<Http3Connection>;
     using Endpoint = quic::Endpoint<Http3Connection>;
@@ -930,6 +930,11 @@ private:
             asio::ip::address_v6::bytes_type b;
             std::memcpy(b.data(), &in6->sin6_addr, 16);
             remote_addr_ = asio::ip::address_v6(b);
+            if (remote_addr_.to_v6().is_v4_mapped()) {  // an IPv4 client of the dual-stack socket
+                remote_addr_ = unmapped(remote_addr_);
+                remote_ = remote_addr_.to_string();
+                return;
+            }
         }
         remote_ = text[0] ? text : "-";
     }
@@ -945,7 +950,11 @@ private:
         c.client_address = {};
         c.forwarded_https = false;
         c.trusted_peer = false;
+        c.peer = this;
     }
+
+    // An access rule asks for the peer's address (core/stream.hpp PeerSource): set at creation.
+    const asio::ip::address& peer_ip() override { return remote_addr_; }
 
     void apply_forwarded(H3Stream& s) {
         if (!trusted_checked_) {
@@ -963,6 +972,7 @@ private:
         gen_ = worker_.gen;
         listener_ = l;
         live_ = &gen_->cfg;
+        trusted_checked_ = false;  // trusted_proxies may have changed: ask again (2026-10-07)
     }
 
     void log_request(H3Stream& s) {

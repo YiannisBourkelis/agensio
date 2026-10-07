@@ -61,7 +61,7 @@ section of `docs/configuration.md` that explains the key.
 | key | type | default | meaning | applies | via | doc |
 |---|---|---|---|---|---|---|
 | `server_header` | string | agensio | The Server response header; "" sends none. | reload | file | 1 |
-| `trusted_proxies` | list of CIDRs | [] (headers ignored) | Proxies or load balancers in front of agensio whose X-Forwarded-For and X-Forwarded-Proto are believed: the client address in logs and REMOTE_ADDR, and the scheme for PHP (HTTPS, REQUEST_SCHEME), come from them. | reload | file | 10 |
+| `trusted_proxies` | list of CIDRs | [] (headers ignored) | Proxies or load balancers in front of agensio whose X-Forwarded-For and X-Forwarded-Proto are believed: the client address in logs and REMOTE_ADDR, and the scheme for PHP (HTTPS, REQUEST_SCHEME), come from them. Several X-Forwarded-For lines are one list read from the end of the last line (the rightmost hop not on this list is the client); an IPv4 client of a [::] listener is recorded as IPv4; zone ids are refused. | reload | file | 10 |
 | `user` | string | "" (stay the starting account) | Start as root, bind the ports and open the logs, then run as this account. Required for hosting with per-site users and for the provisioning helper. | restart | file | 11 |
 | `group` | string | the user's primary group | The group the server runs as; per-site sockets and directories grant it access. | restart | file | 11 |
 | `pools` | path | detected per distro (/etc/php/<v>/fpm/pool.d, /etc/php-fpm.d) | Where agensio pools writes the generated php-fpm pool files. | reload | file | 11 |
@@ -82,6 +82,7 @@ section of `docs/configuration.md` that explains the key.
 | key | type | default | meaning | applies | via | doc |
 |---|---|---|---|---|---|---|
 | `include` | list of globs | [] | Further configuration files, relative to this one: include = ["sites.d/*.toml"] is what site-create needs. | reload | file | 15 |
+| `addresses` | table of address lists | {} | Named address sets: [addresses] office = ["203.0.113.7", "2001:db8:5::/64"], named "@office" in the sites' access rules, so one edit reaches every site that names it. Addresses and ranges only, at most 64 a set. | reload | file | 19 |
 ## `[cache]`
 
 | key | type | default | meaning | applies | via | doc |
@@ -260,6 +261,14 @@ section of `docs/configuration.md` that explains the key.
 | `verify` | bool | true | Verify the origin's certificate (a self-signed origin needs false, or ca). | reload | site file | 12 |
 | `ca` | path | "" (system store) | A PEM bundle to verify the origin with. | reload | site file | 12 |
 | `server_name` | string | the origin's host | The SNI name and verification name for the origin. | reload | site file | 12 |
+## `[[site.access]]`
+
+| key | type | default | meaning | applies | via | doc |
+|---|---|---|---|---|---|---|
+| `path` | string | (required) | The path the rule covers: a prefix covers it and everything below it on a segment boundary (/wp-admin: /wp-admin and /wp-admin/x, never /wp-administrator), in any capitalisation; "/" is the whole site. Checked before the locations, so whichever one would serve the path (a .php file, a proxy) is covered. | reload | site file, site-create (rules.restricted) | 19 |
+| `match` | enum: prefix \| exact | prefix | exact: this path alone. | reload | site file, site-create (rules.restricted) | 19 |
+| `allow` | list | (required) | Who reaches the path: addresses (203.0.113.7), ranges (203.0.113.0/24, 2001:db8:5::/64), sets from [addresses] (@office), or ["any"] to reopen a path below a restricted one. Everyone else gets 403 naming the address the server saw (behind trusted_proxies, the forwarded client). The longest rule covering a path decides; at most 32 rules of 64 addresses. | reload | site file, site-create (rules.restricted) | 19 |
+| `mode` | enum: enforce \| report | enforce | report: everyone is served and the error log names who would have been refused, to try a rule before it locks anyone out. | reload | site file, site-create (rules.restricted) | 19 |
 ## `cgi = {}`
 
 | key | type | default | meaning | applies | via | doc |

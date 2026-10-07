@@ -218,6 +218,20 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
         reply(s, 200, control::settings_catalog(backend_->running(), nullptr));
     } else if (path == "/v1/config/reference") {
         reply(s, 200, control::config_reference(&backend_->running()));
+    } else if (path.starts_with("/v1/sites/") && path.ends_with("/access") && path.size() > 17) {
+        // Access by client address (docs/configuration.md 19): what the site's rules decide for
+        // one path and one address, before a rule is enforced or when a user is refused.
+        const std::string_view name = path.substr(10, path.size() - 10 - 7);
+        const Config& cfg = backend_->running();
+        const SiteConfig* site = control::find_site(cfg, name);
+        if (!site) {
+            reply(s, 404, json::Value::object().set("error", "no such site").set("site", std::string(name)));
+            return false;
+        }
+        std::string error;
+        json::Value v = control::access_check(cfg, *site, control::query_value(req.target, "path"), control::query_value(req.target, "address"), error);
+        if (!error.empty()) reply(s, 400, json::Value::object().set("error", error));
+        else reply(s, 200, v);
     } else if (path.starts_with("/v1/sites/") && path.ends_with("/tasks")) {
         // The named tasks a site's preset offers (F13): from the table, nothing else can run.
         const std::string_view name = path.substr(10, path.size() - 10 - 6);

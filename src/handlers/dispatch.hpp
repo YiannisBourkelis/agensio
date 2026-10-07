@@ -53,6 +53,10 @@ private:
     bool check_method(Stream& s, const LocationConfig& loc, WorkerState& ws);
     void redirect_https(Stream& s, const SiteConfig& site);
     void misdirected(Stream& s);
+    // [[site.access]] (core/access.hpp): every reading of `path` judged by its deciding rule.
+    // False when s.response is the 403; a rule in report mode is logged and lets it through.
+    bool admit(Stream& s, const SiteConfig& site, std::string_view path, WorkerState& ws);
+    void refuse_access(Stream& s, std::string_view address);
 
     StaticHandler& static_;
     FcgiHandler& fcgi_;

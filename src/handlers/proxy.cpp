@@ -58,6 +58,13 @@ void forwarded_for(std::string& out, std::string_view addr) {
 
 }  // namespace
 
+// Every value of a field the client sent on several lines, in order, each followed by ", "
+// (RFC 9110 5.3: the lines are one comma-separated list).
+static void append_lines(std::string& out, const Headers& headers, std::string_view name) {
+    for (const HeaderField& f : headers)
+        if (Headers::iequals(f.name, name) && !f.value.empty()) out.append(f.value).append(", ");
+}
+
 bool ProxyHandler::build_head(std::string& out, const Stream& s, std::string_view target, const UpstreamConfig& policy) {
     const Request& req = s.request;
     out.append(req.method_name).append(" ").append(target).append(" HTTP/1.1\r\n");
@@ -76,7 +83,10 @@ bool ProxyHandler::build_head(std::string& out, const Stream& s, std::string_vie
             if (Headers::iequals(h.first, name)) return true;
         return false;
     };
-    std::string_view xff, xfh, forwarded;
+    std::string_view xfh;
+    // A trusted proxy's chains are forwarded whole (below); a field the client listed in
+    // Connection or the configuration sets itself never gets this far, so it is not.
+    bool xff_lines = false, forwarded_lines = false;
     bool cookie_sent = false;
     for (const HeaderField& h : req.headers) {
         if (http::is_hop_by_hop(h.name) || Headers::iequals(h.name, "expect") ||
@@ -102,10 +112,10 @@ bool ProxyHandler::build_head(std::string& out, const Stream& s, std::string_vie
         }
         // The client's forwarding fields are believed only from a trusted proxy (then
         // appended to), never from the open internet (then replaced).
-        if (Headers::iequals(h.name, "x-forwarded-for")) { if (trusted) xff = h.value; continue; }
+        if (Headers::iequals(h.name, "x-forwarded-for")) { xff_lines = trusted; continue; }
         if (Headers::iequals(h.name, "x-forwarded-host")) { if (trusted) xfh = h.value; continue; }
         if (Headers::iequals(h.name, "x-forwarded-proto") || Headers::iequals(h.name, "x-forwarded-port")) continue;
-        if (Headers::iequals(h.name, "forwarded")) { if (trusted) forwarded = h.value; continue; }
+        if (Headers::iequals(h.name, "forwarded")) { forwarded_lines = trusted; continue; }
         out.append(h.name).append(": ").append(h.value).append("\r\n");
     }
     if (policy.host == "upstream") out.append("Host: ").append(policy.address.key).append("\r\n");
@@ -114,8 +124,10 @@ bool ProxyHandler::build_head(std::string& out, const Stream& s, std::string_vie
     const bool https = s.conn.tls || s.conn.forwarded_https;
     const std::string_view host = xfh.empty() ? req.host : xfh;
     if (x_forwarded) {
+        // A trusted proxy's chain goes on whole: every line in order, then the peer (until
+        // 2026-10-07 only the last line, which dropped the hops of a proxy that adds one).
         out.append("X-Forwarded-For: ");
-        if (!xff.empty()) out.append(xff).append(", ");
+        if (xff_lines) append_lines(out, req.headers, "x-forwarded-for");
         out.append(s.conn.remote_address).append("\r\n");
         out.append("X-Forwarded-Proto: ").append(https ? "https" : "http").append("\r\n");
         // Host passed through already tells the origin what the client asked for; the
@@ -126,7 +138,7 @@ bool ProxyHandler::build_head(std::string& out, const Stream& s, std::string_vie
     }
     if (rfc_forwarded) {
         out.append("Forwarded: ");
-        if (!forwarded.empty()) out.append(forwarded).append(", ");
+        if (forwarded_lines) append_lines(out, req.headers, "forwarded");
         out.append("for=");
         forwarded_for(out, s.conn.remote_address);
         out.append(";proto=").append(https ? "https" : "http");

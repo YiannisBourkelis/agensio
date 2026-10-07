@@ -67,6 +67,8 @@
 #include "http_date.hpp"
 #include "mime.hpp"
 #include "net/cidr.hpp"
+#include "core/forwarded.hpp"
+#include "core/access.hpp"
 #include "path.hpp"
 #include "services/log.hpp"
 #include "upstream/fcgi.hpp"
@@ -5330,6 +5332,253 @@ static void test_config_reference_defaults() {
     CHECK(fwd);
 }
 
+// X-Forwarded-For over several field lines (2026-10-07, the access-control research): the
+// lines are one list (RFC 9110 5.3), walked from the end of the last line, so the hop a
+// trusted proxy added decides. Reading the first line alone let a client behind a proxy
+// that adds a line of its own (HAProxy's option forwardfor) choose the address agensio
+// logs and hands to PHP. X-Forwarded-Proto likewise: the nearest proxy's value counts.
+static void test_forwarded_lines() {
+    std::vector<Cidr> trusted(1);
+    std::string err;
+    CHECK(parse_cidr("127.0.0.1", trusted[0], err));
+    auto client = [&](std::initializer_list<std::pair<const char*, const char*>> fields, bool* https = nullptr) {
+        Request req;
+        for (const auto& [n, v] : fields) req.headers.add(n, v);
+        ConnectionInfo conn;
+        std::string storage;
+        resolve_forwarded(req, trusted, conn, storage);
+        if (https) *https = conn.forwarded_https;
+        return std::string(conn.client_address);
+    };
+    // The client's own line first, the proxy's line last: the proxy's hop decides.
+    CHECK_EQ(client({{"X-Forwarded-For", "10.66.66.66"}, {"X-Forwarded-For", "203.0.113.20"}}), std::string("203.0.113.20"));
+    // A trusted hop at the end of the last line: the walk goes on into the earlier line.
+    CHECK_EQ(client({{"X-Forwarded-For", "198.51.100.1"}, {"X-Forwarded-For", "127.0.0.1"}}), std::string("198.51.100.1"));
+    // One line, as before.
+    CHECK_EQ(client({{"X-Forwarded-For", "203.0.113.9, 127.0.0.1"}}), std::string("203.0.113.9"));
+    // Garbage stops the walk across lines too: nothing left of it is believed.
+    CHECK_EQ(client({{"X-Forwarded-For", "10.66.66.66"}, {"X-Forwarded-For", "nonsense, 127.0.0.1"}}), std::string("127.0.0.1"));
+    // X-Forwarded-Proto: the last line's last value, not a client's earlier "https".
+    bool https = true;
+    (void)client({{"X-Forwarded-For", "203.0.113.9"}, {"X-Forwarded-Proto", "https"}, {"X-Forwarded-Proto", "http"}}, &https);
+    CHECK(!https);
+    (void)client({{"X-Forwarded-For", "203.0.113.9"}, {"X-Forwarded-Proto", "http"}, {"X-Forwarded-Proto", "https"}}, &https);
+    CHECK(https);
+}
+
+// IPv4 clients on a dual-stack listener arrive as ::ffff:a.b.c.d (2026-10-07): they are
+// matched and recorded as the IPv4 address they are. Before, an IPv6 entry with zero leading
+// bits (::/8) matched every IPv4 client, and logs and REMOTE_ADDR carried the mapped text.
+static void test_address_forms() {
+    Cidr c;
+    std::string err;
+    CHECK(parse_cidr("::/8", c, err));
+    CHECK(!c.contains(asio::ip::make_address("::ffff:127.0.0.1")));      // an IPv6 entry never matches an IPv4 client
+    CHECK(parse_cidr("127.0.0.0/8", c, err) && c.contains(asio::ip::make_address("::ffff:127.0.0.1")));
+    // An entry written in mapped form is the IPv4 range it names.
+    CHECK(parse_cidr("::ffff:192.0.2.0/120", c, err) && !c.v6 && c.prefix == 24);
+    CHECK(c.contains(asio::ip::make_address("192.0.2.77")) && !c.contains(asio::ip::make_address("192.0.3.1")));
+    CHECK(parse_cidr("::ffff:192.0.2.1", c, err) && !c.v6 && c.prefix == 32);
+    // Zone ids, brackets and ports are not addresses.
+    CHECK(!parse_cidr("fe80::1%eth0", c, err) && !err.empty());
+    CHECK(!parse_cidr("[::1]", c, err) && !parse_cidr("10.0.0.1:80", c, err));
+    // A mapped X-Forwarded-For entry is recorded unmapped.
+    std::vector<Cidr> trusted(1);
+    CHECK(parse_cidr("127.0.0.1", trusted[0], err));
+    Request req;
+    req.headers.add("X-Forwarded-For", "::ffff:198.51.100.8");
+    ConnectionInfo conn;
+    std::string storage;
+    resolve_forwarded(req, trusted, conn, storage);
+    CHECK_EQ(std::string(conn.client_address), std::string("198.51.100.8"));
+}
+
+// Access by client address (2026-10-07, docs/configuration.md 19): the loader, the matcher,
+// the readings an origin may make of a path, WordPress's admin-ajax rule, the notices, and the
+// control plane's rules.restricted and access-check.
+static void test_access_rules() {
+    namespace fs = std::filesystem;
+    using namespace control;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-access-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "www");
+    auto write = [&](const char* name, const std::string& text) { std::ofstream(dir / name) << text; };
+    const std::string head = "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n";
+    auto load = [&](const std::string& text) {
+        write("acc.toml", text);
+        return load_config(dir / "acc.toml");
+    };
+    auto rejects = [&](const std::string& text) {
+        try {
+            load(text);
+        } catch (const std::runtime_error&) {
+            return true;
+        }
+        return false;
+    };
+    // The loader: sets, rules, the errors that would leave a path open or mean nothing.
+    const std::string sets = "[addresses]\noffice = [\"203.0.113.7\", \"2001:db8:5::/64\"]\n";
+    Config cfg = load(sets + head +
+                      "[[site.access]]\npath = \"/admin/\"\nallow = [\"@office\", \"10.0.0.0/8\"]\n"
+                      "[[site.access]]\npath = \"/admin/open\"\nallow = [\"any\"]\n"
+                      "[[site.access]]\npath = \"/login.php\"\nmatch = \"exact\"\nallow = [\"::ffff:192.0.2.0/120\"]\nmode = \"report\"\n");
+    const SiteConfig& site = cfg.sites[0];
+    CHECK(site.access.size() == 3 && site.access[0].path == "/admin/open" && site.access[2].path == "/admin");  // longest first, "/admin/" kept as "/admin"
+    CHECK(site.access[2].allow.size() == 3 && site.access[2].allow_text.size() == 2 && site.access[2].allow_text[0] == "@office");
+    CHECK(site.access[1].exact && site.access[1].report && !site.access[1].allow[0].v6 && site.access[1].allow[0].prefix == 24);
+    CHECK(rejects(head + "[[site.access]]\npath = \"/a\"\nallow = []\n"));
+    CHECK(rejects(head + "[[site.access]]\npath = \"/a\"\n"));
+    CHECK(rejects(head + "[[site.access]]\npath = \"/a\"\nallow = [\"fe80::1%eth0\"]\n"));
+    CHECK(rejects(head + "[[site.access]]\npath = \"/a\"\nallow = [\"@nosuch\"]\n"));
+    CHECK(rejects(head + "[[site.access]]\npath = \"/a\"\nallow = [\"10.0.0.1\"]\nalow = [\"x\"]\n"));
+    CHECK(rejects(head + "[[site.access]]\npath = \"/a/../b\"\nallow = [\"10.0.0.1\"]\n"));
+    CHECK(rejects(head + "[[site.access]]\npath = \"a\"\nallow = [\"10.0.0.1\"]\n"));
+    CHECK(rejects(head + "[[site.access]]\npath = \"/a%2F\"\nallow = [\"10.0.0.1\"]\n"));
+    CHECK(rejects(head + "[[site.access]]\npath = \"/a\"\nallow = [\"any\", \"10.0.0.1\"]\n"));
+    CHECK(rejects(head + "[[site.access]]\npath = \"/a\"\nallow = [\"10.0.0.1\"]\nmatch = \"suffix\"\n"));
+    CHECK(rejects(head + "[[site.access]]\npath = \"/a\"\nallow = [\"10.0.0.1\"]\nmode = \"log\"\n"));
+    CHECK(rejects(head + "[[site.access]]\npath = \"/a\"\nallow = [\"10.0.0.1\"]\n[[site.access]]\npath = \"/A/\"\nallow = [\"10.0.0.2\"]\n"));  // the same path twice
+    CHECK(rejects("[addresses]\nOffice = [\"10.0.0.1\"]\n" + head));
+    CHECK(rejects("[addresses]\noffice = [\"any\"]\n" + head));
+    CHECK(rejects("[addresses]\noffice = []\n" + head));
+    {
+        std::string many = head;
+        for (int i = 0; i < 33; ++i) many += "[[site.access]]\npath = \"/p" + std::to_string(i) + "\"\nallow = [\"10.0.0.1\"]\n";
+        CHECK(rejects(many));
+        std::string wide = head + "[[site.access]]\npath = \"/a\"\nallow = [";
+        for (int i = 0; i < 65; ++i) wide += std::string(i ? ", " : "") + "\"10.0.0." + std::to_string(i) + "\"";
+        CHECK(rejects(wide + "]\n"));
+    }
+    // The matcher: whole segments, any capitalisation, the longest rule, the first-byte skip.
+    auto rule = [&](std::string_view path) { const AccessRule* r = access::rule_for(site, path); return r ? r->path : std::string("-"); };
+    CHECK(rule("/admin") == "/admin" && rule("/admin/") == "/admin" && rule("/admin/x/y.php") == "/admin" && rule("/ADMIN/x") == "/admin");
+    CHECK(rule("/administrator") == "-" && rule("/adminx") == "-" && rule("/") == "-" && rule("/other") == "-");
+    CHECK(rule("/admin/open") == "/admin/open" && rule("/admin/open/x") == "/admin/open" && rule("/admin/opener") == "/admin");
+    CHECK(rule("/login.php") == "/login.php" && rule("/login.php/x") == "-");
+    auto bit = [&](unsigned char c) { return ((site.access_first[c >> 6] >> (c & 63)) & 1u) == 1; };
+    CHECK(bit('a') && bit('l') && !bit('z') && !bit(0));  // "/admin", "/admin/open", "/login.php"; nothing on "/" itself
+    const auto office = asio::ip::make_address("203.0.113.7"), outsider = asio::ip::make_address("198.51.100.4");
+    std::string scratch;
+    auto decide = [&](std::string_view path, const asio::ip::address& a) {
+        const access::Decision d = access::decide(site, path, [&]() -> const asio::ip::address& { return a; }, scratch);
+        return std::string(d.refuse() ? "refused" : d.rule ? "report" : "allowed");
+    };
+    CHECK(decide("/admin/x", office) == "allowed" && decide("/admin/x", outsider) == "refused" && decide("/admin/open/x", outsider) == "allowed");
+    CHECK(decide("/admin/x", asio::ip::make_address("2001:db8:5::42")) == "allowed" && decide("/admin/x", asio::ip::make_address("::ffff:203.0.113.7")) == "allowed");
+    CHECK(decide("/login.php", outsider) == "report" && decide("/login.php", asio::ip::make_address("192.0.2.9")) == "allowed");
+    // The other readings: a ;parameter segment, a second decoding, the path after a script.
+    CHECK(decide("/x/..;/admin/", outsider) == "refused" && decide("/x/..;/other/", outsider) == "allowed");
+    CHECK(decide("/%61dmin/", outsider) == "refused" && decide("/index.php/admin/x", outsider) == "refused" && decide("/index.php/other", outsider) == "allowed");
+    // An address is asked for only when a rule covers the path.
+    int asked = 0;
+    auto counting = [&]() -> const asio::ip::address& { ++asked; return outsider; };
+    (void)access::decide(site, "/other/page", counting, scratch);
+    CHECK(asked == 0);
+    // WordPress: admin-ajax.php stays open under a /wp-admin rule, not when the whole site is
+    // restricted, not when a rule names it.
+    fs::create_directories(dir / "wp");
+    auto wp = [&](const std::string& rules) {
+        return load("[[site]]\nserver_name = [\"wp.test\"]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"wp\"\napp = \"wordpress\"\n"
+                    "php = { socket = \"unix:/run/php/fpm.sock\" }\n" + rules);
+    };
+    {
+        Config w = wp("[[site.access]]\npath = \"/wp-admin\"\nallow = [\"10.0.0.0/8\"]\n");
+        const AccessRule* r = access::rule_for(w.sites[0], "/wp-admin/admin-ajax.php");
+        CHECK(r && r->any && r->exact && r->origin == "preset:wordpress");
+        Config whole = wp("[[site.access]]\npath = \"/\"\nallow = [\"10.0.0.0/8\"]\n[[site.access]]\npath = \"/wp-admin\"\nallow = [\"10.0.0.0/8\"]\n");
+        r = access::rule_for(whole.sites[0], "/wp-admin/admin-ajax.php");
+        CHECK(r && !r->any && r->path == "/wp-admin");
+        Config named = wp("[[site.access]]\npath = \"/wp-admin\"\nallow = [\"10.0.0.0/8\"]\n[[site.access]]\npath = \"/wp-admin/admin-ajax.php\"\nmatch = \"exact\"\nallow = [\"10.0.0.1\"]\n");
+        r = access::rule_for(named.sites[0], "/wp-admin/admin-ajax.php");
+        CHECK(r && !r->any && r->origin.empty());
+    }
+    // The notices -t, the error log and health give.
+    {
+        Config n = load("[server]\ntrusted_proxies = [\"10.0.0.5\"]\n" + std::string("[[site]]\nserver_name = [\"n.test\"]\nlisten = [\"127.0.0.1:18080\", \"[::1]:18081\"]\nroot = \"www\"\n") +
+                        "[[site.access]]\npath = \"/\"\nallow = [\"10.0.0.0/8\"]\n[[site.access]]\npath = \"/b\"\nallow = [\"127.0.0.1\", \"2001:db8::1\"]\n");
+        std::set<std::string> codes;
+        for (const auto& x : access_notices(n)) codes.insert(x.code);
+        if (codes.size() != 5) {
+            std::string got;
+            for (const auto& c : codes) got += " " + c;
+            std::printf("access notices:%s\n", got.c_str());
+        }
+        CHECK(codes.count("access_allows_proxy") && codes.count("access_site_restricted") && codes.count("access_loopback") && codes.count("access_single_ipv6") && codes.count("access_ipv4_only"));
+    }
+    // rules.restricted: normalised, its errors, rendered as [[site.access]].
+    {
+        SiteSpec spec;
+        spec.domain = "m.test";
+        spec.app = "static";
+        json::Value given, norm;
+        std::string err;
+        CHECK(json::parse(R"({"restricted":[{"path":"/admin/","allow":["203.0.113.7","@office"]},{"path":"/","allow":["any"],"mode":"report"},{"path":"/x.php","match":"exact","allow":["10.0.0.0/8"]}]})", given, err));
+        CHECK(check_rules(given, spec, norm, &cfg).empty());
+        CHECK(norm["restricted"].items().size() == 3 && norm["restricted"].items()[0].get("path") == "/admin" && norm["restricted"].items()[1].get("mode") == "report");
+        auto bad = [&](const char* text) {
+            json::Value g, n2;
+            std::string e;
+            if (!json::parse(text, g, e)) return std::string("unparsed");
+            return check_rules(g, spec, n2, &cfg);
+        };
+        CHECK(!bad(R"({"restricted":[{"path":"/a","allow":[]}]})").empty());
+        CHECK(!bad(R"({"restricted":[{"path":"/a","allow":["@nosuch"]}]})").empty());
+        CHECK(!bad(R"({"restricted":[{"path":"/a","allow":["10.0.0.1"],"alow":1}]})").empty());
+        CHECK(!bad(R"({"restricted":[{"path":"/a/../b","allow":["10.0.0.1"]}]})").empty());
+        CHECK(!bad(R"({"restricted":[{"path":"/a","allow":["any","10.0.0.1"]}]})").empty());
+        CHECK(!bad(R"({"restricted":[{"path":"/a","allow":["10.0.0.1"]},{"path":"/A/","allow":["10.0.0.2"]}]})").empty());
+        spec.rules = norm;
+        spec.https = "none";
+        spec.root = "/var/www/m";
+        spec.no_user = true;
+        const std::string text = render_site(spec, "x");
+        CHECK(text.find("[[site.access]]   # rules: restricted\npath = \"/admin\"\nallow = [\"203.0.113.7\", \"@office\"]\n") != std::string::npos);
+        CHECK(text.find("path = \"/\"\nallow = [\"any\"]\nmode = \"report\"\n") != std::string::npos && text.find("path = \"/x.php\"\nmatch = \"exact\"\n") != std::string::npos);
+    }
+    // access-check: the decision, the rule, the summary; a bad path or address is an error.
+    {
+        std::string err;
+        json::Value v = access_check(cfg, site, "/admin/x", "198.51.100.4", err);
+        CHECK(err.empty() && v.get("decision") == "refused" && v["rule"].get("path") == "/admin" && v.get("summary").starts_with("refused by /admin (allow @office, 10.0.0.0/8)"));
+        v = access_check(cfg, site, "/admin/x", "::ffff:203.0.113.7", err);
+        CHECK(v.get("decision") == "allowed" && v.get("address") == "203.0.113.7" && v.get("summary").starts_with("allowed by /admin"));
+        v = access_check(cfg, site, "/x/..;/admin/", "198.51.100.4", err);
+        CHECK(v.get("decision") == "refused" && v.get("summary").find("an origin may read") != std::string::npos);
+        v = access_check(cfg, site, "/elsewhere", "198.51.100.4", err);
+        CHECK(v.get("decision") == "allowed" && v.get("summary") == "allowed: no access rule covers /elsewhere");
+        err.clear();
+        (void)access_check(cfg, site, "nope", "198.51.100.4", err);
+        CHECK(!err.empty());
+        err.clear();
+        (void)access_check(cfg, site, "/a", "fe80::1%eth0", err);
+        CHECK(!err.empty());
+    }
+    fs::remove_all(dir);
+}
+
+// Every guide in docs/ is installed with the package, or named here as a developer's document
+// (alpha.51 VPS report: docs/mariadb.md, written for the host's administrator, was not in
+// /usr/share/doc/agensio because the install list in CMakeLists.txt was never extended).
+static void test_packaged_docs() {
+    namespace fs = std::filesystem;
+    std::ifstream in(std::string(AGENSIO_SOURCE_DIR) + "/CMakeLists.txt");
+    const std::string cmake((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const std::size_t at = cmake.find("install(FILES README.md");
+    CHECK(at != std::string::npos);
+    const std::string list = cmake.substr(at, cmake.find(')', at) - at);
+    const std::set<std::string> developers = {"CODE_STYLE.md", "ROADMAP.md", "legacy-analysis.md", "linux-dev-setup.md",
+                                              "web-server-feedback.md", "security-audit-2026-10-07.md"};
+    std::size_t guides = 0;
+    for (const auto& e : fs::directory_iterator(fs::path(AGENSIO_SOURCE_DIR) / "docs")) {
+        const std::string name = e.path().filename().string();
+        if (!e.is_regular_file() || !name.ends_with(".md") || name.starts_with("design-") || developers.count(name)) continue;
+        ++guides;
+        const bool installed = list.find("docs/" + name) != std::string::npos;
+        if (!installed) std::printf("docs/%s is not installed: add it to install(FILES ...) in CMakeLists.txt, or name it a developer's document here\n", name.c_str());
+        CHECK(installed);
+    }
+    CHECK(guides >= 7);
+}
+
 // The refused-endings rule, with the spellings a live host served as source.
 // HTTP/2 framing, settings, the shared field rules and HPACK (RFC 7541 appendix C).
 static std::string unhex(std::string_view hex) {
@@ -6383,6 +6632,10 @@ int main() {
 #endif
     test_config_reference();
     test_config_reference_defaults();
+    test_forwarded_lines();
+    test_address_forms();
+    test_access_rules();
+    test_packaged_docs();
     test_refusal_finding();
     test_protection();
     test_install();

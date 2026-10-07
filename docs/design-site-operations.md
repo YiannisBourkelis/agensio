@@ -1058,3 +1058,111 @@ reboot" or nothing. Four choices shaped it:
   offline (`agensio protection -c FILE`), so a panel can script the install.
 
 Security page row 37; `tests/protection.sh` runs the real nft and fail2ban in the devbox.
+
+## 22. Access by client address (2026-10-07, built the same day; the audit's first feature gap)
+
+`docs/security-audit-2026-10-07.md` section 3 ranks nginx's `allow` / `deny` as the gap that
+matters most for the hosting target: an administration path (`/wp-admin/`, Statamic's `/cp`,
+a staging site as a whole) answered only to an office or a VPN. Proposed first as below, then
+measured against how nginx, Apache, LiteSpeed, h2o, Caddy, HAProxy, Traefik and Envoy do it and
+what administrators report (`reports/Web server IP access control.md`), which changed it as the
+last part of this section says; the owner agreed to the result and it is built.
+
+**nginx's pitfall, which this design avoids.** In nginx the access rules belong to a location,
+and a request is checked against the location that serves it. `location /wp-admin/ { allow
+...; deny all; }` does not protect `/wp-admin/admin.php`, because `location ~ \.php$` wins
+that request, and every guide warns about it. Our router has the same order: a suffix
+location (`.php`) beats every prefix that is not `final` (`core/router.hpp`). A `final`
+prefix would shield the subtree but stop its PHP from running, which is what `rules.private`
+wants (section 19) and an allow list does not. So the rule is not a location key.
+
+Proposed:
+
+- **A site-level rule keyed by path, checked before routing.** In a site file:
+
+  ```toml
+  [[site.access]]
+  path = "/wp-admin/"                      # a prefix; match = "exact" for one file
+  allow = ["203.0.113.7", "2001:db8:5::/48"]
+  ```
+
+  `Dispatcher::route` tests the normalised path against the site's rules right after the
+  site is found and before `Router::location`, so whichever location serves the path (a
+  `.php` suffix, a proxy, a static file) the rule has already applied; a `try_files` fallback
+  target is tested too when the site has rules, so a fallback cannot step into a restricted
+  path. Several rules: the longest matching path decides, like locations; lists are not
+  merged. `path = "/"` restricts the whole site (a staging copy), which `rules.private`
+  refuses and this allows.
+- **Allow lists only.** A client not on the list of the deciding rule gets 403; there is no
+  `deny` list and no ordered allow/deny evaluation. Keeping one address out of a path is
+  the firewall's or fail2ban's (the split of 2026-10-02, `docs/configuration.md` 18), and an
+  allow list is the form that cannot be read wrong.
+- **The address the request already has.** The peer, or behind `server.trusted_proxies` the
+  rightmost untrusted `X-Forwarded-For` hop (`core/forwarded.hpp`), the same address the
+  access log and `REMOTE_ADDR` carry. `ConnectionInfo` gains the parsed address next to its
+  text, set where the text is set, so nothing is parsed per request; HTTP/1, HTTP/2 and
+  HTTP/3 share `route`, so all three get the rule at once. Behind a CDN without
+  `trusted_proxies` every request comes from the CDN: a list without its ranges refuses
+  everyone, one with them admits everyone. `-t` and health warn when an `allow` entry
+  overlaps `trusted_proxies` (a proxy on the list admits whatever it forwards), and the
+  documentation says to set `trusted_proxies` first.
+- **The answer.** 403 with the constant error page, as nginx; an info line in the error log
+  at most once a second per worker, and the access log line as usual. The existing
+  `agensio-auth` jail already bans bursts of 401 and 403, so a scanner hammering a
+  restricted path from outside is banned without a new jail. 403 is not heuristically
+  cacheable (RFC 9110 15.1), so a shared cache in front does not store it for everyone.
+- **Cost.** A site without rules pays one emptiness test per request; with rules, a scan of
+  at most 32 paths and the CIDR compares of the deciding rule (at most 64 entries). Gate:
+  `bench/ab.sh <base> -2 -3`, all rows flat.
+- **Who changes it.** A hand-written site file (`[[site.access]]`). A managed site:
+  `rules.restricted = [{path, allow}]` through `site_update` (admin role, as every rule),
+  `agensio ctl site-update --restrict PATH=ADDR[,ADDR...]`, validated by `check_rules` (path
+  syntax as `private`, CIDRs parsed, at most 32 rules and 64 addresses each) and rendered by
+  `render_site` into `[[site.access]]` tables marked `# rules:`. Like every rule it only
+  narrows the site. `site_show` lists the rules in force; the MCP texts of `site_update` and
+  `site_show`, the reference rows (`[[site.access]]` path, match, allow) and
+  `docs/configuration.md` section 15 move with it.
+- **What it leaves alone.** The ACME challenge (answered before routing), `OPTIONS *`, the
+  control socket, and `rules.private` (a private path stays 404 for everyone; an outsider
+  gets the 403 first, which says nothing more than the 404 would).
+
+Tests, each run against the code before the change so it fails first: unit tests for the
+parser and `check_rules` (a bad CIDR, an empty list, more than 32 rules, the overlap
+warning), the matcher (prefix and exact, the longest path deciding, a v4-mapped IPv6
+client), and the routing case (a rule on `/admin/` refuses `/admin/x.php` on a site with a
+`.php` suffix location). Integration on loopback: a rule allowing `10.0.0.0/8` answers
+127.0.0.1 with 403 over HTTP/1, HTTP/2 and HTTP/3, one allowing `127.0.0.1` with 200; a PHP
+file under the path through the FastCGI fixture is 403 and never executed; behind
+`trusted_proxies = ["127.0.0.1"]` an `X-Forwarded-For` of `10.1.2.3` is admitted by the
+first rule; a managed site's `rules.restricted` round trip through the control API.
+
+Not in this step: basic authentication (the audit's second gap; a rule could later name a
+user file next to `allow`, with nginx's `satisfy any` as the open question there) and
+per-path request rates (the third, the owner's call).
+
+What the research changed, and the owner's answers (2026-10-07), as built:
+
+- **Answers.** 403, with `Cache-Control: no-store` (the refusal differs per client; a 404 would
+  confuse the refused administrator, may be cached, and the rule runs before routing, so a 403
+  says only that a prefix is restricted); allow lists only, with `"any"` as the explicit
+  exception value; the names `[[site.access]]` and `rules.restricted`, one shape in both;
+  `path = "/"` allowed, the most asked-for case.
+- **Whole segments, any capitalisation.** A prefix rule covers `/cp` and `/cp/x`, never
+  `/cpanel`; `/CP/` too, since some filesystems and applications ignore case.
+- **The other readings of a path.** A `;parameter` segment, a second decoding and the path
+  after a script are judged as well (Tomcat's `..;/`, double-decoding origins, front
+  controllers reading PATH_INFO), only when the path holds the character that makes them differ.
+- **WordPress.** The preset keeps `/wp-admin/admin-ajax.php` open when `/wp-admin` alone is
+  restricted; without it ordinary visitors got 403s and the `agensio-auth` jail banned them.
+- **Named sets** in `[addresses]`, root's, named `@office`, one edit for every site.
+- **Trying first.** `mode = "report"`, `access-check` / MCP `access_check`, and a refusal page
+  and log line that name the address tested; the log line is `warn`, rate-limited to one a
+  second per worker, so it is seen at the default level and cannot flood.
+- **More warnings** from `access_notices` for `-t`, the error log and health: a loopback entry
+  with no local proxy trusted, IPv4-only lists on IPv6 listeners, single IPv6 addresses.
+- **Three client-address bugs** the research found in agensio were fixed first, each with a test
+  that failed: only the first `X-Forwarded-For` line was read, IPv4 clients of `[::]` listeners
+  kept the `::ffff:` form, and the trusted-proxy verdict survived a reload.
+- **Cost.** The bitmap of first bytes after the leading `/`, so a page no rule can cover pays one
+  bit test, and the address is read only when a rule covers the path. `bench/ab.sh <ref> -A`
+  adds the rows for a site with rules.

@@ -4,9 +4,75 @@
 
 #include "response.hpp"
 
+#include "core/access.hpp"
 #include "path.hpp"
 
 namespace agensio {
+
+namespace {
+
+// The address an access rule judges: the client a trusted proxy forwarded, else the peer.
+const asio::ip::address& client_ip(ConnectionInfo& c) {
+    static const asio::ip::address none;  // a connection that cannot say (never in practice): matches no entry
+    if (!c.client_address.empty()) return c.client_ip;
+    return c.peer ? c.peer->peer_ip() : none;
+}
+
+}  // namespace
+
+// [[site.access]] (core/access.hpp, docs/configuration.md 19). The address is asked for only
+// when a rule covers some reading of the path, so a public page of a site with rules costs a
+// bit test. One error-log line a second per worker, with the count of those not written.
+bool Dispatcher::admit(Stream& s, const SiteConfig& site, std::string_view path, WorkerState& ws) {
+    const asio::ip::address* addr = nullptr;
+    auto address = [&]() -> const asio::ip::address& {
+        if (!addr) addr = &client_ip(s.conn);
+        return *addr;
+    };
+    const access::Decision d = access::decide(site, path, address, ws.access_scratch);
+    if (!d.rule) return true;
+    const std::string text = address().to_string();
+    if (log_ && log_->enabled(LogLevel::warn)) {
+        if (ws.now != ws.access_logged) {
+            std::string line = d.refuse() ? "access refused: site " : "access would refuse: site ";
+            line.append(site.server_names.front()).append(" rule ").append(d.rule->path);
+            if (d.rule->exact) line.append(" (exact)");
+            line.append(" allows ");
+            for (std::size_t i = 0; i < d.rule->allow_text.size(); ++i) line.append(i ? ", " : "").append(d.rule->allow_text[i]);
+            line.append("; client ").append(text);
+            if (!s.conn.client_address.empty() && s.conn.peer)
+                line.append(" (from X-Forwarded-For; peer ").append(s.conn.peer->peer_ip().to_string()).append(")");
+            line.append(" ").append(s.request.method_name).append(" ").append(path.substr(0, 200));
+            if (ws.access_skipped) line.append(" (").append(std::to_string(ws.access_skipped)).append(" more in the last second not written)");
+            log_->warn(line);
+            ws.access_logged = ws.now;
+            ws.access_skipped = 0;
+        } else {
+            ++ws.access_skipped;
+        }
+    }
+    if (!d.refuse()) return true;
+    refuse_access(s, text);
+    return false;
+}
+
+// 403 with the address that was tested, so a user whose address changed can say which one the
+// server saw; never stored by a shared cache (it differs per client).
+void Dispatcher::refuse_access(Stream& s, std::string_view address) {
+    Response& r = s.response;
+    r.reset();
+    r.status = 403;
+    r.keep_alive = s.request.keep_alive;
+    r.head = s.request.method == Method::head;
+    r.buffer.assign("<!doctype html><html><head><title>403 Forbidden</title></head><body><center><h1>403 Forbidden</h1></center>"
+                    "<p><center>This page is open to some addresses only. Yours, ");
+    r.buffer.append(address).append(", is not one of them.</center></p><hr><center>agensio</center></body></html>\n");
+    r.scratch.assign("Content-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: ");
+    r.scratch.append(std::to_string(r.buffer.size())).append("\r\n");
+    r.prebuilt_headers = r.scratch;
+    r.content_type = "text/html; charset=utf-8";
+    r.body = MemoryBody{std::string_view(r.buffer)};
+}
 
 // `redirect = "https"`: 301 to the same host and target over https. The host comes from
 // the Host header without its port (the target listens on 443), or from the configured
@@ -110,6 +176,9 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
         redirect_https(s, *site);
         return nullptr;
     }
+    // [[site.access]] before any location is chosen: whichever would serve the path (a .php
+    // suffix, a proxy) cannot step around the rule, nginx's regex-location trap (2026-10-07).
+    if (!site->access.empty() && !admit(s, *site, ws.path, ws)) return nullptr;
     const LocationConfig* loc = &Router::location(*site, ws.path);
     // A separator spelled as a percent escape (%2F, %5C) never names a file: 404 before any
     // handler that resolves paths on disk runs, Apache's AllowEncodedSlashes Off (2026-10-02
@@ -172,6 +241,7 @@ const LocationConfig* Dispatcher::serve_static(Stream& s, const LocationConfig& 
         return nullptr;
     }
     const auto* site = static_cast<const SiteConfig*>(ws.site);
+    if (!site->access.empty() && !admit(s, *site, ws.path, ws)) return nullptr;  // a fallback cannot step into a restricted path
     const LocationConfig* next = &Router::location(*site, ws.path);
     if (!check_method(s, *next, ws)) return nullptr;
     return next;

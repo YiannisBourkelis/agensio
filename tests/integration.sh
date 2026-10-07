@@ -367,6 +367,77 @@ listen = ["127.0.0.1:8086"]
 root = "{root}/bench/www"
 access_log = "{root}/bench/tmp/logb.log"
 """
+# Access by client address (2026-10-07, docs/configuration.md 19): sites whose rules refuse
+# 127.0.0.1 on some paths and admit it on others; a named set; the TLS sibling for HTTP/3; a
+# WordPress copy whose admin is restricted.
+text += f"""
+[[site]]
+server_name = ["access.test"]
+listen = ["127.0.0.1:8102"]
+root = "{root}/bench/www"
+php = {{ socket = "unix:{root}/bench/tmp/php/fpm.sock" }}
+
+[[site.location]]
+path = "/php/"
+alias = "{root}/tests/php"
+handler = "fastcgi"
+
+[[site.access]]
+path = "/admin"
+allow = ["10.0.0.0/8"]
+
+[[site.access]]
+path = "/admin/open"
+allow = ["any"]
+
+[[site.access]]
+path = "/sub"
+allow = ["@loop"]
+
+[[site.access]]
+path = "/php"
+allow = ["10.0.0.0/8"]
+
+[[site.access]]
+path = "/index.html"
+match = "exact"
+allow = ["203.0.113.0/24"]
+
+[[site.access]]
+path = "/report"
+allow = ["10.0.0.0/8"]
+mode = "report"
+
+[[site]]
+server_name = ["localhost", "127.0.0.1"]
+default = true
+listen = ["127.0.0.1:8103"]
+root = "{root}/bench/www"
+tls = {{ cert = "{root}/bench/certs/cert.pem", key = "{root}/bench/certs/key.pem" }}
+
+[[site.access]]
+path = "/admin"
+allow = ["10.0.0.0/8"]
+
+[[site]]
+server_name = ["wpr.test"]
+listen = ["127.0.0.1:8104"]
+root = "{root}/tests/wordpress"
+app = "wordpress"
+php = {{ socket = "unix:{root}/bench/tmp/php/fpm.sock" }}
+
+[[site.access]]
+path = "/wp-admin"
+allow = ["10.0.0.0/8"]
+
+[[site.access]]
+path = "/wp-login.php"
+match = "exact"
+allow = ["10.0.0.0/8"]
+
+[addresses]
+loop = ["127.0.0.1", "::1"]
+"""
 open(path, "w").write(text)
 PY
 UP_PID=""; UP2_PID=""; UP3_PID=""
@@ -591,6 +662,10 @@ check "php: REDIRECT_STATUS present" "yes" "$(echo "$PI" | grep -q '"REDIRECT_ST
 FW=$(curl -sS -H 'X-Forwarded-For: 203.0.113.9, 127.0.0.1' -H 'X-Forwarded-Proto: https' http://127.0.0.1:8080/php/params.php)
 check "php: trusted proxy: REMOTE_ADDR from X-Forwarded-For" "yes" "$(echo "$FW" | grep -q '"REMOTE_ADDR":"203.0.113.9"' && echo yes)"
 check "php: trusted proxy: HTTPS from X-Forwarded-Proto" "yes" "$(echo "$FW" | grep -q '"HTTPS":"on"' && echo yes)"
+# Several X-Forwarded-For lines are one list, walked from the end of the last line (2026-10-07):
+# a client's own line first and the trusted proxy's line last, the proxy's hop is the client,
+# over HTTP/1 and HTTP/2 alike; a client's earlier "https" does not survive the proxy's "http".
+check "php: trusted proxy: two X-Forwarded-For lines, the last one decides (h1, h2); two X-Forwarded-Proto lines, the last one decides" "203.0.113.20 203.0.113.20 no" "$(curl -sS -H 'X-Forwarded-For: 10.66.66.66' -H 'X-Forwarded-For: 203.0.113.20' http://127.0.0.1:8080/php/params.php | grep -o '"REMOTE_ADDR":"[^"]*"' | cut -d'"' -f4) $(command curl -sS --http2-prior-knowledge -H 'X-Forwarded-For: 10.66.66.66' -H 'X-Forwarded-For: 203.0.113.20' http://127.0.0.1:8080/php/params.php | grep -o '"REMOTE_ADDR":"[^"]*"' | cut -d'"' -f4) $(curl -sS -H 'X-Forwarded-For: 203.0.113.9' -H 'X-Forwarded-Proto: https' -H 'X-Forwarded-Proto: http' http://127.0.0.1:8080/php/params.php | grep -q '"HTTPS":"on"' && echo yes || echo no)"
 check "php: forwarded headers still passed as HTTP_" "yes" "$(echo "$FW" | grep -q '"HTTP_X_FORWARDED_FOR"' || echo "$FW" | grep -q 'X_FORWARDED' || curl -sS -H 'X-Forwarded-For: 1.2.3.4' http://127.0.0.1:8080/php/params.php | grep -q '"REMOTE_ADDR":"1.2.3.4"' && echo yes)"
 else
   echo "skip php-fpm checks (php-fpm not installed)"
@@ -844,7 +919,7 @@ check "the control API refuses pip_install without the user's own confirmation, 
 # Gemfile first; the unit is refused for a site without an account of its own.
 check "database_config needs the application first; site-unit refuses a site without its own account" "409 yes 409 yes" "$(cpost /v1/sites/rails.test/task '{"task":"database_config","confirm":true,"reason":"t"}') $(grep -q 'Gemfile, which does not exist' bench/tmp/ctl-reply.json && echo yes) $(curl -sS -o bench/tmp/unit.json -w '%{http_code}' --unix-socket $CS http://control/v1/sites/rails.test/unit) $(grep -q 'no account of its own' bench/tmp/unit.json && echo yes)"
 cpost /v1/sites/rails.test/delete '{"confirm":true}' > /dev/null
-check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 168 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
+check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 173 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
 check "secrets: the presets catalogue lists each preset's credential files" "/wp-config.php /sites/default/settings.php" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["wordpress"]["secrets"][0], p["drupal"]["secrets"][0])')"
 check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$("$BIN" ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; "$BIN" ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
@@ -1004,6 +1079,62 @@ print(" ".join(out))
 PYT
 )"
 
+# ---- access by client address (2026-10-07, docs/configuration.md 19) ----
+# access.test (8102) refuses 127.0.0.1 on /admin, /php and the exact /index.html (which only
+# 203.0.113.0/24 may fetch, through the trusted proxy 127.0.0.1), admits it on /sub through the
+# named set @loop, reopens /admin/open to anyone, and only reports on /report.
+A=http://127.0.0.1:8102
+ah() { code --path-as-is -H 'Host: access.test' "$@"; }
+check "access: a rule refuses a client outside it on the path, below it and without the slash; a longer path open to anyone reopens its subtree; a name that only starts the same is not covered" "403 403 403 404 404" "$(ah $A/admin) $(ah $A/admin/) $(ah $A/admin/deep/x.html) $(ah $A/admin/open/x.html) $(ah $A/administrator)"
+check "access: a client in a named set is served" "200" "$(ah $A/sub/)"
+check "access: the 403 names the address it tested, is not stored by caches, and is plain HTML" "403 no-store yes" "$(curl -sS -D bench/tmp/acc.h -o bench/tmp/acc.b -w '%{http_code}' -H 'Host: access.test' $A/admin/) $(grep -i '^cache-control:' bench/tmp/acc.h | tr -d '\r' | cut -d' ' -f2) $(grep -q '127\.0\.0\.1' bench/tmp/acc.b && grep -qi '^content-type: text/html' bench/tmp/acc.h && echo yes)"
+check "access: other spellings of a restricted path are refused: dot segments, a ;parameter segment (Tomcat reads ..; as ..), a double-encoded name, the path after a script (PATH_INFO)" "403 403 403 403" "$(ah $A/sub/../admin/) $(ah "$A/sub/..;/admin/") $(ah $A/%2561dmin/) $(ah $A/index.php/admin)"
+check "access: behind a trusted proxy the forwarded client decides" "200 403" "$(ah -H 'X-Forwarded-For: 203.0.113.5' $A/index.html) $(ah $A/index.html)"
+check "access: report mode serves and logs the refusal it would have made" "404 yes" "$(sleep 1.1; ah $A/report/x) $(sleep 1.2; grep -q 'access would refuse: .*rule /report' bench/tmp/error.log && echo yes)"
+check "access: a refusal is logged with the rule and the address tested" "yes" "$(grep -q 'access refused: .*access.test.*rule /admin.*127\.0\.0\.1' bench/tmp/error.log && echo yes)"
+check "access: HTTP/2 refuses the same way" "403 200" "$(command curl -sS --http2-prior-knowledge -o /dev/null -w '%{http_code}' -H 'Host: access.test' $A/admin/) $(command curl -sS --http2-prior-knowledge -o /dev/null -w '%{http_code}' -H 'Host: access.test' $A/sub/)"
+check "access: a TLS site refuses the same way" "403 200" "$(command curl -sSk -o /dev/null -w '%{http_code}' https://127.0.0.1:8103/admin/) $(command curl -sSk -o /dev/null -w '%{http_code}' https://127.0.0.1:8103/)"
+if [ $H3 = 1 ]; then
+  check "access: HTTP/3 refuses the same way" "403 200" "$(command curl -sSk --http3-only -o /dev/null -w '%{http_code}' https://127.0.0.1:8103/admin/) $(command curl -sSk --http3-only -o /dev/null -w '%{http_code}' https://127.0.0.1:8103/)"
+fi
+if [ -n "$PHPFPM" ]; then
+  check "access: a PHP file under a restricted path is refused before it runs" "403 0" "$(ah $A/php/params.php) $(curl -sS -H 'Host: access.test' $A/php/params.php | grep -c REMOTE_ADDR)"
+  check "access: wordpress: /wp-admin and /wp-login.php refused, admin-ajax.php kept open by the preset for the public front end" "403 403 403 200 yes" "$(code -H 'Host: wpr.test' http://127.0.0.1:8104/wp-admin/) $(code -H 'Host: wpr.test' http://127.0.0.1:8104/wp-admin/post.php) $(code -H 'Host: wpr.test' http://127.0.0.1:8104/wp-login.php) $(code -H 'Host: wpr.test' http://127.0.0.1:8104/wp-admin/admin-ajax.php) $(grep -q 'preset:wordpress.*admin-ajax' <<< "$("$BIN" -t --explain -c bench/tmp/agensio-test.toml 2>/dev/null)" && echo yes)"
+fi
+# What -t refuses: an empty list, a zone id, an unknown set, an unknown key, a path that is not
+# normalised, "any" next to addresses.
+acc_t() { printf '[[site]]\nlisten = ["127.0.0.1:1"]\nroot = "%s/bench/www"\n[[site.access]]\n%b' "$ROOT" "$1" > bench/tmp/acc-bad.toml; "$BIN" -t -c bench/tmp/acc-bad.toml > /dev/null 2>&1 && echo accepted || echo refused; }
+check "access: -t refuses an empty list, a zone id, an unknown set, an unknown key, an unnormalised path, any next to addresses; accepts a good rule" "refused refused refused refused refused refused accepted" "$(acc_t 'path = "/a"\nallow = []\n') $(acc_t 'path = "/a"\nallow = ["fe80::1%eth0"]\n') $(acc_t 'path = "/a"\nallow = ["@nosuch"]\n') $(acc_t 'path = "/a"\nallow = ["10.0.0.1"]\nalow = ["x"]\n') $(acc_t 'path = "/a/../b"\nallow = ["10.0.0.1"]\n') $(acc_t 'path = "/a"\nallow = ["any", "10.0.0.1"]\n') $(acc_t 'path = "/a"\nallow = ["10.0.0.0/8", "2001:db8::/48"]\n')"
+# A managed site: rules.restricted through the control API, rendered into the site file,
+# enforced, checked with access-check (ctl and MCP), set and cleared through ctl.
+mkdir -p bench/tmp/sites/acc.test/www; echo acc > bench/tmp/sites/acc.test/www/index.html
+cpost /v1/sites "{\"domain\":\"acc.test\",\"https\":\"none\",\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/bench/tmp/sites/acc.test/www\",\"listen_plain\":\"127.0.0.1:8096\",\"confirm\":true,\"reason\":\"acc\"}" > /dev/null
+check "access: managed site: rules.restricted through site_update is written, enforced and shown; a bad entry is refused" "200 1 403 1 400" "$(cpost /v1/sites/acc.test '{"rules":{"restricted":[{"path":"/","allow":["10.0.0.0/8"]}]},"confirm":true,"reason":"acc"}') $(grep -c '^\[\[site.access\]\]' bench/tmp/sites.d/acc.test.toml) $(code -H 'Host: acc.test' http://127.0.0.1:8096/) $(curl -sS --unix-socket $CS http://control/v1/sites/acc.test | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["rules"]["restricted"]))') $(cpost /v1/sites/acc.test '{"rules":{"restricted":[{"path":"/","allow":[]}]},"confirm":true,"reason":"acc"}')"
+check "access: an unknown set is refused with the sets that exist; config_reference shows root's sets with their entries and the trusted proxies' ranges" "400 yes 127.0.0.1,::1 127.0.0.1/32" "$(cpost /v1/sites/acc.test '{"rules":{"restricted":[{"path":"/","allow":["@nosuch"]}]},"confirm":true,"reason":"acc"}') $(grep -q 'the sets are @loop' bench/tmp/ctl-reply.json && echo yes) $(curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; k={(x["table"],x["key"]):x for x in json.load(sys.stdin)["keys"]}; print(",".join(k[("top level","addresses")]["running"]["loop"]), ",".join(k[("[server]","trusted_proxies")]["running"]))')"
+check "access: access-check answers refused and allowed with the deciding rule" "refused allowed" "$("$BIN" ctl access-check acc.test / 127.0.0.1 --socket $CS | grep -o '^refused') $("$BIN" ctl access-check acc.test /x 10.1.2.3 --socket $CS | grep -o '^allowed')"
+check "access: ctl --restrict sets a rule, --no-restrict clears it" "1 0" "$("$BIN" ctl site-update acc.test --restrict /admin=127.0.0.1,10.0.0.0/8 --yes --reason acc --socket $CS > /dev/null; grep -c 'path = "/admin"' bench/tmp/sites.d/acc.test.toml) $("$BIN" ctl site-update acc.test --no-restrict --yes --reason acc --socket $CS > /dev/null; grep -c '^\[\[site.access\]\]' bench/tmp/sites.d/acc.test.toml)"
+check "mcp: access_check is a read-only viewer tool and answers the decision; the instructions, site_update and the new_site prompt tell the agent about rules.restricted" "True refused /wp-admin yes yes yes" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
+import json, subprocess, sys
+p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}}) + "\n"); p.stdin.flush()
+instructions = json.loads(p.stdout.readline())["result"]["instructions"]
+p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n"); p.stdin.flush()
+tools = {t["name"]: t for t in json.loads(p.stdout.readline())["result"]["tools"]}
+out = [str(tools["access_check"]["annotations"]["readOnlyHint"])]
+p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "access_check", "arguments": {"name": "wpr.test", "path": "/wp-admin/post.php", "address": "127.0.0.1"}}}) + "\n"); p.stdin.flush()
+r = json.loads(p.stdout.readline())["result"]["structuredContent"]
+out += [r["decision"], r["rule"]["path"]]
+p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 3, "method": "prompts/get", "params": {"name": "new_site"}}) + "\n"); p.stdin.flush()
+prompt = json.loads(p.stdout.readline())["result"]["messages"][0]["content"]["text"]
+out += ["yes" if "rules.restricted" in instructions and "access_check" in instructions else "no",
+        "yes" if "restricted" in tools["site_update"]["description"] and "restricted" in json.dumps(tools["site_update"]["inputSchema"]) else "no",
+        "yes" if "rules.restricted" in prompt else "no"]
+p.stdin.close(); p.wait()
+print(" ".join(out))
+PYT
+)"
+cpost /v1/sites/acc.test/delete '{"confirm":true,"reason":"acc"}' > /dev/null
+
 # Static rules of the control plane (F7): nothing there spawns a process or opens a port.
 check "control: no process spawning anywhere under src/control" "0" "$(grep -E 'system\(|popen\(|execv|execl|fork\(|posix_spawn' src/control/*.cpp src/control/*.hpp | wc -l | tr -d ' ')"
 check "control: no TCP listener in the control plane" "0" "$(grep -E 'ip::tcp::acceptor' src/control/*.cpp src/control/*.hpp | wc -l | tr -d ' ')"
@@ -1064,7 +1195,7 @@ print(b.get("server"), "0.0.1-other" in b.get("note", ""), r["content"][0]["text
 PYT
 )
 check "mcp: a server of another build: the note leads the text and sits in structuredContent.bridge" "0.0.1-other True True" "$MCPN"
-check "mcp: initialize, tool list with annotations, calls, confirm, decisions, prompts" "agensio 33 True laravel 428 reloaded https,root,app,user -32601 2" "$mcp"
+check "mcp: initialize, tool list with annotations, calls, confirm, decisions, prompts" "agensio 34 True laravel 428 reloaded https,root,app,user -32601 2" "$mcp"
 check "mcp: site_install and the upload tools are exposed with their arguments" "file url,file,version,sha256 True" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
 import json, subprocess, sys
 p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
@@ -1469,6 +1600,19 @@ curl -sS -o /dev/null http://127.0.0.1:8080/style.css; sleep 1.2
 check "access log: SIGUSR1 reopens the file" "yes" "$([ -s bench/tmp/access.log ] && grep -q '"GET /style.css HTTP/1.1" 200 ' bench/tmp/access.log && echo yes)"
 curl -sS -o /dev/null -H 'X-Forwarded-For: 198.51.100.7' http://127.0.0.1:8080/style.css; sleep 1.2
 check "access log: client address from a trusted proxy" "yes" "$(grep -q '^198.51.100.7 - - .*"GET /style.css' bench/tmp/access.log && echo yes)"
+# A dual-stack listener records an IPv4 client as IPv4, never as ::ffff:127.0.0.1 (2026-10-07),
+# and an IPv6 client as itself; a mapped X-Forwarded-For entry is unmapped too.
+# A server of its own, because a listener on [::] is public and the main configuration's
+# protection checks hold it to loopback.
+mkdir -p bench/tmp/dual; rm -f bench/tmp/dual/access.log
+printf '[server]\nworkers = 1\n[log]\naccess = "%s/bench/tmp/dual/access.log"\nerror = "%s/bench/tmp/dual/error.log"\n[[site]]\nlisten = ["[::]:8101"]\nroot = "%s/bench/www"\n' "$ROOT" "$ROOT" "$ROOT" > bench/tmp/dual/agensio.toml
+"$BIN" -c bench/tmp/dual/agensio.toml > bench/tmp/dual/server.out 2>&1 & DUALPID=$!
+for _ in $(seq 1 50); do nc -z 127.0.0.1 8101 2>/dev/null && break; sleep 0.1; done
+curl -sS -o /dev/null 'http://127.0.0.1:8101/style.css?dual-v4'
+curl -sS -o /dev/null -g 'http://[::1]:8101/style.css?dual-v6'
+curl -sS -o /dev/null -H 'X-Forwarded-For: ::ffff:198.51.100.8' 'http://127.0.0.1:8080/style.css?dual-xff'; sleep 1.2
+kill $DUALPID 2>/dev/null; wait $DUALPID 2>/dev/null
+check "access log: a dual-stack listener records an IPv4 client as IPv4, an IPv6 one as IPv6; a mapped X-Forwarded-For entry unmapped" "127.0.0.1 ::1 198.51.100.8" "$(grep -F 'dual-v4' bench/tmp/dual/access.log | tail -1 | cut -d' ' -f1) $(grep -F 'dual-v6' bench/tmp/dual/access.log | tail -1 | cut -d' ' -f1) $(grep -F 'dual-xff' bench/tmp/access.log | tail -1 | cut -d' ' -f1)"
 printf '<html><body>changed</body></html>\n' > bench/www/sub/index.html; sleep 1.2
 check "revalidation picks up change" "changed" "$(curl -sS http://127.0.0.1:8080/sub/ | sed 's/<[^>]*>//g')"
 printf '<html><body>sub index</body></html>\n' > bench/www/sub/index.html
@@ -1623,6 +1767,7 @@ except OSError:
   H=$(curl -sS -H 'X-Forwarded-For: 10.0.0.1' -H 'Accept: text/x' -H 'X-Forwarded-Proto: https' $P/headers | tr -d '\r')
   check "proxy: Host passed through" "Host: 127.0.0.1:8091" "$(echo "$H" | grep '^Host:')"
   check "proxy: X-Forwarded-For appended behind a trusted proxy" "X-Forwarded-For: 10.0.0.1, 127.0.0.1" "$(echo "$H" | grep '^X-Forwarded-For:')"
+  check "proxy: every X-Forwarded-For line of a trusted proxy kept, in order, then ours" "X-Forwarded-For: 10.0.0.1, 10.0.0.2, 127.0.0.1" "$(curl -sS -H 'X-Forwarded-For: 10.0.0.1' -H 'X-Forwarded-For: 10.0.0.2' $P/headers | tr -d '\r' | grep '^X-Forwarded-For:')"
   check "proxy: X-Forwarded-Proto believed from a trusted proxy" "X-Forwarded-Proto: https" "$(echo "$H" | grep '^X-Forwarded-Proto:')"
   check "proxy: X-Forwarded-Proto is ours when the client sends none" "X-Forwarded-Proto: http" "$(curl -sS $P/headers | tr -d '\r' | grep '^X-Forwarded-Proto:')"
   check "proxy: no X-Forwarded-Host while Host passes through" "0" "$(echo "$H" | grep -c '^X-Forwarded-Host:')"

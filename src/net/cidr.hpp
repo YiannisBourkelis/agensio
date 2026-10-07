@@ -12,36 +12,75 @@
 
 namespace agensio {
 
+// An IPv4 client on a dual-stack socket arrives as ::ffff:a.b.c.d (RFC 4291 2.5.5.2). It is
+// the IPv4 address it maps, for matching, the access log and REMOTE_ADDR alike (2026-10-07:
+// before, logs carried the mapped text and an IPv6 entry with zero leading bits, ::/8,
+// matched every IPv4 client).
+inline asio::ip::address unmapped(const asio::ip::address& a) noexcept {
+    if (a.is_v6() && a.to_v6().is_v4_mapped()) return asio::ip::make_address_v4(asio::ip::v4_mapped, a.to_v6());
+    return a;
+}
+
 struct Cidr {
-    std::array<unsigned char, 16> bytes{};  // v4 addresses are mapped into the low 4 bytes
+    std::array<unsigned char, 16> bytes{};  // v4 addresses are stored in the low 4 bytes
     unsigned prefix = 0;                     // in bits, over `bytes` as stored
     bool v6 = false;
+    // The masked network and the mask as two big-endian words (set by finish(), which
+    // parse_cidr calls): an entry is two word compares, so an access rule's list of 64 is
+    // scanned in a few dozen nanoseconds per request.
+    std::uint64_t net_hi = 0, net_lo = 0, mask_hi = 0, mask_lo = 0;
 
-    bool contains(const asio::ip::address& a) const noexcept {
+    static std::uint64_t word(const std::array<unsigned char, 16>& b, std::size_t from) noexcept {
+        std::uint64_t w = 0;
+        for (std::size_t i = 0; i < 8; ++i) w = (w << 8) | b[from + i];
+        return w;
+    }
+
+    void finish() noexcept {
+        mask_hi = prefix == 0 ? 0 : prefix >= 64 ? ~std::uint64_t{0} : ~std::uint64_t{0} << (64 - prefix);
+        mask_lo = prefix <= 64 ? 0 : prefix >= 128 ? ~std::uint64_t{0} : ~std::uint64_t{0} << (128 - prefix);
+        net_hi = word(bytes, 0) & mask_hi;
+        net_lo = word(bytes, 8) & mask_lo;
+    }
+
+    // A client in the form entries are compared in: IPv4 in the low 4 bytes, a mapped client as IPv4.
+    struct Key {
+        std::uint64_t hi = 0, lo = 0;
+        bool v6 = false;
+    };
+    static Key key_of(const asio::ip::address& given) noexcept {
+        const asio::ip::address a = unmapped(given);
         std::array<unsigned char, 16> b{};
-        if (a.is_v6() != v6) {
-            // v4-mapped v6 clients match a v4 range and vice versa.
-            if (a.is_v6() && a.to_v6().is_v4_mapped()) {
-                if (v6) return false;
-                const auto v4 = asio::ip::make_address_v4(asio::ip::v4_mapped, a.to_v6()).to_bytes();
-                for (std::size_t i = 0; i < 4; ++i) b[i] = v4[i];
-            } else {
-                return false;
-            }
-        } else if (v6) {
+        Key k;
+        k.v6 = a.is_v6();
+        if (k.v6) {
             b = a.to_v6().to_bytes();
         } else {
             const auto v4 = a.to_v4().to_bytes();
             for (std::size_t i = 0; i < 4; ++i) b[i] = v4[i];
         }
-        unsigned bits = prefix;
-        for (std::size_t i = 0; i < bytes.size() && bits > 0; ++i) {
-            const unsigned take = bits >= 8 ? 8 : bits;
-            const unsigned char mask = static_cast<unsigned char>(0xffu << (8 - take));
-            if ((b[i] & mask) != (bytes[i] & mask)) return false;
-            bits -= take;
+        k.hi = word(b, 0);
+        k.lo = word(b, 8);
+        return k;
+    }
+
+    // An IPv4 entry matches IPv4 clients, mapped ones included; an IPv6 entry matches IPv6
+    // clients only.
+    bool matches(const Key& k) const noexcept { return k.v6 == v6 && (k.hi & mask_hi) == net_hi && (k.lo & mask_lo) == net_lo; }
+
+    bool contains(const asio::ip::address& given) const noexcept { return matches(key_of(given)); }
+
+    // "203.0.113.0/24", "2001:db8:5::/64": what config_reference, -t and health show.
+    std::string text() const {
+        asio::ip::address a;
+        if (v6) {
+            asio::ip::address_v6::bytes_type b;
+            for (std::size_t i = 0; i < b.size(); ++i) b[i] = bytes[i];
+            a = asio::ip::address_v6(b);
+        } else {
+            a = asio::ip::address_v4(asio::ip::address_v4::bytes_type{bytes[0], bytes[1], bytes[2], bytes[3]});
         }
-        return true;
+        return a.to_string() + "/" + std::to_string(prefix);
     }
 };
 
@@ -67,19 +106,34 @@ inline bool parse_cidr(std::string_view text, Cidr& out, std::string& error) {
         }
         has_prefix = true;
     }
+    if (ip.find('%') != std::string_view::npos) {  // a zone id names an interface of this host, never a client
+        error = "a zone id is not an address: '" + std::string(text) + "'";
+        return false;
+    }
     asio::error_code ec;
-    const auto a = asio::ip::make_address(std::string(ip), ec);
+    auto a = asio::ip::make_address(std::string(ip), ec);
     if (ec) {
         error = "not an IP address: '" + std::string(ip) + "'";
         return false;
     }
-    out.v6 = a.is_v6();
-    const unsigned max = out.v6 ? 128 : 32;
-    if (!has_prefix) prefix = max;
-    if (prefix > max) {
+    const unsigned given_max = a.is_v6() ? 128 : 32;
+    if (has_prefix && prefix > given_max) {
         error = "prefix length out of range in '" + std::string(text) + "'";
         return false;
     }
+    // A range written in mapped form is the IPv4 range it names (::ffff:192.0.2.0/120 is
+    // 192.0.2.0/24), so it matches the unmapped clients.
+    if (a.is_v6() && a.to_v6().is_v4_mapped()) {
+        if (has_prefix && prefix < 96) {
+            error = "a mapped IPv4 range needs a prefix of 96 or more: '" + std::string(text) + "'";
+            return false;
+        }
+        a = unmapped(a);
+        if (has_prefix) prefix -= 96;
+    }
+    out.v6 = a.is_v6();
+    const unsigned max = out.v6 ? 128 : 32;
+    if (!has_prefix) prefix = max;
     out.prefix = prefix;
     if (out.v6) {
         out.bytes = a.to_v6().to_bytes();
@@ -87,12 +141,17 @@ inline bool parse_cidr(std::string_view text, Cidr& out, std::string& error) {
         const auto v4 = a.to_v4().to_bytes();
         for (std::size_t i = 0; i < 4; ++i) out.bytes[i] = v4[i];
     }
+    out.finish();
     return true;
 }
 
+// The client's bytes are taken once, then each entry is a masked compare (an access rule's
+// list of 64 is scanned per request on a site restricted as a whole).
 inline bool in_any(const std::vector<Cidr>& ranges, const asio::ip::address& a) noexcept {
+    if (ranges.empty()) return false;
+    const Cidr::Key k = Cidr::key_of(a);
     for (const Cidr& c : ranges)
-        if (c.contains(a)) return true;
+        if (c.matches(k)) return true;
     return false;
 }
 

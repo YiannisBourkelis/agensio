@@ -28,6 +28,12 @@ struct WorkerState {
     WorkerLogs logs;             // per-worker access log buffers
     std::string scratch;         // handler scratch (capacity retained)
     std::string params_tail;     // FastCGI per-request params (capacity retained)
+    // Access by client address (core/access.hpp): the other readings of a path a site's rules
+    // test, and the error log's limit of one access line a second per worker with the count of
+    // those not written since (a scanner hammering a restricted path must not flood the log).
+    std::string access_scratch;
+    std::time_t access_logged = 0;
+    unsigned access_skipped = 0;
 };
 
 }  // namespace agensio

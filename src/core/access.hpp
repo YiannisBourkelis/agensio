@@ -1,0 +1,105 @@
+// Access by client address (2026-10-07, docs/configuration.md 19, docs/design-site-operations.md
+// 22): which of a site's [[site.access]] rules decides a request path, and whether a client
+// address passes it. Used by the dispatcher on every request of a site that has rules, by the
+// control plane's access-check and by the tests. Nothing here allocates on an ordinary path.
+#pragma once
+
+#include <string>
+#include <string_view>
+
+#include <asio/ip/address.hpp>
+
+#include "config.hpp"
+#include "net/cidr.hpp"
+#include "path.hpp"
+
+namespace agensio::access {
+
+// ASCII case-insensitive: some filesystems (macOS's default, Windows) and some applications
+// answer /ADMIN/x with /admin/x, so a rule covers every capitalisation of its path.
+inline bool iequal_prefix(std::string_view path, std::string_view prefix) noexcept {
+    if (path.size() < prefix.size()) return false;
+    for (std::size_t i = 0; i < prefix.size(); ++i) {
+        unsigned char a = static_cast<unsigned char>(path[i]), b = static_cast<unsigned char>(prefix[i]);
+        if (a >= 'A' && a <= 'Z') a = static_cast<unsigned char>(a + 32);
+        if (b >= 'A' && b <= 'Z') b = static_cast<unsigned char>(b + 32);
+        if (a != b) return false;
+    }
+    return true;
+}
+
+// A prefix rule covers its path and everything below it on a segment boundary ("/admin":
+// /admin, /admin/ and /admin/x, never /administrator); "/" covers the whole site; an exact
+// rule its path alone.
+inline bool covers(const AccessRule& r, std::string_view path) noexcept {
+    if (r.exact) return path.size() == r.path.size() && iequal_prefix(path, r.path);
+    if (r.path.size() == 1) return true;
+    return iequal_prefix(path, r.path) && (path.size() == r.path.size() || path[r.path.size()] == '/');
+}
+
+// The byte after the leading '/', folded to lower case (0 for "/" itself): the bit of
+// SiteConfig::access_first that says whether any rule can cover the path.
+inline unsigned char first_byte(std::string_view path) noexcept {
+    if (path.size() < 2) return 0;
+    unsigned char c = static_cast<unsigned char>(path[1]);
+    if (c >= 'A' && c <= 'Z') c = static_cast<unsigned char>(c + 32);
+    return c;
+}
+
+inline void mark_first(std::array<std::uint64_t, 4>& bits, unsigned char c) noexcept { bits[c >> 6] |= std::uint64_t{1} << (c & 63); }
+
+// The rule deciding `path` (the site's rules are sorted longest first), or null.
+inline const AccessRule* rule_for(const SiteConfig& site, std::string_view path) noexcept {
+    const unsigned char c = first_byte(path);
+    if (((site.access_first[c >> 6] >> (c & 63)) & 1u) == 0) return nullptr;
+    for (const AccessRule& r : site.access)
+        if (covers(r, path)) return &r;
+    return nullptr;
+}
+
+inline bool admits(const AccessRule& r, const asio::ip::address& a) noexcept { return r.any || in_any(r.allow, a); }
+
+// The other ways an origin may read the same path, tried only when the path holds the
+// character that makes them differ, so an ordinary path has none: a ";parameter" in a segment
+// (Tomcat and Jetty read "/a/..;/b" as "/b", Orange Tsai 2018), a '%' left after the one
+// decoding (an origin that decodes twice reads "/%2561dmin" as "/admin"), and the part after a
+// script ("/index.php/cp" reaches the route "/cp" of a front controller that reads PATH_INFO).
+template <typename F>
+void other_readings(std::string_view path, std::string& scratch, F&& each) {
+    if (path.find(';') != std::string_view::npos) {
+        std::string stripped;
+        stripped.reserve(path.size());
+        bool skip = false;
+        for (char c : path) {
+            if (c == '/') skip = false;
+            else if (c == ';') skip = true;
+            if (!skip) stripped.push_back(c);
+        }
+        if (normalize_target(stripped, scratch)) each(std::string_view(scratch));
+    }
+    if (path.find('%') != std::string_view::npos && normalize_target(path, scratch)) each(std::string_view(scratch));
+    if (const std::size_t php = path.find(".php/"); php != std::string_view::npos) each(path.substr(php + 4));
+}
+
+struct Decision {
+    const AccessRule* rule = nullptr;  // the rule that refuses (or, in report mode, would), null when none does
+    bool refuse() const noexcept { return rule && !rule->report; }
+};
+
+// Every reading of `path` judged by its deciding rule; the client's address is asked for only
+// when some rule covers a reading. A rule that refuses wins over one that only reports.
+template <typename Address>
+Decision decide(const SiteConfig& site, std::string_view path, Address&& address, std::string& scratch) {
+    Decision d;
+    auto judge = [&](std::string_view p) {
+        if (d.refuse()) return;
+        const AccessRule* r = rule_for(site, p);
+        if (!r || r->any || admits(*r, address())) return;
+        if (!d.rule || !r->report) d.rule = r;
+    };
+    judge(path);
+    other_readings(path, scratch, judge);
+    return d;
+}
+
+}  // namespace agensio::access

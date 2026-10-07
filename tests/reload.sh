@@ -196,6 +196,92 @@ fi
 write_config "$T/v2"
 "$BIN" reload -c "$T/agensio.toml" > /dev/null 2>&1; sleep 0.3
 
+# A reload that changes trusted_proxies applies to the connections already open (2026-10-07).
+# Two bugs: the verdict "this peer is a trusted proxy" was cached per connection and kept
+# across reloads (a proxy taken off the list kept choosing the client address, h1 and h2),
+# and with the list emptied an HTTP/1 connection kept the previous request's forwarded
+# address. One keep-alive connection, a request before and one after the reload.
+trust_case() {  # protocol marker replacement-for-the-trusted-line
+  SERVER_EXTRA='trusted_proxies = ["127.0.0.1"]' write_config "$T/v2"
+  "$BIN" reload -c "$T/agensio.toml" > /dev/null 2>&1; sleep 0.5
+  python3 - "$BIN" "$T" "$1" "$2" "$3" <<'PYT'
+import socket, subprocess, sys, time
+bin_, t, proto, marker, repl = sys.argv[1:6]
+s = socket.create_connection(("127.0.0.1", 8097)); s.settimeout(5)
+if proto == "h2":
+    import h2.connection, h2.config, h2.events
+    c = h2.connection.H2Connection(h2.config.H2Configuration(client_side=True))
+    c.initiate_connection(); s.sendall(c.data_to_send())
+    sid = [1]
+def get(path, xff):
+    if proto == "h1":
+        s.sendall(("GET %s HTTP/1.1\r\nHost: k\r\nX-Forwarded-For: %s\r\n\r\n" % (path, xff)).encode())
+        data = b""
+        while b"version two" not in data: data += s.recv(4096)
+        return
+    n = sid[0]; sid[0] += 2
+    c.send_headers(n, [(":method", "GET"), (":path", path), (":scheme", "http"), (":authority", "k"), ("x-forwarded-for", xff)], end_stream=True)
+    s.sendall(c.data_to_send())
+    done = False
+    while not done:
+        for e in c.receive_data(s.recv(65536)):
+            if isinstance(e, h2.events.StreamEnded) and e.stream_id == n: done = True
+        s.sendall(c.data_to_send())
+get("/?%s-before" % marker, "203.0.113.30")
+cfg = open(t + "/agensio.toml").read().replace('trusted_proxies = ["127.0.0.1"]', repl)
+open(t + "/agensio.toml", "w").write(cfg)
+subprocess.run([bin_, "reload", "-c", t + "/agensio.toml"], capture_output=True); time.sleep(0.5)
+get("/?%s-after" % marker, "203.0.113.31")
+print("ok")
+PYT
+}
+first() { grep -F "$1" "$T/logs/access.log" | tail -1 | cut -d' ' -f1; }
+r1=$(trust_case h1 trust-h1-other 'trusted_proxies = ["10.255.255.1"]')
+r2=$(trust_case h1 trust-h1-none '')
+if python3 -c 'import h2' 2>/dev/null; then r3=$(trust_case h2 trust-h2-other 'trusted_proxies = ["10.255.255.1"]'); fi
+sleep 1.3
+check "h1: a reload that takes the peer off trusted_proxies applies to its open connection" "ok 203.0.113.30 127.0.0.1" "$r1 $(first trust-h1-other-before) $(first trust-h1-other-after)"
+check "h1: a reload that empties trusted_proxies leaves no forwarded address behind on an open connection" "ok 203.0.113.30 127.0.0.1" "$r2 $(first trust-h1-none-before) $(first trust-h1-none-after)"
+if python3 -c 'import h2' 2>/dev/null; then
+check "h2: a reload that takes the peer off trusted_proxies applies to its open connection" "ok 203.0.113.30 127.0.0.1" "$r3 $(first trust-h2-other-before) $(first trust-h2-other-after)"
+fi
+write_config "$T/v2"
+"$BIN" reload -c "$T/agensio.toml" > /dev/null 2>&1; sleep 0.3
+
+# A kept HTTP/1 connection takes a shorter idle_timeout from its next request after a reload
+# (alpha.51 VPS report): idle 15 s at boot, a request at T0, a reload to 2 s, a request at
+# T0+4.7 (after the 2 s shed tick armed the timer for the old deadline, T0+15), then idle. The
+# connection closed 10.5 s after that request; HTTP/2 closed 2 s after it.
+write_config "$T/v2"
+"$BIN" reload -c "$T/agensio.toml" > /dev/null 2>&1; sleep 0.5
+kept_idle=$(python3 - "$BIN" "$T" <<'PYT'
+import socket, subprocess, sys, time
+bin_, t = sys.argv[1], sys.argv[2]
+s = socket.create_connection(("127.0.0.1", 8097)); s.settimeout(20)
+def get():
+    s.sendall(b"GET / HTTP/1.1\r\nHost: k\r\n\r\n")
+    data = b""
+    while b"version two" not in data: data += s.recv(4096)
+t0 = time.monotonic()
+get()
+cfg = open(t + "/agensio.toml").read().replace("[server]\n", "[server]\nidle_timeout = 2\n", 1)
+open(t + "/agensio.toml", "w").write(cfg)
+subprocess.run([bin_, "reload", "-c", t + "/agensio.toml"], capture_output=True)
+time.sleep(max(0.0, t0 + 4.7 - time.monotonic()))
+get()
+t1 = time.monotonic()
+try:
+    while s.recv(4096): pass
+    took = time.monotonic() - t1
+    print("closed within 3.5 s" if took < 3.5 else "closed after %.1f s" % took)
+except socket.timeout:
+    print("still open after 20 s")
+PYT
+)
+check "h1: a kept connection takes a shorter idle_timeout from its next request after a reload, not from the timer armed before it" "closed within 3.5 s" "$kept_idle"
+write_config "$T/v2"
+"$BIN" reload -c "$T/agensio.toml" > /dev/null 2>&1; sleep 0.3
+
 # A broken file is refused by the command before signalling, and by the server if signalled.
 printf '[[site]]\nlisten = ["127.0.0.1:8097"]\nroot = "%s"\n[[site]\n' "$T/v2" > "$T/agensio.toml"
 "$BIN" reload -c "$T/agensio.toml" > "$T/reload.out" 2>&1; rc=$?

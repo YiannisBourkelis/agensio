@@ -3,7 +3,7 @@
 # in the same session so that run-to-run drift cancels out. This is the gate for every
 # phase checkpoint and every change on the request path (see CLAUDE.md).
 #
-# usage: bench/ab.sh <base-ref> [-r ROUNDS] [-d DURATION] [-t THREADS] [-w WORKERS] [-P] [-u URLSPEC ...]
+# usage: bench/ab.sh <base-ref> [-r ROUNDS] [-d DURATION] [-t THREADS] [-w WORKERS] [-P] [-A] [-u URLSPEC ...]
 #   base-ref  commit, branch or tag to build as the "base" side (worktree under bench/tmp/ab/)
 #   -2        HTTP/2 gate (phase G): adds the rows "h2c:/:64:1", "h2c:/:64:10", "h2:/:64:1" and
 #             "h2:/:64:10" measured with h2load (proto:path:connections:streams; h2c is prior
@@ -15,6 +15,13 @@
 #             "proxy:/slow?ms=20:256" through the proxy site of bench/proxy/ab-site.toml, on
 #             127.0.0.1:8093. Run it for every change under src/upstream/http*, src/handlers/proxy*.
 #             A base that cannot load the proxy site (pre-D1) runs the static rows only.
+#   -A        access gate (docs/configuration.md 19): two more sites with [[site.access]] rules and
+#             their rows: "access:/:64" (127.0.0.1:8094, a site with a rule on /wp-admin, benchmarked
+#             on /: a public page of a site with rules, one bit test) and "access-all:/:64"
+#             (127.0.0.1:8095, the whole site restricted by 64 entries with 127.0.0.1 last: the most
+#             an admitted request pays). A base without the feature ignores the rules and serves the
+#             same files, so new/base is the check's cost. Run it for every change to core/access.hpp
+#             and the access step of handlers/dispatch.cpp.
 #   -r        rounds of base/new alternation (default 2)
 #   -d        wrk duration per case (default 5s)
 #   -t        wrk threads (default 4)
@@ -29,11 +36,11 @@ BENCH="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$BENCH")"
 [ $# -ge 1 ] || { sed -n '2,16p' "$0"; exit 2; }
 BASE_REF="$1"; shift
-ROUNDS=2; DURATION=5s; THREADS=4; WORKERS=1; SPECS=(); PROXY=0; H2=0; H3=0
-while getopts "r:d:t:w:u:P23" opt; do
+ROUNDS=2; DURATION=5s; THREADS=4; WORKERS=1; SPECS=(); PROXY=0; H2=0; H3=0; ACCESS=0
+while getopts "r:d:t:w:u:P23A" opt; do
   case $opt in
     r) ROUNDS=$OPTARG ;; d) DURATION=$OPTARG ;; t) THREADS=$OPTARG ;; w) WORKERS=$OPTARG ;;
-    u) SPECS+=("$OPTARG") ;; P) PROXY=1 ;; 2) H2=1 ;; 3) H3=1 ;; *) exit 2 ;;
+    u) SPECS+=("$OPTARG") ;; P) PROXY=1 ;; 2) H2=1 ;; 3) H3=1 ;; A) ACCESS=1 ;; *) exit 2 ;;
   esac
 done
 [ ${#SPECS[@]} -eq 0 ] && SPECS=("http:/:64" "http:/style.css:64" "https:/:64" "https:/style.css:64" "http:/big.bin:16" "https:/big.bin:16")
@@ -84,6 +91,33 @@ sed "s#@WORKERS@#$WORKERS#g; s#@BENCH@#$BENCH#g; s#@SENDFILE_MIN@#${SENDFILE_MIN
 # With h3 rows the TLS listener also speaks QUIC; a side whose binary refuses "h3" (a base
 # before phase I) gets the plain config and no h3 rows.
 sed "s#@WORKERS@#$WORKERS#g; s#@BENCH@#$BENCH#g; s#@SENDFILE_MIN@#${SENDFILE_MIN:-48KB}#g; s#@ACCESS_LOG@#${ACCESS_LOG:-off}#g; s#@H3@#, \"h3\"#g" "$BENCH/agensio.toml" > "$BENCH/tmp/ab-agensio-h3.toml"
+# The access gate's two sites go into every config (before the proxy one is built from it).
+if [ $ACCESS = 1 ]; then
+  SPECS+=("access:/:64" "access-all:/:64")
+  allow=""; for i in $(seq 1 63); do allow="$allow\"10.$((i / 250)).$((i % 250)).1\", "; done; allow="$allow\"127.0.0.1\""
+  for f in ab-agensio.toml ab-agensio-h3.toml; do
+    cat >> "$BENCH/tmp/$f" <<ACCESS_SITES
+
+[[site]]
+server_name = ["*"]
+listen = ["127.0.0.1:8094"]
+root = "$BENCH/www"
+
+[[site.access]]
+path = "/wp-admin"
+allow = ["10.0.0.0/8"]
+
+[[site]]
+server_name = ["*"]
+listen = ["127.0.0.1:8095"]
+root = "$BENCH/www"
+
+[[site.access]]
+path = "/"
+allow = [$allow]
+ACCESS_SITES
+  done
+fi
 # The proxy gate adds a site that forwards 127.0.0.1:8093 to the upstream; a side whose
 # binary cannot load it (a base before D1) gets the static-only config and no proxy rows.
 UP_PID=""
@@ -96,7 +130,7 @@ fi
 
 PID=""; SIDE_PROXY=0; SIDE_H2=0; SIDE_H3=0
 start() {  # binary
-  for port in 8080 8443 8093; do
+  for port in 8080 8443 8093 8094 8095; do
     nc -z 127.0.0.1 "$port" 2>/dev/null && { echo "port $port is busy; stop the running server first"; exit 1; }
   done
   local cfg="$BENCH/tmp/ab-agensio.toml"
@@ -147,6 +181,8 @@ measure() {  # side round -> appends "side round spec cpu_us rps" lines to $RAW/
     case $proto in
       https) url="https://127.0.0.1:8443$path" ;;
       proxy) [ $SIDE_PROXY = 1 ] || continue; url="http://127.0.0.1:8093$path" ;;
+      access) url="http://127.0.0.1:8094$path" ;;
+      access-all) url="http://127.0.0.1:8095$path" ;;
       h2c) [ $SIDE_H2 = 1 ] || continue; url="http://127.0.0.1:8080$path" ;;
       h2) [ $SIDE_H2 = 1 ] || continue; url="https://127.0.0.1:8443$path" ;;
       h3) [ $SIDE_H3 = 1 ] || continue; url="https://127.0.0.1:8443$path" ;;

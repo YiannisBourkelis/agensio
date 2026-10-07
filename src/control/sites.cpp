@@ -1,5 +1,7 @@
 #include "control/sites.hpp"
 
+#include "core/access.hpp"
+
 #include "control/commands.hpp"
 
 #include "control/settings.hpp"
@@ -268,12 +270,77 @@ bool php_ending(const std::string& p) {
 
 }  // namespace
 
-std::string check_rules(const json::Value& given, const SiteSpec& spec, json::Value& normalised) {
+std::string check_rules(const json::Value& given, const SiteSpec& spec, json::Value& normalised, const Config* cfg) {
     normalised = json::Value::object();
-    if (!given.is_object()) return "rules must be an object: {\"private\": [...], \"entry_points\": [...], \"cache\": [...], \"front_controller\": \"/index.php\"}";
+    if (!given.is_object()) return "rules must be an object: {\"private\": [...], \"entry_points\": [...], \"cache\": [...], \"front_controller\": \"/index.php\", \"restricted\": [...]}";
     for (const auto& m : given.members())
-        if (m.first != "private" && m.first != "entry_points" && m.first != "cache" && m.first != "front_controller")
-            return "rules: unknown key '" + m.first + "' (private, entry_points, cache, front_controller)";
+        if (m.first != "private" && m.first != "entry_points" && m.first != "cache" && m.first != "front_controller" && m.first != "restricted")
+            return "rules: unknown key '" + m.first + "' (private, entry_points, cache, front_controller, restricted)";
+    // Access by client address (2026-10-07, docs/configuration.md 19): rendered as
+    // [[site.access]] tables, on any app; like every rule it only narrows the site.
+    json::Value restricted = json::Value::array();
+    if (!given["restricted"].is_null()) {
+        const char* shape = "rules.restricted must be a list of {\"path\": \"/wp-admin\", \"allow\": [\"203.0.113.7\", \"2001:db8:5::/64\", \"@office\"]} (optional \"match\": \"exact\", \"mode\": \"report\")";
+        if (!given["restricted"].is_array()) return shape;
+        if (given["restricted"].items().size() > 32) return "rules.restricted: at most 32 rules";
+        std::vector<std::pair<std::string, bool>> seen;
+        for (const auto& r : given["restricted"].items()) {
+            if (!r.is_object()) return shape;
+            for (const auto& m : r.members())
+                if (m.first != "path" && m.first != "allow" && m.first != "match" && m.first != "mode")
+                    return "rules.restricted: unknown key '" + m.first + "' (path, allow, match, mode)";
+            if (!r["path"].is_string()) return "rules.restricted: each rule needs a path, such as \"/wp-admin\", or \"/\" for the whole site";
+            std::string path(r["path"].str());
+            if (const std::string why = check_access_path(path); !why.empty()) return "rules.restricted: " + why;
+            const std::string match = r["match"].is_string() ? std::string(r["match"].str()) : "prefix";
+            if (match != "prefix" && match != "exact") return "rules.restricted: match for " + path + " must be \"prefix\" or \"exact\"";
+            const std::string mode = r["mode"].is_string() ? std::string(r["mode"].str()) : "enforce";
+            if (mode != "enforce" && mode != "report") return "rules.restricted: mode for " + path + " must be \"enforce\" or \"report\"";
+            if (match == "prefix" && path.size() > 1 && path.back() == '/') path.pop_back();
+            for (const auto& [p, exact] : seen)
+                if (exact == (match == "exact") && p.size() == path.size() && access::iequal_prefix(p, path)) return "rules.restricted: a second rule for " + path;
+            seen.emplace_back(path, match == "exact");
+            if (!r["allow"].is_array() || r["allow"].items().empty())
+                return "rules.restricted: " + path + " needs allow, a non-empty list of addresses, ranges, sets (\"@office\") or [\"any\"]";
+            json::Value allow = json::Value::array();
+            std::size_t count = 0;
+            bool any = false;
+            for (const auto& e : r["allow"].items()) {
+                if (!e.is_string()) return "rules.restricted: every allow entry of " + path + " is a string";
+                const std::string text(e.str());
+                if (text == "any") any = true;
+                else if (!text.empty() && text[0] == '@') {
+                    const std::string name = text.substr(1);
+                    bool ok = !name.empty() && name.size() <= 32;
+                    for (const char c : name) ok = ok && ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-');
+                    if (!ok) return "rules.restricted: '" + text + "' is not a set name (lower-case letters, digits, '_', '-')";
+                    if (cfg) {
+                        const auto it = cfg->address_sets.find(name);
+                        if (it == cfg->address_sets.end()) {
+                            std::string known;
+                            for (const auto& [n, l] : cfg->address_sets) known += (known.empty() ? "" : ", ") + ("@" + n);
+                            return "rules.restricted: no address set '" + text + "' in [addresses]; " +
+                                   (known.empty() ? std::string("none is defined") : "the sets are " + known) +
+                                   " (root defines them in the main configuration; config_reference, key addresses, lists their entries)";
+                        }
+                        count += it->second.size();
+                    }
+                } else {
+                    Cidr c;
+                    std::string err;
+                    if (!parse_cidr(text, c, err)) return "rules.restricted: " + path + ": " + err;
+                    ++count;
+                }
+                allow.push(text);
+            }
+            if (any && allow.items().size() > 1) return "rules.restricted: " + path + ": \"any\" admits everyone, so it stands alone";
+            if (count > 64) return "rules.restricted: " + path + " allows " + std::to_string(count) + " addresses and ranges, at most 64; a longer list belongs in the firewall";
+            json::Value rule = json::Value::object().set("path", path).set("allow", std::move(allow));
+            if (match == "exact") rule.set("match", "exact");
+            if (mode == "report") rule.set("mode", "report");
+            restricted.push(std::move(rule));
+        }
+    }
     const bool php = php_app(spec.app), static_site = spec.app.empty() || spec.app == "static";
     std::vector<std::string> priv, entries;
     std::string why, p;
@@ -337,6 +404,7 @@ std::string check_rules(const json::Value& given, const SiteSpec& spec, json::Va
     if (!entries.empty()) normalised.set("entry_points", ev);
     if (!cache.items().empty()) normalised.set("cache", cache);
     if (!front.empty()) normalised.set("front_controller", front);
+    if (!restricted.items().empty()) normalised.set("restricted", restricted);
     return "";
 }
 
@@ -422,7 +490,7 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
     // change can never leave a rule that would widen the site.
     if (has_key(body, "rules")) {
         json::Value normalised;
-        if (const std::string bad = check_rules(body["rules"], spec, normalised); !bad.empty()) {
+        if (const std::string bad = check_rules(body["rules"], spec, normalised, &cfg); !bad.empty()) {
             error = bad;
             return needs;
         }
@@ -522,7 +590,7 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
         }
     if (spec.rules.is_object() && !spec.rules.members().empty()) {
         json::Value again;
-        if (const std::string bad = check_rules(spec.rules, spec, again); !bad.empty()) {
+        if (const std::string bad = check_rules(spec.rules, spec, again, &cfg); !bad.empty()) {
             error = "the site's rules no longer fit its app: " + bad + " (send rules: {} to clear them)";
             return needs;
         }
@@ -654,6 +722,16 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
                          "\nadd_headers = { \"Cache-Control\" = \"public, max-age=" + std::to_string(rl.max_age) + "\" }\n";
                     break;
                 }
+            }
+        // Access by client address: rules.restricted as [[site.access]] tables.
+        if (spec.rules.is_object())
+            for (const auto& r : spec.rules["restricted"].items()) {
+                std::vector<std::string> allow;
+                for (const auto& e : r["allow"].items()) allow.emplace_back(e.str());
+                s += "\n[[site.access]]   # rules: restricted\npath = " + toml_string(r.get("path")) + "\n";
+                if (r.get("match") == "exact") s += "match = \"exact\"\n";
+                s += "allow = " + toml_list(allow) + "\n";
+                if (r.get("mode") == "report") s += "mode = \"report\"\n";
             }
     };
     if (!tls || !spec.redirect_http) {

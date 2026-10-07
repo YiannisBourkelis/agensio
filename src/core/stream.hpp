@@ -5,11 +5,24 @@
 #include <cstdint>
 #include <string_view>
 
+#include <asio/ip/address.hpp>
+
 #include "core/host.hpp"
 #include "core/request.hpp"
 #include "core/response.hpp"
 
 namespace agensio {
+
+// The connection's peer, parsed, asked for on first need: an access rule of the site
+// (core/access.hpp, 2026-10-07). HTTP/1 reads it from the socket then, once per connection,
+// and never for a connection whose requests need nothing else; HTTP/2 and HTTP/3 hold it.
+class PeerSource {
+public:
+    virtual const asio::ip::address& peer_ip() = 0;
+
+protected:
+    ~PeerSource() = default;
+};
 
 // What the transport knows and application handlers need (FastCGI params, proxy
 // headers). Set once per connection; the views point at connection-owned strings.
@@ -21,8 +34,10 @@ struct ConnectionInfo {
     bool tls = false;
     // Per request, from a trusted proxy's X-Forwarded-For / X-Forwarded-Proto (else empty/false).
     std::string_view client_address;
+    asio::ip::address client_ip;  // client_address parsed (set with it)
     bool forwarded_https = false;
     bool trusted_peer = false;  // the peer is one of server.trusted_proxies
+    PeerSource* peer = nullptr;  // the connection, for the peer's parsed address (never owning)
     // TLS: the names of the certificate this connection presented at its handshake (null on
     // plain listeners). A request whose Host it does not cover is 421: the connection is
     // not authoritative for that name, whatever sites the listener holds.

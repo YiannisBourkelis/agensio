@@ -41,7 +41,7 @@
 namespace agensio::h2 {
 
 template <class Socket>
-class Http2Connection : public std::enable_shared_from_this<Http2Connection<Socket>>, private BodyOwner {
+class Http2Connection : public std::enable_shared_from_this<Http2Connection<Socket>>, private BodyOwner, public PeerSource {
 public:
     using Writer = Http2Writer<Socket, Http2Connection>;
     static constexpr std::uint32_t kMaxFramePayload = 16384;         // what we advertise and accept
@@ -840,9 +840,10 @@ private:
         if (remote_.empty()) {
             asio::error_code ec;
             const auto ep = lowest().remote_endpoint(ec);
-            remote_ = ec ? std::string("-") : ep.address().to_string();
+            // An IPv4 client of a dual-stack listener is its IPv4 address (net/cidr.hpp unmapped).
+            if (!ec) remote_addr_ = unmapped(ep.address());
+            remote_ = ec ? std::string("-") : remote_addr_.to_string();
             remote_port_ = ec ? 0 : ep.port();
-            if (!ec) remote_addr_ = ep.address();
         }
         c.remote_address = remote_;
         c.remote_port = remote_port_;
@@ -853,6 +854,7 @@ private:
         c.client_address = {};
         c.forwarded_https = false;
         c.trusted_peer = false;
+        c.peer = this;
     }
 
     void apply_forwarded(H2Stream& s) {
@@ -875,6 +877,7 @@ private:
         gen_ = worker_.gen;
         listener_ = l;
         live_ = &gen_->cfg;
+        trusted_checked_ = false;  // trusted_proxies may have changed: ask again (2026-10-07)
         idle_timeout_ = std::chrono::seconds(live_->idle_timeout_s);
         body_timeout_ = std::chrono::seconds(live_->body_timeout_s);
     }
@@ -1264,13 +1267,20 @@ private:
         worker_.state.logs.log(site->access_log_sink, worker_.state.now ? worker_.state.now : std::time(nullptr), rec);
     }
 
+    // An access rule asks for the peer's address (core/stream.hpp PeerSource).
+    const asio::ip::address& peer_ip() override {
+        if (remote_.empty()) (void)remote_text();
+        return remote_addr_;
+    }
+
     std::string remote_text() {
         if (remote_.empty()) {
             asio::error_code ec;
             const auto ep = lowest().remote_endpoint(ec);
-            remote_ = ec ? std::string("-") : ep.address().to_string();
+            // An IPv4 client of a dual-stack listener is its IPv4 address (net/cidr.hpp unmapped).
+            if (!ec) remote_addr_ = unmapped(ep.address());
+            remote_ = ec ? std::string("-") : remote_addr_.to_string();
             remote_port_ = ec ? 0 : ep.port();
-            if (!ec) remote_addr_ = ep.address();
         }
         return remote_;
     }
