@@ -378,7 +378,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
 - **Reload** (H1): `Generation` = config + routers + TLS contexts; per-worker current
   pointer, per-connection pointer refreshed at each request boundary (one compare);
   `Server::reload` on SIGHUP validates, binds new listeners, then switches; in-flight
-  work keeps the old generation alive. `agensio reload` validates and signals
+  work keeps the old generation alive; the connection limits (`idle_timeout`, `body_timeout`,
+  `max_header_size`) come from the connection's generation, not the boot configuration
+  (2026-10-07; before, a reload left them at the boot values until a restart).
+  `agensio reload` validates and signals
   `server.pid_file`. `tests/reload.sh` proves no request fails across reloads.
 - **Automatic certificates** (H3, `src/services/acme.*`, `services/json.hpp`): `tls = "auto"`
   plus `[server] acme = { email }`; ACME v2 with HTTP-01 against any RFC 8555 CA, JWS ES256

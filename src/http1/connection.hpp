@@ -64,9 +64,11 @@ public:
           cfg_(cfg),
           dispatcher_(dispatcher),
           timer_(worker.ctx),
-          idle_timeout_(std::chrono::seconds(cfg.idle_timeout_s)),
-          body_timeout_(std::chrono::seconds(cfg.body_timeout_s)),
-          in_(cfg.max_header_size),
+          // The connection limits come from the generation the connection starts in, so a
+          // reload applies them to every connection accepted after it (audit 2026-10-07).
+          idle_timeout_(std::chrono::seconds(live_->idle_timeout_s)),
+          body_timeout_(std::chrono::seconds(live_->body_timeout_s)),
+          in_(live_->max_header_size),
           body_source_(*this),
           writer_(socket_, *this, worker.ctx, cfg) {
         worker_.connections.fetch_add(1, std::memory_order_relaxed);
@@ -396,7 +398,7 @@ private:
                 self->close();
                 return;
             }
-            self->in_.resize(self->cfg_.max_header_size);
+            self->in_.resize(self->live_->max_header_size);
             if (self->shed_) {
                 self->shed_ = false;
                 self->worker_.idle.fetch_sub(1, std::memory_order_relaxed);
@@ -506,6 +508,12 @@ private:
         gen_ = worker_.gen;
         listener_ = l;
         live_ = &gen_->cfg;
+        // The timeouts follow the reload from the next request on; the receive buffer's size
+        // follows at the next idle shed, when the buffer is empty.
+        const bool idle_in_effect = timeout_ == idle_timeout_;
+        idle_timeout_ = std::chrono::seconds(live_->idle_timeout_s);
+        body_timeout_ = std::chrono::seconds(live_->body_timeout_s);
+        if (idle_in_effect) timeout_ = idle_timeout_;
     }
 
     void process() {

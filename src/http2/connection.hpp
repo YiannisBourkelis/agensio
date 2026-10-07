@@ -71,8 +71,8 @@ public:
           cfg_(cfg),
           dispatcher_(dispatcher),
           timer_(worker.ctx),
-          idle_timeout_(std::chrono::seconds(cfg.idle_timeout_s)),
-          body_timeout_(std::chrono::seconds(cfg.body_timeout_s)),
+          idle_timeout_(std::chrono::seconds(live_->idle_timeout_s)),  // the generation's: reloads apply
+          body_timeout_(std::chrono::seconds(live_->body_timeout_s)),
           in_(kMaxFramePayload + kFrameHeaderSize),
           decoder_(kHeaderTableSize),
           writer_(socket_, *this, worker.ctx, cfg) {
@@ -875,6 +875,8 @@ private:
         gen_ = worker_.gen;
         listener_ = l;
         live_ = &gen_->cfg;
+        idle_timeout_ = std::chrono::seconds(live_->idle_timeout_s);
+        body_timeout_ = std::chrono::seconds(live_->body_timeout_s);
     }
 
     // ---- request bodies (DATA frames) ----

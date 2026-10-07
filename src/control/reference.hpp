@@ -18,7 +18,7 @@ namespace agensio::control {
 struct KeyDef {
     const char* table;    // "[server]", "[cache]", "[log]", "[control]", "[server] acme", "[[site]]", "php = {}", "proxy = {}", "[[site.location]]", "cgi = {}", "root additions file" (its `site` key), "top level"
     const char* key;
-    const char* type;     // int, seconds, size, bool, string, path, list, table, or "enum: a | b"
+    const char* type;     // int, seconds, size, share (0 to 1), bool, string, path, list, table, or "enum: a | b"
     const char* def;      // the default, in words
     const char* meaning;  // one or two sentences: what it does and when to use it
     const char* applies;  // "reload" (agensio reload / the control plane's reload) or "restart" (systemctl restart agensio)

@@ -172,13 +172,13 @@ section of `docs/configuration.md` that explains the key.
 | `extra` | table | {} | php_admin_value lines. Root only: arbitrary ini keys include code execution. | reload + php-fpm reload | site file | 7 |
 | `read_timeout` | seconds | 60 | Waiting for php-fpm's answer: 504 beyond. | reload | site file | 7 |
 | `connect_timeout` | seconds | 5 | Connecting to php-fpm: 502 beyond. | reload | site file | 7 |
-| `send_timeout` | seconds | 60 | Sending the request to php-fpm. | reload | site file | 7 |
-| `max_connections` | int | children / workers with a pool, else 32 | Connections to php-fpm per worker. | reload | site file | 7 |
-| `max_idle` | int | max_connections | Kept idle connections per worker (keep_conn). | reload | site file | 7 |
+| `send_timeout` | seconds | 30 | Sending the request to php-fpm. | reload | site file | 7 |
+| `max_connections` | int | 16 (children / workers with a generated pool) | Connections to php-fpm per worker. | reload | site file | 7 |
+| `max_idle` | int | 8 | Kept idle connections per worker (keep_conn). | reload | site file | 7 |
 | `idle_timeout` | seconds | 30 | Kept connection closed after this long idle (0 = never); lets an ondemand child exit. | reload | site file | 7 |
-| `queue_depth` | int | 256 | Requests waiting for a connection per worker; 503 beyond. | reload | site file | 7 |
-| `queue_wait` | seconds | 10 | Longest wait in that queue; 503 with Retry-After beyond. | reload | site file | 7 |
-| `priority_reserve` | int | 0 | Connections kept for priority = true locations. | reload | site file | 7 |
+| `queue_depth` | int | 64 | Requests waiting for a connection per worker; 503 beyond. | reload | site file | 7 |
+| `queue_wait` | seconds | 5 | Longest wait in that queue; 503 with Retry-After beyond. | reload | site file | 7 |
+| `priority_reserve` | share | 0 | Share of max_connections (0 to 1) kept for priority = true locations. | reload | site file | 7 |
 | `keep_conn` | bool | false (true with a generated pool) | FastCGI keep-alive; php-fpm pins a child to every kept connection. | reload | site file | 7 |
 | `buffering` | bool | true | Buffer php-fpm's whole answer (memory, then a temp file) so the child is freed at once; false streams it. | reload | site file | 7 |
 | `buffer_max` | size | 1MB | Buffered answer kept in memory up to this, spilled to a temp file above. | reload | site file | 7 |
@@ -188,14 +188,14 @@ section of `docs/configuration.md` that explains the key.
 | `head_max` | size | 64KB | Longest response head accepted from php-fpm. | reload | site file | 7 |
 | `path_info` | bool | true | Route /index.php/extra with PATH_INFO. | reload | site file | 7 |
 | `remote_root` | path | (none) | php-fpm in a container: the script path as the container sees it. | reload | site file | 9 |
-| `max_fails` | int | 1 | Failures before a member of an upstream list is skipped. | reload | site file | 12 |
+| `max_fails` | int | 3 | Failures before a member of an upstream list is skipped. | reload | site file | 12 |
 | `fail_timeout` | seconds | 10 | How long a failed member is skipped. | reload | site file | 12 |
 ## `proxy = {}`
 
 | key | type | default | meaning | applies | via | doc |
 |---|---|---|---|---|---|---|
 | `host` | string | (passed through) | The Host header sent to the origin; $host and other variables allowed. | reload | site file | 12 |
-| `forwarded` | enum: append \| replace \| off \| rfc7239 | append | How X-Forwarded-For/Proto/Host are built from the peer and trusted_proxies. | reload | site file | 12 |
+| `forwarded` | enum: x-forwarded \| forwarded \| both \| off | x-forwarded | Which client-address fields go to the origin: X-Forwarded-For/Proto/Host, RFC 7239 Forwarded, both, or none. A client's own values are replaced unless it is a trusted proxy, whose chain is appended to. | reload | site file | 12 |
 | `headers` | table | {} | Fields added to the forwarded request, with $ variables. | reload | site file | 12 |
 | `hide` | list | [] | Response fields removed before the client sees them. | reload | site file | 12 |
 | `redirects` | enum: rewrite \| pass | rewrite | Rewrite a Location that points at the origin to this site. | reload | site file | 12 |
@@ -204,20 +204,20 @@ section of `docs/configuration.md` that explains the key.
 | `tunnel_timeout` | seconds | 0 (none) | Idle timeout of an upgraded tunnel. | reload | site file | 12 |
 | `read_timeout` | seconds | 60 | Waiting for the origin's answer: 504 beyond. | reload | site file | 12 |
 | `connect_timeout` | seconds | 5 | Connecting to the origin: 502 beyond. | reload | site file | 12 |
-| `send_timeout` | seconds | 60 | Sending to the origin. | reload | site file | 12 |
-| `max_connections` | int | 32 | Connections to the origin per worker. | reload | site file | 12 |
-| `max_idle` | int | max_connections | Kept idle connections per worker. | reload | site file | 12 |
+| `send_timeout` | seconds | 30 | Sending to the origin. | reload | site file | 12 |
+| `max_connections` | int | 256 | Connections to the origin per worker. | reload | site file | 12 |
+| `max_idle` | int | 64 | Kept idle connections per worker. | reload | site file | 12 |
 | `idle_timeout` | seconds | 30 | Kept connection closed after this long idle (0 = until the origin closes it). | reload | site file | 12 |
-| `queue_depth` | int | 256 | Requests waiting per worker; 503 beyond. | reload | site file | 12 |
-| `queue_wait` | seconds | 10 | Longest wait in the queue. | reload | site file | 12 |
-| `priority_reserve` | int | 0 | Connections kept for priority = true locations. | reload | site file | 12 |
+| `queue_depth` | int | 1024 | Requests waiting per worker; 503 beyond. | reload | site file | 12 |
+| `queue_wait` | seconds | 5 | Longest wait in the queue. | reload | site file | 12 |
+| `priority_reserve` | share | 0 | Share of max_connections (0 to 1) kept for priority = true locations. | reload | site file | 12 |
 | `buffering` | bool | true | Buffer the origin's answer or stream it. | reload | site file | 12 |
 | `buffer_max` | size | 1MB | Memory before the answer spills to a temp file. | reload | site file | 12 |
 | `buffer_file_max` | size | 1GB | Cap on that temp file. | reload | site file | 12 |
 | `request_buffering` | bool | true | Collect the request body before forwarding. | reload | site file | 12 |
 | `request_buffer_max` | size | 256KB | Memory before the body spills. | reload | site file | 12 |
 | `head_max` | size | 64KB | Longest response head accepted. | reload | site file | 12 |
-| `max_fails` | int | 1 | Failures before a member is skipped. | reload | site file | 12 |
+| `max_fails` | int | 3 | Failures before a member is skipped. | reload | site file | 12 |
 | `fail_timeout` | seconds | 10 | How long a failed member is skipped. | reload | site file | 12 |
 ## `[[site.location]]`
 

@@ -3,6 +3,7 @@
 // no NaN, strings with the standard escapes. Header-only, no dependencies.
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -105,10 +106,18 @@ private:
             case Type::null: out += "null"; break;
             case Type::boolean: out += bool_ ? "true" : "false"; break;
             case Type::number: {
+                // JSON has no infinity or NaN: written as null, as JavaScript does. A whole number
+                // prints as an integer, but only inside long long's range: the conversion of a
+                // value outside it is undefined behaviour (found by fuzz_json, 2026-10-07).
+                if (!std::isfinite(number_)) {
+                    out += "null";
+                    break;
+                }
                 char buf[32];
-                const auto n = static_cast<long long>(number_);
-                if (static_cast<double>(n) == number_) std::snprintf(buf, sizeof buf, "%lld", n);
-                else std::snprintf(buf, sizeof buf, "%.17g", number_);
+                if (number_ >= -9.2e18 && number_ <= 9.2e18 && std::trunc(number_) == number_)
+                    std::snprintf(buf, sizeof buf, "%lld", static_cast<long long>(number_));
+                else
+                    std::snprintf(buf, sizeof buf, "%.17g", number_);
                 out += buf;
                 break;
             }
@@ -204,6 +213,7 @@ private:
         char* end = nullptr;
         const double d = std::strtod(text.c_str(), &end);
         if (!end || *end != '\0') return fail("bad number");
+        if (!std::isfinite(d)) return fail("number out of range");  // RFC 8259 6 lets a parser limit the range
         out = Value(d);
         return true;
     }

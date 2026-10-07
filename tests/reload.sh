@@ -21,6 +21,7 @@ write_config() {  # root [extra-site-toml]
 workers = 2
 pid_file = "$T/agensio.pid"
 protocols = ["h2c", "h2", "h1"]
+${SERVER_EXTRA:-}
 [log]
 access = "$T/logs/access.log"
 error = "$T/logs/error.log"
@@ -144,6 +145,56 @@ root = \"$T/v2\""
   check "h2: the removed listener is gone again" "000" "$(code --max-time 2 http://127.0.0.1:8098/ 2>/dev/null)"
 fi
 check "removed location is gone" "404" "$(code $B/slow/json)"
+
+# The connection limits apply on reload (audit 2026-10-07, item 2.7): a connection
+# opened after a reload that lowers idle_timeout from the boot value (15 s) to 2 s is
+# closed about 2 s after its response, over HTTP/1 and over HTTP/2. Before the fix both
+# protocols kept the boot value until a restart.
+SERVER_EXTRA="idle_timeout = 2" write_config "$T/v2"
+"$BIN" reload -c "$T/agensio.toml" > /dev/null 2>&1; sleep 0.5
+idle_h1=$(python3 - <<'PYT'
+import socket, time
+s = socket.create_connection(("127.0.0.1", 8097)); s.settimeout(9)
+s.sendall(b"GET / HTTP/1.1\r\nHost: t\r\n\r\n")
+data = b""
+while b"version two" not in data: data += s.recv(4096)
+t0 = time.monotonic()
+try:
+    while s.recv(4096): pass
+    took = time.monotonic() - t0
+    print("closed within 4 s" if took < 4 else "closed after %d s" % took)
+except socket.timeout:
+    print("still open after 9 s")
+PYT
+)
+check "h1: idle_timeout lowered by a reload applies to a new connection" "closed within 4 s" "$idle_h1"
+if python3 -c 'import h2' 2>/dev/null; then
+idle_h2=$(python3 - <<'PYT'
+import socket, time
+import h2.connection, h2.config, h2.events
+s = socket.create_connection(("127.0.0.1", 8097)); s.settimeout(9)
+c = h2.connection.H2Connection(h2.config.H2Configuration(client_side=True))
+c.initiate_connection()
+c.send_headers(1, [(":method", "GET"), (":path", "/"), (":scheme", "http"), (":authority", "t")], end_stream=True)
+s.sendall(c.data_to_send())
+done = False
+while not done:
+    for e in c.receive_data(s.recv(65536)):
+        if isinstance(e, h2.events.StreamEnded): done = True
+    s.sendall(c.data_to_send())
+t0 = time.monotonic()
+try:
+    while s.recv(65536): pass
+    took = time.monotonic() - t0
+    print("closed within 4 s" if took < 4 else "closed after %d s" % took)
+except socket.timeout:
+    print("still open after 9 s")
+PYT
+)
+check "h2: idle_timeout lowered by a reload applies to a new connection" "closed within 4 s" "$idle_h2"
+fi
+write_config "$T/v2"
+"$BIN" reload -c "$T/agensio.toml" > /dev/null 2>&1; sleep 0.3
 
 # A broken file is refused by the command before signalling, and by the server if signalled.
 printf '[[site]]\nlisten = ["127.0.0.1:8097"]\nroot = "%s"\n[[site]\n' "$T/v2" > "$T/agensio.toml"

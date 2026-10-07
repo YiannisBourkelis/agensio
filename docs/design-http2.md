@@ -555,6 +555,11 @@ One lazy `steady_timer` per connection, deadlines checked when it fires, as HTTP
 | response pending, no window progress of at least 1 KB | `idle_timeout` | `RST_STREAM(CANCEL)`, buffers freed: the Bomb's "hold", zero-window slow read; progress is marked when a write carrying the stream's bytes completes |
 | response pending, socket not draining | `idle_timeout` | close: TCP-level slow read |
 
+What the code does differs in three places (security audit 2026-10-07, items 2.3 and 2.10):
+the idle clock is refreshed by every read, also one that completes no frame; the
+incomplete-head deadline and the not-draining check run only while at least one stream is
+open; and the not-draining close comes at four idle timeouts, not one.
+
 ### 6.8 Lifecycle
 
 Preface, our SETTINGS (`HEADER_TABLE_SIZE 4096`, `MAX_CONCURRENT_STREAMS 128`,
@@ -704,6 +709,10 @@ within noise (the "does not affect HTTP/1.1" proof) and the h2 rows recorded.
 ## 8. Security
 
 ### 8.1 Threats and defences
+
+The `h2-attacks.py` named in the Test column was not committed to the tree; the rows are
+held by h2spec, the fuzzers and the integration suite only (security audit 2026-10-07,
+item 2.10).
 
 | Attack | Mechanism | Defence | Limit | Test |
 |---|---|---|---|---|

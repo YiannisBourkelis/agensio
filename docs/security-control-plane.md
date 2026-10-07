@@ -151,6 +151,41 @@ devbox): the one-call paths and each refusal.
 
 ## Sanitizer and fuzz record
 
+2026-10-07, the security audit's campaign (`docs/security-audit-2026-10-07.md`), the first
+with the targets' assertions compiled in (every fuzz build before defined `NDEBUG`, so the
+recorded runs above checked memory safety only): every target five minutes on its corpus
+through `scripts/fuzz-all.sh`, ASan and UBSan, clang 19.
+
+| target | runs | edges | result |
+|---|---|---|---|
+| fuzz_parser | 7.95 M | 286 | clean |
+| fuzz_chunked | 35.56 M | 72 | clean |
+| fuzz_fcgi | 9.43 M | 133 | clean |
+| fuzz_http_head | 121.13 M | 195 | clean |
+| fuzz_path | 16.51 M | 297 | clean |
+| fuzz_json | 16.61 M | 646 | one finding before the fix, clean after (below) |
+| fuzz_archive | 20.56 M | 808 | clean |
+| fuzz_hpack | 0.60 M | 709 | clean |
+| fuzz_hpack_roundtrip | 0.48 M | 601 | clean |
+| fuzz_qpack | 11.93 M | 859 | clean |
+| fuzz_quic_packet | 5.50 M | 192 | clean |
+| fuzz_transport_params | 276.69 M | 185 | clean |
+| fuzz_quic_conn | 0.84 M | 2,346 | clean |
+
+The finding: a number literal whose exponent overflows a double parsed to infinity and was
+written back as `inf`, and a whole number above 2^63 was converted to `long long` (UBSan,
+undefined behaviour); fixed in `services/json.hpp`, the input kept as
+`tests/fuzz/regressions/json/overflow-exponent`. The first pass ran all thirteen targets at
+once next to an eight-job sanitizer build, and seven reported timeouts after 11 to 22
+seconds on inputs that replay in under 5 ms; rerun alone they were clean (the counts above).
+Rule: the campaign runs on an otherwise idle machine. The sanitizer build passed the unit
+tests, the integration suite (588 checks, the server's stderr empty) and the reload suite
+(20); the ACME suite was not run (it needs Pebble through `docker compose`). Two suite
+defects were found on the way, both hidden by the Release build: two sites the SNI and
+authority checks need were defined only when the binary had the HttpArena handler, and four
+checks piped `agensio ctl protection` into `grep -q`, which fails under pipefail when the
+writer is slower than grep (the sanitizer build's `ctl` lost to SIGPIPE every time).
+
 2026-09-25, the QPACK encoder, `alt-svc`, reload and connection-fuzzer step:
 `fuzz_quic_conn` (design 9.2: a connection established by a fuzz-build hook, the
 fuzzer's frames sealed with its keys, the timers stepped) 431 k runs in 120 s on its
@@ -181,15 +216,21 @@ seeded with a tar and a zip), no finding. Unit tests, `tests/install.sh` and
 no finding. Unit, integration, root-role, reload and Pebble suites under
 `-fsanitize=address,undefined`: one finding, a use-after-free at shutdown in the ACME
 manager's second `stop()` (timer cancelled after its io_context was destroyed), fixed;
-all suites clean afterwards. Repeat both before every tag:
+all suites clean afterwards. Repeat both before every tag, every fuzzer since 2026-10-07
+(the security audit found tags alpha.45 to alpha.50 shipped with no recorded run, and the
+list named two of the thirteen targets):
 
 ```
 cmake -B build-san -DAGENSIO_SANITIZE=address,undefined -DAGENSIO_TESTS=ON && cmake --build build-san
 build-san/agensio_tests && tests/integration.sh build-san/agensio && tests/acme.sh build-san/agensio
-cmake -B build-fuzz -DAGENSIO_FUZZ=ON -DAGENSIO_TESTS=OFF -DAGENSIO_TLS=OFF -DCMAKE_CXX_COMPILER=clang++
-cmake --build build-fuzz --target fuzz_json fuzz_archive && build-fuzz/fuzz_json tests/fuzz/regressions/json -max_total_time=120
-build-fuzz/fuzz_archive tests/fuzz/regressions/archive -max_len=65536 -max_total_time=120
+scripts/fuzz-all.sh -t 300      # every target, five minutes each on its corpus; the table goes below
 ```
+
+`scripts/fuzz-all.sh` configures `build-fuzz-all` with clang++ and TLS on, so `fuzz_quic_conn`
+is built where OpenSSL has the QUIC API (3.5, the devbox); new inputs go to a scratch
+corpus under `bench/tmp/`, and an input worth keeping is copied into
+`tests/fuzz/regressions/<target>/` by hand. The weekly CI job (`.github/workflows/fuzz.yml`)
+runs the same script and the sanitizer build on Ubuntu 24.04, without `fuzz_quic_conn`.
 
 
 ## HTTP/2 (phase G)

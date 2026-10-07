@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <iterator>
 #include <string>
 #include <map>
@@ -1576,6 +1577,23 @@ static void test_security_regressions() {
     }
     CHECK(parser_files >= 3);
     CHECK(path_files >= 3);
+    // JSON (fuzz_json's rule): what parses dumps to text that parses again to the same text.
+    // `overflow-exponent` (2026-10-07) parsed to infinity and dumped as "inf".
+    std::size_t json_files = 0;
+    for (const auto& entry : fs::directory_iterator(base / "json")) {
+        if (!entry.is_regular_file()) continue;
+        ++json_files;
+        std::ifstream in(entry.path(), std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        json::Value v, again;
+        std::string err;
+        if (!json::parse(text, v, err)) continue;
+        const std::string once = v.dump();
+        const bool same = json::parse(once, again, err) && again.dump() == once;
+        if (!same) std::printf("json regression %s: dump does not parse back: %.80s\n", entry.path().filename().c_str(), once.c_str());
+        CHECK(same);
+    }
+    CHECK(json_files > 0);
 }
 
 // C3b-1: `user` on a site derives a php-fpm pool; `agensio pools` writes it.
@@ -3051,6 +3069,23 @@ static void test_json() {
     CHECK(v.dump() == "{\"a\":1,\"b\":[true,null,\"x\xc3\xa9\\n\"],\"c\":{\"d\":-25},\"e\":\"\"}");
     CHECK(json::Value::object().set("k", "v").set("n", 3).set("k", "w").dump() == R"({"k":"w","n":3})");
     CHECK(json::Value("a\"b\\c\x01").dump() == R"("a\"b\\c\u0001")");
+    // Numbers outside a double or a long long (fuzz_json, 2026-10-07): the parser refuses a
+    // literal that overflows to infinity, and the writer never converts a value that does not
+    // fit a long long (undefined behaviour) and never writes a non-JSON "inf" or "nan".
+    {
+        json::Value big;
+        std::string berr;
+        CHECK(!json::parse("44445E44444444464444", big, berr) && !berr.empty());
+        CHECK(!json::parse("-1e999", big, berr));
+        CHECK(json::parse("4.44454e19", big, berr));
+        const std::string text = big.dump();
+        json::Value back;
+        CHECK(json::parse(text, back, berr) && back.num() == 4.44454e19);
+        CHECK(json::Value(1e300).dump() == "1.0000000000000001e+300");
+        CHECK(json::Value(9007199254740992.0).dump() == "9007199254740992");
+        CHECK(json::Value(std::numeric_limits<double>::infinity()).dump() == "null");
+        CHECK(json::Value(std::numeric_limits<double>::quiet_NaN()).dump() == "null");
+    }
     CHECK(!json::parse("{\"a\":}", v, err) && !err.empty());
     CHECK(!json::parse("[1,2", v, err));
     CHECK(!json::parse("{\"a\":1} x", v, err));
@@ -5228,6 +5263,73 @@ static void test_config_reference() {
     fs::remove_all(dir);
 }
 
+// The defaults the reference states for the php and proxy tables are the parser's (audit
+// 2026-10-07, item 2.8: the table said max_fails 1, send_timeout 60, pool sizes 32 / 256 /
+// 10 and forwarded = append | replace | rfc7239, none of which the parser had).
+static void test_config_reference_defaults() {
+    namespace fs = std::filesystem;
+    using namespace control;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-refdef-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "www");
+    std::ofstream(dir / "d.toml") << "[[site]]\nserver_name = [\"php.test\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n"
+                                     "php = { socket = \"unix:/run/php/fpm.sock\" }\n"
+                                     "[[site]]\nserver_name = [\"proxy.test\"]\nlisten = [\"127.0.0.1:1\"]\napp = \"proxy\"\n"
+                                     "upstream = \"http://127.0.0.1:9\"\n";
+    const Config cfg = load_config(dir / "d.toml");
+    fs::remove_all(dir);
+    auto def = [](const char* table, const char* key) -> std::string {
+        for (const auto& d : key_defs())
+            if (std::string_view(d.table) == table && std::string_view(d.key) == key) return d.def;
+        std::printf("reference row missing: %s %s\n", table, key);
+        return "";
+    };
+    // The leading number of a row's default must be the parsed value.
+    auto same = [&](const char* table, const char* key, double parsed) {
+        const std::string text = def(table, key);
+        char* end = nullptr;
+        const double stated = std::strtod(text.c_str(), &end);
+        const bool ok = end != text.c_str() && stated == parsed;
+        if (!ok) std::printf("reference default of %s %s is \"%s\", the parser's is %g\n", table, key, text.c_str(), parsed);
+        CHECK(ok);
+    };
+    auto secs = [](std::chrono::milliseconds ms) { return static_cast<double>(ms.count()) / 1000.0; };
+    struct Table {
+        const char* name;
+        const UpstreamOptions& o;
+    };
+    const Table tables[] = {{"php = {}", cfg.sites[0].php.options}, {"proxy = {}", cfg.sites[1].proxy.options}};
+    for (const auto& [name, o] : tables) {
+        same(name, "connect_timeout", secs(o.connect_timeout));
+        same(name, "send_timeout", secs(o.send_timeout));
+        same(name, "read_timeout", secs(o.read_timeout));
+        same(name, "queue_wait", secs(o.queue_wait));
+        same(name, "idle_timeout", secs(o.idle_timeout));
+        same(name, "fail_timeout", secs(o.fail_timeout));
+        same(name, "max_connections", static_cast<double>(o.max_connections));
+        same(name, "max_idle", static_cast<double>(o.max_idle));
+        same(name, "queue_depth", static_cast<double>(o.queue_depth));
+        same(name, "priority_reserve", o.priority_reserve);
+        same(name, "max_fails", static_cast<double>(o.max_fails));
+    }
+    // priority_reserve is a share of max_connections, not a count of connections.
+    for (const char* t : {"php = {}", "proxy = {}"}) {
+        bool share = false;
+        for (const auto& d : key_defs())
+            if (std::string_view(d.table) == t && std::string_view(d.key) == "priority_reserve") share = std::string_view(d.type) == "share";
+        if (!share) std::printf("reference type of %s priority_reserve is not \"share\"\n", t);
+        CHECK(share);
+    }
+    // forwarded: the default and every value the parser accepts, nothing it refuses.
+    std::string ftype;
+    for (const auto& d : key_defs())
+        if (std::string_view(d.table) == "proxy = {}" && std::string_view(d.key) == "forwarded") ftype = d.type;
+    const bool fwd = def("proxy = {}", "forwarded") == cfg.sites[1].proxy.forwarded &&
+                     ftype == "enum: x-forwarded | forwarded | both | off";
+    if (!fwd) std::printf("reference forwarded is \"%s\" default \"%s\", the parser's is x-forwarded | forwarded | both | off, default %s\n",
+                          ftype.c_str(), def("proxy = {}", "forwarded").c_str(), cfg.sites[1].proxy.forwarded.c_str());
+    CHECK(fwd);
+}
+
 // The refused-endings rule, with the spellings a live host served as source.
 // HTTP/2 framing, settings, the shared field rules and HPACK (RFC 7541 appendix C).
 static std::string unhex(std::string_view hex) {
@@ -6280,6 +6382,7 @@ int main() {
     test_quic_stateless();
 #endif
     test_config_reference();
+    test_config_reference_defaults();
     test_refusal_finding();
     test_protection();
     test_install();

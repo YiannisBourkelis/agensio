@@ -351,7 +351,10 @@ validated. `http3.retry = "auto"` sends Retry when the worker's half-open count 
 half its budget, `"always"` always (a deployment under attack), `"never"` never. At the
 full budget further Initials are dropped. NEW_TOKEN for later connections is an I4 item.
 
-The handshake must finish within `idle_timeout`; the Initial and Handshake spaces have
+The handshake must finish within `idle_timeout` (not enforced yet: the only clock is the idle
+timer, which any datagram reaching the connection refreshes, decrypted or not; the
+connection's creation time is recorded and not read. Security audit 2026-10-07, item 2.4);
+the Initial and Handshake spaces have
 their own PTO (6.5) so a lost ServerHello is resent on time; a Handshake packet from a
 peer whose address changed during the handshake is ignored.
 
@@ -845,13 +848,13 @@ time) and the same profile load (`profile-transport.txt` and the files before it
 | Attack | Mechanism | Defence | Limit | Test |
 |---|---|---|---|---|
 | Amplification with a spoofed source | Initials from a victim's address; the server's answers are several times the size | Initials under 1,200 bytes dropped; three times the bytes received until the address is validated; Retry under load; Version Negotiation only for datagrams of at least 1,200 bytes | 3x, RFC 9000 8.1 | `h3-attacks.py amplification` (a client that never acknowledges); the interop runner's `amplificationlimit` |
-| Handshake flood, half-open exhaustion | Initials that never complete; each costs an `SSL` and keys | the half-open budget per worker, Retry at half, drop at full; the handshake bounded by `idle_timeout`; CRYPTO buffered at most 16 KB per level | 1,024 half-open per worker | `h3-attacks.py handshake-flood`; RSS and CPU sampled |
+| Handshake flood, half-open exhaustion | Initials that never complete; each costs an `SSL` and keys | the half-open budget per worker, Retry at half, drop at full; the handshake bounded by `idle_timeout` (not yet, see the handshake paragraph above and the audit's item 2.4); CRYPTO buffered at most 16 KB per level | 1,024 half-open per worker | `h3-attacks.py handshake-flood`; RSS and CPU sampled |
 | Retry token forgery or replay | a token from another address or time | AEAD-sealed with the hourly key, bound to the address, the original id and the time; ten seconds of validity | | unit tests of the token |
 | Optimistic ACK | acknowledge packets never received to inflate the window (RFC 9000 21.4) | an ACK of a number never sent is PROTOCOL_ERROR; packet numbers skipped at random | | `h3-attacks.py optimistic-ack` |
 | ACK frame with many ranges | CPU per frame | 32 ranges processed, the rest ignored; frames bounded by the packet | 32 | `fuzz_quic_packet` |
 | Connection id games (the 2024 quic-go class) | NEW_CONNECTION_ID with `Retire Prior To` floods, RETIRE floods | at most four active ids from the peer, CONNECTION_ID_LIMIT_ERROR beyond; the retirements a `Retire Prior To` demands are queued as one range, never one frame each; a retirement of an id we never issued is PROTOCOL_ERROR; retirements beyond the ids issued are glitches | 4 ids | `h3-attacks.py cid-flood` |
 | Stream flood, Rapid Reset over QUIC | streams beyond the limit; streams reset at once | STREAM_LIMIT_ERROR beyond MAX_STREAMS; the reset counter (RESET_STREAM and STOP_SENDING before the answer, resets we send) closes at 128 per second; the glitch budget | 128 streams, 128 resets per second, 100 glitches | `h3-attacks.py stream-flood`, `rapid-reset` |
-| Flow-control games | a zero window held, 1-byte MAX_STREAM_DATA dribbles, DATA_BLOCKED floods | the write-stall rule (`idle_timeout` per stalled stream); updates under 1 KB while more is pending are glitches | | `h3-attacks.py slow-read`, `dribble` |
+| Flow-control games | a zero window held, 1-byte MAX_STREAM_DATA dribbles, DATA_BLOCKED floods | planned: a write-stall rule (`idle_timeout` per stalled stream), not built: `src/http3` has no per-stream timer and `H3Stream::since` is set but not read (audit 2026-10-07, item 2.10); updates under 1 KB while more is pending are glitches | | `h3-attacks.py slow-read`, `dribble` |
 | Reassembly memory | out-of-order STREAM and CRYPTO data held in gaps | bounded by the windows we granted (beyond is FLOW_CONTROL_ERROR) and the CRYPTO cap per level; the sum is 6.10 | 16 KB per level, the stream's window | `h3-attacks.py gaps`; `fuzz_quic_conn` |
 | QPACK bomb, blocked-stream hold, encoder-stream games | a huge entry referenced thousands of times; sections referencing inserts that never come; capacity games | the decoder table at most 4 KB, blocked streams at most 16 with at most 16 KB each, the decoded list stopped at the first byte over `max_header_size`, capacity above ours or an insert above the capacity is QPACK_ENCODER_STREAM_ERROR | 4 KB, 16 streams, 16 KB | `fuzz_qpack` differential; `h3-attacks.py qpack-bomb`, `blocked-hold` |
 | Control stream abuse | no SETTINGS first, a second SETTINGS, the control stream closed, frames on the wrong stream type, CANCEL_PUSH or PUSH_PROMISE, MAX_PUSH_ID games | the RFC's errors (7.1); reserved frame and stream types ignored, their bytes discarded and counted against the windows | | `fuzz_h3_frame`; `h3-attacks.py control-stream` |
@@ -859,7 +862,7 @@ time) and the same profile load (`profile-transport.txt` and the files before it
 | Key update flood | a key phase flipped repeatedly | a second update before the previous is acknowledged is KEY_UPDATE_ERROR; old keys kept three PTOs | | `h3-attacks.py key-update` |
 | Path validation flood, migration to a victim | packets from spoofed new addresses | passive changes only, one validation at a time, three times the bytes on the new path until validated, PATH_RESPONSE rate-limited, migration to a validated path only | 1 validation in flight | `h3-attacks.py path-flood` |
 | Spoofed stateless reset, Version Negotiation or CONNECTION_CLOSE | tear down a connection from outside | a reset must end in a token we issued (HMAC under the server secret); Version Negotiation answered only for unknown versions and ignored after the handshake; CONNECTION_CLOSE only from a packet that decrypts | | unit tests; the interop runner |
-| Slow handshake, slowloris | a client that dribbles | the handshake bounded by `idle_timeout`, `max_idle_timeout` = `idle_timeout`, `body_timeout` between DATA frames | 15 s, 60 s | integration |
+| Slow handshake, slowloris | a client that dribbles | `max_idle_timeout` = `idle_timeout`; planned and not built: the handshake bounded by `idle_timeout` and `body_timeout` between DATA frames (audit 2026-10-07, items 2.4 and 2.10) | 15 s, 60 s | integration |
 | 0-RTT replay | a replayed early request | early data refused in phase I (`SSL_set_quic_tls_early_data_enabled` off); later opt-in for GET and HEAD only, with `Early-Data: 1` to upstreams | | unit |
 | Memory as a whole | anything that grows | every buffer belongs to a stream, a connection or the worker and has a cap; the worst case is 6.10 | about 3.8 MB per connection at the defaults | the attack suite samples RSS through every run |
 

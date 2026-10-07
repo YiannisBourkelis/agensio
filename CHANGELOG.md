@@ -10,6 +10,60 @@ tuning with sizes for a shared VPS, a database and an account per site for WordP
 other PHP presets, everyday commands, nightly dumps and what to look at when something is
 wrong. Documentation only; nothing in the server changed.
 
+Security audit against the nginx comparison (`docs/security-audit-2026-10-07.md`): an outside
+model's claims about what a fast server leaves out, checked against the code, with what was
+found and what remains to verify live. Fixed from it, each with a test that failed first:
+
+- **Reload applies the connection limits.** HTTP/1 and HTTP/2 connections took
+  `idle_timeout`, `body_timeout` and `max_header_size` from the configuration the server
+  booted with, so a reload changed none of them until a restart, although the key reference
+  says "reload" (HTTP/3 already read the live configuration). They now come from the
+  connection's generation: a connection accepted after a reload gets the new values, a kept
+  connection takes the timeouts at its next request and the receive buffer's size at its next
+  idle shed. `tests/reload.sh` reloads to `idle_timeout = 2` and times a new connection over
+  HTTP/1 and HTTP/2: open after 9 s before, closed within 4 s now (20 checks).
+- **The key reference stated wrong defaults** for the `php` and `proxy` tables: `max_fails`
+  1 (the parser's is 3), `send_timeout` 60 (30), `queue_wait` 10 (5), the pool sizes 32 /
+  256 / max_connections (PHP 16 / 64 / 8, proxy 256 / 1024 / 64), `priority_reserve` a count
+  of connections (a share from 0 to 1), and `proxy.forwarded = append | replace | off |
+  rfc7239` (the parser takes `x-forwarded | forwarded | both | off`, default `x-forwarded`).
+  `docs/configuration.md` was right; the table that `agensio keys`, `config_reference` and
+  `docs/keys.md` print was not. A unit test now holds every numeric default of both tables to
+  a parsed configuration (15 mismatches before).
+- **TLS 1.2 renegotiation**: the audit suspected client-initiated renegotiation was allowed;
+  the test showed OpenSSL 3 refuses it by default, so nothing changed in the server. The
+  integration suite keeps the check (checked against an `s_server` that allows it), so an
+  option or library change cannot turn it back on.
+- The HTTP/2 and HTTP/3 design notes said what the timers should do; they now say what the
+  code does (the HTTP/3 handshake deadline and per-stream timers are not built; the HTTP/2
+  head and drain checks run only while a stream is open), and that `h2-attacks.py` was never
+  committed.
+- **JSON numbers out of range** (found by `fuzz_json` in the audit's campaign): a literal
+  whose exponent overflows a double (`1e999`) parsed to infinity and was written back as
+  `inf`, which is not JSON, and writing a whole number above 2^63 converted it to `long long`
+  out of range, which is undefined behaviour. The parser now refuses such a literal (RFC 8259
+  section 6 lets a parser limit the range), and the writer checks the range before the integer
+  form and writes `null` for infinity and NaN. The parser reads MCP messages, control replies,
+  ACME answers, an archive's `package.json` and the root helper's requests. The input is
+  `tests/fuzz/regressions/json/overflow-exponent`, and the unit tests now replay the JSON
+  corpus with the fuzzer's round-trip rule (five failures before the fix).
+- **The fuzzers checked their invariants for the first time.** The targets state them with
+  `assert()`, and a Release or RelWithDebInfo fuzz build defines `NDEBUG`, so every recorded
+  run until now tested memory safety only (the binaries contained no assertion). The fuzz
+  targets are compiled with `-UNDEBUG` now.
+- **The integration suite passes on a default build again.** Two sites that seven SNI,
+  authority and status checks need were defined only when the binary had the HttpArena
+  handler (off by default, so CI and the sanitizer build failed those checks since
+  2026-09-24), and four checks piped `agensio ctl protection` into `grep -q`, which under
+  pipefail fails whenever the writer is still writing when grep exits at its first match
+  (the sanitizer build's `ctl` was killed by SIGPIPE in 50 of 50 tries). Both fixed in the
+  suite; the server did nothing wrong. The sanitizer build now passes 588 checks with nothing
+  on the server's stderr, the Release build 596.
+- `scripts/fuzz-all.sh` runs every fuzzer for a set time on its checked-in corpus and prints
+  one table (runs, coverage, corpus, verdict); `.github/workflows/fuzz.yml` runs it weekly
+  with the sanitizer build through the unit and integration suites, and the before-tag list in
+  `docs/security-control-plane.md` now names it instead of two fuzzers.
+
 ## 0.1.0-alpha.50 (2026-10-05)
 
 From the alpha.49 report (security, medium): the failure jails reading the journal matched on

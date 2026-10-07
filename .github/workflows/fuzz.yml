@@ -1,0 +1,44 @@
+# Weekly memory-safety run (security audit 2026-10-07, item 2.9): every libFuzzer target for
+# five minutes on its checked-in corpus, and the ASan+UBSan build through the unit and
+# integration suites. Also from the Actions tab (Run workflow) with another duration.
+# Ubuntu 24.04's OpenSSL is 3.0, without the QUIC TLS API, so fuzz_quic_conn is not built
+# here; it runs on the development box before a tag (docs/security-control-plane.md).
+name: fuzz
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: seconds per fuzzer
+        default: "300"
+jobs:
+  fuzz:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libasio-dev libssl-dev zlib1g-dev clang-18 libclang-rt-18-dev
+      - name: every fuzzer
+        run: CXX=clang++-18 scripts/fuzz-all.sh -t "${{ github.event.inputs.seconds || '300' }}" -j 4 -o fuzz-out
+      - name: findings
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-findings
+          path: |
+            fuzz-out/*.log
+            fuzz-out/findings/
+            fuzz-out/summary.md
+  sanitizers:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libasio-dev libssl-dev zlib1g-dev curl netcat-openbsd
+      - name: build with ASan and UBSan
+        run: cmake -S . -B build-san -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DAGENSIO_SANITIZE=address,undefined && cmake --build build-san
+      - name: unit tests
+        run: build-san/agensio_tests
+      - name: integration
+        run: tests/integration.sh build-san/agensio
