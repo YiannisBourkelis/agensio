@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.54
+## 0.1.0-alpha.54 (2026-10-08)
 
 From the alpha.53 report (a live host and a private instance: Drupal's script rule, the
 WordPress refusals and openings, report mode, ports in X-Forwarded-For, the site_update notes
