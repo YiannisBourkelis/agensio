@@ -1,6 +1,7 @@
 #include "control/sites.hpp"
 
 #include "core/access.hpp"
+#include "core/refuse.hpp"
 
 #include "control/commands.hpp"
 
@@ -272,10 +273,31 @@ bool php_ending(const std::string& p) {
 
 std::string check_rules(const json::Value& given, const SiteSpec& spec, json::Value& normalised, const Config* cfg) {
     normalised = json::Value::object();
-    if (!given.is_object()) return "rules must be an object: {\"private\": [...], \"entry_points\": [...], \"cache\": [...], \"front_controller\": \"/index.php\", \"restricted\": [...]}";
+    if (!given.is_object()) return "rules must be an object: {\"private\": [...], \"entry_points\": [...], \"cache\": [...], \"front_controller\": \"/index.php\", \"refuse\": [...], \"restricted\": [...]}";
     for (const auto& m : given.members())
-        if (m.first != "private" && m.first != "entry_points" && m.first != "cache" && m.first != "front_controller" && m.first != "restricted" && m.first != "admin")
-            return "rules: unknown key '" + m.first + "' (private, entry_points, cache, front_controller, restricted, admin)";
+        if (m.first != "private" && m.first != "entry_points" && m.first != "cache" && m.first != "front_controller" && m.first != "restricted" && m.first != "admin" &&
+            m.first != "refuse")
+            return "rules: unknown key '" + m.first + "' (private, entry_points, cache, front_controller, refuse, restricted, admin)";
+    // rules.refuse (2026-10-08, docs/configuration.md 6b): path patterns rendered as the site's
+    // `refuse`, on any app; compiled here so a bad one is answered with what it would mean.
+    RefuseSet refused;
+    json::Value refuse_list = json::Value::array();
+    if (!given["refuse"].is_null()) {
+        if (!given["refuse"].is_array()) return "rules.refuse must be a list of path patterns, such as [\"/vendor/\", \"*.yaml\", \"/ext/*/Resources/Private/\"]";
+        for (const auto& v : given["refuse"].items()) {
+            if (!v.is_string()) return "rules.refuse: every pattern is a string";
+            RefusePattern p;
+            if (const std::string why = refuse::compile(v.str(), p); !why.empty()) return "rules.refuse: " + why;
+            const bool seen = std::any_of(refused.patterns.begin(), refused.patterns.end(), [&](const RefusePattern& o) { return o.text == p.text; });
+            if (!seen) {
+                refuse_list.push(p.text);
+                refused.patterns.push_back(std::move(p));
+            }
+        }
+        if (refused.patterns.size() > refuse::kMaxPatterns)
+            return "rules.refuse: " + std::to_string(refused.patterns.size()) + " patterns, at most " + std::to_string(refuse::kMaxPatterns);
+        refuse::index(refused);
+    }
     // Access by client address (2026-10-07, docs/configuration.md 19): rendered as
     // [[site.access]] tables, on any app; like every rule it only narrows the site.
     // One allow list, checked the same for restricted and admin: addresses, ranges, root's
@@ -452,6 +474,11 @@ std::string check_rules(const json::Value& given, const SiteSpec& spec, json::Va
                 return "rules.front_controller must be one of rules.entry_points (" + front + " is not), so a missing path never reaches a script the rules do not name";
         }
     }
+    // What the rules themselves name as running may not be refused; the preset's own index and
+    // front controller are checked by the loader when the change is validated.
+    for (const auto& e : entries)
+        if (const RefusePattern* p = refuse::match(refused, e))
+            return "rules.refuse: '" + p->text + "' refuses the entry point " + e + "; name what to refuse more narrowly";
     json::Value pv = json::Value::array(), ev = json::Value::array();
     for (const auto& x : priv) pv.push(x);
     for (const auto& x : entries) ev.push(x);
@@ -459,6 +486,7 @@ std::string check_rules(const json::Value& given, const SiteSpec& spec, json::Va
     if (!entries.empty()) normalised.set("entry_points", ev);
     if (!cache.items().empty()) normalised.set("cache", cache);
     if (!front.empty()) normalised.set("front_controller", front);
+    if (!refuse_list.items().empty()) normalised.set("refuse", refuse_list);
     if (!restricted.items().empty()) normalised.set("restricted", restricted);
     if (admin.is_object()) normalised.set("admin", admin);
     return "";
@@ -780,6 +808,11 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
         if (!spec.user.empty() && !spec.access_log.empty()) s += "access_log = " + toml_string(spec.access_log) + "\n";
         if (!spec.login_paths.empty()) s += "login_paths = " + toml_list(spec.login_paths) + "   # fail2ban counts login attempts here (agensio ctl protection)\n";
         if (spec.encoded_slashes == "allow") s += "encoded_slashes = \"allow\"   # a %2F in the path is decoded and looked up (Apache's NoDecode), not 404\n";
+        if (spec.rules.is_object() && !spec.rules["refuse"].items().empty()) {
+            std::vector<std::string> patterns;
+            for (const auto& p : spec.rules["refuse"].items()) patterns.emplace_back(p.str());
+            s += "refuse = " + toml_list(patterns) + "   # rules: refused with 404 whichever location would serve them\n";
+        }
         const bool php = php_app(spec.app);
         if (spec.settings.is_object() && spec.settings["max_body_size"].is_string()) s += "max_body_size = " + toml_string(spec.settings.get("max_body_size")) + "\n";
         if (const std::string fc(spec.rules.get("front_controller")); !fc.empty())

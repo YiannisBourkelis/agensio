@@ -16,6 +16,7 @@
 #include "core/worker_state.hpp"
 #include "file.hpp"
 #include "handlers/encoding.hpp"
+#include "path.hpp"
 
 namespace agensio {
 
@@ -84,6 +85,18 @@ inline bool backup_of_protected(std::string_view path, const std::vector<Protect
         }
     }
     return false;
+}
+
+// What a location refuses by name before any file is looked up, each answered 404: dotfiles
+// (unless it opts in), its refused endings, the endings it serves alone, and backups of the
+// names the site never serves. One rule for a request and for the index file found for a
+// directory, so an index the location refuses by name is never served from the directory
+// either (alpha.53 report: /sub/ served sub/index.php as source on the drupal, laravel and
+// grav presets while /sub/index.php was 404).
+inline bool refused_by_name(const LocationConfig& loc, std::string_view path) noexcept {
+    return (!loc.hidden_files && has_hidden_segment(path)) || (!loc.deny_suffixes.empty() && refused_suffix(path, loc.deny_suffixes)) ||
+           (!loc.allow_suffixes.empty() && !refused_suffix(path, loc.allow_suffixes)) ||
+           (!loc.protects.empty() && backup_of_protected(path, loc.protects));
 }
 
 class StaticHandler {

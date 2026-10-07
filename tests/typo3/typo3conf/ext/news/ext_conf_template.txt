@@ -1,0 +1,1 @@
+# cat=basic; TYPO3-CANARY conf template

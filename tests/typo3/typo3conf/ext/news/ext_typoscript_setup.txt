@@ -1,0 +1,1 @@
+plugin.tx_news = 1 # TYPO3-CANARY ext typoscript

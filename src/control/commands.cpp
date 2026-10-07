@@ -1,6 +1,9 @@
 #include "control/commands.hpp"
 
 #include "core/access.hpp"
+#include "core/refuse.hpp"
+#include "core/router.hpp"
+#include "handlers/static.hpp"
 #include "core/strings.hpp"
 
 #include "control/settings.hpp"
@@ -537,6 +540,171 @@ json::Value access_check(const Config& cfg, const SiteConfig& site, std::string_
     return v;
 }
 
+// path_check (2026-10-08, docs/configuration.md 6b): what a site does with one GET for a path,
+// in the order a worker decides it, and why: the refuse patterns, the location, its refusals
+// by name, try_files and the index, every internal redirect again, then the file served, the
+// script run or the origin it goes to. A description, never a request: it reads the running
+// configuration and stats files as the worker would, and contacts no upstream. The access rules
+// depend on the client and are only named here (access_check decides them for an address).
+json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_view raw_path, std::string& error) {
+    std::string path;
+    bool encoded = false;
+    if (raw_path.empty() || raw_path.front() != '/' || !normalize_target(raw_path, path, &encoded)) {
+        error = "path must be a request path starting with '/', such as /typo3conf/ext/news/Configuration/setup.typoscript";
+        return {};
+    }
+    SiteSpec managed;
+    const bool is_managed = read_managed(site_file(cfg, site.server_names.front()), managed);
+    std::vector<RuleLocation> ruled;
+    if (is_managed) ruled = rule_locations(managed);
+    json::Value v = json::Value::object().set("site", site.server_names.front()).set("path", path);
+    json::Value steps = json::Value::array();
+    auto from_of = [&](const LocationConfig& l) -> std::string {
+        if (!l.origin.empty()) return l.origin;
+        for (const RuleLocation& rl : ruled)
+            if (rl.path == l.path && rl.exact == l.exact && rl.suffix == l.suffix) return "rules";
+        return "";
+    };
+    auto describe = [&](const LocationConfig& l) {
+        const std::string from = from_of(l);
+        return "location " + l.path + " (" + (l.exact ? "exact" : l.suffix ? "suffix" : "prefix") + ", " + l.handler + (from.empty() ? "" : ", from " + from) + ")";
+    };
+    auto finish = [&](const char* decision, int status, const std::string& summary) {
+        v.set("decision", decision);
+        if (status) v.set("status", status);
+        v.set("summary", summary).set("steps", std::move(steps));
+        return v;
+    };
+    auto stat_is = [](const std::string& f, bool dir) {
+        struct stat st {};
+        return ::stat(f.c_str(), &st) == 0 && (dir ? S_ISDIR(st.st_mode) : S_ISREG(st.st_mode));
+    };
+    std::string scratch;
+    for (int hop = 0; hop <= StaticHandler::kMaxInternalRedirects; ++hop) {
+        if (const RefusePattern* p = refuse::decide(site.refuse, path, scratch)) {
+            v.set("refused_by", p->text);
+            const bool other = refuse::match(site.refuse, path) == nullptr;
+            return finish("refused", 404, "404: " + path + " is refused by the site's refuse pattern '" + p->text + "'" +
+                                              (other ? ", for the way an application may read it (a ;parameter, a second decoding or the path after a script)" : ""));
+        }
+        if (!site.refuse.empty()) steps.push(path + ": no refuse pattern matches");
+        if (const AccessRule* r = access::rule_for(site, path); r && !r->any && v["access"].is_null())
+            v.set("access", access_rule_json(*r, access_rule_from(*r, is_managed ? &managed : nullptr)))
+                .set("access_note", "an access rule covers " + path + ": clients outside it get 403 (access_check decides it for an address)");
+        const LocationConfig& loc = Router::location(site, path);
+        steps.push(path + ": " + describe(loc));
+        json::Value lj = json::Value::object().set("path", loc.path).set("match", loc.exact ? "exact" : loc.suffix ? "suffix" : "prefix").set("handler", loc.handler);
+        if (const std::string from = from_of(loc); !from.empty()) lj.set("from", from);
+        v.set("location", std::move(lj));
+        if (encoded && loc.kind != HandlerKind::proxy && !site.encoded_slashes_allow)
+            return finish("not_found", 404, "404: the path spells a separator as a percent escape (%2F, %5C), never a file here");
+        auto fs_of = [&](const std::string& p) {
+            return loc.alias.empty() ? loc.root + p : loc.alias + p.substr(std::min(p.size(), loc.path.size() - 1));
+        };
+        if (loc.kind == HandlerKind::proxy) {
+            if (!loc.deny_suffixes.empty() && refused_suffix(path, loc.deny_suffixes))
+                return finish("refused", 404, "404: " + path + " ends with an ending " + describe(loc) + " refuses before the application sees it");
+            v.set("upstream", upstream_json(loc.proxy));
+            return finish("proxied", 0, path + " goes to the application (" + describe(loc) + "), which answers it");
+        }
+        if (loc.kind == HandlerKind::fastcgi || loc.kind == HandlerKind::cgi) {
+            if (!loc.deny_suffixes.empty() && refused_suffix(path, loc.deny_suffixes))
+                return finish("refused", 404, "404: " + path + " ends with an ending " + describe(loc) + " refuses");
+            std::string script = path, info;
+            if (loc.kind == HandlerKind::fastcgi && loc.fastcgi.options.path_info)
+                if (const std::size_t p = script.find(".php/"); p != std::string::npos) {
+                    info = script.substr(p + 4);
+                    script.resize(p + 4);
+                }
+            if (script.back() == '/') script += loc.index.empty() ? (loc.kind == HandlerKind::cgi ? "index.cgi" : "index.php") : loc.index.front();
+            const std::string file = fs_of(script);
+            v.set("file", file);
+            if (!stat_is(file, false)) return finish("not_found", 404, "404: no script " + file + " for " + describe(loc) + ", answered before the application");
+            return finish("runs", 0, "runs " + script + (info.empty() ? "" : " with PATH_INFO " + info) + " (" + describe(loc) + ")");
+        }
+        if (loc.kind != HandlerKind::static_) return finish("handled", 0, path + " is answered by the " + loc.handler + " handler (" + describe(loc) + ")");
+        // The static handler: its refusals by name, then try_files or the plain rule.
+        if (!loc.hidden_files && has_hidden_segment(path)) return finish("refused", 404, "404: " + path + " has a dot segment (a hidden file), which " + describe(loc) + " never serves");
+        if (!loc.deny_suffixes.empty() && refused_suffix(path, loc.deny_suffixes))
+            return finish("refused", 404, "404: " + path + " ends with an ending " + describe(loc) + " refuses (deny_suffixes)");
+        if (!loc.allow_suffixes.empty() && !refused_suffix(path, loc.allow_suffixes))
+            return finish("refused", 404, "404: " + describe(loc) + " serves certain endings only (allow_suffixes), and " + path + " has none of them");
+        if (!loc.protects.empty() && backup_of_protected(path, loc.protects))
+            return finish("refused", 404, "404: " + path + " is a backup spelling of a name the site never serves");
+        const bool dir_uri = path.back() == '/';
+        // The index of a directory: found here, or routed again as a request for it by name.
+        auto index_of = [&](std::string& file) -> int {
+            for (const auto& i : loc.index) {
+                const std::string candidate = path + i;
+                if (!stat_is(fs_of(candidate), false)) continue;
+                if (&Router::location(site, candidate) != &loc || refused_by_name(loc, candidate) || refuse::match(site.refuse, candidate)) {
+                    steps.push(path + ": its index " + i + " is decided as a request for " + candidate);
+                    path = candidate;
+                    return 2;
+                }
+                file = fs_of(candidate);
+                return 1;
+            }
+            return 0;
+        };
+        std::string file;
+        bool next = false;
+        if (loc.try_files.empty()) {
+            if (dir_uri) {
+                const int r = index_of(file);
+                if (r == 1) {
+                    v.set("file", file);
+                    return finish("static", 200, "200: the index " + file + " (" + describe(loc) + ")");
+                }
+                if (r == 2) continue;
+                if (stat_is(fs_of(path), true)) return finish("forbidden", 403, "403: a directory without an index file");
+                return finish("not_found", 404, "404: no such directory");
+            }
+            file = fs_of(path);
+            if (stat_is(file, false)) {
+                v.set("file", file);
+                return finish("static", 200, "200: the file " + file + " (" + describe(loc) + ")");
+            }
+            if (stat_is(file, true)) return finish("redirect", 301, "301 to " + path + "/: a directory");
+            return finish("not_found", 404, "404: no file " + file);
+        }
+        for (const TryStep& step : loc.try_files) {
+            switch (step.kind) {
+                case TryStep::Kind::uri:
+                    if (!dir_uri && stat_is(fs_of(path), false)) {
+                        v.set("file", fs_of(path));
+                        return finish("static", 200, "200: the file " + fs_of(path) + " (" + describe(loc) + ")");
+                    }
+                    break;
+                case TryStep::Kind::uri_dir:
+                    if (dir_uri) {
+                        const int r = index_of(file);
+                        if (r == 1) {
+                            v.set("file", file);
+                            return finish("static", 200, "200: the index " + file + " (" + describe(loc) + ")");
+                        }
+                        if (r == 2) next = true;
+                    } else if (stat_is(fs_of(path), true)) {
+                        return finish("redirect", 301, "301 to " + path + "/: a directory");
+                    }
+                    break;
+                case TryStep::Kind::status:
+                    return finish(step.status == 404 ? "not_found" : "status", step.status,
+                                  std::to_string(step.status) + (loc.handler == "deny" ? ": " + describe(loc) + " answers 404 whatever exists"
+                                                                                       : ": try_files of " + describe(loc) + " ends in =" + std::to_string(step.status)));
+                case TryStep::Kind::fallback:
+                    steps.push(path + ": no file or directory, so try_files sends it to " + step.target);
+                    path = step.target;
+                    next = true;
+                    break;
+            }
+            if (next) break;
+        }
+        if (!next) return finish("not_found", 404, "404: try_files of " + describe(loc) + " found nothing");
+    }
+    return finish("error", 500, "500: more than " + std::to_string(StaticHandler::kMaxInternalRedirects) + " internal redirects");
+}
+
 json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now) {
     json::Value v = site_summary(s, now);
     v.set("index", strings(s.index));
@@ -600,6 +768,12 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now) {
         json::Value acc = json::Value::array();
         for (const auto& r : s.access) acc.push(access_rule_json(r, access_rule_from(r, is_managed ? &managed : nullptr)));
         v.set("access", std::move(acc));
+    }
+    // `refuse`: the patterns in force, as written (a managed site's come from rules.refuse).
+    if (!s.refuse.empty()) {
+        json::Value list = json::Value::array();
+        for (const auto& p : s.refuse.patterns) list.push(p.text);
+        v.set("refuse", std::move(list));
     }
     (void)cfg;
     return v;

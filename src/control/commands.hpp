@@ -73,6 +73,9 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now);
 // path and one client address, with the deciding rule and a one-line summary. `error` set
 // (and nothing answered) when the path or the address does not parse.
 json::Value access_check(const Config& cfg, const SiteConfig& site, std::string_view path, std::string_view address, std::string& error);
+// What a site does with one GET for `path` and why (refuse, location, refusals by name,
+// try_files, index, redirects; the file, script or origin), as the worker would decide it.
+json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_view path, std::string& error);
 
 // ---- validation and health ----
 

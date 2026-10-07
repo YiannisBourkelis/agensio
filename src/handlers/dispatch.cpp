@@ -5,6 +5,7 @@
 #include "response.hpp"
 
 #include "core/access.hpp"
+#include "core/refuse.hpp"
 #include "path.hpp"
 
 namespace agensio {
@@ -233,8 +234,13 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
         redirect_https(s, *site);
         return nullptr;
     }
-    // [[site.access]] before any location is chosen: whichever would serve the path (a .php
-    // suffix, a proxy) cannot step around the rule, nginx's regex-location trap (2026-10-07).
+    // `refuse` and [[site.access]] before any location is chosen: whichever would serve the
+    // path (a .php suffix, a proxy) cannot step around them, nginx's regex-location trap. A
+    // refused path is 404 for everyone, so it goes first: a restricted client learns nothing.
+    if (!site->refuse.empty() && refuse::decide(site->refuse, ws.path, ws.access_scratch)) {
+        static_.error(s, 404, req.keep_alive);
+        return nullptr;
+    }
     if (!site->access.empty() && !admit(s, *site, ws.path, ws)) return nullptr;
     const LocationConfig* loc = &Router::location(*site, ws.path);
     // A separator spelled as a percent escape (%2F, %5C) never names a file: 404 before any
@@ -298,6 +304,10 @@ const LocationConfig* Dispatcher::serve_static(Stream& s, const LocationConfig& 
         return nullptr;
     }
     const auto* site = static_cast<const SiteConfig*>(ws.site);
+    if (!site->refuse.empty() && refuse::decide(site->refuse, ws.path, ws.access_scratch)) {  // nor into a refused one
+        static_.error(s, 404, s.request.keep_alive);
+        return nullptr;
+    }
     if (!site->access.empty() && !admit(s, *site, ws.path, ws)) return nullptr;  // a fallback cannot step into a restricted path
     const LocationConfig* next = &Router::location(*site, ws.path);
     if (!check_method(s, *next, ws)) return nullptr;

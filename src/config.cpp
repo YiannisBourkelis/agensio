@@ -1,6 +1,7 @@
 #include "config.hpp"
 
 #include "core/access.hpp"
+#include "core/refuse.hpp"
 #include "core/cpus.hpp"
 #include "handlers/httparena.hpp"
 
@@ -1248,6 +1249,40 @@ void parse_access(const toml::node_view<const toml::node>& n, const Config& cfg,
     if (site.access.size() > 32) fail(where + ": " + std::to_string(site.access.size()) + " access rules, at most 32");
 }
 
+// `refuse` (2026-10-08, core/refuse.hpp, docs/configuration.md 6b): path patterns the site
+// answers 404 whichever location would serve them. A bad pattern is refused with what it
+// would have meant, so a translation from another server's syntax can be corrected.
+void parse_refuse(const toml::node_view<const toml::node>& n, SiteConfig& site, const std::string& where) {
+    if (!n.is_array()) fail(where + ".refuse must be a list of path patterns, such as [\"/vendor/\", \"*.yaml\", \"/ext/*/Resources/Private/\"]");
+    for (const auto& text : string_list(n, (where + ".refuse").c_str())) {
+        RefusePattern p;
+        if (const std::string why = refuse::compile(text, p); !why.empty()) fail(where + ".refuse: " + why);
+        const auto same = [&](const RefusePattern& o) { return o.text == p.text; };
+        if (std::none_of(site.refuse.patterns.begin(), site.refuse.patterns.end(), same)) site.refuse.patterns.push_back(std::move(p));
+    }
+    if (site.refuse.patterns.size() > refuse::kMaxPatterns)
+        fail(where + ".refuse: " + std::to_string(site.refuse.patterns.size()) + " patterns, at most " + std::to_string(refuse::kMaxPatterns));
+}
+
+// A pattern may not refuse what the site serves on purpose: the index of its root, a path its
+// try_files sends a miss to (a front controller), or an exact location that runs something
+// (an entry point). Checked once the locations are final, so a preset's count too.
+void check_refuse_conflicts(const SiteConfig& site, const std::string& where) {
+    if (site.refuse.empty()) return;
+    auto check = [&](const std::string& path, const std::string& what) {
+        if (const RefusePattern* p = refuse::match(site.refuse, path))
+            fail(where + ".refuse: '" + p->text + "' refuses " + path + ", " + what + "; name what to refuse more narrowly");
+    };
+    for (const auto& loc : site.locations) {
+        if (!loc.exact && !loc.suffix && loc.path == "/")
+            for (const auto& i : loc.index) check("/" + i, "the site's index");
+        for (const TryStep& step : loc.try_files)
+            if (step.kind == TryStep::Kind::fallback) check(step.target, "where try_files sends a path it does not find");
+        if (loc.exact && (loc.kind == HandlerKind::fastcgi || loc.kind == HandlerKind::cgi || loc.kind == HandlerKind::proxy))
+            check(loc.path, "which the site runs");
+    }
+}
+
 void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, const std::string& where, std::vector<RootAdditions>* root_adds = nullptr) {
     SiteConfig site;
     for (auto& n : string_list(t["server_name"], (where + ".server_name").c_str()))
@@ -1404,6 +1439,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
         fail(where + ": 'location' must be an array of tables ([[site.location]])");
     }
     if (t.contains("access")) parse_access(t["access"], cfg, site, where);
+    if (t.contains("refuse")) parse_refuse(t["refuse"], site, where);
     // Root additions for this site: parsed as hand-written locations after the file's own, so
     // they win over the preset's at their path and a headers-only one joins like any other;
     // the origin names the file for --explain and site_show. The same path twice (the managed
@@ -1466,6 +1502,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     finalize_site(site);
     for (const auto& add : for_root)
         if (LocationConfig* into = find_at("/")) merge_into(*into, add);
+    check_refuse_conflicts(site, where);
     cfg.sites.push_back(std::move(site));
 }
 
@@ -1709,6 +1746,12 @@ void explain_config(const Config& cfg, std::ostream& out) {
             << (site.symlinks_deny ? "deny" : "allow") << "\"\n";
         out << "access_log = \"" << (site.access_log.empty() ? "off" : site.access_log) << "\"\n";
         if (!site.login_paths.empty()) print_list(out, "login_paths", site.login_paths);
+        if (!site.refuse.empty()) {
+            std::vector<std::string> texts;
+            for (const auto& p : site.refuse.patterns) texts.push_back(p.text);
+            out << "# refused with 404 whichever location would serve them (docs/configuration.md 6b)\n";
+            print_list(out, "refuse", texts);
+        }
         if (site.encoded_slashes_allow) out << "encoded_slashes = \"allow\"\n";
         for (const auto& loc : site.locations)
             if (!loc.protects.empty()) {
@@ -1947,6 +1990,7 @@ void finalize_site(SiteConfig& site) {
         if (a.path.size() != b.path.size()) return a.path.size() > b.path.size();
         return a.exact && !b.exact;
     });
+    refuse::index(site.refuse);
     site.access_first = {};
     for (const auto& r : site.access) {
         if (!r.exact && r.path == "/") site.access_first.fill(~std::uint64_t{0});

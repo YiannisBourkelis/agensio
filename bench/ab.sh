@@ -21,7 +21,10 @@
 #             (127.0.0.1:8095, the whole site restricted by 64 entries with 127.0.0.1 last: the most
 #             an admitted request pays). A base without the feature ignores the rules and serves the
 #             same files, so new/base is the check's cost. Run it for every change to core/access.hpp
-#             and the access step of handlers/dispatch.cpp.
+#             and the access step of handlers/dispatch.cpp. Also "refuse:/sub/index.html:64"
+#             (127.0.0.1:8097, a site with the 48 refuse patterns TYPO3's documentation lists,
+#             benchmarked on a two-segment path none of them refuses: the matching's cost; a base
+#             without `refuse` ignores the key and serves the same file). core/refuse.hpp too.
 #   -r        rounds of base/new alternation (default 2)
 #   -d        wrk duration per case (default 5s)
 #   -t        wrk threads (default 4)
@@ -93,7 +96,7 @@ sed "s#@WORKERS@#$WORKERS#g; s#@BENCH@#$BENCH#g; s#@SENDFILE_MIN@#${SENDFILE_MIN
 sed "s#@WORKERS@#$WORKERS#g; s#@BENCH@#$BENCH#g; s#@SENDFILE_MIN@#${SENDFILE_MIN:-48KB}#g; s#@ACCESS_LOG@#${ACCESS_LOG:-off}#g; s#@H3@#, \"h3\"#g" "$BENCH/agensio.toml" > "$BENCH/tmp/ab-agensio-h3.toml"
 # The access gate's two sites go into every config (before the proxy one is built from it).
 if [ $ACCESS = 1 ]; then
-  SPECS+=("access:/:64" "access-all:/:64")
+  SPECS+=("access:/:64" "access-all:/:64" "refuse:/sub/index.html:64")
   allow=""; for i in $(seq 1 63); do allow="$allow\"10.$((i / 250)).$((i % 250)).1\", "; done; allow="$allow\"127.0.0.1\""
   for f in ab-agensio.toml ab-agensio-h3.toml; do
     cat >> "$BENCH/tmp/$f" <<ACCESS_SITES
@@ -115,6 +118,21 @@ root = "$BENCH/www"
 [[site.access]]
 path = "/"
 allow = [$allow]
+
+[[site]]
+server_name = ["*"]
+listen = ["127.0.0.1:8097"]
+root = "$BENCH/www"
+refuse = ["composer.json", "composer.lock", "flexform*.xml", "locallang*.xml", "locallang*.xlf", "ext_conf_template.txt",
+          "ext_typoscript_*.txt", "*.bak", "*.conf", "*.cnf", "*.cfg", "*.yaml", "*.yml", "*.ts", "*.typoscript",
+          "*.tsconfig", "*.dist", "*.fla", "*.inc", "*.ini", "*.log", "*.sh", "*.sql", "*.sqlite", "_recycler_/", "_temp_/",
+          "/fileadmin/templates/**/*.txt", "/vendor/", "/typo3_src/", "/typo3temp/var/",
+          "/typo3conf/ext/*/Configuration/", "/typo3conf/ext/*/Resources/Private/", "/typo3conf/ext/*/Tests/",
+          "/typo3conf/ext/*/Test/", "/typo3conf/ext/*/docs/", "/typo3conf/ext/*/doc/",
+          "/typo3/sysext/*/Configuration/", "/typo3/sysext/*/Resources/Private/", "/typo3/sysext/*/Tests/",
+          "/typo3/sysext/*/Test/", "/typo3/sysext/*/docs/", "/typo3/sysext/*/doc/",
+          "/typo3/ext/*/Configuration/", "/typo3/ext/*/Resources/Private/", "/typo3/ext/*/Tests/",
+          "/typo3/ext/*/Test/", "/typo3/ext/*/docs/", "/typo3/ext/*/doc/"]
 ACCESS_SITES
   done
 fi
@@ -183,6 +201,7 @@ measure() {  # side round -> appends "side round spec cpu_us rps" lines to $RAW/
       proxy) [ $SIDE_PROXY = 1 ] || continue; url="http://127.0.0.1:8093$path" ;;
       access) url="http://127.0.0.1:8094$path" ;;
       access-all) url="http://127.0.0.1:8095$path" ;;
+      refuse) url="http://127.0.0.1:8097$path" ;;
       h2c) [ $SIDE_H2 = 1 ] || continue; url="http://127.0.0.1:8080$path" ;;
       h2) [ $SIDE_H2 = 1 ] || continue; url="https://127.0.0.1:8443$path" ;;
       h3) [ $SIDE_H3 = 1 ] || continue; url="https://127.0.0.1:8443$path" ;;

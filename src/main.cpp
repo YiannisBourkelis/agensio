@@ -66,7 +66,9 @@ void usage() {
                  "                      site-update NAME --restrict PATH=ADDR[,ADDR...] ... (only those addresses reach PATH)\n"
                  "                      site-update NAME --restrict-admin ADDR[,ADDR...] [--admin-login] [--admin-language L]...\n"
                  "                           (WordPress, Drupal: only those addresses reach the admin; --no-restrict-admin)\n"
+                 "                      site-update NAME --refuse PATTERN ... (paths answered 404, gitignore-style; --no-refuse)\n"
                  "                      access-check NAME PATH ADDRESS: what the site's access rules decide for that client\n"
+                 "                      path-check NAME PATH: what the site does with PATH and why (refuse, location, file, script)\n"
                  "                      protection [--nft | --jail | --unit | --filter NAME]: the firewall ruleset and the\n"
                  "                           fail2ban jails rendered for this host, with what is in place (--nft and the\n"
                  "                           others print one file alone, for root to redirect into place)\n"
@@ -215,6 +217,14 @@ int main(int argc, char** argv) {
                              "                    rebuild.php); --admin-login adds the login page, --admin-language L (Drupal, repeatable)\n"
                              "                    the admin and login under /L/; --no-restrict-admin removes it. The admin is open to\n"
                              "                    everyone until this is set. `presets` lists each preset's admin paths\n"
+                             "        --refuse PATTERN (site-create and site-update, repeatable): paths the site answers 404\n"
+                             "                    whichever location would serve them, gitignore-style: /vendor/ from the root,\n"
+                             "                    composer.json or *.yaml in any directory, * within one segment\n"
+                             "                    (/ext/*/Resources/Private/), ** any number of directories (/a/**/*.ts); given\n"
+                             "                    together they replace the site's list and keep its other rules; --no-refuse clears it\n"
+                             "        path-check NAME PATH: what the site does with a GET for PATH and why, as the server decides\n"
+                             "                    it: refused (by which refuse pattern or refusal by name), the file served, the script run,\n"
+                             "                    the application it goes to; every step on the way (try_files, index, redirects) (viewer)\n"
                              "        access-check NAME PATH ADDRESS: which access rule decides PATH for a client at ADDRESS,\n"
                              "                    allowed or refused (viewer); the path as the client sends it, the address as the\n"
                              "                    server sees it (the 403 page shows it)\n"
@@ -257,11 +267,13 @@ int main(int argc, char** argv) {
                     return 0;
                 }
             std::string command, socket_path, site_name, query, upload_file, reveal, raw_part, raw_filter;
-            std::string check_path, check_address;  // access-check NAME PATH ADDRESS
+            std::string check_path, check_address;  // access-check NAME PATH ADDRESS, path-check NAME PATH
             agensio::json::Value restrict_rules = agensio::json::Value::array();  // --restrict / --restrict-exact
             bool restrict_given = false;  // --restrict, --restrict-exact or --no-restrict: rules.restricted is replaced
             agensio::json::Value admin_rule = agensio::json::Value::object();  // --restrict-admin, --admin-login, --admin-language
             bool admin_given = false;  // rules.admin is replaced (--no-restrict-admin: removed)
+            agensio::json::Value refuse_list = agensio::json::Value::array();  // --refuse
+            bool refuse_given = false;  // --refuse or --no-refuse: rules.refuse is replaced
             bool raw = false;
             agensio::json::Value body = agensio::json::Value::object();
             agensio::json::Value aliases = agensio::json::Value::array();
@@ -355,6 +367,11 @@ int main(int argc, char** argv) {
                     admin_rule.set("languages", langs);
                     admin_given = true;
                 } else if (b == "--no-restrict-admin") { admin_rule = agensio::json::Value::object(); admin_given = true; }
+                else if (b == "--refuse") {
+                    std::string v; value(v);
+                    refuse_list.push(v);
+                    refuse_given = true;
+                } else if (b == "--no-refuse") refuse_given = true;
                 else if (b == "--login-path") {
                     std::string v; value(v);
                     agensio::json::Value list = body["login_paths"].is_array() ? body["login_paths"] : agensio::json::Value::array();
@@ -413,6 +430,8 @@ int main(int argc, char** argv) {
                 else if (command == "access-check" && site_name.empty()) site_name = b;
                 else if (command == "access-check" && check_path.empty()) check_path = b;
                 else if (command == "access-check" && check_address.empty()) check_address = b;
+                else if (command == "path-check" && site_name.empty()) site_name = b;
+                else if (command == "path-check" && check_path.empty()) check_path = b;
                 else if (command == "upload" && upload_file.empty()) upload_file = b;
                 else { std::cerr << "ctl: unexpected argument " << b << "\n"; return 2; }
             }
@@ -452,6 +471,18 @@ int main(int argc, char** argv) {
                     return o;
                 };
                 path = "/v1/sites/" + site_name + "/access?path=" + enc(check_path) + "&address=" + enc(check_address);
+            }
+            else if (command == "path-check") {
+                if (site_name.empty() || check_path.empty()) {
+                    std::cerr << "ctl: path-check NAME PATH (for example: path-check example.com /vendor/autoload.php)\n";
+                    return 2;
+                }
+                std::string q;
+                for (const char c : check_path) {
+                    if (std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-' || c == '_' || c == ':') q.push_back(c);
+                    else { char h[4]; std::snprintf(h, sizeof h, "%%%02X", static_cast<unsigned char>(c)); q += h; }
+                }
+                path = "/v1/sites/" + site_name + "/path?path=" + q;
             }
             else if (command == "validate") path = "/v1/config/validate";
             else if (command == "logs") path = "/v1/logs" + query;
@@ -515,12 +546,20 @@ int main(int argc, char** argv) {
                     socket_path = agensio::default_control_socket();  // the file may be unreadable for this user
                 }
             }
-            // --restrict / --no-restrict change rules.restricted alone: the site's other rules
-            // (private paths, entry points, cache) are read and sent back with it, since the
-            // server takes the rules object whole.
-            if (restrict_given || admin_given) {
+            // A new site's rules are what this command says.
+            if (refuse_given && command == "site-create") {
+                agensio::json::Value rules = body["rules"].is_object() ? body["rules"] : agensio::json::Value::object();
+                if (!refuse_list.items().empty()) rules.set("refuse", refuse_list);
+                body.set("rules", rules);
+                refuse_given = false;
+            }
+            // --restrict / --no-restrict (and the admin and refuse flags) change their one rule:
+            // the site's other rules (private paths, entry points, cache) are read and sent back
+            // with it, since the server takes the rules object whole.
+            if (restrict_given || admin_given || refuse_given) {
                 if (command != "site-update" || site_name.empty()) {
-                    std::cerr << "ctl: --restrict, --restrict-exact, --no-restrict and the --restrict-admin flags go with site-update NAME\n";
+                    std::cerr << "ctl: --restrict, --restrict-exact, --no-restrict, the --restrict-admin flags and --refuse go with site-update NAME"
+                                 " (--refuse with site-create too)\n";
                     return 2;
                 }
                 if (admin_given && !admin_rule.members().empty() && admin_rule["allow"].is_null()) {
@@ -541,9 +580,11 @@ int main(int argc, char** argv) {
                 }
                 agensio::json::Value merged = agensio::json::Value::object();
                 for (const auto& m : site_json["rules"].members())
-                    if (!(restrict_given && m.first == "restricted") && !(admin_given && m.first == "admin")) merged.set(m.first, m.second);
+                    if (!(restrict_given && m.first == "restricted") && !(admin_given && m.first == "admin") && !(refuse_given && m.first == "refuse"))
+                        merged.set(m.first, m.second);
                 for (const auto& m : body["rules"].members()) merged.set(m.first, m.second);  // other rule flags of this command
                 if (!restrict_rules.items().empty()) merged.set("restricted", restrict_rules);
+                if (!refuse_list.items().empty()) merged.set("refuse", refuse_list);
                 if (admin_given && !admin_rule.members().empty()) merged.set("admin", admin_rule);
                 body.set("rules", merged);
             }
@@ -585,7 +626,7 @@ int main(int argc, char** argv) {
                     return 0;
                 }
             }
-            if (command == "access-check" && reply.status == 200) {  // the verdict first, the details after
+            if ((command == "access-check" || command == "path-check") && reply.status == 200) {  // the verdict first, the details after
                 agensio::json::Value u;
                 std::string perr;
                 if (agensio::json::parse(reply.body, u, perr)) std::cout << u.get("summary") << "\n";

@@ -369,6 +369,15 @@ access_log = "{root}/bench/tmp/logb.log"
 """
 # Access by client address (2026-10-07, docs/configuration.md 19): sites whose rules refuse
 # 127.0.0.1 on some paths and admit it on others; a named set; the TLS sibling for HTTP/3; a
+# Refused paths (2026-10-08): gitignore-style patterns answered 404 whichever location would
+# serve them, on a tree shaped like the applications they come from (tests/refuse).
+text += f"""
+[[site]]
+server_name = ["refuse.test", "*"]
+listen = ["127.0.0.1:8105"]
+root = "{root}/tests/refuse"
+refuse = ["/vendor/", "*.yaml", "/ext/*/Resources/Private/", "_recycler_/", "/docs/index.html"]
+"""
 # WordPress copy whose admin is restricted.
 text += f"""
 [[site]]
@@ -919,7 +928,7 @@ check "the control API refuses pip_install without the user's own confirmation, 
 # Gemfile first; the unit is refused for a site without an account of its own.
 check "database_config needs the application first; site-unit refuses a site without its own account" "409 yes 409 yes" "$(cpost /v1/sites/rails.test/task '{"task":"database_config","confirm":true,"reason":"t"}') $(grep -q 'Gemfile, which does not exist' bench/tmp/ctl-reply.json && echo yes) $(curl -sS -o bench/tmp/unit.json -w '%{http_code}' --unix-socket $CS http://control/v1/sites/rails.test/unit) $(grep -q 'no account of its own' bench/tmp/unit.json && echo yes)"
 cpost /v1/sites/rails.test/delete '{"confirm":true}' > /dev/null
-check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 173 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
+check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 174 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
 check "secrets: the presets catalogue lists each preset's credential files" "/wp-config.php /sites/default/settings.php" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["wordpress"]["secrets"][0], p["drupal"]["secrets"][0])')"
 check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$("$BIN" ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; "$BIN" ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
@@ -1156,6 +1165,15 @@ check "access: a refusal and a report-mode line in the same second are both writ
 check "access: twenty quick refusals: the lines written and the ones counted add up to 20, the count is written after a quiet second without another refusal, worded since the last line" "403 20 closing -" "$(acclog burst)"
 check "access: report mode names every client it would refuse once a minute, not one a second per worker" "404 198.51.100.21 198.51.100.22" "$(acclog clients)"
 
+# ---- refuse: paths a site refuses by pattern (2026-10-08, core/refuse.hpp) ----
+RF=http://127.0.0.1:8105
+check "refuse: what the patterns name is 404 (a directory from the root, an ending anywhere, '*' within one segment, a directory name anywhere), whatever exists" "404 404 404 404 404" "$(code $RF/vendor/autoload.php) $(code $RF/config/sites/main/config.yaml) $(code $RF/ext/news/Resources/Private/Templates/t.html) $(code $RF/fileadmin/_recycler_/old.jpg) $(code $RF/vendor/)"
+check "refuse: none of those leaked a byte; their neighbours are served" "0 200 200 200 200" "$(curl -sS $RF/vendor/autoload.php $RF/config/sites/main/config.yaml $RF/ext/news/Resources/Private/Templates/t.html $RF/fileadmin/_recycler_/old.jpg $RF/docs/ $RF/docs/index.html | grep -c 'REFUSE-CANARY') $(code $RF/) $(code $RF/ext/news/Resources/Public/Css/n.css) $(code $RF/fileadmin/photo.jpg) $(code $RF/docs/guide.html)"
+check "refuse: a directory whose index file is refused answers 404 at its own URL too, never the index" "404 404" "$(code $RF/docs/) $(code $RF/docs/index.html)"
+check "refuse: path-check names the deciding pattern, the file a path serves, and a refused index through its directory" "404: /ext/news/Resources/Private/Templates/t.html is refused by the site's refuse pattern '/ext/*/Resources/Private/'|200: the file $ROOT/tests/refuse/fileadmin/photo.jpg (location / (prefix, static))|refused 404" "$("$BIN" ctl path-check refuse.test /ext/news/Resources/Private/Templates/t.html --socket $CS | head -1)|$("$BIN" ctl path-check refuse.test /fileadmin/photo.jpg --socket $CS | head -1)|$(curl -sS --unix-socket $CS 'http://control/v1/sites/refuse.test/path?path=/docs/' | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["decision"], d["status"])')"
+printf '[[site]]\nlisten = ["127.0.0.1:18105"]\nroot = "%s/tests/refuse"\nrefuse = ["*.html"]\n' "$ROOT" > bench/tmp/refuse-conflict.toml
+check "refuse: -t refuses a pattern that would refuse what the site serves, naming both; --explain lists the patterns" "1 yes yes" "$("$BIN" -t -c bench/tmp/refuse-conflict.toml > bench/tmp/refuse-t.out 2>&1; echo -n $?) $(grep -q "'\*.html' refuses /index.html" bench/tmp/refuse-t.out && echo yes) $(grep -q 'refuse = \["/vendor/", "\*.yaml", "/ext/\*/Resources/Private/", "_recycler_/", "/docs/index.html"\]' <<< "$("$BIN" -t --explain -c bench/tmp/agensio-test.toml 2>/dev/null)" && echo yes)"
+
 # What -t refuses: an empty list, a zone id, an unknown set, an unknown key, a path that is not
 # normalised, "any" next to addresses.
 acc_t() { printf '[[site]]\nlisten = ["127.0.0.1:1"]\nroot = "%s/bench/www"\n[[site.access]]\n%b' "$ROOT" "$1" > bench/tmp/acc-bad.toml; "$BIN" -t -c bench/tmp/acc-bad.toml > /dev/null 2>&1 && echo accepted || echo refused; }
@@ -1198,7 +1216,92 @@ if [ -n "$PHPFPM" ]; then
   check "access: rules.admin on a managed WordPress site refuses the admin, keeps admin-ajax.php, the login page and its files open" "200 1 403 200 200 200" "$(cpost /v1/sites/wpm.test '{"rules":{"admin":{"allow":["10.0.0.0/8"]}},"confirm":true,"reason":"adm"}') $(grep -c '^\[\[site.access\]\]   # rules: admin' bench/tmp/sites.d/wpm.test.toml) $(wpm /wp-admin/) $(wpm /wp-admin/admin-ajax.php) $(wpm /wp-login.php) $(wpm /wp-admin/css/login.css)"
   check "access: rules.admin with login: true refuses the login page too; access-check names the admin rule; cleared, the admin answers again" "200 403 refused 200 200" "$(cpost /v1/sites/wpm.test '{"rules":{"admin":{"allow":["10.0.0.0/8"],"login":true}},"confirm":true,"reason":"adm"}') $(wpm /wp-login.php) $("$BIN" ctl access-check wpm.test /wp-login.php 127.0.0.1 --socket $CS | grep -o '^refused') $(cpost /v1/sites/wpm.test '{"rules":{},"confirm":true,"reason":"adm"}') $(wpm /wp-admin/)"
   cpost /v1/sites/wpm.test/delete '{"confirm":true,"reason":"adm"}' > /dev/null
+  # TYPO3 without a preset (2026-10-08, the alpha.53 report's third finding): app = "php" and the
+  # rules an agent translates from TYPO3 13.4's documented nginx configuration, through the MCP
+  # bridge as an agent does it: path_check before, site_update as a dry run, then applied,
+  # path_check after; then real requests. tests/typo3 is a classic install with a canary in every
+  # file the documentation denies and PHP of an extension that must never run.
+  cpost /v1/sites "{\"domain\":\"typo3.test\",\"https\":\"none\",\"user\":null,\"app\":\"php\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"root\":\"$ROOT/tests/typo3\",\"listen_plain\":\"127.0.0.1:8096\",\"confirm\":true,\"reason\":\"typo3\"}" > /dev/null
+  check "typo3: configured from its documentation through MCP: path_check shows the denied files served before, site_update (dry run, then applied) renders the rules, path_check names the deciding pattern after; no canary leaks, no extension PHP runs, the front page, backend, install tool and public assets still work" \
+    "ro static static applied refused:12 runs:3 static:4 404:13 leaks:0 front backend route install css" "$(python3 - "$BIN" "$CS" <<'PYT'
+import json, subprocess, sys, urllib.request, urllib.error
+p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+seq = [0]
+def rpc(method, params):
+    seq[0] += 1
+    p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": seq[0], "method": method, "params": params}) + "\n"); p.stdin.flush()
+    return json.loads(p.stdout.readline())
+def call(name, args):
+    r = rpc("tools/call", {"name": name, "arguments": args})["result"]
+    return r.get("structuredContent") or {}, r.get("isError", False)
+def check(path):
+    return call("path_check", {"name": "typo3.test", "path": path})[0]
+def get(path):
+    req = urllib.request.Request("http://127.0.0.1:8096" + path, headers={"Host": "typo3.test"})
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", "replace")
+rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}})
+tools = {t["name"]: t for t in rpc("tools/list", {})["result"]["tools"]}
+out = ["ro" if tools["path_check"]["annotations"]["readOnlyHint"] else "rw"]
+probe = "/typo3conf/ext/news/Configuration/TypoScript/setup.typoscript"
+out.append(check(probe).get("decision", "-"))
+# TYPO3 13.4, system requirements, NGINX: its deny locations, translated one by one.
+refuse = ["composer.json", "composer.lock", "flexform*.xml", "locallang*.xml", "locallang*.xlf", "ext_conf_template.txt",
+          "ext_typoscript_*.txt", "*.bak", "*.conf", "*.cnf", "*.cfg", "*.yaml", "*.yml", "*.ts", "*.typoscript", "*.tsconfig",
+          "*.dist", "*.fla", "*.inc", "*.ini", "*.log", "*.sh", "*.sql", "*.sqlite", "_recycler_/", "_temp_/",
+          "/fileadmin/templates/**/*.txt", "/fileadmin/templates/**/*.ts", "/fileadmin/templates/**/*.typoscript",
+          "/vendor/", "/typo3_src/", "/typo3temp/var/"]
+for root in ("/typo3conf/ext", "/typo3/sysext", "/typo3/ext"):
+    for d in ("Configuration", "Resources/Private", "Tests", "Test", "docs", "doc"):
+        refuse.append(root + "/*/" + d + "/")
+rules = {"entry_points": ["/index.php", "/typo3/index.php", "/typo3/install.php"], "front_controller": "/index.php", "refuse": refuse}
+_, dry_error = call("site_update", {"name": "typo3.test", "rules": rules, "dry_run": True, "confirm": True, "reason": "typo3 dry"})
+out.append(check(probe).get("decision", "-") if not dry_error else "dry-error")
+applied, error = call("site_update", {"name": "typo3.test", "rules": rules, "confirm": True, "reason": "typo3 rules"})
+out.append("applied" if not error else "error:" + json.dumps(applied)[:300])
+refused = ["/typo3conf/ext/news/Configuration/TypoScript/setup.typoscript", "/typo3conf/ext/news/Configuration/FlexForms/flexform_news.xml",
+           "/typo3conf/ext/news/Resources/Private/Templates/List.html", "/typo3conf/ext/news/ext_typoscript_setup.txt",
+           "/typo3conf/ext/news/ext_conf_template.txt", "/typo3/sysext/core/Resources/Private/Language/locallang.xlf",
+           "/typo3/sysext/core/Configuration/TCA/pages.php", "/typo3temp/var/log/typo3_0123.log", "/fileadmin/_recycler_/old.jpg",
+           "/fileadmin/_temp_/upload.tmp", "/composer.json", "/config/sites/main/config.yaml"]
+decided = [check(x) for x in refused]
+ok = sum(1 for d in decided if d.get("decision") == "refused" and d.get("refused_by"))
+out.append("refused:%d" % ok if ok == len(refused) else "refused:%d %s" % (ok, [(x, d.get("summary")) for x, d in zip(refused, decided) if d.get("decision") != "refused"]))
+runs = [check(x) for x in ("/", "/typo3/", "/typo3/module/web/layout")]
+out.append("runs:%d" % sum(1 for d in runs if d.get("decision") == "runs"))
+static = [check(x) for x in ("/typo3conf/ext/news/Resources/Public/Css/news.css", "/typo3/sysext/core/Resources/Public/Icons/x.svg",
+                              "/fileadmin/user_upload/photo.jpg", "/typo3temp/assets/css/x.css")]
+out.append("static:%d" % sum(1 for d in static if d.get("decision") == "static"))
+denied = refused + ["/typo3conf/ext/news/Classes/Controller/NewsController.php"]
+answers = [get(x) for x in denied]
+out.append("404:%d" % sum(1 for c, _ in answers if c == 404))
+out.append("leaks:%d" % sum(1 for _, b in answers if "TYPO3-CANARY" in b))
+words = {"/": "typo3 front /", "/typo3/": "typo3 backend", "/typo3/module/web/layout": "typo3 front /typo3/module/web/layout", "/typo3/install.php": "typo3 install tool"}
+names = {"/": "front", "/typo3/": "backend", "/typo3/module/web/layout": "route", "/typo3/install.php": "install"}
+for path, want in words.items():
+    code, body = get(path)
+    out.append(names[path] if code == 200 and body.startswith(want) else "%s:%d:%s" % (names[path], code, body[:60]))
+code, body = get("/typo3conf/ext/news/Resources/Public/Css/news.css")
+out.append("css" if code == 200 and ".news" in body else "css:%d" % code)
+p.stdin.close(); p.wait()
+print(" ".join(out))
+PYT
+)"
+  cpost /v1/sites/typo3.test/delete '{"confirm":true,"reason":"typo3"}' > /dev/null
 fi
+# rules.refuse on a managed site (2026-10-08): rendered as the site's refuse; a bad pattern is
+# answered with what to write instead; one that would refuse the site's index is refused by
+# the validation and the site keeps the rules it had.
+rfm() { code -H 'Host: rfm.test' "http://127.0.0.1:8105$1"; }
+cpost /v1/sites "{\"domain\":\"rfm.test\",\"https\":\"none\",\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/tests/refuse\",\"listen_plain\":\"127.0.0.1:8105\",\"confirm\":true,\"reason\":\"rf\"}" > /dev/null
+check "refuse: rules.refuse on a managed site renders its refuse, answers 404 there and serves the rest; site-show lists the patterns" "200 1 404 404 200 yes" "$(cpost /v1/sites/rfm.test '{"rules":{"refuse":["/vendor/","*.yaml"]},"confirm":true,"reason":"rf"}') $(grep -c '^refuse = \["/vendor/", "\*.yaml"\]   # rules' bench/tmp/sites.d/rfm.test.toml) $(rfm /vendor/autoload.php) $(rfm /config/sites/main/config.yaml) $(rfm /docs/index.html) $(curl -sS --unix-socket $CS http://control/v1/sites/rfm.test | grep -q '"refuse":\["/vendor/","\*.yaml"\]' && echo yes)"
+check "refuse: a pattern with a '/' inside but none in front is refused with the anchored spelling to use" "400 yes" "$(cpost /v1/sites/rfm.test '{"rules":{"refuse":["vendor/x"]},"confirm":true,"reason":"rf"}') $(grep -q "anchor it at the site's root with a leading '/' ('/vendor/x')" bench/tmp/ctl-reply.json && echo yes)"
+check "refuse: a pattern that refuses the site's index is refused when the change is validated; the site keeps its rules" "yes 404" "$(cpost /v1/sites/rfm.test '{"rules":{"refuse":["*.html"]},"confirm":true,"reason":"rf"}' > /dev/null; grep -q "refuses /index.html" bench/tmp/ctl-reply.json && echo yes) $(rfm /vendor/autoload.php)"
+check "refuse: ctl --refuse replaces the list (/vendor/ is served again, /docs/ refused); --no-refuse clears it" "404 200 200" "$("$BIN" ctl site-update rfm.test --refuse '/docs/' --yes --reason rf --socket $CS > /dev/null 2>&1; rfm /docs/guide.html) $(rfm /vendor/autoload.php) $("$BIN" ctl site-update rfm.test --no-refuse --yes --reason rf --socket $CS > /dev/null 2>&1; rfm /docs/guide.html)"
+cpost /v1/sites/rfm.test/delete '{"confirm":true,"reason":"rf"}' > /dev/null
 check "access: the presets catalogue lists each preset's admin paths, the login one marked" "/wp-admin /wp-login.php|login /admin /user/login|login" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; f=lambda a: " ".join(x["path"]+("|login" if x.get("login") else "") for x in p[a]["admin_paths"] if x["path"] in ("/wp-admin","/wp-login.php","/admin","/user/login")); print(f("wordpress"), f("drupal"))')"
 
 # Static rules of the control plane (F7): nothing there spawns a process or opens a port.
@@ -1261,7 +1364,7 @@ print(b.get("server"), "0.0.1-other" in b.get("note", ""), r["content"][0]["text
 PYT
 )
 check "mcp: a server of another build: the note leads the text and sits in structuredContent.bridge" "0.0.1-other True True" "$MCPN"
-check "mcp: initialize, tool list with annotations, calls, confirm, decisions, prompts" "agensio 34 True laravel 428 reloaded https,root,app,user -32601 2" "$mcp"
+check "mcp: initialize, tool list with annotations, calls, confirm, decisions, prompts" "agensio 35 True laravel 428 reloaded https,root,app,user -32601 2" "$mcp"
 check "mcp: site_install and the upload tools are exposed with their arguments" "file url,file,version,sha256 True" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
 import json, subprocess, sys
 p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
@@ -1420,6 +1523,21 @@ import json,sys
 f=[x for x in json.load(sys.stdin)["findings"] if x["code"]=="archives_in_root"]
 print(",".join(sorted(x["site"] for x in f)), f[0]["message"].split(" ")[0] if f else "-", "yes" if f and "tests/grav/backup/default_site_backup--20260923-101010.zip (0 KB)" in f[0]["message"] else f, "yes" if f and f[0]["fix"].startswith("move backups and dumps out of the document root") else "no")')"
   check "control: site-create on a directory holding another application warns, names the marker and the app to use" "yes" "$(cpost /v1/sites "{\"domain\":\"gravwarn.test\",\"https\":\"none\",\"user\":null,\"app\":\"wordpress\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"root\":\"$ROOT/tests/grav\",\"listen_plain\":\"127.0.0.1:8093\",\"dry_run\":true,\"confirm\":true}" > /dev/null; grep -q '"warnings":\["the files under [^"]*tests/grav look like grav (bin/grav and system/defines.php), not wordpress: the wordpress preset.s refusals do not fit them (health reports it as preset_mismatch); use app: grav"' bench/tmp/ctl-reply.json && echo yes || cat bench/tmp/ctl-reply.json)"
+  # A directory's index file is decided as a request for it by name is (alpha.53 report: on the
+  # drupal preset /sub/ served sub/index.php as source, application/octet-stream, while
+  # /sub/index.php was 404; a TYPO3 tree on it served typo3/index.php at /typo3/). Every preset
+  # with a script rule, twice so a cached answer is held too: refused both ways and never a byte
+  # of source; WordPress, where every .php runs, runs it.
+  idx_check() {  # url-of-the-directory directory-on-disk
+    mkdir -p "$2"; printf '<?php echo "INDEX-RAN"; $db_password = "SECRET-CANARY-7731";' > "$2/index.php"
+    local out="$(code "$1/") $(code "$1/") $(code "$1/index.php") $(curl -sS "$1/" "$1/index.php" | grep -q 'SECRET-CANARY' && echo LEAK || echo no-source)"
+    rm -f "$2/index.php"; rmdir "$2" 2>/dev/null
+    echo "$out"
+  }
+  check "presets: a directory's index.php that a preset refuses by name is 404 as the directory index too, never source (drupal /sub/, /modules/m/, /core/x/; laravel; grav; grav files on drupal)" \
+    "404 404 404 no-source|404 404 404 no-source|404 404 404 no-source|404 404 404 no-source|404 404 404 no-source|404 404 404 no-source" \
+    "$(idx_check $D/sub tests/drupal/web/sub)|$(idx_check $D/modules/m tests/drupal/web/modules/m)|$(idx_check $D/core/x tests/drupal/web/core/x)|$(idx_check http://127.0.0.1:8090/sub tests/laravel/public/sub)|$(idx_check $G/sub tests/grav/sub)|$(idx_check $M/sub2 tests/grav/sub2)"
+  check "presets: on wordpress, where every .php runs, a directory's index.php runs as the index and by name, never source" "200 200 200 no-source INDEX-RAN" "$(idx_check $W/sub tests/wordpress/sub) $(mkdir -p tests/wordpress/sub; printf '<?php echo "INDEX-RAN";' > tests/wordpress/sub/index.php; curl -sS $W/sub/; rm -rf tests/wordpress/sub)"
 fi
 
 # ---- kept origin connections are closed after idle_timeout (1 s on proxy.test) by the pool tick ----
@@ -1678,8 +1796,9 @@ check "access log: client address from a trusted proxy" "yes" "$(grep -q '^198.5
 # An X-Forwarded-For entry with a port, as some load balancers write it (alpha.52 report,
 # finding 3): the address without the port, for IPv4 and for a bracketed IPv6.
 curl -sS -o /dev/null -H 'X-Forwarded-For: 198.51.100.9:1234' 'http://127.0.0.1:8080/style.css?xff-port4'
-curl -sS -o /dev/null -H 'X-Forwarded-For: [2001:db8::9]:443' 'http://127.0.0.1:8080/style.css?xff-port6'; sleep 1.2
-check "access log: an X-Forwarded-For entry with a port is the address without it (IPv4, [IPv6])" "198.51.100.9 2001:db8::9" "$(grep -F 'xff-port4' bench/tmp/access.log | tail -1 | cut -d' ' -f1) $(grep -F 'xff-port6' bench/tmp/access.log | tail -1 | cut -d' ' -f1)"
+curl -sS -o /dev/null -H 'X-Forwarded-For: [2001:db8::9]:443' 'http://127.0.0.1:8080/style.css?xff-port6'
+curl -sS -o /dev/null -H 'X-Forwarded-For: 198.51.100.9:99999' 'http://127.0.0.1:8080/style.css?xff-portbad'; sleep 1.2
+check "access log: an X-Forwarded-For entry with a port is the address without it (IPv4, [IPv6]); a port above 65535 is garbage, so the client is the proxy" "198.51.100.9 2001:db8::9 127.0.0.1" "$(grep -F 'xff-port4' bench/tmp/access.log | tail -1 | cut -d' ' -f1) $(grep -F 'xff-port6' bench/tmp/access.log | tail -1 | cut -d' ' -f1) $(grep -F 'xff-portbad' bench/tmp/access.log | tail -1 | cut -d' ' -f1)"
 # A dual-stack listener records an IPv4 client as IPv4, never as ::ffff:127.0.0.1 (2026-10-07),
 # and an IPv6 client as itself; a mapped X-Forwarded-For entry is unmapped too.
 # A server of its own, because a listener on [::] is public and the main configuration's

@@ -232,6 +232,20 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
         json::Value v = control::access_check(cfg, *site, control::query_value(req.target, "path"), control::query_value(req.target, "address"), error);
         if (!error.empty()) reply(s, 400, json::Value::object().set("error", error));
         else reply(s, 200, v);
+    } else if (path.starts_with("/v1/sites/") && path.ends_with("/path") && path.size() > 15) {
+        // What the site does with one GET for a path and why (docs/configuration.md 6b): the
+        // check an agent runs after translating an application's server rules.
+        const std::string_view name = path.substr(10, path.size() - 10 - 5);
+        const Config& cfg = backend_->running();
+        const SiteConfig* site = control::find_site(cfg, name);
+        if (!site) {
+            reply(s, 404, json::Value::object().set("error", "no such site").set("site", std::string(name)));
+            return false;
+        }
+        std::string error;
+        json::Value v = control::path_check(cfg, *site, control::query_value(req.target, "path"), error);
+        if (!error.empty()) reply(s, 400, json::Value::object().set("error", error));
+        else reply(s, 200, v);
     } else if (path.starts_with("/v1/sites/") && path.ends_with("/tasks")) {
         // The named tasks a site's preset offers (F13): from the table, nothing else can run.
         const std::string_view name = path.substr(10, path.size() - 10 - 6);

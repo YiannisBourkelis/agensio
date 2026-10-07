@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.1.0-alpha.54
+
+From the alpha.53 report (a live host and a private instance: Drupal's script rule, the
+WordPress refusals and openings, report mode, ports in X-Forwarded-For, the site_update notes
+and rules.admin confirmed), three findings: two fixed, each reproduced by a test that failed
+first, and the third answered by the way an application without a preset is configured
+(below):
+
+- **A directory's index.php was served as source where the preset refuses it by name**
+  (security): `/sub/` answered `sub/index.php` as `application/octet-stream` while
+  `/sub/index.php` was 404, on the drupal preset (new with alpha.53's script rule; a TYPO3
+  tree on it served `typo3/index.php` at `/typo3/`) and, the suite found, on laravel and grav
+  since their "only index.php runs" rule. The index lookup now asks the same question as a
+  request by name (`refused_by_name`, one predicate for both): an index another location owns
+  is routed there, one the location refuses gets its 404, never a file. Integration checks
+  for every preset with a script rule, twice so the cached answer is held too; WordPress still
+  runs a directory's index.php.
+- **An X-Forwarded-For port out of range** (`198.51.100.7:99999`) was taken as the address. A
+  port is 1 to 65535 now; any other is garbage and stops the walk, so the client is the
+  proxy. Unit test and an integration check.
+
+Applications without a preset of their own (finding 3: a TYPO3 site on the drupal preset) are
+configured from their own documentation, on `app = "php"`; the server now gives the agent
+what that needs (docs/configuration.md 6b, design section 24):
+
+- **`refuse`**, on any site (`rules.refuse` on a managed one): gitignore-style path patterns
+  answered 404 whichever location would serve them. `/vendor/` from the root, `composer.json`
+  or `*.yaml` a name in any directory, `*` within one segment
+  (`/typo3/sysext/*/Resources/Private/`), `**` any number of directories. No regex, no order,
+  no exception, so nothing can be shadowed the way an nginx regex location is; checked before
+  routing, on every internal redirect and on a directory's index file, case and trailing dots
+  ignored. A bad pattern is refused with what to write instead, and one that would refuse
+  the site's index, a `try_files` target or an entry point is refused when the configuration
+  is checked. TYPO3 13.4's documented deny rules are 48 patterns and cost 2 to 92 ns per
+  request on that site; a site without patterns pays nothing measurable (A/B row `refuse`).
+  `agensio ctl site-update --refuse PATTERN` / `--no-refuse`.
+- **`path_check`** (MCP, viewer; `agensio ctl path-check SITE PATH`): what a site does with one
+  path and why, as the server decides it: refused (by which pattern or refusal by name), the
+  file served, the script run, the application it goes to, with every step on the way.
+- **The agent's instructions** say how: find the application's official web server
+  configuration for the version in use, translate it into `entry_points`, `front_controller`,
+  `private` and `refuse`, show it with its source, dry run, `path_check` the paths the
+  documentation names, apply only with the user's agreement, check again.
+
 ## 0.1.0-alpha.53 (2026-10-07)
 
 From the alpha.52 report (a live host and a private instance: the client-address fixes and the

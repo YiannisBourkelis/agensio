@@ -141,6 +141,39 @@ struct AccessRule {
     std::string origin;   // "" written in the site file, "preset:wordpress" added by a preset
 };
 
+// A path pattern the site refuses with 404 (`refuse`, 2026-10-08, core/refuse.hpp): gitignore-
+// style, compiled once at load. One segment of it, lower case: the literals around its '*'s.
+struct RefuseSegment {
+    std::string first;             // before the first '*' (the whole segment when it has none)
+    std::string last;              // after the last '*'
+    std::vector<std::string> mid;  // between the stars, in order
+    bool star = false;
+};
+
+struct RefusePattern {
+    std::string text;                 // as written: --explain, site_show, path_check
+    std::vector<RefuseSegment> head;  // matched from the site's root; empty for a name in any directory
+    bool deep = false;                // a "**" (or a name without '/'): any number of directories, then `tail`
+    std::vector<RefuseSegment> tail;
+};
+
+// A site's patterns, and what refuse::index builds over them so a path is compared with a few
+// patterns only: a name pattern is found by the last byte its segment must end with (256: it
+// ends with '*'), an anchored one by its first segment when that is a literal (`groups`, one
+// per distinct name), else it is in `anchored_any`; "**/a/b" in `anywhere`.
+struct RefuseSet {
+    struct Group {
+        std::string first;                  // the literal first segment, lower case
+        std::vector<std::uint8_t> members;  // indexes into patterns
+    };
+    std::vector<RefusePattern> patterns;
+    std::vector<std::uint8_t> names, anchored_any, anywhere;
+    std::array<std::uint8_t, 258> name_at{};
+    std::vector<Group> groups;
+    std::size_t longest_first = 0;  // the longest literal first segment of a group
+    bool empty() const noexcept { return patterns.empty(); }
+};
+
 struct SiteConfig {
     std::vector<std::string> server_names;  // lower-case host names, "*" matches anything
     std::string user;   // hosting: PHP runs as this user in its own pool, logs are owned by it
@@ -205,6 +238,9 @@ struct SiteConfig {
     // request whose path starts with no such byte skips the scan.
     std::vector<AccessRule> access;
     std::array<std::uint64_t, 4> access_first{};
+    // `refuse`: paths answered 404 whichever location would serve them (core/refuse.hpp);
+    // empty, a request pays one test.
+    RefuseSet refuse;
 };
 
 // [log]

@@ -24,11 +24,16 @@
 
 namespace agensio {
 
-inline bool all_digits(std::string_view s) noexcept {
+// The port an X-Forwarded-For entry may carry: digits for 1 to 65535 (alpha.53 report:
+// "198.51.100.7:99999" was taken as 198.51.100.7; a bad port is garbage and stops the walk).
+inline bool valid_port(std::string_view s) noexcept {
     if (s.empty() || s.size() > 5) return false;
-    for (const char c : s)
+    unsigned v = 0;
+    for (const char c : s) {
         if (c < '0' || c > '9') return false;
-    return true;
+        v = v * 10 + static_cast<unsigned>(c - '0');
+    }
+    return v >= 1 && v <= 65535;
 }
 
 // `storage` keeps the chosen address alive for the request (conn.client_address views it).
@@ -52,13 +57,13 @@ inline void resolve_forwarded(const Request& req, const std::vector<Cidr>& trust
             if (entry.front() == '[') {
                 const std::size_t close = entry.find(']');
                 const std::string_view port = close == std::string_view::npos ? std::string_view() : entry.substr(close + 1);
-                if (close == std::string_view::npos || !(port.empty() || (port.size() > 1 && port[0] == ':' && all_digits(port.substr(1))))) {
+                if (close == std::string_view::npos || !(port.empty() || (port.size() > 1 && port[0] == ':' && valid_port(port.substr(1))))) {
                     done = true;
                     break;
                 }
                 entry = entry.substr(1, close - 1);
             } else if (const std::size_t colon = entry.find(':'); colon != std::string_view::npos && entry.find(':', colon + 1) == std::string_view::npos) {
-                if (!all_digits(entry.substr(colon + 1))) {
+                if (!valid_port(entry.substr(colon + 1))) {
                     done = true;
                     break;
                 }

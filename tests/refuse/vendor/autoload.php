@@ -1,0 +1,1 @@
+<?php // REFUSE-CANARY vendor

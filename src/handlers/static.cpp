@@ -9,6 +9,7 @@
 #include <cstring>
 #include <ctime>
 
+#include "core/refuse.hpp"
 #include "core/strings.hpp"
 #include "http_date.hpp"
 #include "mime.hpp"
@@ -356,7 +357,11 @@ StaticHandler::Lookup StaticHandler::index_lookup(const LocationConfig& loc, Wor
         const auto* site = static_cast<const SiteConfig*>(ws.site);
         const std::size_t path_len = ws.path.size();
         ws.path.append(index);
-        if (&Router::location(*site, ws.path) != &loc) {
+        // Routed again, as a request for it by name, when the index belongs to another location
+        // or this one or the site's `refuse` refuses it by name: the directory then gets that
+        // answer (404 for a .php the preset does not run), never the file's bytes (alpha.53 report).
+        if (&Router::location(*site, ws.path) != &loc || refused_by_name(loc, ws.path) ||
+            (!site->refuse.empty() && refuse::match(site->refuse, ws.path))) {
             f.close();
             return Lookup::redirect;  // ws.path is now the index path; the caller routes it again
         }
@@ -449,29 +454,14 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
         error(s, 404, req.keep_alive);
         return Outcome::done;
     }
-    // Dotfiles and dot-directories (.env, .git, .htaccess) are never served unless the
-    // location opts in. 404 rather than 403 so their existence is not disclosed.
-    if (!loc.hidden_files && has_hidden_segment(ws.path)) {
-        error(s, 404, req.keep_alive);
-        return Outcome::done;
-    }
-    // Endings this location refuses outright (PHP sources under an uploads directory).
-    // Refused endings answer 404 like hidden files, so a refusal never confirms that a
-    // file exists (one policy for dotfiles, credentials files and PHP where it may not run).
-    if (!loc.deny_suffixes.empty() && refused_suffix(ws.path, loc.deny_suffixes)) {
-        error(s, 404, req.keep_alive);
-        return Outcome::done;
-    }
-    // Endings this location serves and nothing else (Grav's user/data: the media and
-    // documents, never the yaml and json beside them; the same rule, so a directory or
-    // a bare name is refused too): the same 404, so nothing is confirmed either way.
-    if (!loc.allow_suffixes.empty() && !refused_suffix(ws.path, loc.allow_suffixes)) {
-        error(s, 404, req.keep_alive);
-        return Outcome::done;
-    }
-    // Backup spellings of the names the site never serves (wp-config.php.bak, .wp-config.php.swp):
-    // the same 404 as the name, whatever the ending and whatever hidden_files says.
-    if (!loc.protects.empty() && backup_of_protected(ws.path, loc.protects)) {
+    // Refused by name (refused_by_name): dotfiles and dot-directories (.env, .git, .htaccess)
+    // unless the location opts in; endings it refuses outright (PHP sources under an uploads
+    // directory); endings it serves and nothing else (Grav's user/data: the media and
+    // documents, never the yaml and json beside them, so a directory or a bare name is
+    // refused too); backup spellings of the names the site never serves (wp-config.php.bak,
+    // .wp-config.php.swp), whatever the ending and whatever hidden_files says. All 404 rather
+    // than 403, so a refusal never confirms that a file exists.
+    if (refused_by_name(loc, ws.path)) {
         error(s, 404, req.keep_alive);
         return Outcome::done;
     }

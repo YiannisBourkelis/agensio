@@ -1266,3 +1266,57 @@ restriction is one field the user asks for.
   and Drupal's login block as what the login rule does not cover, and the MCP text offers
   report mode first.
 
+## 24. Refused paths and path_check (2026-10-08, built in alpha.54)
+
+The owner's rule, after the alpha.53 report put TYPO3 on the drupal preset: an application
+without a preset of its own runs on `app = "php"`, and the agent configures it from the
+application's official documentation; the server gives the agent the means to express what
+that documentation asks and to check the result. TYPO3 13.4's nginx example showed the two
+gaps the rules had: deny rules by ending and name in any directory (`*.yaml`,
+`flexform*.xml`), and per-extension directories (`(typo3conf/ext|typo3/sysext)/*/Resources/Private/`).
+
+What other servers do, and what was taken from each:
+
+- **nginx** expresses denials as regex locations: powerful, and the source of the classic
+  mistakes. The first matching regex wins, so order decides; a `^~` prefix skips the regexes,
+  so a deny there is never consulted; and a regex carried over from Apache keeps Apache's
+  per-directory form. TYPO3's own example has `location ~ ^(?:vendor|typo3_src|typo3temp/var)`,
+  which never matches, since nginx matches against a path that begins with `/`.
+- **Apache** has `<FilesMatch>` (a name in any directory), `<DirectoryMatch>` and
+  `RewriteRule ... [F]`, merged in an order administrators find hard to predict.
+- **Caddy** matches paths with `*` globs, regex being a separate matcher: the readable
+  model, though the order of its directives still matters.
+- **gitignore** patterns are what every developer and every agent knows: a leading `/`
+  anchors, no `/` means a name in any directory, `*` within a segment, `**` across segments.
+
+Decided: `refuse`, a list of gitignore-style patterns on the site (`rules.refuse` on a managed
+one), allowed on every app since it only narrows. A match is a 404 with no order and no
+exception (no `!`), checked before routing, on every internal redirect and on a directory's
+index file (the lesson of the alpha.53 report's first finding), case-insensitively, with
+trailing dots ignored and on the other readings of a path the access rules judge. Only `*`
+and `**`, at most one `**`, no `?`, brackets, braces or percent escapes, 64 patterns of 200
+characters: matching is linear and allocates nothing. A pattern with a `/` inside must start
+with `/` or `**/`, so the anchoring is never guessed. A pattern that would refuse what the
+site serves on purpose (its index, a `try_files` target, an exact location that runs
+something) is a configuration error naming both, a check no other server makes.
+
+`path_check` is the other half: what the site does with one GET for a path and why, in the
+worker's order (refuse, location, refusals by name, `try_files`, index, redirects), as a
+description that fetches nothing. The agent's loop is: read the official configuration,
+translate it, `dry_run`, `path_check` the paths the documentation names (one each rule
+refuses, the ones that must still work), apply with the user's agreement, check again. It
+answers the complaint the access research found most often, "I cannot tell which rule decided
+this".
+
+Cost (`core/refuse.hpp`): a site without patterns pays one empty-list test. Name patterns are
+bucketed by the last byte their segment must end with, anchored ones grouped by their first
+segment, so TYPO3's 48 patterns cost 2 ns on `/`, 12 to 31 ns on ordinary paths and 92 ns on
+a seven-segment extension path (205 ns before the grouping); the A/B row `refuse` (a site with
+those 48, a two-segment path) measured 1.029 of a server without the key, about 0.06 us, and
+every other row flat (`ab-20261007-214727.md`).
+
+Not built: exceptions (`!`, an "only these endings here" rule; the presets keep
+`allow_suffixes`), braces and `?`, regex, and a second front controller under a path (TYPO3
+12 and earlier wanted `/typo3/` routed to `typo3/index.php`; 13 sends the backend through
+`/index.php`), which stays root's, in the site's root additions file.
+

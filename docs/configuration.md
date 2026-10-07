@@ -62,6 +62,12 @@ redirect, routed again through the locations; a `?$query_string` suffix is accep
 ignored for static files). Without `try_files` the rule is: file, directory index (403 if
 there is none), 301 to the slash form for a directory, else 404.
 
+A directory's index file is answered as a request for it by name would be: when another
+location owns that path (a `.php` that runs) it runs there, and when the location refuses it
+by name (a refused ending, a dotfile, a protected name) the directory gets the same 404. So
+on a preset where only some scripts run, `/sub/` never serves `sub/index.php` as a file
+(before alpha.54 the drupal, laravel and grav presets did, while `/sub/index.php` was 404).
+
 **Encoded separators.** A request whose path spells a slash or a backslash as a percent
 escape (`%2F`, `%5C`, in either case) is answered 404 by every location that resolves paths
 on disk, static, FastCGI and CGI alike, before anything is looked up: it is Apache's
@@ -922,6 +928,71 @@ matched at the end of the path or before a `/`), then the longest `prefix`; an i
 | `priority` | may use the FastCGI pool slots reserved by `priority_reserve` |
 | `httparena = { dataset }` | with `handler = "httparena"`, in a build made with `-DAGENSIO_HTTPARENA=ON` only: the HttpArena benchmark endpoints answered in-process from the dataset (`bench/httparena/`); a release build refuses the handler |
 
+## 6b. Refused paths: `refuse`
+
+Paths a site answers with 404 whichever location would serve them, written as gitignore-style
+patterns. It is where an application without a preset of its own gets the denials its
+official server configuration lists (an nginx `location ~ ... { deny all; }`, an Apache
+`<FilesMatch>` or `RewriteRule ... [F]`), and it works on every `app`, since it only narrows
+what the site serves.
+
+```toml
+[[site]]
+server_name = ["cms.example.com"]
+app = "php"
+root = "/srv/www/cms.example.com/web"
+refuse = ["/vendor/", "composer.json", "*.yaml", "*.typoscript",
+          "/typo3conf/ext/*/Resources/Private/", "/fileadmin/templates/**/*.ts", "_recycler_/"]
+```
+
+| pattern | refuses |
+|---|---|
+| `/vendor/` (or `/vendor`) | `/vendor`, `/vendor/` and everything below; never `/vendors/` or `/a/vendor/` |
+| `composer.json` | that name in any directory: `/composer.json`, `/core/composer.json` |
+| `*.yaml` | every path with a segment ending in `.yaml`: `/config/x.yaml`, and below a directory so named |
+| `_recycler_/` | a directory of that name anywhere and everything below it |
+| `/typo3conf/ext/*/Resources/Private/` | `*` is any run of characters within one segment: `/typo3conf/ext/news/Resources/Private/x.html`, not `/typo3conf/ext/a/b/Resources/Private/` |
+| `/fileadmin/templates/**/*.ts` | `**` is any number of directories, none included: `/fileadmin/templates/a.ts`, `/fileadmin/templates/x/y/a.ts` |
+| `**/Tests/Unit/` | that directory pair at any depth |
+
+The rules, all of them on purpose:
+
+- **A match is a 404, and order does not exist.** No pattern reopens what another refuses, and
+  none is shadowed by a location: the check runs on the request path before any location is
+  chosen, again on every internal redirect (`try_files` fallbacks), and on the index file a
+  directory would answer with, so `/docs/` is 404 when `/docs/index.html` is refused. That is
+  the class of mistake nginx invites, where a `location ~ \.php$` before a deny, or a `^~`
+  prefix, steps around it.
+- **A pattern refuses what it matches and everything below it**, with or without the trailing
+  `/`. A pattern without a `/` (but a trailing one) is a name in any directory; one with a `/`
+  inside is anchored at the root and starts with `/` (or `**/` for any depth): `typo3conf/ext/x`
+  without the leading `/` is refused with that advice, rather than guessed at.
+- **Case and trailing dots are ignored** (`/VENDOR/`, `x.yaml.`), as for every refusal by
+  name; the other ways an application may read a path (a `;parameter` in a segment, a second
+  decoding, the path after a script) are judged too, as for the access rules (section 19).
+- **Wildcards are `*` and `**` only.** No `?`, brackets or braces (write one pattern per
+  alternative), no percent escapes (paths are matched decoded), at most one `**`, at most 64
+  patterns of 200 characters; matching is linear and allocates nothing. A pattern of
+  wildcards alone (`/*`, `**/*`) or `/` is refused: disable the site or restrict it by
+  address instead.
+- **A pattern may not refuse what the site serves on purpose**: the index of its root, a
+  path `try_files` sends a miss to (a front controller), or an exact location that runs
+  something. `-t` refuses the configuration with both named: `'*.php' refuses /index.php,
+  the site's index`.
+
+Translating another server's rules: `location ~* \.(yaml|yml)$ { deny all; }` is `*.yaml`,
+`*.yml`; `location ~ /\.git { deny all; }` needs nothing (dotfiles are hidden by default);
+`RewriteRule ^(vendor|typo3_src)/ - [F]` and nginx's `location ~ ^/vendor/` are `/vendor/`,
+`/typo3_src/`; an unanchored `location ~ _(recycler|temp)_/` is `_recycler_/`, `_temp_/`;
+`<FilesMatch "^(composer\.json|package\.json)$">` is `composer.json`, `package.json`. Beware an
+nginx regex anchored without its slash (`^vendor`): nginx matches it against a path that
+always begins with `/`, so as written it refuses nothing; the intent is `/vendor/`.
+
+On a managed site the same list is `rules.refuse` (section 15), and `path-check` (MCP
+`path_check`) says what the site does with one path and which pattern or location decides.
+A server older than 0.1.0-alpha.54 ignores `refuse` without a word: after an upgrade, check
+with `agensio -t --explain` that the patterns are listed.
+
 ## 7. PHP and FastCGI options
 
 `php = { ... }` on the site is the default for its FastCGI locations; `fastcgi = { ... }`
@@ -1007,7 +1078,7 @@ client address in the access log and `REMOTE_ADDR`, and `X-Forwarded-Proto: http
 spoofed from the open internet.
 
 An entry may carry a port, as some load balancers write it: `198.51.100.7:1234` and
-`[2001:db8::7]:443` are the address alone. Several `X-Forwarded-For` lines are one list in order, read from the end of the last line,
+`[2001:db8::7]:443` are the address alone (a port is 1 to 65535; any other is not an address). Several `X-Forwarded-For` lines are one list in order, read from the end of the last line,
 so a proxy that adds a line of its own (HAProxy's `option forwardfor`) decides, and a line
 the client wrote before it is reached only through hops you trust. `X-Forwarded-Proto`
 counts the last value of its last line. An entry that is not an address stops the walk.
@@ -1652,6 +1723,25 @@ preset's administration paths, which `presets` lists as `admin_paths`, rendered 
 `--restrict-admin ADDR[,ADDR...]`, `--admin-login`, `--admin-language L` (repeatable) and
 `--no-restrict-admin` replace that object and keep the other rules; refused on another app,
 and on a path `rules.restricted` names too.
+
+**Refused paths** (`rules.refuse`, 2026-10-08, section 6b): on any app, a list of
+gitignore-style patterns (`"/vendor/"`, `"*.yaml"`, `"/ext/*/Resources/Private/"`,
+`"/a/**/*.ts"`) rendered as the site's `refuse` key, marked `# rules`; each pattern is
+compiled when the change arrives, so a bad one is answered with what to write instead (a `/`
+inside without a leading one, a `?` or a brace, a percent escape), and one that would refuse
+the site's index, its front controller or an entry point is refused when the change is
+validated, the site keeping the rules it had. `--refuse PATTERN` (repeatable) replaces the
+list and keeps the other rules, `--no-refuse` clears it. It is where an application without a
+preset gets the deny rules its official server configuration lists; `path-check SITE PATH`
+(MCP `path_check`, viewer) says what the site does with one path and which pattern, location,
+`try_files` step or index decides it, as the server would, without fetching anything:
+
+```
+$ agensio ctl path-check cms.example.com /typo3conf/ext/news/Configuration/TypoScript/setup.typoscript
+404: /typo3conf/ext/news/Configuration/TypoScript/setup.typoscript is refused by the site's refuse pattern '*.typoscript'
+$ agensio ctl path-check cms.example.com /typo3/module/web/layout
+runs /index.php (location /index.php (exact, fastcgi, from rules))
+```
 
 **Root additions to a managed site** (`sites.d/<domain>.root.toml`, 2026-10-02). A site the
 control plane manages is regenerated by every `site-update`, so a location added to its file

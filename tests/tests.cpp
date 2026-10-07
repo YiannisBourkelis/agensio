@@ -69,6 +69,7 @@
 #include "net/cidr.hpp"
 #include "core/forwarded.hpp"
 #include "core/access.hpp"
+#include "core/refuse.hpp"
 #include "path.hpp"
 #include "services/log.hpp"
 #include "upstream/fcgi.hpp"
@@ -5364,6 +5365,12 @@ static void test_forwarded_lines() {
     CHECK_EQ(client({{"X-Forwarded-For", "[2001:db8::1]"}}), std::string("2001:db8::1"));
     CHECK_EQ(client({{"X-Forwarded-For", "2001:db8::1"}}), std::string("2001:db8::1"));
     CHECK_EQ(client({{"X-Forwarded-For", "203.0.113.1, 198.51.100.7:x"}}), std::string(""));  // a bad port: garbage, nothing believed
+    // A port is 1 to 65535 (alpha.53 report: "198.51.100.7:99999" was taken as 198.51.100.7).
+    CHECK_EQ(client({{"X-Forwarded-For", "198.51.100.7:65535"}}), std::string("198.51.100.7"));
+    CHECK_EQ(client({{"X-Forwarded-For", "203.0.113.1, 198.51.100.7:99999"}}), std::string(""));
+    CHECK_EQ(client({{"X-Forwarded-For", "203.0.113.1, 198.51.100.7:65536"}}), std::string(""));
+    CHECK_EQ(client({{"X-Forwarded-For", "203.0.113.1, 198.51.100.7:0"}}), std::string(""));
+    CHECK_EQ(client({{"X-Forwarded-For", "203.0.113.1, [2001:db8::1]:70000"}}), std::string(""));
     // X-Forwarded-Proto: the last line's last value, not a client's earlier "https".
     bool https = true;
     (void)client({{"X-Forwarded-For", "203.0.113.9"}, {"X-Forwarded-Proto", "https"}, {"X-Forwarded-Proto", "http"}}, &https);
@@ -5402,6 +5409,220 @@ static void test_address_forms() {
 // Access by client address (2026-10-07, docs/configuration.md 19): the loader, the matcher,
 // the readings an origin may make of a path, WordPress's admin-ajax rule, the notices, and the
 // control plane's rules.restricted and access-check.
+// Refused path patterns (2026-10-08, core/refuse.hpp): gitignore-style globs, matched without
+// order, case or trailing dots mattering, on every reading of a path; TYPO3 13.4's documented
+// denies as the list an agent would translate from its nginx configuration.
+static void test_refuse_patterns() {
+    auto set_of = [](std::initializer_list<const char*> texts) {
+        RefuseSet s;
+        for (const char* t : texts) {
+            RefusePattern p;
+            if (const std::string why = refuse::compile(t, p); !why.empty()) std::printf("refuse pattern %s: %s\n", t, why.c_str());
+            s.patterns.push_back(std::move(p));
+        }
+        refuse::index(s);
+        return s;
+    };
+    auto by = [](const RefuseSet& s, std::string_view path) -> std::string {
+        const RefusePattern* p = refuse::match(s, path);
+        return p ? p->text : std::string("-");
+    };
+    auto error_of = [](const char* t) {
+        RefusePattern p;
+        return refuse::compile(t, p);
+    };
+
+    // What a pattern may not be, each with a reason that says what to write instead.
+    for (const char* bad : {"", "/", "**", "/**", "*", "/*", "/*/*", "**/*"}) CHECK(!error_of(bad).empty());
+    CHECK(error_of("vendor/x").find("anchor it at the site's root with a leading '/' ('/vendor/x')") != std::string::npos);
+    CHECK(error_of("typo3conf/ext/*/Configuration/").find("'/typo3conf/ext/*/Configuration/'") != std::string::npos);
+    CHECK(error_of("^vendor").find("'^'") != std::string::npos);  // a regex anchor carried over from nginx
+    CHECK(error_of("*.{yaml,yml}").find("one pattern per alternative") != std::string::npos);
+    CHECK(error_of("/a?b").find("wildcards") != std::string::npos);
+    CHECK(error_of("/%76endor/").find("percent escape") != std::string::npos);
+    CHECK(error_of("/a//b").find("empty segment") != std::string::npos);
+    CHECK(error_of("/a/../b").find("normalised") != std::string::npos);
+    CHECK(error_of("/a**b").find("whole segment") != std::string::npos);
+    CHECK(error_of("/**/a/**/b").find("more than one") != std::string::npos);
+    CHECK(error_of("/x.").find("trailing dots") != std::string::npos);
+    CHECK(error_of("a b").find("space") != std::string::npos);
+    CHECK(!error_of(std::string(201, 'a').c_str()).empty());
+    for (const char* good : {"/vendor/", "/vendor", "composer.json", "*.yaml", "_temp_/", "/a/**", "**/node_modules/", "/**/x", "/*.php", "/fileadmin/templates/**/*.ts"})
+        CHECK(error_of(good).empty());
+
+    // A name in any directory; the name and everything below it; case and trailing dots ignored.
+    const RefuseSet names = set_of({"composer.json", "*.yaml", "_recycler_/", "flexform*.xml", "ext_typoscript_*.txt", "a*b*c"});
+    CHECK_EQ(by(names, "/composer.json"), std::string("composer.json"));
+    CHECK_EQ(by(names, "/core/composer.json"), std::string("composer.json"));
+    CHECK_EQ(by(names, "/COMPOSER.JSON"), std::string("composer.json"));
+    CHECK_EQ(by(names, "/composer.json."), std::string("composer.json"));
+    CHECK_EQ(by(names, "/composer.jsonx"), std::string("-"));
+    CHECK_EQ(by(names, "/mycomposer.json"), std::string("-"));
+    CHECK_EQ(by(names, "/a/b.yaml"), std::string("*.yaml"));
+    CHECK_EQ(by(names, "/b.YAML"), std::string("*.yaml"));
+    CHECK_EQ(by(names, "/b.yaml.jpg"), std::string("-"));
+    CHECK_EQ(by(names, "/x.yaml/y.png"), std::string("*.yaml"));  // a directory so named: everything below it
+    CHECK_EQ(by(names, "/fileadmin/_recycler_/old.jpg"), std::string("_recycler_/"));
+    CHECK_EQ(by(names, "/fileadmin/_recycler_"), std::string("_recycler_/"));
+    CHECK_EQ(by(names, "/fileadmin/_recycler_x/a"), std::string("-"));
+    CHECK_EQ(by(names, "/ext/n/Configuration/FlexForms/flexform_list.xml"), std::string("flexform*.xml"));
+    CHECK_EQ(by(names, "/flexform.xml"), std::string("flexform*.xml"));
+    CHECK_EQ(by(names, "/myflexform.xml"), std::string("-"));
+    CHECK_EQ(by(names, "/ext/n/ext_typoscript_setup.txt"), std::string("ext_typoscript_*.txt"));
+    CHECK_EQ(by(names, "/ext/n/ext_typoscript.txt"), std::string("-"));
+    CHECK_EQ(by(names, "/aXbYc"), std::string("a*b*c"));
+    CHECK_EQ(by(names, "/abc"), std::string("a*b*c"));
+    CHECK_EQ(by(names, "/acb"), std::string("-"));
+    CHECK_EQ(by(names, "/"), std::string("-"));
+
+    // From the root: whole segments, '*' within one, "**" any number of directories.
+    const RefuseSet anchored = set_of({"/vendor/", "/typo3/sysext/*/Resources/Private/", "/fileadmin/templates/**/*.ts", "**/Tests/Unit/", "/*.php"});
+    CHECK_EQ(by(anchored, "/vendor"), std::string("/vendor/"));
+    CHECK_EQ(by(anchored, "/vendor/"), std::string("/vendor/"));
+    CHECK_EQ(by(anchored, "/Vendor/autoload.php"), std::string("/vendor/"));
+    CHECK_EQ(by(anchored, "/vendors/x"), std::string("-"));
+    CHECK_EQ(by(anchored, "/a/vendor/x"), std::string("-"));
+    CHECK_EQ(by(anchored, "/typo3/sysext/core/Resources/Private/Language/locallang.xlf"), std::string("/typo3/sysext/*/Resources/Private/"));
+    CHECK_EQ(by(anchored, "/typo3/sysext/core/Resources/Public/Icons/x.svg"), std::string("-"));
+    CHECK_EQ(by(anchored, "/typo3/sysext/Resources/Private/x"), std::string("-"));
+    CHECK_EQ(by(anchored, "/typo3/sysext/a/b/Resources/Private/x"), std::string("-"));
+    CHECK_EQ(by(anchored, "/fileadmin/templates/main.ts"), std::string("/fileadmin/templates/**/*.ts"));
+    CHECK_EQ(by(anchored, "/fileadmin/templates/x/y/main.ts"), std::string("/fileadmin/templates/**/*.ts"));
+    CHECK_EQ(by(anchored, "/fileadmin/templates/x/main.css"), std::string("-"));
+    CHECK_EQ(by(anchored, "/fileadmin/main.ts"), std::string("-"));
+    CHECK_EQ(by(anchored, "/ext/n/Tests/Unit/x.php"), std::string("**/Tests/Unit/"));
+    CHECK_EQ(by(anchored, "/Tests/Unit"), std::string("**/Tests/Unit/"));
+    CHECK_EQ(by(anchored, "/ext/n/Tests/Functional/x.php"), std::string("-"));
+    CHECK_EQ(by(anchored, "/x.php"), std::string("/*.php"));
+    CHECK_EQ(by(anchored, "/a/x.php"), std::string("-"));
+
+    // Every reading of the path: a ";parameter", a second decoding, the path after a script.
+    std::string scratch;
+    auto decided = [&](const RefuseSet& s, std::string_view path) {
+        const RefusePattern* p = refuse::decide(s, path, scratch);
+        return p ? p->text : std::string("-");
+    };
+    const RefuseSet vendor = set_of({"/vendor/"});
+    CHECK_EQ(decided(vendor, "/vendor;x/autoload.php"), std::string("/vendor/"));
+    CHECK_EQ(decided(vendor, "/%76endor/autoload.php"), std::string("/vendor/"));
+    CHECK_EQ(decided(vendor, "/index.php/vendor/x"), std::string("/vendor/"));
+    CHECK_EQ(decided(vendor, "/index.php/node/1"), std::string("-"));
+    CHECK_EQ(decided(vendor, "/vendors/x"), std::string("-"));
+
+    // Linear whatever the path: one "**" per pattern, literals taken leftmost.
+    std::string deep;
+    for (int i = 0; i < 2000; ++i) deep += "/aaaaaaaaaaaaaaaa";
+    const RefuseSet worst = set_of({"/**/a*a*a*a*a*a*b", "**/x/y/z/"});
+    CHECK_EQ(by(worst, deep), std::string("-"));
+
+    // TYPO3 13.4's nginx denies (docs.typo3.org, system requirements), translated: what stays
+    // open and what is refused on a classic install.
+    const RefuseSet typo3 = set_of({"composer.json", "composer.lock", "flexform*.xml", "locallang*.xml", "locallang*.xlf", "ext_conf_template.txt",
+                                    "ext_typoscript_*.txt", "*.bak", "*.conf", "*.cnf", "*.cfg", "*.yaml", "*.yml", "*.ts", "*.typoscript",
+                                    "*.tsconfig", "*.dist", "*.fla", "*.inc", "*.ini", "*.log", "*.sh", "*.sql", "*.sqlite", "_recycler_/", "_temp_/",
+                                    "/fileadmin/templates/**/*.txt", "/vendor/", "/typo3_src/", "/typo3temp/var/",
+                                    "/typo3conf/ext/*/Configuration/", "/typo3conf/ext/*/Resources/Private/", "/typo3conf/ext/*/Tests/",
+                                    "/typo3conf/ext/*/Test/", "/typo3conf/ext/*/docs/", "/typo3conf/ext/*/doc/",
+                                    "/typo3/sysext/*/Configuration/", "/typo3/sysext/*/Resources/Private/", "/typo3/sysext/*/Tests/",
+                                    "/typo3/sysext/*/Test/", "/typo3/sysext/*/docs/", "/typo3/sysext/*/doc/",
+                                    "/typo3/ext/*/Configuration/", "/typo3/ext/*/Resources/Private/", "/typo3/ext/*/Tests/",
+                                    "/typo3/ext/*/Test/", "/typo3/ext/*/docs/", "/typo3/ext/*/doc/"});
+    CHECK_EQ(typo3.patterns.size(), static_cast<std::size_t>(48));
+    for (const char* open : {"/", "/index.php", "/typo3/", "/typo3/index.php", "/typo3/install.php", "/typo3/module/web/layout",
+                             "/typo3/sysext/core/Resources/Public/Icons/x.svg", "/typo3conf/ext/news/Resources/Public/Css/news.css",
+                             "/fileadmin/user_upload/photo.jpg", "/fileadmin/templates/main.css", "/_assets/abc/Css/x.css",
+                             "/typo3temp/assets/images/x.png", "/robots.txt", "/sitemap.xml", "/en/about-us"})
+        if (by(typo3, open) != "-") {
+            std::printf("typo3: %s refused by %s\n", open, by(typo3, open).c_str());
+            CHECK(false);
+        }
+    for (const char* closed : {"/composer.json", "/vendor/autoload.php", "/typo3_src/index.php", "/typo3temp/var/log/typo3_0.log",
+                               "/typo3/sysext/core/Resources/Private/Language/locallang.xlf", "/typo3/sysext/core/Configuration/TCA/pages.php",
+                               "/typo3conf/ext/news/Configuration/TypoScript/setup.typoscript", "/typo3conf/ext/news/Tests/Unit/x.php",
+                               "/typo3conf/ext/news/ext_typoscript_setup.txt", "/typo3conf/ext/news/ext_conf_template.txt",
+                               "/fileadmin/_recycler_/old.jpg", "/fileadmin/_temp_/x", "/fileadmin/templates/setup.txt", "/fileadmin/x.ts",
+                               "/config/sites/main/config.yaml", "/typo3conf/system/settings.php.bak", "/backup.sql", "/deploy.sh"})
+        if (by(typo3, closed) == "-") {
+            std::printf("typo3: %s not refused\n", closed);
+            CHECK(false);
+        }
+}
+
+// `refuse` on a site (2026-10-08): the loader keeps and indexes the patterns, refuses a bad one
+// with its reason, and refuses a pattern that would refuse what the site runs.
+static void test_refuse_config() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-refuse-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "www");
+    const std::string head = "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n";
+    auto load = [&](const std::string& text) {
+        std::ofstream(dir / "r.toml") << text;
+        return load_config(dir / "r.toml");
+    };
+    auto error_of = [&](const std::string& text) -> std::string {
+        try {
+            load(text);
+        } catch (const std::runtime_error& e) {
+            return e.what();
+        }
+        return "";
+    };
+    const Config cfg = load(head + "refuse = [\"/vendor/\", \"*.yaml\", \"/ext/*/Resources/Private/\", \"*.yaml\"]\n");
+    const RefuseSet& set = cfg.sites[0].refuse;
+    CHECK(set.patterns.size() == 3);  // the repeated one kept once
+    CHECK(refuse::match(set, "/vendor/autoload.php") && refuse::match(set, "/a/b.yaml") && refuse::match(set, "/ext/n/Resources/Private/t.html"));
+    CHECK(!refuse::match(set, "/ext/n/Resources/Public/t.css") && !refuse::match(set, "/index.html"));
+    CHECK(error_of(head + "refuse = [\"vendor/x\"]\n").find("anchor it") != std::string::npos);
+    CHECK(error_of(head + "refuse = [\"/\"]\n").find("whole site") != std::string::npos);
+    CHECK(error_of(head + "refuse = \"/vendor/\"\n").find("list") != std::string::npos);
+    std::string many = head + "refuse = [";
+    for (int i = 0; i < 65; ++i) many += "\"/d" + std::to_string(i) + "/\",";
+    CHECK(error_of(many + "]\n").find("at most 64") != std::string::npos);
+    // What the site runs cannot be refused: its index, a try_files fallback, an exact entry point.
+    CHECK(error_of(head + "refuse = [\"*.html\"]\n").find("'*.html' refuses /index.html") != std::string::npos);
+    CHECK(error_of(head + "try_files = [\"$uri\", \"/app/shell.html\"]\nrefuse = [\"/app/\"]\n").find("refuses /app/shell.html") != std::string::npos);
+    CHECK(error_of(head + "refuse = [\"*.php\"]\n[[site.location]]\npath = \"/run.php\"\nmatch = \"exact\"\nhandler = \"fastcgi\"\n"
+                          "fastcgi = { socket = \"unix:/tmp/agensio-no.sock\" }\n").find("refuses /run.php") != std::string::npos);
+    fs::remove_all(dir);
+}
+
+// path_check (2026-10-08): what a site does with a path and why, as the worker decides it.
+static void test_path_check() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-pathcheck-" + std::to_string(::getpid()));
+    for (const char* d : {"www/vendor", "www/docs", "www/sub", "www/app"}) fs::create_directories(dir / d);
+    for (const char* f : {"www/index.html", "www/vendor/autoload.php", "www/docs/index.html", "www/docs/guide.html", "www/a.yaml", "www/app/shell.html"})
+        std::ofstream(dir / f) << "x";
+    std::ofstream(dir / "p.toml") << "[[site]]\nserver_name = [\"p.test\"]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n"
+                                     "try_files = [\"$uri\", \"$uri/\", \"=404\"]\nrefuse = [\"/vendor/\", \"*.yaml\", \"/docs/index.html\"]\n"
+                                     "[[site.location]]\npath = \"/app/\"\ntry_files = [\"$uri\", \"/app/shell.html\"]\n";
+    const Config cfg = load_config(dir / "p.toml");
+    const SiteConfig& site = cfg.sites[0];
+    auto check = [&](const char* path) {
+        std::string error;
+        const json::Value v = control::path_check(cfg, site, path, error);
+        return error.empty() ? std::string(v.get("decision")) + " " + std::to_string(static_cast<int>(v["status"].num())) : "error";
+    };
+    std::string error;
+    CHECK_EQ(check("/vendor/autoload.php"), std::string("refused 404"));
+    CHECK_EQ(std::string(control::path_check(cfg, site, "/vendor/autoload.php", error).get("refused_by")), std::string("/vendor/"));
+    CHECK_EQ(check("/%76endor/x"), std::string("refused 404"));  // decoded once, like a request
+    CHECK_EQ(check("/A.YAML"), std::string("refused 404"));
+    CHECK_EQ(check("/index.html"), std::string("static 200"));
+    CHECK(std::string(control::path_check(cfg, site, "/index.html", error).get("file")).ends_with("/www/index.html"));
+    CHECK_EQ(check("/"), std::string("static 200"));
+    CHECK_EQ(check("/docs/guide.html"), std::string("static 200"));
+    CHECK_EQ(check("/docs/"), std::string("refused 404"));  // its index is decided as a request for it
+    CHECK_EQ(check("/sub"), std::string("redirect 301"));
+    CHECK_EQ(check("/sub/"), std::string("not_found 404"));
+    CHECK_EQ(check("/missing"), std::string("not_found 404"));
+    CHECK_EQ(check("/app/route/1"), std::string("static 200"));  // try_files' fallback, routed again
+    const json::Value fb = control::path_check(cfg, site, "/app/route/1", error);
+    CHECK(std::string(fb.get("summary")).find("shell.html") != std::string::npos && fb["steps"].items().size() >= 3);
+    CHECK_EQ(check("relative"), std::string("error"));
+    fs::remove_all(dir);
+}
+
 static void test_access_rules() {
     namespace fs = std::filesystem;
     using namespace control;
@@ -6729,6 +6950,9 @@ int main() {
     test_forwarded_lines();
     test_address_forms();
     test_access_rules();
+    test_refuse_patterns();
+    test_refuse_config();
+    test_path_check();
     test_packaged_docs();
     test_drupal_php_rule();
     test_refusal_finding();

@@ -317,7 +317,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   preset; `/build/` gets an immutable Cache-Control via `add_headers`; WordPress: any
   `.php` runs, `wp-content/uploads` and `wp-includes` are `final` prefix locations, nginx
   `^~`, with `deny_suffixes` so PHP there is 404 and never executed); hand-written
-  locations win over the preset's (one that sets only `add_headers` joins it instead). `agensio -t --explain` prints the effective configuration;
+  locations win over the preset's (one that sets only `add_headers` joins it instead); a
+  directory's index file is decided as a request for it by name (`refused_by_name` in
+  `handlers/static.hpp`: another location's index is routed there, a refused one is 404;
+  before alpha.54 `/sub/` served `sub/index.php` as source on drupal, laravel and grav). `agensio -t --explain` prints the effective configuration;
   `docs/configuration.md` documents each preset's expansion and every option (keep it
   current when a key or preset changes);
   `-t` connects to every FastCGI upstream once and warns, with the reason, if it cannot.
@@ -557,6 +560,20 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   MCP `access_check`; `rules.admin` (WordPress, Drupal: `preset_admin_paths`, `login`,
   Drupal's `languages`; admins open unless the user asks, design section 23); `access_notices` feeds `-t`, the error log and health. Gate: `bench/ab.sh
   <ref> -A`. Security page row 38.
+- **Refused paths** (2026-10-08, `src/core/refuse.hpp`, `docs/configuration.md` 6b, design section
+  24): `refuse = [...]` on a site (`rules.refuse` on a managed one, any app), gitignore-style
+  patterns (`/vendor/`, `*.yaml`, `/ext/*/Resources/Private/`, `/a/**/*.ts`) answered 404 with no
+  order and no exception, checked in `Dispatcher::route` before the access rules, on every hop
+  (`serve_static`) and on a directory's index (`index_lookup`); case and trailing dots ignored,
+  the other readings of `access::other_readings` judged; `*` and one `**` only, 64 patterns;
+  `check_refuse_conflicts` refuses a pattern that would refuse the site's index, a `try_files`
+  target or an exact location that runs something. Name patterns are bucketed by their last
+  byte, anchored ones grouped by their first segment (`RefuseSet`): TYPO3's 48 cost 2 to 92 ns.
+  `path_check` (`control::path_check`, `ctl path-check`, MCP `path_check`) describes what a site
+  does with one GET for a path and why, in the worker's order. The agent's way for an
+  application without a preset: its official server configuration translated into `rules`,
+  checked with `path_check` before and after (MCP instructions). Gate: `bench/ab.sh <ref> -A`
+  (row `refuse`). Security page row 39.
 - **Application install** (F9, `src/services/archive.*`, `fetch.*`, `install.*`):
   `agensio ctl site-install NAME [--url | --file | --version]` fills a site's empty
   directory as the site's account from an https archive, an upload (`agensio ctl upload`)
