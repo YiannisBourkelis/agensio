@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.55
+## 0.1.0-alpha.55 (2026-10-08)
 
 From the alpha.54 report (TYPO3 13.4 configured live from its documentation with the new
 `refuse` patterns and `path_check`: 57 patterns, eight files that were served now 404, the
