@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.1.0-alpha.55
+
+From the alpha.54 report (TYPO3 13.4 configured live from its documentation with the new
+`refuse` patterns and `path_check`: 57 patterns, eight files that were served now 404, the
+frontend, backend, install tool and assets working), one gap:
+
+- **A directory whose index the site refuses is answered as if it had none.** TYPO3's nginx
+  configuration sends the existing directory `/typo3/` to `/index.php`; a managed site could
+  not, because since alpha.54 a directory whose `index.php` is not an entry point answered 404,
+  so the backend needed TYPO3 13's deprecated `typo3/index.php` listed as an entry point. A
+  directory's index is now a file the site would answer by name: one it refuses (a `refuse`
+  pattern, a `deny` location such as the rules' "no other PHP", a refused ending, a dotfile, a
+  protected name's backup) is passed over as if missing, and `try_files` goes on to the front
+  controller, or `=404`, or 403 without `try_files`. The refused file is still never served or
+  run, and is 404 by name. nginx, Apache and Caddy choose an index by existence alone and leave
+  the refusal to a later rule, which is why their documented configurations special-case such
+  directories by hand; here it is one decision (`refused_request`, shared by the static handler
+  and `path_check`), with nothing to configure. TYPO3 needs `entry_points` `/index.php` and
+  `/typo3/install.php` only. Behaviour change: a directory holding a stray `index.php` on the
+  drupal, laravel and grav presets is now answered by the application (its 404 page, unless it
+  has a route there) instead of agensio's 404. Integration checks for every preset and the
+  TYPO3 end-to-end test (now as TYPO3 13 documents it) failed first.
+- **An access rule on a directory's index file now holds at the directory** (security, found
+  while making the change above): with `[[site.access]] path = "/index.html", match = "exact"`,
+  a client outside the rule was refused `/index.html` but served the same file at `/`, because
+  the index was taken from the same location without asking the rules. An index that another access
+  rule decides than the directory is now routed as a request for it by name, so that rule
+  judges the client, as nginx's internal redirect to the index re-matches `location =
+  /index.html`. When one rule covers both (a site restricted whole) the client has passed it
+  already and the answer stays cached under the directory: the first form of this fix routed
+  every such index again and cost the restricted-site A/B row 1.77x, caught by the gate. Sites
+  without access rules take the same path as before. Integration check, failing first.
+
 ## 0.1.0-alpha.54 (2026-10-08)
 
 From the alpha.53 report (a live host and a private instance: Drupal's script rule, the

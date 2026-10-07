@@ -247,9 +247,11 @@ shows them; the agent never writes a site file by hand for this.
 
 TYPO3 goes the same way, from its documentation rather than its archive. The agent reads
 the web server configuration TYPO3 publishes for your version (its nginx example in the
-system requirements) and translates it: `entry_points` `/index.php`, `/typo3/index.php`
-and `/typo3/install.php`, `index.php` as the front controller (which also takes
-`/typo3/module/...`, the backend's routes), and every deny rule as a `refuse` pattern:
+system requirements) and translates it: `entry_points` `/index.php` and
+`/typo3/install.php`, `index.php` as the front controller (which takes `/typo3/` and
+`/typo3/module/...`, the backend, as TYPO3 13 routes it; the deprecated `typo3/index.php` is
+not listed, so it never runs and `/typo3/` passes over it), and every deny rule as a `refuse`
+pattern:
 `composer.json`, `*.yaml`, `*.typoscript`, `_recycler_/`, `/vendor/`, `/typo3temp/var/`,
 `/typo3/sysext/*/Resources/Private/` and the rest, about fifty. It shows you the list with
 the page it came from, sends it with `dry_run`, and runs `path_check` on the paths the

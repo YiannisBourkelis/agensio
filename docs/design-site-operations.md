@@ -1317,6 +1317,21 @@ every other row flat (`ab-20261007-214727.md`).
 
 Not built: exceptions (`!`, an "only these endings here" rule; the presets keep
 `allow_suffixes`), braces and `?`, regex, and a second front controller under a path (TYPO3
-12 and earlier wanted `/typo3/` routed to `typo3/index.php`; 13 sends the backend through
-`/index.php`), which stays root's, in the site's root additions file.
+12 and earlier wanted `/typo3/` routed to `typo3/index.php`), which stays root's, in the
+site's root additions file.
+
+**Directory indexes (alpha.55, the alpha.54 report).** TYPO3 13 sends the existing directory
+`/typo3/` to `/index.php` (its nginx `location /typo3/ { try_files $uri /index.php$is_args$args; }`
+leaves `$uri/` out on purpose). alpha.54 answered 404 there unless the deprecated
+`typo3/index.php` was an entry point, because a directory's refused index got the refusal's
+answer. Weighed: a rules field naming directories routed to the front controller (nginx's
+literal form: more configuration, and the location would repeat every refusal `/` carries),
+against one rule. Decided, the rule: a directory's index is a file the site would answer by
+name; one it refuses (`refused_request`: a refuse pattern, a deny location, a refused ending, a
+dotfile, a protected backup) is passed over as if missing, so `try_files` goes on. nginx's
+`index`, Apache's `DirectoryIndex` and Caddy's `php_fastcgi` choose by existence and refuse in a
+later rule, which is why their documented configurations special-case directories by hand;
+here the choice and the refusal are one decision, a refused index is never served or run, and
+nothing needs configuring. The cost: a directory holding a stray `index.php` on drupal,
+laravel or grav now reaches the application, which answers its own 404.
 

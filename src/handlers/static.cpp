@@ -9,7 +9,6 @@
 #include <cstring>
 #include <ctime>
 
-#include "core/refuse.hpp"
 #include "core/strings.hpp"
 #include "http_date.hpp"
 #include "mime.hpp"
@@ -343,9 +342,19 @@ void fs_path_of(const LocationConfig& loc, WorkerState& ws) {
 // `redirect` when the index belongs to another location. That last case is nginx's
 // `index` semantics, an internal redirect to path + index: a Laravel site's "/" becomes
 // "/index.php", which the exact FastCGI location owns, not the static one.
+//
+// An index is a file the site would answer by name (alpha.55): one it refuses by name
+// (refused_request: a refuse pattern, a deny location, a refused ending, a dotfile, a backup of
+// a protected name) is passed over as if it were missing. nginx's index, Apache's
+// DirectoryIndex and Caddy's php_fastcgi choose an index by existence alone and leave the
+// refusal to a later rule, which is why their documented configurations special-case such a
+// directory by hand (TYPO3's location /typo3/ without $uri/); here the choice and the refusal
+// are one decision, so a refused file is never the answer and the directory gets what a
+// missing index gets: try_files' next step (TYPO3 13's /typo3/ reaches /index.php), or 403.
 StaticHandler::Lookup StaticHandler::index_lookup(const LocationConfig& loc, WorkerState& ws, File& f, FileInfo& fi) {
     fs_path_of(loc, ws);
     const std::size_t base = ws.fs_path.size();
+    const auto* site = static_cast<const SiteConfig*>(ws.site);
     for (const auto& index : loc.index) {
         ws.fs_path.resize(base);
         ws.fs_path.append(index);
@@ -354,14 +363,22 @@ StaticHandler::Lookup StaticHandler::index_lookup(const LocationConfig& loc, Wor
             f.close();
             continue;
         }
-        const auto* site = static_cast<const SiteConfig*>(ws.site);
         const std::size_t path_len = ws.path.size();
         ws.path.append(index);
-        // Routed again, as a request for it by name, when the index belongs to another location
-        // or this one or the site's `refuse` refuses it by name: the directory then gets that
-        // answer (404 for a .php the preset does not run), never the file's bytes (alpha.53 report).
-        if (&Router::location(*site, ws.path) != &loc || refused_by_name(loc, ws.path) ||
-            (!site->refuse.empty() && refuse::match(site->refuse, ws.path))) {
+        const LocationConfig& owner = Router::location(*site, ws.path);
+        if (refused_request(*site, owner, ws.path)) {
+            f.close();
+            ws.path.resize(path_len);
+            continue;
+        }
+        // Routed again, as a request for it by name, when another location owns the index or
+        // another access rule decides it than decided the directory, so that rule judges the
+        // client as it would at the index's own URL (nginx's index redirect re-matches location =
+        // /x/index.html; before alpha.55 an exact rule on /index.html was not asked when / served
+        // the same file). The same rule already admitted the client: no second pass, and the
+        // answer stays cached under the directory (a site restricted whole pays nothing more).
+        if (&owner != &loc ||
+            (!site->access.empty() && access::rule_for(*site, ws.path) != access::rule_for(*site, std::string_view(ws.path).substr(0, path_len)))) {
             f.close();
             return Lookup::redirect;  // ws.path is now the index path; the caller routes it again
         }

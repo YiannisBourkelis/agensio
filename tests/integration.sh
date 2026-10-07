@@ -1099,6 +1099,10 @@ check "access: a client in a named set is served" "200" "$(ah $A/sub/)"
 check "access: the 403 names the address it tested, is not stored by caches, and is plain HTML" "403 no-store yes" "$(curl -sS -D bench/tmp/acc.h -o bench/tmp/acc.b -w '%{http_code}' -H 'Host: access.test' $A/admin/) $(grep -i '^cache-control:' bench/tmp/acc.h | tr -d '\r' | cut -d' ' -f2) $(grep -q '127\.0\.0\.1' bench/tmp/acc.b && grep -qi '^content-type: text/html' bench/tmp/acc.h && echo yes)"
 check "access: other spellings of a restricted path are refused: dot segments, a ;parameter segment (Tomcat reads ..; as ..), a double-encoded name, the path after a script (PATH_INFO)" "403 403 403 403" "$(ah $A/sub/../admin/) $(ah "$A/sub/..;/admin/") $(ah $A/%2561dmin/) $(ah $A/index.php/admin)"
 check "access: behind a trusted proxy the forwarded client decides" "200 403" "$(ah -H 'X-Forwarded-For: 203.0.113.5' $A/index.html) $(ah $A/index.html)"
+# An exact rule on an index file holds at its directory too (alpha.55): "/" would answer with
+# /index.html, so the index is routed as a request for it and the rule judges the client, as
+# nginx's internal redirect to the index re-matches location = /index.html. Before, "/" served it.
+check "access: a rule on a directory's index file holds when the directory is asked for: refused outside it, served inside it" "403 200 403" "$(ah $A/) $(ah -H 'X-Forwarded-For: 203.0.113.5' $A/) $(ah $A/index.html)"
 check "access: report mode serves and logs the refusal it would have made" "404 yes" "$(sleep 1.1; ah $A/report/x) $(sleep 1.2; grep -q 'access would refuse: .*rule /report' bench/tmp/error.log && echo yes)"
 check "access: a refusal is logged with the rule and the address tested" "yes" "$(grep -q 'access refused: .*access.test.*rule /admin.*127\.0\.0\.1' bench/tmp/error.log && echo yes)"
 check "access: HTTP/2 refuses the same way" "403 200" "$(command curl -sS --http2-prior-knowledge -o /dev/null -w '%{http_code}' -H 'Host: access.test' $A/admin/) $(command curl -sS --http2-prior-knowledge -o /dev/null -w '%{http_code}' -H 'Host: access.test' $A/sub/)"
@@ -1169,8 +1173,8 @@ check "access: report mode names every client it would refuse once a minute, not
 RF=http://127.0.0.1:8105
 check "refuse: what the patterns name is 404 (a directory from the root, an ending anywhere, '*' within one segment, a directory name anywhere), whatever exists" "404 404 404 404 404" "$(code $RF/vendor/autoload.php) $(code $RF/config/sites/main/config.yaml) $(code $RF/ext/news/Resources/Private/Templates/t.html) $(code $RF/fileadmin/_recycler_/old.jpg) $(code $RF/vendor/)"
 check "refuse: none of those leaked a byte; their neighbours are served" "0 200 200 200 200" "$(curl -sS $RF/vendor/autoload.php $RF/config/sites/main/config.yaml $RF/ext/news/Resources/Private/Templates/t.html $RF/fileadmin/_recycler_/old.jpg $RF/docs/ $RF/docs/index.html | grep -c 'REFUSE-CANARY') $(code $RF/) $(code $RF/ext/news/Resources/Public/Css/n.css) $(code $RF/fileadmin/photo.jpg) $(code $RF/docs/guide.html)"
-check "refuse: a directory whose index file is refused answers 404 at its own URL too, never the index" "404 404" "$(code $RF/docs/) $(code $RF/docs/index.html)"
-check "refuse: path-check names the deciding pattern, the file a path serves, and a refused index through its directory" "404: /ext/news/Resources/Private/Templates/t.html is refused by the site's refuse pattern '/ext/*/Resources/Private/'|200: the file $ROOT/tests/refuse/fileadmin/photo.jpg (location / (prefix, static))|refused 404" "$("$BIN" ctl path-check refuse.test /ext/news/Resources/Private/Templates/t.html --socket $CS | head -1)|$("$BIN" ctl path-check refuse.test /fileadmin/photo.jpg --socket $CS | head -1)|$(curl -sS --unix-socket $CS 'http://control/v1/sites/refuse.test/path?path=/docs/' | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["decision"], d["status"])')"
+check "refuse: a directory whose only index file is refused has no index: 403 like any directory without one (no try_files here), never the index; the index by name is 404" "403 404 0" "$(code $RF/docs/) $(code $RF/docs/index.html) $(curl -sS $RF/docs/ | grep -c 'REFUSE-CANARY')"
+check "refuse: path-check names the deciding pattern, the file a path serves, and a directory whose only index is refused" "404: /ext/news/Resources/Private/Templates/t.html is refused by the site's refuse pattern '/ext/*/Resources/Private/'|200: the file $ROOT/tests/refuse/fileadmin/photo.jpg (location / (prefix, static))|forbidden 403" "$("$BIN" ctl path-check refuse.test /ext/news/Resources/Private/Templates/t.html --socket $CS | head -1)|$("$BIN" ctl path-check refuse.test /fileadmin/photo.jpg --socket $CS | head -1)|$(curl -sS --unix-socket $CS 'http://control/v1/sites/refuse.test/path?path=/docs/' | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["decision"], d["status"])')"
 printf '[[site]]\nlisten = ["127.0.0.1:18105"]\nroot = "%s/tests/refuse"\nrefuse = ["*.html"]\n' "$ROOT" > bench/tmp/refuse-conflict.toml
 check "refuse: -t refuses a pattern that would refuse what the site serves, naming both; --explain lists the patterns" "1 yes yes" "$("$BIN" -t -c bench/tmp/refuse-conflict.toml > bench/tmp/refuse-t.out 2>&1; echo -n $?) $(grep -q "'\*.html' refuses /index.html" bench/tmp/refuse-t.out && echo yes) $(grep -q 'refuse = \["/vendor/", "\*.yaml", "/ext/\*/Resources/Private/", "_recycler_/", "/docs/index.html"\]' <<< "$("$BIN" -t --explain -c bench/tmp/agensio-test.toml 2>/dev/null)" && echo yes)"
 
@@ -1222,8 +1226,8 @@ if [ -n "$PHPFPM" ]; then
   # path_check after; then real requests. tests/typo3 is a classic install with a canary in every
   # file the documentation denies and PHP of an extension that must never run.
   cpost /v1/sites "{\"domain\":\"typo3.test\",\"https\":\"none\",\"user\":null,\"app\":\"php\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"root\":\"$ROOT/tests/typo3\",\"listen_plain\":\"127.0.0.1:8096\",\"confirm\":true,\"reason\":\"typo3\"}" > /dev/null
-  check "typo3: configured from its documentation through MCP: path_check shows the denied files served before, site_update (dry run, then applied) renders the rules, path_check names the deciding pattern after; no canary leaks, no extension PHP runs, the front page, backend, install tool and public assets still work" \
-    "ro static static applied refused:12 runs:3 static:4 404:13 leaks:0 front backend route install css" "$(python3 - "$BIN" "$CS" <<'PYT'
+  check "typo3: configured from its documentation through MCP: path_check shows the denied files served before, site_update (dry run, then applied) renders the rules, path_check names the deciding pattern after; no canary leaks, no extension PHP runs, the deprecated typo3/index.php neither runs nor answers, /typo3/ reaches the front controller as TYPO3 13 documents, the install tool and public assets still work" \
+    "ro static static applied refused:12 runs:3 static:4 404:14 leaks:0 front backend route install css" "$(python3 - "$BIN" "$CS" <<'PYT'
 import json, subprocess, sys, urllib.request, urllib.error
 p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 seq = [0]
@@ -1257,7 +1261,9 @@ refuse = ["composer.json", "composer.lock", "flexform*.xml", "locallang*.xml", "
 for root in ("/typo3conf/ext", "/typo3/sysext", "/typo3/ext"):
     for d in ("Configuration", "Resources/Private", "Tests", "Test", "docs", "doc"):
         refuse.append(root + "/*/" + d + "/")
-rules = {"entry_points": ["/index.php", "/typo3/index.php", "/typo3/install.php"], "front_controller": "/index.php", "refuse": refuse}
+# TYPO3 13 sends the backend through /index.php (Deprecation #87889): typo3/index.php is not an
+# entry point, so /typo3/ passes over it as a refused index and reaches the front controller.
+rules = {"entry_points": ["/index.php", "/typo3/install.php"], "front_controller": "/index.php", "refuse": refuse}
 _, dry_error = call("site_update", {"name": "typo3.test", "rules": rules, "dry_run": True, "confirm": True, "reason": "typo3 dry"})
 out.append(check(probe).get("decision", "-") if not dry_error else "dry-error")
 applied, error = call("site_update", {"name": "typo3.test", "rules": rules, "confirm": True, "reason": "typo3 rules"})
@@ -1275,11 +1281,11 @@ out.append("runs:%d" % sum(1 for d in runs if d.get("decision") == "runs"))
 static = [check(x) for x in ("/typo3conf/ext/news/Resources/Public/Css/news.css", "/typo3/sysext/core/Resources/Public/Icons/x.svg",
                               "/fileadmin/user_upload/photo.jpg", "/typo3temp/assets/css/x.css")]
 out.append("static:%d" % sum(1 for d in static if d.get("decision") == "static"))
-denied = refused + ["/typo3conf/ext/news/Classes/Controller/NewsController.php"]
+denied = refused + ["/typo3conf/ext/news/Classes/Controller/NewsController.php", "/typo3/index.php"]
 answers = [get(x) for x in denied]
 out.append("404:%d" % sum(1 for c, _ in answers if c == 404))
-out.append("leaks:%d" % sum(1 for _, b in answers if "TYPO3-CANARY" in b))
-words = {"/": "typo3 front /", "/typo3/": "typo3 backend", "/typo3/module/web/layout": "typo3 front /typo3/module/web/layout", "/typo3/install.php": "typo3 install tool"}
+out.append("leaks:%d" % sum(1 for _, b in answers if "TYPO3-CANARY" in b or "typo3 backend" in b))
+words = {"/": "typo3 front /", "/typo3/": "typo3 front /typo3/", "/typo3/module/web/layout": "typo3 front /typo3/module/web/layout", "/typo3/install.php": "typo3 install tool"}
 names = {"/": "front", "/typo3/": "backend", "/typo3/module/web/layout": "route", "/typo3/install.php": "install"}
 for path, want in words.items():
     code, body = get(path)
@@ -1523,21 +1529,25 @@ import json,sys
 f=[x for x in json.load(sys.stdin)["findings"] if x["code"]=="archives_in_root"]
 print(",".join(sorted(x["site"] for x in f)), f[0]["message"].split(" ")[0] if f else "-", "yes" if f and "tests/grav/backup/default_site_backup--20260923-101010.zip (0 KB)" in f[0]["message"] else f, "yes" if f and f[0]["fix"].startswith("move backups and dumps out of the document root") else "no")')"
   check "control: site-create on a directory holding another application warns, names the marker and the app to use" "yes" "$(cpost /v1/sites "{\"domain\":\"gravwarn.test\",\"https\":\"none\",\"user\":null,\"app\":\"wordpress\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"root\":\"$ROOT/tests/grav\",\"listen_plain\":\"127.0.0.1:8093\",\"dry_run\":true,\"confirm\":true}" > /dev/null; grep -q '"warnings":\["the files under [^"]*tests/grav look like grav (bin/grav and system/defines.php), not wordpress: the wordpress preset.s refusals do not fit them (health reports it as preset_mismatch); use app: grav"' bench/tmp/ctl-reply.json && echo yes || cat bench/tmp/ctl-reply.json)"
-  # A directory's index file is decided as a request for it by name is (alpha.53 report: on the
-  # drupal preset /sub/ served sub/index.php as source, application/octet-stream, while
-  # /sub/index.php was 404; a TYPO3 tree on it served typo3/index.php at /typo3/). Every preset
-  # with a script rule, twice so a cached answer is held too: refused both ways and never a byte
-  # of source; WordPress, where every .php runs, runs it.
+  # A directory's index file is one the site would answer by name (alpha.53 report: on the drupal
+  # preset /sub/ served sub/index.php as source while /sub/index.php was 404). Since alpha.55 an
+  # index the site refuses by name is passed over as if it were missing, so try_files goes on to
+  # the front controller, which answers the path (TYPO3's /typo3/ is its backend, alpha.54
+  # report). Every preset with a script rule, twice so a cached answer is held too: the
+  # application answers the directory, the refused file is 404 by name, never a byte of its
+  # source, never run; on WordPress, where every .php runs, it runs.
   idx_check() {  # url-of-the-directory directory-on-disk
     mkdir -p "$2"; printf '<?php echo "INDEX-RAN"; $db_password = "SECRET-CANARY-7731";' > "$2/index.php"
-    local out="$(code "$1/") $(code "$1/") $(code "$1/index.php") $(curl -sS "$1/" "$1/index.php" | grep -q 'SECRET-CANARY' && echo LEAK || echo no-source)"
+    local bodies="$(curl -sS "$1/" "$1/index.php")"
+    local out="$(code "$1/") $(code "$1/") $(code "$1/index.php") $(grep -q 'SECRET-CANARY' <<< "$bodies" && echo LEAK || echo no-source) $(grep -q 'INDEX-RAN' <<< "$bodies" && echo ran || echo not-run)"
     rm -f "$2/index.php"; rmdir "$2" 2>/dev/null
     echo "$out"
   }
-  check "presets: a directory's index.php that a preset refuses by name is 404 as the directory index too, never source (drupal /sub/, /modules/m/, /core/x/; laravel; grav; grav files on drupal)" \
-    "404 404 404 no-source|404 404 404 no-source|404 404 404 no-source|404 404 404 no-source|404 404 404 no-source|404 404 404 no-source" \
+  check "presets: a directory whose index.php the preset refuses by name is answered by the front controller, the file 404 by name, never shown, never run (drupal /sub/, /modules/m/, /core/x/; laravel; grav; grav files on drupal)" \
+    "200 200 404 no-source not-run|200 200 404 no-source not-run|200 200 404 no-source not-run|200 200 404 no-source not-run|200 200 404 no-source not-run|200 200 404 no-source not-run" \
     "$(idx_check $D/sub tests/drupal/web/sub)|$(idx_check $D/modules/m tests/drupal/web/modules/m)|$(idx_check $D/core/x tests/drupal/web/core/x)|$(idx_check http://127.0.0.1:8090/sub tests/laravel/public/sub)|$(idx_check $G/sub tests/grav/sub)|$(idx_check $M/sub2 tests/grav/sub2)"
-  check "presets: on wordpress, where every .php runs, a directory's index.php runs as the index and by name, never source" "200 200 200 no-source INDEX-RAN" "$(idx_check $W/sub tests/wordpress/sub) $(mkdir -p tests/wordpress/sub; printf '<?php echo "INDEX-RAN";' > tests/wordpress/sub/index.php; curl -sS $W/sub/; rm -rf tests/wordpress/sub)"
+  check "presets: the front controller is what answers a directory whose index is refused, with the path asked for (drupal, laravel)" "drupal front /modules/m/|laravel /sub/ /index.php -" "$(mkdir -p tests/drupal/web/modules/m tests/laravel/public/sub; printf '<?php echo "INDEX-RAN";' | tee tests/drupal/web/modules/m/index.php > tests/laravel/public/sub/index.php; curl -sS $D/modules/m/; echo -n '|'; curl -sS http://127.0.0.1:8090/sub/; rm -rf tests/drupal/web/modules/m tests/laravel/public/sub)"
+  check "presets: on wordpress, where every .php runs, a directory's index.php runs as the index and by name, never source" "200 200 200 no-source ran" "$(idx_check $W/sub tests/wordpress/sub)"
 fi
 
 # ---- kept origin connections are closed after idle_timeout (1 s on proxy.test) by the pool tick ----

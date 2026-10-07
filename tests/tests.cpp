@@ -5590,12 +5590,16 @@ static void test_refuse_config() {
 static void test_path_check() {
     namespace fs = std::filesystem;
     const fs::path dir = fs::temp_directory_path() / ("agensio-pathcheck-" + std::to_string(::getpid()));
-    for (const char* d : {"www/vendor", "www/docs", "www/sub", "www/app"}) fs::create_directories(dir / d);
-    for (const char* f : {"www/index.html", "www/vendor/autoload.php", "www/docs/index.html", "www/docs/guide.html", "www/a.yaml", "www/app/shell.html"})
+    for (const char* d : {"www/vendor", "www/docs", "www/sub", "www/app", "www/spa/area", "www/spa/php"}) fs::create_directories(dir / d);
+    for (const char* f : {"www/index.html", "www/vendor/autoload.php", "www/docs/index.html", "www/docs/guide.html", "www/a.yaml", "www/app/shell.html",
+                          "www/spa/shell.html", "www/spa/area/index.html", "www/spa/php/index.php"})
         std::ofstream(dir / f) << "x";
     std::ofstream(dir / "p.toml") << "[[site]]\nserver_name = [\"p.test\"]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n"
-                                     "try_files = [\"$uri\", \"$uri/\", \"=404\"]\nrefuse = [\"/vendor/\", \"*.yaml\", \"/docs/index.html\"]\n"
-                                     "[[site.location]]\npath = \"/app/\"\ntry_files = [\"$uri\", \"/app/shell.html\"]\n";
+                                     "index = [\"index.php\", \"index.html\"]\n"
+                                     "try_files = [\"$uri\", \"$uri/\", \"=404\"]\nrefuse = [\"/vendor/\", \"*.yaml\", \"/docs/index.html\", \"/spa/area/index.html\"]\n"
+                                     "[[site.location]]\npath = \"/app/\"\ntry_files = [\"$uri\", \"/app/shell.html\"]\n"
+                                     "[[site.location]]\npath = \"/spa/\"\ntry_files = [\"$uri\", \"$uri/\", \"/spa/shell.html\"]\n"
+                                     "[[site.location]]\npath = \".php\"\nmatch = \"suffix\"\nhandler = \"deny\"\n";
     const Config cfg = load_config(dir / "p.toml");
     const SiteConfig& site = cfg.sites[0];
     auto check = [&](const char* path) {
@@ -5612,7 +5616,15 @@ static void test_path_check() {
     CHECK(std::string(control::path_check(cfg, site, "/index.html", error).get("file")).ends_with("/www/index.html"));
     CHECK_EQ(check("/"), std::string("static 200"));
     CHECK_EQ(check("/docs/guide.html"), std::string("static 200"));
-    CHECK_EQ(check("/docs/"), std::string("refused 404"));  // its index is decided as a request for it
+    // A directory's index the site refuses by name is passed over as if missing (alpha.55): try_files
+    // goes on, to =404 here, to the fallback below; the index is never the answer.
+    CHECK_EQ(check("/docs/"), std::string("not_found 404"));
+    CHECK_EQ(check("/spa/area/"), std::string("static 200"));  // refused by a pattern: the fallback answers
+    CHECK(std::string(control::path_check(cfg, site, "/spa/area/", error).get("file")).ends_with("/www/spa/shell.html"));
+    CHECK_EQ(check("/spa/php/"), std::string("static 200"));  // owned by a deny location: the same
+    CHECK_EQ(check("/spa/php/index.php"), std::string("not_found 404"));
+    const json::Value passed = control::path_check(cfg, site, "/spa/php/", error);
+    CHECK(passed.dump().find("passed over") != std::string::npos);
     CHECK_EQ(check("/sub"), std::string("redirect 301"));
     CHECK_EQ(check("/sub/"), std::string("not_found 404"));
     CHECK_EQ(check("/missing"), std::string("not_found 404"));

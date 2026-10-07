@@ -15,6 +15,7 @@
 #include "core/stream.hpp"
 #include "core/worker_state.hpp"
 #include "file.hpp"
+#include "core/refuse.hpp"
 #include "handlers/encoding.hpp"
 #include "path.hpp"
 
@@ -97,6 +98,18 @@ inline bool refused_by_name(const LocationConfig& loc, std::string_view path) no
     return (!loc.hidden_files && has_hidden_segment(path)) || (!loc.deny_suffixes.empty() && refused_suffix(path, loc.deny_suffixes)) ||
            (!loc.allow_suffixes.empty() && !refused_suffix(path, loc.allow_suffixes)) ||
            (!loc.protects.empty() && backup_of_protected(path, loc.protects));
+}
+
+// Whether a GET for `path` by name would be refused before anything is read or run: the site's
+// refuse patterns, a location that answers 404 whatever exists (handler = "deny"), the refusals
+// by name of the static location that owns the path, or the refused endings the dispatcher
+// applies to another handler's. A directory's index this says is refused is passed over as if
+// it were missing (alpha.55), so the index is never served or run and try_files goes on, to the
+// front controller where there is one.
+inline bool refused_request(const SiteConfig& site, const LocationConfig& owner, std::string_view path) noexcept {
+    if (!site.refuse.empty() && refuse::match(site.refuse, path)) return true;
+    if (owner.kind == HandlerKind::static_) return owner.handler == "deny" || refused_by_name(owner, path);
+    return !owner.deny_suffixes.empty() && refused_suffix(path, owner.deny_suffixes);
 }
 
 class StaticHandler {

@@ -318,9 +318,11 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   `.php` runs, `wp-content/uploads` and `wp-includes` are `final` prefix locations, nginx
   `^~`, with `deny_suffixes` so PHP there is 404 and never executed); hand-written
   locations win over the preset's (one that sets only `add_headers` joins it instead); a
-  directory's index file is decided as a request for it by name (`refused_by_name` in
-  `handlers/static.hpp`: another location's index is routed there, a refused one is 404;
-  before alpha.54 `/sub/` served `sub/index.php` as source on drupal, laravel and grav). `agensio -t --explain` prints the effective configuration;
+  directory's index is a file the site would answer by name (`refused_request` in
+  `handlers/static.hpp`, shared with `path_check`): another location's index is routed there, a
+  refused one is passed over as if missing so `try_files` goes on to the front controller
+  (alpha.55; TYPO3 13's `/typo3/` reaches `/index.php`); before alpha.54 `/sub/` served
+  `sub/index.php` as source on drupal, laravel and grav. `agensio -t --explain` prints the effective configuration;
   `docs/configuration.md` documents each preset's expansion and every option (keep it
   current when a key or preset changes);
   `-t` connects to every FastCGI upstream once and warns, with the reason, if it cannot.

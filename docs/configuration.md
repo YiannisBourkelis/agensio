@@ -62,11 +62,23 @@ redirect, routed again through the locations; a `?$query_string` suffix is accep
 ignored for static files). Without `try_files` the rule is: file, directory index (403 if
 there is none), 301 to the slash form for a directory, else 404.
 
-A directory's index file is answered as a request for it by name would be: when another
-location owns that path (a `.php` that runs) it runs there, and when the location refuses it
-by name (a refused ending, a dotfile, a protected name) the directory gets the same 404. So
-on a preset where only some scripts run, `/sub/` never serves `sub/index.php` as a file
-(before alpha.54 the drupal, laravel and grav presets did, while `/sub/index.php` was 404).
+A directory's index is a file the site would answer by name. When another location owns it
+(a `.php` that runs) it runs there. When the site refuses it by name (a `refuse` pattern, a
+`deny` location, a refused ending, a dotfile, a backup of a protected name) it is passed over
+as if it were missing: the next index name is tried, then `try_files` goes on to its next step,
+the front controller where there is one, else `=404`, or 403 for a directory without an index
+when there is no `try_files`. A refused index is never served and never run. So on a preset
+where only some scripts run, `/sub/` holding a stray `index.php` is answered by the application,
+and TYPO3 13's `/typo3/` reaches `/index.php` as its documentation routes it, without listing
+the deprecated `typo3/index.php` (alpha.55; alpha.54 answered 404 there, and before alpha.54
+the drupal, laravel and grav presets served `sub/index.php` as a file).
+
+nginx (`index`, `try_files $uri/`), Apache (`DirectoryIndex`) and Caddy (`php_fastcgi`'s
+`{path}/index.php`) choose an index by existence alone and leave the refusal to a later rule,
+which answers 403 or, in a configuration that runs only `/index.php`, can hand the file out as
+text; their documented configurations special-case such directories by hand (TYPO3's `location
+/typo3/` without `$uri/`, a rewrite without `!-d`). Here the choice and the refusal are one
+decision, and `path-check` (section 15) shows it.
 
 **Encoded separators.** A request whose path spells a slash or a backslash as a percent
 escape (`%2F`, `%5C`, in either case) is answered 404 by every location that resolves paths
@@ -1695,8 +1707,9 @@ by a denying one). `cache` (PHP and static sites) names directories served strai
 disk with `Cache-Control: public, max-age=N` (0 to a year), where nothing runs and no
 source backup is served (`deny_suffixes` = the PHP endings plus `.inc`, `.bak`, `~`,
 `.log`, `.sql`, `.sqlite`, `.sqlite3`, `.db`). `front_controller` (one of
-`entry_points`) makes a missing path reach that script with the query string (Kanboard's
-nice URLs). Every rule only narrows what the bare preset serves: a path under a private
+`entry_points`) makes a path the site has nothing to serve for (no file, and no directory
+with an index it serves: a directory whose `index.php` is not an entry point included) reach
+that script with the query string (Kanboard's nice URLs, TYPO3's `/typo3/`). Every rule only narrows what the bare preset serves: a path under a private
 one cannot be an entry point or cached, at most 64 private paths, 16 entry points and 16
 cached directories, a path is `/`-rooted plain characters without `..`, and `/` itself is
 refused. `rules` replaces the whole object (`{}` clears it); a later `app` change the rules
@@ -2437,7 +2450,8 @@ match = "exact"                  # this path alone
 allow = ["@office", "@vpn"]
 ```
 
-**What a rule covers.** A prefix rule covers its path and everything below it on a segment
+**What a rule covers.** A rule on a directory's index file holds at the directory too: `/`
+answering with `/index.html` is judged as a request for `/index.html` (alpha.55). A prefix rule covers its path and everything below it on a segment
 boundary, in any capitalisation (some filesystems and applications answer `/WP-ADMIN/` with
 `/wp-admin/`); `match = "exact"` covers the path alone; `path = "/"` covers the whole site. The
 longest rule that covers a path decides, and rules never merge: `allow = ["any"]` on a longer

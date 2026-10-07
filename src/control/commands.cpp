@@ -632,13 +632,24 @@ json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_vi
         if (!loc.protects.empty() && backup_of_protected(path, loc.protects))
             return finish("refused", 404, "404: " + path + " is a backup spelling of a name the site never serves");
         const bool dir_uri = path.back() == '/';
-        // The index of a directory: found here, or routed again as a request for it by name.
+        // The index of a directory, as StaticHandler::index_lookup decides it: one the site
+        // refuses by name is passed over as if missing; another location's is routed there.
         auto index_of = [&](std::string& file) -> int {
             for (const auto& i : loc.index) {
                 const std::string candidate = path + i;
                 if (!stat_is(fs_of(candidate), false)) continue;
-                if (&Router::location(site, candidate) != &loc || refused_by_name(loc, candidate) || refuse::match(site.refuse, candidate)) {
-                    steps.push(path + ": its index " + i + " is decided as a request for " + candidate);
+                const LocationConfig& owner = Router::location(site, candidate);
+                if (refused_request(site, owner, candidate)) {
+                    steps.push(path + ": its index " + i + " exists but the site refuses it by name, so it is passed over as if missing");
+                    continue;
+                }
+                if (&owner != &loc) {
+                    steps.push(path + ": its index " + i + " belongs to " + describe(owner) + ", routed there");
+                    path = candidate;
+                    return 2;
+                }
+                if (!site.access.empty() && access::rule_for(site, candidate) != access::rule_for(site, path)) {
+                    steps.push(path + ": another access rule decides its index " + i + ", so it is routed as a request for " + candidate);
                     path = candidate;
                     return 2;
                 }
