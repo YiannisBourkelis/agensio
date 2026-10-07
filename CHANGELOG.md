@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.53
+## 0.1.0-alpha.53 (2026-10-07)
 
 From the alpha.52 report (a live host and a private instance: the client-address fixes and the
 access rules confirmed, twenty spellings of a restricted path refused, report mode and the
