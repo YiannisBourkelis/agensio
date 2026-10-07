@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.51
+## 0.1.0-alpha.51 (2026-10-07)
 
 `docs/mariadb.md`: a short guide for the administrator who installs MariaDB on the same
 Debian 13 VPS as agensio, from MariaDB's Knowledge Base and Debian's package notes: what the
