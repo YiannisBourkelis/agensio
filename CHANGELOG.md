@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.52
+## 0.1.0-alpha.52 (2026-10-07)
 
 Three bugs in how agensio decides who the client is, found by the research behind the coming
 access-by-address feature (`reports/Web server IP access control.md`). Each was reproduced by
