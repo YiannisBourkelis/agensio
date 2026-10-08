@@ -13,6 +13,9 @@
 #include "services/pools.hpp"
 #include "services/provision.hpp"
 #include "services/appenv.hpp"
+#ifdef AGENSIO_HAS_AUTH
+#include "services/authusers.hpp"
+#endif
 #include "services/tasks.hpp"
 
 #ifndef _WIN32
@@ -1351,6 +1354,39 @@ void Server::env_async(const json::Value& req, std::function<void(json::Value)> 
         }
         asio::post(workers_[0]->ctx, [done, r] { done(r); });
     }).detach();
+}
+
+void Server::auth_users_async(const json::Value& req, std::function<void(json::Value)> done) {
+#ifdef AGENSIO_HAS_AUTH
+    // Whether a rule reads the file is the running configuration's to say, here on worker 0; the
+    // helper works it out again from the configuration on disk.
+    const bool keep_one = authusers::used_by(running(), authusers::file_of(authusers::dir_of(cfg_.config_path), req.get("site")));
+    std::thread([this, req, keep_one, done = std::move(done)] {
+        json::Value r;
+        if (provisioner_.available()) {
+            r = provisioner_.request(req);
+        } else {
+#ifndef _WIN32
+            // Without the helper the file is this account's own, in the same directory: a server
+            // that runs every site as itself (a developer's machine, the suites).
+            const std::string dir = authusers::dir_of(cfg_.config_path), site(req.get("site"));
+            if (req.get("op") == "auth_users_read") {
+                r = authusers::describe(dir, site, ::geteuid(), std::time(nullptr));
+            } else {
+                authusers::Change change;
+                const std::string bad = authusers::parse_change(req, change);
+                r = bad.empty() ? authusers::apply(dir, site, ::geteuid(), ::getegid(), change, keep_one) : json::Value::object().set("ok", false).set("error", bad);
+            }
+#else
+            r = json::Value::object().set("ok", false).set("error", "not available on this platform");
+#endif
+        }
+        asio::post(workers_[0]->ctx, [done, r] { done(r); });
+    }).detach();
+#else
+    (void)req;
+    done(json::Value::object().set("ok", false).set("error", "this build has no password support (it needs libxcrypt and OpenSSL)"));
+#endif
 }
 
 void Server::provision_async(const json::Value& req, std::function<void(json::Value)> done) {

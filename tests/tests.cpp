@@ -73,6 +73,7 @@
 #ifdef AGENSIO_HAS_AUTH
 #include <crypt.h>
 #include "core/auth.hpp"
+#include "services/authusers.hpp"
 #endif
 #include "path.hpp"
 #include "services/log.hpp"
@@ -5944,6 +5945,168 @@ static void test_auth_config() {
     CHECK(opened == 4);
     fs::remove_all(dir);
 }
+
+// A managed site's users file (2026-10-09, design section 25, step 4b): the change the control API
+// and the helper take, the generated password, the file's lines, and apply/describe as this
+// account in a directory of its own (the helper does the same as root; tests/provision.sh).
+static void test_auth_users() {
+    namespace fs = std::filesystem;
+    using json::Value;
+    // The names and hashes a caller may bring.
+    CHECK(authusers::check_user("anna").empty() && authusers::check_user("anna.b@acme.example").empty() && authusers::check_user("a+b_c-d").empty() &&
+          authusers::check_user("Z9").empty());
+    for (const std::string bad : {std::string(), std::string("-x"), std::string(".x"), std::string("a:b"), std::string("a b"), std::string(65, 'a'), std::string("\xc3\xa4"),
+                                  std::string("a\nb"), std::string("a/b")})
+        CHECK(!authusers::check_user(bad).empty());
+    const std::string yes = auth_hash("$y$", 0, "secret"), bc = auth_hash("$2b$", 4, "pw");
+    CHECK(authusers::check_hash(yes).empty() && authusers::check_hash(bc).empty());
+    CHECK(!authusers::check_hash("").empty() && !authusers::check_hash("$apr1$abc$def").empty() && !authusers::check_hash("{SHA}abc=").empty() &&
+          !authusers::check_hash("!" + yes).empty() && !authusers::check_hash("*").empty() && !authusers::check_hash(yes + ":x").empty() &&
+          !authusers::check_hash(yes + " ").empty() && !authusers::check_hash(std::string(256, 'a')).empty() && !authusers::check_hash("plain").empty());
+    // The change: one user, set or delete; a password is never a field.
+    auto change = [](const char* text, authusers::Change& c) {
+        Value v;
+        std::string err;
+        if (!json::parse(text, v, err)) return std::string("bad json");
+        return authusers::parse_change(v, c);
+    };
+    {
+        authusers::Change c;
+        CHECK(change(R"({"user": "anna", "generate": true, "expires": "2026-10-22", "note": "Anna, Acme: review", "confirm": true, "reason": "x"})", c).empty() &&
+              c.user == "anna" && c.generate && c.hash.empty() && !c.remove && c.expires && *c.expires == "2026-10-22" && c.note && *c.note == "Anna, Acme: review" && !c.locked);
+        CHECK(change(R"({"op": "auth_users_write", "site": "a.test", "user": "anna", "delete": true})", c).empty() && c.remove);
+        CHECK(change(R"({"user": "anna", "locked": true})", c).empty() && c.locked && *c.locked && !c.generate);
+        CHECK(change(R"({"user": "anna", "expires": "", "note": ""})", c).empty() && c.expires && c.expires->empty() && c.note && c.note->empty());
+        CHECK(change(("{\"user\": \"bob\", \"hash\": \"" + bc + "\"}").c_str(), c).empty() && c.hash == bc);
+        CHECK(change(R"({"user": "anna", "password": "secret"})", c).find("--prompt") != std::string::npos);  // never sent
+        CHECK(change(R"({"user": "anna", "generate": true, "colour": 1})", c).find("unknown key 'colour'") != std::string::npos);
+        CHECK(!change(R"({"user": "anna", "delete": true, "generate": true})", c).empty());
+        CHECK(!change(("{\"user\": \"anna\", \"generate\": true, \"hash\": \"" + bc + "\"}").c_str(), c).empty());
+        CHECK(!change(R"({"user": "anna", "expires": "2026-13-01"})", c).empty() && !change(R"({"user": "anna", "expires": "2026-02-30"})", c).empty() &&
+              !change(R"({"user": "anna", "expires": "22-10-2026"})", c).empty());
+        CHECK(!change(R"({"user": "anna", "note": "a\nb"})", c).empty() && !change(("{\"user\": \"anna\", \"note\": \"" + std::string(201, 'n') + "\"}").c_str(), c).empty());
+        CHECK(change(R"({"user": "anna"})", c).find("nothing to change") != std::string::npos);
+        CHECK(!change(R"({"generate": true})", c).empty() && !change(R"({"user": "a:b", "generate": true})", c).empty() && !change(R"({"user": "anna", "generate": "yes"})", c).empty());
+    }
+    // The generated password: four groups of four from 32 characters that do not look alike.
+    {
+        std::set<std::string> seen;
+        std::set<char> chars;
+        bool shape = true;
+        for (int i = 0; i < 300; ++i) {
+            const std::string p = authusers::generate_password();
+            shape = shape && p.size() == 19 && p[4] == '-' && p[9] == '-' && p[14] == '-';
+            for (std::size_t j = 0; j < p.size(); ++j)
+                if (j % 5 != 4) chars.insert(p[j]);
+            seen.insert(p);
+        }
+        CHECK(shape && seen.size() == 300 && chars.size() == 32);
+        for (const char c : {'0', '1', 'l', 'o', 'O', 'I'}) CHECK(!chars.count(c));
+    }
+    CHECK(authusers::method_of(yes) == "yescrypt" && authusers::method_of(bc) == "bcrypt" && authusers::method_of("$6$x$y") == "sha512crypt" &&
+          authusers::method_of("$5$x$y") == "sha256crypt" && authusers::method_of("$7$x") == "scrypt" && authusers::method_of("!" + yes) == "yescrypt" &&
+          authusers::method_of("!").empty() && authusers::method_of("*").empty());
+    // The lines read back as written: expiry and a note with colons.
+    {
+        std::vector<auth::User> in(2), out;
+        in[0].name = "anna", in[0].hash = yes, in[0].expires = 1792627200, in[0].note = "Anna, Acme: review";  // 2026-10-22
+        in[1].name = "bob", in[1].hash = "!" + bc, in[1].locked = true;
+        const std::string text = authusers::render(in, "shop.test");
+        CHECK(text.starts_with("# ") && text.find("anna:" + yes + ":expires=2026-10-22:note=Anna, Acme: review\n") != std::string::npos &&
+              text.find("\nbob:!" + bc + "\n") != std::string::npos);
+        CHECK(auth::parse_users(text, out).empty() && out.size() == 2 && out[0].expires == 1792627200 && out[0].note == "Anna, Acme: review" && out[1].locked);
+    }
+    CHECK(authusers::dir_of("/etc/agensio/agensio.toml") == "/etc/agensio/auth" && authusers::file_of("/etc/agensio/auth", "shop.test") == "/etc/agensio/auth/shop.test.users");
+    // apply and describe as this account, in a directory of its own.
+    const fs::path base = fs::temp_directory_path() / ("agensio-authusers-" + std::to_string(::getpid()));
+    fs::remove_all(base);
+    fs::create_directories(base);
+    const std::string dir = (base / "auth").string(), file = dir + "/shop.test.users";
+    const unsigned uid = ::geteuid(), gid = ::getegid();
+    const std::int64_t now = 1791000000;  // 2026-10-03
+    auto apply = [&](const char* text, bool keep_one = false) {
+        authusers::Change c;
+        Value v;
+        std::string err;
+        json::parse(text, v, err);
+        const std::string bad = authusers::parse_change(v, c);
+        return bad.empty() ? authusers::apply(dir, "shop.test", uid, gid, c, keep_one) : Value::object().set("ok", false).set("error", bad);
+    };
+    auto stored = [&](const std::string& name) {
+        std::ifstream f(file);
+        const std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        std::vector<auth::User> users;
+        auth::parse_users(text, users);
+        for (const auto& u : users)
+            if (u.name == name) return u;
+        return auth::User{};
+    };
+    {
+        const Value d = authusers::describe(dir, "shop.test", uid, now);
+        CHECK(d["ok"].boolean() && !d["exists"].boolean() && d["users"].items().empty() && d.get("file") == file);
+    }
+    std::string first;
+    {
+        const Value r = apply(R"({"user": "anna", "generate": true, "expires": "2026-10-22", "note": "Anna, Acme"})");
+        first = std::string(r.get("password"));
+        struct stat sf {}, sd {};
+        CHECK(r["ok"].boolean() && r.get("action") == "created" && first.size() == 19 && r.get("file") == file && r["users"].num() == 1);
+        CHECK(::stat(file.c_str(), &sf) == 0 && (sf.st_mode & 0777) == 0640 && sf.st_uid == uid && ::stat(dir.c_str(), &sd) == 0 && (sd.st_mode & 0777) == 0750);
+        const auth::User u = stored("anna");
+        CHECK(authusers::method_of(u.hash) == "yescrypt" && auth::verify(first, u.hash) && u.expires == 1792627200 && u.note == "Anna, Acme" && !u.locked);
+        CHECK(!fs::exists(file + ".tmp"));
+    }
+    {
+        const Value r = apply(("{\"user\": \"bob\", \"hash\": \"" + bc + "\"}").c_str());
+        CHECK(r["ok"].boolean() && r.get("action") == "created" && r["password"].is_null() && stored("bob").hash == bc);
+        const Value d = authusers::describe(dir, "shop.test", uid, now);
+        const std::string dump = d.dump();
+        CHECK(d["exists"].boolean() && d["users"].items().size() == 2 && d["users"].items()[0].get("name") == "anna" && d["users"].items()[0].get("method") == "yescrypt" &&
+              d["users"].items()[0].get("expires") == "2026-10-22" && !d["users"].items()[0]["expired"].boolean() && d["users"].items()[0].get("note") == "Anna, Acme" &&
+              d["users"].items()[1].get("method") == "bcrypt" && d["users"].items()[1]["expires"].is_null() && dump.find("$y$") == std::string::npos &&
+              dump.find("$2b$") == std::string::npos);
+    }
+    {   // a lock keeps the hash behind a '!', an unlock gives it back; a new password unlocks
+        const std::string before = stored("bob").hash;
+        CHECK(apply(R"({"user": "bob", "locked": true})")["ok"].boolean() && stored("bob").locked && stored("bob").hash == "!" + before &&
+              authusers::describe(dir, "shop.test", uid, now)["users"].items()[1]["locked"].boolean());
+        CHECK(apply(R"({"user": "bob", "locked": true})").get("action") == "unchanged");
+        CHECK(apply(R"({"user": "bob", "locked": false})")["ok"].boolean() && stored("bob").hash == before && !stored("bob").locked);
+        CHECK(apply(R"({"user": "anna", "note": "", "expires": "2020-01-01"})")["ok"].boolean() && stored("anna").note.empty() && stored("anna").hash.starts_with("$y$") &&
+              authusers::describe(dir, "shop.test", uid, now)["users"].items()[0]["expired"].boolean());
+        const Value r = apply(R"({"user": "anna", "generate": true, "expires": ""})");
+        CHECK(r.get("action") == "changed" && r.get("password") != first && auth::verify(std::string(r.get("password")), stored("anna").hash) &&
+              !auth::verify(first, stored("anna").hash) && stored("anna").expires == 0);
+    }
+    CHECK(apply(R"({"user": "carol", "note": "no password"})").get("error").find("a new user needs a password") != std::string_view::npos);
+    CHECK(apply(R"({"user": "carol", "delete": true})")["ok"].boolean() && apply(R"({"user": "carol", "delete": true})").get("action") == "unchanged");
+    // The last user of a file a rule uses stays (lock it, or remove the rule first); else the file goes.
+    CHECK(apply(R"({"user": "anna", "delete": true})")["ok"].boolean() && stored("bob").hash == bc);
+    CHECK(apply(R"({"user": "bob", "delete": true})", true).get("error").find("the last user") != std::string_view::npos && fs::exists(file));
+    {
+        const Value r = apply(R"({"user": "bob", "delete": true})");
+        CHECK(r["ok"].boolean() && r.get("action") == "deleted" && r.get("removed") == file && !fs::exists(file));
+    }
+    // What is refused on disk: a symlink in the file's place, a file others may write, one that does not parse.
+    fs::create_symlink(base / "target", file);
+    std::ofstream(base / "target") << "kept\n";
+    CHECK(apply(R"({"user": "anna", "generate": true})").get("error").find("symlink") != std::string_view::npos && fs::is_symlink(file));
+    {
+        std::ifstream t(base / "target");
+        std::string line;
+        std::getline(t, line);
+        CHECK(line == "kept");
+    }
+    fs::remove(file);
+    std::ofstream(file) << "anna:" << yes << "\n";
+    fs::permissions(file, fs::perms(0666));
+    CHECK(apply(R"({"user": "bob", "generate": true})").get("error").find("writable") != std::string_view::npos);
+    fs::permissions(file, fs::perms(0640));
+    std::ofstream(file) << "anna\n";
+    CHECK(apply(R"({"user": "bob", "generate": true})").get("error").find("line 1") != std::string_view::npos &&
+          !authusers::describe(dir, "shop.test", uid, now)["ok"].boolean());
+    fs::remove_all(base);
+}
 #endif
 
 static void test_access_rules() {
@@ -7276,6 +7439,7 @@ int main() {
 #ifdef AGENSIO_HAS_AUTH
     test_auth_core();
     test_auth_config();
+    test_auth_users();
 #endif
     test_refuse_patterns();
     test_refuse_config();

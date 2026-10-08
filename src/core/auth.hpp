@@ -35,6 +35,10 @@ struct User {
 // htpasswd file made with `htpasswd -B` reads as is.
 std::string parse_users(std::string_view text, std::vector<User>& out);
 
+// "YYYY-MM-DD" to 00:00 UTC of that day (from then on the user is refused); false for anything
+// else, a year before 1970 or a day the month does not have.
+bool parse_date(std::string_view text, std::int64_t& out) noexcept;
+
 // Why a stored hash is refused, with the command to make an accepted one; "" when accepted
 // (yescrypt, gost-yescrypt, scrypt, bcrypt $2b$ $2y$ $2a$, sha512crypt, sha256crypt, a lock).
 std::string refused_hash(std::string_view hash);

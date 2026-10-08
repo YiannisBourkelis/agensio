@@ -56,6 +56,12 @@ struct ControlBackend {
     // with a task for minutes), `done` on worker 0. Through the helper, whose files are
     // root's, else as this process's own account in its own directory.
     virtual void env_async(const json::Value& req, std::function<void(json::Value)> done) = 0;
+    // A managed site's password users (services/authusers.*, 2026-10-09): req.op "auth_users_read"
+    // or "auth_users_write" with the site's first host name and, for a write, the change. Off the
+    // worker (hashing a generated password takes tens of milliseconds, the helper may be busy with
+    // a task), `done` on worker 0. Through the helper, whose files are root's with the server's
+    // group, else as this process's own account in its own directory.
+    virtual void auth_users_async(const json::Value& req, std::function<void(json::Value)> done) = 0;
     // Whether a site has an environment file: 1 yes, 0 no, -1 unknown (the helper is busy
     // with a task; it is never waited for). Milliseconds, on worker 0.
     // `exposed` receives the names in it that others could read and nobody rotated.
@@ -120,6 +126,11 @@ private:
     void trash_restore(Stream& s, std::string_view entry, std::string_view what, std::function<void()> done);
     void trash_delete(Stream& s, std::string_view entry, std::string_view what, std::function<void()> done);
     void site_env_set(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> done);
+    // A managed site's password users (2026-10-09, design section 25, step 4b): the listing (names,
+    // methods, expiry, notes, locks, never a hash) and one user's change or removal, admin only,
+    // audited by user name; a change the running configuration reads reloads it.
+    void site_auth_users(Stream& s, std::string_view name, std::function<void()> done);
+    void site_auth_user_change(Stream& s, std::string_view name, const json::Value& body, bool remove, std::string_view reason, std::function<void()> done);
     void upload_receive(Stream& s, std::string_view name, std::function<void()> done);
     json::Value uploads_list();
     // The php-fpm pool after a site file changed: through the helper when there is one

@@ -27,7 +27,8 @@ std::int64_t days_from_civil(int y, unsigned m, unsigned d) noexcept {
     return static_cast<std::int64_t>(era) * 146097 + static_cast<std::int64_t>(doe) - 719468;
 }
 
-// "YYYY-MM-DD" to 00:00 UTC of that day; false for anything else or an impossible date.
+}  // namespace
+
 bool parse_date(std::string_view s, std::int64_t& out) noexcept {
     if (s.size() != 10 || s[4] != '-' || s[7] != '-') return false;
     auto num = [&](std::size_t from, std::size_t len, int& v) {
@@ -46,6 +47,8 @@ bool parse_date(std::string_view s, std::int64_t& out) noexcept {
     out = days_from_civil(y, static_cast<unsigned>(m), static_cast<unsigned>(d)) * 86400;
     return true;
 }
+
+namespace {
 
 // The characters a crypt hash is written in: the setting and the output of every accepted
 // method use these and '$' (and ',' / '=' in some parameter strings).

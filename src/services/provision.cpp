@@ -27,6 +27,9 @@
 #include "control/protection.hpp"
 #include "control/sites.hpp"
 #include "services/appenv.hpp"
+#ifdef AGENSIO_HAS_AUTH
+#include "services/authusers.hpp"
+#endif
 #include "services/archive.hpp"
 #include "services/fetch.hpp"
 #include "services/install.hpp"
@@ -175,6 +178,20 @@ std::string validate(const json::Value& req, const Config& cfg) {
             if (std::string bad = appenv::parse_change(req, change); !bad.empty()) return "env_write: " + bad;
         }
         return "";
+    }
+    if (op == "auth_users_read" || op == "auth_users_write") {
+        // A site's name, and for a write one user's change; the helper finds the site on disk,
+        // checks it is managed and names the file from the main configuration's directory.
+        if (!control::valid_domain(req.get("site"))) return op + ": site must be a site's host name";
+#ifdef AGENSIO_HAS_AUTH
+        if (op == "auth_users_write") {
+            authusers::Change change;
+            if (std::string bad = authusers::parse_change(req, change); !bad.empty()) return "auth_users_write: " + bad;
+        }
+        return "";
+#else
+        return op + ": this build has no password support";
+#endif
     }
     if (op == "app_status" || op == "app_logs") {
         // A site's name, and for the journal how much; the helper finds the site on disk and
@@ -591,6 +608,47 @@ json::Value env_op(const json::Value& req, const Config& cfg) {
     if (std::string bad = appenv::check_change_for_app(site->app, change); !bad.empty()) return fail(bad);
     return appenv::apply(dir, key, 0, change).set("site", key);
 }
+
+#ifdef AGENSIO_HAS_AUTH
+// auth_users_read and auth_users_write (2026-10-09, design section 25, step 4b): a managed site's
+// password users, the file root's with the server's group, 0640, under <config dir>/auth/ (a
+// 0750 directory of root's): the server reads it after its privilege drop, the site's account
+// neither reads nor replaces it. The site comes from the configuration on disk and must be one
+// the control plane manages; its first host name names the file, the main configuration's
+// directory holds it, and whether a rule reads it (its last user kept) is worked out here too,
+// so nothing of the path or the policy comes from the server.
+json::Value auth_users_op(const json::Value& req, const Config& cfg) {
+    auto fail = [](std::string why) { return json::Value::object().set("ok", false).set("error", std::move(why)); };
+    Config fresh;
+    try {
+        fresh = load_config(cfg.config_path);
+    } catch (const std::exception& e) {
+        return fail(std::string("the configuration on disk does not load: ") + e.what());
+    }
+    const std::string name(req.get("site"));
+    const SiteConfig* site = control::find_site(fresh, name);
+    if (!site) return fail("no site " + name + " in the configuration on disk");
+    const std::string key = site->server_names.front();
+    control::SiteSpec spec;
+    if (!control::read_managed(control::site_file(fresh, key), spec)) return fail("site " + key + " is not managed by the control plane (hand-written or edited)");
+    const std::string dir = authusers::dir_of(cfg.config_path);
+    if (req.get("op") == "auth_users_read") return authusers::describe(dir, key, 0, std::time(nullptr));
+    // The group the server runs as ([server] group, else its account's), which reads the file.
+    unsigned group = 0;
+    if (!fresh.group.empty()) {
+        const struct group* gr = ::getgrnam(fresh.group.c_str());
+        if (!gr) return fail("the server's group " + fresh.group + " does not exist");
+        group = gr->gr_gid;
+    } else if (!fresh.user.empty()) {
+        const struct passwd* pw = ::getpwnam(fresh.user.c_str());
+        if (!pw) return fail("the server's account " + fresh.user + " does not exist");
+        group = pw->pw_gid;
+    }
+    authusers::Change change;
+    if (std::string bad = authusers::parse_change(req, change); !bad.empty()) return fail(bad);
+    return authusers::apply(dir, key, 0, group, change, authusers::used_by(fresh, authusers::file_of(dir, key)));
+}
+#endif
 
 // app_status and app_logs: a Rails site's application service (the unit site_service_unit
 // renders, agensio-app-<user>.service), read-only, root running systemctl and journalctl
@@ -1670,6 +1728,10 @@ void helper_loop(int fd, const Config& cfg) {
                     reply = task_run(req, cfg, fd);
                 } else if (op == "env_read" || op == "env_write") {
                     reply = env_op(req, cfg);
+#ifdef AGENSIO_HAS_AUTH
+                } else if (op == "auth_users_read" || op == "auth_users_write") {
+                    reply = auth_users_op(req, cfg);
+#endif
                 } else if (op == "app_status" || op == "app_logs") {
                     reply = app_op(req, cfg);
                 } else if (op == "app_check") {

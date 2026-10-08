@@ -143,6 +143,22 @@ h=$("$BIN" ctl health --socket $T/run/control.sock)
 check "health has no error and no log finding" "yes 0 no" "$(echo "$h" | grep -q '"ok":' && echo -n yes) $(echo "$h" | grep -o '"severity":"error"' | wc -l | tr -d ' ') $(echo "$h" | grep -q log_not_readable && echo yes || echo no)"
 check "every helper action is in the audit log" "yes yes yes" "$(grep -q 'provisioned missing_account' $T/logs/audit.log && echo yes) $(grep -q 'provisioned root_missing' $T/logs/audit.log && echo yes) $(grep -q 'sites (provision): created' $T/logs/audit.log && echo yes)"
 
+# A managed site's users through the helper (2026-10-09, design section 25, step 4b): root's file,
+# the server's group, 0640 in a 0750 directory; a symlink in its place refused; the listing and the
+# audit log without a hash or a password.
+out=$("$BIN" ctl site-auth-user-set t9.test anna --generate --note 'Anna' --yes --reason auth --socket $T/run/control.sock)
+check "site-auth-user-set through the helper: root:agensio 0640 in root:agensio 0750, the password answered once" "yes root agensio 640 root agensio 750 yes" \
+  "$(echo "$out" | grep -q '"action":"created"' && echo yes) $(stat -c '%U %G %a' $T/auth/t9.test.users) $(stat -c '%U %G %a' $T/auth) $(echo "$out" | grep -qE '"password":"[a-km-np-z2-9]{4}-' && echo yes)"
+mv $T/auth/t9.test.users $T/auth/kept; ln -s /etc/shadow $T/auth/t9.test.users; sum=$(sha256sum /etc/shadow)
+out=$("$BIN" ctl site-auth-user-set t9.test bob --generate --yes --reason auth --socket $T/run/control.sock)
+check "a symlink in the file's place is refused by the helper; /etc/shadow untouched" "yes yes" "$(echo "$out" | grep -q 'symlink' && echo yes) $([ "$(sha256sum /etc/shadow)" = "$sum" ] && echo yes)"
+rm $T/auth/t9.test.users; mv $T/auth/kept $T/auth/t9.test.users
+out=$("$BIN" ctl site-auth-users t9.test --socket $T/run/control.sock)
+check "site-auth-users through the helper: the name and method, no hash" "yes no" "$(echo "$out" | grep -q '"name":"anna","method":"yescrypt"' && echo yes) $(echo "$out" | grep -q '\$y\$' && echo yes || echo no)"
+out=$("$BIN" ctl site-auth-user-set '*' eve --generate --yes --reason auth --socket $T/run/control.sock)
+check "a hand-written site is refused; the audit log names the change and holds no hash" "yes yes 0" \
+  "$(echo "$out" | grep -q 'not managed' && echo yes) $(grep -q 'auth-users.*anna: created with a generated password' $T/logs/audit.log && echo yes) $(grep -c '\$y\$' $T/logs/audit.log)"
+
 # What the helper refuses.
 out=$("$BIN" ctl site-create --domain t8.test --app static --root "$T/www/t9.test/web" --user t8 --https none --listen-plain 127.0.0.1:18199 --yes --reason repro --socket $T/run/control.sock)
 check "another site's directory is never handed over (helper refuses)" "yes yes" "$(echo "$out" | grep -q 'another site; refused' && echo yes) $([ "$(stat -c %U $T/www/t9.test/web)" = t9 ] && echo yes)"

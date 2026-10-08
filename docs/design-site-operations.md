@@ -1438,6 +1438,21 @@ generated password, easy to type, shown once; `--prompt` lets the owner type one
 never sees), `site-auth-users`, `site-auth-user-delete`; audited; `path_check` names the rule
 that covers a path; health lists expired users and plain-HTTP rules.
 
+Built in step 4b (2026-10-09, `services/authusers.*`): one file per managed site,
+`<config dir>/auth/<site>.users`, root's, the server's group, `0640`, in a `0750` directory of
+root's (what the loader requires and the server reads after its drop), written by the helper's
+`auth_users_write` through a temporary file and a rename with `O_NOFOLLOW`, read by
+`auth_users_read` as names, methods, expiry, notes and locks, never a hash. The generated
+password is sixteen characters from 32 that do not look alike (`a`-`z` without `l` and `o`,
+`2`-`9`) in four groups, 80 bits from `RAND_bytes`, hashed with yescrypt by the helper and
+answered once. `--prompt` hashes in `agensio ctl` itself (the code `agensio passwd` uses), so a
+typed password reaches neither the server nor the helper; the API refuses a `password` field
+and the MCP bridge drops a `hash`, so an agent can only generate. A lock keeps the hash behind
+a `!` (`--unlock` restores it); a new password unlocks. When a rule of the running
+configuration reads the file a change reloads the server, and the last user of such a file is
+kept (an empty file would fail the load). MCP: `site_auth_users`, `site_auth_user_set`,
+`site_auth_user_delete`, admin only.
+
 **Tests** (each written before its code): one verification for a login followed by fifty
 requests (the counter); every failure verified again (never cached); an unknown user
 verified too; a request on the same worker answered while a verification runs; a reload

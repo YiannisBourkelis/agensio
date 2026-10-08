@@ -63,6 +63,9 @@ void usage() {
                  "                      site-task NAME TASK [--param KEY=VALUE]... [--dry-run] (site-tasks NAME lists them)\n"
                  "                      site-env-set NAME [--set KEY=VALUE]... [--unset KEY]... [--generate KEY]...\n"
                  "                           (site-env NAME [--reveal KEY]... shows names, lengths, fingerprints; admin)\n"
+                 "                      site-auth-user-set NAME USER [--generate | --prompt] [--expires YYYY-MM-DD | --no-expiry]\n"
+                 "                           [--note TEXT | --no-note] [--lock | --unlock] | site-auth-user-delete NAME USER\n"
+                 "                           (site-auth-users NAME lists them; a managed site's passwords; admin)\n"
                  "                      Rails service (read): site-unit NAME [--raw] | site-service NAME |\n"
                  "                           site-service-logs NAME [--lines N] [--since 3h] [--raw] (admin) |\n"
                  "                           site-task-output NAME [--offset N] [--length N] [--raw] (admin)\n"
@@ -97,6 +100,34 @@ std::filesystem::path default_config() {
         if (std::filesystem::is_regular_file(candidate)) return candidate;
     return "agensio.toml";
 }
+
+#ifdef AGENSIO_HAS_AUTH
+// A password for `user` from the terminal (asked twice, not echoed) or one line of stdin; false
+// when the two differ. For `agensio passwd` and `agensio ctl site-auth-user-set --prompt`, which
+// hash it here, so the password itself goes nowhere.
+bool read_password(const std::string& user, std::string& password) {
+    password.clear();
+    if (::isatty(STDIN_FILENO)) {
+        termios old_mode{};
+        ::tcgetattr(STDIN_FILENO, &old_mode);
+        termios quiet = old_mode;
+        quiet.c_lflag &= ~static_cast<tcflag_t>(ECHO);
+        ::tcsetattr(STDIN_FILENO, TCSANOW, &quiet);
+        std::string again;
+        std::cerr << "Password for " << user << ": ";
+        std::getline(std::cin, password);
+        std::cerr << "\nAgain: ";
+        std::getline(std::cin, again);
+        std::cerr << "\n";
+        ::tcsetattr(STDIN_FILENO, TCSANOW, &old_mode);
+        if (password != again) return false;
+    } else {
+        std::getline(std::cin, password);
+    }
+    if (!password.empty() && password.back() == '\r') password.pop_back();
+    return true;
+}
+#endif
 
 }  // namespace
 
@@ -150,27 +181,10 @@ int main(int argc, char** argv) {
                 return 2;
             }
             std::string password;
-            if (::isatty(STDIN_FILENO)) {  // asked twice, not echoed
-                termios old_mode{};
-                ::tcgetattr(STDIN_FILENO, &old_mode);
-                termios quiet = old_mode;
-                quiet.c_lflag &= ~static_cast<tcflag_t>(ECHO);
-                ::tcsetattr(STDIN_FILENO, TCSANOW, &quiet);
-                std::string again;
-                std::cerr << "Password for " << user << ": ";
-                std::getline(std::cin, password);
-                std::cerr << "\nAgain: ";
-                std::getline(std::cin, again);
-                std::cerr << "\n";
-                ::tcsetattr(STDIN_FILENO, TCSANOW, &old_mode);
-                if (password != again) {
-                    std::cerr << "passwd: the two passwords differ\n";
-                    return 1;
-                }
-            } else {
-                std::getline(std::cin, password);
+            if (!read_password(user, password)) {
+                std::cerr << "passwd: the two passwords differ\n";
+                return 1;
             }
-            if (!password.empty() && password.back() == '\r') password.pop_back();
             std::string error;
             const std::string hash = agensio::auth::make_hash(password, method, cost, error);
             if (hash.empty()) {
@@ -318,6 +332,13 @@ int main(int argc, char** argv) {
                              "        site-env-set NAME [--set KEY=VALUE]... [--unset KEY]... [--generate KEY]...: the variables the\n"
                              "                    site's tasks and its application service get (app = rails or proxy), in a file\n"
                              "                    root's and 0600; --generate SECRET_KEY_BASE fills a missing name with a random secret\n"
+                             "        site-auth-user-set NAME USER [--generate | --prompt] [--expires YYYY-MM-DD | --no-expiry]\n"
+                             "                    [--note TEXT | --no-note] [--lock | --unlock]: a user of the managed site's password\n"
+                             "                    file (<config dir>/auth/NAME.users, root's, 0640): --generate makes a password and\n"
+                             "                    answers it once; --prompt asks for one here (twice, not echoed; or one line of stdin)\n"
+                             "                    and sends only its hash; --lock refuses every login and keeps the password\n"
+                             "        site-auth-user-delete NAME USER | site-auth-users NAME (names, methods, expiry, notes;\n"
+                             "                    never a hash; admin)\n"
                              "        uploads-delete NAME\n"
                              "upload: upload NAME [FILE]   stores FILE (or stdin) on the server for site-install --file NAME;\n"
                              "                    needs the operator role, no --yes\n"
@@ -345,6 +366,7 @@ int main(int argc, char** argv) {
             agensio::json::Value body = agensio::json::Value::object();
             agensio::json::Value aliases = agensio::json::Value::array();
             bool yes = false;
+            bool prompt = false;  // site-auth-user-set --prompt: the password asked and hashed here
             for (int j = i + 1; j < argc; ++j) {
                 std::string b = argv[j];
                 auto value = [&](std::string& into) { if (j + 1 < argc) into = argv[++j]; };
@@ -467,6 +489,13 @@ int main(int argc, char** argv) {
                 else if (b == "--overwrite") body.set("overwrite", true);
                 else if (b == "--reveal") { std::string v; value(v); reveal += (reveal.empty() ? "" : ",") + v; }
                 else if (b == "--raw") raw = true;
+                else if (command == "site-auth-user-set" && b == "--generate") body.set("generate", true);  // a flag here, no name
+                else if (b == "--prompt") prompt = true;
+                else if (b == "--lock" || b == "--unlock") body.set("locked", b == "--lock");
+                else if (b == "--expires") field("expires");
+                else if (b == "--no-expiry") body.set("expires", "");
+                else if (b == "--note") field("note");
+                else if (b == "--no-note") body.set("note", "");
                 else if (b == "--unset" || b == "--generate") {
                     std::string v; value(v);
                     const char* key = b == "--unset" ? "unset" : "generate";
@@ -493,6 +522,7 @@ int main(int argc, char** argv) {
                 else if (command.empty()) command = b;
                 else if (site_name.empty() && command.starts_with("site") && command != "sites") site_name = b;
                 else if (command == "site-task" && body["task"].is_null()) body.set("task", b);
+                else if ((command == "site-auth-user-set" || command == "site-auth-user-delete") && body["user"].is_null()) body.set("user", b);
                 else if (site_name.empty() && (command == "cert-renew" || command == "upload" || command == "uploads-delete" || command == "settings" || command == "trash-delete")) site_name = b;
                 else if (command == "access-check" && site_name.empty()) site_name = b;
                 else if (command == "access-check" && check_path.empty()) check_path = b;
@@ -512,7 +542,7 @@ int main(int argc, char** argv) {
             }
             std::string path, method = "GET";
             const bool mutation = command == "reload" || command == "logs-reopen" ||
-                                  (command.starts_with("site-") && command != "site-tasks" && command != "site-env" && command != "site-unit" &&
+                                  (command.starts_with("site-") && command != "site-tasks" && command != "site-env" && command != "site-unit" && command != "site-auth-users" &&
                                    command != "site-service" && command != "site-service-logs" && command != "site-task-output") ||
                                   command == "cert-renew" || command == "uploads-delete" || command == "trash-delete" || command == "trash-expire";
             const bool upload = command == "upload";
@@ -570,6 +600,9 @@ int main(int argc, char** argv) {
             else if (command == "site-task-output" && !site_name.empty()) path = "/v1/sites/" + site_name + "/task-output" + query;
             else if ((command == "site-env" || command == "site-env-set") && !site_name.empty())
                 path = "/v1/sites/" + site_name + "/env" + (command == "site-env" && !reveal.empty() ? "?reveal=" + reveal : std::string());
+            else if (command == "site-auth-users" && !site_name.empty()) path = "/v1/sites/" + site_name + "/auth-users";
+            else if ((command == "site-auth-user-set" || command == "site-auth-user-delete") && !site_name.empty() && !body["user"].is_null())
+                path = "/v1/sites/" + site_name + "/auth-users" + (command == "site-auth-user-delete" ? "/delete" : "");
             else if (command == "uploads-delete" && !site_name.empty()) path = "/v1/uploads/" + site_name + "/delete";
             else if (upload && !site_name.empty()) path = "/v1/uploads/" + site_name;
             else {
@@ -579,6 +612,35 @@ int main(int argc, char** argv) {
             if (mutation) {
                 method = "POST";
                 if (yes) body.set("confirm", true);
+            }
+            // --prompt: the password is asked here and hashed here; only the hash goes to the server
+            // (2026-10-09, design section 25), so no server, helper, log or agent ever holds it.
+            if (prompt) {
+                if (command != "site-auth-user-set") {
+                    std::cerr << "ctl: --prompt belongs to site-auth-user-set\n";
+                    return 2;
+                }
+                if (body["generate"].boolean()) {
+                    std::cerr << "ctl: --prompt or --generate, not both\n";
+                    return 2;
+                }
+#ifdef AGENSIO_HAS_AUTH
+                std::string password, error;
+                if (!read_password(std::string(body.get("user")), password)) {
+                    std::cerr << "ctl: the two passwords differ\n";
+                    return 1;
+                }
+                const std::string hash = agensio::auth::make_hash(password, "yescrypt", 0, error);
+                std::fill(password.begin(), password.end(), '\0');
+                if (hash.empty()) {
+                    std::cerr << "ctl: " << error << "\n";
+                    return 2;
+                }
+                body.set("hash", hash);
+#else
+                std::cerr << "ctl: --prompt needs a build with password support (libxcrypt and OpenSSL)\n";
+                return 2;
+#endif
             }
             // pip_install names what gets installed: the user reads the warning here, and the --yes
             // they typed is their confirmation (the control API refuses the task without one).

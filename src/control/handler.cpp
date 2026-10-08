@@ -27,6 +27,9 @@
 #include "control/sites.hpp"
 #include "core/body.hpp"
 #include "services/appenv.hpp"
+#ifdef AGENSIO_HAS_AUTH
+#include "services/authusers.hpp"
+#endif
 #include "services/archive.hpp"
 #include "services/install.hpp"
 #include "services/pools.hpp"
@@ -166,6 +169,16 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
             return false;
         }
         site_env_show(s, path.substr(10, path.size() - 10 - 4), done);
+        return true;
+    }
+    if (path.starts_with("/v1/sites/") && path.ends_with("/auth-users") && path.size() > 21) {
+        // A site's password users: who may log in where is an administrator's to see; audited.
+        if (!require(s, Role::admin, path.substr(4))) return false;
+        if (!done) {
+            reply(s, 503, json::Value::object().set("error", "auth-users needs an asynchronous caller"));
+            return false;
+        }
+        site_auth_users(s, path.substr(10, path.size() - 10 - 11), done);
         return true;
     }
     if (path.starts_with("/v1/sites/") && (path.ends_with("/service") || path.ends_with("/service/logs"))) {
@@ -502,7 +515,7 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
     const bool known = path == "/v1/reload" || path == "/v1/sites" || path == "/v1/logs/reopen" ||
                        (site_path && !name.empty() && (action.empty() || action == "disable" || action == "enable" ||
                                                        action == "delete" || action == "renew" || action == "install" || action == "copy" ||
-                                                       action == "task" || action == "env")) ||
+                                                       action == "task" || action == "env" || action == "auth-users" || action == "auth-users/delete")) ||
                        (upload_path && !name.empty() && action == "delete") || (trash_path && !name.empty() && (action == "restore" || action == "delete")) ||
                        path == "/v1/trash/expire";
     if (!known) {
@@ -594,6 +607,14 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
         else if (action == "task") site_task(s, name, body, what, std::move(done));
         else if (action == "env") site_env_set(s, name, body, what, std::move(done));
         else site_install(s, name, body, what, std::move(done));
+        return true;
+    }
+    if (action == "auth-users" || action == "auth-users/delete") {
+        if (!done) {
+            reply(s, 503, json::Value::object().set("error", "auth-users needs an asynchronous caller"));
+            return false;
+        }
+        site_auth_user_change(s, name, body, action == "auth-users/delete", what, std::move(done));
         return true;
     }
     if (action == "delete" && body["files"].boolean()) {
@@ -2138,6 +2159,164 @@ void ControlHandler::site_env_set(Stream& s, std::string_view name, const json::
         reply(s, 200, r);
         done();
     });
+}
+
+// ---- a managed site's password users (2026-10-09, design section 25, step 4b) ----
+
+namespace {
+
+// A site whose users the tools keep: one the control plane wrote (a managed file), whose first
+// host name names the file. nullptr with the status and the refusal otherwise.
+const SiteConfig* users_site(const Config& cfg, std::string_view name, int& status, json::Value& refusal) {
+    const SiteConfig* site = control::find_site(cfg, name);
+    if (!site) {
+        status = 404;
+        refusal = json::Value::object().set("error", "no such site").set("site", std::string(name));
+        return nullptr;
+    }
+    const std::string key = site->server_names.front();
+    control::SiteSpec spec;
+    if (!appenv::valid_site(key) || !control::read_managed(control::site_file(cfg, key), spec)) {
+        status = 409;
+        refusal = json::Value::object()
+                      .set("error", "site " + key + " is not managed by the control plane (hand-written or edited): its [[site.auth]] rules name their own user files")
+                      .set("hint", "root keeps that file; `agensio passwd USER` prints a line for it (docs/configuration.md 19b)");
+        return nullptr;
+    }
+    return site;
+}
+
+}  // namespace
+
+void ControlHandler::site_auth_users(Stream& s, std::string_view name, std::function<void()> done) {
+    int status = 0;
+    json::Value refusal;
+    const SiteConfig* site = users_site(backend_->running(), name, status, refusal);
+    if (!site) {
+        reply(s, status, refusal);
+        done();
+        return;
+    }
+    const std::string key = site->server_names.front();
+#ifdef AGENSIO_HAS_AUTH
+    const bool used = authusers::used_by(backend_->running(), authusers::file_of(authusers::dir_of(backend_->running().config_path), key));
+#else
+    const bool used = false;
+#endif
+    backend_->auth_users_async(json::Value::object().set("op", "auth_users_read").set("site", key), [this, &s, key, used, done](json::Value r) {
+        const std::string what = "sites/" + key + "/auth-users";
+        if (!r["ok"].boolean()) {
+            audit_peer(s, what, "read refused: " + std::string(r.get("error")));
+            reply(s, 409, r);
+        } else {
+            json::Value names = json::Value::array();
+            for (const auto& u : r["users"].items()) names.push(std::string(u.get("name")));
+            audit_peer(s, what, names.items().empty() ? std::string("read: no users") : "read the users " + joined(names));
+            r.set("used", used);
+            r.set("hint", std::string(used ? "a [[site.auth]] rule of the site reads this file, so these users are asked for on its paths. "
+                                           : "no [[site.auth]] rule reads this file yet, so nobody is asked for these passwords. ") +
+                              "site_auth_user_set adds a user with a generated password (answered once) or changes expires, note and locked; "
+                              "site_auth_user_delete removes one. A hash is never shown");
+            reply(s, 200, r);
+        }
+        done();
+    });
+}
+
+void ControlHandler::site_auth_user_change(Stream& s, std::string_view name, const json::Value& body, bool remove, std::string_view what, std::function<void()> done) {
+#ifdef AGENSIO_HAS_AUTH
+    int status = 0;
+    json::Value refusal;
+    const SiteConfig* site = users_site(backend_->running(), name, status, refusal);
+    if (!site) {
+        reply(s, status, refusal);
+        done();
+        return;
+    }
+    const std::string key = site->server_names.front();
+    json::Value req = json::Value::object().set("op", "auth_users_write").set("site", key);
+    for (const auto& m : body.members())
+        if (m.first != "confirm" && m.first != "reason") req.set(m.first, m.second);
+    if (remove) {
+        if (!body["delete"].is_null() && !body["delete"].boolean()) {
+            reply(s, 400, json::Value::object().set("error", "auth-users/delete deletes; drop \"delete\": false"));
+            done();
+            return;
+        }
+        req.set("delete", true);
+    } else if (body["delete"].boolean()) {
+        reply(s, 400, json::Value::object().set("error", "a user is deleted through auth-users/delete (site_auth_user_delete)"));
+        done();
+        return;
+    }
+    authusers::Change change;
+    if (const std::string bad = authusers::parse_change(req, change); !bad.empty()) {
+        reply(s, 400, json::Value::object().set("error", bad)
+                          .set("hint", "{\"user\": NAME, \"generate\": true} adds a user with a new password (answered once); expires (YYYY-MM-DD, \"\" for "
+                                       "none), note and locked change one; auth-users/delete with {\"user\": NAME} removes one"));
+        done();
+        return;
+    }
+    // What is being done, for the audit log: never a password, never a hash.
+    std::vector<std::string> plan;
+    if (change.remove) plan.emplace_back("delete");
+    if (change.generate) plan.emplace_back("a generated password");
+    if (!change.hash.empty()) plan.emplace_back("a password hashed by the caller (" + authusers::method_of(change.hash) + ")");
+    if (change.locked) plan.emplace_back(*change.locked ? "lock" : "unlock");
+    if (change.expires) plan.emplace_back(change.expires->empty() ? std::string("no expiry") : "expires " + *change.expires);
+    if (change.note) plan.emplace_back(change.note->empty() ? "no note" : "a note");
+    std::string planned;
+    for (const auto& p : plan) planned += (planned.empty() ? "" : ", ") + p;
+    audit_peer(s, what, "user " + change.user + ": " + planned);
+    const Config& cfg = backend_->running();
+    const bool used = authusers::used_by(cfg, authusers::file_of(authusers::dir_of(cfg.config_path), key));
+    backend_->auth_users_async(req, [this, &s, what = std::string(what), change, planned, used, done](json::Value r) {
+        if (!r["ok"].boolean()) {
+            audit_peer(s, what, "user " + change.user + ": refused: " + std::string(r.get("error")));
+            reply(s, 409, r);
+            done();
+            return;
+        }
+        const std::string action(r.get("action"));
+        std::string result = action == "created" ? std::string("created with ") + (change.generate ? "a generated password" : "a password hashed by the caller")
+                             : action == "deleted" ? std::string("deleted")
+                             : action == "unchanged" ? std::string("unchanged")
+                                                     : "changed: " + planned;
+        if (action == "created" && planned.find(", ") != std::string::npos) result += "; " + planned.substr(planned.find(", ") + 2);
+        if (!r.get("removed").empty()) result += "; no user left, the file removed";
+        json::Value steps = json::Value::array();
+        json::Value warnings = json::Value::array();
+        steps.push(action == "unchanged" ? "nothing to write: user " + change.user + " is already so" : "wrote " + std::string(r.get("file")));
+        if (action != "unchanged" && used) {
+            std::string error;
+            if (backend_->reload_now(error)) {
+                steps.push("reloaded: the change applies to the next request (a login remembered with an old password no longer matches)");
+                result += "; reloaded";
+            } else {
+                warnings.push("the reload failed, so the running server still has the users as they were: " + error);
+                result += "; reload failed: " + error;
+            }
+        }
+        audit_peer(s, what, "user " + change.user + ": " + result);
+        r.set("done", std::move(steps));
+        if (!warnings.items().empty()) r.set("warnings", std::move(warnings));
+        if (!r.get("password").empty())
+            r.set("hint", "the password above is answered this once and kept nowhere: give it to " + change.user +
+                              " now, by a channel other than this one when you can, and do not write it into a file, a ticket or a commit. A lost one is "
+                              "replaced (generate again), never recovered; the old one stops working at once");
+        else if (!used && action != "unchanged" && action != "deleted")
+            r.set("hint", "no [[site.auth]] rule of the site reads this file yet, so nobody is asked for this password");
+        reply(s, 200, r);
+        done();
+    });
+#else
+    (void)name;
+    (void)body;
+    (void)remove;
+    (void)what;
+    reply(s, 501, json::Value::object().set("error", "this build has no password support (it needs libxcrypt and OpenSSL)"));
+    done();
+#endif
 }
 
 }  // namespace agensio

@@ -60,6 +60,17 @@ its own:
   `protection_show` answers `auth` (the sites, the log, whether a jail reads it). **Upgrading:**
   root installs the filters again and renders the jail (`fail2ban_filter_stale` gives the three
   lines).
+- **A managed site's users through the control plane and MCP** (`docs/configuration.md` 19b):
+  `agensio ctl site-auth-user-set NAME USER (--generate | --prompt) [--expires D] [--note T]
+  [--lock | --unlock]`, `site-auth-user-delete`, `site-auth-users`, and the MCP tools
+  `site_auth_user_set`, `site_auth_user_delete`, `site_auth_users`, admin only and audited by
+  user name. The file is `<config dir>/auth/<site>.users`, root's, the server's group, `0640`,
+  written by the root helper. A password never travels to the server: `--generate` makes one
+  (`xxxx-xxxx-xxxx-xxxx`, 80 bits, nothing that looks alike) and answers it once, kept nowhere;
+  `--prompt` asks on the terminal and sends only the hash; an agent can only generate (the API
+  refuses a `password` field, the bridge drops a `hash`). The listing never shows a hash. A lock
+  keeps the password for an unlock; a change to a file a rule reads reloads the server at once,
+  and that file's last user is kept. `rules.auth`, the rule a managed site carries, follows.
 - **Fixed: a use-after-free at every exit with the root helper running** (since F12b,
   2026-10-01). Two timers of the server (the trash expiry, the restart) were destroyed after the
   worker's `io_context` that had freed their service; the sanitizer build reported it, a release
@@ -78,7 +89,14 @@ expiry, UTF-8, `open`, `skip_for`, the bypass spellings, plain HTTP from another
 a slow verification runs, a reload keeping the cache, a changed password); `tests/protection.sh`
 (real fail2ban and nftables: twelve challenges and twelve right passwords of an expired user
 counted nothing, eleven wrong passwords banned the address through `agensio-auth` over the error
-log, eleven 403s banned it through `agensio-denied`, the old filter warned about), 31 checks.
+log, eleven 403s banned it through `agensio-denied`, the old filter warned about), 31 checks;
+for the users tools, unit `test_auth_users`, eleven more checks in `tests/auth.sh` (the tools and
+MCP without the helper: the file's mode, the generated and the typed password logging in where a
+rule reads the file, a lock, a new password refusing the old one at once, the last user kept, no
+password or hash in any log), four in `tests/provision.sh` (through the helper: `root:agensio
+0640` in `root:agensio 0750`, a symlink in the file's place refused) and one in
+`tests/control.sh` (admin only; its tool counts were stale since `access_check` and
+`path_check`, now 16, 20 and 38).
 
 ## 0.1.0-alpha.57 (2026-10-08)
 

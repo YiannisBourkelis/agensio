@@ -1370,7 +1370,7 @@ print(b.get("server"), "0.0.1-other" in b.get("note", ""), r["content"][0]["text
 PYT
 )
 check "mcp: a server of another build: the note leads the text and sits in structuredContent.bridge" "0.0.1-other True True" "$MCPN"
-check "mcp: initialize, tool list with annotations, calls, confirm, decisions, prompts" "agensio 35 True laravel 428 reloaded https,root,app,user -32601 2" "$mcp"
+check "mcp: initialize, tool list with annotations, calls, confirm, decisions, prompts" "agensio 38 True laravel 428 reloaded https,root,app,user -32601 2" "$mcp"
 check "mcp: site_install and the upload tools are exposed with their arguments" "file url,file,version,sha256 True" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
 import json, subprocess, sys
 p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)

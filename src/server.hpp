@@ -204,6 +204,7 @@ private:
     void install_async(const json::Value& req, std::function<void(json::Value)> done) override;
     void task_async(const json::Value& req, std::function<void(json::Value)> done) override;
     void env_async(const json::Value& req, std::function<void(json::Value)> done) override;
+    void auth_users_async(const json::Value& req, std::function<void(json::Value)> done) override;
     int env_file_state(std::string_view site, std::vector<std::string>& exposed) override;
     void helper_async(const json::Value& req, std::function<void(json::Value)> done) override;
     void provision_async(const json::Value& req, std::function<void(json::Value)> done) override;

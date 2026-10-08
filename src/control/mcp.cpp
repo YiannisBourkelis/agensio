@@ -285,6 +285,45 @@ std::vector<Tool> tools() {
                          {"confirm", confirm_arg()},
                          {"reason", reason_arg()}},
                         {"name", "confirm", "reason"})});
+    // A managed site's password users (2026-10-09, design section 25, step 4b).
+    t.push_back({"site_auth_users", "List a site's password users",
+                 "The users who may log in where a managed site asks for a password ([[site.auth]], docs/configuration.md 19b), from the site's users file "
+                 "(<directory of the main configuration>/auth/<site>.users: root's, the server's group, 0640, read by the root helper). Each user with name, "
+                 "method (the hash's kind: yescrypt for every password these tools make), expires (YYYY-MM-DD: from that day, UTC, the login is refused) and "
+                 "expired, note (whose login it is) and locked (every login refused, the password kept); never a hash. used says whether a [[site.auth]] "
+                 "rule of the running configuration reads the file: until one does, nobody is asked for these passwords. Admin only; every read is audited "
+                 "with the names. A hand-written site is refused: its rules name their own files, root's.",
+                 "GET", "/v1/sites/{name}/auth-users", true, false, Role::admin, schema({{"name", name_arg()}}, {"name"})});
+    t.push_back({"site_auth_user_set", "Add or change a site's password user",
+                 "Adds a user to a managed site's password file, or changes one. generate: true gives the user a new password made by the server (sixteen "
+                 "lower-case letters and digits in four groups, xxxx-xxxx-xxxx-xxxx, nothing that looks alike), answered in password this one time and kept "
+                 "nowhere: relay it to the user once, with the user name, and never repeat it later in the conversation or write it into a file, a ticket or "
+                 "a commit; a lost password is replaced with generate again, never recovered, and the old one stops working at once. A password is never an "
+                 "argument: when the user wants to choose their own, give them the command agensio ctl site-auth-user-set SITE USER --prompt --yes --reason "
+                 "\"...\" to run on the server, which asks on their terminal and sends only its hash. A new user needs generate. expires: YYYY-MM-DD, from "
+                 "that day (UTC) the login is refused, for a contractor or a client's review; \"\" removes it. note: whose login it is (\"Anna, Acme\"); "
+                 "\"\" removes it. locked: true refuses every login of the user and keeps the password, locked: false gives it back: the reversible "
+                 "alternative to site_auth_user_delete. User names: 1 to 64 letters, digits and . _ @ + -, starting with a letter or a digit. Ask the user "
+                 "for the name, and for an end date when the access is temporary, before calling. When a [[site.auth]] rule reads the file the server "
+                 "reloads at once (done says so) and a login remembered with an old password stops matching; until a rule reads it, nobody is asked. The "
+                 "audit log names the user and what changed, never a password or a hash.",
+                 "POST", "/v1/sites/{name}/auth-users", false, false, Role::admin,
+                 schema({{"name", name_arg()},
+                         {"user", prop("string", "The user name, e.g. anna or anna@acme.example.")},
+                         {"generate", prop("boolean", "true: a new password made by the server, answered once (required for a new user).")},
+                         {"expires", prop("string", "YYYY-MM-DD: refused from that day (UTC); \"\" for no end.")},
+                         {"note", prop("string", "Whose login it is, one line of up to 200 bytes; \"\" removes it.")},
+                         {"locked", prop("boolean", "true: every login refused, the password kept; false: the password works again.")},
+                         {"confirm", confirm_arg()},
+                         {"reason", reason_arg()}},
+                        {"name", "user", "confirm", "reason"})});
+    t.push_back({"site_auth_user_delete", "Remove a site's password user",
+                 "Removes a user from a managed site's password file. When a [[site.auth]] rule reads the file the server reloads and the user's next "
+                 "request is refused; the last user of a file a rule reads is kept (lock it with site_auth_user_set locked: true instead). Locking is the "
+                 "reversible way: prefer it when the user may come back.",
+                 "POST", "/v1/sites/{name}/auth-users/delete", false, true, Role::admin,
+                 schema({{"name", name_arg()}, {"user", prop("string", "The user name to remove.")}, {"confirm", confirm_arg()}, {"reason", reason_arg()}},
+                        {"name", "user", "confirm", "reason"})});
     t.push_back({"site_service_unit", "Render a site's application unit", "The systemd unit that runs a Rails or Redmine site's Puma, a Django or Wagtail site's Gunicorn, or a Node site's node, until agensio manages it itself: rendered from the site (its account, its directory, the loopback port of its upstream, a Django site's project and names, a Node site's entry with HOST and PORT), the runtime of [control] runtimes (the Ruby its bundle was built with; the python3 whose virtualenv the site has, started under the virtualenv's name; root's node) and its environment file, never from anything the caller gives. A Django unit loads agensio_settings (django_settings) and keeps DJANGO_SUPERUSER_PASSWORD from the application (UnsetEnvironment=). The answer carries the unit's text and run_as_root: `agensio ctl site-unit NAME --raw > /etc/systemd/system/agensio-app-USER.service`, `systemctl daemon-reload`, `systemctl enable --now ...`. That is root's step: show the commands, say the site waits for them, and continue when the user ran them. The unit runs the application server as the site's account with the tasks' environment, never as root. Refused with the reason for a site without its own account, or whose upstream is not http on loopback. After a change of the runtime in [control] runtimes, or of a Django site's names (an alias), root renders and installs it again.", "GET", "/v1/sites/{name}/unit", true, false, Role::viewer, schema({{"name", name_arg()}}, {"name"})});
     t.push_back({"site_service_status", "Show a site's service state", "Whether the application service of a Rails, Redmine, Django, Wagtail or Node site runs: its unit (agensio-app-USER.service, the one site_service_unit renders) as systemd reports it, read by the root helper with systemctl show: LoadState (not-found when root has not installed it), ActiveState and SubState, Result and ExecMainStatus of a failure, since when, its main pid, memory, restart count and whether it starts at boot, with summary and next_steps. Use it when the site answers 502, after root installed or restarted the unit, and before telling the user the application is up. Failed or stopped: site_service_logs shows why; starting, stopping and restarting the unit is root's (systemctl), never a tool's, so give the line from next_steps and continue when the user ran it. health_check reports every such site whose service is missing, stopped or failing. 503 with busy: the helper is running a task or an install, ask again after it. 409 for a site without its own account or of another preset, and on a server without the provisioning helper (agensio not started as root).", "GET", "/v1/sites/{name}/service", true, false, Role::viewer, schema({{"name", name_arg()}}, {"name"})});
     t.push_back({"site_service_logs", "Read a site's service journal", "The last lines of a Rails, Redmine, Django, Wagtail or Node site's application service journal (journalctl -u agensio-app-USER.service, run by the root helper with fixed arguments; the unit comes from the site's account, never from the call): the server's start-up lines (Puma, Gunicorn), the exception that stopped it, 'Address already in use', a missing gem or module, a database it cannot open. Use it when site_service_status or health_check says the service failed or is stopped, and after a restart to see that it booted. Summarise the cause for the user and quote the few lines that show it; do not paste the journal. The site's own requests and 502s are in logs_query, not here. Admin only and every read audited, since an application may print what it should not. Same refusals as site_service_status.", "GET", "/v1/sites/{name}/service/logs", true, false, Role::admin,
@@ -324,6 +363,12 @@ const char* kInstructions =
     "CDN or another proxy the rule judges the client only when the proxy is in [server] trusted_proxies (root's main file: "
     "give the line). A user refused with 403 sees the address the server tested on the page: run access_check with it; "
     "refusals are warn lines in logs_query (access refused:, access would refuse: for a rule in report mode). "
+    "Passwords ([[site.auth]], docs/configuration.md 19b): a managed site keeps its password users in a file of its own, "
+    "root's, which site_auth_users lists (never a hash), site_auth_user_set adds to or changes (generate: true for a new "
+    "password, answered once: relay it to the user once with the user name and never repeat it; expires for temporary "
+    "access; locked to suspend) and site_auth_user_delete removes from. A password is never a tool argument: a user who "
+    "wants to choose their own runs agensio ctl site-auth-user-set SITE USER --prompt on the server; give them that line. "
+    "A lost password is replaced, never recovered. "
     "An application without a preset of its own (presets_list has none for it: TYPO3, Kanboard, phpBB, Nextcloud) runs on "
     "app = php with the server rules its own documentation gives, never with another application's preset. Find the "
     "application's official web server configuration for the version the user runs (its nginx and Apache examples) and "
@@ -596,7 +641,8 @@ private:
             // user_confirmed and client are the bridge's to set, after the user's own answer; an
             // argument of that name from the agent is dropped.
             for (const auto& m : args.members())
-                if (m.first != path_arg && m.first != "user_confirmed" && m.first != "client") b.set(m.first, m.second);
+                if (m.first != path_arg && m.first != "user_confirmed" && m.first != "client" && !(name == "site_auth_user_set" && m.first == "hash"))
+                    b.set(m.first, m.second);  // a hash comes from agensio ctl --prompt on the user's terminal, never through the agent
             if (name == "site_task" && tasks::needs_user_confirmation(args.get("task")) && !args["dry_run"].boolean()) {
                 std::string refusal;
                 if (!ask_user(args, refusal)) {

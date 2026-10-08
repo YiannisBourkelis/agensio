@@ -2654,7 +2654,34 @@ hour; it reads the error log, so that must be a file at `warn` (the package's de
 says `fail2ban_auth_unseen` otherwise). `status` reports `auth_verifications`, the hashes run
 since the start.
 
-The reference rows (`agensio ctl reference`, `docs/keys.md`) give every key. Managed sites
-(`rules.auth`, the user tools of the control plane and MCP) follow in the next step of the
-feature (design section 25).
+**A managed site's users.** The control plane keeps one users file per managed site,
+`<directory of the main configuration>/auth/<site>.users`: root's, the server's group, `0640`,
+in a `0750` directory of root's, written by the provisioning helper through a temporary file
+and a rename (a server started without the helper writes its own, under its own account). The
+site's account can neither read it nor replace it, and the loader's checks above hold for it.
+
+```sh
+agensio ctl site-auth-user-set shop.example anna --generate --expires 2026-10-22 --note 'Anna, Acme' --yes --reason "client review"
+agensio ctl site-auth-user-set shop.example bob --prompt --yes --reason "own password"   # asks here, sends only the hash
+agensio ctl site-auth-user-set shop.example anna --lock --yes --reason "review over"     # --unlock gives the password back
+agensio ctl site-auth-users shop.example                                                 # names, methods, expiry, notes; no hash
+agensio ctl site-auth-user-delete shop.example bob --yes --reason "left"
+```
+
+A password never travels to the server. `--generate` has the server make one (sixteen
+lower-case letters and digits in four groups, `xxxx-xxxx-xxxx-xxxx`, without `0`, `1`, `l` or
+`o`: 80 bits, easy to read out) and answer it once; it is kept nowhere and a lost one is
+replaced, never recovered. `--prompt` asks on the terminal where `agensio ctl` runs (twice, not
+echoed; or one line of stdin), hashes it there with yescrypt and sends the hash. The MCP tools
+`site_auth_users`, `site_auth_user_set` and `site_auth_user_delete` do the same for an agent,
+which can only generate: it never receives a password the user typed, and the bridge drops a
+hash it tries to send. Every call is admin only and audited with the user's name and what
+changed, never a password or a hash. When a `[[site.auth]]` rule reads the file, a change
+reloads the server, so it applies to the next request, and the last user of the file is kept
+(lock it instead). A hand-written site is refused: its rules name their own files, which root
+keeps with `agensio passwd`.
+
+The reference rows (`agensio ctl reference`, `docs/keys.md`) give every key. `rules.auth`, the
+rule a managed site carries in its file, follows in the next step of the feature (design
+section 25).
 

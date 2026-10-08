@@ -160,6 +160,7 @@ add_library(agensio_core STATIC
   src/handlers/upstream_common.cpp
   src/handlers/dispatch.cpp
   $<$<BOOL:${AGENSIO_HAS_AUTH}>:src/core/auth.cpp>
+  $<$<BOOL:${AGENSIO_HAS_AUTH}>:src/services/authusers.cpp>
   $<$<BOOL:${AGENSIO_HTTPARENA}>:src/handlers/httparena.cpp>
   src/upstream/client.cpp
   src/upstream/fcgi_client.cpp

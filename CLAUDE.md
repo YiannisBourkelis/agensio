@@ -423,7 +423,7 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   through it and reports `done`; `[control] provision = false` hands commands back
   instead. Its threat analysis is in `docs/security-control-plane.md`; every change to it
   updates that section. `tests/provision.sh` runs it as root in the devbox.
-  `agensio mcp` (F5, `control/mcp.*`): stdio JSON-RPC MCP server, 15 tools with
+  `agensio mcp` (F5, `control/mcp.*`): stdio JSON-RPC MCP server, 38 tools with
   annotations gated by the caller's role, prompts, meant to be spawned over SSH by the
   agent host (`docs/mcp.md`). `agensio ctl` (F6) is the same client for shells.
 - **Site tasks** (F13, `src/services/tasks.*`, design `docs/design-site-operations.md`
@@ -595,8 +595,12 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   libxcrypt and OpenSSL (`AGENSIO_HAS_AUTH`). Gate: `bench/ab.sh <ref> -A` (row `auth`);
   `tests/auth.sh`. fail2ban: `agensio-auth` counts the `auth failed` lines of the error log
   (`control/protection.cpp`, health `fail2ban_auth_challenges` while an older build's 401-counting
-  filter is installed, `fail2ban_auth_unseen`). Security page row 40. Managed sites and MCP: the
-  next step.
+  filter is installed, `fail2ban_auth_unseen`). A managed site's users (`services/authusers.*`):
+  `<config dir>/auth/<site>.users`, root's, the server's group, `0640`, written by the helper's
+  `auth_users_write`; `agensio ctl site-auth-user-set` / `-delete` / `site-auth-users`, MCP
+  `site_auth_user_set`, `site_auth_user_delete`, `site_auth_users` (admin, audited by name); a
+  password never reaches the server (`--generate` answers one once, `--prompt` sends a hash, the
+  bridge drops an agent's hash). Security page row 40. `rules.auth` on managed sites: the next step.
 - **Application install** (F9, `src/services/archive.*`, `fetch.*`, `install.*`):
   `agensio ctl site-install NAME [--url | --file | --version]` fills a site's empty
   directory as the site's account from an https archive, an upload (`agensio ctl upload`)
