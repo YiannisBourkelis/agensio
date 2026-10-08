@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.56
+## 0.1.0-alpha.56 (2026-10-08)
 
 From the security audit of 2026-10-07 (docs/security-audit-2026-10-07.md), item 2.1:
 
