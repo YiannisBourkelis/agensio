@@ -1213,6 +1213,14 @@ private:
             }
             for (std::size_t i = 0; i < streams_.active();) {
                 H2Stream& s = *streams_.all()[i];
+                // Closed already, its release deferred until the writer or the pull completion lets
+                // go of it (close_stream): nothing more to decide here. Without this the loop met
+                // the same stream again and again, cutting it each time, and never returned to the
+                // event loop (security audit 2026-10-07, 2.1).
+                if (s.state == StreamState::closed) {
+                    ++i;
+                    continue;
+                }
                 const auto age = now - s.since;
                 bool cut = false;
                 if (s.state == StreamState::half_closed_local && age >= idle_timeout_) {  // the body never finished
@@ -1222,7 +1230,10 @@ private:
                     continue;
                 }
                 if (s.pending_handler && age >= body_timeout_) cut = true;             // a body that does not arrive
-                else if (s.responded && !s.finished && age >= idle_timeout_) cut = true;  // a response the client does not take
+                // A response the client does not take. One waiting for its application's next bytes
+                // (a pull in flight) is the application's to bound, by its read_timeout, as HTTP/1
+                // does: the client's idle clock does not cut it.
+                else if (s.responded && !s.finished && !s.pulling && age >= idle_timeout_) cut = true;
                 else if (!s.responded && !s.ready && !s.upstream && !s.has_body && age >= idle_timeout_ * 4) cut = true;  // stuck
                 if (cut) {
                     if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::info))

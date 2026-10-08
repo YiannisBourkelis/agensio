@@ -32,7 +32,8 @@ rows, three rounds) is flat within noise; its one row above 3 %, plain 100 KB at
 | JSON numbers out of range (found by the campaign) | **fixed**: an overflowing literal parsed to infinity and was written back as `inf`; a whole number above 2^63 was converted to `long long` out of range (UBSan). The parser refuses such a literal, the writer checks the range and writes `null` for infinity and NaN | five unit checks and a replayed regression input failed before, pass after; the fuzzer replays the input clean under UBSan |
 | integration suite on default builds | **fixed** (suite only): seven checks needed sites defined only with the HttpArena handler, two checks lost to `grep -q` under pipefail on the slower sanitizer binary | sanitizer build 588 checks, Release 596, no failure; server stderr clean |
 | 2.10 design notes | **fixed**: both design notes say what the code does | documentation |
-| 2.1 to 2.5 | **open**: the HTTP/2 timeout loop, the slow TLS download, the HTTP/2 idle clock, the QUIC handshake deadline, the tunnel timeout and watchdog. Not changed in this session: no reproduction test was written for them, and without one the rule of a failing test first cannot be met | section 5 lists the checks each needs |
+| 2.1 HTTP/2 timeout loop | **fixed in code in alpha.56, not yet proven by a test**: `check_timeouts` skips a stream already closed whose release is deferred, so the loop always ends; a stream waiting for its application's next bytes is bounded by the upstream's `read_timeout`, not cut by the client's idle clock (HTTP/1's rule) | **test to write** (section 5, item 1): it must fail or hang on `v0.1.0-alpha.55` and pass from alpha.56. What was run: the unit and integration suites with h2spec, the sanitizer build and the `-2` A/B (`ab-20261008-020159.md`); they show the change breaks nothing, not that it removes the failure, since none of them reaches the deferred-release state. The argument from the code: every pass of the loop now either releases a stream (the list shrinks) or moves past it |
+| 2.2 to 2.5 | **open**: the slow TLS download, the HTTP/2 idle clock, the QUIC handshake deadline, the tunnel timeout and watchdog | section 5 lists the checks each needs |
 
 ## 1. The claims, one by one
 
@@ -270,7 +271,9 @@ control plane), with the nginx feature each stands in for.
 Each item names the check and what a pass looks like. These belong in the suites, not in
 a one-off.
 
-1. **2.1, both shapes**, against a Release build with `idle_timeout = 3`: an HTTP/2
+1. **2.1, both shapes** (the fix is in alpha.56; this test is still to write, and must fail
+   or hang on `v0.1.0-alpha.55` and pass from alpha.56), against a Release build with
+   `idle_timeout = 3`: an HTTP/2
    client with a large window that stops reading a 10 MB response, and a `buffering =
    false` FastCGI script that sleeps longer than the idle timeout between two prints;
    in each, a plain request on another connection must be answered within a second and

@@ -552,7 +552,7 @@ One lazy `steady_timer` per connection, deadlines checked when it fires, as HTTP
 | no stream open, no bytes | `idle_timeout` (15 s) | close (a browser reconnects; the admin raises the key for long-lived pages) |
 | a stream's head incomplete (HEADERS without END_HEADERS, or waiting for CONTINUATION) | `idle_timeout` | `GOAWAY(ENHANCE_YOUR_CALM)` + close: slow headers |
 | a body announced, handler waiting, no DATA | `body_timeout` (60 s) | `RST_STREAM(CANCEL)`, 408 not possible any more, log |
-| response pending, no window progress of at least 1 KB | `idle_timeout` | `RST_STREAM(CANCEL)`, buffers freed: the Bomb's "hold", zero-window slow read; progress is marked when a write carrying the stream's bytes completes |
+| response pending, no window progress of at least 1 KB | `idle_timeout` | `RST_STREAM(CANCEL)`, buffers freed: the Bomb's "hold", zero-window slow read; progress is marked when a write carrying the stream's bytes completes. A stream whose next bytes are being read from its application (a pull in flight) is not cut by this clock: the upstream's `read_timeout` bounds it, as on HTTP/1 (alpha.56). A stream already reset, its release deferred while the writer or the pull still holds it, is skipped by the check (alpha.56: before, the check met it again on every pass and never returned, audit 2.1) |
 | response pending, socket not draining | `idle_timeout` | close: TCP-level slow read |
 
 What the code does differs in three places (security audit 2026-10-07, items 2.3 and 2.10):

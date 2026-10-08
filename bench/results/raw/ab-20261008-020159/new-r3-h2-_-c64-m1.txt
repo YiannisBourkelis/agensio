@@ -1,0 +1,55 @@
+starting benchmark...
+spawning thread #0: 16 total client(s). Timing-based test with 0s of warm-up time and 5s of main duration for measurements.
+spawning thread #1: 16 total client(s). Timing-based test with 0s of warm-up time and 5s of main duration for measurements.
+spawning thread #2: 16 total client(s). Timing-based test with 0s of warm-up time and 5s of main duration for measurements.
+spawning thread #3: 16 total client(s). Timing-based test with 0s of warm-up time and 5s of main duration for measurements.
+Warm-up started for thread #2.
+Warm-up started for thread #1.
+Warm-up phase is over for thread #2.
+Main benchmark duration is started for thread #2.
+Warm-up phase is over for thread #1.
+Main benchmark duration is started for thread #1.
+Warm-up started for thread #0.
+Warm-up started for thread #3.progress: 
+6% of clients started
+progress: 12% of clients started
+progress: 18% of clients started
+progress: 25% of clients started
+progress: 31% of clients started
+progress: 37% of clients started
+progress: 43% of clients started
+progress: 50% of clients started
+progress: 56% of clients started
+progress: 62% of clients started
+progress: 68% of clients started
+progress: 75% of clients started
+progress: 81% of clients started
+progress: 87% of clients started
+progress: 93% of clients started
+progress: 100% of clients started
+Warm-up phase is over for thread #0.
+Main benchmark duration is started for thread #0.
+Warm-up phase is over for thread #3.
+Main benchmark duration is started for thread #3.
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+Main benchmark duration is over for thread #2. Stopping all clients.
+Stopped all clients for thread #2
+Main benchmark duration is over for thread #1. Stopping all clients.
+Stopped all clients for thread #1
+Main benchmark duration is over for thread #0. Stopping all clients.
+Main benchmark duration is over for thread #3. Stopping all clients.
+Stopped all clients for thread #0
+Stopped all clients for thread #3
+
+finished in 5.00s, 322619.40 req/s, 328.29MB/s
+requests: 1613097 total, 1613161 started, 1613097 done, 1613097 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 1613097 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 1.60GB (1721189411) total, 86.16MB (90344056) headers (space savings 70.05%), 1.49GB (1601805321) data
+                     min         max         mean         sd        +/- sd
+time for request:        5us      4.43ms       197us        63us    78.04%
+time for connect:      983us     13.33ms      5.36ms      3.64ms    67.19%
+time to 1st byte:     1.99ms     13.63ms      5.90ms      3.41ms    71.88%
+req/s           :    5013.29     5059.61     5040.60        9.83    60.94%

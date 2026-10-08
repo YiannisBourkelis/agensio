@@ -1,0 +1,55 @@
+starting benchmark...
+spawning thread #0: 16 total client(s). Timing-based test with 0s of warm-up time and 5s of main duration for measurements.
+spawning thread #1: 16 total client(s). Timing-based test with 0s of warm-up time and 5s of main duration for measurements.
+spawning thread #2: 16 total client(s). Timing-based test with 0s of warm-up time and 5s of main duration for measurements.
+spawning thread #3: 16 total client(s). Timing-based test with 0s of warm-up time and 5s of main duration for measurements.
+Warm-up started for thread #2.
+Warm-up started for thread #0.
+Warm-up phase is over for thread #2.
+Main benchmark duration is started for thread #2.
+progress: 6% of clients started
+Warm-up started for thread #3.
+progress: 12% of clients started
+progress: 18% of clients started
+progress: 25% of clients started
+progress: 31% of clients started
+progress: 37% of clients started
+progress: 43% of clients started
+progress: 50% of clients started
+progress: 56% of clients started
+progress: 62% of clients started
+progress: 68% of clients started
+progress: 75% of clients started
+progress: 81% of clients started
+progress: 87% of clients started
+progress: 93% of clients started
+progress: 100% of clients started
+Warm-up phase is over for thread #0.
+Main benchmark duration is started for thread #0.
+Warm-up phase is over for thread #3.
+Main benchmark duration is started for thread #3.
+Warm-up started for thread #1.
+Warm-up phase is over for thread #1.
+Main benchmark duration is started for thread #1.
+TLS Protocol: TLSv1.3
+Cipher: TLS_AES_128_GCM_SHA256
+Server Temp Key: X25519 253 bits
+Application protocol: h2
+Main benchmark duration is over for thread #2. Stopping all clients.
+Stopped all clients for thread #2
+Main benchmark duration is over for thread #0. Stopping all clients.
+Stopped all clients for thread #0
+Main benchmark duration is over for thread #3. Stopping all clients.
+Stopped all clients for thread #3
+Main benchmark duration is over for thread #1. Stopping all clients.
+Stopped all clients for thread #1
+
+finished in 5.00s, 320508.00 req/s, 326.14MB/s
+requests: 1602540 total, 1602604 started, 1602540 done, 1602540 succeeded, 0 failed, 0 errored, 0 timeout
+status codes: 1602540 2xx, 0 3xx, 0 4xx, 0 5xx
+traffic: 1.59GB (1709925092) total, 85.60MB (89752864) headers (space savings 70.05%), 1.48GB (1591322220) data
+                     min         max         mean         sd        +/- sd
+time for request:        5us      4.30ms       198us        60us    77.70%
+time for connect:      925us     14.48ms      5.83ms      4.07ms    65.63%
+time to 1st byte:     2.12ms     14.77ms      6.42ms      3.83ms    73.44%
+req/s           :    4971.36     5036.83     5007.63       13.39    59.38%

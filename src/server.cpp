@@ -229,8 +229,18 @@ void Server::drop_privileges() {
 #include <malloc.h>
 #include <map>
 #endif
+// Not in an AddressSanitizer build: the allocator is the sanitizer's, so glibc's heap has nothing
+// to give back, and malloc_trim walking it crashed the sanitizer server now and then (a SEGV in
+// malloc_trim during tests/reload.sh, 2026-10-08).
+#if defined(__SANITIZE_ADDRESS__)
+#define AGENSIO_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define AGENSIO_ASAN 1
+#endif
+#endif
 static void trim_heap() noexcept {
-#if defined(__GLIBC__)
+#if defined(__GLIBC__) && !defined(AGENSIO_ASAN)
     malloc_trim(0);
 #endif
 }

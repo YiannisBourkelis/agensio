@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.1.0-alpha.56
+
+From the security audit of 2026-10-07 (docs/security-audit-2026-10-07.md), item 2.1:
+
+- **HTTP/2: the per-stream timeout check could stop a worker** (security). When the check
+  reset a stream whose bytes the writer still held, or whose next chunk was still being read
+  from its application, `close_stream` deferred the stream's release and left it in place;
+  the check then met the same stream again on every pass, reset it again, and never returned
+  to the event loop, so every site on that worker stopped. A stream already closed is now
+  skipped. And a stream waiting for its application's next bytes is no longer cut by the
+  client's idle clock: the upstream's `read_timeout` bounds it, as HTTP/1 always did, so a
+  streamed answer from a FastCGI or proxied application that pauses longer than
+  `idle_timeout` between two chunks arrives whole over HTTP/2 too. Verified with the unit and
+  integration suites (h2spec on both listeners), the sanitizer build and the `-2` A/B, which show the
+  change breaks nothing; none of them reaches the failing state, so the fix is not yet
+  proven by a test: the reproduction test the audit describes (section 5, item 1) is still to
+  write, and must fail on alpha.55 and pass from alpha.56.
+- **The sanitizer build's server could crash in `malloc_trim`** (test builds only): the idle
+  trim called glibc's `malloc_trim` while AddressSanitizer owned the allocator, and a
+  `tests/reload.sh` run died with a SEGV there now and then. AddressSanitizer builds skip the
+  trim; release builds are unchanged.
+
 ## 0.1.0-alpha.55 (2026-10-08)
 
 From the alpha.54 report (TYPO3 13.4 configured live from its documentation with the new
