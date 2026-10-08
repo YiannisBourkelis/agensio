@@ -73,6 +73,8 @@ void usage() {
                  "                      site-update NAME --login-path /login ... (where the fail2ban jail counts attempts)\n"
                  "                      site-update NAME --restrict PATH=ADDR[,ADDR...] ... (only those addresses reach PATH)\n"
                  "                      site-update NAME --restrict-admin ADDR[,ADDR...] [--admin-login] [--admin-language L]...\n"
+                 "                      site-update NAME --auth PATH | --auth-exact PATH | --auth-open PATH ... [--auth-realm TEXT]\n"
+                 "                           [--auth-skip ADDR[,ADDR...]] [--auth-plain-http] | --no-auth (a password; the site's users first)\n"
                  "                           (WordPress, Drupal: only those addresses reach the admin; --no-restrict-admin)\n"
                  "                      site-update NAME --refuse PATTERN ... (paths answered 404, gitignore-style; --no-refuse)\n"
                  "                      access-check NAME PATH ADDRESS: what the site's access rules decide for that client\n"
@@ -298,6 +300,13 @@ int main(int argc, char** argv) {
                              "                    rebuild.php); --admin-login adds the login page, --admin-language L (Drupal, repeatable)\n"
                              "                    the admin and login under /L/; --no-restrict-admin removes it. The admin is open to\n"
                              "                    everyone until this is set. `presets` lists each preset's admin paths\n"
+                             "        --auth PATH, --auth-exact PATH, --auth-open PATH (site-update, repeatable): a password on PATH\n"
+                             "                    and everything below it (or PATH alone), with the site's own users (site-auth-user-set\n"
+                             "                    first: refused until the site has one); --auth-open frees a path below a protected\n"
+                             "                    one. --auth-realm TEXT (the dialog's name), --auth-skip ADDR[,ADDR...] (let in without a\n"
+                             "                    password) and --auth-plain-http (ask over plain HTTP too, readable on the network) apply\n"
+                             "                    to each --auth of the command. Given together they replace the site's password rules;\n"
+                             "                    --no-auth removes them. Check with path-check NAME PATH\n"
                              "        --refuse PATTERN (site-create and site-update, repeatable): paths the site answers 404\n"
                              "                    whichever location would serve them, gitignore-style: /vendor/ from the root,\n"
                              "                    composer.json or *.yaml in any directory, * within one segment\n"
@@ -362,6 +371,10 @@ int main(int argc, char** argv) {
             bool admin_given = false;  // rules.admin is replaced (--no-restrict-admin: removed)
             agensio::json::Value refuse_list = agensio::json::Value::array();  // --refuse
             bool refuse_given = false;  // --refuse or --no-refuse: rules.refuse is replaced
+            agensio::json::Value auth_rules = agensio::json::Value::array();  // --auth, --auth-exact, --auth-open
+            agensio::json::Value auth_skip = agensio::json::Value::array();   // --auth-skip: every password rule of this command
+            std::string auth_realm;                                           // --auth-realm: likewise
+            bool auth_plain = false, auth_given = false;                      // --auth-plain-http; any auth flag or --no-auth: rules.auth replaced
             bool raw = false;
             agensio::json::Value body = agensio::json::Value::object();
             agensio::json::Value aliases = agensio::json::Value::array();
@@ -456,6 +469,25 @@ int main(int argc, char** argv) {
                     admin_rule.set("languages", langs);
                     admin_given = true;
                 } else if (b == "--no-restrict-admin") { admin_rule = agensio::json::Value::object(); admin_given = true; }
+                else if (b == "--auth" || b == "--auth-exact" || b == "--auth-open") {
+                    std::string v; value(v);
+                    agensio::json::Value rule = agensio::json::Value::object().set("path", v);
+                    if (b == "--auth-exact") rule.set("match", "exact");
+                    if (b == "--auth-open") rule.set("open", true);
+                    auth_rules.push(rule);
+                    auth_given = true;
+                } else if (b == "--auth-realm") { value(auth_realm); auth_given = true; }
+                else if (b == "--auth-skip") {
+                    std::string v; value(v);
+                    for (std::size_t from = 0; from <= v.size();) {
+                        std::size_t comma = v.find(',', from);
+                        if (comma == std::string::npos) comma = v.size();
+                        if (comma > from) auth_skip.push(v.substr(from, comma - from));
+                        from = comma + 1;
+                    }
+                    auth_given = true;
+                } else if (b == "--auth-plain-http") { auth_plain = true; auth_given = true; }
+                else if (b == "--no-auth") auth_given = true;
                 else if (b == "--refuse") {
                     std::string v; value(v);
                     refuse_list.push(v);
@@ -685,10 +717,29 @@ int main(int argc, char** argv) {
             // --restrict / --no-restrict (and the admin and refuse flags) change their one rule:
             // the site's other rules (private paths, entry points, cache) are read and sent back
             // with it, since the server takes the rules object whole.
-            if (restrict_given || admin_given || refuse_given) {
+            if (auth_given) {  // the realm, skip_for and plain_http of this command go on each of its password rules
+                bool any_closed = false;
+                agensio::json::Value built = agensio::json::Value::array();
+                for (const auto& given : auth_rules.items()) {
+                    agensio::json::Value r = given;
+                    if (!r["open"].boolean()) {
+                        any_closed = true;
+                        if (!auth_realm.empty()) r.set("realm", auth_realm);
+                        if (!auth_skip.items().empty()) r.set("skip_for", auth_skip);
+                        if (auth_plain) r.set("plain_http", true);
+                    }
+                    built.push(std::move(r));
+                }
+                auth_rules = std::move(built);
+                if ((!auth_realm.empty() || !auth_skip.items().empty() || auth_plain) && !any_closed) {
+                    std::cerr << "ctl: --auth-realm, --auth-skip and --auth-plain-http go with --auth PATH or --auth-exact PATH\n";
+                    return 2;
+                }
+            }
+            if (restrict_given || admin_given || refuse_given || auth_given) {
                 if (command != "site-update" || site_name.empty()) {
-                    std::cerr << "ctl: --restrict, --restrict-exact, --no-restrict, the --restrict-admin flags and --refuse go with site-update NAME"
-                                 " (--refuse with site-create too)\n";
+                    std::cerr << "ctl: --restrict, --restrict-exact, --no-restrict, the --restrict-admin flags, the --auth flags and --refuse go with"
+                                 " site-update NAME (--refuse with site-create too)\n";
                     return 2;
                 }
                 if (admin_given && !admin_rule.members().empty() && admin_rule["allow"].is_null()) {
@@ -709,12 +760,14 @@ int main(int argc, char** argv) {
                 }
                 agensio::json::Value merged = agensio::json::Value::object();
                 for (const auto& m : site_json["rules"].members())
-                    if (!(restrict_given && m.first == "restricted") && !(admin_given && m.first == "admin") && !(refuse_given && m.first == "refuse"))
+                    if (!(restrict_given && m.first == "restricted") && !(admin_given && m.first == "admin") && !(refuse_given && m.first == "refuse") &&
+                        !(auth_given && m.first == "auth"))
                         merged.set(m.first, m.second);
                 for (const auto& m : body["rules"].members()) merged.set(m.first, m.second);  // other rule flags of this command
                 if (!restrict_rules.items().empty()) merged.set("restricted", restrict_rules);
                 if (!refuse_list.items().empty()) merged.set("refuse", refuse_list);
                 if (admin_given && !admin_rule.members().empty()) merged.set("admin", admin_rule);
+                if (auth_given && !auth_rules.items().empty()) merged.set("auth", auth_rules);
                 body.set("rules", merged);
             }
             agensio::ControlReply reply;

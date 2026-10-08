@@ -1453,6 +1453,19 @@ configuration reads the file a change reloads the server, and the last user of s
 kept (an empty file would fail the load). MCP: `site_auth_users`, `site_auth_user_set`,
 `site_auth_user_delete`, admin only.
 
+Built in step 4c (2026-10-09): `rules.auth` on `site_update`, a list of `{path, match, open,
+realm, skip_for, plain_http}` (at most 16; an open rule only below a protected one; `skip_for`
+never `"any"`; no `users`, the file is the site's own), rendered as `[[site.auth]]` with `users =
+"../auth/<site>.users"` (site files live in `sites.d/`, so the path stays a pure function of
+the spec). Refused until the file has a user and on `site_create`: decided with the owner, so a
+rule over a missing or empty file never reaches the loader and an old file never comes into
+force unseen. The trash moves the users file with the site (piece `auth`) and back. `path_check`
+names the rule (`auth`, `auth_note`), `site_show` lists them with `users_count` and `usable`.
+Health: `auth_users_unloadable` (the loader's own checks, `auth_users_problem`, run against a
+scratch configuration, so a file broken under a running server is reported before a restart
+that would not start), `auth_no_valid_user`, `auth_users_expired`, `auth_plain_http`,
+`auth_users_orphan`. The whole feature is described in `docs/auth.md`.
+
 **Tests** (each written before its code): one verification for a login followed by fifty
 requests (the counter); every failure verified again (never cached); an unknown user
 verified too; a request on the same worker answered while a verification runs; a reload

@@ -70,7 +70,25 @@ its own:
   `--prompt` asks on the terminal and sends only the hash; an agent can only generate (the API
   refuses a `password` field, the bridge drops a `hash`). The listing never shows a hash. A lock
   keeps the password for an unlock; a change to a file a rule reads reloads the server at once,
-  and that file's last user is kept. `rules.auth`, the rule a managed site carries, follows.
+  and that file's last user is kept.
+- **`rules.auth` on managed sites** (`docs/configuration.md` 15 and 19b, `docs/auth.md`): `site_update`
+  with `{"path": "/", "realm", "skip_for", "plain_http"}` or `{"path", "open": true}`, rendered as
+  `[[site.auth]]` reading the site's users file; `agensio ctl site-update NAME --auth PATH
+  [--auth-exact | --auth-open] [--auth-realm T] [--auth-skip A] [--auth-plain-http]`, `--no-auth`.
+  Refused until the site has a user, so a rule never meets a missing or empty file (which would
+  make the next load refuse the whole configuration), and on `site-create`, so a deleted site's old
+  file never comes into force unseen (`site-create` warns when one exists). `site_show` lists the
+  rules with their users file and how many users can log in; `path_check` names the rule. Deleting
+  a site with its files takes its users file into the trash and a restore brings it back.
+- **`docs/auth.md`** (new, installed with the other administrator documents): the whole password
+  feature in one place: the rule, the users file, how a request is decided, verification and its
+  cost, what applications, caches and logs see, the managed tools, fail2ban, health, every edge
+  case found so far with what happens in it, and configuration examples.
+- **Health reads the users files the way the next load will**: `auth_users_unloadable` (an error:
+  a file gone or broken under a running server, which keeps its users, but a reload is refused
+  and a restart would not start), `auth_no_valid_user` (every user locked or expired: every login
+  fails), `auth_users_expired`, `auth_plain_http` (passwords asked over plain HTTP on a listener
+  the network reaches), `auth_users_orphan` (a users file no site owns).
 - **Fixed: a use-after-free at every exit with the root helper running** (since F12b,
   2026-10-01). Two timers of the server (the trash expiry, the restart) were destroyed after the
   worker's `io_context` that had freed their service; the sanitizer build reported it, a release
@@ -96,7 +114,9 @@ rule reads the file, a lock, a new password refusing the old one at once, the la
 password or hash in any log), four in `tests/provision.sh` (through the helper: `root:agensio
 0640` in `root:agensio 0750`, a symlink in the file's place refused) and one in
 `tests/control.sh` (admin only; its tool counts were stale since `access_check` and
-`path_check`, now 16, 20 and 38).
+`path_check`, now 16, 20 and 38); for `rules.auth`, unit `test_auth_managed` (the checks, the
+rendering read back by the loader, the site detail, `path_check`, each health finding), ten more
+checks in `tests/auth.sh` (37 in all) and two in `tests/trash.sh` (the listing of an entry's pieces now has `auth`).
 
 ## 0.1.0-alpha.57 (2026-10-08)
 

@@ -1333,6 +1333,11 @@ json::Value site_trash(const json::Value& req, const Config& cfg) {
         const std::string env = appenv::dir_of(fresh.config_path) + "/" + domain + ".env";
         struct stat st {};
         if (::lstat(env.c_str(), &st) == 0 && S_ISREG(st.st_mode)) pieces.push_back({"env", env, "env/" + domain + ".env"});
+        // Its password users (<config dir>/auth/<domain>.users, 2026-10-09): a site created again
+        // under the name must not inherit them; they come back with the site.
+        const fs::path parent = fresh.config_path.parent_path().empty() ? fs::path(".") : fresh.config_path.parent_path();
+        const std::string users = (parent / "auth" / (domain + ".users")).string();
+        if (::lstat(users.c_str(), &st) == 0 && S_ISREG(st.st_mode)) pieces.push_back({"auth", users, "auth/" + domain + ".users"});
     }
     // Root's additions to the site (sites.d/<domain>.root.toml, design section 20) go with the
     // site file and come back with it: only the files beside the site file, as the loader found them.
@@ -1357,7 +1362,7 @@ json::Value site_trash(const json::Value& req, const Config& cfg) {
     }
     ::close(tfd);
     const std::string edir = tdir + "/" + entry;
-    for (const char* sub : {"logs", "env", "root"}) ::mkdir((edir + "/" + sub).c_str(), 0700);
+    for (const char* sub : {"logs", "env", "root", "auth"}) ::mkdir((edir + "/" + sub).c_str(), 0700);
     json::Value moved = json::Value::array();
     std::vector<std::pair<std::string, std::string>> done;  // to, from: undone on a failure
     for (const auto& p : pieces) {
@@ -1480,7 +1485,7 @@ json::Value site_restore(const json::Value& req, const Config& cfg) {
         bool exists = false;
         absent_or_empty_dir(from, exists);
         if (exists) ::rmdir(from.c_str());
-        if (!ensure_parent(from, server_gid, kind == "log", why)) break;
+        if (!ensure_parent(from, server_gid, kind == "log" || kind == "auth", why)) break;  // logs/ and auth/: root and the server's group, 0750
         bool exdev = false;
         if (!move_path(to, from, why, exdev)) break;
         done.emplace_back(to, from);

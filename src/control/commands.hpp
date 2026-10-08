@@ -137,6 +137,13 @@ json::Value health(const Config& running, const Config& boot, bool as_root, std:
 // appenv::inspect's answer as findings: a file a task would refuse (warn), one the next task
 // tightens (info), a deleted site's file (info), or that the check could not run.
 std::vector<Finding> env_findings(const json::Value& inspected);
+// Passwords ([[site.auth]], 2026-10-09, docs/configuration.md 19b): for every users file a rule
+// reads, what the next load would say of it (auth_users_unloadable, an error: a reload is refused
+// and a restart does not start while the running server keeps its users), whether anyone can log
+// in (auth_no_valid_user: every user locked or expired), who can no longer (auth_users_expired);
+// a rule asked over plain HTTP on a listener the network reaches (auth_plain_http); and the users
+// files under <config dir>/auth/ no site owns (auth_users_orphan). health_findings includes them.
+std::vector<Finding> auth_findings(const Config& cfg, std::time_t now);
 // The helper's app_check as findings, per site: no unit (info, with site_service_unit),
 // stopped, failed or restarting (warn, with site_service_logs and the root line); nothing
 // when active, and nothing at all for a reply that is not ok (a busy helper).

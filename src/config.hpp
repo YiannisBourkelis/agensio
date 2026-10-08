@@ -550,5 +550,11 @@ void explain_config(const Config& cfg, std::ostream& out);
 // Loads and validates a configuration file. Throws std::runtime_error with a
 // human readable message on any problem.
 Config load_config(const std::filesystem::path& path);
+// What the next load would say about a [[site.auth]] users file: "" when it loads, else the
+// loader's own refusal (missing, a symlink, another owner than the main configuration's,
+// writable by group or others, readable by others, over 1 MB, a line it cannot read). Health
+// asks it for every file a rule names, so a file broken under a running server is reported
+// before a restart that would not start (2026-10-09). "" in a build without passwords.
+std::string auth_users_problem(const std::string& path, const Config& cfg);
 
 }  // namespace agensio

@@ -47,7 +47,7 @@ exit 0
 
 %files
 %license LICENSE
-%doc README.md CHANGELOG.md docs/configuration.md docs/install.md docs/mcp.md docs/fail2ban.md
+%doc README.md CHANGELOG.md docs/configuration.md docs/install.md docs/mcp.md docs/fail2ban.md docs/auth.md
 %{_sbindir}/agensio
 %config(noreplace) %attr(0640,root,agensio) %{_sysconfdir}/agensio/agensio.toml
 %config(noreplace) %{_sysconfdir}/agensio/sites.d/default.toml

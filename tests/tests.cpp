@@ -6107,6 +6107,144 @@ static void test_auth_users() {
           !authusers::describe(dir, "shop.test", uid, now)["ok"].boolean());
     fs::remove_all(base);
 }
+
+// rules.auth on a managed site (2026-10-09, design section 25, step 4c): the rule's checks, its
+// rendering into the site file and the loader reading it back with the site's own users file;
+// the site detail and path_check naming it; the health findings over the users files.
+static void test_auth_managed() {
+    namespace fs = std::filesystem;
+    using namespace control;
+    constexpr auto npos = std::string::npos;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-authmgd-" + std::to_string(::getpid()));
+    fs::remove_all(dir);
+    for (const char* sub : {"sites.d", "auth", "www"}) fs::create_directories(dir / sub);
+    std::ofstream(dir / "agensio.toml") << "include = [\"sites.d/*.toml\"]\n[server]\nworkers = 1\n[addresses]\noffice = [\"198.51.100.0/24\"]\n"
+                                           "[[site]]\nserver_name = [\"other.test\"]\nlisten = [\"127.0.0.1:18300\"]\nroot = \"www\"\n";
+    const Config cfg = load_config(dir / "agensio.toml");
+    SiteSpec spec;
+    spec.domain = "shop.test";
+    spec.app = "static";
+    spec.https = "none";
+    spec.root = (dir / "www").string();
+    spec.no_user = true;
+    spec.listen_plain = "0.0.0.0:18301";
+    auto rules = [&](const std::string& text, json::Value& norm) {
+        json::Value g;
+        std::string e;
+        if (!json::parse(text, g, e)) return std::string("unparsed");
+        return check_rules(g, spec, norm, &cfg);
+    };
+    json::Value norm;
+    CHECK(rules(R"({"auth":[{"path":"/","realm":"Shop staging","skip_for":["@office","203.0.113.7"]},{"path":"/health.html","match":"exact","open":true},)"
+                R"({"path":"/lan/","plain_http":true}]})", norm).empty());
+    {
+        const json::Value& a = norm["auth"];
+        CHECK(a.items().size() == 3 && a.items()[0].get("path") == "/" && a.items()[0].get("realm") == "Shop staging" && a.items()[0]["skip_for"].items().size() == 2 &&
+              a.items()[1]["open"].boolean() && a.items()[1].get("match") == "exact" && a.items()[2].get("path") == "/lan" && a.items()[2]["plain_http"].boolean() &&
+              a.items()[0]["users"].is_null());
+    }
+    for (const char* bad : {R"({"auth":{"path":"/"}})",                                  // not a list
+                            R"({"auth":[{"realm":"x"}]})",                               // no path
+                            R"({"auth":[{"path":"no-slash"}]})",
+                            R"({"auth":[{"path":"/a/../b"}]})",
+                            R"({"auth":[{"path":"/","users":"/etc/shadow"}]})",         // the file is the site's own
+                            R"({"auth":[{"path":"/","realm":"a\"b"}]})",
+                            R"({"auth":[{"path":"/","realm":""}]})",
+                            R"({"auth":[{"path":"/","skip_for":["any"]}]})",
+                            R"({"auth":[{"path":"/","skip_for":["@nosuch"]}]})",
+                            R"({"auth":[{"path":"/","plain_http":"yes"}]})",
+                            R"({"auth":[{"path":"/","match":"suffix"}]})",
+                            R"({"auth":[{"path":"/a"},{"path":"/A/"}]})",                // the same path twice
+                            R"({"auth":[{"path":"/x","open":true}]})",                   // an open rule alone
+                            R"({"auth":[{"path":"/a"},{"path":"/b/c","open":true}]})",   // open, but below no password rule
+                            R"({"auth":[{"path":"/a"},{"path":"/a/b","open":true,"realm":"x"}]})"}) {  // an open rule asks for nothing
+        json::Value n2;
+        const std::string why = rules(bad, n2);
+        if (why.empty()) std::printf("rules.auth accepted: %s\n", bad);
+        CHECK(!why.empty());
+    }
+    {
+        std::string many = R"({"auth":[)";
+        for (int i = 0; i < 17; ++i) many += std::string(i ? "," : "") + "{\"path\":\"/p" + std::to_string(i) + "\"}";
+        json::Value n2;
+        CHECK(rules(many + "]}", n2).find("at most 16") != npos);
+    }
+    // Rendered into the site file with the site's own users file, which the loader reads back.
+    spec.rules = norm;
+    const std::string text = render_site(spec, "x");
+    CHECK(text.find("[[site.auth]]   # rules: auth\npath = \"/\"\nrealm = \"Shop staging\"\nusers = \"../auth/shop.test.users\"\nskip_for = [\"@office\", \"203.0.113.7\"]\n") != npos);
+    CHECK(text.find("[[site.auth]]   # rules: auth, open\npath = \"/health.html\"\nmatch = \"exact\"\nopen = true\n") != npos);
+    CHECK(text.find("path = \"/lan\"\nusers = \"../auth/shop.test.users\"\nplain_http = \"allow\"\n") != npos);
+    std::string err;
+    CHECK(write_site_file(site_file(cfg, "shop.test"), text, err));
+    const std::string users = (dir / "auth" / "shop.test.users").string();
+    auto change = [&](const char* body) {
+        json::Value v;
+        std::string e;
+        json::parse(body, v, e);
+        authusers::Change c;
+        CHECK(authusers::parse_change(v, c).empty());
+        return authusers::apply((dir / "auth").string(), "shop.test", ::geteuid(), ::getegid(), c, false);
+    };
+    CHECK(change(R"({"user": "anna", "generate": true})")["ok"].boolean() && change(R"({"user": "bob", "generate": true, "expires": "2020-01-01"})")["ok"].boolean());
+    const std::time_t now = 1791000000;  // 2026-10-03
+    Config loaded = load_config(dir / "agensio.toml");
+    const SiteConfig* s = find_site(loaded, "shop.test");
+    CHECK(s && s->auth.size() == 3);
+    if (!s) return;
+    const AuthRule* root_rule = nullptr;
+    for (const auto& r : s->auth)
+        if (r.path == "/") root_rule = &r;
+    CHECK(root_rule && root_rule->users_path == fs::path(users).lexically_normal().string() && root_rule->users && root_rule->users->users.size() == 2 &&
+          root_rule->realm == "Shop staging" && root_rule->skip_text.size() == 2 && authusers::used_by(loaded, users));
+    CHECK(auth_users_problem(users, loaded).empty());
+    // The site detail: each rule, where it comes from, how many users can log in.
+    {
+        const json::Value d = site(loaded, *s, now);
+        const json::Value* r = nullptr;
+        for (const auto& x : d["auth"].items())
+            if (x.get("path") == "/") r = &x;
+        CHECK(d["auth"].items().size() == 3 && r && r->get("from") == "rules" && r->get("realm") == "Shop staging" && (*r)["users_count"].num() == 2 &&
+              (*r)["usable"].num() == 1 && r->get("users") == fs::path(users).lexically_normal().string() && (*r)["skip_for"].items().size() == 2);
+    }
+    // path_check names the rule that decides a path.
+    {
+        std::string perr;
+        json::Value pc = path_check(loaded, *s, "/private/x.html", perr);
+        CHECK(pc["auth"].get("path") == "/" && pc.get("auth_note").find("401") != std::string_view::npos);
+        pc = path_check(loaded, *s, "/health.html", perr);
+        CHECK(pc["auth"]["open"].boolean());
+    }
+    // Health: an expired user, a rule asked over plain HTTP from the network; every user locked or
+    // expired; the file gone (the next load refuses, the running server keeps its users); an orphan.
+    auto codes = [&](const Config& c) {
+        std::string out;
+        for (const auto& f : auth_findings(c, now)) out += (out.empty() ? "" : " ") + f.severity + ":" + f.code;
+        return out;
+    };
+    {
+        const auto f = auth_findings(loaded, now);
+        CHECK(codes(loaded) == "info:auth_users_expired warn:auth_plain_http");
+        CHECK(f.size() == 2 && f[0].site == "shop.test" && f[0].message.find("bob") != npos && f[0].message.find("2020-01-01") != npos &&
+              f[1].message.find("/lan") != npos);
+    }
+    CHECK(change(R"({"user": "anna", "locked": true})")["ok"].boolean());
+    loaded = load_config(dir / "agensio.toml");
+    CHECK(codes(loaded).find("warn:auth_no_valid_user") != npos && auth_findings(loaded, now)[0].message.find("every login") != npos);
+    fs::rename(users, users + ".away");
+    {
+        const auto f = auth_findings(loaded, now);
+        CHECK(codes(loaded).starts_with("error:auth_users_unloadable") && f[0].message.find("cannot open") != npos && !auth_users_problem(users, loaded).empty());
+    }
+    fs::rename(users + ".away", users);
+    std::ofstream(dir / "auth" / "ghost.test.users") << "x:" << auth_hash("$2b$", 4, "x") << "\n";
+    fs::permissions(dir / "auth" / "ghost.test.users", fs::perms(0640));
+    {
+        const auto f = auth_findings(loaded, now);
+        CHECK(codes(loaded).find("info:auth_users_orphan") != npos);
+    }
+    fs::remove_all(dir);
+}
 #endif
 
 static void test_access_rules() {
@@ -7440,6 +7578,7 @@ int main() {
     test_auth_core();
     test_auth_config();
     test_auth_users();
+    test_auth_managed();
 #endif
     test_refuse_patterns();
     test_refuse_config();

@@ -1329,6 +1329,7 @@ std::shared_ptr<const AuthUserFile> load_auth_users(const fs::path& file, Config
 }
 #endif
 
+
 void parse_auth(const toml::node_view<const toml::node>& n, Config& cfg, SiteConfig& site, const fs::path& base_dir, const std::string& where) {
 #ifndef AGENSIO_HAS_AUTH
     (void)n;
@@ -2237,6 +2238,25 @@ void finalize_site(SiteConfig& site) {
                          if (rank(a) != rank(b)) return rank(a) < rank(b);
                          return a.path.size() > b.path.size();
                      });
+}
+
+std::string auth_users_problem(const std::string& path, const Config& cfg) {
+#ifdef AGENSIO_HAS_AUTH
+    Config probe;  // a scratch configuration: the loader's checks without its cache of files read
+    probe.config_path = cfg.config_path;
+    try {
+        (void)load_auth_users(path, probe, "users");
+    } catch (const std::exception& e) {
+        std::string why = e.what();
+        if (why.starts_with("users.users: ")) why.erase(0, 13);
+        else if (why.starts_with("users: ")) why.erase(0, 7);
+        return why;
+    }
+#else
+    (void)path;
+    (void)cfg;
+#endif
+    return "";
 }
 
 Config load_config(const fs::path& path) {

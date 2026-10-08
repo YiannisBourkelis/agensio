@@ -480,6 +480,40 @@ json::Value new_errors(const std::vector<std::string>& before, const std::vector
     return a;
 }
 
+// A managed site's rules.auth needs a user to log in with (2026-10-09, design section 25): the
+// loader refuses a rule whose users file is missing or empty, so the answer says what to do first
+// instead of a refused reload. Null when the change may go on; `warnings` gets what the user should
+// know (every user locked or expired: the rule asks and nobody gets in).
+json::Value auth_users_needed(const control::SiteSpec& spec, const Config& cfg, bool helper, json::Value& warnings) {
+    bool needs = false;
+    if (spec.rules.is_object())
+        for (const auto& r : spec.rules["auth"].items()) needs = needs || !r["open"].boolean();
+    if (!needs) return {};
+#ifdef AGENSIO_HAS_AUTH
+    const json::Value d = authusers::describe(authusers::dir_of(cfg.config_path), spec.domain, helper ? 0 : ::geteuid(), std::time(nullptr));
+    if (!d["ok"].boolean())
+        return json::Value::object().set("ok", false)
+            .set("error", "rules.auth reads the site's users file, which is refused: " + std::string(d.get("error")))
+            .set("hint", "the file is root's (" + authusers::file_of(authusers::dir_of(cfg.config_path), spec.domain) + "); site_auth_users shows what the tools read");
+    if (d["users"].items().empty())
+        return json::Value::object().set("ok", false)
+            .set("error", "rules.auth needs a user first: with no user nobody could log in, and the configuration would not load")
+            .set("next_steps", json::Value::array().push("site_auth_user_set " + spec.domain + " USER with generate: true (in a terminal: agensio ctl site-auth-user-set " +
+                                                         spec.domain + " USER --generate), then this change again"));
+    std::size_t can = 0;
+    for (const auto& u : d["users"].items()) can += !u["locked"].boolean() && !u["expired"].boolean();
+    if (can == 0)
+        warnings.push("auth: every user of the site's users file is locked or expired, so the rule asks and nobody can log in until one is unlocked or "
+                      "given a later expires (site_auth_users lists them)");
+    return {};
+#else
+    (void)cfg;
+    (void)helper;
+    (void)warnings;
+    return json::Value::object().set("ok", false).set("error", "rules.auth needs a build with password support (libxcrypt and OpenSSL)");
+#endif
+}
+
 json::Value decisions_json(const std::vector<control::Decision>& needs) {
     json::Value a = json::Value::array();
     for (const auto& d : needs) {
@@ -1305,6 +1339,14 @@ void ControlHandler::site_create(Stream& s, const json::Value& body, std::string
         reply(s, 409, json::Value::object().set("error", "a site already serves " + spec.domain).set("hint", "use site-update"));
         return;
     }
+    // A password rule comes after the site's first user (2026-10-09): the users file is the site's,
+    // and an old one left under the name must not come into force unseen.
+    if (spec.rules.is_object() && !spec.rules["auth"].items().empty()) {
+        reply(s, 400, json::Value::object().set("error", "rules.auth on a new site: a site gets its password rule after its first user")
+                          .set("next_steps", json::Value::array().push("site_create without rules.auth").push("site_auth_user_set " + spec.domain + " USER with generate: true")
+                                                 .push("site_update " + spec.domain + " with rules.auth")));
+        return;
+    }
     // Every problem at once, so the caller fixes all of them and retries once.
     const auto problems = control::preflight(spec, cfg, backend_->privileged());
     bool blocking = false, restart = false;
@@ -1359,6 +1401,11 @@ void ControlHandler::site_create(Stream& s, const json::Value& body, std::string
     // What -t would note about the site's access rules (a site restricted as a whole, an entry
     // that holds a trusted proxy, ...): the agent relays it before the user confirms.
     for (const auto& n : control::access_notices_for(spec, cfg)) warnings.push("access: " + n.text);
+#ifdef AGENSIO_HAS_AUTH
+    if (const std::string users = authusers::file_of(authusers::dir_of(cfg.config_path), spec.domain); [&] { std::error_code ec; return std::filesystem::exists(users, ec); }())
+        warnings.push("auth: " + users + " already exists, a deleted site's password users under this name: site_auth_users lists them, and a password "
+                      "rule (rules.auth) would let them in, so remove those who should not (site_auth_user_delete) before adding one");
+#endif
     if (dry_run) {
         reply(s, 200, json::Value::object().set("ok", !blocking).set("dry_run", true).set("file", file.string())
                           .set("would_write", rendered).set("problems", problems_json(problems))
@@ -1474,12 +1521,16 @@ void ControlHandler::site_update(Stream& s, std::string_view name, const json::V
         reply(s, 422, json::Value::object().set("error", "decisions needed").set("needs", decisions_json(needs)).set("spec", spec.to_json()));
         return;
     }
+    json::Value warnings = json::Value::array();
+    if (json::Value refusal = auth_users_needed(spec, cfg, backend_->provision_available(), warnings); !refusal.is_null()) {
+        reply(s, 409, refusal);
+        return;
+    }
     const auto problems = control::preflight(spec, cfg, backend_->privileged());
     bool blocking = false;
     for (const auto& p : problems) blocking = blocking || p.blocks;
     // What -t would note about the site's access rules, for the agent to relay before the user
     // confirms (alpha.52 report: a whole-site rule's dry run answered warnings: null).
-    json::Value warnings = json::Value::array();
     for (const auto& n : control::access_notices_for(spec, cfg)) warnings.push("access: " + n.text);
     if (body["dry_run"].boolean()) {
         reply(s, 200, json::Value::object().set("ok", !blocking).set("dry_run", true).set("file", file.string())
@@ -2214,7 +2265,8 @@ void ControlHandler::site_auth_users(Stream& s, std::string_view name, std::func
             audit_peer(s, what, names.items().empty() ? std::string("read: no users") : "read the users " + joined(names));
             r.set("used", used);
             r.set("hint", std::string(used ? "a [[site.auth]] rule of the site reads this file, so these users are asked for on its paths. "
-                                           : "no [[site.auth]] rule reads this file yet, so nobody is asked for these passwords. ") +
+                                           : "no [[site.auth]] rule reads this file yet, so nobody is asked for these passwords (site_update with rules.auth puts one "
+                                             "in front of a path). ") +
                               "site_auth_user_set adds a user with a generated password (answered once) or changes expires, note and locked; "
                               "site_auth_user_delete removes one. A hash is never shown");
             reply(s, 200, r);
@@ -2305,7 +2357,8 @@ void ControlHandler::site_auth_user_change(Stream& s, std::string_view name, con
                               " now, by a channel other than this one when you can, and do not write it into a file, a ticket or a commit. A lost one is "
                               "replaced (generate again), never recovered; the old one stops working at once");
         else if (!used && action != "unchanged" && action != "deleted")
-            r.set("hint", "no [[site.auth]] rule of the site reads this file yet, so nobody is asked for this password");
+            r.set("hint", "no [[site.auth]] rule of the site reads this file yet, so nobody is asked for this password: site_update with rules.auth "
+                          "(agensio ctl site-update NAME --auth /) puts one in front of a path");
         reply(s, 200, r);
         done();
     });

@@ -1737,6 +1737,16 @@ preset's administration paths, which `presets` lists as `admin_paths`, rendered 
 `--no-restrict-admin` replace that object and keep the other rules; refused on another app,
 and on a path `rules.restricted` names too.
 
+**Passwords** (`rules.auth`, 2026-10-09, section 19b): on any app, a list of `{"path": "/"}` with
+optional `"match": "exact"`, `"realm"`, `"skip_for": ["@office"]` and `"plain_http": true`, or
+`{"path": "/health.html", "open": true}` for a path below a protected one that needs no
+password, rendered as `[[site.auth]]` tables marked `# rules: auth` that read the site's own
+users file (`users = "../auth/<site>.users"`, the control plane's). At most 16 rules; an open
+rule must lie below a protected one; `skip_for` never `"any"`. Refused until the site has a
+user (`site-auth-user-set` first), and on `site-create`. `--auth PATH`, `--auth-exact PATH`,
+`--auth-open PATH` (repeatable) with `--auth-realm TEXT`, `--auth-skip ADDR[,ADDR...]` and
+`--auth-plain-http` replace the list and keep the other rules; `--no-auth` clears it.
+
 **Refused paths** (`rules.refuse`, 2026-10-08, section 6b): on any app, a list of
 gitignore-style patterns (`"/vendor/"`, `"*.yaml"`, `"/ext/*/Resources/Private/"`,
 `"/a/**/*.ts"`) rendered as the site's `refuse` key, marked `# rules`; each pattern is
@@ -2681,7 +2691,37 @@ reloads the server, so it applies to the next request, and the last user of the 
 (lock it instead). A hand-written site is refused: its rules name their own files, which root
 keeps with `agensio passwd`.
 
-The reference rows (`agensio ctl reference`, `docs/keys.md`) give every key. `rules.auth`, the
-rule a managed site carries in its file, follows in the next step of the feature (design
-section 25).
+**A managed site's rule.** `site_update` with `rules.auth` (section 15) writes the rules into the
+site file as `[[site.auth]]` tables reading the site's own users file:
+
+```sh
+agensio ctl site-auth-user-set shop.example anna --generate --yes --reason "staging"         # the first user
+agensio ctl site-update shop.example --auth / --auth-realm "Shop staging" --auth-skip @office \
+    --auth-open /health.html --yes --reason "staging behind a password"
+agensio ctl path-check shop.example /cart        # names the rule; auth_note says what a request meets
+agensio ctl site-update shop.example --no-auth --yes --reason "goes public"
+```
+
+The rule is refused until the site has a user: a rule whose users file is missing or empty
+would make the next load refuse the whole configuration, so the answer names the command for
+the first user instead. `site-create` refuses `rules.auth` altogether: a site gets its first
+user, then its rule. `site_show` lists every rule in force (`auth`, with `from`: `rules`,
+`preset:wordpress` or nothing for a hand-written one), its users file, `users_count` and
+`usable` (who can log in now); the names are `site-auth-users`'. Deleting the site with its
+files moves the users file into the trash with the rest, and a restore brings it back; deleting
+it without its files leaves the file, which health then reports, and `site-create` under the
+same name warns that it exists.
+
+**What health says.** For every users file a rule reads (hand-written sites too):
+
+| code | severity | when |
+|---|---|---|
+| `auth_users_unloadable` | error | the next load would refuse the file (gone, a symlink, another owner, a wrong mode, a line it cannot read): a reload is refused and a restart does not start the server, while the running one still asks with the users it loaded |
+| `auth_no_valid_user` | warn | every user of the file is locked or expired: every login fails and the browser keeps asking |
+| `auth_users_expired` | info | users past their `expires` |
+| `auth_plain_http` | warn | a rule with `plain_http` on a listener the network reaches |
+| `auth_users_orphan` | info | a file under `<config dir>/auth/` no site owns: a site created again under that name with a rule would let its users in |
+
+The reference rows (`agensio ctl reference`, `docs/keys.md`) give every key; `docs/auth.md` is
+the whole feature in one place, with its edge cases.
 

@@ -217,6 +217,40 @@ print(" ".join(out))
 PYT
 check "mcp: site_auth_users read-only, site_auth_user_delete destructive, no hash argument; a generated password answered; a hash the agent sends is dropped" \
   "True True nohash pw dropped anna,carol" "$(cat "$T/mcp.out")"
+# rules.auth on a managed site (2026-10-09, step 4c): refused until the site has a user and on a new
+# site; then the site asks where the rule says, an open rule frees one file, site_show and path_check
+# name the rule, health reads the users file the way the next load will, --no-auth removes it.
+acodes() { ctl health | python3 -c "import json,sys; d=json.load(sys.stdin); print(' '.join(f['severity'] + ':' + f['code'] for f in d['findings'] if f['code'].startswith('auth_') and f.get('site', '') in ('$1', '')))"; }
+echo users-home > "$T/www/users.test/index.html"; echo ok > "$T/www/users.test/health.html"; mkdir -p "$T/www/empty.test"
+ctl site-create --domain empty.test --app static --no-user --https none --root "$T/www/empty.test" --listen-plain 127.0.0.1:18134 --yes --reason auth > /dev/null
+ctl site-update empty.test --auth / --yes --reason staging > "$T/out"
+check "rules.auth on a site without users: refused, naming the command for the first user; the site file untouched" "False yes no" \
+  "$(jv 'd.get("ok")') $(grep -q 'site-auth-user-set empty.test' "$T/out" && echo yes) $(grep -q 'site.auth' "$T/sites.d/empty.test.toml" && echo yes || echo no)"
+check "site-create with rules.auth: refused (a new site gets its first user, then its rule)" "400 yes" \
+  "$(cpost /v1/sites '{"domain":"new.test","https":"none","user":null,"app":"static","root":"'"$T"'/www/empty.test","rules":{"auth":[{"path":"/"}]},"confirm":true}') $(grep -q 'first user' "$T/out" && echo yes)"
+ctl site-update users.test --auth / --auth-realm 'Users staging' --auth-open /health.html --yes --reason staging > "$T/out"
+P=http://users.test:18132; R="--resolve users.test:18132:127.0.0.1"   # the managed site answers its own name only (421 otherwise)
+check "rules.auth with users: the site asks with its realm, a user's password is served, the open file needs none" "True 401 yes 200 200" \
+  "$(jv 'd.get("ok")') $(code $R $P/) $(curl -sS $R -D - -o /dev/null $P/ | tr -d '\r' | grep -qi '^www-authenticate: Basic realm="Users staging"' && echo yes) $(code $R -u "anna:$PW2" $P/) $(code $R $P/health.html)"
+ctl site users.test > "$T/out"
+check "site_show: each rule with where it comes from, its realm, its users and how many can log in" "rules Users staging 2 2 True" \
+  "$(jv '[(r["from"], r["realm"], r["users_count"], r["usable"]) for r in d["auth"] if r["path"] == "/"][0][0], [r for r in d["auth"] if r["path"] == "/"][0]["realm"], [r for r in d["auth"] if r["path"] == "/"][0]["users_count"], [r for r in d["auth"] if r["path"] == "/"][0]["usable"], [r for r in d["auth"] if r["path"] == "/health.html"][0]["open"]')"
+check "path_check names the password rule, and the open one" "/ True" \
+  "$(ctl path-check users.test /index.html | tail -1 > "$T/out"; jv 'd["auth"]["path"]') $(ctl path-check users.test /health.html | tail -1 > "$T/out"; jv 'd["auth"]["open"]')"
+ctl site-auth-user-set users.test anna --lock --yes --reason h > /dev/null; ctl site-auth-user-set users.test carol --lock --yes --reason h > /dev/null
+check "health: every user of a rule locked: auth_no_valid_user, a warning" "warn:auth_no_valid_user" "$(acodes users.test)"
+ctl site-auth-user-set users.test anna --unlock --yes --reason h > /dev/null; ctl site-auth-user-set users.test carol --unlock --expires 2020-01-01 --yes --reason h > /dev/null
+check "health: one user past its expiry: auth_users_expired, information" "info:auth_users_expired" "$(acodes users.test)"
+mv "$T/auth/users.test.users" "$T/auth/users.test.away"
+check "health: the users file gone: the next load would refuse it (an error), while the running server still asks and serves" "error:auth_users_unloadable 401 200" \
+  "$(acodes users.test) $(code $R $P/) $(code $R -u "anna:$PW2" $P/)"
+mv "$T/auth/users.test.away" "$T/auth/users.test.users"; cp -p "$T/auth/users.test.users" "$T/auth/gone.test.users"
+check "health: a users file no site owns: auth_users_orphan (a site created again under that name would inherit its users)" "yes" \
+  "$(ctl health | grep -q '"code":"auth_users_orphan".*gone.test.users' && echo yes)"
+rm -f "${T:?}/auth/gone.test.users"
+ctl site-update users.test --no-auth --yes --reason public > "$T/out"
+check "--no-auth: the rule is gone from the site file and the site answers without a password" "True no 200" \
+  "$(jv 'd.get("ok")') $(grep -q 'site.auth' "$T/sites.d/users.test.toml" && echo yes || echo no) $(code $R $P/)"
 sleep 1.2
 check "the audit log names each change by user and never holds a password or a hash; no other log does either" "yes 0" \
   "$(grep -q 'auth-users.*anna: created with a generated password' "$T/logs/audit.log" && echo yes) $(cat "$T/logs/"*.log | grep -c -F -e "${PW:-no password}" -e "${PW2:-no password}" -e 'typed-pass' -e '$y$')"

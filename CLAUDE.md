@@ -600,7 +600,12 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   `auth_users_write`; `agensio ctl site-auth-user-set` / `-delete` / `site-auth-users`, MCP
   `site_auth_user_set`, `site_auth_user_delete`, `site_auth_users` (admin, audited by name); a
   password never reaches the server (`--generate` answers one once, `--prompt` sends a hash, the
-  bridge drops an agent's hash). Security page row 40. `rules.auth` on managed sites: the next step.
+  bridge drops an agent's hash). `rules.auth` on managed sites (`check_rules`, `render_site`: `[[site.auth]]`
+  with `users = "../auth/<site>.users"`), refused until the site has a user and on `site_create`;
+  the trash moves the users file; `path_check` and `site_show` name the rules; health
+  `auth_findings` (`auth_users_unloadable` through the loader's own checks, `auth_users_problem`,
+  `auth_no_valid_user`, `auth_users_expired`, `auth_plain_http`, `auth_users_orphan`). The whole
+  feature: `docs/auth.md`. Security page row 40.
 - **Application install** (F9, `src/services/archive.*`, `fetch.*`, `install.*`):
   `agensio ctl site-install NAME [--url | --file | --version]` fills a site's empty
   directory as the site's account from an https archive, an upload (`agensio ctl upload`)

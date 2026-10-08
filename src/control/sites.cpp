@@ -276,8 +276,8 @@ std::string check_rules(const json::Value& given, const SiteSpec& spec, json::Va
     if (!given.is_object()) return "rules must be an object: {\"private\": [...], \"entry_points\": [...], \"cache\": [...], \"front_controller\": \"/index.php\", \"refuse\": [...], \"restricted\": [...]}";
     for (const auto& m : given.members())
         if (m.first != "private" && m.first != "entry_points" && m.first != "cache" && m.first != "front_controller" && m.first != "restricted" && m.first != "admin" &&
-            m.first != "refuse")
-            return "rules: unknown key '" + m.first + "' (private, entry_points, cache, front_controller, refuse, restricted, admin)";
+            m.first != "refuse" && m.first != "auth")
+            return "rules: unknown key '" + m.first + "' (private, entry_points, cache, front_controller, refuse, restricted, admin, auth)";
     // rules.refuse (2026-10-08, docs/configuration.md 6b): path patterns rendered as the site's
     // `refuse`, on any app; compiled here so a bad one is answered with what it would mean.
     RefuseSet refused;
@@ -418,6 +418,76 @@ std::string check_rules(const json::Value& given, const SiteSpec& spec, json::Va
         if (restricted.items().size() + expanded.items().size() > 32)
             return "rules.admin and rules.restricted come to " + std::to_string(restricted.items().size() + expanded.items().size()) + " rules, at most 32";
     }
+    // rules.auth (2026-10-09, docs/configuration.md 19b, design section 25 step 4c): password rules,
+    // rendered as [[site.auth]] tables that read the site's own users file (the control plane's,
+    // <config dir>/auth/<site>.users, which site_auth_user_set fills); on any app, and like every
+    // rule they only narrow what the site serves.
+    json::Value auth = json::Value::array();
+    if (!given["auth"].is_null()) {
+        const char* shape = "rules.auth must be a list of {\"path\": \"/\"} (optional \"match\": \"exact\", \"realm\", \"skip_for\": [addresses], "
+                            "\"plain_http\": true; or \"open\": true for a path below a protected one that needs no password)";
+        if (!given["auth"].is_array()) return shape;
+        if (given["auth"].items().size() > 16) return "rules.auth: at most 16 rules";
+        std::vector<std::pair<std::string, bool>> auth_seen;  // path, exact
+        std::vector<std::string> protected_prefixes;
+        for (const auto& r : given["auth"].items()) {
+            if (!r.is_object()) return shape;
+            for (const auto& m : r.members())
+                if (m.first != "path" && m.first != "match" && m.first != "open" && m.first != "realm" && m.first != "skip_for" && m.first != "plain_http")
+                    return "rules.auth: unknown key '" + m.first + "' (path, match, open, realm, skip_for, plain_http)" +
+                           (m.first == "users" ? std::string("; the users are the site's own file, which site_auth_user_set fills") : std::string());
+            if (!r["path"].is_string()) return "rules.auth: each rule needs a path, such as \"/\" for the whole site or \"/staging\"";
+            std::string path(r["path"].str());
+            if (const std::string why = check_access_path(path); !why.empty()) return "rules.auth: " + why;
+            const std::string match = r["match"].is_null() ? std::string("prefix") : r["match"].is_string() ? std::string(r["match"].str()) : std::string();
+            if (match != "prefix" && match != "exact") return "rules.auth: match for " + path + " must be \"prefix\" or \"exact\"";
+            if (match == "prefix" && path.size() > 1 && path.back() == '/') path.pop_back();
+            for (const auto& [p, exact] : auth_seen)
+                if (exact == (match == "exact") && p.size() == path.size() && access::iequal_prefix(p, path)) return "rules.auth: a second rule for " + path;
+            auth_seen.emplace_back(path, match == "exact");
+            if (!r["open"].is_null() && r["open"].type() != json::Value::Type::boolean) return "rules.auth: open is true or false";
+            json::Value rule = json::Value::object().set("path", path);
+            if (match == "exact") rule.set("match", "exact");
+            if (r["open"].boolean()) {
+                if (!r["realm"].is_null() || !r["skip_for"].is_null() || !r["plain_http"].is_null())
+                    return "rules.auth: " + path + " is open, so it asks for nothing: no realm, skip_for or plain_http";
+                rule.set("open", true);
+                auth.push(std::move(rule));
+                continue;
+            }
+            if (!r["realm"].is_null()) {
+                const std::string realm = r["realm"].is_string() ? std::string(r["realm"].str()) : std::string();
+                bool ok = !realm.empty() && realm.size() <= 64;
+                for (const char c : realm) ok = ok && static_cast<unsigned char>(c) >= 0x20 && c != 0x7f && c != '"' && c != '\\';
+                if (!ok) return "rules.auth: the realm of " + path + " is 1 to 64 characters without quotes, backslashes or control characters (the browser shows it)";
+                rule.set("realm", realm);
+            }
+            if (!r["skip_for"].is_null()) {
+                if (!r["skip_for"].is_array() || r["skip_for"].items().empty())
+                    return "rules.auth: skip_for of " + path + " is a list of addresses, ranges or sets (\"@office\") let in without a password";
+                json::Value list;
+                if (const std::string why = allow_list(r["skip_for"], "skip_for of " + path, list); !why.empty()) return "rules.auth: " + why;
+                for (const auto& e : list.items())
+                    if (e.str() == "any") return "rules.auth: skip_for of " + path + " cannot be \"any\": that is no password at all (remove the rule, or make a path open)";
+                rule.set("skip_for", std::move(list));
+            }
+            if (!r["plain_http"].is_null()) {
+                if (r["plain_http"].type() != json::Value::Type::boolean) return "rules.auth: plain_http is true (ask over plain HTTP too, when the user asks for it) or false";
+                if (r["plain_http"].boolean()) rule.set("plain_http", true);
+            }
+            if (match == "prefix") protected_prefixes.push_back(path);
+            auth.push(std::move(rule));
+        }
+        // An open rule frees a path below a password rule; on its own it means nothing.
+        for (const auto& r : auth.items()) {
+            if (!r["open"].boolean()) continue;
+            const std::string p(r.get("path"));
+            bool below = false;
+            for (const auto& q : protected_prefixes)
+                below = below || q == "/" || (p.size() > q.size() && access::iequal_prefix(p, q) && p[q.size()] == '/');
+            if (!below) return "rules.auth: the open rule " + p + " lies below no password rule; an open rule frees a path inside a protected one";
+        }
+    }
     const bool php = php_app(spec.app), static_site = spec.app.empty() || spec.app == "static";
     std::vector<std::string> priv, entries;
     std::string why, p;
@@ -489,6 +559,7 @@ std::string check_rules(const json::Value& given, const SiteSpec& spec, json::Va
     if (!refuse_list.items().empty()) normalised.set("refuse", refuse_list);
     if (!restricted.items().empty()) normalised.set("restricted", restricted);
     if (admin.is_object()) normalised.set("admin", admin);
+    if (!auth.items().empty()) normalised.set("auth", auth);
     return "";
 }
 
@@ -869,6 +940,26 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
                 if (r.get("match") == "exact") s += "match = \"exact\"\n";
                 s += "allow = " + toml_list(allow) + "\n";
                 if (r.get("mode") == "report") s += "mode = \"report\"\n";
+            }
+        // rules.auth: password rules reading the site's own users file, which lives beside sites.d
+        // (<config dir>/auth/<site>.users) and is written by the control plane's user tools.
+        if (spec.rules.is_object())
+            for (const auto& r : spec.rules["auth"].items()) {
+                const bool open = r["open"].boolean();
+                s += std::string("\n[[site.auth]]   # rules: auth") + (open ? ", open" : "") + "\npath = " + toml_string(r.get("path")) + "\n";
+                if (r.get("match") == "exact") s += "match = \"exact\"\n";
+                if (open) {
+                    s += "open = true\n";
+                    continue;
+                }
+                if (!r.get("realm").empty()) s += "realm = " + toml_string(r.get("realm")) + "\n";
+                s += "users = " + toml_string("../auth/" + spec.domain + ".users") + "\n";
+                if (!r["skip_for"].items().empty()) {
+                    std::vector<std::string> skip;
+                    for (const auto& e : r["skip_for"].items()) skip.emplace_back(e.str());
+                    s += "skip_for = " + toml_list(skip) + "\n";
+                }
+                if (r["plain_http"].boolean()) s += "plain_http = \"allow\"\n";
             }
         // rules.admin: the preset's administration paths, as the user asked them restricted.
         const json::Value admin = admin_rules(spec);  // kept alive for the loop: items() refers into it

@@ -503,6 +503,45 @@ std::string access_rule_text(const AccessRule& r) {
     return t + ")";
 }
 
+// A user who can log in at `now`: not locked, not past the day `expires` names.
+bool usable(const auth::User& u, std::time_t now) { return !u.locked && (u.expires == 0 || now < u.expires); }
+
+// A [[site.auth]] rule as site_show and path_check show it (2026-10-09): never a hash or a name,
+// only the file and how many of its users can log in now (site_auth_users lists them, admin).
+json::Value auth_rule_json(const AuthRule& r, const std::string& from, std::time_t now) {
+    json::Value v = json::Value::object().set("path", r.path).set("match", r.exact ? "exact" : "prefix").set("open", r.open);
+    if (!r.open) {
+        v.set("realm", r.realm).set("users", r.users_path);
+        std::size_t total = 0, can = 0;
+        if (r.users)
+            for (const auto& u : r.users->users) {
+                ++total;
+                if (usable(u, now)) ++can;
+            }
+        v.set("users_count", static_cast<double>(total)).set("usable", static_cast<double>(can));
+        json::Value skip = json::Value::array();
+        for (const auto& t : r.skip_text) skip.push(t);
+        v.set("skip_for", std::move(skip)).set("plain_http", r.plain_http);
+        v.set("credentials", r.credentials == AuthRule::Credentials::pass ? "pass" : "strip");
+        if (!r.forward_user.empty()) v.set("forward_user", r.forward_user);
+    }
+    if (!from.empty()) v.set("from", from);
+    return v;
+}
+
+// "rules" when a managed site's rules.auth wrote it, the preset's name for an opening a preset
+// added (WordPress's admin-ajax.php below a protected /wp-admin), "" for one written by hand.
+std::string auth_rule_from(const AuthRule& r, const SiteSpec* managed) {
+    if (!r.origin.empty()) return r.origin;
+    if (managed && managed->rules.is_object())
+        for (const auto& m : managed->rules["auth"].items()) {
+            const std::string p(m.get("path"));
+            if ((m.get("match") == "exact") == r.exact && m["open"].boolean() == r.open && p.size() == r.path.size() && access::iequal_prefix(p, r.path))
+                return "rules";
+        }
+    return "";
+}
+
 }  // namespace
 
 json::Value access_check(const Config& cfg, const SiteConfig& site, std::string_view raw_path, std::string_view address_text, std::string& error) {
@@ -591,6 +630,14 @@ json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_vi
         if (const AccessRule* r = access::rule_for(site, path); r && !r->any && v["access"].is_null())
             v.set("access", access_rule_json(*r, access_rule_from(*r, is_managed ? &managed : nullptr)))
                 .set("access_note", "an access rule covers " + path + ": clients outside it get 403 (access_check decides it for an address)");
+        // Passwords (2026-10-09), checked after the access rules as the dispatcher does.
+        if (const AuthRule* r = access::auth_rule_for(site, path); r && v["auth"].is_null()) {
+            v.set("auth", auth_rule_json(*r, auth_rule_from(*r, is_managed ? &managed : nullptr), std::time(nullptr)));
+            v.set("auth_note", r->open ? path + " is open: the rule " + r->path + " frees it below a password rule, so nobody is asked"
+                                       : "a password rule covers " + path + ": a request without the password of one of its users gets 401 (realm \"" + r->realm +
+                                             "\")" + (r->skip_text.empty() ? std::string() : ", except from the addresses of skip_for") +
+                                             (r->plain_http ? std::string() : "; over plain HTTP from another host it gets 403 and is never asked"));
+        }
         const LocationConfig& loc = Router::location(site, path);
         steps.push(path + ": " + describe(loc));
         json::Value lj = json::Value::object().set("path", loc.path).set("match", loc.exact ? "exact" : loc.suffix ? "suffix" : "prefix").set("handler", loc.handler);
@@ -779,6 +826,13 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now) {
         json::Value acc = json::Value::array();
         for (const auto& r : s.access) acc.push(access_rule_json(r, access_rule_from(r, is_managed ? &managed : nullptr)));
         v.set("access", std::move(acc));
+    }
+    // Passwords: the rules in force, longest first, each with where it comes from and how many of
+    // its users can log in now; the names are site_auth_users' (admin).
+    if (!s.auth.empty()) {
+        json::Value list = json::Value::array();
+        for (const auto& r : s.auth) list.push(auth_rule_json(r, auth_rule_from(r, is_managed ? &managed : nullptr), now));
+        v.set("auth", std::move(list));
     }
     // `refuse`: the patterns in force, as written (a managed site's come from rules.refuse).
     if (!s.refuse.empty()) {
@@ -1201,6 +1255,7 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
         else if (n.code == "access_site_restricted") fix = "meant for a staging copy or an internal site; site_update with the rule on / removed when it goes public";
         add(n.severity == "warning" ? "warn" : "info", n.code, n.site, n.text, fix);
     }
+    for (auto& f : auth_findings(running, now)) out.push_back(std::move(f));
     for (const auto& o : running.orphan_additions) {
         std::error_code ec;
         const fs::path f = o.file;
@@ -1253,6 +1308,105 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
     if (!lines.empty())
         add("warn", "recent_errors", "", std::to_string(lines.size()) + (truncated ? "+" : "") + " error(s) in the last 24 hours; last: " + lines.back().text,
             "agensio ctl logs --since 24h --level error");
+    return out;
+}
+
+std::vector<Finding> auth_findings(const Config& cfg, std::time_t now) {
+    std::vector<Finding> out;
+    auto day = [](std::int64_t t) {
+        const std::time_t tt = static_cast<std::time_t>(t);
+        std::tm tm{};
+        ::gmtime_r(&tt, &tm);
+        char buf[16];
+        return std::string(buf, std::strftime(buf, sizeof buf, "%Y-%m-%d", &tm));
+    };
+    auto joined = [](const std::vector<std::string>& v) {
+        std::string t;
+        for (const auto& x : v) t += (t.empty() ? "" : ", ") + x;
+        return t;
+    };
+    const fs::path config_dir = cfg.config_path.parent_path().empty() ? fs::path(".") : cfg.config_path.parent_path();
+    std::error_code ec;
+    for (const auto& s : cfg.sites) {
+        if (s.auth.empty() || s.server_names.empty()) continue;
+        const std::string site = s.server_names.front();
+        const std::string own = fs::absolute(config_dir / "auth" / (site + ".users"), ec).lexically_normal().string();
+        std::vector<std::string> files;
+        for (const auto& r : s.auth) {
+            if (r.open || !r.users || std::find(files.begin(), files.end(), r.users_path) != files.end()) continue;
+            files.push_back(r.users_path);
+            std::vector<std::string> paths;
+            for (const auto& q : s.auth)
+                if (!q.open && q.users_path == r.users_path) paths.push_back(q.path);
+            const std::string where = joined(paths);
+            const bool managed = fs::absolute(r.users_path, ec).lexically_normal().string() == own;
+            if (const std::string why = auth_users_problem(r.users_path, cfg); !why.empty()) {
+                out.push_back(Finding{"error", "auth_users_unloadable", site,
+                                      "the users file of " + where + " would be refused by the next load, so a reload is refused and a restart does not start "
+                                      "the server: " + why + ". The running server still asks with the users it loaded",
+                                      managed ? "put the file back (root keeps it under " + (config_dir / "auth").string() + "), or correct what the message names; "
+                                                "`agensio -t` says when the next load accepts it"
+                                              : "correct what the message names (root's file, chmod 640, `agensio passwd USER` for a line); `agensio -t` says when "
+                                                "the next load accepts it"});
+                continue;
+            }
+            std::vector<std::string> expired, locked;
+            std::size_t can = 0;
+            for (const auto& u : r.users->users) {
+                if (u.locked) locked.push_back(u.name);
+                else if (u.expires && now >= u.expires) expired.push_back(u.name + " (expired " + day(u.expires) + ")");
+                else ++can;
+            }
+            if (can == 0) {
+                std::vector<std::string> who = expired;
+                for (const auto& l : locked) who.push_back(l + " (locked)");
+                out.push_back(Finding{"warn", "auth_no_valid_user", site,
+                                      "every login on " + where + " fails: no user of " + r.users_path + " can log in (" + joined(who) + "), so the browser asks and asks",
+                                      managed ? "site_auth_user_set " + site + " USER with locked: false or a later expires, or a new user with generate: true; "
+                                                "or site_update without the rule if the area is closed for good"
+                                              : "unlock or extend a user in the file (`agensio passwd USER` for a new line), or remove the rule"});
+                continue;
+            }
+            if (!expired.empty())
+                out.push_back(Finding{"info", "auth_users_expired", site, joined(expired) + " can no longer log in on " + where,
+                                      managed ? "site_auth_user_delete " + site + " for each one who is gone, or site_auth_user_set with a later expires"
+                                              : "remove their lines from " + r.users_path + ", or change their :expires= field"});
+        }
+        // Plain HTTP on a listener the network reaches: the password crosses it readable.
+        if (s.tls) continue;
+        std::vector<std::string> outside;
+        for (const auto& l : s.listen) {
+            const std::size_t colon = l.rfind(':');
+            const std::string host = colon == std::string::npos ? l : l.substr(0, colon);
+            if (host != "127.0.0.1" && host != "[::1]" && host != "localhost" && !host.starts_with("127.")) outside.push_back(l);
+        }
+        if (outside.empty()) continue;
+        for (const auto& r : s.auth)
+            if (!r.open && r.plain_http)
+                out.push_back(Finding{"warn", "auth_plain_http", site,
+                                      "passwords on " + r.path + " are asked over plain HTTP (plain_http) on " + joined(outside) +
+                                          ": anyone on the network path can read them, and the browser sends them again with every request",
+                                      "serve the site over https and drop plain_http from the rule, unless the network is one the user trusts (a LAN tool)"});
+    }
+    // Users files no site owns: a deleted site's (site_delete without files leaves it). A site
+    // created again under the name with a password rule would let those users in.
+    const fs::path adir = config_dir / "auth";
+    for (const auto& e : fs::directory_iterator(adir, ec)) {
+        const std::string name = e.path().filename().string();
+        if (!name.ends_with(".users") || !e.is_regular_file(ec)) continue;
+        const std::string stem = name.substr(0, name.size() - 6);
+        const std::string abs = fs::absolute(e.path(), ec).lexically_normal().string();
+        bool used = false;
+        for (const auto& s : cfg.sites) {
+            used = used || (!s.server_names.empty() && s.server_names.front() == stem);
+            for (const auto& r : s.auth) used = used || (!r.users_path.empty() && fs::absolute(r.users_path, ec).lexically_normal().string() == abs);
+        }
+        if (!used)
+            out.push_back(Finding{"info", "auth_users_orphan", "",
+                                  e.path().string() + " belongs to no configured site (a deleted site's password users): a site created again as " + stem +
+                                      " with a password rule would let them in",
+                                  "as root: rm " + e.path().string() + " (unless the site comes back; site_delete with files moves this file into the trash)"});
+    }
     return out;
 }
 
