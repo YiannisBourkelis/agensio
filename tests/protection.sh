@@ -59,8 +59,19 @@ root = "$T/www"
 app = "php"
 php = { socket = "unix:$T/run/none.sock" }
 login_paths = ["/login", "/?controller=AuthController&action=check"]
+[[site.auth]]
+path = "/private"
+users = "$T/users"
+realm = "Private"
+[[site.access]]
+path = "/office"
+allow = ["192.0.2.0/24"]
 CFG
 }
+# The password file of /private: anna, and old, whose password is right but whose access ended.
+printf 'secret\n' | "$BIN" passwd --method bcrypt --cost 4 anna > $T/users
+printf 'secret\n' | "$BIN" passwd --method bcrypt --cost 4 old | sed 's/$/:expires=2020-01-01/' >> $T/users
+chown root:agensio $T/users; chmod 640 $T/users
 write_config ""
 "$BIN" -c $T/agensio.toml >> $T/server.out 2>&1 &
 for _ in $(seq 1 50); do [ -S $T/run/control.sock ] && break; sleep 0.1; done; sleep 0.2
@@ -79,20 +90,44 @@ check "the rendered ruleset loads, and loads again over itself; the table carrie
 check "health: the limits are loaded and cover the port; whether they survive a reboot could not be told (no systemd here), so the keep commands are the fix; the file on disk is current" "info:firewall_limits_unsaved warn:fail2ban_missing True True [18880] 4 True True yes" "$(codes) $(prot 'd["firewall"]["detected"]["table_loaded"], d["firewall"]["detected"]["covered"], d["firewall"]["detected"]["limited_tcp_ports"], len(d["firewall"]["detected"]["rules"]), d["firewall"]["file_present"], d["firewall"]["file_current"]') $(ctl health | grep -q 'could not be told' && echo yes)"
 
 # 3. fail2ban with the shipped filters and the rendered jail, reading the site's access log.
-install -m 644 $ROOT/packaging/fail2ban/filter.d/agensio-login.conf $ROOT/packaging/fail2ban/filter.d/agensio-auth.conf $ROOT/packaging/fail2ban/filter.d/agensio-scan.conf $ROOT/packaging/fail2ban/filter.d/agensio-post.conf /etc/fail2ban/filter.d/
+install -m 644 $ROOT/packaging/fail2ban/filter.d/agensio-*.conf /etc/fail2ban/filter.d/
 ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf
 printf '[DEFAULT]\nignoreip =\nignoreself = false\nbackend = polling\n[sshd]\nenabled = false\n' > /etc/fail2ban/jail.d/zz-agensio-test.conf   # loopback bannable here (ignoreself is on by default), no inotify, no sshd log
 mkdir -p /run/fail2ban
 fail2ban-client -x start > $T/f2b-start.out 2>&1
 for _ in $(seq 1 50); do fail2ban-client status >/dev/null 2>&1 && break; sleep 0.2; done
-check "fail2ban runs the four agensio jails over the site's access log" "agensio-auth, agensio-login, agensio-post, agensio-scan yes" "$(fail2ban-client status | sed -n 's/.*Jail list:[[:space:]]*//p') $(fail2ban-client status agensio-login | grep -q "File list:.*$T/logs/access.log" && echo yes)"
-check "health: fail2ban covers the logs now; protection names the jails that read them and the installed jail file matches the rendering" "info:firewall_limits_unsaved True same 4 reads" "$(codes) $(prot 'd["fail2ban"]["detected"]["covered"], d["fail2ban"]["installed_jail"], len([j for j in d["fail2ban"]["detected"]["jails"] if j["reads_agensio_logs"]]), "reads" if "fail2ban reads the access logs" in d["summary"] else d["summary"]')"
+check "fail2ban runs the five agensio jails, four over the site's access log and agensio-auth over the error log" "agensio-auth, agensio-denied, agensio-login, agensio-post, agensio-scan yes yes" "$(fail2ban-client status | sed -n 's/.*Jail list:[[:space:]]*//p') $(fail2ban-client status agensio-login | grep -q "File list:.*$T/logs/access.log" && echo yes) $(fail2ban-client status agensio-auth | grep -q "File list:.*$T/logs/error.log" && echo yes)"
+check "health: fail2ban covers the logs now; protection names the jails that read the access logs, the installed jail file matches the rendering, and the site's failed passwords are counted" "info:firewall_limits_unsaved True same 4 reads True" "$(codes) $(prot 'd["fail2ban"]["detected"]["covered"], d["fail2ban"]["installed_jail"], len([j for j in d["fail2ban"]["detected"]["jails"] if j["reads_agensio_logs"]]), "reads" if "fail2ban reads the access logs" in d["summary"] else d["summary"], d["auth"]["counted"]')"
 
 # 4. Ten POSTs to the login path from one address: banned through nftables, seen by protection.
 for _ in $(seq 1 11); do curl -sS -o /dev/null -X POST --max-time 3 http://127.0.0.1:18880/login; done
 for _ in $(seq 1 60); do [ "$(fail2ban-client status agensio-login | sed -n 's/.*Currently banned:[[:space:]]*//p')" = 1 ] && break; sleep 0.25; done
 check "eleven POSTs to /login from 127.0.0.1 ban it: fail2ban counts one, the site no longer answers that address, protection reports the ban" "1 refused 1 1" "$(fail2ban-client status agensio-login | sed -n 's/.*Currently banned:[[:space:]]*//p') $(curl -sS -o /dev/null --max-time 3 http://127.0.0.1:18880/ 2>/dev/null && echo answered || echo refused) $(prot 'd["fail2ban"]["detected"]["banned"], d["fail2ban"]["detected"]["total_banned"]')"
 fail2ban-client set agensio-login unbanip 127.0.0.1 > /dev/null
+check "unbanned: the site answers again" "200" "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:18880/)"
+
+# 4b. Passwords ([[site.auth]], 2026-10-08): the challenge every browser meets first is no failure, nor
+# is an expired user's right password; a wrong password is one, counted by agensio-auth from the error
+# log's "auth failed" lines (until alpha.58 the jail counted every 401 in the access log, so a protected
+# site banned the people who had its password). A 403 (an address outside a site's access rule) is
+# agensio-denied's, over the access log.
+banned() { fail2ban-client status "$1" 2>/dev/null | sed -n 's/.*Currently banned:[[:space:]]*//p'; }
+failed() { fail2ban-client status "$1" 2>/dev/null | sed -n 's/.*Total failed:[[:space:]]*//p'; }
+refused_soon() { for _ in $(seq 1 20); do curl -sS -o /dev/null --max-time 1 http://127.0.0.1:18880/ 2>/dev/null || return 0; sleep 0.25; done; }
+for _ in $(seq 1 12); do curl -sS -o /dev/null --max-time 3 http://127.0.0.1:18880/private/; done
+for _ in $(seq 1 12); do curl -sS -o /dev/null --max-time 3 -u old:secret http://127.0.0.1:18880/private/; done
+sleep 2.5   # the polling backend reads once a second
+check "twelve challenges (no credentials) and twelve right passwords of an expired user: nothing counted, no address banned, the site still asks" "0 0 401" "$(failed agensio-auth) $(banned agensio-auth) $(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:18880/private/)"
+for i in $(seq 1 11); do curl -sS -o /dev/null --max-time 3 -u "anna:wrong$i" http://127.0.0.1:18880/private/; done
+for _ in $(seq 1 60); do [ "$(banned agensio-auth)" = 1 ] && break; sleep 0.25; done
+refused_soon   # fail2ban counts the ban before its nft action has run
+check "eleven wrong passwords from 127.0.0.1: agensio-auth counts them from the error log and bans the address; the site no longer answers it" "1 refused" "$(banned agensio-auth) $(curl -sS -o /dev/null --max-time 3 http://127.0.0.1:18880/ 2>/dev/null && echo answered || echo refused)"
+fail2ban-client unban --all > /dev/null
+for _ in $(seq 1 11); do curl -sS -o /dev/null --max-time 3 http://127.0.0.1:18880/office/; done
+for _ in $(seq 1 60); do [ "$(banned agensio-denied)" = 1 ] && break; sleep 0.25; done
+refused_soon
+check "eleven requests to a path closed to 127.0.0.1 (403): agensio-denied bans the address" "1 refused" "$(banned agensio-denied) $(curl -sS -o /dev/null --max-time 3 http://127.0.0.1:18880/ 2>/dev/null && echo answered || echo refused)"
+fail2ban-client unban --all > /dev/null
 check "unbanned: the site answers again" "200" "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:18880/)"
 
 # 5. A site added later: the loaded table misses its port and the installed jail is stale; rendering again heals both.
@@ -132,6 +167,10 @@ check "rendered and loaded again: both ports covered, the jail current" "info:fi
 cp /etc/fail2ban/filter.d/agensio-auth.conf $T/auth.bak; printf '[Definition]\nfailregex = ^<HOST> old\n' > /etc/fail2ban/filter.d/agensio-auth.conf
 ctl site-update lp.test --login-path /other --yes --reason prot > $T/update.json
 check "an installed filter of an older build: health warns naming it (and the jail is stale from the new login path), protection reports it stale, and the site change's re-render step starts with the install line" "info:firewall_limits_unsaved warn:fail2ban_filter_stale info:fail2ban_jail_stale stale agensio-auth yes" "$(codes) $(prot 'd["fail2ban"]["installed_filters"]["state"], ",".join(d["fail2ban"]["installed_filters"]["stale"])') $(python3 -c "import json; ns=[x for x in json.load(open('$T/update.json'))['next_steps'] if 'fail2ban jail on disk' in x]; print('yes' if ns and 'as root: install -m 644 /usr/share/agensio/fail2ban/filter.d/agensio-login.conf' in ns[0] and ns[0].find('install -m 644') < ns[0].find('agensio ctl protection --jail') else ns)")"
+# The agensio-auth filter of alpha.57 and before counted every 401 and 403 in the access log: on a
+# host with a password-protected site health names the consequence, not only the stale file.
+printf '[INCLUDES]\nbefore = common.conf\n\n[Definition]\nfailregex = ^<HOST> \\S+ \\S+ \\[\\] "\\S+ \\S+ HTTP/\\S+" (?:401|403) \nignoreregex =\ndatepattern = ^[^\\[]*\\[({DATE})\n' > /etc/fail2ban/filter.d/agensio-auth.conf
+check "the alpha.57 agensio-auth filter installed: health warns that it counts each browser's first request to /private, besides the stale file" "info:firewall_limits_unsaved warn:fail2ban_filter_stale info:fail2ban_jail_stale warn:fail2ban_auth_challenges yes" "$(codes) $(ctl health | grep -q 'bans the people who have the password' && echo yes)"
 cp $T/auth.bak /etc/fail2ban/filter.d/agensio-auth.conf; ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload > /dev/null; sleep 0.5
 check "filters and jail reinstalled: back to the one informational finding" "info:firewall_limits_unsaved same same" "$(codes) $(prot 'd["fail2ban"]["installed_filters"]["state"], d["fail2ban"]["installed_jail"]')"
 

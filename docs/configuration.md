@@ -2294,16 +2294,20 @@ configuration kept elsewhere. A manual `systemctl restart nftables` on Debian ru
 agensio-firewall` puts the table back, or add `include "/etc/agensio/firewall.nft"` to that
 file instead of the unit.
 
-*fail2ban.* Four jails over agensio's access logs (combined format; the filters do not read
-JSON logs), rendered for this host's logs, ports and sites: `agensio-login` counts
-credentials posted to the sites' login paths, ten in ten minutes bans for an hour (a failed
-and a successful login look alike in an access log, so this counts attempts: no one types
-ten passwords in ten minutes, every tool does); `agensio-auth` bursts of 401 and 403;
-`agensio-scan` bursts of 404 (forty in five minutes); `agensio-post` bursts of POST to any
+*fail2ban.* Jails over agensio's access logs (combined format; the filters do not read
+JSON logs) and its error log, rendered for this host's logs, ports and sites: `agensio-login`
+counts credentials posted to the sites' login paths, ten in ten minutes bans for an hour (a
+failed and a successful login look alike in an access log, so this counts attempts: no one
+types ten passwords in ten minutes, every tool does); `agensio-auth` the error log's `auth
+failed` lines, the failed passwords on `[[site.auth]]` paths (section 19b), never a 401, which
+is the challenge every browser meets first (until alpha.58 it counted every 401 and 403, and
+so banned the people with a site's password; it needs the error log in a file at `warn`, the
+package's default); `agensio-denied` bursts of 403 (an address outside an access rule, an
+application refusing); `agensio-scan` bursts of 404 (forty in five minutes); `agensio-post` bursts of POST to any
 path (120 in two minutes), the catch-all for a login nobody named, with an `ignore`
 parameter for an API posted to that often (`filter = agensio-post[ignore="/api/|/jsonrpc\.php"]`).
 Bans go through nftables into fail2ban's own table (`banaction = nftables-multiport`); a
-host whose firewall is managed otherwise overrides that in a `jail.local`. The four filters
+host whose firewall is managed otherwise overrides that in a `jail.local`. The five filters
 are static and shipped; the jail file carries what is the host's:
 
 ```sh
@@ -2515,7 +2519,7 @@ server saw. The error log gets one `warn` line a second per worker, `access refu
 rule /wp-admin allows @office; client 198.51.100.4 GET /wp-admin/`; the refusals held back are
 counted, `(N more refusals since the last such line, not written)`, written with the next line
 or on its own once the second is over. The access log has every 403 with its client as usual,
-and the `agensio-auth` fail2ban jail (section 18) bans an address that keeps hitting a
+and the `agensio-denied` fail2ban jail (section 18) bans an address that keeps hitting a
 restricted path from outside.
 
 **Trying a rule first.** `mode = "report"` serves everyone and logs `access would refuse:`
@@ -2644,7 +2648,11 @@ otherwise, never a name a refused request claimed (JSON: `"user"`). Each failed 
 `auth failed: client 198.51.100.4 site shop.example realm "Shop staging" user "anna" (wrong
 password) GET /`. The reasons are `wrong password`, `unknown user`, `expired`, `locked user`
 and `malformed credentials`; the challenge itself, which every browser meets before it sends
-a login, writes nothing. `status` reports `auth_verifications`, the hashes run since the start.
+a login, writes nothing. The `agensio-auth` fail2ban jail (section 18, `docs/fail2ban.md` 2c)
+counts these lines but `expired`, a right password: ten in ten minutes ban the address for an
+hour; it reads the error log, so that must be a file at `warn` (the package's default; health
+says `fail2ban_auth_unseen` otherwise). `status` reports `auth_verifications`, the hashes run
+since the start.
 
 The reference rows (`agensio ctl reference`, `docs/keys.md`) give every key. Managed sites
 (`rules.auth`, the user tools of the control plane and MCP) follow in the next step of the

@@ -26,14 +26,14 @@ by agensio for the host they run on and applied by root; agensio never writes in
 ```sh
 agensio ctl protection                 # the whole picture as JSON: files, commands, what is in place
 agensio ctl protection --jail          # the jail file for this host
-agensio ctl protection --filter NAME   # one of the four shipped filters
+agensio ctl protection --filter NAME   # one of the five shipped filters
 agensio protection -c /etc/agensio/agensio.toml --jail   # the same, from the configuration alone, no server needed
 ```
 
 The MCP tool `protection_show` answers the same picture to an agent. The shipped copies
 under `/usr/share/agensio/fail2ban/` are the rendering for a default host; the host's own
-rendering carries its ports, its access logs, the login paths of its sites and the jails of
-the application types it runs.
+rendering carries its ports, its access logs and error log, the login paths of its sites and the
+jails of the application types it runs.
 
 Install, as root:
 
@@ -61,7 +61,7 @@ makes that address the real client's, so bans hit the right one.
 | jail | counts | threshold | ban |
 |---|---|---|---|
 | `agensio-login`, one per access log | POST requests to the login paths of the sites writing that log, in every spelling the server accepts | 10 in 10 min | 1 h |
-| `agensio-auth` | answers 401 and 403 | 10 in 10 min | 1 h |
+| `agensio-denied` | answers 403: an address outside a site's access rule (`[[site.access]]`), a password asked for over plain HTTP, an application refusing; never 401 (section 2c) | 10 in 10 min | 1 h |
 | `agensio-scan` | answers 404 | 40 in 5 min | 1 h |
 | `agensio-post` | POST requests to any path, the catch-all for a login nobody named | 120 in 2 min | 30 min |
 
@@ -142,6 +142,60 @@ fields above) from the last 30 days, and keeps `fail2ban_failures_unseen` while 
 none: the Syslog module is still off, or the plugin is not active yet (or nobody has logged
 in since). `agensio ctl protection` and `protection_show` report it as `journal_seen` per
 jail and the sites it cannot read as `unidentified`.
+
+### 2c. Passwords agensio asks for: the error log
+
+A site's `[[site.auth]]` paths (`docs/configuration.md` 19b) are agensio's own login, so agensio
+writes its failures itself: one `warn` line in the error log per login it refused, and none for
+anything else.
+
+```
+2026/10/08 17:20:01 [warn] auth failed: client 198.51.100.4 site shop.example realm "Shop staging" user "anna" (wrong password) GET /private/
+```
+
+| jail | counts | threshold | ban |
+|---|---|---|---|
+| `agensio-auth` | `auth failed` lines with the reason `wrong password`, `unknown user`, `locked user` or `malformed credentials` | 10 in 10 min | 1 h |
+
+**Why not the 401s.** A 401 in the access log is mostly not a failure. It is the challenge:
+a browser's first request to a protected path carries no password, the 401 makes it ask, and
+on a site protected as a whole a browser meets several: it sends the password unasked only
+below the directory of the address that was challenged (RFC 7617 2.2, `docs/rfc/`), so each
+other directory it loads from starts with a 401. A client that does not send credentials
+preemptively (WebDAV, .NET's `HttpClient`, many API libraries) meets one before every
+request. Until alpha.58 the filter called `agensio-auth` counted every 401 and 403 in the
+access logs, so a password-protected site banned the people who had the password. fail2ban's
+own filters do the same as agensio does now: `apache-auth` and `nginx-http-auth` read the
+error logs, and `apache-auth.conf` says why: "An unauthorized response 401 is the first step
+for a browser to instigate authentication however apache doesn't log this as an error"
+(`docs/fail2ban-ref/config/filter.d/`). The 403s the old filter also counted are
+`agensio-denied`'s now, over the access logs as before.
+
+**What counts.** A wrong password, a user the file does not have, a locked user (`!` or `*`
+in the file), and an `Authorization` field that does not decode: in each, the client did not
+show that it knows a password. An expired user's right password (`expired`) is no guess and
+is not counted; a challenge writes no line at all. The line is anchored: the date, `[warn]`,
+then `auth failed: client <ADDR>`, so the address is always the server's own reading of the
+connection (behind `trusted_proxies`, the client X-Forwarded-For named); the realm and the
+user name come after it with every `"`, backslash and control byte escaped, so a user name
+cannot pass for another address. The filter takes addresses only (`<ADDR>`), never names to
+resolve.
+
+**What it needs.** The error log in a file at `warn` or more: `[log] error =
+"/var/log/agensio/error.log"` and `level = "warn"`, the package's defaults. With the error
+log on stderr or at `level = "error"` the jail is rendered disabled with root's line, and
+health reports `fail2ban_auth_unseen` for the sites with a password. The jail names no site,
+so a site that gains a password needs no new rendering.
+
+**Who else gets banned.** A browser asks again after a wrong password, so a person
+mistyping writes one line each time; ten in ten minutes is no person. A script or a monitor
+that keeps sending an old password after it changed writes one per request and is banned
+like a guesser; list the monitor's address in `ignoreip` (section 4) or give it the new
+password. An application's own 401s (one that asks for a password itself, an API with
+tokens) are not counted by any agensio jail: put `[[site.auth]]` in front of it to have the
+failures counted, or add a local failure jail over the application's log (section 4).
+
+Test it on the host's own log: `fail2ban-regex /var/log/agensio/error.log agensio-auth`.
 
 ## 3. What each application type gets, and what to add
 
@@ -273,8 +327,11 @@ fail2ban-client set agensio-login unbanip 203.0.113.9
 when no jail reads agensio's logs (`fail2ban_missing`), when the jail or a filter on disk is
 older than the build (`fail2ban_jail_stale`, `fail2ban_filter_stale`), when a site has no
 access log for fail2ban to read (`fail2ban_blind`), when the logs are JSON
-(`fail2ban_log_format`) and when an application's failure tier is not in place yet
-(`fail2ban_failures_unseen`).
+(`fail2ban_log_format`), when an application's failure tier is not in place yet
+(`fail2ban_failures_unseen`), when a site has a password and nothing counts its failed logins
+(`fail2ban_auth_unseen`), and, as a warning to act on at once, when the installed
+`agensio-auth` filter is an older build's that counts every 401 and so bans the people with
+a site's password (`fail2ban_auth_challenges`).
 
 **A local failure jail for an application agensio does not render.** The shape, for Redmine's
 production log, with the regex from Redmine's own wiki:

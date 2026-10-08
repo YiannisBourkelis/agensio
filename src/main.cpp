@@ -211,7 +211,7 @@ int main(int argc, char** argv) {
             else if (part == "filter") {
                 for (const auto& f : agensio::control::protection_filters())
                     if (filter == f.name) { std::cout << f.text; return 0; }
-                std::cerr << "protection: no filter " << filter << " (agensio-login, agensio-auth, agensio-scan, agensio-post)\n";
+                std::cerr << "protection: no filter " << filter << " (agensio-login, agensio-auth, agensio-scan, agensio-post, agensio-denied)\n";
                 return 2;
             } else {
                 std::cout << agensio::control::protection_report(in, agensio::control::read_probe(agensio::json::Value(nullptr), in), {}).dump() << "\n";
@@ -243,7 +243,7 @@ int main(int argc, char** argv) {
                              "        protection [--nft | --jail | --unit | --filter NAME] (the firewall ruleset and the fail2ban jails rendered\n"
                              "                    for this host's listeners, logs and login paths, the root commands that try, keep and remove\n"
                              "                    them, and what the kernel and fail2ban do now; one file alone with --nft, --jail, --unit or\n"
-                             "                    --filter agensio-login|agensio-auth|agensio-scan|agensio-post, for root to redirect into place) |\n"
+                             "                    --filter agensio-login|agensio-auth|agensio-scan|agensio-post|agensio-denied, for root to redirect into place) |\n"
                              "        site-unit NAME [--raw] (the Puma unit of a Rails site, rendered for root: --raw prints the unit alone) |\n"
                              "        site-service NAME (whether the Rails site's agensio-app-USER.service runs, from systemctl show) |\n"
                              "        site-service-logs NAME [--lines N] [--since 30m|3h|2d] [--raw] (admin, audited: its journal;\n"
@@ -685,7 +685,7 @@ int main(int argc, char** argv) {
                     else if (raw_part == "jail") std::cout << u["fail2ban"].get("jail");
                     else if (raw_part == "filter") {
                         if (u["fail2ban"]["filters"].get(raw_filter).empty()) {
-                            std::cerr << "protection: no filter " << raw_filter << " (agensio-login, agensio-auth, agensio-scan, agensio-post)\n";
+                            std::cerr << "protection: no filter " << raw_filter << " (agensio-login, agensio-auth, agensio-scan, agensio-post, agensio-denied)\n";
                             return 2;
                         }
                         std::cout << u["fail2ban"]["filters"].get(raw_filter);

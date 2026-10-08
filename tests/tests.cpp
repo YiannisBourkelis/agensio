@@ -4703,6 +4703,23 @@ static void test_protection() {
         CHECK((in.login_paths == std::vector<std::string>{"/api/token", "/login", "/one", "/wp-login.php", "/xmlrpc.php"}) && in.firewall_file == (dir / "firewall.nft").string());
         CHECK(in.login_jails.size() == 1 && in.login_jails[0].name == "agensio-login" && in.login_jails[0].log == (dir / "access.log").string() && in.login_jails[0].paths.size() == 4 &&
               in.login_jails[0].paths[0].path == "/api/token" && in.login_jails[0].paths[0].php && !in.login_jails[0].paths[0].format && (in.login_jails[0].sites == std::vector<std::string>{"wp.test"}));
+        // Failed passwords: the error log in a file at warn, and the sites with a password (an
+        // open rule alone is none).
+        CHECK(in.error_log.empty() && in.error_log_warn && in.auth_sites.empty());
+        {
+            Config ac = cfg;
+            AuthRule open;
+            open.path = "/pub";
+            open.open = true;
+            ac.sites[1].auth.push_back(open);
+            AuthRule shut;
+            shut.path = "/private";
+            ac.sites[0].auth.push_back(shut);
+            ac.log.error = "/var/log/agensio/error.log";
+            ac.log.level = "error";
+            const ProtectionInput ai = protection_input(ac);
+            CHECK((ai.auth_sites == std::vector<std::string>{"wp.test"}) && ai.error_log == "/var/log/agensio/error.log" && !ai.error_log_warn);
+        }
         // The failure tier: the WordPress site brings the plugin's two jails, enabled only with the
         // filter and the log on the host (both looked for; here neither is asserted, the flags are
         // set by hand below), the needs naming the admin panel and root's copy, never an install.
@@ -4928,7 +4945,46 @@ static void test_protection() {
     CHECK(render_jail(def) == file("packaging/fail2ban/jail.d/agensio.conf"));
     CHECK(render_firewall_unit(def) == file("packaging/agensio-firewall.service"));
     for (const auto& f : protection_filters()) CHECK(f.text == file(("packaging/fail2ban/filter.d/" + std::string(f.name) + ".conf").c_str()));
-    CHECK(protection_filters().size() == 4);
+    CHECK(protection_filters().size() == 5);
+    // Failed passwords ([[site.auth]], 2026-10-08): agensio-auth reads the error log's "auth failed"
+    // lines, since a 401 of an access log is the challenge every browser meets first; the 403s are
+    // agensio-denied's, over the access logs; without the error log in a file at warn the jail
+    // waits, disabled, with root's step.
+    {
+        constexpr auto npos = std::string::npos;
+        auto section = [](const std::string& jail, const std::string& name) {
+            const std::size_t a = jail.find("\n[" + name + "]\n");
+            if (a == npos) return std::string();
+            const std::size_t b = jail.find("\n[", a + 2);
+            return jail.substr(a, b == npos ? npos : b - a);
+        };
+        CHECK(def.error_log == "/var/log/agensio/error.log" && def.error_log_warn && def.auth_sites.empty());
+        const std::string auth = section(render_jail(def), "agensio-auth"), denied = section(render_jail(def), "agensio-denied");
+        CHECK(auth.find("enabled   = true\n") != npos && auth.find("filter    = agensio-auth\n") != npos && auth.find("logpath   = /var/log/agensio/error.log\n") != npos &&
+              auth.find("access.log") == npos && auth.find("maxretry  = 10\n") != npos && auth.find("never the challenge") != npos);
+        CHECK(denied.find("enabled   = true\n") != npos && denied.find("filter    = agensio-denied\n") != npos && denied.find("logpath   = /var/log/agensio/access.log\n") != npos);
+        CHECK(std::string_view(protection_filters()[1].name) == "agensio-auth" && std::string_view(protection_filters()[4].name) == "agensio-denied");
+        const std::string& fa = protection_filters()[1].text;
+        const std::string& fd = protection_filters()[4].text;
+        CHECK(fa.find("failregex = ^\\s*\\[warn\\] auth failed: client <ADDR> site \\S+ realm \"[^\"]*\" user \"[^\"]*\" "
+                      "\\((?:wrong password|unknown user|locked user|malformed credentials)\\) \n") != npos &&
+              fa.find("(?:401|403)") == npos && fa.find("datepattern = {^LN-BEG}\n") != npos && fa.find('%') == npos);
+        CHECK(fd.find("HTTP/\\S+\" 403 \n") != npos && fd.find("401|") == npos && fd.find('%') == npos);
+        ProtectionInput se = def;
+        se.error_log.clear();
+        const std::string a2 = section(render_jail(se), "agensio-auth");
+        CHECK(a2.find("# Disabled: the error log goes to stderr") != npos && a2.find("enabled   = false\n") != npos && a2.find("logpath") == npos &&
+              a2.find("[log] error = \"/var/log/agensio/error.log\"") != npos);
+        ProtectionInput le = def;
+        le.error_log_warn = false;
+        const std::string a3 = section(render_jail(le), "agensio-auth");
+        CHECK(a3.find("leaves out the auth failed lines, which are warn") != npos && a3.find("enabled   = false\n") != npos && a3.find("logpath   = /var/log/agensio/error.log\n") != npos &&
+              a3.find("[log] level = \"warn\"") != npos);
+        // A site that gains a password leaves the rendering as it was: the jail names no site.
+        ProtectionInput withsite = def;
+        withsite.auth_sites = {"shop.test"};
+        CHECK(render_jail(withsite) == render_jail(def));
+    }
     // What a host's rendering says: its ports, its logs, its paths (escaped for the regex), the
     // QUIC rule only with h3, the login jail disabled without a path.
     ProtectionInput in;
@@ -4961,7 +5017,7 @@ static void test_protection() {
         ProtectionInput odd = in;
         odd.firewall_file = "/srv/agensio/firewall.nft";
         CHECK(firewall_keep_commands(odd).size() == 4 && firewall_keep_commands(odd)[1] == "agensio ctl protection --unit > /etc/systemd/system/agensio-firewall.service");
-        CHECK(fail2ban_install_commands().size() == 3 && fail2ban_install_commands()[0].find("filter.d/agensio-post.conf /etc/fail2ban/filter.d/") != std::string::npos);
+        CHECK(fail2ban_install_commands().size() == 3 && fail2ban_install_commands()[0].find("filter.d/agensio-post.conf /usr/share/agensio/fail2ban/filter.d/agensio-denied.conf /etc/fail2ban/filter.d/") != std::string::npos);
     }
     // The helper's answer, read: nft's JSON (our table with counters, a foreign rule through a
     // named port set), the units, fail2ban's status texts.
@@ -5053,7 +5109,8 @@ static void test_protection() {
         const auto f = protection_findings(in, probe, oldf);
         CHECK(codes(in, probe, oldf) == "warn:fail2ban_filter_stale" && f[0].message.starts_with("the installed filter(s) agensio-login in /etc/fail2ban/filter.d/ differ") &&
               f[0].fix == "as root: install -m 644 /usr/share/agensio/fail2ban/filter.d/agensio-login.conf /usr/share/agensio/fail2ban/filter.d/agensio-auth.conf "
-                          "/usr/share/agensio/fail2ban/filter.d/agensio-scan.conf /usr/share/agensio/fail2ban/filter.d/agensio-post.conf /etc/fail2ban/filter.d/; fail2ban-client reload");
+                          "/usr/share/agensio/fail2ban/filter.d/agensio-scan.conf /usr/share/agensio/fail2ban/filter.d/agensio-post.conf "
+                          "/usr/share/agensio/fail2ban/filter.d/agensio-denied.conf /etc/fail2ban/filter.d/; fail2ban-client reload");
         const json::Value r = protection_report(in, probe, oldf);
         CHECK(r["fail2ban"]["installed_filters"].get("state") == "stale" && r["fail2ban"]["installed_filters"]["stale"].items().size() == 1 &&
               r.get("summary").find("the installed filter(s) agensio-login are older than the shipped text") != std::string_view::npos);
@@ -5067,6 +5124,58 @@ static void test_protection() {
         ProtectionFiles part = files;
         part.installed_filters[3].reset();
         CHECK(protection_report(in, probe, part)["fail2ban"]["installed_filters"].get("state") == "partial" && protection_findings(in, probe, part)[0].message.find("agensio-post are not installed") != std::string::npos);
+    }
+    // Failed passwords ([[site.auth]], 2026-10-08): a site with one and no jail on the error log
+    // (the installed jail an older build's); the jail in place; the agensio-auth filter of
+    // alpha.57, which counted every 401 of the access logs; the error log on stderr.
+    {
+        constexpr auto npos = std::string::npos;
+        ProtectionInput ai = in;
+        ai.error_log = "/var/log/agensio/error.log";
+        ai.auth_sites = {"shop.test"};
+        ProtectionFiles af = files;
+        af.installed_jail = render_jail(ai);
+        const ProtectionProbe p0 = read_probe(reply, ai);
+        {
+            const auto f = protection_findings(ai, p0, af);
+            CHECK(codes(ai, p0, af) == "warn:fail2ban_auth_unseen" && f[0].message.find("failed passwords on shop.test are not counted: no fail2ban jail reads the error log /var/log/agensio/error.log") != npos &&
+                  f[0].fix.find("; agensio ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf; fail2ban-client reload") != npos);
+            const json::Value r = protection_report(ai, p0, af);
+            CHECK(!r["auth"]["counted"].boolean() && r["auth"]["jail_enabled"].boolean() && r["auth"].get("error_log") == "/var/log/agensio/error.log" &&
+                  r["auth"]["sites"].items().size() == 1 && r.get("summary").find("; failed passwords are not counted (no jail reads the error log)") != std::string_view::npos);
+        }
+        std::string text = reply_text;
+        const std::string tail = "203.0.113.9\"}]}}";
+        text.replace(text.rfind(tail), tail.size(),
+                     "203.0.113.9\"}, {\"name\": \"agensio-auth\", \"status\": \"Status for the jail: agensio-auth\\n|- Filter\\n|  |- Currently failed:\\t1\\n|  |- Total failed:\\t4\\n"
+                     "|  `- File list:\\t/var/log/agensio/error.log\\n`- Actions\\n   |- Currently banned:\\t0\\n   |- Total banned:\\t0\\n   `- Banned IP list:\\t\"}]}}");
+        json::Value with_auth;
+        CHECK(json::parse(text, with_auth, perr));
+        const ProtectionProbe p1 = read_probe(with_auth, ai);
+        CHECK(p1.jails.size() == 3 && p1.jails[2].error_log && !p1.jails[2].ours && !p1.jails[1].error_log && codes(ai, p1, af).empty() &&
+              protection_report(ai, p1, af)["auth"]["counted"].boolean() && protection_report(ai, p1, af).get("summary").find("; failed passwords are counted from the error log") != std::string_view::npos);
+        ProtectionFiles old = af;
+        old.installed_filters[1] = "[INCLUDES]\nbefore = common.conf\n\n[Definition]\nfailregex = ^<HOST> \\S+ \\S+ \\[\\] \"\\S+ \\S+ HTTP/\\S+\" (?:401|403) \nignoreregex =\n";
+        {
+            const auto f = protection_findings(ai, p1, old);
+            CHECK(codes(ai, p1, old) == "warn:fail2ban_filter_stale warn:fail2ban_auth_challenges" && f[1].message.find("of shop.test is one (the challenge that makes the browser ask), so fail2ban bans the people who have the password") != npos &&
+                  f[1].fix.starts_with("as root: install -m 644 "));
+        }
+        CHECK(codes(in, probe, old).find("auth") == npos);  // no site with a password: the old filter is only stale
+        ProtectionInput se = ai;
+        se.error_log.clear();
+        ProtectionFiles sf = files;
+        sf.installed_jail = render_jail(se);
+        {
+            const auto f = protection_findings(se, read_probe(with_auth, se), sf);
+            CHECK(codes(se, read_probe(with_auth, se), sf) == "warn:fail2ban_auth_unseen" && f[0].message.find("the error log goes to stderr, and fail2ban reads files") != npos &&
+                  f[0].fix.starts_with("root sets [log] error = \"/var/log/agensio/error.log\""));
+        }
+        ProtectionInput ext = ai;
+        ext.host_protection = "external";
+        ProtectionFiles ef = af;
+        ef.installed_jail = render_jail(ext);
+        CHECK(codes(ext, p0, ef) == "info:fail2ban_auth_unseen");
     }
     ProtectionFiles nojail = files;
     nojail.installed_jail.reset();

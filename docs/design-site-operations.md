@@ -1109,7 +1109,8 @@ Proposed:
 - **The answer.** 403 with the constant error page, as nginx; an info line in the error log
   at most once a second per worker, and the access log line as usual. The existing
   `agensio-auth` jail already bans bursts of 401 and 403, so a scanner hammering a
-  restricted path from outside is banned without a new jail. 403 is not heuristically
+  restricted path from outside is banned without a new jail (since alpha.58 the 403s are
+  `agensio-denied`'s and `agensio-auth` counts failed passwords, section 25). 403 is not heuristically
   cacheable (RFC 9110 15.1), so a shared cache in front does not store it for everyone.
 - **Cost.** A site without rules pays one emptiness test per request; with rules, a scan of
   at most 32 paths and the CIDR compares of the deciding rule (at most 64 entries). Gate:
@@ -1153,7 +1154,8 @@ What the research changed, and the owner's answers (2026-10-07), as built:
   after a script are judged as well (Tomcat's `..;/`, double-decoding origins, front
   controllers reading PATH_INFO), only when the path holds the character that makes them differ.
 - **WordPress.** The preset keeps `/wp-admin/admin-ajax.php` open when `/wp-admin` alone is
-  restricted; without it ordinary visitors got 403s and the `agensio-auth` jail banned them.
+  restricted; without it ordinary visitors got 403s and the `agensio-auth` jail (now
+  `agensio-denied`) banned them.
 - **Named sets** in `[addresses]`, root's, named `@office`, one edit for every site.
 - **Trying first.** `mode = "report"`, `access-check` / MCP `access_check`, and a refusal page
   and log line that name the address tested; the log line is `warn`, rate-limited to one a
@@ -1418,10 +1420,16 @@ loopback calls need them), `"strip"` on proxy presets; PHP always gets `REMOTE_U
 that name removed first.
 
 **Logs.** The access log's user field shows verified users only. A failed attempt (wrong
-password, unknown or expired user) is one `warn` line `auth failed: site S realm R user U
-client A (reason)`, never the password or the header, rate-limited like the access lines;
-the credential-less challenge logs nothing. The fail2ban jail counts those lines, not 401s
-(today's `agensio-auth` filter counts every 401 and would ban normal visitors).
+password, unknown, locked or expired user, malformed credentials) is one `warn` line `auth
+failed: client A site S realm "R" user "U" (reason) METHOD PATH`, the client first and what
+the client chose escaped after it, never the password or the header, and never rate-limited,
+since fail2ban counts them; the credential-less
+challenge logs nothing. The fail2ban jail counts those lines, not 401s: built in step 4a,
+`agensio-auth` reads the error log (`docs/fail2ban.md` 2c; the filter of alpha.57 and
+before counted every 401 and 403 of the access logs and banned the people with the password,
+health's `fail2ban_auth_challenges` while it is installed) and the 403s went to a new
+`agensio-denied` over the access logs, which the access rules (section 22) rely on; an
+expired user's right password is not counted.
 
 **Managed sites and the agent.** `rules.auth` on `site_update` (paths, realm, `skip_for`,
 `open`, `plain_http`), and user tools through the provisioning helper:

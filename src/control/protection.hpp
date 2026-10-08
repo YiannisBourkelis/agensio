@@ -95,6 +95,13 @@ struct ProtectionInput {
     std::vector<LoginJail> login_jails;       // per access log, the server-wide log's first
     std::vector<FailureJail> failure_jails;   // per preset present, over the application's own log
     std::vector<std::string> unlogged;        // sites without an access log (fail2ban cannot see them)
+    // Failed passwords ([[site.auth]], 2026-10-08, docs/configuration.md 19b): one "auth failed"
+    // warn line each in the error log, which agensio-auth counts. A 401 in an access log is no
+    // failure: it is the challenge every browser meets first (fail2ban's apache-auth and
+    // nginx-http-auth read the error logs for the same reason, docs/fail2ban-ref/config/filter.d/).
+    std::string error_log;                    // the error log's file; empty when it goes to stderr
+    bool error_log_warn = true;               // [log] level writes warn lines (the auth failed lines are warn)
+    std::vector<std::string> auth_sites;      // sites with a password on some path, ascending
     bool combined = true;                     // [log] format = "combined": the filters read that format only
     bool exposed = false;                     // at least one listener is not loopback
     std::string firewall_file;                // where this host keeps the ruleset: <config dir>/firewall.nft
@@ -115,7 +122,7 @@ std::string render_nft(const ProtectionInput& in);
 std::string render_jail(const ProtectionInput& in);
 std::string render_firewall_unit(const ProtectionInput& in);
 struct ProtectionFilter {
-    const char* name;  // agensio-login, agensio-auth, agensio-scan, agensio-post
+    const char* name;  // agensio-login, agensio-auth, agensio-scan, agensio-post, agensio-denied
     std::string text;
 };
 const std::vector<ProtectionFilter>& protection_filters();
@@ -171,6 +178,7 @@ struct ProtectionProbe {
         std::vector<std::string> files;
         std::uint64_t banned = 0, total_banned = 0;
         bool ours = false;                    // reads one of this host's access logs
+        bool error_log = false;               // reads this host's error log (agensio-auth)
     };
     std::vector<Jail> jails;
     // The journal, for the failure jails in journal mode (alpha.48 report: an enabled jail over

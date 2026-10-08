@@ -257,7 +257,7 @@ std::vector<std::string> failure_tier_steps(const std::string& app, const std::s
 
 namespace {
 
-// The four jails share the shape; the text is one place so the shipped copy and the host's
+// The access-log jails share the shape; the text is one place so the shipped copy and the host's
 // rendering never drift.
 std::string login_filter_text() {
     std::string paths;
@@ -294,15 +294,40 @@ std::string login_filter_text() {
            "datepattern = ^[^\\[]*\\[({DATE})\n";
 }
 
+// Failed passwords on [[site.auth]] paths (2026-10-08), from the error log as fail2ban's own
+// nginx-http-auth and apache-auth read theirs (docs/fail2ban-ref/config/filter.d/): a 401 in an
+// access log is the challenge every browser meets first, so counting 401s (this filter until
+// alpha.57) banned the people who had the password. The line is Dispatcher::auth_failed_line's:
+// the client first and ours (an address, <ADDR>), what a client chose later and escaped, so a
+// user name cannot pass for another address; "expired" is a right password and no guess.
 const char* kFilterAuth =
-    "# fail2ban filter for agensio (docs/configuration.md 18): requests refused with 401 or 403.\n"
-    "# HTTP authentication, API tokens and the applications that answer a failed login with 403.\n"
+    "# fail2ban filter for agensio (docs/configuration.md 18, 19b): failed passwords on [[site.auth]] paths.\n"
+    "# One \"auth failed\" line in the error log per login the server refused: a wrong password, an unknown\n"
+    "# or locked user, malformed credentials. The challenge every browser meets first (a 401 without\n"
+    "# credentials) writes none, and an expired user's right password is no guess; the error log, not the\n"
+    "# access log, as fail2ban's own nginx-http-auth and apache-auth read theirs.\n"
     "\n"
     "[INCLUDES]\n"
     "before = common.conf\n"
     "\n"
     "[Definition]\n"
-    "failregex = ^<HOST> \\S+ \\S+ \\[\\] \"\\S+ \\S+ HTTP/\\S+\" (?:401|403) \n"
+    "failregex = ^\\s*\\[warn\\] auth failed: client <ADDR> site \\S+ realm \"[^\"]*\" user \"[^\"]*\" \\((?:wrong password|unknown user|locked user|malformed credentials)\\) \n"
+    "ignoreregex =\n"
+    "datepattern = {^LN-BEG}\n";
+
+// Requests refused with 403: an address outside a site's access rule ([[site.access]]), a password
+// asked over plain HTTP, an application refusing. 401 is not counted (see above).
+const char* kFilterDenied =
+    "# fail2ban filter for agensio (docs/configuration.md 18): requests refused with 403.\n"
+    "# An address outside a site's access rule, a password asked for over plain HTTP, an application\n"
+    "# refusing. A 401 is not counted: every browser meets one first on a password-protected path\n"
+    "# (agensio-auth counts the failed passwords themselves, from the error log).\n"
+    "\n"
+    "[INCLUDES]\n"
+    "before = common.conf\n"
+    "\n"
+    "[Definition]\n"
+    "failregex = ^<HOST> \\S+ \\S+ \\[\\] \"\\S+ \\S+ HTTP/\\S+\" 403 \n"
     "ignoreregex =\n"
     "datepattern = ^[^\\[]*\\[({DATE})\n";
 
@@ -339,7 +364,7 @@ const char* kFilterPost =
 
 const std::vector<ProtectionFilter>& shipped_filters() {
     static const std::vector<ProtectionFilter> kFilters = {
-        {"agensio-login", login_filter_text()}, {"agensio-auth", kFilterAuth}, {"agensio-scan", kFilterScan}, {"agensio-post", kFilterPost}};
+        {"agensio-login", login_filter_text()}, {"agensio-auth", kFilterAuth}, {"agensio-scan", kFilterScan}, {"agensio-post", kFilterPost}, {"agensio-denied", kFilterDenied}};
     return kFilters;
 }
 
@@ -447,7 +472,10 @@ ProtectionInput protection_input(const Config& cfg, const UidLookup& uid_of, std
     in.firewall_file = (cfg.config_path.parent_path() / "firewall.nft").string();
     in.host_protection = cfg.control.host_protection;
     in.combined = !cfg.log.json;
+    if (cfg.log.error != "stderr") in.error_log = cfg.log.error;
+    in.error_log_warn = cfg.log.level != "error";
     for (const auto& s : cfg.sites) {
+        if (!s.server_names.empty() && std::any_of(s.auth.begin(), s.auth.end(), [](const AuthRule& r) { return !r.open; })) add_unique(in.auth_sites, s.server_names.front());
         for (const auto& l : s.listen) {
             const std::size_t colon = l.rfind(':');
             if (colon == std::string::npos) continue;
@@ -490,6 +518,7 @@ ProtectionInput protection_input(const Config& cfg, const UidLookup& uid_of, std
     std::sort(in.udp_ports.begin(), in.udp_ports.end());
     std::sort(in.logs.begin(), in.logs.end());
     std::sort(in.login_paths.begin(), in.login_paths.end());
+    std::sort(in.auth_sites.begin(), in.auth_sites.end());
     // The server-wide log's jail first, then one per site log, named after the first site writing it.
     std::stable_sort(in.login_jails.begin(), in.login_jails.end(), [&](const LoginJail& a, const LoginJail& b) {
         const bool da = a.log == cfg.log.access, db = b.log == cfg.log.access;
@@ -581,6 +610,7 @@ ProtectionInput default_protection_input() {
     in.tcp_ports = {80, 443};
     in.udp_ports = {443};
     in.logs = {"/var/log/agensio/access.log"};
+    in.error_log = "/var/log/agensio/error.log";
     LoginJail jail{"agensio-login", in.logs.front(), {}, {}};
     for (const auto& app : app_presets())
         for (const auto& p : preset_login_paths(app)) {
@@ -647,21 +677,35 @@ std::string render_nft(const ProtectionInput& in) {
     return s;
 }
 
+namespace {
+
+// What root changes so that agensio-auth has lines to read: the error log in a file, at warn.
+// Empty when it has them.
+std::string auth_log_step(const ProtectionInput& in) {
+    if (in.error_log.empty())
+        return "[log] error = \"/var/log/agensio/error.log\" in the main configuration (root's; the package's default), "
+               "then agensio reload and this file rendered again";
+    if (!in.error_log_warn) return "[log] level = \"warn\" in the main configuration (root's), then agensio reload and this file rendered again";
+    return {};
+}
+
+}  // namespace
+
 std::string render_jail(const ProtectionInput& in) {
     const std::string ports = port_list(in.tcp_ports.empty() ? std::vector<unsigned>{80, 443} : in.tcp_ports);
     const std::vector<std::string> logs = in.logs.empty() ? std::vector<std::string>{"/var/log/agensio/access.log"} : in.logs;
     std::string logpath;
     for (std::size_t i = 0; i < logs.size(); ++i) logpath += (i ? "\n            " : "") + logs[i];
     std::string s;
-    s += "# agensio: fail2ban jails over its access logs (docs/configuration.md 18), rendered by\n";
-    s += "# `agensio ctl protection --jail` for this host: its web ports, its access logs and the login\n";
+    s += "# agensio: fail2ban jails over its access logs and its error log (docs/configuration.md 18), rendered by\n";
+    s += "# `agensio ctl protection --jail` for this host: its web ports, its logs and the login\n";
     s += "# paths of its sites (each preset's, plus every site's login_paths), one login jail per log, and for a\n";
     s += "# preset whose application logs its failed logins (WordPress with the WP fail2ban plugin, Drupal with its\n";
     s += "# Syslog module) a jail over that log, counting failures rather than attempts. Install as\n";
     s += "# " + std::string(kJailFile) + " with the filters from " + shipped("fail2ban/filter.d") + ", then\n";
     s += "# `fail2ban-client reload`; render again when a site is added (health says when this file is stale).\n";
-    s += "# The logs are in the combined format: the client address is the first field (behind a trusted\n";
-    s += "# proxy, the one X-Forwarded-For named). Bans go through nftables into fail2ban's own table;\n";
+    s += "# The access logs are in the combined format: the client address is the first field (behind a trusted\n";
+    s += "# proxy, the one X-Forwarded-For named), as in the error log's lines. Bans go through nftables into fail2ban's own table;\n";
     s += "# a host whose firewall is managed otherwise sets banaction in its jail.local.\n";
     if (!in.combined)
         s += "#\n# NOTE: this host's access logs are JSON ([log] format = \"json\"); these filters read the combined\n# format only, so nothing here matches until the format is combined.\n";
@@ -722,11 +766,32 @@ std::string render_jail(const ProtectionInput& in) {
         s += "findtime  = " + f.findtime + "\n";
         s += "bantime   = " + f.bantime + "\n";
     }
+    // Failed passwords ([[site.auth]]): the error log's lines. The jail names no site, so a site
+    // that gains a password needs no new rendering; without a file at warn it waits, disabled.
     s += "\n[agensio-auth]\n";
-    s += "# Requests refused with 401 or 403: ten in ten minutes bans for an hour.\n";
-    s += "enabled   = true\n";
+    s += "# Failed passwords on [[site.auth]] paths, the error log's \"auth failed\" lines (never the challenge\n";
+    s += "# every browser meets first): ten in ten minutes bans for an hour.\n";
+    if (const std::string step = auth_log_step(in); !step.empty()) {
+        s += "# Disabled: " + std::string(in.error_log.empty() ? "the error log goes to stderr ([log] error) and fail2ban reads files"
+                                                                : "[log] level = \"error\" leaves out the auth failed lines, which are warn") + ". Needs:\n";
+        s += "#   " + step + "\n";
+        s += "enabled   = false\n";
+    } else {
+        s += "enabled   = true\n";
+    }
     s += "port      = " + ports + "\n";
     s += "filter    = agensio-auth\n";
+    if (!in.error_log.empty()) s += "logpath   = " + in.error_log + "\n";
+    s += "banaction = nftables-multiport\n";
+    s += "maxretry  = 10\n";
+    s += "findtime  = 10m\n";
+    s += "bantime   = 1h\n";
+    s += "\n[agensio-denied]\n";
+    s += "# Requests refused with 403 (an address outside a site's access rule, an application refusing): ten in ten\n";
+    s += "# minutes bans for an hour.\n";
+    s += "enabled   = true\n";
+    s += "port      = " + ports + "\n";
+    s += "filter    = agensio-denied\n";
     s += "logpath   = " + logpath + "\n";
     s += "banaction = nftables-multiport\n";
     s += "maxretry  = 10\n";
@@ -885,6 +950,7 @@ ProtectionProbe read_probe(const json::Value& reply, const ProtectionInput& in) 
             if (!f.empty()) {
                 jail.files.push_back(f);
                 if (std::find(in.logs.begin(), in.logs.end(), f) != in.logs.end()) jail.ours = true;
+                if (!in.error_log.empty() && f == in.error_log) jail.error_log = true;
             }
             if (sp == std::string::npos) break;
             i = sp + 1;
@@ -921,6 +987,10 @@ struct Verdict {
     std::string filters_state;     // "same" | "stale" | "missing" | "partial" (the installed filters against the shipped text)
     std::vector<std::string> stale_filters, missing_filters;
     std::uint64_t banned = 0, total_banned = 0;
+    // Failed passwords: a jail reads the error log; the installed agensio-auth filter is the one
+    // of alpha.57 and before, which counted every 401 of the access logs.
+    bool auth_counted = false;
+    bool auth_counts_challenges = false;
 };
 
 Verdict judge(const ProtectionInput& in, const ProtectionProbe& probe, const ProtectionFiles& files) {
@@ -937,12 +1007,17 @@ Verdict judge(const ProtectionInput& in, const ProtectionProbe& probe, const Pro
     v.saved_unknown = probe.firewall_unit.empty();
     v.f2b_missing = probe.checked && !probe.fail2ban_available;
     v.f2b_down = probe.fail2ban_available && probe.fail2ban_service != "active" && probe.jails.empty();
-    for (const auto& j : probe.jails)
+    for (const auto& j : probe.jails) {
         if (j.ours) {
             v.f2b_ours = true;
             v.banned += j.banned;
             v.total_banned += j.total_banned;
         }
+        if (j.error_log) v.auth_counted = true;
+    }
+    for (std::size_t i = 0; i < shipped_filters().size() && i < files.installed_filters.size(); ++i)
+        if (std::string_view(shipped_filters()[i].name) == "agensio-auth" && files.installed_filters[i] && files.installed_filters[i]->find("(?:401|403)") != std::string::npos)
+            v.auth_counts_challenges = true;
     if (!files.installed_jail) v.jail_state = "missing";
     else v.jail_state = *files.installed_jail == render_jail(in) ? "same" : "stale";
     for (std::size_t i = 0; i < shipped_filters().size(); ++i) {
@@ -980,6 +1055,12 @@ json::Value protection_report(const ProtectionInput& in, const ProtectionProbe& 
                      .set("unidentified", strings_json(f.unidentified)).set("source", f.source).set("needs", strings_json(f.needs)));
     }
     r.set("failure_jails", std::move(fjs));
+    // Failed passwords: the sites with one, the log agensio-auth reads, whether a jail reads it.
+    json::Value auth = json::Value::object().set("sites", strings_json(in.auth_sites));
+    auth.set("error_log", in.error_log.empty() ? json::Value(nullptr) : json::Value(in.error_log)).set("jail_enabled", auth_log_step(in).empty());
+    if (const std::string step = auth_log_step(in); !step.empty()) auth.set("needs", step);
+    auth.set("counted", v.auth_counted);
+    r.set("auth", std::move(auth));
     // The firewall
     json::Value fw = json::Value::object();
     fw.set("table", std::string(kFirewallTable)).set("file", in.firewall_file).set("shipped", shipped("firewall/agensio.nft")).set("unit", std::string(kFirewallUnit));
@@ -1055,6 +1136,8 @@ json::Value protection_report(const ProtectionInput& in, const ProtectionProbe& 
                                     (v.jail_state == "stale" ? "; the installed jail file is older than this rendering" : "") + ")"
                               : v.f2b_missing ? "fail2ban is not installed" : v.f2b_down ? "fail2ban is installed but not running" : "no fail2ban jail reads the access logs";
         if (v.f2b_ours && v.filters_state == "stale") summary += "; the installed filter(s) " + join(v.stale_filters, ", ") + " are older than the shipped text";
+        if (v.f2b_ours && !in.auth_sites.empty())
+            summary += v.auth_counted ? "; failed passwords are counted from the error log" : "; failed passwords are not counted (no jail reads the error log)";
     }
     r.set("summary", summary);
     return r;
@@ -1127,6 +1210,26 @@ std::vector<Finding> protection_findings(const ProtectionInput& in, const Protec
         if (v.jail_state == "stale")
             out.push_back(Finding{"info", "fail2ban_jail_stale", "", std::string(kJailFile) + " is older than this host's rendering (a site, a log or a login path was added since)",
                                   "as root: " + reinstall + "agensio ctl protection --jail > " + std::string(kJailFile) + "; fail2ban-client reload"});
+    }
+    // Failed passwords ([[site.auth]], 2026-10-08): counted from the error log by agensio-auth; the
+    // filter of alpha.57 and before counted every 401 of the access logs, the challenge included.
+    if (v.f2b_ours && !in.auth_sites.empty()) {
+        const std::string sites = join(in.auth_sites, ", ");
+        const std::string render = "as root: " + filter_install_command() + "; agensio ctl protection --jail > " + std::string(kJailFile) + "; fail2ban-client reload";
+        if (v.auth_counts_challenges)
+            out.push_back(Finding{"warn", "fail2ban_auth_challenges", "",
+                                  "the installed agensio-auth filter is an older build's and counts every 401 in the access logs: the first request of every visitor to a password-protected path of " +
+                                      sites + " is one (the challenge that makes the browser ask), so fail2ban bans the people who have the password",
+                                  render});
+        if (!v.auth_counted) {
+            const std::string step = auth_log_step(in);
+            out.push_back(Finding{missing, "fail2ban_auth_unseen", "",
+                                  "failed passwords on " + sites + " are not counted: " +
+                                      (in.error_log.empty() ? std::string("the error log goes to stderr, and fail2ban reads files")
+                                       : !in.error_log_warn ? std::string("[log] level = \"error\" leaves out the auth failed lines, which are warn")
+                                                            : "no fail2ban jail reads the error log " + in.error_log + ", where each is a line (the installed jail file is an older build's, or fail2ban was not reloaded after it was written)"),
+                                  step.empty() ? render : "root sets " + step});
+        }
     }
     // The failure tier a preset offers but the host does not have in place yet: the
     // application's plugin or module, root's filter copy, the log (informational: the attempt

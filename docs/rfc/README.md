@@ -7,6 +7,7 @@ Keep this list in step with the code: a new protocol feature adds its RFC here f
 
 | File | Title | Implemented by |
 |---|---|---|
+| `rfc7617.txt` | The 'Basic' HTTP Authentication Scheme | `[[site.auth]]` (`docs/configuration.md` 19b): the credentials' syntax and the UTF-8 `charset` (2, 2.1, 3) in `src/core/auth.*` (`parse_basic`), the challenge in `src/handlers/dispatch.cpp` (`auth_challenge`); the reuse of credentials below a challenged path (2.2) is why `agensio-auth` counts the error log's failures and not 401s (`docs/fail2ban.md` 2c) |
 | `rfc9110.txt` | HTTP Semantics | every protocol layer: methods, status codes, fields, conditionals, ranges (`src/core/`, `src/handlers/`) |
 | `rfc9112.txt` | HTTP/1.1 | `src/http1/` (parser, connection, chunked coding) |
 | `rfc9113.txt` | HTTP/2 | `src/http2/` (`docs/design-http2.md`) |

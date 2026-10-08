@@ -61,6 +61,7 @@ exit 0
 %{_datadir}/agensio/fail2ban/filter.d/agensio-auth.conf
 %{_datadir}/agensio/fail2ban/filter.d/agensio-scan.conf
 %{_datadir}/agensio/fail2ban/filter.d/agensio-post.conf
+%{_datadir}/agensio/fail2ban/filter.d/agensio-denied.conf
 %dir %attr(0750,root,agensio) %{_sysconfdir}/agensio
 %dir %attr(0750,agensio,agensio) %{_sysconfdir}/agensio/sites.d
 %dir %attr(0750,agensio,agensio) /var/log/agensio

@@ -43,6 +43,23 @@ its own:
   none.
 - **Built only with libxcrypt and OpenSSL** (a new dependency row); a build without them refuses
   a configuration with `[[site.auth]]` instead of leaving the paths open.
+- **fail2ban counts failed passwords, not challenges** (`docs/fail2ban.md` 2c). The
+  `agensio-auth` jail now reads the error log's `auth failed` lines (a wrong password, an unknown
+  or locked user, malformed credentials; not an expired user's right password), as fail2ban's
+  own `nginx-http-auth` and `apache-auth` read theirs. Until now it counted every 401 and 403 in
+  the access logs, and a 401 is the challenge: every browser's first request to a protected path,
+  one per directory on a site protected as a whole (RFC 7617 2.2, now in `docs/rfc/`), one per
+  request for a client that does not send the password unasked; so a password-protected site
+  would have banned the people who had its password (shown by the new checks of
+  `tests/protection.sh`: twelve challenges and twelve right passwords of an expired user counted
+  24 failures and banned the address). The 403s, which the access rules rely on, go to a new
+  jail `agensio-denied` over the access logs, unchanged. The jail needs the error log in a file
+  at `warn`, the package's defaults; otherwise it is rendered disabled with root's line. Health:
+  `fail2ban_auth_challenges` (warn) while the old filter is installed on a host with a
+  password-protected site, `fail2ban_auth_unseen` when nothing counts a site's failed passwords;
+  `protection_show` answers `auth` (the sites, the log, whether a jail reads it). **Upgrading:**
+  root installs the filters again and renders the jail (`fail2ban_filter_stale` gives the three
+  lines).
 
 Tests: unit (the user file, the Authorization parser, verification, the cache key and cache,
 the pool, the configuration and its refusals) and `tests/auth.sh` (16 checks against a
@@ -50,7 +67,10 @@ one-worker server: one verification for a login followed by fifty requests on on
 and five new ones, every failure verified again, an unknown user verified too, the challenge,
 expiry, UTF-8, `open`, `skip_for`, the bypass spellings, plain HTTP from another host, TLS,
 `Cache-Control: private`, the access log's user, the failure lines, a request answered while
-a slow verification runs, a reload keeping the cache, a changed password).
+a slow verification runs, a reload keeping the cache, a changed password); `tests/protection.sh`
+(real fail2ban and nftables: twelve challenges and twelve right passwords of an expired user
+counted nothing, eleven wrong passwords banned the address through `agensio-auth` over the error
+log, eleven 403s banned it through `agensio-denied`, the old filter warned about), 31 checks.
 
 ## 0.1.0-alpha.57 (2026-10-08)
 

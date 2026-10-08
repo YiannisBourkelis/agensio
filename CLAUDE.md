@@ -593,7 +593,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   unless `plain_http = "allow"`; `Cache-Control: private` on protected static answers;
   `REMOTE_USER` to PHP; `auth failed: client ...` lines. `agensio passwd`. Built only with
   libxcrypt and OpenSSL (`AGENSIO_HAS_AUTH`). Gate: `bench/ab.sh <ref> -A` (row `auth`);
-  `tests/auth.sh`. Security page row 40. Managed sites and MCP: the next step.
+  `tests/auth.sh`. fail2ban: `agensio-auth` counts the `auth failed` lines of the error log
+  (`control/protection.cpp`, health `fail2ban_auth_challenges` while an older build's 401-counting
+  filter is installed, `fail2ban_auth_unseen`). Security page row 40. Managed sites and MCP: the
+  next step.
 - **Application install** (F9, `src/services/archive.*`, `fetch.*`, `install.*`):
   `agensio ctl site-install NAME [--url | --file | --version]` fills a site's empty
   directory as the site's account from an https archive, an upload (`agensio ctl upload`)
@@ -1053,9 +1056,11 @@ Each item was benchmarked before and after on the reduced matrix (`bench/run.sh 
    `agensio protection -c FILE` render, for this host's public ports, logs and sites, an nftables
    ruleset in a table of its own (`inet agensio`: per-source new-connection rate, connections held,
    QUIC handshakes; no policy, nothing else touched) with root's commit-confirmed commands (a
-   trial a `systemd-run` timer undoes in ten minutes, then `agensio-firewall.service`), and four
+   trial a `systemd-run` timer undoes in ten minutes, then `agensio-firewall.service`), and
    fail2ban jails over the access logs (`agensio-login` on the presets' login paths plus each
-   site's `login_paths`, `-auth`, `-scan`, `-post`) with static shipped filters; the packaged
+   site's `login_paths`, `-denied` for 403s, `-scan`, `-post`) and `agensio-auth` over the error
+   log (failed passwords on `[[site.auth]]` paths, never a 401: the challenge every browser meets
+   first; alpha.58, `docs/fail2ban.md` 2c) with static shipped filters; the packaged
    copies under `/usr/share/agensio/` are `--defaults` and the unit test holds them to the
    renderers. Health (and the tool) read what is in place through the helper's read-only
    `host_protection` (`nft -j list ruleset`, `systemctl show`, `fail2ban-client status`, and
