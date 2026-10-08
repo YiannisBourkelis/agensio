@@ -229,8 +229,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   twin older than the file is ignored, revalidation stats the twins with the file, and
   `cache.precompressed = false` switches the lookup off. Only memory entries have twins.
 - **Response**: prebuilt header fragments; `Date:` refreshed once per second per worker;
-  one `async_write` with a `std::array<const_buffer, N>` of header + body. Uncached large
-  files stream in 64 KB chunks from an open fd (`sendfile` on Linux later).
+  one `async_write` with a `std::array<const_buffer, N>` of header + body; a memory body beyond
+  that write and one 64 KB piece goes on in 64 KB pieces, each refreshing the idle clock
+  (alpha.57, audit 2.2: a 4 MB cached file over TLS had to reach the client within one idle
+  timeout). Uncached large files stream in 64 KB chunks from an open fd (`sendfile` on Linux later).
 - **MIME**: static extension table compiled in (nginx `mime.types` equivalent), overridable
   from config.
 - **Config**: TOML (vendored toml++). `[server]`, `[cache]`, `[[site]]` with `server_name`,

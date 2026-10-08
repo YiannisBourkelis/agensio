@@ -4,6 +4,8 @@
 //     (per-worker "status + Server + Date" prefix, the response's prebuilt block, the
 //     extra fields, the body);
 //   * TLS: head and body prefix coalesced into one full-size record;
+//   * a memory body beyond the first write and one stream_chunk_size piece goes on in such
+//     pieces, each refreshing the idle clock (both sockets; audit 2026-10-07, 2.2);
 //   * files on plain sockets: sendfile with the head attached (macOS/FreeBSD) or written
 //     first (Linux); files on TLS: pread + write in stream_chunk_size pieces;
 // and the pull path for StreamBody sources (FastCGI, proxy, CGI in later phases): one
@@ -65,6 +67,7 @@ public:
         stream_ = &stream;
         source_done_ = false;
         body_sent_ = 0;
+        mem_rest_ = {};
         build_head(ws);
         start();
     }
@@ -82,6 +85,7 @@ public:
     void reset() noexcept {
         sf_file_ = nullptr;
         stream_ = nullptr;
+        mem_rest_ = {};
     }
 
 private:
@@ -185,14 +189,25 @@ private:
 
     // ---- head + memory body, or head followed by a file / source ----
 
+    // A memory body goes out in pieces of stream_chunk_size after the first write, and each
+    // completed piece refreshes the idle clock in on_write, as the file path does (security
+    // audit 2026-10-07, 2.2: a cached body was one write whose clock moved only when all of it
+    // had gone, so a 4 MB entry over TLS to a client slower than about 2.2 Mbit/s was cut at
+    // idle_timeout). A body that fits the first write and one piece goes out as before.
+    std::string_view first_piece(std::string_view rest) {
+        const std::size_t piece = std::max<std::size_t>(cfg_.stream_chunk_size, 16384);
+        if (rest.size() <= piece) return rest;
+        mem_rest_ = rest.substr(piece);
+        return rest.substr(0, piece);
+    }
+
     void start() {
         Response& r = response();
         const std::string_view body = memory_body();
-        body_sent_ = body.size();  // memory bodies go out whole; file paths count as they send
         auto done = write_done();
         if constexpr (IsTlsStream<Socket>::value) {
             // TlsStream encrypts one buffer per write_some, so coalesce everything up to
-            // one full-size record; the rest of the body follows as-is.
+            // one full-size record; the rest of the body follows as-is, in pieces.
             constexpr std::size_t kRecord = 16384;  // max TLS plaintext per record
             out_.assign(hdr_.begin(), hdr_.end());
             out_.insert(out_.end(), block_.begin(), block_.end());
@@ -201,12 +216,14 @@ private:
             const std::size_t take = std::min(room, body.size());
             out_.insert(out_.end(), body.data(),
                         body.data() + take);  // NOLINT(bugprone-suspicious-stringview-data-usage): bounded by take
-            if (take == body.size()) asio::async_write(socket_, asio::buffer(out_), done);
-            else
-                asio::async_write(socket_,
-                                  std::array<asio::const_buffer, 2>{
-                                      asio::buffer(out_), asio::buffer(body.data() + take, body.size() - take)},
-                                  done);
+            if (take == body.size()) {
+                body_sent_ = body.size();
+                asio::async_write(socket_, asio::buffer(out_), done);
+                return;
+            }
+            const std::string_view piece = first_piece(body.substr(take));
+            body_sent_ = take + piece.size();  // body bytes handed over so far; on_write adds the rest
+            asio::async_write(socket_, std::array<asio::const_buffer, 2>{asio::buffer(out_), asio::buffer(piece)}, done);
             return;
         } else {
             if (cfg_.sendfile && !sendfile_unsupported_ && !r.head) {
@@ -223,13 +240,17 @@ private:
                     return;
                 }
             }
-            // Plain socket: one writev over the pieces, nothing concatenated.
+            // Plain socket: one writev over the pieces, nothing concatenated (a large body not
+            // sent with sendfile, `sendfile = false` or an entry without a descriptor, goes on in
+            // pieces from on_write).
+            const std::string_view piece = first_piece(body);
+            body_sent_ = piece.size();
             std::array<asio::const_buffer, 4> bufs;
             std::size_t n = 0;
             bufs[n++] = asio::buffer(hdr_);
             if (!block_.empty()) bufs[n++] = asio::buffer(block_);
             if (!tail_.empty()) bufs[n++] = asio::buffer(tail_);
-            if (!body.empty()) bufs[n++] = asio::buffer(body);
+            if (!piece.empty()) bufs[n++] = asio::buffer(piece);
             switch (n) {
                 case 1:
                     asio::async_write(socket_, bufs[0], done);
@@ -253,6 +274,13 @@ private:
             return;
         }
         owner_.touch();
+        if (!mem_rest_.empty()) {  // the next piece of a memory body; the clock moved with the last
+            const std::string_view piece = mem_rest_.substr(0, std::max<std::size_t>(cfg_.stream_chunk_size, 16384));
+            mem_rest_.remove_prefix(piece.size());
+            body_sent_ += piece.size();
+            asio::async_write(socket_, asio::buffer(piece), write_done());
+            return;
+        }
         if (sf_file_) {  // headers went out via writev; now the file
             sendfile_step();
             return;
@@ -274,6 +302,7 @@ private:
     void finish() {
         sf_file_ = nullptr;
         stream_ = nullptr;
+        mem_rest_ = {};
         owner_.on_response_written();
     }
 
@@ -465,6 +494,7 @@ private:
     std::string_view block_;    // the response's prebuilt block (view; kept alive by the response)
     std::string tail_;          // extra fields + blank line, empty on the fast path
     std::uint64_t body_sent_ = 0;  // body bytes handed to the kernel (access log)
+    std::string_view mem_rest_;    // what is left of a memory body after the pieces written (view; the response keeps it alive)
     bool chunked_ = false;      // StreamBody of unknown length on HTTP/1.1
     bool source_done_ = false;  // StreamBody reported end of body
     bool source_sized_ = false;         // the StreamBody declared its length

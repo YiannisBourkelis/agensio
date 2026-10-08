@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.0-alpha.57
+
+From the security audit of 2026-10-07 (docs/security-audit-2026-10-07.md), item 2.2:
+
+- **A large cached file over HTTPS reached a slow client only if it arrived within one idle
+  timeout** (availability). A cached body went out as one write and the idle clock moved only
+  when all of it had gone, so with the defaults a cached file of up to 4 MB to a client slower
+  than about 2.2 Mbit/s (a phone on a weak link) was cut at 15 s, on every HTTPS site; the
+  same on plain HTTP for a large entry not sent with sendfile (`sendfile = false`). The rest
+  of a body beyond the first write and one piece now goes out in pieces of
+  `stream_chunk_size` (64 KB), each refreshing the idle clock, as files and HTTP/2 already
+  did; the access log counts the bytes actually handed over. Small answers are written
+  exactly as before. Fixed in code, not yet proven by a test: the suites, the sanitizer
+  build and the A/B show the change breaks nothing; the reproduction test of the audit's
+  section 5, item 2 is still to write, and must fail on alpha.56 and pass from alpha.57.
+
 ## 0.1.0-alpha.56 (2026-10-08)
 
 From the security audit of 2026-10-07 (docs/security-audit-2026-10-07.md), item 2.1:

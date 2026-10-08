@@ -33,7 +33,8 @@ rows, three rounds) is flat within noise; its one row above 3 %, plain 100 KB at
 | integration suite on default builds | **fixed** (suite only): seven checks needed sites defined only with the HttpArena handler, two checks lost to `grep -q` under pipefail on the slower sanitizer binary | sanitizer build 588 checks, Release 596, no failure; server stderr clean |
 | 2.10 design notes | **fixed**: both design notes say what the code does | documentation |
 | 2.1 HTTP/2 timeout loop | **fixed in code in alpha.56, not yet proven by a test**: `check_timeouts` skips a stream already closed whose release is deferred, so the loop always ends; a stream waiting for its application's next bytes is bounded by the upstream's `read_timeout`, not cut by the client's idle clock (HTTP/1's rule) | **test to write** (section 5, item 1): it must fail or hang on `v0.1.0-alpha.55` and pass from alpha.56. What was run: the unit and integration suites with h2spec, the sanitizer build and the `-2` A/B (`ab-20261008-020159.md`); they show the change breaks nothing, not that it removes the failure, since none of them reaches the deferred-release state. The argument from the code: every pass of the loop now either releases a stream (the list shrinks) or moves past it |
-| 2.2 to 2.5 | **open**: the slow TLS download, the HTTP/2 idle clock, the QUIC handshake deadline, the tunnel timeout and watchdog | section 5 lists the checks each needs |
+| 2.2 cached body in one write | **fixed in code in alpha.57, not yet proven by a test**: a memory body beyond the first write and one piece goes out in `stream_chunk_size` (64 KB) pieces, each refreshing the idle clock in `on_write`, over TLS and on plain sockets without sendfile; the first write is unchanged, so small answers go out as before | **test to write** (section 5, item 2): it must fail on `v0.1.0-alpha.56` and pass from alpha.57. Run: the unit and integration suites, the sanitizer build and the A/B (HTTPS rows); they show the change breaks nothing, not that it removes the cut |
+| 2.3 to 2.5 | **open**: the HTTP/2 idle clock, the QUIC handshake deadline, the tunnel timeout and watchdog | section 5 lists the checks each needs |
 
 ## 1. The claims, one by one
 
@@ -280,7 +281,8 @@ a one-off.
    the worker's CPU must stay idle. Then the same with the fix. Run under the sanitizer
    build as well. The HTTP/1 counterpart (a slow reader on the sendfile path) as the
    control row.
-2. **2.2**: an HTTPS client with a 4 KB receive buffer reading a 2 MB cached file at
+2. **2.2** (the fix is in alpha.57; this test is still to write, and must fail on
+   `v0.1.0-alpha.56` and pass from alpha.57): an HTTPS client with a 4 KB receive buffer reading a 2 MB cached file at
    100 KB/s must receive it whole; today the expectation is a cut at 15 s.
 3. **2.3**: an h2c client dribbling one byte of a frame every 14 s, and one sending the
    preface only; the connection must close at the idle timeout after the fix.
