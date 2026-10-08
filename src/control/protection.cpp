@@ -157,7 +157,7 @@ namespace {
 // the WP fail2ban plugin logging to the auth facility with its own wordpress-hard and
 // wordpress-soft filters). A new application is a row.
 struct FailureTier {
-    const char* app;
+    std::string_view app;  // a view, so `app == "drupal"` compares the text, not two addresses
     const char* jail;
     const char* filter;
     bool auth_log;  // the auth facility's file; else the system log

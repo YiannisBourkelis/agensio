@@ -60,6 +60,9 @@ its own:
   `protection_show` answers `auth` (the sites, the log, whether a jail reads it). **Upgrading:**
   root installs the filters again and renders the jail (`fail2ban_filter_stale` gives the three
   lines).
+- `protection.cpp` compared the failure tier's application name with `"drupal"` by address
+  (a `const char*`), right only because the compiler merges equal literals; it compares the text
+  now, and the two compiler warnings are gone.
 
 Tests: unit (the user file, the Authorization parser, verification, the cache key and cache,
 the pool, the configuration and its refusals) and `tests/auth.sh` (16 checks against a
