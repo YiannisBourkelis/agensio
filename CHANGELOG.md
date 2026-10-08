@@ -38,9 +38,19 @@ its own:
   `no-store`, one page for every kind of failure; PHP gets `REMOTE_USER` and `AUTH_TYPE`;
   `Authorization` reaches PHP (WordPress's loopback calls) and is stripped before any other
   application (`credentials` to choose); `forward_user` sends the verified name to a proxied
-  one; protected static answers are `Cache-Control: private`; the access log's user field is
-  the verified user; each failed login is one `auth failed: client ...` line, the challenge
-  none.
+  one; the access log's user field is the verified user; each failed login is one `auth
+  failed: client ...` line, the challenge none.
+- **No protected answer is one a shared cache may keep** (`core/private_cache.hpp`): a file
+  agensio serves carries `Cache-Control: private`; an answer of PHP, CGI or a proxied application
+  loses `public`, `s-maxage` and `proxy-revalidate` and gains `private` (`public, max-age=3600`
+  becomes `private, max-age=3600`, none becomes `private`), and the fields only CDNs act on
+  (`CDN-Cache-Control` and its `*-Cache-Control` vendor forms, `Surrogate-Control`, `Edge-Control`)
+  are dropped. A shared cache may reuse an answer to a request with a password when the answer
+  says `public` or `s-maxage` (RFC 9111 3.5), a CDN follows its targeted field over
+  `Cache-Control` (RFC 9213 2.2), and a client let in by `skip_for` sends no password at all: with
+  a CDN in front, a protected WordPress page with a cache plugin could have been served to anyone.
+  Shown first by `tests/auth.sh` (the protected answers came out `public, max-age=3600` with three
+  CDN fields), five checks; RFC 9111 and 9213 added to `docs/rfc/`.
 - **Built only with libxcrypt and OpenSSL** (a new dependency row); a build without them refuses
   a configuration with `[[site.auth]]` instead of leaving the paths open.
 - **fail2ban counts failed passwords, not challenges** (`docs/fail2ban.md` 2c). The

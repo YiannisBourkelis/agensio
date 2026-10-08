@@ -590,7 +590,7 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   a location of kind `auth` and routes again), remembered per worker in `auth::Cache` (HMAC of
   the user, the stored hash and the password; successes only; five minutes) and per connection
   in `AuthMemo` (the last verified header). No prompt over plain HTTP from another host (403)
-  unless `plain_http = "allow"`; `Cache-Control: private` on protected static answers;
+  unless `plain_http = "allow"`; no protected answer a shared cache may keep (`core/private_cache.hpp`: `Cache-Control: private`, the application's `public`, `s-maxage`, `proxy-revalidate` and the CDN fields dropped, on static, PHP, CGI and proxied answers alike);
   `REMOTE_USER` to PHP; `auth failed: client ...` lines. `agensio passwd`. Built only with
   libxcrypt and OpenSSL (`AGENSIO_HAS_AUTH`). Gate: `bench/ab.sh <ref> -A` (row `auth`);
   `tests/auth.sh`. fail2ban: `agensio-auth` counts the `auth failed` lines of the error log

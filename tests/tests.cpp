@@ -70,6 +70,7 @@
 #include "core/forwarded.hpp"
 #include "core/access.hpp"
 #include "core/refuse.hpp"
+#include "core/private_cache.hpp"
 #ifdef AGENSIO_HAS_AUTH
 #include <crypt.h>
 #include "core/auth.hpp"
@@ -6247,6 +6248,28 @@ static void test_auth_managed() {
 }
 #endif
 
+// A protected answer is never one a shared cache may keep (2026-10-09, core/private_cache.hpp):
+// the directives only shared caches act on are dropped from Cache-Control, the browser's kept;
+// the targeted fields (RFC 9213) and Surrogate-Control and Edge-Control are dropped whole.
+static void test_private_cache() {
+    auto keep = [](std::initializer_list<const char*> values) {
+        std::string kept;
+        for (const char* v : values) private_cache::keep_directives(v, kept);
+        return kept;
+    };
+    CHECK(keep({"public, max-age=3600"}) == "max-age=3600");
+    CHECK(keep({"public, max-age=3600, s-maxage=600"}) == "max-age=3600");
+    CHECK(keep({"no-store"}) == "no-store");
+    CHECK(keep({"private=\"Set-Cookie, X-Token\", max-age=60", "s-maxage=600, proxy-revalidate"}) == "max-age=60");
+    CHECK(keep({"PUBLIC,MAX-AGE=31536000 ,  immutable"}) == "MAX-AGE=31536000, immutable");
+    CHECK(keep({"no-cache, must-revalidate, max-age=0"}) == "no-cache, must-revalidate, max-age=0");
+    CHECK(keep({"", " , ,", "public"}).empty());
+    CHECK(keep({"no-cache=\"a,\\\"b\", public"}) == "no-cache=\"a,\\\"b\"");  // a quoted comma and an escaped quote do not split
+    for (const char* f : {"CDN-Cache-Control", "cdn-cache-control", "Cloudflare-CDN-Cache-Control", "ExampleCDN-Cache-Control", "Surrogate-Control", "Edge-Control"})
+        CHECK(private_cache::shared_only_field(f));
+    for (const char* f : {"Cache-Control", "-cache-control", "Expires", "Vary", "Content-Type", "X-Control"}) CHECK(!private_cache::shared_only_field(f));
+}
+
 static void test_access_rules() {
     namespace fs = std::filesystem;
     using namespace control;
@@ -7573,6 +7596,7 @@ int main() {
     test_config_reference_defaults();
     test_forwarded_lines();
     test_address_forms();
+    test_private_cache();
     test_access_rules();
 #ifdef AGENSIO_HAS_AUTH
     test_auth_core();

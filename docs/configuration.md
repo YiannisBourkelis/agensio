@@ -2648,9 +2648,15 @@ what a worker remembers is keyed by the stored hash too.
 `credentials = "pass"` (the default on a site that runs PHP: WordPress's loopback calls need
 it) also leaves `Authorization` in, `"strip"` (the default elsewhere) takes it out, so a
 proxied application never receives the site's password. `forward_user = "X-Remote-User"` on a
-proxy sends the verified name in that field, the client's own copy removed first. Static
-answers on a protected path carry `Cache-Control: private`, replacing a preset's `public`, so
-no shared cache serves them to someone else.
+proxy sends the verified name in that field, the client's own copy removed first. Every answer
+on a protected path is one no shared cache may keep: a file agensio serves carries
+`Cache-Control: private` in place of a preset's `public`; an answer of PHP, CGI or a proxied
+application has `public`, `s-maxage` and `proxy-revalidate` removed from its `Cache-Control` and
+`private` added, its other directives kept (`max-age`, `no-store`), and the fields only CDNs act
+on dropped (`CDN-Cache-Control` and every `*-Cache-Control` targeted field, `Surrogate-Control`,
+`Edge-Control`: a CDN follows those over `Cache-Control`, RFC 9213 2.2). This holds for a client
+let in by `skip_for` too, whose request carries no `Authorization` and so gets no protection from
+the cache's own rule for authenticated requests (RFC 9111 3.5).
 
 **Logs.** The access log's user field (`%u`, the third field) is the verified user, `-`
 otherwise, never a name a refused request claimed (JSON: `"user"`). Each failed login is one

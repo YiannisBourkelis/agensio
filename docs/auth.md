@@ -199,11 +199,23 @@ sites without `[[site.auth]]` pay nothing.
 - **The user**: PHP and CGI get `REMOTE_USER` and `AUTH_TYPE = Basic`; a proxied application
   gets the name in the field `forward_user` names, and a client's own field of that name is
   dropped, so it cannot claim to be someone. A client let in by `skip_for` has no user.
-- **Caches**: every file agensio serves itself on a protected path carries `Cache-Control:
-  private` (a preset's `public` on uploads, `/build/` or `/static/` included), so no shared cache
-  serves it to someone without the password. An answer of PHP or a proxied application carries
-  what the application sends; a shared cache does not reuse a response to a request with
-  `Authorization` unless the response allows it explicitly (RFC 9111 3.5).
+- **Caches**: every answer on a protected path is one no shared cache (a CDN, Varnish, a
+  caching proxy) may keep, so none serves it to someone without the password:
+  - a file agensio serves itself carries `Cache-Control: private`, in place of a preset's
+    `public` on uploads, `/build/` or `/static/`;
+  - an answer of PHP, CGI or a proxied application keeps its own `Cache-Control` directives
+    except `public`, `s-maxage` and `proxy-revalidate` (the ones only shared caches act on), and
+    gets `private`: `public, max-age=3600` becomes `private, max-age=3600`, `no-store` becomes
+    `private, no-store`, none becomes `private`; several fields become one;
+  - the fields only CDNs act on are dropped: `CDN-Cache-Control` and every targeted field named
+    `*-Cache-Control` (a CDN that follows one ignores `Cache-Control` and `Expires`, RFC 9213 2.2),
+    `Surrogate-Control`, `Edge-Control`.
+
+  Why it matters: a shared cache may reuse an answer to a request with a password when the answer
+  says `public`, `s-maxage` or `must-revalidate` (RFC 9111 3.5), which a page-cache plugin does; and
+  a client let in by `skip_for` sends no password at all, so its answers are ordinary ones to a
+  cache. Before 2026-10-09 only the files agensio served itself were made private: a protected
+  WordPress page with a cache plugin, behind a CDN, could have been served to anyone.
 - **The access log**: the user field (`%u`, the third field; JSON `"user"`) is the verified
   user, `-` otherwise, never a name a refused request claimed.
 - **The error log**: one `warn` line per failed login, the client first and what the client
@@ -325,6 +337,9 @@ server.
 | `rules.auth` on `site_create` | refused: the first user comes after the site |
 | a site deleted without its files, then created again | the old users file is still there: `site_create` warns, health says `auth_users_orphan`, and a rule added later would let those users in |
 | a build without libxcrypt or OpenSSL | a configuration with `[[site.auth]]` is refused; nothing is left open |
+| a shared cache (a CDN, Varnish) in front, and the application says `public, max-age=3600` | the answer goes out `private, max-age=3600`, so the cache does not keep it; a CDN's own field (`CDN-Cache-Control`, `Surrogate-Control`) is dropped |
+| a client let in by `skip_for`, with a shared cache in front | the same: its answers are private too, though its request carries no password |
+| the application sends `Cache-Control: no-store` | `private, no-store`: the browser keeps nothing either |
 | logging out | Basic authentication has none: the browser keeps the password until it is closed (some keep it longer). To end someone's access, lock or delete the user, or change the password |
 
 ## 10. Configuration examples
@@ -454,7 +469,8 @@ section 2c has the rest; `protection_show` renders the jail for the host.
 | the rule matcher | `src/core/access.hpp` (`auth_rule_for`) |
 | the request path: the check, the challenge, the pool hand-off, the failure lines | `src/handlers/dispatch.cpp` (`check_auth`, `start_auth`, `auth_challenge`, `auth_failed_line`) |
 | waiting for a verification | `src/http1/connection.hpp`, `src/http2/connection.hpp`, `src/http3/connection.hpp` (`HandlerKind::auth`) |
-| `REMOTE_USER`, `forward_user`, `Cache-Control: private`, the index rule | `src/handlers/fastcgi.cpp`, `proxy.cpp`, `static.cpp` |
+| `REMOTE_USER`, `forward_user`, the index rule | `src/handlers/fastcgi.cpp`, `proxy.cpp`, `static.cpp` |
+| no answer a shared cache may keep: `Cache-Control: private`, the targeted fields dropped | `src/core/private_cache.hpp`, used by `handlers/upstream_common.cpp` (PHP, CGI, proxy) and `handlers/static.cpp` |
 | a managed site's users file | `src/services/authusers.*`; the helper's `auth_users_op` in `src/services/provision.cpp` |
 | the control API and the tools | `src/control/handler.cpp` (`site_auth_users`, `site_auth_user_change`, `auth_users_needed`), `src/control/mcp.cpp`, `src/main.cpp` (`agensio passwd`, `ctl`) |
 | `rules.auth` | `src/control/sites.cpp` (`check_rules`, `render_site`) |

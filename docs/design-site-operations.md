@@ -1411,7 +1411,9 @@ a protected path never asks for a password: a GET or HEAD on a site with HTTPS i
 there, anything else gets 403 with a page saying to use HTTPS; loopback connections and
 requests a trusted proxy forwarded as https are asked as usual, and `plain_http = "allow"`
 asks anyway (`-t` warns, health keeps a finding, the agent sets it only on request).
-Responses on protected paths carry `Cache-Control: private` (the presets' `public` on
+Responses on protected paths carry `Cache-Control: private` (since 2026-10-09 the answers of
+PHP, CGI and proxied applications too, their `public`, `s-maxage`, `proxy-revalidate` and the
+CDN-targeted fields dropped, `core/private_cache.hpp`; before, only the static ones) (the presets' `public` on
 uploads, `/build/`, `/static/` included), so no shared cache serves them to anyone else.
 
 **What the application sees.** `credentials = "pass"` by default on PHP presets (WordPress's

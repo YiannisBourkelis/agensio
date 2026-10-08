@@ -28,6 +28,31 @@ printf 'p\xc3\xa4ssw\xc3\xb6rd\n' | "$BIN" passwd --method bcrypt --cost 4 jose 
 printf 'slow\n' | "$BIN" passwd --method bcrypt --cost 15 slow >> "$T/users"
 chmod 640 "$T/users"
 IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+# An application and a CGI script that let shared caches keep their answers (a page-cache plugin's
+# headers), for the check that a password-protected answer is never one a shared cache may keep.
+mkdir -p "$T/cgi"
+printf '#!/bin/sh\nprintf "Content-Type: text/plain\\r\\nCache-Control: public, max-age=3600, s-maxage=600\\r\\nCDN-Cache-Control: max-age=600\\r\\n\\r\\ncgi\\n"\n' > "$T/cgi/cache.cgi"
+chmod 755 "$T/cgi/cache.cgi"
+cat > "$T/app.py" <<'PYAPP'
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        last = self.path.rsplit("/", 1)[-1]
+        fields = {"public": [("Cache-Control", "public, max-age=3600"), ("CDN-Cache-Control", "max-age=600"), ("Surrogate-Control", "max-age=600"),
+                             ("Cloudflare-CDN-Cache-Control", "max-age=600")],
+                  "nostore": [("Cache-Control", "no-store")],
+                  "quoted": [("Cache-Control", 'private="Set-Cookie, X-Token", max-age=60'), ("Cache-Control", "s-maxage=600, proxy-revalidate")],
+                  "plain": []}.get(last, [])
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        for n, v in fields: self.send_header(n, v)
+        self.send_header("Content-Length", "3")
+        self.end_headers()
+        self.wfile.write(b"app")
+    def log_message(self, *a): pass
+http.server.ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PYAPP
+python3 -I "$T/app.py" 18139 & APP=$!
 cat > "$T/agensio.toml" <<EOF
 include = ["sites.d/*.toml"]
 [server]
@@ -64,6 +89,23 @@ path = "/lan"
 users = "$T/users"
 plain_http = "allow"
 
+[[site.location]]
+path = "/private/app/"
+upstream = "http://127.0.0.1:18139"
+
+[[site.location]]
+path = "/office/app/"
+upstream = "http://127.0.0.1:18139"
+
+[[site.location]]
+path = "/app/"
+upstream = "http://127.0.0.1:18139"
+
+[[site.location]]
+path = "/private/cgi/"
+alias = "$T/cgi"
+handler = "cgi"
+
 [[site]]
 server_name = ["*"]
 listen = ["0.0.0.0:18131"]
@@ -76,7 +118,7 @@ users = "$T/users"
 realm = "Private"
 EOF
 "$BIN" -c "$T/agensio.toml" > "$T/server.out" 2>&1 & SRV=$!
-trap 'kill $SRV 2>/dev/null; wait $SRV 2>/dev/null' EXIT
+trap 'kill $SRV 2>/dev/null; kill -TERM $APP 2>/dev/null; wait $SRV 2>/dev/null' EXIT
 for _ in $(seq 1 50); do nc -z 127.0.0.1 18130 2>/dev/null && break; sleep 0.1; done
 B=http://127.0.0.1:18130
 verifications() { curl -sS --unix-socket "$T/control.sock" http://control/v1/status | python3 -c 'import json,sys; print(json.load(sys.stdin).get("auth_verifications", "none"))'; }
@@ -126,6 +168,28 @@ check "the access log names the verified user, never the one a refused request c
   "$(grep '/private/doc.html' "$T/logs/access.log" | grep '" 200 ' | tail -1 | cut -d' ' -f3) $(grep '/private/doc.html' "$T/logs/access.log" | grep '" 401 ' | tail -1 | cut -d' ' -f3)"
 check "one auth failed line per failure, with the user, the client and the reason; none for the challenge; never the password" "yes yes 0" \
   "$(grep -q 'auth failed: client 127.0.0.1 site .* realm "Private" user "anna" (wrong password)' "$T/logs/error.log" && echo yes) $(grep -q 'auth failed: .*user "old" .*expired' "$T/logs/error.log" && echo yes) $(grep -c 'secret\|wrong1' "$T/logs/error.log")"
+
+# Shared caches (2026-10-09): an answer from a password-protected path is never one a shared cache may
+# keep, whatever the application says. A shared cache (a CDN, Varnish, a caching proxy) may store a
+# response to a request with Authorization when it says public or s-maxage (RFC 9111 3.5), and a CDN
+# follows CDN-Cache-Control and its vendor forms (RFC 9213) or Surrogate-Control over Cache-Control;
+# a client let in by skip_for sends no Authorization at all. So the protected answers of PHP, CGI and a
+# proxied application carry Cache-Control: private, with the shared-cache directives and the targeted
+# fields dropped; an unprotected path keeps what the application sent.
+cc() { curl -sS -D - -o /dev/null "$@" | tr -d '\r' | sed -n 's/^[Cc]ache-[Cc]ontrol: //p' | paste -sd'|'; }
+targeted() { curl -sS -D - -o /dev/null "$@" | tr -d '\r' | grep -ciE '^([a-z-]*cdn-cache-control|surrogate-control|edge-control):'; }
+for _ in $(seq 1 50); do nc -z 127.0.0.1 18139 2>/dev/null && break; sleep 0.1; done
+check "a proxied application's public answer behind a password: Cache-Control private, its max-age kept, public dropped, no targeted CDN field" "private, max-age=3600 0" \
+  "$(cc -u anna:secret $B/private/app/public) $(targeted -u anna:secret $B/private/app/public)"
+check "the same for a client let in by skip_for, whose request has no Authorization" "private, max-age=3600 0" \
+  "$(cc $B/office/app/public) $(targeted $B/office/app/public)"
+check "a CGI script's public answer with s-maxage behind a password: private, max-age kept" "private, max-age=3600 0" \
+  "$(cc -u anna:secret $B/private/cgi/cache.cgi) $(targeted -u anna:secret $B/private/cgi/cache.cgi)"
+check "no-store is kept; an answer with no Cache-Control gets private; private=\"fields\", s-maxage and proxy-revalidate over two fields become one private" \
+  "private, no-store|private|private, max-age=60" \
+  "$(cc -u anna:secret $B/private/app/nostore)|$(cc -u anna:secret $B/private/app/plain)|$(cc -u anna:secret $B/private/app/quoted)"
+check "an unprotected path keeps what the application sent, the targeted fields too" "public, max-age=3600 3" \
+  "$(cc $B/app/public) $(targeted $B/app/public)"
 
 # A slow verification runs off the worker's loop.
 ( curl -sS -o /dev/null -u slow:slow $B/private/doc.html & )

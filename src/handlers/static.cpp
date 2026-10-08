@@ -10,6 +10,7 @@
 #include <ctime>
 
 #include "core/access.hpp"
+#include "core/private_cache.hpp"
 #include "core/strings.hpp"
 #include "http_date.hpp"
 #include "mime.hpp"
@@ -624,10 +625,11 @@ bool content_hashed(std::string_view path) noexcept {
 void StaticHandler::add_headers(Stream& s, const LocationConfig& loc, std::string_view path) {
     const auto& fields = !loc.hashed_headers.empty() && content_hashed(path) ? loc.hashed_headers : loc.add_headers;
     // What a password protects ([[site.auth]]) is never stored by a shared cache: a preset's
-    // "public" (uploads, /build/, /static/) becomes "private" there.
+    // "public" (uploads, /build/, /static/) becomes "private" there, and a field only shared
+    // caches act on (CDN-Cache-Control, Surrogate-Control: core/private_cache.hpp) is dropped.
     const bool guarded = s.auth.protected_path;
     for (const auto& h : fields)
-        if (!guarded || !Headers::iequals(h.first, "cache-control")) s.response.headers.add(h.first, h.second);
+        if (!guarded || (!Headers::iequals(h.first, "cache-control") && !private_cache::shared_only_field(h.first))) s.response.headers.add(h.first, h.second);
     if (guarded) s.response.headers.add("Cache-Control", "private");
 }
 

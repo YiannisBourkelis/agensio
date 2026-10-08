@@ -8,6 +8,8 @@ Keep this list in step with the code: a new protocol feature adds its RFC here f
 | File | Title | Implemented by |
 |---|---|---|
 | `rfc7617.txt` | The 'Basic' HTTP Authentication Scheme | `[[site.auth]]` (`docs/configuration.md` 19b): the credentials' syntax and the UTF-8 `charset` (2, 2.1, 3) in `src/core/auth.*` (`parse_basic`), the challenge in `src/handlers/dispatch.cpp` (`auth_challenge`); the reuse of credentials below a challenged path (2.2) is why `agensio-auth` counts the error log's failures and not 401s (`docs/fail2ban.md` 2c) |
+| `rfc9111.txt` | HTTP Caching | what a password-protected answer may say to caches (3.5: a shared cache may reuse a response to a request with `Authorization` only when it says `public`, `s-maxage` or `must-revalidate`; 5.2.2.7: `private`): `src/core/private_cache.hpp`, used by `handlers/upstream_common.cpp` and `handlers/static.cpp` |
+| `rfc9213.txt` | Targeted HTTP Cache Control | `CDN-Cache-Control` and its vendor forms, which a CDN follows over `Cache-Control` and `Expires` (2.2): dropped from a password-protected answer, `src/core/private_cache.hpp` |
 | `rfc9110.txt` | HTTP Semantics | every protocol layer: methods, status codes, fields, conditionals, ranges (`src/core/`, `src/handlers/`) |
 | `rfc9112.txt` | HTTP/1.1 | `src/http1/` (parser, connection, chunked coding) |
 | `rfc9113.txt` | HTTP/2 | `src/http2/` (`docs/design-http2.md`) |

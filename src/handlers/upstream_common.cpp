@@ -3,6 +3,7 @@
 #include <cerrno>
 #include <system_error>
 
+#include "core/private_cache.hpp"
 #include "core/strings.hpp"
 #include "response.hpp"
 
@@ -105,12 +106,23 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
     // Head: every upstream field except the ones the writer owns (framing, connection) and
     // the ones we set ourselves (Server, Date), as nginx hides them by default.
     const bool no_body_status = res.status == 204 || res.status == 304 || res.status < 200;
+    // A password-protected path (core/private_cache.hpp): the answer is never one a shared cache
+    // may keep, whatever the application said; an open path pays one test per field.
+    const bool guarded = s.auth.protected_path;
+    std::string kept;  // the application's Cache-Control directives a protected answer keeps
     r.scratch.reserve(res.head.size() + 64);
     for (const HeaderField& h : res.headers) {
         if (Headers::iequals(h.name, "content-length") || Headers::iequals(h.name, "transfer-encoding") ||
             Headers::iequals(h.name, "connection") || Headers::iequals(h.name, "keep-alive") ||
             Headers::iequals(h.name, "server") || Headers::iequals(h.name, "date"))
             continue;
+        if (guarded) {
+            if (Headers::iequals(h.name, "cache-control")) {
+                private_cache::keep_directives(h.value, kept);
+                continue;
+            }
+            if (private_cache::shared_only_field(h.name)) continue;
+        }
         if (proxied && hidden(h.name, loc)) continue;
         if (proxied && loc.proxy.rewrite_redirects && Headers::iequals(h.name, "location")) {
             r.scratch.append("Location: ");
@@ -126,7 +138,15 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
     const int st = res.status;
     if (st == 200 || st == 201 || st == 204 || st == 206 || st == 301 || st == 302 || st == 303 || st == 304 ||
         st == 307 || st == 308)
-        for (const auto& h : loc.add_headers) r.scratch.append(h.first).append(": ").append(h.second).append("\r\n");
+        for (const auto& h : loc.add_headers) {
+            if (guarded && Headers::iequals(h.first, "cache-control")) {
+                private_cache::keep_directives(h.second, kept);
+                continue;
+            }
+            if (guarded && private_cache::shared_only_field(h.first)) continue;
+            r.scratch.append(h.first).append(": ").append(h.second).append("\r\n");
+        }
+    if (guarded) r.scratch.append("Cache-Control: private").append(kept.empty() ? "" : ", ").append(kept).append("\r\n");
     if (res.streamed) {  // buffering off, or the temp-file cap switched it mid-response
         r.prebuilt_headers = r.scratch;  // the writer adds Content-Length or chunked framing
         if (!no_body_status) r.body = std::move(source);
