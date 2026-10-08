@@ -241,9 +241,13 @@ void WorkerLogs::flush() noexcept {
     }
 }
 
-// remote - - [time] "METHOD target HTTP/1.x" status bytes "referer" "user-agent"
+// remote - user [time] "METHOD target HTTP/1.x" status bytes "referer" "user-agent"; user is the
+// name a password check verified ([[site.auth]]), "-" otherwise (never the name a client merely claimed).
 void WorkerLogs::format_combined(std::string& out, std::string_view time_local, const AccessRecord& r) {
-    out.append(r.remote.empty() ? std::string_view("-") : r.remote).append(" - - [").append(time_local).append("] \"");
+    out.append(r.remote.empty() ? std::string_view("-") : r.remote).append(" - ");
+    if (r.user.empty()) out.push_back('-');
+    else append_escaped(out, r.user);
+    out.append(" [").append(time_local).append("] \"");
     if (r.method.empty()) {
         out.push_back('-');
     } else {
@@ -287,6 +291,10 @@ void WorkerLogs::format_json(std::string& out, std::string_view time_iso, const 
     append_json(out, r.referer);
     out.append(",\"user_agent\":");
     append_json(out, r.user_agent);
+    if (!r.user.empty()) {
+        out.append(",\"user\":");
+        append_json(out, r.user);
+    }
     if (!r.upstream.empty()) {
         out.append(",\"upstream\":");
         append_json(out, r.upstream);

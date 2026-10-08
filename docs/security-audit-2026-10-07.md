@@ -273,8 +273,16 @@ Each item names the check and what a pass looks like. These belong in the suites
 a one-off.
 
 1. **2.1, both shapes** (the fix is in alpha.56; this test is still to write, and must fail
-   or hang on `v0.1.0-alpha.55` and pass from alpha.56), against a Release build with
-   `idle_timeout = 3`: an HTTP/2
+   or hang on `v0.1.0-alpha.55` and pass from alpha.56). Live on 2026-10-08 (alpha.55 beside
+   alpha.56, `idle_timeout = 2`): the pull-in-flight part is confirmed (a streaming proxy
+   answer pausing 8 s between chunks was cut at 4.0 s on alpha.55, whole at 8.0 s on
+   alpha.56); the worker stop was not reproduced by a client with a 1 KB window that never
+   updates it: flow control blocks the response before the writer holds any of it, so
+   `close_stream` releases the stream at once and the loop moves on. The failing state needs
+   the stream's bytes inside a write when the cut lands: a client with a large window (2^31-1
+   and a connection WINDOW_UPDATE to match), a small receive buffer (4 KB), a 10 MB response
+   over TLS (plain HTTP sends a large cached file through sendfile, another path), never
+   reading. Against a Release build with `idle_timeout = 3`: an HTTP/2
    client with a large window that stops reading a 10 MB response, and a `buffering =
    false` FastCGI script that sleeps longer than the idle timeout between two prints;
    in each, a plain request on another connection must be answered within a second and

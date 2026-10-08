@@ -6,6 +6,7 @@
 #include <string>
 
 #include "cache.hpp"
+#include "core/auth.hpp"
 #include "http_date.hpp"
 #include "net/cidr.hpp"
 #include "services/log.hpp"
@@ -13,6 +14,19 @@
 namespace agensio {
 
 struct WorkerState {
+    // [[site.auth]] (design section 25): this worker's remembered logins, the verifications it
+    // has on the pool (bounded), and the one a request just asked for, which the connection hands
+    // to the pool with its continuation (Dispatcher::start_auth).
+    auth::Cache auth_cache;
+    unsigned auth_inflight = 0;
+    std::string auth_scratch;
+    struct AuthJob {
+        bool pending = false;
+        std::string password, hash, user, site, realm, client, method, path;
+        auth::Key key{};
+        bool known = false, locked = false;
+        std::int64_t expires = 0;
+    } auth_job;
     DateCache date;
     LocalIndex local;
     std::time_t now = 0;      // wall clock read once per request by the connection

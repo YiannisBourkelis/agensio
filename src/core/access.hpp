@@ -31,7 +31,9 @@ inline bool iequal_prefix(std::string_view path, std::string_view prefix) noexce
 // A prefix rule covers its path and everything below it on a segment boundary ("/admin":
 // /admin, /admin/ and /admin/x, never /administrator); "/" covers the whole site; an exact
 // rule its path alone.
-inline bool covers(const AccessRule& r, std::string_view path) noexcept {
+// The same matcher serves [[site.auth]] rules (AuthRule: the same path and exact fields).
+template <class Rule>
+inline bool covers(const Rule& r, std::string_view path) noexcept {
     if (r.exact) return path.size() == r.path.size() && iequal_prefix(path, r.path);
     if (r.path.size() == 1) return true;
     return iequal_prefix(path, r.path) && (path.size() == r.path.size() || path[r.path.size()] == '/');
@@ -53,6 +55,15 @@ inline const AccessRule* rule_for(const SiteConfig& site, std::string_view path)
     const unsigned char c = first_byte(path);
     if (((site.access_first[c >> 6] >> (c & 63)) & 1u) == 0) return nullptr;
     for (const AccessRule& r : site.access)
+        if (covers(r, path)) return &r;
+    return nullptr;
+}
+
+// [[site.auth]]: the rule deciding `path` (longest first, the same bitmap test), or null.
+inline const AuthRule* auth_rule_for(const SiteConfig& site, std::string_view path) noexcept {
+    const unsigned char c = first_byte(path);
+    if (((site.auth_first[c >> 6] >> (c & 63)) & 1u) == 0) return nullptr;
+    for (const AuthRule& r : site.auth)
         if (covers(r, path)) return &r;
     return nullptr;
 }

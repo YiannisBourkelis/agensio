@@ -70,6 +70,10 @@
 #include "core/forwarded.hpp"
 #include "core/access.hpp"
 #include "core/refuse.hpp"
+#ifdef AGENSIO_HAS_AUTH
+#include <crypt.h>
+#include "core/auth.hpp"
+#endif
 #include "path.hpp"
 #include "services/log.hpp"
 #include "upstream/fcgi.hpp"
@@ -5635,6 +5639,204 @@ static void test_path_check() {
     fs::remove_all(dir);
 }
 
+#ifdef AGENSIO_HAS_AUTH
+// Basic authentication, the core (2026-10-08, design section 25): the user file, the
+// Authorization value, verification through libxcrypt, the cache of successes.
+static std::string auth_hash(const char* prefix, unsigned long cost, const char* password) {
+    char setting[CRYPT_GENSALT_OUTPUT_SIZE];
+    if (!crypt_gensalt_rn(prefix, cost, nullptr, 0, setting, sizeof setting)) return "";
+    auto data = std::make_unique<crypt_data>();
+    const char* out = crypt_rn(password, setting, data.get(), sizeof *data);
+    return out && out[0] != '*' ? std::string(out) : std::string();
+}
+
+static void test_auth_core() {
+    using namespace auth;
+    const std::string y = auth_hash("$y$", 0, "secret"), b = auth_hash("$2b$", 4, "secret"), s6 = auth_hash("$6$", 1000, "secret");
+    CHECK(y.starts_with("$y$") && b.starts_with("$2b$") && s6.starts_with("$6$"));
+
+    // The user file: htpasswd lines, two optional fields, comments and blank lines.
+    std::vector<User> users;
+    std::string err = parse_users("# staging\n\nanna:" + y + ":expires=2026-10-22:note=Anna: Acme (review)\ndev:" + b + "\nlocked:!\n", users);
+    CHECK(err.empty());
+    CHECK(users.size() == 3 && users[0].name == "anna" && users[0].hash == y && users[0].expires == 1792627200 &&
+          users[0].note == "Anna: Acme (review)");
+    CHECK(users[1].name == "dev" && users[1].expires == 0 && users[1].note.empty() && !users[1].locked);
+    CHECK(users[2].locked);
+    auto refused = [&](const std::string& line, const char* fragment) {
+        std::vector<User> u;
+        const std::string why = parse_users(line, u);
+        if (why.find(fragment) == std::string::npos) std::printf("users file %s: '%s'\n", line.c_str(), why.c_str());
+        return why.find(fragment) != std::string::npos;
+    };
+    CHECK(refused("a:{SHA}W6ph5Mm5Pz8GgiULbPgzG37mj9g=\n", "line 1"));
+    CHECK(refused("a:{SHA}W6ph5Mm5Pz8GgiULbPgzG37mj9g=\n", "htpasswd -B"));
+    CHECK(refused("a:$apr1$abcdefgh$0123456789abcdefghijkl\n", "MD5"));
+    CHECK(refused("a:$1$abcdefgh$0123456789abcdefghijkl\n", "MD5"));
+    CHECK(refused("a:abJnggxhB/yWI\n", "DES"));
+    CHECK(refused("a:{PLAIN}secret\n", "plain"));
+    CHECK(refused("a:{SSHA}abcdefghijklmnop\n", "SHA-1"));
+    CHECK(refused("a:$2x$10$abcdefghijklmnopqrstuuabcdefghijklmnopqrstuvwxyzabcde\n", "$2x$"));
+    CHECK(refused("anna:" + y + ":expire=2026-10-22\n", "unknown field 'expire'"));
+    CHECK(refused("anna:" + y + ":expires=2026-13-01\n", "expires"));
+    CHECK(refused("anna:" + y + "\nanna:" + b + "\n", "line 2: user anna is listed twice"));
+    CHECK(refused(":" + y + "\n", "line 1"));
+    CHECK(refused(std::string("an\x01na:") + y + "\n", "control"));
+    CHECK(refused("anna\n", "line 1"));
+    CHECK(refused("", "no users"));
+    std::vector<User> two_a;
+    CHECK(parse_users("a:$2a$04$abcdefghijklmnopqrstuuabcdefghijklmnopqrstuvwxyzabcde\n", two_a).empty());  // $2a$ is bcrypt
+
+    // The Authorization value: strict, views into the scratch, nothing a crypt() would cut.
+    std::string scratch;
+    Credentials c;
+    CHECK(parse_basic("Basic YW5uYTpzZWNyZXQ=", scratch, c) == Parsed::ok && c.user == "anna" && c.password == "secret");
+    CHECK(parse_basic("basic    YW5uYTpzZWNyZXQ=", scratch, c) == Parsed::ok && c.user == "anna");
+    CHECK(parse_basic("Bearer abc", scratch, c) == Parsed::none);
+    CHECK(parse_basic("Basic", scratch, c) == Parsed::malformed);
+    CHECK(parse_basic("Basic !!!!", scratch, c) == Parsed::malformed);
+    CHECK(parse_basic("Basic YW5uYXNlY3JldA==", scratch, c) == Parsed::malformed);                 // no colon
+    CHECK(parse_basic("Basic OnNlY3JldA==", scratch, c) == Parsed::malformed);                     // empty user
+    CHECK(parse_basic("Basic YW5uYTpzZQBjcmV0", scratch, c) == Parsed::malformed);                 // a NUL in the password
+    CHECK(parse_basic("Basic YW5uYTpzZQljcmV0", scratch, c) == Parsed::malformed);                 // a tab
+    CHECK(parse_basic("Basic YW5uYTphOmI=", scratch, c) == Parsed::ok && c.password == "a:b");     // the first colon splits
+    CHECK(parse_basic("Basic YW5uYTpww6Rzc3fDtnJk", scratch, c) == Parsed::ok && c.password == "p\xc3\xa4sswörd");
+    CHECK(parse_basic("Basic " + std::string(1200, 'A'), scratch, c) == Parsed::malformed);         // too long
+
+    // Verification: the right password, never a wrong one, a locked user or the hash itself.
+    CHECK(verify("secret", y) && verify("secret", b) && verify("secret", s6));
+    CHECK(!verify("Secret", y) && !verify("secret ", b) && !verify("", s6));
+    CHECK(!verify(y, y) && !verify("anything", "!") && !verify("anything", "*"));
+
+    // The cache key: length-prefixed user, the stored hash and the password, under the process key.
+    CHECK(cache_key("ab", y, "c") != cache_key("a", y, "bc"));
+    CHECK(cache_key("anna", y, "secret") != cache_key("anna", b, "secret"));
+    CHECK(cache_key("anna", y, "secret") != cache_key("anna", y, "secreT"));
+    CHECK(cache_key("anna", y, "secret") == cache_key("anna", y, "secret"));
+
+    // The cache of successes: until the entry's time, bounded, the most recent kept.
+    Cache cache;
+    const Key k = cache_key("anna", y, "secret");
+    CHECK(!cache.find(k, 1000));
+    cache.insert(k, 1300);
+    CHECK(cache.find(k, 1000) && cache.find(k, 1299) && !cache.find(k, 1300));
+    CHECK(!cache.find(cache_key("anna", y, "other"), 1000));
+    for (int i = 0; i < 5000; ++i) cache.insert(cache_key("u" + std::to_string(i), y, "p"), 2000);
+    CHECK(cache.find(cache_key("u4999", y, "p"), 1500));
+    CHECK(cache.size() <= Cache::kCapacity);
+
+    // The pool: results on its own threads, every hash counted, a full queue refused.
+    {
+        Verifier pool(2, 4);
+        std::mutex m;
+        std::condition_variable cv;
+        int done = 0, good = 0;
+        auto finish = [&](bool ok) {
+            const std::lock_guard lock(m);
+            ++done;
+            good += ok;
+            cv.notify_one();
+        };
+        CHECK(pool.submit("secret", b, finish) && pool.submit("wrong", b, finish) && pool.submit("secret", y, finish));
+        std::unique_lock lock(m);
+        cv.wait_for(lock, std::chrono::seconds(10), [&] { return done == 3; });
+        CHECK(done == 3 && good == 2 && pool.verifications() == 3);
+    }
+    {
+        Verifier tiny(1, 1);  // one slow job running, one queued: the next is refused
+        const std::string slow = auth_hash("$2b$", 12, "x");
+        int refused = 0;
+        for (int i = 0; i < 4; ++i) refused += !tiny.submit("x", slow, [](bool) {});
+        CHECK(refused >= 2);
+    }
+}
+#endif
+
+#ifdef AGENSIO_HAS_AUTH
+// [[site.auth]] in the configuration (2026-10-08, design section 25): the rules, the user file
+// read and checked once per load, the WordPress openings, --explain; every refusal with its reason.
+static void test_auth_config() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-authcfg-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "www");
+    const std::string hash = auth_hash("$2b$", 4, "secret");
+    auto users = [&](const char* name, const std::string& text, fs::perms mode) {
+        std::ofstream(dir / name) << text;
+        fs::permissions(dir / name, mode);
+    };
+    using fs::perms;
+    users("users", "anna:" + hash + ":expires=2026-10-22:note=Anna, Acme\ndev:" + hash + "\n", perms::owner_read | perms::owner_write | perms::group_read);
+    const std::string head = "[addresses]\noffice = [\"203.0.113.0/24\"]\n[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n";
+    auto load = [&](const std::string& text) {
+        std::ofstream(dir / "a.toml") << text;
+        return load_config(dir / "a.toml");
+    };
+    auto error_of = [&](const std::string& text) -> std::string {
+        try {
+            load(text);
+        } catch (const std::runtime_error& e) {
+            return e.what();
+        }
+        return "";
+    };
+    const Config cfg = load(head + "[[site.auth]]\npath = \"/admin\"\nusers = \"users\"\nrealm = \"Admin area\"\nskip_for = [\"@office\"]\n"
+                                   "[[site.auth]]\npath = \"/admin/health\"\nmatch = \"exact\"\nopen = true\n"
+                                   "[[site.auth]]\npath = \"/staff\"\nusers = \"users\"\n");
+    const SiteConfig& site = cfg.sites[0];
+    CHECK(site.auth.size() == 3 && site.auth[0].path == "/admin/health" && site.auth[0].open && site.auth[0].exact);
+    const AuthRule* admin = nullptr;
+    for (const auto& r : site.auth)
+        if (r.path == "/admin") admin = &r;
+    CHECK(admin && admin->realm == "Admin area" && admin->users && admin->users->users.size() == 2 && !admin->skip.empty() &&
+          admin->skip_text == std::vector<std::string>{"@office"} && !admin->plain_http);
+    CHECK(admin && admin->users->users[0].note == "Anna, Acme" && admin->users->users[0].expires == 1792627200);
+    for (const auto& r : site.auth)
+        if (r.path == "/staff") CHECK(r.realm == "a.test" && r.users == admin->users);  // one file read once, the site's name as realm
+    CHECK(cfg.auth_files.size() == 1);
+    std::ostringstream explained;
+    explain_config(cfg, explained);
+    CHECK(explained.str().find("[[site.auth]]") != std::string::npos && explained.str().find("2 users") != std::string::npos &&
+          explained.str().find(hash) == std::string::npos);
+
+    // Refused, each with what is wrong.
+    const std::string rule = "[[site.auth]]\npath = \"/admin\"\nusers = \"users\"\n";
+    auto refused = [&](const std::string& text, const char* fragment) {
+        const std::string why = error_of(text);
+        if (why.find(fragment) == std::string::npos) std::printf("auth config: expected '%s', got '%s'\n", fragment, why.c_str());
+        return why.find(fragment) != std::string::npos;
+    };
+    CHECK(refused(head + rule + "realms = \"x\"\n", "unknown key 'realms'"));
+    CHECK(refused(head + "[[site.auth]]\npath = \"/admin\"\n", "users"));
+    CHECK(refused(head + "[[site.auth]]\npath = \"admin\"\nusers = \"users\"\n", "must start with '/'"));
+    CHECK(refused(head + rule + "realm = \"a\\\"b\"\n", "realm"));
+    CHECK(refused(head + rule + "skip_for = [\"any\"]\n", "open = true"));
+    CHECK(refused(head + rule + "skip_for = [\"@nosuch\"]\n", "@nosuch"));
+    CHECK(refused(head + rule + "plain_http = \"maybe\"\n", "plain_http"));
+    CHECK(refused(head + rule + "credentials = \"yes\"\n", "credentials"));
+    CHECK(refused(head + rule + "forward_user = \"Bad Header\"\n", "forward_user"));
+    CHECK(refused(head + "[[site.auth]]\npath = \"/admin\"\nusers = \"nosuch\"\n", "nosuch"));
+    users("open", "anna:" + hash + "\n", perms::owner_read | perms::owner_write | perms::group_read | perms::others_read);
+    CHECK(refused(head + "[[site.auth]]\npath = \"/admin\"\nusers = \"open\"\n", "readable by others"));
+    users("shared", "anna:" + hash + "\n", perms::owner_read | perms::owner_write | perms::group_read | perms::group_write);
+    CHECK(refused(head + "[[site.auth]]\npath = \"/admin\"\nusers = \"shared\"\n", "writable by group or others"));
+    users("weak", "anna:{SHA}W6ph5Mm5Pz8GgiULbPgzG37mj9g=\n", perms::owner_read | perms::owner_write);
+    CHECK(refused(head + "[[site.auth]]\npath = \"/admin\"\nusers = \"weak\"\n", "line 1"));
+    CHECK(refused(head + "[[site.auth]]\npath = \"/admin\"\nusers = \"weak\"\n", "weak"));
+    CHECK(refused(head + rule + rule, "a second rule for /admin"));
+
+    // WordPress: below a protected /wp-admin, what the public site needs stays open.
+    std::ofstream(dir / "fpm.sock");
+    const Config wp = load("[[site]]\nserver_name = [\"w.test\"]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\napp = \"wordpress\"\n"
+                           "php = { socket = \"unix:" + (dir / "fpm.sock").string() + "\" }\n" + rule.substr(0, rule.find("path")) +
+                           "path = \"/wp-admin\"\nusers = \"users\"\n");
+    int opened = 0;
+    for (const auto& r : wp.sites[0].auth)
+        if (r.open && r.origin == "preset:wordpress") ++opened;
+    CHECK(opened == 4);
+    fs::remove_all(dir);
+}
+#endif
+
 static void test_access_rules() {
     namespace fs = std::filesystem;
     using namespace control;
@@ -6962,6 +7164,10 @@ int main() {
     test_forwarded_lines();
     test_address_forms();
     test_access_rules();
+#ifdef AGENSIO_HAS_AUTH
+    test_auth_core();
+    test_auth_config();
+#endif
     test_refuse_patterns();
     test_refuse_config();
     test_path_check();

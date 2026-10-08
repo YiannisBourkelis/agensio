@@ -2558,3 +2558,95 @@ which drops no connection.
 
 A server older than 0.1.0-alpha.52 ignores `[[site.access]]` without a word: after an
 upgrade, check with `agensio -t --explain` that the rules are listed.
+
+## 19b. Passwords: `[[site.auth]]`
+
+A password in front of a path: a staging site, an admin area, a tool without a login of its
+own. The rules sit beside the access rules and are matched the same way, before any location
+is chosen.
+
+```toml
+[addresses]
+office = ["203.0.113.0/24"]
+
+[[site]]
+server_name = ["staging.shop.example"]
+app = "wordpress"
+root = "/srv/www/staging.shop.example/web"
+tls = "auto"
+
+[[site.auth]]
+path = "/"                                              # the whole site
+users = "/etc/agensio/auth/staging.shop.example.users"
+realm = "Shop staging"
+skip_for = ["@office"]                                  # the office gets in without a password
+
+[[site.auth]]
+path = "/api/health"
+match = "exact"
+open = true                                             # no password for the monitor
+```
+
+The user file is htpasswd's format, so a file made with `htpasswd -B` works as is, with two
+optional fields after the hash:
+
+```
+anna:$y$j9T$...:expires=2026-10-22:note=Anna, Acme (client review)
+dev:$2y$12$...:note=Our developer
+old:!                                                   # a locked user
+```
+
+From the `expires` date (UTC) the user is refused even with the right password; `note` says
+whose login it is, in `--explain`, `site_show` and the log lines. Accepted hashes: yescrypt
+(`mkpasswd -m yescrypt`, Debian's default), bcrypt (`htpasswd -B -C 12`), sha512crypt,
+sha256crypt, scrypt. Refused at load, with the command to use instead: MD5 (`$apr1$`, `$1$`,
+htpasswd's old default), `{SHA}`, `{SSHA}`, `{PLAIN}` and DES. The file belongs to the owner
+of the main configuration (root), is not writable by group or others and not readable by
+others (`chmod 640`, the server's group may read it), and is read at load and at every
+reload. On a WordPress site, a protected `/wp-admin` keeps `admin-ajax.php` and the login
+page's own css, js and images open, as the access rules do. A build of agensio without
+libxcrypt refuses a configuration with `[[site.auth]]` instead of leaving the paths open.
+
+**Making a user file.** `agensio passwd anna >> /etc/agensio/auth/staging.users` asks for the
+password twice at a terminal (or reads one line from stdin) and prints `anna:$y$...` (yescrypt;
+`--method bcrypt --cost 12` or `--method sha512` for the others), so no Apache tools are
+needed; append `:expires=` and `:note=` by hand.
+
+**What a request meets.** The checks run in this order before any location: `refuse`, the
+access rules, then the password. A client in `skip_for` goes on without one. Over plain HTTP
+the browser would send the password in clear, so a request that is not on TLS, not from this
+host and not forwarded as https by a trusted proxy is never asked: it gets `403` with a page
+that says to use https, unless the rule says `plain_http = "allow"`. Otherwise:
+
+- no `Authorization`: `401` with `WWW-Authenticate: Basic realm="...", charset="UTF-8"` and
+  `Cache-Control: no-store`; the same page for a malformed, a wrong and an unknown login;
+- a login this worker verified in the last five minutes (or until the user's expiry, if that
+  comes first): served at once, for the cost of one HMAC;
+- any other login: verified on a small pool of threads while the request waits, never on the
+  worker's loop; at most eight at a time per worker, `503` with `Retry-After: 1` beyond. An
+  unknown user is checked against a real entry of the file, so the answer takes the same
+  time and does not tell which users exist. A failure is never remembered.
+
+A changed password takes effect at the next reload; the old one stops working at once, since
+what a worker remembers is keyed by the stored hash too.
+
+**What the application and caches see.** PHP gets `REMOTE_USER` and `AUTH_TYPE = Basic`;
+`credentials = "pass"` (the default on a site that runs PHP: WordPress's loopback calls need
+it) also leaves `Authorization` in, `"strip"` (the default elsewhere) takes it out, so a
+proxied application never receives the site's password. `forward_user = "X-Remote-User"` on a
+proxy sends the verified name in that field, the client's own copy removed first. Static
+answers on a protected path carry `Cache-Control: private`, replacing a preset's `public`, so
+no shared cache serves them to someone else.
+
+**Logs.** The access log's user field (`%u`, the third field) is the verified user, `-`
+otherwise, never a name a refused request claimed (JSON: `"user"`). Each failed login is one
+`warn` line, the client first so a name the client chose cannot pass for another address:
+`auth failed: client 198.51.100.4 site shop.example realm "Shop staging" user "anna" (wrong
+password) GET /`. The reasons are `wrong password`, `unknown user`, `expired`, `locked user`
+and `malformed credentials`; the challenge itself, which every browser meets before it sends
+a login, writes nothing. `status` reports `auth_verifications`, the hashes run since the start.
+
+The reference rows (`agensio ctl reference`, `docs/keys.md`) give every key. Managed sites
+(`rules.auth`, the user tools of the control plane and MCP) follow in the next step of the
+feature (design section 25).
+

@@ -14,7 +14,7 @@ Pre-alpha `0.1.0-alpha.1` (2026-09-19): phases A-D, E1/E9, F0-F7, H1, H3 done, G
 2026-09-23, the first slice of I (HTTP/3) 2026-09-24, F13 (site tasks, the first step of
 `docs/design-site-operations.md`) 2026-09-26; see `CHANGELOG.md`. Everything under "Architecture" below is what the code does now, not a
 proposal. Before every tag: the suites (unit, integration, reload, pools, control, acme),
-the sanitizer and fuzz runs listed in `docs/security-control-plane.md`, and
+`tests/auth.sh`, the sanitizer and fuzz runs listed in `docs/security-control-plane.md`, and
 `bench/ab.sh` against the previous tag.
 
 ## Hard constraints
@@ -103,6 +103,7 @@ plugin's filters, with a README mapping each to `src/control/protection.*` and
 | OpenSSL 3 | TLS (later phase) | optional, `-DAGENSIO_TLS=ON` |
 | toml++ 3.4.0 | Config parsing | vendored single header in `third_party/tomlplusplus` (MIT) |
 | zlib | gzip and deflate for the archive extractor behind `site-install` (`.tar.gz`, `.zip`); on every system already | optional at build time (`find_package(ZLIB)`); without it only plain `.tar` installs |
+| libxcrypt (LGPL-2.1+) | password checks for `[[site.auth]]` (`crypt_rn`: yescrypt, bcrypt, sha-crypt); the system's libcrypt on Debian, Ubuntu, Fedora and RHEL, linked dynamically | optional at build time (`crypt_rn` in `crypt.h`, with OpenSSL); without it authentication is compiled out and a configuration that asks for it is refused |
 
 ## Planned layout
 
@@ -578,6 +579,21 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   application without a preset: its official server configuration translated into `rules`,
   checked with `path_check` before and after (MCP instructions). Gate: `bench/ab.sh <ref> -A`
   (row `refuse`). Security page row 39.
+- **Passwords** (2026-10-08, `src/core/auth.*`, `docs/configuration.md` 19b, design section 25,
+  `reports/Web server basic authentication.md`): `[[site.auth]]` (`path`, `match`, `users`, `realm`,
+  `skip_for`, `open`, `plain_http`, `credentials`, `forward_user`), matched like the access rules
+  (`access::auth_rule_for`, `SiteConfig::auth_first`) and checked in `Dispatcher::route` after
+  `refuse` and the access rules, on every hop and on a directory's index. User files
+  (`AuthUserFile`, one load per file, a unique `id`): htpasswd lines plus `expires=` and `note=`,
+  strong hashes only through libxcrypt (`crypt_rn`), root's and `640`. A login is verified on
+  `auth::Verifier` (a small thread pool, results posted to the worker; the connection waits on
+  a location of kind `auth` and routes again), remembered per worker in `auth::Cache` (HMAC of
+  the user, the stored hash and the password; successes only; five minutes) and per connection
+  in `AuthMemo` (the last verified header). No prompt over plain HTTP from another host (403)
+  unless `plain_http = "allow"`; `Cache-Control: private` on protected static answers;
+  `REMOTE_USER` to PHP; `auth failed: client ...` lines. `agensio passwd`. Built only with
+  libxcrypt and OpenSSL (`AGENSIO_HAS_AUTH`). Gate: `bench/ab.sh <ref> -A` (row `auth`);
+  `tests/auth.sh`. Security page row 40. Managed sites and MCP: the next step.
 - **Application install** (F9, `src/services/archive.*`, `fetch.*`, `install.*`):
   `agensio ctl site-install NAME [--url | --file | --version]` fills a site's empty
   directory as the site's account from an https archive, an upload (`agensio ctl upload`)

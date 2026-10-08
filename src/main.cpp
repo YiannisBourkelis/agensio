@@ -6,6 +6,8 @@
 #ifndef _WIN32
 #include <signal.h>
 #include <sys/types.h>
+#include <termios.h>
+#include <unistd.h>
 #endif
 #include <iostream>
 #include <iterator>
@@ -39,6 +41,9 @@ void usage() {
                  "  -t, --test          check the configuration (and FastCGI upstreams) and exit\n"
                  "      --explain       with -t: print the effective configuration after presets\n"
                  "  -v, --version       print the version and exit\n"
+                 "  passwd [--method yescrypt|bcrypt|sha512] [--cost N] USER\n"
+                 "                      print a line for a [[site.auth]] user file (USER:hash), the\n"
+                 "                      password asked twice at a terminal or read from stdin\n"
                  "  reload              validate the configuration, then signal the running server\n"
                  "                      (server.pid_file, SIGHUP) to switch to it without a restart\n"
                  "  ctl                 talk to the running server's control socket ([control]) as the\n"
@@ -116,6 +121,68 @@ int main(int argc, char** argv) {
             if (markdown) std::cout << agensio::control::reference_markdown();
             else std::cout << agensio::control::config_reference(nullptr).dump() << "\n";
             return 0;
+        }
+        else if (a == "passwd" && i == 1) {  // one line of a [[site.auth]] user file, no server needed
+#ifdef AGENSIO_HAS_AUTH
+            std::string user, method;
+            unsigned long cost = 0;
+            for (int j = i + 1; j < argc; ++j) {
+                std::string b = argv[j];
+                if (b == "--method" && j + 1 < argc) method = argv[++j];
+                else if (b == "--cost" && j + 1 < argc) {
+                    try {
+                        cost = std::stoul(argv[++j]);
+                    } catch (const std::exception&) {
+                        std::cerr << "passwd: --cost takes a number\n";
+                        return 2;
+                    }
+                } else if (user.empty() && !b.empty() && b[0] != '-') user = b;
+                else {
+                    std::cerr << "passwd: unexpected argument " << b << "\n";
+                    return 2;
+                }
+            }
+            bool name_ok = !user.empty() && user.size() <= 255;
+            for (const unsigned char c : user) name_ok = name_ok && c > 0x20 && c != 0x7f && c != ':';
+            if (!name_ok) {
+                std::cerr << "usage: agensio passwd [--method yescrypt|bcrypt|sha512] [--cost N] USER\n"
+                             "       (a user name of 1 to 255 characters, no ':' or space; the password from the terminal or stdin)\n";
+                return 2;
+            }
+            std::string password;
+            if (::isatty(STDIN_FILENO)) {  // asked twice, not echoed
+                termios old_mode{};
+                ::tcgetattr(STDIN_FILENO, &old_mode);
+                termios quiet = old_mode;
+                quiet.c_lflag &= ~static_cast<tcflag_t>(ECHO);
+                ::tcsetattr(STDIN_FILENO, TCSANOW, &quiet);
+                std::string again;
+                std::cerr << "Password for " << user << ": ";
+                std::getline(std::cin, password);
+                std::cerr << "\nAgain: ";
+                std::getline(std::cin, again);
+                std::cerr << "\n";
+                ::tcsetattr(STDIN_FILENO, TCSANOW, &old_mode);
+                if (password != again) {
+                    std::cerr << "passwd: the two passwords differ\n";
+                    return 1;
+                }
+            } else {
+                std::getline(std::cin, password);
+            }
+            if (!password.empty() && password.back() == '\r') password.pop_back();
+            std::string error;
+            const std::string hash = agensio::auth::make_hash(password, method, cost, error);
+            if (hash.empty()) {
+                std::cerr << "passwd: " << error << "\n";
+                return 2;
+            }
+            std::cout << user << ":" << hash << "\n";
+            return 0;
+#else
+            std::cerr << "passwd: this agensio was built without authentication (libxcrypt and OpenSSL)\n";
+            return 2;
+#endif
         }
         else if (a == "protection" && i == 1) {  // the host protection files, rendered from the configuration alone
             std::string part, filter;

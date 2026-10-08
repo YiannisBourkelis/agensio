@@ -1,6 +1,7 @@
 #include "handlers/dispatch.hpp"
 
 #include <cstdio>
+#include <ctime>
 
 #include "response.hpp"
 
@@ -17,6 +18,50 @@ const asio::ip::address& client_ip(ConnectionInfo& c) {
     static const asio::ip::address none;  // a connection that cannot say (never in practice): matches no entry
     if (!c.client_address.empty()) return c.client_ip;
     return c.peer ? c.peer->peer_ip() : none;
+}
+
+// [[site.auth]]: the rule that asks for a password on some reading of the path, or null. An open
+// rule decides its path only when no other reading falls under a rule that asks: the stricter wins.
+const AuthRule* protecting_rule(const SiteConfig& site, std::string_view path, std::string& scratch) {
+    const AuthRule* found = nullptr;
+    auto judge = [&](std::string_view p) {
+        if (found) return;
+        const AuthRule* r = access::auth_rule_for(site, p);
+        if (r && !r->open) found = r;
+    };
+    judge(path);
+    if (!found) access::other_readings(path, scratch, judge);
+    return found;
+}
+
+// The location route() returns while a password is being verified: never configured, never served.
+const LocationConfig& auth_pending() {
+    static const LocationConfig loc = [] {
+        LocationConfig l;
+        l.path = "/";
+        l.kind = HandlerKind::auth;
+        l.handler = "auth";
+        return l;
+    }();
+    return loc;
+}
+
+// A user name as the log line writes it: quotes, backslashes and bytes outside printable ASCII
+// escaped, so a name a client chose cannot forge another field of the line.
+std::string log_text(std::string_view v) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string out;
+    for (const char ch : v.substr(0, 128)) {
+        const auto c = static_cast<unsigned char>(ch);
+        if (c < 0x20 || c >= 0x7f || c == '"' || c == '\\') {
+            out += "\\x";
+            out.push_back(kHex[c >> 4]);
+            out.push_back(kHex[c & 15]);
+        } else {
+            out.push_back(ch);
+        }
+    }
+    return out;
 }
 
 }  // namespace
@@ -112,6 +157,211 @@ void Dispatcher::access_log_tick(WorkerState& ws, std::time_t now) {
                    " more requests in report mode since the last such line, not named (more than 16 new clients a second)");
         al.report_unnamed = 0;
     }
+}
+
+// [[site.auth]] (design section 25). The client must be on a secure link to be asked: TLS, a
+// trusted proxy that forwarded https, or this host itself; otherwise it gets 403 unless the rule
+// says plain_http = "allow". skip_for lets its clients in without a password. A remembered login
+// (this worker's cache) is let in at once; anything else is verified on the pool: the request
+// waits, never the worker. Every failure is one `auth failed` line; the challenge is none.
+Dispatcher::AuthOutcome Dispatcher::check_auth(Stream& s, const SiteConfig& site, const AuthRule& rule, WorkerState& ws) {
+    s.auth.protected_path = true;
+    if (!rule.forward_user.empty()) {  // only the server sets this field: a client's own goes
+        s.auth.forward_field = rule.forward_user;
+        s.request.headers.remove(rule.forward_user);
+    }
+    auto strip = [&] {
+        if (rule.credentials == AuthRule::Credentials::strip) s.request.headers.remove("authorization");
+    };
+    if (!rule.skip.empty() && in_any(rule.skip, client_ip(s.conn))) {
+        strip();
+        return AuthOutcome::allowed;
+    }
+    const bool local_peer = s.conn.peer && s.conn.peer->peer_ip().is_loopback();
+    if (!rule.plain_http && !s.conn.tls && !(s.conn.trusted_peer && s.conn.forwarded_https) && !local_peer) {
+        auth_plain_http(s);
+        return AuthOutcome::answered;
+    }
+#ifdef AGENSIO_HAS_AUTH
+    const std::string_view header = s.request.headers.get("authorization");
+    AuthMemo* memo = s.conn.auth_memo;
+    if (memo && !header.empty() && memo->users_id == rule.users->id && ws.now < memo->until && memo->value == header &&
+        s.auth.result == AuthState::Result::none) {  // this connection's last verified login, the same header: one comparison
+        s.auth.user = memo->user;
+        strip();
+        return AuthOutcome::allowed;
+    }
+    auto remember = [&](std::string_view user, std::int64_t expires) {
+        if (!memo) return;
+        memo->value.assign(header);
+        memo->users_id = rule.users->id;
+        memo->user.assign(user);
+        memo->until = expires != 0 ? std::min<std::int64_t>(ws.now + 300, expires) : ws.now + 300;
+    };
+    const asio::ip::address& client = client_ip(s.conn);
+    auth::Credentials c;
+    const auth::Parsed parsed = auth::parse_basic(header, ws.auth_scratch, c);
+    if (parsed == auth::Parsed::none) {
+        auth_challenge(s, rule);
+        return AuthOutcome::answered;
+    }
+    if (parsed == auth::Parsed::malformed) {
+        auth_failed_line(client.to_string(), site.server_names.front(), rule.realm, "", "malformed credentials", s.request.method_name, ws.path);
+        auth_challenge(s, rule);
+        return AuthOutcome::answered;
+    }
+    switch (s.auth.result) {
+        case AuthState::Result::verified: {
+            s.auth.user = std::string(c.user);
+            std::int64_t expires = 0;
+            for (const auth::User& u : rule.users->users)
+                if (u.name == c.user) expires = u.expires;
+            remember(c.user, expires);
+            strip();
+            return AuthOutcome::allowed;
+        }
+        case AuthState::Result::failed:  // logged when the verification ended
+            auth_challenge(s, rule);
+            return AuthOutcome::answered;
+        case AuthState::Result::busy:
+            auth_busy(s);
+            return AuthOutcome::answered;
+        case AuthState::Result::none: break;
+    }
+    const auth::User* user = nullptr;
+    const auth::User* stand_in = nullptr;  // an unknown user is checked against a real entry: the same time
+    for (const auth::User& u : rule.users->users) {
+        if (!user && u.name == c.user) user = &u;
+        if (!stand_in && !u.locked) stand_in = &u;
+    }
+    const std::string& hash = user ? user->hash : stand_in ? stand_in->hash : rule.users->users.front().hash;
+    const auth::Key key = auth::cache_key(c.user, hash, c.password);
+    if (user && !user->locked && (user->expires == 0 || ws.now < user->expires) && ws.auth_cache.find(key, ws.now)) {
+        s.auth.user = std::string(c.user);
+        remember(c.user, user->expires);
+        strip();
+        return AuthOutcome::allowed;
+    }
+    if (!verifier_ || ws.auth_inflight >= 8) {  // at most eight hashes per worker at a time; guessing waits its turn
+        auth_busy(s);
+        return AuthOutcome::answered;
+    }
+    WorkerState::AuthJob& job = ws.auth_job;
+    job.pending = true;
+    job.password.assign(c.password);
+    job.hash = hash;
+    job.user.assign(c.user);
+    job.site = site.server_names.front();
+    job.realm = rule.realm;
+    job.client = client.to_string();
+    job.method.assign(s.request.method_name);
+    job.path = ws.path;
+    job.key = key;
+    job.known = user != nullptr;
+    job.locked = user && user->locked;
+    job.expires = user ? user->expires : 0;
+    return AuthOutcome::pending;
+#else
+    (void)site;
+    (void)ws;
+    auth_challenge(s, rule);
+    return AuthOutcome::answered;
+#endif
+}
+
+void Dispatcher::start_auth(WorkerState& ws, asio::io_context& ctx, std::function<void(AuthState::Result)> done) {
+#ifdef AGENSIO_HAS_AUTH
+    auto job = std::make_shared<WorkerState::AuthJob>(std::move(ws.auth_job));
+    ws.auth_job = {};
+    std::string password = std::move(job->password);
+    job->password.clear();
+    ++ws.auth_inflight;
+    auto finish = [this, &ws, &ctx, job, done](bool ok) {
+        asio::post(ctx, [this, &ws, job, done, ok] {
+            --ws.auth_inflight;
+            const std::time_t now = std::time(nullptr);
+            const char* reason = !job->known ? "unknown user" : job->locked ? "locked user" : !ok ? "wrong password"
+                                 : (job->expires != 0 && now >= job->expires) ? "expired" : nullptr;
+            if (!reason) {
+                const std::int64_t until = now + 300;
+                ws.auth_cache.insert(job->key, job->expires != 0 ? std::min<std::int64_t>(until, job->expires) : until);
+                done(AuthState::Result::verified);
+                return;
+            }
+            auth_failed_line(job->client, job->site, job->realm, job->user, reason, job->method, job->path);
+            done(AuthState::Result::failed);
+        });
+    };
+    if (!verifier_ || !verifier_->submit(std::move(password), job->hash, std::move(finish))) {
+        --ws.auth_inflight;
+        asio::post(ctx, [done] { done(AuthState::Result::busy); });
+    }
+#else
+    (void)ws;
+    asio::post(ctx, [done] { done(AuthState::Result::failed); });
+#endif
+}
+
+// 401 with the challenge (RFC 7617: the realm, charset UTF-8), never stored by a cache; one page
+// for a missing, a malformed and a wrong login, so the answer does not tell which it was.
+void Dispatcher::auth_challenge(Stream& s, const AuthRule& rule) {
+    Response& r = s.response;
+    r.reset();
+    r.status = 401;
+    r.keep_alive = s.request.keep_alive;
+    r.head = s.request.method == Method::head;
+    r.buffer.assign("<!doctype html><html><head><title>401 Unauthorized</title></head><body><center><h1>401 Unauthorized</h1></center>"
+                    "<p><center>This page needs a user name and a password.</center></p><hr><center>agensio</center></body></html>\n");
+    r.scratch.assign("Content-Type: text/html; charset=utf-8\r\nWWW-Authenticate: Basic realm=\"");
+    r.scratch.append(rule.realm).append("\", charset=\"UTF-8\"\r\nCache-Control: no-store\r\nContent-Length: ");
+    r.scratch.append(std::to_string(r.buffer.size())).append("\r\n");
+    r.prebuilt_headers = r.scratch;
+    r.content_type = "text/html; charset=utf-8";
+    r.body = MemoryBody{std::string_view(r.buffer)};
+}
+
+// Over plain HTTP the browser would send the password in clear: no challenge, a page that says so.
+void Dispatcher::auth_plain_http(Stream& s) {
+    Response& r = s.response;
+    r.reset();
+    r.status = 403;
+    r.keep_alive = s.request.keep_alive;
+    r.head = s.request.method == Method::head;
+    r.buffer.assign("<!doctype html><html><head><title>403 Forbidden</title></head><body><center><h1>403 Forbidden</h1></center>"
+                    "<p><center>This page needs a password, which is asked over https only. Open it with https://.</center></p>"
+                    "<hr><center>agensio</center></body></html>\n");
+    r.scratch.assign("Content-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: ");
+    r.scratch.append(std::to_string(r.buffer.size())).append("\r\n");
+    r.prebuilt_headers = r.scratch;
+    r.content_type = "text/html; charset=utf-8";
+    r.body = MemoryBody{std::string_view(r.buffer)};
+}
+
+// The worker's verifications are all in flight (or the pool's queue is full): try again shortly.
+void Dispatcher::auth_busy(Stream& s) {
+    Response& r = s.response;
+    r.reset();
+    r.status = 503;
+    r.keep_alive = s.request.keep_alive;
+    r.head = s.request.method == Method::head;
+    r.buffer.assign("<!doctype html><html><head><title>503 Service Unavailable</title></head><body><center><h1>503 Service Unavailable</h1>"
+                    "</center><hr><center>agensio</center></body></html>\n");
+    r.scratch.assign("Content-Type: text/html; charset=utf-8\r\nRetry-After: 1\r\nCache-Control: no-store\r\nContent-Length: ");
+    r.scratch.append(std::to_string(r.buffer.size())).append("\r\n");
+    r.prebuilt_headers = r.scratch;
+    r.content_type = "text/html; charset=utf-8";
+    r.body = MemoryBody{std::string_view(r.buffer)};
+}
+
+// One line per failed login, for the owner and fail2ban: the client first (a name the client
+// chose comes later and is escaped, so it cannot pass for another address), never the password.
+void Dispatcher::auth_failed_line(std::string_view client, std::string_view site, std::string_view realm, std::string_view user,
+                                  std::string_view reason, std::string_view method, std::string_view path) {
+    if (!log_ || !log_->enabled(LogLevel::warn)) return;
+    std::string line = "auth failed: client ";
+    line.append(client).append(" site ").append(site).append(" realm \"").append(log_text(realm)).append("\" user \"");
+    line.append(log_text(user)).append("\" (").append(reason).append(") ").append(log_text(method)).append(" ").append(log_text(path.substr(0, 200)));
+    log_->warn(line);
 }
 
 // 403 with the address that was tested, so a user whose address changed can say which one the
@@ -242,6 +492,13 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
         return nullptr;
     }
     if (!site->access.empty() && !admit(s, *site, ws.path, ws)) return nullptr;
+    // [[site.auth]] after the address rules, before any location is chosen.
+    if (!site->auth.empty())
+        if (const AuthRule* rule = protecting_rule(*site, ws.path, ws.access_scratch)) switch (check_auth(s, *site, *rule, ws)) {
+                case AuthOutcome::allowed: break;
+                case AuthOutcome::answered: return nullptr;
+                case AuthOutcome::pending: return &auth_pending();
+            }
     const LocationConfig* loc = &Router::location(*site, ws.path);
     // A separator spelled as a percent escape (%2F, %5C) never names a file: 404 before any
     // handler that resolves paths on disk runs, Apache's AllowEncodedSlashes Off (2026-10-02
@@ -309,6 +566,12 @@ const LocationConfig* Dispatcher::serve_static(Stream& s, const LocationConfig& 
         return nullptr;
     }
     if (!site->access.empty() && !admit(s, *site, ws.path, ws)) return nullptr;  // a fallback cannot step into a restricted path
+    if (!site->auth.empty())  // nor around a password
+        if (const AuthRule* rule = protecting_rule(*site, ws.path, ws.access_scratch)) switch (check_auth(s, *site, *rule, ws)) {
+                case AuthOutcome::allowed: break;
+                case AuthOutcome::answered: return nullptr;
+                case AuthOutcome::pending: return &auth_pending();
+            }
     const LocationConfig* next = &Router::location(*site, ws.path);
     if (!check_method(s, *next, ws)) return nullptr;
     return next;

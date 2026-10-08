@@ -67,6 +67,29 @@ if(AGENSIO_TLS)
   endif()
 endif()
 
+# ---------------------------------------------------------------- libxcrypt (Basic authentication)
+# Password checks for [[site.auth]] (docs/design-site-operations.md section 25) use the
+# system's libxcrypt (crypt_rn: yescrypt, bcrypt, sha-crypt) and OpenSSL's HMAC; without
+# both, authentication is compiled out and a configuration that asks for it is refused.
+set(AGENSIO_HAS_AUTH OFF)
+find_path(XCRYPT_INCLUDE_DIR crypt.h)
+find_library(XCRYPT_LIBRARY NAMES crypt)
+if(AGENSIO_HAS_TLS AND XCRYPT_INCLUDE_DIR AND XCRYPT_LIBRARY)
+  include(CheckSymbolExists)
+  set(CMAKE_REQUIRED_INCLUDES ${XCRYPT_INCLUDE_DIR})
+  set(CMAKE_REQUIRED_LIBRARIES ${XCRYPT_LIBRARY})
+  check_symbol_exists(crypt_rn crypt.h AGENSIO_HAVE_CRYPT_RN)
+  unset(CMAKE_REQUIRED_INCLUDES)
+  unset(CMAKE_REQUIRED_LIBRARIES)
+  if(AGENSIO_HAVE_CRYPT_RN)
+    set(AGENSIO_HAS_AUTH ON)
+    message(STATUS "Basic authentication enabled (libxcrypt ${XCRYPT_LIBRARY})")
+  endif()
+endif()
+if(NOT AGENSIO_HAS_AUTH)
+  message(STATUS "Basic authentication disabled: needs libxcrypt (crypt_rn) and OpenSSL")
+endif()
+
 # ---------------------------------------------------------------- HTTP/3 (phase I, docs/design-http3.md)
 # Our own QUIC transport over OpenSSL 3.5's QUIC TLS API (SSL_set_quic_tls_cbs) and its
 # primitives; the UDP endpoint uses recvmmsg, sendmmsg, UDP_GRO and UDP_SEGMENT, so it is
@@ -136,6 +159,7 @@ add_library(agensio_core STATIC
   src/handlers/cgi.cpp
   src/handlers/upstream_common.cpp
   src/handlers/dispatch.cpp
+  $<$<BOOL:${AGENSIO_HAS_AUTH}>:src/core/auth.cpp>
   $<$<BOOL:${AGENSIO_HTTPARENA}>:src/handlers/httparena.cpp>
   src/upstream/client.cpp
   src/upstream/fcgi_client.cpp
@@ -151,12 +175,17 @@ target_compile_definitions(agensio_core PUBLIC
   $<$<BOOL:${AGENSIO_QUIC_TRACE}>:AGENSIO_QUIC_TRACE=1>
   $<$<BOOL:${AGENSIO_HTTPARENA}>:AGENSIO_HTTPARENA=1>
   $<$<BOOL:${AGENSIO_INTEROP}>:AGENSIO_INTEROP=1>
-  $<$<BOOL:${AGENSIO_HAS_ZLIB}>:AGENSIO_HAS_ZLIB=1>)
+  $<$<BOOL:${AGENSIO_HAS_ZLIB}>:AGENSIO_HAS_ZLIB=1>
+  $<$<BOOL:${AGENSIO_HAS_AUTH}>:AGENSIO_HAS_AUTH=1>)
 if(AGENSIO_HAS_TLS)
   target_link_libraries(agensio_core PUBLIC OpenSSL::SSL OpenSSL::Crypto)
 endif()
 if(AGENSIO_HAS_ZLIB)
   target_link_libraries(agensio_core PUBLIC ZLIB::ZLIB)
+endif()
+if(AGENSIO_HAS_AUTH)
+  target_include_directories(agensio_core PUBLIC ${XCRYPT_INCLUDE_DIR})
+  target_link_libraries(agensio_core PUBLIC ${XCRYPT_LIBRARY})
 endif()
 if(MSVC)
   target_compile_options(agensio_core PUBLIC /W4 /permissive- $<$<BOOL:${AGENSIO_HARDEN}>:/GS /guard:cf /sdl>)

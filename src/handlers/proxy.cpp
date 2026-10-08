@@ -145,6 +145,8 @@ bool ProxyHandler::build_head(std::string& out, const Stream& s, std::string_vie
         if (!host.empty()) out.append(";host=").append(host);
         out.append("\r\n");
     }
+    // [[site.auth]]'s forward_user: the verified name, in a field the client's own copy of was removed.
+    if (!s.auth.forward_field.empty() && !s.auth.user.empty()) out.append(s.auth.forward_field).append(": ").append(s.auth.user).append("\r\n");
     for (const auto& h : policy.set_headers) {
         if (h.second.empty()) continue;  // "" removes
         out.append(h.first).append(": ");

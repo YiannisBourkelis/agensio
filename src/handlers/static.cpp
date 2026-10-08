@@ -9,6 +9,7 @@
 #include <cstring>
 #include <ctime>
 
+#include "core/access.hpp"
 #include "core/strings.hpp"
 #include "http_date.hpp"
 #include "mime.hpp"
@@ -378,7 +379,8 @@ StaticHandler::Lookup StaticHandler::index_lookup(const LocationConfig& loc, Wor
         // the same file). The same rule already admitted the client: no second pass, and the
         // answer stays cached under the directory (a site restricted whole pays nothing more).
         if (&owner != &loc ||
-            (!site->access.empty() && access::rule_for(*site, ws.path) != access::rule_for(*site, std::string_view(ws.path).substr(0, path_len)))) {
+            (!site->access.empty() && access::rule_for(*site, ws.path) != access::rule_for(*site, std::string_view(ws.path).substr(0, path_len))) ||
+            (!site->auth.empty() && access::auth_rule_for(*site, ws.path) != access::auth_rule_for(*site, std::string_view(ws.path).substr(0, path_len)))) {
             f.close();
             return Lookup::redirect;  // ws.path is now the index path; the caller routes it again
         }
@@ -621,8 +623,12 @@ bool content_hashed(std::string_view path) noexcept {
 // Configured response fields (add_headers) on 200 and 304; the values live in the config.
 void StaticHandler::add_headers(Stream& s, const LocationConfig& loc, std::string_view path) {
     const auto& fields = !loc.hashed_headers.empty() && content_hashed(path) ? loc.hashed_headers : loc.add_headers;
+    // What a password protects ([[site.auth]]) is never stored by a shared cache: a preset's
+    // "public" (uploads, /build/, /static/) becomes "private" there.
+    const bool guarded = s.auth.protected_path;
     for (const auto& h : fields)
-        s.response.headers.add(h.first, h.second);
+        if (!guarded || !Headers::iequals(h.first, "cache-control")) s.response.headers.add(h.first, h.second);
+    if (guarded) s.response.headers.add("Cache-Control", "private");
 }
 
 }  // namespace agensio

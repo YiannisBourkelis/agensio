@@ -17,6 +17,7 @@
 #include <ostream>
 #include <sstream>
 #include <cctype>
+#include <ctime>
 #include <charconv>
 #include <stdexcept>
 #include <thread>
@@ -24,6 +25,8 @@
 #include <toml.hpp>
 #ifndef _WIN32
 #include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 
 namespace agensio {
@@ -1283,6 +1286,156 @@ void check_refuse_conflicts(const SiteConfig& site, const std::string& where) {
     }
 }
 
+// [[site.auth]] (2026-10-08, docs/configuration.md 19b, design section 25). A user file is read
+// once per load and shared by every rule that names it; it belongs to the main configuration's
+// owner (root), is never writable by group or others and never readable by others, and is
+// opened without following a symlink. A build without libxcrypt refuses the rule: a password it
+// could not check would leave the path open.
+#ifdef AGENSIO_HAS_AUTH
+std::shared_ptr<const AuthUserFile> load_auth_users(const fs::path& file, Config& cfg, const std::string& w) {
+    const std::string key = file.lexically_normal().string();
+    if (const auto it = cfg.auth_files.find(key); it != cfg.auth_files.end()) return it->second;
+    const int fd = ::open(key.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0)
+        fail(w + ".users: cannot open " + key + ": " + std::strerror(errno) + (errno == ELOOP ? " (a symlink is not followed)" : ""));
+    struct Closer {
+        int fd;
+        ~Closer() { ::close(fd); }
+    } closer{fd};
+    struct stat st {}, main {};
+    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) fail(w + ".users: " + key + " is not a regular file");
+    if (st.st_mode & (S_IWGRP | S_IWOTH)) fail(w + ".users: " + key + " is writable by group or others; chmod 640 " + key);
+    if (st.st_mode & S_IROTH)
+        fail(w + ".users: " + key + " is readable by others, who could guess at its hashes offline; chmod 640 " + key +
+             " (root's, the server's group may read it)");
+    if (::stat(cfg.config_path.c_str(), &main) == 0 && st.st_uid != main.st_uid)
+        fail(w + ".users: " + key + " belongs to uid " + std::to_string(st.st_uid) + ", not to the owner of " + cfg.config_path.filename().string() +
+             " (uid " + std::to_string(main.st_uid) + "): only root keeps the passwords; chown it");
+    if (st.st_size > 1024 * 1024) fail(w + ".users: " + key + " is larger than 1 MB");
+    std::string text(static_cast<std::size_t>(st.st_size), '\0');
+    std::size_t got = 0;
+    while (got < text.size()) {
+        const ssize_t n = ::read(fd, text.data() + got, text.size() - got);
+        if (n <= 0) fail(w + ".users: cannot read " + key);
+        got += static_cast<std::size_t>(n);
+    }
+    static std::atomic<std::uint64_t> next_id{1};
+    auto f = std::make_shared<AuthUserFile>();
+    f->path = key;
+    f->id = next_id.fetch_add(1, std::memory_order_relaxed);
+    if (const std::string why = auth::parse_users(text, f->users); !why.empty()) fail(w + ".users: " + key + ", " + why);
+    cfg.auth_files[key] = f;
+    return f;
+}
+#endif
+
+void parse_auth(const toml::node_view<const toml::node>& n, Config& cfg, SiteConfig& site, const fs::path& base_dir, const std::string& where) {
+#ifndef AGENSIO_HAS_AUTH
+    (void)n;
+    (void)cfg;
+    (void)site;
+    (void)base_dir;
+    fail(where + ": [[site.auth]] needs a build with authentication (libxcrypt and OpenSSL); this agensio was built without it, and a "
+                 "password rule it cannot check is refused rather than left open");
+#else
+    const auto* arr = n.as_array();
+    if (!arr) fail(where + ": 'auth' must be an array of tables ([[site.auth]])");
+    std::size_t idx = 0;
+    for (const auto& node : *arr) {
+        const std::string w = where + " [[auth]] #" + std::to_string(++idx);
+        const auto* t = node.as_table();
+        if (!t) fail(w + ": each [[site.auth]] must be a table");
+        for (const auto& [k, v] : *t) {
+            const std::string_view key = k.str();
+            if (key != "path" && key != "match" && key != "users" && key != "realm" && key != "skip_for" && key != "open" && key != "plain_http" &&
+                key != "credentials" && key != "forward_user")
+                fail(w + ": unknown key '" + std::string(key) +
+                     "' (path, match, users, realm, skip_for, open, plain_http, credentials, forward_user); a misspelt key would leave the path open");
+        }
+        AuthRule r;
+        const auto path = (*t)["path"].value<std::string>();
+        if (!path) fail(w + ".path is required: the path the password covers, such as \"/wp-admin\", or \"/\" for the whole site");
+        if (const std::string why = check_access_path(*path); !why.empty()) fail(w + ".path: " + why);
+        r.path = *path;
+        if (const auto m = (*t)["match"].value<std::string>()) {
+            if (*m == "exact") r.exact = true;
+            else if (*m != "prefix") fail(w + ".match must be \"prefix\" (the path and everything below it) or \"exact\" (this path alone)");
+        } else if (t->contains("match")) {
+            fail(w + ".match must be a string");
+        }
+        if (!r.exact && r.path.size() > 1 && r.path.back() == '/') r.path.pop_back();
+        if (t->contains("open")) {
+            const auto o = (*t)["open"].value<bool>();
+            if (!o) fail(w + ".open must be true or false");
+            r.open = *o;
+        }
+        if (const auto u = (*t)["users"].value<std::string>()) {
+            if (r.open) fail(w + ": an open rule asks for no password, so it takes no users");
+            fs::path file(*u);
+            if (file.is_relative()) file = base_dir / file;
+            r.users_path = file.lexically_normal().string();
+            r.users = load_auth_users(file, cfg, w);
+        } else if (t->contains("users")) {
+            fail(w + ".users must be a path to a user file");
+        } else if (!r.open) {
+            fail(w + ".users is required: the user file (name:hash lines, `htpasswd -B` or `mkpasswd -m yescrypt`), or open = true for a path anyone may reach");
+        }
+        if (const auto realm = (*t)["realm"].value<std::string>()) {
+            if (realm->empty() || realm->size() > 64) fail(w + ".realm: 1 to 64 characters");
+            for (const unsigned char c : *realm)
+                if (c < 0x20 || c == 0x7f || c == '"' || c == '\\') fail(w + ".realm: no quote, backslash or control character");
+            r.realm = *realm;
+        } else if (t->contains("realm")) {
+            fail(w + ".realm must be a string");
+        } else {
+            r.realm = site.server_names.front() == "*" ? std::string("agensio") : site.server_names.front();
+        }
+        if (t->contains("skip_for")) {
+            const auto* list = (*t)["skip_for"].as_array();
+            if (!list) fail(w + ".skip_for must be a list of addresses, ranges or @sets");
+            for (const auto& e : *list) {
+                const auto text = e.value<std::string>();
+                if (!text) fail(w + ".skip_for: every entry is a string");
+                bool any = false;
+                if (const std::string why = access_entry(*text, cfg, r.skip, any); !why.empty()) fail(w + ".skip_for: " + why);
+                if (any) fail(w + ".skip_for: \"any\" would skip the password for everyone; write open = true for a path anyone may reach");
+                r.skip_text.push_back(*text);
+            }
+            if (r.skip.size() > 64) fail(w + ".skip_for: at most 64 addresses and ranges once the sets are expanded");
+        }
+        if (const auto ph = (*t)["plain_http"].value<std::string>()) {
+            if (*ph == "allow") r.plain_http = true;
+            else if (*ph != "refuse")
+                fail(w + ".plain_http must be \"refuse\" (no password asked over plain HTTP, the default) or \"allow\" (asked anyway: a network you trust)");
+        } else if (t->contains("plain_http")) {
+            fail(w + ".plain_http must be a string");
+        }
+        if (const auto c = (*t)["credentials"].value<std::string>()) {
+            if (*c == "pass") r.credentials = AuthRule::Credentials::pass;
+            else if (*c == "strip") r.credentials = AuthRule::Credentials::strip;
+            else fail(w + ".credentials must be \"pass\" (the application sees Authorization) or \"strip\" (it never does)");
+        } else if (t->contains("credentials")) {
+            fail(w + ".credentials must be a string");
+        }
+        if (const auto f = (*t)["forward_user"].value<std::string>()) {
+            bool ok = !f->empty() && f->size() <= 64;
+            for (const char c : *f) ok = ok && ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-');
+            const std::string low = to_lower(*f);
+            if (!ok || low == "authorization" || low == "cookie" || low == "host" || low.starts_with("x-forwarded-"))
+                fail(w + ".forward_user: a field name of letters, digits and '-' (X-Remote-User), not Authorization, Cookie, Host or X-Forwarded-*");
+            r.forward_user = *f;
+        } else if (t->contains("forward_user")) {
+            fail(w + ".forward_user must be a string");
+        }
+        for (const auto& o : site.auth)
+            if (o.exact == r.exact && o.path.size() == r.path.size() && access::iequal_prefix(o.path, r.path))
+                fail(w + ": a second rule for " + r.path + (r.exact ? " (exact)" : "") + "; one rule per path");
+        site.auth.push_back(std::move(r));
+    }
+    if (site.auth.size() > 32) fail(where + ": " + std::to_string(site.auth.size()) + " auth rules, at most 32");
+#endif
+}
+
 void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, const std::string& where, std::vector<RootAdditions>* root_adds = nullptr) {
     SiteConfig site;
     for (auto& n : string_list(t["server_name"], (where + ".server_name").c_str()))
@@ -1440,6 +1593,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     }
     if (t.contains("access")) parse_access(t["access"], cfg, site, where);
     if (t.contains("refuse")) parse_refuse(t["refuse"], site, where);
+    if (t.contains("auth")) parse_auth(t["auth"], cfg, site, base_dir, where);
     // Root additions for this site: parsed as hand-written locations after the file's own, so
     // they win over the preset's at their path and a headers-only one joins like any other;
     // the origin names the file for --explain and site_show. The same path twice (the managed
@@ -1770,6 +1924,41 @@ void explain_config(const Config& cfg, std::ostream& out) {
             out << "]\n";
             if (r.report) out << "mode = \"report\"\n";
         }
+        for (const auto& r : site.auth) {
+            out << "\n[[site.auth]]";
+            if (r.origin == "preset:wordpress") out << "   # from preset:wordpress: " << r.path << " stays open for the public front end";
+            else if (r.users) {
+                out << "   # " << r.users->users.size() << (r.users->users.size() == 1 ? " user" : " users") << " in " << r.users_path;
+                std::size_t shown = 0;
+                for (const auto& u : r.users->users) {
+                    if (shown++ == 8) {
+                        out << ", ...";
+                        break;
+                    }
+                    out << (shown == 1 ? ": " : ", ") << u.name;
+                    if (u.locked) out << " (locked)";
+                    else if (u.expires) {
+                        const std::time_t t = static_cast<std::time_t>(u.expires);
+                        std::tm tm{};
+                        gmtime_r(&t, &tm);
+                        char date[16];
+                        std::strftime(date, sizeof date, "%Y-%m-%d", &tm);
+                        out << " (until " << date << ")";
+                    }
+                }
+            }
+            out << "\npath = \"" << r.path << "\"\n";
+            if (r.exact) out << "match = \"exact\"\n";
+            if (r.open) {
+                out << "open = true\n";
+                continue;
+            }
+            out << "users = \"" << r.users_path << "\"\nrealm = \"" << r.realm << "\"\n";
+            if (!r.skip_text.empty()) print_list(out, "skip_for", r.skip_text);
+            if (r.plain_http) out << "plain_http = \"allow\"   # passwords are asked over plain HTTP too\n";
+            out << "credentials = \"" << (r.credentials == AuthRule::Credentials::pass ? "pass" : "strip") << "\"\n";
+            if (!r.forward_user.empty()) out << "forward_user = \"" << r.forward_user << "\"\n";
+        }
         for (const auto& loc : site.locations) {
             out << "\n[[site.location]]";
             if (!loc.origin.empty()) out << "  # from " << loc.origin;
@@ -1995,6 +2184,51 @@ void finalize_site(SiteConfig& site) {
     for (const auto& r : site.access) {
         if (!r.exact && r.path == "/") site.access_first.fill(~std::uint64_t{0});
         else access::mark_first(site.access_first, access::first_byte(r.path));
+    }
+    // [[site.auth]]: the same openings below a protected /wp-admin as for the access rules
+    // (admin-ajax.php for the public front end, the login page's own files), a rule the site
+    // names for one of these paths winning; credentials pass to PHP (WordPress's loopback calls
+    // carry them) and are stripped before any other application; longest path first.
+    if (site.app == "wordpress" && !site.auth.empty()) {
+        bool whole = false;
+        for (const auto& r : site.auth) whole = whole || (!r.exact && r.path == "/" && !r.open);
+        struct Opening {
+            const char* path;
+            bool exact;
+            const char* probe;
+        };
+        static constexpr Opening kOpen[] = {{"/wp-admin/admin-ajax.php", true, "/wp-admin/admin-ajax.php"},
+                                            {"/wp-admin/css", false, "/wp-admin/css/x.css"},
+                                            {"/wp-admin/js", false, "/wp-admin/js/x.js"},
+                                            {"/wp-admin/images", false, "/wp-admin/images/x.png"}};
+        std::vector<AuthRule> add;
+        for (const Opening& o : kOpen) {
+            if (whole) break;
+            const AuthRule* best = nullptr;
+            for (const auto& r : site.auth)
+                if (access::covers(r, o.probe) && (!best || r.path.size() > best->path.size() || (r.exact && !best->exact))) best = &r;
+            if (!best || best->exact || best->open || best->path.size() != 9 || !access::iequal_prefix(best->path, "/wp-admin")) continue;
+            AuthRule open;
+            open.path = o.path;
+            open.exact = o.exact;
+            open.open = true;
+            open.origin = "preset:wordpress";
+            add.push_back(std::move(open));
+        }
+        for (auto& r : add) site.auth.push_back(std::move(r));
+    }
+    bool runs_php = false;
+    for (const auto& loc : site.locations) runs_php = runs_php || loc.kind == HandlerKind::fastcgi;
+    for (auto& r : site.auth)
+        if (r.credentials == AuthRule::Credentials::preset) r.credentials = runs_php ? AuthRule::Credentials::pass : AuthRule::Credentials::strip;
+    std::stable_sort(site.auth.begin(), site.auth.end(), [](const AuthRule& a, const AuthRule& b) {
+        if (a.path.size() != b.path.size()) return a.path.size() > b.path.size();
+        return a.exact && !b.exact;
+    });
+    site.auth_first = {};
+    for (const auto& r : site.auth) {
+        if (!r.exact && r.path == "/") site.auth_first.fill(~std::uint64_t{0});
+        else access::mark_first(site.auth_first, access::first_byte(r.path));
     }
     // Exact matches first, then suffixes, then prefixes; within a kind the longest first.
     auto rank = [](const LocationConfig& l) { return l.exact ? 0 : l.suffix ? 1 : 2; };

@@ -526,6 +526,18 @@ private:
         s.site = static_cast<const SiteConfig*>(ws.site);
         int hops = 0;
         while (loc) {
+            if (loc->kind == HandlerKind::auth) {  // [[site.auth]]: a password is verified on the pool; the stream waits, then routes again
+                const unsigned gen = s.gen;
+                H3Stream* sp = &s;
+                auto self = this->shared_from_this();
+                dispatcher_.start_auth(ws, worker_.ctx, [self, sp, gen](AuthState::Result result) {
+                    if (sp->gen != gen || self->closed_) return;  // reset or closed meanwhile
+                    sp->stream.auth.result = result;
+                    self->dispatch(*sp);
+                    self->flush_if_outside();
+                });
+                return;
+            }
             if (loc->kind == HandlerKind::control) {
                 dispatcher_.static_handler().error(s.stream, 404, true);
                 break;
@@ -941,6 +953,7 @@ private:
 
     void fill_connection_info(H3Stream& s) {
         ConnectionInfo& c = s.stream.conn;
+        c.auth_memo = &auth_memo_;  // [[site.auth]]: the connection's last verified login, for all its streams
         c.remote_address = remote_;
         c.remote_port = remote_port_;
         c.local_address = listener_->address_text;
@@ -992,6 +1005,7 @@ private:
         rec.bytes = s.body_sent;
         rec.referer = req.headers.get("referer");
         rec.user_agent = req.headers.get("user-agent");
+        rec.user = s.stream.auth.user;  // verified by [[site.auth]], never the name a refused request claimed
         if (s.stream.response.upstream) rec.upstream = s.stream.response.upstream;
         worker_.state.logs.log(site->access_log_sink, worker_.state.now ? worker_.state.now : std::time(nullptr), rec);
     }
@@ -1019,6 +1033,7 @@ private:
     bool decoder_dirty_ = false;      // the decoder stream has new bytes to send
     std::string decode_scratch_;
     std::string remote_;
+    AuthMemo auth_memo_;  // [[site.auth]] (core/stream.hpp)
     std::uint16_t remote_port_ = 0;
     asio::ip::address remote_addr_;
     bool trusted_checked_ = false, trusted_peer_ = false;

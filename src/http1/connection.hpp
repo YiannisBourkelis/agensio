@@ -73,6 +73,7 @@ public:
           writer_(socket_, *this, worker.ctx, cfg) {
         worker_.connections.fetch_add(1, std::memory_order_relaxed);
         stream_.conn.peer = this;
+        stream_.conn.auth_memo = &auth_memo_;  // [[site.auth]]: this connection's last verified login
     }
 
     // An access rule asks for the peer's address (core/stream.hpp PeerSource): the socket is
@@ -322,6 +323,7 @@ private:
         rec.bytes = writer_.body_bytes_sent();
         rec.referer = req.headers.get("referer");
         rec.user_agent = req.headers.get("user-agent");
+        rec.user = stream_.auth.user;  // verified by [[site.auth]], never the name a refused request claimed
         if (stream_.response.upstream) rec.upstream = stream_.response.upstream;
         worker_.state.logs.log(site->access_log_sink, worker_.state.now, rec);
     }
@@ -687,6 +689,18 @@ private:
         site_ = static_cast<const SiteConfig*>(ws.site);
         int hops = 0;
         while (loc) {
+            if (loc->kind == HandlerKind::auth) {  // [[site.auth]]: a password is verified on the pool; then route again
+                handler_busy_ = true;
+                const unsigned gen = ++request_gen_;
+                auto self = this->shared_from_this();
+                dispatcher_.start_auth(ws, worker_.ctx, [self, gen](AuthState::Result result) {
+                    if (self->request_gen_ != gen) return;  // connection closed meanwhile
+                    self->stream_.auth.result = result;
+                    self->handler_busy_ = false;
+                    self->dispatch();
+                });
+                return;
+            }
             if (loc->kind == HandlerKind::control) {  // the control socket's API (worker 0 only)
                 fill_connection_info();
                 handler_busy_ = true;
@@ -1006,6 +1020,7 @@ private:
     std::vector<char> body_buf_;  // body bytes read after the head (allocated on first use)
     std::size_t bpos_ = 0, blen_ = 0;
     std::string remote_;       // client address for the access log / handlers, resolved on first use
+    AuthMemo auth_memo_;  // [[site.auth]] (core/stream.hpp)
     std::uint16_t remote_port_ = 0;
     asio::ip::address remote_addr_;
     std::string client_addr_;      // from X-Forwarded-For when the peer is a trusted proxy

@@ -1335,3 +1335,110 @@ here the choice and the refusal are one decision, a refused index is never serve
 nothing needs configuring. The cost: a directory holding a stray `index.php` on drupal,
 laravel or grav now reaches the application, which answers its own 404.
 
+
+## 25. Basic authentication (2026-10-08, agreed with the owner; building)
+
+The audit's second feature gap (security-audit-2026-10-07.md section 3, item 2): a password in
+front of a staging site, an admin path or an application without a login of its own. The
+research behind it is `reports/Web server basic authentication.md`: nginx, Apache, Traefik,
+HAProxy, OpenLiteSpeed and h2o hash the password on every request (nginx inside the worker:
+about 4 ms at bcrypt cost 5, 250 requests a second per core), Caddy alone remembers results
+and keeps plaintext passwords and failures in memory, nginx's per-location `auth_basic`
+shares its `.php` regex trap with hosting panels to this day, none sends RFC 7617's
+`charset`, every one asks for a password over plain HTTP, and fail2ban's filters count only
+failures, not the credential-less challenge that starts every browser login.
+
+**Rules.** `[[site.auth]]` tables beside `[[site.access]]`, matched the same way (prefix on
+whole segments, any case, the longest rule decides, checked before routing, on every hop
+and on a directory's index; sections 22 and 24):
+
+```toml
+[[site.auth]]
+path = "/"                                   # or "/wp-admin", or match = "exact"
+users = "/etc/agensio/auth/staging.example.users"
+realm = "Staging"                            # default: the site's first name
+skip_for = ["@office"]                       # these addresses need no password (nginx satisfy any)
+plain_http = "allow"                         # rare: ask over plain HTTP (a LAN tool); default refuse
+credentials = "strip"                        # or "pass": the application sees Authorization (default per preset)
+forward_user = "X-Remote-User"               # proxy only: the verified name, the client's own field dropped
+
+[[site.auth]]
+path = "/api/health"
+match = "exact"
+open = true                                  # no password below a protected path
+```
+
+The WordPress preset opens what its public site needs below a protected `/wp-admin`
+(`admin-ajax.php`, the login page's own css, js and images), as for the access rules. Order
+of the checks: `refuse`, then access by address, then the password.
+
+**The user file.** htpasswd lines, so a `htpasswd -B` file works as is, with two optional
+fields after the hash: `name:hash[:expires=YYYY-MM-DD][:note=free text to the end of the
+line]`. From the `expires` date (UTC) the user is refused even with the right password;
+`note` says whose login it is (shown by `site_show`, the MCP answers and the auth log lines).
+Accepted hashes, through libxcrypt's `crypt_rn`: yescrypt `$y$` (and `$gy$`), scrypt `$7$`,
+bcrypt `$2b$` `$2y$` `$2a$`, sha512crypt `$6$`, sha256crypt `$5$`; `!` or `*` marks a locked
+user. Refused at load with the command to use instead (`htpasswd -B`, `mkpasswd -m
+yescrypt`): `$2x$`, md5crypt `$1$`, `$apr1$`, `{SHA}`, `{SSHA}`, `{PLAIN}`, DES and the other
+legacy formats; an unknown field (`expire=`), a duplicate user, a `:` in a name or a control
+character anywhere is an error naming the line. The file is root's or the server user's,
+not writable by group or others and not readable by others (`-t` refuses otherwise), read at
+load and reload.
+
+**Verifying without paying the hash per request.**
+1. Credentials are parsed strictly: `Basic` in any case, standard base64, the first `:`
+   splits, no control character (a NUL would end the password for `crypt`), user at most 255
+   bytes, password at most 512 (libxcrypt's limit).
+2. A per-connection memo holds the last `Authorization` value that verified on it: a browser's
+   next requests cost a byte comparison.
+3. A per-worker cache of successes keyed by HMAC-SHA256, under a random per-process key, of
+   the length-prefixed user, the stored hash and the password: never the password itself, never
+   a failure, 1,024 entries, five minutes or until the user's expiry. The stored hash in the key
+   means a changed password or a second area with the same user name never matches an old
+   entry, so a reload (every `site_update` makes one) keeps the cache.
+4. A miss is verified on a small process-wide thread pool, the request waiting
+   asynchronously, never on the worker's loop; a bounded number of verifications in flight
+   per worker, 503 with `Retry-After` beyond. An unknown user is verified against a real entry
+   of the same file and refused, so timing does not tell which users exist.
+5. A `status` counter of verifications run, so the tests prove "one hash per login, none per
+   request" exactly rather than by timing.
+
+**Answers.** 401 with `WWW-Authenticate: Basic realm="...", charset="UTF-8"` and
+`Cache-Control: no-store`, one page for an unknown user and a wrong password. Over plain HTTP
+a protected path never asks for a password: a GET or HEAD on a site with HTTPS is redirected
+there, anything else gets 403 with a page saying to use HTTPS; loopback connections and
+requests a trusted proxy forwarded as https are asked as usual, and `plain_http = "allow"`
+asks anyway (`-t` warns, health keeps a finding, the agent sets it only on request).
+Responses on protected paths carry `Cache-Control: private` (the presets' `public` on
+uploads, `/build/`, `/static/` included), so no shared cache serves them to anyone else.
+
+**What the application sees.** `credentials = "pass"` by default on PHP presets (WordPress's
+loopback calls need them), `"strip"` on proxy presets; PHP always gets `REMOTE_USER` and
+`AUTH_TYPE`. `forward_user` on a proxy sends the verified name, the client's own field of
+that name removed first.
+
+**Logs.** The access log's user field shows verified users only. A failed attempt (wrong
+password, unknown or expired user) is one `warn` line `auth failed: site S realm R user U
+client A (reason)`, never the password or the header, rate-limited like the access lines;
+the credential-less challenge logs nothing. The fail2ban jail counts those lines, not 401s
+(today's `agensio-auth` filter counts every 401 and would ban normal visitors).
+
+**Managed sites and the agent.** `rules.auth` on `site_update` (paths, realm, `skip_for`,
+`open`, `plain_http`), and user tools through the provisioning helper:
+`site-auth-user-set NAME USER [--expires D] [--note T] (--generate | --prompt)` (a
+generated password, easy to type, shown once; `--prompt` lets the owner type one the agent
+never sees), `site-auth-users`, `site-auth-user-delete`; audited; `path_check` names the rule
+that covers a path; health lists expired users and plain-HTTP rules.
+
+**Tests** (each written before its code): one verification for a login followed by fifty
+requests (the counter); every failure verified again (never cached); an unknown user
+verified too; a request on the same worker answered while a verification runs; a reload
+keeps the cache, a changed password refuses the old one at once; one name in two areas does
+not cross; challenge headers; expiry; every bypass spelling of the access rules; `open` and
+`skip_for`; the plain-HTTP answers; what PHP and a proxy receive; `Cache-Control: private`;
+UTF-8 passwords and refused control characters; refused formats and file modes at `-t`; the
+fail2ban filter against the challenge and a failure; the access log's user field; an A/B
+row on a protected path with a remembered login.
+
+Built in steps: the core (parsers, verification, cache), the configuration, the request
+path, logs and the control plane, then the end-to-end tests.

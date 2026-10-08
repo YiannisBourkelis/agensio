@@ -113,6 +113,10 @@ void FcgiHandler::append_request_params(std::string& out, Stream& s, const SiteC
         add("CONTENT_LENGTH", tmp);
     }
     add("REMOTE_ADDR", s.conn.client_address.empty() ? s.conn.remote_address : s.conn.client_address);
+    if (!s.auth.user.empty()) {  // a password verified by [[site.auth]]: the CGI variables Apache sets
+        add("REMOTE_USER", s.auth.user);
+        add("AUTH_TYPE", "Basic");
+    }
     tmp.clear();
     append_number(tmp, s.conn.remote_port);
     add("REMOTE_PORT", tmp);

@@ -262,6 +262,19 @@ section of `docs/configuration.md` that explains the key.
 | `verify` | bool | true | Verify the origin's certificate (a self-signed origin needs false, or ca). | reload | site file | 12 |
 | `ca` | path | "" (system store) | A PEM bundle to verify the origin with. | reload | site file | 12 |
 | `server_name` | string | the origin's host | The SNI name and verification name for the origin. | reload | site file | 12 |
+## `[[site.auth]]`
+
+| key | type | default | meaning | applies | via | doc |
+|---|---|---|---|---|---|---|
+| `path` | string | (required) | The path a password covers, matched like an access rule: a prefix covers it and everything below it on a segment boundary, in any capitalisation; "/" is the whole site. Checked before the locations, after refuse and the access rules, on every internal redirect and on a directory's index, so no location (a .php file, a proxy) steps around it. The longest rule decides. | reload | site file | 19b |
+| `match` | enum: prefix \| exact | prefix | exact: this path alone. | reload | site file | 19b |
+| `users` | path | (required unless open) | The user file: name:hash lines (htpasswd -B or mkpasswd -m yescrypt), with optional :expires=YYYY-MM-DD (refused from that day, UTC) and :note=text (whose login it is). yescrypt, bcrypt, sha512crypt, sha256crypt and scrypt hashes; MD5 (apr1), {SHA}, {PLAIN} and DES are refused at load with the command to use instead. Root's (the owner of the main configuration), not writable by group or others, not readable by others (640), read at load and reload. | reload | site file | 19b |
+| `realm` | string | the site's first name | The realm of the challenge (WWW-Authenticate: Basic realm="...", charset="UTF-8"); a browser keeps one login per realm. 1 to 64 characters, no quote or backslash. | reload | site file | 19b |
+| `skip_for` | list | (none) | Clients that get in without a password: addresses, ranges or @sets from [addresses] (nginx satisfy any). Everyone else is asked. | reload | site file | 19b |
+| `open` | bool | false | true: no password on this path, below a protected one (a health check, a webhook). Takes no users. | reload | site file | 19b |
+| `plain_http` | enum: refuse \| allow | refuse | refuse: a request over plain HTTP is never asked for a password (the browser would send it in clear): a GET or HEAD goes to https when the site has it, anything else gets 403 saying to use HTTPS; loopback connections and requests a trusted proxy forwarded as https are asked as usual. allow: asked anyway, for a tool on a network you trust; -t warns and health keeps a finding. | reload | site file | 19b |
+| `credentials` | enum: pass \| strip | pass on a site that runs PHP, strip otherwise | pass: the application receives Authorization (PHP_AUTH_USER and PHP_AUTH_PW; WordPress's loopback calls need them). strip: it never does. PHP always gets REMOTE_USER and AUTH_TYPE. | reload | site file | 19b |
+| `forward_user` | field name | (none) | A proxy location sends the verified user name in this request field (X-Remote-User); the client's own field of that name is removed first. | reload | site file | 19b |
 ## `[[site.access]]`
 
 | key | type | default | meaning | applies | via | doc |

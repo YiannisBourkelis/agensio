@@ -83,6 +83,12 @@ Server::Server(Config cfg)
       dispatcher_(handler_, fcgi_handler_, proxy_handler_, cgi_handler_, control_handler_, httparena_handler_) {
     auto gen = std::make_shared<Generation>();
     gen->cfg = std::move(cfg);
+#ifdef AGENSIO_HAS_AUTH
+    // A few threads for [[site.auth]]'s slow hashes, whatever the workers do: at most four,
+    // a quarter of the machine's threads, never none.
+    auth_verifier_ = std::make_unique<auth::Verifier>(std::clamp(std::thread::hardware_concurrency() / 4, 1u, 4u));
+    dispatcher_.set_verifier(auth_verifier_.get());
+#endif
     open_logs();
     if (cfg_.control.enabled) audit_sink_ = logs_.add(cfg_.control.audit);
     control_handler_.attach(this, &logs_, audit_sink_);
@@ -782,6 +788,8 @@ json::Value Server::status() {
     v.set("connections_idle", static_cast<double>(rr.idle));  // HTTP/1 and HTTP/2 connections idle 2 s or more
     v.set("max_connections", static_cast<double>(rr.ceiling));  // per worker
     v.set("connections_refused", static_cast<double>(rr.refused));
+    // [[site.auth]]: the slow hashes the pool has run (one per login, none per request after it).
+    v.set("auth_verifications", static_cast<double>(auth_verifier_ ? auth_verifier_->verifications() : 0));
     {
         using tp = std::chrono::steady_clock::time_point;
         const tp now = std::chrono::steady_clock::now();

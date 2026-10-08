@@ -4,6 +4,8 @@
 // fallbacks re-enter the router: static -> fallback -> static or fastcgi.
 #pragma once
 
+#include <functional>
+
 #include "config.hpp"
 #include "core/router.hpp"
 #include "core/stream.hpp"
@@ -48,6 +50,11 @@ public:
     // Once a second from the worker's flush timer: the counts of access lines held back in a
     // second that is over (refusals, report-mode clients past the per-second cap) are written.
     void access_log_tick(WorkerState& ws, std::time_t now);
+    // [[site.auth]]: route() returns a location of kind `auth` when a password must be verified;
+    // the connection hands the job to the pool with its continuation, which runs on the worker
+    // (`ctx`) with the result; the connection records it on the stream and routes again.
+    void set_verifier(auth::Verifier* v) noexcept { verifier_ = v; }
+    void start_auth(WorkerState& ws, asio::io_context& ctx, std::function<void(AuthState::Result)> done);
 
 private:
     // Applies loc's method policy. False when a 405 was produced. A method the static
@@ -61,6 +68,13 @@ private:
     // False when s.response is the 403; a rule in report mode is logged and lets it through.
     bool admit(Stream& s, const SiteConfig& site, std::string_view path, WorkerState& ws);
     void refuse_access(Stream& s, std::string_view address);
+    enum class AuthOutcome { allowed, answered, pending };
+    AuthOutcome check_auth(Stream& s, const SiteConfig& site, const AuthRule& rule, WorkerState& ws);
+    void auth_challenge(Stream& s, const AuthRule& rule);
+    void auth_plain_http(Stream& s);
+    void auth_busy(Stream& s);
+    void auth_failed_line(std::string_view client, std::string_view site, std::string_view realm, std::string_view user, std::string_view reason,
+                          std::string_view method, std::string_view path);
 
     StaticHandler& static_;
     FcgiHandler& fcgi_;
@@ -70,6 +84,7 @@ private:
     HttparenaHandler& httparena_;
     AcmeChallenges* acme_ = nullptr;
     ErrorLog* log_ = nullptr;
+    auth::Verifier* verifier_ = nullptr;
 };
 
 }  // namespace agensio

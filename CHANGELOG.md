@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.1.0-alpha.58
+
+**Passwords: `[[site.auth]]`** (the security audit's second feature gap; docs/configuration.md
+19b, design section 25, the research in `reports/Web server basic authentication.md`). A
+password in front of a path, for a staging site, an admin area or a tool without a login of
+its own:
+
+- **Rules like the access rules:** checked before any location, after `refuse` and the access
+  rules, on every internal redirect and on a directory's index, so no `.php` location,
+  fallback or index steps around them (nginx's per-location `auth_basic` does not hold for a
+  regex `.php` location, the trap hosting panels still ship). `open = true` frees a path below a
+  protected one; `skip_for` lets addresses in without a password; WordPress keeps
+  `admin-ajax.php` and the login page's own files open below a protected `/wp-admin`.
+- **Strong hashes only,** through the system's libxcrypt: yescrypt, bcrypt, sha-crypt, scrypt.
+  MD5 (`$apr1$`, htpasswd's old default), `{SHA}`, `{PLAIN}` and DES are refused at load with the
+  command to use instead. The user file is htpasswd's format, so `htpasswd -B` files work, with
+  two optional fields: `expires=YYYY-MM-DD` (refused from that day) and `note=` (whose login it
+  is). Root's, not readable by others. `agensio passwd USER` writes a line without Apache's tools.
+- **The slow hash is never paid per request, and never on a worker's loop.** nginx, Apache,
+  Traefik and HAProxy hash the password for every request (nginx inside its worker: about 4 ms
+  at bcrypt cost 5); Caddy remembers results with the plaintext password and failures in
+  memory. Here a verified login is remembered per worker for five minutes as an HMAC of the
+  user, the stored hash and the password (never the password; never a failure; a changed
+  password or another area never matches; a reload keeps it), and a new one is verified on a
+  small thread pool while the request waits; at most eight per worker at a time, 503 beyond.
+  An unknown user is verified against a real entry, so timing does not tell who exists.
+  Each connection also remembers its last verified `Authorization` value, so a browser's
+  next requests on it cost one comparison. `status` counts the hashes run. Measured
+  (`ab-20261008-171903.md`): a protected page with a logged-in client costs 1.072 of an open
+  one, about 0.14 us; every other row of `ab-20261008-171002.md` is flat, so a site without
+  `[[site.auth]]` pays nothing.
+- **No password asked over plain HTTP** unless the rule says `plain_http = "allow"`: a request
+  that is not on TLS, not from this host and not forwarded as https by a trusted proxy gets 403
+  with a page that says to use https (nginx and Apache ask anyway).
+- **The answers and what others see:** 401 with `realm`, `charset="UTF-8"` (RFC 7617) and
+  `no-store`, one page for every kind of failure; PHP gets `REMOTE_USER` and `AUTH_TYPE`;
+  `Authorization` reaches PHP (WordPress's loopback calls) and is stripped before any other
+  application (`credentials` to choose); `forward_user` sends the verified name to a proxied
+  one; protected static answers are `Cache-Control: private`; the access log's user field is
+  the verified user; each failed login is one `auth failed: client ...` line, the challenge
+  none.
+- **Built only with libxcrypt and OpenSSL** (a new dependency row); a build without them refuses
+  a configuration with `[[site.auth]]` instead of leaving the paths open.
+
+Tests: unit (the user file, the Authorization parser, verification, the cache key and cache,
+the pool, the configuration and its refusals) and `tests/auth.sh` (16 checks against a
+one-worker server: one verification for a login followed by fifty requests on one connection
+and five new ones, every failure verified again, an unknown user verified too, the challenge,
+expiry, UTF-8, `open`, `skip_for`, the bypass spellings, plain HTTP from another host, TLS,
+`Cache-Control: private`, the access log's user, the failure lines, a request answered while
+a slow verification runs, a reload keeping the cache, a changed password).
+
 ## 0.1.0-alpha.57 (2026-10-08)
 
 From the security audit of 2026-10-07 (docs/security-audit-2026-10-07.md), item 2.2:

@@ -47,6 +47,15 @@ public:
         if (i < count_) fields_[i].value = value;
     }
 
+    // Every field with this name removed (case-insensitive), the others kept in order: what a
+    // password check takes away before the application sees the request (Authorization).
+    void remove(std::string_view name) noexcept {
+        std::size_t to = 0;
+        for (std::size_t i = 0; i < count_; ++i)
+            if (!iequals(fields_[i].name, name)) fields_[to++] = fields_[i];
+        count_ = to;
+    }
+
     // First field with this name (case-insensitive), or an empty view.
     std::string_view get(std::string_view name) const noexcept {
         for (std::size_t i = 0; i < count_; ++i)

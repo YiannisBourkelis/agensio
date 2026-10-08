@@ -25,6 +25,8 @@
 #             (127.0.0.1:8097, a site with the 48 refuse patterns TYPO3's documentation lists,
 #             benchmarked on a two-segment path none of them refuses: the matching's cost; a base
 #             without `refuse` ignores the key and serves the same file). core/refuse.hpp too.
+#             And "auth:/:64" (127.0.0.1:8096, [[site.auth]] on the whole site, wrk sending a
+#             remembered login with every request): what a protected page costs per request.
 #   -r        rounds of base/new alternation (default 2)
 #   -d        wrk duration per case (default 5s)
 #   -t        wrk threads (default 4)
@@ -97,6 +99,13 @@ sed "s#@WORKERS@#$WORKERS#g; s#@BENCH@#$BENCH#g; s#@SENDFILE_MIN@#${SENDFILE_MIN
 # The access gate's two sites go into every config (before the proxy one is built from it).
 if [ $ACCESS = 1 ]; then
   SPECS+=("access:/:64" "access-all:/:64" "refuse:/sub/index.html:64")
+  # [[site.auth]] on the whole site, a remembered login sent with every request (as a browser
+  # does): what a protected page costs. The user file comes from the new binary's passwd.
+  if printf 'secret\n' | "$ROOT/build/agensio" passwd anna > "$BENCH/tmp/ab-users" 2>/dev/null; then
+    chmod 640 "$BENCH/tmp/ab-users"
+    SPECS+=("auth:/:64")
+    AUTH_SITE=1
+  fi
   allow=""; for i in $(seq 1 63); do allow="$allow\"10.$((i / 250)).$((i % 250)).1\", "; done; allow="$allow\"127.0.0.1\""
   for f in ab-agensio.toml ab-agensio-h3.toml; do
     cat >> "$BENCH/tmp/$f" <<ACCESS_SITES
@@ -134,6 +143,19 @@ refuse = ["composer.json", "composer.lock", "flexform*.xml", "locallang*.xml", "
           "/typo3/ext/*/Configuration/", "/typo3/ext/*/Resources/Private/", "/typo3/ext/*/Tests/",
           "/typo3/ext/*/Test/", "/typo3/ext/*/docs/", "/typo3/ext/*/doc/"]
 ACCESS_SITES
+    if [ "${AUTH_SITE:-0}" = 1 ]; then
+      cat >> "$BENCH/tmp/$f" <<AUTH_SITES
+
+[[site]]
+server_name = ["*"]
+listen = ["127.0.0.1:8096"]
+root = "$BENCH/www"
+
+[[site.auth]]
+path = "/"
+users = "$BENCH/tmp/ab-users"
+AUTH_SITES
+    fi
   done
 fi
 # The proxy gate adds a site that forwards 127.0.0.1:8093 to the upstream; a side whose
@@ -202,6 +224,7 @@ measure() {  # side round -> appends "side round spec cpu_us rps" lines to $RAW/
       access) url="http://127.0.0.1:8094$path" ;;
       access-all) url="http://127.0.0.1:8095$path" ;;
       refuse) url="http://127.0.0.1:8097$path" ;;
+      auth) url="http://127.0.0.1:8096$path" ;;
       h2c) [ $SIDE_H2 = 1 ] || continue; url="http://127.0.0.1:8080$path" ;;
       h2) [ $SIDE_H2 = 1 ] || continue; url="https://127.0.0.1:8443$path" ;;
       h3) [ $SIDE_H3 = 1 ] || continue; url="https://127.0.0.1:8443$path" ;;
@@ -218,7 +241,8 @@ measure() {  # side round -> appends "side round spec cpu_us rps" lines to $RAW/
       h2load -D "${DURATION%s}" -c"$conns" -m"$streams" -t"$t" "$url" > "$raw" 2>&1 || true
       n=$(awk '/^requests:/{print $6}' "$raw"); rps=$(awk '/^finished in/{print $4}' "$raw")  # "N done", "X req/s"
     else
-      wrk -t"$t" -c"$conns" -d"$DURATION" "$url" > "$raw" 2>&1
+      hdr=(); [ "$proto" = auth ] && hdr=(-H "Authorization: Basic YW5uYTpzZWNyZXQ=")  # anna:secret
+      wrk -t"$t" -c"$conns" -d"$DURATION" "${hdr[@]}" "$url" > "$raw" 2>&1
       n=$(awk '/requests in/{print $1}' "$raw"); rps=$(awk '/^Requests\/sec/{print $2}' "$raw")
     fi
     c1=$(cpu_seconds)

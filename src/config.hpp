@@ -6,12 +6,14 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <ostream>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "core/auth.hpp"
 #include "core/request.hpp"
 #include "net/cidr.hpp"
 #include "services/json.hpp"
@@ -19,7 +21,9 @@
 
 namespace agensio {
 
-enum class HandlerKind : std::uint8_t { static_, fastcgi, proxy, cgi, control, httparena };
+// `auth` is never configured: the dispatcher returns a location of that kind while a password is
+// verified on the pool ([[site.auth]]); the connection waits for it and routes the request again.
+enum class HandlerKind : std::uint8_t { static_, fastcgi, proxy, cgi, control, httparena, auth };
 
 struct HttparenaDataset;  // handlers/httparena.hpp: the benchmark handler's dataset, loaded at config time
 
@@ -141,6 +145,30 @@ struct AccessRule {
     std::string origin;   // "" written in the site file, "preset:wordpress" added by a preset
 };
 
+// [[site.auth]] (2026-10-08, docs/configuration.md 19b, design section 25): a password in front
+// of a path. The user file is read and checked once per load, shared by the rules that name it.
+struct AuthUserFile {
+    std::string path;
+    std::vector<auth::User> users;
+    std::uint64_t id = 0;  // unique per load: a connection's memo of a login names the load it was checked against
+};
+
+struct AuthRule {
+    std::string path;     // matched like an access rule: whole segments, any case, the longest decides
+    bool exact = false;
+    bool open = false;    // open = true: no password here, below a protected path
+    std::string users_path;
+    std::shared_ptr<const AuthUserFile> users;
+    std::string realm;    // the challenge's realm (default: the site's first name)
+    std::vector<Cidr> skip;              // skip_for, sets expanded: these clients need no password
+    std::vector<std::string> skip_text;  // as written
+    bool plain_http = false;             // plain_http = "allow": asked over plain HTTP too
+    enum class Credentials : std::uint8_t { preset, pass, strip };
+    Credentials credentials = Credentials::preset;  // resolved at load: pass for PHP sites, strip otherwise
+    std::string forward_user;  // a proxy location sends the verified name in this field
+    std::string origin;        // "" written in the site file, "preset:wordpress" added by a preset
+};
+
 // A path pattern the site refuses with 404 (`refuse`, 2026-10-08, core/refuse.hpp): gitignore-
 // style, compiled once at load. One segment of it, lower case: the literals around its '*'s.
 struct RefuseSegment {
@@ -241,6 +269,9 @@ struct SiteConfig {
     // `refuse`: paths answered 404 whichever location would serve them (core/refuse.hpp);
     // empty, a request pays one test.
     RefuseSet refuse;
+    // [[site.auth]], longest path first, with the same first-byte bitmap as `access`.
+    std::vector<AuthRule> auth;
+    std::array<std::uint64_t, 4> auth_first{};
 };
 
 // [log]
@@ -347,6 +378,8 @@ struct Config {
     // [addresses] (2026-10-07): named address sets the sites' access rules name as "@name", so
     // one edit reaches every site that uses them; checked and expanded at load.
     std::map<std::string, std::vector<std::string>> address_sets;
+    // The user files of the sites' [[site.auth]] rules, each read and checked once per load.
+    std::map<std::string, std::shared_ptr<const AuthUserFile>> auth_files;
     // Hosting (C3b): the group agensio runs as (pool sockets grant it access; "" = the
     // process's group), where `agensio pools` writes pool files ("" = detected per distro),
     // where generated pools listen, and the per-user state directories.

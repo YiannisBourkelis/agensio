@@ -88,6 +88,7 @@ struct AccessRecord {
     std::string_view referer;
     std::string_view user_agent;
     std::string_view upstream;  // "ok", an FcgiFailure name, or empty for static (json only)
+    std::string_view user;      // the user a password check verified ([[site.auth]]); empty: "-"
 };
 
 class WorkerLogs {
