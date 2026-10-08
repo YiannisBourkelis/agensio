@@ -152,6 +152,12 @@ check "a symlink on the way is refused, nothing created under it" "yes no" "$(ec
 out=$("$BIN" ctl site-create --domain root.test --app static --root "$T/www/root.test/web" --user root --https none --listen-plain 127.0.0.1:18199 --yes --reason repro --socket $T/run/control.sock)
 check "a system account name is refused before the helper is asked" "yes no" "$(echo "$out" | grep -q 'system account' && echo yes) $(grep -q 'account_add.*root' $T/logs/audit.log && echo yes || echo no)"
 check "the helper answers only the server: the socketpair has no path" "0" "$(ls $T/run | grep -c helper)"
+# A clean stop (2026-10-09): SIGTERM ends the server with the helper running, and a sanitizer build
+# reports nothing on the way out. The trash timer, which only a server with the helper arms, was
+# destroyed after the workers' contexts had freed its service: a use-after-free at every exit.
+SP=$(cat $T/agensio.pid); kill -TERM $SP; for _ in $(seq 1 100); do kill -0 $SP 2>/dev/null || break; sleep 0.1; done
+check "SIGTERM stops the server with the helper running; no sanitizer report on the way out" "stopped 0" \
+  "$(kill -0 $SP 2>/dev/null && echo running || echo stopped) $(grep -c 'ERROR: AddressSanitizer\|runtime error:' $T/server.out)"
 echo "provision: $pass passed, $fail failed"
 [ $fail = 0 ] || { echo "--- error.log"; cat $T/logs/error.log; echo "--- audit"; cat $T/logs/audit.log; echo "--- last reply"; echo "$out"; echo "--- health"; "$BIN" ctl health --socket $T/run/control.sock; echo; echo "--- upload answer"; head -c 300 $T/upl.out; echo; echo "--- fpm.log"; cat $T/fpm.log 2>/dev/null | tail -20; }
 [ $fail = 0 ]

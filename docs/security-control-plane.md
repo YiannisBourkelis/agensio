@@ -154,6 +154,17 @@ devbox): the one-call paths and each refusal.
 
 ## Sanitizer and fuzz record
 
+2026-10-09, the password users (step 4b of design section 25): the unit tests, `tests/auth.sh`
+(27 checks) and `tests/provision.sh` with the sanitizer build, its reports kept with
+`ASAN_OPTIONS=log_path=` since the helper suite's own directory is removed at its end. One
+finding, older than the step: `Server::restart_timer_` and `trash_timer_` were declared before
+`workers_`, so at every exit with the helper running (which arms the trash timer) the timer was
+destroyed after its worker's `io_context` had freed the timer service, a heap use-after-free in
+`~basic_waitable_timer`. Moved after `workers_`; `tests/provision.sh` now stops the server
+with SIGTERM, waits for it and fails on any sanitizer report in its stderr (it failed before
+the move, passes after). `AcmeManager` holds a timer the same way but resets it in `stop()`,
+which `Server::stop()` calls first.
+
 2026-10-07, the security audit's campaign (`docs/security-audit-2026-10-07.md`), the first
 with the targets' assertions compiled in (every fuzz build before defined `NDEBUG`, so the
 recorded runs above checked memory safety only): every target five minutes on its corpus

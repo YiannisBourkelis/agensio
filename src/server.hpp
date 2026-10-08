@@ -234,10 +234,13 @@ private:
     AcmeManager acme_{error_log_};
     Provisioner provisioner_;
     std::string uploads_dir_;
-    std::unique_ptr<asio::steady_timer> restart_timer_;
-    std::unique_ptr<asio::steady_timer> trash_timer_;  // worker 0, hourly: expired trash entries removed through the helper
     void arm_trash_expiry();
     std::vector<std::unique_ptr<Worker>> workers_;
+    // Timers on worker 0's context. Declared after workers_, so they are destroyed first: a timer
+    // destroyed after its context's timer service reads freed memory (2026-10-09, the sanitizer
+    // build at every exit with the helper running, which arms the trash timer).
+    std::unique_ptr<asio::steady_timer> restart_timer_;
+    std::unique_ptr<asio::steady_timer> trash_timer_;  // hourly: expired trash entries removed through the helper
     // [[site.auth]]'s verification pool. Declared after workers_, so it is destroyed first: its
     // threads post results into the workers' contexts and must stop before those go.
     std::unique_ptr<auth::Verifier> auth_verifier_;

@@ -60,6 +60,11 @@ its own:
   `protection_show` answers `auth` (the sites, the log, whether a jail reads it). **Upgrading:**
   root installs the filters again and renders the jail (`fail2ban_filter_stale` gives the three
   lines).
+- **Fixed: a use-after-free at every exit with the root helper running** (since F12b,
+  2026-10-01). Two timers of the server (the trash expiry, the restart) were destroyed after the
+  worker's `io_context` that had freed their service; the sanitizer build reported it, a release
+  build read freed memory on the way out. They are declared after the workers now, and
+  `tests/provision.sh` stops the server and fails on any sanitizer report in its stderr.
 - `protection.cpp` compared the failure tier's application name with `"drupal"` by address
   (a `const char*`), right only because the compiler merges equal literals; it compares the text
   now, and the two compiler warnings are gone.
