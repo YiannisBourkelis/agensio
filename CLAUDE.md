@@ -87,6 +87,13 @@ plugin's filters, with a README mapping each to `src/control/protection.*` and
   change, and `docs/keys.md` is regenerated with `build/agensio keys --markdown >
   docs/keys.md`. The unit test holds the table to the parser and to the section
   headings; the integration suite holds `docs/keys.md` to the binary.
+- **Every feature an administrator configures has a recipe in the cookbook**
+  (`docs/examples.md`, one file per category in `docs/examples/`): a change that adds or
+  changes a configuration key, a preset or a control-plane field adds or updates the recipe
+  that shows it in use, in the same change, with the managed-site (`agensio ctl`, MCP) way
+  beside the TOML. `tests/examples.sh` (run by the integration suite) loads every recipe with
+  `agensio -t` and checks its `ctl` lines, MCP names and links, so a recipe that stops working
+  fails the suite.
 - **The agent interface is part of every change.** Whenever behaviour, a configuration
   key, a control command, a preset or an error answer is added, fixed or changed, check
   whether the MCP tool descriptions, argument descriptions, server instructions and
@@ -367,8 +374,8 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   agensio on 8075) and `bench/uptime-kuma/` (Node, Socket.IO over WebSockets, agensio on
   8076); `setup.sh` starts each, `tests/redmine.sh` and `tests/uptime-kuma.sh` run the
   live checks and skip when the bed is down. `app = "proxy"` with a site-level `upstream`
-  is the preset both use; examples for Node, Rails, Rocket.Chat and ThingsBoard in
-  `docs/examples/`.
+  is the preset both use; recipes for Node, Rails, Django, Rocket.Chat and ThingsBoard in
+  `docs/examples/proxy.md` (the cookbook, `docs/examples.md`).
 - **Logging** (A5, `src/services/log.*`): access log in Apache/nginx "combined" format
   (same escaping, so fail2ban filters work) or JSON, per site (`access_log`) with the
   `[log] access` default; one descriptor per path opened `O_APPEND`, per-worker buffers

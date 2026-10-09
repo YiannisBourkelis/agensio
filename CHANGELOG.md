@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.0-alpha.60
+
+**The configuration cookbook** (`docs/examples.md`): practical recipes for the jobs an
+administrator does, one file per category under `docs/examples/` (basics, PHP applications,
+applications behind the proxy, protection, hosting and the control plane, protocols and
+capacity). Each recipe is a complete configuration with what a request meets, how to check it,
+and the same change on a managed site through `agensio ctl` and the MCP tools. `tests/examples.sh`
+(run by the integration suite) loads every recipe with `agensio -t`, checks every `agensio ctl`
+line against the binary's help, every MCP name against the server and every link and anchor,
+so a recipe that stops working fails the suite. The proxy examples of `docs/examples/*.toml` are
+recipes now. CLAUDE.md's working agreement: a feature an administrator configures gets its recipe
+in the same change.
+
 ## 0.1.0-alpha.59 (2026-10-09)
 
 From the alpha.58 report:

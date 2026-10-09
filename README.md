@@ -99,7 +99,9 @@ php = { socket = "unix:/run/php/php8.4-fpm.sock" }
 `agensio -t -c file.toml` validates a configuration without starting; `-t --explain`
 prints what the presets expanded to. Worked examples for static sites, plain PHP,
 Laravel, Statamic, WordPress, Node, Rails and more, with every option you can change,
-are in [docs/configuration.md](docs/configuration.md) and [docs/examples/](docs/examples/).
+are in [docs/configuration.md](docs/configuration.md); complete recipes for common jobs (HTTPS,
+WordPress on its own account, a staging site behind a password, an application behind the
+proxy) are in the cookbook, [docs/examples.md](docs/examples.md).
 
 ## First site on a server
 

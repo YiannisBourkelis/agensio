@@ -18,7 +18,10 @@ site and location as agensio sees it, marking the blocks a preset generated with
 
 Every key, with its type, default, whether a change needs a reload or a restart, and who
 may change it, is listed in `docs/keys.md`, generated from the same table that the MCP
-tool `config_reference` and `agensio keys` serve; the sections below explain them.
+tool `config_reference` and `agensio keys` serve; the sections below explain them. For
+whole jobs (a site on HTTPS, WordPress on its own account, a staging site behind a password,
+an application behind the proxy), the cookbook in [examples.md](examples.md) has complete
+recipes that the test suite loads with `agensio -t`.
 
 ## 1. Static site
 
@@ -546,7 +549,7 @@ add_headers = { "Cache-Control" = "public, max-age=31536000, immutable" }
 Equivalent by hand: one `[[site.location]]` with `path = "/"`, `handler = "proxy"` and the
 site's upstreams and options. WebSockets, redirects pointing at the origin, forwarded
 headers and keep-alive need nothing (section 12). Worked examples for Node, Rails,
-Rocket.Chat and ThingsBoard are in `docs/examples/`; two real applications run this
+Django, Rocket.Chat and ThingsBoard are recipes in [the cookbook](examples/proxy.md); two real applications run this
 way in the repository's test beds, Redmine (Rails) in `bench/redmine/` and Uptime Kuma
 (Node, Socket.IO over WebSockets) in `bench/uptime-kuma/`.
 
