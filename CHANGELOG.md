@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.60
+## 0.1.0-alpha.60 (2026-10-09)
 
 **The configuration cookbook** (`docs/examples.md`): practical recipes for the jobs an
 administrator does, one file per category under `docs/examples/` (basics, PHP applications,
