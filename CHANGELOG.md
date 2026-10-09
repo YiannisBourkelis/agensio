@@ -2,6 +2,23 @@
 
 ## 0.1.0-alpha.61
 
+- **A misspelt configuration key was ignored.** Only `[[site.auth]]`, `[[site.access]]` and the
+  `http2` and `http3` tables refused a key they did not know; everywhere else (the top level,
+  `[server]`, `[cache]`, `[log]`, `[control]`, `[[site]]`, locations and their `php`, `fastcgi`,
+  `proxy`, `tls` and `cgi` tables) it loaded without a word, so `refsue = ["/vendor/"]` refused
+  nothing, `max_body_sise` left the 1 MB limit and a misspelt `include` loaded no site file.
+  Every table now refuses a key the reference table does not give it, naming the nearest one
+  (`unknown key 'refsue' (did you mean 'refuse'?)`) and the table's keys; a top-level key found
+  inside a table says to move it above the first `[table]` header, and a `[server]` in an
+  included file is refused rather than ignored. The reference table is the one list: the loader,
+  `docs/keys.md`, `agensio ctl reference` and the MCP tool `config_reference` read it. A reload
+  with such a key is refused and the running configuration stays; a start fails with the message
+  (the packaged unit runs `agensio -t` first). Found with it: the reference listed a location
+  key `php` that the parser never read (a location's FastCGI table is `fastcgi`), and the sample
+  `config/agensio.toml` had its `include` under `[cache]`, where it did nothing. Shown first by
+  the unit test `test_unknown_keys`: of its nineteen misspellings alpha.60 loaded seventeen without
+  a word and refused two only because a required key was then missing.
+
 - **TLS to an origin checked no name unless `proxy.tls.server_name` was set.** Upstreams are IP
   addresses, and with an empty `server_name` agensio verified that a trusted CA had signed the
   origin's certificate but not whose it was, so any certificate a public CA issued, for any

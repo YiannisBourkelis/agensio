@@ -248,7 +248,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   (`path`, `match = "prefix" | "exact"`, per-location `root` or `alias`/`index`/`try_files`/
   `hidden_files`/`symlinks`/`handler`); `include = ["sites.d/*.toml"]` for
   panel-generated per-site files. Loading never creates sockets; `Server` is built from the
-  `Config` struct. `agensio -t` validates.
+  `Config` struct. `agensio -t` validates. Every table refuses a key the reference table
+  (`control/reference.cpp`) does not give it, naming the nearest (`check_keys` in `config.cpp`,
+  alpha.61): the reference is the parser's schema, so a new key needs its row before it loads.
 - **Request bodies** (A3): the HTTP/1 connection is the pull source behind
   `Request::body` (`StreamBody`: `async_read` with backpressure), decoding Content-Length
   or chunked (`http1/chunked.hpp`, fuzzed) from its receive buffer and socket.

@@ -1,5 +1,7 @@
 #include "config.hpp"
 
+#include "control/reference.hpp"
+
 #include "core/access.hpp"
 #include "core/refuse.hpp"
 #include "core/cpus.hpp"
@@ -20,7 +22,9 @@
 #include <ctime>
 #include <charconv>
 #include <stdexcept>
+#include <string_view>
 #include <thread>
+#include <unordered_map>
 
 #include <toml.hpp>
 #ifndef _WIN32
@@ -69,6 +73,60 @@ std::string to_lower(std::string s) {
 
 [[noreturn]] void fail(const std::string& msg) {
     throw std::runtime_error(msg);
+}
+
+// Edits between two short words (Levenshtein), for "did you mean".
+std::size_t edit_distance(std::string_view a, std::string_view b) {
+    std::vector<std::size_t> row(b.size() + 1);
+    for (std::size_t j = 0; j <= b.size(); ++j) row[j] = j;
+    for (std::size_t i = 1; i <= a.size(); ++i) {
+        std::size_t diag = row[0];
+        row[0] = i;
+        for (std::size_t j = 1; j <= b.size(); ++j) {
+            const std::size_t up = row[j];
+            row[j] = std::min({row[j] + 1, row[j - 1] + 1, diag + (a[i - 1] == b[j - 1] ? 0 : 1)});
+            diag = up;
+        }
+    }
+    return row[b.size()];
+}
+
+// Unknown keys are refused (2026-10-09, the cookbook's finding): a key that no row of the
+// reference table (control/reference.cpp) gives one of `tables`, and that is not in `extra`
+// (a sub-table's name), stops the load with the nearest key and the table's keys. Before,
+// most tables ignored it: `refsue = ["/vendor/"]` loaded and refused nothing, a misspelt
+// `include` dropped every site file. The reference is the one list of keys: the loader, the
+// reference document (docs/keys.md), `agensio ctl reference` and the MCP tool read it.
+void check_keys(const toml::table& t, std::initializer_list<std::string_view> tables, std::initializer_list<std::string_view> extra,
+                const std::string& where, std::string_view hint = {}) {
+    static const auto by_table = [] {
+        std::unordered_map<std::string_view, std::vector<std::string_view>> m;
+        for (const auto& d : control::key_defs()) m[d.table].push_back(d.key);
+        return m;
+    }();
+    std::vector<std::string_view> keys(extra);
+    for (const auto table : tables)
+        if (const auto it = by_table.find(table); it != by_table.end()) keys.insert(keys.end(), it->second.begin(), it->second.end());
+    for (const auto& [k, v] : t) {
+        const std::string_view key = k.str();
+        if (std::find(keys.begin(), keys.end(), key) != keys.end()) continue;
+        std::string_view nearest;
+        std::size_t best = key.size();
+        for (const auto known : keys)
+            if (const std::size_t d = edit_distance(key, known); d < best) {
+                best = d;
+                nearest = known;
+            }
+        std::string msg = where + ": unknown key '" + std::string(key) + "'";
+        if (!nearest.empty() && best <= std::max<std::size_t>(2, key.size() / 3)) msg += " (did you mean '" + std::string(nearest) + "'?)";
+        if (!hint.empty()) msg += "; " + std::string(hint);
+        if (const auto top = by_table.find("top level"); top != by_table.end() && std::find(tables.begin(), tables.end(), "top level") == tables.end() &&
+                                                         std::find(top->second.begin(), top->second.end(), key) != top->second.end())
+            msg += "; '" + std::string(key) + "' is a top-level key: put it above the first [table] header (TOML gives a key to the table above it)";
+        msg += "; the keys here are";
+        for (std::size_t i = 0; i < keys.size(); ++i) msg += (i ? ", " : " ") + std::string(keys[i]);
+        fail(msg + " (docs/keys.md, agensio ctl reference)");
+    }
 }
 
 std::size_t size_node(const toml::node_view<const toml::node>& n, std::size_t fallback, const char* what) {
@@ -197,6 +255,7 @@ std::vector<std::pair<std::string, std::string>> headers_of(const toml::table* t
 
 // The proxy's header policy keys of a `proxy = { ... }` table (site defaults or a location).
 void parse_proxy_policy(const toml::table& t, const fs::path& base_dir, UpstreamConfig& out, const std::string& where) {
+    check_keys(t, {"proxy = {}"}, {}, where);
     if (auto h = t["host"].value<std::string>()) {
         out.host = *h == "pass" || *h == "upstream" ? *h : to_lower(*h);
         if (out.host.empty() || out.host.find_first_of(" \t\r\n/") != std::string::npos)
@@ -233,6 +292,7 @@ void parse_proxy_policy(const toml::table& t, const fs::path& base_dir, Upstream
         out.rewrite_redirects = mode == "rewrite";
     }
     if (auto tt = t["tls"].as_table()) {
+        check_keys(*tt, {"proxy tls = {}"}, {}, where + ".tls");
         out.tls.verify = (*tt)["verify"].value_or(out.tls.verify);
         out.tls.server_name = (*tt)["server_name"].value_or(out.tls.server_name);
         if (auto ca = (*tt)["ca"].value<std::string>()) {
@@ -383,6 +443,7 @@ void parse_upstreams(const toml::node_view<const toml::node>& n, UpstreamConfig&
 }
 
 void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& site, const std::string& where) {
+    check_keys(t, {"[[site.location]]"}, {}, where);
     LocationConfig loc;
     auto path = t["path"].value<std::string>();
     if (!path || path->empty() || ((*path)[0] != '/' && (*path)[0] != '.'))
@@ -463,7 +524,10 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
     } else if (loc.handler == "fastcgi") {
         loc.kind = HandlerKind::fastcgi;
         loc.fastcgi = site.php;  // site-level `php = { socket = ... }` is the default
-        if (auto ft = t["fastcgi"].as_table()) parse_fcgi_table(*ft, base_dir, loc.fastcgi, where + ".fastcgi");
+        if (auto ft = t["fastcgi"].as_table()) {
+            check_keys(*ft, {"php = {}"}, {}, where + ".fastcgi");
+            parse_fcgi_table(*ft, base_dir, loc.fastcgi, where + ".fastcgi");
+        }
         else if (t.contains("fastcgi")) fail(where + ": 'fastcgi' must be a table");
         if (!loc.fastcgi.configured)
             fail(where + ": handler \"fastcgi\" needs fastcgi.socket here or php.socket on the site");
@@ -500,6 +564,7 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
         loc.cgi.options.read_timeout = std::chrono::milliseconds(30000);
         loc.cgi.options.keep_conn = false;
         if (auto ct = t["cgi"].as_table()) {
+            check_keys(*ct, {"cgi = {}", "php = {}"}, {}, where + ".cgi");
             parse_fcgi_table(*ct, base_dir, loc.cgi, where + ".cgi");
             if (auto ip = (*ct)["interpreter"].value<std::string>()) {
                 loc.cgi.interpreter = resolve(base_dir, *ip).string();
@@ -1438,6 +1503,7 @@ void parse_auth(const toml::node_view<const toml::node>& n, Config& cfg, SiteCon
 }
 
 void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, const std::string& where, std::vector<RootAdditions>* root_adds = nullptr) {
+    check_keys(t, {"[[site]]"}, {"auth", "access"}, where);
     SiteConfig site;
     for (auto& n : string_list(t["server_name"], (where + ".server_name").c_str()))
         site.server_names.push_back(to_lower(n));
@@ -1507,7 +1573,10 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
 
     if (t.contains("index")) site.index = index_list(t["index"], where);
     if (t.contains("try_files")) site.try_files = try_files_of(t["try_files"], where);
-    if (auto pt = t["php"].as_table()) parse_fcgi_table(*pt, base_dir, site.php, where + ".php");
+    if (auto pt = t["php"].as_table()) {
+        check_keys(*pt, {"php = {}"}, {}, where + ".php");
+        parse_fcgi_table(*pt, base_dir, site.php, where + ".php");
+    }
     else if (t.contains("php")) fail(where + ": 'php' must be a table");
     // Proxy defaults for the site's locations: keep-alive to the origin, and pool bounds
     // sized for a front-end (per worker: 256 in flight, 1024 waiting, 64 idle kept), not
@@ -1543,6 +1612,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
         tc.key = dir / "key.pem";
         site.tls = std::move(tc);
     } else if (auto tls = t["tls"].as_table()) {
+        check_keys(*tls, {"tls = {}"}, {}, where + ".tls");
         auto cert = (*tls)["cert"].value<std::string>();
         auto key = (*tls)["key"].value<std::string>();
         if (!cert || !key) fail(where + ".tls: 'cert' and 'key' are required");
@@ -2308,6 +2378,8 @@ Config load_config(const fs::path& path) {
         fail(msg);
     }
     const toml::table& root = tbl;
+    check_keys(root, {"top level"}, {"server", "cache", "log", "control", "site"}, path.filename().string() + " (the main file)");
+    if (const auto* st = root["server"].as_table()) check_keys(*st, {"[server]"}, {"acme", "http2", "http3"}, "server");
 
     auto server = root["server"];
     if (auto w = server["workers"].value<std::int64_t>()) {
@@ -2378,6 +2450,7 @@ Config load_config(const fs::path& path) {
     if (cfg.state_dir.empty() || cfg.state_dir[0] != '/') fail("server.state_dir must be an absolute path");
     cfg.strict_users = server["strict_users"].value_or(false);
     if (auto acme = server["acme"].as_table()) {
+        check_keys(*acme, {"[server] acme"}, {}, "server.acme");
         cfg.acme.enabled = true;
         cfg.acme.email = (*acme)["email"].value_or(std::string());
         if (cfg.acme.email.empty() || cfg.acme.email.find('@') == std::string::npos)
@@ -2402,6 +2475,7 @@ Config load_config(const fs::path& path) {
 #endif
     }
 
+    if (const auto* ct = root["cache"].as_table()) check_keys(*ct, {"[cache]"}, {}, "cache");
     auto cache = root["cache"];
     cfg.cache_max_file_size = size_node(cache["max_file_size"], cfg.cache_max_file_size, "cache.max_file_size");
     cfg.cache_max_size = size_node(cache["max_size"], cfg.cache_max_size, "cache.max_size");
@@ -2423,6 +2497,7 @@ Config load_config(const fs::path& path) {
     }
     if (auto p = cache["precompressed"].value<bool>()) cfg.cache_precompressed = *p;
 
+    if (const auto* lt = root["log"].as_table()) check_keys(*lt, {"[log]"}, {}, "log");
     auto log = root["log"];
     if (auto a = log["access"].value<std::string>())
         cfg.log.access = (*a == "off" || a->empty()) ? std::string() : resolve(base_dir, *a).string();
@@ -2452,7 +2527,11 @@ Config load_config(const fs::path& path) {
                 fail(file.string() + ":" + std::to_string(e.source().begin.line) + ": " + std::string(e.description()));
             }
             if (sub["site"].is_string()) additions.push_back(parse_root_additions(std::move(sub), file, cfg.config_path));
-            else site_files.emplace_back(std::move(sub), file);
+            else {
+                check_keys(sub, {}, {"site"}, file.filename().string(),
+                           "an included file holds [[site]] tables; [server], [cache], [log], [control], include and [addresses] belong in the main file");
+                site_files.emplace_back(std::move(sub), file);
+            }
         }
     }
     // [addresses] (2026-10-07): named address sets for the sites' access rules ("@office").
@@ -2563,6 +2642,7 @@ Config load_config(const fs::path& path) {
                         fail("listen address " + la + " is used by both a TLS and a plain site");
 
     if (auto ct = root["control"].as_table()) {
+        check_keys(*ct, {"[control]"}, {}, "control");
         cfg.control.enabled = true;
         if (auto s = (*ct)["socket"].value<std::string>()) cfg.control.socket = resolve(base_dir, *s).string();
         else {
@@ -2582,6 +2662,8 @@ Config load_config(const fs::path& path) {
         if (auto ca = (*ct)["install_ca"].value<std::string>()) cfg.control.install_ca = resolve(base_dir, *ca).string();
         cfg.control.upload_max = size_node((*ct)["upload_max"], cfg.control.upload_max, "control.upload_max");
         if (auto sl = (*ct)["site_limits"].as_table()) {
+            check_keys(*sl, {}, {"max_body_size", "memory_limit", "max_execution_time", "max_input_time", "children", "max_requests"},
+                       "control.site_limits");
             auto& lim = cfg.control.site_limits;
             lim.max_body_size = size_node((*sl)["max_body_size"], lim.max_body_size, "control.site_limits.max_body_size");
             lim.memory_limit = size_node((*sl)["memory_limit"], lim.memory_limit, "control.site_limits.memory_limit");

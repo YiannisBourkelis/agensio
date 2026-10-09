@@ -164,7 +164,7 @@ const std::vector<KeyDef>& key_defs() {
         {"[[site.location]]", "allow_suffixes", "list", "[]", "When set, only request paths ending with one of these are served here (matched like deny_suffixes); every other path, a directory or a bare name included, is 404 whatever exists. For a directory whose public media sits beside private data (Grav's user/data).", "reload", "site file", "6"},
         {"[[site.location]]", "add_headers", "table", "{}", "Response headers added here (Cache-Control for assets, Strict-Transport-Security).", "reload", "site file", "6"},
         {"[[site.location]]", "priority", "bool", "false", "This location's upstream requests draw on priority_reserve.", "reload", "site file", "7"},
-        {"[[site.location]]", "php", "table", "the site's", "php = { socket, ... }: FastCGI for this location.", "reload", "site file", "7"},
+        {"[[site.location]]", "fastcgi", "table", "the site's php", "fastcgi = { socket, read_timeout, ... }: FastCGI for this location (handler = \"fastcgi\"), the keys of php = {}; without it the site's php table.", "reload", "site file", "7"},
         {"[[site.location]]", "upstream", "URL or list", "(none)", "Proxy this location to an origin.", "reload", "site file", "12"},
         {"[[site.location]]", "proxy", "table", "the site's", "Proxy policy for this location.", "reload", "site file", "12"},
         {"[[site.location]]", "cgi", "table { interpreter, env }", "(none)", "Run scripts here as CGI processes (interpreter, extra environment).", "reload", "site file", "13"},
@@ -329,6 +329,9 @@ std::string reference_markdown() {
     o << "Generated from the table in `src/control/reference.cpp` by `agensio keys --markdown`; the\n"
          "integration suite fails when this file and the binary disagree. The MCP tool\n"
          "`config_reference` and `agensio ctl reference` serve the same table, with the running values.\n"
+         "The loader reads its keys from it too: a key this table does not give its table is refused\n"
+         "when the configuration loads, with the nearest key named (`unknown key 'refsue' (did you\n"
+         "mean 'refuse'?)`), so a misspelt key never passes unnoticed (0.1.0-alpha.61).\n"
          "*applies*: whether a change takes effect on `agensio reload` or needs\n"
          "`systemctl restart agensio`. *via*: who changes it: **file** = root, in the main configuration\n"
          "file; **site file** = a site file under `sites.d` (a hand-written one, or a managed one after\n"

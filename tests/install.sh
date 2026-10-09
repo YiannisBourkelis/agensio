@@ -75,7 +75,7 @@ check "site-copy: a destination directory owned by another account is refused, n
 check "a component owned by another account is refused, nothing created below it" "1 yes no" "$(ctl site-install t7.test --file wp.tgz --path wp-content/other/x --create-path --yes --reason plugin > $T/out; echo -n "$? "; grep -q 'another account' $T/out && echo -n yes; echo " $([ -e $T/www/t7.test/wp-content/other/x ] && echo yes || echo no)")"
 rm -rf $T/www/t7.test/*
 check "an archive with a symlink is refused, the directory stays empty" "1 yes 0" "$(ctl upload evil.tgz $T/pub/evil.tgz > /dev/null; ctl site-install t7.test --file evil.tgz --yes --reason evil > $T/out; echo -n "$? "; grep -q 'symbolic link' $T/out && echo -n yes; echo " $(ls -A $T/www/t7.test | wc -l | tr -d ' ')")"
-check "a tarball made with 'tar -C dir .' installs (its ./ root entry is nothing to create)" "0 19" "$(ctl upload dot.tgz $T/pub/dot.tgz > /dev/null; ctl site-install t7.test --file dot.tgz --yes --reason dot > /dev/null; echo -n "$? "; find $T/www/t7.test -type f | wc -l | tr -d ' ')"
+check "a tarball made with 'tar -C dir .' installs (its ./ root entry is nothing to create)" "0 $(find $ROOT/tests/wordpress -type f | wc -l | tr -d ' ')" "$(ctl upload dot.tgz $T/pub/dot.tgz > /dev/null; ctl site-install t7.test --file dot.tgz --yes --reason dot > /dev/null; echo -n "$? "; find $T/www/t7.test -type f | wc -l | tr -d ' ')"
 rm -rf $T/www/t7.test/*
 
 # Downloads: fenced by address unless install_private, verified by sha256, https only.

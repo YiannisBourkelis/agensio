@@ -18,7 +18,13 @@ site and location as agensio sees it, marking the blocks a preset generated with
 
 Every key, with its type, default, whether a change needs a reload or a restart, and who
 may change it, is listed in `docs/keys.md`, generated from the same table that the MCP
-tool `config_reference` and `agensio keys` serve; the sections below explain them. For
+tool `config_reference` and `agensio keys` serve; the sections below explain them. A key that
+table does not list for its table is refused when the configuration loads, naming the nearest
+one: `unknown key 'refsue' (did you mean 'refuse'?)`. A key belongs to the TOML table above it,
+so a top-level key (`include`, `[addresses]`) goes above the first `[table]` header, and an
+included file holds `[[site]]` tables only. Before 0.1.0-alpha.61 most tables ignored an
+unknown key, so a misspelt `refuse` refused nothing and a misspelt `include` loaded no site
+file. For
 whole jobs (a site on HTTPS, WordPress on its own account, a staging site behind a password,
 an application behind the proxy), the cookbook in [examples.md](examples.md) has complete
 recipes that the test suite loads with `agensio -t`.

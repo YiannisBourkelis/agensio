@@ -5321,6 +5321,72 @@ static void test_protection() {
     fs::remove_all(dir);
 }
 
+// Unknown keys are refused (2026-10-09, the cookbook's finding): a misspelt key in any table,
+// the main file's top level, an included file, a site, a location and their sub-tables, stops
+// the load with the nearest key; before, most tables ignored it (`refsue` refused nothing).
+static void test_unknown_keys() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-keys-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "www");
+    fs::create_directories(dir / "sites.d");
+    auto write = [&](const std::string& name, const std::string& text) { std::ofstream(dir / name) << text; };
+    const std::string site = "[[site]]\nserver_name = [\"k.test\"]\nlisten = [\"127.0.0.1:18701\"]\nroot = \"www\"\n";
+    auto refused = [&](const std::string& text, const char* needle) {
+        write("k.toml", text);
+        try {
+            load_config(dir / "k.toml");
+            std::printf("unknown keys: loaded, expected '%s'\n", needle);
+            return false;
+        } catch (const std::exception& e) {
+            const bool hit = std::string(e.what()).find(needle) != std::string::npos;
+            if (!hit) std::printf("unknown keys: expected '%s', got '%s'\n", needle, e.what());
+            return hit;
+        }
+    };
+    CHECK(refused("inclde = [\"sites.d/*.toml\"]\n" + site, "unknown key 'inclde' (did you mean 'include'?)"));
+    CHECK(refused("[server]\nworkres = 2\n" + site, "server: unknown key 'workres' (did you mean 'workers'?)"));
+    CHECK(refused("[cache]\nmax_size = \"64MB\"\ninclude = [\"sites.d/*.toml\"]\n" + site, "'include' is a top-level key: put it above the first [table] header"));
+    CHECK(refused("[server]\nacme = { emial = \"a@example.com\" }\n" + site, "server.acme: unknown key 'emial' (did you mean 'email'?)"));
+    CHECK(refused("[cache]\nmax_szie = \"1GB\"\n" + site, "cache: unknown key 'max_szie' (did you mean 'max_size'?)"));
+    CHECK(refused("[log]\nlevle = \"info\"\n" + site, "log: unknown key 'levle' (did you mean 'level'?)"));
+    CHECK(refused("[control]\ntrash_keeps = 30\n" + site, "control: unknown key 'trash_keeps' (did you mean 'trash_keep'?)"));
+    CHECK(refused("[control]\nsite_limits = { childern = 8 }\n" + site, "control.site_limits: unknown key 'childern' (did you mean 'children'?)"));
+    CHECK(refused(site + "refsue = [\"/vendor/\"]\n", "unknown key 'refsue' (did you mean 'refuse'?)"));
+    CHECK(refused(site + "tls = { cert = \"c.pem\", kye = \"k.pem\" }\n", ".tls: unknown key 'kye' (did you mean 'key'?)"));
+    CHECK(refused(site + "php = { socket = \"unix:/run/x.sock\", chidren = 4 }\n", ".php: unknown key 'chidren' (did you mean 'children'?)"));
+    CHECK(refused(site + "proxy = { read_timout = 5 }\n", ".proxy: unknown key 'read_timout' (did you mean 'read_timeout'?)"));
+    CHECK(refused(site + "proxy = { tls = { server_nmae = \"a.test\" } }\n", ".proxy.tls: unknown key 'server_nmae' (did you mean 'server_name'?)"));
+    CHECK(refused(site + "[[site.location]]\npath = \"/a/\"\nhiden_files = true\n", "unknown key 'hiden_files' (did you mean 'hidden_files'?)"));
+    CHECK(refused(site + "[[site.location]]\npath = \"/a/\"\nphp = { socket = \"unix:/run/x.sock\" }\n", "unknown key 'php'"));  // the location key is fastcgi
+    CHECK(refused(site + "[[site.location]]\npath = \"/a/\"\nhandler = \"fastcgi\"\nfastcgi = { socket = \"unix:/run/x.sock\", read_timout = 5 }\n",
+                  ".fastcgi: unknown key 'read_timout' (did you mean 'read_timeout'?)"));
+    CHECK(refused(site + "[[site.location]]\npath = \"/c/\"\ncgi = { interpeter = \"/bin/sh\" }\n", ".cgi: unknown key 'interpeter' (did you mean 'interpreter'?)"));
+    CHECK(refused(site + "[[site.location]]\npath = \"/api/\"\nupstream = \"http://127.0.0.1:9\"\nproxy = { hide = [\"X-Powered-By\"], read_timout = 5 }\n",
+                  ".proxy: unknown key 'read_timout'"));
+    // An included file holds sites only: a [server] there was ignored before.
+    write("sites.d/a.toml", "[server]\nworkers = 2\n" + site);
+    CHECK(refused("include = [\"sites.d/*.toml\"]\n", "a.toml: unknown key 'server'; an included file holds [[site]] tables"));
+    fs::remove(dir / "sites.d/a.toml");
+    // Every legitimate table still loads: the keys a reference row gives, the free-form tables
+    // (add_headers, proxy headers, cgi env, address sets) and the sub-tables.
+    write("ok.toml", "include = [\"sites.d/*.toml\"]\n[server]\nworkers = 1\nhttp2 = { max_concurrent_streams = 64 }\n[cache]\nmax_size = \"64MB\"\n"
+                     "[log]\nlevel = \"warn\"\naccess = \"off\"\n[addresses]\noffice = [\"203.0.113.0/24\"]\n" + site +
+                     "php = { socket = \"unix:/run/x.sock\", read_timeout = 30 }\n"
+                     "proxy = { headers = { \"X-Any-Name\" = \"$host\" }, tls = { verify = false } }\n"
+                     "[[site.location]]\npath = \"/a/\"\nadd_headers = { \"X-Custom-Field\" = \"1\" }\n"
+                     "[[site.location]]\npath = \"/c/\"\ncgi = { env = { \"ANY_NAME\" = \"1\" }, read_timeout = 5 }\n"
+                     "[[site.location]]\npath = \"/f/\"\nhandler = \"fastcgi\"\nfastcgi = { socket = \"unix:/run/y.sock\", read_timeout = 9 }\n"
+                     "[[site.access]]\npath = \"/admin\"\nallow = [\"@office\"]\n");
+    bool loaded = false;
+    try {
+        loaded = load_config(dir / "ok.toml").sites.size() == 1;
+    } catch (const std::exception& e) {
+        std::printf("unknown keys: a good configuration was refused: %s\n", e.what());
+    }
+    CHECK(loaded);
+    fs::remove_all(dir);
+}
+
 // The configuration reference (F11) is held to the parser and to the reference document:
 // every key the parser reads is a row, every row's section exists, docs/keys.md is what the
 // binary prints (the integration suite diffs it), and the JSON carries running values.
@@ -7690,6 +7756,7 @@ int main() {
     test_quic();
     test_quic_stateless();
 #endif
+    test_unknown_keys();
     test_config_reference();
     test_config_reference_defaults();
     test_forwarded_lines();
