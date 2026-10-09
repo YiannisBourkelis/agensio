@@ -55,7 +55,7 @@ instead). The catch-all site answers requests whose Host no site lists; without 
 Easy to get wrong: `strict_users = true` refuses every site without `user`, and that includes
 the plain-port redirect site `site-create` writes for an HTTPS site, so leave it off on a host
 the control plane manages. `user`, `socket` and `provision` take effect at a restart, not a
-reload, and so do the role groups: the server looks them up when it starts.
+reload; the role groups apply on reload, the next connection judged by them.
 
 **Check it.**
 
@@ -478,7 +478,7 @@ groupadd --system agensio-admin && groupadd --system agensio-ops && groupadd --s
 usermod -aG agensio-admin anna       # creates, changes, installs, deletes
 usermod -aG agensio-ops oncall       # reloads, reopens logs, renews certificates, uploads archives
 usermod -aG agensio-view dev1        # reads: status, sites, logs, health, presets, settings
-systemctl restart agensio            # once, after the groups first appear in [control]
+agensio reload                       # after the groups appear in [control]; members log in again for a new group
 ```
 
 The groups are the `[control]` table of [the main file](#the-main-file-of-a-shared-host).

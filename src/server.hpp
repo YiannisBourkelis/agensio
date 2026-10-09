@@ -181,6 +181,8 @@ private:
     void remove_pid_file() noexcept;
     void prepare_acme(const Config& cfg);  // storage tree and placeholder certificates for tls = "auto" sites
     void open_control();                   // the control socket (F0/F1), before the privilege drop
+    RoleGroups resolve_control_groups(const Config& cfg);  // the role groups' ids by name
+    void apply_control_groups(const Config& cfg);          // a reload's new role groups, on worker 0
     void start_accept_control();
     // HTTP/3 (phase I, docs/design-http3.md): a UDP endpoint per TLS listener that lists
     // h3, on worker 0 in this slice; bound before the privilege drop like the acceptors.

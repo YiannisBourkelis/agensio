@@ -404,7 +404,11 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   `Server::reload` on SIGHUP validates, binds new listeners, then switches; in-flight
   work keeps the old generation alive; the connection limits (`idle_timeout`, `body_timeout`,
   `max_header_size`) come from the connection's generation, not the boot configuration
-  (2026-10-07; before, a reload left them at the boot values until a restart).
+  (2026-10-07; before, a reload left them at the boot values until a restart). Restart-only
+  keys (the reference's `applies` column, among them the whole `[cache]` table,
+  `sendfile_max_chunk` and `tcp_nodelay`, read from the boot configuration on the hot path) are
+  named by `control::restart_needed` in the reload's warning, `validate` and health, held to the
+  reference by a unit test; the control role groups apply on reload (`Server::apply_control_groups`).
   `agensio reload` validates and signals
   `server.pid_file`. `tests/reload.sh` proves no request fails across reloads.
 - **Automatic certificates** (H3, `src/services/acme.*`, `services/json.hpp`): `tls = "auto"`

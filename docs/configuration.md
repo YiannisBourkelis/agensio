@@ -1436,8 +1436,16 @@ Nothing is interrupted:
   serving.
 
 Under a 64-connection load the switch itself costs nothing measurable and no request
-fails (`tests/reload.sh`). Restart-only settings, logged as kept when the file changes
-them: `workers`, `reuse_port`, `user`, `group`, `sendfile` and the cache sizes.
+fails (`tests/reload.sh`). Restart-only settings (the `applies` column of `docs/keys.md`):
+`workers`, `reuse_port`, `user`, `group`, `pid_file`, `sendfile`, `sendfile_max_chunk`,
+`tcp_nodelay`, the whole `[cache]` table, and `[control]` `socket` and `provision`. A reload that finds
+one of them changed keeps the running value and names each in the error log (`reload:
+cache.precompressed, tcp_nodelay changed on disk and take effect at a restart`), and
+`agensio ctl validate` and health list them under `restart_needed`. The control plane's role
+groups (`admins`, `operators`, `viewers`) apply on reload: the next connection to the socket
+is judged by the new groups. Before 0.1.0-alpha.61 the reference called most of the `[cache]`
+keys, `stream_chunk_size`, `sendfile_max_chunk` and `tcp_nodelay` reload keys while a reload kept
+them, and the role groups needed a restart.
 
 Note: the static file cache starts cold for every reloaded site (entries are keyed by
 the location the configuration created), so the first request for each file after a

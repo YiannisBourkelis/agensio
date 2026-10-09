@@ -287,7 +287,8 @@ rollback.
 
 8. **Changes.** Edit, `sudo agensio -t`, `sudo agensio reload` (or `systemctl reload
    agensio`): no connection is dropped. Restart-only settings: `workers`, `reuse_port`,
-   `user`, `group`, `sendfile`, cache sizes; the reload says so when they changed.
+   `user`, `group`, `pid_file`, `sendfile`, `sendfile_max_chunk`, `tcp_nodelay`, the whole
+   `[cache]` table, `[control]` `socket` and `provision`; the reload names each one it kept.
 
 9. **Upgrade and rollback.** Install the new binary next to the old one, `agensio -t`
    with the new binary, then `systemctl restart agensio`. Keep the previous binary; a

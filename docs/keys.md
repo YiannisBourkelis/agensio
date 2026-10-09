@@ -25,9 +25,9 @@ section of `docs/configuration.md` that explains the key.
 | `max_body_size` | size | 1MB | The request-body limit every site takes unless it sets its own (413 above it); it also drives the generated php-fpm pools' upload sizes. Per site: the site's max_body_size, settable through the control plane. | reload | file | 7 |
 | `body_timeout` | seconds | 60 | Longest wait between two reads of a request body before the request fails. | reload | file | 1 |
 | `reuse_port` | enum: auto \| on \| off | auto | Whether every worker gets its own accepting socket (SO_REUSEPORT; Linux) or one worker accepts for all. auto picks the platform's best. | restart | file | 1 |
-| `tcp_nodelay` | bool | true | TCP_NODELAY on client sockets (no Nagle delay on small writes). | reload | file | 1 |
+| `tcp_nodelay` | bool | true | TCP_NODELAY on client sockets (no Nagle delay on small writes). | restart | file | 1 |
 | `sendfile` | bool | true | Zero-copy sendfile() for files on plain sockets; off makes the server copy through user space (useful only when a filesystem misbehaves with sendfile). | restart | file | 1 |
-| `sendfile_max_chunk` | size | 1MB | Bytes per sendfile() call, so one huge file cannot hold a worker. | reload | file | 1 |
+| `sendfile_max_chunk` | size | 1MB | Bytes per sendfile() call, so one huge file cannot hold a worker. | restart | file | 1 |
 ## `[[site.location]]`
 
 | key | type | default | meaning | applies | via | doc |
@@ -92,12 +92,12 @@ section of `docs/configuration.md` that explains the key.
 |---|---|---|---|---|---|---|
 | `max_file_size` | size | 4MB | Files up to this size are held in memory; larger ones keep an open descriptor and stream. | restart | file | 1 |
 | `max_size` | size | 256MB | Total bytes of file content the cache may hold before it evicts. | restart | file | 1 |
-| `evict_fraction` | float | 0.2 | How much of the cache an eviction pass frees. | reload | file | 1 |
-| `revalidate_interval` | seconds | 1 | A cached file is stat()ed at most this often; a change on disk shows within this interval. | reload | file | 1 |
-| `stream_chunk_size` | size | 64KB | Read size when a large file is streamed without sendfile (TLS). | reload | file | 1 |
-| `sendfile_min_size` | size | 48KB | Cached files at least this large are sent with sendfile on plain sockets (0 = never); below it the memory copy is cheaper. | reload | file | 1 |
-| `max_open_files` | int | 1024 | How many streamed files may keep an open descriptor in the cache (0 = none). | reload | file | 1 |
-| `precompressed` | bool | true | Serve name.br or name.gz beside a cached file to a client whose Accept-Encoding takes it (Content-Encoding, Vary), cached with the file and revalidated with it; a twin older than the file is ignored. | reload | file | 1 |
+| `evict_fraction` | float | 0.2 | How much of the cache an eviction pass frees. | restart | file | 1 |
+| `revalidate_interval` | seconds | 1 | A cached file is stat()ed at most this often; a change on disk shows within this interval. | restart | file | 1 |
+| `stream_chunk_size` | size | 64KB | Read size when a large file is streamed without sendfile (TLS). | restart | file | 1 |
+| `sendfile_min_size` | size | 48KB | Cached files at least this large are sent with sendfile on plain sockets (0 = never); below it the memory copy is cheaper. | restart | file | 1 |
+| `max_open_files` | int | 1024 | How many streamed files may keep an open descriptor in the cache (0 = none). | restart | file | 1 |
+| `precompressed` | bool | true | Serve name.br or name.gz beside a cached file to a client whose Accept-Encoding takes it (Content-Encoding, Vary), cached with the file and revalidated with it; a twin older than the file is ignored. | restart | file | 1 |
 ## `[log]`
 
 | key | type | default | meaning | applies | via | doc |

@@ -457,6 +457,51 @@ void Server::build_listeners(Generation& gen) {
 
 // ---- control socket (F0/F1) ----
 
+// The role groups' ids, from the configuration's names; a name that is no group gives nobody
+// that role and says so.
+RoleGroups Server::resolve_control_groups(const Config& cfg) {
+    const HostFacts facts = system_facts();
+    auto group_id = [&](const std::string& name, const char* key) -> long {
+        if (name.empty()) return -1;
+        unsigned g = 0;
+        if (facts.group(name, g)) return static_cast<long>(g);
+        error_log_.warn(std::string("control.") + key + ": group '" + name + "' does not exist; nobody gets that role");
+        return -1;
+    };
+    RoleGroups g;
+    g.admins = group_id(cfg.control.admins, "admins");
+    g.operators = group_id(cfg.control.operators, "operators");
+    g.viewers = group_id(cfg.control.viewers, "viewers");
+    return g;
+}
+
+// A reload that changes the role groups applies them (2026-10-09, the cookbook's finding: they
+// were looked up once at start, so a group added to [control] gave its members nothing until a
+// restart). Runs on worker 0, where the control socket accepts, so the next connection is
+// judged by the new groups. The socket's mode follows the start's rule: 0660 when the admin
+// group is the only one and the socket belongs to it, otherwise 0666, the peer credentials
+// deciding either way. After the privilege drop the server owns the socket and may chmod it,
+// but may give it to another group only while it is root.
+void Server::apply_control_groups(const Config& cfg) {
+#ifdef ASIO_HAS_LOCAL_SOCKETS
+    control_groups_ = resolve_control_groups(cfg);
+    const std::string& path = cfg_.control.socket;  // the socket itself is restart-only
+    const bool one_group = control_groups_.admins >= 0 && control_groups_.operators < 0 && control_groups_.viewers < 0;
+    bool owned = false;
+    if (one_group) {
+        struct stat st{};
+        owned = ::stat(path.c_str(), &st) == 0 && st.st_gid == static_cast<gid_t>(control_groups_.admins);
+        if (!owned && ::geteuid() == 0) owned = ::chown(path.c_str(), static_cast<uid_t>(-1), static_cast<gid_t>(control_groups_.admins)) == 0;
+    }
+    const bool restricted = one_group && owned;
+    ::chmod(path.c_str(), restricted ? 0660 : 0666);
+    error_log_.info("control: role groups from the reloaded configuration; socket " + path +
+                    (restricted ? " 0660, group " + cfg.control.admins : std::string(" 0666, roles by peer credentials")));
+#else
+    (void)cfg;
+#endif
+}
+
 void Server::open_control() {
     if (!cfg_.control.enabled) return;
 #ifdef ASIO_HAS_LOCAL_SOCKETS
@@ -465,16 +510,7 @@ void Server::open_control() {
     const bool have_user = !cfg_.user.empty() && facts.user(cfg_.user, uid, gid);
     if (!cfg_.group.empty()) facts.group(cfg_.group, gid);
     server_uid_ = have_user ? static_cast<long>(uid) : static_cast<long>(::geteuid());
-    auto group_id = [&](const std::string& name, const char* key) -> long {
-        if (name.empty()) return -1;
-        unsigned g = 0;
-        if (facts.group(name, g)) return static_cast<long>(g);
-        error_log_.warn(std::string("control.") + key + ": group '" + name + "' does not exist; nobody gets that role");
-        return -1;
-    };
-    control_groups_.admins = group_id(cfg_.control.admins, "admins");
-    control_groups_.operators = group_id(cfg_.control.operators, "operators");
-    control_groups_.viewers = group_id(cfg_.control.viewers, "viewers");
+    control_groups_ = resolve_control_groups(cfg_);
 
     // The directory is part of the boundary: owned by the server, never world-writable, so
     // no site user can replace the socket path. The socket itself is 0660 for the admin
@@ -1495,11 +1531,13 @@ bool Server::reload(std::string& error) {
         for (const auto& e : hosting) all += (all.empty() ? "" : "; ") + e;
         return refuse(all);
     }
-    // Restart-only settings stay what they were; say so when the file changed them.
-    if (fresh.workers != cfg_.workers || fresh.reuse_port != cfg_.reuse_port || fresh.user != cfg_.user ||
-        fresh.group != cfg_.group || fresh.sendfile != cfg_.sendfile || fresh.cache_max_size != cfg_.cache_max_size ||
-        fresh.cache_max_file_size != cfg_.cache_max_file_size)
-        error_log_.warn("reload: workers, reuse_port, user, group, sendfile and cache sizes need a restart; kept");
+    // Restart-only settings stay what they were; say which, when the file changed them
+    // (control::restart_needed, the same list validate and health report).
+    if (const auto kept = control::restart_needed(fresh, cfg_); !kept.empty()) {
+        std::string keys;
+        for (const auto& k : kept) keys += (keys.empty() ? "" : ", ") + k;
+        error_log_.warn("reload: " + keys + " changed on disk and take effect at a restart (systemctl restart agensio); the running values are kept");
+    }
     auto gen = std::make_shared<Generation>();
     gen->cfg = std::move(fresh);
     try {
@@ -1537,7 +1575,12 @@ bool Server::reload(std::string& error) {
     }
     // Switch: every worker takes the generation on its own loop; connections pick it up at
     // their next request, exchanges in flight keep the old one alive until they finish.
+    const auto previous = gen_;
     gen_ = gen;
+    if (cfg_.control.enabled && gen->cfg.control.enabled &&
+        (gen->cfg.control.admins != previous->cfg.control.admins || gen->cfg.control.operators != previous->cfg.control.operators ||
+         gen->cfg.control.viewers != previous->cfg.control.viewers))
+        apply_control_groups(gen->cfg);
     max_connections_.store(connection_ceiling(gen->cfg, fd_limit_, static_cast<unsigned>(workers_.size())), std::memory_order_relaxed);
     for (auto& w : workers_) asio::post(w->ctx, [w = w.get(), gen] { w->gen = gen; });
     reload_h3(gen->cfg);

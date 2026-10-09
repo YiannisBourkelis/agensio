@@ -72,6 +72,19 @@ start
 check "one group: socket 0660 owned by the server user and the admin group" "660 ctlsrv ctladm" "$(stat -c '%a %U %G' "$T/run/control.sock")"
 check "admin group member connects" "admin" "$(role_as alice)"
 check "outsider cannot even connect (file mode)" "" "$(role_as dave)"
+# The role groups apply on reload (2026-10-09, the cookbook's finding: they were looked up once at
+# start, so a group added to [control] gave its members nothing until a restart).
+write_config 'admins = "ctladm"
+viewers = "ctlview"'
+kill -HUP $SRV
+for _ in $(seq 1 30); do [ "$(role_as carol)" = viewer ] && break; sleep 0.1; done
+check "a role group added by a reload applies at once: its member is a viewer, the socket opens to the credentials" "[viewer] 666" \
+  "[$(role_as carol)] $(stat -c %a "$T/run/control.sock")"
+write_config 'admins = "ctladm"'
+kill -HUP $SRV
+for _ in $(seq 1 30); do [ -z "$(role_as carol)" ] && break; sleep 0.1; done
+check "a role group removed by a reload: its member is refused again, the socket 0660 for the admin group again" "[] 660 ctladm" \
+  "[$(role_as carol)] $(stat -c '%a %G' "$T/run/control.sock")"
 stop
 check "socket removed at shutdown" "gone" "$([ -S "$T/run/control.sock" ] && echo still || echo gone)"
 

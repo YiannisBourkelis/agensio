@@ -860,17 +860,34 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now) {
 
 // ---- validation and health ----
 
+// The restart-only keys the file changed, each by name: the reference rows whose `applies` is
+// restart (2026-10-09, the cookbook's finding: the [cache] keys, stream_chunk_size,
+// sendfile_max_chunk, tcp_nodelay and pid_file kept their start values on a reload while the
+// reference said reload, and nothing said so). The reload's warning, validate and health read it.
 std::vector<std::string> restart_needed(const Config& fresh, const Config& running) {
     std::vector<std::string> out;
-    if (fresh.workers != running.workers) out.push_back("workers");
-    if (fresh.reuse_port != running.reuse_port) out.push_back("reuse_port");
-    if (fresh.user != running.user) out.push_back("user");
-    if (fresh.group != running.group) out.push_back("group");
-    if (fresh.sendfile != running.sendfile) out.push_back("sendfile");
-    if (fresh.cache_max_size != running.cache_max_size || fresh.cache_max_file_size != running.cache_max_file_size)
-        out.push_back("cache sizes");
-    if (fresh.control.enabled != running.control.enabled || fresh.control.socket != running.control.socket)
-        out.push_back("control");
+    auto kept = [&](bool changed, const char* key) {
+        if (changed) out.push_back(key);
+    };
+    kept(fresh.workers != running.workers, "workers");
+    kept(fresh.reuse_port != running.reuse_port, "reuse_port");
+    kept(fresh.user != running.user, "user");
+    kept(fresh.group != running.group, "group");
+    kept(fresh.sendfile != running.sendfile, "sendfile");
+    kept(fresh.sendfile_max_chunk != running.sendfile_max_chunk, "sendfile_max_chunk");
+    kept(fresh.tcp_nodelay != running.tcp_nodelay, "tcp_nodelay");
+    kept(fresh.pid_file != running.pid_file, "pid_file");
+    kept(fresh.cache_max_file_size != running.cache_max_file_size, "cache.max_file_size");
+    kept(fresh.cache_max_size != running.cache_max_size, "cache.max_size");
+    kept(fresh.cache_evict_fraction != running.cache_evict_fraction, "cache.evict_fraction");
+    kept(fresh.cache_revalidate_s != running.cache_revalidate_s, "cache.revalidate_interval");
+    kept(fresh.stream_chunk_size != running.stream_chunk_size, "cache.stream_chunk_size");
+    kept(fresh.cache_sendfile_min_size != running.cache_sendfile_min_size, "cache.sendfile_min_size");
+    kept(fresh.cache_max_open_files != running.cache_max_open_files, "cache.max_open_files");
+    kept(fresh.cache_precompressed != running.cache_precompressed, "cache.precompressed");
+    kept(fresh.control.enabled != running.control.enabled, "control");
+    kept(fresh.control.enabled && running.control.enabled && fresh.control.socket != running.control.socket, "control.socket");
+    kept(fresh.control.provision != running.control.provision, "control.provision");
     // Not the task keys (runtimes, task_limits, task_network): the helper reads them from
     // root's file for every task, and the server from the configuration it runs, so a
     // reload changes them (2026-09-27 Writebook report: a new Ruby cost every site a restart).

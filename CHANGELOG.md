@@ -2,6 +2,24 @@
 
 ## 0.1.0-alpha.61
 
+- **Keys the reference said a reload applies kept their start values.** `[cache]`
+  `revalidate_interval`, `precompressed`, `sendfile_min_size`, `stream_chunk_size`,
+  `evict_fraction` and `max_open_files`, and `[server]` `sendfile_max_chunk` and `tcp_nodelay`,
+  are read from the configuration the server started with (the static handler, the HTTP/1
+  writer, the accept path, the shared file cache), so a reload changed nothing while the
+  reference, `keys.md` and `config_reference` said "reload", and neither the reload's warning
+  nor `validate` named them. They are restart keys now, so the hot path stays as it is; the
+  reload's warning, `agensio ctl validate` and health's `restart_needed` name every restart-only
+  key the file changed (`reload: cache.precompressed, tcp_nodelay changed on disk and take effect
+  at a restart ...`, where it said "cache sizes" or nothing), and a unit test holds the
+  reference's restart rows to that list. The control plane's role groups (`admins`, `operators`,
+  `viewers`), documented as reload keys and looked up once at start, now apply on reload: the
+  next connection to the socket is judged by them, and the socket's mode follows. Shown first by
+  the unit test (of the restart-only keys changed one at a time, alpha.60 named ten not at all and
+  two only as "cache sizes")
+  and `tests/control.sh` (a viewer group added by a reload gave its member nothing, socket still
+  0660; now a viewer, 0666).
+
 - **A misspelt configuration key was ignored.** Only `[[site.auth]]`, `[[site.access]]` and the
   `http2` and `http3` tables refused a key they did not know; everywhere else (the top level,
   `[server]`, `[cache]`, `[log]`, `[control]`, `[[site]]`, locations and their `php`, `fastcgi`,

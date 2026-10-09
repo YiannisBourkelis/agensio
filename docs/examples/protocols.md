@@ -429,8 +429,9 @@ that long. Do not set it to 0: that turns the check off, and a replaced file sta
 is evicted or a reload empties the site's cache.
 
 The cache is built at start: a change to this table needs `systemctl restart agensio`. A reload
-keeps the running values; for the two sizes it also writes `... cache sizes need a restart; kept`
-to the error log.
+keeps the running values and names each key it kept in the error log (`reload: cache.max_size,
+cache.max_open_files changed on disk and take effect at a restart ...`); `agensio ctl validate`
+lists them under `restart_needed`.
 
 **Check it.**
 
@@ -467,12 +468,12 @@ and binds new listen addresses; only then does every worker switch, between requ
 - a broken file, an unreadable certificate or a port that cannot be bound refuses the whole
   reload (`reload refused: ...` in the error log), and the old configuration keeps serving.
 
-Restart-only, by `keys.md`'s `applies` column: `workers`, `reuse_port`, `sendfile`, `user`,
-`group`, `pid_file`, the cache sizes (and, in this version, the whole `[cache]` table, see
-the previous recipe), `[control] socket` and `provision`, and a new listen port below 1024 (once
-the server runs as `server.user` it cannot bind one). A reload keeps those as they are, and
-`agensio ctl validate` lists the main ones the file changed under `restart_needed`; a restart
-ends every open connection. A site's static files are read from disk again on their first
+Restart-only, by `keys.md`'s `applies` column: `workers`, `reuse_port`, `sendfile`,
+`sendfile_max_chunk`, `tcp_nodelay`, `user`, `group`, `pid_file`, the whole `[cache]` table,
+`[control] socket` and `provision`, and a new listen port below 1024 (once the server runs as
+`server.user` it cannot bind one). A reload keeps those as they are and names each one it kept in
+the error log, and `agensio ctl validate` lists them under `restart_needed`; a restart ends every
+open connection. The control plane's role groups apply on reload. A site's static files are read from disk again on their first
 request after a reload: its cache starts empty.
 
 **Check it.** `agensio ctl reload` runs the same reload and answers with the result itself

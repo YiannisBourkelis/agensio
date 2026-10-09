@@ -3,6 +3,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <limits>
 #include <iterator>
@@ -3340,6 +3341,58 @@ static void test_control_commands() {
         Config changed = cfg;
         changed.workers = cfg.workers + 3;
         CHECK(restart_needed(changed, cfg) == std::vector<std::string>{"workers"});
+        // Every restart-only key, changed alone, is named (2026-10-09, the cookbook's finding: the
+        // [cache] keys, stream_chunk_size, sendfile_max_chunk, tcp_nodelay and pid_file kept their
+        // start values on a reload, and neither the reload's warning nor validate said so).
+        const std::vector<std::pair<std::string, std::function<void(Config&)>>> restart_only = {
+            {"reuse_port", [](Config& c) { c.reuse_port = "off"; }},
+            {"user", [](Config& c) { c.user = "someone"; }},
+            {"group", [](Config& c) { c.group = "somegroup"; }},
+            {"sendfile", [](Config& c) { c.sendfile = !c.sendfile; }},
+            {"sendfile_max_chunk", [](Config& c) { c.sendfile_max_chunk *= 2; }},
+            {"tcp_nodelay", [](Config& c) { c.tcp_nodelay = !c.tcp_nodelay; }},
+            {"pid_file", [](Config& c) { c.pid_file = "/run/other.pid"; }},
+            {"cache.max_file_size", [](Config& c) { c.cache_max_file_size *= 2; }},
+            {"cache.max_size", [](Config& c) { c.cache_max_size *= 2; }},
+            {"cache.evict_fraction", [](Config& c) { c.cache_evict_fraction = 0.5; }},
+            {"cache.revalidate_interval", [](Config& c) { c.cache_revalidate_s += 5; }},
+            {"cache.stream_chunk_size", [](Config& c) { c.stream_chunk_size *= 2; }},
+            {"cache.sendfile_min_size", [](Config& c) { c.cache_sendfile_min_size *= 2; }},
+            {"cache.max_open_files", [](Config& c) { c.cache_max_open_files += 1; }},
+            {"cache.precompressed", [](Config& c) { c.cache_precompressed = !c.cache_precompressed; }},
+            {"control.provision", [](Config& c) { c.control.provision = !c.control.provision; }},
+        };
+        for (const auto& [key, change] : restart_only) {
+            Config one = cfg;
+            change(one);
+            const auto named = restart_needed(one, cfg);
+            if (named != std::vector<std::string>{key}) {
+                std::string got;
+                for (const auto& n : named) got += " " + n;
+                std::printf("restart_needed: changing %s named [%s ]\n", key.c_str(), got.c_str());
+            }
+            CHECK(named == std::vector<std::string>{key});
+        }
+        Config with_control = cfg, moved = cfg;
+        with_control.control.enabled = moved.control.enabled = true;
+        moved.control.socket = "/run/elsewhere/control.sock";
+        CHECK(restart_needed(moved, with_control) == std::vector<std::string>{"control.socket"});
+        // The reference's restart rows are exactly these keys: a new restart-only key gets its
+        // line in restart_needed and here, or this fails.
+        std::set<std::string> covered = {"workers", "control.socket"};
+        for (const auto& [key, change] : restart_only) covered.insert(key);
+        for (const auto& d : control::key_defs()) {
+            if (std::string_view(d.applies) != "restart") continue;
+            const std::string_view table = d.table;
+            const std::string name = table == "[server]" ? std::string(d.key) : table == "[cache]" ? "cache." + std::string(d.key)
+                                   : table == "[control]" ? "control." + std::string(d.key) : std::string(table) + " " + d.key;
+            if (!covered.count(name)) std::printf("restart_needed: the reference's restart row %s is not named\n", name.c_str());
+            CHECK(covered.count(name) == 1);
+        }
+        // The role groups apply on reload: they are looked up again (Server::apply_control_groups).
+        Config roles = cfg;
+        roles.control.viewers = "staff";
+        CHECK(restart_needed(roles, cfg).empty());
         // The task keys apply on reload: the helper reads them from root's file for every task.
         Config tasks_changed = cfg;
         tasks_changed.control.runtimes.ruby = "/opt/ruby-3.4.7/bin";
