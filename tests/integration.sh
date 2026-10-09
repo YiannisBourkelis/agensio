@@ -1814,13 +1814,44 @@ check "access log: an X-Forwarded-For entry with a port is the address without i
 # A server of its own, because a listener on [::] is public and the main configuration's
 # protection checks hold it to loopback.
 mkdir -p bench/tmp/dual; rm -f bench/tmp/dual/access.log
-printf '[server]\nworkers = 1\n[log]\naccess = "%s/bench/tmp/dual/access.log"\nerror = "%s/bench/tmp/dual/error.log"\n[[site]]\nlisten = ["[::]:8101"]\nroot = "%s/bench/www"\n' "$ROOT" "$ROOT" "$ROOT" > bench/tmp/dual/agensio.toml
+# It trusts no proxy, as most hosts do, so nothing asks for a client's address before the log
+# line; the TLS listener is for the aborts below.
+printf '[server]\nworkers = 1\n[log]\naccess = "%s/bench/tmp/dual/access.log"\nerror = "%s/bench/tmp/dual/error.log"\n[[site]]\nlisten = ["[::]:8101"]\nroot = "%s/bench/www"\n[[site]]\nlisten = ["127.0.0.1:18921"]\nroot = "%s/bench/www"\ntls = { cert = "%s/bench/certs/cert.pem", key = "%s/bench/certs/key.pem" }\n' "$ROOT" "$ROOT" "$ROOT" "$ROOT" "$ROOT" "$ROOT" > bench/tmp/dual/agensio.toml
 "$BIN" -c bench/tmp/dual/agensio.toml > bench/tmp/dual/server.out 2>&1 & DUALPID=$!
-for _ in $(seq 1 50); do nc -z 127.0.0.1 8101 2>/dev/null && break; sleep 0.1; done
+for _ in $(seq 1 50); do nc -z 127.0.0.1 8101 2>/dev/null && nc -z 127.0.0.1 18921 2>/dev/null && break; sleep 0.1; done
 curl -sS -o /dev/null 'http://127.0.0.1:8101/style.css?dual-v4'
 curl -sS -o /dev/null -g 'http://[::1]:8101/style.css?dual-v6'
-curl -sS -o /dev/null -H 'X-Forwarded-For: ::ffff:198.51.100.8' 'http://127.0.0.1:8080/style.css?dual-xff'; sleep 1.2
+curl -sS -o /dev/null -H 'X-Forwarded-For: ::ffff:198.51.100.8' 'http://127.0.0.1:8080/style.css?dual-xff'
+# A client that goes away mid-response (alpha.57 report, finding 2): it reads the start of a large
+# file and resets the connection. Its line names it, as a complete request's does; until
+# alpha.58 the address was asked of the socket when the line was written, after the reset, and
+# the line said "-", so fail2ban could not attribute it.
+python3 - <<'PYABORT'
+import socket, ssl, struct
+def cut(family, host, port, agent, tls):
+    s = socket.create_connection((host, port))
+    if tls:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        s = ctx.wrap_socket(s, server_hostname="localhost")
+    s.sendall(("GET /big.bin HTTP/1.1\r\nHost: localhost\r\nUser-Agent: %s\r\n\r\n" % agent).encode())
+    got = 0
+    while got < 65536:
+        b = s.recv(16384)
+        if not b:
+            break
+        got += len(b)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))  # close with a reset
+    s.close()
+cut(socket.AF_INET, "127.0.0.1", 8101, "agensio-abort-plain", False)
+cut(socket.AF_INET, "127.0.0.1", 18921, "agensio-abort-tls", True)
+cut(socket.AF_INET6, "::1", 8101, "agensio-abort-v6", False)
+PYABORT
+sleep 1.2
 kill $DUALPID 2>/dev/null; wait $DUALPID 2>/dev/null
+check "access log: a client that resets mid-response is named in its line, over plain HTTP, TLS and IPv6 (alpha.57 report: \"-\")" "127.0.0.1 127.0.0.1 ::1" \
+  "$(for a in plain tls v6; do grep -F "agensio-abort-$a" bench/tmp/dual/access.log | tail -1 | cut -d' ' -f1; done | tr '\n' ' ' | sed 's/ $//')"
 check "access log: a dual-stack listener records an IPv4 client as IPv4, an IPv6 one as IPv6; a mapped X-Forwarded-For entry unmapped" "127.0.0.1 ::1 198.51.100.8" "$(grep -F 'dual-v4' bench/tmp/dual/access.log | tail -1 | cut -d' ' -f1) $(grep -F 'dual-v6' bench/tmp/dual/access.log | tail -1 | cut -d' ' -f1) $(grep -F 'dual-xff' bench/tmp/access.log | tail -1 | cut -d' ' -f1)"
 printf '<html><body>changed</body></html>\n' > bench/www/sub/index.html; sleep 1.2
 check "revalidation picks up change" "changed" "$(curl -sS http://127.0.0.1:8080/sub/ | sed 's/<[^>]*>//g')"

@@ -559,7 +559,7 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   (`WorkerState::access_log`, `Dispatcher::access_log_tick`); `mode = "report"` names each rule
   and client once a minute with a limiter of its own. The address:
   `ConnectionInfo::client_ip` behind `trusted_proxies`, else the connection's `PeerSource`
-  (HTTP/1 reads the socket only then). WordPress keeps `/wp-admin/admin-ajax.php` and the login page's
+  (HTTP/1 has it from `accept(2)` itself since alpha.58, `Acceptor::peer`, `set_peer_endpoint`: no `getpeername`, and an address even after the client reset; before, it asked the socket when first needed, and a client that reset mid-response was logged as `-`). WordPress keeps `/wp-admin/admin-ajax.php` and the login page's
   `/wp-admin/css`, `js`, `images` (shields: nothing runs there) open under a `/wp-admin` rule. `SiteConfig::access_first` (a bit per first byte after `/`) makes an
   uncovered path one bit test. Managed: `rules.restricted`, `ctl --restrict`, `access-check` /
   MCP `access_check`; `rules.admin` (WordPress, Drupal: `preset_admin_paths`, `login`,

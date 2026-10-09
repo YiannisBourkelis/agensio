@@ -150,6 +150,9 @@ private:
         asio::steady_timer backoff;  // pauses accepting when descriptors run out
         std::string address;         // the listener it serves, looked up in the worker's generation at accept
         Worker* owner;               // the worker whose io_context runs this acceptor
+        // The client of the connection accept(2) returned, written by that call itself (its
+        // sockaddr argument): no getpeername later, and an address even after the client reset.
+        asio::ip::tcp::endpoint peer;
         bool open = true;            // accepting (written by the reload thread)
         std::atomic<bool> closed{false};  // the posted close ran on the owner's loop: the slot may be reused
         Acceptor(asio::io_context& ctx, std::string a, Worker* w)
@@ -164,7 +167,7 @@ private:
     // A connection accepted while its worker is at the ceiling: counted, a plain client told
     // 503 with Retry-After, a TLS one closed before any handshake work, one log line per
     // worker per ten seconds. Runs on the worker's own loop.
-    void refuse_connection(asio::ip::tcp::socket& sock, const Listener& l, Worker& w);
+    void refuse_connection(asio::ip::tcp::socket& sock, const asio::ip::tcp::endpoint& peer, const Listener& l, Worker& w);
     // The error log line for a worker at its ceiling, from its sample (under refusal_mutex).
     std::string ceiling_line(const Worker& w, const RefusalSample& s, std::chrono::steady_clock::time_point now) const;
     // Every worker's refusals merged, for status and health.

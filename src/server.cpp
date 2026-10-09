@@ -911,9 +911,8 @@ namespace {
 constexpr std::string_view kConnectionLimitAnswer = "HTTP/1.1 503 Service Unavailable\r\nServer: agensio\r\nContent-Type: text/plain\r\nContent-Length: 82\r\nConnection: close\r\nRetry-After: 2\r\n\r\n503 Service Unavailable: the server is at its connection limit, try again shortly\n";
 }  // namespace
 
-void Server::refuse_connection(asio::ip::tcp::socket& sock, const Listener& l, Worker& w) {
-    asio::error_code ec, ignored;
-    const asio::ip::tcp::endpoint peer = sock.remote_endpoint(ec);  // who, before the close
+void Server::refuse_connection(asio::ip::tcp::socket& sock, const asio::ip::tcp::endpoint& peer, const Listener& l, Worker& w) {
+    asio::error_code ignored;
     if (!l.tls) {  // a TLS client is closed before the handshake: a flood must not buy CPU with it
         sock.non_blocking(true, ignored);
         sock.send(asio::buffer(kConnectionLimitAnswer), 0, ignored);
@@ -928,7 +927,7 @@ void Server::refuse_connection(asio::ip::tcp::socket& sock, const Listener& l, W
         if (s.first == std::chrono::steady_clock::time_point{}) s.first = now;
         s.last = now;
         ++s.window;
-        if (!ec) {
+        {  // the client, as accept(2) gave it
             RefusalSample::Address* slot = nullptr;
             for (auto& a : s.addresses)
                 if (a.count && a.addr == peer.address()) {
@@ -1027,7 +1026,7 @@ void Server::start_accept(std::size_t index) {
     Worker& target =
         reuse_port_ ? *acc.owner : *workers_[next_worker_.fetch_add(1, std::memory_order_relaxed) % workers_.size()];
     acc.socket.async_accept(
-        target.ctx, [this, index, &acc, &target](const asio::error_code& ec, asio::ip::tcp::socket sock) {
+        target.ctx, acc.peer, [this, index, &acc, &target](const asio::error_code& ec, asio::ip::tcp::socket sock) {
             if (ec == asio::error::operation_aborted || stopping_.load(std::memory_order_relaxed) || !acc.open) return;
             if (ec == asio::error::no_descriptors || ec == asio::error::no_buffer_space ||
                 ec == std::errc::too_many_files_open_in_system) {
@@ -1062,17 +1061,19 @@ void Server::start_accept(std::size_t index) {
                     asio::error_code ignored;
                     sock.close(ignored);
                 } else if (target.connections.load(std::memory_order_relaxed) >= max_connections_.load(std::memory_order_relaxed)) {
-                    refuse_connection(sock, *l, target);  // the ceiling: the descriptor budget's guard (hardening item 5)
+                    refuse_connection(sock, acc.peer, *l, target);  // the ceiling: the descriptor budget's guard (hardening item 5)
                 } else if (l->tls) {
 #ifdef AGENSIO_HAS_TLS
                     auto c = std::make_shared<Http1Connection<TlsStream>>(TlsStream(std::move(sock), *l->ssl), target,
                                                                      std::move(gen), l, cfg_, dispatcher_);
+                    c->set_peer_endpoint(acc.peer);  // read before the next accept writes it again
                     if (&target == acc.owner) c->start();
                     else asio::post(target.ctx, [c] { c->start(); });
 #endif
                 } else {
                     auto c = std::make_shared<Http1Connection<asio::ip::tcp::socket>>(std::move(sock), target,
                                                                                        std::move(gen), l, cfg_, dispatcher_);
+                    c->set_peer_endpoint(acc.peer);  // read before the next accept writes it again
                     if (&target == acc.owner) c->start();
                     else asio::post(target.ctx, [c] { c->start(); });
                 }

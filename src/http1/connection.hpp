@@ -83,6 +83,16 @@ public:
         return remote_addr_;
     }
 
+    // The client's endpoint as accept(2) wrote it (Server::start_accept): the address the logs and
+    // the rules use, known even after the client reset. Until alpha.58 it was asked of the socket
+    // when first needed, which for a request no rule looked at was the access log line, after a
+    // client that went away mid-response had reset: the line said "-" and fail2ban could not
+    // attribute it (alpha.57 report, finding 2). It also spares that getpeername.
+    void set_peer_endpoint(const asio::ip::tcp::endpoint& ep) noexcept {
+        peer_ep_ = ep;
+        have_peer_ep_ = true;
+    }
+
     // Control socket: the peer's credentials and role, decided at accept (F0).
     void set_peer(long uid, long gid, std::uint8_t role) noexcept {
         stream_.conn.peer_uid = uid;
@@ -825,7 +835,7 @@ private:
             remote_ = "local";
         } else {
             asio::error_code ec;
-            const auto ep = lowest().remote_endpoint(ec);
+            const auto ep = have_peer_ep_ ? peer_ep_ : lowest().remote_endpoint(ec);
             // An IPv4 client of a dual-stack listener is its IPv4 address (net/cidr.hpp unmapped).
             if (!ec) remote_addr_ = unmapped(ep.address());
             remote_ = ec ? std::string("-") : remote_addr_.to_string();
@@ -1023,6 +1033,8 @@ private:
     AuthMemo auth_memo_;  // [[site.auth]] (core/stream.hpp)
     std::uint16_t remote_port_ = 0;
     asio::ip::address remote_addr_;
+    asio::ip::tcp::endpoint peer_ep_;  // from accept(2), when the server knows it (set_peer_endpoint)
+    bool have_peer_ep_ = false;
     std::string client_addr_;      // from X-Forwarded-For when the peer is a trusted proxy
     bool trusted_checked_ = false;
     bool trusted_peer_ = false;

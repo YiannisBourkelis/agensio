@@ -2,6 +2,24 @@
 
 ## 0.1.0-alpha.58
 
+From the alpha.57 report:
+
+- **A client that went away mid-response was logged with no address.** An HTTP/1 request whose
+  client reset the connection before the answer was out, over plain HTTP and TLS alike, was
+  written to the access log as `- - - [...] "GET /wp-includes/js/dist/editor.min.js ..."`: the
+  address was asked of the socket when it was first needed, which for a request no access rule
+  and no trusted proxy looked at was the log line, after the reset. So fail2ban could not
+  attribute a client that pulled most of a large file and reset (the error log's `request line did
+  not parse from -` the same). The address is now the one `accept(2)` returns with the
+  connection, written by that call itself, so it is always known and the `getpeername` a logged
+  connection cost is gone; the connection ceiling's refusal sample uses it too. HTTP/2 kept its
+  address already, HTTP/3 has the datagram's. Shown first by `tests/integration.sh` (a client that
+  reads 64 KB of a large file and resets, over plain HTTP, TLS and IPv6: `- - -` before, `127.0.0.1
+  127.0.0.1 ::1` after).
+- Item 2.2 of the security audit (alpha.57) is verified on the test VPS: a 3 MB cached file at
+  300 KB/s with idle_timeout 2 was cut at 0.77 MB over TLS on alpha.56 and arrives whole on
+  alpha.57; the audit's status table records it. Its automated reproduction test is still to write.
+
 **Passwords: `[[site.auth]]`** (the security audit's second feature gap; docs/configuration.md
 19b, design section 25, the research in `reports/Web server basic authentication.md`). A
 password in front of a path, for a staging site, an admin area or a tool without a login of
