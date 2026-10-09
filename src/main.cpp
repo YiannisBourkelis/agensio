@@ -287,7 +287,9 @@ int main(int argc, char** argv) {
                              "                    given together they replace the site's list; --no-login-paths clears\n"
                              "        --private PATH, --entry-point /x.php, --cache PATH=SECONDS, --front-controller /x.php\n"
                              "                    (site-create and site-update, repeatable): an application's own rules, which only\n"
-                             "                    make the site serve less; given together they replace the site's rules; --no-rules clears\n"
+                             "                    make the site serve less; each replaces its own part (the private paths, the entry\n"
+                             "                    points, the cached directories, the front controller) and keeps the site's other\n"
+                             "                    rules; --no-rules clears them all\n"
                              "        --restrict PATH=ADDR[,ADDR...], --restrict-exact PATH=ADDR[,...] (site-update, repeatable): only\n"
                              "                    those clients reach PATH and everything below it (or PATH alone); ADDR is an address,\n"
                              "                    a range (203.0.113.0/24, 2001:db8:5::/64), a set root named in [addresses] (@office),\n"
@@ -375,6 +377,8 @@ int main(int argc, char** argv) {
             agensio::json::Value auth_skip = agensio::json::Value::array();   // --auth-skip: every password rule of this command
             std::string auth_realm;                                           // --auth-realm: likewise
             bool auth_plain = false, auth_given = false;                      // --auth-plain-http; any auth flag or --no-auth: rules.auth replaced
+            bool app_rules_given = false;  // --private, --entry-point, --cache, --front-controller: each replaces its own part
+            bool no_rules = false;         // --no-rules: every rule of the site removed
             bool raw = false;
             agensio::json::Value body = agensio::json::Value::object();
             agensio::json::Value aliases = agensio::json::Value::array();
@@ -413,6 +417,7 @@ int main(int argc, char** argv) {
                 else if (b == "--files") body.set("files", true);
                 else if (b == "--private" || b == "--entry-point") {
                     std::string v; value(v);
+                    app_rules_given = true;
                     const char* key = b == "--private" ? "private" : "entry_points";
                     agensio::json::Value rules = body["rules"].is_object() ? body["rules"] : agensio::json::Value::object();
                     agensio::json::Value list = rules[key].is_array() ? rules[key] : agensio::json::Value::array();
@@ -421,6 +426,7 @@ int main(int argc, char** argv) {
                     body.set("rules", rules);
                 } else if (b == "--cache") {
                     std::string v; value(v);
+                    app_rules_given = true;
                     const std::size_t eq = v.find('=');
                     if (eq == std::string::npos || eq == 0) { std::cerr << "ctl: --cache needs PATH=SECONDS\n"; return 2; }
                     agensio::json::Value rules = body["rules"].is_object() ? body["rules"] : agensio::json::Value::object();
@@ -430,10 +436,14 @@ int main(int argc, char** argv) {
                     body.set("rules", rules);
                 } else if (b == "--front-controller") {
                     std::string v; value(v);
+                    app_rules_given = true;
                     agensio::json::Value rules = body["rules"].is_object() ? body["rules"] : agensio::json::Value::object();
                     rules.set("front_controller", v);
                     body.set("rules", rules);
-                } else if (b == "--no-rules") body.set("rules", agensio::json::Value::object());
+                } else if (b == "--no-rules") {
+                    no_rules = true;
+                    body.set("rules", agensio::json::Value::object());
+                }
                 else if (b == "--restrict" || b == "--restrict-exact") {
                     std::string v; value(v);
                     const std::size_t eq = v.find('=');
@@ -714,9 +724,11 @@ int main(int argc, char** argv) {
                 body.set("rules", rules);
                 refuse_given = false;
             }
-            // --restrict / --no-restrict (and the admin and refuse flags) change their one rule:
-            // the site's other rules (private paths, entry points, cache) are read and sent back
-            // with it, since the server takes the rules object whole.
+            // Every rule flag of site-update changes its own part of the rules (--restrict the address
+            // rules, --cache the cached directories, ...): the site's other parts are read and sent back
+            // with it, since the server takes the rules object whole. Before alpha.61 --private,
+            // --entry-point, --cache and --front-controller skipped this, so given alone they dropped
+            // the site's address rules, passwords and refused paths (the cookbook's finding).
             if (auth_given) {  // the realm, skip_for and plain_http of this command go on each of its password rules
                 bool any_closed = false;
                 agensio::json::Value built = agensio::json::Value::array();
@@ -736,7 +748,7 @@ int main(int argc, char** argv) {
                     return 2;
                 }
             }
-            if (restrict_given || admin_given || refuse_given || auth_given) {
+            if (restrict_given || admin_given || refuse_given || auth_given || (app_rules_given && command == "site-update")) {
                 if (command != "site-update" || site_name.empty()) {
                     std::cerr << "ctl: --restrict, --restrict-exact, --no-restrict, the --restrict-admin flags, the --auth flags and --refuse go with"
                                  " site-update NAME (--refuse with site-create too)\n";
@@ -759,11 +771,13 @@ int main(int argc, char** argv) {
                     return 1;
                 }
                 agensio::json::Value merged = agensio::json::Value::object();
-                for (const auto& m : site_json["rules"].members())
-                    if (!(restrict_given && m.first == "restricted") && !(admin_given && m.first == "admin") && !(refuse_given && m.first == "refuse") &&
-                        !(auth_given && m.first == "auth"))
-                        merged.set(m.first, m.second);
-                for (const auto& m : body["rules"].members()) merged.set(m.first, m.second);  // other rule flags of this command
+                const agensio::json::Value given = body["rules"].is_object() ? body["rules"] : agensio::json::Value::object();
+                if (!no_rules)  // --no-rules with another flag: that flag's part alone remains
+                    for (const auto& m : site_json["rules"].members())
+                        if (!(restrict_given && m.first == "restricted") && !(admin_given && m.first == "admin") &&
+                            !(refuse_given && m.first == "refuse") && !(auth_given && m.first == "auth") && given[m.first].is_null())
+                            merged.set(m.first, m.second);
+                for (const auto& m : given.members()) merged.set(m.first, m.second);  // the parts --private, --entry-point, --cache, --front-controller name
                 if (!restrict_rules.items().empty()) merged.set("restricted", restrict_rules);
                 if (!refuse_list.items().empty()) merged.set("refuse", refuse_list);
                 if (admin_given && !admin_rule.members().empty()) merged.set("admin", admin_rule);

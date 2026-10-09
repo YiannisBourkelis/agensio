@@ -343,6 +343,11 @@ mv "$T/auth/users.test.away" "$T/auth/users.test.users"; cp -p "$T/auth/users.te
 check "health: a users file no site owns: auth_users_orphan (a site created again under that name would inherit its users)" "yes" \
   "$(ctl health | grep -q '"code":"auth_users_orphan".*gone.test.users' && echo yes)"
 rm -f "${T:?}/auth/gone.test.users"
+# Another rule flag alone keeps the password rule (2026-10-09, the cookbook's finding: --cache alone
+# sent a rules object without auth, which the server replaces whole, and the site answered openly).
+ctl site-update users.test --cache /assets/=60 --yes --reason cache > "$T/out"
+check "a rule flag given alone (--cache) keeps the site's password rule: still in the file, the site still asks" "True yes 401" \
+  "$(jv 'd.get("ok")') $(grep -q 'site.auth' "$T/sites.d/users.test.toml" && echo yes || echo no) $(code $R $P/)"
 ctl site-update users.test --no-auth --yes --reason public > "$T/out"
 check "--no-auth: the rule is gone from the site file and the site answers without a password" "True no 200" \
   "$(jv 'd.get("ok")') $(grep -q 'site.auth' "$T/sites.d/users.test.toml" && echo yes || echo no) $(code $R $P/)"

@@ -393,16 +393,17 @@ agensio ctl site example.com                          # every location with the 
 
 **On a managed site.** `--hsts` puts HSTS on the `/` location as above; `--cache` makes a
 directory served from disk with `Cache-Control: public, max-age=N` (no `immutable`), where
-nothing runs. The rules go to the server as one object, so a site that has other rules
-(`agensio ctl site NAME` lists them) gets them in the same command:
+nothing runs. Each flag replaces its own part of the site's rules and keeps the others
+(passwords, address rules, refused paths; before 0.1.0-alpha.61 `--cache` alone dropped them):
 
 ```sh
 agensio ctl site-update example.com --hsts --cache /assets/=31536000 --yes --reason "long-lived assets, HSTS"
 ```
 
-**MCP:** `site_update` with `hsts` true and `rules` = `{"cache": [{"path": "/assets/", "max_age": 31536000}]}`
-(the whole rules object: read it with `site_show` first). A field no flag covers (`immutable`,
-another header on one path) goes into the site's root additions file, root's.
+**MCP:** `site_update` with `hsts` true and `rules` = the site's current rules from `site_show`
+with `"cache": [{"path": "/assets/", "max_age": 31536000}]` added: the tool replaces the whole
+rules object, so a part left out is removed. A field no flag covers (`immutable`, another header
+on one path) goes into the site's root additions file, root's.
 
 **Reference:** [Locations](../configuration.md#6-locations-the-reference),
 [Customising a preset](../configuration.md#5-customising-a-preset),

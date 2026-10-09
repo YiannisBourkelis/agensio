@@ -1721,7 +1721,10 @@ archive's own `.htaccess` files deny whole (`Require all denied`, `Deny from all
 `<Files>` blocks) as `facts.htaccess_denied` and suggests the matching `private` rule in
 its next steps; agensio never reads `.htaccess` when serving and never applies the rule
 on its own. On the command line: `--private PATH`, `--entry-point /x.php`, `--cache
-PATH=SECONDS` (repeatable), `--front-controller /x.php`, `--no-rules`.
+PATH=SECONDS` (repeatable), `--front-controller /x.php`, `--no-rules`. Each flag replaces its own
+part and `agensio ctl` sends the site's other rules back with it, so `--cache` alone keeps the
+address rules, passwords and refused paths (before 0.1.0-alpha.61 those four flags given alone
+dropped them); `--no-rules` clears every rule.
 
 **Access by client address** (`rules.restricted`, 2026-10-07, section 19): on any app, a list
 of `{"path": "/wp-admin", "allow": ["203.0.113.7", "@office"]}` with optional `"match":

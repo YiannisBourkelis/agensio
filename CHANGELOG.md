@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.0-alpha.61
+
+- **`agensio ctl site-update --cache` (or `--private`, `--entry-point`, `--front-controller`)
+  given alone removed the site's other rules.** The server takes a site's `rules` whole, and
+  `agensio ctl` read the current rules and sent them back only for `--restrict`, `--refuse`,
+  `--restrict-admin` and the `--auth` flags; the four application-rule flags sent their own part
+  alone, so adding a cached directory dropped the site's passwords, address rules, admin rule
+  and refused paths without a word. Every rule flag of `site-update` now replaces its own part
+  and keeps the rest; `--no-rules` still clears everything. The MCP tool was not affected (its
+  description has the agent send the current rules with the change). Found while writing the
+  cookbook; shown first by `tests/integration.sh` (`--cache` and `--private` after `--restrict`
+  and `--refuse`: the site was left with `private` alone, each flag dropping even the one before it; now `cache private refuse restricted`)
+  and `tests/auth.sh` (`--cache` after `--auth /`: the rule was gone and the site answered 200,
+  now it asks, 401).
+
 ## 0.1.0-alpha.60 (2026-10-09)
 
 **The configuration cookbook** (`docs/examples.md`): practical recipes for the jobs an
