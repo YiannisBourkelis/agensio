@@ -6270,6 +6270,104 @@ static void test_private_cache() {
     for (const char* f : {"Cache-Control", "-cache-control", "Expires", "Vary", "Content-Type", "X-Control"}) CHECK(!private_cache::shared_only_field(f));
 }
 
+// Exact rules and the script that runs (2026-10-09, the alpha.58 report, finding 1): an exact rule
+// on a script covers every path that runs that script, as the location serving the path splits it
+// (FastCGI at the first ".php/", the directory's index of a FastCGI location, CGI's longest leading
+// part that names a file), over every reading of the path; never a path agensio does not run as
+// that script (a proxied application, path_info off, a directory above a CGI script, /blog/post).
+static void test_exact_script_rules() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-script-" + std::to_string(::getpid()));
+    fs::remove_all(dir);
+    fs::create_directories(dir / "www" / "cgi-bin" / "tools");
+    fs::create_directories(dir / "www" / "legacy");
+    for (const char* f : {"www/info.php", "www/wp-login.php", "www/update.php", "www/cgi-bin/report", "www/cgi-bin/tools/run.cgi", "www/legacy/index.php"})
+        std::ofstream(dir / f) << "x\n";
+    const std::string rules = "[[site.access]]\npath = \"/info.php\"\nmatch = \"exact\"\nallow = [\"192.0.2.1\"]\n"
+                              "[[site.access]]\npath = \"/wp-login.php\"\nmatch = \"exact\"\nallow = [\"192.0.2.1\"]\n"
+                              "[[site.access]]\npath = \"/update.php\"\nmatch = \"exact\"\nallow = [\"192.0.2.1\"]\n"
+                              "[[site.access]]\npath = \"/cgi-bin/report\"\nmatch = \"exact\"\nallow = [\"192.0.2.1\"]\n"
+                              "[[site.access]]\npath = \"/cgi-bin/tools\"\nmatch = \"exact\"\nallow = [\"192.0.2.1\"]\n"
+                              "[[site.access]]\npath = \"/legacy/index.php\"\nmatch = \"exact\"\nallow = [\"192.0.2.1\"]\n"
+                              "[[site.access]]\npath = \"/app/x.php\"\nmatch = \"exact\"\nallow = [\"192.0.2.1\"]\n"
+                              "[[site.access]]\npath = \"/blog\"\nmatch = \"exact\"\nallow = [\"192.0.2.1\"]\n";
+    std::ofstream(dir / "a.toml") << "[[site]]\nserver_name = [\"s.test\"]\nlisten = [\"127.0.0.1:18600\"]\nroot = \"www\"\napp = \"php\"\n"
+                                     "php = { socket = \"unix:/run/none.sock\" }\n"
+                                     "[[site.location]]\npath = \"/cgi-bin/\"\nhandler = \"cgi\"\n"
+                                     "[[site.location]]\npath = \"/legacy/\"\nhandler = \"fastcgi\"\nindex = [\"index.php\"]\n"
+                                     "[[site.location]]\npath = \"/app/\"\nfinal = true\nupstream = \"http://127.0.0.1:9\"\n" + rules +
+                                     "[[site]]\nserver_name = [\"nopi.test\"]\nlisten = [\"127.0.0.1:18600\"]\nroot = \"www\"\napp = \"php\"\n"
+                                     "php = { socket = \"unix:/run/none.sock\" }\n"
+                                     "[[site.location]]\npath = \".php\"\nmatch = \"suffix\"\nhandler = \"fastcgi\"\nfastcgi = { path_info = false }\n" + rules;
+    const Config cfg = load_config(dir / "a.toml");
+    const SiteConfig& s = cfg.sites[0];
+    const SiteConfig& nopi = cfg.sites[1];
+    const asio::ip::address client = asio::ip::make_address("127.0.0.1");
+    std::string scratch;
+    auto refused = [&](const SiteConfig& site, std::string_view path) {
+        return access::decide(site, path, [&]() -> const asio::ip::address& { return client; }, scratch).refuse() ? "403" : "ok";
+    };
+    // Covered: the script itself, its path-info forms (FastCGI's split), the directory whose index a
+    // FastCGI location runs, an extensionless CGI script with path info, and through the other readings.
+    for (const char* p : {"/info.php", "/info.php/extra", "/info.php/", "/wp-login.php/x", "/wp-login.php/x.php", "/update.php/selection",
+                          "/legacy/", "/legacy/index.php/x", "/cgi-bin/report", "/cgi-bin/report/2026", "/info.php;x/extra", "/%69nfo.php/extra"}) {  // the last: the path after the first decoding of /%2569nfo.php/extra
+        const std::string got = refused(s, p);
+        if (got != "403") std::printf("exact script rule: %s -> %s\n", p, got.c_str());
+        CHECK(got == "403");
+    }
+    // Not covered: a proxied application's path, a directory above a CGI script, a route below an exact
+    // non-script rule, other names, a spelling the router does not run as PHP (its ".php" is
+    // case-sensitive: a static 404), and on a location with path_info off the split never happens.
+    for (const char* p : {"/app/x.php/y", "/cgi-bin/tools/run.cgi/x", "/blog/post", "/info.phpx", "/info.php.bak/x", "/INFO.PHP/extra", "/other.php"}) {
+        const std::string got = refused(s, p);
+        if (got != "ok") std::printf("exact script rule, should stay open: %s -> %s\n", p, got.c_str());
+        CHECK(got == "ok");
+    }
+    CHECK(std::string(refused(nopi, "/info.php")) == "403" && std::string(refused(nopi, "/info.php/extra")) == "ok");
+    // path_check says which script a path was judged as, and names the rule.
+    {
+        std::string err;
+        const json::Value v = control::path_check(cfg, s, "/wp-login.php/x", err);
+        CHECK(v.get("script") == "/wp-login.php" && v["access"].get("path") == "/wp-login.php");
+        const json::Value w = control::path_check(cfg, s, "/app/x.php/y", err);
+        CHECK(w["script"].is_null() && w["access"].is_null());
+    }
+    // -t, the error log and health say when an exact rule names a script on a proxied location.
+    {
+        bool noticed = false;
+        for (const auto& n : access_notices(cfg))
+            if (n.code == "exact_rule_proxied_script" && n.site == "s.test" && n.text.find("/app/x.php") != std::string::npos) noticed = true;
+        CHECK(noticed);
+        // A site previewed with its rules alone (site_update's notes) has no locations: no notice,
+        // and no Router::location on an empty list (the integration suite's abort, rules.admin
+        // with login: true).
+        Config view;
+        SiteConfig bare;
+        bare.server_names = {"bare.test"};
+        AccessRule r;
+        r.path = "/wp-login.php";
+        r.exact = true;
+        bare.access.push_back(r);
+        view.sites.push_back(bare);
+        CHECK(access_notices(view).empty() || access_notices(view).front().code != "exact_rule_proxied_script");
+    }
+#ifdef AGENSIO_HAS_AUTH
+    // The password rules decide the same way.
+    {
+        std::ofstream(dir / "users") << "anna:" << auth_hash("$2b$", 4, "x") << "\n";
+        fs::permissions(dir / "users", fs::perms(0640));
+        std::ofstream(dir / "b.toml") << "[[site]]\nserver_name = [\"p.test\"]\nlisten = [\"127.0.0.1:18601\"]\nroot = \"www\"\napp = \"php\"\n"
+                                         "php = { socket = \"unix:/run/none.sock\" }\n"
+                                         "[[site.auth]]\npath = \"/wp-login.php\"\nmatch = \"exact\"\nusers = \"users\"\n";
+        const Config pc = load_config(dir / "b.toml");
+        std::string sc;
+        CHECK(access::auth_protecting_rule(pc.sites[0], "/wp-login.php/x", sc) != nullptr && access::auth_protecting_rule(pc.sites[0], "/wp-login.php/", sc) != nullptr &&
+              access::auth_protecting_rule(pc.sites[0], "/wp-login.phpx/y", sc) == nullptr);
+    }
+#endif
+    fs::remove_all(dir);
+}
+
 static void test_access_rules() {
     namespace fs = std::filesystem;
     using namespace control;
@@ -7597,6 +7695,7 @@ int main() {
     test_forwarded_lines();
     test_address_forms();
     test_private_cache();
+    test_exact_script_rules();
     test_access_rules();
 #ifdef AGENSIO_HAS_AUTH
     test_auth_core();

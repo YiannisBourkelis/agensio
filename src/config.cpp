@@ -1221,7 +1221,7 @@ void parse_access(const toml::node_view<const toml::node>& n, const Config& cfg,
         r.path = *path;
         if (const auto m = (*t)["match"].value<std::string>()) {
             if (*m == "exact") r.exact = true;
-            else if (*m != "prefix") fail(w + ".match must be \"prefix\" (the path and everything below it) or \"exact\" (this path alone)");
+            else if (*m != "prefix") fail(w + ".match must be \"prefix\" (the path and everything below it) or \"exact\" (this path, and the script run with path info)");
         } else if (t->contains("match")) {
             fail(w + ".match must be a string");
         }
@@ -1360,7 +1360,7 @@ void parse_auth(const toml::node_view<const toml::node>& n, Config& cfg, SiteCon
         r.path = *path;
         if (const auto m = (*t)["match"].value<std::string>()) {
             if (*m == "exact") r.exact = true;
-            else if (*m != "prefix") fail(w + ".match must be \"prefix\" (the path and everything below it) or \"exact\" (this path alone)");
+            else if (*m != "prefix") fail(w + ".match must be \"prefix\" (the path and everything below it) or \"exact\" (this path, and the script run with path info)");
         } else if (t->contains("match")) {
             fail(w + ".match must be a string");
         }
@@ -2117,6 +2117,24 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
             if (v4 && !v6 && v6_listener)
                 out.push_back({"access_ipv4_only", "info", name, name + " " + rule + " allows IPv4 addresses only, and the site listens on IPv6 too: a client that arrives over IPv6 is refused; add its IPv6 range if it has one"});
         }
+        // An exact rule on a PHP script that a proxied location serves (2026-10-09, the alpha.58
+        // report's finding 1): agensio runs no script there, so the rule covers that path alone
+        // (access::script_of); the application behind the proxy may run /x.php/y as /x.php. A site
+        // previewed with its rules alone (control::access_notices_for) has no locations to ask.
+        auto proxied_script = [&](const std::string& path) {
+            return !site.locations.empty() && path.size() > 4 &&
+                   access::iequal_prefix(std::string_view(path).substr(path.size() - 4), ".php") &&
+                   Router::location(site, path).kind == HandlerKind::proxy;
+        };
+        auto proxied_notice = [&](const std::string& kind, const std::string& path) {
+            out.push_back({"exact_rule_proxied_script", "info", name,
+                           name + " exact " + kind + " rule " + path + " is on a proxied location: agensio runs no script there and judges " + path +
+                               " alone; if the application behind it runs " + path + "/... as the same script, a prefix rule covers both"});
+        };
+        for (const auto& r : site.access)
+            if (r.exact && !r.any && proxied_script(r.path)) proxied_notice("access", r.path);
+        for (const auto& r : site.auth)
+            if (r.exact && !r.open && proxied_script(r.path)) proxied_notice("password", r.path);
     }
     return out;
 }
@@ -2231,6 +2249,9 @@ void finalize_site(SiteConfig& site) {
         if (!r.exact && r.path == "/") site.auth_first.fill(~std::uint64_t{0});
         else access::mark_first(site.auth_first, access::first_byte(r.path));
     }
+    site.exact_rules = std::any_of(site.access.begin(), site.access.end(), [](const AccessRule& r) { return r.exact && !r.any; }) ||
+                       std::any_of(site.auth.begin(), site.auth.end(), [](const AuthRule& r) { return r.exact && !r.open; });
+    site.cgi_locations = std::any_of(site.locations.begin(), site.locations.end(), [](const LocationConfig& l) { return l.kind == HandlerKind::cgi; });
     // Exact matches first, then suffixes, then prefixes; within a kind the longest first.
     auto rank = [](const LocationConfig& l) { return l.exact ? 0 : l.suffix ? 1 : 2; };
     std::stable_sort(site.locations.begin(), site.locations.end(),

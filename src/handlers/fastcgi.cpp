@@ -1,5 +1,7 @@
 #include "handlers/fastcgi.hpp"
 
+#include "core/script_split.hpp"
+
 #include "handlers/upstream_common.hpp"
 
 #include <cstring>
@@ -134,14 +136,13 @@ void FcgiHandler::append_request_params(std::string& out, Stream& s, const SiteC
 std::shared_ptr<FcgiRequest> FcgiHandler::start(Stream& s, const SiteConfig& site, const LocationConfig& loc,
                                                 WorkerState& ws, FcgiPool& pool, std::function<void()> done) {
     // The script: the request path, plus the index for a directory URI, under root/alias.
-    // "/index.php/extra/path" is split into the script and PATH_INFO (nginx
-    // fastcgi_split_path_info ^(.+\.php)(/.+)$).
+    // "/index.php/extra/path" is split into the script and PATH_INFO (core/script_split.hpp, the
+    // same split the access and password rules judge the script by).
     std::string path_info;
     if (loc.fastcgi.options.path_info) {
-        const std::string_view marker = ".php/";
-        if (const std::size_t p = ws.path.find(marker); p != std::string::npos) {
-            path_info = ws.path.substr(p + marker.size() - 1);
-            ws.path.resize(p + marker.size() - 1);
+        if (const std::size_t end = script_split::php_end(ws.path); end != std::string_view::npos) {
+            path_info = ws.path.substr(end);
+            ws.path.resize(end);
         }
     }
     if (ws.path.back() == '/') ws.path.append(loc.index.empty() ? std::string("index.php") : loc.index.front());

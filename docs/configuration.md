@@ -2460,17 +2460,35 @@ allow = ["@office", "@vpn"]
 
 [[site.access]]
 path = "/wp-login.php"
-match = "exact"                  # this path alone
+match = "exact"                  # this path, and the script run as /wp-login.php/...
 allow = ["@office", "@vpn"]
 ```
 
 **What a rule covers.** A rule on a directory's index file holds at the directory too: `/`
 answering with `/index.html` is judged as a request for `/index.html` (alpha.55). A prefix rule covers its path and everything below it on a segment
 boundary, in any capitalisation (some filesystems and applications answer `/WP-ADMIN/` with
-`/wp-admin/`); `match = "exact"` covers the path alone; `path = "/"` covers the whole site. The
+`/wp-admin/`); `match = "exact"` covers the path and the requests that run it as a script
+(below); `path = "/"` covers the whole site. The
 longest rule that covers a path decides, and rules never merge: `allow = ["any"]` on a longer
 path reopens it below a restricted one. Every rule is an allow list, so nothing is open by
 omission, and an empty list is an error rather than "everyone" or "no one".
+
+**Exact rules and scripts run with path info.** An exact rule covers its path and every request
+agensio runs as that same script. A PHP location with `path_info` (the default) runs
+`/wp-login.php/x` as `/wp-login.php` with `PATH_INFO = /x`, and a CGI location runs
+`/cgi-bin/report/2026` as `/cgi-bin/report` when `report` is the file, so an exact rule on the
+script holds for those requests too; one on a directory's index served by PHP
+(`/legacy/index.php`) holds for `/legacy/`. Nothing else widens it: `/info.phpx`,
+`/info.php.bak/x`, `/info.html/x` and a PHP location with `path_info = false` run no such script,
+and the rule leaves them alone. The split is the one the PHP and CGI handlers use themselves
+(`core/script_split.hpp`), so the rules and the handlers cannot disagree on which script runs.
+`path_check` names the script a path runs (`script`). In front of a proxied application agensio
+runs nothing and an exact rule judges its path alone; only the application knows whether it runs
+`/x.php/y` as `/x.php`, so `-t`, the error log and health note an exact rule on a `.php` path
+there (`exact_rule_proxied_script`), and a prefix rule covers both forms. This is stricter than
+nginx's `location =`, Caddy's exact `path` and HAProxy's `path`, which cover the path alone, the
+forms WordPress's hardening page gives for `wp-login.php`. Before 0.1.0-alpha.59 an exact rule
+here covered the path alone too, and `/wp-login.php/x` reached the login page past it.
 
 **Why it is not a location key.** The rules are checked on the normalised path after the site
 is found and before any location is chosen, so whichever location would serve the request (a
@@ -2577,7 +2595,7 @@ upgrade, check with `agensio -t --explain` that the rules are listed.
 
 A password in front of a path: a staging site, an admin area, a tool without a login of its
 own. The rules sit beside the access rules and are matched the same way, before any location
-is chosen.
+is chosen; an exact rule on a script covers it run with path info too (section 19).
 
 ```toml
 [addresses]

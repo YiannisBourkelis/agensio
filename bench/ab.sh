@@ -16,8 +16,10 @@
 #             127.0.0.1:8093. Run it for every change under src/upstream/http*, src/handlers/proxy*.
 #             A base that cannot load the proxy site (pre-D1) runs the static rows only.
 #   -A        access gate (docs/configuration.md 19): two more sites with [[site.access]] rules and
-#             their rows: "access:/:64" (127.0.0.1:8094, a site with a rule on /wp-admin, benchmarked
-#             on /: a public page of a site with rules, one bit test) and "access-all:/:64"
+#             their rows: "access:/:64" (127.0.0.1:8094, a site with a rule on /wp-admin and an exact
+#             one on /wp-login.php, benchmarked on /: a public page of a site with rules, one bit test,
+#             and, since alpha.59, the router asked which script a directory runs, the cost an exact
+#             rule adds, access::script_of) and "access-all:/:64"
 #             (127.0.0.1:8095, the whole site restricted by 64 entries with 127.0.0.1 last: the most
 #             an admitted request pays). A base without the feature ignores the rules and serves the
 #             same files, so new/base is the check's cost. Run it for every change to core/access.hpp
@@ -117,6 +119,11 @@ root = "$BENCH/www"
 
 [[site.access]]
 path = "/wp-admin"
+allow = ["10.0.0.0/8"]
+
+[[site.access]]
+path = "/wp-login.php"
+match = "exact"
 allow = ["10.0.0.0/8"]
 
 [[site]]

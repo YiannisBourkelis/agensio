@@ -267,7 +267,7 @@ section of `docs/configuration.md` that explains the key.
 | key | type | default | meaning | applies | via | doc |
 |---|---|---|---|---|---|---|
 | `path` | string | (required) | The path a password covers, matched like an access rule: a prefix covers it and everything below it on a segment boundary, in any capitalisation; "/" is the whole site. Checked before the locations, after refuse and the access rules, on every internal redirect and on a directory's index, so no location (a .php file, a proxy) steps around it. The longest rule decides. | reload | site file | 19b |
-| `match` | enum: prefix \| exact | prefix | exact: this path alone. | reload | site file | 19b |
+| `match` | enum: prefix \| exact | prefix | exact: this path, and the requests agensio runs as that script (PHP or CGI with path info: /wp-login.php/x runs /wp-login.php). | reload | site file | 19b |
 | `users` | path | (required unless open) | The user file: name:hash lines (htpasswd -B or mkpasswd -m yescrypt), with optional :expires=YYYY-MM-DD (refused from that day, UTC) and :note=text (whose login it is). yescrypt, bcrypt, sha512crypt, sha256crypt and scrypt hashes; MD5 (apr1), {SHA}, {PLAIN} and DES are refused at load with the command to use instead. Root's (the owner of the main configuration), not writable by group or others, not readable by others (640), read at load and reload. | reload | site file | 19b |
 | `realm` | string | the site's first name | The realm of the challenge (WWW-Authenticate: Basic realm="...", charset="UTF-8"); a browser keeps one login per realm. 1 to 64 characters, no quote or backslash. | reload | site file | 19b |
 | `skip_for` | list | (none) | Clients that get in without a password: addresses, ranges or @sets from [addresses] (nginx satisfy any). Everyone else is asked. | reload | site file | 19b |
@@ -280,7 +280,7 @@ section of `docs/configuration.md` that explains the key.
 | key | type | default | meaning | applies | via | doc |
 |---|---|---|---|---|---|---|
 | `path` | string | (required) | The path the rule covers: a prefix covers it and everything below it on a segment boundary (/wp-admin: /wp-admin and /wp-admin/x, never /wp-administrator), in any capitalisation; "/" is the whole site. Checked before the locations, so whichever one would serve the path (a .php file, a proxy) is covered. | reload | site file, site-create (rules.restricted) | 19 |
-| `match` | enum: prefix \| exact | prefix | exact: this path alone. | reload | site file, site-create (rules.restricted) | 19 |
+| `match` | enum: prefix \| exact | prefix | exact: this path, and the requests agensio runs as that script (PHP or CGI with path info: /wp-login.php/x runs /wp-login.php). | reload | site file, site-create (rules.restricted) | 19 |
 | `allow` | list | (required) | Who reaches the path: addresses (203.0.113.7), ranges (203.0.113.0/24, 2001:db8:5::/64), sets from [addresses] (@office), or ["any"] to reopen a path below a restricted one. Everyone else gets 403 naming the address the server saw (behind trusted_proxies, the forwarded client). The longest rule covering a path decides; at most 32 rules of 64 addresses. | reload | site file, site-create (rules.restricted) | 19 |
 | `mode` | enum: enforce \| report | enforce | report: everyone is served and the error log names who would have been refused, to try a rule before it locks anyone out. | reload | site file, site-create (rules.restricted) | 19 |
 ## `cgi = {}`

@@ -627,11 +627,25 @@ json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_vi
                                               (other ? ", for the way an application may read it (a ;parameter, a second decoding or the path after a script)" : ""));
         }
         if (!site.refuse.empty()) steps.push(path + ": no refuse pattern matches");
-        if (const AccessRule* r = access::rule_for(site, path); r && !r->any && v["access"].is_null())
-            v.set("access", access_rule_json(*r, access_rule_from(*r, is_managed ? &managed : nullptr)))
+        // The script the path runs, which an exact rule judges too (access::script_of, the alpha.58
+        // report's finding 1): named, and a rule that covers it shown as the path's.
+        std::string script;
+        const bool scripted = access::script_of(site, path, script);
+        if (scripted && v["script"].is_null()) {
+            v.set("script", script);
+            steps.push(path + ": runs the script " + script + ", which the access and password rules judge too");
+        }
+        const AccessRule* ar = access::rule_for(site, path);
+        if ((!ar || ar->any) && scripted)
+            if (const AccessRule* sr = access::rule_for(site, script); sr && !sr->any) ar = sr;
+        if (ar && !ar->any && v["access"].is_null())
+            v.set("access", access_rule_json(*ar, access_rule_from(*ar, is_managed ? &managed : nullptr)))
                 .set("access_note", "an access rule covers " + path + ": clients outside it get 403 (access_check decides it for an address)");
         // Passwords (2026-10-09), checked after the access rules as the dispatcher does.
-        if (const AuthRule* r = access::auth_rule_for(site, path); r && v["auth"].is_null()) {
+        const AuthRule* pr = access::auth_rule_for(site, path);
+        if ((!pr || pr->open) && scripted)
+            if (const AuthRule* sr = access::auth_rule_for(site, script); sr && !sr->open) pr = sr;
+        if (const AuthRule* r = pr; r && v["auth"].is_null()) {
             v.set("auth", auth_rule_json(*r, auth_rule_from(*r, is_managed ? &managed : nullptr), std::time(nullptr)));
             v.set("auth_note", r->open ? path + " is open: the rule " + r->path + " frees it below a password rule, so nobody is asked"
                                        : "a password rule covers " + path + ": a request without the password of one of its users gets 401 (realm \"" + r->realm +
@@ -1253,6 +1267,7 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
         else if (n.code == "access_ipv4_only") fix = "add the client's IPv6 range (its /64) to the rule or to its address set, if it has one";
         else if (n.code == "access_single_ipv6") fix = "allow the /64 the address belongs to";
         else if (n.code == "access_site_restricted") fix = "meant for a staging copy or an internal site; site_update with the rule on / removed when it goes public";
+        else if (n.code == "exact_rule_proxied_script") fix = "if the application runs the script's path-info forms (/x.php/anything), make the rule a prefix rule (match = \"prefix\"); otherwise nothing to do";
         add(n.severity == "warning" ? "warn" : "info", n.code, n.site, n.text, fix);
     }
     for (auto& f : auth_findings(running, now)) out.push_back(std::move(f));

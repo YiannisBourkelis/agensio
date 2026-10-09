@@ -137,7 +137,7 @@ struct PhpPool {
 // covering a path decides; every rule is an allow list, so nothing is open by omission.
 struct AccessRule {
     std::string path;     // a prefix covers whole segments ("/admin": /admin, /admin/x, never /administrator); "/" covers the site
-    bool exact = false;   // match = "exact": this path alone
+    bool exact = false;   // match = "exact": this path, and the script it names run with path info (access::script_of)
     bool any = false;     // allow = ["any"]: everyone (reopens a subtree of a restricted path)
     bool report = false;  // mode = "report": log who would be refused, refuse nobody
     std::vector<Cidr> allow;              // the entries with named sets expanded
@@ -272,6 +272,11 @@ struct SiteConfig {
     // [[site.auth]], longest path first, with the same first-byte bitmap as `access`.
     std::vector<AuthRule> auth;
     std::array<std::uint64_t, 4> auth_first{};
+    // An exact access or password rule (2026-10-09, the alpha.58 report, finding 1): a path that
+    // runs a script is judged as that script too (access::script_of); and a CGI location, where
+    // any path may run one. Without the first, a request pays nothing for it.
+    bool exact_rules = false;
+    bool cgi_locations = false;
 };
 
 // [log]
@@ -467,7 +472,8 @@ std::string access_entry(std::string_view text, const Config& cfg, std::vector<C
 // an entry that holds a trusted proxy, a loopback entry with no local proxy trusted, an IPv4-only
 // list on a site reachable over IPv6, a single IPv6 address, a whole site restricted.
 struct AccessNotice {
-    std::string code;      // access_allows_proxy, access_loopback, access_ipv4_only, access_single_ipv6, access_site_restricted
+    std::string code;      // access_allows_proxy, access_loopback, access_ipv4_only, access_single_ipv6, access_site_restricted,
+                           // exact_rule_proxied_script
     std::string severity;  // "warning" or "info"
     std::string site, text;
 };

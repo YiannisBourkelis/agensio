@@ -554,7 +554,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   proxy) steps around a rule; prefix rules cover whole segments in any capitalisation, the
   longest rule decides, `"any"` reopens a subtree, the other readings of a path (a `;` segment
   parameter, a second decoding, the path after a script) are judged when the path holds those
-  characters. Allow lists only; 403 with `Cache-Control: no-store` naming the address tested; one
+  characters; an exact rule also covers the script a request runs with path info (`access::script_of`,
+  the split shared with the handlers in `core/script_split.hpp`, gated by `SiteConfig::exact_rules`;
+  alpha.59, the alpha.58 report), never a proxied path. Allow lists only; 403 with `Cache-Control: no-store` naming the address tested; one
   `warn` line a second per worker, held refusals counted and written by the flush tick
   (`WorkerState::access_log`, `Dispatcher::access_log_tick`); `mode = "report"` names each rule
   and client once a minute with a limiter of its own. The address:

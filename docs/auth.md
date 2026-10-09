@@ -66,7 +66,7 @@ agensio ctl site-update staging.example.com --auth / --auth-realm Staging --yes 
 | key | type | default | meaning |
 |---|---|---|---|
 | `path` | string | required | the protected path; a prefix covers whole segments (`/private` covers `/private` and `/private/x`, never `/privately`), in any capitalisation; `/` is the whole site |
-| `match` | `"prefix"` or `"exact"` | `"prefix"` | `exact`: this path alone |
+| `match` | `"prefix"` or `"exact"` | `"prefix"` | `exact`: this path, and the requests agensio runs as that script (section 5.1) |
 | `users` | path | required, unless `open` | the users file (section 4); relative to the file the rule is in |
 | `realm` | string, 1 to 64 characters, no `"`, `\` or control | the site's first name, or `"agensio"` | the name the browser's dialog shows; also separates the browser's remembered passwords |
 | `open` | boolean | false | no password on this path below a protected one (a health check, a webhook); takes no `users` |
@@ -132,6 +132,18 @@ front controller) and a directory's index file is checked again, so `/private/` 
 `/private/index.php`, a fallback to `/index.php`, or a `.php` location cannot step around a
 rule (nginx's per-location `auth_basic` does not hold for a regex `.php` location; agensio's
 rules are not attached to locations at all). Every method is covered, OPTIONS and TRACE too.
+
+An exact rule covers its path and every request agensio runs as that same script: a PHP
+location with path info runs `/wp-login.php/x` as `/wp-login.php`, a CGI location runs
+`/cgi-bin/report/2026` as `/cgi-bin/report` when `report` is the file, and PHP serving
+`/legacy/` runs `/legacy/index.php`; an exact rule on the script asks for the password on each
+of them. The split is the PHP and CGI handlers' own (`core/script_split.hpp`), so nothing else
+widens the rule: `/wp-login.phpx/y`, a static `/info.html/x` or a location with
+`path_info = false` are not that script. On a proxied location agensio runs no script and an
+exact rule covers its path alone; `-t` and health say so for a `.php` path there
+(`exact_rule_proxied_script`), and a prefix rule covers both forms. Before 0.1.0-alpha.59 an
+exact rule covered the path alone, and `/wp-login.php/x` reached the login page without a
+password (the alpha.58 report).
 
 ### 5.2 Inside a protected path
 
@@ -324,6 +336,10 @@ server.
 | the ACME challenge (`tls = "auto"`) | answered before any rule, so certificates renew on a protected site |
 | `/private` protected, request for `/PRIVATE/x`, `/private/./x`, `//private/x`, `/%70rivate/x` | all asked: the path is normalised and matched in any capitalisation |
 | `/private` protected, request for `/privately` | not covered: a prefix covers whole segments |
+| exact `/wp-login.php`, request for `/wp-login.php/x` or `/wp-login.php/` | asked: PHP runs `/wp-login.php` with path info, so the rule covers it (section 5.1) |
+| exact `/cgi-bin/report` on a CGI location, request for `/cgi-bin/report/2026` | asked: the CGI handler runs `report` with `PATH_INFO = /2026` |
+| exact `/info.php`, request for `/info.phpx/y` or `/info.php.bak/x` | not covered: no such script runs |
+| exact `/x.php` on a proxied location, request for `/x.php/y` | not covered: agensio runs nothing there and cannot know what the application does; `-t` and health note it (`exact_rule_proxied_script`); use a prefix rule |
 | `/private/` whose index file lives under another rule | the index is routed as its own request and decided by its own rule |
 | a `.php` location or a `try_files` fallback to `/index.php` | checked on every hop, so a fallback cannot step from an open path into a protected one |
 | HEAD, OPTIONS, TRACE, POST | all asked; the rules come before the method policy |
@@ -457,6 +473,7 @@ section 2c has the rest; `protection_show` renders the jail for the host.
 | `auth_users_expired` | info | users past their `expires` | delete those who are gone, or give a later date |
 | `auth_plain_http` | warn | a rule with `plain_http` on a listener the network reaches | serve over https and drop `plain_http`, unless the network is trusted |
 | `auth_users_orphan` | info | a users file under `<config dir>/auth/` no site owns | delete it as root, unless the site comes back |
+| `exact_rule_proxied_script` | info | an exact rule on a `.php` path that a proxied location serves: agensio runs no script there and judges the path alone | if the application runs `/x.php/anything` as the same script, make the rule a prefix rule |
 | `fail2ban_auth_challenges` | warn | the installed `agensio-auth` filter is an older build's that counts every `401` | install the filters again and render the jail |
 | `fail2ban_auth_unseen` | warn | a site has a password and nothing counts its failed logins | the fix names the log setting or the jail to install |
 
@@ -466,7 +483,8 @@ section 2c has the rest; `protection_show` renders the jail for the host.
 |---|---|
 | users file parser, `Authorization` parser, verification, cache key, cache, pool | `src/core/auth.*` |
 | `[[site.auth]]` parsing, the users file's checks, the WordPress openings, `--explain`, `auth_users_problem` | `src/config.cpp` (`parse_auth`, `load_auth_users`, `finalize_site`) |
-| the rule matcher | `src/core/access.hpp` (`auth_rule_for`) |
+| the rule matcher | `src/core/access.hpp` (`auth_rule_for`, `auth_protecting_rule`; `script_of`: the script a path runs, judged too) |
+| the script and path info split, one copy for the handlers and the rules | `src/core/script_split.hpp` |
 | the request path: the check, the challenge, the pool hand-off, the failure lines | `src/handlers/dispatch.cpp` (`check_auth`, `start_auth`, `auth_challenge`, `auth_failed_line`) |
 | waiting for a verification | `src/http1/connection.hpp`, `src/http2/connection.hpp`, `src/http3/connection.hpp` (`HandlerKind::auth`) |
 | `REMOTE_USER`, `forward_user`, the index rule | `src/handlers/fastcgi.cpp`, `proxy.cpp`, `static.cpp` |
@@ -476,4 +494,4 @@ section 2c has the rest; `protection_show` renders the jail for the host.
 | `rules.auth` | `src/control/sites.cpp` (`check_rules`, `render_site`) |
 | `site_show`, `path_check`, health | `src/control/commands.cpp` (`auth_rule_json`, `path_check`, `auth_findings`) |
 | fail2ban | `src/control/protection.cpp` (`kFilterAuth`, the `agensio-auth` jail), `packaging/fail2ban/` |
-| tests | unit `test_auth_core`, `test_auth_config`, `test_auth_users`, `test_auth_managed`, `test_protection`; `tests/auth.sh`, `tests/provision.sh`, `tests/control.sh`, `tests/trash.sh`, `tests/protection.sh` |
+| tests | unit `test_auth_core`, `test_auth_config`, `test_exact_script_rules`, `test_auth_users`, `test_auth_managed`, `test_protection`; `tests/auth.sh`, `tests/provision.sh`, `tests/control.sh`, `tests/trash.sh`, `tests/protection.sh` |

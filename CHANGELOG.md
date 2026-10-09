@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.1.0-alpha.59
+
+From the alpha.58 report:
+
+- **An exact rule missed its script run with path info.** `match = "exact"` on `[[site.access]]`
+  and `[[site.auth]]` (and the exact rules `rules.restricted`, `rules.auth` and `rules.admin`
+  write, such as WordPress's `/wp-login.php` with `login: true`) compared the request path alone,
+  but PHP runs `/wp-login.php/x` as `/wp-login.php` with `PATH_INFO = /x`, Drupal's
+  `/update.php/selection` as `/update.php`, and a CGI location `/cgi-bin/report/2026` as `report`:
+  the login page or the script answered past the rule. An exact rule now covers its path and
+  every request agensio runs as that same script, and nothing else: the script is taken from
+  the split the FastCGI and CGI handlers use themselves, now one copy in
+  `core/script_split.hpp`, so the rules and the handlers cannot disagree (Caddy's CVE-2026-27590
+  and CVE-2026-45135 came from two splits), and `/info.phpx`, `/info.php.bak/x`, a static path
+  or a location with `path_info = false` stay outside the rule. In front of a proxied application
+  agensio runs no script, so an exact rule there judges its path alone, and `-t`, the error log
+  and health say so for a `.php` path (`exact_rule_proxied_script`, info: a prefix rule covers
+  both forms). `path_check` names the script a path runs (`script`). nginx's `location =`,
+  Caddy's exact `path` and HAProxy's `path` cover the path alone, the forms WordPress's own
+  hardening page gives; the research is in `research_notes/Exact rules and path info/`. A site
+  without exact rules pays a flag test (`SiteConfig::exact_rules`), and one with them no
+  allocation: `bench/ab.sh 75fec4e -A -r 3` (`ab-20261009-144743.md`, the `access` row's site now
+  with an exact rule, so its `/` asks the router which script a directory runs) 1.012 on
+  `access`, 1.000 `access-all`, 0.994 `refuse`, 1.012 `auth`, the static rows 0.96 to 1.03,
+  against 1.011 / 1.019 / 1.030 / 1.020 for the same code compared with itself
+  (`ab-20261009-142357.md`). Shown first by `tests/auth.sh`
+  (exact rules on CGI scripts: `/run/cache.cgi/extra` and `/run/report/2026` answered 200 on
+  alpha.58, 401 now) and `tests/integration.sh` (exact access rules on PHP scripts: the path-info
+  forms and the directory answered 201 and 200, 403 now).
+
 ## 0.1.0-alpha.58 (2026-10-09)
 
 From the alpha.57 report:

@@ -33,6 +33,9 @@ IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 mkdir -p "$T/cgi"
 printf '#!/bin/sh\nprintf "Content-Type: text/plain\\r\\nCache-Control: public, max-age=3600, s-maxage=600\\r\\nCDN-Cache-Control: max-age=600\\r\\n\\r\\ncgi\\n"\n' > "$T/cgi/cache.cgi"
 chmod 755 "$T/cgi/cache.cgi"
+mkdir -p "$T/cgi/tools"
+printf '#!/bin/sh\nprintf "Content-Type: text/plain\\r\\n\\r\\nreport %%s\\n" "$PATH_INFO"\n' > "$T/cgi/report"
+cp "$T/cgi/report" "$T/cgi/tools/run.cgi"; chmod 755 "$T/cgi/report" "$T/cgi/tools/run.cgi"
 cat > "$T/app.py" <<'PYAPP'
 import http.server, sys
 class H(http.server.BaseHTTPRequestHandler):
@@ -105,6 +108,29 @@ upstream = "http://127.0.0.1:18139"
 path = "/private/cgi/"
 alias = "$T/cgi"
 handler = "cgi"
+
+# Exact rules on CGI scripts (the alpha.58 report, finding 1): the CGI handler runs the longest
+# leading part of the path that names a file, so an exact rule covers that script with path info,
+# extension or not; a directory above a script is never the script.
+[[site.location]]
+path = "/run/"
+alias = "$T/cgi"
+handler = "cgi"
+
+[[site.auth]]
+path = "/run/cache.cgi"
+match = "exact"
+users = "$T/users"
+
+[[site.auth]]
+path = "/run/report"
+match = "exact"
+users = "$T/users"
+
+[[site.auth]]
+path = "/run/tools"
+match = "exact"
+users = "$T/users"
 
 [[site]]
 server_name = ["*"]
@@ -190,6 +216,11 @@ check "no-store is kept; an answer with no Cache-Control gets private; private=\
   "$(cc -u anna:secret $B/private/app/nostore)|$(cc -u anna:secret $B/private/app/plain)|$(cc -u anna:secret $B/private/app/quoted)"
 check "an unprotected path keeps what the application sent, the targeted fields too" "public, max-age=3600 3" \
   "$(cc $B/app/public) $(targeted $B/app/public)"
+
+# Exact rules and the script that runs (the alpha.58 report, finding 1).
+check "an exact rule on a CGI script covers it run with path info, with or without an extension; an exact rule on a directory above a script does not cover that script" \
+  "401 401 401 401 200" \
+  "$(for u in /run/cache.cgi /run/cache.cgi/extra /run/report /run/report/2026 /run/tools/run.cgi/x; do code $B$u; printf ' '; done | sed 's/ $//')"
 
 # A slow verification runs off the worker's loop.
 ( curl -sS -o /dev/null -u slow:slow $B/private/doc.html & )

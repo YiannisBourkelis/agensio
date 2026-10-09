@@ -137,7 +137,11 @@ import os
 text = open(path).read().replace("default = true\n", block, 1)
 # The TLS site gets the same php upstream and a /php/ location (HTTPS=on check).
 tls_line = [l for l in text.splitlines() if l.startswith("tls = ")][0]
-text = text.replace(tls_line + "\n", tls_line + f'\nphp = {{ socket = "unix:{root}/bench/tmp/php/fpm.sock" }}\n\n[[site.location]]\npath = "/php/"\nalias = "{root}/tests/php"\nindex = ["index.php"]\nhandler = "fastcgi"\n', 1)
+text = text.replace(tls_line + "\n", tls_line + f'\nphp = {{ socket = "unix:{root}/bench/tmp/php/fpm.sock" }}\n\n[[site.location]]\npath = "/php/"\nalias = "{root}/tests/php"\nindex = ["index.php"]\nhandler = "fastcgi"\n'
+                    # exact rules on two scripts (the alpha.58 report, finding 1): they cover the same
+                    # script reached with path info and as a directory's index, never another script
+                    '\n[[site.access]]\npath = "/php/headers.php"\nmatch = "exact"\nallow = ["192.0.2.1"]\n'
+                    '\n[[site.access]]\npath = "/php/index.php"\nmatch = "exact"\nallow = ["192.0.2.1"]\n', 1)
 text = text.replace("[log]\n", f'[log]\nerror = "{root}/bench/tmp/error.log"\n', 1)
 # A Laravel-shaped project through the preset, on its own port.
 text += f"""
@@ -636,6 +640,13 @@ check "php: HTTP_ header passed" "yes" "$(echo "$P" | grep -q '"HTTP_X_TEST":"ye
 check "php: SERVER_NAME from the site" "yes" "$(echo "$P" | grep -q '"SERVER_NAME":"localhost"' && echo yes)"
 check "php: no HTTPS on plain" "yes" "$(echo "$P" | grep -qv '"HTTPS"' && echo yes)"
 check "php: HTTPS=on over TLS" "yes" "$(curl -sSk https://127.0.0.1:8443/php/params.php | grep -q '"HTTPS":"on"' && echo yes)"
+# An exact rule covers the script that runs (the alpha.58 report, finding 1): /php/headers.php with
+# path info runs headers.php, and /php/ runs the location's index, /php/index.php; until alpha.59 the
+# rule judged only the literal path, so both ran for any client. Another script with path info still
+# runs, with its PATH_INFO.
+check "exact rule on a PHP script: the script, its path-info forms and the directory whose index it is are refused; another script with path info runs" \
+  "403 403 403 403 200 /extra" \
+  "$(for u in /php/headers.php /php/headers.php/extra /php/headers.php/ /php/; do curl -sSk -o /dev/null -w '%{http_code} ' https://127.0.0.1:8443$u; done)$(curl -sSk -o bench/tmp/pi.json -w '%{http_code}' https://127.0.0.1:8443/php/params.php/extra) $(python3 -c 'import json; print(json.load(open("bench/tmp/pi.json")).get("PATH_INFO"))')"
 check "php: OPTIONS reaches the application" "yes" "$(curl -sS -X OPTIONS http://127.0.0.1:8080/php/params.php | grep -q '"REQUEST_METHOD":"OPTIONS"' && echo yes)"
 check "php: TRACE still 405" "405" "$(code -X TRACE http://127.0.0.1:8080/php/params.php)"
 check "php: POST form body" "7 $(printf 'a=1&b=2' | md5sum | cut -d' ' -f1) a=1&b=2" "$(curl -sS -d 'a=1&b=2' http://127.0.0.1:8080/php/post.php)"

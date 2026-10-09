@@ -23,15 +23,7 @@ const asio::ip::address& client_ip(ConnectionInfo& c) {
 // [[site.auth]]: the rule that asks for a password on some reading of the path, or null. An open
 // rule decides its path only when no other reading falls under a rule that asks: the stricter wins.
 const AuthRule* protecting_rule(const SiteConfig& site, std::string_view path, std::string& scratch) {
-    const AuthRule* found = nullptr;
-    auto judge = [&](std::string_view p) {
-        if (found) return;
-        const AuthRule* r = access::auth_rule_for(site, p);
-        if (r && !r->open) found = r;
-    };
-    judge(path);
-    if (!found) access::other_readings(path, scratch, judge);
-    return found;
+    return access::auth_protecting_rule(site, path, scratch);  // shared with path_check and the tests
 }
 
 // The location route() returns while a password is being verified: never configured, never served.

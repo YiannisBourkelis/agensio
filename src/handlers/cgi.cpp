@@ -1,5 +1,6 @@
 #include "handlers/cgi.hpp"
 
+#include "core/script_split.hpp"
 #include "file.hpp"
 #include "handlers/fastcgi.hpp"
 #include "handlers/static.hpp"
@@ -26,22 +27,19 @@ struct CgiHandler::Exchange : std::enable_shared_from_this<Exchange> {
 namespace {
 
 // The script is the longest leading part of the path that names a regular file under the
-// location (Apache's rule); the rest is PATH_INFO. A directory URI takes the index.
+// location (Apache's rule, core/script_split.hpp, which the rules judge the script by too); the
+// rest is PATH_INFO. A directory URI takes the index.
 bool resolve_script(const LocationConfig& loc, WorkerState& ws, std::string& path_info) {
     if (ws.path.back() == '/') ws.path.append(loc.index.empty() ? std::string("index.cgi") : loc.index.front());
-    const std::string full = ws.path;
-    for (std::size_t cut = full.size();;) {
-        ws.path.assign(full, 0, cut);
-        fs_path_of(loc, ws);
+    const std::size_t cut = script_split::cgi_end(loc, ws.path, ws.fs_path, [](const std::string& f) {
         FileInfo fi;
-        if (stat_path(ws.fs_path.c_str(), fi) && fi.is_regular) {
-            path_info.assign(full, cut, std::string::npos);
-            return true;
-        }
-        const std::size_t slash = full.rfind('/', cut - 1);
-        if (slash == std::string::npos || slash == 0) return false;
-        cut = slash;
-    }
+        return stat_path(f.c_str(), fi) && fi.is_regular;
+    });
+    if (cut == 0) return false;
+    path_info.assign(ws.path, cut, std::string::npos);
+    ws.path.resize(cut);
+    fs_path_of(loc, ws);
+    return true;
 }
 
 }  // namespace
