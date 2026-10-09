@@ -299,8 +299,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   passive health per worker in `UpstreamPool` (`pick`, `mark_failure`, `mark_success`),
   next-member retry only when nothing binding was sent (`try_next_address`). TLS to the
   origin (D4b): `BasicTlsStream<Socket>` in client mode inside `UpstreamConnection`,
-  contexts cached per pool, `https://` in the pool key, `proxy.tls = { verify,
-  server_name, ca }`. CGI (D5, `src/upstream/cgi_client.*`, `src/handlers/cgi.*`): the
+  contexts cached per pool, `https://` and the location's TLS policy in the pool key
+  (`UpstreamAddress::pool`, set in `finalize_site`), `proxy.tls = { verify,
+  server_name, ca }`; without `server_name` the certificate must name the upstream's address
+  (`X509_VERIFY_PARAM_set1_ip_asc`, alpha.61). CGI (D5, `src/upstream/cgi_client.*`, `src/handlers/cgi.*`): the
   exchange's connect step forks the script with a socketpair as stdin/stdout, so the
   shared exchange code does the rest; processes capped and reaped per worker pool.
 - **Presets** (C3): `app = "laravel" | "drupal" | "wordpress" | "grav" | "php" | "static"` (and the

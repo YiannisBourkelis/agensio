@@ -19,7 +19,20 @@ struct UpstreamAddress {
     std::string path;  // unix socket path
     std::string host;  // IPv4/IPv6 literal
     std::uint16_t port = 0;
-    std::string key;   // "unix:/path" or "host:port", the pool key
+    std::string key;   // "unix:/path", "host:port" or "https://host:port": logs, health, the pool key
+    // An https origin's pool key with the location's TLS policy (verify, ca, server_name), set
+    // once at load (finalize_site): a connection verified under one policy is never lent to a
+    // location with another (2026-10-09, the cookbook's finding: a verify = false location's
+    // kept connection served a location that verifies). Empty: the key is the pool key.
+    std::string pool;
+    const std::string& pool_key() const noexcept { return pool.empty() ? key : pool; }
+    // "host:port" without a scheme: the Host field for proxy.host = "upstream" and what an
+    // origin's absolute redirect is matched against.
+    std::string_view authority() const noexcept {
+        std::string_view k = key;
+        if (tls && k.starts_with("https://")) k.remove_prefix(8);
+        return k;
+    }
 };
 
 // "unix:/run/php/php-fpm.sock", "/run/php/php-fpm.sock", "127.0.0.1:9000", "[::1]:9000".
@@ -72,7 +85,10 @@ struct UpstreamOptions {
 // `proxy = { tls = { ... } }`: how TLS to an https:// origin is set up.
 struct TlsClientConfig {
     bool verify = true;        // the origin's certificate against the store below
-    std::string server_name;   // SNI and the name checked (default: none; needed for verify with an IP literal)
+    // SNI and the name the certificate must carry. Empty: no SNI (the upstream is an IP literal,
+    // RFC 6066 3) and the certificate must name that address (nginx's and Caddy's default);
+    // before 2026-10-09 an empty name meant no name was checked at all.
+    std::string server_name;
     std::string ca_file;       // a PEM bundle; "" = the system store
     std::string key() const { return (verify ? "v:" : "n:") + ca_file; }  // one ssl::context per distinct setup
 };

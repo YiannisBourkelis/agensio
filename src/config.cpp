@@ -2158,6 +2158,19 @@ void finalize_site(SiteConfig& site) {
     static std::atomic<std::uint64_t> next_id{1};
     for (auto& loc : site.locations)
         if (loc.id == 0) loc.id = next_id.fetch_add(1, std::memory_order_relaxed);
+    // An https origin's kept connections are pooled with the location's TLS policy, so one
+    // opened under one policy never serves a location with another (2026-10-09, the
+    // cookbook's finding). Length-prefixed: no two policies spell the same key.
+    for (auto& loc : site.locations) {
+        if (loc.kind != HandlerKind::proxy) continue;
+        const TlsClientConfig& tc = loc.proxy.tls;
+        auto pool_of = [&](UpstreamAddress& a) {
+            if (a.tls)
+                a.pool = a.key + (tc.verify ? "|v|" : "|n|") + std::to_string(tc.ca_file.size()) + ":" + tc.ca_file + "|" + tc.server_name;
+        };
+        pool_of(loc.proxy.address);
+        for (auto& a : loc.proxy.addresses) pool_of(a);
+    }
     // [[site.access]]: with /wp-admin alone restricted (not the whole site), what the public
     // site still needs below it stays open to anyone: admin-ajax.php, which the front end
     // calls (search, carts, comment forms; the hardening guide's own caveat), and the login

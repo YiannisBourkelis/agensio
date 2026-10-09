@@ -478,7 +478,7 @@ void UpstreamRequest::begin(UpstreamBodyInput body, bool priority, bool retry_ok
     started_ = std::chrono::steady_clock::now();
     pool_.watch(this);
     arm(options_.queue_wait);
-    pool_.acquire(address_.key, options_, priority_, shared_from_this());
+    pool_.acquire(address_.pool_key(), options_, priority_, shared_from_this());
 }
 
 void UpstreamRequest::on_queue_refused(UpstreamFailure why) {
@@ -491,7 +491,7 @@ void UpstreamRequest::on_queue_refused(UpstreamFailure why) {
 
 void UpstreamRequest::on_slot(std::unique_ptr<UpstreamConnection> conn) {
     if (phase_ != Phase::queued) {  // cancelled or timed out while queued: give the slot back
-        pool_.release(address_.key, options_, std::move(conn));
+        pool_.release(address_.pool_key(), options_, std::move(conn));
         return;
     }
     ++attempts_;
@@ -511,7 +511,7 @@ void UpstreamRequest::cancel() noexcept {
     slow_fn_ = nullptr;
     asio::error_code ec;
     pool_.unwatch(this);
-    if (was == Phase::queued) pool_.dequeue(address_.key, this);
+    if (was == Phase::queued) pool_.dequeue(address_.pool_key(), this);
     else if (was != Phase::finished && was != Phase::failed) release_connection(false);
     if (conn_ && conn_->sock().is_open()) conn_->sock().close(ec);
     conn_.reset();
@@ -550,7 +550,7 @@ void UpstreamRequest::on_tick(std::chrono::steady_clock::time_point now) {
     switch (phase_) {
         case Phase::queued:
             pool_.unwatch(this);
-            pool_.dequeue(address_.key, this);
+            pool_.dequeue(address_.pool_key(), this);
             phase_ = Phase::failed;
             result_.failure = UpstreamFailure::queue_timeout;
             deliver_head();
@@ -622,7 +622,7 @@ void UpstreamRequest::handshake() {
     }
     const TlsClientConfig tc = tls_ ? *tls_ : TlsClientConfig{};
     conn_->tls = std::make_unique<BasicTlsStream<UpstreamConnection::Socket>>(std::move(conn_->socket), *ctx);
-    if (!conn_->tls->set_client(tc.server_name, tc.verify)) {
+    if (!conn_->tls->set_client(tc.server_name, tc.verify, address_.host)) {
         fail(UpstreamFailure::tls_error, std::error_code(asio::error::invalid_argument));
         return;
     }
@@ -905,7 +905,7 @@ void UpstreamRequest::finish() {
 void UpstreamRequest::finish_upgraded() {
     phase_ = Phase::finished;
     pool_.unwatch(this);
-    pool_.release(address_.key, options_, nullptr);
+    pool_.release(address_.pool_key(), options_, nullptr);
     result_.upgraded = true;
     deliver_head();
 }
@@ -917,7 +917,7 @@ void UpstreamRequest::release_connection(bool reusable) {
         if (c->sock().is_open()) c->sock().close(ignored);
         c.reset();
     }
-    pool_.release(address_.key, options_, std::move(c));
+    pool_.release(address_.pool_key(), options_, std::move(c));
 }
 
 void UpstreamRequest::deliver_head() {
@@ -946,7 +946,7 @@ bool UpstreamRequest::try_next_address(UpstreamFailure why) {
         asio::error_code ignored;
         if (c->sock().is_open()) c->sock().close(ignored);
     }
-    if (phase_ != Phase::queued) pool_.release(address_.key, options_, nullptr);
+    if (phase_ != Phase::queued) pool_.release(address_.pool_key(), options_, nullptr);
     member_ = next;
     address_ = (*group_)[next];
     if (next < 32) tried_ |= 1u << next;
@@ -955,7 +955,7 @@ bool UpstreamRequest::try_next_address(UpstreamFailure why) {
     body_pos_ = 0;
     phase_ = Phase::queued;
     arm(options_.queue_wait);
-    pool_.acquire(address_.key, options_, priority_, shared_from_this());
+    pool_.acquire(address_.pool_key(), options_, priority_, shared_from_this());
     return true;
 }
 
@@ -969,7 +969,7 @@ void UpstreamRequest::fail(UpstreamFailure why, std::error_code ec) {
     phase_ = Phase::failed;
     pool_.unwatch(this);
     on_end(false);
-    if (was == Phase::queued) pool_.dequeue(address_.key, this);
+    if (was == Phase::queued) pool_.dequeue(address_.pool_key(), this);
     else release_connection(false);
     result_.error = ec;
     if (!head_delivered_) {

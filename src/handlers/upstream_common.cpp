@@ -65,15 +65,18 @@ void collect_request_body(Stream& s, UpstreamBodyInput& body, std::size_t memory
 
 namespace {
 
-// "http://<origin address><rewrite prefix>rest" -> "<scheme>://<host><location prefix>rest".
+// "http(s)://<origin address><rewrite prefix>rest" -> "<scheme>://<host><location prefix>rest".
+// The scheme is the origin's: an https origin's redirects name https (before 2026-10-09 they were
+// never rewritten, its key carrying the scheme).
 bool rewrite_location(std::string& out, std::string_view value, const Stream& s, const LocationConfig& loc) {
-    if (!value.starts_with("http://")) return false;
-    std::string_view rest = value.substr(7);
+    const bool tls = value.starts_with("https://");
+    if (!tls && !value.starts_with("http://")) return false;
+    std::string_view rest = value.substr(tls ? 8 : 7);
     const UpstreamAddress* origin = nullptr;
     for (const auto& a : loc.proxy.addresses)
-        if (!a.unix && rest.starts_with(a.key)) origin = &a;
+        if (!a.unix && a.tls == tls && rest.starts_with(a.authority())) origin = &a;
     if (!origin) return false;
-    rest.remove_prefix(origin->key.size());
+    rest.remove_prefix(origin->authority().size());
     if (!rest.empty() && rest.front() != '/') return false;  // a longer host name
     const std::string_view prefix = loc.proxy.rewrite.empty() ? std::string_view("/") : loc.proxy.rewrite;
     if (rest.starts_with(prefix)) rest.remove_prefix(prefix.size());

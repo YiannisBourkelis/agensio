@@ -326,6 +326,21 @@ proxy = {{ tls = {{ ca = "{root}/bench/certs/cert.pem", server_name = "localhost
 path = "/tlsbad/"
 upstream = "https://127.0.0.1:8443/"
 
+[[site.location]]                       # the origin's certificate names *.wild.test, never 127.0.0.1: without server_name the address is the name checked
+path = "/tlsname/"
+upstream = "https://127.0.0.1:9131/"
+proxy = {{ tls = {{ ca = "{root}/bench/tmp/certs-wild/cert.pem" }} }}
+
+[[site.location]]                       # the same origin with the name its certificate carries
+path = "/tlsnamed/"
+upstream = "https://127.0.0.1:9131/"
+proxy = {{ tls = {{ ca = "{root}/bench/tmp/certs-wild/cert.pem", server_name = "x.wild.test" }} }}
+
+[[site.location]]                       # Host = the origin's address over TLS, and the origin's absolute redirects
+path = "/tlshost/"
+upstream = "https://127.0.0.1:9131/"
+proxy = {{ host = "upstream", tls = {{ verify = false }} }}
+
 [[site.location]]                       # D5: CGI scripts, a process per request
 path = "/cgi-bin/"
 alias = "{root}/tests/cgi"
@@ -462,9 +477,12 @@ if [ -x build/agensio_upstream ]; then
   build/agensio_upstream -p 9109 >/dev/null 2>&1 &
   UP3_PID=$!
 fi
+# An HTTPS origin with the wildcard certificate, for the proxy's TLS name, pool and redirect checks.
+python3 -I tests/tls-origin.py 9131 bench/tmp/certs-wild/cert.pem bench/tmp/certs-wild/key.pem 2>/dev/null &
+TLSO_PID=$!
 "$BIN" -c bench/tmp/agensio-test.toml >/dev/null 2>bench/tmp/server.err &   # stderr kept: a sanitizer build reports there
 PID=$!
-trap 'kill $PID 2>/dev/null; wait $PID 2>/dev/null; [ -n "$FPM_PID" ] && kill $FPM_PID 2>/dev/null; [ -n "$UP_PID" ] && kill $UP_PID 2>/dev/null; [ -n "$UP2_PID" ] && kill $UP2_PID 2>/dev/null; [ -n "$UP3_PID" ] && kill $UP3_PID 2>/dev/null; true' EXIT
+trap 'kill $PID 2>/dev/null; wait $PID 2>/dev/null; [ -n "$FPM_PID" ] && kill $FPM_PID 2>/dev/null; [ -n "$UP_PID" ] && kill $UP_PID 2>/dev/null; [ -n "$UP2_PID" ] && kill $UP2_PID 2>/dev/null; [ -n "$UP3_PID" ] && kill $UP3_PID 2>/dev/null; kill $TLSO_PID 2>/dev/null; true' EXIT
 for _ in $(seq 1 50); do nc -z 127.0.0.1 8080 2>/dev/null && nc -z 127.0.0.1 8443 2>/dev/null && break; sleep 0.1; done
 
 fails=0
@@ -2067,6 +2085,17 @@ except OSError:
   check "proxy: https origin verified against the configured CA and name" "$IDX" "$(curl -sS $P/tlsverify/ | sum)"
   check "proxy: https origin failing verification is a 502" "502" "$(code $P/tlsbad/)"
   check "proxy: tls_error logged with the hint" "yes" "$(grep -q 'https://127.0.0.1:8443 tls_error .*proxy.tls' bench/tmp/error.log && echo yes)"
+  # The origin's name and the kept connections' policy (2026-10-09, the cookbook's findings):
+  # without server_name the upstream's address is the name the certificate must carry, and a
+  # connection kept under one TLS policy is never lent to a location with another.
+  check "proxy: https origin whose certificate names another host, no server_name: 502, the address is the name checked" "502" "$(code $P/tlsname/)"
+  check "proxy: that error line says the certificate must name the address and to set server_name" "yes" "$(grep -q 'https://127.0.0.1:9131 tls_error .*must name 127.0.0.1' bench/tmp/error.log && echo yes)"
+  check "proxy: the same origin verified with the name its certificate carries" "200" "$(code $P/tlsnamed/)"
+  check "proxy: a connection kept for one TLS policy is not lent to another (verify off, then the system store, on one client connection)" "200 502" \
+    "$(curl -sS -o /dev/null -o /dev/null -w '%{http_code} ' $P/tls/ $P/tlsbad/ | sed 's/ $//')"
+  check "proxy: host = \"upstream\" over TLS sends the origin's address without the scheme; its absolute redirect is rewritten to the site" \
+    "127.0.0.1:9131 http://127.0.0.1:8091/tlshost/landing" \
+    "$(curl -sSi $P/tlshost/ | tr -d '\r' | sed -n 's/^[Xx]-[Ss]een-[Hh]ost: //p') $(curl -sSi $P/tlshost/go/x | tr -d '\r' | sed -n 's/^[Ll]ocation: //p')"
   check "proxy: https origin keeps its connection (one handshake for three requests)" "$IDX $IDX $IDX" "$(curl -sS $P/tls/ $P/tls/ $P/tls/ | (a=$(head -c $IDXLEN | sum); b=$(head -c $IDXLEN | sum); c=$(sum); echo "$a $b $c"))"
   # Groups (D4): one keep-alive client connection stays on one worker, whose rotation
   # alternates the members; the dead member of the failover group is tried, marked down

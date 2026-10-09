@@ -2,6 +2,28 @@
 
 ## 0.1.0-alpha.61
 
+- **TLS to an origin checked no name unless `proxy.tls.server_name` was set.** Upstreams are IP
+  addresses, and with an empty `server_name` agensio verified that a trusted CA had signed the
+  origin's certificate but not whose it was, so any certificate a public CA issued, for any
+  domain, passed (`keys.md` said the name defaulted to the origin's host). Without
+  `server_name` the certificate must now name the upstream's address (an IP address entry), as
+  nginx and Caddy check by default; most certificates name hosts, so such an origin answers
+  `502` and the error line says to set `server_name` to the name the certificate carries.
+- **Kept origin connections were shared across TLS policies.** They were pooled by
+  `https://address:port` alone, so a connection a `verify = false` location had opened was lent
+  to a location that verifies, whose check never ran. The pool key now carries the location's
+  TLS policy (`verify`, `ca`, `server_name`), computed once at load.
+- With the same cause, the key carrying the scheme: a redirect from an `https://` origin to its
+  own address was never rewritten to the site, and `proxy.host = "upstream"` sent
+  `Host: https://address:port`. Both use the origin's `address:port` now.
+- Found while writing the cookbook; shown first by `tests/integration.sh` against a small HTTPS
+  origin (`tests/tls-origin.py`, a certificate naming `*.wild.test` only): no `server_name`
+  answered `200` on alpha.60, `502` now with the line naming the fix; `verify = false` then the
+  system store on one client connection gave `200 200`, now `200 502`; `host = "upstream"` sent
+  `https://127.0.0.1:9131` and the origin's redirect reached the browser as
+  `https://127.0.0.1:9131/landing`, now `127.0.0.1:9131` and the site's own
+  `http://127.0.0.1:8091/tlshost/landing`.
+
 - **`agensio ctl site-update --cache` (or `--private`, `--entry-point`, `--front-controller`)
   given alone removed the site's other rules.** The server takes a site's `rules` whole, and
   `agensio ctl` read the current rules and sent them back only for `--restrict`, `--refuse`,

@@ -261,7 +261,7 @@ section of `docs/configuration.md` that explains the key.
 |---|---|---|---|---|---|---|
 | `verify` | bool | true | Verify the origin's certificate (a self-signed origin needs false, or ca). | reload | site file | 12 |
 | `ca` | path | "" (system store) | A PEM bundle to verify the origin with. | reload | site file | 12 |
-| `server_name` | string | the origin's host | The SNI name and verification name for the origin. | reload | site file | 12 |
+| `server_name` | string | (none: the certificate must name the upstream's address) | The name the origin's certificate must carry, also sent as SNI. Without it the certificate must name the upstream's IP address and no SNI is sent; most certificates name hosts, so set it to the name yours carries. | reload | site file | 12 |
 ## `[[site.auth]]`
 
 | key | type | default | meaning | applies | via | doc |

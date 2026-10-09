@@ -118,7 +118,7 @@ bool ProxyHandler::build_head(std::string& out, const Stream& s, std::string_vie
         if (Headers::iequals(h.name, "forwarded")) { forwarded_lines = trusted; continue; }
         out.append(h.name).append(": ").append(h.value).append("\r\n");
     }
-    if (policy.host == "upstream") out.append("Host: ").append(policy.address.key).append("\r\n");
+    if (policy.host == "upstream") out.append("Host: ").append(policy.address.authority()).append("\r\n");  // never the scheme
     else if (policy.host != "pass") out.append("Host: ").append(policy.host).append("\r\n");
     else if (req.headers.get("host").empty() && !req.host.empty()) out.append("Host: ").append(req.host).append("\r\n");
     const bool https = s.conn.tls || s.conn.forwarded_https;
@@ -231,6 +231,9 @@ void ProxyHandler::finish(Exchange& x, UpstreamResult& res) {
                 break;
             case UpstreamFailure::tls_error:
                 msg += ": TLS handshake or certificate verification failed (proxy.tls: verify, server_name, ca)";
+                if (loc.proxy.tls.verify && loc.proxy.tls.server_name.empty())
+                    msg += "; without server_name the certificate must name " + x.req->address().host +
+                           ": set proxy.tls.server_name to the name it carries";
                 break;
             default: break;
         }

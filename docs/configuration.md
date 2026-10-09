@@ -1302,9 +1302,18 @@ active health checks until a real deployment asks for them.
 keep-alive included, so a handshake is paid once per pooled connection rather than per
 request. The certificate is verified against the system store by default;
 `proxy = { tls = { ca = "/etc/ssl/internal-ca.pem", server_name = "app.internal" } }`
-names a private CA and the name to check (also sent as SNI; needed whenever the address is
-an IP literal), and `tls = { verify = false }` accepts anything, for a self-signed origin
-you control. A failed handshake or verification is a 502 logged as `tls_error`.
+names a private CA and the name the certificate must carry (also sent as SNI). Without
+`server_name` the certificate must name the upstream's address itself (an IP address entry,
+`IP:10.0.0.11`), as nginx and Caddy check by default, and no SNI is sent; most certificates
+name hosts, not addresses, so set `server_name` to the name yours carries. `tls = { verify =
+false }` accepts anything, for a self-signed origin you control. A failed handshake or
+verification is a 502 logged as `tls_error`; without `server_name` the line adds that the
+certificate must name the address. Kept connections belong to their TLS policy: two
+locations reaching one origin with different `tls` tables never share a connection. Before
+0.1.0-alpha.61 an empty `server_name` checked no name at all (any certificate a trusted CA
+signed was accepted), connections were shared across policies, a redirect from an `https://`
+origin to its own address was never rewritten, and `host = "upstream"` sent the scheme in
+`Host`.
 
 **Target.** The client's request line is forwarded as sent. With a URI part on `upstream`
 (`http://host:port/` or `.../v1/`) the location's prefix is replaced by it, the way
