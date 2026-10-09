@@ -176,7 +176,13 @@ A password sent over plain HTTP can be read by anyone on the network path, and t
 sends it again with every request. So unless the rule says `plain_http = "allow"`, a request
 that is not on TLS, not from this host (loopback) and not forwarded as https by a trusted
 proxy gets `403` with a page that says to use https, and is never asked. nginx and Apache ask
-anyway. On a managed site with https the plain listener only redirects (step 3 above), so this
+anyway. Behind a trusted proxy (`server.trusted_proxies`) the proxy's report decides, never its
+own address: `X-Forwarded-Proto: https` makes the request https, and only a client it names in
+`X-Forwarded-For` that is this host makes it local. So a tunnel or TLS terminator on the same
+host (cloudflared, HAProxy) relaying a remote client's plain-HTTP request gets `403`, and one
+that relays https must say so in `X-Forwarded-Proto` (every common proxy does; nginx needs
+`proxy_set_header X-Forwarded-Proto $scheme`). Before 0.1.0-alpha.61 such a proxy's loopback
+address got every client it relayed asked over plain HTTP (the alpha.58 report). On a managed site with https the plain listener only redirects (step 3 above), so this
 applies to hand-written plain listeners and sites without https.
 
 ## 6. Verification and what it costs
@@ -344,6 +350,7 @@ server.
 | a `.php` location or a `try_files` fallback to `/index.php` | checked on every hop, so a fallback cannot step from an open path into a protected one |
 | HEAD, OPTIONS, TRACE, POST | all asked; the rules come before the method policy |
 | plain HTTP from another host | `403` and a page saying to use https, unless `plain_http = "allow"`; loopback and trusted https-forwarding proxies are asked |
+| a tunnel or TLS terminator on this host (in `trusted_proxies`) relaying a remote client's plain HTTP | `403`: the proxy's `X-Forwarded-Proto` and the client it names decide, not its own loopback address; with `X-Forwarded-Proto: https` the client is asked (before 0.1.0-alpha.61 it was asked either way) |
 | behind a CDN or a proxy | `skip_for` judges the client `X-Forwarded-For` names only when the proxy is in `trusted_proxies`; otherwise the proxy's address |
 | WordPress with `/wp-admin` protected | `admin-ajax.php` and the login page's files under `/wp-admin/css`, `js` and `images` stay open (the public site calls them); not when the whole site is protected |
 | HTTP/2 and HTTP/3 | the same rules, the same answers; the memo is per connection |

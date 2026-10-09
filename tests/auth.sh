@@ -61,6 +61,7 @@ include = ["sites.d/*.toml"]
 [server]
 workers = 1
 pid_file = "$T/agensio.pid"
+trusted_proxies = ["127.0.0.3"]   # a TLS terminator or tunnel on this host, for the plain-HTTP checks
 [log]
 access = "$T/logs/access.log"
 error = "$T/logs/error.log"
@@ -177,6 +178,11 @@ check "every spelling of a protected path asks: case, no slash, its index, dot s
   "$(code $B/PRIVATE/doc.html) $(code $B/private) $(code $B/private/) $(code --path-as-is $B/office/../private/doc.html) $(code $B/%70rivate/doc.html)"
 
 # Plain HTTP from another host: never asked; from loopback and over TLS: asked.
+# Behind a trusted proxy on this host (cloudflared, HAProxy at 127.0.0.3) the proxy's report
+# decides, not its loopback address (2026-10-09, the alpha.58 report's finding 2: a remote
+# client's plain-HTTP request relayed by it was asked, the password crossing the network in clear).
+check "behind a trusted proxy on this host: a remote client over plain HTTP is 403 (also with X-Forwarded-Proto: http); forwarded as https, or a client on this host, is asked" "403 403 401 401" \
+  "$(code --interface 127.0.0.3 -H 'X-Forwarded-For: 203.0.113.9' $B/private/doc.html) $(code --interface 127.0.0.3 -H 'X-Forwarded-For: 203.0.113.9' -H 'X-Forwarded-Proto: http' $B/private/doc.html) $(code --interface 127.0.0.3 -H 'X-Forwarded-For: 203.0.113.9' -H 'X-Forwarded-Proto: https' $B/private/doc.html) $(code --interface 127.0.0.3 -H 'X-Forwarded-For: 127.0.0.1' $B/private/doc.html)"
 if [ -n "$IP" ]; then
   curl -sS -D "$T/hplain" -o "$T/bplain" "http://$IP:18130/private/doc.html"
   check "plain HTTP from another host: 403 with no challenge and a page saying to use HTTPS; plain_http = \"allow\" asks anyway" "403 no-challenge yes 401" \

@@ -423,7 +423,10 @@ allow = ["@office"]
 
 **What it does.** From a trusted proxy, the client is the rightmost address in
 `X-Forwarded-For` that is not itself a trusted proxy, and `X-Forwarded-Proto: https` counts as
-https (so a password is asked, and PHP sees `HTTPS=on`). From anyone else those fields are
+https (so a password is asked, and PHP sees `HTTPS=on`). Without it the request counts as plain
+HTTP whatever the proxy's own address, so a password rule answers `403` rather than ask a client
+whose password would cross the network in clear: make the proxy send the field (nginx:
+`proxy_set_header X-Forwarded-Proto $scheme`). From anyone else those fields are
 ignored, so a visitor cannot claim the office's address by sending them. Never list the proxy
 in an `allow`: a request it sends without the field would pass as the proxy; `agensio -t` warns
 about that.

@@ -2,6 +2,21 @@
 
 ## 0.1.0-alpha.61
 
+From the alpha.58 report:
+
+- **A password could be asked over plain HTTP behind a proxy on the same host.** The rule that
+  nobody is asked over plain HTTP except from this host judged the connection's peer: a tunnel
+  or TLS terminator on the same host in `trusted_proxies` (cloudflared, HAProxy) is loopback, so
+  every client it relayed was asked, a remote one's plain-HTTP request included, and the
+  password crossed the network in clear. Behind a trusted proxy its report decides now: the
+  request is https only with `X-Forwarded-Proto: https`, and local only when the client it names
+  in `X-Forwarded-For` is this host. Shown first by `tests/auth.sh` (from 127.0.0.3, trusted, for
+  203.0.113.9: plain, `X-Forwarded-Proto: http`, `https`, and a client 127.0.0.1 answered
+  `401 401 401 401` on alpha.60, now `403 403 401 401`).
+
+Found while writing the cookbook (`docs/examples.md`), each shown first by a test that failed on
+alpha.60:
+
 - **Keys the reference said a reload applies kept their start values.** `[cache]`
   `revalidate_interval`, `precompressed`, `sendfile_min_size`, `stream_chunk_size`,
   `evict_fraction` and `max_open_files`, and `[server]` `sendfile_max_chunk` and `tcp_nodelay`,

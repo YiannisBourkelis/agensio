@@ -2677,7 +2677,12 @@ needed; append `:expires=` and `:note=` by hand.
 access rules, then the password. A client in `skip_for` goes on without one. Over plain HTTP
 the browser would send the password in clear, so a request that is not on TLS, not from this
 host and not forwarded as https by a trusted proxy is never asked: it gets `403` with a page
-that says to use https, unless the rule says `plain_http = "allow"`. Otherwise:
+that says to use https, unless the rule says `plain_http = "allow"`. From a trusted proxy the
+proxy's report decides: the request counts as https only with `X-Forwarded-Proto: https`, and
+as this host's only when the client it names in `X-Forwarded-For` is; a tunnel or TLS
+terminator on this host is loopback itself, which says nothing about the client it relays
+(before 0.1.0-alpha.61 its loopback address got every client it relayed asked over plain HTTP).
+Otherwise:
 
 - no `Authorization`: `401` with `WWW-Authenticate: Basic realm="...", charset="UTF-8"` and
   `Cache-Control: no-store`; the same page for a malformed, a wrong and an unknown login;

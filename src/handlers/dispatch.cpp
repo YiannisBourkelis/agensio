@@ -152,7 +152,8 @@ void Dispatcher::access_log_tick(WorkerState& ws, std::time_t now) {
 }
 
 // [[site.auth]] (design section 25). The client must be on a secure link to be asked: TLS, a
-// trusted proxy that forwarded https, or this host itself; otherwise it gets 403 unless the rule
+// trusted proxy that forwarded https, or this host itself (behind a trusted proxy, the client it
+// names); otherwise it gets 403 unless the rule
 // says plain_http = "allow". skip_for lets its clients in without a password. A remembered login
 // (this worker's cache) is let in at once; anything else is verified on the pool: the request
 // waits, never the worker. Every failure is one `auth failed` line; the challenge is none.
@@ -169,8 +170,15 @@ Dispatcher::AuthOutcome Dispatcher::check_auth(Stream& s, const SiteConfig& site
         strip();
         return AuthOutcome::allowed;
     }
-    const bool local_peer = s.conn.peer && s.conn.peer->peer_ip().is_loopback();
-    if (!rule.plain_http && !s.conn.tls && !(s.conn.trusted_peer && s.conn.forwarded_https) && !local_peer) {
+    // Secure, or this host itself. Behind a trusted proxy the proxy's report decides: https only
+    // when it says the client came over https (X-Forwarded-Proto), local only when the client it
+    // names is this host; its own loopback address says nothing (2026-10-09, the alpha.58
+    // report's finding 2: a tunnel or TLS terminator on this host relaying a client's plain-HTTP
+    // request got it asked, the password then crossing the network in clear).
+    const bool via_proxy = s.conn.trusted_peer;
+    const bool secure = via_proxy ? s.conn.forwarded_https : s.conn.tls;
+    const bool local = via_proxy ? client_ip(s.conn).is_loopback() : s.conn.peer && s.conn.peer->peer_ip().is_loopback();
+    if (!rule.plain_http && !secure && !local) {
         auth_plain_http(s);
         return AuthOutcome::answered;
     }
