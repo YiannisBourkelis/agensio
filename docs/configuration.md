@@ -2699,7 +2699,10 @@ what a worker remembers is keyed by the stored hash too.
 **What the application and caches see.** PHP gets `REMOTE_USER` and `AUTH_TYPE = Basic`;
 `credentials = "pass"` (the default on a site that runs PHP: WordPress's loopback calls need
 it) also leaves `Authorization` in, `"strip"` (the default elsewhere) takes it out, so a
-proxied application never receives the site's password. `forward_user = "X-Remote-User"` on a
+proxied application never receives the site's password. A client let in by `skip_for` was never
+asked, so its `Authorization` is always taken out, whatever `credentials` says: PHP never sees a
+`PHP_AUTH_USER` nobody verified (before 0.1.0-alpha.61 it did on a site that passes
+credentials). `forward_user = "X-Remote-User"` on a
 proxy sends the verified name in that field, the client's own copy removed first. Every answer
 on a protected path is one no shared cache may keep: a file agensio serves carries
 `Cache-Control: private` in place of a preset's `public`; an answer of PHP, CGI or a proxied

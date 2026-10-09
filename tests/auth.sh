@@ -56,6 +56,16 @@ class H(http.server.BaseHTTPRequestHandler):
 http.server.ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 PYAPP
 python3 -I "$T/app.py" 18139 & APP=$!
+# php-fpm for the PHP site below (its checks are skipped when php-fpm is not installed): what a
+# script receives as a user, verified or not.
+mkdir -p "$T/php"
+printf '<?php header("Content-Type: text/plain"); foreach (["REMOTE_USER", "PHP_AUTH_USER", "PHP_AUTH_PW", "HTTP_AUTHORIZATION"] as $k) echo $k, "=", $_SERVER[$k] ?? "", " ";\n' > "$T/php/who.php"
+PHPFPM=$(command -v php-fpm8.4 || command -v php-fpm8.3 || command -v php-fpm || true); FPM=""
+if [ -n "$PHPFPM" ]; then
+  printf '[global]\npid = %s/fpm.pid\nerror_log = %s/fpm.log\ndaemonize = no\n[www]\nlisten = %s/fpm.sock\nlisten.mode = 0666\npm = static\npm.max_children = 2\n' "$T" "$T" "$T" > "$T/fpm.conf"
+  "$PHPFPM" -y "$T/fpm.conf" -F -p "$T" >/dev/null 2>&1 & FPM=$!
+  for _ in $(seq 1 50); do [ -S "$T/fpm.sock" ] && break; sleep 0.1; done
+fi
 cat > "$T/agensio.toml" <<EOF
 include = ["sites.d/*.toml"]
 [server]
@@ -143,9 +153,23 @@ tls = { cert = "$ROOT/bench/certs/cert.pem", key = "$ROOT/bench/certs/key.pem" }
 path = "/private"
 users = "$T/users"
 realm = "Private"
+
+# A PHP site whose password lets one address in without asking (skip_for): what reaches PHP from
+# that client is nothing verified (the alpha.58 report, finding 3).
+[[site]]
+server_name = ["*"]
+listen = ["127.0.0.1:18141"]
+root = "$T/php"
+app = "php"
+php = { socket = "unix:$T/fpm.sock" }
+
+[[site.auth]]
+path = "/"
+users = "$T/users"
+skip_for = ["127.0.0.2"]
 EOF
 "$BIN" -c "$T/agensio.toml" > "$T/server.out" 2>&1 & SRV=$!
-trap 'kill $SRV 2>/dev/null; kill -TERM $APP 2>/dev/null; wait $SRV 2>/dev/null' EXIT
+trap 'kill $SRV 2>/dev/null; kill -TERM $APP 2>/dev/null; [ -n "$FPM" ] && kill $FPM 2>/dev/null; wait $SRV 2>/dev/null' EXIT
 for _ in $(seq 1 50); do nc -z 127.0.0.1 18130 2>/dev/null && break; sleep 0.1; done
 B=http://127.0.0.1:18130
 verifications() { curl -sS --unix-socket "$T/control.sock" http://control/v1/status | python3 -c 'import json,sys; print(json.load(sys.stdin).get("auth_verifications", "none"))'; }
@@ -190,6 +214,20 @@ if [ -n "$IP" ]; then
   check "over TLS from another host: asked, and the right password served" "401 200" "$(code -k --resolve localhost:18131:$IP https://localhost:18131/private/doc.html) $(code -k --resolve localhost:18131:$IP -u anna:secret https://localhost:18131/private/doc.html)"
 else
   echo "skip plain-HTTP checks: no address but loopback"
+fi
+
+# A client let in by skip_for was never asked, so nothing it sends as Authorization reaches PHP as
+# a user (2026-10-09, the alpha.58 report's finding 3: PHP_AUTH_USER carried any name such a client
+# chose, on a site that passes credentials, and PHP cannot tell it from a verified one). A client
+# that was asked and verified keeps PHP_AUTH_USER, PHP_AUTH_PW and the header (WordPress's loopback).
+if [ -n "$FPM" ]; then
+  check "skip_for client sending credentials: PHP gets no user, password or Authorization; REMOTE_USER empty" \
+    "REMOTE_USER= PHP_AUTH_USER= PHP_AUTH_PW= HTTP_AUTHORIZATION=" \
+    "$(curl -sS --interface 127.0.0.2 -u admin:x http://127.0.0.1:18141/who.php | sed 's/ $//')"
+  check "a verified client still gets REMOTE_USER, PHP_AUTH_USER and the header" "anna anna yes" \
+    "$(curl -sS -u anna:secret http://127.0.0.1:18141/who.php | tr ' ' '\n' | sed -n 's/^REMOTE_USER=//p; s/^PHP_AUTH_USER=//p' | tr '\n' ' ')$(curl -sS -u anna:secret http://127.0.0.1:18141/who.php | grep -q 'HTTP_AUTHORIZATION=Basic ' && echo yes)"
+else
+  echo "skip the skip_for PHP checks: php-fpm not installed"
 fi
 
 # What caches and logs see.

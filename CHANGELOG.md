@@ -13,6 +13,16 @@ From the alpha.58 report:
   in `X-Forwarded-For` is this host. Shown first by `tests/auth.sh` (from 127.0.0.3, trusted, for
   203.0.113.9: plain, `X-Forwarded-Proto: http`, `https`, and a client 127.0.0.1 answered
   `401 401 401 401` on alpha.60, now `403 403 401 401`).
+- **A client let in by `skip_for` could hand PHP any user name.** It is never asked, so nothing it
+  sends as `Authorization` is verified, yet on a site that passes credentials (`credentials =
+  "pass"`, the default where PHP runs) the field went on to PHP, which built `PHP_AUTH_USER` and
+  `PHP_AUTH_PW` from it: an application that trusts `PHP_AUTH_USER` as the server's verified user
+  took such a client as whoever it named. The field is now always removed for a `skip_for`
+  client, whatever `credentials` says; a client that was asked and verified keeps it, and
+  `PHP_AUTH_USER` with it (WordPress's loopback check). An application with its own HTTP Basic
+  login below a `skip_for` rule gets no login from those clients: give its path `open = true`.
+  Shown first by `tests/auth.sh` (a PHP site, `-u admin:x` from the `skip_for` address: PHP saw
+  `PHP_AUTH_USER=admin PHP_AUTH_PW=x` and the header on alpha.60, now none of them).
 
 Found while writing the cookbook (`docs/examples.md`), each shown first by a test that failed on
 alpha.60:

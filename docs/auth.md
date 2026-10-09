@@ -213,7 +213,12 @@ sites without `[[site.auth]]` pay nothing.
 
 - **The `Authorization` field**: passed to PHP (`credentials = "pass"`, the default on a site
   with a FastCGI location: WordPress's loopback calls need it), stripped before any other
-  application (`"strip"`). A client let in by `skip_for` has its field stripped the same way.
+  application (`"strip"`). A client let in by `skip_for` was never asked, so its field is always
+  stripped, whatever `credentials` says: PHP builds `PHP_AUTH_USER` and `PHP_AUTH_PW` from that
+  field, and one nobody verified must not look like a login (before 0.1.0-alpha.61 it passed on
+  a site that passes credentials, the alpha.58 report). An application that runs its own HTTP
+  Basic login below a `skip_for` rule therefore gets no login from those clients: give its path
+  `open = true`.
 - **The user**: PHP and CGI get `REMOTE_USER` and `AUTH_TYPE = Basic`; a proxied application
   gets the name in the field `forward_user` names, and a client's own field of that name is
   dropped, so it cannot claim to be someone. A client let in by `skip_for` has no user.
@@ -362,6 +367,7 @@ server.
 | a build without libxcrypt or OpenSSL | a configuration with `[[site.auth]]` is refused; nothing is left open |
 | a shared cache (a CDN, Varnish) in front, and the application says `public, max-age=3600` | the answer goes out `private, max-age=3600`, so the cache does not keep it; a CDN's own field (`CDN-Cache-Control`, `Surrogate-Control`) is dropped |
 | a client let in by `skip_for`, with a shared cache in front | the same: its answers are private too, though its request carries no password |
+| a client let in by `skip_for` that sends `Authorization` anyway (a cached login, or a name it chose) | the field is removed before the application: PHP gets no `PHP_AUTH_USER`, `PHP_AUTH_PW` or `HTTP_AUTHORIZATION`, and no `REMOTE_USER` |
 | the application sends `Cache-Control: no-store` | `private, no-store`: the browser keeps nothing either |
 | logging out | Basic authentication has none: the browser keeps the password until it is closed (some keep it longer). To end someone's access, lock or delete the user, or change the password |
 

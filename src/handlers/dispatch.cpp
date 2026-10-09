@@ -167,7 +167,11 @@ Dispatcher::AuthOutcome Dispatcher::check_auth(Stream& s, const SiteConfig& site
         if (rule.credentials == AuthRule::Credentials::strip) s.request.headers.remove("authorization");
     };
     if (!rule.skip.empty() && in_any(rule.skip, client_ip(s.conn))) {
-        strip();
+        // Let in without being asked, so nothing it sends as Authorization was verified: it never
+        // reaches the application, whatever `credentials` says (2026-10-09, the alpha.58 report's
+        // finding 3: on a site that passes credentials, PHP built PHP_AUTH_USER from any name such
+        // a client chose, which an application cannot tell from a verified one).
+        s.request.headers.remove("authorization");
         return AuthOutcome::allowed;
     }
     // Secure, or this host itself. Behind a trusted proxy the proxy's report decides: https only
