@@ -3,7 +3,8 @@
 # sites.d/ are loaded each on its own: a file with an error is set aside and the other sites
 # serve; on reload a file set aside keeps its last good version; a file claiming a running
 # site's name on its address is set aside, the running one keeping its place; a site whose root
-# additions file cannot be loaded is set aside whole, and so is a site that breaks a hosting rule;
+# additions file cannot be loaded is set aside whole, and so is a site that breaks a hosting rule
+# or whose certificate cannot be loaded;
 # -t exits 0 with a warning, --strict 1;
 # health names each file; the control plane never reports a change it set aside as done.
 # usage: tests/isolation.sh build/agensio
@@ -180,6 +181,36 @@ if [ -n "$ME" ]; then
 else
   echo "skip the hosting rules: no account name for uid $(id -u)"
 fi
+
+# Certificates (design section 26, step C3): a site whose certificate or key cannot be loaded is set
+# aside with its file and the others serve; a served site whose files can no longer be loaded (a key
+# the server cannot read, as a root-only key after the privilege drop; a broken renewal) keeps the
+# certificate it loaded before, while another site's change applies in the same reload.
+CT=$T/certs; mkdir -p "$CT/t" "$CT/bad" "$T/www/t"; echo "site t" > "$T/www/t/index.html"
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$CT/t/key.pem" -out "$CT/t/cert.pem" \
+  -subj /CN=t.test -addext subjectAltName=DNS:t.test -days 2 > /dev/null 2>&1
+cp "$CT/t/cert.pem" "$CT/bad/cert.pem"; echo "not a key" > "$CT/bad/key.pem"
+tls_site() { site t.test "$2" "$T/www/t" "tls = { cert = \"$1/cert.pem\", key = \"$1/key.pem\" }"; }
+tbody() { curl -sk --max-time 3 --resolve "t.test:$1:127.0.0.1" "https://t.test:$1/" 2>/dev/null || echo "none"; }
+S3=$T/start-tls; mkdir -p "$S3/sites.d" "$S3/logs"
+printf 'include = ["sites.d/*.toml"]\n[server]\nworkers = 1\npid_file = "%s/agensio.pid"\n[log]\naccess = "off"\nerror = "%s/logs/error.log"\n' "$S3" "$S3" > "$S3/agensio.toml"
+tls_site "$CT/bad" 18313 > "$S3/sites.d/t.toml"
+site o.test 18314 "$T/www/b" > "$S3/sites.d/o.toml"
+"$BIN" -c "$S3/agensio.toml" > "$S3/server.out" 2>&1 & S3PID=$!
+for _ in $(seq 1 50); do nc -z 127.0.0.1 18314 2>/dev/null && break; sleep 0.1; done
+check "at start, a site whose key cannot be loaded is set aside, the other site serves, the error log says why" "site b none yes" \
+  "$(body o.test 18314) $(tbody 18313) $(grep -q 't.toml set aside.*could not be loaded' "$S3/logs/error.log" && echo yes)"
+kill $S3PID 2>/dev/null; wait $S3PID 2>/dev/null
+tls_site "$CT/t" 18306 > "$T/sites.d/t.toml"; reload
+check "a TLS site with its own certificate serves" "site t" "$(tbody 18306)"
+chmod 000 "$CT/t/key.pem"; site a.test 18301 "$T/www/a" > "$T/sites.d/a.toml"; reload
+check "its key made unreadable, then a reload with another site's change: it keeps the certificate loaded before, the change applies, health says so" "site t site a yes" \
+  "$(tbody 18306) $(body a.test 18301) $(held sites.d/t.toml | grep -q 'could not be loaded' && held sites.d/t.toml | grep -q 'keeps serving' && echo yes)"
+chmod 600 "$CT/t/key.pem"
+tls_site "$CT/bad" 18306 > "$T/sites.d/t.toml"; site a.test 18301 "$T/www/c" > "$T/sites.d/a.toml"; reload
+check "an edit pointing it at a key that cannot be loaded: its running version keeps serving, another site's change applies" "site t site c" \
+  "$(tbody 18306) $(body a.test 18301)"
+rm -f "$T/sites.d/t.toml"; site a.test 18301 "$T/www/a2" > "$T/sites.d/a.toml"; reload
 
 # A broken main file still refuses the reload, as before: the main file is all or nothing.
 cp "$T/agensio.toml" "$T/agensio.toml.good"

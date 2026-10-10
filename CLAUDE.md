@@ -262,7 +262,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   the same way (C2, `isolate_hosting` in `services/pools.*` over `set_aside_until_clean`): a site
   breaking one is set aside, kept in its running version only when that version passes them now
   (a root opened to others takes the site down at the next reload); health `hosting_rule`;
-  `write_pools` removes no pool while a file is set aside. Not yet per site: certificates (C3).
+  `write_pools` removes no pool while a file is set aside. The certificates the same way (C3,
+  `Server::load_certificates`, `Generation::certificates`): each pair loaded once before the
+  listeners, whose contexts copy the material; a pair that does not load sets the site aside, a
+  carried site keeps the previous generation's material (a root-only key after the drop).
 - **Request bodies** (A3): the HTTP/1 connection is the pull source behind
   `Request::body` (`StreamBody`: `async_read` with backpressure), decoding Content-Length
   or chunked (`http1/chunked.hpp`, fuzzed) from its receive buffer and socket.

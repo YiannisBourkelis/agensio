@@ -169,9 +169,10 @@ the configuration when either file is missing. The certificate must cover every 
 `server_name`: a request for a name it does not cover is answered `421`. Nothing watches the
 files: a renewed certificate is read on the next `agensio reload`, which your ACME client's
 renewal hook should run. That reload reads the files as the account the server runs as, not as
-root, so a key only root can read works at start and then every reload is refused
-(`reload refused: use_private_key_file: Permission denied` in the error log) while the old
-certificate keeps serving; hence the group read above. Sites with automatic and with managed
+root, so a key only root can read works at start and then is not read again: each reload sets
+the site aside and keeps serving the certificate loaded at start (`the certificate loaded before
+keeps serving` in the error log, the file in health) until it expires, while the other sites'
+changes apply; hence the group read above. Before 0.1.0-alpha.63 that refused every reload. Sites with automatic and with managed
 certificates share one listener.
 
 **Check it.**

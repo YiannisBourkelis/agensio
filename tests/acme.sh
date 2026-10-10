@@ -9,7 +9,7 @@
 set -uo pipefail
 BIN=$(readlink -f "${1:-build/agensio}")
 ROOT=$(pwd)
-T=$ROOT/bench/tmp/acme; rm -rf "$T"; mkdir -p "$T/www" "$T/logs"
+T=$ROOT/bench/tmp/acme; rm -rf "$T"; mkdir -p "$T/www" "$T/logs" "$T/sites.d"
 echo "hello over acme" > "$T/www/index.html"
 pass=0; fail=0
 check() { if [ "$3" = "$2" ]; then echo "ok   $1"; pass=$((pass+1)); else echo "FAIL $1: expected [$2] got [$3]"; fail=$((fail+1)); fi; }
@@ -24,6 +24,7 @@ check "Pebble is up and its CA certificate was copied" "yes" "$([ -s "$T/pebble-
 
 write_config() {  # [extra server keys]
   cat > "$T/agensio.toml" <<CFG
+include = ["sites.d/*.toml"]
 [server]
 workers = 2
 pid_file = "$T/agensio.pid"
@@ -33,6 +34,9 @@ ${1:-}
 access = "$T/logs/access.log"
 error = "$T/logs/error.log"
 level = "info"
+[control]
+socket = "$T/control.sock"
+provision = false
 [[site]]
 server_name = ["host.docker.internal"]
 listen = ["0.0.0.0:5002"]
@@ -78,5 +82,15 @@ kill $SRV; wait $SRV 2>/dev/null
 for _ in $(seq 1 50); do nc -z 127.0.0.1 8449 2>/dev/null && break; sleep 0.1; done
 sleep 1
 check "restart keeps the issued certificate without a new order" "1 yes" "$(grep -c 'acme: certificate issued' "$T/logs/error.log") $(issuer | grep -q 'Pebble Intermediate' && echo yes)"
+# A renewal while another site's file is broken (design section 26): the broken file is set aside
+# and the renewed certificate is served. Before alpha.62 the renewal's reload was refused with every
+# other one, and the new certificate waited on disk until someone fixed the other site.
+serial() { echo | openssl s_client -connect 127.0.0.1:8449 -servername host.docker.internal 2>/dev/null | openssl x509 -noout -serial 2>/dev/null; }
+printf '[[site]]\nserver_name = ["broken.test"]\nlisten = ["127.0.0.1:5003"]\nroot = "%s/www"\nrefsue = 1\n' "$T" > "$T/sites.d/broken.toml"
+before=$(serial)
+"$BIN" ctl cert-renew host.docker.internal --yes --reason acme --socket "$T/control.sock" > "$T/renew.out" 2>&1
+for _ in $(seq 1 150); do [ -n "$(serial)" ] && [ "$(serial)" != "$before" ] && break; sleep 0.2; done
+check "a renewal while another site's file is broken: the renewed certificate is served, the broken file set aside" "yes yes 2" \
+  "$([ -n "$before" ] && [ "$(serial)" != "$before" ] && echo yes) $(grep -q 'broken.toml set aside' "$T/logs/error.log" && echo yes) $(grep -c 'acme: certificate issued' "$T/logs/error.log")"
 echo "acme: $pass passed, $fail failed"
 [ $fail = 0 ]

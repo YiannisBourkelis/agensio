@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.0-alpha.64
+
+Site isolation, step C3:
+
+- **A certificate one site's server cannot load no longer stops the others.** A certificate or
+  key that did not load (a file the server's account cannot read, not PEM, a key that is not the
+  certificate's, a broken renewal) refused the whole reload, every other site's change and every
+  renewal with it, and at start kept the server from starting. Each pair is now loaded once per
+  start or reload before the listeners are built: one that does not load sets its site's file
+  aside like a file with an error, and a site that was serving keeps the certificate it loaded
+  before (its listeners' new contexts take that material from memory, never from the files
+  again), so the cookbook's case, a key only root can read after the privilege drop, keeps the
+  site on its start-time certificate with a warning instead of blocking the host. Shown first
+  by `tests/isolation.sh` (a start with a key that is not a key: the server did not start; a
+  key made unreadable, and an edit to a broken pair, each with another site's change in the
+  same reload: refused before, now the site keeps its certificate and the change applies).
+
 ## 0.1.0-alpha.63 (2026-10-11)
 
 From the alpha.62 report:

@@ -101,12 +101,13 @@ Server::Server(Config cfg)
     own_site_logs(gen->cfg);
     for (const auto& o : gen->cfg.orphan_additions)
         error_log_.warn(o.file + " holds root additions for site " + o.site + ", which is not in the configuration (disabled or deleted): ignored");
+    prepare_acme(gen->cfg);
+    load_certificates(*gen, nullptr);  // a site whose pair does not load is set aside here (C3)
     for (const auto& h : gen->cfg.held_back)
         error_log_.error(h.file + " set aside, its sites are not served: " + h.error);
     for (const auto& n : access_notices(gen->cfg))  // the notes at level info (alpha.61 report, finding 2)
         n.severity == "warning" ? error_log_.warn(n.text) : error_log_.info(n.text);
     warm_response_tables();
-    prepare_acme(gen->cfg);
     build_listeners(*gen);
     gen_ = std::move(gen);
     build_workers();
@@ -377,6 +378,57 @@ static int select_protocol(SSL* ssl, const unsigned char** out, unsigned char* o
 }
 #endif
 
+std::vector<std::string> Server::load_certificates(Generation& gen, const Generation* previous) {
+    std::vector<std::string> kept;
+#ifdef AGENSIO_HAS_TLS
+    auto load = [](const TlsConfig& t, std::string& error) -> std::shared_ptr<asio::ssl::context> {
+        auto ctx = std::make_shared<asio::ssl::context>(asio::ssl::context::tls_server);
+        asio::error_code ec;
+        ctx->use_certificate_chain_file(t.cert.string(), ec);
+        if (ec) error = "certificate " + t.cert.string() + ": " + ec.message();
+        else {
+            ctx->use_private_key_file(t.key.string(), asio::ssl::context::pem, ec);  // also checks it is the certificate's key
+            if (ec) error = "key " + t.key.string() + ": " + ec.message();
+        }
+        if (!ec) return ctx;
+        ERR_clear_error();
+        return nullptr;
+    };
+    set_aside_until_clean(gen.cfg, previous ? &previous->cfg : nullptr, [&](const Config& c) -> std::optional<SiteConflict> {
+        for (std::size_t i = 0; i < c.sites.size(); ++i) {
+            const SiteConfig& site = c.sites[i];
+            if (!site.tls) continue;
+            const std::string pair = site.tls->cert.string() + '\n' + site.tls->key.string();
+            if (gen.certificates.contains(pair)) continue;
+            std::string error;
+            if (auto ctx = load(*site.tls, error)) {
+                gen.certificates.emplace(pair, std::move(ctx));
+                continue;
+            }
+            // A carried version (its file set aside, or set aside right here) keeps what the
+            // running generation loaded from the same files.
+            if (site.carried && previous)
+                if (auto p = previous->certificates.find(pair); p != previous->certificates.end()) {
+                    gen.certificates.emplace(pair, p->second);
+                    kept.push_back("site " + site.server_names.front() + ": " + error + "; the certificate loaded before keeps serving");
+                    continue;
+                }
+            return SiteConflict{i, SiteConflict::npos, "site " + site.server_names.front() + ": the certificate could not be loaded: " + error};
+        }
+        return std::nullopt;
+    });
+    if (gen.cfg.sites.empty()) {
+        std::string why;
+        for (const auto& h : gen.cfg.held_back) why += "\n  " + h.file + ": " + h.error;
+        throw std::runtime_error(gen.cfg.config_path.string() + ": no site could be loaded; every site file was set aside:" + why);
+    }
+#else
+    (void)gen;
+    (void)previous;
+#endif
+    return kept;
+}
+
 void Server::build_listeners(Generation& gen) {
     auto& listeners = gen.listeners;
     for (const auto& site : gen.cfg.sites) {
@@ -419,8 +471,19 @@ void Server::build_listeners(Generation& gen) {
                 ctx->set_options(asio::ssl::context::default_workarounds | asio::ssl::context::no_sslv2 |
                                  asio::ssl::context::no_sslv3 | asio::ssl::context::no_tlsv1 |
                                  asio::ssl::context::no_tlsv1_1 | asio::ssl::context::single_dh_use);
-                ctx->use_certificate_chain_file(site.tls->cert.string());
-                ctx->use_private_key_file(site.tls->key.string(), asio::ssl::context::pem);
+                // The pair load_certificates loaded (this generation's, or the previous one's for a
+                // carried site): certificate, chain and key shared by reference, never read again.
+                const auto source = gen.certificates.find(site.tls->cert.string() + '\n' + site.tls->key.string());
+                if (source == gen.certificates.end()) throw std::runtime_error("site " + site.server_names.front() + ": certificate " + site.tls->cert.string() + " was not loaded");
+                SSL_CTX* from = source->second->native_handle();
+                STACK_OF(X509)* chain = nullptr;
+                SSL_CTX_get0_chain_certs(from, &chain);
+                if (SSL_CTX_use_certificate(ctx->native_handle(), SSL_CTX_get0_certificate(from)) != 1 ||
+                    SSL_CTX_set1_chain(ctx->native_handle(), chain) != 1 ||
+                    SSL_CTX_use_PrivateKey(ctx->native_handle(), SSL_CTX_get0_privatekey(from)) != 1) {
+                    ERR_clear_error();
+                    throw std::runtime_error("site " + site.server_names.front() + ": certificate " + site.tls->cert.string() + " could not be set up");
+                }
                 SSL_CTX_set_min_proto_version(ctx->native_handle(), TLS1_2_VERSION);
                 // SSL_MODE_RELEASE_BUFFERS deliberately not set: it costs a malloc/free per record.
                 SSL_CTX_set_options(ctx->native_handle(), SSL_OP_NO_COMPRESSION);
@@ -1539,25 +1602,35 @@ bool Server::reload(std::string& error, std::string_view must_load) {
     } catch (const std::exception& e) {
         return refuse(e.what());
     }
+    auto gen = std::make_shared<Generation>();
+    gen->cfg = std::move(fresh);
+    // The certificates the same way (C3): a site whose pair does not load is set aside, a carried
+    // one keeps the material the running generation loaded (a key the server can no longer read).
+    std::vector<std::string> kept_certificates;
+    try {
+        prepare_acme(gen->cfg);
+        kept_certificates = load_certificates(*gen, gen_.get());
+    } catch (const std::exception& e) {
+        return refuse(e.what());
+    }
+    const Config& loaded = gen->cfg;
     if (!must_load.empty()) {
         const std::string want = std::filesystem::path(must_load).lexically_normal().string();
-        for (const auto& h : fresh.held_back)
+        for (const auto& h : loaded.held_back)
             if (std::filesystem::path(h.file).lexically_normal().string() == want) return refuse(h.error);
     }
-    for (const auto& h : fresh.held_back)
+    for (const auto& h : loaded.held_back)
         error_log_.error(h.file + " set aside: " + h.error +
                          (h.carried ? " (the version loaded before keeps serving its sites)" : " (its sites are not served)"));
+    for (const auto& k : kept_certificates) error_log_.warn(k);
     // Restart-only settings stay what they were; say which, when the file changed them
     // (control::restart_needed, the same list validate and health report).
-    if (const auto kept = control::restart_needed(fresh, cfg_); !kept.empty()) {
+    if (const auto kept = control::restart_needed(loaded, cfg_); !kept.empty()) {
         std::string keys;
         for (const auto& k : kept) keys += (keys.empty() ? "" : ", ") + k;
         error_log_.warn("reload: " + keys + " changed on disk and take effect at a restart (systemctl restart agensio); the running values are kept");
     }
-    auto gen = std::make_shared<Generation>();
-    gen->cfg = std::move(fresh);
     try {
-        prepare_acme(gen->cfg);
         build_listeners(*gen);
     } catch (const std::exception& e) {
         return refuse(e.what());

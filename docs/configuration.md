@@ -1453,10 +1453,10 @@ Nothing is interrupted:
   same connection;
 - a connection on a listen address that was removed serves its current request, then is
   told `Connection: close`; the address stops accepting at once;
-- a broken main file, a certificate that cannot be read or a port that cannot be bound
-  refuses the whole reload, with the reason in the error log, and the old configuration
-  keeps serving; a broken site file under `sites.d/` is set aside instead and the other
-  sites' changes apply (12c).
+- a broken main file or a port that cannot be bound refuses the whole reload, with the
+  reason in the error log, and the old configuration keeps serving; a broken site file
+  under `sites.d/`, or a site whose certificate cannot be loaded, is set aside instead and
+  the other sites' changes apply (12c).
 
 Under a 64-connection load the switch itself costs nothing measurable and no request
 fails (`tests/reload.sh`). Restart-only settings (the `applies` column of `docs/keys.md`):
@@ -1488,6 +1488,8 @@ What sets a file aside:
 
 - an error in it: TOML syntax, an unknown key (`unknown key 'refsue' (did you mean
   'refuse'?)`), a value out of range, a preset that does not fit;
+- a certificate and key pair that does not load (section 14): a site that was serving keeps
+  the certificate it loaded before, a new one is not served;
 - something its sites need that does not load: the site's root additions file (section 15;
   a site is never served without the locations root added, which may be the ones that
   protect it), or a users file of a `[[site.auth]]` rule (19b). An additions file that does
@@ -1541,8 +1543,8 @@ agensio -t --strict -c /etc/agensio/agensio.toml   # the same, exit 1
 agensio ctl health                                 # site_file_held_back, with the file, the error and what serves meanwhile
 ```
 
-Not yet set aside per site (it still refuses the whole start or reload): a certificate that
-cannot be read; planned.
+What still refuses the whole start or reload: the main file, a site in it, the server's own
+account (section 11), a listen address that cannot be bound.
 
 ## 13. CGI
 
@@ -1585,6 +1587,16 @@ tls = { cert = "/etc/ssl/example/fullchain.pem", key = "/etc/ssl/example/privkey
 ```
 
 A listen address is either plain or TLS for every site on it.
+
+Each certificate and key pair is loaded once per start or reload, before the listeners are
+built. A pair that does not load (a file the server's account cannot read, not PEM, a key that
+is not the certificate's) sets its site's file aside, and the other sites start or reload
+(section 12c); a site of the main file refuses the whole start or reload. A site that was
+serving keeps the certificate it loaded before: a renewal whose key the server cannot read
+(root's `0600` after the privilege drop) or a broken file never takes it down, the error log
+says `the certificate loaded before keeps serving`, and health names the file until the files
+load. Before 0.1.0-alpha.63 such a pair refused the whole reload, every other site's change
+and renewal with it, and at start it kept the server from starting.
 
 ### Automatic certificates
 

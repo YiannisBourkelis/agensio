@@ -1482,7 +1482,7 @@ Built in steps: the core (parsers, verification, cache), the configuration, the 
 path, logs and the control plane, then the end-to-end tests.
 
 
-## 26. One broken site never stops the others (2026-10-10, agreed with the owner; steps C1 and C2 built)
+## 26. One broken site never stops the others (2026-10-10, agreed with the owner; steps C1 to C3 built)
 
 The owner's question, raised while planning the certificate work: a site file with an error
 should leave the other sites working, with health telling the administrator what is wrong.
@@ -1651,6 +1651,22 @@ it would have yielded to the file loaded, i.e. not served and later in load orde
 broken file never takes a served name down. Only a file set aside for its own error leaves a
 claim; one that lost a conflict leaves none, and the conflict rules stay as they were.
 
-**Next step** of this section: C3, the certificates loaded per site in `build_listeners`, a site
-whose certificate or key cannot be read set aside with its last good version kept; then
-`tests/acme.sh` with a broken file elsewhere on the host during a renewal.
+**Built, third step (C3, 2026-10-11, 0.1.0-alpha.63).** `Server::load_certificates` loads every
+certificate and key pair of a generation once, before `build_listeners`, into
+`Generation::certificates` (keyed by both paths); the listeners' contexts copy the certificate,
+its chain and the key from there (`SSL_CTX_use_certificate`, `SSL_CTX_set1_chain`,
+`SSL_CTX_use_PrivateKey`), so a context is never shared between generations. A pair that does
+not load is a problem of its site for `set_aside_until_clean`: the file is set aside, a served one
+carried, and a carried site whose pair does not load takes the previous generation's material
+(the key only root can read after the privilege drop, the cookbook's finding; a broken renewal).
+Unlike the hosting rules this keeps a served site: the material in memory is the site's own,
+loaded and checked before, and serving it is what the site did until then; its expiry is the
+certificate work's (health judging the served certificate). The start-time cases (a main-file
+site's pair, every site's pair failing) still refuse, the latter as "no site could be loaded".
+Tests: three checks in `tests/isolation.sh` with a certificate generated for the test, and the
+check this section's test list asked of `tests/acme.sh`: a renewal forced with `cert-renew` while
+another site's file is broken serves the renewed certificate (C1's doing; before alpha.62 that
+reload was refused).
+
+**Next**: the certificate work (section 26's "Order"): health judging the served certificate,
+the hint for a key the server cannot read, the refresh and the hourly watch, `docs/tls.md`.

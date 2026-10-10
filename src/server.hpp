@@ -112,6 +112,13 @@ struct Listener {
 struct Generation {
     Config cfg;
     std::vector<Listener> listeners;
+#ifdef AGENSIO_HAS_TLS
+    // Each certificate and key pair the configuration names, loaded once (load_certificates): the
+    // listeners' contexts take their material from here, and a carried site whose files no longer
+    // load takes it from the previous generation's (design section 26, C3). Never used for a
+    // handshake, so sharing one between generations is safe.
+    std::map<std::string, std::shared_ptr<asio::ssl::context>> certificates;  // by "cert\nkey"
+#endif
     SiteConfig control_site;             // the control listener's synthetic site (stable address for its router)
     std::unique_ptr<Listener> control;   // present when [control] is enabled
     const Listener* find(std::string_view address) const noexcept {
@@ -162,6 +169,10 @@ private:
     };
 
     void build_listeners(Generation& gen);
+    // Loads every certificate of `gen` before the listeners are built; a site whose pair does not
+    // load is set aside with its file, a carried one keeps `previous`'s material. Throws for the
+    // main file's sites. Returns the lines to log for material kept.
+    std::vector<std::string> load_certificates(Generation& gen, const Generation* previous);
     void build_workers();
     std::size_t open_acceptor(const Listener& listener, Worker& worker, bool reuse_port);
     void open_acceptor_socket(Acceptor& acc, const Listener& listener, bool reuse_port);
