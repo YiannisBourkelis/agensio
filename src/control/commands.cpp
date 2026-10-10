@@ -383,8 +383,10 @@ CertificateState certificate_state(const TlsConfig& tls, std::time_t now) {
     st.placeholder = info.placeholder;
     st.issuer = info.issuer;
     st.names = info.names;
+    st.not_before = std::chrono::system_clock::to_time_t(info.not_before);
     st.not_after = std::chrono::system_clock::to_time_t(info.not_after);
     st.days_left = static_cast<long>((st.not_after - now) / 86400);
+    st.fingerprint = info.fingerprint;
 #else
     (void)tls;
     (void)now;
@@ -429,11 +431,20 @@ json::Value strings(const std::vector<std::string>& v) {
     return a;
 }
 
-json::Value tls_json(const SiteConfig& s, std::time_t now) {
+// The file on disk, and with the running server's facts the certificate it serves (step T2):
+// `served.same_as_disk` false means a newer file waits (or one that could not be loaded).
+json::Value tls_json(const SiteConfig& s, std::time_t now, const TlsFacts* tls) {
     json::Value t = json::Value::object();
     if (!s.tls) return t.set("mode", "none");
     t.set("mode", s.tls->automatic ? "auto" : "manual").set("cert", s.tls->cert.string()).set("key", s.tls->key.string());
     const CertificateState st = certificate_state(*s.tls, now);
+    if (tls)
+        if (auto it = tls->served.find(s.tls->cert.string() + '\n' + s.tls->key.string()); it != tls->served.end() && it->second.present) {
+            const CertificateState& sv = it->second;
+            t.set("served", json::Value::object().set("issuer", sv.issuer).set("placeholder", sv.placeholder).set("names", strings(sv.names))
+                                .set("not_after", static_cast<double>(sv.not_after)).set("days_left", static_cast<double>(sv.days_left))
+                                .set("same_as_disk", st.present && st.fingerprint == sv.fingerprint));
+        }
     t.set("present", st.present);
     if (!st.present) return t.set("error", st.error);
     t.set("placeholder", st.placeholder).set("issuer", st.issuer).set("names", strings(st.names));
@@ -441,7 +452,7 @@ json::Value tls_json(const SiteConfig& s, std::time_t now) {
     return t;
 }
 
-json::Value site_summary(const SiteConfig& s, std::time_t now) {
+json::Value site_summary(const SiteConfig& s, std::time_t now, const TlsFacts* tls = nullptr) {
     json::Value v = json::Value::object();
     v.set("server_name", strings(s.server_names)).set("listen", strings(s.listen));
     v.set("root", s.root).set("app", s.app).set("user", s.user).set("group", s.group);
@@ -450,7 +461,7 @@ json::Value site_summary(const SiteConfig& s, std::time_t now) {
     v.set("catch_all", is_catch_all(s));
     if (s.carried) v.set("last_good_version", true);  // its file was set aside on reload (design section 26)
     v.set("access_log", s.access_log);
-    v.set("tls", tls_json(s, now));
+    v.set("tls", tls_json(s, now, tls));
     return v;
 }
 
@@ -463,9 +474,9 @@ json::Value upstream_json(const UpstreamConfig& u) {
 
 }  // namespace
 
-json::Value sites(const Config& cfg, std::time_t now) {
+json::Value sites(const Config& cfg, std::time_t now, const TlsFacts* tls) {
     json::Value arr = json::Value::array();
-    for (const auto& s : cfg.sites) arr.push(site_summary(s, now));
+    for (const auto& s : cfg.sites) arr.push(site_summary(s, now, tls));
     return json::Value::object().set("count", static_cast<double>(cfg.sites.size())).set("sites", std::move(arr));
 }
 
@@ -778,8 +789,8 @@ json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_vi
     return finish("error", 500, "500: more than " + std::to_string(StaticHandler::kMaxInternalRedirects) + " internal redirects");
 }
 
-json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now) {
-    json::Value v = site_summary(s, now);
+json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now, const TlsFacts* tls) {
+    json::Value v = site_summary(s, now, tls);
     v.set("index", strings(s.index));
     v.set("settings", effective_settings(s, cfg));  // each with its value and where it comes from
     if (s.php.configured) {
@@ -1078,7 +1089,7 @@ PoolResidency pool_residency(const std::string& pool) {
     return r;
 }
 
-std::vector<Finding> health_findings(const Config& running, const Config& boot, bool as_root, std::time_t now) {
+std::vector<Finding> health_findings(const Config& running, const Config& boot, bool as_root, std::time_t now, const TlsFacts* tls) {
     std::vector<Finding> out;
     auto add = [&](std::string sev, std::string code, std::string site, std::string msg, std::string fix = "") {
         out.push_back(Finding{std::move(sev), std::move(code), std::move(site), std::move(msg), std::move(fix)});
@@ -1167,10 +1178,26 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
     // is never read again, so a renewal waits for a restart.
     for (const auto& p : tls_read_problems(running, system_facts()))
         add("warn", "tls_key_unreadable", running.sites[p.site].server_names.front(), p.message, p.fix);
+    // The certificates as served (step T2): what clients get is the certificate in memory, which
+    // may not be the file on disk (a reload not yet made, a key the server cannot read). Without
+    // the running server's facts (the unit tests, an older caller) the file stands in for it.
+    auto date = [](std::time_t t) {
+        char buf[16] = {};
+        std::tm tm{};
+        gmtime_r(&t, &tm);
+        std::strftime(buf, sizeof buf, "%Y-%m-%d", &tm);
+        return std::string(buf);
+    };
     for (const auto& s : running.sites) {
         if (!s.tls) continue;
         const std::string name = s.server_names.front();
-        const CertificateState st = certificate_state(*s.tls, now);
+        const std::string pair = s.tls->cert.string() + '\n' + s.tls->key.string();
+        const CertificateState disk = certificate_state(*s.tls, now);
+        const CertificateState* served = nullptr;
+        if (tls)
+            if (auto it = tls->served.find(pair); it != tls->served.end()) served = &it->second;
+        const CertificateState& st = served ? *served : disk;
+        const std::string what = served ? "the certificate served" : "certificate";
         if (!st.present) {
             add("error", "certificate_unreadable", name, "certificate cannot be read: " + st.error, "check tls.cert");
         } else if (st.placeholder) {
@@ -1178,10 +1205,52 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
                 "still on the placeholder certificate; the ACME order has not succeeded",
                 "make sure the names resolve here and port 80 is reachable, then read the acme lines in the error log");
         } else if (st.days_left < 0) {
-            add("error", "certificate_expired", name, "certificate expired", s.tls->automatic ? "read the acme lines in the error log" : "install a new certificate and reload");
+            add("error", "certificate_expired", name, what + " expired on " + date(st.not_after),
+                s.tls->automatic ? "read the acme lines in the error log" : "install a new certificate and reload");
         } else if (!s.tls->automatic && st.days_left < 14) {
-            add("warn", "certificate_expiring", name, "certificate expires in " + std::to_string(st.days_left) + " days",
+            add("warn", "certificate_expiring", name, what + " expires in " + std::to_string(st.days_left) + " days (" + date(st.not_after) + ")",
                 "renew it and reload, or switch to tls = \"auto\"");
+        }
+        // A newer certificate on disk than the one served: a reload not yet made, or one that
+        // could not load it (the site's file set aside with the certificate's error, C3).
+        if (served && disk.present && !disk.fingerprint.empty() && disk.fingerprint != served->fingerprint && disk.not_after > served->not_after) {
+            std::string reason = "a reload loads it";
+            std::string fix = "agensio reload (agensio ctl reload)";
+            for (const auto& h : running.held_back)
+                if (h.file == s.source && h.error.find("certificate could not be loaded") != std::string::npos) {
+                    reason = "the server could not load it: " + h.error;
+                    fix = "make the files readable to the server's account (tls_key_unreadable gives the lines) or correct them, then reload";
+                }
+            add(served->days_left < 7 ? "error" : "warn", "certificate_not_loaded", name,
+                "the certificate on disk (valid until " + date(disk.not_after) + ") is not the one served (valid until " + date(served->not_after) +
+                    "): " + reason,
+                fix);
+        }
+        // Automatic renewal (ACME orders at a third of the lifetime left, hourly): overdue a day
+        // after that point, with the last failure the manager recorded.
+        if (s.tls->automatic && served && served->present && !served->placeholder && tls) {
+            const std::time_t due = served->not_after - (served->not_after - served->not_before) / 3;
+            std::string failure;
+            if (auto f = tls->acme_failures.find(s.tls->cert.string()); f != tls->acme_failures.end()) {
+                std::tm tm{};
+                gmtime_r(&f->second.first, &tm);
+                char at[32] = {};
+                std::strftime(at, sizeof at, "%Y-%m-%d %H:%M UTC", &tm);
+                failure = std::string("the last attempt failed at ") + at + ": " + f->second.second;
+            }
+            const std::string acme_fix = "make sure every name resolves to this host and port 80 reaches it (HTTP-01), then agensio ctl cert-renew " + name +
+                                         " (MCP cert_renew) to try at once";
+            if (now > due + 86400)
+                add("error", "acme_renewal_overdue", name,
+                    "the automatic renewal is overdue: the certificate served expires in " + std::to_string(served->days_left) + " days (" +
+                        date(served->not_after) + "), renewal was due on " + date(due) + "; " +
+                        (failure.empty() ? std::string("no failed attempt since the start: read the acme lines of the error log") : failure),
+                    acme_fix);
+            else if (!failure.empty())
+                add("warn", "acme_renewal_failed", name,
+                    failure + "; the manager tries again every hour, the certificate served expires in " + std::to_string(served->days_left) + " days (" +
+                        date(served->not_after) + ")",
+                    acme_fix);
         }
         if (s.tls->automatic && !has_plain(s, false, true))
             add("warn", "acme_needs_port_80", name, "tls = \"auto\" but no plain site on port 80 covers these names",
@@ -1561,8 +1630,9 @@ Finding refusal_finding(const RefusalReport& r) {
     return Finding{"warn", "connections_refused", "", msg, fix};
 }
 
-json::Value health(const Config& running, const Config& boot, bool as_root, std::time_t now, const std::vector<Finding>& extra) {
-    auto findings = health_findings(running, boot, as_root, now);
+json::Value health(const Config& running, const Config& boot, bool as_root, std::time_t now, const std::vector<Finding>& extra,
+                   const TlsFacts* tls) {
+    auto findings = health_findings(running, boot, as_root, now, tls);
     findings.insert(findings.end(), extra.begin(), extra.end());
     json::Value arr = json::Value::array();
     bool ok = true;

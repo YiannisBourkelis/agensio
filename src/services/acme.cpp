@@ -15,6 +15,7 @@
 #include <ctime>
 #include <fstream>
 #include <sstream>
+#include <tuple>
 
 #include <asio/ssl.hpp>
 #include <openssl/asn1.h>
@@ -675,6 +676,28 @@ bool certificate_info(const fs::path& cert_path, CertInfo& out, std::string& err
         error = "not a PEM certificate";
         return false;
     }
+    return certificate_info_of(x.get(), out, error);
+}
+
+bool certificate_info_of(const X509* x509, CertInfo& out, std::string& error) {
+    if (!x509) {
+        error = "no certificate";
+        return false;
+    }
+    struct View {
+        const X509* p;
+        const X509* get() const noexcept { return p; }
+    } x{x509};
+    unsigned char md[EVP_MAX_MD_SIZE];
+    unsigned int md_len = 0;
+    out.fingerprint.clear();
+    if (X509_digest(x.get(), EVP_sha256(), md, &md_len) == 1) {
+        static const char* hex = "0123456789abcdef";
+        for (unsigned int i = 0; i < md_len; ++i) {
+            out.fingerprint.push_back(hex[md[i] >> 4]);
+            out.fingerprint.push_back(hex[md[i] & 15]);
+        }
+    }
     char cn[128] = {};
     X509_NAME_get_text_by_NID(X509_get_issuer_name(x.get()), NID_commonName, cn, sizeof cn);
     out.issuer = cn;
@@ -904,23 +927,25 @@ void AcmeManager::check() {
     busy_ = true;
     if (worker_.joinable()) worker_.join();
     worker_ = std::thread([this, due = std::move(due), cfg = cfg_] {
-        std::vector<std::pair<std::string, bool>> results;  // cert path, success
+        std::vector<std::tuple<std::string, bool, std::string>> results;  // cert path, success, error
         for (const auto& site : due) {
             std::string error;
             const bool ok = acme::issue(cfg, site, challenges_, log_, error);
             if (ok) log_.warn("acme: certificate issued for " + site.names.front() + " -> " + site.cert.string());
             else log_.error("acme: " + site.names.front() + ": " + error + " (retry in an hour)");
-            results.emplace_back(site.cert.string(), ok);
+            results.emplace_back(site.cert.string(), ok, error);
         }
         asio::post(*ctx_, [this, results = std::move(results)] {
             busy_ = false;
             bool renewed = false;
-            for (const auto& [path, ok] : results) {
+            for (const auto& [path, ok, error] : results) {
                 if (ok) {
                     failed_at_.erase(path);
+                    failures_.erase(path);
                     renewed = true;
                 } else {
                     failed_at_[path] = std::chrono::steady_clock::now();
+                    failures_[path] = Failure{std::chrono::system_clock::now(), error};
                 }
             }
             if (stopped_) return;

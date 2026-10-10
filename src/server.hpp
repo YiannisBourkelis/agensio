@@ -173,6 +173,7 @@ private:
     // load is set aside with its file, a carried one keeps `previous`'s material. Throws for the
     // main file's sites. Returns the lines to log for material kept.
     std::vector<std::string> load_certificates(Generation& gen, const Generation* previous);
+    control::TlsFacts tls_facts();  // the certificates as served and the ACME failures, for health (T2)
     void build_workers();
     std::size_t open_acceptor(const Listener& listener, Worker& worker, bool reuse_port);
     void open_acceptor_socket(Acceptor& acc, const Listener& listener, bool reuse_port);

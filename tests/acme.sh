@@ -92,5 +92,7 @@ before=$(serial)
 for _ in $(seq 1 150); do [ -n "$(serial)" ] && [ "$(serial)" != "$before" ] && break; sleep 0.2; done
 check "a renewal while another site's file is broken: the renewed certificate is served, the broken file set aside" "yes yes 2" \
   "$([ -n "$before" ] && [ "$(serial)" != "$before" ] && echo yes) $(grep -q 'broken.toml set aside' "$T/logs/error.log" && echo yes) $(grep -c 'acme: certificate issued' "$T/logs/error.log")"
+check "health judges the certificate served (step T2): the renewed one, nothing to report; site_show's tls.served is the file on disk" "none True" \
+  "$("$BIN" ctl health --socket "$T/control.sock" 2>/dev/null | python3 -c 'import json,sys; print(" ".join(f["code"] for f in json.load(sys.stdin)["findings"] if f["code"].startswith(("certificate_", "acme_renewal"))) or "none")') $("$BIN" ctl site host.docker.internal --socket "$T/control.sock" 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print([s for s in [d] if s["tls"]["mode"] == "auto"][0]["tls"]["served"]["same_as_disk"])' 2>/dev/null || echo error)"
 echo "acme: $pass passed, $fail failed"
 [ $fail = 0 ]

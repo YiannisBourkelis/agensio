@@ -380,6 +380,35 @@ static int select_protocol(SSL* ssl, const unsigned char** out, unsigned char* o
 }
 #endif
 
+// The certificates as served (the certificate work, step T2): each pair's certificate in memory,
+// and the ACME manager's last failures, for health. On worker 0, where both live.
+control::TlsFacts Server::tls_facts() {
+    control::TlsFacts facts;
+#ifdef AGENSIO_HAS_TLS
+    const std::time_t now = std::time(nullptr);
+    for (const auto& [pair, ctx] : gen_->certificates) {
+        acme::CertInfo info;
+        control::CertificateState st;
+        if (!acme::certificate_info_of(SSL_CTX_get0_certificate(ctx->native_handle()), info, st.error)) {
+            facts.served.emplace(pair, st);
+            continue;
+        }
+        st.present = true;
+        st.placeholder = info.placeholder;
+        st.issuer = info.issuer;
+        st.names = info.names;
+        st.not_before = std::chrono::system_clock::to_time_t(info.not_before);
+        st.not_after = std::chrono::system_clock::to_time_t(info.not_after);
+        st.days_left = static_cast<long>((st.not_after - now) / 86400);
+        st.fingerprint = info.fingerprint;
+        facts.served.emplace(pair, std::move(st));
+    }
+    for (const auto& [path, f] : acme_.failures())
+        facts.acme_failures.emplace(path, std::make_pair(std::chrono::system_clock::to_time_t(f.at), f.error));
+#endif
+    return facts;
+}
+
 std::vector<std::string> Server::load_certificates(Generation& gen, const Generation* previous) {
     std::vector<std::string> kept;
 #ifdef AGENSIO_HAS_TLS
@@ -803,12 +832,17 @@ void Server::start_accept_control() {
 #endif
 }
 
-json::Value Server::sites() { return control::sites(gen_->cfg, std::time(nullptr)); }
+json::Value Server::sites() {
+    const control::TlsFacts tls = tls_facts();  // each site's tls.served (T2)
+    return control::sites(gen_->cfg, std::time(nullptr), &tls);
+}
 
 json::Value Server::site(std::string_view name, bool& found) {
     const SiteConfig* s = control::find_site(gen_->cfg, name);
     found = s != nullptr;
-    return s ? control::site(gen_->cfg, *s, std::time(nullptr)) : json::Value();
+    if (!s) return json::Value();
+    const control::TlsFacts tls = tls_facts();
+    return control::site(gen_->cfg, *s, std::time(nullptr), &tls);
 }
 
 json::Value Server::validate() { return control::validate(cfg_.config_path, cfg_, &gen_->cfg); }
@@ -884,7 +918,8 @@ json::Value Server::health() {
         const auto more = control::protection_findings(in, control::read_probe(probe, in), files);
         extra.insert(extra.end(), more.begin(), more.end());
     }
-    return control::health(cfg, cfg_, as_root, std::time(nullptr), extra);
+    const control::TlsFacts tls = tls_facts();
+    return control::health(cfg, cfg_, as_root, std::time(nullptr), extra, &tls);
 }
 
 json::Value Server::status() {

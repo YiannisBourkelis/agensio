@@ -212,6 +212,28 @@ check "an edit pointing it at a key that cannot be loaded: its running version k
   "$(tbody 18306) $(body a.test 18301)"
 rm -f "$T/sites.d/t.toml"; site a.test 18301 "$T/www/a2" > "$T/sites.d/a.toml"; reload
 
+# Health judges the certificate served (the certificate work, step T2), not the file on disk: a
+# short-lived certificate served while a longer one waits on disk is still named as expiring, and
+# the one on disk as not loaded; a reload clears both; a newer one whose key the server cannot read
+# is not loaded either, and health says why.
+mkcert() { openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$1/key.pem" -out "$1/cert.pem" \
+  -subj /CN=t.test -addext subjectAltName=DNS:t.test -days "$2" > /dev/null 2>&1; }
+tcodes() { health | python3 -c 'import json,sys; print(" ".join(sorted(f["code"] for f in json.load(sys.stdin)["findings"] if f.get("site") == "t.test" and f["code"].startswith("certificate"))) or "none")'; }
+tmsg() { health | python3 -c 'import json,sys; m=[f["message"] for f in json.load(sys.stdin)["findings"] if f.get("site") == "t.test" and f["code"] == sys.argv[1]]; print(m[0] if m else "none")' "$1"; }
+mkdir -p "$CT/u" "$CT/next"; mkcert "$CT/u" 2
+tls_site "$CT/u" 18306 > "$T/sites.d/t.toml"; reload
+check "a certificate served with a day left: certificate_expiring" "certificate_expiring" "$(tcodes)"
+mkcert "$CT/next" 90; cp "$CT/next/cert.pem" "$CT/next/key.pem" "$CT/u/"
+check "a longer one written to disk, no reload: the served one is still expiring, the one on disk not loaded (a reload loads it)" \
+  "certificate_expiring certificate_not_loaded yes" "$(tcodes) $(tmsg certificate_not_loaded | grep -q 'a reload loads it' && echo yes)"
+reload
+check "reloaded: the one on disk is served, nothing to say; site_show's tls.served is it" "none True" \
+  "$(tcodes) $("$BIN" ctl site t.test --socket "$CS" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["tls"]["served"]["same_as_disk"])')"
+mkcert "$CT/next" 120; cp "$CT/next/cert.pem" "$CT/next/key.pem" "$CT/u/"; chmod 000 "$CT/u/key.pem"; reload
+check "a newer one whose key the server cannot read: not loaded, and health says why" "certificate_not_loaded yes" \
+  "$(tcodes) $(tmsg certificate_not_loaded | grep -q 'could not load it' && echo yes)"
+chmod 600 "$CT/u/key.pem"; rm -f "$T/sites.d/t.toml"; reload
+
 # A broken main file still refuses the reload, as before: the main file is all or nothing.
 cp "$T/agensio.toml" "$T/agensio.toml.good"
 printf 'workres = 2\n' >> "$T/agensio.toml"

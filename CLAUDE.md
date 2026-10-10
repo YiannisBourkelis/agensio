@@ -267,7 +267,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   listeners, whose contexts copy the material; a pair that does not load sets the site aside, a
   carried site keeps the previous generation's material (a root-only key after the drop); `-t`,
   the start and health (`tls_key_unreadable`, `server_read_problem` in `services/pools.*`, T1)
-  say ahead of time which certificate or key the server's account cannot read after the drop.
+  say ahead of time which certificate or key the server's account cannot read after the drop;
+  health judges the certificates as served (`Server::tls_facts`, `control::TlsFacts`, T2):
+  `certificate_not_loaded`, `acme_renewal_overdue` and `acme_renewal_failed` with the manager's
+  last failure (`AcmeManager::failures`).
 - **Request bodies** (A3): the HTTP/1 connection is the pull source behind
   `Request::body` (`StreamBody`: `async_read` with backpressure), decoding Content-Length
   or chunked (`http1/chunked.hpp`, fuzzed) from its receive buffer and socket.

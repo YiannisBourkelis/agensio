@@ -5458,6 +5458,74 @@ static void test_unknown_keys() {
     fs::remove_all(dir);
 }
 
+// Health judges the certificate served (the certificate work, step T2), on described facts: the
+// served one's expiry wins over the file's; an automatic renewal is overdue a day after a third of
+// the lifetime is left, with the manager's last failure, and a failure before that is a warning.
+static void test_served_certificates() {
+    using control::Finding;
+    constexpr auto npos = std::string::npos;
+    const std::time_t now = std::time(nullptr);
+    const std::time_t day = 86400;
+    Config cfg;
+    cfg.config_path = "/nonexistent/agensio.toml";
+    SiteConfig site;
+    site.server_names = {"a.test"};
+    site.listen = {"127.0.0.1:443"};
+    TlsConfig tls;
+    tls.automatic = true;
+    tls.cert = "/nonexistent/a.test/fullchain.pem";
+    tls.key = "/nonexistent/a.test/key.pem";
+    site.tls = tls;
+    cfg.sites.push_back(site);
+    const std::string pair = tls.cert.string() + '\n' + tls.key.string();
+    control::TlsFacts facts;
+    control::CertificateState served;
+    served.present = true;
+    served.issuer = "R11";
+    served.fingerprint = "aa";
+    served.not_before = now - 70 * day;
+    served.not_after = now + 20 * day;  // 90 days, due at 30 days left: ten days ago
+    served.days_left = 20;
+    facts.served[pair] = served;
+    auto find = [](const std::vector<Finding>& f, const char* code) -> const Finding* {
+        for (const auto& x : f)
+            if (x.code == code) return &x;
+        return nullptr;
+    };
+    {
+        const auto f = control::health_findings(cfg, cfg, false, now, &facts);
+        const Finding* o = find(f, "acme_renewal_overdue");
+        CHECK(o && o->severity == "error" && o->message.find("expires in 20 days") != npos && o->message.find("no failed attempt since the start") != npos &&
+              !find(f, "certificate_unreadable"));  // the file is gone; what is served is judged
+    }
+    facts.acme_failures[tls.cert.string()] = {now - 3600, "urn:ietf:params:acme:error:connection: Timeout during connect (likely firewall problem)"};
+    {
+        const auto f = control::health_findings(cfg, cfg, false, now, &facts);
+        const Finding* o = find(f, "acme_renewal_overdue");
+        CHECK(o && o->message.find("the last attempt failed at") != npos && o->message.find("likely firewall problem") != npos &&
+              o->fix.find("cert-renew a.test") != npos);
+    }
+    facts.served[pair].not_before = now - 40 * day;
+    facts.served[pair].not_after = now + 50 * day;  // due at 30 days left: in twenty days
+    facts.served[pair].days_left = 50;
+    {
+        const auto f = control::health_findings(cfg, cfg, false, now, &facts);
+        const Finding* w = find(f, "acme_renewal_failed");
+        CHECK(!find(f, "acme_renewal_overdue") && w && w->severity == "warn" && w->message.find("likely firewall problem") != npos);
+    }
+    // A managed certificate: the served one's expiry is reported, whatever the file says.
+    cfg.sites[0].tls->automatic = false;
+    facts.served[pair].days_left = 3;
+    facts.served[pair].not_after = now + 3 * day + 3600;
+    {
+        const auto f = control::health_findings(cfg, cfg, false, now, &facts);
+        const Finding* e = find(f, "certificate_expiring");
+        CHECK(e && e->message.find("the certificate served expires in 3 days") != npos && !find(f, "certificate_unreadable") && !find(f, "acme_renewal_failed"));
+    }
+    // Without the running server's facts the file stands in: here it is missing.
+    CHECK(find(control::health_findings(cfg, cfg, false, now), "certificate_unreadable"));
+}
+
 // A certificate or key the server's account cannot read after the privilege drop (the certificate
 // work, step T1), on a described machine: every directory on the way searchable, the file readable,
 // through the account's own uid, its group or a supplementary one (Debian's ssl-cert).
@@ -8265,6 +8333,7 @@ int main() {
     test_site_isolation();
     test_hosting_isolation();
     test_tls_read();
+    test_served_certificates();
     test_config_reference();
     test_config_reference_defaults();
     test_forwarded_lines();

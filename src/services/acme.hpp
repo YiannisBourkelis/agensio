@@ -20,6 +20,8 @@
 #include "config.hpp"
 #include "services/log.hpp"
 
+struct x509_st;  // OpenSSL's X509
+
 namespace agensio {
 
 // Tokens of the orders in flight. Read by any worker, written by the manager thread.
@@ -74,8 +76,11 @@ struct CertInfo {
     std::chrono::system_clock::time_point not_before;
     std::chrono::system_clock::time_point not_after;
     bool placeholder = false;
+    std::string fingerprint;  // SHA-256 of the DER, hex: tells two certificates apart
 };
 bool certificate_info(const std::filesystem::path& cert, CertInfo& out, std::string& error);
+// The same of a certificate in memory (what a listener serves, the certificate work's step T2).
+bool certificate_info_of(const x509_st* cert, CertInfo& out, std::string& error);
 
 // True when the certificate at `cert` should be (re)issued for `names`: missing, unreadable,
 // our placeholder, not covering every name, or less than a third of its lifetime left.
@@ -121,6 +126,13 @@ public:
     // Orders `cert` again now, whatever its state; false when no managed site has it.
     bool renew_now(const std::filesystem::path& cert);
     void stop();
+    // The last failed order of each certificate (by its path) since the start, with the CA's or the
+    // network's error; a success clears it. On worker 0's loop, where health asks (step T2).
+    struct Failure {
+        std::chrono::system_clock::time_point at;
+        std::string error;
+    };
+    const std::map<std::string, Failure>& failures() const noexcept { return failures_; }
 
 private:
     void check();
@@ -132,6 +144,7 @@ private:
     AcmeConfig cfg_;
     std::vector<AcmeSite> sites_;
     std::map<std::string, std::chrono::steady_clock::time_point> failed_at_;  // by cert path; retried after an hour
+    std::map<std::string, Failure> failures_;                                  // by cert path, for health
     std::vector<std::string> forced_;  // cert paths to order at the next check regardless
     std::function<void()> on_renewed_;
     AcmeChallenges challenges_;

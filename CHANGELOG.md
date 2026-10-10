@@ -2,7 +2,21 @@
 
 ## 0.1.0-alpha.64
 
-Certificates (the certificate work, step T1):
+Certificates (the certificate work, steps T1 and T2):
+
+- **Health judges the certificate served, not the file on disk.** It read the certificate files,
+  so a renewal written but not loaded (no reload yet, or a key the server could not read) looked
+  fine while the old, expiring certificate kept being served; and a failing automatic renewal said
+  nothing until the certificate had expired. Health now reads each site's certificate from the
+  server's memory: expiry and the placeholder are the served one's; `certificate_not_loaded` (a
+  warning, an error under 7 days left) names a newer file on disk with why (a reload loads it, or
+  the server could not load it, with the error); `acme_renewal_overdue` (an error) is an automatic
+  certificate a day past its renewal point, a third of its lifetime left, with the CA's error from
+  the last failed order, which the manager now keeps; `acme_renewal_failed` (a warning) is a
+  failed order before that point. Shown first by `tests/isolation.sh` (a short-lived certificate
+  served while a longer one waits on disk: health reported nothing; now the served one's expiry
+  and the waiting one, cleared by a reload; a newer one whose key the server cannot read: named
+  with why) and unit checks on described facts.
 
 - **A key only root can read is named before it costs a renewal.** With `server.user` the start
   reads the certificates as root and every reload after that as that account, so a key only root

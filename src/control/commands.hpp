@@ -5,6 +5,7 @@
 
 #include <ctime>
 #include <filesystem>
+#include <map>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -56,19 +57,30 @@ struct CertificateState {
     bool placeholder = false;
     std::string issuer;
     std::vector<std::string> names;
+    std::time_t not_before = 0;
     std::time_t not_after = 0;
     long days_left = 0;
-    std::string error;  // why it could not be read
+    std::string fingerprint;  // SHA-256 of the DER: tells the file on disk from what is served
+    std::string error;        // why it could not be read
 };
-CertificateState certificate_state(const TlsConfig& tls, std::time_t now);
+CertificateState certificate_state(const TlsConfig& tls, std::time_t now);  // the file on disk
 
-json::Value sites(const Config& cfg, std::time_t now);
+// What health knows of the running server beyond its configuration (the certificate work, step
+// T2): the certificate each pair serves, read from memory, and the ACME manager's last failed
+// order per certificate.
+struct TlsFacts {
+    std::map<std::string, CertificateState> served;                              // by "cert\nkey"
+    std::map<std::string, std::pair<std::time_t, std::string>> acme_failures;  // by cert path: when, the error
+};
+
+// With `tls` each TLS site's `tls` carries `served`: the certificate in memory (step T2).
+json::Value sites(const Config& cfg, std::time_t now, const TlsFacts* tls = nullptr);
 // The site whose server_name list contains `name` (case-insensitive), or null.
 const SiteConfig* find_site(const Config& cfg, std::string_view name);
 // `server_name = ["*"]` or `default = true`: answers every Host on its listener.
 bool is_catch_all(const SiteConfig& s);
 bool listener_has_catch_all(const Config& cfg, const std::string& address);
-json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now);
+json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now, const TlsFacts* tls = nullptr);
 // Access by client address (docs/configuration.md 19): what the site's rules decide for one
 // path and one client address, with the deciding rule and a one-line summary. `error` set
 // (and nothing answered) when the path or the address does not parse.
@@ -132,10 +144,12 @@ std::string ago_text(double seconds);
 Finding refusal_finding(const RefusalReport& r);
 // What an administrator should look at: certificates, redirects, port 80 for ACME,
 // recent errors, pending restart, root, shared accounts, stale pools.
-std::vector<Finding> health_findings(const Config& running, const Config& boot, bool as_root, std::time_t now);
+// With `tls` (the running server's) the certificates are judged as served, else as on disk.
+std::vector<Finding> health_findings(const Config& running, const Config& boot, bool as_root, std::time_t now, const TlsFacts* tls = nullptr);
 // `extra`: findings the caller gathered where this process cannot look (the sites'
 // environment files, through the helper), appended as they are.
-json::Value health(const Config& running, const Config& boot, bool as_root, std::time_t now, const std::vector<Finding>& extra = {});
+json::Value health(const Config& running, const Config& boot, bool as_root, std::time_t now, const std::vector<Finding>& extra = {},
+                   const TlsFacts* tls = nullptr);
 // appenv::inspect's answer as findings: a file a task would refuse (warn), one the next task
 // tightens (info), a deleted site's file (info), or that the check could not run.
 std::vector<Finding> env_findings(const json::Value& inspected);

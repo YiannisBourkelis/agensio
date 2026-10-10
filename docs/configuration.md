@@ -1607,7 +1607,18 @@ of time, every directory on the way included, and give root's commands, for exam
 agensio /etc/letsencrypt/live && chmod g+x /etc/letsencrypt/live; chgrp agensio
 /etc/letsencrypt/live/example.com/privkey.pem && chmod 640 ...`; a reload that meets it says the
 same beside `the certificate loaded before keeps serving`. Keys `tls = "auto"` writes are the
-server account's already. Adding the server's account to a group that reads the keys (Debian's
+server account's already.
+
+**What health says about certificates.** It judges the certificate each site serves, read from
+the server's memory, not the file on disk (before 0.1.0-alpha.64 it read the file, so a renewal
+written but not loaded looked fine while the expiring one kept being served):
+`certificate_expired` and `certificate_expiring` (a managed certificate with under 14 days left)
+give the served one's date; `certificate_not_issued` is an automatic site still on its
+placeholder; `certificate_not_loaded` is a file on disk newer than the one served, with why (a
+reload loads it, or the server could not load it, with the error); `acme_renewal_overdue` (an
+error) is an automatic certificate more than a day past its renewal point, a third of its
+lifetime left, with the CA's error from the last failed order; `acme_renewal_failed` (a warning)
+is a failed order before that point, retried every hour. Adding the server's account to a group that reads the keys (Debian's
 `ssl-cert` for `/etc/ssl/private`) works too.
 
 ### Automatic certificates
