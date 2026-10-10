@@ -38,6 +38,17 @@ From the alpha.58 report:
   yescrypt); the control plane's own files are always yescrypt.
 - Both shown first by the unit test `test_auth_notes` (alpha.60 warned about the `[::1]` site, said
   nothing at `-t` for a public one, and had no note for a mixed file).
+- **The WordPress login page came unstyled below a protected `/wp-admin`.** WordPress concatenates
+  the login page's styles and scripts (`script_concat_settings` on `login_init`) through
+  `/wp-admin/load-styles.php` and `/wp-admin/load-scripts.php`, which were not among the paths the
+  preset keeps open below a `/wp-admin` rule, so with an address rule, `rules.admin` or a password
+  on `/wp-admin` the login page's stylesheet was refused or asked for a password. Both are open
+  now, exactly (`/wp-admin/load-styles.php/x` stays restricted), for address rules and passwords
+  alike from one list (`kWordPressOpenings`, where two copies were). They are WordPress core
+  scripts every installation keeps public: no plugin, no database, no login, only core styles or
+  scripts named in the query. Shown first by the unit tests and `tests/integration.sh` (below a
+  restricted `/wp-admin`, `load-styles.php` and `load-scripts.php` answered 403 on alpha.60, now
+  200, the path-info form 403).
 
 Found while writing the cookbook (`docs/examples.md`), each shown first by a test that failed on
 alpha.60:

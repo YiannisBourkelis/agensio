@@ -363,7 +363,7 @@ server.
 | plain HTTP from another host | `403` and a page saying to use https, unless `plain_http = "allow"`; loopback and trusted https-forwarding proxies are asked |
 | a tunnel or TLS terminator on this host (in `trusted_proxies`) relaying a remote client's plain HTTP | `403`: the proxy's `X-Forwarded-Proto` and the client it names decide, not its own loopback address; with `X-Forwarded-Proto: https` the client is asked (before 0.1.0-alpha.61 it was asked either way) |
 | behind a CDN or a proxy | `skip_for` judges the client `X-Forwarded-For` names only when the proxy is in `trusted_proxies`; otherwise the proxy's address |
-| WordPress with `/wp-admin` protected | `admin-ajax.php` and the login page's files under `/wp-admin/css`, `js` and `images` stay open (the public site calls them); not when the whole site is protected |
+| WordPress with `/wp-admin` protected | `admin-ajax.php`, the login page's `load-styles.php` and `load-scripts.php` (exactly) and its files under `/wp-admin/css`, `js` and `images` stay open (the public site and the login page call them; before 0.1.0-alpha.61 the two scripts were asked, and the login page came unstyled); not when the whole site is protected |
 | HTTP/2 and HTTP/3 | the same rules, the same answers; the memo is per connection |
 | several sites name one file | read once per load; each site's rules decide for that site |
 | the same user name in two files | independent: different hashes, different cache keys |

@@ -6062,7 +6062,11 @@ static void test_auth_config() {
     int opened = 0;
     for (const auto& r : wp.sites[0].auth)
         if (r.open && r.origin == "preset:wordpress") ++opened;
-    CHECK(opened == 4);
+    CHECK(opened == 6);  // admin-ajax.php, css, js, images, load-styles.php, load-scripts.php
+    for (const char* path : {"/wp-admin/load-styles.php", "/wp-admin/load-scripts.php"}) {
+        const AuthRule* a = access::auth_rule_for(wp.sites[0], path);
+        CHECK(a && a->open && a->exact);
+    }
     fs::remove_all(dir);
 }
 
@@ -6643,6 +6647,15 @@ static void test_access_rules() {
             const AccessRule* o = access::rule_for(w.sites[0], open);
             CHECK(o && o->any && o->origin == "preset:wordpress");
         }
+        // WordPress concatenates the login page's styles and scripts (script_concat_settings on
+        // login_init): wp-login.php takes them from load-styles.php and load-scripts.php, which stay
+        // open, exactly (the alpha.58 report's finding 5); run with path info they are /wp-admin's.
+        for (const char* open : {"/wp-admin/load-styles.php", "/wp-admin/load-scripts.php"}) {
+            const AccessRule* o = access::rule_for(w.sites[0], open);
+            CHECK(o && o->any && o->exact && o->origin == "preset:wordpress");
+        }
+        r = access::rule_for(w.sites[0], "/wp-admin/load-styles.php/x");
+        CHECK(r && !r->any && r->path == "/wp-admin");
         r = access::rule_for(w.sites[0], "/wp-admin/options.php");
         CHECK(r && !r->any && r->path == "/wp-admin");
         // WordPress's hardening guide: wp-admin/includes/ and wp-includes/theme-compat/ refused whole.

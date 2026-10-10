@@ -2532,12 +2532,19 @@ a front controller).
 **WordPress.** Its public pages call `/wp-admin/admin-ajax.php` (search, carts, comment
 forms), and the login page loads its styles, scripts and logo from `/wp-admin/css/`,
 `/wp-admin/js/` and `/wp-admin/images/` (WordPress's `script-loader.php`; WooCommerce's
-account page takes the password meter from there too), so when `/wp-admin` is restricted and
-the whole site is not, the preset keeps that file and those three directories open to anyone
-(`agensio -t --explain` shows the rules, `# from preset:wordpress`). They hold WordPress's own
-static files, the same on every installation, and the preset runs no script there (section
-4), so the openings serve files and nothing else. Write your own rule for one of those paths
-to change that.
+account page takes the password meter from there too), or, as WordPress usually does,
+concatenated through `/wp-admin/load-styles.php` and `/wp-admin/load-scripts.php`
+(`script_concat_settings` on `login_init`). So when `/wp-admin` is restricted and the whole site
+is not, the preset keeps those three scripts (exactly: `/wp-admin/load-styles.php/x` stays
+restricted) and those three directories open to anyone (`agensio -t --explain` shows the rules,
+`# from preset:wordpress`); before 0.1.0-alpha.61 the two concatenating scripts were not among
+them, and the login page came unstyled or asked for a password. The directories hold
+WordPress's own static files and the preset runs no script there (section 4). The two
+concatenating scripts are WordPress core files every installation keeps public: they load no
+plugin, no database and no login and print only core styles or scripts named in the query.
+Asking `load-scripts.php` for every script at once costs the server some work, a known
+WordPress trait (CVE-2018-6389) the firewall's per-address limits answer (section 18). Write
+your own rule for one of those paths to change that.
 
 **Admin panels.** A site's administration is open to everyone by default, as WordPress and
 Drupal ship it: their own login, the fail2ban jails (section 18) and the firewall's limits

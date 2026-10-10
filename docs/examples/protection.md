@@ -39,9 +39,11 @@ allow = ["@office"]
 
 **What it does.** A request for `/wp-admin` or below from any other address gets `403` with a
 page naming the address the server saw, whichever location would have served it: a `.php`
-file, a fallback, a static file. The WordPress preset keeps `/wp-admin/admin-ajax.php` and the
-login page's own `css/`, `js/` and `images/` open, because the public site calls them (search,
-carts, comment forms) and nothing runs there but WordPress's own files. The login page itself,
+file, a fallback, a static file. The WordPress preset keeps `/wp-admin/admin-ajax.php`, the
+login page's `load-styles.php` and `load-scripts.php` (its styles and scripts, concatenated) and
+its own `css/`, `js/` and `images/` open, because the public site and the login page call them
+(search, carts, comment forms, the login form's look), and nothing runs there but WordPress's own
+files. The login page itself,
 `/wp-login.php`, stays open: a shop's customers log in there. When no visitor ever does, add
 it with an exact rule (next recipe).
 

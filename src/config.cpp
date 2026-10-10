@@ -2267,6 +2267,30 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
     return out;
 }
 
+// What a WordPress site's public pages and login page need below /wp-admin, kept open under a
+// rule on /wp-admin alone (an address rule or a password; rules.admin is the former), a rule the
+// site names for one of these paths winning. admin-ajax.php: the front end calls it (search,
+// carts, comment forms). css/, js/, images/: wp-login.php's own files (login.css, forms.css,
+// user-profile.js, the password meter, the logo; wp-includes/script-loader.php), served as files
+// only, nothing runs there. load-styles.php and load-scripts.php (the alpha.58 report's finding 5):
+// the login page's styles and scripts concatenated (script_concat_settings on login_init), without
+// which the login page is unstyled or asks for the password; two core scripts WordPress keeps
+// public, which load no plugin, no database and no login and print only core files named in the
+// query. Exact, so a path-info form (/wp-admin/load-styles.php/x) stays /wp-admin's.
+struct WordPressOpening {
+    const char* path;
+    bool exact;
+    const char* probe;  // a path the opening covers, to find the rule over it
+};
+constexpr WordPressOpening kWordPressOpenings[] = {
+    {"/wp-admin/admin-ajax.php", true, "/wp-admin/admin-ajax.php"},
+    {"/wp-admin/load-styles.php", true, "/wp-admin/load-styles.php"},
+    {"/wp-admin/load-scripts.php", true, "/wp-admin/load-scripts.php"},
+    {"/wp-admin/css", false, "/wp-admin/css/x.css"},
+    {"/wp-admin/js", false, "/wp-admin/js/x.js"},
+    {"/wp-admin/images", false, "/wp-admin/images/x.png"},
+};
+
 void finalize_site(SiteConfig& site) {
     bool has_root_prefix = false;
     for (const auto& loc : site.locations)
@@ -2300,26 +2324,12 @@ void finalize_site(SiteConfig& site) {
         for (auto& a : loc.proxy.addresses) pool_of(a);
     }
     // [[site.access]]: with /wp-admin alone restricted (not the whole site), what the public
-    // site still needs below it stays open to anyone: admin-ajax.php, which the front end
-    // calls (search, carts, comment forms; the hardening guide's own caveat), and the login
-    // page's files, since wp-login.php loads /wp-admin/css/login.css, forms.css, l10n.css and
-    // /wp-admin/js/user-profile.js and password-strength-meter.js (wp-includes/script-loader.php;
-    // WooCommerce's account pages load the meter too) with the logo from /wp-admin/images/.
-    // A rule the site names for one of these paths wins.
+    // site and the login page still need below it stays open to anyone (kWordPressOpenings).
     if (site.app == "wordpress" && !site.access.empty()) {
         bool whole = false;
         for (const auto& r : site.access) whole = whole || (!r.exact && r.path == "/");
-        struct Opening {
-            const char* path;
-            bool exact;
-            const char* probe;
-        };
-        static constexpr Opening kOpen[] = {{"/wp-admin/admin-ajax.php", true, "/wp-admin/admin-ajax.php"},
-                                            {"/wp-admin/css", false, "/wp-admin/css/x.css"},
-                                            {"/wp-admin/js", false, "/wp-admin/js/x.js"},
-                                            {"/wp-admin/images", false, "/wp-admin/images/x.png"}};
         std::vector<AccessRule> add;
-        for (const Opening& o : kOpen) {
+        for (const WordPressOpening& o : kWordPressOpenings) {
             if (whole) break;
             const AccessRule* best = nullptr;
             for (const auto& r : site.access)
@@ -2352,17 +2362,8 @@ void finalize_site(SiteConfig& site) {
     if (site.app == "wordpress" && !site.auth.empty()) {
         bool whole = false;
         for (const auto& r : site.auth) whole = whole || (!r.exact && r.path == "/" && !r.open);
-        struct Opening {
-            const char* path;
-            bool exact;
-            const char* probe;
-        };
-        static constexpr Opening kOpen[] = {{"/wp-admin/admin-ajax.php", true, "/wp-admin/admin-ajax.php"},
-                                            {"/wp-admin/css", false, "/wp-admin/css/x.css"},
-                                            {"/wp-admin/js", false, "/wp-admin/js/x.js"},
-                                            {"/wp-admin/images", false, "/wp-admin/images/x.png"}};
         std::vector<AuthRule> add;
-        for (const Opening& o : kOpen) {
+        for (const WordPressOpening& o : kWordPressOpenings) {
             if (whole) break;
             const AuthRule* best = nullptr;
             for (const auto& r : site.auth)
