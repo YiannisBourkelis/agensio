@@ -1361,7 +1361,13 @@ nothing is silently reset by a nested table, which is nginx's best-known
 ones, `Server` and `Date` (agensio's own), and whatever `hide = [...]` lists. A chunked
 origin body is re-framed with a Content-Length when buffered, passed on as chunked when
 streaming. A `Location` that points at the origin's own address is rewritten to this site
-and location (`redirects = "pass"` leaves it alone). The location's `add_headers` are
+(`redirects = "pass"` leaves it alone): with a URI part the URI part becomes the location's
+prefix (`path = "/api/"`, `upstream = "http://127.0.0.1:3000/v1/"`: `http://127.0.0.1:3000/v1/x`
+becomes `https://example.com/api/x`); without one the origin was asked the path untouched, so
+its root is the site's root and only the scheme and host change (`http://127.0.0.1:3000/app/x`
+becomes `https://example.com/app/x`), as nginx's `proxy_redirect default` does. Before
+0.1.0-alpha.62 a location without a URI part added its prefix again (`/app/app/x`); a location
+at `/` was not affected. The location's `add_headers` are
 added on 2xx and 3xx answers (HSTS, CORS, cache policy), for proxied and PHP responses
 alike.
 

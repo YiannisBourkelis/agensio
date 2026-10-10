@@ -342,7 +342,10 @@ final = true                          # nothing PHP-like under /api/: /api/expor
 upstream's own path, the query string kept: `/api/rooms?from=2026-10-01` arrives as
 `/rooms?from=2026-10-01`. Without a path on the upstream (`http://127.0.0.1:4000`) the request
 line goes unchanged, `/api/rooms`. A redirect the service sends to its own address
-(`http://127.0.0.1:4000/rooms/7`) reaches the browser as `https://shop.example.com/api/rooms/7`.
+(`http://127.0.0.1:4000/rooms/7`) reaches the browser as `https://shop.example.com/api/rooms/7`;
+without a path on the upstream the service's redirects already carry the prefix, and only the
+address changes (`http://127.0.0.1:4000/api/rooms/7` becomes
+`https://shop.example.com/api/rooms/7`; before 0.1.0-alpha.62 it became `/api/api/rooms/7`).
 
 Two things are easy to get wrong. A PHP site's `.php` location is checked before any prefix,
 so without `final = true` a request for `/api/export.php` runs PHP (or is a `404`) instead of

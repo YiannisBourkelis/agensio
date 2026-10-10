@@ -67,7 +67,10 @@ namespace {
 
 // "http(s)://<origin address><rewrite prefix>rest" -> "<scheme>://<host><location prefix>rest".
 // The scheme is the origin's: an https origin's redirects name https (before 2026-10-09 they were
-// never rewritten, its key carrying the scheme).
+// never rewritten, its key carrying the scheme). Without a URI part the origin was asked the path
+// untouched, so its root is the site's root and the path stays as it is, nginx's proxy_redirect
+// default for a proxy_pass without a URI (before alpha.62 the location's prefix was added again:
+// /app/app/landing, the alpha.61 report).
 bool rewrite_location(std::string& out, std::string_view value, const Stream& s, const LocationConfig& loc) {
     const bool tls = value.starts_with("https://");
     if (!tls && !value.starts_with("http://")) return false;
@@ -78,11 +81,15 @@ bool rewrite_location(std::string& out, std::string_view value, const Stream& s,
     if (!origin) return false;
     rest.remove_prefix(origin->authority().size());
     if (!rest.empty() && rest.front() != '/') return false;  // a longer host name
-    const std::string_view prefix = loc.proxy.rewrite.empty() ? std::string_view("/") : loc.proxy.rewrite;
+    const bool https = s.conn.tls || s.conn.forwarded_https;
+    if (loc.proxy.rewrite.empty()) {
+        out.append(https ? "https://" : "http://").append(s.request.host).append(rest.empty() ? std::string_view("/") : rest);
+        return true;
+    }
+    const std::string_view prefix = loc.proxy.rewrite;
     if (rest.starts_with(prefix)) rest.remove_prefix(prefix.size());
     else if (rest.empty() || rest == "/") rest = {};
     else return false;  // outside the mapped prefix: leave it
-    const bool https = s.conn.tls || s.conn.forwarded_https;
     out.append(https ? "https://" : "http://").append(s.request.host).append(loc.path);
     if (!loc.path.empty() && loc.path.back() != '/' && !rest.empty()) out.push_back('/');
     out.append(rest);

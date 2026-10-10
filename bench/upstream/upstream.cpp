@@ -12,6 +12,8 @@
 //                   echoed back until the client closes (a WebSocket-shaped tunnel without
 //                   the framing); other paths ignore Upgrade like an application would
 //   /redirect       302 to http://127.0.0.1:<port>/json with X-Powered-By: redirect and hide rules
+//   .../to-landing  302 to http://127.0.0.1:<port>/.../landing: the path the origin was asked kept,
+//                   as an application builds its redirects (a proxy's Location rewrite)
 //   /stats          {"connections":N,"requests":M} accepted so far: proves pool reuse
 // Build: target agensio_upstream. Run: agensio_upstream [-p 9100] [-w 1] [-b 102400].
 #include <asio.hpp>
@@ -203,6 +205,12 @@ private:
         if (path == "/redirect") {
             head_ = "HTTP/1.1 302 Found\r\nServer: upstream\r\nLocation: http://127.0.0.1:" + std::to_string(g_port) +
                     "/json\r\nX-Powered-By: upstream\r\nContent-Length: 0" +
+                    std::string(close ? "\r\nConnection: close\r\n\r\n" : "\r\n\r\n");
+            return write({}, close);
+        }
+        if (path.ends_with("/to-landing")) {
+            head_ = "HTTP/1.1 302 Found\r\nServer: upstream\r\nLocation: http://127.0.0.1:" + std::to_string(g_port) +
+                    std::string(path.substr(0, path.size() - 10)) + "landing\r\nContent-Length: 0" +
                     std::string(close ? "\r\nConnection: close\r\n\r\n" : "\r\n\r\n");
             return write({}, close);
         }

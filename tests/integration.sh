@@ -357,6 +357,15 @@ path = "/abort/"
 upstream = "http://127.0.0.1:9109/"
 proxy = {{ max_connections = 1, queue_depth = 0 }}
 
+[[site.location]]                       # no URI part: the origin sees the path whole, its redirects name it
+path = "/whole/"
+upstream = "http://127.0.0.1:9107"
+
+[[site.location]]                       # the same over TLS
+path = "/tlswhole/"
+upstream = "https://127.0.0.1:9131"
+proxy = {{ tls = {{ verify = false }} }}
+
 [[site.location]]                       # D2: redirects passed through untouched
 path = "/raw/"
 upstream = "http://127.0.0.1:9107/"
@@ -2072,6 +2081,11 @@ except OSError:
   check "proxy: origin header visible without hide" "1" "$(echo "$R" | grep -c '^X-Powered-By:')"
   R=$(curl -sS -i $P/policy/redirect | tr -d '\r')
   check "proxy: hidden field dropped" "0" "$(echo "$R" | grep -c '^X-Powered-By:')"
+  # A location without a URI part passes the path untouched, so the origin's root is the site's
+  # root: its Location keeps the prefix it was asked (alpha.61 report, finding 1: /whole/whole/).
+  check "proxy: a location without a URI part maps the origin's root to the site's, plain and TLS origins, and at / too" \
+    "http://127.0.0.1:8091/whole/landing http://127.0.0.1:8091/tlswhole/landing http://127.0.0.1:8091/deep/landing" \
+    "$(curl -sSi $P/whole/to-landing | tr -d '\r' | sed -n 's/^[Ll]ocation: //p') $(curl -sSi $P/tlswhole/go/x | tr -d '\r' | sed -n 's/^[Ll]ocation: //p') $(curl -sSi $P/deep/to-landing | tr -d '\r' | sed -n 's/^[Ll]ocation: //p')"
   check "proxy: redirects = pass leaves Location alone" "Location: http://127.0.0.1:9107/json" "$(curl -sS -i $P/raw/redirect | tr -d '\r' | grep '^Location:')"
   # CGI (D5): the script's output, environment, PATH_INFO, body on stdin, status and
   # Location handling, stderr in the log, an exit without output, a timeout, the cap.

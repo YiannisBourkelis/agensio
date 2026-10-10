@@ -2,6 +2,19 @@
 
 ## 0.1.0-alpha.62
 
+From the alpha.61 report:
+
+- **A proxied redirect named the location's prefix twice.** A location without a URI part on
+  its upstream (`path = "/app/"`, `upstream = "http://127.0.0.1:3000"`) passes the path
+  untouched, so the origin's redirects already carry `/app/`; the rewrite of a `Location`
+  pointing at the origin replaced the origin's root by the location's prefix and sent
+  `/app/app/landing`. The origin's root is now the site's root there and only the scheme and
+  host change, as nginx's `proxy_redirect default` does; with a URI part nothing changes. A
+  location at `/`, every proxy preset's, was not affected. Plain-HTTP origins had it since D2;
+  alpha.61's rewrite for `https://` origins brought it there too. Shown first by an integration
+  check (`/whole/to-landing`, `/tlswhole/go/x`: `/whole/whole/landing` and
+  `/tlswhole/tlswhole/landing` on alpha.61).
+
 - **One broken site file no longer stops every site.** The configuration loaded all or nothing:
   one mistake in any file under `sites.d/` (a misspelt key, a broken TOML line, a root additions
   file left group-writable) failed `agensio -t`, which the packaged unit runs before it starts,

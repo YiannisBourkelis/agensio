@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """A small HTTPS origin for the reverse proxy's TLS checks in tests/integration.sh: every answer
-carries the Host it received (X-Seen-Host), and /go/... answers with an absolute redirect to its
-own address, the kind the proxy rewrites to the site.
+carries the Host it received (X-Seen-Host), and .../go/... answers with an absolute redirect to its
+own address, the kind the proxy rewrites to the site: to <what came before /go/>/landing, as an
+application builds its redirects from the path it was asked.
 
 usage: tests/tls-origin.py PORT CERT KEY
 """
@@ -16,9 +17,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_GET(self):
-        if self.path.startswith("/go/"):
+        go = self.path.find("/go/")
+        if go >= 0:
             self.send_response(302)
-            self.send_header("Location", f"https://127.0.0.1:{port}/landing")
+            self.send_header("Location", f"https://127.0.0.1:{port}{self.path[:go]}/landing")
             body = b""
         else:
             self.send_response(200)
