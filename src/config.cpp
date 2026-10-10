@@ -35,6 +35,23 @@
 
 namespace agensio {
 
+bool loopback_listen(std::string_view listen) {
+    const std::size_t colon = listen.rfind(':');
+    const std::string_view host = colon == std::string_view::npos ? listen : listen.substr(0, colon);
+    if (host == "localhost") return true;
+    asio::error_code ec;
+    asio::ip::address a = asio::ip::make_address(std::string(host), ec);
+    if (ec) return false;
+    if (a.is_v6() && a.to_v6().is_v4_mapped()) a = asio::ip::make_address_v4(asio::ip::v4_mapped, a.to_v6());
+    return a.is_loopback();
+}
+
+std::string display_listen(std::string_view listen) {
+    const std::size_t colon = listen.rfind(':');
+    if (colon == std::string_view::npos || listen.substr(0, colon).find(':') == std::string_view::npos) return std::string(listen);
+    return "[" + std::string(listen.substr(0, colon)) + "]" + std::string(listen.substr(colon));
+}
+
 namespace fs = std::filesystem;
 
 std::size_t parse_size(std::string_view text) {
@@ -2205,6 +2222,47 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
             if (r.exact && !r.any && proxied_script(r.path)) proxied_notice("access", r.path);
         for (const auto& r : site.auth)
             if (r.exact && !r.open && proxied_script(r.path)) proxied_notice("password", r.path);
+        // Passwords asked over plain HTTP on a listener the network reaches (plain_http = "allow"):
+        // they cross it readable. Here so -t says it too, and judged by the address: [::1] is
+        // loopback like 127.0.0.1 (the alpha.58 report's finding 4).
+        if (!site.tls) {
+            std::string outside;
+            for (const auto& l : site.listen)
+                if (!loopback_listen(l)) outside += (outside.empty() ? "" : ", ") + display_listen(l);
+            if (!outside.empty())
+                for (const auto& r : site.auth)
+                    if (!r.open && r.plain_http)
+                        out.push_back({"auth_plain_http", "warning", name,
+                                       "passwords on " + r.path + " are asked over plain HTTP (plain_http) on " + outside +
+                                           ": anyone on the network path can read them, and the browser sends them again with every request"});
+        }
+#ifdef AGENSIO_HAS_AUTH
+        // A users file whose hashes differ in method or cost (the alpha.58 report's finding 6): an
+        // unknown name is checked against the first usable entry, so it takes that entry's time,
+        // and a wrong password for a user of another kind answers in another time, which tells a
+        // guesser that the name exists. Once per file and site; the tools write yescrypt alone.
+        std::vector<const AuthUserFile*> seen;
+        for (const auto& r : site.auth) {
+            if (r.open || !r.users || std::find(seen.begin(), seen.end(), r.users.get()) != seen.end()) continue;
+            seen.push_back(r.users.get());
+            const auth::User* first = nullptr;
+            for (const auto& u : r.users->users)
+                if (!u.locked) {
+                    first = &u;
+                    break;
+                }
+            if (!first) continue;
+            const std::string kind = auth::hash_kind(first->hash);
+            std::string others;
+            for (const auto& u : r.users->users)
+                if (!u.locked && &u != first && auth::hash_kind(u.hash) != kind)
+                    others += (others.empty() ? "" : ", ") + u.name + " (" + auth::hash_kind(u.hash) + ")";
+            if (!others.empty())
+                out.push_back({"auth_users_mixed_methods", "info", name,
+                               r.users_path + " mixes hash methods or costs: an unknown name is checked against " + first->name + "'s " + kind +
+                                   ", so a wrong password for " + others + " answers in another time, which tells a guesser those names exist"});
+        }
+#endif
     }
     return out;
 }

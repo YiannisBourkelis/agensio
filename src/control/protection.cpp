@@ -17,10 +17,6 @@ namespace agensio::control {
 
 namespace {
 
-bool loopback_host(std::string_view host) {
-    return host == "::1" || host == "localhost" || host.starts_with("127.");
-}
-
 void add_unique(std::vector<unsigned>& v, unsigned x) {
     if (std::find(v.begin(), v.end(), x) == v.end()) v.push_back(x);
 }
@@ -479,9 +475,8 @@ ProtectionInput protection_input(const Config& cfg, const UidLookup& uid_of, std
         for (const auto& l : s.listen) {
             const std::size_t colon = l.rfind(':');
             if (colon == std::string::npos) continue;
-            const std::string host = l.substr(0, colon);
             const unsigned port = static_cast<unsigned>(std::atoi(l.c_str() + colon + 1));
-            if (loopback_host(host) || !port) continue;
+            if (loopback_listen(l) || !port) continue;  // config.cpp: the parsed address, shared with health
             in.exposed = true;
             add_unique(in.tcp_ports, port);
             if (s.tls && s.h3) add_unique(in.udp_ports, port);

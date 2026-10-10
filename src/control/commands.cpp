@@ -1285,6 +1285,8 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
         else if (n.code == "access_single_ipv6") fix = "allow the /64 the address belongs to";
         else if (n.code == "access_site_restricted") fix = "meant for a staging copy or an internal site; site_update with the rule on / removed when it goes public";
         else if (n.code == "exact_rule_proxied_script") fix = "if the application runs the script's path-info forms (/x.php/anything), make the rule a prefix rule (match = \"prefix\"); otherwise nothing to do";
+        else if (n.code == "auth_plain_http") fix = "serve the site over https and drop plain_http from the rule, unless the network is one the user trusts (a LAN tool)";
+        else if (n.code == "auth_users_mixed_methods") fix = "give every user of the file one method and cost: agensio passwd NAME writes yescrypt (a managed site's tools always do), then reload";
         add(n.severity == "warning" ? "warn" : "info", n.code, n.site, n.text, fix);
     }
     for (auto& f : auth_findings(running, now)) out.push_back(std::move(f));
@@ -1404,21 +1406,7 @@ std::vector<Finding> auth_findings(const Config& cfg, std::time_t now) {
                                       managed ? "site_auth_user_delete " + site + " for each one who is gone, or site_auth_user_set with a later expires"
                                               : "remove their lines from " + r.users_path + ", or change their :expires= field"});
         }
-        // Plain HTTP on a listener the network reaches: the password crosses it readable.
-        if (s.tls) continue;
-        std::vector<std::string> outside;
-        for (const auto& l : s.listen) {
-            const std::size_t colon = l.rfind(':');
-            const std::string host = colon == std::string::npos ? l : l.substr(0, colon);
-            if (host != "127.0.0.1" && host != "[::1]" && host != "localhost" && !host.starts_with("127.")) outside.push_back(l);
-        }
-        if (outside.empty()) continue;
-        for (const auto& r : s.auth)
-            if (!r.open && r.plain_http)
-                out.push_back(Finding{"warn", "auth_plain_http", site,
-                                      "passwords on " + r.path + " are asked over plain HTTP (plain_http) on " + joined(outside) +
-                                          ": anyone on the network path can read them, and the browser sends them again with every request",
-                                      "serve the site over https and drop plain_http from the rule, unless the network is one the user trusts (a LAN tool)"});
+        // Plain HTTP on a listener the network reaches: config.cpp access_notices (auth_plain_http), so -t says it too.
     }
     // Users files no site owns: a deleted site's (site_delete without files leaves it). A site
     // created again under the name with a password rule would let those users in.

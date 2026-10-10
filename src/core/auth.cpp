@@ -187,6 +187,24 @@ Parsed parse_basic(std::string_view value, std::string& scratch, Credentials& ou
     return Parsed::ok;
 }
 
+std::string hash_kind(std::string_view h) {
+    if (!h.empty() && h.front() == '!') h.remove_prefix(1);
+    if (h.size() < 3 || h.front() != '$') return {};
+    const std::size_t id_end = h.find('$', 1);
+    if (id_end == std::string_view::npos) return {};
+    const std::string_view id = h.substr(1, id_end - 1);
+    std::string_view param = h.substr(id_end + 1);
+    param = param.substr(0, param.find('$'));  // the field after the id: yescrypt's parameters, bcrypt's cost, rounds=
+    if (id == "y" || id == "gy") return std::string(id == "y" ? "yescrypt " : "gost-yescrypt ") + std::string(param);
+    if (id == "7") return "scrypt " + std::string(param.substr(0, 11));  // N, r and p, before the salt
+    if (id == "2a" || id == "2b" || id == "2y") return "bcrypt cost " + std::string(param);
+    if (id == "6" || id == "5") {
+        const std::string name = id == "6" ? "sha512crypt " : "sha256crypt ";
+        return name + (param.starts_with("rounds=") ? std::string(param) : std::string("rounds=5000"));  // crypt(5)'s default
+    }
+    return {};
+}
+
 std::string make_hash(std::string_view password, std::string_view method, unsigned long cost, std::string& error) {
     error.clear();
     if (password.empty() || password.size() > 512) {

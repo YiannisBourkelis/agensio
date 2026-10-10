@@ -201,8 +201,13 @@ so it never runs on a worker's loop and is paid once per login, not per request:
 - **The connection's memo**: the last verified `Authorization` value with the file's load id,
   so the browser's next requests on the connection cost one comparison. A reload gives the
   file a new id, so the memo falls back to the cache.
-- **An unknown user** is verified against a real entry of the file, so the time an answer
-  takes tells nothing about who exists.
+- **An unknown user** is verified against a real entry of the file, the first one that is not
+  locked, so the time an answer takes tells nothing about who exists, as long as every hash
+  of the file is of one kind (method and cost). A file that mixes them, `htpasswd -B -C 5`
+  lines next to yescrypt ones say, lets a guesser tell the names on the other kind apart:
+  a wrong password for them answers faster or slower than an unknown name. `agensio -t` and
+  health name those users (`auth_users_mixed_methods`, section 12); `agensio passwd NAME`
+  writes yescrypt, which the control plane's tools always use.
 - `status` reports `auth_verifications`, the hashes run since the start.
 
 Measured (one worker, `bench/ab.sh -A`, `bench/results/ab-20261008-171903.md`): a protected
@@ -338,6 +343,7 @@ server.
 | many wrong passwords from one address | each is verified (no failure is cached) and logged; the `agensio-auth` fail2ban jail bans after ten in ten minutes (section 11) |
 | a flood of logins that each cost a hash | at most eight in flight per worker and a bounded queue; beyond, `503` with `Retry-After: 1`; the worker's loop never waits for a hash |
 | an unknown user name | verified against a real entry, the same time as a known one; the same 401 |
+| a users file whose hashes differ in method or cost (yescrypt next to sha512, bcrypt cost 5) | a wrong password for a user of another kind answers in another time than an unknown name, so the name can be told apart; `-t` and health note it (`auth_users_mixed_methods`) with the users to hash again |
 | a non-ASCII password | the challenge says `charset="UTF-8"`, so browsers send UTF-8; it is hashed as those bytes. A file made with another encoding does not match |
 | a password longer than 72 bytes with bcrypt | bcrypt uses the first 72 bytes only; yescrypt (the tools' choice) uses all of it |
 | a password with a NUL or another control character | refused as malformed (a NUL would cut it for `crypt`) |
@@ -484,7 +490,8 @@ section 2c has the rest; `protection_show` renders the jail for the host.
 | `auth_users_unloadable` | error | a rule's users file the next load would refuse (the loader's own checks, run against a scratch configuration) | put the file back or correct what the message names; `agensio -t` says when it loads. Until then a reload is refused and a restart does not start |
 | `auth_no_valid_user` | warn | every user of a rule's file is locked or expired | unlock or extend one, add one, or remove the rule |
 | `auth_users_expired` | info | users past their `expires` | delete those who are gone, or give a later date |
-| `auth_plain_http` | warn | a rule with `plain_http` on a listener the network reaches | serve over https and drop `plain_http`, unless the network is trusted |
+| `auth_plain_http` | warn | a rule with `plain_http` on a listener the network reaches (judged by the address: `[::1]` is loopback; `-t` says it too) | serve over https and drop `plain_http`, unless the network is trusted |
+| `auth_users_mixed_methods` | info | a users file whose hashes differ in method or cost: a wrong password for a user of another kind answers in another time than an unknown name | hash those users again with one method (`agensio passwd NAME`, yescrypt), then `agensio reload` |
 | `auth_users_orphan` | info | a users file under `<config dir>/auth/` no site owns | delete it as root, unless the site comes back |
 | `exact_rule_proxied_script` | info | an exact rule on a `.php` path that a proxied location serves: agensio runs no script there and judges the path alone | if the application runs `/x.php/anything` as the same script, make the rule a prefix rule |
 | `fail2ban_auth_challenges` | warn | the installed `agensio-auth` filter is an older build's that counts every `401` | install the filters again and render the jail |

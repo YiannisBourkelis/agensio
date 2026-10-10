@@ -23,6 +23,21 @@ From the alpha.58 report:
   login below a `skip_for` rule gets no login from those clients: give its path `open = true`.
   Shown first by `tests/auth.sh` (a PHP site, `-u admin:x` from the `skip_for` address: PHP saw
   `PHP_AUTH_USER=admin PHP_AUTH_PW=x` and the header on alpha.60, now none of them).
+- **Health took `[::1]` for a public address.** The warning that a rule asks for passwords over
+  plain HTTP on a listener the network reaches (`auth_plain_http`) looked for `[::1]` while the
+  loader stores IPv6 listen addresses unbracketed (`::1:18080`), so a site on the IPv6 loopback
+  was warned about. Listeners are now judged by the parsed address (`loopback_listen`: 127.0.0.0/8,
+  `::1`, `localhost`), shared with the host-protection renderer, and the warning is one of the
+  access notices, so `agensio -t` and the error log say it too (the reference said `-t` warned;
+  it did not). Addresses are printed as written, `[::1]:18080`.
+- **A users file mixing hash methods told a guesser which names exist.** An unknown name is
+  checked against the file's first usable entry so it takes a real user's time; a user hashed
+  with another method or cost (sha512 or bcrypt cost 5 next to yescrypt) answers a wrong password
+  faster or slower, and stands out. `agensio -t`, the error log and health now note such a file
+  (`auth_users_mixed_methods`, information) with the users to hash again (`agensio passwd`,
+  yescrypt); the control plane's own files are always yescrypt.
+- Both shown first by the unit test `test_auth_notes` (alpha.60 warned about the `[::1]` site, said
+  nothing at `-t` for a public one, and had no note for a mixed file).
 
 Found while writing the cookbook (`docs/examples.md`), each shown first by a test that failed on
 alpha.60:

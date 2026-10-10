@@ -478,6 +478,14 @@ struct AccessNotice {
     std::string site, text;
 };
 std::vector<AccessNotice> access_notices(const Config& cfg);
+
+// A normalised listen address ("host:port", an IPv6 host unbracketed: "::1:443") that only this
+// machine reaches: 127.0.0.0/8, ::1 (an IPv4-mapped 127.x too) or localhost. Judged on the parsed
+// address, never its spelling (the alpha.58 report's finding 4: "[::1]" was looked for and "::1"
+// stored). Health, -t and the host-protection renderer share it.
+bool loopback_listen(std::string_view listen);
+// The same address as written in a configuration: "[::1]:443" for IPv6.
+std::string display_listen(std::string_view listen);
 // The synthetic site the control listener routes to: one location of kind `control`.
 SiteConfig control_site();
 // Every value `app = "..."` accepts: "static", the PHP presets in table order, "proxy",

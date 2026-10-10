@@ -6231,6 +6231,65 @@ static void test_auth_users() {
 // rules.auth on a managed site (2026-10-09, design section 25, step 4c): the rule's checks, its
 // rendering into the site file and the loader reading it back with the site's own users file;
 // the site detail and path_check naming it; the health findings over the users files.
+// Two notes from the alpha.58 report (findings 4 and 6), both at -t, in the error log and in
+// health (config.cpp access_notices): passwords asked over plain HTTP on a listener the network
+// reaches, judged by the address and never by its spelling (`[::1]` is stored unbracketed and was
+// taken for a public one); and a users file whose hashes differ in method or cost, where a wrong
+// password for a user of another kind answers in another time than an unknown name, telling a
+// guesser which names exist.
+static void test_auth_notes() {
+    namespace fs = std::filesystem;
+    using namespace control;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-authnotes-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "www");
+    auto users_file = [&](const std::string& name, const std::string& text) {
+        std::ofstream(dir / name) << text;
+        fs::permissions(dir / name, fs::perms(0640));
+    };
+    users_file("mixed.users", "anna:" + auth_hash("$y$", 0, "a") + "\nbob:" + auth_hash("$6$", 0, "b") + "\ncarl:" + auth_hash("$2b$", 5, "c") + "\n");
+    users_file("same.users", "anna:" + auth_hash("$y$", 0, "a") + "\nbob:" + auth_hash("$y$", 0, "b") + "\n");
+    std::ofstream(dir / "a.toml") << "[[site]]\nserver_name = [\"loop.test\"]\nlisten = [\"127.0.0.1:18080\", \"[::1]:18080\"]\nroot = \"www\"\n"
+                                     "[[site.auth]]\npath = \"/pa\"\nusers = \"same.users\"\nplain_http = \"allow\"\n"
+                                     "[[site]]\nserver_name = [\"lan.test\"]\nlisten = [\"0.0.0.0:18081\"]\nroot = \"www\"\n"
+                                     "[[site.auth]]\npath = \"/pa\"\nusers = \"same.users\"\nplain_http = \"allow\"\n"
+                                     "[[site]]\nserver_name = [\"mixed.test\"]\nlisten = [\"127.0.0.1:18082\"]\nroot = \"www\"\n"
+                                     "[[site.auth]]\npath = \"/\"\nusers = \"mixed.users\"\n"
+                                     "[[site.auth]]\npath = \"/admin\"\nusers = \"mixed.users\"\nrealm = \"Admin\"\n";
+    const Config cfg = load_config(dir / "a.toml");
+    const auto notes = access_notices(cfg);
+    auto has = [&](const char* code, const char* site, const char* needle) {
+        for (const auto& n : notes)
+            if (n.code == code && n.site == site && n.text.find(needle) != std::string::npos) return true;
+        return false;
+    };
+    auto count = [&](const char* code, const char* site) {
+        return std::count_if(notes.begin(), notes.end(), [&](const AccessNotice& n) { return n.code == code && n.site == site; });
+    };
+    // Finding 4: the loopback site, on 127.0.0.1 and [::1], has no warning; the one on 0.0.0.0 has,
+    // at -t too (access_notices; before, health's own list alone carried it, with the false one).
+    auto plain_warnings = [&](const char* site) {
+        std::size_t n = static_cast<std::size_t>(count("auth_plain_http", site));
+        for (const auto& f : auth_findings(cfg, std::time(nullptr)))
+            if (f.code == "auth_plain_http" && f.site == site) ++n;
+        return n;
+    };
+    CHECK(plain_warnings("loop.test") == 0);
+    CHECK(plain_warnings("lan.test") == 1 && has("auth_plain_http", "lan.test", "0.0.0.0:18081"));
+    CHECK(loopback_listen("127.0.0.1:80") && loopback_listen("127.8.9.1:80") && loopback_listen("::1:80") && loopback_listen("localhost:80") &&
+          !loopback_listen("0.0.0.0:80") && !loopback_listen("::0:80") && !loopback_listen("203.0.113.7:80") && !loopback_listen("2001:db8::1:80"));
+    CHECK(display_listen("::1:18080") == "[::1]:18080" && display_listen("127.0.0.1:80") == "127.0.0.1:80");
+    // Finding 6: the mixed file is named once for its site (two rules read it), with the users
+    // whose kind differs from the first one's (anna, yescrypt: what an unknown name is checked
+    // against); a file of one kind gets nothing.
+    CHECK(count("auth_users_mixed_methods", "mixed.test") == 1);
+    CHECK(has("auth_users_mixed_methods", "mixed.test", "bob (sha512crypt") && has("auth_users_mixed_methods", "mixed.test", "carl (bcrypt cost 05") &&
+          !has("auth_users_mixed_methods", "mixed.test", "anna ("));
+    CHECK(count("auth_users_mixed_methods", "loop.test") == 0 && count("auth_users_mixed_methods", "lan.test") == 0);
+    CHECK(auth::hash_kind(auth_hash("$2b$", 12, "x")) == "bcrypt cost 12" && auth::hash_kind(auth_hash("$6$", 0, "x")) == "sha512crypt rounds=5000" &&
+          auth::hash_kind(auth_hash("$y$", 0, "x")).starts_with("yescrypt "));
+    fs::remove_all(dir);
+}
+
 static void test_auth_managed() {
     namespace fs = std::filesystem;
     using namespace control;
@@ -6344,9 +6403,12 @@ static void test_auth_managed() {
     };
     {
         const auto f = auth_findings(loaded, now);
-        CHECK(codes(loaded) == "info:auth_users_expired warn:auth_plain_http");
-        CHECK(f.size() == 2 && f[0].site == "shop.test" && f[0].message.find("bob") != npos && f[0].message.find("2020-01-01") != npos &&
-              f[1].message.find("/lan") != npos);
+        CHECK(codes(loaded) == "info:auth_users_expired");
+        CHECK(f.size() == 1 && f[0].site == "shop.test" && f[0].message.find("bob") != npos && f[0].message.find("2020-01-01") != npos);
+        // The plain-HTTP warning is one of the access notices (-t, the error log, health).
+        bool lan = false;
+        for (const auto& n : access_notices(loaded)) lan = lan || (n.code == "auth_plain_http" && n.site == "shop.test" && n.text.find("/lan") != npos);
+        CHECK(lan);
     }
     CHECK(change(R"({"user": "anna", "locked": true})")["ok"].boolean());
     loaded = load_config(dir / "agensio.toml");
@@ -7822,6 +7884,7 @@ int main() {
     test_auth_config();
     test_auth_users();
     test_auth_managed();
+    test_auth_notes();
 #endif
     test_refuse_patterns();
     test_refuse_config();

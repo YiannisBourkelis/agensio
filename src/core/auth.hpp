@@ -57,6 +57,11 @@ Parsed parse_basic(std::string_view value, std::string& scratch, Credentials& ou
 // compared in constant time. Slow by design: never on a worker's loop.
 bool verify(std::string_view password, const std::string& hash);
 
+// The method and the cost of a hash, which decide how long checking a password against it takes:
+// two hashes of one kind take the same time, two kinds do not ("yescrypt j9T", "bcrypt cost 12",
+// "sha512crypt rounds=5000"). A lock mark is ignored; "" for a hash no method here reads.
+std::string hash_kind(std::string_view hash);
+
 // A new hash of `password` for a user file: method "yescrypt" (the default, libxcrypt's cost
 // unless `cost` says otherwise), "bcrypt" (cost 4 to 31, default 12) or "sha512" (rounds,
 // default 500,000). "" and `error` when the method, the cost or the password is refused.

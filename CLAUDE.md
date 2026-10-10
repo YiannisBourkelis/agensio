@@ -621,7 +621,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   with `users = "../auth/<site>.users"`), refused until the site has a user and on `site_create`;
   the trash moves the users file; `path_check` and `site_show` name the rules; health
   `auth_findings` (`auth_users_unloadable` through the loader's own checks, `auth_users_problem`,
-  `auth_no_valid_user`, `auth_users_expired`, `auth_plain_http`, `auth_users_orphan`). The whole
+  `auth_no_valid_user`, `auth_users_expired`, `auth_users_orphan`; `auth_plain_http` and
+  `auth_users_mixed_methods` are access notices, so `-t` and the error log say them too, with
+  listeners judged by `loopback_listen`). The whole
   feature: `docs/auth.md`. Security page row 40.
 - **Application install** (F9, `src/services/archive.*`, `fetch.*`, `install.*`):
   `agensio ctl site-install NAME [--url | --file | --version]` fills a site's empty

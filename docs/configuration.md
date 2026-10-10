@@ -2690,8 +2690,11 @@ Otherwise:
   comes first): served at once, for the cost of one HMAC;
 - any other login: verified on a small pool of threads while the request waits, never on the
   worker's loop; at most eight at a time per worker, `503` with `Retry-After: 1` beyond. An
-  unknown user is checked against a real entry of the file, so the answer takes the same
-  time and does not tell which users exist. A failure is never remembered.
+  unknown user is checked against a real entry of the file (the first usable one), so the
+  answer takes the same time and does not tell which users exist, as long as every hash of
+  the file is of one method and cost: a user hashed otherwise answers a wrong password in
+  another time, and `-t` and health say so (`auth_users_mixed_methods`, naming those users).
+  A failure is never remembered.
 
 A changed password takes effect at the next reload; the old one stops working at once, since
 what a worker remembers is keyed by the stored hash too.
