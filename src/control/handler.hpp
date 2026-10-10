@@ -30,7 +30,10 @@ struct ControlBackend {
     virtual json::Value logs(std::string_view target) = 0;  // the request target with its query
     virtual json::Value health() = 0;
     // Mutations (F3). Each returns false with `error` when refused; nothing changed then.
-    virtual bool reload_now(std::string& error) = 0;
+    // `must_load`: the site file the change wrote; the reload is refused if that file would be
+    // set aside (docs/design-site-operations.md 26), so a change is never reported done for a
+    // site that is not served. Other files set aside keep their last good version.
+    virtual bool reload_now(std::string& error, std::string_view must_load = {}) = 0;
     virtual bool renew_certificate(std::string_view site, std::string& error) = 0;
     virtual void reopen_logs() = 0;
     virtual const Config& running() = 0;

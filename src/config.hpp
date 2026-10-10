@@ -253,6 +253,10 @@ struct SiteConfig {
     // each location marked origin "root:<file>"; root's alone, never written or read by the
     // control plane, so a site the tools manage keeps root's freedom.
     std::vector<std::string> root_additions;
+    // The file this site was read from (absolute), and whether it is the last good version a
+    // reload carried over because that file was set aside (docs/design-site-operations.md 26).
+    std::string source;
+    bool carried = false;
     // The paths a login form or an authenticating API is posted to (`login_paths`,
     // 2026-10-02, docs/configuration.md 18), on top of the preset's own
     // (preset_login_paths): what the rendered fail2ban jail counts attempts on. Never read
@@ -424,6 +428,24 @@ struct Config {
         std::string file, site;
     };
     std::vector<OrphanAdditions> orphan_additions;
+    // Included site files set aside (docs/design-site-operations.md 26): the file, the loader's
+    // error, and whether the last good version of its sites, carried from the running
+    // configuration, keeps serving (a reload) or its sites are not served (a start, or a
+    // carried version that lost a conflict). The main file is all or nothing: an error there
+    // still fails the load.
+    struct HeldBack {
+        std::string file, error;
+        bool carried = false;
+    };
+    std::vector<HeldBack> held_back;
+    // A digest of each loaded file's text: a reload tells a file it already runs unchanged from
+    // a newcomer when two of them conflict (the running one keeps its place).
+    std::map<std::string, std::size_t> file_digests;
+    const HeldBack* held(std::string_view file) const noexcept {
+        for (const auto& h : held_back)
+            if (h.file == file) return &h;
+        return nullptr;
+    }
 };
 
 // The per-worker connection ceiling in force: the configured value, else from the open-file
@@ -561,9 +583,13 @@ std::string preset_uploads(const std::string& app);
 // location, so nothing a preset did is hidden (`agensio -t --explain`).
 void explain_config(const Config& cfg, std::ostream& out);
 
-// Loads and validates a configuration file. Throws std::runtime_error with a
-// human readable message on any problem.
-Config load_config(const std::filesystem::path& path);
+// Loads and validates a configuration file. Throws std::runtime_error with a human readable
+// message on a problem of the main file or one every site shares; an included site file with
+// an error, or one that conflicts with another, is set aside (Config::held_back) and the rest
+// loads. With `running` (a reload), a file set aside keeps the version of its sites the running
+// configuration has, and in a conflict a file the running configuration loaded unchanged keeps
+// its place (docs/design-site-operations.md 26).
+Config load_config(const std::filesystem::path& path, const Config* running = nullptr);
 // What the next load would say about a [[site.auth]] users file: "" when it loads, else the
 // loader's own refusal (missing, a symlink, another owner than the main configuration's,
 // writable by group or others, readable by others, over 1 MB, a line it cannot read). Health

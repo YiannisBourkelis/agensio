@@ -312,7 +312,8 @@ without a catch-all it gets `421` with `Cache-Control: no-store`, so forged Host
 reach an application. On port 443 the handshake for an unknown name ends with
 `unrecognized_name` and no other site's certificate is ever shown; a connection opened for one
 certificate's names answers `421` for any other Host. A catch-all is `server_name = ["*"]`, or
-`default = true` on a site that also lists its names; keep one per address. The package's
+`default = true` on a site that also lists its names, one per address: a second catch-all, or a
+name two files claim on one address, sets one of the files aside (the next recipe). The package's
 `sites.d/default.toml` is one (it serves `/var/www/html`), which is why this file takes its
 name. On the TLS port a catch-all serves only clients that send no name, since an unknown name
 ends the handshake, and `tls = "auto"` cannot have `*`. Monitors that check the bare address
@@ -334,6 +335,51 @@ a hand-written file: no field of `site-create` sets a redirect target.
 **MCP:** `server_status` names each listener's catch-all site; `sites_list` marks it.
 
 **Reference:** [Which site answers a request](../configuration.md#1b-which-site-answers-a-request).
+
+## A mistake in one site's file
+
+**When:** a host with many sites, one file each under `sites.d/`, and an edit to one of them
+goes wrong: a misspelt key, a broken TOML line, a name another site already answers on the same
+address, a root additions file left writable by its group. You want the other sites untouched
+and the mistake named.
+
+**What it does.** Each file under `sites.d/` loads on its own; the main file
+(`agensio.toml`) is still all or nothing. A file that does not load is set aside with all its
+sites, and everything else loads:
+
+- at start its sites are not served and the server starts with the others, so a reboot never
+  takes the whole host down for one file (the packaged unit runs `agensio -t` first, which
+  warns and passes);
+- on reload a file whose sites were being served keeps serving the version that loaded before,
+  and the other files' changes apply, certificate renewals included; fix the file and reload;
+- a site whose root additions file or password users file does not load is set aside whole,
+  never served without the rule that protected part of it;
+- when two files claim one name (or both a catch-all) on one address, the one already serving
+  keeps it and the other is set aside; at start the later file in alphabetical order yields.
+
+Each file set aside is a line in the error log at every start and reload and an error in
+health (`site_file_held_back`) with the loader's own message, for example `unknown key 'refsue'
+(did you mean 'refuse'?)`, and whether the old version still serves.
+
+**Check it.**
+
+```sh
+agensio -t -c /etc/agensio/agensio.toml            # exit 0: "warning: ... set aside, its sites not loaded: ..."
+agensio -t --strict -c /etc/agensio/agensio.toml   # exit 1 for the same, for scripts and CI
+agensio ctl health                                 # site_file_held_back: the file, the error, what serves meanwhile
+agensio ctl validate                               # held_back: what the next reload would set aside
+```
+
+**On a managed site.** The tools never leave a managed file set aside: `site-create`,
+`site-update` and `site-enable` reload with their own file required to load, and when it would
+not they undo the change (a new file removed, the previous version put back) and answer with
+the loader's error. A hand-written file or a root additions file is fixed by root, then
+`agensio reload`.
+
+**MCP:** `health_check` and `config_validate` name each file set aside; `reload` lists them in
+its answer.
+
+**Reference:** [One broken site file never stops the others](../configuration.md#12c-one-broken-site-file-never-stops-the-others).
 
 ## Long cache lifetimes for assets, and HSTS
 

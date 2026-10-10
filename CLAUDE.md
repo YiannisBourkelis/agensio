@@ -251,6 +251,15 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   `Config` struct. `agensio -t` validates. Every table refuses a key the reference table
   (`control/reference.cpp`) does not give it, naming the nearest (`check_keys` in `config.cpp`,
   alpha.61): the reference is the parser's schema, so a new key needs its row before it loads.
+  Site isolation (alpha.62, design section 26, `docs/configuration.md` 12c): the main file is all
+  or nothing, each included site file loads on its own (`load_config(path, running)`): one that
+  does not load, whose root additions or users file does not, or that loses a cross-file
+  conflict (`first_site_conflict`: a name twice on one address, two catch-alls, protocols, TLS
+  or plain, pools; the served file keeps its place) is set aside (`Config::held_back`), and on
+  reload a served file keeps its last good version (`SiteConfig::source`, `carried`); `-t`
+  warns, `-t --strict` fails, health `site_file_held_back`; the control plane passes its own file
+  to `reload_now` and undoes a change it would set aside; `tests/isolation.sh`. Not yet per site:
+  hosting rules and certificates (C2, C3).
 - **Request bodies** (A3): the HTTP/1 connection is the pull source behind
   `Request::body` (`StreamBody`: `async_read` with backpressure), decoding Content-Length
   or chunked (`http1/chunked.hpp`, fuzzed) from its receive buffer and socket.

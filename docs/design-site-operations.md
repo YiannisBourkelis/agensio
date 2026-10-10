@@ -1480,3 +1480,145 @@ row on a protected path with a remembered login.
 
 Built in steps: the core (parsers, verification, cache), the configuration, the request
 path, logs and the control plane, then the end-to-end tests.
+
+
+## 26. One broken site never stops the others (2026-10-10, agreed with the owner; first step built)
+
+The owner's question, raised while planning the certificate work: a site file with an error
+should leave the other sites working, with health telling the administrator what is wrong.
+
+**What happens today.** The configuration is loaded all or nothing. A single error in any
+included file fails `load_config`, and:
+
+- at start the packaged unit's `ExecStartPre=/usr/sbin/agensio -t` fails, so after a reboot or
+  an upgrade the service does not start and every site on the host is down;
+- at reload the reload is refused and the old configuration keeps serving, which is safe, but
+  every later change on the host is blocked with it: another customer's `site-update`, every
+  control-plane action, and the reload that brings a renewed certificate in. One customer's
+  typo holds the host hostage, and an ACME certificate renewed on disk can expire unused.
+
+**What other servers do.** nginx, Apache httpd, Caddy and HAProxy load all or nothing, as
+agensio does: `nginx -t` fails on any included file, a reload is refused, a start fails.
+Traefik is the exception: a router whose configuration is wrong is disabled and shown in
+error on its dashboard, and the rest keeps serving. Kubernetes' ingress-nginx learned the cost
+of the first model: one bad Ingress object broke the generated nginx configuration for every
+site in the cluster, and the project added an admission webhook that rejects it before it is
+stored.
+
+**Decided** (with the owner, 2026-10-10):
+
+1. **The main file stays all or nothing.** It is root's and holds what every site depends on
+   (`[server]`, `[log]`, `[control]`, `[addresses]`, `trusted_proxies`); a broken main file
+   still fails a start and refuses a reload. Sites written in the main file belong to it and
+   share its fate: isolation is for the files `include` names (`sites.d/*.toml`), where the
+   control plane writes every managed site and where hand-written sites belong.
+2. **The unit is the file, and a site loads whole or not at all.** A site file (often the
+   port-80 redirect and the TLS site of one domain) is loaded with every site in it or set
+   aside with all of them. Whatever a site needs is part of it: its root additions file
+   (`<domain>.root.toml`), the users files its password rules read, its certificate and key.
+   If any of them fails, the site's file is set aside: a site never runs without the rule or
+   the location that protects part of it, since running it partly could open what was closed.
+   An additions file that cannot be parsed names its site by its file name.
+3. **On reload, a file set aside keeps its last good version.** The sites that came from that
+   file in the running generation are carried into the new one unchanged (`SiteConfig` records
+   the file it came from), protections, users and location ids included, so the cache stays
+   warm and nothing about the site changes but the change that was refused. At start there is
+   no last good version: the file's sites are not served until it is fixed, and every other
+   site starts. A carried version keeps what it resolved when it was loaded (the address sets
+   its rules expanded, its pool sizing); a change to the main file reaches it when its own file
+   loads again.
+4. **Conflicts between files: the running one keeps its place.** A name claimed twice on one
+   address (accepted silently today, the first site winning: a finding of the cookbook), two
+   accounts sharing a root, a log or a php socket, sites of one account disagreeing on its
+   pool, sites of one address disagreeing on its protocols or on TLS: the file that was already
+   running wins and the newcomer is set aside. At start, the files' load order (their names)
+   decides. Every cross-site check and every hosting rule (`check_hosting`) therefore reports
+   the sites and files it concerns instead of a sentence, so the loader can choose.
+5. **Health and the logs say it.** `site_file_held_back`, an error: the file, the exact error
+   the loader gave, and either "the version loaded at <time> is still serving" or "its sites
+   are not served"; the error log has one line per such file at every start and reload, and
+   `agensio ctl status` counts them.
+6. **`agensio -t` exits 0 with a warning per file set aside**, so the unit starts at boot with
+   every other site; `agensio -t --strict` fails on any of them, for scripts, CI and a package
+   upgrade check. An error in the main file fails both, as today.
+7. **The control plane never reports success for a file set aside.** `site-create`,
+   `site-update` and every other mutation read their own file's outcome after the reload: set
+   aside means the change is undone and refused with the loader's error, as a refused reload is
+   today, so an agent never tells a user "done" for a site that is not served. `validate`
+   lists the files set aside as warnings, never as errors that would block other work.
+
+**How it works.** `load_config` parses the main file as today, then each included file inside
+its own error boundary: a parse or validation error records `HeldBack{file, error}` and goes
+on. After all files are parsed, the cross-site checks run on the survivors; each conflict sets
+the newcomer's file aside and the checks run again until none is left (a fixed point, at most
+one pass per file). The server's reload then carries, for every file set aside, the sites the
+running generation had from that file; the certificates are loaded per site, so a site whose
+certificate or key cannot be read is set aside the same way (and keeps its last good version on
+reload) instead of failing the whole reload. Nothing of this runs on the request path: it is
+load time, health and the logs, so no A/B gate applies; the reload tests (`tests/reload.sh`)
+hold that no request fails while a file is set aside.
+
+**What stays the same.** A valid configuration loads exactly as today. An error in the main
+file, an unparsable main file or a host-wide rule (`[control]`, the listeners' binding, the
+privilege drop) still stops the start or refuses the reload, with the same messages.
+
+**Tests** (each written before its code):
+
+- unit: a configuration with one broken site file loads the others and records the file and
+  its error; a site whose root additions file, users file or certificate fails is set aside
+  whole; two files claiming one name on one address keep the earlier one; each cross-site
+  check and hosting rule names its files;
+- `tests/reload.sh`: a running site's file broken, then reloaded: the old version keeps
+  serving, another site's change in the same reload applies, health names the file; the file
+  fixed and reloaded: the new version serves;
+- integration: a start with one broken site file serves every other site, `-t` exits 0 with
+  the warning and `-t --strict` exits 1; the control plane refuses and undoes a `site-update`
+  whose file would be set aside;
+- `tests/acme.sh`: a site file broken elsewhere on the host, then a forced renewal: the new
+  certificate is served (today it waits on disk).
+
+**Order.** This goes first; the certificate work (a key the server cannot read, health judging
+the served certificate, the hourly watch and a certificate refresh that does not depend on the
+main file, `docs/tls.md`) follows, built on it.
+
+**Built, first step (C1, 2026-10-10, 0.1.0-alpha.62).** The loader's part, as decided, with what
+building it settled:
+
+- `load_config(path, running)`: each included file is read and parsed inside its own boundary;
+  `SiteConfig::source` names the file a site came from, `Config::held_back` the files set aside
+  with their errors, `Config::file_digests` a hash of every included file's text. A root
+  additions file that does not load sets its site's file aside; one whose `site` names no site
+  (or cannot be parsed and its file name names none) is set aside itself, so `-t` and health
+  still name it. A users file a `[[site.auth]]` rule cannot load fails the site's parse, so its
+  file is set aside the same way.
+- The cross-site checks are one function (`first_site_conflict`) returning the pair and the
+  message, with two checks added: a name claimed twice on one address, and two catch-all sites
+  on one address. The loop sets one file aside per conflict until none is left. Decision 4 was
+  refined while writing the tests: "running" ranks a file served and unchanged (or carried)
+  above one served but edited, and that above a new file, so an edited file is not pushed out
+  by a newcomer claiming its name; at a tie the later file in load order yields. A served file
+  that yields keeps its last good version, once (a carried version that conflicts again is
+  dropped, which ends the loop).
+- `Server::reload(error, must_load)`: the control plane's `site-create`, `site-update` and
+  `site-enable` pass their own file, and a reload that would set it aside is refused, so the
+  existing undo paths (file removed, `.bak` put back, file disabled again) run unchanged; the
+  202 path of a `site-create` that needs a restart reads `validate`'s `held_back` for its file.
+- Visible: an error-log line per file at start and every reload; health `site_file_held_back`
+  (an error) for the running configuration's files and, separately, for the files on disk as the
+  next reload would load them; `status` `site_files_held_back`; `validate` `held_back` (each with
+  `keeps_running_version`; `ok` stays true); the reload command's answer and audit line name
+  them; `site_summary` marks a carried site `last_good_version`. Health says "the version
+  loaded before keeps serving" without the time: the generation does not record when a file
+  last loaded, and the error log has it.
+- `agensio -t` warns and exits 0, `--strict` exits 1; `agensio reload` prints the same warning.
+- Tests: `tests/isolation.sh` (its own server, eleven checks: start, reload, conflict, additions,
+  the control plane, a broken main file; run by the integration suite) failed on alpha.61 (the
+  server did not start); `test_site_isolation` in the unit tests; the root additions unit
+  checks, two integration checks and one of `tests/trash.sh` (now `-t --strict`) changed from
+  "refused" to "set aside".
+
+**Next steps** of this section: C2, the hosting rules (`check_hosting`) attributed to sites and
+their files so a site that breaks one is set aside instead of refusing the whole reload; C3, the
+certificates loaded per site in `build_listeners`, a site whose certificate or key cannot be
+read set aside with its last good version kept; then `tests/acme.sh` with a broken file
+elsewhere on the host during a renewal.

@@ -80,7 +80,9 @@ json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_vi
 // ---- validation and health ----
 
 // Loads `path` again and runs the hosting rules; never throws.
-json::Value validate(const std::filesystem::path& path, const Config& running);
+// `current`: the configuration being served, so a site file set aside keeps its running version
+// as a reload would (design section 26).
+json::Value validate(const std::filesystem::path& path, const Config& running, const Config* current = nullptr);
 // The restart-only settings that differ between the file on disk and the running server.
 std::vector<std::string> restart_needed(const Config& fresh, const Config& running);
 // php-fpm's global file next to the pool directory (Debian: fpm/php-fpm.conf; RHEL:
@@ -138,8 +140,9 @@ json::Value health(const Config& running, const Config& boot, bool as_root, std:
 // tightens (info), a deleted site's file (info), or that the check could not run.
 std::vector<Finding> env_findings(const json::Value& inspected);
 // Passwords ([[site.auth]], 2026-10-09, docs/configuration.md 19b): for every users file a rule
-// reads, what the next load would say of it (auth_users_unloadable, an error: a reload is refused
-// and a restart does not start while the running server keeps its users), whether anyone can log
+// reads, what the next load would say of it (auth_users_unloadable, an error: the site's file is set
+// aside, or for a site in the main file a reload is refused and a restart does not start, while the
+// running server keeps its users), whether anyone can log
 // in (auth_no_valid_user: every user locked or expired), who can no longer (auth_users_expired);
 // a rule asked over plain HTTP on a listener the network reaches (auth_plain_http); and the users
 // files under <config dir>/auth/ no site owns (auth_users_orphan). health_findings includes them.

@@ -1682,7 +1682,9 @@ static void test_pools() {
     CHECK(refused("badname.toml", server + "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"blog\"\nuser = \"../web1\"\n", "not a valid account name"));
     CHECK(refused("badpm.toml", server + shop + "php = { pm = \"forever\" }\n", "pm must be"));
     CHECK(refused("strict.toml", "[server]\nstrict_users = true\n[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"blog\"\n", "'user' is required"));
-    CHECK(refused("differs.toml", server + shop + "php = { children = 6 }\n" + shop + "php = { children = 8 }\n", "php.children differs"));
+    std::string shop2 = shop;  // the same user under another name: one name per address (design section 26)
+    shop2.replace(shop2.find("[\"shop\"]"), 8, "[\"shop2\"]");
+    CHECK(refused("differs.toml", server + shop + "php = { children = 6 }\n" + shop2 + "php = { children = 8 }\n", "php.children differs"));
     CHECK(refused("shared.toml", server + "[[site]]\nserver_name = [\"x\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"blog\"\nuser = \"web1\"\napp = \"php\"\nphp = { socket = \"unix:/one.sock\" }\n"
                                      "[[site]]\nserver_name = [\"y\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"blog\"\nuser = \"web2\"\napp = \"php\"\nphp = { socket = \"unix:/one.sock\" }\n", "different users but the same php socket"));
     // An existing pool given by hand under a user is kept as is.
@@ -3697,6 +3699,7 @@ static void test_control_sites() {
             CHECK(rendered.find("max_body_size = \"200MB\"") != std::string::npos && rendered.find("memory_limit = \"512MB\"") != std::string::npos && rendered.find("children = 4") != std::string::npos && rendered.find("pm = \"dynamic\"") != std::string::npos);
             SiteSpec back;
             CHECK(SiteSpec::from_json(tuned.to_json(), back) && back.settings.get("max_body_size") == "200MB" && back.php_children == 4);
+            std::filesystem::rename(dir / "sites.d" / "shop.test.toml", dir / "sites.d" / "shop.test.toml.keep");  // one file per name (design section 26)
             std::ofstream(dir / "sites.d" / "tuned.toml") << rendered;
             Config tcfg;
             bool loads = true;
@@ -3715,6 +3718,7 @@ static void test_control_sites() {
                 }
             }
             std::filesystem::remove(dir / "sites.d" / "tuned.toml");
+            std::filesystem::rename(dir / "sites.d" / "shop.test.toml.keep", dir / "sites.d" / "shop.test.toml");
             // [control] site_limits from the file, and a site-level max_body_size.
             std::ofstream(dir / "lim.toml") << "[control]\nsite_limits = { max_body_size = \"64MB\", children = 4 }\n[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\nmax_body_size = \"3MB\"\n";
             const Config lim = load_config(dir / "lim.toml");
@@ -3921,13 +3925,14 @@ static void test_control_sites() {
                     "[[site]]\nserver_name = [\"shop.test\"]\nlisten = [\"127.0.0.1:1\"]\napp = \"wordpress\"\nroot = \"shop\"\nphp = { socket = \"127.0.0.1:9000\" }\n"
                     "[[site.location]]\npath = \"/own/\"\nadd_headers = { \"X-Own\" = \"1\" }\n");
                 const fs::path frag = ra / "sites.d" / "shop.test.root.toml";
-                auto load_fails = [&](const char* needle) {
-                    try {
-                        load_config(ra / "agensio.toml");
-                    } catch (const std::exception& e) {
-                        if (std::string(e.what()).find(needle) != npos) return true;
-                        std::printf("root additions: %s\n", e.what());
-                    }
+                // A refused additions file sets its site's file aside (design section 26), or itself
+                // when it names no site; the main file's site serves on.
+                auto set_aside = [&](const char* held_file, const char* needle) {
+                    const Config c = load_config(ra / "agensio.toml");
+                    const Config::HeldBack* h = c.held((ra / "sites.d" / held_file).string());
+                    const bool shop_out = std::string_view(held_file) == "shop.test.toml";  // else the additions file names no site
+                    if (h && h->error.find(needle) != npos && c.sites.size() == (shop_out ? 1u : 2u) && c.sites[0].server_names.front() == "*") return true;
+                    std::printf("root additions: %s\n", h ? h->error.c_str() : "nothing set aside");
                     return false;
                 };
                 put(frag, "site = \"shop.test\"\n\n[[location]]\npath = \"/wp-content/uploads/\"\nadd_headers = { \"X-Up\" = \"1\" }\n\n[[location]]\npath = \"/wp-includes/\"\nfinal = true\n"
@@ -3955,20 +3960,24 @@ static void test_control_sites() {
                 // Refused: a key that is not site or location, no site, location not a table array,
                 // a duplicate of the site file's own path, a writable file, a symlink.
                 put(ra / "sites.d" / "bad.root.toml", "site = \"shop.test\"\nfoo = 1\n");
-                CHECK(load_fails("bad.root.toml: a root additions file holds site = \"<domain>\" and [[location]] tables only, not 'foo'"));
+                CHECK(set_aside("shop.test.toml", "bad.root.toml: a root additions file holds site = \"<domain>\" and [[location]] tables only, not 'foo'"));
                 put(ra / "sites.d" / "bad.root.toml", "site = \"\"\n");
-                CHECK(load_fails("names the managed site"));
+                CHECK(set_aside("bad.root.toml", "names the managed site"));  // naming no site, it sets nothing else aside
                 put(ra / "sites.d" / "bad.root.toml", "site = \"shop.test\"\nlocation = 1\n");
-                CHECK(load_fails("'location' must be an array of tables"));
+                CHECK(set_aside("shop.test.toml", "'location' must be an array of tables"));
+                put(ra / "sites.d" / "bad.root.toml", "site = \"shop.test\"\n[[location]\n");  // not TOML: its file name says the site
+                CHECK(set_aside("bad.root.toml", "bad.root.toml:"));
                 fs::remove(ra / "sites.d" / "bad.root.toml");
+                put(frag, "site = \"shop.test\"\n[[location]\n");
+                CHECK(set_aside("shop.test.toml", "its root additions file could not be loaded"));
                 put(frag, "site = \"shop.test\"\n[[location]]\npath = \"/own/\"\nfinal = true\n");
-                CHECK(load_fails("shop.test.root.toml [[location]] #1: duplicate location '/own/'"));
+                CHECK(set_aside("shop.test.toml", "shop.test.root.toml [[location]] #1: duplicate location '/own/'"));
                 put(frag, "site = \"shop.test\"\n[[location]]\npath = \"/x/\"\n");
                 fs::permissions(frag, fs::perms::group_write, fs::perm_options::add);
-                CHECK(load_fails("must not be writable by its group or by others"));
+                CHECK(set_aside("shop.test.toml", "must not be writable by its group or by others"));
                 fs::permissions(frag, rw_r_r);
                 fs::create_symlink("shop.test.root.toml", ra / "sites.d" / "link.root.toml");
-                CHECK(load_fails("link.root.toml: a root additions file must be a regular file, not a symlink"));
+                CHECK(set_aside("shop.test.toml", "link.root.toml: a root additions file must be a regular file, not a symlink"));
                 fs::remove(ra / "sites.d" / "link.root.toml");
                 CHECK(load_config(ra / "agensio.toml").sites[1].root_additions.size() == 1);
             }
@@ -5437,6 +5446,121 @@ static void test_unknown_keys() {
         std::printf("unknown keys: a good configuration was refused: %s\n", e.what());
     }
     CHECK(loaded);
+    fs::remove_all(dir);
+}
+
+// One broken site never stops the others (design section 26): an included file that does not
+// load is set aside whole, a reload keeps a served file's last good version, a conflict between
+// files sets one aside (the served one keeps its place), the main file stays all or nothing.
+static void test_site_isolation() {
+    namespace fs = std::filesystem;
+    constexpr auto npos = std::string::npos;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-iso-" + std::to_string(::getpid()));
+    fs::remove_all(dir);
+    fs::create_directories(dir / "sites.d");
+    fs::create_directories(dir / "www");
+    auto write = [&](const std::string& name, const std::string& text) { std::ofstream(dir / name) << text; };
+    const fs::path main = dir / "agensio.toml";
+    write("agensio.toml", "include = [\"sites.d/*.toml\"]\n[server]\nworkers = 1\n");
+    auto file = [&](const char* name) { return (dir / "sites.d" / name).string(); };
+    auto find = [](const Config& c, const char* name) -> const SiteConfig* {
+        for (const auto& x : c.sites)
+            if (x.server_names.front() == name) return &x;
+        return nullptr;
+    };
+    auto load_error = [&](const Config* running = nullptr) {
+        try {
+            load_config(main, running);
+        } catch (const std::exception& e) {
+            return std::string(e.what());
+        }
+        return std::string();
+    };
+    const std::string a = "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:18711\"]\nroot = \"../www\"\n";
+    const std::string b = "[[site]]\nserver_name = [\"b.test\"]\nlisten = [\"127.0.0.1:18712\"]\nroot = \"../www\"\n";
+    write("sites.d/a.toml", a);
+    write("sites.d/b.toml", b + "refsue = [\"/x/\"]\n");
+    // At start: the broken file is set aside with the parser's error, the others load.
+    {
+        const Config c = load_config(main);
+        const Config::HeldBack* h = c.held(file("b.toml"));
+        CHECK(c.sites.size() == 1 && find(c, "a.test") && find(c, "a.test")->source == file("a.toml") && h && !h->carried &&
+              h->error.find("unknown key 'refsue'") != npos && c.held_back.size() == 1);
+    }
+    write("sites.d/b.toml", b);
+    const Config running = load_config(main);
+    CHECK(running.sites.size() == 2 && running.held_back.empty() && running.file_digests.size() == 2);
+    // On reload: a served file that breaks keeps its running version.
+    write("sites.d/b.toml", b + "refsue = [\"/x/\"]\n");
+    {
+        const Config c = load_config(main, &running);
+        const Config::HeldBack* h = c.held(file("b.toml"));
+        CHECK(c.sites.size() == 2 && find(c, "b.test") && find(c, "b.test")->carried && !find(c, "a.test")->carried && h && h->carried);
+        // Carried again on the next reload (the carried version is the running one).
+        const Config c2 = load_config(main, &c);
+        CHECK(c2.sites.size() == 2 && find(c2, "b.test") && find(c2, "b.test")->carried && c2.held(file("b.toml")) && c2.held(file("b.toml"))->carried);
+        // A file that was never served has nothing to carry.
+        write("sites.d/c.toml", "[[site]]\nserver_name = [\"c.test\"]\nlisten = [\"127.0.0.1:18713\"]\nroot = 1\n");
+        const Config c3 = load_config(main, &c);
+        CHECK(!find(c3, "c.test") && c3.held(file("c.toml")) && !c3.held(file("c.toml"))->carried);
+        fs::remove(dir / "sites.d/c.toml");
+    }
+    write("sites.d/b.toml", b);
+    // A new file claiming a served name on its address yields though it loads first; at start
+    // (nothing served) the later file yields.
+    write("sites.d/0c.toml", "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:18711\"]\nroot = \"../www\"\n");
+    {
+        const Config c = load_config(main, &running);
+        const Config::HeldBack* h = c.held(file("0c.toml"));
+        CHECK(find(c, "a.test")->source == file("a.toml") && h && !h->carried &&
+              h->error.find("a.test on 127.0.0.1:18711 is claimed by two sites") != npos && h->error.find("a.toml keeps its place") != npos);
+        const Config start = load_config(main);
+        CHECK(find(start, "a.test")->source == file("0c.toml") && start.held(file("a.toml")) && !start.held(file("a.toml"))->carried);
+        // A served file that was edited still keeps its place against a new one.
+        write("sites.d/a.toml", a + "index = [\"start.html\"]\n");
+        const Config edited = load_config(main, &running);
+        CHECK(find(edited, "a.test")->source == file("a.toml") && !find(edited, "a.test")->carried && edited.held(file("0c.toml")));
+        write("sites.d/a.toml", a);
+    }
+    fs::remove(dir / "sites.d/0c.toml");
+    // A served file edited to claim another served file's name yields and keeps its last good
+    // version; the unchanged one keeps its place.
+    write("sites.d/b.toml", b + "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:18711\"]\nroot = \"../www\"\n");
+    {
+        const Config c = load_config(main, &running);
+        const Config::HeldBack* h = c.held(file("b.toml"));
+        CHECK(c.sites.size() == 2 && find(c, "a.test")->source == file("a.toml") && !find(c, "a.test")->carried && find(c, "b.test")->carried && h && h->carried);
+    }
+    write("sites.d/b.toml", b);
+    // Two catch-alls on one address: the later file yields.
+    write("sites.d/x.toml", "[[site]]\nserver_name = [\"x.test\"]\nlisten = [\"127.0.0.1:18711\"]\nroot = \"../www\"\ndefault = true\n");
+    write("sites.d/y.toml", "[[site]]\nserver_name = [\"*\"]\nlisten = [\"127.0.0.1:18711\"]\nroot = \"../www\"\n");
+    {
+        const Config c = load_config(main);
+        CHECK(find(c, "x.test") && !find(c, "*") && c.held(file("y.toml")) && c.held(file("y.toml"))->error.find("has two catch-all sites") != npos);
+    }
+    fs::remove(dir / "sites.d/x.toml");
+    fs::remove(dir / "sites.d/y.toml");
+    // The main file: a site there never yields to an included file, a conflict within it fails
+    // the load, an error in it fails the load.
+    write("agensio.toml", "include = [\"sites.d/*.toml\"]\n[server]\nworkers = 1\n[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:18711\"]\nroot = \"www\"\n");
+    {
+        const Config c = load_config(main, &running);
+        CHECK(find(c, "a.test")->source == main.string() && c.held(file("a.toml")) && !c.held(file("a.toml"))->carried && find(c, "b.test"));
+    }
+    write("agensio.toml", "include = [\"sites.d/*.toml\"]\n[server]\nworkers = 1\n[[site]]\nserver_name = [\"m.test\"]\nlisten = [\"127.0.0.1:18714\"]\nroot = \"www\"\n"
+                          "[[site]]\nserver_name = [\"m.test\"]\nlisten = [\"127.0.0.1:18714\"]\nroot = \"www\"\n");
+    CHECK(load_error(&running).find("m.test on 127.0.0.1:18714 is claimed by two sites") != npos);
+    write("agensio.toml", "include = [\"sites.d/*.toml\"]\n[server]\nworkres = 1\n");
+    CHECK(load_error(&running).find("unknown key 'workres'") != npos);
+    // Every site file set aside: nothing to serve, the load fails and names each file.
+    write("agensio.toml", "include = [\"sites.d/*.toml\"]\n[server]\nworkers = 1\n");
+    write("sites.d/a.toml", a + "refsue = 1\n");
+    write("sites.d/b.toml", b + "refsue = 1\n");
+    {
+        const std::string e = load_error();
+        CHECK(e.find("no site could be loaded") != npos && e.find("a.toml") != npos && e.find("b.toml") != npos);
+    }
     fs::remove_all(dir);
 }
 
@@ -7885,6 +8009,7 @@ int main() {
     test_quic_stateless();
 #endif
     test_unknown_keys();
+    test_site_isolation();
     test_config_reference();
     test_config_reference_defaults();
     test_forwarded_lines();

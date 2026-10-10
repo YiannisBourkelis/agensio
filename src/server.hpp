@@ -138,7 +138,9 @@ public:
         std::string ignored;
         reload(ignored);
     }
-    bool reload(std::string& error);
+    // `must_load`: a site file that must load (the control plane's own change): its being set
+    // aside refuses the reload; any other file set aside keeps its last good version.
+    bool reload(std::string& error, std::string_view must_load = {});
 
     const std::vector<Listener>& listeners() const noexcept { return gen_->listeners; }
     unsigned worker_count() const noexcept { return static_cast<unsigned>(workers_.size()); }
@@ -199,7 +201,7 @@ private:
     json::Value validate() override;
     json::Value logs(std::string_view target) override;
     json::Value health() override;
-    bool reload_now(std::string& error) override { return reload(error); }
+    bool reload_now(std::string& error, std::string_view must_load = {}) override { return reload(error, must_load); }
     bool renew_certificate(std::string_view site, std::string& error) override;
     void reopen_logs() override { logs_.reopen_all(); }
     const Config& running() override { return gen_->cfg; }

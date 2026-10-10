@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.1.0-alpha.62
+
+- **One broken site file no longer stops every site.** The configuration loaded all or nothing:
+  one mistake in any file under `sites.d/` (a misspelt key, a broken TOML line, a root additions
+  file left group-writable) failed `agensio -t`, which the packaged unit runs before it starts,
+  so after a reboot every site on the host stayed down; on a running server it refused every
+  reload, another customer's changes and renewed certificates included. Each included site file
+  now loads on its own (`docs/configuration.md` 12c, design section 26): a file that does not
+  load is set aside with its error and the other sites are served; on reload a file whose sites
+  were served keeps its last good version while the other files' changes apply; a site whose
+  root additions file or `[[site.auth]]` users file does not load is set aside whole, never
+  served without them. The main file stays all or nothing. `agensio -t` warns and exits 0,
+  `agensio -t --strict` exits 1; health reports each file (`site_file_held_back`, an error,
+  with the loader's message and what serves meanwhile), as do the error log, `status`
+  (`site_files_held_back`), `validate` and the reload command's answer (`held_back`).
+  `site-create`, `site-update` and `site-enable` refuse and undo a change whose own file would
+  be set aside, as before for a refused reload. Shown first by `tests/isolation.sh` (eleven
+  checks, all failing on alpha.61, where the server did not start).
+- **Two sites claiming one name on one address are refused.** The loader accepted them and the
+  first one answered, so the second file's site was silently never served (a cookbook finding);
+  two catch-all sites on one address likewise. Now one of the two files is set aside and named:
+  the one the running server serves keeps its place, at start the later file in load order
+  yields; inside the main file the load fails.
+
 ## 0.1.0-alpha.61 (2026-10-10)
 
 From the alpha.58 report:

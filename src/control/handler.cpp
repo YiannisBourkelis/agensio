@@ -578,9 +578,22 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
     if (path == "/v1/reload") {
         std::string error;
         const bool ok = backend_->reload_now(error);
-        audit_peer(s, what, ok ? "ok" : error);
-        if (ok) reply(s, 200, json::Value::object().set("ok", true).set("message", "configuration reloaded"));
-        else reply(s, 409, json::Value::object().set("ok", false).set("error", error));
+        if (!ok) {
+            audit_peer(s, what, error);
+            reply(s, 409, json::Value::object().set("ok", false).set("error", error));
+            return false;
+        }
+        // Site files set aside (design section 26): the reload applied the rest; say which and why.
+        json::Value held = json::Value::array();
+        std::string note;
+        for (const auto& h : backend_->running().held_back) {
+            held.push(json::Value::object().set("file", h.file).set("error", h.error).set("keeps_running_version", h.carried));
+            note += "; set aside: " + h.file + ": " + h.error;
+        }
+        audit_peer(s, what, "ok" + note);
+        reply(s, 200, json::Value::object().set("ok", true).set("message", held.items().empty() ? "configuration reloaded"
+                                                                                                : "configuration reloaded; site files set aside, see held_back")
+                          .set("held_back", std::move(held)));
         return false;
     }
     if (path == "/v1/logs/reopen") {
@@ -846,7 +859,8 @@ void ControlHandler::trash_restore(Stream& s, std::string_view entry, std::strin
             return;
         }
         std::string error;
-        const bool reloaded = backend_->reload_now(error);
+        // The restored site file must load: set aside, the answer says the reload was refused.
+        const bool reloaded = backend_->reload_now(error, control::site_file(backend_->running(), r.get("site")).string());
         std::string back;
         for (const auto& p : r["restored"].items()) back += (back.empty() ? "" : ", ") + std::string(p.get("path"));
         audit_peer(s, what, "restored " + std::string(r.get("site")) + ": " + back + (reloaded ? "" : "; reload refused: " + error));
@@ -1427,7 +1441,10 @@ void ControlHandler::site_create(Stream& s, const json::Value& body, std::string
     }
     if (restart) {
         // The file must still be a valid configuration; the listener is bound at the restart.
-        const json::Value check = backend_->validate();
+        json::Value check = backend_->validate();
+        for (const auto& h : check["held_back"].items())  // the other sites load; this one would not
+            if (std::filesystem::path(h["file"].str()).lexically_normal() == file.lexically_normal())
+                check.set("ok", false).set("errors", json::Value::array().push(h["error"].str()));
         if (!check["ok"].boolean()) {
             std::error_code ec;
             std::filesystem::remove(file, ec);
@@ -1445,7 +1462,7 @@ void ControlHandler::site_create(Stream& s, const json::Value& body, std::string
                           .set("done", done).set("spec", spec.to_json()).set("next_steps", strings(control::next_steps(spec, cfg))).set("warnings", warnings));
         return;
     }
-    if (!backend_->reload_now(error)) {
+    if (!backend_->reload_now(error, file.string())) {  // refused too when the new file would be set aside
         std::error_code ec;
         std::filesystem::remove(file, ec);
         audit_peer(s, what, "refused: " + error);
@@ -1570,7 +1587,7 @@ void ControlHandler::site_update(Stream& s, std::string_view name, const json::V
         reply(s, 500, json::Value::object().set("error", error));
         return;
     }
-    if (!backend_->reload_now(error)) {
+    if (!backend_->reload_now(error, file.string())) {  // refused too when the changed file would be set aside
         std::error_code ec;
         std::filesystem::rename(file.string() + ".bak", file, ec);
         audit_peer(s, what, "refused: " + error);
@@ -1640,7 +1657,8 @@ void ControlHandler::site_toggle(Stream& s, std::string_view name, std::string_v
         reply(s, 500, json::Value::object().set("error", ec.message()));
         return;
     }
-    if (!backend_->reload_now(error)) {
+    // An enabled file that would be set aside is refused and disabled again.
+    if (!backend_->reload_now(error, action == "enable" ? file.string() : std::string{})) {
         if (action == "disable") std::filesystem::rename(disabled, file, ec);
         else if (action == "enable") std::filesystem::rename(file, disabled, ec);
         else {
@@ -2322,7 +2340,7 @@ void ControlHandler::site_auth_user_change(Stream& s, std::string_view name, con
     audit_peer(s, what, "user " + change.user + ": " + planned);
     const Config& cfg = backend_->running();
     const bool used = authusers::used_by(cfg, authusers::file_of(authusers::dir_of(cfg.config_path), key));
-    backend_->auth_users_async(req, [this, &s, what = std::string(what), change, planned, used, done](json::Value r) {
+    backend_->auth_users_async(req, [this, &s, what = std::string(what), change, planned, used, key, done](json::Value r) {
         if (!r["ok"].boolean()) {
             audit_peer(s, what, "user " + change.user + ": refused: " + std::string(r.get("error")));
             reply(s, 409, r);
@@ -2341,7 +2359,8 @@ void ControlHandler::site_auth_user_change(Stream& s, std::string_view name, con
         steps.push(action == "unchanged" ? "nothing to write: user " + change.user + " is already so" : "wrote " + std::string(r.get("file")));
         if (action != "unchanged" && used) {
             std::string error;
-            if (backend_->reload_now(error)) {
+            // The site's file must load with the new users file: set aside, it would keep the old users unannounced.
+            if (backend_->reload_now(error, control::site_file(backend_->running(), key).string())) {
                 steps.push("reloaded: the change applies to the next request (a login remembered with an old password no longer matches)");
                 result += "; reloaded";
             } else {

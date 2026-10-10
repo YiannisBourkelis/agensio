@@ -332,7 +332,7 @@ server.
 |---|---|
 | the users file is missing when the server starts or `agensio -t` runs | the configuration is refused (`[[auth]] #1.users: cannot open ...`); the server does not start (the packaged unit runs `agensio -t` first, so the message is in the journal) |
 | the file has comments only, or no line at all | refused: `no users: the file needs at least one line name:hash` |
-| the file is removed or broken while the server runs | nothing changes for requests: the running server keeps the users it loaded. `agensio reload` is refused (`reload refused: ...`) and the old configuration stays. Health reports `auth_users_unloadable` (an error), because a restart would not start the server |
+| the file is removed or broken while the server runs | nothing changes for requests: the running server keeps the users it loaded. `agensio reload` sets the site's file aside and keeps its running version (`docs/configuration.md` 12c), the other sites' changes apply; a restart would start without the site. Health reports `auth_users_unloadable` (an error). A site in the main file: the reload is refused and a restart would not start the server |
 | the file has a wrong owner, a symlink, mode `0644` or `0660` | refused at load, with the `chown` or `chmod` to run |
 | every user is locked or expired | the file loads; every login fails and the browser keeps asking. Health: `auth_no_valid_user` |
 | a user expires while logged in | refused from 00:00 UTC of the day: the cache and the connection's memo never last past `expires` |
@@ -487,7 +487,7 @@ section 2c has the rest; `protection_show` renders the jail for the host.
 
 | code | severity | when | what to do |
 |---|---|---|---|
-| `auth_users_unloadable` | error | a rule's users file the next load would refuse (the loader's own checks, run against a scratch configuration) | put the file back or correct what the message names; `agensio -t` says when it loads. Until then a reload is refused and a restart does not start |
+| `auth_users_unloadable` | error | a rule's users file the next load would refuse (the loader's own checks, run against a scratch configuration) | put the file back or correct what the message names; `agensio -t` says when it loads. Until then a reload keeps the site's running version and a restart does not serve the site (a site in the main file: a reload is refused and a restart does not start) |
 | `auth_no_valid_user` | warn | every user of a rule's file is locked or expired | unlock or extend one, add one, or remove the rule |
 | `auth_users_expired` | info | users past their `expires` | delete those who are gone, or give a later date |
 | `auth_plain_http` | warn | a rule with `plain_http` on a listener the network reaches (judged by the address: `[::1]` is loopback; `-t` says it too) | serve over https and drop `plain_http`, unless the network is trusted |

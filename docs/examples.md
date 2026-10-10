@@ -35,7 +35,7 @@ plain-HTTP site that redirects port 80 to it is the same for every domain and sh
 ## Applying a recipe
 
 ```sh
-agensio -t -c /etc/agensio/agensio.toml          # validates everything, names any problem
+agensio -t -c /etc/agensio/agensio.toml          # validates everything, names any problem; --strict fails on a site file set aside
 agensio -t --explain -c /etc/agensio/agensio.toml   # the effective configuration, presets expanded
 agensio reload                                   # applies it; no connection is dropped
 ```
@@ -53,6 +53,7 @@ start them and the warning goes. What a key needs (a reload, a restart, root) is
 - [HTTPS with certificate files you manage](examples/basics.md#https-with-certificate-files-you-manage): `tls = { cert, key }`, renewal by `agensio reload`, and a key the server's account can read.
 - [One canonical host](examples/basics.md#one-canonical-host): the bare name redirected to www in one hop, or the reverse.
 - [Several sites on one address, and the catch-all](examples/basics.md#several-sites-on-one-address-and-the-catch-all): sites matched by name, certificates by SNI, 421 for unknown names, and one catch-all.
+- [A mistake in one site's file](examples/basics.md#a-mistake-in-one-sites-file): one file set aside, the other sites served, its last good version kept on reload; `-t --strict`, health.
 - [Long cache lifetimes for assets, and HSTS](examples/basics.md#long-cache-lifetimes-for-assets-and-hsts): `add_headers` per location, and when a location joins the preset's instead of replacing it.
 - [A single-page application](examples/basics.md#a-single-page-application): `try_files` to the shell, with missing assets still answered 404.
 - [An access log per site, and JSON logs](examples/basics.md#an-access-log-per-site-and-json-logs): `access_log`, `[log] format`, log rotation, and why JSON costs you fail2ban.

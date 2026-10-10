@@ -16,8 +16,11 @@
 #include <cstdio>
 #include <atomic>
 #include <map>
+#include <fstream>
+#include <optional>
 #include <ostream>
 #include <sstream>
+#include <set>
 #include <cctype>
 #include <ctime>
 #include <charconv>
@@ -1748,7 +1751,17 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     cfg.sites.push_back(std::move(site));
 }
 
-void parse_sites_from(const toml::table& tbl, const fs::path& base_dir, Config& cfg, const std::string& file_label, std::vector<RootAdditions>* root_adds) {
+void parse_sites_from(const toml::table& tbl, const fs::path& base_dir, Config& cfg, const std::string& file_label, std::vector<RootAdditions>* root_adds,
+                      const std::string& source) {
+    const std::size_t first = cfg.sites.size();
+    struct Stamp {  // every site this file adds carries the file's name, however it leaves
+        Config& cfg;
+        std::size_t first;
+        const std::string& source;
+        ~Stamp() {
+            for (std::size_t i = first; i < cfg.sites.size(); ++i) cfg.sites[i].source = source;
+        }
+    } stamp{cfg, first, source};
     if (auto arr = tbl["site"].as_array()) {
         std::size_t idx = 0;
         for (auto& node : *arr) {
@@ -2422,7 +2435,114 @@ std::string auth_users_problem(const std::string& path, const Config& cfg) {
     return "";
 }
 
-Config load_config(const fs::path& path) {
+struct SiteConflict {
+    std::size_t first, second;  // indexes into Config::sites, the earlier first
+    std::string message;
+};
+
+// The first conflict between two sites, the earlier one first: what a host cannot serve at once
+// (docs/design-site-operations.md 26). The messages are the ones the loader gave when any of
+// these failed the load; the duplicate names and catch-alls were accepted before, the first site
+// silently winning (the cookbook's finding, 2026-10-09).
+std::optional<SiteConflict> first_site_conflict(const Config& cfg) {
+    const auto& sites = cfg.sites;
+    // A listener speaks one set of protocols: every site on an address must name the same.
+    for (std::size_t i = 0; i < sites.size(); ++i)
+        for (std::size_t j = 0; j < i; ++j)
+            for (const std::string& a : sites[i].listen)
+                for (const std::string& b : sites[j].listen)
+                    if (a == b && sites[i].protocols != sites[j].protocols)
+                        return SiteConflict{j, i, "sites " + sites[j].server_names.front() + " and " + sites[i].server_names.front() + " share " + a +
+                                                      " but list different protocols; sites on one address must agree"};
+    // Sites sharing a listen address must agree on TLS on/off.
+    for (std::size_t i = 0; i < sites.size(); ++i)
+        for (std::size_t j = 0; j < i; ++j)
+            for (const auto& la : sites[i].listen)
+                for (const auto& lb : sites[j].listen)
+                    if (la == lb && sites[i].tls.has_value() != sites[j].tls.has_value())
+                        return SiteConflict{j, i, "listen address " + la + " is used by both a TLS and a plain site"};
+    // A name answers on an address for one site, and an address has one catch-all.
+    auto catch_all = [](const SiteConfig& x) {
+        return x.is_default || std::find(x.server_names.begin(), x.server_names.end(), "*") != x.server_names.end();
+    };
+    for (std::size_t i = 0; i < sites.size(); ++i)
+        for (std::size_t j = 0; j < i; ++j)
+            for (const auto& la : sites[i].listen) {
+                if (std::find(sites[j].listen.begin(), sites[j].listen.end(), la) == sites[j].listen.end()) continue;
+                for (const auto& n : sites[i].server_names)
+                    if (n != "*" && std::find(sites[j].server_names.begin(), sites[j].server_names.end(), n) != sites[j].server_names.end())
+                        return SiteConflict{j, i, n + " on " + display_listen(la) + " is claimed by two sites (" + fs::path(sites[j].source).filename().string() +
+                                                      " and " + fs::path(sites[i].source).filename().string() + "); a name answers for one site on an address"};
+                if (catch_all(sites[i]) && catch_all(sites[j]))
+                    return SiteConflict{j, i, display_listen(la) + " has two catch-all sites (" + sites[j].server_names.front() + " in " +
+                                                  fs::path(sites[j].source).filename().string() + ", " + sites[i].server_names.front() + " in " +
+                                                  fs::path(sites[i].source).filename().string() + "); an address has one"};
+            }
+    // One user, one pool: sites of the same user share it and must size it alike; sites of
+    // different users never share a socket, whatever they say.
+    for (std::size_t i = 0; i < sites.size(); ++i)
+        for (std::size_t j = 0; j < i; ++j) {
+            const SiteConfig& a = sites[j];
+            const SiteConfig& b = sites[i];
+            if (a.user.empty() || b.user.empty()) continue;
+            const std::string pair = a.server_names.front() + " and " + b.server_names.front();
+            if (a.user != b.user) {
+                if (a.php.configured && b.php.configured && a.php.address.key == b.php.address.key)
+                    return SiteConflict{j, i, pair + " have different users but the same php socket " + a.php.address.key};
+                continue;
+            }
+            if (!a.pool.generated || !b.pool.generated) continue;
+            const PhpPool& x = a.pool;
+            const PhpPool& y = b.pool;
+            const char* differs = x.children != y.children         ? "children"
+                                  : x.pm != y.pm                    ? "pm"
+                                  : x.max_requests != y.max_requests ? "max_requests"
+                                  : x.memory_limit != y.memory_limit ? "memory_limit"
+                                  : x.max_execution_time != y.max_execution_time ? "max_execution_time"
+                                  : x.version != y.version                       ? "version"
+                                  : x.extra != y.extra                           ? "extra"
+                                                                                 : nullptr;
+            if (differs) return SiteConflict{j, i, pair + " share user " + a.user + " but php." + differs + " differs"};
+        }
+    // The FastCGI pool is per upstream address (and worker), so every location on the same
+    // socket must agree on the pool bounds; the first definition wins, a conflict is an error.
+    struct PoolBounds {
+        const FcgiOptions* opts;
+        std::string where;
+        std::size_t site;
+    };
+    std::map<std::string, PoolBounds> pools;
+    for (std::size_t si = 0; si < sites.size(); ++si)
+        for (const auto& loc : sites[si].locations) {
+            if (loc.kind == HandlerKind::static_) continue;
+            const UpstreamConfig& up = loc.kind == HandlerKind::fastcgi ? loc.fastcgi
+                                       : loc.kind == HandlerKind::cgi   ? loc.cgi
+                                                                        : loc.proxy;
+            const FcgiOptions& o = up.options;
+            const std::string where = sites[si].server_names.front() + " location '" + loc.path + "'";
+            std::vector<std::string> keys;
+            if (loc.kind != HandlerKind::proxy) keys.push_back(up.address.key);
+            else for (const auto& a : up.addresses) keys.push_back(a.key);
+            for (const auto& key : keys) {
+                auto it = pools.find(key);
+                if (it == pools.end()) {
+                    pools.emplace(key, PoolBounds{&o, where, si});
+                    continue;
+                }
+                const FcgiOptions& f = *it->second.opts;
+                if (o.max_connections != f.max_connections || o.queue_depth != f.queue_depth || o.queue_wait != f.queue_wait ||
+                    o.priority_reserve != f.priority_reserve || o.max_idle != f.max_idle || o.keep_conn != f.keep_conn || o.idle_timeout != f.idle_timeout)
+                    return SiteConflict{it->second.site, si,
+                                        where + ": pool limits (max_connections, queue_depth, queue_wait, priority_reserve, "
+                                                "max_idle, idle_timeout, keep_conn) for upstream " +
+                                            key + " differ from " + it->second.where +
+                                            "; the pool is per upstream, set them once (site-level php = {...} or proxy = {...})"};
+            }
+        }
+    return std::nullopt;
+}
+
+Config load_config(const fs::path& path, const Config* running) {
     Config cfg;
     std::error_code ec;
     cfg.config_path = fs::absolute(path, ec);
@@ -2574,23 +2694,48 @@ Config load_config(const fs::path& path) {
     // top-level `site = "<domain>"` string), so an additions file is at hand when its site is
     // parsed, whichever file defines the site; the sites themselves are parsed in the old
     // order: the main file's, then each include's.
+    // Each included file is read on its own (docs/design-site-operations.md 26): a site file that
+    // cannot be parsed is set aside with the parser's error; a root additions file that cannot be
+    // loaded sets its site's file aside below (a site never runs without the locations root added).
     std::vector<RootAdditions> additions;
     std::vector<std::pair<toml::table, fs::path>> site_files;
+    struct FailedAdditions {
+        std::string file, error;
+        bool claimed = false;  // a site of that name was parsed
+    };
+    std::map<std::string, FailedAdditions> failed_additions;  // the site's name -> the additions file that did not load
+    auto hold = [&](const std::string& file, const std::string& error) {
+        if (!cfg.held(file)) cfg.held_back.push_back({file, error, false});
+    };
     for (auto& pattern : string_list(root["include"], "include")) {
         cfg.includes.push_back(pattern);
         for (auto& file : expand_include(base_dir, pattern)) {
+            const std::string name = file.filename().string();
+            const bool additions_name = name.size() > 10 && name.ends_with(".root.toml");
+            {
+                std::ifstream in(file, std::ios::binary);
+                const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                cfg.file_digests[file.string()] = std::hash<std::string>{}(text);
+            }
             toml::table sub;
             try {
                 sub = toml::parse_file(file.string());
             } catch (const toml::parse_error& e) {
-                fail(file.string() + ":" + std::to_string(e.source().begin.line) + ": " + std::string(e.description()));
+                const std::string error = file.string() + ":" + std::to_string(e.source().begin.line) + ": " + std::string(e.description());
+                if (additions_name) failed_additions[to_lower(name.substr(0, name.size() - 10))] = {file.string(), error};
+                else hold(file.string(), error);
+                continue;
             }
-            if (sub["site"].is_string()) additions.push_back(parse_root_additions(std::move(sub), file, cfg.config_path));
-            else {
-                check_keys(sub, {}, {"site"}, file.filename().string(),
-                           "an included file holds [[site]] tables; [server], [cache], [log], [control], include and [addresses] belong in the main file");
-                site_files.emplace_back(std::move(sub), file);
+            if (sub["site"].is_string()) {
+                const std::string domain = to_lower(sub["site"].value_or(std::string()));
+                try {
+                    additions.push_back(parse_root_additions(std::move(sub), file, cfg.config_path));
+                } catch (const std::exception& e) {
+                    failed_additions[domain] = {file.string(), e.what()};
+                }
+                continue;
             }
+            site_files.emplace_back(std::move(sub), file);
         }
     }
     // [addresses] (2026-10-07): named address sets for the sites' access rules ("@office").
@@ -2614,91 +2759,101 @@ Config load_config(const fs::path& path) {
     } else if (root.contains("addresses")) {
         fail("'addresses' must be a table: [addresses] office = [\"203.0.113.7\", \"2001:db8:5::/64\"]");
     }
-    parse_sites_from(root, base_dir, cfg, path.filename().string(), &additions);
-    for (auto& [sub, file] : site_files) parse_sites_from(sub, file.parent_path(), cfg, file.filename().string(), &additions);
+    parse_sites_from(root, base_dir, cfg, path.filename().string(), &additions, cfg.config_path.string());
+    for (const auto& site : cfg.sites)  // the main file's sites share its fate
+        if (auto f = failed_additions.find(site.server_names.front()); f != failed_additions.end())
+            fail(site.server_names.front() + ": its root additions file could not be loaded: " + f->second.error);
+    for (auto& [sub, file] : site_files) {
+        const std::size_t before = cfg.sites.size();
+        try {
+            check_keys(sub, {}, {"site"}, file.filename().string(),
+                       "an included file holds [[site]] tables; [server], [cache], [log], [control], include and [addresses] belong in the main file");
+            parse_sites_from(sub, file.parent_path(), cfg, file.filename().string(), &additions, file.string());
+            for (std::size_t i = before; i < cfg.sites.size(); ++i)
+                if (auto f = failed_additions.find(cfg.sites[i].server_names.front()); f != failed_additions.end()) {
+                    f->second.claimed = true;
+                    fail(cfg.sites[i].server_names.front() + ": its root additions file could not be loaded, and the site is not served without it: " +
+                         f->second.error);
+                }
+        } catch (const std::exception& e) {
+            cfg.sites.erase(cfg.sites.begin() + static_cast<std::ptrdiff_t>(before), cfg.sites.end());
+            hold(file.string(), e.what());
+        }
+    }
+    // An additions file that did not load and whose site is nowhere (an empty or misspelt
+    // `site`, or its site's own file set aside before its name was read) is named itself.
+    for (const auto& [domain, f] : failed_additions)
+        if (!f.claimed) hold(f.file, f.error);
     for (const auto& a : additions)
         if (!a.used) cfg.orphan_additions.push_back({a.file.string(), a.site});
-
-    if (cfg.sites.empty()) fail(path.string() + ": no [[site]] defined");
-
-    // A listener speaks one set of protocols: every site on an address must name the same.
-    for (std::size_t i = 0; i < cfg.sites.size(); ++i)
-        for (std::size_t j = 0; j < i; ++j)
-            for (const std::string& a : cfg.sites[i].listen)
-                for (const std::string& b : cfg.sites[j].listen)
-                    if (a == b && cfg.sites[i].protocols != cfg.sites[j].protocols)
-                        fail("sites " + cfg.sites[j].server_names.front() + " and " + cfg.sites[i].server_names.front() +
-                             " share " + a + " but list different protocols; sites on one address must agree");
-
-    // One user, one pool: sites of the same user share it and must size it alike; sites of
-    // different users never share a socket, whatever they say.
-    for (const auto& a : cfg.sites) {
-        if (a.user.empty()) continue;
-        for (const auto& b : cfg.sites) {
-            if (&a == &b || b.user.empty()) continue;
-            const std::string pair = a.server_names.front() + " and " + b.server_names.front();
-            if (a.user != b.user) {
-                if (a.php.configured && b.php.configured && a.php.address.key == b.php.address.key)
-                    fail(pair + " have different users but the same php socket " + a.php.address.key);
-                continue;
-            }
-            if (!a.pool.generated || !b.pool.generated) continue;
-            const PhpPool& x = a.pool;
-            const PhpPool& y = b.pool;
-            const char* differs = x.children != y.children         ? "children"
-                                  : x.pm != y.pm                    ? "pm"
-                                  : x.max_requests != y.max_requests ? "max_requests"
-                                  : x.memory_limit != y.memory_limit ? "memory_limit"
-                                  : x.max_execution_time != y.max_execution_time ? "max_execution_time"
-                                  : x.version != y.version                       ? "version"
-                                  : x.extra != y.extra                           ? "extra"
-                                                                                 : nullptr;
-            if (differs) fail(pair + " share user " + a.user + " but php." + differs + " differs");
+    // A reload: a file set aside keeps the version of its sites the running configuration has.
+    if (running)
+        for (auto& h : cfg.held_back)
+            for (const auto& site : running->sites)
+                if (site.source == h.file) {
+                    cfg.sites.push_back(site);
+                    cfg.sites.back().carried = true;
+                    h.carried = true;
+                }
+    // Conflicts between files: one is set aside and the checks run again until none is left.
+    // The main file never yields to an included one and fails the load when it conflicts with
+    // itself. Between included files the one the running configuration served keeps its place:
+    // served and unchanged (or carried) first, then served but edited, then new; at a tie the
+    // later file in load order yields. A file that was served and yields keeps its last good
+    // version, as a file that does not parse does (once: a carried version that conflicts is
+    // dropped, so the loop ends).
+    {
+        const std::string main_file = cfg.config_path.string();
+        auto served = [&](const std::string& file) {
+            return running && std::any_of(running->sites.begin(), running->sites.end(), [&](const SiteConfig& r) { return r.source == file; });
+        };
+        auto rank = [&](const std::string& file) {
+            if (!served(file)) return 0;
+            if (const auto* h = cfg.held(file); h && h->carried) return 2;
+            const auto now = cfg.file_digests.find(file);
+            const auto then = running->file_digests.find(file);
+            return now != cfg.file_digests.end() && then != running->file_digests.end() && now->second == then->second ? 2 : 1;
+        };
+        std::set<std::string> carried_once;
+        for (const auto& h : cfg.held_back)
+            if (h.carried) carried_once.insert(h.file);
+        for (std::size_t round = 0;; ++round) {
+            const auto c = first_site_conflict(cfg);
+            if (!c) break;
+            const std::string fa = cfg.sites[c->first].source, fb = cfg.sites[c->second].source;
+            if ((fa == main_file && fb == main_file) || round > 4 * (cfg.sites.size() + cfg.held_back.size() + 1)) fail(c->message);
+            std::string loser;
+            if (fa == fb) loser = fa;
+            else if (fa == main_file) loser = fb;
+            else if (fb == main_file) loser = fa;
+            else loser = rank(fa) > rank(fb) ? fb : rank(fb) > rank(fa) ? fa : fb;
+            const std::string winner = loser == fa ? fb : fa;
+            const std::string why = c->message + (winner == loser ? "" : "; " + fs::path(winner).filename().string() + " keeps its place");
+            std::erase_if(cfg.sites, [&](const SiteConfig& x) { return x.source == loser; });
+            const bool carry = served(loser) && carried_once.insert(loser).second;
+            if (carry)
+                for (const auto& site : running->sites)
+                    if (site.source == loser) {
+                        cfg.sites.push_back(site);
+                        cfg.sites.back().carried = true;
+                    }
+            bool known = false;
+            for (auto& h : cfg.held_back)
+                if (h.file == loser) {
+                    h.carried = carry;
+                    h.error += "; then " + why;
+                    known = true;
+                }
+            if (!known) cfg.held_back.push_back({loser, why, carry});
         }
     }
 
-    // The FastCGI pool is per upstream address (and worker), so every location on the same
-    // socket must agree on the pool bounds; the first definition wins, a conflict is an error.
-    struct PoolBounds {
-        const FcgiOptions* opts;
-        std::string where;
-    };
-    std::map<std::string, PoolBounds> pools;
-    for (const auto& site : cfg.sites)
-        for (const auto& loc : site.locations) {
-            if (loc.kind == HandlerKind::static_) continue;
-            const UpstreamConfig& up = loc.kind == HandlerKind::fastcgi ? loc.fastcgi
-                                       : loc.kind == HandlerKind::cgi   ? loc.cgi
-                                                                        : loc.proxy;
-            const FcgiOptions& o = up.options;
-            const std::string where = site.server_names.front() + " location '" + loc.path + "'";
-            std::vector<std::string> keys;
-            if (loc.kind != HandlerKind::proxy) keys.push_back(up.address.key);
-            else for (const auto& a : up.addresses) keys.push_back(a.key);
-            for (const auto& key : keys) {
-                auto it = pools.find(key);
-                if (it == pools.end()) {
-                    pools.emplace(key, PoolBounds{&o, where});
-                    continue;
-                }
-                const FcgiOptions& f = *it->second.opts;
-                if (o.max_connections != f.max_connections || o.queue_depth != f.queue_depth ||
-                    o.queue_wait != f.queue_wait || o.priority_reserve != f.priority_reserve ||
-                    o.max_idle != f.max_idle || o.keep_conn != f.keep_conn || o.idle_timeout != f.idle_timeout)
-                    fail(where + ": pool limits (max_connections, queue_depth, queue_wait, priority_reserve, "
-                                 "max_idle, idle_timeout, keep_conn) for upstream " +
-                         key + " differ from " + it->second.where +
-                         "; the pool is per upstream, set them once (site-level php = {...} or proxy = {...})");
-            }
-        }
+    if (cfg.sites.empty()) {
+        std::string why;
+        for (const auto& h : cfg.held_back) why += "\n  " + h.file + ": " + h.error;
+        fail(path.string() + (why.empty() ? ": no [[site]] defined" : ": no site could be loaded; every site file was set aside:" + why));
+    }
 
-    // Sites sharing a listen address must agree on TLS on/off.
-    for (auto& a : cfg.sites)
-        for (auto& b : cfg.sites)
-            for (auto& la : a.listen)
-                for (auto& lb : b.listen)
-                    if (la == lb && a.tls.has_value() != b.tls.has_value())
-                        fail("listen address " + la + " is used by both a TLS and a plain site");
 
     if (auto ct = root["control"].as_table()) {
         check_keys(*ct, {"[control]"}, {}, "control");

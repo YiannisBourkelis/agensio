@@ -101,6 +101,8 @@ Server::Server(Config cfg)
     own_site_logs(gen->cfg);
     for (const auto& o : gen->cfg.orphan_additions)
         error_log_.warn(o.file + " holds root additions for site " + o.site + ", which is not in the configuration (disabled or deleted): ignored");
+    for (const auto& h : gen->cfg.held_back)
+        error_log_.error(h.file + " set aside, its sites are not served: " + h.error);
     for (const auto& n : access_notices(gen->cfg))
         if (n.severity == "warning") error_log_.warn(n.text);
     warm_response_tables();
@@ -737,7 +739,7 @@ json::Value Server::site(std::string_view name, bool& found) {
     return s ? control::site(gen_->cfg, *s, std::time(nullptr)) : json::Value();
 }
 
-json::Value Server::validate() { return control::validate(cfg_.config_path, cfg_); }
+json::Value Server::validate() { return control::validate(cfg_.config_path, cfg_, &gen_->cfg); }
 
 json::Value Server::logs(std::string_view target) {
     control::LogQuery q;
@@ -890,6 +892,10 @@ json::Value Server::status() {
         sites.push(std::move(site));
     }
     v.set("sites", std::move(sites));
+    // Site files set aside (design section 26); health says why and what to do.
+    json::Value held = json::Value::array();
+    for (const auto& h : gen_->cfg.held_back) held.push(h.file);
+    v.set("site_files_held_back", std::move(held));
     v.set("acme", gen_->cfg.acme.enabled);
     return v;
 }
@@ -1513,7 +1519,7 @@ void Server::stop() {
 
 // ---- reload ----
 
-bool Server::reload(std::string& error) {
+bool Server::reload(std::string& error, std::string_view must_load) {
     auto refuse = [&](const std::string& why) {
         error = why;
         error_log_.error("reload refused: " + why);
@@ -1521,10 +1527,18 @@ bool Server::reload(std::string& error) {
     };
     Config fresh;
     try {
-        fresh = load_config(cfg_.config_path);
+        fresh = load_config(cfg_.config_path, &gen_->cfg);  // a file set aside keeps its running version
     } catch (const std::exception& e) {
         return refuse(e.what());
     }
+    if (!must_load.empty()) {
+        const std::string want = std::filesystem::path(must_load).lexically_normal().string();
+        for (const auto& h : fresh.held_back)
+            if (std::filesystem::path(h.file).lexically_normal().string() == want) return refuse(h.error);
+    }
+    for (const auto& h : fresh.held_back)
+        error_log_.error(h.file + " set aside: " + h.error +
+                         (h.carried ? " (the version loaded before keeps serving its sites)" : " (its sites are not served)"));
     const auto hosting = check_hosting(fresh, system_facts());
     if (!hosting.empty()) {
         std::string all;

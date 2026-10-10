@@ -83,7 +83,7 @@ fi
 
 # Root additions beside the managed file (design section 20): root's alone, moved with the site.
 printf 'site = "a.test"\n\n[[location]]\npath = "/ra/"\nadd_headers = { "X-RA" = "1" }\n' > $T/sites.d/a.test.root.toml; chmod 644 $T/sites.d/a.test.root.toml
-check "root additions owned by the tenant are refused with the rule; root's load, and site shows them after a reload" "1 yes 0 True 1" "$(chown t1 $T/sites.d/a.test.root.toml; "$BIN" -t -c $T/agensio.toml > /dev/null 2> $T/t.err; echo -n "$? "; grep -q 'must belong to the owner of agensio.toml' $T/t.err && echo -n yes; chown root $T/sites.d/a.test.root.toml; "$BIN" -t -c $T/agensio.toml > /dev/null 2>&1; echo -n " $? "; ctl reload --yes --reason ra > /dev/null; ctl site a.test > $T/out; j 'd["root_additions"]["present"], int(d["root_additions"]["locations"])')"
+check "root additions owned by the tenant are refused with the rule (their site set aside: -t --strict fails); root's load, and site shows them after a reload" "1 yes 0 True 1" "$(chown t1 $T/sites.d/a.test.root.toml; "$BIN" -t --strict -c $T/agensio.toml > /dev/null 2> $T/t.err; echo -n "$? "; grep -q 'must belong to the owner of agensio.toml' $T/t.err && echo -n yes; chown root $T/sites.d/a.test.root.toml; "$BIN" -t -c $T/agensio.toml > /dev/null 2>&1; echo -n " $? "; ctl reload --yes --reason ra > /dev/null; ctl site a.test > $T/out; j 'd["root_additions"]["present"], int(d["root_additions"]["locations"])')"
 ctl site-auth-user-set a.test anna --generate --yes --reason trash > /dev/null   # its password users (2026-10-09) go with it too
 ctl site-delete a.test --files --yes --reason trash > $T/out
 E1=$(j 'd["entry"]')

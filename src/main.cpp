@@ -40,6 +40,9 @@ void usage() {
                  "                      /etc/agensio/agensio.toml, /usr/local/etc/agensio/agensio.toml)\n"
                  "  -t, --test          check the configuration (and FastCGI upstreams) and exit\n"
                  "      --explain       with -t: print the effective configuration after presets\n"
+                 "      --strict        with -t: a site file set aside (an error of its own, or a conflict\n"
+                 "                      with another file) fails the check too; without it the check\n"
+                 "                      passes with a warning, as the server starts the other sites\n"
                  "  -v, --version       print the version and exit\n"
                  "  passwd [--method yescrypt|bcrypt|sha512] [--cost N] USER\n"
                  "                      print a line for a [[site.auth]] user file (USER:hash), the\n"
@@ -138,6 +141,7 @@ int main(int argc, char** argv) {
     std::filesystem::path config_path;
     bool test_only = false;
     bool explain = false;
+    bool strict = false;  // -t --strict: a site file set aside fails the check too
     bool pools = false;
     bool reload = false;
     bool dry_run = false;
@@ -147,6 +151,7 @@ int main(int argc, char** argv) {
         if ((a == "-c" || a == "--config") && i + 1 < argc) config_path = argv[++i];
         else if (a == "-t" || a == "--test") test_only = true;
         else if (a == "--explain") explain = true;
+        else if (a == "--strict") strict = true;
         else if (a == "pools" && i == 1) pools = true;
         else if (a == "reload" && i == 1) reload = true;
         else if (a == "keys" && i == 1) {  // the configuration reference, no server needed
@@ -853,6 +858,16 @@ int main(int argc, char** argv) {
         std::cerr << "configuration error: " << e.what() << "\n";
         return 1;
     }
+    // Site files set aside (docs/design-site-operations.md 26): the other sites load, so -t passes
+    // (the packaged unit's ExecStartPre runs it) unless --strict; a reload keeps their last good
+    // version.
+    for (const auto& h : cfg.held_back)
+        std::cerr << "warning: " << h.file << " set aside, its sites not loaded: " << h.error
+                  << (reload ? " (the running server keeps serving the version it loaded before, if any)" : "") << "\n";
+    if (strict && !cfg.held_back.empty()) {
+        std::cerr << "configuration error: " << cfg.held_back.size() << " site file(s) set aside (--strict)\n";
+        return 1;
+    }
     if (reload) {
 #ifdef _WIN32
         std::cerr << "reload is not available on Windows\n";
@@ -904,7 +919,8 @@ int main(int argc, char** argv) {
                       << ", which is not in the configuration (disabled or deleted): ignored\n";
         for (const auto& n : agensio::access_notices(cfg))
             std::cerr << (n.severity == "warning" ? "warning: " : "note: ") << n.text << "\n";
-        std::cout << "configuration " << cfg.config_path.string() << " is OK (" << cfg.sites.size() << " site(s))\n";
+        std::cout << "configuration " << cfg.config_path.string() << " is OK (" << cfg.sites.size() << " site(s)"
+                  << (cfg.held_back.empty() ? std::string() : ", " + std::to_string(cfg.held_back.size()) + " site file(s) set aside") << ")\n";
         return 0;
     }
 

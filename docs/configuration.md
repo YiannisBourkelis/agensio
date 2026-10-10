@@ -4,6 +4,8 @@ A configuration is one TOML file: `[server]`, `[log]`, `[cache]` and one `[[site
 virtual host, with optional `[[site.location]]` blocks. Paths are relative to the file's
 directory. `include = ["sites.d/*.toml"]` pulls in more `[[site]]` tables, one file per
 site if a panel writes them, and root additions files beside managed sites (section 15).
+Each included site file loads on its own: one with a mistake is set aside and the other
+sites are served (section 12c).
 
 Two commands you will use while editing:
 
@@ -1431,9 +1433,10 @@ Nothing is interrupted:
   same connection;
 - a connection on a listen address that was removed serves its current request, then is
   told `Connection: close`; the address stops accepting at once;
-- a broken file, a certificate that cannot be read or a port that cannot be bound refuses
-  the whole reload, with the reason in the error log, and the old configuration keeps
-  serving.
+- a broken main file, a certificate that cannot be read or a port that cannot be bound
+  refuses the whole reload, with the reason in the error log, and the old configuration
+  keeps serving; a broken site file under `sites.d/` is set aside instead and the other
+  sites' changes apply (12c).
 
 Under a 64-connection load the switch itself costs nothing measurable and no request
 fails (`tests/reload.sh`). Restart-only settings (the `applies` column of `docs/keys.md`):
@@ -1450,6 +1453,60 @@ them, and the role groups needed a restart.
 Note: the static file cache starts cold for every reloaded site (entries are keyed by
 the location the configuration created), so the first request for each file after a
 reload reads it from disk again.
+
+## 12c. One broken site file never stops the others
+
+The main file is all or nothing: an error there refuses the start or the reload, as before.
+Each file an `include` pattern brings in is loaded on its own, and a site file that does not
+load is **set aside** whole while every other site loads. Before 0.1.0-alpha.62 one mistake in
+any site file stopped the whole host: the packaged unit runs `agensio -t` before it starts the
+server, so a misspelt key in one customer's file kept every site down at boot, and every
+reload (certificate renewals included) was refused until someone fixed it.
+
+What sets a file aside:
+
+- an error in it: TOML syntax, an unknown key (`unknown key 'refsue' (did you mean
+  'refuse'?)`), a value out of range, a preset that does not fit;
+- something its sites need that does not load: the site's root additions file (section 15;
+  a site is never served without the locations root added, which may be the ones that
+  protect it), or a users file of a `[[site.auth]]` rule (19b). An additions file that does
+  not load and names no site is named itself;
+- a conflict with another file: a name both claim on one address, two catch-all sites on
+  one address, a TLS and a plain site on one address, two sites of one user that size its
+  php-fpm pool differently. One of the two files yields, the rest of it with it: the main
+  file never yields; between site files, the one the running server serves keeps its place
+  (unchanged before edited, edited before new), and at a tie, at start, the later file in
+  load order (alphabetical within a pattern) yields. A conflict inside the main file fails
+  the load.
+
+What happens then:
+
+- **at start** the file's sites are not served; the server starts with the others (it
+  refuses to start only when no site at all is left);
+- **on reload** a file whose sites were being served keeps serving the version that loaded
+  before (its *last good version*), and the other files' changes apply; a new file that does
+  not load is simply not served. Fix the file and reload, and it loads like any other;
+- every file set aside is a line in the error log (`... sites.d/b.example.toml set aside: ...
+  (the version loaded before keeps serving its sites)`), a `site_file_held_back` error in
+  health with the loader's message, the file in `agensio ctl status`
+  (`site_files_held_back`) and in `agensio ctl validate` (`held_back`, which says what the
+  next reload would do with the files on disk);
+- `agensio -t` prints a warning per file set aside and still exits 0, because the server
+  would start and serve the other sites; `agensio -t --strict` exits 1 for the same, for
+  scripts and CI that want every file to load;
+- the control plane never reports a change as done when its own file was set aside:
+  `site-create`, `site-update` and `site-enable` reload with their file required to load,
+  and on a refusal undo what they wrote (a new file removed, the previous version put back,
+  an enabled file disabled again) and answer 409 with the loader's error.
+
+```sh
+agensio -t -c /etc/agensio/agensio.toml            # warning: .../sites.d/b.example.toml set aside, its sites not loaded: ...
+agensio -t --strict -c /etc/agensio/agensio.toml   # the same, exit 1
+agensio ctl health                                 # site_file_held_back, with the file, the error and what serves meanwhile
+```
+
+Not yet set aside per site (they still refuse the whole start or reload): a certificate that
+cannot be read and a hosting rule a site breaks (section 11); both are planned.
 
 ## 13. CGI
 
@@ -2787,7 +2844,7 @@ same name warns that it exists.
 
 | code | severity | when |
 |---|---|---|
-| `auth_users_unloadable` | error | the next load would refuse the file (gone, a symlink, another owner, a wrong mode, a line it cannot read): a reload is refused and a restart does not start the server, while the running one still asks with the users it loaded |
+| `auth_users_unloadable` | error | the next load would refuse the file (gone, a symlink, another owner, a wrong mode, a line it cannot read): a reload keeps the site's running version and a restart does not serve the site (12c; a site in the main file: a reload is refused and a restart does not start the server), while the running one still asks with the users it loaded |
 | `auth_no_valid_user` | warn | every user of the file is locked or expired: every login fails and the browser keeps asking |
 | `auth_users_expired` | info | users past their `expires` |
 | `auth_plain_http` | warn | a rule with `plain_http` on a listener the network reaches |

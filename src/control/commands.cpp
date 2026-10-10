@@ -448,6 +448,7 @@ json::Value site_summary(const SiteConfig& s, std::time_t now) {
     v.set("encoded_slashes", s.encoded_slashes_allow ? "allow" : "deny");
     if (!s.redirect.empty()) v.set("redirect", s.redirect);
     v.set("catch_all", is_catch_all(s));
+    if (s.carried) v.set("last_good_version", true);  // its file was set aside on reload (design section 26)
     v.set("access_log", s.access_log);
     v.set("tls", tls_json(s, now));
     return v;
@@ -894,12 +895,12 @@ std::vector<std::string> restart_needed(const Config& fresh, const Config& runni
     return out;
 }
 
-json::Value validate(const fs::path& path, const Config& running) {
+json::Value validate(const fs::path& path, const Config& running, const Config* current) {
     json::Value v = json::Value::object().set("path", path.string());
     json::Value errors = json::Value::array();
     Config fresh;
     try {
-        fresh = load_config(path);
+        fresh = load_config(path, current);
     } catch (const std::exception& e) {
         errors.push(e.what());
         return v.set("ok", false).set("errors", std::move(errors));
@@ -907,6 +908,11 @@ json::Value validate(const fs::path& path, const Config& running) {
     for (const auto& e : check_hosting(fresh, system_facts())) errors.push(e);
     const bool ok = errors.items().empty();
     v.set("ok", ok).set("errors", std::move(errors)).set("sites", static_cast<double>(fresh.sites.size()));
+    // Site files a reload would set aside (design section 26): the rest loads, so ok stays true.
+    json::Value held = json::Value::array();
+    for (const auto& h : fresh.held_back)
+        held.push(json::Value::object().set("file", h.file).set("error", h.error).set("keeps_running_version", h.carried));
+    v.set("held_back", std::move(held));
     v.set("restart_needed", strings(restart_needed(fresh, running)));
     return v;
 }
@@ -1075,9 +1081,22 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
     auto add = [&](std::string sev, std::string code, std::string site, std::string msg, std::string fix = "") {
         out.push_back(Finding{std::move(sev), std::move(code), std::move(site), std::move(msg), std::move(fix)});
     };
+    // Site files set aside (design section 26): by the running configuration, then by the files
+    // on disk as the next reload would load them, each file once.
+    auto held_finding = [&](const Config::HeldBack& h, bool on_disk) {
+        const std::string name = fs::path(h.file).filename().string();
+        std::string msg = h.file + (on_disk ? " does not load as it is on disk: " : " was not loaded: ") + h.error + "; ";
+        msg += on_disk ? (h.carried ? "the next reload keeps serving the version running now" : "its sites are not served after the next reload")
+                       : (h.carried ? "the version loaded before keeps serving its sites" : "its sites are not served");
+        add("error", "site_file_held_back", "", std::move(msg),
+            "fix " + name + " (agensio -t names the error), then reload; the other sites are not affected");
+    };
+    for (const auto& h : running.held_back) held_finding(h, false);
     // The file on disk.
     try {
-        const Config fresh = load_config(running.config_path);
+        const Config fresh = load_config(running.config_path, &running);
+        for (const auto& h : fresh.held_back)
+            if (const auto* r = running.held(h.file); !r || r->error != h.error) held_finding(h, true);
         for (const auto& e : check_hosting(fresh, system_facts()))
             add("error", "hosting_rule", "", e, "fix the ownership, then agensio -t");
         const auto restart = restart_needed(fresh, boot);
@@ -1375,9 +1394,13 @@ std::vector<Finding> auth_findings(const Config& cfg, std::time_t now) {
             const std::string where = joined(paths);
             const bool managed = fs::absolute(r.users_path, ec).lexically_normal().string() == own;
             if (const std::string why = auth_users_problem(r.users_path, cfg); !why.empty()) {
+                // A site file is set aside without it (design section 26); the main file fails whole.
+                const bool in_main = s.source.empty() || s.source == cfg.config_path.string();
                 out.push_back(Finding{"error", "auth_users_unloadable", site,
-                                      "the users file of " + where + " would be refused by the next load, so a reload is refused and a restart does not start "
-                                      "the server: " + why + ". The running server still asks with the users it loaded",
+                                      "the users file of " + where + " would be refused by the next load, " +
+                                          (in_main ? std::string("so a reload is refused and a restart does not start the server: ")
+                                                   : std::string("so a reload keeps this site's running version and a restart does not serve the site: ")) +
+                                          why + ". The running server still asks with the users it loaded",
                                       managed ? "put the file back (root keeps it under " + (config_dir / "auth").string() + "), or correct what the message names; "
                                                 "`agensio -t` says when the next load accepts it"
                                               : "correct what the message names (root's file, chmod 640, `agensio passwd USER` for a line); `agensio -t` says when "

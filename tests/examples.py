@@ -174,7 +174,7 @@ for path in CATEGORIES:
             conf = os.path.join(base, "etc/agensio/agensio.toml")
             with open(conf, "w") as f:
                 f.write(text)
-            r = subprocess.run([BIN, "-t", "-c", conf], capture_output=True, text=True)
+            r = subprocess.run([BIN, "-t", "--strict", "-c", conf], capture_output=True, text=True)
             out = r.stdout + r.stderr
             expect = re.findall(r"#\s*expect:\s*(.+)", text)
             expect_error = re.findall(r"#\s*expect-error:\s*(.+)", text)
