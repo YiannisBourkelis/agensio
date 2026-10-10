@@ -2558,6 +2558,129 @@ std::optional<SiteConflict> first_site_conflict(const Config& cfg) {
     return std::nullopt;
 }
 
+namespace {
+
+// What a site file set aside for its own error still claims (the alpha.62 report, finding 1):
+// each [[site]]'s names and addresses, read as parse_site reads them, so that at start another
+// file does not take them over without the broken file's rules. A site whose names cannot be
+// read claims nothing.
+struct SiteClaim {
+    std::vector<std::string> names, listen;
+    bool catch_all = false;
+};
+
+SiteClaim claim_of(const toml::table& t) {
+    SiteClaim c;
+    auto strings = [](const toml::node_view<const toml::node>& n) {
+        std::vector<std::string> out;
+        if (auto v = n.value<std::string>()) out.push_back(*v);
+        else if (const auto* a = n.as_array())
+            for (const auto& e : *a)
+                if (auto v = e.value<std::string>()) out.push_back(*v);
+        return out;
+    };
+    for (auto& n : strings(t["server_name"])) c.names.push_back(to_lower(n));
+    if (c.names.empty()) c.names.push_back("*");
+    for (auto& l : strings(t["listen"])) {
+        try {
+            c.listen.push_back(normalise_listen(l));
+        } catch (const std::exception&) {
+        }
+    }
+    c.catch_all = t["default"].value_or(false) || std::find(c.names.begin(), c.names.end(), "*") != c.names.end();
+    return c;
+}
+
+std::vector<SiteClaim> claims_of(const toml::table& file) {
+    std::vector<SiteClaim> out;
+    if (const auto* sites = file["site"].as_array())
+        for (const auto& e : *sites)
+            if (const auto* t = e.as_table()) out.push_back(claim_of(*t));
+    return out;
+}
+
+// The same from a file that is not TOML: the server_name, listen and default lines directly under
+// each [[site]] header, each parsed alone (an array may span up to 32 lines).
+std::vector<SiteClaim> claims_of_text(std::string_view text, bool& names_unread) {
+    std::vector<SiteClaim> out;
+    toml::table head;
+    bool in_head = false, unreadable = false;
+    auto flush = [&] {
+        if (in_head && !unreadable) out.push_back(claim_of(head));
+        if (in_head && unreadable) names_unread = true;
+        head = toml::table{};
+        in_head = unreadable = false;
+    };
+    auto depth_of = [](std::string_view l) {  // [ minus ] outside quoted strings
+        int d = 0;
+        char quote = 0;
+        for (std::size_t i = 0; i < l.size(); ++i) {
+            const char c = l[i];
+            if (quote) {
+                if (c == '\\' && quote == '"') ++i;
+                else if (c == quote) quote = 0;
+            } else if (c == '"' || c == '\'') quote = c;
+            else if (c == '#') break;
+            else if (c == '[') ++d;
+            else if (c == ']') --d;
+        }
+        return d;
+    };
+    std::string chunk, key;
+    int depth = 0, lines = 0;
+    auto take = [&] {
+        try {
+            const toml::table one = toml::parse(chunk);
+            for (const auto& [k, v] : one) head.insert_or_assign(k, v);
+        } catch (const std::exception&) {
+            if (key == "server_name") unreadable = true;
+        }
+        chunk.clear();
+    };
+    std::size_t pos = 0;
+    while (pos < text.size()) {
+        const std::size_t nl = text.find('\n', pos);
+        const std::string_view line = text.substr(pos, nl == std::string_view::npos ? std::string_view::npos : nl - pos);
+        pos = nl == std::string_view::npos ? text.size() : nl + 1;
+        if (!chunk.empty()) {  // an array spanning lines
+            chunk.append("\n").append(line);
+            depth += depth_of(line);
+            if (depth <= 0) take();
+            else if (++lines > 32) {
+                if (key == "server_name") unreadable = true;
+                chunk.clear();
+            }
+            continue;
+        }
+        const std::string_view t = line.substr(std::min(line.size(), line.find_first_not_of(" \t")));
+        if (t.starts_with("[[site]]")) {
+            flush();
+            in_head = true;
+            continue;
+        }
+        if (t.starts_with("[")) {
+            flush();
+            continue;
+        }
+        if (!in_head) continue;
+        const std::size_t eq = t.find('=');
+        if (eq == std::string_view::npos) continue;
+        std::string_view k = t.substr(0, eq);
+        while (!k.empty() && (k.back() == ' ' || k.back() == '\t')) k.remove_suffix(1);
+        if (k != "server_name" && k != "listen" && k != "default") continue;
+        key = std::string(k);
+        chunk = std::string(t);
+        depth = depth_of(t);
+        lines = 0;
+        if (depth <= 0) take();
+    }
+    if (!chunk.empty() && key == "server_name") unreadable = true;
+    flush();
+    return out;
+}
+
+}  // namespace
+
 void set_aside_until_clean(Config& cfg, const Config* running,
                            const std::function<std::optional<SiteConflict>(const Config&)>& find) {
     const std::string main_file = cfg.config_path.string();
@@ -2776,14 +2899,20 @@ Config load_config(const fs::path& path, const Config* running) {
     auto hold = [&](const std::string& file, const std::string& error) {
         if (!cfg.held(file)) cfg.held_back.push_back({file, error, false});
     };
+    // Load order (the main file first) and what each file set aside for its own error claims.
+    std::map<std::string, std::size_t> order{{cfg.config_path.string(), 0}};
+    std::map<std::string, std::vector<SiteClaim>> claims;
+    std::set<std::string> names_unread;  // files whose [[site]] names the text scan could not read
     for (auto& pattern : string_list(root["include"], "include")) {
         cfg.includes.push_back(pattern);
         for (auto& file : expand_include(base_dir, pattern)) {
             const std::string name = file.filename().string();
             const bool additions_name = name.size() > 10 && name.ends_with(".root.toml");
+            order.emplace(file.string(), order.size());
+            std::string text;
             {
                 std::ifstream in(file, std::ios::binary);
-                const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                text.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
                 cfg.file_digests[file.string()] = std::hash<std::string>{}(text);
             }
             toml::table sub;
@@ -2792,7 +2921,12 @@ Config load_config(const fs::path& path, const Config* running) {
             } catch (const toml::parse_error& e) {
                 const std::string error = file.string() + ":" + std::to_string(e.source().begin.line) + ": " + std::string(e.description());
                 if (additions_name) failed_additions[to_lower(name.substr(0, name.size() - 10))] = {file.string(), error};
-                else hold(file.string(), error);
+                else {
+                    hold(file.string(), error);
+                    bool unread = false;
+                    claims[file.string()] = claims_of_text(text, unread);
+                    if (unread) names_unread.insert(file.string());
+                }
                 continue;
             }
             if (sub["site"].is_string()) {
@@ -2847,6 +2981,7 @@ Config load_config(const fs::path& path, const Config* running) {
         } catch (const std::exception& e) {
             cfg.sites.erase(cfg.sites.begin() + static_cast<std::ptrdiff_t>(before), cfg.sites.end());
             hold(file.string(), e.what());
+            claims[file.string()] = claims_of(sub);
         }
     }
     // An additions file that did not load and whose site is nowhere (an empty or misspelt
@@ -2864,6 +2999,52 @@ Config load_config(const fs::path& path, const Config* running) {
                     cfg.sites.back().carried = true;
                     h.carried = true;
                 }
+    // A file set aside for its own error keeps a claim on its names (the alpha.62 report, finding
+    // 1: at start a duplicate took a broken file's name over, without its access rule). A file
+    // claiming one of them on one of its addresses yields with it when it would have yielded to
+    // the file loaded: not served by the running configuration and later in load order. A
+    // carried version takes part in the conflicts itself; the main file never yields.
+    {
+        const std::string main_file = cfg.config_path.string();
+        auto served = [&](const std::string& file) {
+            return running && std::any_of(running->sites.begin(), running->sites.end(), [&](const SiteConfig& r) { return r.source == file; });
+        };
+        std::map<std::string, std::string> yields;  // file -> why
+        for (const auto& [file, list] : claims) {
+            const Config::HeldBack* h = cfg.held(file);
+            if (!h || h->carried) continue;
+            const std::string by = fs::path(file).filename().string();
+            for (const auto& site : cfg.sites) {
+                if (site.source == main_file || site.carried || yields.count(site.source) || served(site.source) || order[site.source] < order[file]) continue;
+                const bool site_catch_all = site.is_default || std::find(site.server_names.begin(), site.server_names.end(), "*") != site.server_names.end();
+                for (const auto& c : list) {
+                    std::string why;
+                    for (const auto& la : site.listen) {
+                        if (std::find(c.listen.begin(), c.listen.end(), la) == c.listen.end()) continue;
+                        for (const auto& n : site.server_names)
+                            if (n != "*" && std::find(c.names.begin(), c.names.end(), n) != c.names.end()) {
+                                why = n + " on " + display_listen(la) + " is claimed by " + by + ", which is set aside for its own error; neither is served until it loads";
+                                break;
+                            }
+                        if (why.empty() && c.catch_all && site_catch_all)
+                            why = display_listen(la) + " has a catch-all site in " + by + ", which is set aside for its own error; neither is served until it loads";
+                        if (!why.empty()) break;
+                    }
+                    if (!why.empty()) {
+                        yields[site.source] = why;
+                        break;
+                    }
+                }
+            }
+        }
+        for (const auto& [file, why] : yields) {
+            std::erase_if(cfg.sites, [&](const SiteConfig& x) { return x.source == file; });
+            cfg.held_back.push_back({file, why, false});
+        }
+        // A site whose names could not be read claims nothing: say so where the file is named.
+        for (auto& h : cfg.held_back)
+            if (names_unread.count(h.file) && !h.carried) h.error += " (a site's names in it could not be read, so another file claiming them is served)";
+    }
     // Conflicts between files: one is set aside and the checks run again until none is left.
     set_aside_until_clean(cfg, running, first_site_conflict);
 

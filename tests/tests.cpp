@@ -5686,6 +5686,51 @@ static void test_site_isolation() {
         const std::string e = load_error();
         CHECK(e.find("no site could be loaded") != npos && e.find("a.toml") != npos && e.find("b.toml") != npos);
     }
+    // A file set aside for its own error keeps a claim on its names (the alpha.62 report, finding
+    // 1): at start a later file claiming one of them on its address yields with it, an earlier one
+    // keeps it (it would have anyway), another address is not concerned.
+    write("sites.d/b.toml", b);
+    write("sites.d/a.toml", a + "[[site.access]]\npath = \"/\"\nallow = [\"127.0.0.1\"]\nrefsue = 1\n");
+    write("sites.d/z-dup.toml", "[[site]]\nserver_name = [\"A.test\"]\nlisten = [\"127.0.0.1:18711\"]\nroot = \"../www\"\n");
+    write("sites.d/z-other.toml", "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:18719\"]\nroot = \"../www\"\n");
+    {
+        const Config c = load_config(main);
+        const Config::HeldBack* h = c.held(file("z-dup.toml"));
+        CHECK(c.held(file("a.toml")) && h && h->error.find("a.test on 127.0.0.1:18711 is claimed by a.toml, which is set aside for its own error") != npos &&
+              find(c, "a.test") && find(c, "a.test")->source == file("z-other.toml") && find(c, "b.test"));
+    }
+    fs::remove(dir / "sites.d/z-dup.toml");
+    fs::remove(dir / "sites.d/z-other.toml");
+    write("sites.d/0dup.toml", "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:18711\"]\nroot = \"../www\"\n");
+    CHECK(find(load_config(main), "a.test") && find(load_config(main), "a.test")->source == file("0dup.toml"));
+    fs::remove(dir / "sites.d/0dup.toml");
+    // Not TOML at all: the names are read from its lines, an array over several lines included;
+    // a catch-all claims its address's catch-all; names it cannot read are said.
+    write("sites.d/a.toml", "[[site]]\nserver_name = [\n  \"a.test\",  # the main name\n  \"www.a.test\",\n]\nlisten = [\"127.0.0.1:18711\"]\ndefault = true\n[[site.access]\n");
+    write("sites.d/z-dup.toml", "[[site]]\nserver_name = [\"www.a.test\"]\nlisten = [\"127.0.0.1:18711\"]\nroot = \"../www\"\n");
+    write("sites.d/z-catch.toml", "[[site]]\nserver_name = [\"*\"]\nlisten = [\"127.0.0.1:18711\"]\nroot = \"../www\"\n");
+    {
+        const Config c = load_config(main);
+        const Config::HeldBack* d = c.held(file("z-dup.toml"));
+        const Config::HeldBack* k = c.held(file("z-catch.toml"));
+        CHECK(d && d->error.find("www.a.test on 127.0.0.1:18711 is claimed by a.toml") != npos && k &&
+              k->error.find("127.0.0.1:18711 has a catch-all site in a.toml") != npos && !find(c, "www.a.test") && !find(c, "*"));
+    }
+    fs::remove(dir / "sites.d/z-catch.toml");
+    write("sites.d/a.toml", "[[site]]\nserver_name = [\"a.test\nlisten = [\"127.0.0.1:18711\"]\n");
+    {
+        const Config c = load_config(main);
+        CHECK(c.held(file("a.toml")) && c.held(file("a.toml"))->error.find("a site's names in it could not be read") != npos && find(c, "www.a.test"));
+    }
+    fs::remove(dir / "sites.d/z-dup.toml");
+    // On reload a new broken file's claim never outranks a site the server serves, even loaded first.
+    write("sites.d/a.toml", a);
+    {
+        const Config served = load_config(main);
+        write("sites.d/0n.toml", "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:18711\"]\nroot = \"../www\"\nrefsue = 1\n");
+        const Config c = load_config(main, &served);
+        CHECK(c.held(file("0n.toml")) && find(c, "a.test") && find(c, "a.test")->source == file("a.toml") && !c.held(file("a.toml")));
+    }
     fs::remove_all(dir);
 }
 

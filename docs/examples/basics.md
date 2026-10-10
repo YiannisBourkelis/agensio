@@ -360,7 +360,10 @@ sites, and everything else loads:
   opened to others while it serves takes that site down until it is fixed (health
   `hosting_rule`, with the `chown` or `chmod` to run);
 - when two files claim one name (or both a catch-all) on one address, the one already serving
-  keeps it and the other is set aside; at start the later file in alphabetical order yields.
+  keeps it and the other is set aside; at start the later file in alphabetical order yields;
+- a name stays with its file while the file is set aside: a duplicate that yielded to it does
+  not take the name over at the next start without its rules, the name answers `421` until the
+  file loads.
 
 Each file set aside is a line in the error log at every start and reload and an error in
 health (`site_file_held_back`) with the loader's own message, for example `unknown key 'refsue'

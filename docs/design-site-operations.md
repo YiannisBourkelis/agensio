@@ -1642,6 +1642,15 @@ the rules, since writing the pools is how a socket rule is fixed. Tests: four ch
 `tests/isolation.sh` (a site of the test's own account), `test_hosting_isolation` on a described
 machine, a `write_pools` check.
 
+**The alpha.62 report's finding (2026-10-11).** A file set aside for its own error had its sites
+removed before the conflicts were looked at, so at start a duplicate that had always yielded to it
+served its name without its access rules, passwords and root additions. Such a file now keeps a
+claim on its names (read from its `[[site]]` tables, or from its `server_name`, `listen` and
+`default` lines when it is not TOML): a file claiming one on the same address yields with it when
+it would have yielded to the file loaded, i.e. not served and later in load order, so a new
+broken file never takes a served name down. Only a file set aside for its own error leaves a
+claim; one that lost a conflict leaves none, and the conflict rules stay as they were.
+
 **Next step** of this section: C3, the certificates loaded per site in `build_listeners`, a site
 whose certificate or key cannot be read set aside with its last good version kept; then
 `tests/acme.sh` with a broken file elsewhere on the host during a renewal.

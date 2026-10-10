@@ -103,6 +103,56 @@ reload
 check "site-create whose file would be set aside: refused, the file removed, the running site unchanged" "1 no site a2" \
   "$([ $CREATE_EXIT -ne 0 ] && echo 1 || echo 0) $([ -f "$T/sites.d/e.test.toml" ] && echo yes || echo no) $(body a.test 18301)"
 
+# site-update and site-enable the same way (the alpha.62 report: not covered): an update adding an
+# alias another file serves on the address is refused and the previous file put back; enabling a
+# site whose name another file serves meanwhile is refused and the file disabled again.
+"$BIN" ctl site-create --domain f.test --app static --no-user --https none --root "$T/www/e" \
+  --listen-plain 127.0.0.1:18301 --yes --reason isolation --socket "$CS" > "$T/f.out" 2>&1
+"$BIN" ctl site-update f.test --alias a.test --yes --reason isolation --socket "$CS" > "$T/fu.out" 2>&1; UPDATE_EXIT=$?
+check "site-update adding an alias another file serves: refused, the previous file back, both sites serving" "1 no site e site a2" \
+  "$([ $UPDATE_EXIT -ne 0 ] && echo 1 || echo 0) $(grep -q 'a\.test' "$T/sites.d/f.test.toml" && echo yes || echo no) $(body f.test 18301) $(body a.test 18301)"
+"$BIN" ctl site-disable f.test --yes --reason isolation --socket "$CS" > /dev/null 2>&1
+site f.test 18301 "$T/www/b" > "$T/sites.d/f-hand.toml"; reload   # another file serves f.test meanwhile
+"$BIN" ctl site-enable f.test --yes --reason isolation --socket "$CS" > "$T/fe.out" 2>&1; ENABLE_EXIT=$?
+check "site-enable of a site whose name another file serves meanwhile: refused, the file disabled again, the other one serving" "1 yes site b" \
+  "$([ $ENABLE_EXIT -ne 0 ] && echo 1 || echo 0) $([ -f "$T/sites.d/f.test.toml.disabled" ] && [ ! -f "$T/sites.d/f.test.toml" ] && echo yes || echo no) $(body f.test 18301)"
+rm -f "$T/sites.d/f-hand.toml" "$T/sites.d/f.test.toml.disabled"; reload
+
+# A new file with an error of its own claiming a served name: set aside, the served site keeps it
+# (its claim never outranks a site the server serves).
+site a.test 18301 "$T/www/c" 'refsue = 1' > "$T/sites.d/0n.toml"; reload
+check "a new broken file claiming a served name: set aside, the served site keeps the name" "site a2 yes" \
+  "$(body a.test 18301) $(held 0n.toml | grep -q 'refsue' && echo yes)"
+rm -f "$T/sites.d/0n.toml"; reload
+
+# At start (the alpha.62 report, finding 1): a file set aside for its own error keeps a claim on its
+# names, so a later file that conflicted with it does not take them over without its rules (its
+# access rule here): the name answers 421 on that address until the broken file loads. Also when
+# the broken file is not TOML at all: its names are read from its server_name and listen lines.
+S2=$T/start; mkdir -p "$S2/sites.d" "$S2/logs"
+cat > "$S2/agensio.toml" <<EOF
+include = ["sites.d/*.toml"]
+[server]
+workers = 1
+pid_file = "$S2/agensio.pid"
+[log]
+access = "off"
+error = "$S2/logs/error.log"
+EOF
+{ site a.test 18311 "$T/www/a" 'refsue = 1'; printf '[[site.access]]\npath = "/"\nallow = ["127.0.0.1"]\n'; } > "$S2/sites.d/a.toml"
+site a.test 18311 "$T/www/c" > "$S2/sites.d/z-dup.toml"
+site o.test 18311 "$T/www/b" > "$S2/sites.d/o.toml"
+"$BIN" -t -c "$S2/agensio.toml" > "$S2/t.out" 2>&1
+"$BIN" -c "$S2/agensio.toml" > "$S2/server.out" 2>&1 & S2PID=$!
+for _ in $(seq 1 50); do nc -z 127.0.0.1 18311 2>/dev/null && break; sleep 0.1; done
+check "at start, a duplicate of a broken file's name is set aside with it: the name answers 421, the other site serves, -t says why" "421 site b yes" \
+  "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 -H 'Host: a.test' http://127.0.0.1:18311/) $(body o.test 18311) $(grep -q 'z-dup.toml set aside.*a.test on 127.0.0.1:18311 is claimed by a.toml, which is set aside' "$S2/t.out" && echo yes)"
+kill $S2PID; wait $S2PID 2>/dev/null
+{ site a.test 18311 "$T/www/a"; printf '[[site.access]\npath = "/"\n'; } > "$S2/sites.d/a.toml"   # not TOML: a broken header
+"$BIN" -t -c "$S2/agensio.toml" > "$S2/t2.out" 2>&1
+check "a broken file that is not TOML keeps its names too, read from its lines" "yes" \
+  "$(grep -q 'z-dup.toml set aside.*a.test on 127.0.0.1:18311 is claimed by a.toml, which is set aside' "$S2/t2.out" && echo yes)"
+
 # The hosting rules (design section 26, step C2) for a site with an account (the one running this
 # test): a site whose root others can write into is set aside and the others serve; a site is served
 # only by a version that passes every rule now, so a served one whose root is opened to others goes

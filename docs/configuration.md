@@ -1503,7 +1503,16 @@ What sets a file aside:
   file never yields; between site files, the one the running server serves keeps its place
   (unchanged before edited, edited before new), and at a tie, at start, the later file in
   load order (alphabetical within a pattern) yields. A conflict inside the main file fails
-  the load.
+  the load;
+- a name a file set aside for its own error claims: its names stay its own, so another file
+  does not take one over without the broken file's access rules, passwords and root additions.
+  A file claiming one on the same address yields with it when it would have yielded to the file
+  loaded (not served by the running server, and later in load order), and the name answers
+  `421` there until the broken file loads; a site the server serves keeps its name, so a new
+  broken file never takes one down. The names come from the file's `[[site]]` tables, or, when
+  it is not TOML at all, from its `server_name`, `listen` and `default` lines; a site whose
+  names cannot be read is said in the warning. In 0.1.0-alpha.62 a duplicate that had yielded
+  to a file took its name over when that file broke, at the next start.
 
 What happens then:
 

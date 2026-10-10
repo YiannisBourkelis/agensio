@@ -2,6 +2,26 @@
 
 ## 0.1.0-alpha.63
 
+From the alpha.62 report:
+
+- **At start a duplicate took over the name of a file set aside, without its rules.** A file
+  claiming a name another file serves on the same address yields to it; but when that file had
+  an error of its own at the next start, its sites were out before the conflict was looked at,
+  so the duplicate served the name: other content, and none of the broken file's access rules,
+  passwords or root additions (the report: `a.test` from 127.0.0.2 answered 200 "site dup"
+  instead of 403). A file set aside for its own error now keeps a claim on its names: a file
+  claiming one on the same address yields with it when it would have yielded to the file
+  loaded (not served by the running server, later in load order), and the name answers 421
+  there until the broken file loads; a site the server serves keeps its name, so a new broken
+  file never takes one down. The names come from the file's `[[site]]` tables, or from its
+  `server_name`, `listen` and `default` lines when it is not TOML at all. Shown first by
+  `tests/isolation.sh` (a server started with the report's files: 200 from the duplicate before,
+  421 now) and unit checks; the same suite now also covers `site-update` and `site-enable`
+  refusing and undoing a change whose own file would be set aside, which the report could not
+  provoke on the live host.
+
+Site isolation, step C2:
+
 - **A hosting rule one site breaks no longer stops the others** (design section 26, step C2). A
   site with its own account (`user`) whose root others can write into, whose credential file is
   readable by others or whose socket belongs to another account refused the whole start or
