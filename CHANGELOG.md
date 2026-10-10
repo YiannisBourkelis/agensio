@@ -2,6 +2,13 @@
 
 ## 0.1.0-alpha.64
 
+From the alpha.63 report:
+
+- **Health named one hosting problem twice after the reload that took its site down**: once as
+  the running server's (with "the version loaded before breaks it too") and once as what the next
+  reload would do, the same rule without that history. The second is now left out when one text
+  contains the other. Shown first by `tests/isolation.sh` (two findings for the file, now one).
+
 Certificates (the certificate work, steps T1 to T4):
 
 - **`docs/tls.md`, the administrator's guide to certificates.** Automatic certificates and your

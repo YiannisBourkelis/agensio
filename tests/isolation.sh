@@ -173,6 +173,8 @@ if [ -n "$ME" ]; then
   chmod 757 "$T/www/h"; reload
   check "its root opened to others while it serves: the next reload takes it down, the version running breaks the rule too" "none yes" \
     "$(body h.test 18305) $(held h.toml | grep -q 'not served' && echo yes)"
+  check "health names that problem once, not again as what the next reload would do (alpha.63 report, finding 2)" "1" \
+    "$(health | python3 -c 'import json,sys; print(len([f for f in json.load(sys.stdin)["findings"] if f["code"] in ("site_file_held_back", "hosting_rule") and "sites.d/h.toml" in f["message"]]))')"
   chmod 755 "$T/www/h"; reload
   chmod 757 "$T/www/h2"; site h.test 18305 "$T/www/h2" "user = \"$ME\"" > "$T/sites.d/h.toml"; reload
   check "an edit pointing it at a root others can write into: the version that passes keeps serving" "site h yes" \

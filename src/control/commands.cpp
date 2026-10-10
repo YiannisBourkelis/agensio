@@ -1117,8 +1117,12 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
         // The hosting rules as a reload applies them (C2): a site breaking one is set aside, named
         // below; what is left (the server's account, the main file's sites) refuses everything.
         const auto hosting = isolate_hosting(fresh, system_facts(), &running);
+        // What the next reload would set aside, unless the running server already says so: the
+        // same problem may read with or without its history ("the version loaded before breaks it
+        // too", the alpha.63 report's finding 2), so one containing the other is the same.
         for (const auto& h : fresh.held_back)
-            if (const auto* r = running.held(h.file); !r || r->error != h.error) held_finding(h, true);
+            if (const auto* r = running.held(h.file); !r || (r->error.find(h.error) == std::string::npos && h.error.find(r->error) == std::string::npos))
+                held_finding(h, true);
         for (const auto& e : hosting)
             add("error", "hosting_rule", "", e, "fix the ownership, then agensio -t");
         const auto restart = restart_needed(fresh, boot);
