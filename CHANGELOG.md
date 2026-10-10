@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.61
+## 0.1.0-alpha.61 (2026-10-10)
 
 From the alpha.58 report:
 
