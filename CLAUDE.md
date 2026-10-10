@@ -265,7 +265,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   `write_pools` removes no pool while a file is set aside. The certificates the same way (C3,
   `Server::load_certificates`, `Generation::certificates`): each pair loaded once before the
   listeners, whose contexts copy the material; a pair that does not load sets the site aside, a
-  carried site keeps the previous generation's material (a root-only key after the drop).
+  carried site keeps the previous generation's material (a root-only key after the drop); `-t`,
+  the start and health (`tls_key_unreadable`, `server_read_problem` in `services/pools.*`, T1)
+  say ahead of time which certificate or key the server's account cannot read after the drop.
 - **Request bodies** (A3): the HTTP/1 connection is the pull source behind
   `Request::body` (`StreamBody`: `async_read` with backpressure), decoding Content-Length
   or chunked (`http1/chunked.hpp`, fuzzed) from its receive buffer and socket.

@@ -2,6 +2,21 @@
 
 ## 0.1.0-alpha.64
 
+Certificates (the certificate work, step T1):
+
+- **A key only root can read is named before it costs a renewal.** With `server.user` the start
+  reads the certificates as root and every reload after that as that account, so a key only root
+  can read (certbot's `0600` key in its `0700` directories) worked at boot and was never read again:
+  every renewal waited for a restart, silently since step C3 kept the old certificate. `agensio
+  -t`, the start and health (`tls_key_unreadable`) now check that the server's account can read
+  each certificate and key, every directory on the way included, through its group and its
+  supplementary groups (as `initgroups` gives them), and give root's `chgrp` and `chmod` lines; a
+  reload that meets such a key says the same beside `the certificate loaded before keeps serving`.
+  The loader no longer fails a site whose key it may not look at with `filesystem error: status:
+  Permission denied`; the certificate step explains it. Shown first by `tests/pools.sh` (a root-only
+  key under `server.user`: nothing said at `-t` or on reload before; now both name it with the fix,
+  and the fix applied, the next reload loads it) and unit checks.
+
 Site isolation, step C3:
 
 - **A certificate one site's server cannot load no longer stops the others.** A certificate or

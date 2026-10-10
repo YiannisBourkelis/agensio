@@ -1163,6 +1163,10 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
         }
         return false;
     };
+    // A certificate or key the server's account cannot read (step T1): read as root at start, it
+    // is never read again, so a renewal waits for a restart.
+    for (const auto& p : tls_read_problems(running, system_facts()))
+        add("warn", "tls_key_unreadable", running.sites[p.site].server_names.front(), p.message, p.fix);
     for (const auto& s : running.sites) {
         if (!s.tls) continue;
         const std::string name = s.server_names.front();

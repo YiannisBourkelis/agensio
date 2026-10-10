@@ -103,6 +103,8 @@ Server::Server(Config cfg)
         error_log_.warn(o.file + " holds root additions for site " + o.site + ", which is not in the configuration (disabled or deleted): ignored");
     prepare_acme(gen->cfg);
     load_certificates(*gen, nullptr);  // a site whose pair does not load is set aside here (C3)
+    // Read as root now; every reload reads them as server.user (step T1).
+    for (const auto& p : tls_read_problems(gen->cfg, system_facts())) error_log_.warn(p.message + "; fix: " + p.fix);
     for (const auto& h : gen->cfg.held_back)
         error_log_.error(h.file + " set aside, its sites are not served: " + h.error);
     for (const auto& n : access_notices(gen->cfg))  // the notes at level info (alpha.61 report, finding 2)
@@ -381,7 +383,7 @@ static int select_protocol(SSL* ssl, const unsigned char** out, unsigned char* o
 std::vector<std::string> Server::load_certificates(Generation& gen, const Generation* previous) {
     std::vector<std::string> kept;
 #ifdef AGENSIO_HAS_TLS
-    auto load = [](const TlsConfig& t, std::string& error) -> std::shared_ptr<asio::ssl::context> {
+    auto load = [this](const TlsConfig& t, std::string& error) -> std::shared_ptr<asio::ssl::context> {
         auto ctx = std::make_shared<asio::ssl::context>(asio::ssl::context::tls_server);
         asio::error_code ec;
         ctx->use_certificate_chain_file(t.cert.string(), ec);
@@ -392,6 +394,13 @@ std::vector<std::string> Server::load_certificates(Generation& gen, const Genera
         }
         if (!ec) return ctx;
         ERR_clear_error();
+        // After the privilege drop: say what the account lacks and root's commands (step T1).
+        const HostFacts facts = system_facts();
+        for (const auto& file : {t.cert.string(), t.key.string()}) {
+            std::string fix;
+            if (const std::string why = server_read_problem(cfg_, facts, file, fix); !why.empty())
+                error += " (" + cfg_.user + ", the account the server runs as, cannot read " + file + ": " + why + "; fix: " + fix + ")";
+        }
         return nullptr;
     };
     set_aside_until_clean(gen.cfg, previous ? &previous->cfg : nullptr, [&](const Config& c) -> std::optional<SiteConflict> {

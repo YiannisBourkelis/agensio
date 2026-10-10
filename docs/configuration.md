@@ -1595,8 +1595,20 @@ is not the certificate's) sets its site's file aside, and the other sites start 
 serving keeps the certificate it loaded before: a renewal whose key the server cannot read
 (root's `0600` after the privilege drop) or a broken file never takes it down, the error log
 says `the certificate loaded before keeps serving`, and health names the file until the files
-load. Before 0.1.0-alpha.63 such a pair refused the whole reload, every other site's change
+load. Before 0.1.0-alpha.64 such a pair refused the whole reload, every other site's change
 and renewal with it, and at start it kept the server from starting.
+
+**A key the server's account must read.** With `server.user`, the start reads every certificate
+and key as root and each reload after that as that account (its group and supplementary groups),
+so a key only root can read, certbot's `0600` key in its `0700` `live/` and `archive/`
+directories for one, works at boot and is never read again: renewals are not served until a
+restart. `agensio -t`, the start (the error log) and health (`tls_key_unreadable`) check it ahead
+of time, every directory on the way included, and give root's commands, for example `chgrp
+agensio /etc/letsencrypt/live && chmod g+x /etc/letsencrypt/live; chgrp agensio
+/etc/letsencrypt/live/example.com/privkey.pem && chmod 640 ...`; a reload that meets it says the
+same beside `the certificate loaded before keeps serving`. Keys `tls = "auto"` writes are the
+server account's already. Adding the server's account to a group that reads the keys (Debian's
+`ssl-cert` for `/etc/ssl/private`) works too.
 
 ### Automatic certificates
 

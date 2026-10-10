@@ -1651,7 +1651,7 @@ it would have yielded to the file loaded, i.e. not served and later in load orde
 broken file never takes a served name down. Only a file set aside for its own error leaves a
 claim; one that lost a conflict leaves none, and the conflict rules stay as they were.
 
-**Built, third step (C3, 2026-10-11, 0.1.0-alpha.63).** `Server::load_certificates` loads every
+**Built, third step (C3, 2026-10-11, 0.1.0-alpha.64).** `Server::load_certificates` loads every
 certificate and key pair of a generation once, before `build_listeners`, into
 `Generation::certificates` (keyed by both paths); the listeners' contexts copy the certificate,
 its chain and the key from there (`SSL_CTX_use_certificate`, `SSL_CTX_set1_chain`,

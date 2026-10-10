@@ -169,6 +169,22 @@ HostFacts system_facts() {
         const struct passwd* pw = ::getpwuid(static_cast<uid_t>(uid));
         return pw ? std::string(pw->pw_name) : std::string();
     };
+    f.groups = [](const std::string& name, unsigned gid) {
+        std::vector<unsigned> out;
+#ifdef __APPLE__
+        using gid_type = int;
+#else
+        using gid_type = gid_t;
+#endif
+        int n = 64;
+        std::vector<gid_type> g(static_cast<std::size_t>(n));
+        if (::getgrouplist(name.c_str(), static_cast<gid_type>(gid), g.data(), &n) < 0) {
+            g.resize(static_cast<std::size_t>(n));
+            if (::getgrouplist(name.c_str(), static_cast<gid_type>(gid), g.data(), &n) < 0) n = 0;
+        }
+        for (int i = 0; i < n; ++i) out.push_back(static_cast<unsigned>(g[static_cast<std::size_t>(i)]));
+        return out;
+    };
 #else
     f.user_name = [](unsigned) { return std::string(); };
 #endif
@@ -416,6 +432,81 @@ std::vector<std::string> isolate_hosting(Config& cfg, const HostFacts& facts, co
         std::string why;
         for (const auto& h : cfg.held_back) why += "\n  " + h.file + ": " + h.error;
         out.push_back(main_file + ": no site could be loaded; every site file was set aside:" + why);
+    }
+    return out;
+}
+
+std::string server_read_problem(const Config& cfg, const HostFacts& facts, const std::string& path, std::string& fix) {
+    fix.clear();
+    if (cfg.user.empty()) return "";
+    const ServerAccount who = server_account(cfg, facts);
+    if (!who.known || who.uid == 0) return "";
+    std::vector<unsigned> gids{who.gid};
+    if (facts.groups)
+        for (const unsigned g : facts.groups(cfg.user, who.gid))
+            if (std::find(gids.begin(), gids.end(), g) == gids.end()) gids.push_back(g);
+    auto allows = [&](const FileFacts& f, unsigned owner_bit) {  // 0400 read, 0100 search
+        if (f.uid == who.uid) return (f.mode & owner_bit) != 0;
+        if (std::find(gids.begin(), gids.end(), f.gid) != gids.end()) return (f.mode & (owner_bit >> 3)) != 0;
+        return (f.mode & (owner_bit >> 6)) != 0;
+    };
+    const fs::path named = fs::path(path).lexically_normal();
+    std::error_code ec;
+    const fs::path real = fs::canonical(named, ec);
+    std::vector<fs::path> ways{named};
+    if (!ec && real != named) ways.push_back(real);
+    std::string why;
+    std::vector<std::string> fixes, seen;
+    for (const auto& way : ways) {
+        std::vector<fs::path> dirs;  // the outermost first
+        for (fs::path d = way.parent_path(); !d.empty(); d = d.parent_path()) {
+            dirs.insert(dirs.begin(), d);
+            if (d == d.root_path()) break;
+        }
+        for (const auto& d : dirs) {
+            if (std::find(seen.begin(), seen.end(), d.string()) != seen.end()) continue;
+            seen.push_back(d.string());
+            FileFacts f;
+            if (!facts.stat(d.string(), f) || allows(f, 0100)) continue;
+            if (why.empty()) why = "the directory " + d.string() + " is not searchable for it";
+            fixes.push_back("chgrp " + who.group + " " + d.string() + " && chmod g+x " + d.string());
+        }
+    }
+    FileFacts f;
+    const bool seen_file = facts.stat((ec ? named : real).string(), f);
+    if (seen_file && !allows(f, 0400)) {
+        if (why.empty())
+            why = "it is owned by uid " + std::to_string(f.uid) + " gid " + std::to_string(f.gid) + " mode " + octal(f.mode);
+        fixes.push_back("chgrp " + who.group + " " + named.string() + " && chmod 640 " + named.string());
+    } else if (!seen_file && !fixes.empty()) {
+        // A directory hides the file from whoever asks (the server after the drop): its own mode
+        // is unknown here, so the fix covers it too.
+        fixes.push_back("chgrp " + who.group + " " + named.string() + " && chmod 640 " + named.string());
+    }
+    if (fixes.empty()) return "";
+    for (const auto& x : fixes) fix += (fix.empty() ? "" : "; ") + x;
+    return why;
+}
+
+std::vector<TlsReadProblem> tls_read_problems(const Config& cfg, const HostFacts& facts) {
+    std::vector<TlsReadProblem> out;
+    std::vector<std::string> seen;
+    for (std::size_t i = 0; i < cfg.sites.size(); ++i) {
+        const SiteConfig& site = cfg.sites[i];
+        if (!site.tls) continue;
+        for (const auto& [what, file] : {std::pair<const char*, std::string>{"certificate", site.tls->cert.string()},
+                                         std::pair<const char*, std::string>{"key", site.tls->key.string()}}) {
+            if (std::find(seen.begin(), seen.end(), file) != seen.end()) continue;
+            seen.push_back(file);
+            std::string fix;
+            const std::string why = server_read_problem(cfg, facts, file, fix);
+            if (why.empty()) continue;
+            out.push_back({i,
+                           "site " + site.server_names.front() + ": " + cfg.user + ", the account the server runs as after the start, cannot read the " +
+                               what + " " + file + " (" + why + "): the start reads it as root, but every reload after that keeps the certificate "
+                               "loaded at start, so a renewed certificate is never served until a restart",
+                           fix});
+        }
     }
     return out;
 }

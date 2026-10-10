@@ -918,6 +918,8 @@ int main(int argc, char** argv) {
         if (!hosting_errors.empty()) return 1;
         for (const auto& w : agensio::check_upstreams(cfg))
             std::cerr << "warning: " << w << "\n";
+        for (const auto& p : agensio::tls_read_problems(cfg, agensio::system_facts()))  // read as root here, as the account on reload
+            std::cerr << "warning: " << p.message << "; fix: " << p.fix << "\n";
         for (const auto& o : cfg.orphan_additions)
             std::cerr << "warning: " << o.file << " holds root additions for site " << o.site
                       << ", which is not in the configuration (disabled or deleted): ignored\n";

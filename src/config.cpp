@@ -1639,8 +1639,11 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
         TlsConfig tc;
         tc.cert = resolve(base_dir, *cert);
         tc.key = resolve(base_dir, *key);
-        if (!fs::is_regular_file(tc.cert)) fail(where + ".tls: cert file not found: " + tc.cert.string());
-        if (!fs::is_regular_file(tc.key)) fail(where + ".tls: key file not found: " + tc.key.string());
+        // A file the loader may not look at (a reload after the privilege drop) is the certificate
+        // step's to explain, with the account's fix (Server::load_certificates).
+        std::error_code ec;
+        if (!fs::is_regular_file(tc.cert, ec) && ec != std::errc::permission_denied) fail(where + ".tls: cert file not found: " + tc.cert.string());
+        if (!fs::is_regular_file(tc.key, ec) && ec != std::errc::permission_denied) fail(where + ".tls: key file not found: " + tc.key.string());
         site.tls = std::move(tc);
     }
     // The listeners' protocols: the server's unless this site names its own (a TLS port

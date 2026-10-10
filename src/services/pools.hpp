@@ -51,6 +51,9 @@ struct HostFacts {
     std::function<bool(const std::string& name, unsigned& gid)> group;
     std::function<std::string(unsigned gid)> group_name;  // "" when unknown
     std::function<std::string(unsigned uid)> user_name;   // "" when unknown (may be unset in tests)
+    // The groups `name` is in, `gid` included, as initgroups gives them (may be unset in tests:
+    // then `gid` alone).
+    std::function<std::vector<unsigned>(const std::string& name, unsigned gid)> groups;
 };
 HostFacts system_facts();
 
@@ -90,6 +93,19 @@ std::vector<HostingError> hosting_errors(const Config& cfg, const HostFacts& fac
 // the whole configuration: the server's own account, and a rule only the main file's sites
 // break (the main file is all or nothing).
 std::vector<std::string> isolate_hosting(Config& cfg, const HostFacts& facts, const Config* running);
+
+// Whether the account the server runs as after the start can read `path` (the certificate work,
+// step T1): with server.user set, the start reads the certificates as root and every reload after
+// that as this account (its group and supplementary groups, as initgroups gives them), through
+// every directory on the way, the path as named and where its links lead. "" when it can, or
+// when nothing is dropped; else why not, and `fix` gets root's commands.
+std::string server_read_problem(const Config& cfg, const HostFacts& facts, const std::string& path, std::string& fix);
+struct TlsReadProblem {
+    std::size_t site;  // in cfg.sites
+    std::string message, fix;
+};
+// Every certificate and key of a TLS site the server's account could not read on a reload.
+std::vector<TlsReadProblem> tls_read_problems(const Config& cfg, const HostFacts& facts);
 
 // The files and directories of a site that hold credentials, absolute: the preset's
 // secrets (`preset_secrets`) under the served root, `.env` and `.git`, and for Laravel

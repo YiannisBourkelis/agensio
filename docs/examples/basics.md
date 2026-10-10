@@ -172,7 +172,9 @@ renewal hook should run. That reload reads the files as the account the server r
 root, so a key only root can read works at start and then is not read again: each reload sets
 the site aside and keeps serving the certificate loaded at start (`the certificate loaded before
 keeps serving` in the error log, the file in health) until it expires, while the other sites'
-changes apply; hence the group read above. Before 0.1.0-alpha.63 that refused every reload. Sites with automatic and with managed
+changes apply; hence the group read above. `agensio -t` and health (`tls_key_unreadable`) say so
+ahead of time, with the `chgrp` and `chmod` lines for every directory and file on the way. Before
+0.1.0-alpha.64 that refused every reload. Sites with automatic and with managed
 certificates share one listener.
 
 **Check it.**

@@ -5458,6 +5458,83 @@ static void test_unknown_keys() {
     fs::remove_all(dir);
 }
 
+// A certificate or key the server's account cannot read after the privilege drop (the certificate
+// work, step T1), on a described machine: every directory on the way searchable, the file readable,
+// through the account's own uid, its group or a supplementary one (Debian's ssl-cert).
+static void test_tls_read() {
+    constexpr auto npos = std::string::npos;
+    Config cfg;
+    cfg.user = "agensio";
+    bool in_ssl_cert = true;
+    std::map<std::string, FileFacts> files;
+    HostFacts facts;
+    facts.user = [](const std::string& n, unsigned& uid, unsigned& gid) {
+        if (n == "agensio") { uid = 33; gid = 33; return true; }
+        if (n == "root") { uid = 0; gid = 0; return true; }
+        return false;
+    };
+    facts.group = [](const std::string& n, unsigned& gid) {
+        if (n == "agensio") { gid = 33; return true; }
+        return false;
+    };
+    facts.group_name = [](unsigned gid) { return gid == 33 ? std::string("agensio") : gid == 0 ? std::string("root") : std::string(); };
+    facts.groups = [&](const std::string&, unsigned gid) { return in_ssl_cert ? std::vector<unsigned>{gid, 109} : std::vector<unsigned>{gid}; };
+    facts.stat = [&](const std::string& path, FileFacts& out) {
+        auto it = files.find(path);
+        if (it == files.end()) return false;
+        out = it->second;
+        return true;
+    };
+    auto dir = [](unsigned uid, unsigned gid, unsigned mode) { return FileFacts{true, uid, gid, mode}; };
+    auto file = [](unsigned uid, unsigned gid, unsigned mode) { return FileFacts{false, uid, gid, mode}; };
+    files["/"] = dir(0, 0, 0755);
+    files["/srv"] = dir(0, 0, 0755);
+    files["/srv/x-ssl"] = dir(0, 0, 0755);
+    files["/srv/x-ssl/private"] = dir(0, 109, 0710);
+    files["/srv/x-ssl/private/k.pem"] = file(0, 109, 0640);
+    std::string fix;
+    // Through the supplementary group ssl-cert: readable.
+    CHECK(server_read_problem(cfg, facts, "/srv/x-ssl/private/k.pem", fix).empty() && fix.empty());
+    // Without it: the directory first, then the file, each with its line.
+    in_ssl_cert = false;
+    const std::string why = server_read_problem(cfg, facts, "/srv/x-ssl/private/k.pem", fix);
+    CHECK(why == "the directory /srv/x-ssl/private is not searchable for it" &&
+          fix == "chgrp agensio /srv/x-ssl/private && chmod g+x /srv/x-ssl/private; chgrp agensio /srv/x-ssl/private/k.pem && chmod 640 /srv/x-ssl/private/k.pem");
+    // certbot's layout: live/ 0700 root, the key 0600 root.
+    files["/srv/le"] = dir(0, 0, 0755);
+    files["/srv/le/live"] = dir(0, 0, 0700);
+    files["/srv/le/live/a.test"] = dir(0, 0, 0755);
+    files["/srv/le/live/a.test/privkey.pem"] = file(0, 0, 0600);
+    CHECK(server_read_problem(cfg, facts, "/srv/le/live/a.test/privkey.pem", fix).find("/srv/le/live is not searchable") != npos &&
+          fix.find("chgrp agensio /srv/le/live/a.test/privkey.pem && chmod 640") != npos);
+    // A key the server's account owns (the ACME storage's): readable; a file only root reads: not.
+    files["/srv/le/live/a.test/privkey.pem"] = file(33, 33, 0600);
+    files["/srv/le/live"] = dir(0, 0, 0755);
+    CHECK(server_read_problem(cfg, facts, "/srv/le/live/a.test/privkey.pem", fix).empty());
+    files["/srv/le/live/a.test/privkey.pem"] = file(0, 0, 0600);
+    CHECK(server_read_problem(cfg, facts, "/srv/le/live/a.test/privkey.pem", fix).find("owned by uid 0 gid 0 mode 0600") != npos &&
+          fix == "chgrp agensio /srv/le/live/a.test/privkey.pem && chmod 640 /srv/le/live/a.test/privkey.pem");
+    // Nothing is dropped: no server.user, or root.
+    Config plain = cfg;
+    plain.user.clear();
+    CHECK(server_read_problem(plain, facts, "/srv/le/live/a.test/privkey.pem", fix).empty());
+    plain.user = "root";
+    CHECK(server_read_problem(plain, facts, "/srv/le/live/a.test/privkey.pem", fix).empty());
+    // Per site: the key named, with what a reload does with it.
+    SiteConfig site;
+    site.server_names = {"a.test"};
+    TlsConfig tls;
+    tls.cert = "/srv/le/live/a.test/fullchain.pem";
+    tls.key = "/srv/le/live/a.test/privkey.pem";
+    site.tls = tls;
+    files["/srv/le/live/a.test/fullchain.pem"] = file(0, 0, 0644);
+    cfg.sites.push_back(site);
+    const auto problems = tls_read_problems(cfg, facts);
+    CHECK(problems.size() == 1 && problems[0].site == 0 &&
+          problems[0].message.find("site a.test: agensio, the account the server runs as after the start, cannot read the key /srv/le/live/a.test/privkey.pem") != npos &&
+          problems[0].message.find("never served until a restart") != npos);
+}
+
 // The hosting rules the way site files load (design section 26, step C2), on a described machine:
 // a site that breaks one is set aside with its file and the others load; on reload a served site
 // keeps its running version only when that version passes the rules now; two users sharing a root
@@ -8187,6 +8264,7 @@ int main() {
     test_unknown_keys();
     test_site_isolation();
     test_hosting_isolation();
+    test_tls_read();
     test_config_reference();
     test_config_reference_defaults();
     test_forwarded_lines();

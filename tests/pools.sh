@@ -110,6 +110,47 @@ kill $SRV; wait $SRV 2>/dev/null || true
 su -s /bin/bash web1 -c "$BIN -c $T/agensio.toml" > $T/nonroot.out 2>&1 || true
 check "start as a different non-root user is refused" "$(grep -c 'not root and cannot switch\|fatal:\|configuration error' $T/nonroot.out | sed 's/^[1-9][0-9]*$/1/')" "1"
 
+# A key the server's account cannot read (the certificate work, step T1): with server.user the
+# server reads the certificates as root at start and as agensio on every reload after that, so a
+# root-only key works at boot and no renewal is ever loaded. -t names it with the fix, a reload
+# after the start says the same and keeps the certificate; the fix applied, both are quiet.
+K=$T/tls; mkdir -p $K/private $K/www $K/sites.d; echo "tls site" > $K/www/index.html; chmod 755 $K $K/www $K/sites.d
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout $K/private/key.pem -out $K/cert.pem \
+  -subj /CN=localhost -addext subjectAltName=DNS:localhost -days 2 > /dev/null 2>&1
+chmod 700 $K/private; chmod 600 $K/private/key.pem; chmod 644 $K/cert.pem
+cat > $K/agensio.toml <<EOF
+include = ["sites.d/*.toml"]
+[server]
+workers = 1
+user = "agensio"
+pid_file = "$K/agensio.pid"
+[log]
+access = "off"
+error = "$K/error.log"
+EOF
+cat > $K/sites.d/tls.toml <<EOF
+[[site]]
+server_name = ["localhost"]
+listen = ["127.0.0.1:18461"]
+root = "$K/www"
+tls = { cert = "$K/cert.pem", key = "$K/private/key.pem" }
+EOF
+touch $K/error.log; chown agensio $K/error.log
+"$BIN" -t -c $K/agensio.toml > $K/t.out 2>&1 || true
+check "-t: a key only root can read under server.user is named, with the fix for its directory and itself" \
+  "$(grep 'cannot read the key' $K/t.out | grep -c "chgrp agensio $K/private && chmod g+x $K/private.*chgrp agensio $K/private/key.pem && chmod 640 $K/private/key.pem")" "1"
+"$BIN" -c $K/agensio.toml > $K/server.out 2>&1 & KS=$!
+for i in $(seq 1 50); do nc -z 127.0.0.1 18461 2>/dev/null && break; sleep 0.1; done
+kill -HUP $KS; sleep 0.8
+check "a reload after the drop keeps the certificate and names the fix" \
+  "$(curl -sk --max-time 3 --resolve localhost:18461:127.0.0.1 https://localhost:18461/) $(grep 'the certificate loaded before keeps serving' $K/error.log | grep -c "chgrp agensio $K/private/key.pem")" "tls site 1"
+chgrp agensio $K/private $K/private/key.pem; chmod 750 $K/private; chmod 640 $K/private/key.pem
+"$BIN" -t -c $K/agensio.toml > $K/t2.out 2>&1 || true
+kill -HUP $KS; sleep 0.8
+check "the key given the server's group: -t is quiet, the next reload loads it" \
+  "$(grep -c 'cannot read the key' $K/t2.out) $(grep -c 'the certificate loaded before keeps serving' $K/error.log) $(curl -sk --max-time 3 --resolve localhost:18461:127.0.0.1 https://localhost:18461/)" "0 1 tls site"
+kill $KS; wait $KS 2>/dev/null || true
+
 echo "pools: $pass passed, $fail failed"
 if [ $fail != 0 ]; then echo "--- server.out"; cat $T/server.out; echo "--- error.log"; cat $T/logs/error.log 2>/dev/null; echo "--- fpm.log"; cat $T/fpm.log 2>/dev/null | tail -5; echo "--- nonroot.out"; cat $T/nonroot.out; fi
 [ $fail = 0 ]
