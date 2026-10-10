@@ -399,5 +399,41 @@ sleep 1.2
 check "the audit log names each change by user and never holds a password or a hash; no other log does either" "yes 0" \
   "$(grep -q 'auth-users.*anna: created with a generated password' "$T/logs/audit.log" && echo yes) $(cat "$T/logs/"*.log | grep -c -F -e "${PW:-no password}" -e "${PW2:-no password}" -e 'typed-pass' -e '$y$')"
 
+# A users file mixing hash methods (alpha.58 report, finding 6) read by a domain's plain and TLS
+# sites: -t notes it once, and the error log at level info once (alpha.61 report, finding 2: twice
+# at -t and in health, never in the error log). A server of its own, logs apart from the checks above.
+M=$T/mixed; mkdir -p "$M/www"
+{ printf 'a\n' | "$BIN" passwd anna; printf 'b\n' | "$BIN" passwd --method sha512 bob; } > "$M/users"; chmod 640 "$M/users"
+cat > "$M/agensio.toml" <<EOF
+[server]
+workers = 1
+pid_file = "$M/agensio.pid"
+[log]
+access = "off"
+error = "$M/error.log"
+level = "info"
+[[site]]
+server_name = ["mixed.test"]
+listen = ["127.0.0.1:18151"]
+root = "$M/www"
+[[site.auth]]
+path = "/"
+users = "$M/users"
+[[site]]
+server_name = ["mixed.test"]
+listen = ["127.0.0.1:18152"]
+root = "$M/www"
+tls = { cert = "$ROOT/bench/certs/cert.pem", key = "$ROOT/bench/certs/key.pem" }
+[[site.auth]]
+path = "/"
+users = "$M/users"
+EOF
+"$BIN" -t -c "$M/agensio.toml" > "$M/t.out" 2>&1
+"$BIN" -c "$M/agensio.toml" > /dev/null 2>&1 & MS=$!
+for _ in $(seq 1 50); do nc -z 127.0.0.1 18152 2>/dev/null && break; sleep 0.1; done
+kill $MS; wait $MS 2>/dev/null
+check "a users file mixing methods, read by a plain and a TLS site: -t notes it once, the error log at level info once" "1 1" \
+  "$(grep -c 'mixes hash methods' "$M/t.out") $(grep -c 'mixes hash methods' "$M/error.log")"
+
 echo "auth: $pass passed, $fail failed"
 [ $fail -eq 0 ]

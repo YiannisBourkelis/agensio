@@ -1450,7 +1450,8 @@ fails (`tests/reload.sh`). Restart-only settings (the `applies` column of `docs/
 `tcp_nodelay`, the whole `[cache]` table, and `[control]` `socket` and `provision`. A reload that finds
 one of them changed keeps the running value and names each in the error log (`reload:
 cache.precompressed, tcp_nodelay changed on disk and take effect at a restart`), and
-`agensio ctl validate` and health list them under `restart_needed`. The control plane's role
+`agensio ctl validate`, health and the answer of `agensio ctl reload` list them under
+`restart_needed` (the reload's answer since 0.1.0-alpha.62). The control plane's role
 groups (`admins`, `operators`, `viewers`) apply on reload: the next connection to the socket
 is judged by the new groups. Before 0.1.0-alpha.61 the reference called most of the `[cache]`
 keys, `stream_chunk_size`, `sendfile_max_chunk` and `tcp_nodelay` reload keys while a reload kept

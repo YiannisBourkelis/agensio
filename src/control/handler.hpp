@@ -37,6 +37,9 @@ struct ControlBackend {
     virtual bool renew_certificate(std::string_view site, std::string& error) = 0;
     virtual void reopen_logs() = 0;
     virtual const Config& running() = 0;
+    // The restart-only keys the running configuration has other values for than the server
+    // started with (control::restart_needed): kept until a restart.
+    virtual std::vector<std::string> restart_pending() = 0;
     virtual bool privileged() = 0;  // still root (before the drop): a reload can bind any port
     // The provisioning helper (F8): available when the server started as root with
     // [control] provision = true. `provision` sends one request and returns its reply.

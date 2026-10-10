@@ -103,8 +103,8 @@ Server::Server(Config cfg)
         error_log_.warn(o.file + " holds root additions for site " + o.site + ", which is not in the configuration (disabled or deleted): ignored");
     for (const auto& h : gen->cfg.held_back)
         error_log_.error(h.file + " set aside, its sites are not served: " + h.error);
-    for (const auto& n : access_notices(gen->cfg))
-        if (n.severity == "warning") error_log_.warn(n.text);
+    for (const auto& n : access_notices(gen->cfg))  // the notes at level info (alpha.61 report, finding 2)
+        n.severity == "warning" ? error_log_.warn(n.text) : error_log_.info(n.text);
     warm_response_tables();
     prepare_acme(gen->cfg);
     build_listeners(*gen);
@@ -1622,8 +1622,8 @@ bool Server::reload(std::string& error, std::string_view must_load) {
                     std::to_string(opened.size()) + " bound, " + std::to_string(removed) + " closed");
     for (const auto& o : gen->cfg.orphan_additions)
         error_log_.warn(o.file + " holds root additions for site " + o.site + ", which is not in the configuration (disabled or deleted): ignored");
-    for (const auto& n : access_notices(gen->cfg))
-        if (n.severity == "warning") error_log_.warn(n.text);
+    for (const auto& n : access_notices(gen->cfg))  // the notes at level info (alpha.61 report, finding 2)
+        n.severity == "warning" ? error_log_.warn(n.text) : error_log_.info(n.text);
     return true;
 }
 

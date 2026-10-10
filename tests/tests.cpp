@@ -6382,7 +6382,9 @@ static void test_auth_notes() {
                                      "[[site.auth]]\npath = \"/pa\"\nusers = \"same.users\"\nplain_http = \"allow\"\n"
                                      "[[site]]\nserver_name = [\"mixed.test\"]\nlisten = [\"127.0.0.1:18082\"]\nroot = \"www\"\n"
                                      "[[site.auth]]\npath = \"/\"\nusers = \"mixed.users\"\n"
-                                     "[[site.auth]]\npath = \"/admin\"\nusers = \"mixed.users\"\nrealm = \"Admin\"\n";
+                                     "[[site.auth]]\npath = \"/admin\"\nusers = \"mixed.users\"\nrealm = \"Admin\"\n"
+                                     "[[site]]\nserver_name = [\"mixed2.test\"]\nlisten = [\"127.0.0.1:18083\"]\nroot = \"www\"\n"
+                                     "[[site.auth]]\npath = \"/\"\nusers = \"mixed.users\"\n";
     const Config cfg = load_config(dir / "a.toml");
     const auto notes = access_notices(cfg);
     auto has = [&](const char* code, const char* site, const char* needle) {
@@ -6413,6 +6415,10 @@ static void test_auth_notes() {
     CHECK(has("auth_users_mixed_methods", "mixed.test", "bob (sha512crypt") && has("auth_users_mixed_methods", "mixed.test", "carl (bcrypt cost 05") &&
           !has("auth_users_mixed_methods", "mixed.test", "anna ("));
     CHECK(count("auth_users_mixed_methods", "loop.test") == 0 && count("auth_users_mixed_methods", "lan.test") == 0);
+    // Once per file, however many sites read it (alpha.61 report, finding 2: a domain's plain and
+    // TLS sites printed it twice), naming every site that reads it.
+    CHECK(std::count_if(notes.begin(), notes.end(), [](const AccessNotice& n) { return n.code == "auth_users_mixed_methods"; }) == 1 &&
+          count("auth_users_mixed_methods", "mixed2.test") == 0 && has("auth_users_mixed_methods", "mixed.test", "read by mixed.test and mixed2.test"));
     CHECK(auth::hash_kind(auth_hash("$2b$", 12, "x")) == "bcrypt cost 12" && auth::hash_kind(auth_hash("$6$", 0, "x")) == "sha512crypt rounds=5000" &&
           auth::hash_kind(auth_hash("$y$", 0, "x")).starts_with("yescrypt "));
     fs::remove_all(dir);

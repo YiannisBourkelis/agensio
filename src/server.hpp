@@ -202,6 +202,7 @@ private:
     json::Value logs(std::string_view target) override;
     json::Value health() override;
     bool reload_now(std::string& error, std::string_view must_load = {}) override { return reload(error, must_load); }
+    std::vector<std::string> restart_pending() override { return control::restart_needed(gen_->cfg, cfg_); }
     bool renew_certificate(std::string_view site, std::string& error) override;
     void reopen_logs() override { logs_.reopen_all(); }
     const Config& running() override { return gen_->cfg; }

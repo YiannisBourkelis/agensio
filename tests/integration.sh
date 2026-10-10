@@ -785,6 +785,11 @@ printf '[[site]\n' > bench/tmp/sites.d/broken.toml
 check "control: reload with a broken site file on disk sets it aside and names it; the other sites serve (design section 26)" "200 yes 200" "$(cpost /v1/reload '{"confirm":true}') $(python3 -c 'import json; d=json.load(open("bench/tmp/ctl-reply.json")); print("yes" if [h["file"].endswith("broken.toml") for h in d["held_back"]] == [True] else d)') $(code http://127.0.0.1:8080/)"
 rm -f bench/tmp/sites.d/broken.toml
 cpost /v1/reload '{"confirm":true}' > /dev/null
+# A restart-only key changed on disk: the reload's own answer names it (alpha.61 report, finding 3:
+# only the error log, validate and health did), and a reload once it is back names none.
+sed -i 's#^\[cache\]#[cache]\nrevalidate_interval = 7#' bench/tmp/agensio-test.toml
+check "control: a reload names in its answer the restart-only keys changed on disk; none once they are back" "200 cache.revalidate_interval 200 none" \
+  "$(cpost /v1/reload '{"confirm":true}') $(python3 -c 'import json; print(",".join(json.load(open("bench/tmp/ctl-reply.json")).get("restart_needed", [])) or "none")') $(sed -i '/^revalidate_interval = 7$/d' bench/tmp/agensio-test.toml; cpost /v1/reload '{"confirm":true}') $(python3 -c 'import json; print(",".join(json.load(open("bench/tmp/ctl-reply.json")).get("restart_needed", [])) or "none")')"
 check "control: ctl site-create through the client reports the decisions" "1 yes" "$("$BIN" ctl site-create --domain cli.test --yes --socket $CS > bench/tmp/ctl.out 2>&1; echo -n "$? "; grep -q 'decisions needed' bench/tmp/ctl.out && echo yes)"
 check "control: audit has every mutation with its result" "yes" "$(grep -q 'sites (test): created' bench/tmp/audit.log && grep -q 'sites/created.test/delete: delete' bench/tmp/audit.log && grep -q 'reload: .*broken.toml' bench/tmp/audit.log && echo yes)"
 # One rule set for hosting (2026-09-19): the ownership rules and the server's account live in

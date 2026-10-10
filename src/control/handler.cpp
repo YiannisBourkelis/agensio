@@ -584,16 +584,25 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
             return false;
         }
         // Site files set aside (design section 26): the reload applied the rest; say which and why.
+        // Restart-only keys changed on disk keep their running values: say which (the alpha.61
+        // report's finding 3; before, only the error log, validate and health named them).
         json::Value held = json::Value::array();
-        std::string note;
+        std::string note, message = "configuration reloaded";
         for (const auto& h : backend_->running().held_back) {
             held.push(json::Value::object().set("file", h.file).set("error", h.error).set("keeps_running_version", h.carried));
             note += "; set aside: " + h.file + ": " + h.error;
         }
+        if (!held.items().empty()) message += "; site files set aside, see held_back";
+        const std::vector<std::string> restart = backend_->restart_pending();
+        if (!restart.empty()) {
+            std::string keys;
+            for (const auto& k : restart) keys += (keys.empty() ? "" : ", ") + k;
+            message += "; " + keys + " changed on disk and take effect at a restart (systemctl restart agensio), see restart_needed";
+            note += "; restart needed for " + keys;
+        }
         audit_peer(s, what, "ok" + note);
-        reply(s, 200, json::Value::object().set("ok", true).set("message", held.items().empty() ? "configuration reloaded"
-                                                                                                : "configuration reloaded; site files set aside, see held_back")
-                          .set("held_back", std::move(held)));
+        reply(s, 200, json::Value::object().set("ok", true).set("message", message).set("held_back", std::move(held))
+                          .set("restart_needed", strings(restart)));
         return false;
     }
     if (path == "/v1/logs/reopen") {

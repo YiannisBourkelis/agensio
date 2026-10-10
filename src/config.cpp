@@ -2187,6 +2187,11 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
     parse_cidr("::1", loop6, err);
     const bool loopback_trusted = in_any(cfg.trusted_proxies, asio::ip::make_address("127.0.0.1")) ||
                                   in_any(cfg.trusted_proxies, asio::ip::make_address("::1"));
+#ifdef AGENSIO_HAS_AUTH
+    // A users file is noted once whichever sites read it (a domain's plain and TLS sites, the
+    // alpha.61 report's finding 2): the note's index and the sites that read the file.
+    std::map<std::string, std::pair<std::size_t, std::vector<std::string>>> mixed;
+#endif
     for (const auto& site : cfg.sites) {
         const std::string& name = site.server_names.front();
         bool v6_listener = false;
@@ -2253,11 +2258,16 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
         // A users file whose hashes differ in method or cost (the alpha.58 report's finding 6): an
         // unknown name is checked against the first usable entry, so it takes that entry's time,
         // and a wrong password for a user of another kind answers in another time, which tells a
-        // guesser that the name exists. Once per file and site; the tools write yescrypt alone.
+        // guesser that the name exists. Once per file, naming the sites that read it; the tools
+        // write yescrypt alone.
         std::vector<const AuthUserFile*> seen;
         for (const auto& r : site.auth) {
             if (r.open || !r.users || std::find(seen.begin(), seen.end(), r.users.get()) != seen.end()) continue;
             seen.push_back(r.users.get());
+            if (auto m = mixed.find(r.users_path); m != mixed.end()) {
+                m->second.second.push_back(name);
+                continue;
+            }
             const auth::User* first = nullptr;
             for (const auto& u : r.users->users)
                 if (!u.locked) {
@@ -2270,13 +2280,24 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
             for (const auto& u : r.users->users)
                 if (!u.locked && &u != first && auth::hash_kind(u.hash) != kind)
                     others += (others.empty() ? "" : ", ") + u.name + " (" + auth::hash_kind(u.hash) + ")";
-            if (!others.empty())
+            if (!others.empty()) {
+                mixed[r.users_path] = {out.size(), {name}};
                 out.push_back({"auth_users_mixed_methods", "info", name,
                                r.users_path + " mixes hash methods or costs: an unknown name is checked against " + first->name + "'s " + kind +
                                    ", so a wrong password for " + others + " answers in another time, which tells a guesser those names exist"});
+            }
         }
 #endif
     }
+#ifdef AGENSIO_HAS_AUTH
+    for (const auto& [file, at] : mixed) {
+        const auto& sites = at.second;
+        if (sites.size() < 2) continue;
+        std::string list;
+        for (std::size_t i = 0; i < sites.size(); ++i) list += (i == 0 ? "" : i + 1 == sites.size() ? " and " : ", ") + sites[i];
+        out[at.first].text += " (read by " + list + ")";
+    }
+#endif
     return out;
 }
 

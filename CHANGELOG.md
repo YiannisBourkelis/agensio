@@ -14,6 +14,18 @@ From the alpha.61 report:
   alpha.61's rewrite for `https://` origins brought it there too. Shown first by an integration
   check (`/whole/to-landing`, `/tlswhole/go/x`: `/whole/whole/landing` and
   `/tlswhole/tlswhole/landing` on alpha.61).
+- **The note on a users file mixing hash methods came once per site and never reached the error
+  log.** A domain's plain and TLS sites both read its users file, so `-t` and health named the
+  file twice; and the error log took only the configuration notes that are warnings, so this one
+  (information) was in no log at all, though alpha.61's entry said so. It is now one note per
+  file naming the sites that read it, and every information note (this one, a site restricted
+  as a whole) goes to the error log at level `info`, at start and at each reload. Shown first by
+  `tests/auth.sh` (a plain and a TLS site on one file: `-t` 2, the error log at level `info` 0 on
+  alpha.61; now 1 and 1) and a unit check.
+- **`agensio ctl reload` now names the restart-only keys it kept.** A reload keeps the running
+  value of a key that needs a restart; the error log, `validate` and health said which, the
+  reload's own answer did not. It carries them now in `restart_needed`, and its message says
+  they wait for a restart; the MCP `reload` tool tells the agent to pass that on.
 
 - **One broken site file no longer stops every site.** The configuration loaded all or nothing:
   one mistake in any file under `sites.d/` (a misspelt key, a broken TOML line, a root additions
