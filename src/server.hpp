@@ -174,6 +174,18 @@ private:
     // main file's sites. Returns the lines to log for material kept.
     std::vector<std::string> load_certificates(Generation& gen, const Generation* previous);
     control::TlsFacts tls_facts();  // the certificates as served and the ACME failures, for health (T2)
+    bool switch_to(const std::shared_ptr<Generation>& gen, std::string& error, std::size_t& bound, std::size_t& closed, bool logs);
+    // The certificate refresh and its hourly watch (step T3).
+    bool refresh_certificates(std::string& error, const std::vector<std::string>& only, std::vector<std::string>& report);
+    void arm_certificate_watch();
+#ifdef AGENSIO_HAS_TLS
+    std::shared_ptr<asio::ssl::context> load_pair(const TlsConfig& t, std::string& error);
+    static std::string pair_stamp(const TlsConfig& t);
+#endif
+    std::map<std::string, std::string> cert_stamps_;       // by pair: the files as last loaded (or tried)
+    std::map<std::string, std::string> cert_load_errors_;  // by pair: why its files did not load, last time
+    std::unique_ptr<asio::steady_timer> cert_watch_timer_;
+    std::chrono::seconds cert_watch_interval_{3600};
     void build_workers();
     std::size_t open_acceptor(const Listener& listener, Worker& worker, bool reuse_port);
     void open_acceptor_socket(Acceptor& acc, const Listener& listener, bool reuse_port);
@@ -215,7 +227,7 @@ private:
     json::Value health() override;
     bool reload_now(std::string& error, std::string_view must_load = {}) override { return reload(error, must_load); }
     std::vector<std::string> restart_pending() override { return control::restart_needed(gen_->cfg, cfg_); }
-    bool renew_certificate(std::string_view site, std::string& error) override;
+    bool renew_certificate(std::string_view site, std::string& error, std::string& message) override;
     void reopen_logs() override { logs_.reopen_all(); }
     const Config& running() override { return gen_->cfg; }
     bool provision_available() override { return provisioner_.available(); }

@@ -71,6 +71,7 @@ CertificateState certificate_state(const TlsConfig& tls, std::time_t now);  // t
 struct TlsFacts {
     std::map<std::string, CertificateState> served;                              // by "cert\nkey"
     std::map<std::string, std::pair<std::time_t, std::string>> acme_failures;  // by cert path: when, the error
+    std::map<std::string, std::string> load_errors;  // by "cert\nkey": why its files did not load the last time (T3)
 };
 
 // With `tls` each TLS site's `tls` carries `served`: the certificate in memory (step T2).

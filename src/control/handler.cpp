@@ -651,10 +651,13 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
         return false;
     }
     if (action == "renew") {
-        std::string error;
-        const bool ok = backend_->renew_certificate(name, error);
-        audit_peer(s, what, ok ? "ordering" : error);
-        if (ok) reply(s, 202, json::Value::object().set("ok", true).set("message", "order started; watch `site " + std::string(name) + "` and the error log"));
+        std::string error, message;
+        const bool ok = backend_->renew_certificate(name, error, message);
+        const SiteConfig* site = control::find_site(backend_->running(), name);
+        const bool automatic = site && site->tls && site->tls->automatic;
+        audit_peer(s, what, ok ? (automatic ? std::string("ordering") : message) : error);
+        // An order runs on (202); a site's own files were loaded now (200, what happened).
+        if (ok) reply(s, automatic ? 202 : 200, json::Value::object().set("ok", true).set("message", message));
         else reply(s, 409, json::Value::object().set("ok", false).set("error", error));
         return false;
     }

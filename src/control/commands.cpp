@@ -1214,13 +1214,18 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
         // A newer certificate on disk than the one served: a reload not yet made, or one that
         // could not load it (the site's file set aside with the certificate's error, C3).
         if (served && disk.present && !disk.fingerprint.empty() && disk.fingerprint != served->fingerprint && disk.not_after > served->not_after) {
-            std::string reason = "a reload loads it";
-            std::string fix = "agensio reload (agensio ctl reload)";
+            // The server reloads changed files within the hour (the watch, step T3) and at once
+            // on cert-renew; when it tried and failed, why.
+            std::string reason = "the server loads it at its next hourly check of the files, or now with cert-renew";
+            std::string fix = "agensio ctl cert-renew " + name + " (MCP cert_renew) loads it now";
+            std::string failed;
+            if (auto e = tls->load_errors.find(pair); e != tls->load_errors.end()) failed = e->second;
             for (const auto& h : running.held_back)
-                if (h.file == s.source && h.error.find("certificate could not be loaded") != std::string::npos) {
-                    reason = "the server could not load it: " + h.error;
-                    fix = "make the files readable to the server's account (tls_key_unreadable gives the lines) or correct them, then reload";
-                }
+                if (failed.empty() && h.file == s.source && h.error.find("certificate could not be loaded") != std::string::npos) failed = h.error;
+            if (!failed.empty()) {
+                reason = "the server could not load it: " + failed;
+                fix = "make the files readable to the server's account (tls_key_unreadable gives the lines) or correct them, then cert-renew " + name;
+            }
             add(served->days_left < 7 ? "error" : "warn", "certificate_not_loaded", name,
                 "the certificate on disk (valid until " + date(disk.not_after) + ") is not the one served (valid until " + date(served->not_after) +
                     "): " + reason,

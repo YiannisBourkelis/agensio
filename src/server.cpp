@@ -86,6 +86,9 @@ Server::Server(Config cfg)
       dispatcher_(handler_, fcgi_handler_, proxy_handler_, cgi_handler_, control_handler_, httparena_handler_) {
     auto gen = std::make_shared<Generation>();
     gen->cfg = std::move(cfg);
+    // The certificate watch's period (step T3): an hour; shorter only for the tests.
+    if (const char* w = std::getenv("AGENSIO_CERT_WATCH_SECONDS"))
+        if (const long v = std::strtol(w, nullptr, 10); v >= 1) cert_watch_interval_ = std::chrono::seconds(v);
 #ifdef AGENSIO_HAS_AUTH
     // A few threads for [[site.auth]]'s slow hashes, whatever the workers do: at most four,
     // a quarter of the machine's threads, never none.
@@ -405,32 +408,68 @@ control::TlsFacts Server::tls_facts() {
     }
     for (const auto& [path, f] : acme_.failures())
         facts.acme_failures.emplace(path, std::make_pair(std::chrono::system_clock::to_time_t(f.at), f.error));
+    facts.load_errors = cert_load_errors_;
 #endif
     return facts;
 }
 
+#ifdef AGENSIO_HAS_TLS
+// One certificate and key pair from its files: nullptr and why when it does not load, with what
+// the server's account lacks after the privilege drop and root's commands (step T1).
+std::shared_ptr<asio::ssl::context> Server::load_pair(const TlsConfig& t, std::string& error) {
+    auto ctx = std::make_shared<asio::ssl::context>(asio::ssl::context::tls_server);
+    asio::error_code ec;
+    ctx->use_certificate_chain_file(t.cert.string(), ec);
+    if (ec) error = "certificate " + t.cert.string() + ": " + ec.message();
+    else {
+        ctx->use_private_key_file(t.key.string(), asio::ssl::context::pem, ec);  // also checks it is the certificate's key
+        if (ec) error = "key " + t.key.string() + ": " + ec.message();
+    }
+    if (!ec) return ctx;
+    ERR_clear_error();
+    const HostFacts facts = system_facts();
+    for (const auto& file : {t.cert.string(), t.key.string()}) {
+        std::string fix;
+        if (const std::string why = server_read_problem(cfg_, facts, file, fix); !why.empty())
+            error += " (" + cfg_.user + ", the account the server runs as, cannot read " + file + ": " + why + "; fix: " + fix + ")";
+    }
+    return nullptr;
+}
+
+// What the watch compares (step T3): each file's inode, size and change time, or that it could
+// not be looked at; certbot replaces the target of its live/ link, so the stat follows links.
+std::string Server::pair_stamp(const TlsConfig& t) {
+    std::string out;
+    for (const auto& f : {t.cert, t.key}) {
+        struct stat st {};
+        if (::stat(f.c_str(), &st) != 0) {
+            out += "!" + std::to_string(errno) + "|";
+            continue;
+        }
+#ifdef __APPLE__
+        const auto& m = st.st_mtimespec;
+        const auto& c = st.st_ctimespec;
+#else
+        const auto& m = st.st_mtim;
+        const auto& c = st.st_ctim;
+#endif
+        out += std::to_string(st.st_ino) + ":" + std::to_string(st.st_size) + ":" + std::to_string(m.tv_sec) + "." + std::to_string(m.tv_nsec) + ":" +
+               std::to_string(c.tv_sec) + "." + std::to_string(c.tv_nsec) + "|";
+    }
+    return out;
+}
+#endif
+
 std::vector<std::string> Server::load_certificates(Generation& gen, const Generation* previous) {
     std::vector<std::string> kept;
 #ifdef AGENSIO_HAS_TLS
-    auto load = [this](const TlsConfig& t, std::string& error) -> std::shared_ptr<asio::ssl::context> {
-        auto ctx = std::make_shared<asio::ssl::context>(asio::ssl::context::tls_server);
-        asio::error_code ec;
-        ctx->use_certificate_chain_file(t.cert.string(), ec);
-        if (ec) error = "certificate " + t.cert.string() + ": " + ec.message();
-        else {
-            ctx->use_private_key_file(t.key.string(), asio::ssl::context::pem, ec);  // also checks it is the certificate's key
-            if (ec) error = "key " + t.key.string() + ": " + ec.message();
-        }
-        if (!ec) return ctx;
-        ERR_clear_error();
-        // After the privilege drop: say what the account lacks and root's commands (step T1).
-        const HostFacts facts = system_facts();
-        for (const auto& file : {t.cert.string(), t.key.string()}) {
-            std::string fix;
-            if (const std::string why = server_read_problem(cfg_, facts, file, fix); !why.empty())
-                error += " (" + cfg_.user + ", the account the server runs as, cannot read " + file + ": " + why + "; fix: " + fix + ")";
-        }
-        return nullptr;
+    auto load = [this](const TlsConfig& t, std::string& error) {
+        const std::string pair = t.cert.string() + '\n' + t.key.string();
+        cert_stamps_[pair] = pair_stamp(t);
+        auto ctx = load_pair(t, error);
+        if (ctx) cert_load_errors_.erase(pair);
+        else cert_load_errors_[pair] = error;
+        return ctx;
     };
     set_aside_until_clean(gen.cfg, previous ? &previous->cfg : nullptr, [&](const Config& c) -> std::optional<SiteConflict> {
         for (std::size_t i = 0; i < c.sites.size(); ++i) {
@@ -1261,12 +1300,17 @@ void Server::run() {
     drop_privileges();  // ports are bound and logs open: nothing else needs root
     for (auto& w : workers_) w->gen = gen_;
     arm_trash_expiry();
+    arm_certificate_watch();
 #ifdef AGENSIO_HAS_TLS
     // Automatic certificates: orders run on the manager's thread, the result comes back
     // through reload() so the new certificate is picked up without touching a request.
     acme_.start(workers_[0]->ctx, gen_->cfg.acme, acme::sites_of(gen_->cfg), [this] {
-        error_log_.info("acme: new certificate(s) on disk, reloading");
-        reload();
+        // The refresh, not a reload: no configuration file read, so a broken one never keeps the
+        // new certificate waiting (step T3).
+        error_log_.info("acme: new certificate(s) on disk, loading them");
+        std::string error;
+        std::vector<std::string> report;
+        refresh_certificates(error, {}, report);
     });
 #endif
     for (auto& w : workers_) {
@@ -1626,6 +1670,192 @@ void Server::stop() {
 
 // ---- reload ----
 
+// From the listeners to the switch, shared by a reload and the certificate refresh (step T3):
+// the generation's listeners built from its certificates, new addresses bound before anything
+// switches (a port that cannot be bound changes nothing), every worker moved to it between
+// requests, addresses that left closed. `logs`: a new configuration's log files and ACME sites,
+// which a refresh of the running one does not touch.
+bool Server::switch_to(const std::shared_ptr<Generation>& gen, std::string& error, std::size_t& bound, std::size_t& closed, bool logs) {
+    try {
+        build_listeners(*gen);
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+    if (logs) {
+        assign_log_sinks(gen->cfg);
+        if (!logs_.open_all(error)) return false;
+        own_site_logs(gen->cfg);
+    }
+
+    // New addresses are bound before anything switches, so a port that cannot be bound
+    // refuses the whole reload and nothing changed.
+    std::vector<std::size_t> opened;
+    try {
+        for (const auto& l : gen->listeners) {
+            bool listening = false;
+            for (const auto& a : acceptors_) listening = listening || (a->open && a->address == l.address);
+            if (listening) continue;
+            if (reuse_port_)
+                for (auto& w : workers_) opened.push_back(open_acceptor(l, *w, true));
+            else
+                opened.push_back(open_acceptor(l, *workers_[0], false));
+        }
+    } catch (const std::exception& e) {
+        for (std::size_t i : opened) {  // never accepted: nothing runs on them yet
+            asio::error_code ignored;
+            acceptors_[i]->socket.close(ignored);
+            acceptors_[i]->open = false;
+            acceptors_[i]->closed.store(true, std::memory_order_release);
+        }
+        error = e.what();
+        return false;
+    }
+    // Switch: every worker takes the generation on its own loop; connections pick it up at
+    // their next request, exchanges in flight keep the old one alive until they finish.
+    const auto previous = gen_;
+    gen_ = gen;
+    if (cfg_.control.enabled && gen->cfg.control.enabled &&
+        (gen->cfg.control.admins != previous->cfg.control.admins || gen->cfg.control.operators != previous->cfg.control.operators ||
+         gen->cfg.control.viewers != previous->cfg.control.viewers))
+        apply_control_groups(gen->cfg);
+    max_connections_.store(connection_ceiling(gen->cfg, fd_limit_, static_cast<unsigned>(workers_.size())), std::memory_order_relaxed);
+    for (auto& w : workers_) asio::post(w->ctx, [w = w.get(), gen] { w->gen = gen; });
+    reload_h3(gen->cfg);
+    sync_h3(gen);
+    for (std::size_t i : opened) asio::post(acceptors_[i]->owner->ctx, [this, i] { start_accept(i); });
+    // Addresses that left the configuration stop accepting; their open connections finish
+    // their current request and are told to close (Connection: close) on the next one.
+    std::size_t removed = 0;
+    for (auto& a : acceptors_) {
+        if (!a->open || gen->find(a->address)) continue;
+        a->open = false;
+        ++removed;
+        Acceptor* acc = a.get();  // stays alive: its slot is reused only after `closed` is set here
+        asio::post(acc->owner->ctx, [acc] {
+            asio::error_code ignored;
+            acc->socket.close(ignored);
+            acc->closed.store(true, std::memory_order_release);
+        });
+    }
+#ifdef AGENSIO_HAS_TLS
+    if (logs) acme_.update(gen->cfg.acme, acme::sites_of(gen->cfg));  // a new configuration's sites
+#endif
+    bound = opened.size();
+    closed = removed;
+    return true;
+}
+
+// The certificate refresh (the certificate work, step T3): the running configuration's
+// certificates loaded again from their files, no configuration file read, so a broken main or
+// site file never keeps a renewed certificate waiting. `only`: those pairs, else every one. A
+// pair that loads and differs is switched in; one that does not load keeps the certificate
+// served, its error kept for health; nothing changed, nothing switches. `report`: one line per
+// pair looked at. False when a pair could not be loaded or the switch was refused.
+bool Server::refresh_certificates(std::string& error, const std::vector<std::string>& only, std::vector<std::string>& report) {
+#ifdef AGENSIO_HAS_TLS
+    auto gen = std::make_shared<Generation>();
+    gen->cfg = gen_->cfg;
+    bool changed = false, failed = false;
+    std::vector<std::string> loaded;
+    auto site_of = [&](const std::string& pair) {
+        for (const auto& s : gen->cfg.sites)
+            if (s.tls && s.tls->cert.string() + '\n' + s.tls->key.string() == pair) return s.server_names.front();
+        return std::string("?");
+    };
+    auto until = [](const std::shared_ptr<asio::ssl::context>& ctx) {
+        acme::CertInfo info;
+        std::string e;
+        if (!acme::certificate_info_of(SSL_CTX_get0_certificate(ctx->native_handle()), info, e)) return std::string("?");
+        const std::time_t t = std::chrono::system_clock::to_time_t(info.not_after);
+        std::tm tm{};
+        gmtime_r(&t, &tm);
+        char buf[16] = {};
+        std::strftime(buf, sizeof buf, "%Y-%m-%d", &tm);
+        return std::string(buf);
+    };
+    for (const auto& [pair, ctx] : gen_->certificates) {
+        if (!only.empty() && std::find(only.begin(), only.end(), pair) == only.end()) {
+            gen->certificates.emplace(pair, ctx);
+            continue;
+        }
+        TlsConfig t;
+        t.cert = pair.substr(0, pair.find('\n'));
+        t.key = pair.substr(pair.find('\n') + 1);
+        const std::string name = site_of(pair);
+        cert_stamps_[pair] = pair_stamp(t);
+        std::string why;
+        auto fresh = load_pair(t, why);
+        if (!fresh) {
+            cert_load_errors_[pair] = why;
+            gen->certificates.emplace(pair, ctx);
+            report.push_back("site " + name + ": the certificate could not be loaded: " + why + "; the certificate loaded before keeps serving (valid until " +
+                             until(ctx) + ")");
+            failed = true;
+            continue;
+        }
+        cert_load_errors_.erase(pair);
+        if (X509_cmp(SSL_CTX_get0_certificate(fresh->native_handle()), SSL_CTX_get0_certificate(ctx->native_handle())) == 0) {
+            gen->certificates.emplace(pair, ctx);
+            report.push_back("site " + name + ": unchanged, the certificate served is the file's (valid until " + until(ctx) + ")");
+            continue;
+        }
+        report.push_back("site " + name + ": loaded the certificate valid until " + until(fresh));
+        loaded.push_back(report.back());
+        gen->certificates.emplace(pair, std::move(fresh));
+        changed = true;
+    }
+    for (const auto& line : report)
+        if (line.find("could not be loaded") != std::string::npos) error_log_.warn("certificate refresh: " + line);
+    if (changed) {
+        std::size_t bound = 0, closed = 0;
+        if (!switch_to(gen, error, bound, closed, false)) {
+            error_log_.error("certificate refresh refused: " + error);
+            return false;
+        }
+        std::string all;
+        for (const auto& l : loaded) all += (all.empty() ? "" : "; ") + l;
+        error_log_.warn("certificates refreshed: " + all);
+    }
+    if (failed && error.empty()) error = "a certificate could not be loaded";
+    return !failed;
+#else
+    (void)only;
+    (void)report;
+    error = "built without TLS";
+    return false;
+#endif
+}
+
+// Every hour (AGENSIO_CERT_WATCH_SECONDS for the tests), on worker 0: one stat per certificate and
+// key file; the pairs whose files changed since they were last loaded are refreshed, so a
+// certificate another tool renews (certbot) is served within the hour, without a reload.
+void Server::arm_certificate_watch() {
+#ifdef AGENSIO_HAS_TLS
+    if (!cert_watch_timer_) cert_watch_timer_ = std::make_unique<asio::steady_timer>(workers_[0]->ctx);
+    cert_watch_timer_->expires_after(cert_watch_interval_);
+    cert_watch_timer_->async_wait([this](const asio::error_code& ec) {
+        if (ec || stopping_) return;
+        std::vector<std::string> changed;
+        for (const auto& [pair, ctx] : gen_->certificates) {
+            TlsConfig t;
+            t.cert = pair.substr(0, pair.find('\n'));
+            t.key = pair.substr(pair.find('\n') + 1);
+            const std::string now = pair_stamp(t);
+            auto it = cert_stamps_.find(pair);
+            if (it == cert_stamps_.end()) cert_stamps_[pair] = now;
+            else if (it->second != now) changed.push_back(pair);
+        }
+        if (!changed.empty()) {
+            std::string error;
+            std::vector<std::string> report;
+            refresh_certificates(error, changed, report);
+        }
+        arm_certificate_watch();
+    });
+#endif
+}
+
 bool Server::reload(std::string& error, std::string_view must_load) {
     auto refuse = [&](const std::string& why) {
         error = why;
@@ -1674,71 +1904,12 @@ bool Server::reload(std::string& error, std::string_view must_load) {
         for (const auto& k : kept) keys += (keys.empty() ? "" : ", ") + k;
         error_log_.warn("reload: " + keys + " changed on disk and take effect at a restart (systemctl restart agensio); the running values are kept");
     }
-    try {
-        build_listeners(*gen);
-    } catch (const std::exception& e) {
-        return refuse(e.what());
-    }
-    assign_log_sinks(gen->cfg);
+    std::size_t bound = 0, closed = 0;
     std::string err;
-    if (!logs_.open_all(err)) return refuse(err);
-    own_site_logs(gen->cfg);
-
-    // New addresses are bound before anything switches, so a port that cannot be bound
-    // refuses the whole reload and nothing changed.
-    std::vector<std::size_t> opened;
-    try {
-        for (const auto& l : gen->listeners) {
-            bool bound = false;
-            for (const auto& a : acceptors_) bound = bound || (a->open && a->address == l.address);
-            if (bound) continue;
-            if (reuse_port_)
-                for (auto& w : workers_) opened.push_back(open_acceptor(l, *w, true));
-            else
-                opened.push_back(open_acceptor(l, *workers_[0], false));
-        }
-    } catch (const std::exception& e) {
-        for (std::size_t i : opened) {  // never accepted: nothing runs on them yet
-            asio::error_code ignored;
-            acceptors_[i]->socket.close(ignored);
-            acceptors_[i]->open = false;
-            acceptors_[i]->closed.store(true, std::memory_order_release);
-        }
-        return refuse(e.what());
-    }
-    // Switch: every worker takes the generation on its own loop; connections pick it up at
-    // their next request, exchanges in flight keep the old one alive until they finish.
-    const auto previous = gen_;
-    gen_ = gen;
-    if (cfg_.control.enabled && gen->cfg.control.enabled &&
-        (gen->cfg.control.admins != previous->cfg.control.admins || gen->cfg.control.operators != previous->cfg.control.operators ||
-         gen->cfg.control.viewers != previous->cfg.control.viewers))
-        apply_control_groups(gen->cfg);
-    max_connections_.store(connection_ceiling(gen->cfg, fd_limit_, static_cast<unsigned>(workers_.size())), std::memory_order_relaxed);
-    for (auto& w : workers_) asio::post(w->ctx, [w = w.get(), gen] { w->gen = gen; });
-    reload_h3(gen->cfg);
-    sync_h3(gen);
-    for (std::size_t i : opened) asio::post(acceptors_[i]->owner->ctx, [this, i] { start_accept(i); });
-    // Addresses that left the configuration stop accepting; their open connections finish
-    // their current request and are told to close (Connection: close) on the next one.
-    std::size_t removed = 0;
-    for (auto& a : acceptors_) {
-        if (!a->open || gen->find(a->address)) continue;
-        a->open = false;
-        ++removed;
-        Acceptor* acc = a.get();  // stays alive: its slot is reused only after `closed` is set here
-        asio::post(acc->owner->ctx, [acc] {
-            asio::error_code ignored;
-            acc->socket.close(ignored);
-            acc->closed.store(true, std::memory_order_release);
-        });
-    }
-#ifdef AGENSIO_HAS_TLS
-    acme_.update(gen->cfg.acme, acme::sites_of(gen->cfg));
-#endif
+    if (!switch_to(gen, err, bound, closed, true)) return refuse(err);
     error_log_.warn("reloaded " + cfg_.config_path.string() + ": " + std::to_string(gen->cfg.sites.size()) +
                     " site(s), " + std::to_string(gen->listeners.size()) + " listener(s), " +
-                    std::to_string(opened.size()) + " bound, " + std::to_string(removed) + " closed");
+                    std::to_string(bound) + " bound, " + std::to_string(closed) + " closed");
     for (const auto& o : gen->cfg.orphan_additions)
         error_log_.warn(o.file + " holds root additions for site " + o.site + ", which is not in the configuration (disabled or deleted): ignored");
     for (const auto& n : access_notices(gen->cfg))  // the notes at level info (alpha.61 report, finding 2)
@@ -1746,24 +1917,36 @@ bool Server::reload(std::string& error, std::string_view must_load) {
     return true;
 }
 
-bool Server::renew_certificate(std::string_view site, std::string& error) {
+bool Server::renew_certificate(std::string_view site, std::string& error, std::string& message) {
 #ifdef AGENSIO_HAS_TLS
     const SiteConfig* s = control::find_site(gen_->cfg, site);
     if (!s) {
         error = "no such site";
         return false;
     }
-    if (!s->tls || !s->tls->automatic) {
-        error = "the site has no automatic certificate (tls = \"auto\")";
+    if (!s->tls) {
+        error = "the site has no certificate (no tls)";
         return false;
+    }
+    // A site with its own files (step T3): they are loaded now, as the hourly watch would.
+    if (!s->tls->automatic) {
+        std::vector<std::string> report;
+        const bool ok = refresh_certificates(error, {s->tls->cert.string() + '\n' + s->tls->key.string()}, report);
+        std::string all;
+        for (const auto& l : report) all += (all.empty() ? "" : "; ") + l;
+        if (!ok) error = all.empty() ? error : all;
+        message = all;
+        return ok;
     }
     if (!acme_.renew_now(s->tls->cert)) {
         error = "certificate not managed";
         return false;
     }
+    message = "order started; watch `site " + std::string(site) + "` and the error log";
     return true;
 #else
     (void)site;
+    (void)message;
     error = "built without TLS";
     return false;
 #endif

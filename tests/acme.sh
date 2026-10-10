@@ -64,8 +64,8 @@ check "plain site answers on the challenge port" "hello over acme" "$(curl -sS -
 check "an unknown token is a 404, not a hint" "404" "$(code -H 'Host: host.docker.internal' http://127.0.0.1:5002/.well-known/acme-challenge/nothing-here)"
 check "a Host the listener does not serve is 421, even for a challenge path" "421" "$(code http://127.0.0.1:5002/.well-known/acme-challenge/nothing-here)"
 for _ in $(seq 1 150); do issuer | grep -q 'Pebble' && break; sleep 0.2; done
-check "the issued certificate is served within 30 s, picked up by a reload" "yes" "$(issuer | grep -q 'Pebble Intermediate' && echo yes)"
-check "reload logged after the issuance" "yes" "$(grep -q 'acme: certificate issued for host.docker.internal' "$T/logs/error.log" && grep -q 'reloaded ' "$T/logs/error.log" && echo yes)"
+check "the issued certificate is served within 30 s, picked up by the certificate refresh" "yes" "$(issuer | grep -q 'Pebble Intermediate' && echo yes)"
+check "the certificate refresh logged after the issuance (no reload: step T3)" "yes" "$(grep -q 'acme: certificate issued for host.docker.internal' "$T/logs/error.log" && grep -q 'certificates refreshed: site host.docker.internal: loaded the certificate valid until' "$T/logs/error.log" && echo yes)"
 check "the listener started on a placeholder certificate, then ordered" "yes" "$(grep -q 'ordering a certificate for host.docker.internal (placeholder certificate)' "$T/logs/error.log" && echo yes)"
 check "validation logged" "yes" "$(grep -q 'acme: host.docker.internal validated (http-01)' "$T/logs/error.log" && echo yes)"
 curl -sk https://127.0.0.1:15000/roots/0 > "$T/pebble-root.pem"
@@ -82,16 +82,26 @@ kill $SRV; wait $SRV 2>/dev/null
 for _ in $(seq 1 50); do nc -z 127.0.0.1 8449 2>/dev/null && break; sleep 0.1; done
 sleep 1
 check "restart keeps the issued certificate without a new order" "1 yes" "$(grep -c 'acme: certificate issued' "$T/logs/error.log") $(issuer | grep -q 'Pebble Intermediate' && echo yes)"
-# A renewal while another site's file is broken (design section 26): the broken file is set aside
-# and the renewed certificate is served. Before alpha.62 the renewal's reload was refused with every
-# other one, and the new certificate waited on disk until someone fixed the other site.
+# A renewal while another site's file is broken (design section 26): the renewed certificate is
+# served. Before alpha.62 the renewal's reload was refused with every other one, and the new
+# certificate waited on disk until someone fixed the other site; since step T3 the manager loads it
+# through the certificate refresh, which reads no configuration file at all.
 serial() { echo | openssl s_client -connect 127.0.0.1:8449 -servername host.docker.internal 2>/dev/null | openssl x509 -noout -serial 2>/dev/null; }
 printf '[[site]]\nserver_name = ["broken.test"]\nlisten = ["127.0.0.1:5003"]\nroot = "%s/www"\nrefsue = 1\n' "$T" > "$T/sites.d/broken.toml"
 before=$(serial)
 "$BIN" ctl cert-renew host.docker.internal --yes --reason acme --socket "$T/control.sock" > "$T/renew.out" 2>&1
 for _ in $(seq 1 150); do [ -n "$(serial)" ] && [ "$(serial)" != "$before" ] && break; sleep 0.2; done
-check "a renewal while another site's file is broken: the renewed certificate is served, the broken file set aside" "yes yes 2" \
-  "$([ -n "$before" ] && [ "$(serial)" != "$before" ] && echo yes) $(grep -q 'broken.toml set aside' "$T/logs/error.log" && echo yes) $(grep -c 'acme: certificate issued' "$T/logs/error.log")"
+check "a renewal while another site's file is broken: the renewed certificate is served" "yes 2" \
+  "$([ -n "$before" ] && [ "$(serial)" != "$before" ] && echo yes) $(grep -c 'acme: certificate issued' "$T/logs/error.log")"
+# The same with the main file broken (step T3): the manager loads its new certificate through the
+# certificate refresh, which reads no configuration file; a reload would be refused.
+cp "$T/agensio.toml" "$T/agensio.toml.good"; printf 'workres = 2\n' >> "$T/agensio.toml"
+before=$(serial)
+"$BIN" ctl cert-renew host.docker.internal --yes --reason acme --socket "$T/control.sock" > "$T/renew2.out" 2>&1
+for _ in $(seq 1 150); do [ -n "$(serial)" ] && [ "$(serial)" != "$before" ] && break; sleep 0.2; done
+check "a renewal while the main file is broken: the renewed certificate is served" "yes 3" \
+  "$([ -n "$before" ] && [ "$(serial)" != "$before" ] && echo yes) $(grep -c 'acme: certificate issued' "$T/logs/error.log")"
+mv "$T/agensio.toml.good" "$T/agensio.toml"
 check "health judges the certificate served (step T2): the renewed one, nothing to report; site_show's tls.served is the file on disk" "none True" \
   "$("$BIN" ctl health --socket "$T/control.sock" 2>/dev/null | python3 -c 'import json,sys; print(" ".join(f["code"] for f in json.load(sys.stdin)["findings"] if f["code"].startswith(("certificate_", "acme_renewal"))) or "none")') $("$BIN" ctl site host.docker.internal --socket "$T/control.sock" 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print([s for s in [d] if s["tls"]["mode"] == "auto"][0]["tls"]["served"]["same_as_disk"])' 2>/dev/null || echo error)"
 echo "acme: $pass passed, $fail failed"

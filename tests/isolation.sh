@@ -224,8 +224,8 @@ mkdir -p "$CT/u" "$CT/next"; mkcert "$CT/u" 2
 tls_site "$CT/u" 18306 > "$T/sites.d/t.toml"; reload
 check "a certificate served with a day left: certificate_expiring" "certificate_expiring" "$(tcodes)"
 mkcert "$CT/next" 90; cp "$CT/next/cert.pem" "$CT/next/key.pem" "$CT/u/"
-check "a longer one written to disk, no reload: the served one is still expiring, the one on disk not loaded (a reload loads it)" \
-  "certificate_expiring certificate_not_loaded yes" "$(tcodes) $(tmsg certificate_not_loaded | grep -q 'a reload loads it' && echo yes)"
+check "a longer one written to disk, no reload: the served one is still expiring, the one on disk not loaded (the hourly check or cert-renew loads it)" \
+  "certificate_expiring certificate_not_loaded yes" "$(tcodes) $(tmsg certificate_not_loaded | grep -q 'next hourly check of the files, or now with cert-renew' && echo yes)"
 reload
 check "reloaded: the one on disk is served, nothing to say; site_show's tls.served is it" "none True" \
   "$(tcodes) $("$BIN" ctl site t.test --socket "$CS" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["tls"]["served"]["same_as_disk"])')"
@@ -233,6 +233,38 @@ mkcert "$CT/next" 120; cp "$CT/next/cert.pem" "$CT/next/key.pem" "$CT/u/"; chmod
 check "a newer one whose key the server cannot read: not loaded, and health says why" "certificate_not_loaded yes" \
   "$(tcodes) $(tmsg certificate_not_loaded | grep -q 'could not load it' && echo yes)"
 chmod 600 "$CT/u/key.pem"; rm -f "$T/sites.d/t.toml"; reload
+
+# The certificate refresh (step T3): the running configuration's certificates loaded again from
+# their files, no configuration file read, so a broken main file (reloads refused) never keeps a
+# renewed certificate waiting. cert-renew on a site with its own files loads them now; with nothing
+# new it says so; one that cannot be loaded keeps the certificate served, and health says why.
+served_fp() { echo | openssl s_client -connect "127.0.0.1:$1" -servername t.test 2>/dev/null | openssl x509 -noout -fingerprint -sha256 2>/dev/null; }
+disk_fp() { openssl x509 -in "$1/cert.pem" -noout -fingerprint -sha256 2>/dev/null; }
+renew() { "$BIN" ctl cert-renew t.test --yes --reason refresh --socket "$CS" > "$T/renew.out" 2>&1; echo $?; }
+mkdir -p "$CT/w"; mkcert "$CT/w" 30; tls_site "$CT/w" 18306 > "$T/sites.d/t.toml"; reload
+cp "$T/agensio.toml" "$T/agensio.toml.good"; printf 'workres = 2\n' >> "$T/agensio.toml"
+mkcert "$CT/next" 60; cp "$CT/next/cert.pem" "$CT/next/key.pem" "$CT/w/"; reload
+check "the main file broken: a reload is refused; cert-renew on the site loads its new certificate anyway" "0 yes yes" \
+  "$(renew) $(grep -q 'valid until' "$T/renew.out" && echo yes) $([ -n "$(disk_fp "$CT/w")" ] && [ "$(served_fp 18306)" = "$(disk_fp "$CT/w")" ] && echo yes)"
+check "cert-renew with nothing new: it says the certificate served is the file's" "0 yes" "$(renew) $(grep -q 'unchanged' "$T/renew.out" && echo yes)"
+before=$(served_fp 18306)
+mkcert "$CT/next" 90; cp "$CT/next/cert.pem" "$CT/next/key.pem" "$CT/w/"; chmod 000 "$CT/w/key.pem"
+check "a new certificate whose key cannot be read: cert-renew refuses with why, the one served stays, health says why" "1 yes yes yes" \
+  "$(renew) $(grep -q 'could not be loaded' "$T/renew.out" && echo yes) $([ "$(served_fp 18306)" = "$before" ] && echo yes) $(tmsg certificate_not_loaded | grep -q 'could not load it' && echo yes)"
+chmod 600 "$CT/w/key.pem"; mv "$T/agensio.toml.good" "$T/agensio.toml"; rm -f "$T/sites.d/t.toml"; reload
+
+# The hourly watch (here every second, AGENSIO_CERT_WATCH_SECONDS): a certificate renewed on disk
+# by another tool (certbot) is loaded by itself, no reload, no cert-renew.
+S4=$T/watch; mkdir -p "$S4/sites.d" "$S4/logs" "$CT/s4"; mkcert "$CT/s4" 30
+printf 'include = ["sites.d/*.toml"]\n[server]\nworkers = 1\npid_file = "%s/agensio.pid"\n[log]\naccess = "off"\nerror = "%s/logs/error.log"\n' "$S4" "$S4" > "$S4/agensio.toml"
+tls_site "$CT/s4" 18315 > "$S4/sites.d/t.toml"
+AGENSIO_CERT_WATCH_SECONDS=1 "$BIN" -c "$S4/agensio.toml" > "$S4/server.out" 2>&1 & S4PID=$!
+for _ in $(seq 1 50); do nc -z 127.0.0.1 18315 2>/dev/null && break; sleep 0.1; done
+mkcert "$CT/next" 60; cp "$CT/next/cert.pem" "$CT/next/key.pem" "$CT/s4/"
+for _ in $(seq 1 50); do [ "$(served_fp 18315)" = "$(disk_fp "$CT/s4")" ] && break; sleep 0.1; done
+check "the watch loads a certificate renewed on disk by itself, and logs it" "yes yes" \
+  "$([ -n "$(disk_fp "$CT/s4")" ] && [ "$(served_fp 18315)" = "$(disk_fp "$CT/s4")" ] && echo yes) $(grep -q 'certificates refreshed' "$S4/logs/error.log" && echo yes)"
+kill $S4PID 2>/dev/null; wait $S4PID 2>/dev/null
 
 # A broken main file still refuses the reload, as before: the main file is all or nothing.
 cp "$T/agensio.toml" "$T/agensio.toml.good"

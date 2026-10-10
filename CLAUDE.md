@@ -270,7 +270,12 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   say ahead of time which certificate or key the server's account cannot read after the drop;
   health judges the certificates as served (`Server::tls_facts`, `control::TlsFacts`, T2):
   `certificate_not_loaded`, `acme_renewal_overdue` and `acme_renewal_failed` with the manager's
-  last failure (`AcmeManager::failures`).
+  last failure (`AcmeManager::failures`). The certificate refresh (T3,
+  `Server::refresh_certificates` over `switch_to`, the half of a reload after the configuration is
+  loaded): the running configuration's certificates read again, no configuration file read; ACME
+  uses it after an order, an hourly watch (`arm_certificate_watch`, one stat per file,
+  `AGENSIO_CERT_WATCH_SECONDS` for the tests) for changed files, `cert-renew` for a site's own
+  files.
 - **Request bodies** (A3): the HTTP/1 connection is the pull source behind
   `Request::body` (`StreamBody`: `async_read` with backpressure), decoding Content-Length
   or chunked (`http1/chunked.hpp`, fuzzed) from its receive buffer and socket.

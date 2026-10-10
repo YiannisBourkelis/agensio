@@ -1598,6 +1598,17 @@ says `the certificate loaded before keeps serving`, and health names the file un
 load. Before 0.1.0-alpha.64 such a pair refused the whole reload, every other site's change
 and renewal with it, and at start it kept the server from starting.
 
+**A renewed certificate is picked up by itself.** The server stats every certificate and key
+file once an hour and loads the pairs whose files changed (certbot replaces the target of its
+`live/` links; a `cp` over the file counts too), through the certificate refresh: the running
+configuration's certificates read again, no configuration file read, so a broken main or site
+file never keeps a renewal waiting. `agensio ctl cert-renew NAME` (MCP `cert_renew`) loads a site's
+own files at once and answers what happened (`loaded the certificate valid until ...`,
+`unchanged`, or why it could not be loaded, the certificate served staying); a renewal hook can
+run it instead of `agensio reload`. A pair that does not load keeps the certificate served and its
+error goes to health (`certificate_not_loaded`). Before 0.1.0-alpha.64 nothing watched the files:
+a renewal waited for a reload, which another file's error could refuse.
+
 **A key the server's account must read.** With `server.user`, the start reads every certificate
 and key as root and each reload after that as that account (its group and supplementary groups),
 so a key only root can read, certbot's `0600` key in its `0700` `live/` and `archive/`
@@ -1607,7 +1618,8 @@ of time, every directory on the way included, and give root's commands, for exam
 agensio /etc/letsencrypt/live && chmod g+x /etc/letsencrypt/live; chgrp agensio
 /etc/letsencrypt/live/example.com/privkey.pem && chmod 640 ...`; a reload that meets it says the
 same beside `the certificate loaded before keeps serving`. Keys `tls = "auto"` writes are the
-server account's already.
+server account's already. Adding the server's account to a group that reads the keys (Debian's
+`ssl-cert` for `/etc/ssl/private`) works too.
 
 **What health says about certificates.** It judges the certificate each site serves, read from
 the server's memory, not the file on disk (before 0.1.0-alpha.64 it read the file, so a renewal
@@ -1618,8 +1630,7 @@ placeholder; `certificate_not_loaded` is a file on disk newer than the one serve
 reload loads it, or the server could not load it, with the error); `acme_renewal_overdue` (an
 error) is an automatic certificate more than a day past its renewal point, a third of its
 lifetime left, with the CA's error from the last failed order; `acme_renewal_failed` (a warning)
-is a failed order before that point, retried every hour. Adding the server's account to a group that reads the keys (Debian's
-`ssl-cert` for `/etc/ssl/private`) works too.
+is a failed order before that point, retried every hour.
 
 ### Automatic certificates
 
@@ -1642,7 +1653,9 @@ tls = "auto"
 `tls = "auto"` makes agensio obtain and renew the certificate itself from an ACME
 (RFC 8555) certificate authority, Let's Encrypt by default. There is no separate client
 to install, no cron job and no reload hook: the server does the whole thing and switches
-to the new certificate through the reload path, so no request is interrupted.
+to the new certificate through the certificate refresh (the running configuration's
+certificates loaded again, no configuration file read), so no request is interrupted and no
+broken file elsewhere can hold it back.
 
 What happens:
 
@@ -1828,7 +1841,7 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 | `site-restore ENTRY` | admin | brings an entry of the trash back: every piece to its original path, the site file from the manifest, a reload; only into an empty place (refused when the site exists again, its file is there, or any original path exists and is not empty), and only with the account at the uid the files carry (else the `useradd --uid` line for root). The application's service is not restored: `site-unit` renders it again |
 | `trash-delete ENTRY` | admin | removes one entry now, for good |
 | `trash-expire` | admin | removes the entries older than `trash_keep` now (worker 0 does it every hour) |
-| `cert-renew NAME` | operator | orders the site's automatic certificate again now |
+| `cert-renew NAME` | operator | orders the site's automatic certificate again now; for a site with its own certificate files, loads them now and answers what happened (section 14) |
 | `upload NAME [FILE]` | operator | stores FILE (stdin by default) as `<state_dir>/uploads/NAME`, the server's own directory (0700); `PUT /v1/uploads/NAME` with the raw bytes on the socket; no `--yes`; at most `upload_max`; names are plain file names (letters, digits, `.`, `_`, `-`, no leading dot); a partial transfer leaves nothing |
 | `uploads-delete NAME` | operator | removes a stored upload |
 | `site-install NAME` | admin | puts an application's files into the site's directory (the `root` as given, above a preset's `public/` or `web/`; `--path SUB` for a subdirectory such as `wp-content/plugins/NAME`, with `--create-path` when it does not exist yet) **as the site's account**, from one source: `--url https://...` (a `.tar.gz`, `.tar` or `.zip`), `--file UPLOAD` (a stored upload), or nothing, which takes the preset's official archive (`presets` lists it under `source`; `--version V` picks a release, default the newest; WordPress and Drupal have one, Laravel is made with composer). `--sha256 HEX` refuses an archive whose digest differs. `--strip 0|1` keeps or unwraps a single top directory (default: unwrap when there is exactly one). `--dry-run` takes the same walk as the real call, as the same account, and answers with the target, the account and `would_create`, or with the refusal the real call would meet; nothing is downloaded or written. Answers 201 with `files`, `bytes`, `sha256`, `unwrapped`, `created` (each directory made, with owner and mode), `facts` for an install into the site's directory itself (`gemfile`, `credentials`: Rails' `config/credentials.yml.enc` or `config/credentials/production.yml.enc`, `ruby_version`: what `.ruby-version` pins), `next_steps` (for `app = "rails"`: the pinned Ruby, then `bundle_install`, `db_prepare`, `assets_precompile` and Puma; for the others the application's own setup in the browser; for every site but a static one its request-body limit), and `done` when a Rails archive without credentials got its `SECRET_KEY_BASE` generated into the site's environment (once: an existing value is kept); 409 with the reason and nothing left behind; 403 when `install = false` and a URL was given; 422 when no source can be found |

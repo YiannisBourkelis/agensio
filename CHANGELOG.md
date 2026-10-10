@@ -2,7 +2,22 @@
 
 ## 0.1.0-alpha.64
 
-Certificates (the certificate work, steps T1 and T2):
+Certificates (the certificate work, steps T1 to T3):
+
+- **A renewed certificate is loaded by itself, and nothing can hold it back.** Nothing watched the
+  certificate files: a renewal from certbot or another client waited for a reload, and the ACME
+  manager's own renewals went through a reload, which a broken main file refused. The server now
+  has a certificate refresh: the running configuration's certificates loaded again from their
+  files, no configuration file read, a pair that does not load keeping the certificate served
+  with its error for health. The ACME manager uses it after every order; an hourly watch (one stat
+  per certificate and key file) runs it for the pairs whose files changed; and `agensio ctl
+  cert-renew NAME` (MCP `cert_renew`) on a site with its own files runs it at once and answers what
+  happened (loaded with the new date, unchanged, or why not, `409`), where it used to be refused.
+  `certificate_not_loaded` says when the server loads a waiting file, or why it could not. Shown
+  first by `tests/isolation.sh` (with the main file broken, `cert-renew` loads a site's new
+  certificate, says `unchanged`, and refuses with why for a key it cannot read; a server whose
+  watch runs every second, `AGENSIO_CERT_WATCH_SECONDS=1`, picks a renewed file up by itself) and
+  `tests/acme.sh` (a renewal while the main file is broken is served).
 
 - **Health judges the certificate served, not the file on disk.** It read the certificate files,
   so a renewal written but not loaded (no reload yet, or a key the server could not read) looked

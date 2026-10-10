@@ -34,7 +34,9 @@ struct ControlBackend {
     // set aside (docs/design-site-operations.md 26), so a change is never reported done for a
     // site that is not served. Other files set aside keep their last good version.
     virtual bool reload_now(std::string& error, std::string_view must_load = {}) = 0;
-    virtual bool renew_certificate(std::string_view site, std::string& error) = 0;
+    // An automatic certificate: an order started (`message` says so). A site with its own files
+    // (step T3): they are loaded now, `message` saying what happened; false when they could not be.
+    virtual bool renew_certificate(std::string_view site, std::string& error, std::string& message) = 0;
     virtual void reopen_logs() = 0;
     virtual const Config& running() = 0;
     // The restart-only keys the running configuration has other values for than the server

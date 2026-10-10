@@ -166,13 +166,13 @@ tls = { cert = "/etc/ssl/example.com/fullchain.pem", key = "/etc/ssl/example.com
 **What it does.** A client that asks for one of the site's names gets this certificate;
 `fullchain.pem` is the certificate first, then the intermediates, in PEM. `agensio -t` refuses
 the configuration when either file is missing. The certificate must cover every name in
-`server_name`: a request for a name it does not cover is answered `421`. Nothing watches the
-files: a renewed certificate is read on the next `agensio reload`, which your ACME client's
-renewal hook should run. That reload reads the files as the account the server runs as, not as
-root, so a key only root can read works at start and then is not read again: each reload sets
-the site aside and keeps serving the certificate loaded at start (`the certificate loaded before
-keeps serving` in the error log, the file in health) until it expires, while the other sites'
-changes apply; hence the group read above. `agensio -t` and health (`tls_key_unreadable`) say so
+`server_name`: a request for a name it does not cover is answered `421`. The server checks the
+files every hour and loads a renewed certificate by itself, without a reload; your ACME client's
+renewal hook can run `agensio ctl cert-renew example.com --yes` to load it at once. It reads the
+files as the account the server runs as, not as root, so a key only root can read works at start
+and then is not read again: every later load keeps serving the certificate loaded at start (`the
+certificate loaded before keeps serving` in the error log, `certificate_not_loaded` in health)
+until it expires; hence the group read above. `agensio -t` and health (`tls_key_unreadable`) say so
 ahead of time, with the `chgrp` and `chmod` lines for every directory and file on the way. Before
 0.1.0-alpha.64 that refused every reload. Sites with automatic and with managed
 certificates share one listener.
