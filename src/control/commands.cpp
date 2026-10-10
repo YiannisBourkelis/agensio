@@ -899,19 +899,21 @@ json::Value validate(const fs::path& path, const Config& running, const Config* 
     json::Value v = json::Value::object().set("path", path.string());
     json::Value errors = json::Value::array();
     Config fresh;
+    std::vector<std::string> hosting;
     try {
         fresh = load_config(path, current);
+        hosting = isolate_hosting(fresh, system_facts(), current);  // a site breaking one is set aside (held_back)
     } catch (const std::exception& e) {
         errors.push(e.what());
         return v.set("ok", false).set("errors", std::move(errors));
     }
-    for (const auto& e : check_hosting(fresh, system_facts())) errors.push(e);
+    for (const auto& e : hosting) errors.push(e);
     const bool ok = errors.items().empty();
     v.set("ok", ok).set("errors", std::move(errors)).set("sites", static_cast<double>(fresh.sites.size()));
     // Site files a reload would set aside (design section 26): the rest loads, so ok stays true.
     json::Value held = json::Value::array();
     for (const auto& h : fresh.held_back)
-        held.push(json::Value::object().set("file", h.file).set("error", h.error).set("keeps_running_version", h.carried));
+        held.push(json::Value::object().set("file", h.file).set("error", h.error).set("keeps_running_version", h.carried).set("hosting_rule", h.hosting));
     v.set("held_back", std::move(held));
     v.set("restart_needed", strings(restart_needed(fresh, running)));
     return v;
@@ -1083,21 +1085,30 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
     };
     // Site files set aside (design section 26): by the running configuration, then by the files
     // on disk as the next reload would load them, each file once.
+    // A hosting rule's (C2) is a hosting_rule finding: the fix is an owner or a mode, not the file.
     auto held_finding = [&](const Config::HeldBack& h, bool on_disk) {
         const std::string name = fs::path(h.file).filename().string();
-        std::string msg = h.file + (on_disk ? " does not load as it is on disk: " : " was not loaded: ") + h.error + "; ";
+        std::string msg = h.hosting ? h.error + "; " + h.file + (on_disk ? " is set aside at the next reload: " : " is set aside: ")
+                                    : h.file + (on_disk ? " does not load as it is on disk: " : " was not loaded: ") + h.error + "; ";
         msg += on_disk ? (h.carried ? "the next reload keeps serving the version running now" : "its sites are not served after the next reload")
                        : (h.carried ? "the version loaded before keeps serving its sites" : "its sites are not served");
-        add("error", "site_file_held_back", "", std::move(msg),
-            "fix " + name + " (agensio -t names the error), then reload; the other sites are not affected");
+        if (h.hosting)
+            add("error", "hosting_rule", "", std::move(msg),
+                "fix the owner or mode the message names, then reload; the other sites are not affected");
+        else
+            add("error", "site_file_held_back", "", std::move(msg),
+                "fix " + name + " (agensio -t names the error), then reload; the other sites are not affected");
     };
     for (const auto& h : running.held_back) held_finding(h, false);
     // The file on disk.
     try {
-        const Config fresh = load_config(running.config_path, &running);
+        Config fresh = load_config(running.config_path, &running);
+        // The hosting rules as a reload applies them (C2): a site breaking one is set aside, named
+        // below; what is left (the server's account, the main file's sites) refuses everything.
+        const auto hosting = isolate_hosting(fresh, system_facts(), &running);
         for (const auto& h : fresh.held_back)
             if (const auto* r = running.held(h.file); !r || r->error != h.error) held_finding(h, true);
-        for (const auto& e : check_hosting(fresh, system_facts()))
+        for (const auto& e : hosting)
             add("error", "hosting_rule", "", e, "fix the ownership, then agensio -t");
         const auto restart = restart_needed(fresh, boot);
         if (!restart.empty()) {

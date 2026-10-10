@@ -3,7 +3,8 @@
 # sites.d/ are loaded each on its own: a file with an error is set aside and the other sites
 # serve; on reload a file set aside keeps its last good version; a file claiming a running
 # site's name on its address is set aside, the running one keeping its place; a site whose root
-# additions file cannot be loaded is set aside whole; -t exits 0 with a warning, --strict 1;
+# additions file cannot be loaded is set aside whole, and so is a site that breaks a hosting rule;
+# -t exits 0 with a warning, --strict 1;
 # health names each file; the control plane never reports a change it set aside as done.
 # usage: tests/isolation.sh build/agensio
 set -uo pipefail
@@ -44,7 +45,7 @@ held() {  # file: the health finding's message for that file, or "none"
 import json, sys
 try: d = json.load(sys.stdin)
 except ValueError: d = {'findings': []}
-m = [f['message'] for f in d.get('findings', []) if f['code'] == 'site_file_held_back' and sys.argv[1] in f['message']]
+m = [f['message'] for f in d.get('findings', []) if f['code'] in ('site_file_held_back', 'hosting_rule') and sys.argv[1] in f['message']]
 print(m[0] if m else 'none')" "$1"
 }
 reload() { kill -HUP "$SRV"; sleep 0.6; }
@@ -101,6 +102,34 @@ reload
   --listen-plain 127.0.0.1:18301 --yes --reason isolation --socket "$CS" > "$T/create.out" 2>&1; CREATE_EXIT=$?
 check "site-create whose file would be set aside: refused, the file removed, the running site unchanged" "1 no site a2" \
   "$([ $CREATE_EXIT -ne 0 ] && echo 1 || echo 0) $([ -f "$T/sites.d/e.test.toml" ] && echo yes || echo no) $(body a.test 18301)"
+
+# The hosting rules (design section 26, step C2) for a site with an account (the one running this
+# test): a site whose root others can write into is set aside and the others serve; a site is served
+# only by a version that passes every rule now, so a served one whose root is opened to others goes
+# down at the next reload, while an edit pointing it at such a root keeps the version that passes.
+ME=$(id -un 2>/dev/null || true)
+if [ -n "$ME" ]; then
+  mkdir -p "$T/www/h" "$T/www/h2"; echo "site h" > "$T/www/h/index.html"; echo "site h2" > "$T/www/h2/index.html"
+  chmod 757 "$T/www/h"
+  site h.test 18305 "$T/www/h" "user = \"$ME\"" > "$T/sites.d/h.toml"
+  reload
+  check "a site whose root others can write into is set aside, the other sites serve; health names the rule" "none site a2 yes" \
+    "$(body h.test 18305) $(body a.test 18301) $(held h.toml | grep -q 'writable by other users' && echo yes)"
+  check "health reports it as hosting_rule (an owner or a mode to fix); validate marks it, which the writers count as refused" "hosting_rule True" \
+    "$(health | python3 -c 'import json,sys; print(" ".join(f["code"] for f in json.load(sys.stdin)["findings"] if f["code"] in ("site_file_held_back", "hosting_rule") and "h.toml" in f["message"]) or "none")') $("$BIN" ctl validate --socket "$CS" 2>/dev/null | python3 -c 'import json,sys; print([h.get("hosting_rule") for h in json.load(sys.stdin).get("held_back", []) if h["file"].endswith("h.toml")])' | tr -d "[]'")"
+  chmod 755 "$T/www/h"; reload
+  check "the root fixed and reloaded: it serves, health is clear of it" "site h none" "$(body h.test 18305) $(held h.toml)"
+  chmod 757 "$T/www/h"; reload
+  check "its root opened to others while it serves: the next reload takes it down, the version running breaks the rule too" "none yes" \
+    "$(body h.test 18305) $(held h.toml | grep -q 'not served' && echo yes)"
+  chmod 755 "$T/www/h"; reload
+  chmod 757 "$T/www/h2"; site h.test 18305 "$T/www/h2" "user = \"$ME\"" > "$T/sites.d/h.toml"; reload
+  check "an edit pointing it at a root others can write into: the version that passes keeps serving" "site h yes" \
+    "$(body h.test 18305) $(held h.toml | grep -q 'keeps serving' && echo yes)"
+  rm -f "$T/sites.d/h.toml"; reload
+else
+  echo "skip the hosting rules: no account name for uid $(id -u)"
+fi
 
 # A broken main file still refuses the reload, as before: the main file is all or nothing.
 cp "$T/agensio.toml" "$T/agensio.toml.good"

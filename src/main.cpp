@@ -852,12 +852,21 @@ int main(int argc, char** argv) {
     if (config_path.empty()) config_path = default_config();
 
     agensio::Config cfg;
+    // Hosting rules (sites with `user`): ownership and sharing, checked the same way before a
+    // start, under -t and before a reload is signalled, so the message names the path and the
+    // mode to fix. A site that breaks one is set aside with its file (design section 26, C2);
+    // what remains is the server's own account and the main file's sites, which refuse it all.
+    // Not for `agensio pools`: writing the pools is how a socket rule is fixed.
+    std::vector<std::string> hosting_errors;
     try {
         cfg = agensio::load_config(config_path);
+        if (!pools) hosting_errors = agensio::isolate_hosting(cfg, agensio::system_facts(), nullptr);
     } catch (const std::exception& e) {
         std::cerr << "configuration error: " << e.what() << "\n";
         return 1;
     }
+    for (const auto& e : hosting_errors) std::cerr << "configuration error: " << e << "\n";
+    if (!hosting_errors.empty() && !explain) return 1;
     // Site files set aside (docs/design-site-operations.md 26): the other sites load, so -t passes
     // (the packaged unit's ExecStartPre runs it) unless --strict; a reload keeps their last good
     // version.
@@ -903,11 +912,6 @@ int main(int argc, char** argv) {
         std::cout.flush();
         return rc;
     }
-    // Hosting rules (sites with `user`): ownership and sharing, checked the same way before
-    // a start and under -t so the message names the path and the mode to fix.
-    const auto hosting_errors = agensio::check_hosting(cfg, agensio::system_facts());
-    for (const auto& e : hosting_errors) std::cerr << "configuration error: " << e << "\n";
-    if (!hosting_errors.empty() && !explain) return 1;
     if (test_only || explain) {
         if (explain) agensio::explain_config(cfg, std::cout);
         std::cout.flush();

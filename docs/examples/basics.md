@@ -354,6 +354,11 @@ sites, and everything else loads:
   and the other files' changes apply, certificate renewals included; fix the file and reload;
 - a site whose root additions file or password users file does not load is set aside whole,
   never served without the rule that protected part of it;
+- a site with its own account (`user`) that breaks a hosting rule (a root others can write
+  into, a credential file readable by others, a socket of another account) is set aside too;
+  on reload it keeps its running version only when that version passes the rules, so a root
+  opened to others while it serves takes that site down until it is fixed (health
+  `hosting_rule`, with the `chown` or `chmod` to run);
 - when two files claim one name (or both a catch-all) on one address, the one already serving
   keeps it and the other is set aside; at start the later file in alphabetical order yields.
 

@@ -75,6 +75,21 @@ ServerAccount server_account(const Config& cfg, const HostFacts& facts);
 // state directory or log; logs not readable by other users. One message per failure,
 // with the path and what was expected; empty when everything is in order.
 std::vector<std::string> check_hosting(const Config& cfg, const HostFacts& facts);
+// The same rules with the sites each concerns (indexes into cfg.sites): none for the server's
+// own account, one for a site's own paths, two for what two users must not share.
+struct HostingError {
+    std::string message;
+    std::vector<std::size_t> sites;
+};
+std::vector<HostingError> hosting_errors(const Config& cfg, const HostFacts& facts);
+// The hosting rules applied the way site files load (docs/design-site-operations.md 26, step
+// C2): a site that breaks one is set aside with its file (set_aside_until_clean), the other
+// sites load; with `running` (a reload) a served site keeps its running version only when that
+// version passes every rule now, so a root opened to others takes the site down at the next
+// reload while an edit that breaks a rule keeps the version that passes. Returns what refuses
+// the whole configuration: the server's own account, and a rule only the main file's sites
+// break (the main file is all or nothing).
+std::vector<std::string> isolate_hosting(Config& cfg, const HostFacts& facts, const Config* running);
 
 // The files and directories of a site that hold credentials, absolute: the preset's
 // secrets (`preset_secrets`) under the served root, `.env` and `.git`, and for Laravel

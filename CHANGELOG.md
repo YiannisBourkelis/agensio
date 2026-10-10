@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.1.0-alpha.63
+
+- **A hosting rule one site breaks no longer stops the others** (design section 26, step C2). A
+  site with its own account (`user`) whose root others can write into, whose credential file is
+  readable by others or whose socket belongs to another account refused the whole start or
+  reload, so one tenant's `chmod` kept every site down at the next boot and blocked every reload.
+  Such a site's file is now set aside like a file with an error, and the other sites load. A site
+  is served only by a version that passes every rule now: on reload an edit that breaks a rule
+  keeps the version that runs, while a root opened to others while the site serves takes that
+  site down until it is fixed (its running version breaks the rule too). Two accounts sharing a
+  root, a log or a state directory set the newer file aside. The server's own account and the
+  main file's sites still refuse it all. Health reports these as `hosting_rule` with the owner or
+  mode to fix and what the site serves meanwhile; `validate`'s `held_back` marks them
+  `hosting_rule`. The control plane's writers (`site-install`, `site-copy`, `site-task`) count a
+  site set aside as a refused state, so they never answer ok to one. Shown first by
+  `tests/isolation.sh` (four checks with a site of the test's own account, failing on the step
+  before) and unit checks on a described machine.
+- **A pool file was removed while its site's file was set aside.** `agensio pools` and the
+  helper's `pools_apply` (run after every PHP site change) took the pool of an account whose site
+  file did not load for stale, removed it and reloaded php-fpm, so a site still serving its last
+  good version lost its PHP. While any site file is set aside no pool file is removed now.
+
 ## 0.1.0-alpha.62 (2026-10-10)
 
 From the alpha.61 report:

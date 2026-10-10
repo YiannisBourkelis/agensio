@@ -1482,7 +1482,7 @@ Built in steps: the core (parsers, verification, cache), the configuration, the 
 path, logs and the control plane, then the end-to-end tests.
 
 
-## 26. One broken site never stops the others (2026-10-10, agreed with the owner; first step built)
+## 26. One broken site never stops the others (2026-10-10, agreed with the owner; steps C1 and C2 built)
 
 The owner's question, raised while planning the certificate work: a site file with an error
 should leave the other sites working, with health telling the administrator what is wrong.
@@ -1617,8 +1617,31 @@ building it settled:
   checks, two integration checks and one of `tests/trash.sh` (now `-t --strict`) changed from
   "refused" to "set aside".
 
-**Next steps** of this section: C2, the hosting rules (`check_hosting`) attributed to sites and
-their files so a site that breaks one is set aside instead of refusing the whole reload; C3, the
-certificates loaded per site in `build_listeners`, a site whose certificate or key cannot be
-read set aside with its last good version kept; then `tests/acme.sh` with a broken file
-elsewhere on the host during a renewal.
+**Built, second step (C2, 2026-10-11, 0.1.0-alpha.62).** The hosting rules the same way.
+`hosting_errors` gives each rule's message with the sites it concerns (none for the server's
+own account, one for a site's own paths, two for what two accounts must not share);
+`isolate_hosting` runs them through `set_aside_until_clean` (the conflict loop of C1, made
+reusable) after `load_config` at `-t`, at a start, on every reload, in `validate`, in health and
+in the helper's `pools_apply`, and returns what refuses everything: the server's own account and
+a rule only the main file's sites break. Decided with the owner while building it: **a site is
+served only by a version that passes every rule now.** A classification was examined first (a
+site going down only for the rules where serving it is the attack path, a root others can
+write into, a socket of another account, a writable log directory, and keeping its running
+version for the rest) and dropped as not worth its cost: most of the "keep" rules are ones under
+which the site does not work anyway, a later rule could be classed wrong, and the reload and the
+boot would disagree. So an edit that breaks a rule keeps the running version (it passes), while
+a root opened to others while the site serves takes the site down at the next reload (the
+running version breaks the rule too); no tenant can make another's site break a rule, every
+path involved being the site's own account's or root's. A file set aside by a rule is marked
+(`HeldBack::hosting`), so health reports it as `hosting_rule` with the owner or mode to fix,
+and the writers' before-and-after comparison (`validation_errors`) counts `held_back`, so a
+credential file a writer leaves readable is still a refusal (security row 24). Found on the way,
+a gap of C1: `write_pools` took the pool of an account whose file was set aside for stale and
+removed it; while any file is set aside it removes none. `agensio pools` itself is not held to
+the rules, since writing the pools is how a socket rule is fixed. Tests: four checks in
+`tests/isolation.sh` (a site of the test's own account), `test_hosting_isolation` on a described
+machine, a `write_pools` check.
+
+**Next step** of this section: C3, the certificates loaded per site in `build_listeners`, a site
+whose certificate or key cannot be read set aside with its last good version kept; then
+`tests/acme.sh` with a broken file elsewhere on the host during a renewal.

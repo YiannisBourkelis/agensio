@@ -2456,11 +2456,6 @@ std::string auth_users_problem(const std::string& path, const Config& cfg) {
     return "";
 }
 
-struct SiteConflict {
-    std::size_t first, second;  // indexes into Config::sites, the earlier first
-    std::string message;
-};
-
 // The first conflict between two sites, the earlier one first: what a host cannot serve at once
 // (docs/design-site-operations.md 26). The messages are the ones the loader gave when any of
 // these failed the load; the duplicate names and catch-alls were accepted before, the first site
@@ -2561,6 +2556,59 @@ std::optional<SiteConflict> first_site_conflict(const Config& cfg) {
             }
         }
     return std::nullopt;
+}
+
+void set_aside_until_clean(Config& cfg, const Config* running,
+                           const std::function<std::optional<SiteConflict>(const Config&)>& find) {
+    const std::string main_file = cfg.config_path.string();
+    auto served = [&](const std::string& file) {
+        return running && std::any_of(running->sites.begin(), running->sites.end(), [&](const SiteConfig& r) { return r.source == file; });
+    };
+    // Served and unchanged (or carried) 2, served but edited 1, new 0.
+    auto rank = [&](const std::string& file) {
+        if (!served(file)) return 0;
+        if (const auto* h = cfg.held(file); h && h->carried) return 2;
+        const auto now = cfg.file_digests.find(file);
+        const auto then = running->file_digests.find(file);
+        return now != cfg.file_digests.end() && then != running->file_digests.end() && now->second == then->second ? 2 : 1;
+    };
+    std::set<std::string> carried_once;
+    for (const auto& h : cfg.held_back)
+        if (h.carried) carried_once.insert(h.file);
+    for (std::size_t round = 0;; ++round) {
+        const auto c = find(cfg);
+        if (!c) break;
+        const bool pair = c->second != SiteConflict::npos;
+        const std::string fa = cfg.sites[c->first].source, fb = pair ? cfg.sites[c->second].source : fa;
+        if ((fa == main_file && fb == main_file) || round > 4 * (cfg.sites.size() + cfg.held_back.size() + 1)) fail(c->message);
+        std::string loser;
+        if (fa == fb) loser = fa;
+        else if (fa == main_file) loser = fb;
+        else if (fb == main_file) loser = fa;
+        else loser = rank(fa) > rank(fb) ? fb : rank(fb) > rank(fa) ? fa : fb;
+        const std::string winner = loser == fa ? fb : fa;
+        const std::string why = c->message + (winner == loser ? "" : "; " + fs::path(winner).filename().string() + " keeps its place");
+        // A carried version with a problem of its own: the version loaded before fails too.
+        const bool was_carried = std::any_of(cfg.sites.begin(), cfg.sites.end(), [&](const SiteConfig& x) { return x.source == loser && x.carried; });
+        std::erase_if(cfg.sites, [&](const SiteConfig& x) { return x.source == loser; });
+        const bool carry = served(loser) && carried_once.insert(loser).second;
+        if (carry)
+            for (const auto& site : running->sites)
+                if (site.source == loser) {
+                    cfg.sites.push_back(site);
+                    cfg.sites.back().carried = true;
+                }
+        bool known = false;
+        for (auto& h : cfg.held_back)
+            if (h.file == loser) {
+                if (was_carried) h.error += h.error.find(c->message) != std::string::npos ? "; the version loaded before breaks it too"
+                                                                                           : "; the version loaded before: " + why;
+                else h.error += "; then " + why;
+                h.carried = carry;
+                known = true;
+            }
+        if (!known) cfg.held_back.push_back({loser, why, carry});
+    }
 }
 
 Config load_config(const fs::path& path, const Config* running) {
@@ -2817,57 +2865,7 @@ Config load_config(const fs::path& path, const Config* running) {
                     h.carried = true;
                 }
     // Conflicts between files: one is set aside and the checks run again until none is left.
-    // The main file never yields to an included one and fails the load when it conflicts with
-    // itself. Between included files the one the running configuration served keeps its place:
-    // served and unchanged (or carried) first, then served but edited, then new; at a tie the
-    // later file in load order yields. A file that was served and yields keeps its last good
-    // version, as a file that does not parse does (once: a carried version that conflicts is
-    // dropped, so the loop ends).
-    {
-        const std::string main_file = cfg.config_path.string();
-        auto served = [&](const std::string& file) {
-            return running && std::any_of(running->sites.begin(), running->sites.end(), [&](const SiteConfig& r) { return r.source == file; });
-        };
-        auto rank = [&](const std::string& file) {
-            if (!served(file)) return 0;
-            if (const auto* h = cfg.held(file); h && h->carried) return 2;
-            const auto now = cfg.file_digests.find(file);
-            const auto then = running->file_digests.find(file);
-            return now != cfg.file_digests.end() && then != running->file_digests.end() && now->second == then->second ? 2 : 1;
-        };
-        std::set<std::string> carried_once;
-        for (const auto& h : cfg.held_back)
-            if (h.carried) carried_once.insert(h.file);
-        for (std::size_t round = 0;; ++round) {
-            const auto c = first_site_conflict(cfg);
-            if (!c) break;
-            const std::string fa = cfg.sites[c->first].source, fb = cfg.sites[c->second].source;
-            if ((fa == main_file && fb == main_file) || round > 4 * (cfg.sites.size() + cfg.held_back.size() + 1)) fail(c->message);
-            std::string loser;
-            if (fa == fb) loser = fa;
-            else if (fa == main_file) loser = fb;
-            else if (fb == main_file) loser = fa;
-            else loser = rank(fa) > rank(fb) ? fb : rank(fb) > rank(fa) ? fa : fb;
-            const std::string winner = loser == fa ? fb : fa;
-            const std::string why = c->message + (winner == loser ? "" : "; " + fs::path(winner).filename().string() + " keeps its place");
-            std::erase_if(cfg.sites, [&](const SiteConfig& x) { return x.source == loser; });
-            const bool carry = served(loser) && carried_once.insert(loser).second;
-            if (carry)
-                for (const auto& site : running->sites)
-                    if (site.source == loser) {
-                        cfg.sites.push_back(site);
-                        cfg.sites.back().carried = true;
-                    }
-            bool known = false;
-            for (auto& h : cfg.held_back)
-                if (h.file == loser) {
-                    h.carried = carry;
-                    h.error += "; then " + why;
-                    known = true;
-                }
-            if (!known) cfg.held_back.push_back({loser, why, carry});
-        }
-    }
+    set_aside_until_clean(cfg, running, first_site_conflict);
 
     if (cfg.sites.empty()) {
         std::string why;

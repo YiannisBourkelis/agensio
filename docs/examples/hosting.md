@@ -156,6 +156,12 @@ naming the path, its owner and mode and the fix:
 - sites of different accounts never share a root (or nest one inside the other), an access
   log, a state directory or a php socket.
 
+A site that breaks one of these is set aside with its file, and the other sites go on: at a
+boot it is not served, and on a reload it keeps its running version only when that version
+passes them, so an edit that breaks a rule changes nothing while a root opened to others while
+the site serves takes that one site down until it is fixed (health `hosting_rule` says which and
+how). Before 0.1.0-alpha.62 one site's rule refused the whole start or reload.
+
 Sites of one account share one pool, so they must agree on its keys (`children`, `pm`,
 `max_requests`, `memory_limit`, `max_execution_time`, `version`, `extra`); `agensio -t` names
 the key that differs. Easy to get wrong: a site without `access_log` writes the server-wide
@@ -389,9 +395,9 @@ says `site = "<domain>"` carries `[[location]]` tables for that site, with any k
 preset expands, so they count as hand-written: at a preset's path one replaces the preset's
 location, except one with only `add_headers`, which adds its fields to it (the uploads keep
 their refusals and their cache header and gain the CORS field). A path the site file already
-has is a duplicate, and the reload refuses it naming the file. The file must be a regular file
-owned by the owner of the main file and writable by nobody else, or the load is refused with
-the line to run: the server's own account, which writes the managed files, cannot add one. The
+has is a duplicate, and the reload sets the site's file aside naming the file. The file must be
+a regular file owned by the owner of the main file and writable by nobody else, or the site is
+set aside with the line to run (never served without it; the other sites load): the server's own account, which writes the managed files, cannot add one. The
 control plane never writes it. This block is shown as text because it lives in a file of its
 own; `agensio -t` checks it on the host.
 

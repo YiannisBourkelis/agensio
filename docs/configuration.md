@@ -1214,8 +1214,8 @@ application; `agensio pools` writes nothing for it, `health` looks for no PHP
 directory, and pool keys in its `php = { ... }` are refused (2026-09-26: a Rails site
 was reported `php_tmp_missing` and `pools_stale` before this rule).
 
-**What `agensio -t` (and every start) refuses** for a site with `user`, naming the path,
-its owner and mode, and what was expected:
+**What the hosting rules refuse** for a site with `user`, naming the path, its owner and
+mode, and what was expected (what a refusal does follows the list):
 
 - the user or group does not exist;
 - the root or an `open_basedir` entry is not owned by the user (or root), or is writable
@@ -1237,6 +1237,20 @@ its owner and mode, and what was expected:
   log or a state directory.
 
 Sites without `user` are not checked, so a single-tenant machine changes nothing.
+
+A site file under `sites.d/` whose site breaks a rule is set aside like a file with an error
+(section 12c), and the other sites load: `agensio -t` warns (`--strict` fails), health reports
+`hosting_rule` with the site, the path and the fix. **A site is served only by a version that
+passes every rule now:** on a reload, a site whose file was edited to break a rule keeps the
+version that runs, while a site whose own paths broke a rule (a root opened to others while it
+serves) goes down until they are fixed and a reload brings it back, because its running version
+breaks the rule too; a reboot does the same. Two users sharing a root, a log or a state directory
+set one of the two files aside, the one the server already serves keeping its place. What only
+the server's own account breaks (`server.group` missing), and a rule a site of the main file
+breaks, refuse the start or the reload as a whole. Before 0.1.0-alpha.62 any rule any site broke
+refused it as a whole: one tenant's `chmod` stopped every site at the next boot and blocked
+every reload. `agensio pools` is not held to the rules (writing the pools is how a socket rule
+is fixed) and, while a site file is set aside, keeps the pool files of every account.
 
 The account's home is its state directory, `<state_dir>/<user>`. For a PHP site `agensio
 pools` creates it with `tmp/` and `sessions/`; for an account without a PHP pool (a Rails
@@ -1478,6 +1492,11 @@ What sets a file aside:
   a site is never served without the locations root added, which may be the ones that
   protect it), or a users file of a `[[site.auth]]` rule (19b). An additions file that does
   not load and names no site is named itself;
+- a hosting rule its site breaks (section 11: a root others can write into, a socket of
+  another account, a credential file readable by others, ...). A site is served only by a
+  version that passes every rule now, so on reload the version that runs is kept only when it
+  passes: an edit that breaks a rule keeps it, a root opened to others while the site serves
+  takes the site down;
 - a conflict with another file: a name both claim on one address, two catch-all sites on
   one address, a TLS and a plain site on one address, two sites of one user that size its
   php-fpm pool differently. One of the two files yields, the rest of it with it: the main
@@ -1495,7 +1514,8 @@ What happens then:
   not load is simply not served. Fix the file and reload, and it loads like any other;
 - every file set aside is a line in the error log (`... sites.d/b.example.toml set aside: ...
   (the version loaded before keeps serving its sites)`), a `site_file_held_back` error in
-  health with the loader's message, the file in `agensio ctl status`
+  health with the loader's message (`hosting_rule` when a hosting rule set it aside, with the
+  owner or mode to fix), the file in `agensio ctl status`
   (`site_files_held_back`) and in `agensio ctl validate` (`held_back`, which says what the
   next reload would do with the files on disk);
 - `agensio -t` prints a warning per file set aside and still exits 0, because the server
@@ -1512,8 +1532,8 @@ agensio -t --strict -c /etc/agensio/agensio.toml   # the same, exit 1
 agensio ctl health                                 # site_file_held_back, with the file, the error and what serves meanwhile
 ```
 
-Not yet set aside per site (they still refuse the whole start or reload): a certificate that
-cannot be read and a hosting rule a site breaks (section 11); both are planned.
+Not yet set aside per site (it still refuses the whole start or reload): a certificate that
+cannot be read; planned.
 
 ## 13. CGI
 
@@ -1882,13 +1902,15 @@ add_headers = { "X-Robots-Tag" = "noindex" }
 reports), and every `[[location]]` takes any key of section 6. The locations are parsed after
 the site file's own and before the preset expands, so they count as hand-written: one at a
 preset's path replaces the preset's, one with only `add_headers` joins it (section 5), and
-one at a path the site file already has (a rule of this section, say) is a duplicate the
-reload refuses, naming the file. `--explain` marks them `# from root:<file>`; `site-show`
+one at a path the site file already has (a rule of this section, say) is a duplicate that
+sets the site's file aside, naming the file (section 12c; a `site_update` that would collide is
+refused and undone). `--explain` marks them `# from root:<file>`; `site-show`
 reports `root_additions` (the file's path, present or not, the locations it added), so an
 agent asked for what no field covers hands you this block instead of editing the managed
 file. The file must be a regular file owned by the owner of the main configuration (root in
-production) and writable by nobody else, or the load is refused with the line to run: the
-server's own account, which writes the managed files, cannot add one. A file whose site is
+production) and writable by nobody else, or the site is set aside with the line to run (never
+served without its additions; the other sites load, section 12c): the server's own account,
+which writes the managed files, cannot add one. A file whose site is
 disabled or deleted is kept and ignored with a warning (`-t`, the error log, health
 `root_additions_orphan`); a plain `site-delete` renames it `.bak` beside the site file's
 `.bak` (still root's; rename both back to return the site), and `site-delete --files`

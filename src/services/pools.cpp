@@ -1,5 +1,6 @@
 #include "services/pools.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -210,6 +211,7 @@ std::string octal(unsigned mode) {
 // One site's accounts and the paths its rules apply to.
 struct SiteFacts {
     const SiteConfig* site = nullptr;
+    std::size_t index = 0;  // in cfg.sites
     std::string name;
     unsigned uid = 0, gid = 0;
 };
@@ -230,8 +232,11 @@ std::vector<std::string> secret_paths(const SiteConfig& site) {
     return out;
 }
 
-std::vector<std::string> check_hosting(const Config& cfg, const HostFacts& facts) {
-    std::vector<std::string> errors;
+std::vector<HostingError> hosting_errors(const Config& cfg, const HostFacts& facts) {
+    std::vector<HostingError> errors;
+    // The sites the rule being checked concerns (indexes into cfg.sites); none for the server's own.
+    std::vector<std::size_t> scope;
+    auto add = [&](std::string message) { errors.push_back({std::move(message), scope}); };
     std::vector<SiteFacts> sites;
     bool any_user = false;
     for (const auto& site : cfg.sites) any_user = any_user || !site.user.empty();
@@ -241,9 +246,9 @@ std::vector<std::string> check_hosting(const Config& cfg, const HostFacts& facts
     const bool have_agensio_gid = server.known;
     const std::string agensio_group = server.group.empty() ? std::string("?") : server.group;
     if (!have_agensio_gid) {
-        if (!cfg.group.empty()) errors.push_back("server.group: group '" + cfg.group + "' does not exist (the group the server runs as)");
-        else if (!cfg.user.empty()) errors.push_back("server.user: user '" + cfg.user + "' does not exist");
-        else errors.push_back("server.group: cannot resolve the group the server runs as (set server.group)");
+        if (!cfg.group.empty()) add("server.group: group '" + cfg.group + "' does not exist (the group the server runs as)");
+        else if (!cfg.user.empty()) add("server.user: user '" + cfg.user + "' does not exist");
+        else add("server.group: cannot resolve the group the server runs as (set server.group)");
     }
     // The server reads static files and stats scripts as server.user: a root it cannot
     // enter serves nothing. Root sees everything, so the rule needs a configured user.
@@ -255,19 +260,22 @@ std::vector<std::string> check_hosting(const Config& cfg, const HostFacts& facts
     };
 
     // Rule 1: accounts exist.
-    for (const auto& site : cfg.sites) {
+    for (std::size_t i = 0; i < cfg.sites.size(); ++i) {
+        const SiteConfig& site = cfg.sites[i];
         if (site.user.empty()) continue;
+        scope = {i};
         SiteFacts sf;
         sf.site = &site;
+        sf.index = i;
         sf.name = "site " + site.server_names.front();
         unsigned primary = 0;
         if (!facts.user(site.user, sf.uid, primary)) {
-            errors.push_back(sf.name + ": user '" + site.user + "' does not exist");
+            add(sf.name + ": user '" + site.user + "' does not exist");
             continue;
         }
         sf.gid = primary;
         if (!site.group.empty() && !facts.group(site.group, sf.gid)) {
-            errors.push_back(sf.name + ": group '" + site.group + "' does not exist");
+            add(sf.name + ": group '" + site.group + "' does not exist");
             continue;
         }
         sites.push_back(sf);
@@ -281,16 +289,16 @@ std::vector<std::string> check_hosting(const Config& cfg, const HostFacts& facts
         FileFacts f;
         if (!facts.stat(path, f)) return;  // state directories appear with `agensio pools`
         if (f.uid != sf.uid && f.uid != 0)
-            errors.push_back(sf.name + ": " + what + " " + path + " is " + describe(f) + "; expected owner " +
+            add(sf.name + ": " + what + " " + path + " is " + describe(f) + "; expected owner " +
                              sf.site->user + " (uid " + std::to_string(sf.uid) + ") or root");
         if ((f.mode & 0002) || ((f.mode & 0020) && f.gid != sf.gid))
-            errors.push_back(sf.name + ": " + what + " " + path + " is writable by other users (" + describe(f) +
+            add(sf.name + ": " + what + " " + path + " is writable by other users (" + describe(f) +
                              "); remove the write bit for others" +
                              ((f.mode & 0020) && f.gid != sf.gid ? " and for group " + std::to_string(f.gid) : ""));
         // Rule 2b: the server's account must be able to enter what it serves from (static
         // files, script stat); the user's private tmp/ and sessions/ are PHP's alone.
         if (server_must_read && server_reads && f.is_dir && !server_can_read(f))
-            errors.push_back(sf.name + ": " + what + " " + path + " is " + describe(f) + "; the server (" +
+            add(sf.name + ": " + what + " " + path + " is " + describe(f) + "; the server (" +
                              (server.user.empty() ? "uid " + std::to_string(server.uid) : server.user) + ", group " +
                              agensio_group + ") cannot read it. Give it the server's group: chown " + sf.site->user + ":" +
                              agensio_group + " " + path + " && chmod 2750 " + path);
@@ -299,12 +307,13 @@ std::vector<std::string> check_hosting(const Config& cfg, const HostFacts& facts
         FileFacts f;
         if (!facts.stat(path, f)) return;
         if (secret_exposed(f.mode, f.gid, sf.gid))
-            errors.push_back(sf.name + ": " + path + " is readable by other users (" + describe(f) +
+            add(sf.name + ": " + path + " is readable by other users (" + describe(f) +
                              "); make it 0600, or 0640 with the site's own group (" +
                              (sf.site->group.empty() ? sf.site->user : sf.site->group) + "), never the server's");
     };
     for (const auto& sf : sites) {
         const SiteConfig& site = *sf.site;
+        scope = {sf.index};
         check_root(sf, site.root, "root", true);
         for (const auto& dir : site.pool.open_basedir)
             if (dir != site.root) check_root(sf, dir, "open_basedir entry", site.root.starts_with(dir + "/"));
@@ -315,28 +324,28 @@ std::vector<std::string> check_hosting(const Config& cfg, const HostFacts& facts
             const std::string& sock = site.php.address.path;
             if (facts.stat(sock, f)) {
                 if (f.uid != sf.uid)
-                    errors.push_back(sf.name + ": socket " + sock + " is " + describe(f) + "; expected owner " +
+                    add(sf.name + ": socket " + sock + " is " + describe(f) + "; expected owner " +
                                      site.user);
                 if (have_agensio_gid && f.gid != agensio_gid)
-                    errors.push_back(sf.name + ": socket " + sock + " has gid " + std::to_string(f.gid) +
+                    add(sf.name + ": socket " + sock + " has gid " + std::to_string(f.gid) +
                                      "; expected group " + agensio_group + " (gid " + std::to_string(agensio_gid) +
                                      "), the server's group: the server connects through the group bit and nobody "
                                      "else can (listen.group in the pool file, as `agensio pools` writes it)");
                 if (f.mode & 0007)
-                    errors.push_back(sf.name + ": socket " + sock + " is mode " + octal(f.mode) +
+                    add(sf.name + ": socket " + sock + " is mode " + octal(f.mode) +
                                      "; any user could connect, make it 0660");
             }
             FileFacts d;
             const std::string dir = fs::path(sock).parent_path().string();
             if (facts.stat(dir, d) && (d.mode & 0002) && !(d.mode & 01000))
-                errors.push_back(sf.name + ": socket directory " + dir + " is world-writable (" + describe(d) +
+                add(sf.name + ": socket directory " + dir + " is world-writable (" + describe(d) +
                                  "); another user could replace the socket");
         }
         // Rule 2c: the user reaches its own state directory: the parent lets others traverse.
         if (site.pool.generated) {
             FileFacts parent;
             if (facts.stat(cfg.state_dir, parent) && !(parent.mode & 0001) && parent.gid != sf.gid && parent.uid != sf.uid)
-                errors.push_back(sf.name + ": state directory parent " + cfg.state_dir + " is " + describe(parent) +
+                add(sf.name + ": state directory parent " + cfg.state_dir + " is " + describe(parent) +
                                  "; " + site.user + " cannot reach " + site.pool.state_dir + " (PHP's tmp and sessions). chmod 751 " +
                                  cfg.state_dir);
         }
@@ -345,12 +354,12 @@ std::vector<std::string> check_hosting(const Config& cfg, const HostFacts& facts
             FileFacts f;
             if (facts.stat(site.access_log, f) &&
                 ((f.mode & 0004) || ((f.mode & 0040) && f.gid != sf.gid && (!have_agensio_gid || f.gid != agensio_gid))))
-                errors.push_back(sf.name + ": access log " + site.access_log + " is readable by other users (" +
+                add(sf.name + ": access log " + site.access_log + " is readable by other users (" +
                                  describe(f) + ")");
             FileFacts d;
             const std::string dir = fs::path(site.access_log).parent_path().string();
             if (facts.stat(dir, d) && ((d.mode & 0002) || ((d.mode & 0020) && d.uid != 0 && d.gid != agensio_gid)))
-                errors.push_back(sf.name + ": log directory " + dir + " is writable by other users (" + describe(d) +
+                add(sf.name + ": log directory " + dir + " is writable by other users (" + describe(d) +
                                  "); a site user could plant a symlink there");
         }
     }
@@ -360,15 +369,55 @@ std::vector<std::string> check_hosting(const Config& cfg, const HostFacts& facts
             const SiteConfig& a = *sites[i].site;
             const SiteConfig& b = *sites[j].site;
             if (a.user == b.user) continue;
+            scope = {sites[i].index, sites[j].index};
             const std::string pair = sites[i].name + " (" + a.user + ") and " + b.server_names.front() + " (" + b.user + ")";
             if (a.root == b.root || a.root.starts_with(b.root + "/") || b.root.starts_with(a.root + "/"))
-                errors.push_back(pair + " have different users but nested or equal roots " + a.root + " and " + b.root);
+                add(pair + " have different users but nested or equal roots " + a.root + " and " + b.root);
             if (!a.access_log.empty() && a.access_log == b.access_log)
-                errors.push_back(pair + " have different users but the same access log " + a.access_log);
+                add(pair + " have different users but the same access log " + a.access_log);
             if (a.pool.generated && b.pool.generated && a.pool.state_dir == b.pool.state_dir)
-                errors.push_back(pair + " have different users but the same state directory " + a.pool.state_dir);
+                add(pair + " have different users but the same state directory " + a.pool.state_dir);
         }
     return errors;
+}
+
+std::vector<std::string> check_hosting(const Config& cfg, const HostFacts& facts) {
+    std::vector<std::string> out;
+    for (auto& e : hosting_errors(cfg, facts)) out.push_back(std::move(e.message));
+    return out;
+}
+
+std::vector<std::string> isolate_hosting(Config& cfg, const HostFacts& facts, const Config* running) {
+    const std::string main_file = cfg.config_path.string();
+    std::map<std::string, std::string> before;  // the files the loader set aside, with their errors
+    for (const auto& h : cfg.held_back) before[h.file] = h.error;
+    // A rule only the main file's sites break, or the server's own account: the whole host's.
+    auto host_wide = [&](const Config& c, const HostingError& e) {
+        return std::all_of(e.sites.begin(), e.sites.end(), [&](std::size_t i) { return c.sites[i].source.empty() || c.sites[i].source == main_file; });
+    };
+    set_aside_until_clean(cfg, running, [&](const Config& c) -> std::optional<SiteConflict> {
+        for (auto& e : hosting_errors(c, facts)) {
+            if (host_wide(c, e)) continue;
+            // A pair with one of the main file's sites: the other one's file yields.
+            std::vector<std::size_t> in_files;
+            for (const std::size_t i : e.sites)
+                if (!c.sites[i].source.empty() && c.sites[i].source != main_file) in_files.push_back(i);
+            if (e.sites.size() > 1 && in_files.size() == 1) return SiteConflict{in_files[0], SiteConflict::npos, std::move(e.message)};
+            return SiteConflict{e.sites[0], e.sites.size() > 1 ? e.sites[1] : SiteConflict::npos, std::move(e.message)};
+        }
+        return std::nullopt;
+    });
+    for (auto& h : cfg.held_back)  // what this step set aside, so health gives the ownership fix
+        if (auto b = before.find(h.file); b == before.end() || b->second != h.error) h.hosting = true;
+    std::vector<std::string> out;
+    for (auto& e : hosting_errors(cfg, facts))
+        if (host_wide(cfg, e)) out.push_back(std::move(e.message));
+    if (cfg.sites.empty()) {
+        std::string why;
+        for (const auto& h : cfg.held_back) why += "\n  " + h.file + ": " + h.error;
+        out.push_back(main_file + ": no site could be loaded; every site file was set aside:" + why);
+    }
+    return out;
 }
 
 int write_pools(const Config& cfg, const fs::path& out_dir, bool dry_run, std::ostream& out) {
@@ -477,8 +526,14 @@ int write_pools(const Config& cfg, const fs::path& out_dir, bool dry_run, std::o
         }
     }
 
-    // Files we generated for users that are no longer configured.
+    // Files we generated for users that are no longer configured. While a site file is set aside
+    // (design section 26) its sites are not in `cfg`, whether a running version of them serves or
+    // not, so no pool file is taken for stale: removing one would stop the PHP of a site that keeps
+    // its last good version.
+    if (!cfg.held_back.empty())
+        out << "kept every other pool: " << cfg.held_back.size() << " site file(s) set aside, their pools stay until they load\n";
     for (const auto& entry : fs::directory_iterator(out_dir, ec)) {
+        if (!cfg.held_back.empty()) break;
         const std::string name = entry.path().filename().string();
         if (!name.starts_with("agensio-") || !name.ends_with(".conf")) continue;
         bool wanted = false;

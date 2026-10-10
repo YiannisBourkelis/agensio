@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <ostream>
@@ -436,6 +437,7 @@ struct Config {
     struct HeldBack {
         std::string file, error;
         bool carried = false;
+        bool hosting = false;  // set aside by a hosting rule (services/pools.hpp isolate_hosting)
     };
     std::vector<HeldBack> held_back;
     // A digest of each loaded file's text: a reload tells a file it already runs unchanged from
@@ -590,6 +592,23 @@ void explain_config(const Config& cfg, std::ostream& out);
 // configuration has, and in a conflict a file the running configuration loaded unchanged keeps
 // its place (docs/design-site-operations.md 26).
 Config load_config(const std::filesystem::path& path, const Config* running = nullptr);
+
+// A problem the sites of a configuration have (docs/design-site-operations.md 26): between two
+// sites, the earlier first, or of one site alone (`second` = npos).
+struct SiteConflict {
+    std::size_t first = 0, second = npos;  // indexes into Config::sites
+    std::string message;
+    static constexpr std::size_t npos = static_cast<std::size_t>(-1);
+};
+// Sets site files aside until `find` reports no problem: a problem of one site sets its file
+// aside, one between two sites the file that yields (the main file never; then a file the
+// running configuration serves unchanged or carried, then one served but edited, then a new one;
+// at a tie the later in load order). A served file set aside keeps its running version once:
+// a carried version with a problem of its own is dropped, which ends the loop. A problem of the
+// main file alone throws, as load_config does. Used by load_config for the conflicts between
+// files and by isolate_hosting (services/pools.hpp) for the hosting rules.
+void set_aside_until_clean(Config& cfg, const Config* running,
+                           const std::function<std::optional<SiteConflict>(const Config&)>& find);
 // What the next load would say about a [[site.auth]] users file: "" when it loads, else the
 // loader's own refusal (missing, a symlink, another owner than the main configuration's,
 // writable by group or others, readable by others, over 1 MB, a line it cannot read). Health

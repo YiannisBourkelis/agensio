@@ -1663,6 +1663,15 @@ static void test_pools() {
     CHECK(write_pools(cfg, dir / "pool.d", false, log) == 0);
     write("b.toml", server + shop + "\n");
     Config one = load_config(dir / "b.toml");
+    // While a site file is set aside (design section 26) no pool is taken for stale: its sites are
+    // not in the configuration, and a running version of them may still serve through its pool.
+    {
+        Config held = one;
+        held.held_back.push_back({(dir / "sites.d" / "blog.toml").string(), "unknown key 'refsue'", true});
+        std::ostringstream kept;
+        CHECK(write_pools(held, dir / "pool.d", false, kept) != 1 && fs::exists(dir / "pool.d" / "agensio-web2.conf") &&
+              kept.str().find("kept every other pool: 1 site file(s) set aside") != std::string::npos);
+    }
     CHECK(write_pools(one, dir / "pool.d", false, log) == 3 && !fs::exists(dir / "pool.d" / "agensio-web2.conf") &&
           fs::exists(dir / "pool.d" / "agensio-web1.conf"));
     write("pool.d/agensio-web1.conf", "[agensio-web1]\nuser = someone\n");
@@ -5449,6 +5458,122 @@ static void test_unknown_keys() {
     fs::remove_all(dir);
 }
 
+// The hosting rules the way site files load (design section 26, step C2), on a described machine:
+// a site that breaks one is set aside with its file and the others load; on reload a served site
+// keeps its running version only when that version passes the rules now; two users sharing a root
+// set the newcomer aside; the server's own account and the main file's sites refuse it all.
+static void test_hosting_isolation() {
+    namespace fs = std::filesystem;
+    constexpr auto npos = std::string::npos;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-hostiso-" + std::to_string(::getpid()));
+    fs::remove_all(dir);
+    for (const char* d : {"sites.d", "a/sub", "b", "b2", "m"}) fs::create_directories(dir / d);
+    auto write = [&](const std::string& name, const std::string& text) { std::ofstream(dir / name) << text; };
+    const std::string main_head = "include = [\"sites.d/*.toml\"]\n[server]\nworkers = 1\ngroup = \"agensio\"\n";
+    write("agensio.toml", main_head);
+    auto site = [&](const char* name, const char* port, const char* root, const char* user) {
+        return std::string("[[site]]\nserver_name = [\"") + name + "\"]\nlisten = [\"127.0.0.1:" + port + "\"]\nroot = \"" + (dir / root).string() +
+               "\"\nuser = \"" + user + "\"\naccess_log = \"" + (dir / "logs" / name).string() + ".log\"\n";  // users never share a log
+    };
+    write("sites.d/a.toml", site("a.test", "18721", "a", "web1"));
+    write("sites.d/b.toml", site("b.test", "18722", "b", "web2"));
+    std::map<std::string, FileFacts> files;
+    bool agensio_group = true;
+    HostFacts facts;
+    facts.user = [](const std::string& n, unsigned& uid, unsigned& gid) {
+        if (n == "web1") { uid = 1001; gid = 1001; return true; }
+        if (n == "web2") { uid = 1002; gid = 1002; return true; }
+        return false;
+    };
+    facts.group = [&](const std::string& n, unsigned& gid) {
+        if (n == "agensio" && agensio_group) { gid = 33; return true; }
+        return false;
+    };
+    facts.stat = [&](const std::string& path, FileFacts& out) {
+        auto it = files.find(path);
+        if (it == files.end()) return false;
+        out = it->second;
+        return true;
+    };
+    const std::string ra = fs::canonical(dir / "a").string(), rb = fs::canonical(dir / "b").string(), rb2 = fs::canonical(dir / "b2").string();
+    files[ra] = FileFacts{true, 1001, 1001, 0755};
+    files[rb] = FileFacts{true, 1002, 1002, 0755};
+    files[rb2] = FileFacts{true, 1002, 1002, 0757};
+    auto file = [&](const char* name) { return (dir / "sites.d" / name).string(); };
+    auto find = [](const Config& c, const char* name) -> const SiteConfig* {
+        for (const auto& x : c.sites)
+            if (x.server_names.front() == name) return &x;
+        return nullptr;
+    };
+    auto load = [&](const Config* running, std::vector<std::string>& host) {
+        Config c = load_config(dir / "agensio.toml", running);
+        host = isolate_hosting(c, facts, running);
+        return c;
+    };
+    std::vector<std::string> host;
+    // A clean machine: both load.
+    const Config running = load(nullptr, host);
+    CHECK(host.empty() && running.sites.size() == 2 && running.held_back.empty());
+    // At start, b's root writable by others: b set aside with the rule, a loads.
+    files[rb].mode = 0757;
+    {
+        const Config c = load(nullptr, host);
+        const Config::HeldBack* h = c.held(file("b.toml"));
+        CHECK(host.empty() && find(c, "a.test") && !find(c, "b.test") && h && !h->carried && h->error.find("writable by other users") != npos);
+    }
+    // On reload, the same: b's file unchanged, its running version breaks the rule too, so it is
+    // not kept (the site goes down), and the message says so.
+    {
+        const Config c = load(&running, host);
+        const Config::HeldBack* h = c.held(file("b.toml"));
+        CHECK(host.empty() && find(c, "a.test") && !find(c, "b.test") && h && !h->carried && h->error.find("the version loaded before breaks it too") != npos);
+    }
+    // An edit pointing b at a root others can write into, the old root fine: the running version
+    // passes, so it keeps serving.
+    files[rb].mode = 0755;
+    write("sites.d/b.toml", site("b.test", "18722", "b2", "web2"));
+    {
+        const Config c = load(&running, host);
+        const Config::HeldBack* h = c.held(file("b.toml"));
+        CHECK(host.empty() && find(c, "b.test") && find(c, "b.test")->carried && find(c, "b.test")->root == rb && h && h->carried);
+    }
+    write("sites.d/b.toml", site("b.test", "18722", "b", "web2"));
+    // Two users with nested roots (c's own, inside a's): the newcomer yields though it loads first,
+    // the served one keeps its place.
+    files[fs::canonical(dir / "a" / "sub").string()] = FileFacts{true, 1002, 1002, 0755};
+    write("sites.d/0c.toml", site("c.test", "18723", "a/sub", "web2"));
+    {
+        const Config c = load(&running, host);
+        const Config::HeldBack* h = c.held(file("0c.toml"));
+        CHECK(host.empty() && find(c, "a.test") && !find(c, "c.test") && h && h->error.find("nested or equal roots") != npos &&
+              h->error.find("a.toml keeps its place") != npos);
+    }
+    fs::remove(dir / "sites.d/0c.toml");
+    // The main file's site breaking a rule refuses everything, as before; so does the server's
+    // own group missing.
+    write("agensio.toml", main_head + site("m.test", "18724", "m", "web1"));
+    files[fs::canonical(dir / "m").string()] = FileFacts{true, 1001, 1001, 0757};
+    {
+        const Config c = load(&running, host);
+        CHECK(host.size() == 1 && host[0].find("site m.test: root") != npos && c.held_back.empty() && find(c, "m.test"));
+    }
+    write("agensio.toml", main_head);
+    agensio_group = false;
+    {
+        load(&running, host);
+        CHECK(host.size() == 1 && host[0].find("server.group: group 'agensio' does not exist") != npos);
+    }
+    agensio_group = true;
+    // Every site set aside: nothing to serve, which refuses it too.
+    files[ra].mode = 0757;
+    files[rb].mode = 0757;
+    {
+        const Config c = load(nullptr, host);
+        CHECK(c.sites.empty() && !host.empty() && host.back().find("no site could be loaded") != npos);
+    }
+    fs::remove_all(dir);
+}
+
 // One broken site never stops the others (design section 26): an included file that does not
 // load is set aside whole, a reload keeps a served file's last good version, a conflict between
 // files sets one aside (the served one keeps its place), the main file stays all or nothing.
@@ -8016,6 +8141,7 @@ int main() {
 #endif
     test_unknown_keys();
     test_site_isolation();
+    test_hosting_isolation();
     test_config_reference();
     test_config_reference_defaults();
     test_forwarded_lines();

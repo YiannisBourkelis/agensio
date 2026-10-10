@@ -469,6 +469,10 @@ std::vector<std::string> validation_errors(ControlBackend& backend) {
     const json::Value v = backend.validate();
     for (const auto& e : v["errors"].items())
         if (e.is_string()) out.push_back(e.str());
+    // A site file the next load would set aside counts as refused too (design section 26): a
+    // credential file left readable by others sets its site aside instead of failing the load.
+    for (const auto& h : v["held_back"].items())
+        if (h["error"].is_string()) out.push_back(h["file"].str() + ": " + h["error"].str());
     return out;
 }
 

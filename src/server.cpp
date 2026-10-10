@@ -1528,6 +1528,14 @@ bool Server::reload(std::string& error, std::string_view must_load) {
     Config fresh;
     try {
         fresh = load_config(cfg_.config_path, &gen_->cfg);  // a file set aside keeps its running version
+        // The hosting rules the same way (design section 26, C2): a site that breaks one is set
+        // aside, kept in its running version only when that version passes them now.
+        const auto hosting = isolate_hosting(fresh, system_facts(), &gen_->cfg);
+        if (!hosting.empty()) {
+            std::string all;
+            for (const auto& e : hosting) all += (all.empty() ? "" : "; ") + e;
+            return refuse(all);
+        }
     } catch (const std::exception& e) {
         return refuse(e.what());
     }
@@ -1539,12 +1547,6 @@ bool Server::reload(std::string& error, std::string_view must_load) {
     for (const auto& h : fresh.held_back)
         error_log_.error(h.file + " set aside: " + h.error +
                          (h.carried ? " (the version loaded before keeps serving its sites)" : " (its sites are not served)"));
-    const auto hosting = check_hosting(fresh, system_facts());
-    if (!hosting.empty()) {
-        std::string all;
-        for (const auto& e : hosting) all += (all.empty() ? "" : "; ") + e;
-        return refuse(all);
-    }
     // Restart-only settings stay what they were; say which, when the file changed them
     // (control::restart_needed, the same list validate and health report).
     if (const auto kept = control::restart_needed(fresh, cfg_); !kept.empty()) {
