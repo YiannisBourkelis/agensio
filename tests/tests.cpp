@@ -5603,6 +5603,60 @@ static void test_tls_read() {
           problems[0].message.find("never served until a restart") != npos);
 }
 
+// A restart decides what the last reload decided (the alpha.63 report, finding 1): the record of
+// the site files served ranks a conflict at a start as the running configuration does on a reload;
+// without a record, load order decides as before.
+static void test_served_record() {
+    namespace fs = std::filesystem;
+    constexpr auto npos = std::string::npos;
+    CHECK(file_digest("") == static_cast<std::size_t>(14695981039346656037ull) && file_digest("a") == static_cast<std::size_t>(0xaf63dc4c8601ec8cull));
+    const fs::path dir = fs::temp_directory_path() / ("agensio-record-" + std::to_string(::getpid()));
+    fs::remove_all(dir);
+    fs::create_directories(dir / "sites.d");
+    fs::create_directories(dir / "www");
+    fs::create_directories(dir / "state" / ".server");
+    auto write = [&](const std::string& name, const std::string& text) { std::ofstream(dir / name) << text; };
+    write("agensio.toml", "include = [\"sites.d/*.toml\"]\n[server]\nworkers = 1\nstate_dir = \"" + (dir / "state").string() + "\"\n");
+    auto site = [](const char* name, const char* port, const char* extra = "") {
+        return std::string("[[site]]\nserver_name = [\"") + name + "\"]\nlisten = [\"127.0.0.1:" + port + "\"]\nroot = \"../www\"\n" + extra;
+    };
+    auto file = [&](const char* name) { return (dir / "sites.d" / name).string(); };
+    auto from = [](const Config& c, const char* name) -> std::string {
+        for (const auto& x : c.sites)
+            if (x.server_names.front() == name) return fs::path(x.source).filename().string();
+        return "none";
+    };
+    write("sites.d/a.toml", site("a.test", "18731"));
+    write("sites.d/b.toml", site("b.test", "18732"));
+    {
+        const Config served = load_config(dir / "agensio.toml", nullptr, true);
+        CHECK(!served.served_record_read);  // the first start: no record yet
+        std::string error;
+        CHECK(write_served_record(served, error));
+    }
+    // T4: an earlier newcomer claiming a served name; T3: a broken newcomer claiming one.
+    write("sites.d/0dup.toml", site("a.test", "18731"));
+    write("sites.d/0bad.toml", site("b.test", "18732", "refsue = 1\n"));
+    {
+        const Config c = load_config(dir / "agensio.toml", nullptr, true);
+        CHECK(c.served_record_read && from(c, "a.test") == "a.toml" && c.held(file("0dup.toml")) && from(c, "b.test") == "b.toml" &&
+              c.held(file("0bad.toml")) && !c.held(file("b.toml")));
+        const Config order = load_config(dir / "agensio.toml");  // without the record: load order, as before
+        CHECK(from(order, "a.test") == "0dup.toml" && from(order, "b.test") == "none");
+    }
+    // A served file edited since still outranks a newcomer.
+    write("sites.d/a.toml", site("a.test", "18731", "index = [\"start.html\"]\n"));
+    CHECK(from(load_config(dir / "agensio.toml", nullptr, true), "a.test") == "a.toml");
+    // A served file broken since keeps a claim stronger than an earlier newcomer's name.
+    write("sites.d/a.toml", site("a.test", "18731", "refsue = 1\n"));
+    {
+        const Config c = load_config(dir / "agensio.toml", nullptr, true);
+        const Config::HeldBack* d = c.held(file("0dup.toml"));
+        CHECK(from(c, "a.test") == "none" && c.held(file("a.toml")) && d && d->error.find("claimed by a.toml") != npos);
+    }
+    fs::remove_all(dir);
+}
+
 // The hosting rules the way site files load (design section 26, step C2), on a described machine:
 // a site that breaks one is set aside with its file and the others load; on reload a served site
 // keeps its running version only when that version passes the rules now; two users sharing a root
@@ -8331,6 +8385,7 @@ int main() {
 #endif
     test_unknown_keys();
     test_site_isolation();
+    test_served_record();
     test_hosting_isolation();
     test_tls_read();
     test_served_certificates();

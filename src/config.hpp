@@ -258,6 +258,9 @@ struct SiteConfig {
     // reload carried over because that file was set aside (docs/design-site-operations.md 26).
     std::string source;
     bool carried = false;
+    // The digest (file_digest) of the text the site was parsed from: a carried site keeps its
+    // own, so the record of the files served names the version that is served.
+    std::size_t source_digest = 0;
     // The paths a login form or an authenticating API is posted to (`login_paths`,
     // 2026-10-02, docs/configuration.md 18), on top of the preset's own
     // (preset_login_paths): what the rendered fail2ban jail counts attempts on. Never read
@@ -443,6 +446,11 @@ struct Config {
     // A digest of each loaded file's text: a reload tells a file it already runs unchanged from
     // a newcomer when two of them conflict (the running one keeps its place).
     std::map<std::string, std::size_t> file_digests;
+    // At start (no running configuration): the site files the server served at its last start or
+    // reload, with their digests, from the record (served_record): the ranking of conflicts uses
+    // them as a reload uses the running configuration (the alpha.63 report, finding 1).
+    std::map<std::string, std::size_t> served_before;
+    bool served_record_read = false;  // the record existed and was read
     const HeldBack* held(std::string_view file) const noexcept {
         for (const auto& h : held_back)
             if (h.file == file) return &h;
@@ -591,7 +599,17 @@ void explain_config(const Config& cfg, std::ostream& out);
 // loads. With `running` (a reload), a file set aside keeps the version of its sites the running
 // configuration has, and in a conflict a file the running configuration loaded unchanged keeps
 // its place (docs/design-site-operations.md 26).
-Config load_config(const std::filesystem::path& path, const Config* running = nullptr);
+// `use_record`: at start and -t, without `running`, read the record of the site files served
+// (served_record) so a conflict between files is decided as the last reload decided it.
+Config load_config(const std::filesystem::path& path, const Config* running = nullptr, bool use_record = false);
+
+// A stable digest of a file's text (FNV-1a, 64 bits): the same across builds and library versions,
+// as the record outlives the binary that wrote it.
+std::size_t file_digest(std::string_view text) noexcept;
+// <state_dir>/.server/served: one line per site file whose sites are served, "<digest> <path>".
+std::filesystem::path served_record(const Config& cfg);
+// Writes it for `cfg` (atomically: a temporary file renamed); false and why when it cannot.
+bool write_served_record(const Config& cfg, std::string& error);
 
 // A problem the sites of a configuration have (docs/design-site-operations.md 26): between two
 // sites, the earlier first, or of one site alone (`second` = npos).

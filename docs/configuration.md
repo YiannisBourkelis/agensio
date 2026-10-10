@@ -1502,14 +1502,19 @@ What sets a file aside:
 - a conflict with another file: a name both claim on one address, two catch-all sites on
   one address, a TLS and a plain site on one address, two sites of one user that size its
   php-fpm pool differently. One of the two files yields, the rest of it with it: the main
-  file never yields; between site files, the one the running server serves keeps its place
-  (unchanged before edited, edited before new), and at a tie, at start, the later file in
-  load order (alphabetical within a pattern) yields. A conflict inside the main file fails
-  the load;
+  file never yields; between site files, the one the server serves keeps its place (unchanged
+  before edited, edited before new), and at a tie the later file in load order (alphabetical
+  within a pattern) yields. A conflict inside the main file fails the load. At a start, "the
+  one the server serves" is the record the server keeps of its site files, `<state_dir>/.server/served`,
+  rewritten after every start and reload, so a restart decides what the last reload decided: a
+  file added while the server runs never takes a name at the next boot that the reload kept from
+  it. Without the record (the first start, a lost state directory) load order decides, and the
+  error log says so. Before 0.1.0-alpha.64 a restart always went by load order, so a file that
+  sorted earlier took the name at the next boot;
 - a name a file set aside for its own error claims: its names stay its own, so another file
   does not take one over without the broken file's access rules, passwords and root additions.
   A file claiming one on the same address yields with it when it would have yielded to the file
-  loaded (not served by the running server, and later in load order), and the name answers
+  loaded (it ranks lower, the record counting at a start, or as low and later in load order), and the name answers
   `421` there until the broken file loads; a site the server serves keeps its name, so a new
   broken file never takes one down. The names come from the file's `[[site]]` tables, or, when
   it is not TOML at all, from its `server_name`, `listen` and `default` lines; a site whose

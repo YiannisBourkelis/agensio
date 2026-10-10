@@ -257,7 +257,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   conflict (`first_site_conflict`: a name twice on one address, two catch-alls, protocols, TLS
   or plain, pools; the served file keeps its place) is set aside (`Config::held_back`), and on
   reload a served file keeps its last good version (`SiteConfig::source`, `carried`); `-t`
-  warns, `-t --strict` fails, health `site_file_held_back`; the control plane passes its own file
+  warns, `-t --strict` fails, health `site_file_held_back`; a start and `-t` rank conflicts by the
+  record of the files served (`<state_dir>/.server/served`, `write_served_record`, `file_rank`), so a
+  restart decides as the last reload did (alpha.64); the control plane passes its own file
   to `reload_now` and undoes a change it would set aside; `tests/isolation.sh`. The hosting rules
   the same way (C2, `isolate_hosting` in `services/pools.*` over `set_aside_until_clean`): a site
   breaking one is set aside, kept in its running version only when that version passes them now

@@ -455,7 +455,8 @@ sites, and everything else loads:
   opened to others while it serves takes that site down until it is fixed (health
   `hosting_rule`, with the `chown` or `chmod` to run);
 - when two files claim one name (or both a catch-all) on one address, the one already serving
-  keeps it and the other is set aside; at start the later file in alphabetical order yields;
+  keeps it and the other is set aside, at a restart too (the server keeps a record of the files
+  it serves); between files neither served, the later in alphabetical order yields;
 - a name stays with its file while the file is set aside: a duplicate that yielded to it does
   not take the name over at the next start without its rules, the name answers `421` until the
   file loads.

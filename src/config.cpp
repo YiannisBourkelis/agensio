@@ -1762,7 +1762,11 @@ void parse_sites_from(const toml::table& tbl, const fs::path& base_dir, Config& 
         std::size_t first;
         const std::string& source;
         ~Stamp() {
-            for (std::size_t i = first; i < cfg.sites.size(); ++i) cfg.sites[i].source = source;
+            const auto d = cfg.file_digests.find(source);
+            for (std::size_t i = first; i < cfg.sites.size(); ++i) {
+                cfg.sites[i].source = source;
+                cfg.sites[i].source_digest = d == cfg.file_digests.end() ? 0 : d->second;
+            }
         }
     } stamp{cfg, first, source};
     if (auto arr = tbl["site"].as_array()) {
@@ -2684,20 +2688,31 @@ std::vector<SiteClaim> claims_of_text(std::string_view text, bool& names_unread)
 
 }  // namespace
 
+// How firmly a file holds its names in a conflict (design section 26): served and unchanged (or
+// carried) 2, served but edited 1, new 0. Served means by the running configuration on a reload,
+// and at a start by the record of the last start or reload (Config::served_before, the alpha.63
+// report's finding 1: a restart decided by load order alone could give a name to another file).
+// Unchanged means the text the served sites came from (SiteConfig::source_digest).
+static int file_rank(const Config& cfg, const Config* running, const std::string& file) {
+    const auto now = cfg.file_digests.find(file);
+    if (running) {
+        const auto r = std::find_if(running->sites.begin(), running->sites.end(), [&](const SiteConfig& x) { return x.source == file; });
+        if (r == running->sites.end()) return 0;
+        if (const auto* h = cfg.held(file); h && h->carried) return 2;
+        return now != cfg.file_digests.end() && now->second == r->source_digest ? 2 : 1;
+    }
+    const auto before = cfg.served_before.find(file);
+    if (before == cfg.served_before.end()) return 0;
+    return now != cfg.file_digests.end() && now->second == before->second ? 2 : 1;
+}
+
 void set_aside_until_clean(Config& cfg, const Config* running,
                            const std::function<std::optional<SiteConflict>(const Config&)>& find) {
     const std::string main_file = cfg.config_path.string();
-    auto served = [&](const std::string& file) {
+    auto served = [&](const std::string& file) {  // what can be carried: the running configuration's alone
         return running && std::any_of(running->sites.begin(), running->sites.end(), [&](const SiteConfig& r) { return r.source == file; });
     };
-    // Served and unchanged (or carried) 2, served but edited 1, new 0.
-    auto rank = [&](const std::string& file) {
-        if (!served(file)) return 0;
-        if (const auto* h = cfg.held(file); h && h->carried) return 2;
-        const auto now = cfg.file_digests.find(file);
-        const auto then = running->file_digests.find(file);
-        return now != cfg.file_digests.end() && then != running->file_digests.end() && now->second == then->second ? 2 : 1;
-    };
+    auto rank = [&](const std::string& file) { return file_rank(cfg, running, file); };
     std::set<std::string> carried_once;
     for (const auto& h : cfg.held_back)
         if (h.carried) carried_once.insert(h.file);
@@ -2737,7 +2752,46 @@ void set_aside_until_clean(Config& cfg, const Config* running,
     }
 }
 
-Config load_config(const fs::path& path, const Config* running) {
+std::size_t file_digest(std::string_view text) noexcept {
+    std::uint64_t h = 14695981039346656037ull;
+    for (const unsigned char c : text) {
+        h ^= c;
+        h *= 1099511628211ull;
+    }
+    return static_cast<std::size_t>(h);
+}
+
+fs::path served_record(const Config& cfg) { return fs::path(cfg.state_dir) / ".server" / "served"; }  // a dot: no account name, so never a site account's <state_dir>/<user>
+
+bool write_served_record(const Config& cfg, std::string& error) {
+    const fs::path path = served_record(cfg);
+    std::map<std::string, std::size_t> files;
+    const std::string main_file = cfg.config_path.string();
+    for (const auto& s : cfg.sites)
+        if (!s.source.empty() && s.source != main_file) files.emplace(s.source, s.source_digest);
+    const fs::path tmp = path.string() + ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::trunc);
+        if (!out) {
+            error = "cannot write " + tmp.string();
+            return false;
+        }
+        for (const auto& [file, digest] : files) out << digest << ' ' << file << '\n';
+        if (!out.flush()) {
+            error = "cannot write " + tmp.string();
+            return false;
+        }
+    }
+    std::error_code ec;
+    fs::rename(tmp, path, ec);
+    if (ec) {
+        error = "cannot replace " + path.string() + ": " + ec.message();
+        return false;
+    }
+    return true;
+}
+
+Config load_config(const fs::path& path, const Config* running, bool use_record) {
     Config cfg;
     std::error_code ec;
     cfg.config_path = fs::absolute(path, ec);
@@ -2916,7 +2970,7 @@ Config load_config(const fs::path& path, const Config* running) {
             {
                 std::ifstream in(file, std::ios::binary);
                 text.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-                cfg.file_digests[file.string()] = std::hash<std::string>{}(text);
+                cfg.file_digests[file.string()] = file_digest(text);
             }
             toml::table sub;
             try {
@@ -3002,23 +3056,39 @@ Config load_config(const fs::path& path, const Config* running) {
                     cfg.sites.back().carried = true;
                     h.carried = true;
                 }
+    // At a start, the record of the site files served at the last start or reload ranks the
+    // conflicts below as the running configuration does on a reload (the alpha.63 report,
+    // finding 1). Without it (the first start, a lost state directory) load order decides.
+    if (use_record && !running) {
+        std::ifstream in(served_record(cfg));
+        std::string line;
+        cfg.served_record_read = static_cast<bool>(in);
+        while (in && std::getline(in, line)) {
+            const std::size_t sp = line.find(' ');
+            if (sp == std::string::npos || sp == 0) continue;
+            std::size_t digest = 0;
+            if (std::from_chars(line.data(), line.data() + sp, digest).ec != std::errc()) continue;
+            cfg.served_before[line.substr(sp + 1)] = digest;
+        }
+    }
     // A file set aside for its own error keeps a claim on its names (the alpha.62 report, finding
     // 1: at start a duplicate took a broken file's name over, without its access rule). A file
     // claiming one of them on one of its addresses yields with it when it would have yielded to
-    // the file loaded: not served by the running configuration and later in load order. A
-    // carried version takes part in the conflicts itself; the main file never yields.
+    // the file loaded: it ranks lower (file_rank: the record makes a file served before outrank a
+    // newcomer at a start too), or as low and later in load order. A carried version takes part
+    // in the conflicts itself; the main file never yields.
     {
         const std::string main_file = cfg.config_path.string();
-        auto served = [&](const std::string& file) {
-            return running && std::any_of(running->sites.begin(), running->sites.end(), [&](const SiteConfig& r) { return r.source == file; });
-        };
         std::map<std::string, std::string> yields;  // file -> why
         for (const auto& [file, list] : claims) {
             const Config::HeldBack* h = cfg.held(file);
             if (!h || h->carried) continue;
             const std::string by = fs::path(file).filename().string();
+            const int held_rank = file_rank(cfg, running, file);
             for (const auto& site : cfg.sites) {
-                if (site.source == main_file || site.carried || yields.count(site.source) || served(site.source) || order[site.source] < order[file]) continue;
+                if (site.source == main_file || site.carried || yields.count(site.source)) continue;
+                const int rank = file_rank(cfg, running, site.source);
+                if (rank > held_rank || (rank == held_rank && order[site.source] < order[file])) continue;
                 const bool site_catch_all = site.is_default || std::find(site.server_names.begin(), site.server_names.end(), "*") != site.server_names.end();
                 for (const auto& c : list) {
                     std::string why;

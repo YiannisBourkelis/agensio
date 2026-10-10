@@ -1697,7 +1697,7 @@ void helper_loop(int fd, const Config& cfg) {
                         // A site that breaks a hosting rule is left out (design section 26, C2) and
                         // write_pools keeps every pool while a file is set aside; the server's own
                         // account and the main file's sites still refuse it.
-                        Config fresh = load_config(cfg.config_path);
+                        Config fresh = load_config(cfg.config_path, nullptr, true);  // as the server would start
                         const auto errors = isolate_hosting(fresh, system_facts(), nullptr);
                         if (!errors.empty()) {
                             reply.set("ok", false).set("error", "hosting rules: " + errors.front());

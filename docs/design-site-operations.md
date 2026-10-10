@@ -1651,6 +1651,21 @@ it would have yielded to the file loaded, i.e. not served and later in load orde
 broken file never takes a served name down. Only a file set aside for its own error leaves a
 claim; one that lost a conflict leaves none, and the conflict rules stay as they were.
 
+**The alpha.63 report's finding (2026-10-11): a restart decided by load order alone.** Decision 4
+said "at start, the files' load order decides", and a start has no running configuration to rank
+by, so a file added while the server ran and sorting earlier took a contested name at the next
+boot (a new `0dup.toml` over `a.toml`, without its access rule), and a broken newcomer sorting
+earlier took a served site down. Of the report's options, the record was chosen: the server
+writes `<state_dir>/.server/served` (the dot because no account name has one, so it is never a site
+account's `<state_dir>/<user>`; each site file with the digest of the text its served sites
+came from, `SiteConfig::source_digest`, so a carried file names the version served) after every
+start and reload, and a start and `-t` read it into `Config::served_before`, which `file_rank`
+uses where a reload uses the running configuration; nothing is carried at a start (there is no
+version in memory). A ctime tie-break was rejected (ctime is the last chmod or chown, not the
+file's age), and failing closed at start was not needed once the record exists; without one,
+load order still decides and the error log says so. The digest became FNV-1a, stable across
+builds, as the record outlives the binary.
+
 **Built, third step (C3, 2026-10-11, 0.1.0-alpha.64).** `Server::load_certificates` loads every
 certificate and key pair of a generation once, before `build_listeners`, into
 `Generation::certificates` (keyed by both paths); the listeners' contexts copy the certificate,

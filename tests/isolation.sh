@@ -154,6 +154,30 @@ kill $S2PID; wait $S2PID 2>/dev/null
 check "a broken file that is not TOML keeps its names too, read from its lines" "yes" \
   "$(grep -q 'z-dup.toml set aside.*a.test on 127.0.0.1:18311 is claimed by a.toml, which is set aside' "$S2/t2.out" && echo yes)"
 
+# A restart decides what the last reload decided (the alpha.63 report, finding 1): the server keeps
+# a record of the site files it serves (<state_dir>/.server/served), and at start a file listed there
+# keeps its names as on a reload. T4: a new 0dup.toml claiming a.test, set aside on reload, does not
+# take it over at the restart (a.toml's access rule still answers 403 from 127.0.0.2), and -t says
+# the same; T3: a new broken 0bad.toml claiming b.test does not take it down at the restart.
+S5=$T/restart; mkdir -p "$S5/sites.d" "$S5/logs" "$S5/state"
+printf 'include = ["sites.d/*.toml"]\n[server]\nworkers = 1\npid_file = "%s/agensio.pid"\nstate_dir = "%s/state"\n[log]\naccess = "off"\nerror = "%s/logs/error.log"\n' "$S5" "$S5" "$S5" > "$S5/agensio.toml"
+{ site a.test 18316 "$T/www/a"; printf '[[site.access]]\npath = "/"\nallow = ["127.0.0.1"]\n'; } > "$S5/sites.d/a.toml"
+site b.test 18317 "$T/www/b" > "$S5/sites.d/b.toml"
+s5_start() { "$BIN" -c "$S5/agensio.toml" > "$S5/server.out" 2>&1 & S5PID=$!; for _ in $(seq 1 50); do nc -z 127.0.0.1 18317 2>/dev/null && break; sleep 0.1; done; }
+s5_stop() { kill $S5PID 2>/dev/null; wait $S5PID 2>/dev/null; }
+from2() { curl -sS --max-time 3 -o /dev/null -w '%{http_code}' --interface 127.0.0.2 -H "Host: $1" "http://127.0.0.1:$2/" 2>/dev/null || echo "none"; }
+s5_start
+site a.test 18316 "$T/www/c" > "$S5/sites.d/0dup.toml"
+site b.test 18317 "$T/www/c" 'refsue = 1' > "$S5/sites.d/0bad.toml"
+kill -HUP $S5PID; sleep 0.6
+check "on reload: 0dup.toml yields to the served a.toml (403 from 127.0.0.2), the broken 0bad.toml does not take b.test down" "403 site b" \
+  "$(from2 a.test 18316) $(body b.test 18317)"
+"$BIN" -t -c "$S5/agensio.toml" > "$S5/t.out" 2>&1
+s5_stop; s5_start
+check "after a restart the same: a.toml keeps a.test with its access rule, b.toml keeps b.test; -t predicted it" "403 site b yes" \
+  "$(from2 a.test 18316) $(body b.test 18317) $(grep -q '0dup.toml set aside' "$S5/t.out" && ! grep -q 'a.toml set aside' "$S5/t.out" && echo yes)"
+s5_stop
+
 # The hosting rules (design section 26, step C2) for a site with an account (the one running this
 # test): a site whose root others can write into is set aside and the others serve; a site is served
 # only by a version that passes every rule now, so a served one whose root is opened to others goes

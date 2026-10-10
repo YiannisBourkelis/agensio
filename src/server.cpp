@@ -110,6 +110,9 @@ Server::Server(Config cfg)
     for (const auto& p : tls_read_problems(gen->cfg, system_facts())) error_log_.warn(p.message + "; fix: " + p.fix);
     for (const auto& h : gen->cfg.held_back)
         error_log_.error(h.file + " set aside, its sites are not served: " + h.error);
+    if (!gen->cfg.served_record_read)
+        error_log_.info("no record of the site files served before (" + served_record(gen->cfg).string() +
+                        "): a conflict between site files at this start was decided by load order");
     for (const auto& n : access_notices(gen->cfg))  // the notes at level info (alpha.61 report, finding 2)
         n.severity == "warning" ? error_log_.warn(n.text) : error_log_.info(n.text);
     warm_response_tables();
@@ -1293,11 +1296,13 @@ void Server::run() {
     open_control();
     open_h3();
     prepare_uploads();
+    prepare_served_record();
     write_pid_file();
     // The provisioning helper keeps root for the five operations site creation needs;
     // forked before the drop so that nothing else in this process is ever root again.
     if (cfg_.control.enabled && cfg_.control.provision) provisioner_.start(gen_->cfg, error_log_);
     drop_privileges();  // ports are bound and logs open: nothing else needs root
+    record_served();    // as the server's account, which every reload writes it as
     for (auto& w : workers_) w->gen = gen_;
     arm_trash_expiry();
     arm_certificate_watch();
@@ -1368,6 +1373,35 @@ void Server::run() {
 
 // The uploads directory: created by the server for itself (0700), so an archive put there
 // by `agensio ctl upload` is readable by nobody else until the install reads it.
+// The record of the site files served (the alpha.63 report, finding 1): its directory under
+// state_dir, created while root and given to the server's account, so every reload after the
+// privilege drop rewrites it.
+void Server::prepare_served_record() {
+#ifndef _WIN32
+    const std::filesystem::path dir = served_record(cfg_).parent_path();
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec) return;  // said once by record_served
+    if (::geteuid() == 0 && !cfg_.user.empty()) {
+        unsigned uid = 0, gid = 0;
+        if (system_facts().user(cfg_.user, uid, gid) && ::chown(dir.c_str(), uid, gid) != 0)
+            error_log_.warn("cannot chown " + dir.string() + ": " + std::strerror(errno));
+    }
+    ::chmod(dir.c_str(), 0700);
+#endif
+}
+
+// After a start or a reload: which site files the server serves, so the next start ranks a
+// conflict between files as this one did, not by load order alone.
+void Server::record_served() {
+    std::string error;
+    if (write_served_record(gen_->cfg, error)) return;
+    if (record_warned_) return;
+    record_warned_ = true;
+    error_log_.warn("the record of the site files served could not be written (" + error +
+                    "): at the next start a conflict between site files is decided by load order, not by what is served now");
+}
+
 void Server::prepare_uploads() {
     if (!cfg_.control.enabled) return;
 #ifndef _WIN32
@@ -1907,6 +1941,7 @@ bool Server::reload(std::string& error, std::string_view must_load) {
     std::size_t bound = 0, closed = 0;
     std::string err;
     if (!switch_to(gen, err, bound, closed, true)) return refuse(err);
+    record_served();
     error_log_.warn("reloaded " + cfg_.config_path.string() + ": " + std::to_string(gen->cfg.sites.size()) +
                     " site(s), " + std::to_string(gen->listeners.size()) + " listener(s), " +
                     std::to_string(bound) + " bound, " + std::to_string(closed) + " closed");

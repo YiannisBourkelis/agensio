@@ -861,7 +861,7 @@ int main(int argc, char** argv) {
     // Not for `agensio pools`: writing the pools is how a socket rule is fixed.
     std::vector<std::string> hosting_errors;
     try {
-        cfg = agensio::load_config(config_path);
+        cfg = agensio::load_config(config_path, nullptr, true);  // the record of the files served ranks conflicts as at the last reload
         if (!pools) hosting_errors = agensio::isolate_hosting(cfg, agensio::system_facts(), nullptr);
     } catch (const std::exception& e) {
         std::cerr << "configuration error: " << e.what() << "\n";

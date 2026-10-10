@@ -4,6 +4,19 @@
 
 From the alpha.63 report:
 
+- **A restart could give a name to another file than the running server served** (security).
+  On reload the file the server serves keeps a contested name; at start nothing was served yet,
+  so the later file in load order yielded: a file added while running that sorted earlier took
+  the name at the next boot (the report: a new `0dup.toml` served `a.test` without `a.toml`'s
+  access rule), and a new broken file sorting earlier took a served site down. The server now
+  keeps a record of the site files it serves, `<state_dir>/.server/served` (each file with a
+  digest of the text its sites came from), rewritten after every start and reload; a start and
+  `agensio -t` rank conflicts with it as a reload does with the running configuration. Without
+  the record load order decides, as before, and the error log says so. Shown first by
+  `tests/isolation.sh` (the report's two cases, a restart after the reload: `200` from the
+  duplicate and `b.test` down; now `403` and `b.test` served, and `-t` predicting it) and unit
+  checks.
+
 - **Health named one hosting problem twice after the reload that took its site down**: once as
   the running server's (with "the version loaded before breaks it too") and once as what the next
   reload would do, the same rule without that history. The second is now left out when one text

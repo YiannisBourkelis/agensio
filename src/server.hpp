@@ -175,6 +175,9 @@ private:
     std::vector<std::string> load_certificates(Generation& gen, const Generation* previous);
     control::TlsFacts tls_facts();  // the certificates as served and the ACME failures, for health (T2)
     bool switch_to(const std::shared_ptr<Generation>& gen, std::string& error, std::size_t& bound, std::size_t& closed, bool logs);
+    void prepare_served_record();  // <state_dir>/server, the server's account's (alpha.63 report, finding 1)
+    void record_served();          // after a start and a reload
+    bool record_warned_ = false;
     // The certificate refresh and its hourly watch (step T3).
     bool refresh_certificates(std::string& error, const std::vector<std::string>& only, std::vector<std::string>& report);
     void arm_certificate_watch();
