@@ -1668,5 +1668,9 @@ check this section's test list asked of `tests/acme.sh`: a renewal forced with `
 another site's file is broken serves the renewed certificate (C1's doing; before alpha.62 that
 reload was refused).
 
-**Next**: the certificate work (section 26's "Order"): health judging the served certificate,
-the hint for a key the server cannot read, the refresh and the hourly watch, `docs/tls.md`.
+**The certificate work followed** (section 26's "Order", 0.1.0-alpha.64): T1, a key the server's
+account cannot read named at `-t`, at start and in health (`tls_key_unreadable`) with root's
+lines; T2, health judging the certificate served from memory (`certificate_not_loaded`,
+`acme_renewal_overdue`, `acme_renewal_failed`); T3, the certificate refresh (no configuration file
+read) used by ACME, an hourly watch of the files and `cert-renew` on a site's own files; T4,
+`docs/tls.md` and the cookbook's certbot recipe.

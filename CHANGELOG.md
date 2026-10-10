@@ -2,7 +2,15 @@
 
 ## 0.1.0-alpha.64
 
-Certificates (the certificate work, steps T1 to T3):
+Certificates (the certificate work, steps T1 to T4):
+
+- **`docs/tls.md`, the administrator's guide to certificates.** Automatic certificates and your
+  own files side by side, what the server does from the first order to renewal and failure,
+  who must be able to read a key and the layouts that work, how a new certificate reaches the
+  clients without a reload, every health finding with what to do, and troubleshooting. The
+  cookbook gains [Certificates from certbot](docs/examples/basics.md#certificates-from-certbot):
+  a wildcard over DNS-01 with a deploy hook, certbot's directories and key opened to the
+  server's account, and an existing `--webroot` certbot renewing through agensio.
 
 - **A renewed certificate is loaded by itself, and nothing can hold it back.** Nothing watched the
   certificate files: a renewal from certbot or another client waited for a reload, and the ACME

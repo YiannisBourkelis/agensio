@@ -275,7 +275,7 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   loaded): the running configuration's certificates read again, no configuration file read; ACME
   uses it after an order, an hourly watch (`arm_certificate_watch`, one stat per file,
   `AGENSIO_CERT_WATCH_SECONDS` for the tests) for changed files, `cert-renew` for a site's own
-  files.
+  files. `docs/tls.md` is the administrator's guide (T4); keep it current with any change here.
 - **Request bodies** (A3): the HTTP/1 connection is the pull source behind
   `Request::body` (`StreamBody`: `async_read` with backpressure), decoding Content-Length
   or chunked (`http1/chunked.hpp`, fuzzed) from its receive buffer and socket.

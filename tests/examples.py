@@ -98,7 +98,7 @@ def recipes(path):
 
 
 # Paths a recipe names on a real host, moved under the recipe's scratch tree.
-HOST_PATH = re.compile(r'"(/(?:var/www|var/log|var/lib|etc/agensio|etc/ssl|srv|opt|home)(?:/[^"]*)?)"')
+HOST_PATH = re.compile(r'"(/(?:var/www|var/log|var/lib|etc/agensio|etc/ssl|etc/letsencrypt|srv|opt|home)(?:/[^"]*)?)"')
 DIR_KEYS = {"root", "alias", "sites_root", "state_dir", "pools", "pools_run", "storage"}
 CERT_KEYS = {"cert", "ca", "install_ca"}
 

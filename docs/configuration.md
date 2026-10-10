@@ -1578,6 +1578,9 @@ in the child. Not a fast path: a process per request is what CGI is.
 
 ## 14. TLS
 
+The administrator's guide to certificates, automatic and your own, renewal, what health says and
+troubleshooting, is [tls.md](tls.md); this section is the reference.
+
 ```toml
 [[site]]
 server_name = ["example.com"]
@@ -1669,8 +1672,9 @@ What happens:
    site above). Nothing else needs configuring: no location, no writable webroot.
 3. **Issue.** A fresh P-256 key is generated per certificate, a CSR covering all the
    names is finalized, the chain is downloaded and both files are written atomically.
-4. **Switch.** The server reloads itself (`reloaded ...` in the error log): new
-   connections get the new certificate, connections in flight finish undisturbed.
+4. **Switch.** The server loads it through the certificate refresh (`certificates refreshed:
+   site ...: loaded the certificate valid until ...` in the error log): new connections get the
+   new certificate, connections in flight finish undisturbed.
 5. **Renew.** Once an hour the certificates are checked and renewed when a third of
    their lifetime is left (day 60 of a 90-day certificate, day 4 of a 6-day one), so
    short-lived profiles work too. A failed order is logged with the CA's reason and

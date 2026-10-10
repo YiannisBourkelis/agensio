@@ -195,7 +195,99 @@ agensio ctl site-create --domain example.com --alias www.example.com --app stati
 **MCP:** `site_create` or `site_update` with `https` = `{"cert": "/etc/ssl/example.com/fullchain.pem", "key": "/etc/ssl/example.com/privkey.pem"}`.
 
 **Reference:** [TLS](../configuration.md#14-tls),
-[Which site answers a request](../configuration.md#1b-which-site-answers-a-request).
+[Which site answers a request](../configuration.md#1b-which-site-answers-a-request),
+[TLS certificates](../tls.md#3-your-own-certificate-files).
+
+## Certificates from certbot
+
+**When:** certbot already manages the host's certificates, or a site needs a wildcard
+certificate (`*.example.com`), which takes DNS-01: certbot does it with a plugin for your DNS
+provider, agensio's own client does not. For names that resolve here with port 80 open,
+`tls = "auto"` needs no certbot at all.
+
+```sh
+# A wildcard over DNS-01 (Cloudflare's plugin here; certbot has one for most DNS providers).
+certbot certonly --dns-cloudflare --dns-cloudflare-credentials /root/.secrets/cloudflare.ini \
+  -d example.com -d '*.example.com' --deploy-hook 'agensio ctl cert-renew example.com --yes --reason certbot'
+# certbot makes live/ and archive/ 0700 and the key 0600; the server's account reads them after the start.
+chmod 0755 /etc/letsencrypt/live /etc/letsencrypt/archive
+chgrp agensio /etc/letsencrypt/live/example.com/privkey.pem && chmod 640 /etc/letsencrypt/live/example.com/privkey.pem
+agensio -t -c /etc/agensio/agensio.toml   # names anything on the way still closed to it, with the line to run
+```
+
+```toml
+# /etc/agensio/sites.d/example.com.toml
+[[site]]
+server_name = ["example.com", "www.example.com"]
+listen = ["0.0.0.0:80"]
+redirect = "https"
+
+[[site]]
+server_name = ["example.com", "www.example.com"]
+listen = ["0.0.0.0:443"]
+root = "/var/www/example.com/web"
+tls = { cert = "/etc/letsencrypt/live/example.com/fullchain.pem", key = "/etc/letsencrypt/live/example.com/privkey.pem" }
+```
+
+```toml
+# /etc/agensio/sites.d/shop.example.com.toml: another site under the same wildcard
+[[site]]
+server_name = ["shop.example.com"]
+listen = ["0.0.0.0:80"]
+redirect = "https"
+
+[[site]]
+server_name = ["shop.example.com"]
+listen = ["0.0.0.0:443"]
+root = "/var/www/shop.example.com/web"
+tls = { cert = "/etc/letsencrypt/live/example.com/fullchain.pem", key = "/etc/letsencrypt/live/example.com/privkey.pem" }
+```
+
+**What it does.** certbot proves the names through DNS and writes the certificate under
+`/etc/letsencrypt/live/example.com/`, links to the current files in `archive/`. Both sites serve
+it; a site lists its names exactly (`server_name` takes no `*.` pattern), and the wildcard covers
+each of them. When certbot renews it points the links at new files, and agensio loads them by
+itself within the hour; the deploy hook, which certbot runs after each renewal and keeps for the
+next ones, makes it at once. One `cert-renew` loads the files for every site that names them.
+
+Easy to get wrong: the server starts as root and then runs as `agensio`, and every load after
+the start reads the files as `agensio`. With certbot's own modes it would serve the start's
+certificate until it expired; the two commands above open the directories (certbot's own
+documentation suggests `0755` for them) and give the key the server's group, which certbot keeps
+on every renewal. `agensio -t` and health (`tls_key_unreadable`) name whatever is still closed.
+
+An existing certbot that renews with `--webroot` works through agensio too: Let's Encrypt asks
+over port 80, the redirect sends it to https (it follows redirects to port 443 and does not check
+that certificate), and a location on the TLS site serves the file certbot wrote. agensio answers
+its own orders' tokens first, so this never disturbs a `tls = "auto"` site. For a certificate the
+site does not have yet, use DNS-01 or `tls = "auto"`: the https site must already serve.
+
+```toml
+# On each TLS site the certificate covers, for: certbot renew --webroot -w /var/lib/letsencrypt/webroot
+[[site.location]]
+path = "/.well-known/acme-challenge/"
+alias = "/var/lib/letsencrypt/webroot/.well-known/acme-challenge/"
+hidden_files = true            # the path starts with a dot segment
+```
+
+**Check it.**
+
+```sh
+agensio ctl cert-renew example.com --yes     # "loaded the certificate valid until ...", or "unchanged"
+certbot renew --dry-run                      # the renewal itself works
+agensio ctl site shop.example.com            # tls.served: the certificate in memory, same_as_disk true
+agensio ctl health                           # certificate_not_loaded or tls_key_unreadable if something waits
+```
+
+**On a managed site.** `site-create` with `--cert` and `--key` naming the files under
+`/etc/letsencrypt/live/`; the webroot location goes into the site's root additions file
+(`site-show` names it), since no field of `site-update` writes a location.
+
+**MCP:** `site_create` with `https` = `{"cert": "/etc/letsencrypt/live/example.com/fullchain.pem",
+"key": "/etc/letsencrypt/live/example.com/privkey.pem"}`; `cert_renew` loads renewed files at once;
+`health_check` for what waits.
+
+**Reference:** [TLS certificates](../tls.md#34-certbot), [TLS](../configuration.md#14-tls).
 
 ## One canonical host
 

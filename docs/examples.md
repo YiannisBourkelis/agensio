@@ -51,6 +51,7 @@ start them and the warning goes. What a key needs (a reload, a restart, root) is
 - [A static site](examples/basics.md#a-static-site): the smallest site; what `index` and hidden files do, and `/.well-known/` served anyway.
 - [HTTPS with a certificate agensio obtains itself](examples/basics.md#https-with-a-certificate-agensio-obtains-itself): `[server] acme`, `tls = "auto"`, and the port-80 redirect every other recipe assumes.
 - [HTTPS with certificate files you manage](examples/basics.md#https-with-certificate-files-you-manage): `tls = { cert, key }`, renewal by `agensio reload`, and a key the server's account can read.
+- [Certificates from certbot](examples/basics.md#certificates-from-certbot): a wildcard over DNS-01, the key the server's account must read, renewals loaded by themselves or by a deploy hook, an existing `--webroot` certbot.
 - [One canonical host](examples/basics.md#one-canonical-host): the bare name redirected to www in one hop, or the reverse.
 - [Several sites on one address, and the catch-all](examples/basics.md#several-sites-on-one-address-and-the-catch-all): sites matched by name, certificates by SNI, 421 for unknown names, and one catch-all.
 - [A mistake in one site's file](examples/basics.md#a-mistake-in-one-sites-file): one file set aside, the other sites served, its last good version kept on reload; `-t --strict`, health.
