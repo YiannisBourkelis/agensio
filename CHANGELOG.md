@@ -24,6 +24,11 @@
   release code is byte-identical). It checks what the server sends against RFC 9113 and 7541
   and that the connection ends with its client. 49 M runs on twenty processes found five
   server bugs, each fixed in an entry below.
+- **HTTP/2: `memcpy` from a null pointer when a connection began.** After ALPN the connection
+  is handed no bytes read yet, as an empty view whose pointer may be null, and the constructor
+  copied them with `memcpy`, which may not be given a null pointer even for nothing (undefined
+  behaviour; harmless with glibc, flagged by UBSan). The copy now runs only when there are
+  bytes. Shown first by `fuzz_h2_conn` (the input `preface-socket`).
 - **`agensio ctl logs --since` with a huge number, and a JSON access line with an absurd
   status, were undefined behaviour.** `since=99999999999999999999s` or `999999999999999w`
   overflowed a signed integer while the bound was computed, and a JSON line's `status` of 1e30

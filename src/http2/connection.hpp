@@ -77,7 +77,9 @@ public:
           decoder_(kHeaderTableSize),
           writer_(socket_, *this, worker.ctx, cfg) {
         worker_.connections.fetch_add(1, std::memory_order_relaxed);
-        if (initial.size() <= in_.size()) {
+        // After ALPN nothing was read yet, and an empty view may hold a null pointer, which
+        // memcpy may not be given even for no bytes (UBSan, fuzz_h2_conn 2026-10-12).
+        if (!initial.empty() && initial.size() <= in_.size()) {
             std::memcpy(in_.data(), initial.data(), initial.size());
             in_len_ = initial.size();
         }
