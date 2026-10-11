@@ -1,9 +1,12 @@
 # Security regression inputs
 
-Every file here is replayed by `agensio_tests` on every build through the request parser
-(`parser/`) or the path normaliser (`path/`) with the same invariants the fuzzers assert.
-Hand-written attack strings and the fuzzers' most interesting corpus entries live here.
+One directory per fuzz target (`tests/fuzz/fuzz_<name>.cpp`), named without the `fuzz_`
+prefix. `scripts/fuzz-all.sh` seeds each target with its directory; new inputs go to a scratch
+corpus, never here. `agensio_tests` replays `parser/`, `chunked/`, `fcgi/`, `path/` and `json/`
+on every build with the invariants the fuzzers assert. Hand-written attack strings, the seeds
+that show a target its input format (`refuse/`: patterns, an empty line, paths), and the
+fuzzers' most interesting corpus entries live here.
 
 Rule: any input that crashes, hangs, or violates an invariant in a fuzzer or in production
-is saved here first, then fixed. The test then fails until the fix lands and stays as a
-permanent regression check.
+is saved here first, then fixed, with a replay in `test_security_regressions` when its target
+has none yet. The test then fails until the fix lands and stays as a permanent regression check.

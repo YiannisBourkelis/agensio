@@ -1,0 +1,9 @@
+/a/**/b/
+*
+/x*y*z/
+.env
+
+/a/b/
+/a/q/r/b/c
+/xaybzc/
+/sub/.env.

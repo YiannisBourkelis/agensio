@@ -1,0 +1,15 @@
+/vendor/
+*.yaml
+/typo3/sysext/*/Resources/Private/
+/fileadmin/templates/**/*.ts
+composer.json
+_temp_/
+
+/vendor/autoload.php
+/A.YAML.
+/typo3/sysext/core/Resources/Private/Language/x.xlf
+/fileadmin/templates/a/b/main.ts
+/docs/Composer.JSON
+/x/_temp_/y
+/index.html
+/%76endor/x

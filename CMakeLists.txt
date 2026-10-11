@@ -142,6 +142,7 @@ add_library(agensio_core STATIC
   src/services/appenv.cpp
   src/control/handler.cpp
   src/control/commands.cpp
+  src/control/loglines.cpp
   src/control/protection.cpp
   src/control/sites.cpp
   src/control/settings.cpp
@@ -238,10 +239,11 @@ target_link_libraries(agensio_upstream PRIVATE asio Threads::Threads)
 
 # ---------------------------------------------------------------- fuzzers (parsers only, no asio)
 if(AGENSIO_FUZZ)
-  foreach(t parser path chunked fcgi http_head json archive hpack hpack_roundtrip quic_packet transport_params qpack)
+  foreach(t parser path chunked fcgi http_head json archive hpack hpack_roundtrip quic_packet transport_params qpack refuse fields log_line)
     add_executable(fuzz_${t} tests/fuzz/fuzz_${t}.cpp src/http1/parser.cpp src/path.cpp src/services/archive.cpp src/http2/hpack.cpp
-                   src/http/field_codec.cpp src/http3/qpack.cpp)
+                   src/http/field_codec.cpp src/http3/qpack.cpp src/control/loglines.cpp)
     target_include_directories(fuzz_${t} PRIVATE src)
+    target_link_libraries(fuzz_${t} PRIVATE asio)
     target_compile_features(fuzz_${t} PRIVATE cxx_std_20)
     target_compile_definitions(fuzz_${t} PRIVATE $<$<BOOL:${AGENSIO_HAS_ZLIB}>:AGENSIO_HAS_ZLIB=1>)
     # -UNDEBUG: the targets state their invariants with assert(), which a Release or
@@ -253,6 +255,17 @@ if(AGENSIO_FUZZ)
       target_link_libraries(fuzz_${t} PRIVATE ZLIB::ZLIB)
     endif()
   endforeach()
+  # The password files and Basic credentials: the server's own parser, so a build with
+  # authentication only (libxcrypt and OpenSSL), linked as the server links them.
+  if(AGENSIO_HAS_AUTH)
+    add_executable(fuzz_auth_users tests/fuzz/fuzz_auth_users.cpp src/core/auth.cpp)
+    target_include_directories(fuzz_auth_users PRIVATE src ${XCRYPT_INCLUDE_DIR})
+    target_compile_features(fuzz_auth_users PRIVATE cxx_std_20)
+    target_compile_definitions(fuzz_auth_users PRIVATE AGENSIO_HAS_TLS=1 AGENSIO_HAS_AUTH=1)
+    target_compile_options(fuzz_auth_users PRIVATE -fsanitize=fuzzer,address,undefined -g -O1 -fno-omit-frame-pointer -UNDEBUG)
+    target_link_options(fuzz_auth_users PRIVATE -fsanitize=fuzzer,address,undefined)
+    target_link_libraries(fuzz_auth_users PRIVATE asio ${XCRYPT_LIBRARY} OpenSSL::Crypto)
+  endif()
   # The connection fuzzer needs the transport's crypto: a fuzz build configured with
   # -DAGENSIO_TLS=ON on a host whose OpenSSL has the QUIC TLS API (3.5).
   if(AGENSIO_HAS_QUIC)

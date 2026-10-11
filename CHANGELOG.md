@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.0-alpha.72
+
+- Four new fuzz targets for parsers of client and administrator input that had none:
+  `fuzz_refuse` (the `refuse` patterns and their index against normalised paths),
+  `fuzz_fields` (`Range`, `If-Range`, `Accept-Encoding`, `X-Forwarded-For` and `-Proto` behind
+  trusted proxies, CIDRs), `fuzz_auth_users` (password files, their dates, the Basic field) and
+  `fuzz_log_line` (the three log formats `agensio ctl logs` reads back, moved for it from
+  `control/commands.cpp` into `control/loglines.*`, behaviour unchanged). Each asserts what its
+  parser promises, not only memory safety. All seventeen targets ran five minutes each under
+  ASan and UBSan with no finding (`docs/security-control-plane.md`, "Sanitizer and fuzz
+  record"); the weekly job installs libxcrypt so `fuzz_auth_users` runs there too.
+
 ## 0.1.0-alpha.71 (2026-10-11)
 
 From the alpha.70 report:

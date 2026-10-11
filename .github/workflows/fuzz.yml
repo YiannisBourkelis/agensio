@@ -3,6 +3,7 @@
 # integration suites. Also from the Actions tab (Run workflow) with another duration.
 # Ubuntu 24.04's OpenSSL is 3.0, without the QUIC TLS API, so fuzz_quic_conn is not built
 # here; it runs on the development box before a tag (docs/security-control-plane.md).
+# libcrypt-dev (libxcrypt) builds fuzz_auth_users and the password checks.
 name: fuzz
 on:
   schedule:
@@ -18,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libasio-dev libssl-dev zlib1g-dev clang-18 libclang-rt-18-dev
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libasio-dev libssl-dev libcrypt-dev zlib1g-dev clang-18 libclang-rt-18-dev
       - name: every fuzzer
         run: CXX=clang++-18 scripts/fuzz-all.sh -t "${{ github.event.inputs.seconds || '300' }}" -j 4 -o fuzz-out
       - name: findings

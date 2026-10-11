@@ -183,7 +183,8 @@ Source map (`src/`, files move into subdirectories as they are touched, see the 
   fuzzed), `http_client` (`HttpRequest`: HTTP/1.1 framing both ways, keep-alive rules).
 - top level, not yet moved: `config`, `path`, `mime`, `http_date`, `file`, `cache`,
   `response` (status lines, error pages), `tls_stream.hpp`, `server`, `main`.
-Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
+Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (seventeen, each seeded from
+`tests/fuzz/regressions/<name>/`, all run by `scripts/fuzz-all.sh`).
 
 ## Architecture (as implemented)
 
@@ -472,7 +473,7 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   to the audit log, `agensio ctl status` and the future MCP bridge use `control/client.*`.
   `tests/control.sh` runs the role matrix as root in the devbox. Read commands (F2,
   `control/commands.*`): `sites`, `site NAME`, `validate`, `logs` (three log formats parsed
-  by hand, files read backwards with caps), `health` (findings with a fix each); all GET,
+  by hand in `control/loglines.*`, fuzzed, files read backwards with caps), `health` (findings with a fix each); all GET,
   viewer role, pure functions over the Config so the unit tests cover them. Mutations
   (F3, `control/sites.*`): POST with `confirm`, audited; `site-create` answers a decision
   form (422) and root prerequisites as commands (409, `waiting`), writes managed
