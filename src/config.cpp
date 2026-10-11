@@ -2729,6 +2729,8 @@ void set_aside_until_clean(Config& cfg, const Config* running,
         else loser = rank(fa) > rank(fb) ? fb : rank(fb) > rank(fa) ? fa : fb;
         const std::string winner = loser == fa ? fb : fa;
         const std::string why = c->message + (winner == loser ? "" : "; " + fs::path(winner).filename().string() + " keeps its place");
+        if (fa != fb && fa != main_file && fb != main_file && rank(fa) == rank(fb) && !running && !cfg.served_record_read)
+            cfg.order_decided.push_back(why);  // load order decided it: a start without the record
         // A carried version with a problem of its own: the version loaded before fails too.
         const bool was_carried = std::any_of(cfg.sites.begin(), cfg.sites.end(), [&](const SiteConfig& x) { return x.source == loser && x.carried; });
         std::erase_if(cfg.sites, [&](const SiteConfig& x) { return x.source == loser; });
@@ -2759,6 +2761,12 @@ std::size_t file_digest(std::string_view text) noexcept {
         h *= 1099511628211ull;
     }
     return static_cast<std::size_t>(h);
+}
+
+std::string served_record_absence(const Config& cfg) {
+    const std::string path = served_record(cfg).string();
+    return cfg.served_record_problem.empty() ? "no record of the site files served before (" + path + ")"
+                                             : "the record of the site files served before (" + path + ") could not be read: " + cfg.served_record_problem;
 }
 
 fs::path served_record(const Config& cfg) { return fs::path(cfg.state_dir) / ".server" / "served"; }  // a dot: no account name, so never a site account's <state_dir>/<user>
@@ -3060,9 +3068,16 @@ Config load_config(const fs::path& path, const Config* running, bool use_record)
     // conflicts below as the running configuration does on a reload (the alpha.63 report,
     // finding 1). Without it (the first start, a lost state directory) load order decides.
     if (use_record && !running) {
-        std::ifstream in(served_record(cfg));
+        const fs::path record = served_record(cfg);
+        std::ifstream in(record);
         std::string line;
         cfg.served_record_read = static_cast<bool>(in);
+        if (!in) {  // absent, or this account may not read it (a -t that is not root)
+            std::error_code ec;
+            const bool there = fs::exists(record, ec);
+            if (ec) cfg.served_record_problem = ec.message();
+            else if (there) cfg.served_record_problem = "this account cannot open it";
+        }
         while (in && std::getline(in, line)) {
             const std::size_t sp = line.find(' ');
             if (sp == std::string::npos || sp == 0) continue;
@@ -3088,25 +3103,32 @@ Config load_config(const fs::path& path, const Config* running, bool use_record)
             for (const auto& site : cfg.sites) {
                 if (site.source == main_file || site.carried || yields.count(site.source)) continue;
                 const int rank = file_rank(cfg, running, site.source);
-                if (rank > held_rank || (rank == held_rank && order[site.source] < order[file])) continue;
+                if (rank > held_rank) continue;
+                const bool by_order = rank == held_rank && !running && !cfg.served_record_read;  // a start without the record
+                const bool keeps = rank == held_rank && order[site.source] < order[file];
+                if (keeps && !by_order) continue;
                 const bool site_catch_all = site.is_default || std::find(site.server_names.begin(), site.server_names.end(), "*") != site.server_names.end();
                 for (const auto& c : list) {
-                    std::string why;
+                    std::string what;  // the name (or the catch-all) on the address both claim
                     for (const auto& la : site.listen) {
                         if (std::find(c.listen.begin(), c.listen.end(), la) == c.listen.end()) continue;
                         for (const auto& n : site.server_names)
                             if (n != "*" && std::find(c.names.begin(), c.names.end(), n) != c.names.end()) {
-                                why = n + " on " + display_listen(la) + " is claimed by " + by + ", which is set aside for its own error; neither is served until it loads";
+                                what = n + " on " + display_listen(la) + " is claimed by " + by;
                                 break;
                             }
-                        if (why.empty() && c.catch_all && site_catch_all)
-                            why = display_listen(la) + " has a catch-all site in " + by + ", which is set aside for its own error; neither is served until it loads";
-                        if (!why.empty()) break;
+                        if (what.empty() && c.catch_all && site_catch_all) what = display_listen(la) + " has a catch-all site in " + by;
+                        if (!what.empty()) break;
                     }
-                    if (!why.empty()) {
-                        yields[site.source] = why;
+                    if (what.empty()) continue;
+                    if (keeps) {
+                        cfg.order_decided.push_back(what + ", which is set aside for its own error; " + fs::path(site.source).filename().string() +
+                                                    " loads before it and keeps it");
                         break;
                     }
+                    yields[site.source] = what + ", which is set aside for its own error; neither is served until it loads";
+                    if (by_order) cfg.order_decided.push_back(yields[site.source]);
+                    break;
                 }
             }
         }

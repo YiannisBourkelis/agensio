@@ -5643,6 +5643,27 @@ static void test_served_record() {
               c.held(file("0bad.toml")) && !c.held(file("b.toml")));
         const Config order = load_config(dir / "agensio.toml");  // without the record: load order, as before
         CHECK(from(order, "a.test") == "0dup.toml" && from(order, "b.test") == "none");
+        CHECK(c.order_decided.empty());
+    }
+    // The record lost: load order decides, and each conflict it decided is noted for the warning the
+    // start and -t give (the alpha.64 report, finding 2), with the name and the file that kept it.
+    {
+        const fs::path record = dir / "state" / ".server" / "served", kept = dir / "state" / ".server" / "kept";
+        fs::rename(record, kept);
+        write("sites.d/c.toml", site("c.test", "18733"));  // loads before a broken file claiming its name, and keeps it
+        write("sites.d/zbad.toml", site("c.test", "18733", "refsue = 1\n"));
+        const Config c = load_config(dir / "agensio.toml", nullptr, true);
+        auto noted = [&](const char* what) {
+            return std::any_of(c.order_decided.begin(), c.order_decided.end(), [&](const std::string& d) { return d.find(what) != npos; });
+        };
+        CHECK(!c.served_record_read && c.served_record_problem.empty() && c.order_decided.size() == 3 && noted("a.test on 127.0.0.1:18731 is claimed by two sites") &&
+              noted("0dup.toml keeps its place") && noted("b.test on 127.0.0.1:18732 is claimed by 0bad.toml") &&
+              noted("c.test on 127.0.0.1:18733 is claimed by zbad.toml, which is set aside for its own error; c.toml loads before it and keeps it") &&
+              from(c, "c.test") == "c.toml");
+        CHECK(served_record_absence(c) == "no record of the site files served before (" + record.string() + ")");
+        fs::remove(dir / "sites.d" / "c.toml");
+        fs::remove(dir / "sites.d" / "zbad.toml");
+        fs::rename(kept, record);
     }
     // A served file edited since still outranks a newcomer.
     write("sites.d/a.toml", site("a.test", "18731", "index = [\"start.html\"]\n"));

@@ -451,6 +451,10 @@ struct Config {
     // them as a reload uses the running configuration (the alpha.63 report, finding 1).
     std::map<std::string, std::size_t> served_before;
     bool served_record_read = false;  // the record existed and was read
+    std::string served_record_problem;  // why a record that exists could not be read ("" when absent or read)
+    // At a start without the record: each conflict between site files that load order decided,
+    // naming the name and the file that kept it, for a warning (the alpha.64 report, finding 2).
+    std::vector<std::string> order_decided;
     const HeldBack* held(std::string_view file) const noexcept {
         for (const auto& h : held_back)
             if (h.file == file) return &h;
@@ -610,6 +614,9 @@ std::size_t file_digest(std::string_view text) noexcept;
 std::filesystem::path served_record(const Config& cfg);
 // Writes it for `cfg` (atomically: a temporary file renamed); false and why when it cannot.
 bool write_served_record(const Config& cfg, std::string& error);
+// "no record of the site files served before (<path>)", or that it could not be read and why:
+// what the start and -t say before each of Config::order_decided.
+std::string served_record_absence(const Config& cfg);
 
 // A problem the sites of a configuration have (docs/design-site-operations.md 26): between two
 // sites, the earlier first, or of one site alone (`second` = npos).

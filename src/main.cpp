@@ -881,6 +881,9 @@ int main(int argc, char** argv) {
         std::cerr << "warning: " << h.file << " set aside, its sites not loaded: " << h.error
                   << (reload ? " (the running server keeps serving the version it loaded before, if any)" : "") << "\n";
     for (const auto& n : certificate_notes) std::cerr << "note: " << n << "\n";
+    // As the start would say it (a reload ranks by the running configuration, not by load order).
+    if (!reload)
+        for (const auto& d : cfg.order_decided) std::cerr << "warning: " << agensio::served_record_absence(cfg) << ": load order decided: " << d << "\n";
     if (strict && !cfg.held_back.empty()) {
         std::cerr << "configuration error: " << cfg.held_back.size() << " site file(s) set aside (--strict)\n";
         return 1;

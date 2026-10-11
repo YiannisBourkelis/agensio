@@ -1509,7 +1509,7 @@ What sets a file aside:
   rewritten after every start and reload, so a restart decides what the last reload decided: a
   file added while the server runs never takes a name at the next boot that the reload kept from
   it. Without the record (the first start, a lost state directory) load order decides, and the
-  error log says so. Before 0.1.0-alpha.64 a restart always went by load order, so a file that
+  error log warns for each name it decided, as `agensio -t` does. Before 0.1.0-alpha.64 a restart always went by load order, so a file that
   sorted earlier took the name at the next boot;
 - a name a file set aside for its own error claims: its names stay its own, so another file
   does not take one over without the broken file's access rules, passwords and root additions.
@@ -1589,9 +1589,13 @@ Three cases:
    `shop.example.com` too. The reload keeps the shop serving, and so does the next start: the
    record lists the shop's file, so the broken file's claim does not take the name down.
 3. *No record.* The first start ever, a new `state_dir`, or the file deleted: load order
-   decides, as before 0.1.0-alpha.64, and the error log says `no record of the site files served
-   before (...): a conflict between site files at this start was decided by load order`. From
-   then on there is a record.
+   decides, as before 0.1.0-alpha.64, and each conflict it decided is a warning in the error log
+   (and from `agensio -t`) naming the name and the file that kept it: `no record of the site
+   files served before (...): load order decided: example.com on 0.0.0.0:443 is claimed by two sites
+   (0old.toml and example.com.toml); a name answers for one site on an address; 0old.toml keeps
+   its place`. Check that file is the one you want, or fix the other. With no conflict the line
+   is a note at level `info`. From then on there is a record. A `-t` run as an account that
+   cannot read the record (it is the server account's, `0700`) says so instead: run it as root.
 
 Nothing needs doing with it. `cat /var/lib/agensio/.server/served` shows which site files the
 server serves. Deleting it only makes the next start decide conflicts by load order; it needs no

@@ -177,6 +177,16 @@ s5_stop; s5_start
 check "after a restart the same: a.toml keeps a.test with its access rule, b.toml keeps b.test; -t predicted it" "403 site b yes" \
   "$(from2 a.test 18316) $(body b.test 18317) $(grep -q '0dup.toml set aside' "$S5/t.out" && ! grep -q 'a.toml set aside' "$S5/t.out" && echo yes)"
 s5_stop
+# Without the record (lost with the state directory) load order decides, as before it existed, and
+# the error log says so at its default level, warn, naming each name it decided (the alpha.64
+# report, finding 2: one line at info, whether a conflict was decided or not); -t the same.
+rm -f "$S5/state/.server/served"; : > "$S5/logs/error.log"
+"$BIN" -t -c "$S5/agensio.toml" > "$S5/t2.out" 2>&1
+s5_start
+check "no record: load order decides (0dup.toml takes a.test, b.test down); the error log at warn and -t name a.test and b.test" "site c none yes yes" \
+  "$(body a.test 18316) $(body b.test 18317) $(grep 'no record of the site files served before' "$S5/logs/error.log" | grep -q 'load order decided: a.test on' &&
+    grep 'no record of the site files served before' "$S5/logs/error.log" | grep -q 'load order decided: b.test on' && echo yes) $(grep -q 'warning: no record.*load order decided: a.test on' "$S5/t2.out" && grep -q 'warning: no record.*load order decided: b.test on' "$S5/t2.out" && echo yes)"
+s5_stop
 
 # The hosting rules (design section 26, step C2) for a site with an account (the one running this
 # test): a site whose root others can write into is set aside and the others serve; a site is served

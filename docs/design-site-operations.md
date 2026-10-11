@@ -1664,7 +1664,13 @@ uses where a reload uses the running configuration; nothing is carried at a star
 version in memory). A ctime tie-break was rejected (ctime is the last chmod or chown, not the
 file's age), and failing closed at start was not needed once the record exists; without one,
 load order still decides and the error log says so. The digest became FNV-1a, stable across
-builds, as the record outlives the binary.
+builds, as the record outlives the binary. That line was at `info` and written whether a conflict
+was decided or not (the alpha.64 report's second finding, corrected in the alpha.65 report): the
+loader now notes each conflict load order decides at a start without the record
+(`Config::order_decided`, from `set_aside_until_clean` at a tie between two included files and
+from the claims pass), and the start and `-t` write each as a warning with the record's absence
+(`served_record_absence`, which also says when the record exists but this account cannot open
+it); `agensio reload` does not, since the running server ranks by its running configuration.
 
 **Built, third step (C3, 2026-10-11, 0.1.0-alpha.64).** `Server::load_certificates` loads every
 certificate and key pair of a generation once, before `build_listeners`, into

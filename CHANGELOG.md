@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.0-alpha.66
+
+From the alpha.65 report (correcting the alpha.64 report's second finding):
+
+- **A start without the record of the site files served said nothing at the default log level.**
+  Without the record (the first start, a lost state directory, the file deleted) load order
+  decides a conflict between site files, so a contested name may go to another file than the one
+  served before; the only line saying so was at level `info`, written whether a conflict was
+  decided or not, and the alpha.64 notes claimed the error log says it. Now each conflict load order
+  decided at a start is a warning naming the name, its address and the file that kept it
+  (`no record of the site files served before (...): load order decided: a.test on 127.0.0.1:8080
+  is claimed by two sites (0dup.toml and a.toml); ...; 0dup.toml keeps its place`), and `agensio -t`
+  prints the same; with no such conflict the line stays at `info`. A `-t` run as an account that
+  cannot read the record says that instead of "no record". Shown first by `tests/isolation.sh`
+  (the record deleted and the server restarted: nothing at `warn`; now a line for `a.test` and one
+  for `b.test`, in the error log and from `-t`) and unit checks.
+
 ## 0.1.0-alpha.65 (2026-10-11)
 
 From the alpha.64 report:

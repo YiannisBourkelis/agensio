@@ -110,9 +110,14 @@ Server::Server(Config cfg)
     for (const auto& p : tls_read_problems(gen->cfg, system_facts())) error_log_.warn(p.message + "; fix: " + p.fix);
     for (const auto& h : gen->cfg.held_back)
         error_log_.error(h.file + " set aside, its sites are not served: " + h.error);
-    if (!gen->cfg.served_record_read)
-        error_log_.info("no record of the site files served before (" + served_record(gen->cfg).string() +
-                        "): a conflict between site files at this start was decided by load order");
+    // Without the record load order decides a conflict between site files, as before the record
+    // existed: a warning for each it decided, since the name may have gone to another file than
+    // the one served before (the alpha.64 report, finding 2); with none, a note.
+    if (!gen->cfg.served_record_read) {
+        if (gen->cfg.order_decided.empty())
+            error_log_.info(served_record_absence(gen->cfg) + ": no conflict between site files at this start, so it was not needed");
+        for (const auto& d : gen->cfg.order_decided) error_log_.warn(served_record_absence(gen->cfg) + ": load order decided: " + d);
+    }
     for (const auto& n : access_notices(gen->cfg))  // the notes at level info (alpha.61 report, finding 2)
         n.severity == "warning" ? error_log_.warn(n.text) : error_log_.info(n.text);
     warm_response_tables();
