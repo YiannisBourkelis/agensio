@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.66
+## 0.1.0-alpha.66 (2026-10-11)
 
 - **`agensio ctl validate` and health did not load certificates.** They say what the next reload
   would do with the files on disk, but ran only the loader and the hosting rules: a site file whose
