@@ -2,20 +2,10 @@
 
 ## 0.1.0-alpha.68 (2026-10-11)
 
-- chore: update changelog version header to indicate unreleased status for alpha.67
-- chore: update changelog version header for alpha.67
-- Docs: third-party bugs agensio works around, and how to check them
-- Docs: third-party bugs agensio works around, and how to check them
-- site-create's refusal carries detail as one text on the restart path too (alpha.66 report)
-- No FastCGI keep-alive to an ondemand pool: bursts waited until read_timeout (alpha.66 report, finding 1)
-
-## 0.1.0-alpha.67 (unreleased)
+0.1.0-alpha.67 was never published: its release stopped at a failing unit test, and its changes
+ship here.
 
 From the alpha.66 report:
-
-- **`site-create`'s refusal carried `detail` in two shapes**: a list when the site waited for a
-  restart (a port the running server cannot bind), a string on every other refusal. It is one
-  text everywhere now, the errors joined with `; `. Shown first by `tests/isolation.sh`.
 
 - **PHP requests on a generated pool could wait until `read_timeout` (504) when several opened
   at once** (availability; seen in production on alpha.56, .65 and .66). A generated pool is
@@ -33,7 +23,24 @@ From the alpha.66 report:
   at 2.41 s; keep-alive off costs about 11 us of CPU per request (agensio 7.0 to 11.4, php-fpm 24.5
   to 31.4 on a script that only echoes, 142k to 87k req/s there; under 0.5 % of a request that
   runs an application), and cuts p99 from 1.75 ms to 0.21 to 0.31 ms. Shown first by
-  `tests/pools.sh` (the burst on a cold ondemand pool: 5 x 504; now none) and unit checks.
+  `tests/pools.sh` (the burst on a cold ondemand pool: 5 x 504; now none) and unit checks. On the
+  live host (the alpha.68 report) 120 requests at once to a Drupal site's pool took 2.23 s with no
+  504, where alpha.66 waited 60 s and answered 4 x 504.
+
+- **`site-create`'s refusal carried `detail` in two shapes**: a list when the site waited for a
+  restart (a port the running server cannot bind), a string on every other refusal. It is one
+  text everywhere now, the errors joined with `; `. Shown first by `tests/isolation.sh`.
+
+Documentation and tooling:
+
+- **`docs/third-party-bugs.md`**, the upstream bugs agensio works around: php-fpm's `ondemand`
+  forking too few children (bugs #69724 and #72935, behind the change above) and a child on a kept
+  connection killed after `request_terminate_timeout` (bug #78405, which generated pools do not
+  set), each with how it showed, what agensio does and where, and what to change once it is fixed,
+  and the procedure for checking them. A developer's document, not installed with the package.
+
+- **`scripts/release.sh` adds the RPM changelog entry once**, so a run that stopped before its
+  commit can run again (the alpha.67 runs left the entry twice).
 
 ## 0.1.0-alpha.66 (2026-10-11)
 

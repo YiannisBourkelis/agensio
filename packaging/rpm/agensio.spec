@@ -72,9 +72,6 @@ exit 0
 * Sun Oct 11 2026 Yiannis Bourkelis - 0.1.0-0.1.alpha.68
 - Release 0.1.0-alpha.68, see CHANGELOG.md.
 
-* Sun Oct 11 2026 Yiannis Bourkelis - 0.1.0-0.1.alpha.67
-- Release 0.1.0-alpha.67, see CHANGELOG.md.
-
 * Sun Oct 11 2026 Yiannis Bourkelis - 0.1.0-0.1.alpha.66
 - Release 0.1.0-alpha.66, see CHANGELOG.md.
 
