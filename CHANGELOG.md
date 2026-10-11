@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.0-alpha.68 (2026-10-11)
+
+- chore: update changelog version header to indicate unreleased status for alpha.67
+- chore: update changelog version header for alpha.67
+- Docs: third-party bugs agensio works around, and how to check them
+- Docs: third-party bugs agensio works around, and how to check them
+- site-create's refusal carries detail as one text on the restart path too (alpha.66 report)
+- No FastCGI keep-alive to an ondemand pool: bursts waited until read_timeout (alpha.66 report, finding 1)
+
 ## 0.1.0-alpha.67 (unreleased)
 
 From the alpha.66 report:

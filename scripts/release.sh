@@ -106,7 +106,9 @@ sed -i "s/^set(AGENSIO_VERSION_STRING \"[^\"]*\")/set(AGENSIO_VERSION_STRING \"$
 sed -i "s/^_tag=.*/_tag=$version/; s/^pkgver=.*/pkgver=${base}${pre//./}/; s/^pkgrel=.*/pkgrel=1/" packaging/arch/PKGBUILD
 sed -i "s/^%global upstream_version .*/%global upstream_version $version/; s/^Version:        .*/Version:        $base/; s/^Release:        .*/Release:        ${rpm_release}%{?dist}/" packaging/rpm/agensio.spec
 entry="* $(LC_ALL=C date '+%a %b %d %Y') Yiannis Bourkelis - $base-$rpm_release\n- Release $version, see CHANGELOG.md."
-sed -i "s/^%changelog$/%changelog\n$entry\n/" packaging/rpm/agensio.spec
+# Once: a run that stopped before its commit (a failing test) has added it already.
+grep -qxF -- "- Release $version, see CHANGELOG.md." packaging/rpm/agensio.spec ||
+    sed -i "s/^%changelog$/%changelog\n$entry\n/" packaging/rpm/agensio.spec
 sed -i -E "s/^## $version( \(.*\))?\s*$/## $version ($today)/" CHANGELOG.md
 
 # 5. Build and test with the new version string.
