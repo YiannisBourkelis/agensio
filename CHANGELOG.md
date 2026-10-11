@@ -2,6 +2,12 @@
 
 ## 0.1.0-alpha.71
 
+- **`agensio ctl --help` named Rails where every application service applies.** `site-unit` read
+  "the Puma unit of a Rails site", `site-service` "the Rails site's" service, `site-env-set` "(app =
+  rails or proxy)", and the top-level help "Rails service", while units, services and environments
+  cover redmine, django, wagtail and node too (Puma, Gunicorn, node), as the MCP texts already said.
+  Help text only.
+
 - **The agent was told it could add a redirect through a site's root additions, which it cannot.**
   The MCP server instructions and the `site_show` and `site_update` texts listed "a redirect" among
   what root additions cover, but a root additions file holds locations and no location key
