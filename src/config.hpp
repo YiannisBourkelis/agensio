@@ -441,6 +441,7 @@ struct Config {
         std::string file, error;
         bool carried = false;
         bool hosting = false;  // set aside by a hosting rule (services/pools.hpp isolate_hosting)
+        bool certificate = false;  // set aside because its certificate and key did not load (services/certificates.hpp)
     };
     std::vector<HeldBack> held_back;
     // A digest of each loaded file's text: a reload tells a file it already runs unchanged from

@@ -132,6 +132,7 @@ add_library(agensio_core STATIC
   src/core/router.cpp
   src/services/log.cpp
   src/services/pools.cpp
+  src/services/certificates.cpp
   src/services/acme.cpp
   src/services/provision.cpp
   src/services/archive.cpp

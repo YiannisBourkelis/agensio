@@ -264,13 +264,36 @@ s6_main $'user = "nobody"\n'
 check "-t not as root with server.user another account: the unreadable key is not judged, -t says so; the broken ones are set aside" "yes yes" \
   "$(! grep -q 'l.toml set aside' "$S6/user.out" && grep -q "note: .*locked/key.pem.*agensio -t as root" "$S6/user.out" && echo yes) $(grep -q 'm.toml set aside' "$S6/user.out" && echo yes)"
 chmod 600 "$CT/locked/key.pem"
+# The control plane's view of the next reload loads the certificates as the reload does: a new site
+# file whose key does not load is in validate's held_back (certificate) and in health before any
+# reload; a site-create that waits for a restart (a port the server, not root, cannot bind) and whose
+# key does not load is refused, its file removed, where it used to be reported as written and valid.
+vheld() {  # file: "certificate keeps_running_version" of validate's held_back entry for it, or "none"
+  "$BIN" ctl validate --socket "$CS" 2>/dev/null | python3 -c "
+import json, sys
+try: d = json.load(sys.stdin)
+except ValueError: d = {}
+m = [h for h in d.get('held_back', []) if h['file'].endswith('/' + sys.argv[1])]
+print('%s %s' % (m[0].get('certificate'), m[0]['keeps_running_version']) if m else 'none')" "$1"
+}
+site v.test 18325 "$T/www/a" "tls = { cert = \"$CT/bad/cert.pem\", key = \"$CT/bad/key.pem\" }" > "$T/sites.d/v.toml"
+check "a new site file whose key does not load, before any reload: validate's held_back has it (certificate), health names it" "True False yes" \
+  "$(vheld v.toml) $(held sites.d/v.toml | grep -q 'certificate could not be loaded' && echo yes)"
+rm -f "$T/sites.d/v.toml"
+"$BIN" ctl site-create --domain g.test --app static --no-user --cert "$CT/bad/cert.pem" --key "$CT/bad/key.pem" --no-redirect --root "$T/www/e" \
+  --listen-tls 127.0.0.1:443 --yes --reason isolation --socket "$CS" > "$T/g.out" 2>&1; G_EXIT=$?
+check "site-create waiting for a restart, with a key that does not load: refused, the file removed" "1 no" \
+  "$([ $G_EXIT -ne 0 ] && echo 1 || echo 0) $([ -f "$T/sites.d/g.test.toml" ] && echo yes || echo no)"
+rm -f "$T/sites.d/g.test.toml"   # unfixed, it stays: a reload would then try port 443
 tls_site "$CT/t" 18306 > "$T/sites.d/t.toml"; reload
 check "a TLS site with its own certificate serves" "site t" "$(tbody 18306)"
 chmod 000 "$CT/t/key.pem"; site a.test 18301 "$T/www/a" > "$T/sites.d/a.toml"; reload
 check "its key made unreadable, then a reload with another site's change: it keeps the certificate loaded before, the change applies, health says so" "site t site a yes" \
   "$(tbody 18306) $(body a.test 18301) $(held sites.d/t.toml | grep -q 'could not be loaded' && held sites.d/t.toml | grep -q 'keeps serving' && echo yes)"
 chmod 600 "$CT/t/key.pem"
-tls_site "$CT/bad" 18306 > "$T/sites.d/t.toml"; site a.test 18301 "$T/www/c" > "$T/sites.d/a.toml"; reload
+tls_site "$CT/bad" 18306 > "$T/sites.d/t.toml"; site a.test 18301 "$T/www/c" > "$T/sites.d/a.toml"
+check "the edit on disk, before the reload: validate's held_back has it, its running version kept (certificate)" "True True" "$(vheld t.toml)"
+reload
 check "an edit pointing it at a key that cannot be loaded: its running version keeps serving, another site's change applies" "site t site c" \
   "$(tbody 18306) $(body a.test 18301)"
 rm -f "$T/sites.d/t.toml"; site a.test 18301 "$T/www/a2" > "$T/sites.d/a.toml"; reload
@@ -292,7 +315,10 @@ check "a longer one written to disk, no reload: the served one is still expiring
 reload
 check "reloaded: the one on disk is served, nothing to say; site_show's tls.served is it" "none True" \
   "$(tcodes) $("$BIN" ctl site t.test --socket "$CS" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["tls"]["served"]["same_as_disk"])')"
-mkcert "$CT/next" 120; cp "$CT/next/cert.pem" "$CT/next/key.pem" "$CT/u/"; chmod 000 "$CT/u/key.pem"; reload
+mkcert "$CT/next" 120; cp "$CT/next/cert.pem" "$CT/next/key.pem" "$CT/u/"; chmod 000 "$CT/u/key.pem"
+check "a newer one whose key the server cannot read, before a reload: not loaded, health says why once (not again as the next reload's set-aside)" \
+  "certificate_not_loaded yes none" "$(tcodes) $(tmsg certificate_not_loaded | grep -q 'could not load it' && echo yes) $(held sites.d/t.toml)"
+reload
 check "a newer one whose key the server cannot read: not loaded, and health says why" "certificate_not_loaded yes" \
   "$(tcodes) $(tmsg certificate_not_loaded | grep -q 'could not load it' && echo yes)"
 chmod 600 "$CT/u/key.pem"; rm -f "$T/sites.d/t.toml"; reload

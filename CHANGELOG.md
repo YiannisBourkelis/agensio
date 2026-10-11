@@ -2,6 +2,20 @@
 
 ## 0.1.0-alpha.66
 
+- **`agensio ctl validate` and health did not load certificates.** They say what the next reload
+  would do with the files on disk, but ran only the loader and the hosting rules: a site file whose
+  certificate and key do not load was named only after the reload set it aside, and `site-create`
+  of a site waiting for a restart (a privileged port the running server cannot bind) answered
+  "written and valid" for a key that is not a key, which the restart then set aside. Both now load
+  each pair as the reload does, as the server's account: `held_back` lists such a file with
+  `certificate: true` (also in the reload's answer, which gains `hosting_rule` too), whether its
+  running version keeps serving, and the `site-create` above is refused with the loader's error and
+  its file removed. A served site whose renewed files do not load stays one finding,
+  `certificate_not_loaded`, which now says why ("the server loads it at its next hourly check" was
+  said of a key it could not read). About 0.1 ms per certificate per call. Shown first by
+  `tests/isolation.sh` (four checks: validate, health, the restart `site-create` and the renewal,
+  each failing before).
+
 - **A build without libxcrypt or without OpenSSL did not link.** The server always kept the
   password verification pool of `[[site.auth]]`, whose code is compiled only with both libraries,
   so any build without them (no OpenSSL, or no libxcrypt, for example a Mac without Homebrew's)

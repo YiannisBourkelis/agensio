@@ -125,7 +125,10 @@ certificate's, unreadable), is set aside with its file and the other sites load 
 the main file it stops the start. `agensio -t` loads each pair as the start does, so it says the
 same ahead of time: a warning per file set aside, and `-t --strict` fails. Run it as the account
 that starts the server (root, with `server.user`): run as another account, it cannot read a key
-only root reads and says it did not check it (`note: ... not checked`).
+only root reads and says it did not check it (`note: ... not checked`). `agensio ctl validate`
+(MCP `config_validate`) and health do the same for the next reload, reading the files as the
+server's account does: a file the reload would set aside for its certificate is in `held_back`
+with `certificate: true` before you reload.
 
 ### 3.2 Who must be able to read them
 

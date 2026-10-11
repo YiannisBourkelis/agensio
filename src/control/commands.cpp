@@ -24,6 +24,7 @@
 
 #include "services/acme.hpp"
 #include "services/appenv.hpp"
+#include "services/certificates.hpp"
 #include "services/pools.hpp"
 
 namespace agensio::control {
@@ -914,6 +915,7 @@ json::Value validate(const fs::path& path, const Config& running, const Config* 
     try {
         fresh = load_config(path, current);
         hosting = isolate_hosting(fresh, system_facts(), current);  // a site breaking one is set aside (held_back)
+        check_certificates(fresh, current);  // and one whose certificate and key do not load, as the reload loads them
     } catch (const std::exception& e) {
         errors.push(e.what());
         return v.set("ok", false).set("errors", std::move(errors));
@@ -924,7 +926,8 @@ json::Value validate(const fs::path& path, const Config& running, const Config* 
     // Site files a reload would set aside (design section 26): the rest loads, so ok stays true.
     json::Value held = json::Value::array();
     for (const auto& h : fresh.held_back)
-        held.push(json::Value::object().set("file", h.file).set("error", h.error).set("keeps_running_version", h.carried).set("hosting_rule", h.hosting));
+        held.push(json::Value::object().set("file", h.file).set("error", h.error).set("keeps_running_version", h.carried).set("hosting_rule", h.hosting)
+                      .set("certificate", h.certificate));
     v.set("held_back", std::move(held));
     v.set("restart_needed", strings(restart_needed(fresh, running)));
     return v;
@@ -1111,18 +1114,21 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
                 "fix " + name + " (agensio -t names the error), then reload; the other sites are not affected");
     };
     for (const auto& h : running.held_back) held_finding(h, false);
-    // The file on disk.
+    // The file on disk. Its files set aside are said after the certificates: a served site whose
+    // renewed files do not load is certificate_not_loaded, said once.
+    std::vector<Config::HeldBack> disk_held;
     try {
         Config fresh = load_config(running.config_path, &running);
         // The hosting rules as a reload applies them (C2): a site breaking one is set aside, named
         // below; what is left (the server's account, the main file's sites) refuses everything.
         const auto hosting = isolate_hosting(fresh, system_facts(), &running);
+        check_certificates(fresh, &running);  // and the certificates as the reload loads them (C3)
         // What the next reload would set aside, unless the running server already says so: the
         // same problem may read with or without its history ("the version loaded before breaks it
         // too", the alpha.63 report's finding 2), so one containing the other is the same.
         for (const auto& h : fresh.held_back)
             if (const auto* r = running.held(h.file); !r || (r->error.find(h.error) == std::string::npos && h.error.find(r->error) == std::string::npos))
-                held_finding(h, true);
+                disk_held.push_back(h);
         for (const auto& e : hosting)
             add("error", "hosting_rule", "", e, "fix the ownership, then agensio -t");
         const auto restart = restart_needed(fresh, boot);
@@ -1226,6 +1232,14 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
             if (auto e = tls->load_errors.find(pair); e != tls->load_errors.end()) failed = e->second;
             for (const auto& h : running.held_back)
                 if (failed.empty() && h.file == s.source && h.error.find("certificate could not be loaded") != std::string::npos) failed = h.error;
+            // The next reload's view: the site's file would be set aside for it, keeping the
+            // certificate served; that is this finding, so it is not said again below.
+            for (auto it = disk_held.begin(); it != disk_held.end();)
+                if (it->file == s.source && it->certificate && it->carried) {
+                    if (failed.empty()) failed = it->error;
+                    it = disk_held.erase(it);
+                } else
+                    ++it;
             if (!failed.empty()) {
                 reason = "the server could not load it: " + failed;
                 fix = "make the files readable to the server's account (tls_key_unreadable gives the lines) or correct them, then cert-renew " + name;
@@ -1268,6 +1282,7 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
             add("info", "no_http_redirect", name, "no plain site redirects these names to https",
                 "add a [[site]] on port 80 with redirect = \"https\"");
     }
+    for (const auto& h : disk_held) held_finding(h, true);  // the next reload's, not said above
 
     // A per-site log the site user cannot read (created by a reload after the privilege
     // drop, which cannot chown): stands until a restart hands it over.

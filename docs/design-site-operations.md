@@ -1692,7 +1692,16 @@ reload was refused). `agensio -t` (0.1.0-alpha.65, the alpha.64 report): the loo
 `--explain` and `agensio reload` run after the hosting rules, so `-t` sets aside what the start
 would; an automatic pair not issued yet is skipped (the start writes a placeholder), and a file a
 `-t` that is not root cannot read, while the start reads it as root before running as
-`server.user`, is named in a note rather than judged.
+`server.user`, is named in a note rather than judged. The control plane's view of the next reload
+(0.1.0-alpha.66): the three functions moved to `services/certificates.*`, `check_certificates`
+takes the running configuration (the pairs it names are the ones the running generation holds, so a
+carried site keeps its material as on a reload), and `validate` and health's view of the disk run
+it after the hosting rules, inside the server as `server.user`, the account a reload reads the
+files as; `HeldBack::certificate` marks what it set aside. Before, `site-create` of a site waiting
+for a restart answered "written and valid" for a key that did not load, and validate and health
+said nothing until a reload. A served site whose renewed files do not load is one finding,
+`certificate_not_loaded`, with the loader's error. Cost: about 0.1 ms a pair per call (200 pairs,
+EC or RSA-2048: 23 ms), on worker 0 with the rest of the call, never per request.
 
 **The certificate work followed** (section 26's "Order", 0.1.0-alpha.64): T1, a key the server's
 account cannot read named at `-t`, at start and in health (`tls_key_unreadable`) with root's

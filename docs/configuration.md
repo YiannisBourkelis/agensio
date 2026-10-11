@@ -1533,7 +1533,8 @@ What happens then:
   health with the loader's message (`hosting_rule` when a hosting rule set it aside, with the
   owner or mode to fix), the file in `agensio ctl status`
   (`site_files_held_back`) and in `agensio ctl validate` (`held_back`, which says what the
-  next reload would do with the files on disk);
+  next reload would do with the files on disk, their certificates loaded as the reload loads
+  them: `certificate` when that set the file aside, `hosting_rule` for a hosting rule);
 - `agensio -t` prints a warning per file set aside and still exits 0, because the server
   would start and serve the other sites; `agensio -t --strict` exits 1 for the same, for
   scripts and CI that want every file to load. It loads each certificate and key pair as the
@@ -1654,7 +1655,8 @@ built. A pair that does not load (a file the server's account cannot read, not P
 is not the certificate's) sets its site's file aside, and the other sites start or reload
 (section 12c); a site of the main file refuses the whole start or reload. `agensio -t` loads the
 pairs the same way and names those files ahead of the start (before 0.1.0-alpha.65 it only
-looked for the files). A site that was
+looked for the files), and `agensio ctl validate` and health ahead of the next reload, reading
+them as the server's account does (0.1.0-alpha.66). A site that was
 serving keeps the certificate it loaded before: a renewal whose key the server cannot read
 (root's `0600` after the privilege drop) or a broken file never takes it down, the error log
 says `the certificate loaded before keeps serving`, and health names the file until the files

@@ -3352,7 +3352,13 @@ static void test_control_commands() {
         const auto f = health_findings(cfg, cfg, true, std::time(nullptr));
         auto has = [&](std::string_view code) { return std::any_of(f.begin(), f.end(), [&](const Finding& x) { return x.code == code; }); };
         CHECK(has("running_as_root") && has("certificate_unreadable") && has("no_http_redirect") && has("shared_account"));
+#ifdef AGENSIO_HAS_TLS
+        // The next reload loads its certificate as a reload does (C3), and a main-file site's that does
+        // not load refuses the reload: the file on disk is said not to load.
+        CHECK(has("config_invalid") && !has("restart_needed") && !has("acme_needs_port_80"));
+#else
         CHECK(!has("config_invalid") && !has("restart_needed") && !has("acme_needs_port_80"));
+#endif
         // The recent-errors rule reads the error log written above (dates in 2026: within 24 h only if today).
         Config changed = cfg;
         changed.workers = cfg.workers + 3;
@@ -3422,7 +3428,12 @@ static void test_control_commands() {
         CHECK(s["count"].num() == 3 && s["sites"].items()[0]["tls"].get("mode") == "manual" && !s["sites"].items()[0]["tls"]["present"].boolean());
         CHECK(find_site(cfg, "B.TEST") == &cfg.sites[1] && find_site(cfg, "z.test") == nullptr);
         const json::Value v = validate(dir / "h.toml", cfg);
+#ifdef AGENSIO_HAS_TLS
+        CHECK(!v["ok"].boolean() && v["errors"].items().size() == 1 &&
+              v["errors"].items()[0].str().find("site a.test: the certificate could not be loaded") != std::string::npos);
+#else
         CHECK(v["ok"].boolean() && v["sites"].num() == 3);
+#endif
         std::ofstream(dir / "bad.toml") << "[[site]\n";
         CHECK(!validate(dir / "bad.toml", cfg)["ok"].boolean());
     }

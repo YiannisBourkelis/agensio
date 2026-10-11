@@ -30,6 +30,7 @@
 #include "control/handler.hpp"
 #include "control/roles.hpp"
 #include "services/acme.hpp"
+#include "services/certificates.hpp"
 #include "core/host.hpp"
 #include "services/provision.hpp"
 #include "services/log.hpp"
@@ -105,27 +106,6 @@ struct Listener {
 #endif
     std::vector<std::string> site_names;  // for the startup log
 };
-
-#ifdef AGENSIO_HAS_TLS
-using CertificateSet = std::map<std::string, std::shared_ptr<asio::ssl::context>>;  // by "cert\nkey"
-// One certificate and key pair from its files, as the start, a reload, the refresh and agensio -t
-// load it: nullptr and why when it does not load (a file missing or unreadable, not PEM, a key that
-// is not the certificate's), with what cfg.user lacks to read the files after the drop (step T1).
-std::shared_ptr<asio::ssl::context> load_certificate_pair(const Config& cfg, const TlsConfig& t, std::string& error);
-// The certificate step of the start, a reload and agensio -t (design section 26, C3): every TLS
-// site's pair loaded once with `load` into `out`; a site whose pair does not load is set aside with
-// its file, a carried one keeps `previous`'s material (said in `kept`). Throws for the main file's
-// sites and when no site is left.
-void isolate_certificates(Config& cfg, const Config* running, CertificateSet& out, const CertificateSet* previous,
-                          const std::function<std::shared_ptr<asio::ssl::context>(const TlsConfig&, std::string&)>& load,
-                          std::vector<std::string>& kept);
-#endif
-// agensio -t's certificate step (the alpha.64 report, finding 1): each pair loaded as the start
-// loads it, so a site the start would set aside for its certificate is set aside here too. Not an
-// automatic certificate still to be issued (the start writes a placeholder), and not a file this
-// process may not read while the start reads it as root (-t not root, server.user another
-// account): the notes returned name those. Throws as the start does.
-std::vector<std::string> check_certificates(Config& cfg);
 
 // One loaded configuration with everything derived from it: the routers (which point into
 // its sites), the TLS contexts, the log sink indexes. A reload builds a new one and
