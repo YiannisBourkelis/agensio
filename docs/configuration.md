@@ -1131,7 +1131,7 @@ user = "agensio"             # the account the server serves as; its group reads
 # pools = "/etc/php/8.3/fpm/pool.d"   # where `agensio pools` writes (default: detected)
 # pools_run = "/run/php"              # where generated pools listen (default: per distro)
 # state_dir = "/var/lib/agensio"      # per-user tmp and session directories
-# strict_users = true                 # refuse a site without `user`
+# strict_users = true                 # refuse a site without `user` (one that only redirects needs none)
 
 [[site]]
 server_name = ["shop.example.com"]

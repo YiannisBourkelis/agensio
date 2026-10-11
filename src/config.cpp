@@ -1621,7 +1621,9 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     site.user = account_name(t["user"], where + ".user");
     site.group = account_name(t["group"], where + ".group");
     if (!site.group.empty() && site.user.empty()) fail(where + ": 'group' needs 'user'");
-    if (cfg.strict_users && site.user.empty()) fail(where + ": 'user' is required (server.strict_users)");
+    // A site that only redirects serves no file and runs no code (no root; the dispatcher answers it
+    // before routing): nothing to isolate, and site-create writes one for an HTTPS site's plain port.
+    if (cfg.strict_users && site.user.empty() && site.redirect.empty()) fail(where + ": 'user' is required (server.strict_users)");
     parse_pool(t["php"].as_table(), base_dir, cfg, site, root_given, where, runs_php(t, site));
 
     if (auto mode = t["tls"].value<std::string>()) {

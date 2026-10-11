@@ -1728,6 +1728,15 @@ static void test_pools() {
     CHECK(refused("badname.toml", server + "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"blog\"\nuser = \"../web1\"\n", "not a valid account name"));
     CHECK(refused("badpm.toml", server + shop + "php = { pm = \"forever\" }\n", "pm must be"));
     CHECK(refused("strict.toml", "[server]\nstrict_users = true\n[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"blog\"\n", "'user' is required"));
+    // A site that only redirects serves nothing and runs nothing: it needs no user under
+    // strict_users, and site-create writes one for an HTTPS site's plain port (the cookbook's
+    // finding, alpha.71: every site-create with https was refused on such a host).
+    {
+        write("strictredir.toml", "[server]\nstrict_users = true\n[[site]]\nserver_name = [\"r.test\"]\nlisten = [\"127.0.0.1:1\"]\nredirect = \"https\"\n");
+        std::string why;
+        try { (void)load_config(dir / "strictredir.toml"); } catch (const std::exception& e) { why = e.what(); }
+        CHECK(why.empty());
+    }
     std::string shop2 = shop;  // the same user under another name: one name per address (design section 26)
     shop2.replace(shop2.find("[\"shop\"]"), 8, "[\"shop2\"]");
     CHECK(refused("differs.toml", server + shop + "php = { children = 6 }\n" + shop2 + "php = { children = 8 }\n", "php.children differs"));

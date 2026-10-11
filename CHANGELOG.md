@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.0-alpha.71
+
+- **`strict_users` refused every HTTPS site `site-create` made.** For an HTTPS site with the plain
+  port redirecting, `site-create` writes a second site on port 80 that only redirects (`redirect =
+  "https"`, no root), with no `user`, and `[server] strict_users = true` refused any site without
+  one, so the control plane could create no HTTPS site on such a host. A site that only redirects
+  serves no file and runs no code (the dispatcher answers it before routing), so `strict_users`
+  no longer asks it for a `user`; every other site still needs one. Shown first by a unit check (a
+  redirect-only site under `strict_users`: refused, now loaded).
+
 ## 0.1.0-alpha.70 (2026-10-11)
 
 - **A managed site's access log was never rotated, and a rotated site log lost the site's group.**

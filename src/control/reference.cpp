@@ -31,7 +31,7 @@ const std::vector<KeyDef>& key_defs() {
         {"[server]", "pools", "path", "detected per distro (/etc/php/<v>/fpm/pool.d, /etc/php-fpm.d)", "Where agensio pools writes the generated php-fpm pool files.", "reload", "file", "11"},
         {"[server]", "pools_run", "path", "/run/php (Linux)", "Where the generated pools listen (agensio-<user>.sock).", "reload", "file", "11"},
         {"[server]", "state_dir", "path", "/var/lib/agensio", "Per-user PHP state (<user>/tmp, <user>/sessions), the ACME storage, the uploads store, and .server/served: the record of the site files served, which a start ranks conflicts by.", "reload", "file", "11"},
-        {"[server]", "strict_users", "bool", "false", "Every site must name a user; a site without one is a configuration error. For hosts where isolation is mandatory.", "reload", "file", "11"},
+        {"[server]", "strict_users", "bool", "false", "Every site must name a user; a site without one is a configuration error, except one that only redirects. For hosts where isolation is mandatory.", "reload", "file", "11"},
         {"[server]", "pid_file", "path", "/run/agensio.pid (Linux)", "Written at start; agensio reload signals it. \"\" disables it.", "restart", "file", "12b"},
         {"[server] acme", "email", "string", "(none)", "The ACME account contact; the CA sends expiry warnings there. Setting acme = { email } enables automatic certificates for sites with tls = \"auto\".", "reload", "file", "14"},
         {"[server] acme", "directory", "string", "https://acme-v02.api.letsencrypt.org/directory", "The ACME v2 directory URL: Let's Encrypt by default, any RFC 8555 CA.", "reload", "file", "14"},
