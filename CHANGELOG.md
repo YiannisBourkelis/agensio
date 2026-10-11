@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.69
+## 0.1.0-alpha.69 (2026-10-11)
 
 - **`scripts/release.sh` stops a release that would publish the wrong notes or skip a version**
   (the alpha.68 report: alpha.68 shipped a list of commit subjects as its notes, and alpha.67's
