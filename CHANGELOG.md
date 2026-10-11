@@ -47,6 +47,12 @@
   raising it: the client may already have retried those requests elsewhere. Every GOAWAY now
   names the lower of the highest stream opened and what an earlier GOAWAY named. Shown first by
   `fuzz_h2_conn` (the input `goaway-last-id-raised`).
+- **HTTP/2: a request on a stream the server had reset while idle was served.** A PRIORITY frame
+  making an idle stream depend on itself is answered with RST_STREAM (RFC 7540 5.3.1, which
+  h2spec still checks), which closes that stream for the server (RFC 9113 5.1); a HEADERS the
+  client then sent on it was answered as a new request. The id is now remembered with the other
+  streams the server reset, and such a HEADERS is decoded, to keep the header table in step, and
+  dropped. Shown first by `fuzz_h2_conn` (the input `headers-after-idle-reset`).
 - **`agensio ctl logs --since` with a huge number, and a JSON access line with an absurd
   status, were undefined behaviour.** `since=99999999999999999999s` or `999999999999999w`
   overflowed a signed integer while the bound was computed, and a JSON line's `status` of 1e30

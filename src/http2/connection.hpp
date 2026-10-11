@@ -385,9 +385,18 @@ private:
             case FrameType::priority:
                 if (h.stream_id == 0) return connection_error(ErrorCode::protocol_error, "PRIORITY on stream 0");
                 if (h.length != 5) return connection_error(ErrorCode::frame_size_error, "PRIORITY of the wrong length");
-                if ((read_u32(payload) & kMaxStreamId) == h.stream_id) {  // RFC 9113 5.3.1
-                    if (H2Stream* s = find(h.stream_id)) stream_error(*s, ErrorCode::protocol_error, "stream depends on itself");
-                    else send_rst(h.stream_id, ErrorCode::protocol_error, "stream depends on itself"), glitch({});
+                // A stream error by RFC 7540 5.3.1, which h2spec 5.3.1 holds us to; RFC 9113 dropped the
+                // rule. A stream reset while idle is closed for us from here (RFC 9113 5.1): its id
+                // is remembered, so a HEADERS the client still sends on it is decoded and dropped,
+                // not served (fuzz_h2_conn 2026-10-12: it was answered after its RST_STREAM).
+                if ((read_u32(payload) & kMaxStreamId) == h.stream_id) {
+                    if (H2Stream* s = find(h.stream_id)) {
+                        stream_error(*s, ErrorCode::protocol_error, "stream depends on itself");
+                    } else {
+                        send_rst(h.stream_id, ErrorCode::protocol_error, "stream depends on itself");
+                        if (h.stream_id > last_stream_id_) note_reset(h.stream_id);
+                        glitch({});
+                    }
                     break;
                 }
                 glitch("PRIORITY frame (deprecated, ignored)");  // RFC 9113 5.3.2: no tree here
@@ -553,7 +562,9 @@ private:
                 return connection_error(ErrorCode::protocol_error, "stream id lower than one already used");
             last_stream_id_ = h.stream_id;
             block_kind_ = BlockKind::request;
-            if (self_dependent) {  // RFC 9113 5.3.1: a stream error; the block is still decoded
+            if (recently_closed(h.stream_id)) {  // reset while idle (PRIORITY above): closed, the block only decoded
+                block_kind_ = BlockKind::discard;
+            } else if (self_dependent) {  // RFC 7540 5.3.1, as for PRIORITY: a stream error; the block is still decoded
                 send_rst(h.stream_id, ErrorCode::protocol_error, "stream depends on itself");
                 glitch({});
                 count_reset();
@@ -633,6 +644,8 @@ private:
         return nullptr;
     }
 
+    void note_reset(std::uint32_t id) noexcept { recent_closed_[recent_pos_++ % kRecentClosed] = id; }
+
     bool recently_closed(std::uint32_t id) const noexcept {
         for (const std::uint32_t r : recent_closed_)
             if (r == id) return true;
@@ -697,7 +710,7 @@ private:
         }
         if (!s.body_done && s.recv_pending > 0) return_window(s, static_cast<std::uint32_t>(s.recv_pending), false);
         writer_.dequeue(s);
-        recent_closed_[recent_pos_++ % kRecentClosed] = s.id;
+        note_reset(s.id);
         if (writer_.in_flight(s) || s.pulling) {
             s.defer_release = true;  // the writer or the pull completion releases it
             return;
