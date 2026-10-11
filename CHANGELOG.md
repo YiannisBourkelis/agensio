@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.70
+## 0.1.0-alpha.70 (2026-10-11)
 
 - **A managed site's access log was never rotated, and a rotated site log lost the site's group.**
   `site-create` writes a site's log as `/var/log/agensio/sites/<domain>.log`, which the packaged
