@@ -40,6 +40,13 @@
   when idle) the queue held a freed stream. The writer now refuses a closed stream, a body read
   that completes on one releases it, and a fuzz build asserts that no queued stream is reset.
   Shown first by `fuzz_h2_conn` (the input `closed-stream-requeued`).
+- **HTTP/2: a second GOAWAY could name a higher last stream id than the first.** When a client's
+  misbehaviour passed the first threshold of its budget the server sent a GOAWAY naming the last
+  stream it had taken; a HEADERS the client had already sent on a higher id was refused, but
+  when the connection then closed on a protocol error its GOAWAY named that id. RFC 9113 6.8 forbids
+  raising it: the client may already have retried those requests elsewhere. Every GOAWAY now
+  names the lower of the highest stream opened and what an earlier GOAWAY named. Shown first by
+  `fuzz_h2_conn` (the input `goaway-last-id-raised`).
 - **`agensio ctl logs --since` with a huge number, and a JSON access line with an absurd
   status, were undefined behaviour.** `since=99999999999999999999s` or `999999999999999w`
   overflowed a signed integer while the bound was computed, and a JSON line's `status` of 1e30

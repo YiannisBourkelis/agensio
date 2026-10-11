@@ -1112,7 +1112,7 @@ private:
         if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::info))
             log->info("http2 " + remote_text() + ": closing, " + std::string(error_name(code)) + ": " + std::string(reason));
         std::string f;
-        append_goaway(f, last_stream_id_, code, reason.substr(0, 64));
+        append_goaway(f, goaway_last(), code, reason.substr(0, 64));
         closing_after_write_ = true;
         for (auto& s : streams_.all()) {  // nothing more is served; the GOAWAY is the last write
             if (s->upstream) {
@@ -1152,15 +1152,25 @@ private:
         goaway_reason_ = reason;
     }
 
+    // The last stream id a GOAWAY names: the highest the client opened, never above what an
+    // earlier GOAWAY named (RFC 9113 6.8: the client may already have retried the rest on
+    // another connection; fuzz_h2_conn 2026-10-12: a stream opened behind the glitch budget's
+    // GOAWAY raised the id in the GOAWAY that closed the connection).
+    std::uint32_t goaway_last() noexcept {
+        goaway_last_ = std::min(goaway_last_, last_stream_id_);
+        return goaway_last_;
+    }
+
     // Graceful: no new streams after this id, the open ones finish, then the connection closes.
     void goaway(ErrorCode code, std::string_view reason) {
         if (going_away_ || closed_) return;
         going_away_ = true;
+        const std::uint32_t last = goaway_last();
         if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::info))
-            log->info("http2 " + remote_text() + ": GOAWAY after stream " + std::to_string(last_stream_id_) + ", " +
+            log->info("http2 " + remote_text() + ": GOAWAY after stream " + std::to_string(last) + ", " +
                       std::string(error_name(code)) + ": " + std::string(reason));
         std::string f;
-        append_goaway(f, last_stream_id_, code, reason.substr(0, 64));
+        append_goaway(f, last, code, reason.substr(0, 64));
         writer_.control(f);
         maybe_finish();
     }
@@ -1169,10 +1179,11 @@ private:
         if (going_away_ && streams_.active() == 0 && !closed_) {
             if (goaway_pending_) {
                 goaway_pending_ = false;
+                const std::uint32_t last = goaway_last();
                 if (ErrorLog* log = dispatcher_.error_log(); log && log->enabled(LogLevel::info))
-                    log->info("http2 " + remote_text() + ": GOAWAY after stream " + std::to_string(last_stream_id_) + ", NO_ERROR: " + goaway_reason_);
+                    log->info("http2 " + remote_text() + ": GOAWAY after stream " + std::to_string(last) + ", NO_ERROR: " + goaway_reason_);
                 std::string f;
-                append_goaway(f, last_stream_id_, ErrorCode::no_error, goaway_reason_);
+                append_goaway(f, last, ErrorCode::no_error, goaway_reason_);
                 writer_.control(f);
             }
             closing_after_write_ = true;
@@ -1373,6 +1384,7 @@ private:
     std::uint32_t conn_recv_grant_ = kDefaultWindow;  // what the peer may still send us in total
     std::uint32_t conn_unreturned_ = 0;
     std::uint32_t last_stream_id_ = 0;
+    std::uint32_t goaway_last_ = kMaxStreamId;  // the id the last GOAWAY sent named (goaway_last)
     std::uint32_t streams_opened_ = 0;
     http::StreamPool<H2Stream> streams_;  // the active table and the pool (http/stream_pool.hpp)
     std::uint32_t recent_closed_[kRecentClosed] = {};
