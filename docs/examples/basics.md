@@ -651,9 +651,10 @@ a shared file, which the combined format cannot. The format is one setting for e
 log, and the trade-off is fail2ban: its filters read the combined format, so with JSON no jail
 can count login attempts (`agensio ctl health` says `fail2ban_log_format`). A site with its own
 `user` gets its log made `agensio:<site group>` `0640` at start, so the account can read it.
-The package's logrotate rule rotates `/var/log/agensio/*.log` and `/var/log/agensio/sites/*/*.log`
-and sends `SIGUSR1`, which reopens every file; a log elsewhere needs a rule of its own with the
-same `postrotate`.
+The package's logrotate rule rotates `/var/log/agensio/*.log` and the sites' own logs,
+`/var/log/agensio/sites/*.log` (where `site-create` puts them) and `/var/log/agensio/sites/*/*.log`,
+keeping each site log's group so the account goes on reading it, and sends `SIGUSR1`, which reopens
+every file; a log elsewhere needs a rule of its own with the same `postrotate`.
 
 **Check it.**
 

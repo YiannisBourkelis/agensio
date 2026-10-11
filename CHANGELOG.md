@@ -2,6 +2,18 @@
 
 ## 0.1.0-alpha.70
 
+- **A managed site's access log was never rotated, and a rotated site log lost the site's group.**
+  `site-create` writes a site's log as `/var/log/agensio/sites/<domain>.log`, which the packaged
+  logrotate rule (`/var/log/agensio/*.log`, `sites/*/*.log`) did not match, so it grew for ever; and
+  the rule recreated a rotated file as `agensio:agensio`, so a site's account could no longer read
+  its own log (`agensio:<site group>` `0640`). The sites' logs have a stanza of their own now,
+  `sites/*.log` and `sites/*/*.log`, whose `create 0640` keeps each file's owner and group. The
+  file is a configuration file in every package: an unedited one is replaced, an edited one is
+  kept (dpkg asks, rpm writes `.rpmnew`, pacman `.pacnew`). Shown first by a unit test holding the
+  packaged rule to the paths the server writes, and by logrotate itself on the packaged layout
+  (before: the managed log not rotated, the other one recreated `agensio:agensio`; now both
+  rotated, both still the site's group).
+
 - **A CGI location without an `index` of its own ran the site's index file as a script.** Every
   location inherits the site's `index` unless it names one, so `/cgi-bin/` on a site with the
   default `index.html` asked the CGI handler to run `cgi-bin/index.html` (a 404 when missing; the

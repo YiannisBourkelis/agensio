@@ -14,6 +14,7 @@
 #include <thread>
 #include <string_view>
 #include <unistd.h>
+#include <fnmatch.h>
 
 #include "cache.hpp"
 #include "http1/chunked.hpp"
@@ -7381,6 +7382,44 @@ static void test_access_rules() {
 // Every guide in docs/ is installed with the package, or named here as a developer's document
 // (alpha.51 VPS report: docs/mariadb.md, written for the host's administrator, was not in
 // /usr/share/doc/agensio because the install list in CMakeLists.txt was never extended).
+// The packaged logrotate rule covers the logs where the packages and site-create put them, and a
+// site's log keeps its group when rotated: the site's account reads it through that group (agensio
+// owns it, 0640). The cookbook's finding (2026-10-09): a managed site's log, <dir of [log] access>/
+// sites/<domain>.log (control/sites.cpp), matched no pattern and grew for ever.
+static void test_packaged_logrotate() {
+    std::ifstream in(std::string(AGENSIO_SOURCE_DIR) + "/packaging/agensio.logrotate");
+    struct Stanza {
+        std::vector<std::string> patterns;
+        std::string create;
+    };
+    std::vector<Stanza> stanzas;
+    bool inside = false;
+    for (std::string line; std::getline(in, line);) {
+        const std::size_t start = line.find_first_not_of(" \t");
+        if (start == std::string::npos || line[start] == '#') continue;
+        line = line.substr(start);
+        if (!inside && line.back() == '{') {
+            stanzas.emplace_back();
+            std::istringstream words(line.substr(0, line.size() - 1));
+            for (std::string w; words >> w;) stanzas.back().patterns.push_back(w);
+            inside = true;
+        } else if (inside && line == "}") inside = false;
+        else if (inside && line.rfind("create", 0) == 0) stanzas.back().create = line;
+    }
+    auto stanza_for = [&](const char* path) -> const Stanza* {
+        for (const auto& st : stanzas)
+            for (const auto& pat : st.patterns)
+                if (::fnmatch(pat.c_str(), path, FNM_PATHNAME) == 0) return &st;
+        return nullptr;
+    };
+    const Stanza* managed = stanza_for("/var/log/agensio/sites/example.com.log");       // site-create's
+    const Stanza* written = stanza_for("/var/log/agensio/sites/example.com/access.log");  // the cookbook's
+    const Stanza* own = stanza_for("/var/log/agensio/access.log");
+    CHECK(managed && managed->create == "create 0640");  // the owner and group kept: agensio, the site's group
+    CHECK(written && written->create == "create 0640");
+    CHECK(own && own->create == "create 0640 agensio agensio");
+}
+
 static void test_packaged_docs() {
     namespace fs = std::filesystem;
     std::ifstream in(std::string(AGENSIO_SOURCE_DIR) + "/CMakeLists.txt");
@@ -8502,6 +8541,7 @@ int main() {
     test_refuse_config();
     test_path_check();
     test_packaged_docs();
+    test_packaged_logrotate();
     test_drupal_php_rule();
     test_refusal_finding();
     test_protection();
