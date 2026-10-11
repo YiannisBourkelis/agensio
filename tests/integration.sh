@@ -347,6 +347,11 @@ alias = "{root}/tests/cgi"
 index = ["index.cgi"]
 cgi = {{ env = {{ "APP_ENV" = "test" }} }}
 
+[[site.location]]                       # the same scripts with no index of its own: index.cgi, never the site's index.html
+path = "/cgi-noindex/"
+alias = "{root}/tests/cgi"
+handler = "cgi"
+
 [[site.location]]                       # D5: a short timeout and a cap of one process
 path = "/cgi-slow/"
 alias = "{root}/tests/cgi"
@@ -2112,6 +2117,7 @@ except OSError:
   check "cgi: environment and PATH_INFO" "method=GET path_info=/extra/bit query=a=1 script=/cgi-bin/env.cgi x_test=yes" "$(curl -sS -H 'X-Test: yes' "$P/cgi-bin/env.cgi/extra/bit?a=1" | tr '\n' ' ' | sed 's/ cwd=.*//')"
   check "cgi: runs in the script's directory" "yes" "$(curl -sS $P/cgi-bin/env.cgi | grep -q 'cwd=.*/tests/cgi$' && echo yes)"
   check "cgi: directory index" "index cgi" "$(curl -sS $P/cgi-bin/)"
+  check "cgi: a location without an index of its own runs index.cgi, not the site's index.html" "index cgi" "$(curl -sS $P/cgi-noindex/)"
   check "cgi: POST body on stdin, echoed" "same" "$(curl -sS --data-binary @bench/tmp/proxy-blob $P/cgi-bin/echo.cgi | cmp -s - bench/tmp/proxy-blob && echo same)"
   check "cgi: 3 MB output spilled and intact" "3000000" "$(curl -sS $P/cgi-bin/big.cgi | wc -c | tr -d ' ')"
   check "cgi: Status from the script" "404" "$(code $P/cgi-bin/status.cgi)"

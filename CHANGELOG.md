@@ -2,6 +2,14 @@
 
 ## 0.1.0-alpha.70
 
+- **A CGI location without an `index` of its own ran the site's index file as a script.** Every
+  location inherits the site's `index` unless it names one, so `/cgi-bin/` on a site with the
+  default `index.html` asked the CGI handler to run `cgi-bin/index.html` (a 404 when missing; the
+  interpreter fed an HTML file when present), while the documentation and `path_check` said
+  `index.cgi`. A CGI location now defaults to `index = ["index.cgi"]`. Shown first by
+  `tests/integration.sh` (a CGI location without `index`: 404, now `index.cgi`'s answer) and a unit
+  check.
+
 - **`/.well-known/` answered 404.** Dot-files and dot-directories are hidden by default, and the
   rule caught `/.well-known/` too, which is public by definition (RFC 8615): `security.txt`, app
   links, a webroot ACME client's challenge. The cookbook's way round it, a location with

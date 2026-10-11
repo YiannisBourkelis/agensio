@@ -2956,6 +2956,14 @@ static void test_proxy() {
     const Config rwcfg = load_config(dir / "rw.toml");
     CHECK(Router::location(rwcfg.sites[0], "/api/x").proxy.rewrite == "/v1/");
     CHECK(refused("rwexact.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/x\"\nmatch = \"exact\"\nupstream = \"http://127.0.0.1:9100/\"\n", "prefix location"));
+    // A CGI location runs its own index, index.cgi, unless it names one: never the site's
+    // index.html as a script (the cookbook's finding, alpha.70).
+    write("cgi.toml", "[[site]]\nlisten = [\"127.0.0.1:18097\"]\nroot = \"www\"\n[[site.location]]\npath = \"/cgi-bin/\"\nhandler = \"cgi\"\n"
+                      "[[site.location]]\npath = \"/cgi-own/\"\nhandler = \"cgi\"\nindex = [\"start.pl\"]\n");
+    const Config ccfg = load_config(dir / "cgi.toml");
+    CHECK((Router::location(ccfg.sites[0], "/cgi-bin/x").index == std::vector<std::string>{"index.cgi"}) &&
+          (Router::location(ccfg.sites[0], "/cgi-own/x").index == std::vector<std::string>{"start.pl"}) &&
+          (Router::location(ccfg.sites[0], "/x").index == std::vector<std::string>{"index.html"}));
 
     // The forwarded head: hop-by-hop dropped, Host kept, X-Forwarded-* set.
     Stream st;

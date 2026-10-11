@@ -577,8 +577,11 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
 #endif
     } else if (loc.handler == "cgi") {
         // A process per request: the pool caps them per worker (max_connections, default 8)
-        // and queues the rest; the script's own output is the response.
+        // and queues the rest; the script's own output is the response. A directory URI runs the
+        // location's own index, index.cgi unless it names one: never the site's index.html as a
+        // script (before alpha.70 it inherited the site's list).
         loc.kind = HandlerKind::cgi;
+        if (!t.contains("index")) loc.index = {"index.cgi"};
         loc.cgi.options.max_connections = 8;
         loc.cgi.options.queue_depth = 32;
         loc.cgi.options.read_timeout = std::chrono::milliseconds(30000);

@@ -610,7 +610,7 @@ root = "/var/www/tools.example.com/web"
 [[site.location]]
 path = "/cgi-bin/"
 alias = "/var/www/tools.example.com/cgi-bin"   # scripts only: every file here is run, never served
-index = ["index.cgi"]                          # what /cgi-bin/ runs; without it, the site's index.html
+index = ["index.cgi"]                          # what /cgi-bin/ runs (index.cgi is the default; name another here)
 cgi = { env = { "APP_ENV" = "production" } }
 
 [[site.location]]

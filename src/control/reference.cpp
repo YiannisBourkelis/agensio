@@ -153,7 +153,7 @@ const std::vector<KeyDef>& key_defs() {
         {"[[site.location]]", "match", "enum: prefix | exact | suffix", "prefix", "How path matches: a prefix (longest wins), the exact path, or an ending such as .php.", "reload", "site file", "6"},
         {"[[site.location]]", "root", "path", "the site's root", "A different document root for this location.", "reload", "site file", "6"},
         {"[[site.location]]", "alias", "path", "(none)", "Serve this directory in place of the matched prefix.", "reload", "site file", "6"},
-        {"[[site.location]]", "index", "list", "the site's", "Index files for this location.", "reload", "site file", "6"},
+        {"[[site.location]]", "index", "list", "the site's (a CGI location: index.cgi)", "Index files for this location.", "reload", "site file", "6"},
         {"[[site.location]]", "try_files", "list", "the site's", "What to try for a path here.", "reload", "site file", "6"},
         {"[[site.location]]", "hidden_files", "bool", "the site's", "Serve dot-files here.", "reload", "site file", "6"},
         {"[[site.location]]", "symlinks", "enum: allow | deny", "the site's", "Symlink policy here.", "reload", "site file", "6"},

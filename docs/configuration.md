@@ -1639,7 +1639,8 @@ cgi = { interpreter = "/usr/bin/perl" }
 
 The script is the longest leading part of the path that names a regular file (Apache's
 rule), the rest is `PATH_INFO`; a directory URI takes the location's `index`
-(`index.cgi` by default). The process runs in the script's directory with the same
+(`index.cgi` by default, never the site's: before 0.1.0-alpha.70 a CGI location without one ran
+the site's `index.html` as a script). The process runs in the script's directory with the same
 variables the FastCGI handler sends (`REQUEST_METHOD`, `SCRIPT_NAME`, `PATH_INFO`,
 `QUERY_STRING`, `CONTENT_LENGTH`, `REMOTE_ADDR`, `HTTPS`, `HTTP_*` and the rest), the
 location's `env` entries, and a plain `PATH`. The request body is its stdin, its stdout
