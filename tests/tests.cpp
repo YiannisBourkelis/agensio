@@ -1468,6 +1468,10 @@ static void test_config_locations() {
     CHECK(rejects("bad11.toml", head + "[[site.location]]\npath = \"/a/\"\nmethods = [\"POST\"]\n"));
     CHECK(rejects("bad12.toml", head + "[[site.location]]\npath = \"/a/\"\nmethods = [\"TRACE\"]\n"));
     CHECK(rejects("bad13.toml", head + "[[site.location]]\npath = \"/a/\"\nmethods = []\n"));
+    // A proxy or CGI location takes the methods its handler serves, every one an application may see
+    // (the cookbook's finding, alpha.71: they were checked against the static handler's GET, HEAD, OPTIONS).
+    CHECK(!rejects("methods_proxy.toml", head + "[[site.location]]\npath = \"/api/\"\nupstream = \"http://127.0.0.1:9100\"\nmethods = [\"GET\", \"POST\"]\n"));
+    CHECK(!rejects("methods_cgi.toml", head + "[[site.location]]\npath = \"/cgi-bin/\"\nhandler = \"cgi\"\nmethods = [\"POST\", \"DELETE\"]\n"));
     CHECK(rejects("bad14.toml", head + "[[site.location]]\npath = \"/a/\"\nhandler = \"fastcgi\"\n"));  // no socket
     CHECK(rejects("bad15.toml", head + "[[site.location]]\npath = \"/a/\"\nhandler = \"fastcgi\"\n"
                                       "fastcgi = { socket = \"localhost:9000\" }\n"));

@@ -637,7 +637,11 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
         fail(where + ": cgi = {...} is for a CGI location, and handler = \"" + loc.handler + "\" runs another; remove one of them");
     if (loc.kind == HandlerKind::fastcgi) loc.fastcgi.params_prefix = FcgiHandler::prebuild_params(site, loc);
     if (t.contains("methods")) {
-        const MethodSet implemented = loc.kind == HandlerKind::fastcgi ? kFcgiMethods : kStaticMethods;
+        // What the handler serves: an application behind FastCGI, a proxy or CGI may see every method
+        // (their default too); the static handler GET, HEAD and OPTIONS (before alpha.71 a proxy or CGI
+        // location's list was checked against the static set, so methods = ["POST"] was refused there).
+        const bool application = loc.kind == HandlerKind::fastcgi || loc.kind == HandlerKind::proxy || loc.kind == HandlerKind::cgi;
+        const MethodSet implemented = application ? kFcgiMethods : kStaticMethods;
         MethodSet set = 0;
         for (const auto& name : string_list(t["methods"], (where + ".methods").c_str())) {
             Method m;

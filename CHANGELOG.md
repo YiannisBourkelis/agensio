@@ -2,6 +2,12 @@
 
 ## 0.1.0-alpha.71
 
+- **`methods` on a proxy or CGI location was checked against the static handler's.** A proxy or CGI
+  location passes every method an application may see (its default), but an explicit list there was
+  held to the static handler's GET, HEAD and OPTIONS, so `methods = ["GET", "POST"]` was refused ("the
+  proxy handler does not implement POST"). The list is now checked against what the location's handler
+  serves. Shown first by unit checks (a proxy and a CGI location with POST: refused, now loaded).
+
 - **A location with another handler's table loaded as a static location.** `proxy = { ... }`
   without `upstream` or `handler = "proxy"`, `fastcgi = { ... }` without `handler = "fastcgi"`, or a
   `cgi` table under another `handler`: the table did nothing, silently, and the location served the
