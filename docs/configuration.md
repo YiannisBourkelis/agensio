@@ -1551,6 +1551,52 @@ agensio ctl health                                 # site_file_held_back, with t
 What still refuses the whole start or reload: the main file, a site in it, the server's own
 account (section 11), a listen address that cannot be bound.
 
+**The record of the site files served.** So that a restart decides a conflict between site files
+the way the last reload did, the server keeps a small file, `<state_dir>/.server/served`
+(`/var/lib/agensio/.server/served` by default): one line per site file whose sites it serves, a
+digest of the text those sites were loaded from, then the file's path. The main file is never
+listed, since it never yields:
+
+```
+13002516248778111997 /etc/agensio/sites.d/example.com.toml
+4467891120098732211 /etc/agensio/sites.d/shop.example.com.toml
+```
+
+- **Written** after every start, once the privileges are dropped, and after every reload that
+  switched; replaced whole (a temporary file renamed), so it is never half written. A refused
+  reload leaves it as it was; a certificate refresh does not touch it. A site that keeps its last
+  good version is listed with the digest of that version, not of the broken file on disk.
+- **Read** at a start and by `agensio -t` (and before the helper writes the php-fpm pools), for one
+  thing only: when two site files claim the same name on the same address, or both a catch-all,
+  the file listed and unchanged since keeps it, then one listed but edited since, then one not
+  listed; at a tie, the later in load order yields. The same ranking applies to the names of a
+  file set aside for its own error. Without a conflict on the host it changes nothing.
+- **Never** does it make a file load, add a site or bring back an older version: at a start
+  there is nothing in memory to keep, so a file set aside is not served, as before.
+
+Three cases:
+
+1. *A newcomer at the next boot.* `example.com.toml` serves `example.com` with an access rule
+   on `/`; a copy, `0old.toml`, is dropped into `sites.d/` claiming the same name on the same
+   address. The reload sets `0old.toml` aside (health says so). The host reboots: the record
+   lists `example.com.toml`, so it keeps `example.com` and `0old.toml` is set aside again.
+   Without the record `0old.toml` sorts first and would serve `example.com`, without the access
+   rule (what 0.1.0-alpha.63 and earlier did).
+2. *A broken newcomer.* `shop.example.com.toml` serves its site; a new file with a typo claims
+   `shop.example.com` too. The reload keeps the shop serving, and so does the next start: the
+   record lists the shop's file, so the broken file's claim does not take the name down.
+3. *No record.* The first start ever, a new `state_dir`, or the file deleted: load order
+   decides, as before 0.1.0-alpha.64, and the error log says `no record of the site files served
+   before (...): a conflict between site files at this start was decided by load order`. From
+   then on there is a record.
+
+Nothing needs doing with it. `cat /var/lib/agensio/.server/served` shows which site files the
+server serves. Deleting it only makes the next start decide conflicts by load order; it needs no
+backup. If the server cannot write it (a `state_dir` its account cannot reach), the error log
+says so once: `the record of the site files served could not be written (...)`. The record only
+settles a conflict; the conflict itself stays a mistake to fix: health names the file set aside
+the whole time, and removing or correcting it ends the conflict.
+
 ## 13. CGI
 
 `handler = "cgi"` (or just a `cgi = { ... }` table) on a location runs the requested file

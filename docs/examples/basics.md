@@ -471,6 +471,7 @@ health (`site_file_held_back`) with the loader's own message, for example `unkno
 agensio -t -c /etc/agensio/agensio.toml            # exit 0: "warning: ... set aside, its sites not loaded: ..."
 agensio -t --strict -c /etc/agensio/agensio.toml   # exit 1 for the same, for scripts and CI
 agensio ctl health                                 # site_file_held_back: the file, the error, what serves meanwhile
+cat /var/lib/agensio/.server/served                # the site files served, by which a restart settles a conflict as the last reload did
 agensio ctl validate                               # held_back: what the next reload would set aside
 ```
 
