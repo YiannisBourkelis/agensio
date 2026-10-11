@@ -5,6 +5,7 @@
 // reached its concurrency; every buffer keeps its capacity between uses.
 #pragma once
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -112,6 +113,7 @@ struct H2Stream {
     std::size_t slot = 0;          // its place in the connection's active table (O(1) release)
 
     void reset() {
+        assert(!in_ready && !in_cycle);  // still linked by the writer: the pool would hand out a queued stream
         state = StreamState::idle;
         stream.reset();
         arena.clear();

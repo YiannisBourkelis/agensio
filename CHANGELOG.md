@@ -29,6 +29,17 @@
   copied them with `memcpy`, which may not be given a null pointer even for nothing (undefined
   behaviour; harmless with glibc, flagged by UBSan). The copy now runs only when there are
   bytes. Shown first by `fuzz_h2_conn` (the input `preface-socket`).
+- **HTTP/2: a closed stream could be queued again and go back to the pool still queued.** A
+  stream closed while its bytes were in flight (cut by the idle check, reset) stays in the
+  table until the write completes; a WINDOW_UPDATE for it or for the connection, a SETTINGS
+  change of the initial window, or a body read completing put it back in the writer's queue.
+  When the write completed it was reset into the pool while the queue still linked it. Seen
+  with a client that stopped reading a large file and later sent a window update: after the
+  stream's RST_STREAM the server sent a `200` head with nothing but `server` and `date` on it.
+  By the code, the rest of the queue could be lost behind it, and with the pool full (or shed
+  when idle) the queue held a freed stream. The writer now refuses a closed stream, a body read
+  that completes on one releases it, and a fuzz build asserts that no queued stream is reset.
+  Shown first by `fuzz_h2_conn` (the input `closed-stream-requeued`).
 - **`agensio ctl logs --since` with a huge number, and a JSON access line with an absurd
   status, were undefined behaviour.** `since=99999999999999999999s` or `999999999999999w`
   overflowed a signed integer while the bound was computed, and a JSON line's `status` of 1e30

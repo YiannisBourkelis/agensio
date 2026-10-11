@@ -85,8 +85,12 @@ public:
         ctl_.append(frame);
         schedule();
     }
-    // The stream's response is filled (or its window or source data became available).
+    // The stream's response is filled (or its window or source data became available). A
+    // closed stream is never queued: nothing more goes out on it, and its object may go back
+    // to the pool while the list still pointed at it (2026-10-12, fuzz_h2_conn: a WINDOW_UPDATE
+    // re-queued a stream cut by the idle check, its pooled object then sent a blank 200 head).
     void enqueue(H2Stream& s) {
+        if (s.state == StreamState::closed) return;
         if (!s.in_ready) {
             s.in_ready = true;
             s.next_ready = nullptr;
@@ -282,7 +286,7 @@ private:
     }
 
     void enqueue_silent(H2Stream& s) noexcept {
-        if (s.in_ready) return;
+        if (s.in_ready || s.state == StreamState::closed) return;
         s.in_ready = true;
         s.next_ready = nullptr;
         if (ready_tail_) ready_tail_->next_ready = &s;
@@ -517,7 +521,8 @@ private:
                               --pulls_;
                               H2Stream& st = *sp;
                               st.pulling = false;
-                              if (st.gen != gen) {  // reset meanwhile: the stream is only now free
+                              // Reset or closed meanwhile: the stream is only now free.
+                              if (st.gen != gen || st.state == StreamState::closed) {
                                   owner_.release_deferred(st);
                                   return;
                               }
