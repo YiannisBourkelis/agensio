@@ -174,6 +174,23 @@ public:
         maybe_finish();
     }
 
+#ifdef AGENSIO_FUZZ_HOOKS
+    // Fuzz builds only (tests/fuzz/fuzz_h2_conn.cpp): the connection made `d` older, every time
+    // it keeps moved back as if the clock had moved forward, then what the timer does when it
+    // fires, at once. The clock itself is untouched, so the release build is the same code.
+    // A time point added to the connection or its streams belongs here too.
+    void fuzz_age(std::chrono::steady_clock::duration d) {
+        if (closed_) return;
+        last_activity_ -= d;
+        block_since_ -= d;
+        reset_window_ -= d;
+        ping_rate_.first -= d;
+        settings_rate_.first -= d;
+        for (auto& s : streams_.all()) s->since -= d;
+        check_timeouts();
+    }
+#endif
+
     void close() {
         if (closed_) return;
         closed_ = true;

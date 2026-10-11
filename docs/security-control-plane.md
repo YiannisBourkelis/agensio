@@ -174,7 +174,9 @@ clean. The logs kept since 2026-10-07 hold no other report but the JSON finding 
 which its assertion caught and the record names. Every fuzz
 target is now built with `-fno-sanitize-recover=undefined`: undefined behaviour stops the run and
 leaves its input, as a memory error does (three inputs that reach those lines exit 1 now, 0
-before).
+before). The parser was fixed the same day (a relative time further back than a century is the
+beginning, a status outside 0 to 999 is 0); the three inputs are its regression files, and
+`fuzz_log_line` then ran 2.75 M inputs in 120 s from the campaign's corpus with no report.
 
 2026-10-11, four new targets for the parsers the audit's list did not reach (alpha.72):
 `fuzz_refuse` (patterns compiled, capped and indexed as the loader does, then paths through the

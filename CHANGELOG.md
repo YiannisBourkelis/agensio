@@ -17,6 +17,13 @@
   the run clean; the campaign above missed four reports from `fuzz_log_line` that way. Every fuzz
   target is now built with `-fno-sanitize-recover=undefined`, so undefined behaviour stops the
   run and keeps its input like a memory error, and the record is corrected.
+- **`agensio ctl logs --since` with a huge number, and a JSON access line with an absurd
+  status, were undefined behaviour.** `since=99999999999999999999s` or `999999999999999w`
+  overflowed a signed integer while the bound was computed, and a JSON line's `status` of 1e30
+  or -1 was converted to `int` as it was. A relative time further back than a century now means
+  from the beginning, and a status outside 0 to 999 is 0 (unknown). Shown first by unit checks
+  (the bounds wrapped, the statuses came out as INT_MIN and -1) and by the three inputs, now
+  under `tests/fuzz/regressions/log_line/`, that stopped `fuzz_log_line`.
 
 ## 0.1.0-alpha.71 (2026-10-11)
 

@@ -104,7 +104,9 @@ bool parse_log_line(std::string_view line, LogLine& out) {
             !digits(t, 11, 2, h) || !digits(t, 14, 2, mi) || !digits(t, 17, 2, s) || !zone_offset(t.substr(19), off))
             return false;
         out.time = utc_to_time(y, mo - 1, d, h, mi, s) - off;
-        out.status = static_cast<int>(v["status"].num());
+        // A status no HTTP answer has is 0 (unknown); a double out of int's range would be undefined.
+        const double status = v["status"].num();
+        out.status = status >= 0 && status < 1000 ? static_cast<int>(status) : 0;
         out.host = lower(v.get("host"));
         if (const std::size_t colon = out.host.rfind(':'); colon != std::string::npos && out.host.find(']') == std::string::npos) out.host.erase(colon);
         return true;
@@ -136,9 +138,13 @@ bool parse_since(std::string_view text, std::time_t now, std::time_t& out) {
         out = local_to_time(y, mo - 1, d, h, mi, s);
         return true;
     }
+    // Further back than a century is the beginning (0): the digits stop counting there, so
+    // neither the number nor its product with the unit can overflow.
+    constexpr long kCentury = 100L * 366 * 86400;
     long n = 0;
     std::size_t i = 0;
-    for (; i < text.size() && text[i] >= '0' && text[i] <= '9'; ++i) n = n * 10 + (text[i] - '0');
+    for (; i < text.size() && text[i] >= '0' && text[i] <= '9'; ++i)
+        if (n <= kCentury) n = n * 10 + (text[i] - '0');
     if (i == 0) return false;
     long unit = 1;
     if (i < text.size()) {
@@ -152,7 +158,8 @@ bool parse_since(std::string_view text, std::time_t now, std::time_t& out) {
             default: return false;
         }
     }
-    out = now - n * unit;
+    const long back = n > kCentury / unit ? kCentury : n * unit;
+    out = back >= now ? 0 : now - back;
     return true;
 }
 

@@ -3323,6 +3323,12 @@ static void test_control_commands() {
     CHECK(parse_since("45m", now, t) && t == now - 2700 && parse_since("2d", now, t) && t == now - 2 * 86400);
     CHECK(parse_since("90", now, t) && t == now - 90 && !parse_since("3x", now, t) && !parse_since("", now, t));
     CHECK(parse_since("2026-09-18T10:00:00", now, t) && t > 1700000000);
+    // Further back than the clock goes is the beginning, never an overflow (fuzz_log_line,
+    // 2026-10-11: these wrapped through signed overflow), and a status no HTTP answer has is 0.
+    CHECK(parse_since("99999999999999999999s", now, t) && t == 0);
+    CHECK(parse_since("999999999999999w", now, t) && t == 0 && parse_since("12d", now, t) && t == 0);
+    CHECK(parse_log_line(R"({"time":"2026-09-18T18:44:39+00:00","status":1e30})", l) && l.status == 0);
+    CHECK(parse_log_line(R"({"time":"2026-09-18T18:44:39+00:00","status":-1})", l) && l.status == 0);
     CHECK(query_value("/v1/logs?site=a.test&since=3h&x=a%20b+c", "since") == "3h");
     CHECK(query_value("/v1/logs?site=a.test&since=3h&x=a%20b+c", "x") == "a b c");
     CHECK(query_value("/v1/logs?site=a.test", "nope").empty() && query_value("/v1/logs", "site").empty());

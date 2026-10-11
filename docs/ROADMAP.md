@@ -637,7 +637,8 @@ misbehaviour counters against every published attack class up to the 2026 HTTP/2
       TLS stream 2017 vs 2771 us after the record-sized frames and the pre-framed preadv
       file chunks of the same day (2864 before, nginx's only win). Caddy 30 us on every
       small row. Not done from the G0 list: `fuzz_h2_frame` with a fake socket (G3, with
-      the attack suite).
+      the attack suite); built 2026-10-12 as `fuzz_h2_conn`, the real connection over a
+      socket pair (`docs/design-http2.md` 8.2), the attack suite still open.
 - [ ] G1 Request bodies: DATA to `StreamBody`, windows sized to the site's body limit
       (uploads at the consumer's pace, not 64 KB per round trip), POST through FastCGI,
       proxy and CGI, the presets' uploads over h2 in the root suite, abort by RST_STREAM,

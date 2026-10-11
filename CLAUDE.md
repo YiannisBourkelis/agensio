@@ -183,7 +183,7 @@ Source map (`src/`, files move into subdirectories as they are touched, see the 
   fuzzed), `http_client` (`HttpRequest`: HTTP/1.1 framing both ways, keep-alive rules).
 - top level, not yet moved: `config`, `path`, `mime`, `http_date`, `file`, `cache`,
   `response` (status lines, error pages), `tls_stream.hpp`, `server`, `main`.
-Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (seventeen, each seeded from
+Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (eighteen, each seeded from
 `tests/fuzz/regressions/<name>/`, all run by `scripts/fuzz-all.sh`).
 
 ## Architecture (as implemented)
@@ -710,6 +710,8 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (seventeen, each seeded fro
   path are unchanged (A/B gate). `http2.max_concurrent_streams` is the one HTTP/2 key;
   everything else derives from the existing limits (docs/configuration.md 16). Every
   GOAWAY and RST_STREAM sent is an info log line. Tests: RFC 7541 vectors, `fuzz_hpack`,
+  `fuzz_h2_conn` (the connection itself over a socket pair, the fuzz-build hook `fuzz_age`
+  for time; its release code byte-identical),
   h2spec on both listeners and an h2-library client in `tests/integration.sh`,
   `bench/h2/run.sh` against nginx and Caddy. Rule for every change here: the threat table
   of the design document and the MCP texts move with it; the h1 rows of the A/B stay flat.

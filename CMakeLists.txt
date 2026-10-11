@@ -121,7 +121,8 @@ if(NOT ZLIB_FOUND)
 endif()
 
 # ---------------------------------------------------------------- core library
-add_library(agensio_core STATIC
+# The list is shared with agensio_core_fuzz (the connection fuzzer's instrumented copy, below).
+set(AGENSIO_CORE_SOURCES
   src/config.cpp
   src/http_date.cpp
   src/mime.cpp
@@ -169,6 +170,7 @@ add_library(agensio_core STATIC
   src/upstream/http_client.cpp
   src/upstream/cgi_client.cpp
   src/server.cpp)
+add_library(agensio_core STATIC ${AGENSIO_CORE_SOURCES})
 target_include_directories(agensio_core PUBLIC src)
 target_link_libraries(agensio_core PUBLIC asio tomlplusplus)
 target_compile_definitions(agensio_core PUBLIC
@@ -279,6 +281,31 @@ if(AGENSIO_FUZZ)
     target_link_options(fuzz_quic_conn PRIVATE -fsanitize=fuzzer,address,undefined)
     target_link_libraries(fuzz_quic_conn PRIVATE asio OpenSSL::SSL OpenSSL::Crypto)
   endif()
+  # The HTTP/2 connection fuzzer drives the server's own connection, dispatcher and handlers, so
+  # it links a copy of the whole core built with the fuzzer's coverage, the sanitizers, the
+  # assertions and the fuzz hook (Http2Connection::fuzz_age); agensio_core itself is unchanged.
+  add_library(agensio_core_fuzz STATIC ${AGENSIO_CORE_SOURCES})
+  target_include_directories(agensio_core_fuzz PUBLIC src)
+  target_compile_features(agensio_core_fuzz PUBLIC cxx_std_20)
+  target_link_libraries(agensio_core_fuzz PUBLIC asio tomlplusplus)
+  target_compile_definitions(agensio_core_fuzz PUBLIC $<TARGET_PROPERTY:agensio_core,INTERFACE_COMPILE_DEFINITIONS> AGENSIO_FUZZ_HOOKS=1)
+  target_compile_options(agensio_core_fuzz PUBLIC -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=undefined
+                         -g -O1 -fno-omit-frame-pointer -UNDEBUG)
+  target_link_options(agensio_core_fuzz PUBLIC -fsanitize=address,undefined)
+  if(AGENSIO_HAS_TLS)
+    target_link_libraries(agensio_core_fuzz PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+  endif()
+  if(AGENSIO_HAS_ZLIB)
+    target_link_libraries(agensio_core_fuzz PUBLIC ZLIB::ZLIB)
+  endif()
+  if(AGENSIO_HAS_AUTH)
+    target_include_directories(agensio_core_fuzz PUBLIC ${XCRYPT_INCLUDE_DIR})
+    target_link_libraries(agensio_core_fuzz PUBLIC ${XCRYPT_LIBRARY})
+  endif()
+  add_executable(fuzz_h2_conn tests/fuzz/fuzz_h2_conn.cpp)
+  target_link_libraries(fuzz_h2_conn PRIVATE agensio_core_fuzz)
+  target_compile_options(fuzz_h2_conn PRIVATE -fsanitize=fuzzer)
+  target_link_options(fuzz_h2_conn PRIVATE -fsanitize=fuzzer)
 endif()
 
 # ---------------------------------------------------------------- install and packages (H7)

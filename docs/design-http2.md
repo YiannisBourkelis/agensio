@@ -210,7 +210,7 @@ src/http2/
                      scheduler's write cycle, StreamBody pulls
 src/core/fields.hpp  field rules shared by h2 and h3
 tools/gen-huffman.py
-tests/fuzz/fuzz_h2_frame.cpp, fuzz_hpack.cpp   (+ regressions/)
+tests/fuzz/fuzz_h2_conn.cpp, fuzz_hpack.cpp   (+ regressions/)
 tests/h2-attacks.py  the attack suite of section 8 (raw sockets)
 bench/h2/run.sh      h2load rows against nginx and Caddy
 ```
@@ -726,7 +726,7 @@ item 2.10).
 | Empty frames flood, 0-length headers leak (CVE-2019-9518, 9516) | DATA or HEADERS frames with no payload, no END_STREAM | each is a glitch | 100 | `h2-attacks.py empty-frames` |
 | Resource loop, dependency cycle (CVE-2019-9513, Imperva 2016) | PRIORITY frames building a pathological tree | no tree: priorities are not implemented (`NO_RFC7540_PRIORITIES`), PRIORITY frames are glitches | 100 | `h2-attacks.py priority-flood` |
 | Stream multiplexing abuse | thousands of streams | `MAX_CONCURRENT_STREAMS` enforced (`REFUSED_STREAM` beyond), ids monotonic, GOAWAY at `max_requests_per_connection` | 128 concurrent, 1,000 per connection | h2spec 5.1.2; `h2-attacks.py stream-flood` |
-| Frame size, padding, reserved bits | frames larger than advertised, padding longer than the payload | `FRAME_SIZE_ERROR` / `PROTOCOL_ERROR` before buffering | 16 KB | h2spec 4.2, 6.1; `fuzz_h2_frame` |
+| Frame size, padding, reserved bits | frames larger than advertised, padding longer than the payload | `FRAME_SIZE_ERROR` / `PROTOCOL_ERROR` before buffering | 16 KB | h2spec 4.2, 6.1; `fuzz_h2_conn` |
 | Request smuggling over the HTTP/1.1 downgrade (2021) | CR/LF in values, `transfer-encoding`, a `content-length` that disagrees with DATA, `:authority` against `Host` | the field rules of 6.4 at decode time, before the request exists | none reaches php-fpm or an origin | unit tests of `fields.hpp`; integration through the proxy and FastCGI fixtures |
 | Header list size, table size games | `SETTINGS_HEADER_TABLE_SIZE` above ours, a dynamic table update larger than allowed | `COMPRESSION_ERROR`; our table never exceeds 4 KB; we never use the peer's table for encoding | 4 KB | `fuzz_hpack` differential |
 | Memory as a whole | anything that grows without bound | every buffer belongs to a stream or the connection and has a cap; the sum of the caps is the connection's worst case (7.3) | about 3.8 MB worst case at the defaults, 22 KB idle | the attack suite samples RSS through every run |
@@ -736,8 +736,14 @@ item 2.10).
 - **h2spec** (summerwind/h2spec, the conformance suite for RFC 7540 and 7541) in the
   integration run, all sections, against a devbox image that carries its binary; G0
   records which cases wait for request bodies (G1), G1 passes them all.
-- **Fuzzers**: `fuzz_h2_frame` drives a connection through a fake socket with arbitrary
-  frame sequences (crashes, hangs, unbounded growth); `fuzz_hpack` decodes arbitrary
+- **Fuzzers**: `fuzz_h2_conn` (2026-10-12; planned as `fuzz_h2_frame` with a fake socket)
+  drives the real `Http2Connection` over a socket pair, in front of the server's own
+  dispatcher, static handler, cache and logs, with a script of requests, frames of any
+  shape, raw bytes, reading stopped and resumed, windows replenished or not, and time moved
+  forward through the fuzz-build hook `fuzz_age`; it checks what the server sends (frame
+  sizes, both windows, every header block decoded with the table size the client allowed,
+  responses only on opened streams, nothing after a stream's end, content-length, no body
+  for HEAD, 204, 304) and that the connection is gone once its client is. `fuzz_hpack` decodes arbitrary
   blocks and, when `libnghttp2` is present at build time, decodes each with nghttp2's
   inflater too and compares the fields (a differential test against ten years of
   fixes). Both run under ASan and UBSan, minutes per checkpoint, the counts recorded in

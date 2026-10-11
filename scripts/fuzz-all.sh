@@ -33,7 +33,7 @@ cmake --build "$BUILD" >/dev/null || { echo "fuzz build failed"; exit 1; }
 
 # The longest input each target is given (the parsers' natural sizes); others take libFuzzer's.
 max_len() {
-  case $1 in parser|json) echo 4096 ;; archive) echo 65536 ;; quic_packet) echo 2048 ;; *) echo 0 ;; esac
+  case $1 in parser|json) echo 4096 ;; archive) echo 65536 ;; quic_packet) echo 2048 ;; h2_conn) echo 8192 ;; *) echo 0 ;; esac
 }
 if [ $# -gt 0 ]; then names=("$@")
 else names=(); for f in "$BUILD"/fuzz_*; do [ -x "$f" ] && names+=("${f##*/fuzz_}"); done; fi
