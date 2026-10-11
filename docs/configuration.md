@@ -1536,7 +1536,10 @@ What happens then:
   next reload would do with the files on disk);
 - `agensio -t` prints a warning per file set aside and still exits 0, because the server
   would start and serve the other sites; `agensio -t --strict` exits 1 for the same, for
-  scripts and CI that want every file to load;
+  scripts and CI that want every file to load. It loads each certificate and key pair as the
+  start does (section 14), so a site the start would set aside for its certificate is named
+  too; run it as the account that starts the server (root, with `server.user`), since run as
+  another it cannot read a key only root reads and says it did not check it;
 - the control plane never reports a change as done when its own file was set aside:
   `site-create`, `site-update` and `site-enable` reload with their file required to load,
   and on a refusal undo what they wrote (a new file removed, the previous version put back,
@@ -1645,7 +1648,9 @@ A listen address is either plain or TLS for every site on it.
 Each certificate and key pair is loaded once per start or reload, before the listeners are
 built. A pair that does not load (a file the server's account cannot read, not PEM, a key that
 is not the certificate's) sets its site's file aside, and the other sites start or reload
-(section 12c); a site of the main file refuses the whole start or reload. A site that was
+(section 12c); a site of the main file refuses the whole start or reload. `agensio -t` loads the
+pairs the same way and names those files ahead of the start (before 0.1.0-alpha.65 it only
+looked for the files). A site that was
 serving keeps the certificate it loaded before: a renewal whose key the server cannot read
 (root's `0600` after the privilege drop) or a broken file never takes it down, the error log
 says `the certificate loaded before keeps serving`, and health names the file until the files

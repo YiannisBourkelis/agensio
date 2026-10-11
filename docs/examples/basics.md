@@ -164,8 +164,10 @@ tls = { cert = "/etc/ssl/example.com/fullchain.pem", key = "/etc/ssl/example.com
 ```
 
 **What it does.** A client that asks for one of the site's names gets this certificate;
-`fullchain.pem` is the certificate first, then the intermediates, in PEM. `agensio -t` refuses
-the configuration when either file is missing. The certificate must cover every name in
+`fullchain.pem` is the certificate first, then the intermediates, in PEM. `agensio -t` loads the
+pair as the start does and names a site whose files do not load (missing, not PEM, a key that is
+not the certificate's): its file is set aside, or for a site of the main file the configuration is
+refused. The certificate must cover every name in
 `server_name`: a request for a name it does not cover is answered `421`. The server checks the
 files every hour and loads a renewed certificate by itself, without a reload; your ACME client's
 renewal hook can run `agensio ctl cert-renew example.com --yes` to load it at once. It reads the
@@ -454,6 +456,8 @@ sites, and everything else loads:
   on reload it keeps its running version only when that version passes the rules, so a root
   opened to others while it serves takes that site down until it is fixed (health
   `hosting_rule`, with the `chown` or `chmod` to run);
+- a site whose certificate or key does not load (not PEM, a key that is not the certificate's,
+  unreadable) is set aside too; on reload a served one keeps the certificate it loaded before;
 - when two files claim one name (or both a catch-all) on one address, the one already serving
   keeps it and the other is set aside, at a restart too (the server keeps a record of the files
   it serves); between files neither served, the later in alphabetical order yields;

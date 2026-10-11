@@ -38,10 +38,12 @@ void usage() {
                  "       agensio mcp [--socket PATH] [-c config.toml]\n"
                  "  -c, --config FILE   configuration file (default: ./agensio.toml, ./config/agensio.toml,\n"
                  "                      /etc/agensio/agensio.toml, /usr/local/etc/agensio/agensio.toml)\n"
-                 "  -t, --test          check the configuration (and FastCGI upstreams) and exit\n"
+                 "  -t, --test          check the configuration (FastCGI upstreams, certificate and key\n"
+                 "                      pairs as the start loads them) and exit\n"
                  "      --explain       with -t: print the effective configuration after presets\n"
-                 "      --strict        with -t: a site file set aside (an error of its own, or a conflict\n"
-                 "                      with another file) fails the check too; without it the check\n"
+                 "      --strict        with -t: a site file set aside (an error of its own, a conflict\n"
+                 "                      with another file, a hosting rule, a certificate that does not\n"
+                 "                      load) fails the check too; without it the check\n"
                  "                      passes with a warning, as the server starts the other sites\n"
                  "  -v, --version       print the version and exit\n"
                  "  passwd [--method yescrypt|bcrypt|sha512] [--cost N] USER\n"
@@ -859,10 +861,13 @@ int main(int argc, char** argv) {
     // mode to fix. A site that breaks one is set aside with its file (design section 26, C2);
     // what remains is the server's own account and the main file's sites, which refuse it all.
     // Not for `agensio pools`: writing the pools is how a socket rule is fixed.
-    std::vector<std::string> hosting_errors;
+    // The certificates the same way (C3): the start loads each pair in the server, which sets aside a
+    // site whose pair does not load; -t, --explain and reload load them here as the start would.
+    std::vector<std::string> hosting_errors, certificate_notes;
     try {
         cfg = agensio::load_config(config_path, nullptr, true);  // the record of the files served ranks conflicts as at the last reload
         if (!pools) hosting_errors = agensio::isolate_hosting(cfg, agensio::system_facts(), nullptr);
+        if (!pools && (test_only || explain || reload)) certificate_notes = agensio::check_certificates(cfg);
     } catch (const std::exception& e) {
         std::cerr << "configuration error: " << e.what() << "\n";
         return 1;
@@ -875,6 +880,7 @@ int main(int argc, char** argv) {
     for (const auto& h : cfg.held_back)
         std::cerr << "warning: " << h.file << " set aside, its sites not loaded: " << h.error
                   << (reload ? " (the running server keeps serving the version it loaded before, if any)" : "") << "\n";
+    for (const auto& n : certificate_notes) std::cerr << "note: " << n << "\n";
     if (strict && !cfg.held_back.empty()) {
         std::cerr << "configuration error: " << cfg.held_back.size() << " site file(s) set aside (--strict)\n";
         return 1;

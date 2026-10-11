@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.0-alpha.65
+
+From the alpha.64 report:
+
+- **`agensio -t` passed a site the start sets aside for its certificate.** `-t` only looked for
+  the certificate and key files, while the start loads each pair: a key that is not a key, a key
+  that is not the certificate's, or a key the account cannot read set the site's file aside at the
+  start while `-t` said OK and `--strict` exited 0, so CI and the unit's `ExecStartPre` passed a
+  configuration whose site would not be served. `-t` (also with `--explain`, and `agensio reload`
+  before it signals) now loads each pair as the start does, through the same code, and a pair that
+  does not load sets its file aside with the start's message: a warning, `--strict` fails, and for
+  a site of the main file an error. An automatic certificate not issued yet is not loaded (the
+  start writes a placeholder). `-t` reads the files as whoever runs it, as the start does; run as
+  an account other than root while `server.user` names another, it cannot read a key only root
+  reads, which the start reads as root, and says so (`note: ... not checked`) instead of setting
+  the site aside. Shown first by `tests/isolation.sh` (the three keys: `-t` said OK for all five
+  sites and `--strict` exited 0; now three files set aside and exit 1).
+
 ## 0.1.0-alpha.64 (2026-10-11)
 
 From the alpha.63 report:

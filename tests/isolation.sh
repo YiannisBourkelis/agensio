@@ -227,6 +227,33 @@ for _ in $(seq 1 50); do nc -z 127.0.0.1 18314 2>/dev/null && break; sleep 0.1; 
 check "at start, a site whose key cannot be loaded is set aside, the other site serves, the error log says why" "site b none yes" \
   "$(body o.test 18314) $(tbody 18313) $(grep -q 't.toml set aside.*could not be loaded' "$S3/logs/error.log" && echo yes)"
 kill $S3PID 2>/dev/null; wait $S3PID 2>/dev/null
+# -t loads each pair as the start does (the alpha.64 report, finding 1): a key that is not a key, a
+# key that is not the certificate's and a key this account cannot read set their files aside, so -t
+# warns and --strict fails, while an automatic certificate not issued yet (the start writes a
+# placeholder) is not one of them; with server.user naming another account the start reads the
+# files as root, so a -t that is not root says it cannot judge the unreadable key instead.
+S6=$T/check-tls; mkdir -p "$S6/sites.d" "$S6/state" "$CT/other" "$CT/mix" "$CT/locked"
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$CT/other/key.pem" -out "$CT/other/cert.pem" \
+  -subj /CN=other.test -days 2 > /dev/null 2>&1
+cp "$CT/t/cert.pem" "$CT/mix/cert.pem"; cp "$CT/other/key.pem" "$CT/mix/key.pem"
+cp "$CT/t/cert.pem" "$CT/t/key.pem" "$CT/locked/"; chmod 000 "$CT/locked/key.pem"
+s6_main() { printf 'include = ["sites.d/*.toml"]\n[server]\nstate_dir = "%s/state"\nacme = { email = "a@example.com" }\n%s' "$S6" "${1:-}" > "$S6/agensio.toml"; }
+s6_main
+tls_site "$CT/bad" 18320 > "$S6/sites.d/t.toml"
+site m.test 18321 "$T/www/a" "tls = { cert = \"$CT/mix/cert.pem\", key = \"$CT/mix/key.pem\" }" > "$S6/sites.d/m.toml"
+site l.test 18322 "$T/www/a" "tls = { cert = \"$CT/locked/cert.pem\", key = \"$CT/locked/key.pem\" }" > "$S6/sites.d/l.toml"
+site u.test 18323 "$T/www/a" 'tls = "auto"' > "$S6/sites.d/u.toml"
+site o.test 18324 "$T/www/b" > "$S6/sites.d/o.toml"
+"$BIN" -t -c "$S6/agensio.toml" > "$S6/t.out" 2>&1; S6_T=$?
+"$BIN" -t --strict -c "$S6/agensio.toml" > "$S6/strict.out" 2>&1; S6_STRICT=$?
+check "-t sets aside a key that is not a key, a key not the certificate's, a key it cannot read; not an automatic one to come; --strict fails" "0 yes yes 1" \
+  "$S6_T $(grep -q 't.toml set aside.*could not be loaded' "$S6/t.out" && grep -q 'm.toml set aside.*could not be loaded' "$S6/t.out" &&
+          grep -q 'l.toml set aside.*could not be loaded' "$S6/t.out" && echo yes) $(! grep -q -e 'u.toml set aside' -e 'o.toml set aside' "$S6/t.out" && echo yes) $S6_STRICT"
+s6_main $'user = "nobody"\n'
+"$BIN" -t -c "$S6/agensio.toml" > "$S6/user.out" 2>&1
+check "-t not as root with server.user another account: the unreadable key is not judged, -t says so; the broken ones are set aside" "yes yes" \
+  "$(! grep -q 'l.toml set aside' "$S6/user.out" && grep -q "note: .*locked/key.pem.*agensio -t as root" "$S6/user.out" && echo yes) $(grep -q 'm.toml set aside' "$S6/user.out" && echo yes)"
+chmod 600 "$CT/locked/key.pem"
 tls_site "$CT/t" 18306 > "$T/sites.d/t.toml"; reload
 check "a TLS site with its own certificate serves" "site t" "$(tbody 18306)"
 chmod 000 "$CT/t/key.pem"; site a.test 18301 "$T/www/a" > "$T/sites.d/a.toml"; reload

@@ -120,10 +120,12 @@ key, both PEM. The certificate must cover every name in `server_name`: a request
 does not cover is answered `421`, and a TLS client asking for a name no site lists is refused
 during the handshake (`unrecognized_name`), so another site's certificate is never shown.
 
-A site whose files are missing is set aside with its file (the other sites load; `agensio -t`
-warns and `-t --strict` fails); in the main file it stops the start. A site whose files exist
-but do not load (not PEM, a key that is not the certificate's, unreadable) is set aside the
-same way (section 4).
+A site whose files are missing, or exist but do not load (not PEM, a key that is not the
+certificate's, unreadable), is set aside with its file and the other sites load (section 4); in
+the main file it stops the start. `agensio -t` loads each pair as the start does, so it says the
+same ahead of time: a warning per file set aside, and `-t --strict` fails. Run it as the account
+that starts the server (root, with `server.user`): run as another account, it cannot read a key
+only root reads and says it did not check it (`note: ... not checked`).
 
 ### 3.2 Who must be able to read them
 
@@ -256,7 +258,7 @@ x509 -noout -issuer -enddate -fingerprint -sha256`.
 ## 7. Commands at a glance
 
 ```sh
-agensio -t -c /etc/agensio/agensio.toml         # names files the server's account cannot read, and certificates that are missing
+agensio -t -c /etc/agensio/agensio.toml         # loads every pair as the start does; names files the server's account cannot read
 agensio ctl health                              # every finding of section 5
 agensio ctl site example.com                    # tls (the file) and tls.served (the certificate in memory)
 agensio ctl cert-renew example.com --yes        # automatic: order now; your own files: load them now

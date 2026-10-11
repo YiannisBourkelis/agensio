@@ -5,6 +5,7 @@
 
 #include <array>
 #include <atomic>
+#include <functional>
 #include <mutex>
 #include <map>
 #include <memory>
@@ -105,6 +106,27 @@ struct Listener {
     std::vector<std::string> site_names;  // for the startup log
 };
 
+#ifdef AGENSIO_HAS_TLS
+using CertificateSet = std::map<std::string, std::shared_ptr<asio::ssl::context>>;  // by "cert\nkey"
+// One certificate and key pair from its files, as the start, a reload, the refresh and agensio -t
+// load it: nullptr and why when it does not load (a file missing or unreadable, not PEM, a key that
+// is not the certificate's), with what cfg.user lacks to read the files after the drop (step T1).
+std::shared_ptr<asio::ssl::context> load_certificate_pair(const Config& cfg, const TlsConfig& t, std::string& error);
+// The certificate step of the start, a reload and agensio -t (design section 26, C3): every TLS
+// site's pair loaded once with `load` into `out`; a site whose pair does not load is set aside with
+// its file, a carried one keeps `previous`'s material (said in `kept`). Throws for the main file's
+// sites and when no site is left.
+void isolate_certificates(Config& cfg, const Config* running, CertificateSet& out, const CertificateSet* previous,
+                          const std::function<std::shared_ptr<asio::ssl::context>(const TlsConfig&, std::string&)>& load,
+                          std::vector<std::string>& kept);
+#endif
+// agensio -t's certificate step (the alpha.64 report, finding 1): each pair loaded as the start
+// loads it, so a site the start would set aside for its certificate is set aside here too. Not an
+// automatic certificate still to be issued (the start writes a placeholder), and not a file this
+// process may not read while the start reads it as root (-t not root, server.user another
+// account): the notes returned name those. Throws as the start does.
+std::vector<std::string> check_certificates(Config& cfg);
+
 // One loaded configuration with everything derived from it: the routers (which point into
 // its sites), the TLS contexts, the log sink indexes. A reload builds a new one and
 // switches the workers to it; a connection keeps the generation it is serving a request
@@ -117,7 +139,7 @@ struct Generation {
     // listeners' contexts take their material from here, and a carried site whose files no longer
     // load takes it from the previous generation's (design section 26, C3). Never used for a
     // handshake, so sharing one between generations is safe.
-    std::map<std::string, std::shared_ptr<asio::ssl::context>> certificates;  // by "cert\nkey"
+    CertificateSet certificates;
 #endif
     SiteConfig control_site;             // the control listener's synthetic site (stable address for its router)
     std::unique_ptr<Listener> control;   // present when [control] is enabled
@@ -182,7 +204,6 @@ private:
     bool refresh_certificates(std::string& error, const std::vector<std::string>& only, std::vector<std::string>& report);
     void arm_certificate_watch();
 #ifdef AGENSIO_HAS_TLS
-    std::shared_ptr<asio::ssl::context> load_pair(const TlsConfig& t, std::string& error);
     static std::string pair_stamp(const TlsConfig& t);
 #endif
     std::map<std::string, std::string> cert_stamps_;       // by pair: the files as last loaded (or tried)

@@ -1681,7 +1681,12 @@ site's pair, every site's pair failing) still refuse, the latter as "no site cou
 Tests: three checks in `tests/isolation.sh` with a certificate generated for the test, and the
 check this section's test list asked of `tests/acme.sh`: a renewal forced with `cert-renew` while
 another site's file is broken serves the renewed certificate (C1's doing; before alpha.62 that
-reload was refused).
+reload was refused). `agensio -t` (0.1.0-alpha.65, the alpha.64 report): the loop is
+`isolate_certificates`, shared by the start, a reload and `check_certificates`, which `-t`,
+`--explain` and `agensio reload` run after the hosting rules, so `-t` sets aside what the start
+would; an automatic pair not issued yet is skipped (the start writes a placeholder), and a file a
+`-t` that is not root cannot read, while the start reads it as root before running as
+`server.user`, is named in a note rather than judged.
 
 **The certificate work followed** (section 26's "Order", 0.1.0-alpha.64): T1, a key the server's
 account cannot read named at `-t`, at start and in health (`tls_key_unreadable`) with root's

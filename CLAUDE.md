@@ -267,8 +267,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   `write_pools` removes no pool while a file is set aside. The certificates the same way (C3,
   `Server::load_certificates`, `Generation::certificates`): each pair loaded once before the
   listeners, whose contexts copy the material; a pair that does not load sets the site aside, a
-  carried site keeps the previous generation's material (a root-only key after the drop); `-t`,
-  the start and health (`tls_key_unreadable`, `server_read_problem` in `services/pools.*`, T1)
+  carried site keeps the previous generation's material (a root-only key after the drop); `-t`
+  loads each pair as the start does (`check_certificates` over the shared `isolate_certificates`,
+  alpha.65); `-t`, the start and health (`tls_key_unreadable`, `server_read_problem` in `services/pools.*`, T1)
   say ahead of time which certificate or key the server's account cannot read after the drop;
   health judges the certificates as served (`Server::tls_facts`, `control::TlsFacts`, T2):
   `certificate_not_loaded`, `acme_renewal_overdue` and `acme_renewal_failed` with the manager's
