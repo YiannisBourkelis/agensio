@@ -2,6 +2,16 @@
 
 ## 0.1.0-alpha.71
 
+- **A proxied application's redirect to the name agensio gave it as `Host` reached the browser
+  unchanged.** With `proxy = { host = "app.internal" }` the origin is told it is `app.internal` and
+  builds its redirects from that name, while only a `Location` naming the origin's address was
+  rewritten to the site, so the client was sent to a name it cannot reach. A `Location` naming the
+  configured `host` (either scheme, the whole name only) now points at the origin too and is
+  rewritten; `redirects = "pass"` still turns rewriting off. nginx and Apache rewrite only the
+  upstream's own URL unless told another name; agensio itself chose this one. Shown first by
+  `tests/integration.sh` (the test origin's new `/host-redirect`, which builds its redirect from
+  Host: `http://app.internal/json`, now the site's `/policy/json`).
+
 - **A field the configuration sets toward the origin that agensio also writes went twice.**
   `proxy = { headers = { ... } }` was added after agensio's own `Host`, `X-Forwarded-For`,
   `X-Forwarded-Proto`, `X-Forwarded-Host` and `Forwarded` lines, which went anyway: the origin got

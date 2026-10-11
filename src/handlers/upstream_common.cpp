@@ -75,11 +75,18 @@ bool rewrite_location(std::string& out, std::string_view value, const Stream& s,
     const bool tls = value.starts_with("https://");
     if (!tls && !value.starts_with("http://")) return false;
     std::string_view rest = value.substr(tls ? 8 : 7);
-    const UpstreamAddress* origin = nullptr;
+    std::size_t authority = 0;  // the origin's authority at the start of `rest`, its length; 0 for none
     for (const auto& a : loc.proxy.addresses)
-        if (!a.unix && a.tls == tls && rest.starts_with(a.authority())) origin = &a;
-    if (!origin) return false;
-    rest.remove_prefix(origin->authority().size());
+        if (!a.unix && a.tls == tls && rest.starts_with(a.authority())) authority = a.authority().size();
+    // The name given to the origin as its Host (host = "<name>"): the origin builds its absolute
+    // redirects from it, so a Location naming it points at the origin too, either scheme (alpha.71;
+    // nginx and Apache rewrite only the upstream's own URL unless told another name).
+    const std::string_view named = loc.proxy.host;
+    if (authority == 0 && named != "pass" && named != "upstream" && !named.empty() && rest.size() >= named.size() &&
+        Headers::iequals(rest.substr(0, named.size()), named))
+        authority = named.size();
+    if (authority == 0) return false;
+    rest.remove_prefix(authority);
     if (!rest.empty() && rest.front() != '/') return false;  // a longer host name
     const bool https = s.conn.tls || s.conn.forwarded_https;
     if (loc.proxy.rewrite.empty()) {

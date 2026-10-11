@@ -2107,6 +2107,12 @@ except OSError:
     "$(echo "$H" | grep -ci '^X-Forwarded-Proto:') $(echo "$H" | grep -i '^X-Forwarded-Proto:') $(echo "$H" | grep -ci '^Host:') $(echo "$H" | grep -i '^Host:') $(echo "$H" | grep -ci '^Forwarded:') $(echo "$H" | grep -i '^Forwarded:')"
   H=$(curl -sS -H 'Accept: text/x' $P/policy/headers | tr -d '\r')
   check "proxy: host rewritten" "Host: app.internal" "$(echo "$H" | grep '^Host:')"
+  # The origin builds its redirect from the Host agensio gave it (host = "app.internal"): that name is
+  # the origin too, so the Location comes back to this site, either scheme (alpha.71; before, the
+  # client was sent to app.internal, which it cannot reach). A longer name is left alone.
+  check "proxy: a redirect to the name given as host is rewritten to the site (http and https)" \
+    "http://127.0.0.1:8091/policy/json http://127.0.0.1:8091/policy/json" \
+    "$(curl -sS -i $P/policy/host-redirect | tr -d '\r' | awk '/^Location:/{print $2}') $(curl -sS -i "$P/policy/host-redirect?https" | tr -d '\r' | awk '/^Location:/{print $2}')"
   check "proxy: X-Forwarded-Host carries the original when Host is rewritten" "X-Forwarded-Host: 127.0.0.1:8091" "$(echo "$H" | grep '^X-Forwarded-Host:')"
   check "proxy: RFC 7239 Forwarded added" "Forwarded: for=127.0.0.1;proto=http;host=127.0.0.1:8091" "$(echo "$H" | grep '^Forwarded:')"
   check "proxy: configured fields with variables" "X-Real-IP: 127.0.0.1 X-Site: http://127.0.0.1:8091" "$(echo "$H" | grep -E '^X-(Real-IP|Site):' | paste -sd' ')"

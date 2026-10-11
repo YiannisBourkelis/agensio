@@ -508,9 +508,10 @@ proxy = { host = "pass", forwarded = "forwarded", headers = { "X-Gateway" = "por
 `X-Forwarded-Proto`; from a client that is not in `trusted_proxies`, those fields are replaced,
 never appended to. Here the main origin gets `Host: portal.internal.example.com` and, because
 Host was rewritten, `X-Forwarded-Host: portal.example.com`. An application that builds links
-from `Host` then shows its internal name, and a redirect to that name is passed on as it is:
-only one to the origin's address (`http://127.0.0.1:8080/...`) is rewritten to the site. Keep
-`host = "pass"` unless the origin refuses other names.
+from `Host` then shows its internal name in its pages; its redirects come back to the site,
+since a redirect to the name given as `host`, like one to the origin's address
+(`http://127.0.0.1:8080/...`), points at the origin and is rewritten (before 0.1.0-alpha.71 only
+the address was). Keep `host = "pass"` unless the origin refuses other names.
 
 `headers` sets fields on every request, with `$host`, `$remote_addr` (the client, behind
 trusted proxies the forwarded one), `$scheme`, `$server_name` and `$server_port`; the client's

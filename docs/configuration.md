@@ -1415,7 +1415,7 @@ on a location.
 | `forwarded` | `"x-forwarded"` | `"x-forwarded"`, `"forwarded"` (RFC 7239), `"both"`, `"off"` |
 | `headers` | none | fields set toward the origin, `{ "X-Real-IP" = "$remote_addr" }`; `""` removes; a field agensio writes itself (`Host`, `X-Forwarded-*`, `Forwarded`) named here replaces agensio's line, sent once |
 | `hide` | none | fields dropped from the origin's answer, `["X-Powered-By"]` |
-| `redirects` | `"rewrite"` | Location pointing at the origin rewritten to this site, or `"pass"` |
+| `redirects` | `"rewrite"` | Location pointing at the origin (its address, or the name given as `host`) rewritten to this site, or `"pass"` |
 | `upgrade` | `true` | forward Upgrade requests and tunnel after a 101 (WebSocket) |
 | `tunnel_timeout` | 0 | seconds a tunnel may stay idle in both directions; 0 = no limit |
 | `buffering` | `true` | collect the whole answer (memory, then a temp file above `buffer_max`) so a slow client never holds the origin; `false` streams with backpressure |

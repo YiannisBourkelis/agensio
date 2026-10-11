@@ -14,6 +14,8 @@
 //   /redirect       302 to http://127.0.0.1:<port>/json with X-Powered-By: redirect and hide rules
 //   .../to-landing  302 to http://127.0.0.1:<port>/.../landing: the path the origin was asked kept,
 //                   as an application builds its redirects (a proxy's Location rewrite)
+//   /host-redirect  302 to http://<the Host it was sent>/json (https:// with ?https): an application
+//                   building its absolute redirects from Host (a proxy's rewrite of the name it gave)
 //   /stats          {"connections":N,"requests":M} accepted so far: proves pool reuse
 // Build: target agensio_upstream. Run: agensio_upstream [-p 9100] [-w 1] [-b 102400].
 #include <asio.hpp>
@@ -168,6 +170,20 @@ private:
             } else {
                 consumed_ += body;
             }
+        }
+        if (target.substr(0, target.find('?')) == "/host-redirect") {
+            g_requests.fetch_add(1, std::memory_order_relaxed);
+            std::string host;
+            for (std::size_t at = request.find("\r\n"); at != std::string_view::npos && host.empty(); at = request.find("\r\n", at + 2)) {
+                const std::size_t end = request.find("\r\n", at + 2);
+                const std::string_view line = request.substr(at + 2, end == std::string_view::npos ? std::string_view::npos : end - at - 2);
+                if (line.size() > 5 && (line[0] | 0x20) == 'h' && (line[1] | 0x20) == 'o' && (line[2] | 0x20) == 's' && (line[3] | 0x20) == 't' && line[4] == ':')
+                    host.assign(line.substr(line.find_first_not_of(' ', 5)));
+            }
+            const bool https = target.find("?https") != std::string_view::npos;
+            head_ = std::string("HTTP/1.1 302 Found\r\nServer: upstream\r\nLocation: ") + (https ? "https://" : "http://") + host +
+                    "/json\r\nContent-Length: 0" + (close ? "\r\nConnection: close\r\n\r\n" : "\r\n\r\n");
+            return write({}, close);
         }
         if (target.substr(0, target.find('?')) == "/headers") {
             g_requests.fetch_add(1, std::memory_order_relaxed);
