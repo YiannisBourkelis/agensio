@@ -268,11 +268,14 @@ your agreement, does it apply the rules, and it runs the same checks once more.
 > agent shows you the one line (`refused by the site's refuse pattern '/typo3conf/ext/*/'`,
 > say, a pattern too wide) and proposes the narrower one the documentation meant.
 
-When you ask for what no field covers (a redirect, a header on one path, an alias outside
-the root, a second upstream, CGI), the agent does not edit the site's file, which would
-unmanage it. It hands you the exact `[[location]]` block for the site's root additions
-file, `sites.d/<domain>.root.toml`, root's alone, with `site = "<domain>"` on its first
-line, then `agensio reload`, and reads the result back with `site_show`.
+When you ask for what no field covers (a header on one path, an alias outside the root, a
+second upstream, CGI), the agent does not edit the site's file, which would unmanage it. It
+hands you the exact `[[location]]` block for the site's root additions file,
+`sites.d/<domain>.root.toml`, root's alone, with `site = "<domain>"` on its first line, then
+`agensio reload`, and reads the result back with `site_show`. A redirect of one path cannot be
+made yet (no location key redirects), and the agent says so; a whole domain sent to another
+(`redirect = "https://new.example"`, path and query kept) is a site file of its own that root
+writes, which the agent hands you.
 
 An existing application comes as an archive. For Writebook the agent calls
 `site_install` with the GitHub release URL; the answer says the application pins Ruby

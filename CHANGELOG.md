@@ -2,6 +2,16 @@
 
 ## 0.1.0-alpha.71
 
+- **The agent was told it could add a redirect through a site's root additions, which it cannot.**
+  The MCP server instructions and the `site_show` and `site_update` texts listed "a redirect" among
+  what root additions cover, but a root additions file holds locations and no location key
+  redirects, so an agent following them handed the user a file that could not do what it promised.
+  The texts now say that a redirect of one path cannot be made yet, and give what can: a whole
+  domain sent to another (`redirect = "https://new.example"`, path and query kept, 301) is a site
+  file of its own that root writes, and a site's plain port to HTTPS is `site_update`'s
+  `redirect_http`. `docs/mcp.md` the same. Shown first by a unit check holding the instructions to
+  the reference table (no location key redirects: the instructions must say so).
+
 - **`path_check` described a CGI request with path info as a missing script.** The CGI handler runs
   the longest leading part of the path that is a file and passes the rest as `PATH_INFO`
   (`/cgi-bin/env.cgi/extra` runs `env.cgi` with `/extra`); `path_check` (`agensio ctl path-check`,

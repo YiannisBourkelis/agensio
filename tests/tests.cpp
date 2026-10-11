@@ -7404,6 +7404,23 @@ static void test_access_rules() {
 // site's log keeps its group when rotated: the site's account reads it through that group (agensio
 // owns it, 0640). The cookbook's finding (2026-10-09): a managed site's log, <dir of [log] access>/
 // sites/<domain>.log (control/sites.cpp), matched no pattern and grew for ever.
+// The agent's texts promise only what the configuration can do (the cookbook's finding, alpha.71): while
+// no location key redirects, the server instructions say a redirect of one path cannot be made, and
+// never offer one through root additions. A redirect key added later fails this until the text moves.
+static void test_mcp_texts() {
+    std::istringstream in("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\","
+                          "\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"1\"}}}\n");
+    std::ostringstream out;
+    run_mcp("/nonexistent/agensio-test.sock", in, out);
+    const std::string text = out.str();
+    const auto& keys = control::key_defs();
+    const bool location_redirect = std::any_of(keys.begin(), keys.end(), [](const control::KeyDef& k) {
+        return std::string_view(k.table) == "[[site.location]]" && std::string_view(k.key) == "redirect";
+    });
+    CHECK(text.find("\"instructions\"") != std::string::npos && !location_redirect);
+    CHECK(text.find("no location key redirects") != std::string::npos && text.find("(a redirect,") == std::string::npos);
+}
+
 static void test_packaged_logrotate() {
     std::ifstream in(std::string(AGENSIO_SOURCE_DIR) + "/packaging/agensio.logrotate");
     struct Stanza {
@@ -8560,6 +8577,7 @@ int main() {
     test_path_check();
     test_packaged_docs();
     test_packaged_logrotate();
+    test_mcp_texts();
     test_drupal_php_rule();
     test_refusal_finding();
     test_protection();
