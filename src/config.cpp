@@ -1198,15 +1198,15 @@ void parse_pool(const toml::table* php, const fs::path& base_dir, const Config& 
     if (!parse_fcgi_address("unix:" + pool.socket, site.php.address, err)) fail(where + ": " + err);
     site.php.addresses = {site.php.address};
     site.php.configured = true;
-    // Keep-alive sized so kept connections cannot pin every child (C3a), unless set by hand; not for
-    // an ondemand pool: php-fpm forks one child per event on its socket, and a child on a kept
-    // connection never accepts another, so connections opened together waited in the backlog
-    // until read_timeout (the alpha.66 report). A static or dynamic pool has children to take them.
-    if (!php || !php->contains("keep_conn")) site.php.options.keep_conn = pool.pm != "ondemand";
-    if (!php || !php->contains("max_connections")) {
-        const unsigned workers = cfg.workers ? cfg.workers : available_cpus();
-        site.php.options.max_connections = std::max(1u, pool.children / workers);
-    }
+    // Keep-alive sized so kept connections cannot pin every child (C3a), unless set by hand: a child
+    // holding a kept connection takes no other, so the workers together must hold no more
+    // connections than the pool has children. Not for an ondemand pool: php-fpm forks one child per
+    // event on its socket, so connections opened together waited in the backlog until read_timeout
+    // (the alpha.66 report). Not with fewer children than workers either: every worker holds one
+    // connection at least, and those beyond the children waited the same way.
+    const unsigned workers = cfg.workers ? cfg.workers : available_cpus();
+    if (!php || !php->contains("keep_conn")) site.php.options.keep_conn = pool.pm != "ondemand" && pool.children >= workers;
+    if (!php || !php->contains("max_connections")) site.php.options.max_connections = std::max(1u, pool.children / workers);
 }
 
 
@@ -2308,15 +2308,28 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
         out[at.first].text += " (read by " + list + ")";
     }
 #endif
-    // keep_conn set by hand on a generated ondemand pool (off by default there, the alpha.66 report):
-    // requests opened together wait for read_timeout. Once per pool.
+    // keep_conn set by hand on a generated pool where kept connections can leave a request without a
+    // child: an ondemand pool (off by default there, the alpha.66 report), or more connections than
+    // children (max_connections x workers). Requests wait for read_timeout. Once per pool.
     std::set<std::string> pools;
-    for (const auto& s : cfg.sites)
-        if (s.pool.generated && s.pool.pm == "ondemand" && s.php.options.keep_conn && pools.insert(s.pool.name).second)
-            out.push_back({"php_keep_conn_ondemand", "warning", s.server_names.front(),
-                           "site " + s.server_names.front() + ": keep_conn = true on its ondemand php-fpm pool " + s.pool.name +
+    const unsigned workers = cfg.workers ? cfg.workers : available_cpus();
+    for (const auto& s : cfg.sites) {
+        if (!s.pool.generated || !s.php.options.keep_conn || !pools.insert(s.pool.name).second) continue;
+        const std::string name = s.server_names.front();
+        const unsigned long held = static_cast<unsigned long>(s.php.options.max_connections) * workers;
+        if (s.pool.pm == "ondemand")
+            out.push_back({"php_keep_conn_ondemand", "warning", name,
+                           "site " + name + ": keep_conn = true on its ondemand php-fpm pool " + s.pool.name +
                                ": php-fpm forks one child per event on the pool's socket and a child holding a kept connection never "
                                "takes another, so PHP requests that open connections together can wait until read_timeout (504)"});
+        else if (held > s.pool.children)
+            out.push_back({"php_keep_conn_exceeds_children", "warning", name,
+                           "site " + name + ": keep_conn = true with max_connections " + std::to_string(s.php.options.max_connections) + " on " +
+                               std::to_string(workers) + " worker(s) can hold " + std::to_string(held) + " connections to its php-fpm pool " +
+                               s.pool.name + " of " + std::to_string(s.pool.children) +
+                               " children: a child holding a kept connection takes no other, so a request on the others can wait until "
+                               "read_timeout (504)"});
+    }
     return out;
 }
 

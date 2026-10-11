@@ -1641,12 +1641,24 @@ static void test_pools() {
             return std::string("[[site]]\nserver_name = [\"") + name + "\"]\nlisten = [\"127.0.0.1:18090\"]\nroot = \"blog\"\nuser = \"" + user +
                    "\"\napp = \"php\"\nphp = { " + php + " }\n";
         };
+        // Two workers: a pool of one child gets no keep-alive (each worker holds a connection at least),
+        // and keep_conn set by hand where max_connections x workers exceeds the children is a warning.
         write("k.toml", server + php_site("d.test", "web4", "pm = \"dynamic\"") + php_site("k.test", "web5", "keep_conn = true") +
-                            php_site("k2.test", "web5", "keep_conn = true") + php_site("s.test", "web6", "pm = \"static\", keep_conn = true"));
+                            php_site("k2.test", "web5", "keep_conn = true") + php_site("s.test", "web6", "pm = \"static\", keep_conn = true") +
+                            php_site("l.test", "web7", "pm = \"static\", children = 1") +
+                            php_site("h.test", "web8", "pm = \"static\", children = 1, keep_conn = true") +
+                            php_site("m.test", "web9", "pm = \"dynamic\", children = 4, keep_conn = true, max_connections = 4"));
         const Config k = load_config(dir / "k.toml");
         const auto notes = access_notices(k);
         const auto kept = std::count_if(notes.begin(), notes.end(), [](const AccessNotice& n) { return n.code == "php_keep_conn_ondemand"; });
+        auto exceeds = [&](const char* site) {
+            return std::any_of(notes.begin(), notes.end(), [&](const AccessNotice& n) { return n.code == "php_keep_conn_exceeds_children" && n.site == site; });
+        };
         CHECK(k.sites[0].php.options.keep_conn && k.sites[1].php.options.keep_conn && kept == 1);
+        CHECK(!k.sites[4].php.options.keep_conn && k.sites[4].php.options.max_connections == 1 && !exceeds("l.test") && !exceeds("s.test") &&
+              !exceeds("d.test"));
+        CHECK(exceeds("h.test") && exceeds("m.test") &&
+              std::count_if(notes.begin(), notes.end(), [](const AccessNotice& n) { return n.code == "php_keep_conn_exceeds_children"; }) == 2);
         CHECK(std::any_of(notes.begin(), notes.end(), [](const AccessNotice& n) {
             return n.code == "php_keep_conn_ondemand" && n.severity == "warning" && n.site == "k.test" && n.text.find("read_timeout (504)") != std::string::npos;
         }));

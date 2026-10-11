@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.0-alpha.70
+
+- **PHP requests could wait until `read_timeout` (504) on a generated `static` or `dynamic` pool
+  with fewer children than the server has workers** (availability; the same failure as the
+  `ondemand` one fixed in alpha.68). Each worker gets `children / workers` connections to the
+  pool, at least one, and kept them: 4 workers before a pool of 2 children held 4 connections, a
+  php-fpm child holding a kept connection takes no other, and a request on the connections no
+  child took waited in the pool's backlog until agensio gave up. Such a pool now gets no kept
+  connections (`keep_conn = false` unless set by hand); a pool with at least one child per worker
+  keeps them. `keep_conn = true` set by hand where `max_connections` x workers exceeds the
+  children is a warning from `-t`, the error log and health (`php_keep_conn_exceeds_children`).
+  Measured with `bench/php/pool.sh` (now with `-w` workers, `-n` children and `-b` the burst; the
+  two builds alternated, `bench/results/php-pool-20261011-161150.md`), a static pool of 2 children
+  behind 4 workers: 16 requests of a 150 ms script over 8 connections gave 4 to 8 x 504 in 15 to
+  20 s, now none in 1.2 s; a small script 2,100 to 3,500 req/s (most connections waiting), now
+  85k. Shown first by `tests/pools.sh` (4 workers before a static and a dynamic pool of 2 children:
+  4 and 8 x 504; now none) and unit checks.
+
 ## 0.1.0-alpha.69 (2026-10-11)
 
 - **`scripts/release.sh` stops a release that would publish the wrong notes or skip a version**

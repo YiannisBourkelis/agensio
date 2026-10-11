@@ -113,7 +113,7 @@ const std::vector<KeyDef>& key_defs() {
         {"php = {}", "queue_depth", "int", "64", "Requests waiting for a connection per worker; 503 beyond.", "reload", "site file", "7"},
         {"php = {}", "queue_wait", "seconds", "5", "Longest wait in that queue; 503 with Retry-After beyond.", "reload", "site file", "7"},
         {"php = {}", "priority_reserve", "share", "0", "Share of max_connections (0 to 1) kept for priority = true locations.", "reload", "site file", "7"},
-        {"php = {}", "keep_conn", "bool", "false (true with a generated static or dynamic pool)", "FastCGI keep-alive; php-fpm pins a child to every kept connection, so not with pm = ondemand.", "reload", "site file", "7"},
+        {"php = {}", "keep_conn", "bool", "false (true with a generated static or dynamic pool of at least one child per worker)", "FastCGI keep-alive; php-fpm pins a child to every kept connection, so not with pm = ondemand, and max_connections x workers at most the children.", "reload", "site file", "7"},
         {"php = {}", "buffering", "bool", "true", "Buffer php-fpm's whole answer (memory, then a temp file) so the child is freed at once; false streams it.", "reload", "site file", "7"},
         {"php = {}", "buffer_max", "size", "1MB", "Buffered answer kept in memory up to this, spilled to a temp file above.", "reload", "site file", "7"},
         {"php = {}", "buffer_file_max", "size", "1GB", "Cap on that temp file; beyond it the rest streams.", "reload", "site file", "7"},

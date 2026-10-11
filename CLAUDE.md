@@ -400,7 +400,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   `php = { children, pm, ... }`; `pm` is `ondemand` by default since 2026-09-21 with a
   60 s child idle timeout, because static pools kept 150-200 MB resident per idle site,
   and `static` is what a PHP benchmark must set), sets `max_connections = children / workers`
-  and `keep_conn = true` for `static` and `dynamic` pools only (alpha.67, the alpha.66 report: an
+  and `keep_conn = true` for `static` and `dynamic` pools of at least one child per worker only
+  (alpha.70: with fewer children every worker still held a connection, more than the children;
+  health and `-t` warn `php_keep_conn_exceeds_children` for max_connections x workers above the
+  children; `php-pool-20261011-161150.md`; alpha.67, the alpha.66 report: an
   ondemand pool forks a child per edge-triggered event on its socket, php bugs #69724 and #72935,
   and a child on a kept connection never accepts again, so a burst waited until `read_timeout`;
   `bench/php/pool.sh`, `php-pool-20261011-103217.md`: no 504 after, keep-alive off costs 11 us of

@@ -7,18 +7,22 @@
 # they are alternated in one session, as bench/ab.sh does. Linux, as root (the devbox as root):
 #
 #   docker run --rm --init --ulimit nofile=65536:65536 --user root -v "$PWD:$PWD" -w "$PWD" \
-#     agensio-devbox bench/php/pool.sh BIN [BIN2] [-r ROUNDS] [-d SECONDS] [-c CONNECTIONS] [-m PM] [-o 'KEY = VALUE']
+#     agensio-devbox bench/php/pool.sh BIN [BIN2] [-r ROUNDS] [-d SECONDS] [-c CONNECTIONS] [-m PM] [-n CHILDREN]
+#       [-w WORKERS] [-b CONNSxREQUESTS] [-o 'KEY = VALUE']
 #
 # Defaults: 3 rounds, 10 s per row, wrk with 8 connections, pm = ondemand, 8 children, one
-# worker, the pool's other settings as generated (max_requests 500); -o adds to the site's
-# php table (for example -o 'keep_conn = false'). Writes
+# worker, a burst of 30 connections x 4 requests, the pool's other settings as generated
+# (max_requests 500); -o adds to the site's php table (for example -o 'keep_conn = false'). Writes
 # bench/results/php-pool-<stamp>.md.
 set -uo pipefail
 [ "$(id -u)" = 0 ] || { echo "pool.sh: run as root (the devbox as root)"; exit 1; }
 BINS=("$(readlink -f "$1")"); shift
 if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then BINS+=("$(readlink -f "$1")"); shift; fi
-ROUNDS=3; DUR=10; CONNS=8; PM=ondemand; CHILDREN=8; EXTRA=""
-while getopts r:d:c:m:o: o; do case $o in r) ROUNDS=$OPTARG ;; d) DUR=$OPTARG ;; c) CONNS=$OPTARG ;; m) PM=$OPTARG ;; o) EXTRA=", $OPTARG" ;; *) exit 2 ;; esac; done
+ROUNDS=3; DUR=10; CONNS=8; PM=ondemand; CHILDREN=8; WORKERS=1; BURST=30x4; EXTRA=""
+while getopts r:d:c:m:n:w:b:o: o; do
+  case $o in r) ROUNDS=$OPTARG ;; d) DUR=$OPTARG ;; c) CONNS=$OPTARG ;; m) PM=$OPTARG ;; n) CHILDREN=$OPTARG ;; w) WORKERS=$OPTARG ;;
+    b) BURST=$OPTARG ;; o) EXTRA=", $OPTARG" ;; *) exit 2 ;; esac
+done
 FPM=$(ls /usr/sbin/php-fpm* | head -1)
 ROOT=$(pwd)
 STAMP=$(date -u +%Y%m%d-%H%M%S)
@@ -38,7 +42,7 @@ echo '<?php usleep(150000); echo "slow\n";' > "$P/slow.php"
 chown -R web1:agensio "$T/web1"; chmod 2750 "$T/web1" "$T/web1/site" "$P"; chmod 644 "$P"/*.php
 cat > "$T/agensio.toml" <<EOF
 [server]
-workers = 1
+workers = $WORKERS
 user = "agensio"
 pools_run = "$T/run"
 state_dir = "$T/state"
@@ -96,10 +100,10 @@ row() {  # label path: one measured wrk run, after a 2 s warm-up
   req=$(awk '/requests in/ {print $1}' "$T/wrk.out")
   rps=$(awk '/Requests\/sec/ {printf "%.0f", $2}' "$T/wrk.out")
   p50=$(awk '$1 == "50%" {print $2}' "$T/wrk.out"); p99=$(awk '$1 == "99%" {print $2}' "$T/wrk.out")
-  local non2xx; non2xx=$(awk '/Non-2xx/ {print $4}' "$T/wrk.out")
-  printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' "$label" "$path" "$req" "$rps" "$p50" "$p99" \
+  local non2xx timeouts; non2xx=$(awk '/Non-2xx/ {print $4}' "$T/wrk.out"); timeouts=$(awk '/Socket errors/ {print $NF}' "$T/wrk.out")
+  printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' "$label" "$path" "$req" "$rps" "$p50" "$p99" \
     "$(awk -v d=$((a1 - a0)) -v hz="$HZ" -v n="$req" 'BEGIN {printf "%.1f", d * 1000000 / hz / n}')" \
-    "$(awk -v d=$((f1 - f0)) -v hz="$HZ" -v n="$req" 'BEGIN {printf "%.1f", d * 1000000 / hz / n}')" "${non2xx:-0}"
+    "$(awk -v d=$((f1 - f0)) -v hz="$HZ" -v n="$req" 'BEGIN {printf "%.1f", d * 1000000 / hz / n}')" "${non2xx:-0}" "${timeouts:-0}"
   cat "$T/wrk.out" >> "$T/raw.txt"
 }
 
@@ -111,13 +115,13 @@ row() {  # label path: one measured wrk run, after a 2 s warm-up
   echo "- binaries: ${BINS[*]}"
   for b in "${BINS[@]}"; do echo "  - $(basename "$b"): $("$b" --version 2>&1 | head -1), sha256 $(sha256sum "$b" | cut -c1-12)"; done
   echo "- php-fpm: $("$FPM" -v | head -1)"
-  echo "- pool: pm = $PM, $CHILDREN children, as agensio pools generates it; agensio one worker, server.user agensio; php read_timeout 5 s${EXTRA:+; php table also: ${EXTRA#, }}"
-  echo "- load: wrk -t2 -c$CONNS, ${DUR} s per row after 2 s of warm-up; burst: 30 keep-alive connections x 4 GETs of a 150 ms script at once, on a pool started cold"
-  echo "- command: bench/php/pool.sh ${BINS[*]} -r $ROUNDS -d $DUR -c $CONNS -m $PM${EXTRA:+ -o '${EXTRA#, }'}"
+  echo "- pool: pm = $PM, $CHILDREN children, as agensio pools generates it; agensio $WORKERS worker(s), server.user agensio; php read_timeout 5 s${EXTRA:+; php table also: ${EXTRA#, }}"
+  echo "- load: wrk -t2 -c$CONNS, ${DUR} s per row after 2 s of warm-up; burst: ${BURST%x*} keep-alive connections x ${BURST#*x} GETs of a 150 ms script at once, on a pool started cold"
+  echo "- command: bench/php/pool.sh ${BINS[*]} -r $ROUNDS -d $DUR -c $CONNS -m $PM -n $CHILDREN -w $WORKERS -b $BURST${EXTRA:+ -o '${EXTRA#, }'}"
   echo "- CPU: utime + stime per request from /proc (agensio's process; php-fpm's master, its children and the children it reaped)"
   echo
-  echo "| binary | path | requests | req/s | p50 | p99 | agensio us/req | php-fpm us/req | non-2xx |"
-  echo "|---|---|---|---|---|---|---|---|---|"
+  echo "| binary | path | requests | req/s | p50 | p99 | agensio us/req | php-fpm us/req | non-2xx | wrk timeouts |"
+  echo "|---|---|---|---|---|---|---|---|---|---|"
 } > "$OUT"
 BURSTS=""
 for r in $(seq 1 "$ROUNDS"); do
@@ -128,7 +132,7 @@ for r in $(seq 1 "$ROUNDS"); do
     "$b" -c "$T/agensio.toml" > "$T/agensio.out" 2>&1 & APID=$!
     for _ in $(seq 1 50); do nc -z 127.0.0.1 $PORT 2> /dev/null && break; sleep 0.1; done
     for _ in 1 2 3; do curl -s -o /dev/null -H "Host: php.test" "http://127.0.0.1:$PORT/hello.php"; done   # the report's warm-up
-    read -r ok g504 other secs < <(python3 "$T/burst.py" $PORT 30 4 /slow.php)
+    read -r ok g504 other secs < <(python3 "$T/burst.py" $PORT "${BURST%x*}" "${BURST#*x}" /slow.php)
     BURSTS+="| $(basename "$b") | $r | $ok | $g504 | $other | $secs |"$'\n'
     row "$(basename "$b")" /hello.php >> "$OUT"
     row "$(basename "$b")" /page.php >> "$OUT"
@@ -139,7 +143,7 @@ for r in $(seq 1 "$ROUNDS"); do
 done
 {
   echo
-  echo "Burst (120 requests of /slow.php, 150 ms each, over 30 connections; 504 = waited for read_timeout):"
+  echo "Burst ($(( ${BURST%x*} * ${BURST#*x} )) requests of /slow.php, 150 ms each, over ${BURST%x*} connections; 504 = waited for read_timeout):"
   echo
   echo "| binary | round | 200 | 504 | other | seconds |"
   echo "|---|---|---|---|---|---|"

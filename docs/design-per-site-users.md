@@ -67,6 +67,9 @@ Rules:
   edge-triggered event on the socket (its bugs #69724, #72935), and a child on a kept
   connection never calls accept() again, so connections opened in a burst waited until
   `read_timeout`; nginx, h2o, Apache and Caddy open a connection per request by default.
+  Since 0.1.0-alpha.70 it is false too for a pool with fewer children than workers: each worker
+  holds one connection at least, so the workers held more connections than the pool had
+  children, and a request on a connection no child took waited until `read_timeout`.
 
 ## The generated pool file
 

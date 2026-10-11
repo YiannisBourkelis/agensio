@@ -217,6 +217,70 @@ check "the same burst on a dynamic pool" "$dy_ok $dy_504" "120 0"
 kill $BS; wait $BS 2>/dev/null || true
 kill "$(cat $B/fpm.pid)" 2>/dev/null || true
 
+# More workers than children: each worker kept a connection to a static or dynamic pool
+# (max_connections = children / workers, at least 1), so 4 workers held 4 connections to 2
+# children, and a request on a connection no child would take waited until read_timeout. 8
+# connections x 2 requests of the 150 ms script, read_timeout 5 s: every one answered.
+W=$T/wide; mkdir -p $W/run $W/state $W/pool.d
+for u in web5 web6; do
+  id -u $u >/dev/null 2>&1 || useradd -r -M -s /usr/sbin/nologin $u
+  mkdir -p $W/$u/public; echo '<?php usleep(150000); echo "slow\n";' > $W/$u/public/slow.php
+  chown -R $u:agensio $W/$u; chmod 2750 $W/$u $W/$u/public; chmod 644 $W/$u/public/slow.php
+done
+cat > $W/agensio.toml <<EOF
+[server]
+workers = 4
+user = "agensio"
+pools_run = "$W/run"
+state_dir = "$W/state"
+[log]
+access = "off"
+error = "$T/logs/wide-error.log"
+[[site]]
+server_name = ["static.test"]
+listen = ["127.0.0.1:18098"]
+root = "$W/web5/public"
+user = "web5"
+app = "php"
+php = { pm = "static", children = 2, read_timeout = 5 }
+[[site]]
+server_name = ["dynamic.test"]
+listen = ["127.0.0.1:18098"]
+root = "$W/web6/public"
+user = "web6"
+app = "php"
+php = { pm = "dynamic", children = 2, read_timeout = 5 }
+EOF
+"$BIN" pools -c $W/agensio.toml --out $W/pool.d > /dev/null || true
+printf '[global]\npid = %s/fpm.pid\nerror_log = %s/fpm.log\ninclude = %s/pool.d/*.conf\n' $W $W $W > $W/fpm.conf
+$FPM -y $W/fpm.conf -D
+for i in $(seq 1 50); do [ -S $W/run/agensio-web5.sock ] && [ -S $W/run/agensio-web6.sock ] && break; sleep 0.1; done
+"$BIN" -c $W/agensio.toml > $W/server.out 2>&1 & WS=$!
+for i in $(seq 1 50); do nc -z 127.0.0.1 18098 2>/dev/null && break; sleep 0.1; done
+cat > $W/burst.py <<'EOF'
+import http.client, sys, threading, time
+host, codes, lock, t0 = sys.argv[1], [], threading.Lock(), time.time()
+def run():
+    c = http.client.HTTPConnection("127.0.0.1", 18098, timeout=30)
+    for _ in range(2):
+        try:
+            c.request("GET", "/slow.php", headers={"Host": host}); r = c.getresponse(); r.read(); s = r.status
+        except Exception:
+            s = 0; c = http.client.HTTPConnection("127.0.0.1", 18098, timeout=30)
+        with lock: codes.append(s)
+ts = [threading.Thread(target=run) for _ in range(8)]
+for t in ts: t.start()
+for t in ts: t.join()
+print(codes.count(200), codes.count(504), "%.2f" % (time.time() - t0))
+EOF
+read -r st_ok st_504 st_s < <(python3 $W/burst.py static.test)
+read -r dw_ok dw_504 dw_s < <(python3 $W/burst.py dynamic.test)
+echo "     4 workers, 2 children: static $st_ok answered, $st_504 x 504, ${st_s} s; dynamic $dw_ok, $dw_504 x 504, ${dw_s} s"
+check "4 workers before a static pool of 2 children: all 16 answered, none waits for read_timeout" "$st_ok $st_504" "16 0"
+check "the same before a dynamic pool of 2 children" "$dw_ok $dw_504" "16 0"
+kill $WS; wait $WS 2>/dev/null || true
+kill "$(cat $W/fpm.pid)" 2>/dev/null || true
+
 echo "pools: $pass passed, $fail failed"
 if [ $fail != 0 ]; then echo "--- server.out"; cat $T/server.out; echo "--- error.log"; cat $T/logs/error.log 2>/dev/null; echo "--- fpm.log"; cat $T/fpm.log 2>/dev/null | tail -5; echo "--- nonroot.out"; cat $T/nonroot.out; fi
 [ $fail = 0 ]

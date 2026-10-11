@@ -1037,7 +1037,7 @@ location on the same socket must agree on them: set them once on the site.
 | `priority_reserve` | 0 | share of `max_connections` kept for `priority = true` locations |
 | `max_idle` | 8 | idle connections kept per worker to this socket when `keep_conn` is on |
 | `idle_timeout` | 30 | seconds a kept connection may stay idle before agensio closes it (0 = kept until the peer closes); a kept connection pins a php-fpm child |
-| `keep_conn` | `false`; with a generated pool `true` for `pm = "static"` or `"dynamic"`, `false` for `"ondemand"` | FastCGI keep-alive; php-fpm pins a child to every kept connection, so `max_connections` x workers must stay below `pm.max_children`. Never with `pm = "ondemand"` (`-t` and health warn, `php_keep_conn_ondemand`): php-fpm forks one child per event on its socket, so connections opened together can get one child between them (its bugs #69724 and #72935), and a child on a kept connection never takes another, so the rest wait until `read_timeout`. Not worth it through a Docker-published port (see below) |
+| `keep_conn` | `false`; with a generated pool `true` for `pm = "static"` or `"dynamic"` with at least as many children as workers, `false` for `"ondemand"` or fewer children | FastCGI keep-alive; php-fpm pins a child to every kept connection, so `max_connections` x workers must stay at or below `pm.max_children` (`-t` and health warn, `php_keep_conn_exceeds_children`): a request on a kept connection no child takes waits until `read_timeout`. Never with `pm = "ondemand"` (`-t` and health warn, `php_keep_conn_ondemand`): php-fpm forks one child per event on its socket, so connections opened together can get one child between them (its bugs #69724 and #72935), and a child on a kept connection never takes another, so the rest wait until `read_timeout`. Not worth it through a Docker-published port (see below) |
 | `head_max` | `"64KB"` | reply head larger than this is 502 |
 | `path_info` | `true` | split `/x.php/extra` into SCRIPT_NAME and PATH_INFO |
 
@@ -1163,8 +1163,13 @@ keeps a file's group (2026-09-20: every upload was `0640 user:user` and answered
 as `files_unreadable` until then, with `php_tmp_missing` when the directory is gone), `memory_limit`, `max_execution_time`, upload limits from
 `max_body_size`, `clear_env`, `expose_php = off`. `agensio -t --explain` prints the
 whole file. agensio's own FastCGI options for a generated pool default to
-`max_connections = children / workers`, and to `keep_conn = true` for a `static` or
-`dynamic` pool, so kept connections can never pin every child (section 7). An `ondemand`
+`max_connections = children / workers` (at least 1), and to `keep_conn = true` for a
+`static` or `dynamic` pool with at least as many children as workers, so kept connections can
+never pin every child (section 7). With fewer children than workers each worker still holds a
+connection, more than the pool has children, so such a pool gets no kept connections either
+(before 0.1.0-alpha.70 the rest waited until `read_timeout`: 4 workers before a static pool of 2
+children answered a burst of 16 requests with up to 8 x 504 in 20 s, now all in 1.2 s,
+`bench/results/php-pool-20261011-161150.md`). An `ondemand`
 pool (the default) gets no kept connections: php-fpm forks its children one per event on the
 pool's socket, and a burst of connections behind kept ones waited until `read_timeout`
 (0.1.0-alpha.66 and earlier). Keep-alive saves about 11 us of CPU per request (agensio's and
