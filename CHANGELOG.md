@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.0-alpha.69
+
+- **`scripts/release.sh` stops a release that would publish the wrong notes or skip a version**
+  (the alpha.68 report: alpha.68 shipped a list of commit subjects as its notes, and alpha.67's
+  were left under a heading never released). A version string with no tag of its own, set by a
+  run that stopped before tagging, is suggested again rather than the next one, and skipping it
+  needs a confirmation in a terminal; another version's section without a release date
+  ("(unreleased)") stops the run until it is renamed or merged; and the draft the script inserts
+  from the commit subjects carries a marker line, so a section still holding it is refused until
+  the notes are written.
+
 ## 0.1.0-alpha.68 (2026-10-11)
 
 0.1.0-alpha.67 was never published: its release stopped at a failing unit test, and its changes

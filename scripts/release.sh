@@ -6,7 +6,12 @@
 # usage: scripts/release.sh [version] [--dry-run] [--no-push]
 #   version   X.Y.Z or X.Y.Z-<pre>.<n> (alpha.2, beta.1, rc.1); the tag is v<version>.
 #             Without it the next version is suggested from the current one (alpha.1 ->
-#             alpha.2, 0.1.0 -> 0.1.1) and you can accept it with Enter or type another.
+#             alpha.2, 0.1.0 -> 0.1.1) and you can accept it with Enter or type another;
+#             a current version that was never tagged (a run that stopped after setting it)
+#             is suggested again, and skipping it needs a confirmation.
+# The changelog stops a run that would publish the wrong notes: another version's section
+# without a release date (renamed or merged first), or the draft this script inserts, still
+# carrying its marker line (alpha.68 shipped a commit list and skipped alpha.67 that way).
 #   --dry-run show what would change, touch nothing
 #   --no-push commit and tag, do not push
 set -euo pipefail
@@ -31,11 +36,15 @@ suggest() {
         echo "${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))"
     fi
 }
+# A version string without its tag was set by a run that stopped before tagging (a failing
+# unit test): it is still the version to release.
+untagged=""
+git rev-parse -q --verify "refs/tags/v$current" > /dev/null || untagged="$current"
 if [ -z "$version" ]; then
-    next=$(suggest "$current")
+    if [ -n "$untagged" ]; then next="$current"; else next=$(suggest "$current"); fi
     [ -n "$next" ] || { echo "cannot derive the next version from '$current'; pass one"; exit 2; }
     if [ -t 0 ]; then
-        read -r -p "current version is $current; next version [$next]: " answer
+        read -r -p "current version is $current${untagged:+ (never tagged: a run stopped before its tag)}; next version [$next]: " answer
         version="${answer:-$next}"
     else
         version="$next"
@@ -50,6 +59,25 @@ today=$(date +%Y-%m-%d)
 say() { printf '%s\n' "$*"; }
 fail() { say "error: $*"; exit 1; }
 
+if [ -n "$untagged" ] && [ "$version" != "$untagged" ]; then
+    say "note: $untagged, the version in CMakeLists.txt, was never tagged; releasing $version skips it"
+    if [ $dry = 0 ]; then
+        [ -t 0 ] || fail "pass $untagged to release it, or run in a terminal to confirm skipping it"
+        read -r -p "skip $untagged and release $version? [y/N] " answer
+        [[ "$answer" =~ ^[Yy] ]] || fail "stopped; nothing changed"
+    fi
+fi
+
+# 0. Every other section of the changelog is a release, with its date: one without (a version
+#    planned under another number, "(unreleased)") is renamed to this version or merged into
+#    it first, so its notes are not left behind.
+undated=$(grep -E '^## [0-9]' CHANGELOG.md | grep -vE '\([0-9]{4}-[0-9]{2}-[0-9]{2}\)[[:space:]]*$' |
+          grep -vE "^## ${version//./\\.}( \(.*\))?[[:space:]]*$" || true)
+[ -z "$undated" ] || fail "CHANGELOG.md has a section for another version, not released:
+$undated
+rename it to $version or merge it into the $version section, then run again"
+draft_mark='<!-- draft from the commit subjects: edit the notes, then delete this line -->'
+
 # 1. The changelog must describe the version. When it does not, a draft is inserted from
 #    the commit subjects since the previous tag (merges and release commits left out),
 #    for you to edit; the script stops so the notes are reviewed before anything is tagged.
@@ -57,6 +85,10 @@ fail() { say "error: $*"; exit 1; }
 # "## 0.1.0-alpha.10", "## 0.1.0-alpha.10 (unreleased)" or "## 0.1.0-alpha.10 (2026-09-20)";
 # the date is stamped in below.
 if grep -qE "^## $version( \(.*\))?\s*$" CHANGELOG.md; then
+    section=$(awk -v v="$version" '/^## / { if (on) exit; h = $0; sub(/^## /, "", h); sub(/ \(.*\)[[:space:]]*$/, "", h); sub(/[[:space:]]+$/, "", h); on = (h == v); next } on' CHANGELOG.md)
+    if grep -qF -- "$draft_mark" <<< "$section"; then
+        fail "the $version section of CHANGELOG.md is still the draft of commit subjects: write the notes, delete its marker line, then run again"
+    fi
     say "CHANGELOG.md has a $version section: using it as written (its date becomes $today)"
 else
     say "CHANGELOG.md has no '## $version' section."
@@ -69,9 +101,9 @@ else
         say "$draft"
         read -r -p "insert this as the section at the top for you to edit, then stop? [Y/n] " answer
         if [[ ! "$answer" =~ ^[Nn] ]]; then
-            { printf '# Changelog\n\n## %s (%s)\n\n%s\n\n' "$version" "$today" "$draft"; tail -n +2 CHANGELOG.md | sed '1{/^$/d}'; } > CHANGELOG.md.new
+            { printf '# Changelog\n\n## %s (%s)\n\n%s\n\n%s\n\n' "$version" "$today" "$draft_mark" "$draft"; tail -n +2 CHANGELOG.md | sed '1{/^$/d}'; } > CHANGELOG.md.new
             mv CHANGELOG.md.new CHANGELOG.md
-            say "inserted; edit the wording (no commit needed, it goes into the release commit) and run $0 $version again"
+            say "inserted; write the notes from it, delete the marker line (no commit needed, it goes into the release commit) and run $0 $version again"
             exit 1
         fi
     fi
