@@ -330,6 +330,7 @@ static int select_certificate(SSL* ssl, int* alert, void* arg) {
     const char* name = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
     const SiteConfig* site = listener->router.site(name ? std::string_view(name) : std::string_view());
     if (!site || !site->tls) {
+        SSL_set_ex_data(ssl, sni_refused_index(), reinterpret_cast<void*>(1));  // counted by the connection
         *alert = SSL_AD_UNRECOGNIZED_NAME;
         return SSL_TLSEXT_ERR_ALERT_FATAL;
     }
@@ -938,6 +939,36 @@ json::Value Server::status() {
     v.set("connections_idle", static_cast<double>(rr.idle));  // HTTP/1 and HTTP/2 connections idle 2 s or more
     v.set("max_connections", static_cast<double>(rr.ceiling));  // per worker
     v.set("connections_refused", static_cast<double>(rr.refused));
+    // TLS handshakes refused for their name (none on a listener without a catch-all, or one no site
+    // there has; the alpha.70 report): the count, and the addresses and listeners over the workers.
+    {
+        using tp = std::chrono::steady_clock::time_point;
+        const tp now = std::chrono::steady_clock::now();
+        std::uint64_t total = 0;
+        bool partial = false;
+        tp first{}, last{};
+        std::map<std::string, std::uint64_t> addresses, listeners;
+        for (const auto& w : workers_) {
+            total += w->tls_refused.load(std::memory_order_relaxed);
+            std::lock_guard<std::mutex> lock(w->refusal_mutex);
+            const RefusalSample& t = w->tls_refusals;
+            if (t.first != tp{} && (first == tp{} || t.first < first)) first = t.first;
+            if (t.last > last) last = t.last;
+            for (const auto& a : t.addresses)
+                if (a.count) addresses[a.addr.to_string()] += a.count;
+            partial = partial || t.unsampled > 0;
+            for (const auto& [name, count] : t.listeners) listeners[name] += count;
+        }
+        std::vector<std::pair<std::string, std::uint64_t>> top(addresses.begin(), addresses.end());
+        std::sort(top.begin(), top.end(), [](const auto& x, const auto& y) { return x.second > y.second; });
+        json::Value addrs = json::Value::array(), ls = json::Value::array();
+        for (const auto& [a, c] : top) addrs.push(json::Value::object().set("address", a).set("count", static_cast<double>(c)));
+        for (const auto& [n, c] : listeners) ls.push(json::Value::object().set("address", n).set("count", static_cast<double>(c)));
+        json::Value d = json::Value::object().set("addresses", std::move(addrs)).set("addresses_partial", partial).set("listeners", std::move(ls));
+        if (first != tp{})
+            d.set("first_s_ago", std::chrono::duration<double>(now - first).count()).set("last_s_ago", std::chrono::duration<double>(now - last).count());
+        v.set("tls_handshakes_refused", static_cast<double>(total)).set("tls_handshakes_refused_detail", std::move(d));
+    }
     // [[site.auth]]: the slow hashes the pool has run (one per login, none per request after it).
 #ifdef AGENSIO_HAS_AUTH
     v.set("auth_verifications", static_cast<double>(auth_verifier_ ? auth_verifier_->verifications() : 0));
@@ -1079,42 +1110,7 @@ void Server::refuse_connection(asio::ip::tcp::socket& sock, const asio::ip::tcp:
     {
         std::lock_guard<std::mutex> lock(w.refusal_mutex);
         RefusalSample& s = w.refusals;
-        if (s.first == std::chrono::steady_clock::time_point{}) s.first = now;
-        s.last = now;
-        ++s.window;
-        {  // the client, as accept(2) gave it
-            RefusalSample::Address* slot = nullptr;
-            for (auto& a : s.addresses)
-                if (a.count && a.addr == peer.address()) {
-                    slot = &a;
-                    break;
-                }
-            if (!slot)
-                for (auto& a : s.addresses)
-                    if (!a.count) {
-                        slot = &a;
-                        break;
-                    }
-            if (!slot) {  // every slot taken: the least recently refused address gives way
-                slot = &s.addresses[0];
-                for (auto& a : s.addresses)
-                    if (a.last < slot->last) slot = &a;
-                s.unsampled += slot->count;
-                slot->count = 0;
-                slot->addr = peer.address();
-            }
-            if (!slot->count) slot->addr = peer.address();
-            ++slot->count;
-            slot->last = now;
-        }
-        bool known = false;
-        for (auto& [name, count] : s.listeners)
-            if (name == l.address) {
-                ++count;
-                known = true;
-                break;
-            }
-        if (!known) s.listeners.emplace_back(l.address, 1);
+        s.note(peer.address(), l.address, now);  // the client, as accept(2) gave it
         if (s.window_start == std::chrono::steady_clock::time_point{} || now - s.window_start >= std::chrono::seconds(10)) {
             line = ceiling_line(w, s, now);
             s.window = 0;

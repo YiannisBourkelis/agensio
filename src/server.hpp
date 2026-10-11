@@ -58,7 +58,51 @@ struct RefusalSample {
     std::chrono::steady_clock::time_point first{}, last{};
     std::uint64_t window = 0;  // refusals since the last log line
     std::chrono::steady_clock::time_point window_start{};
+    // One refusal of `addr` on `listener`, under the worker's refusal_mutex: the address's slot (when
+    // every slot is taken the least recently refused address gives way), the listener's count, the times.
+    void note(const asio::ip::address& addr, std::string_view listener, std::chrono::steady_clock::time_point now) {
+        if (first == std::chrono::steady_clock::time_point{}) first = now;
+        last = now;
+        ++window;
+        Address* slot = nullptr;
+        for (auto& a : addresses)
+            if (a.count && a.addr == addr) {
+                slot = &a;
+                break;
+            }
+        if (!slot)
+            for (auto& a : addresses)
+                if (!a.count) {
+                    slot = &a;
+                    break;
+                }
+        if (!slot) {
+            slot = &addresses[0];
+            for (auto& a : addresses)
+                if (a.last < slot->last) slot = &a;
+            unsampled += slot->count;
+            slot->count = 0;
+        }
+        if (!slot->count) slot->addr = addr;
+        ++slot->count;
+        slot->last = now;
+        for (auto& [name, count] : listeners)
+            if (name == listener) {
+                ++count;
+                return;
+            }
+        listeners.emplace_back(std::string(listener), 1);
+    }
 };
+
+#ifdef AGENSIO_HAS_TLS
+// The SNI callback marks a handshake it refuses (a name no site on the listener has, or none and no
+// catch-all) in this slot of the SSL object, so the connection counts it with the client's address.
+inline int sni_refused_index() {
+    static const int index = SSL_get_ex_new_index(0, nullptr, nullptr, nullptr, nullptr);
+    return index;
+}
+#endif
 
 struct Worker {
     explicit Worker(unsigned id_) : id(id_) {}
@@ -72,6 +116,10 @@ struct Worker {
     std::atomic<std::uint32_t> idle{0};     // HTTP/1 and HTTP/2 connections idle 2 s or more (buffers shed); this thread writes
     mutable std::mutex refusal_mutex;
     RefusalSample refusals;
+    // TLS handshakes refused for their name (none on a listener without a catch-all, or one no site
+    // there has): scanners probing port 443 by address (the alpha.70 report). Same mutex.
+    std::atomic<std::uint64_t> tls_refused{0};
+    RefusalSample tls_refusals;
     unsigned sheds = 0;  // connections that dropped their idle buffers or closed since the last trim (this thread only)
     // The configuration this worker hands to new connections and to connections at their
     // next request. Written only by a handler posted to this worker's loop (reload).

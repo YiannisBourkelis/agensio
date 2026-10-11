@@ -119,6 +119,7 @@ acme` once, which only root edits.
 key, both PEM. The certificate must cover every name in `server_name`: a request for a name it
 does not cover is answered `421`, and a TLS client asking for a name no site lists is refused
 during the handshake (`unrecognized_name`), so another site's certificate is never shown.
+`agensio ctl status` counts those refusals (`tls_handshakes_refused`, with the addresses).
 
 A site whose files are missing, or exist but do not load (not PEM, a key that is not the
 certificate's, unreadable), is set aside with its file and the other sites load (section 4); in

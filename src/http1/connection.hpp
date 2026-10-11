@@ -93,6 +93,16 @@ public:
         have_peer_ep_ = true;
     }
 
+    // A handshake the SNI callback refused for its name: counted on this worker with the client's
+    // address and the listener, for status (the alpha.70 report: probes of 443 by address were in
+    // no log and no counter). The refusal path only.
+    void note_refused_name() {
+        worker_.tls_refused.fetch_add(1, std::memory_order_relaxed);
+        if (!have_peer_ep_) return;
+        std::lock_guard<std::mutex> lock(worker_.refusal_mutex);
+        worker_.tls_refusals.note(peer_ep_.address(), listener_->address, std::chrono::steady_clock::now());
+    }
+
     // Control socket: the peer's credentials and role, decided at accept (F0).
     void set_peer(long uid, long gid, std::uint8_t role) noexcept {
         stream_.conn.peer_uid = uid;
@@ -117,6 +127,9 @@ public:
             auto self = this->shared_from_this();
             socket_.async_handshake([self](const asio::error_code& ec) {
                 if (ec) {
+#ifdef AGENSIO_HAS_TLS
+                    if (SSL_get_ex_data(self->socket_.native_handle(), sni_refused_index())) self->note_refused_name();
+#endif
                     self->close();
                     return;
                 }

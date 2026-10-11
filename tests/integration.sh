@@ -584,6 +584,10 @@ check "sni: a name no site lists is refused, no other site's certificate shown" 
 check "sni: no SNI on a listener without catch-all is refused" "" "$(sni -noservername)"
 check "sni: no SNI on a listener with a catch-all gets its certificate" "b.test" "$(echo | openssl s_client -connect 127.0.0.1:8448 -noservername 2>/dev/null | openssl x509 -noout -subject 2>/dev/null | sed 's/.*CN *= *//')"
 check "sni: the matched site serves over TLS" "200" "$(curl -sSk -o /dev/null -w '%{http_code}' --resolve b.test:8446:127.0.0.1 https://b.test:8446/)"
+# The handshakes refused above for their name are counted in status with the client's address (the
+# alpha.70 report: a scanner probing 443 by bare address was in no log and no counter).
+check "sni: handshakes refused for their name are counted in status, with the client's address" "yes yes" \
+  "$(curl -sS --unix-socket bench/tmp/control.sock http://control/v1/status | python3 -c 'import json,sys; d=json.load(sys.stdin); n=d.get("tls_handshakes_refused", 0); a=[x["address"] for x in d.get("tls_handshakes_refused_detail", {}).get("addresses", [])]; print("yes" if n >= 2 else "no", "yes" if "127.0.0.1" in a else "no")')"
 # Authority (2026-09-20): on TLS a connection answers only names the certificate it presented
 # covers, whatever sites the listener holds (RFC 9110 7.4, RFC 6125).
 hostcode() { curl -sSk -o /dev/null -w '%{http_code}' --resolve "$1:$3:127.0.0.1" -H "Host: $2" "https://$1:$3/"; }

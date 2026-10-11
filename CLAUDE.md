@@ -1122,7 +1122,9 @@ Each item was benchmarked before and after on the reduced matrix (`bench/run.sh 
    listeners and the times under a mutex taken only on the refusal path, and counts its
    connections idle 2 s or more at the shed hooks of HTTP/1 and HTTP/2 (`Worker::idle`,
    nothing on the request path). Status shows the ceiling, `connections_refused`,
-   `connections_idle` and `workers_detail`; health's `connections_refused` fix follows from
+   `connections_idle` and `workers_detail` (and, alpha.71, `tls_handshakes_refused`: TLS handshakes
+   refused for their name, marked by the SNI callback in an SSL ex-data slot and noted by the
+   connection's handshake-failure branch in a second `RefusalSample`); health's `connections_refused` fix follows from
    the shape (`control::refusal_finding`: one address behind most refusals, workers full of
    idle connections, or load); the error log line carries the same context once per worker
    per ten seconds. Decided with it: per-address limits are the

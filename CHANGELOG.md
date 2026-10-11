@@ -2,6 +2,18 @@
 
 ## 0.1.0-alpha.71
 
+From the alpha.70 report:
+
+- **A TLS handshake refused for its name was in no log and no counter.** On a listener without a
+  catch-all, a client sending no SNI (a scanner probing port 443 by address) or a name no site has
+  is refused during the handshake (`unrecognized_name`, so no certificate is shown); there is no
+  request, so no access log line, and nothing counted it. `agensio ctl status` (MCP
+  `server_status`) now reports `tls_handshakes_refused` with `tls_handshakes_refused_detail`: the
+  addresses, most refused first, and the listeners, merged over the workers, kept as the connection
+  ceiling's refusals are (a small sample per worker, nothing allocated per refusal). The handshake
+  that succeeds is unchanged. Shown first by `tests/integration.sh` (two refused handshakes on a
+  listener without a catch-all: not in status, now counted with 127.0.0.1).
+
 - **`methods` on a proxy or CGI location was checked against the static handler's.** A proxy or CGI
   location passes every method an application may see (its default), but an explicit list there was
   held to the static handler's GET, HEAD and OPTIONS, so `methods = ["GET", "POST"]` was refused ("the

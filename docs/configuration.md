@@ -135,8 +135,10 @@ site. Monitors that check the IP address need the hostname, or a catch-all.
 that lists the name the client sent (SNI), each site on a listener may have its own
 certificate, and a name no site lists ends the handshake with `unrecognized_name`, so no
 other site's certificate is ever shown. A client that sends no name gets the catch-all's
-certificate, or is refused when the listener has none. An HTTP/1.1 request without a
-Host header stays a 400.
+certificate, or is refused when the listener has none. Such refusals write no log line (there is
+no request), but `agensio ctl status` counts them, `tls_handshakes_refused`, with the addresses
+and listeners in `tls_handshakes_refused_detail`: a scanner probing port 443 by address shows up
+there. An HTTP/1.1 request without a Host header stays a 400.
 
 **A TLS connection is authoritative only for the names its certificate covers** (RFC 9110
 section 7.4, RFC 6125 matching: the subject CN, the DNS and IP entries of the
