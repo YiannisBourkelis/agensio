@@ -161,6 +161,11 @@ static void test_security_path() {
     CHECK(has_hidden_segment("/a/.hidden/b"));
     CHECK(!has_hidden_segment("/a.b/c.d"));
     CHECK(!has_hidden_segment("/"));
+    // /.well-known/ at the root is public by definition (RFC 8615): only that first segment;
+    // a dot segment below it, or a .well-known further down, is hidden as any other.
+    CHECK(!has_hidden_segment("/.well-known/security.txt") && !has_hidden_segment("/.well-known/") && !has_hidden_segment("/.well-known"));
+    CHECK(has_hidden_segment("/.well-known/.inner/x") && has_hidden_segment("/sub/.well-known/x") && has_hidden_segment("/.well-knownx/a") &&
+          has_hidden_segment("/.WELL-KNOWN/x"));
     CHECK(!has_hidden_segment("/a/b."));
 
     CHECK(windows_path_ok("/a/b.txt"));

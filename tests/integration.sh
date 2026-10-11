@@ -633,6 +633,14 @@ check "location: final prefix keeps .php out of the suffix location, deny_suffix
 check "location: fallback result served again (cache hit on the target)" "app shell" "$(curl -sS http://127.0.0.1:8080/app/some/route | sed 's/<[^>]*>//g')"
 check "dotfile hidden (404)" "404" "$(code http://127.0.0.1:8080/.env)"
 check "dot-directory hidden (404)" "404" "$(code http://127.0.0.1:8080/.git/config)"
+# /.well-known/ at the root is served (RFC 8615: security.txt, app links), a dot segment below it
+# and a .well-known further down stay hidden (before alpha.70 the first was 404 too).
+mkdir -p bench/www/.well-known/.inner bench/www/sub/.well-known
+echo "Contact: mailto:security@example.com" > bench/www/.well-known/security.txt
+echo inner > bench/www/.well-known/.inner/secret; echo deeper > bench/www/sub/.well-known/x
+check "/.well-known/security.txt served; a dot segment below it and a .well-known further down are 404" "200 404 404" \
+  "$(code http://127.0.0.1:8080/.well-known/security.txt) $(code http://127.0.0.1:8080/.well-known/.inner/secret) $(code http://127.0.0.1:8080/sub/.well-known/x)"
+rm -rf bench/www/.well-known bench/www/sub/.well-known
 check "symlink outside root served with symlinks=allow" "200" "$(code http://127.0.0.1:8080/outside.txt)"
 check "smuggling CL+TE rejected" "HTTP/1.1 400 Bad Request" "$(printf 'GET / HTTP/1.1\r\nHost: l\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\nGET /sub/ HTTP/1.1\r\nHost: l\r\n\r\n' | ncq 127.0.0.1 8080 | head -1 | tr -d '\r')"
 check "smuggling: connection closed after 400" "1" "$(printf 'GET / HTTP/1.1\r\nHost: l\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\nGET /sub/ HTTP/1.1\r\nHost: l\r\n\r\n' | ncq 127.0.0.1 8080 | grep -c '^HTTP/1.1')"

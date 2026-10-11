@@ -41,7 +41,9 @@ root = "/var/www/example"
 ```
 
 Defaults you get without writing them: `index = ["index.html"]`, dotfiles and
-dot-directories hidden (404), symlinks followed, files up to 4 MB cached in memory and
+dot-directories hidden (404) except `/.well-known/` at the root (RFC 8615: `security.txt`, app
+links, a webroot ACME client's challenge; a dot segment below it stays hidden; before
+0.1.0-alpha.70 it needed a location with `hidden_files = true`), symlinks followed, files up to 4 MB cached in memory and
 larger ones streamed with sendfile, access log on (see section 8), and Range requests
 (one range per request, `If-Range` honoured; video seeking, resumable downloads, PDF
 viewers) answered with 206 from the cache and from disk alike.

@@ -1090,7 +1090,8 @@ Each item was benchmarked before and after on the reduced matrix (`bench/run.sh 
    count, chunked state machine), so the boundary to a pipelined request is the framing's
    and never a guess; a declared length above `max_body_size` gets 413 and close.
 2. **Path policies** (`handler.cpp`, `path.cpp`): `hidden_files = false` per site (default)
-   answers 404 for any dot-segment (`.env`, `.git/`); `symlinks = "deny"` checks the
+   answers 404 for any dot-segment (`.env`, `.git/`) but a leading `/.well-known/` (RFC 8615,
+   alpha.70; a dot segment below it stays hidden); `symlinks = "deny"` checks the
    realpath stays under the root on each cache miss (default `allow`, like nginx, because
    Laravel's `public/storage` link points outside `public/`); an encoded separator in the
    path (`%2F`, `%5C`, `WorkerState::encoded_separator` from `normalize_target`) is 404 on

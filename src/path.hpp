@@ -20,7 +20,9 @@ namespace agensio {
 bool normalize_target(std::string_view target, std::string& out, bool* encoded_separator = nullptr);
 
 // True if any path segment starts with '.', i.e. a dotfile or dot-directory (".env",
-// "/.git/config", "/a/.hidden/b"). Input is a normalised path.
+// "/.git/config", "/a/.hidden/b"), except a first segment that is exactly ".well-known": public by
+// definition (RFC 8615: security.txt, app links, a webroot client's ACME challenge; alpha.70). A dot
+// segment below it, or a .well-known further down, is hidden. Input is a normalised path.
 bool has_hidden_segment(std::string_view path) noexcept;
 
 // Windows filesystem rules, applied to a normalised path when the server runs on

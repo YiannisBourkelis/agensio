@@ -91,7 +91,10 @@ bool normalize_target(std::string_view target, std::string& out, bool* encoded_s
 }
 
 bool has_hidden_segment(std::string_view path) noexcept {
-    for (std::size_t i = 0; i + 1 < path.size(); ++i)
+    constexpr std::string_view kWellKnown = "/.well-known";
+    std::size_t i = 0;
+    if (path.starts_with(kWellKnown) && (path.size() == kWellKnown.size() || path[kWellKnown.size()] == '/')) i = kWellKnown.size();
+    for (; i + 1 < path.size(); ++i)
         if (path[i] == '/' && path[i + 1] == '.') return true;
     return false;
 }

@@ -30,18 +30,15 @@ error = "/var/log/agensio/error.log"
 server_name = ["example.com", "www.example.com"]   # the Host names this site answers
 listen = ["0.0.0.0:80"]
 root = "/var/www/example.com/web"
-
-[[site.location]]
-path = "/.well-known/"         # security.txt and app links: served although the name starts with a dot
-hidden_files = true
 ```
 
 **What it does.** A request for either name on port 80 is served from the root: `/` gets
 `index.html` (the default `index`), `/docs` answers `301` to `/docs/`, a directory without an
 index file is `403`, a missing file `404`. Files and directories whose name starts with a dot
-(`.env`, `.git/`) are `404` whatever exists, which is why `/.well-known/` needs a location of
-its own; the certificate validation under `/.well-known/acme-challenge/` does not, agensio
-answers it itself. GET, HEAD and OPTIONS are served, anything else gets `405` with `Allow`.
+(`.env`, `.git/`) are `404` whatever exists, except `/.well-known/` at the root, which is
+public by definition (`security.txt`, app links) and served like any directory, while a dot
+segment below it stays hidden; agensio answers its own certificate validation under
+`/.well-known/acme-challenge/` itself. GET, HEAD and OPTIONS are served, anything else gets `405` with `Allow`.
 Files up to 4 MB are held in memory and larger ones streamed, a changed file shows within a
 second, and Range requests work. A Host no site lists gets `421` (see the catch-all recipe
 below). The package installs this main file (with a `[control]` table for `agensio ctl`) and a
@@ -269,7 +266,6 @@ site does not have yet, use DNS-01 or `tls = "auto"`: the https site must alread
 [[site.location]]
 path = "/.well-known/acme-challenge/"
 alias = "/var/lib/letsencrypt/webroot/.well-known/acme-challenge/"
-hidden_files = true            # the path starts with a dot segment
 ```
 
 **Check it.**

@@ -2,6 +2,15 @@
 
 ## 0.1.0-alpha.70
 
+- **`/.well-known/` answered 404.** Dot-files and dot-directories are hidden by default, and the
+  rule caught `/.well-known/` too, which is public by definition (RFC 8615): `security.txt`, app
+  links, a webroot ACME client's challenge. The cookbook's way round it, a location with
+  `hidden_files = true`, opened every dot path below it, and a managed site could not add one. A
+  first segment that is exactly `.well-known` is now served like any directory; a dot segment
+  below it (`/.well-known/.x`) and a `.well-known` further down (`/sub/.well-known/`) stay hidden.
+  The two cookbook recipes no longer need the location. Shown first by `tests/integration.sh`
+  (`/.well-known/security.txt` 404, now 200) and unit checks.
+
 - **A request no site took was in no log, so fail2ban never saw a scanner probing by address.**
   On a listener without a catch-all site, a request for a name no site answers (the bare IP
   address, a scanner's guess) is answered `421`, and the access log was written only for a site:
