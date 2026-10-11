@@ -164,6 +164,29 @@ devbox): the one-call paths and each refusal.
 
 ## Sanitizer and fuzz record
 
+2026-10-12, `fuzz_h2_conn`: the HTTP/2 connection as an h2c listener runs it, over a socket
+pair, in front of the server's own dispatcher, static handler, cache and logs, a proxy and a
+FastCGI location whose origins are not there, and time moved by the fuzz-build hook
+`Http2Connection::fuzz_age` (the release code section byte-identical with and without it).
+Beyond ASan and UBSan it checks what the server sends against RFC 9113 and 7541 and that the
+connection ends with its client (`docs/design-http2.md` 8.2). The first run, five minutes on
+twenty processes, made 8.0 M runs to 15,319 edges and stopped 1,676 times in five classes;
+two of them were the target's own checks being wrong (a HEAD answer carries content-length
+and no body, read now from the request block the client really sent; an RST_STREAM answering
+a PRIORITY that makes an idle stream depend on itself is what h2spec 5.3.1 expects), the other
+three came from two server bugs, and the log held a third, UBSan's `memcpy` report (1,675
+times; not yet fatal in that build). With those fixed in the working tree every one of the
+1,676 inputs replayed clean but eleven, a fourth bug, and the twenty-minute run after it
+(41.3 M runs, 15,376 edges) found a fifth in its last seconds. The five, each fixed in its own change of alpha.72 and kept
+as an input under `tests/fuzz/regressions/h2_conn/`: a closed stream queued again by a
+WINDOW_UPDATE, a SETTINGS window change or a pull completion, then pooled while the writer's
+list still held it (a blank 200 head on the stream just reset, the queue behind it cut off, a
+freed stream in the list when the pool was full or shed); a second GOAWAY naming a higher last
+stream id than the first (RFC 9113 6.8); a HEADERS served on a stream the server had reset
+while idle (RFC 9113 5.1); `memcpy` from a null pointer in the constructor for an empty
+hand-over (UBSan); and a WINDOW_UPDATE of zero for an empty DATA frame while a window was low,
+a connection error for the client on stream 0 (RFC 9113 6.9).
+
 2026-10-12, a correction: until today UBSan in the fuzz builds printed its report and let the
 target go on, so libFuzzer exited 0, left no input, and `scripts/fuzz-all.sh` called the run
 clean. The log of the 2026-10-11 campaign holds four reports from `fuzz_log_line`, all signed
@@ -312,7 +335,8 @@ frame floods, priority trees, request smuggling over the HTTP/1.1 downgrade) and
 bound each one meets are the table of `docs/design-http2.md` section 8; the limits are
 constants at the top of `src/http2/connection.hpp` and derive from `max_header_size`,
 `max_requests_per_connection`, `idle_timeout`, `body_timeout` and the body limits. Fuzz
-record: `fuzz_hpack` (decoder, persistent decoder, encoder round trip, Huffman round trip).
+record: `fuzz_hpack` (decoder, persistent decoder, encoder round trip, Huffman round trip) and
+`fuzz_h2_conn` (the connection itself, 2026-10-12, recorded below).
 The attack suite (`tests/h2-attacks.py`) and the differential fuzz against nghttp2 are
 step G3 of the roadmap.
 

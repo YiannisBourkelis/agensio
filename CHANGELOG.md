@@ -17,6 +17,13 @@
   the run clean; the campaign above missed four reports from `fuzz_log_line` that way. Every fuzz
   target is now built with `-fno-sanitize-recover=undefined`, so undefined behaviour stops the
   run and keeps its input like a memory error, and the record is corrected.
+- **`fuzz_h2_conn`, the HTTP/2 connection fuzzed with the server behind it.** The real
+  connection over a socket pair, in front of the server's own dispatcher, handlers, cache and
+  logs, driven by a script of requests, frames of any shape, raw bytes, reading stopped and
+  resumed, windows replenished or not, and time moved by a fuzz-build hook (`fuzz_age`; the
+  release code is byte-identical). It checks what the server sends against RFC 9113 and 7541
+  and that the connection ends with its client. 49 M runs on twenty processes found five
+  server bugs, each fixed in an entry below.
 - **`agensio ctl logs --since` with a huge number, and a JSON access line with an absurd
   status, were undefined behaviour.** `since=99999999999999999999s` or `999999999999999w`
   overflowed a signed integer while the bound was computed, and a JSON line's `status` of 1e30
