@@ -1624,14 +1624,33 @@ static void test_pools() {
     Config cfg = load_config(dir / "a.toml");
     const SiteConfig& a = cfg.sites[0];
     const SiteConfig& b = cfg.sites[1];
-    // Derived socket, keep-alive sized to children / workers, project root in open_basedir.
+    // Derived socket, connections sized to children / workers, project root in open_basedir; no
+    // keep-alive to an ondemand pool (the default pm): php-fpm forks a child per event on its socket
+    // and a child on a kept connection never takes another (the alpha.66 report).
     CHECK(a.pool.generated && a.pool.name == "agensio-web1" &&
           a.php.address.key == "unix:" + dir.string() + "/run/agensio-web1.sock");
-    CHECK(a.php.options.keep_conn && a.php.options.max_connections == 3);
+    CHECK(!a.php.options.keep_conn && a.php.options.max_connections == 3);
     CHECK(a.pool.open_basedir.size() == 3 && a.pool.open_basedir[0] == fs::canonical(dir / "app").string());
     CHECK(a.pool.state_dir == dir.string() + "/state/web1");
     // Hand-written FastCGI options win over the pool's defaults.
     CHECK(!b.php.options.keep_conn && b.php.options.max_connections == 5 && b.group == "client2");
+    // A static or dynamic pool keeps keep-alive; keep_conn set by hand on an ondemand pool is a
+    // warning, once per pool (two sites of one account share it).
+    {
+        auto php_site = [](const char* name, const char* user, const char* php) {
+            return std::string("[[site]]\nserver_name = [\"") + name + "\"]\nlisten = [\"127.0.0.1:18090\"]\nroot = \"blog\"\nuser = \"" + user +
+                   "\"\napp = \"php\"\nphp = { " + php + " }\n";
+        };
+        write("k.toml", server + php_site("d.test", "web4", "pm = \"dynamic\"") + php_site("k.test", "web5", "keep_conn = true") +
+                            php_site("k2.test", "web5", "keep_conn = true") + php_site("s.test", "web6", "pm = \"static\", keep_conn = true"));
+        const Config k = load_config(dir / "k.toml");
+        const auto notes = access_notices(k);
+        const auto kept = std::count_if(notes.begin(), notes.end(), [](const AccessNotice& n) { return n.code == "php_keep_conn_ondemand"; });
+        CHECK(k.sites[0].php.options.keep_conn && k.sites[1].php.options.keep_conn && kept == 1);
+        CHECK(std::any_of(notes.begin(), notes.end(), [](const AccessNotice& n) {
+            return n.code == "php_keep_conn_ondemand" && n.severity == "warning" && n.site == "k.test" && n.text.find("read_timeout (504)") != std::string::npos;
+        }));
+    }
     const std::string ini = render_pool(cfg, a, "www");
     for (const char* line : {"[agensio-web1]", "user = web1", "group = web1", "listen.group = www",
                              "listen.mode = 0660", "pm = ondemand", "pm.process_idle_timeout = 60s", "pm.max_children = 6", "clear_env = yes",

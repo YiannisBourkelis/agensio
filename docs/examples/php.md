@@ -408,7 +408,8 @@ hosting rules check your socket too: it must belong to that account, with the se
 mode `0660`, so a pool shared by several sites cannot serve a site with its own account. Kept
 connections (`keep_conn`) are off for a pool you run: php-fpm ties a child to each kept
 connection, so turn them on only with `max_connections` times the workers below the pool's
-`pm.max_children`.
+`pm.max_children`, and never for a pool with `pm = ondemand`, whose children are forked one per
+event on its socket: requests that open connections together wait until `read_timeout`.
 
 **Check it.**
 

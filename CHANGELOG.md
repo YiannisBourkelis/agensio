@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.1.0-alpha.67
+
+From the alpha.66 report:
+
+- **PHP requests on a generated pool could wait until `read_timeout` (504) when several opened
+  at once** (availability; seen in production on alpha.56, .65 and .66). A generated pool is
+  `pm = ondemand` by default and agensio kept its FastCGI connections. php-fpm forks an ondemand
+  child per edge-triggered event on the pool's socket, so connections arriving together can get
+  one child between them (php bugs #69724 and #72935, open since 2015), and a child on a kept
+  connection never accepts another: the rest waited in the socket's backlog until agensio gave
+  up. Without keep-alive a child that finishes takes the next connection, so nothing waits
+  longer than a request; nginx, h2o, Apache and Caddy all open a connection per request by
+  default. An `ondemand` pool now gets `keep_conn = false`; `static` and `dynamic` keep it, as
+  their children wait in accept(). A `keep_conn = true` set by hand on an `ondemand` pool is a
+  warning from `-t`, the error log and health (`php_keep_conn_ondemand`). Measured with the new
+  `bench/php/pool.sh` (the two builds alternated, 8 children, `bench/results/php-pool-20261011-103217.md`):
+  120 requests of a 150 ms script over 30 connections gave 3 to 5 x 504 at 5.7 to 6.1 s, now none
+  at 2.41 s; keep-alive off costs about 11 us of CPU per request (agensio 7.0 to 11.4, php-fpm 24.5
+  to 31.4 on a script that only echoes, 142k to 87k req/s there; under 0.5 % of a request that
+  runs an application), and cuts p99 from 1.75 ms to 0.21 to 0.31 ms. Shown first by
+  `tests/pools.sh` (the burst on a cold ondemand pool: 5 x 504; now none) and unit checks.
+
 ## 0.1.0-alpha.66 (2026-10-11)
 
 - **`agensio ctl validate` and health did not load certificates.** They say what the next reload

@@ -510,7 +510,7 @@ std::string access_entry(std::string_view text, const Config& cfg, std::vector<C
 // list on a site reachable over IPv6, a single IPv6 address, a whole site restricted.
 struct AccessNotice {
     std::string code;      // access_allows_proxy, access_loopback, access_ipv4_only, access_single_ipv6, access_site_restricted,
-                           // exact_rule_proxied_script
+                           // exact_rule_proxied_script, auth_plain_http, auth_users_mixed_methods, php_keep_conn_ondemand
     std::string severity;  // "warning" or "info"
     std::string site, text;
 };

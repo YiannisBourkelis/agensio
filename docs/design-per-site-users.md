@@ -62,7 +62,11 @@ Rules:
   through verbatim as `php_admin_value`.
 - agensio's own FastCGI options for a generated pool default to `keep_conn = true` with
   `max_connections = children / workers` (rounded down, at least 1), which is the sizing
-  C3a required. The user can still override them.
+  C3a required. The user can still override them. Since 0.1.0-alpha.67 `keep_conn` is false
+  for `pm = "ondemand"` (the alpha.66 report): php-fpm forks an ondemand child per
+  edge-triggered event on the socket (its bugs #69724, #72935), and a child on a kept
+  connection never calls accept() again, so connections opened in a burst waited until
+  `read_timeout`; nginx, h2o, Apache and Caddy open a connection per request by default.
 
 ## The generated pool file
 

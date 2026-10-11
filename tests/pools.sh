@@ -151,6 +151,72 @@ check "the key given the server's group: -t is quiet, the next reload loads it" 
   "$(grep -c 'cannot read the key' $K/t2.out) $(grep -c 'the certificate loaded before keeps serving' $K/error.log) $(curl -sk --max-time 3 --resolve localhost:18461:127.0.0.1 https://localhost:18461/)" "0 1 tls site"
 kill $KS; wait $KS 2>/dev/null || true
 
+# A burst on cold generated pools (the alpha.66 report): php-fpm's ondemand forks one child per
+# event on its socket, and a child on a kept connection never accepts again while it stays open,
+# so FastCGI connections opened together waited in the backlog until read_timeout (504). 120
+# requests of a 150 ms script over 30 connections, read_timeout 5 s: every one answered, on an
+# ondemand pool and a dynamic one.
+B=$T/burst; mkdir -p $B/run $B/state $B/pool.d
+for u in web3 web4; do
+  id -u $u >/dev/null 2>&1 || useradd -r -M -s /usr/sbin/nologin $u
+  mkdir -p $B/$u/public; echo '<?php usleep(150000); echo "slow\n";' > $B/$u/public/slow.php
+  chown -R $u:agensio $B/$u; chmod 2750 $B/$u $B/$u/public; chmod 644 $B/$u/public/slow.php
+done
+cat > $B/agensio.toml <<EOF
+[server]
+workers = 1
+user = "agensio"
+pools_run = "$B/run"
+state_dir = "$B/state"
+[log]
+access = "off"
+error = "$T/logs/burst-error.log"
+[[site]]
+server_name = ["ondemand.test"]
+listen = ["127.0.0.1:18097"]
+root = "$B/web3/public"
+user = "web3"
+app = "php"
+php = { pm = "ondemand", read_timeout = 5 }
+[[site]]
+server_name = ["dynamic.test"]
+listen = ["127.0.0.1:18097"]
+root = "$B/web4/public"
+user = "web4"
+app = "php"
+php = { pm = "dynamic", read_timeout = 5 }
+EOF
+"$BIN" pools -c $B/agensio.toml --out $B/pool.d > /dev/null || true
+printf '[global]\npid = %s/fpm.pid\nerror_log = %s/fpm.log\ninclude = %s/pool.d/*.conf\n' $B $B $B > $B/fpm.conf
+$FPM -y $B/fpm.conf -D
+for i in $(seq 1 50); do [ -S $B/run/agensio-web3.sock ] && [ -S $B/run/agensio-web4.sock ] && break; sleep 0.1; done
+"$BIN" -c $B/agensio.toml > $B/server.out 2>&1 & BS=$!
+for i in $(seq 1 50); do nc -z 127.0.0.1 18097 2>/dev/null && break; sleep 0.1; done
+cat > $B/burst.py <<'EOF'
+import http.client, sys, threading, time
+host, codes, lock, t0 = sys.argv[1], [], threading.Lock(), time.time()
+def run():
+    c = http.client.HTTPConnection("127.0.0.1", 18097, timeout=30)
+    for _ in range(4):
+        try:
+            c.request("GET", "/slow.php", headers={"Host": host}); r = c.getresponse(); r.read(); s = r.status
+        except Exception:
+            s = 0; c = http.client.HTTPConnection("127.0.0.1", 18097, timeout=30)
+        with lock: codes.append(s)
+ts = [threading.Thread(target=run) for _ in range(30)]
+for t in ts: t.start()
+for t in ts: t.join()
+print(codes.count(200), codes.count(504), "%.2f" % (time.time() - t0))
+EOF
+for h in ondemand.test dynamic.test; do curl -s -o /dev/null -H "Host: $h" http://127.0.0.1:18097/slow.php; done   # one request each first
+read -r od_ok od_504 od_s < <(python3 $B/burst.py ondemand.test)
+read -r dy_ok dy_504 dy_s < <(python3 $B/burst.py dynamic.test)
+echo "     burst: ondemand $od_ok answered, $od_504 x 504, ${od_s} s; dynamic $dy_ok, $dy_504 x 504, ${dy_s} s"
+check "a burst on a cold ondemand pool: all 120 answered, none waits for read_timeout" "$od_ok $od_504" "120 0"
+check "the same burst on a dynamic pool" "$dy_ok $dy_504" "120 0"
+kill $BS; wait $BS 2>/dev/null || true
+kill "$(cat $B/fpm.pid)" 2>/dev/null || true
+
 echo "pools: $pass passed, $fail failed"
 if [ $fail != 0 ]; then echo "--- server.out"; cat $T/server.out; echo "--- error.log"; cat $T/logs/error.log 2>/dev/null; echo "--- fpm.log"; cat $T/fpm.log 2>/dev/null | tail -5; echo "--- nonroot.out"; cat $T/nonroot.out; fi
 [ $fail = 0 ]

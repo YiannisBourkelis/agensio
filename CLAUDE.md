@@ -394,9 +394,14 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   (socket `<pools_run>/agensio-web1.sock`, state dir, `open_basedir`, sizing from
   `php = { children, pm, ... }`; `pm` is `ondemand` by default since 2026-09-21 with a
   60 s child idle timeout, because static pools kept 150-200 MB resident per idle site,
-  and `static` is what a PHP benchmark must set), sets `keep_conn = true` with
-  `max_connections = children / workers`, closes kept upstream connections after
-  `idle_timeout` (30 s, from the pool tick) so children can exit, and `agensio pools`
+  and `static` is what a PHP benchmark must set), sets `max_connections = children / workers`
+  and `keep_conn = true` for `static` and `dynamic` pools only (alpha.67, the alpha.66 report: an
+  ondemand pool forks a child per edge-triggered event on its socket, php bugs #69724 and #72935,
+  and a child on a kept connection never accepts again, so a burst waited until `read_timeout`;
+  `bench/php/pool.sh`, `php-pool-20261011-103217.md`: no 504 after, keep-alive off costs 11 us of
+  CPU per request, agensio 4.4 and php-fpm 6.5, and cuts p99 from 1.75 to 0.26 ms; health and
+  `-t` warn `php_keep_conn_ondemand` for one set by hand), closes kept upstream connections after
+  `idle_timeout` (30 s, from the pool tick), and `agensio pools`
   writes the pool file into the distro's directory (exit 3 when php-fpm needs a reload).
   `health` `php_pool_resident` reads `/proc` for what a static or dynamic pool keeps. Sites of one user share a pool and
   must agree on it; different users never share a socket. `check_hosting` (C3b-2) runs

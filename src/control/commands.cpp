@@ -1413,6 +1413,7 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
         else if (n.code == "access_site_restricted") fix = "meant for a staging copy or an internal site; site_update with the rule on / removed when it goes public";
         else if (n.code == "exact_rule_proxied_script") fix = "if the application runs the script's path-info forms (/x.php/anything), make the rule a prefix rule (match = \"prefix\"); otherwise nothing to do";
         else if (n.code == "auth_plain_http") fix = "serve the site over https and drop plain_http from the rule, unless the network is one the user trusts (a LAN tool)";
+        else if (n.code == "php_keep_conn_ondemand") fix = "remove keep_conn from the site's php table (off by default with pm = \"ondemand\"), or set pm to \"dynamic\" or \"static\" to keep it";
         else if (n.code == "auth_users_mixed_methods") fix = "give every user of the file one method and cost: agensio passwd NAME writes yescrypt (a managed site's tools always do), then reload";
         add(n.severity == "warning" ? "warn" : "info", n.code, n.site, n.text, fix);
     }

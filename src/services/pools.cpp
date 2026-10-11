@@ -59,8 +59,8 @@ std::string render_pool(const Config& cfg, const SiteConfig& site, const std::st
           << "\n";
     } else if (p.pm == "ondemand") {
         // A child exits after a quiet minute (php-fpm's default is 10 s, too eager for a
-        // site with a visitor every half minute); the server closes its kept connections
-        // after idle_timeout (30 s) first, so the child is free to go.
+        // site with a visitor every half minute). The server keeps no connection to an
+        // ondemand pool (keep_conn off, the alpha.66 report), so nothing holds a child.
         o << "pm.process_idle_timeout = 60s\n";
     }
     if (p.max_requests) o << "pm.max_requests = " << p.max_requests << "\n";
