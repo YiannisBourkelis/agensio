@@ -282,8 +282,8 @@ check "a new site file whose key does not load, before any reload: validate's he
 rm -f "$T/sites.d/v.toml"
 "$BIN" ctl site-create --domain g.test --app static --no-user --cert "$CT/bad/cert.pem" --key "$CT/bad/key.pem" --no-redirect --root "$T/www/e" \
   --listen-tls 127.0.0.1:443 --yes --reason isolation --socket "$CS" > "$T/g.out" 2>&1; G_EXIT=$?
-check "site-create waiting for a restart, with a key that does not load: refused, the file removed" "1 no" \
-  "$([ $G_EXIT -ne 0 ] && echo 1 || echo 0) $([ -f "$T/sites.d/g.test.toml" ] && echo yes || echo no)"
+check "site-create waiting for a restart, with a key that does not load: refused, the file removed, detail one text as on every refusal" "1 no str" \
+  "$([ $G_EXIT -ne 0 ] && echo 1 || echo 0) $([ -f "$T/sites.d/g.test.toml" ] && echo yes || echo no) $(python3 -c 'import json,sys; print(type(json.load(open(sys.argv[1])).get("detail")).__name__)' "$T/g.out" 2>/dev/null)"
 rm -f "$T/sites.d/g.test.toml"   # unfixed, it stays: a reload would then try port 443
 tls_site "$CT/t" 18306 > "$T/sites.d/t.toml"; reload
 check "a TLS site with its own certificate serves" "site t" "$(tbody 18306)"

@@ -1466,7 +1466,9 @@ void ControlHandler::site_create(Stream& s, const json::Value& body, std::string
             std::error_code ec;
             std::filesystem::remove(file, ec);
             audit_peer(s, what, "refused: " + check["errors"].dump());
-            reply(s, 409, json::Value::object().set("error", "the new site did not validate; file removed").set("detail", check["errors"]));
+            std::string detail;  // one text, as every other refusal's (the alpha.66 report)
+            for (const auto& e : check["errors"].items()) detail += (detail.empty() ? "" : "; ") + std::string(e.str());
+            reply(s, 409, json::Value::object().set("error", "the new site did not validate; file removed").set("detail", detail));
             return;
         }
         audit_peer(s, what, "created " + file.string() + " (restart needed for a privileged port)");

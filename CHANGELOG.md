@@ -4,6 +4,10 @@
 
 From the alpha.66 report:
 
+- **`site-create`'s refusal carried `detail` in two shapes**: a list when the site waited for a
+  restart (a port the running server cannot bind), a string on every other refusal. It is one
+  text everywhere now, the errors joined with `; `. Shown first by `tests/isolation.sh`.
+
 - **PHP requests on a generated pool could wait until `read_timeout` (504) when several opened
   at once** (availability; seen in production on alpha.56, .65 and .66). A generated pool is
   `pm = ondemand` by default and agensio kept its FastCGI connections. php-fpm forks an ondemand
