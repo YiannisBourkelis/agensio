@@ -992,7 +992,8 @@ private:
         if (s.logged) return;
         s.logged = true;
         const SiteConfig* site = s.site ? s.site : listener_->router.default_site();
-        if (!site || site->access_log_sink < 0) return;
+        const int sink = site ? site->access_log_sink : listener_->access_sink;  // no site took it: [log] access (alpha.70)
+        if (sink < 0) return;
         const Request& req = s.stream.request;
         AccessRecord rec;
         rec.remote = s.stream.conn.client_address.empty() ? std::string_view(remote_) : s.stream.conn.client_address;
@@ -1007,7 +1008,7 @@ private:
         rec.user_agent = req.headers.get("user-agent");
         rec.user = s.stream.auth.user;  // verified by [[site.auth]], never the name a refused request claimed
         if (s.stream.response.upstream) rec.upstream = s.stream.response.upstream;
-        worker_.state.logs.log(site->access_log_sink, worker_.state.now ? worker_.state.now : std::time(nullptr), rec);
+        worker_.state.logs.log(sink, worker_.state.now ? worker_.state.now : std::time(nullptr), rec);
     }
 
     Endpoint& ep_;

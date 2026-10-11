@@ -91,6 +91,7 @@ struct Listener {
     bool hq = false;  // TLS: the interop runner's hq-interop over QUIC too (AGENSIO_INTEROP builds)
     std::string alt_svc;       // TLS with h3: the alt-svc value (h3=":port"; ma=86400) every h1 and h2 answer carries
     std::string alt_svc_line;  // the same as the HTTP/1 head line, prebuilt
+    int access_sink = -1;  // [log] access: the log of a request no site took (no catch-all here), -1 when off
 #ifdef AGENSIO_HAS_TLS
     std::shared_ptr<asio::ssl::context> ssl;  // the handshake starts here; SNI switches to the site's context
     std::map<std::string, std::shared_ptr<asio::ssl::context>> tls_contexts;  // by certificate path

@@ -330,13 +330,14 @@ const char* kFilterDenied =
 const char* kFilterScan =
     "# fail2ban filter for agensio (docs/configuration.md 18): paths that do not exist, in numbers.\n"
     "# A browser meets a 404 now and then; a scanner probing for wp-login.php, phpmyadmin and\n"
-    "# backups meets dozens a minute (the agensio presets answer those 404 themselves).\n"
+    "# backups meets dozens a minute (the agensio presets answer those 404 themselves). A 421 is\n"
+    "# a name no site answers on that address: a scanner going by IP gets one per request.\n"
     "\n"
     "[INCLUDES]\n"
     "before = common.conf\n"
     "\n"
     "[Definition]\n"
-    "failregex = ^<HOST> \\S+ \\S+ \\[\\] \"(?:GET|POST|HEAD) \\S+ HTTP/\\S+\" 404 \n"
+    "failregex = ^<HOST> \\S+ \\S+ \\[\\] \"(?:GET|POST|HEAD) \\S+ HTTP/\\S+\" (?:404|421) \n"
     "ignoreregex =\n"
     "datepattern = ^[^\\[]*\\[({DATE})\n";
 
@@ -509,6 +510,9 @@ ProtectionInput protection_input(const Config& cfg, const UidLookup& uid_of, std
         for (const auto& p : preset_login_paths(s.app)) add_path(p);
         for (const auto& p : s.login_paths) add_path(p);
     }
+    // A request no site took (a 421 on a listener without a catch-all) is logged to [log] access
+    // (alpha.70), so the jails read it even when every site writes a log of its own.
+    if (!cfg.log.access.empty()) add_unique(in.logs, cfg.log.access);
     std::sort(in.tcp_ports.begin(), in.tcp_ports.end());
     std::sort(in.udp_ports.begin(), in.udp_ports.end());
     std::sort(in.logs.begin(), in.logs.end());

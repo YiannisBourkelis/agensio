@@ -2,6 +2,17 @@
 
 ## 0.1.0-alpha.70
 
+- **A request no site took was in no log, so fail2ban never saw a scanner probing by address.**
+  On a listener without a catch-all site, a request for a name no site answers (the bare IP
+  address, a scanner's guess) is answered `421`, and the access log was written only for a site:
+  the line was dropped, and the `agensio-scan` jail counted only 404s anyway. Such a request is now
+  written to `[log] access` (unless it is `"off"`), over HTTP/1, HTTP/2 and HTTP/3; the jails read
+  that file even when every site has a log of its own; and `agensio-scan` counts a 421 as it counts
+  a 404. The filter shipped under `/usr/share/agensio/fail2ban/` changed: health's
+  `fail2ban_filter_stale` names an installed old copy with root's lines to reinstall it. Shown first
+  by `tests/integration.sh` (a 421 over HTTP/1 and HTTP/2 on the strict listener: no line; now one
+  each) and unit checks.
+
 - **PHP requests could wait until `read_timeout` (504) on a generated `static` or `dynamic` pool
   with fewer children than the server has workers** (availability; the same failure as the
   `ondemand` one fixed in alpha.68). Each worker gets `children / workers` connections to the

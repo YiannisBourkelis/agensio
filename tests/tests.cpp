@@ -4822,6 +4822,18 @@ static void test_protection() {
         const ProtectionInput in = protection_input(cfg);
         CHECK(in.exposed && (in.tcp_ports == std::vector<unsigned>{8080, 8443}) && in.udp_ports.empty() && in.combined && in.host_protection == "external");
         CHECK((in.logs == std::vector<std::string>{(dir / "access.log").string()}) && (in.unlogged == std::vector<std::string>{"lo.test"}));
+        // A request no site took (a 421 on a listener without a catch-all) is logged to [log] access
+        // (alpha.70): the jails read it even when every site has a log of its own, and the scan
+        // filter counts a 421 as it counts a 404.
+        {
+            Config own = cfg;
+            own.sites[0].access_log = (dir / "wp.log").string();
+            const ProtectionInput oi = protection_input(own);
+            CHECK((oi.logs == std::vector<std::string>{(dir / "access.log").string(), (dir / "wp.log").string()}));
+            const auto& filters = protection_filters();
+            const auto scan = std::find_if(filters.begin(), filters.end(), [](const ProtectionFilter& f) { return std::string_view(f.name) == "agensio-scan"; });
+            CHECK(scan != filters.end() && scan->text.find("\" (?:404|421) \n") != std::string::npos);
+        }
         CHECK((in.login_paths == std::vector<std::string>{"/api/token", "/login", "/one", "/wp-login.php", "/xmlrpc.php"}) && in.firewall_file == (dir / "firewall.nft").string());
         CHECK(in.login_jails.size() == 1 && in.login_jails[0].name == "agensio-login" && in.login_jails[0].log == (dir / "access.log").string() && in.login_jails[0].paths.size() == 4 &&
               in.login_jails[0].paths[0].path == "/api/token" && in.login_jails[0].paths[0].php && !in.login_jails[0].paths[0].format && (in.login_jails[0].sites == std::vector<std::string>{"wp.test"}));

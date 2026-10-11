@@ -561,6 +561,13 @@ check "strict: HTTP/1.0 without Host on a listener without catch-all is 421, kee
 check "strict: HTTP/1.1 without Host stays 400" "400" "$(printf 'GET / HTTP/1.1\r\n\r\n' | ncq 127.0.0.1 8099 | head -1 | awk '{print $2}')"
 check "strict: a listener with a catch-all serves unknown Hosts as before" "200" "$(code -H 'Host: evil.example.com' http://127.0.0.1:8080/)"
 check "strict: OPTIONS * with an unknown Host is 421" "421" "$(printf 'OPTIONS * HTTP/1.1\r\nHost: nobody.invalid\r\n\r\n' | ncq 127.0.0.1 8099 | head -1 | awk '{print $2}')"
+# A request no site took (no catch-all on the listener) is written to [log] access, so a scanner
+# probing by address is in the log the jails read (before alpha.70 it was in no log at all).
+curl -s -o /dev/null -H 'Host: four21.invalid' $S/four21-probe-h1
+curl -s -o /dev/null --http2-prior-knowledge -H 'Host: four21.invalid' $S/four21-probe-h2
+sleep 1.3
+check "strict: a 421 over HTTP/1 and HTTP/2 is in the server's access log ([log] access)" "1 1" \
+  "$(grep -c '"GET /four21-probe-h1 HTTP/1.1" 421 ' bench/tmp/access.log) $(grep -c '"GET /four21-probe-h2 HTTP/2.0" 421 ' bench/tmp/access.log)"
 sni() { echo | openssl s_client -connect 127.0.0.1:8446 "$@" 2>/dev/null | openssl x509 -noout -subject 2>/dev/null | sed 's/.*CN *= *//'; }
 check "sni: each site gets its own certificate" "a.test b.test" "$(sni -servername a.test) $(sni -servername b.test)"
 check "sni: a name no site lists is refused, no other site's certificate shown" "" "$(sni -servername c.test)"

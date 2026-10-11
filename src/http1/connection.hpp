@@ -320,7 +320,10 @@ private:
         // b.test's log, a tenant's traffic in another tenant's hands).
         const SiteConfig* site = site_;
         if (!site) site = listener_->router.default_site();
-        if (!site || site->access_log_sink < 0) return;
+        // A request no site took (a 421 on a listener without a catch-all) goes to [log] access, so
+        // an address probing by IP is in the log the jails read (alpha.70; before, in no log).
+        const int sink = site ? site->access_log_sink : listener_->access_sink;
+        if (sink < 0) return;
         ensure_remote();
         const Request& req = stream_.request;
         AccessRecord rec;
@@ -335,7 +338,7 @@ private:
         rec.user_agent = req.headers.get("user-agent");
         rec.user = stream_.auth.user;  // verified by [[site.auth]], never the name a refused request claimed
         if (stream_.response.upstream) rec.upstream = stream_.response.upstream;
-        worker_.state.logs.log(site->access_log_sink, worker_.state.now, rec);
+        worker_.state.logs.log(sink, worker_.state.now, rec);
     }
     static constexpr std::size_t kDrainChunk = 8192;
 

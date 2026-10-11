@@ -62,7 +62,7 @@ makes that address the real client's, so bans hit the right one.
 |---|---|---|---|
 | `agensio-login`, one per access log | POST requests to the login paths of the sites writing that log, in every spelling the server accepts | 10 in 10 min | 1 h |
 | `agensio-denied` | answers 403: an address outside a site's access rule (`[[site.access]]`), a password asked for over plain HTTP, an application refusing; never 401 (section 2c) | 10 in 10 min | 1 h |
-| `agensio-scan` | answers 404 | 40 in 5 min | 1 h |
+| `agensio-scan` | answers 404, and 421 (a name no site answers on that address: a scanner going by IP gets one per request; `[log] access` holds them and every jail of this row reads it) | 40 in 5 min | 1 h |
 | `agensio-post` | POST requests to any path, the catch-all for a login nobody named | 120 in 2 min | 30 min |
 
 An access log cannot tell a failed login from a successful one, so `agensio-login` counts

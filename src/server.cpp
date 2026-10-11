@@ -179,6 +179,8 @@ void Server::assign_log_sinks(Config& cfg) {
         site.access_log_sink = logs_.add(site.access_log);
         if (site.access_log_sink >= 0) access_logging_ = true;
     }
+    cfg.log.access_sink = logs_.add(cfg.log.access);  // what no site took (alpha.70)
+    if (cfg.log.access_sink >= 0) access_logging_ = true;
 }
 
 // A site with `user` gets its access log as agensio:<site group> 0640: agensio writes it
@@ -487,6 +489,7 @@ void Server::build_listeners(Generation& gen) {
                 l->h2 = site.h2;
                 l->h2c = site.h2c;
                 l->h3 = site.h3 && site.tls.has_value();
+                l->access_sink = gen.cfg.log.access_sink;
                 l->hq = site.hq_interop && site.tls.has_value();
                 if (l->h3 && gen.cfg.http3.alt_svc) {  // design 7.4
                     l->alt_svc = "h3=\":" + std::to_string(l->port) + "\"; ma=86400";

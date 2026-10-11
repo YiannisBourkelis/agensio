@@ -102,7 +102,7 @@ section of `docs/configuration.md` that explains the key.
 
 | key | type | default | meaning | applies | via | doc |
 |---|---|---|---|---|---|---|
-| `access` | path or "off" | logs/access.log next to the configuration | The access log every site uses unless it sets access_log; "off" logs nothing. | reload | file | 8 |
+| `access` | path or "off" | logs/access.log next to the configuration | The access log every site uses unless it sets access_log, and the log of a request no site took (421 on a listener without a catch-all); "off" logs nothing. | reload | file | 8 |
 | `format` | enum: combined \| json | combined | Apache/nginx combined (fail2ban-compatible) or one JSON object per line with the upstream outcome. | reload | file | 8 |
 | `error` | path or "stderr" | stderr | Where the error log goes. | reload | file | 8 |
 | `level` | enum: error \| warn \| info | warn | Error-log verbosity; info logs reloads, certificate work, the helper's start. | reload | file | 8 |

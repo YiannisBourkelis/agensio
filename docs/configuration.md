@@ -1062,7 +1062,10 @@ error = "stderr"             # or a file
 level = "warn"               # error | warn | info
 ```
 
-A site sets `access_log = "path"` or `"off"` to differ. Logs are buffered per worker and
+A site sets `access_log = "path"` or `"off"` to differ. A request no site takes (a `421` for a
+name no site answers on a listener without a catch-all, a scanner going by the bare address)
+is written to `[log] access` whatever the sites log, so the fail2ban jails see it (section 18;
+before 0.1.0-alpha.70 it was in no log). Logs are buffered per worker and
 flushed every second; `kill -USR1 <pid>` reopens all files after rotation. The escaping is
 nginx's (`ngx_http_log_escape`): in the combined format `"`, `\`, control bytes and every
 byte from 0x7F up are written `\xHH`, so a line is ASCII whatever a client sent; a JSON line

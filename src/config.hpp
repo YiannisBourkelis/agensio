@@ -347,6 +347,9 @@ struct LogConfig {
     bool json = false;      // format = "json" instead of "combined"
     std::string error = "stderr";  // "stderr" or a path
     std::string level = "warn";    // error | warn | info
+    // `access` as a sink (Server::assign_log_sinks), -1 when off: a request no site took (a 421 on a
+    // listener without a catch-all) is logged there, so the jails see an address probing by IP.
+    int access_sink = -1;
 };
 
 struct Config {

@@ -432,7 +432,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/`.
   descriptor is kept until the next reopen so a racing worker never writes to a recycled
   fd). A line goes to the request's own site: HTTP/1 keeps it per connection (until
   2026-09-27 it took the worker's last routed site, so an answer that waited on an origin
-  was logged in another site's file), HTTP/2 and HTTP/3 per stream; a 413 too. Error log (`[log] error`, `level`) to stderr or a file. **On by default**
+  was logged in another site's file), HTTP/2 and HTTP/3 per stream; a 413 too; a request no site
+  took (a 421 on a listener without a catch-all) to `[log] access` (`Listener::access_sink`,
+  alpha.70), which the jails read and whose `agensio-scan` filter counts 421 with 404. Error log (`[log] error`, `level`) to stderr or a file. **On by default**
   (`logs/access.log` next to the config file): measured on Linux, one worker, alternated
   off/on twice, plain 1 KB 2.0 -> 2.0-2.1 us, TLS 1 KB 2.8 -> 2.9-3.0 us, 100 KB rows
   within noise, i.e. 0.1-0.2 us per request, under the 1 us bar the roadmap set. Benchmark
