@@ -95,6 +95,11 @@ plugin's filters, with a README mapping each to `src/control/protection.*` and
   beside the TOML. `tests/examples.sh` (run by the integration suite) loads every recipe with
   `agensio -t` and checks its `ctl` lines, MCP names and links, so a recipe that stops working
   fails the suite.
+- **Third-party bugs are tracked in `docs/third-party-bugs.md`**: a change that works around a bug
+  in code agensio does not own (php-fpm, OpenSSL, Asio, the kernel, a hosted application) adds its
+  entry there in the same commit: the upstream links and status with the date checked, how it
+  showed, what agensio does about it and where, and what to change once it is fixed. When asked to
+  check the third-party bugs, follow the procedure at the top of that file.
 - **The agent interface is part of every change.** Whenever behaviour, a configuration
   key, a control command, a preset or an error answer is added, fixed or changed, check
   whether the MCP tool descriptions, argument descriptions, server instructions and
