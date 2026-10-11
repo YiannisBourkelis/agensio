@@ -6422,16 +6422,17 @@ static void test_refuse_config() {
 static void test_path_check() {
     namespace fs = std::filesystem;
     const fs::path dir = fs::temp_directory_path() / ("agensio-pathcheck-" + std::to_string(::getpid()));
-    for (const char* d : {"www/vendor", "www/docs", "www/sub", "www/app", "www/spa/area", "www/spa/php"}) fs::create_directories(dir / d);
+    for (const char* d : {"www/vendor", "www/docs", "www/sub", "www/app", "www/spa/area", "www/spa/php", "www/cgi-bin"}) fs::create_directories(dir / d);
     for (const char* f : {"www/index.html", "www/vendor/autoload.php", "www/docs/index.html", "www/docs/guide.html", "www/a.yaml", "www/app/shell.html",
-                          "www/spa/shell.html", "www/spa/area/index.html", "www/spa/php/index.php"})
+                          "www/spa/shell.html", "www/spa/area/index.html", "www/spa/php/index.php", "www/cgi-bin/env.cgi", "www/cgi-bin/index.cgi"})
         std::ofstream(dir / f) << "x";
     std::ofstream(dir / "p.toml") << "[[site]]\nserver_name = [\"p.test\"]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n"
                                      "index = [\"index.php\", \"index.html\"]\n"
                                      "try_files = [\"$uri\", \"$uri/\", \"=404\"]\nrefuse = [\"/vendor/\", \"*.yaml\", \"/docs/index.html\", \"/spa/area/index.html\"]\n"
                                      "[[site.location]]\npath = \"/app/\"\ntry_files = [\"$uri\", \"/app/shell.html\"]\n"
                                      "[[site.location]]\npath = \"/spa/\"\ntry_files = [\"$uri\", \"$uri/\", \"/spa/shell.html\"]\n"
-                                     "[[site.location]]\npath = \".php\"\nmatch = \"suffix\"\nhandler = \"deny\"\n";
+                                     "[[site.location]]\npath = \".php\"\nmatch = \"suffix\"\nhandler = \"deny\"\n"
+                                     "[[site.location]]\npath = \"/cgi-bin/\"\nhandler = \"cgi\"\n";
     const Config cfg = load_config(dir / "p.toml");
     const SiteConfig& site = cfg.sites[0];
     auto check = [&](const char* path) {
@@ -6464,6 +6465,14 @@ static void test_path_check() {
     const json::Value fb = control::path_check(cfg, site, "/app/route/1", error);
     CHECK(std::string(fb.get("summary")).find("shell.html") != std::string::npos && fb["steps"].items().size() >= 3);
     CHECK_EQ(check("relative"), std::string("error"));
+    // CGI: the script is the longest leading part that is a file, the rest PATH_INFO, as the handler
+    // splits it (core/script_split.hpp; the cookbook's finding: the whole path was taken for the script).
+    CHECK_EQ(check("/cgi-bin/env.cgi/extra/path"), std::string("runs 0"));
+    const json::Value cg = control::path_check(cfg, site, "/cgi-bin/env.cgi/extra/path", error);
+    CHECK(std::string(cg.get("file")).ends_with("/www/cgi-bin/env.cgi") && std::string(cg.get("summary")).find("PATH_INFO /extra/path") != std::string::npos);
+    CHECK_EQ(check("/cgi-bin/env.cgi"), std::string("runs 0"));
+    CHECK_EQ(check("/cgi-bin/missing.cgi/x"), std::string("not_found 404"));
+    CHECK_EQ(check("/cgi-bin/"), std::string("runs 0"));  // its index, index.cgi
     fs::remove_all(dir);
 }
 

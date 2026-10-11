@@ -3,6 +3,7 @@
 #include "core/access.hpp"
 #include "core/refuse.hpp"
 #include "core/router.hpp"
+#include "core/script_split.hpp"
 #include "handlers/static.hpp"
 #include "core/strings.hpp"
 
@@ -684,13 +685,22 @@ json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_vi
         if (loc.kind == HandlerKind::fastcgi || loc.kind == HandlerKind::cgi) {
             if (!loc.deny_suffixes.empty() && refused_suffix(path, loc.deny_suffixes))
                 return finish("refused", 404, "404: " + path + " ends with an ending " + describe(loc) + " refuses");
+            // The script and its path info as the handler splits them (core/script_split.hpp, one place:
+            // before alpha.71 a CGI path with path info was taken whole for the script here).
             std::string script = path, info;
             if (loc.kind == HandlerKind::fastcgi && loc.fastcgi.options.path_info)
-                if (const std::size_t p = script.find(".php/"); p != std::string::npos) {
-                    info = script.substr(p + 4);
-                    script.resize(p + 4);
+                if (const std::size_t p = script_split::php_end(script); p != std::string::npos) {
+                    info = script.substr(p);
+                    script.resize(p);
                 }
             if (script.back() == '/') script += loc.index.empty() ? (loc.kind == HandlerKind::cgi ? "index.cgi" : "index.php") : loc.index.front();
+            if (loc.kind == HandlerKind::cgi) {  // the longest leading part that is a file (Apache's rule)
+                std::string scratch;
+                if (const std::size_t cut = script_split::cgi_end(loc, script, scratch, [&](const std::string& f) { return stat_is(f, false); }); cut != 0) {
+                    info = script.substr(cut);
+                    script.resize(cut);
+                }
+            }
             const std::string file = fs_of(script);
             v.set("file", file);
             if (!stat_is(file, false)) return finish("not_found", 404, "404: no script " + file + " for " + describe(loc) + ", answered before the application");

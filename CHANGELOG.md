@@ -2,6 +2,14 @@
 
 ## 0.1.0-alpha.71
 
+- **`path_check` described a CGI request with path info as a missing script.** The CGI handler runs
+  the longest leading part of the path that is a file and passes the rest as `PATH_INFO`
+  (`/cgi-bin/env.cgi/extra` runs `env.cgi` with `/extra`); `path_check` (`agensio ctl path-check`,
+  MCP `path_check`) took the whole path for the script and answered "404: no script". It now takes
+  the script and its path info from the handler's own split (`core/script_split.hpp`), for FastCGI
+  too, so the two cannot disagree. Shown first by unit checks (a CGI script with path info: 404,
+  now "runs env.cgi with PATH_INFO /extra/path").
+
 - **`strict_users` refused every HTTPS site `site-create` made.** For an HTTPS site with the plain
   port redirecting, `site-create` writes a second site on port 80 that only redirects (`redirect =
   "https"`, no root), with no `user`, and `[server] strict_users = true` refused any site without
