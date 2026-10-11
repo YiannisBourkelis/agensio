@@ -578,9 +578,10 @@ field from the application (nginx's per-answer switch): the location decides.
 `request_buffering = false` hands the body over as it arrives instead of collecting it first;
 `max_body_size` still applies.
 
-Easy to get wrong: a location with a `proxy` table but neither `upstream` nor `handler =
-"proxy"` is a static location, and `agensio -t` does not warn. `handler = "proxy"` with no
-`upstream` uses the site's.
+A location with a `proxy` table needs `upstream` or `handler = "proxy"` (with no `upstream` it
+uses the site's): without either it is refused, as a `fastcgi` table without `handler =
+"fastcgi"` is (before 0.1.0-alpha.71 it loaded as a static location serving the site's files,
+and `agensio -t` said nothing).
 
 **Check it.**
 

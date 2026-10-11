@@ -626,6 +626,15 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
     } else {
         fail(where + ": handler \"" + loc.handler + "\" is not available (\"static\", \"fastcgi\", \"proxy\", \"cgi\" or \"deny\")");
     }
+    // A table for a handler this location does not run would be ignored: refused instead of serving
+    // the location as something else (the cookbook's finding, alpha.71: `proxy = {...}` without
+    // `upstream` served the site's files where an application was meant).
+    if (t.contains("proxy") && loc.kind != HandlerKind::proxy)
+        fail(where + ": proxy = {...} is for a location that proxies; add upstream = \"http://host:port\" (or handler = \"proxy\" for the site's upstream), or remove it");
+    if (t.contains("fastcgi") && loc.kind != HandlerKind::fastcgi)
+        fail(where + ": fastcgi = {...} is for a FastCGI location; add handler = \"fastcgi\" (or remove it)");
+    if (t.contains("cgi") && loc.kind != HandlerKind::cgi)
+        fail(where + ": cgi = {...} is for a CGI location, and handler = \"" + loc.handler + "\" runs another; remove one of them");
     if (loc.kind == HandlerKind::fastcgi) loc.fastcgi.params_prefix = FcgiHandler::prebuild_params(site, loc);
     if (t.contains("methods")) {
         const MethodSet implemented = loc.kind == HandlerKind::fastcgi ? kFcgiMethods : kStaticMethods;

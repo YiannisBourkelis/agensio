@@ -2,6 +2,14 @@
 
 ## 0.1.0-alpha.71
 
+- **A location with another handler's table loaded as a static location.** `proxy = { ... }`
+  without `upstream` or `handler = "proxy"`, `fastcgi = { ... }` without `handler = "fastcgi"`, or a
+  `cgi` table under another `handler`: the table did nothing, silently, and the location served the
+  site's files where an application was meant, with `-t` saying OK. Such a location is now refused,
+  naming what to add. On upgrade, a site file holding one is set aside (the other sites serve) and a
+  main file holding one does not load: run the new binary's `agensio -t` first. Shown first by unit
+  checks (the three cases loaded before).
+
 - **A proxied application's redirect to the name agensio gave it as `Host` reached the browser
   unchanged.** With `proxy = { host = "app.internal" }` the origin is told it is `app.internal` and
   builds its redirects from that name, while only a `Location` naming the origin's address was

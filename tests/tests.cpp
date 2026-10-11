@@ -2960,6 +2960,15 @@ static void test_proxy() {
     CHECK(refused("tls.toml", tls_site, "needs a build with TLS"));  // a build without OpenSSL refuses it, saying why
 #endif
     CHECK(refused("noup.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/\"\nhandler = \"proxy\"\n", "needs upstream"));
+    // A handler's table on a location that runs another handler did nothing, silently: `proxy =
+    // {...}` without upstream served the site's files where an application was meant (the
+    // cookbook's finding, alpha.71). Refused, naming what to add.
+    CHECK(refused("proxyonly.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/api/\"\nproxy = { host = \"origin.test\" }\n",
+                  "add upstream"));
+    CHECK(refused("fcgionly.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/app/\"\nfastcgi = { read_timeout = 5 }\n",
+                  "add handler = \"fastcgi\""));
+    CHECK(refused("cgistatic.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/cgi-bin/\"\nhandler = \"static\"\ncgi = { read_timeout = 5 }\n",
+                  "cgi = {...} is for a CGI location"));
     CHECK(refused("name.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/\"\nupstream = \"http://origin:3000\"\n", "IP literal"));
     CHECK(api.proxy.rewrite.empty() && api.proxy.options.max_connections == 256 && api.proxy.options.max_idle == 64);
     write("rw.toml", "[[site]]\nlisten = [\"127.0.0.1:18097\"]\nroot = \"www\"\n[[site.location]]\npath = \"/api/\"\nupstream = \"http://127.0.0.1:9100/v1\"\n");
