@@ -126,7 +126,7 @@ const std::vector<KeyDef>& key_defs() {
         {"php = {}", "fail_timeout", "seconds", "10", "How long a failed member is skipped.", "reload", "site file", "12"},
         {"proxy = {}", "host", "string", "(passed through)", "The Host header sent to the origin; $host and other variables allowed.", "reload", "site file", "12"},
         {"proxy = {}", "forwarded", "enum: x-forwarded | forwarded | both | off", "x-forwarded", "Which client-address fields go to the origin: X-Forwarded-For/Proto/Host, RFC 7239 Forwarded, both, or none. A client's own values are replaced unless it is a trusted proxy, whose chain is appended to.", "reload", "site file", "12"},
-        {"proxy = {}", "headers", "table", "{}", "Fields added to the forwarded request, with $ variables.", "reload", "site file", "12"},
+        {"proxy = {}", "headers", "table", "{}", "Fields added to the forwarded request, with $ variables; one agensio writes itself (Host, X-Forwarded-*, Forwarded) is replaced, sent once.", "reload", "site file", "12"},
         {"proxy = {}", "hide", "list", "[]", "Response fields removed before the client sees them.", "reload", "site file", "12"},
         {"proxy = {}", "redirects", "enum: rewrite | pass", "rewrite", "Rewrite a Location that points at the origin to this site.", "reload", "site file", "12"},
         {"proxy = {}", "tls", "table { verify, ca, server_name }", "verify = true", "TLS to the origin: verification, a CA bundle, the SNI name.", "reload", "site file", "12"},

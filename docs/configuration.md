@@ -1413,7 +1413,7 @@ on a location.
 |---|---|---|
 | `host` | `"pass"` | `"pass"` the client's Host, `"upstream"` the origin's address, or a literal name |
 | `forwarded` | `"x-forwarded"` | `"x-forwarded"`, `"forwarded"` (RFC 7239), `"both"`, `"off"` |
-| `headers` | none | fields set toward the origin, `{ "X-Real-IP" = "$remote_addr" }`; `""` removes |
+| `headers` | none | fields set toward the origin, `{ "X-Real-IP" = "$remote_addr" }`; `""` removes; a field agensio writes itself (`Host`, `X-Forwarded-*`, `Forwarded`) named here replaces agensio's line, sent once |
 | `hide` | none | fields dropped from the origin's answer, `["X-Powered-By"]` |
 | `redirects` | `"rewrite"` | Location pointing at the origin rewritten to this site, or `"pass"` |
 | `upgrade` | `true` | forward Upgrade requests and tunnel after a 101 (WebSocket) |

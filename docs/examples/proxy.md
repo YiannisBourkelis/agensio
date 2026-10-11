@@ -522,9 +522,9 @@ for=...;proto=https;host=...` instead of the `X-Forwarded-*` fields; `"both"` se
 `"off"` neither. `hide` takes fields out of the answers; `Server` and `Date` are always
 agensio's own.
 
-Easy to get wrong: `X-Forwarded-*`, `Forwarded` and `Host` are not for `headers`. agensio
-sets them itself, and a configured `X-Forwarded-Proto` is sent next to its own, not instead
-of it; use `host` and `forwarded`.
+`X-Forwarded-*`, `Forwarded` and `Host` are agensio's own: `host` and `forwarded` choose them.
+One of them named in `headers` replaces agensio's line of that name, so the origin gets it once
+with the configured value (before 0.1.0-alpha.71 it got both lines).
 
 **Check it.**
 

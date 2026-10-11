@@ -303,6 +303,11 @@ path = "/policy/"
 upstream = "http://127.0.0.1:9107/"
 proxy = {{ host = "app.internal", forwarded = "both", headers = {{ "X-Real-IP" = "$remote_addr", "X-Site" = "$scheme://$host", "Accept" = "" }}, hide = ["X-Powered-By"] }}
 
+[[site.location]]                       # a configured field agensio also writes replaces agensio's own line
+path = "/dup/"
+upstream = "http://127.0.0.1:9107/"
+proxy = {{ forwarded = "both", headers = {{ "X-Forwarded-Proto" = "https", "Host" = "configured.test", "Forwarded" = "for=192.0.2.9" }} }}
+
 [[site.location]]                       # D4: a group of two origins, round-robin
 path = "/group/"
 upstream = ["http://127.0.0.1:9107/", "http://127.0.0.1:9108/"]
@@ -2095,6 +2100,11 @@ except OSError:
   check "proxy: no X-Forwarded-Host while Host passes through" "0" "$(echo "$H" | grep -c '^X-Forwarded-Host:')"
   check "proxy: no Forwarded by default, client fields kept" "0 Accept: text/x" "$(echo "$H" | grep -c '^Forwarded:') $(echo "$H" | grep '^Accept:')"
   check "proxy: no Connection field toward the origin (HTTP/1.1 persistent by default), no hop-by-hop leak" "0" "$(echo "$H" | grep -c '^Connection:')"
+  # A field the configuration sets that agensio also writes goes once, the configured value
+  # (before alpha.71 both lines went, two Host fields among them, which RFC 9112 makes a 400).
+  H=$(curl -sS $P/dup/headers | tr -d '\r')
+  check "proxy: a configured X-Forwarded-Proto, Host and Forwarded each go once, the configured value" "1 X-Forwarded-Proto: https 1 Host: configured.test 1 Forwarded: for=192.0.2.9" \
+    "$(echo "$H" | grep -ci '^X-Forwarded-Proto:') $(echo "$H" | grep -i '^X-Forwarded-Proto:') $(echo "$H" | grep -ci '^Host:') $(echo "$H" | grep -i '^Host:') $(echo "$H" | grep -ci '^Forwarded:') $(echo "$H" | grep -i '^Forwarded:')"
   H=$(curl -sS -H 'Accept: text/x' $P/policy/headers | tr -d '\r')
   check "proxy: host rewritten" "Host: app.internal" "$(echo "$H" | grep '^Host:')"
   check "proxy: X-Forwarded-Host carries the original when Host is rewritten" "X-Forwarded-Host: 127.0.0.1:8091" "$(echo "$H" | grep '^X-Forwarded-Host:')"

@@ -118,25 +118,31 @@ bool ProxyHandler::build_head(std::string& out, const Stream& s, std::string_vie
         if (Headers::iequals(h.name, "forwarded")) { forwarded_lines = trusted; continue; }
         out.append(h.name).append(": ").append(h.value).append("\r\n");
     }
-    if (policy.host == "upstream") out.append("Host: ").append(policy.address.authority()).append("\r\n");  // never the scheme
-    else if (policy.host != "pass") out.append("Host: ").append(policy.host).append("\r\n");
-    else if (req.headers.get("host").empty() && !req.host.empty()) out.append("Host: ").append(req.host).append("\r\n");
+    // A field the configuration sets replaces agensio's own line of that name: written once, below
+    // (before alpha.71 both went, two Host fields among them, which RFC 9112 7.2 makes a 400).
+    if (!configured("host")) {
+        if (policy.host == "upstream") out.append("Host: ").append(policy.address.authority()).append("\r\n");  // never the scheme
+        else if (policy.host != "pass") out.append("Host: ").append(policy.host).append("\r\n");
+        else if (req.headers.get("host").empty() && !req.host.empty()) out.append("Host: ").append(req.host).append("\r\n");
+    }
     const bool https = s.conn.tls || s.conn.forwarded_https;
     const std::string_view host = xfh.empty() ? req.host : xfh;
     if (x_forwarded) {
         // A trusted proxy's chain goes on whole: every line in order, then the peer (until
         // 2026-10-07 only the last line, which dropped the hops of a proxy that adds one).
-        out.append("X-Forwarded-For: ");
-        if (xff_lines) append_lines(out, req.headers, "x-forwarded-for");
-        out.append(s.conn.remote_address).append("\r\n");
-        out.append("X-Forwarded-Proto: ").append(https ? "https" : "http").append("\r\n");
+        if (!configured("x-forwarded-for")) {
+            out.append("X-Forwarded-For: ");
+            if (xff_lines) append_lines(out, req.headers, "x-forwarded-for");
+            out.append(s.conn.remote_address).append("\r\n");
+        }
+        if (!configured("x-forwarded-proto")) out.append("X-Forwarded-Proto: ").append(https ? "https" : "http").append("\r\n");
         // Host passed through already tells the origin what the client asked for; the
         // field is only worth its bytes when Host was rewritten or a proxy in front set it
         // (a Node origin measured 3 % more req/s per field it does not have to parse).
-        if (!host.empty() && (policy.host != "pass" || !xfh.empty()))
+        if (!host.empty() && (policy.host != "pass" || !xfh.empty()) && !configured("x-forwarded-host"))
             out.append("X-Forwarded-Host: ").append(host).append("\r\n");
     }
-    if (rfc_forwarded) {
+    if (rfc_forwarded && !configured("forwarded")) {
         out.append("Forwarded: ");
         if (forwarded_lines) append_lines(out, req.headers, "forwarded");
         out.append("for=");
@@ -146,7 +152,8 @@ bool ProxyHandler::build_head(std::string& out, const Stream& s, std::string_vie
         out.append("\r\n");
     }
     // [[site.auth]]'s forward_user: the verified name, in a field the client's own copy of was removed.
-    if (!s.auth.forward_field.empty() && !s.auth.user.empty()) out.append(s.auth.forward_field).append(": ").append(s.auth.user).append("\r\n");
+    if (!s.auth.forward_field.empty() && !s.auth.user.empty() && !configured(s.auth.forward_field))
+        out.append(s.auth.forward_field).append(": ").append(s.auth.user).append("\r\n");
     for (const auto& h : policy.set_headers) {
         if (h.second.empty()) continue;  // "" removes
         out.append(h.first).append(": ");

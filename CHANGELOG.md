@@ -2,6 +2,14 @@
 
 ## 0.1.0-alpha.71
 
+- **A field the configuration sets toward the origin that agensio also writes went twice.**
+  `proxy = { headers = { ... } }` was added after agensio's own `Host`, `X-Forwarded-For`,
+  `X-Forwarded-Proto`, `X-Forwarded-Host` and `Forwarded` lines, which went anyway: the origin got
+  two values for one field, and two `Host` fields, which RFC 9112 makes a 400. A field named in
+  `headers` now replaces agensio's own line of that name. Shown first by `tests/integration.sh` (a
+  location configuring `X-Forwarded-Proto`, `Host` and `Forwarded`: each twice, now once with the
+  configured value).
+
 - **`agensio ctl --help` named Rails where every application service applies.** `site-unit` read
   "the Puma unit of a Rails site", `site-service` "the Rails site's" service, `site-env-set` "(app =
   rails or proxy)", and the top-level help "Rails service", while units, services and environments
