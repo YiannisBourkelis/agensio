@@ -248,8 +248,10 @@ if(AGENSIO_FUZZ)
     target_compile_definitions(fuzz_${t} PRIVATE $<$<BOOL:${AGENSIO_HAS_ZLIB}>:AGENSIO_HAS_ZLIB=1>)
     # -UNDEBUG: the targets state their invariants with assert(), which a Release or
     # RelWithDebInfo build would compile out (it did until 2026-10-07: the recorded runs
-    # checked memory safety only, never the invariants).
-    target_compile_options(fuzz_${t} PRIVATE -fsanitize=fuzzer,address,undefined -g -O1 -fno-omit-frame-pointer -UNDEBUG)
+    # checked memory safety only, never the invariants). -fno-sanitize-recover: undefined
+    # behaviour stops the run and leaves its input, as a memory error does (until 2026-10-12
+    # UBSan printed and went on, and scripts/fuzz-all.sh called such a run clean).
+    target_compile_options(fuzz_${t} PRIVATE -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined -g -O1 -fno-omit-frame-pointer -UNDEBUG)
     target_link_options(fuzz_${t} PRIVATE -fsanitize=fuzzer,address,undefined)
     if(AGENSIO_HAS_ZLIB)
       target_link_libraries(fuzz_${t} PRIVATE ZLIB::ZLIB)
@@ -262,7 +264,7 @@ if(AGENSIO_FUZZ)
     target_include_directories(fuzz_auth_users PRIVATE src ${XCRYPT_INCLUDE_DIR})
     target_compile_features(fuzz_auth_users PRIVATE cxx_std_20)
     target_compile_definitions(fuzz_auth_users PRIVATE AGENSIO_HAS_TLS=1 AGENSIO_HAS_AUTH=1)
-    target_compile_options(fuzz_auth_users PRIVATE -fsanitize=fuzzer,address,undefined -g -O1 -fno-omit-frame-pointer -UNDEBUG)
+    target_compile_options(fuzz_auth_users PRIVATE -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined -g -O1 -fno-omit-frame-pointer -UNDEBUG)
     target_link_options(fuzz_auth_users PRIVATE -fsanitize=fuzzer,address,undefined)
     target_link_libraries(fuzz_auth_users PRIVATE asio ${XCRYPT_LIBRARY} OpenSSL::Crypto)
   endif()
@@ -273,7 +275,7 @@ if(AGENSIO_FUZZ)
     target_include_directories(fuzz_quic_conn PRIVATE src)
     target_compile_features(fuzz_quic_conn PRIVATE cxx_std_20)
     target_compile_definitions(fuzz_quic_conn PRIVATE AGENSIO_HAS_TLS=1 AGENSIO_HAS_QUIC=1 AGENSIO_FUZZ_HOOKS=1)
-    target_compile_options(fuzz_quic_conn PRIVATE -fsanitize=fuzzer,address,undefined -g -O1 -fno-omit-frame-pointer -UNDEBUG)
+    target_compile_options(fuzz_quic_conn PRIVATE -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined -g -O1 -fno-omit-frame-pointer -UNDEBUG)
     target_link_options(fuzz_quic_conn PRIVATE -fsanitize=fuzzer,address,undefined)
     target_link_libraries(fuzz_quic_conn PRIVATE asio OpenSSL::SSL OpenSSL::Crypto)
   endif()

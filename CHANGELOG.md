@@ -9,8 +9,14 @@
   `fuzz_log_line` (the three log formats `agensio ctl logs` reads back, moved for it from
   `control/commands.cpp` into `control/loglines.*`, behaviour unchanged). Each asserts what its
   parser promises, not only memory safety. All seventeen targets ran five minutes each under
-  ASan and UBSan with no finding (`docs/security-control-plane.md`, "Sanitizer and fuzz
-  record"); the weekly job installs libxcrypt so `fuzz_auth_users` runs there too.
+  ASan and UBSan, with no finding but the undefined behaviour of the next entry
+  (`docs/security-control-plane.md`, "Sanitizer and fuzz record"); the weekly job installs
+  libxcrypt so `fuzz_auth_users` runs there too.
+- **A fuzz run with undefined behaviour was reported clean.** UBSan in the fuzz builds printed
+  its report and let the target go on, so libFuzzer exited 0 and `scripts/fuzz-all.sh` counted
+  the run clean; the campaign above missed four reports from `fuzz_log_line` that way. Every fuzz
+  target is now built with `-fno-sanitize-recover=undefined`, so undefined behaviour stops the
+  run and keeps its input like a memory error, and the record is corrected.
 
 ## 0.1.0-alpha.71 (2026-10-11)
 

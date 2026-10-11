@@ -164,6 +164,18 @@ devbox): the one-call paths and each refusal.
 
 ## Sanitizer and fuzz record
 
+2026-10-12, a correction: until today UBSan in the fuzz builds printed its report and let the
+target go on, so libFuzzer exited 0, left no input, and `scripts/fuzz-all.sh` called the run
+clean. The log of the 2026-10-11 campaign holds four reports from `fuzz_log_line`, all signed
+overflow in `parse_since` (`control/loglines.cpp` lines 141 and 155: a relative time with too
+many digits, or too large for its unit); the first five-minute run of the new targets that day
+also had a JSON log line's `status` of 1e30 converted to `int` (line 107). Its row below said
+clean. The logs kept since 2026-10-07 hold no other report but the JSON finding of that day,
+which its assertion caught and the record names. Every fuzz
+target is now built with `-fno-sanitize-recover=undefined`: undefined behaviour stops the run and
+leaves its input, as a memory error does (three inputs that reach those lines exit 1 now, 0
+before).
+
 2026-10-11, four new targets for the parsers the audit's list did not reach (alpha.72):
 `fuzz_refuse` (patterns compiled, capped and indexed as the loader does, then paths through the
 normaliser: the indexed set's answer is the answer of every pattern alone, and the hit it names
@@ -195,7 +207,7 @@ Every target five minutes on its corpus, twelve at once, ASan and UBSan, clang 1
 | fuzz_refuse | 4.25 M | 1,135 | clean |
 | fuzz_fields | 13.35 M | 710 | clean |
 | fuzz_auth_users | 32.93 M | 609 | clean |
-| fuzz_log_line | 4.52 M | 901 | clean |
+| fuzz_log_line | 4.52 M | 901 | four UBSan reports, missed (2026-10-12 above) |
 
 2026-10-09, the password users (step 4b of design section 25): the unit tests, `tests/auth.sh`
 (27 checks) and `tests/provision.sh` with the sanitizer build, its reports kept with
