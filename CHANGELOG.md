@@ -2,6 +2,15 @@
 
 ## 0.1.0-alpha.66
 
+- **A build without libxcrypt or without OpenSSL did not link.** The server always kept the
+  password verification pool of `[[site.auth]]`, whose code is compiled only with both libraries,
+  so any build without them (no OpenSSL, or no libxcrypt, for example a Mac without Homebrew's)
+  stopped at the link with `auth::Verifier::~Verifier()` undefined, since 0.1.0-alpha.58. The pool exists
+  only in a build with passwords now (`status` says `auth_verifications: 0` without), and the unit
+  tests run in all three builds: two of them assumed TLS (a proxy to an `https://` origin, an
+  install's checksum) and now check what a build without OpenSSL answers instead. The builds
+  without OpenSSL and without libxcrypt are on the list of checks before a release.
+
 From the alpha.65 report (correcting the alpha.64 report's second finding):
 
 - **A start without the record of the site files served said nothing at the default log level.**

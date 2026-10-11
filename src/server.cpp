@@ -1031,7 +1031,11 @@ json::Value Server::status() {
     v.set("max_connections", static_cast<double>(rr.ceiling));  // per worker
     v.set("connections_refused", static_cast<double>(rr.refused));
     // [[site.auth]]: the slow hashes the pool has run (one per login, none per request after it).
+#ifdef AGENSIO_HAS_AUTH
     v.set("auth_verifications", static_cast<double>(auth_verifier_ ? auth_verifier_->verifications() : 0));
+#else
+    v.set("auth_verifications", 0.0);  // built without authentication: the same field, nothing run
+#endif
     {
         using tp = std::chrono::steady_clock::time_point;
         const tp now = std::chrono::steady_clock::now();

@@ -2900,14 +2900,19 @@ static void test_proxy() {
     };
     // TLS to the origin (D4b): https:// sets the flag and keeps the pool apart; the tls table.
     std::ofstream(dir / "ca.pem") << "-----BEGIN CERTIFICATE-----\n";
-    write("tls.toml", "[[site]]\nlisten = [\"127.0.0.1:18097\"]\nroot = \"www\"\n[[site.location]]\npath = \"/\"\nupstream = \"https://127.0.0.1:9100\"\n"
-                      "proxy = { tls = { verify = false, server_name = \"origin.internal\", ca = \"ca.pem\" } }\n");
+    const std::string tls_site = "[[site]]\nlisten = [\"127.0.0.1:18097\"]\nroot = \"www\"\n[[site.location]]\npath = \"/\"\nupstream = \"https://127.0.0.1:9100\"\n"
+                                 "proxy = { tls = { verify = false, server_name = \"origin.internal\", ca = \"ca.pem\" } }\n";
+#ifdef AGENSIO_HAS_TLS
+    write("tls.toml", tls_site);
     const Config tcfg = load_config(dir / "tls.toml");
     const LocationConfig& tl = Router::location(tcfg.sites[0], "/");
     CHECK(tl.proxy.address.tls && tl.proxy.address.key == "https://127.0.0.1:9100" && tl.proxy.address.port == 9100);
     CHECK(!tl.proxy.tls.verify && tl.proxy.tls.server_name == "origin.internal" && tl.proxy.tls.ca_file == fs::canonical(dir / "ca.pem").string());
     CHECK(refused("tlsunix.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/\"\nupstream = \"https://unix:/run/x.sock\"\n", "unix socket"));
     CHECK(refused("tlsca.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/\"\nupstream = \"https://127.0.0.1:9100\"\nproxy = { tls = { ca = \"missing.pem\" } }\n", "file not found"));
+#else
+    CHECK(refused("tls.toml", tls_site, "needs a build with TLS"));  // a build without OpenSSL refuses it, saying why
+#endif
     CHECK(refused("noup.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/\"\nhandler = \"proxy\"\n", "needs upstream"));
     CHECK(refused("name.toml", "[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"www\"\n[[site.location]]\npath = \"/\"\nupstream = \"http://origin:3000\"\n", "IP literal"));
     CHECK(api.proxy.rewrite.empty() && api.proxy.options.max_connections == 256 && api.proxy.options.max_idle == 64);
@@ -4375,10 +4380,12 @@ static void test_install() {
         fs::remove_all(dir / "target");
         fs::create_directories(dir / "target");
         ::chmod((dir / "target").c_str(), 0750);
-        // A wrong digest: refused before anything is written.
+        // A wrong digest: refused before anything is written (a build without OpenSSL refuses any digest, saying why).
         v = run("app.tar", std::string(64, '0'));
+#ifndef AGENSIO_HAS_TLS
+        CHECK(!v["ok"].boolean() && std::string(v.get("error")).find("cannot compute sha256") != std::string::npos && fs::is_empty(dir / "target"));
+#else
         CHECK(!v["ok"].boolean() && std::string(v.get("error")).find("sha256 mismatch") != std::string::npos && fs::is_empty(dir / "target"));
-#ifdef AGENSIO_HAS_TLS
         const std::string digest(v.get("error").substr(std::string(v.get("error")).find("archive is ") + 11, 64));
         v = run("app.tar", digest, 0);
         CHECK(v["ok"].boolean() && v.get("unwrapped").empty() && fs::exists(dir / "target" / "app" / "a.txt"));

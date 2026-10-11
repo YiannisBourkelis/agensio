@@ -299,8 +299,11 @@ private:
     std::unique_ptr<asio::steady_timer> restart_timer_;
     std::unique_ptr<asio::steady_timer> trash_timer_;  // hourly: expired trash entries removed through the helper
     // [[site.auth]]'s verification pool. Declared after workers_, so it is destroyed first: its
-    // threads post results into the workers' contexts and must stop before those go.
+    // threads post results into the workers' contexts and must stop before those go. Only in a
+    // build with authentication (core/auth.cpp is compiled only then).
+#ifdef AGENSIO_HAS_AUTH
     std::unique_ptr<auth::Verifier> auth_verifier_;
+#endif
     std::vector<std::unique_ptr<Acceptor>> acceptors_;
     std::unique_ptr<H3Endpoints> h3_;
     std::vector<std::unique_ptr<asio::executor_work_guard<asio::io_context::executor_type>>> guards_;

@@ -14,7 +14,8 @@ Pre-alpha `0.1.0-alpha.1` (2026-09-19): phases A-D, E1/E9, F0-F7, H1, H3 done, G
 2026-09-23, the first slice of I (HTTP/3) 2026-09-24, F13 (site tasks, the first step of
 `docs/design-site-operations.md`) 2026-09-26; see `CHANGELOG.md`. Everything under "Architecture" below is what the code does now, not a
 proposal. Before every tag: the suites (unit, integration, reload, pools, control, acme),
-`tests/auth.sh`, the sanitizer and fuzz runs listed in `docs/security-control-plane.md`, and
+`tests/auth.sh`, the sanitizer and fuzz runs listed in `docs/security-control-plane.md`, the
+builds without OpenSSL and without libxcrypt (link and unit tests; see "Build and run"), and
 `bench/ab.sh` against the previous tag.
 
 ## Hard constraints
@@ -137,6 +138,8 @@ cmake --build build
 ./build/agensio -c bench/agensio.toml      # http://127.0.0.1:8080 and https://127.0.0.1:8443
 ./build/agensio -t -c config/agensio.toml  # config check only
 cmake -S . -B build -DAGENSIO_HTTPARENA=ON  # adds the HttpArena benchmark handler (handler = "httparena"); never in a release
+cmake -S . -B build-notls -G Ninja -DCMAKE_BUILD_TYPE=Release -DAGENSIO_TLS=OFF   # without OpenSSL: no TLS, no passwords
+cmake -S . -B build-noauth -G Ninja -DCMAKE_BUILD_TYPE=Release -DXCRYPT_LIBRARY=/nonexistent  # as without libxcrypt: no passwords
 (cd build && cpack -G DEB)                 # the .deb (packaging/, tests/package.sh runs it in the root devbox)
 bench/run.sh                               # 5 s per case; -d 15s for publishable numbers
 scripts/lint.sh && scripts/format.sh       # clang-tidy / clang-format
