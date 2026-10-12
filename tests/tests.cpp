@@ -7522,7 +7522,7 @@ static void test_packaged_docs() {
     const std::string list = cmake.substr(at, cmake.find(')', at) - at);
     const std::set<std::string> developers = {"CODE_STYLE.md", "ROADMAP.md", "legacy-analysis.md", "linux-dev-setup.md",
                                               "web-server-feedback.md", "security-audit-2026-10-07.md", "third-party-bugs.md",
-                                              "redirects.md"};  // a proposal until the feature is built; then installed
+                                              "redirects.md", "headers.md"};  // proposals until the features are built; then installed
     std::size_t guides = 0;
     for (const auto& e : fs::directory_iterator(fs::path(AGENSIO_SOURCE_DIR) / "docs")) {
         const std::string name = e.path().filename().string();

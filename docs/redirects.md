@@ -5,8 +5,8 @@
 > be checked against it before anything is built. The questions the use cases raised and the
 > owner's decisions are in section 9, the check against the research in section 11, how it will
 > be built and tested in section 12. The research behind it is
-> `reports/Web server headers and redirects.md`; response headers (`[[site.headers]]`) get a
-> document of their own.
+> `reports/Web server headers and redirects.md`; response headers (`[[site.headers]]`, the security
+> baseline per preset, and the mechanism `hsts` uses) are in `docs/headers.md`.
 
 ## 1. The model
 
@@ -911,7 +911,7 @@ this design stands. Response headers are left to their own document.
 
 The research's rows on response headers (the verbs, per-field resolution, `when = "success"`,
 the refused names, CORS, the baseline per preset, `add`/`merge`, retiring `add_headers`) belong to
-`[[site.headers]]` and the per-preset security headers, which get a document of their own.
+`[[site.headers]]` and the per-preset security headers: `docs/headers.md`.
 
 ## 12. How it will be built and tested
 
