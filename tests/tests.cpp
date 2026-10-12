@@ -1,4 +1,5 @@
 // Minimal self-contained unit tests (no framework dependency).
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -7451,7 +7452,31 @@ static void test_mcp_texts() {
         return std::string_view(k.table) == "[[site.location]]" && std::string_view(k.key) == "redirect";
     });
     CHECK(text.find("\"instructions\"") != std::string::npos && !location_redirect);
-    CHECK(text.find("no location key redirects") != std::string::npos && text.find("(a redirect,") == std::string::npos);
+    // What a host shows (2026-10-12): the instructions had grown to 16,554 characters, of which
+    // Claude Code shows 2,048, so a session saw the first eighth. They keep the rules and the map
+    // of where each job's guidance lives; the guidance is in the tools' descriptions.
+    const McpTexts texts = mcp_texts();
+    if (texts.instructions.size() > 2048) std::printf("MCP instructions: %zu characters, a host shows 2048\n", texts.instructions.size());
+    CHECK(texts.instructions.size() <= 2048);
+    std::set<std::string> names;
+    std::string update;
+    for (const auto& [name, description] : texts.tools) {
+        names.insert(name);
+        if (name == "site_update") update = description;
+        if (description.size() > 16384) std::printf("MCP tool %s: %zu characters, a host shows 16384\n", name.c_str(), description.size());
+        CHECK(description.size() <= 16384 && description.find("server instructions") == std::string::npos);
+        CHECK(description.find("(a redirect,") == std::string::npos);
+    }
+    const std::string& ins = texts.instructions;
+    for (std::size_t i = 0; i < ins.size();) {  // every tool the map names exists
+        std::size_t j = i;
+        while (j < ins.size() && (std::islower(static_cast<unsigned char>(ins[j])) || ins[j] == '_')) ++j;
+        const std::string word = ins.substr(i, j - i);
+        if (word.find('_') != std::string::npos && word != "run_as_root" && !names.count(word)) std::printf("MCP instructions name %s, no tool\n", word.c_str());
+        CHECK(word.find('_') == std::string::npos || word == "run_as_root" || names.count(word));
+        i = j == i ? i + 1 : j;
+    }
+    CHECK(update.find("no location key redirects") != std::string::npos && ins.find("(a redirect,") == std::string::npos);
 }
 
 static void test_packaged_logrotate() {

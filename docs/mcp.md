@@ -164,6 +164,15 @@ Two prompts help a newcomer: `getting_started` (greet, run the health check, off
 usual jobs) and `new_site` (walk through a new website: HTTPS, its own user, what runs
 there, where the files are).
 
+The bridge's server instructions are short on purpose: the rules every session needs (tools
+before a terminal, root's commands shown exactly and waited for, every change agreed and given a
+reason, no invented settings, no password as an argument) and a map of which tool's description
+holds the guidance for each job. Agent hosts show only the start of the instructions (Claude Code
+2,048 characters) and load a tool's whole description when the agent is about to use it (Claude
+Code up to 16,384 characters), so what an agent must know about a job (the order of a Rails
+site's tasks, how to translate an application's nginx rules, why a redirect of one path cannot
+be made yet) is written into that tool's description. The unit test holds both to those lengths.
+
 ## A session, in practice
 
 > **You:** create a website for www.example.com, https only.

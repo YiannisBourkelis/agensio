@@ -1282,7 +1282,7 @@ check "access: ctl --restrict sets a rule, --no-restrict clears it" "1 0" "$("$B
 check "access: ctl --cache and --private given alone keep the site's address rules and refused paths" "cache private refuse restricted" \
   "$("$BIN" ctl site-update acc.test --restrict /admin=127.0.0.1 --refuse /secret/ --yes --reason acc --socket $CS > /dev/null; "$BIN" ctl site-update acc.test --cache /assets/=60 --yes --reason acc --socket $CS > /dev/null; "$BIN" ctl site-update acc.test --private /private/ --yes --reason acc --socket $CS > /dev/null; "$BIN" ctl site acc.test --socket $CS | python3 -c 'import json,sys; print(" ".join(sorted(json.load(sys.stdin).get("rules") or {})))')"
 "$BIN" ctl site-update acc.test --no-rules --yes --reason acc --socket $CS > /dev/null
-check "mcp: access_check is a read-only viewer tool and answers the decision; the instructions, site_update and the new_site prompt tell the agent about rules.restricted" "True refused /wp-admin yes yes yes" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
+check "mcp: access_check is a read-only viewer tool and answers the decision; the instructions' map sends the agent to site_update, whose description and the new_site prompt tell it about rules.restricted" "True refused /wp-admin yes yes yes" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
 import json, subprocess, sys
 p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}}) + "\n"); p.stdin.flush()
@@ -1295,7 +1295,7 @@ r = json.loads(p.stdout.readline())["result"]["structuredContent"]
 out += [r["decision"], r["rule"]["path"]]
 p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 3, "method": "prompts/get", "params": {"name": "new_site"}}) + "\n"); p.stdin.flush()
 prompt = json.loads(p.stdout.readline())["result"]["messages"][0]["content"]["text"]
-out += ["yes" if "rules.restricted" in instructions and "access_check" in instructions else "no",
+out += ["yes" if "site_update" in instructions and "access_check" in tools["site_update"]["description"] else "no",
         "yes" if "restricted" in tools["site_update"]["description"] and "restricted" in json.dumps(tools["site_update"]["inputSchema"]) and "languages" in json.dumps(tools["site_update"]["inputSchema"]) else "no",
         "yes" if "rules.restricted" in prompt else "no"]
 p.stdin.close(); p.wait()
