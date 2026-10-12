@@ -311,3 +311,9 @@ except into the trash, from which `site_restore` brings them back for `trash_kee
 Those are yours, on purpose. On a server with the helper
 it creates site accounts, restarts the service after a change that needs it and installs
 applications as the site's account; without the helper it hands the commands back.
+
+It does not look at a site from outside either: `health_check` and `path_check` are the
+server's own view. For what visitors and browsers get (the certificate, the headers, the
+redirects, HTTP/3, IPv6), the agent suggests the outside service that fits the question,
+from `docs/online-checks.md`, and says which of them list tested names publicly unless told
+not to.
