@@ -164,6 +164,35 @@ devbox): the one-call paths and each refusal.
 
 ## Sanitizer and fuzz record
 
+2026-10-12, the campaign after the UBSan correction and the five HTTP/2 fixes (d85b590), with
+undefined behaviour fatal for the first time: every target thirty minutes on its corpus, one
+process each and eighteen at once (`scripts/fuzz-all.sh -t 1800 -j 18`), ASan and UBSan, clang
+19; then the two connection fuzzers an hour each on ten processes (libFuzzer's `-fork=10`) from
+those corpora. No finding, no timeout, no UBSan line in any log. The machine was not idle (other
+work held about four of its 24 threads). Coverage counts are not comparable with the rows before
+this date: the instrumentation changed with `-fno-sanitize-recover`.
+
+| target | runs | edges | result |
+|---|---|---|---|
+| fuzz_parser | 323.40 M | 240 | clean |
+| fuzz_chunked | 766.40 M | 63 | clean |
+| fuzz_fcgi | 402.64 M | 96 | clean |
+| fuzz_http_head | 462.93 M | 152 | clean |
+| fuzz_path | 96.17 M | 236 | clean |
+| fuzz_json | 57.34 M | 557 | clean |
+| fuzz_archive | 119.12 M | 646 | clean |
+| fuzz_hpack | 16.46 M | 529 | clean |
+| fuzz_hpack_roundtrip | 1.00 M | 464 | clean |
+| fuzz_qpack | 40.14 M | 645 | clean |
+| fuzz_quic_packet | 201.92 M | 217 | clean |
+| fuzz_transport_params | 1,096.14 M | 211 | clean |
+| fuzz_quic_conn | 3.18 M, then 33.99 M in 1 h on 10 | 1,559, 1,579 | clean |
+| fuzz_refuse | 10.37 M | 875 | clean |
+| fuzz_fields | 67.61 M | 574 | clean |
+| fuzz_auth_users | 195.05 M | 498 | clean |
+| fuzz_log_line | 21.39 M | 750 | clean |
+| fuzz_h2_conn | 3.74 M, then 18.26 M in 1 h on 10 | 10,382, 10,566 | clean |
+
 2026-10-12, `fuzz_h2_conn`: the HTTP/2 connection as an h2c listener runs it, over a socket
 pair, in front of the server's own dispatcher, static handler, cache and logs, a proxy and a
 FastCGI location whose origins are not there, and time moved by the fuzz-build hook

@@ -146,7 +146,12 @@ public:
     const sockaddr_storage& peer() const noexcept { return peer_; }
     socklen_t peer_len() const noexcept { return peer_len_; }
     TlsSession& tls() noexcept { return tls_; }
-    std::string_view alpn() const noexcept { return tls_.alpn(); }
+    std::string_view alpn() const noexcept {
+#ifdef AGENSIO_FUZZ_HOOKS
+        if (!fuzz_alpn_.empty()) return fuzz_alpn_;  // set by fuzz_establish: no handshake chose one
+#endif
+        return tls_.alpn();
+    }
     void unschedule() { ep_.unschedule(this); }
 
     // ---- application interface ----
@@ -505,7 +510,8 @@ public:
     // fuzzer seals its packets with the same) and the peer's transport parameters at
     // generous values, so arbitrary 1-RTT packets meet streams, credit, acknowledgements,
     // losses and timers with real packet protection.
-    bool fuzz_establish(const unsigned char* secret, std::size_t len, TimePoint now) {
+    bool fuzz_establish(const unsigned char* secret, std::size_t len, TimePoint now, std::string_view alpn = {}) {
+        fuzz_alpn_ = alpn;  // what alpn() reports, as if the handshake had chosen it (fuzz_h3_conn: "h3")
         if (!rx_[2].install(Suite::aes128gcm, secret, len, false)) return false;
         if (!tx_[2].install(Suite::aes128gcm, secret, len, true)) return false;
         peer_tp_ = TransportParams{};
@@ -533,6 +539,7 @@ public:
         last_receive_ = now;
         return true;
     }
+    std::string fuzz_alpn_;
 #endif
 
 private:

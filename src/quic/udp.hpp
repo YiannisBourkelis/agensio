@@ -138,6 +138,16 @@ public:
         pos_ = 0;
         datagrams_ = 0;
     }
+#ifdef AGENSIO_FUZZ_HOOKS
+    // Fuzz builds only (tests/fuzz/fuzz_h3_conn.cpp): every datagram of the batch, in order,
+    // to f(data, len), then the batch emptied, in place of a send.
+    template <class F>
+    void fuzz_drain(F&& f) {
+        for (const Msg& m : msgs_)
+            for (std::size_t off = 0; off < m.len; off += m.seg) f(buf_.data() + m.off + off, std::min(m.seg, m.len - off));
+        clear();
+    }
+#endif
 
 private:
     struct Msg {
@@ -234,9 +244,22 @@ public:
     std::uint64_t retries_sent = 0, tokens_refused = 0, initials_dropped = 0, resets_sent = 0;
 
     void flush() noexcept {
+#ifdef AGENSIO_FUZZ_HOOKS
+        if (fuzz_sink) {  // the fuzzer reads the datagrams instead of a socket
+            datagrams_out += batch.datagrams();
+            batch.fuzz_drain(fuzz_sink);
+            return;
+        }
+#endif
         datagrams_out += batch.datagrams();
         dropped += batch.flush(fd);
     }
+#ifdef AGENSIO_FUZZ_HOOKS
+    // Fuzz builds only (tests/fuzz/fuzz_h3_conn.cpp): while fuzz_sink is set, flush() hands it
+    // the datagrams, and the endpoint's own clock reads (flush_connection, fire) are fuzz_now.
+    std::function<void(const unsigned char*, std::size_t)> fuzz_sink;
+    std::chrono::steady_clock::time_point fuzz_now{};
+#endif
     // The connection's deadline changed.
     void schedule(Timed* t, std::chrono::steady_clock::time_point deadline) {
         if (deadline == std::chrono::steady_clock::time_point::max()) {
@@ -425,7 +448,11 @@ public:
 
     // Produce and send now, outside a wake-up (an upstream completion on the loop).
     void flush_connection(Conn& c) {
+#ifdef AGENSIO_FUZZ_HOOKS
+        const auto now = fuzz_sink ? fuzz_now : Clock::now();
+#else
         const auto now = Clock::now();
+#endif
         c.quic().produce(batch, now);
         flush();
         c.quic().reschedule(now);
@@ -602,7 +629,36 @@ private:
 
     void retire_shared(Conn& c) { retire(c); }
 
+#ifdef AGENSIO_FUZZ_HOOKS
+    // Fuzz builds only (tests/fuzz/fuzz_h3_conn.cpp), with fuzz_sink set: a connection made
+    // outside the accept path, registered as accept registers one; one datagram through
+    // dispatch() and the tail of a wake-up (drain's: produce, one flush, retire or reschedule)
+    // at fuzz_now; the timers due at fuzz_now.
+    void fuzz_adopt(const std::shared_ptr<Conn>& c) {
+        ++conns_;
+        for (const Cid& cid : c->quic().our_cids()) add_cid(cid, c);
+    }
+    void fuzz_deliver(unsigned char* data, std::size_t len, const sockaddr_storage& from, socklen_t fromlen) {
+        touched_.clear();
+        ++datagrams_in;
+        dispatch(data, len, from, fromlen, fuzz_now);
+        for (Conn* c : touched_)
+            if (!c->quic().closed()) c->quic().produce(batch, fuzz_now);
+        flush();
+        for (Conn* c : touched_) {
+            c->quic().touched = false;
+            if (c->quic().closed()) retire_shared(*c);
+            else c->quic().reschedule(fuzz_now);
+        }
+        touched_.clear();
+    }
+    void fuzz_fire() { fire(); }
+#endif
+
     void arm_if_earlier(Clock::time_point deadline) override {
+#ifdef AGENSIO_FUZZ_HOOKS
+        if (fuzz_sink) return;  // the fuzzer runs the timers itself (fuzz_fire)
+#endif
         if (armed_ != Clock::time_point::max() && armed_ <= deadline) return;
         armed_ = deadline;
         timer_.expires_at(deadline);
@@ -614,7 +670,11 @@ private:
     }
 
     void fire() {
+#ifdef AGENSIO_FUZZ_HOOKS
+        const auto now = fuzz_sink ? fuzz_now : Clock::now();
+#else
         const auto now = Clock::now();
+#endif
         // Every connection whose deadline passed, then one send for all of them.
         std::vector<Conn*> due;
         while (Timed* t = timers.top()) {
