@@ -2297,5 +2297,42 @@ PY
 )"
 check "connection ceiling: the derived default is logged at start with the open-file limit" "yes" "$(grep -q 'connection ceiling 3 per worker (1 worker(s), open-file limit [0-9]*, server.max_connections)' bench/tmp/limit/error.log && echo yes)"
 kill $LPID; wait $LPID 2>/dev/null
+# IPv4 and IPv6 on one port (the cookbook report of 2026-10-09): sites on 0.0.0.0:P and on [::]:P
+# started only with SO_REUSEPORT; with reuse_port = "off" (macOS's way, one shared acceptor) the
+# second bind failed, "cannot bind :::P: Address already in use", though -t said OK. The [::]
+# listener is IPv6-only next to an IPv4 one there, so each family reaches its own site, as the
+# kernel routes them with SO_REUSEPORT; -t says a site on [::]:P alone is reachable over IPv6
+# only; a reload says what it cannot change without a restart.
+if python3 -c 'import socket; socket.socket(socket.AF_INET6).bind(("::1", 0))' 2>/dev/null; then
+  mkdir -p bench/tmp/dual/v4 bench/tmp/dual/v6
+  echo v4-site > bench/tmp/dual/v4/index.html; echo v6-site > bench/tmp/dual/v6/index.html
+  dual_conf() {  # the sites to write, in order: v4 (on 0.0.0.0:$DUAL_PORT), v6 (on [::]:$DUAL_PORT)
+    printf '[server]\nworkers = 2\nreuse_port = "off"\n[log]\naccess = "off"\nerror = "%s/bench/tmp/dual/error.log"\nlevel = "info"\n' "$ROOT"
+    for s in "$@"; do
+      if [ "$s" = v4 ]; then printf '[[site]]\nserver_name = ["*"]\nlisten = ["0.0.0.0:%s"]\nroot = "%s/bench/tmp/dual/v4"\n' "$DUAL_PORT" "$ROOT"; fi
+      if [ "$s" = v6 ]; then printf '[[site]]\nserver_name = ["*"]\nlisten = ["[::]:%s"]\nroot = "%s/bench/tmp/dual/v6"\n' "$DUAL_PORT" "$ROOT"; fi
+    done
+  }
+  dual_wait_log() { for _ in $(seq 1 50); do grep -qE "$1" bench/tmp/dual/error.log 2>/dev/null && return; sleep 0.1; done; }
+  DUAL_PORT=8062; dual_conf v4 v6 > bench/tmp/dual/agensio.toml; rm -f bench/tmp/dual/error.log
+  "$BIN" -c bench/tmp/dual/agensio.toml > bench/tmp/dual/server.out 2>&1 & DPID=$!
+  for _ in $(seq 1 30); do nc -z 127.0.0.1 8062 2>/dev/null && break; sleep 0.1; done
+  check "IPv4 and IPv6 on one port without SO_REUSEPORT: both bound, each family served by its own site" "v4-site v6-site" "$(curl -s -4 http://127.0.0.1:8062/) $(curl -s -6 'http://[::1]:8062/')"
+  # grep -c, not -q: under pipefail a grep that exits at its first match can fail the pipe (SIGPIPE).
+  check "a site on [::]:P alone next to a site on 0.0.0.0:P: -t says it is reachable over IPv6 only" "1" "$("$BIN" -t -c bench/tmp/dual/agensio.toml 2>&1 | grep -c 'reachable over IPv6 only')"
+  # A reload that drops 0.0.0.0:P leaves [::]:P IPv6-only until a restart, and says so.
+  dual_conf v6 > bench/tmp/dual/agensio.toml; kill -HUP $DPID; dual_wait_log 'reloaded|reload refused'
+  check "reload without SO_REUSEPORT: dropping 0.0.0.0:P leaves [::]:P IPv6-only until a restart, in a warning" "yes" "$(grep -q '\[::\]:8062 stays IPv6-only until a restart' bench/tmp/dual/error.log && echo yes)"
+  kill $DPID 2>/dev/null; wait $DPID 2>/dev/null
+  # [::]:P opened alone takes IPv4 too: a reload cannot add 0.0.0.0:P beside it, and says why.
+  DUAL_PORT=8063; dual_conf v6 > bench/tmp/dual/agensio.toml; rm -f bench/tmp/dual/error.log
+  "$BIN" -c bench/tmp/dual/agensio.toml > bench/tmp/dual/server.out 2>&1 & DPID=$!
+  for _ in $(seq 1 30); do nc -z 127.0.0.1 8063 2>/dev/null && break; sleep 0.1; done
+  dual_conf v4 v6 > bench/tmp/dual/agensio.toml; kill -HUP $DPID; dual_wait_log 'reloaded|reload refused'
+  check "reload without SO_REUSEPORT: 0.0.0.0:P cannot join a [::]:P opened alone; refused, naming the restart, still serving IPv4" "yes v6-site" "$(grep -q 'reload refused: cannot add 0.0.0.0:8063 by a reload: \[::\]:8063.*restart' bench/tmp/dual/error.log && echo yes) $(curl -s -4 http://127.0.0.1:8063/)"
+  kill $DPID 2>/dev/null; wait $DPID 2>/dev/null
+else
+  echo "skip IPv4 and IPv6 on one port (no IPv6 here)"
+fi
 kill $PID; wait $PID 2>/dev/null
 [ $fails -eq 0 ] && echo "integration: all passed" || { echo "integration: $fails failure(s):$failed_names"; exit 1; }

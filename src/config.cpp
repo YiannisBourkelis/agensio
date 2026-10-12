@@ -2348,6 +2348,42 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
                                " children: a child holding a kept connection takes no other, so a request on the others can wait until "
                                "read_timeout (504)"});
     }
+    // A site on [::]:P with no IPv4 address on P, next to sites on an IPv4 address with that port:
+    // the kernel gives an IPv4 connection to the IPv4 socket, so it never reaches this site (the
+    // cookbook report of 2026-10-09; without SO_REUSEPORT the server opens [::] IPv6-only there).
+    auto endpoint_of = [](const std::string& listen, asio::ip::address& addr, std::string& port) {  // stored unbracketed: ":::443"
+        const std::size_t colon = listen.rfind(':');
+        if (colon == std::string::npos) return false;
+        asio::error_code ec;
+        addr = asio::ip::make_address(listen.substr(0, colon), ec);
+        port = listen.substr(colon + 1);
+        return !ec;
+    };
+    std::set<std::string> ipv4_ports;  // the ports some site listens on with an IPv4 address
+    for (const auto& site : cfg.sites)
+        for (const auto& l : site.listen) {
+            asio::ip::address a;
+            std::string p;
+            if (endpoint_of(l, a, p) && a.is_v4()) ipv4_ports.insert(p);
+        }
+    for (const auto& site : cfg.sites) {
+        std::set<std::string> own_ipv4;
+        for (const auto& l : site.listen) {
+            asio::ip::address a;
+            std::string p;
+            if (endpoint_of(l, a, p) && a.is_v4()) own_ipv4.insert(p);
+        }
+        for (const auto& l : site.listen) {
+            asio::ip::address a;
+            std::string p;
+            if (!endpoint_of(l, a, p) || !a.is_v6() || !a.to_v6().is_unspecified() || !ipv4_ports.count(p) || own_ipv4.count(p)) continue;
+            const std::string& name = site.server_names.front();
+            out.push_back({"listen_ipv6_only", "warning", name,
+                           name + " listens on [::]:" + p + " and on no IPv4 address with that port, while other sites listen on IPv4 there: "
+                                  "it is reachable over IPv6 only (an IPv4 connection goes to the IPv4 listener); add 0.0.0.0:" + p +
+                                  " to its listen to serve IPv4 clients too"});
+        }
+    }
     return out;
 }
 

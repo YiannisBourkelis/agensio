@@ -7313,6 +7313,20 @@ static void test_access_rules() {
         }
         CHECK(codes.count("access_allows_proxy") && codes.count("access_site_restricted") && codes.count("access_loopback") && codes.count("access_single_ipv6") && codes.count("access_ipv4_only"));
     }
+    // A site on [::]:P alone, next to sites on IPv4 there, is reachable over IPv6 only: the kernel
+    // gives an IPv4 connection to the IPv4 socket (the cookbook report). Not when it lists IPv4
+    // too, nor when [::]:P is alone on its port (it takes both families then).
+    {
+        auto site = [](const char* name, const char* listen) {
+            return std::string("[[site]]\nserver_name = [\"") + name + "\"]\nlisten = [" + listen + "]\nroot = \"www\"\n";
+        };
+        const Config d = load(site("v4.test", "\"0.0.0.0:18090\"") + site("v6.test", "\"[::]:18090\"") +
+                              site("both.test", "\"0.0.0.0:18090\", \"[::]:18090\"") + site("alone.test", "\"[::]:18091\""));
+        std::vector<std::string> sites;
+        for (const auto& x : access_notices(d))
+            if (x.code == "listen_ipv6_only") sites.push_back(x.site + (x.severity == "warning" && x.text.find("reachable over IPv6 only") != std::string::npos ? "" : "?"));
+        CHECK(sites == std::vector<std::string>{"v6.test"});
+    }
     // rules.restricted: normalised, its errors, rendered as [[site.access]].
     {
         SiteSpec spec;

@@ -537,6 +537,11 @@ void Server::build_listeners(Generation& gen) {
             l->site_names.push_back(site.server_names.front());
         }
     }
+    for (auto& l : listeners) {  // [::] next to an IPv4 listener on its port (open_acceptor_socket)
+        const asio::ip::address a = l.endpoint.address();
+        if (!a.is_v6() || !a.to_v6().is_unspecified()) continue;
+        for (const auto& m : listeners) l.ipv4_on_port = l.ipv4_on_port || (m.endpoint.address().is_v4() && m.port == l.port);
+    }
 #ifdef AGENSIO_HAS_TLS
     // The vector is complete: each listener's address is stable for the callback argument.
     for (auto& l : listeners) {
@@ -1082,8 +1087,14 @@ void Server::open_acceptor_socket(Acceptor& acc, const Listener& listener, bool 
     s.set_option(asio::socket_base::reuse_address(true));
     if (reuse_port) s.set_option(reuse_port_option(true));
     if (listener.endpoint.address().is_v6()) {
+        // [::] takes IPv4 too, except next to an IPv4 listener on its port without SO_REUSEPORT,
+        // where the two could not both bind (macOS, reuse_port = "off"; the cookbook report of
+        // 2026-10-09): there it is IPv6-only, nginx's ipv6only=on. With SO_REUSEPORT the kernel
+        // gives an IPv4 connection to the IPv4 socket anyway, so each family reaches its own
+        // listener either way.
+        acc.v6only = listener.ipv4_on_port && !reuse_port;
         asio::error_code ec;
-        s.set_option(asio::ip::v6_only(false), ec);
+        s.set_option(asio::ip::v6_only(acc.v6only), ec);
     }
     asio::error_code ec;
     s.bind(listener.endpoint, ec);
@@ -1690,6 +1701,16 @@ bool Server::switch_to(const std::shared_ptr<Generation>& gen, std::string& erro
             bool listening = false;
             for (const auto& a : acceptors_) listening = listening || (a->open && a->address == l.address);
             if (listening) continue;
+            // Without SO_REUSEPORT a [::] socket opened alone takes IPv4 too and cannot be made
+            // IPv6-only while it runs: the IPv4 listener on its port waits for a restart.
+            if (!reuse_port_ && l.endpoint.address().is_v4())
+                for (const auto& a : acceptors_) {
+                    if (!a->open || a->v6only) continue;
+                    const auto ep = parse_endpoint(a->address);
+                    if (ep.port() == l.port && ep.address().is_v6() && ep.address().to_v6().is_unspecified())
+                        throw std::runtime_error("cannot add " + l.address + " by a reload: [::]:" + std::to_string(l.port) +
+                                                 ", opened with no IPv4 listener on its port, takes IPv4 clients too; restart agensio to give them to " + l.address);
+                }
             if (reuse_port_)
                 for (auto& w : workers_) opened.push_back(open_acceptor(l, *w, true));
             else
@@ -1704,6 +1725,18 @@ bool Server::switch_to(const std::shared_ptr<Generation>& gen, std::string& erro
         }
         error = e.what();
         return false;
+    }
+    // A [::] socket opened IPv6-only stays so: with the IPv4 listener of its port gone, IPv4
+    // clients of that port are refused until a restart opens it for both families again.
+    for (const auto& l : gen->listeners) {
+        if (l.ipv4_on_port) continue;
+        for (const auto& a : acceptors_)
+            if (a->open && a->v6only && a->address == l.address) {
+                const std::string port = std::to_string(l.port);
+                error_log_.warn("[::]:" + port + " stays IPv6-only until a restart: it was opened next to an IPv4 listener on port " + port +
+                                ", which the configuration no longer has, so IPv4 clients of that port are refused until agensio restarts");
+                break;
+            }
     }
     // Switch: every worker takes the generation on its own loop; connections pick it up at
     // their next request, exchanges in flight keep the old one alive until they finish.

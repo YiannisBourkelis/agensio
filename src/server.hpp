@@ -131,6 +131,8 @@ struct Listener {
     asio::ip::tcp::endpoint endpoint;
     std::string address_text;  // the bound IP as text (SERVER_ADDR)
     std::uint16_t port = 0;
+    // An IPv4 listener uses the same port: a [::] listener leaves IPv4 to it (open_acceptor_socket).
+    bool ipv4_on_port = false;
     Router router;  // site by Host, location by path
     bool tls = false;
     bool h2 = true;   // TLS: h2 offered through ALPN (the sites' `protocols`)
@@ -214,6 +216,7 @@ private:
         // sockaddr argument): no getpeername later, and an address even after the client reset.
         asio::ip::tcp::endpoint peer;
         bool open = true;            // accepting (written by the reload thread)
+        bool v6only = false;         // [::] opened IPv6-only: next to an IPv4 listener on its port, without SO_REUSEPORT
         std::atomic<bool> closed{false};  // the posted close ran on the owner's loop: the slot may be reused
         Acceptor(asio::io_context& ctx, std::string a, Worker* w)
             : socket(ctx), backoff(ctx), address(std::move(a)), owner(w) {}

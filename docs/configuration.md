@@ -131,6 +131,17 @@ fresh one rather than caching a 404. If you want the old behaviour of "the only 
 serves everything", say so with `server_name = ["*"]`, or add `default = true` to the
 site. Monitors that check the IP address need the hostname, or a catch-all.
 
+**IPv4 and IPv6 on one port.** A listener on `[::]:P` takes both families while it is the
+only listener on port P. Next to a listener on an IPv4 address with the same port
+(`0.0.0.0:P`), IPv4 clients go to that listener's sites and `[::]:P` serves IPv6 only, as
+nginx's `ipv6only=on`; a site for both lists both addresses (`listen = ["0.0.0.0:443",
+"[::]:443"]`), and `-t` and health warn about a site on `[::]:P` alone next to IPv4 sites
+there (`listen_ipv6_only`). With `SO_REUSEPORT` (Linux, `reuse_port = "auto"`) the kernel
+routes the families so; without it (macOS, `reuse_port = "off"`) the `[::]` socket is opened
+IPv6-only for it, and the two cannot be separated on a running socket: a reload cannot add
+`0.0.0.0:P` next to a `[::]:P` that was opened alone (refused, restart), and one that
+removes `0.0.0.0:P` leaves `[::]:P` IPv6-only until a restart (a warning in the error log).
+
 **TLS** follows the same rule at the handshake: the certificate is the one of the site
 that lists the name the client sent (SNI), each site on a listener may have its own
 certificate, and a name no site lists ends the handshake with `unrecognized_name`, so no

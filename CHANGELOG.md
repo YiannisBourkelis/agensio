@@ -59,6 +59,19 @@
   of no bytes (an empty DATA with END_STREAM, as clients end an upload) drew an increment of
   zero: a stream error for the client, and on stream 0 a connection error (RFC 9113 6.9). A frame
   of no bytes now returns nothing. Shown first by `fuzz_h2_conn` (the input `window-update-zero`).
+- **Listening on both `0.0.0.0:P` and `[::]:P` worked only with SO_REUSEPORT.** A `[::]` listener
+  takes IPv4 too, so without SO_REUSEPORT (macOS, where agensio runs one shared acceptor, or
+  `reuse_port = "off"`) the second bind failed and the server did not start (`cannot bind
+  :::P: Address already in use`), though `-t` said OK. Next to an IPv4 listener on its port,
+  `[::]` is now opened IPv6-only there, as nginx does; with SO_REUSEPORT nothing changes, the
+  kernel already gave IPv4 connections to the IPv4 socket. That also confirmed the cookbook
+  writers' suspicion: a site on `[::]:P` alone next to sites on `0.0.0.0:P` was never reached
+  over IPv4, and `-t` and health now say so (`listen_ipv6_only`). Without SO_REUSEPORT a
+  running socket's families cannot change: a reload adding `0.0.0.0:P` beside a `[::]:P` that
+  was opened alone is refused with the reason, one removing it leaves `[::]:P` IPv6-only with a
+  warning; a restart applies either. HTTP/3's UDP sockets bound both already. Shown first by
+  `tests/integration.sh` (the start that failed, each family's site, the two reloads) and a unit
+  check (the notice).
 - **`agensio ctl logs --since` with a huge number, and a JSON access line with an absurd
   status, were undefined behaviour.** `since=99999999999999999999s` or `999999999999999w`
   overflowed a signed integer while the bound was computed, and a JSON line's `status` of 1e30
