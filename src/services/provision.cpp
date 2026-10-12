@@ -1174,7 +1174,7 @@ json::Value read_manifest(const std::string& entry_dir, std::string& why) {
 // The places other than the primary entry directory a piece may sit in: a trash beside the
 // state directory or the logs, named <base>/.trash/<entry>; nothing else is ever removed.
 bool secondary_location_ok(const Config& cfg, const std::string& entry, const std::string& to) {
-    for (const std::string base : {cfg.state_dir, logs_root(cfg)})
+    for (const std::string& base : {cfg.state_dir, logs_root(cfg)})
         if (!base.empty() && under_root(to, base + "/.trash/" + entry) && to != base + "/.trash/" + entry) return true;
     return false;
 }

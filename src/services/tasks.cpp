@@ -102,24 +102,6 @@ constexpr const char* kRedmineGemfileLocal =
     "# harmless, this line is the one production loads.\n"
     "gem \"puma\"\n";
 
-// ^[0-9]{1,4}(\.[0-9]{1,4}){0,2}$: an exact release of a Python package (8.0, 8.0.1, 23).
-bool package_version(std::string_view v) noexcept {
-    int groups = 0, run = 0;
-    for (std::size_t i = 0; i < v.size(); ++i) {
-        const unsigned char c = static_cast<unsigned char>(v[i]);
-        if (c == '.') {
-            if (run == 0) return false;
-            ++groups;
-            run = 0;
-        } else if (digit(c)) {
-            if (++run > 4) return false;
-        } else {
-            return false;
-        }
-    }
-    return run > 0 && groups <= 2;
-}
-
 // One requirement specifier as pip reads it, and nothing it would read as anything else: a name
 // (PEP 508: letters and digits at both ends, . _ - between), optional extras in brackets,
 // optional version clauses (==1.2, >=3,<4, ~=2.0) starting with a digit. No URL, path, marker,
