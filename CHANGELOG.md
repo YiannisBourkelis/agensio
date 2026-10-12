@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.72
+## 0.1.0-alpha.72 (2026-10-12)
 
 - Four new fuzz targets for parsers of client and administrator input that had none:
   `fuzz_refuse` (the `refuse` patterns and their index against normalised paths),
