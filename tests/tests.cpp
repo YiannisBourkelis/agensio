@@ -6705,7 +6705,7 @@ static void test_auth_users() {
     // The names and hashes a caller may bring.
     CHECK(authusers::check_user("anna").empty() && authusers::check_user("anna.b@acme.example").empty() && authusers::check_user("a+b_c-d").empty() &&
           authusers::check_user("Z9").empty());
-    for (const std::string bad : {std::string(), std::string("-x"), std::string(".x"), std::string("a:b"), std::string("a b"), std::string(65, 'a'), std::string("\xc3\xa4"),
+    for (const std::string& bad : {std::string(), std::string("-x"), std::string(".x"), std::string("a:b"), std::string("a b"), std::string(65, 'a'), std::string("\xc3\xa4"),
                                   std::string("a\nb"), std::string("a/b")})
         CHECK(!authusers::check_user(bad).empty());
     const std::string yes = auth_hash("$y$", 0, "secret"), bc = auth_hash("$2b$", 4, "pw");
