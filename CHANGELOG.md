@@ -53,6 +53,12 @@
   client then sent on it was answered as a new request. The id is now remembered with the other
   streams the server reset, and such a HEADERS is decoded, to keep the header table in step, and
   dropped. Shown first by `fuzz_h2_conn` (the input `headers-after-idle-reset`).
+- **HTTP/2: an empty DATA frame could draw a WINDOW_UPDATE of zero.** When a DATA frame's bytes
+  are taken (read by the handler, or dropped after the response) the server returns them to the
+  client's windows, and once a window ran low it sent the update whatever the amount, so a frame
+  of no bytes (an empty DATA with END_STREAM, as clients end an upload) drew an increment of
+  zero: a stream error for the client, and on stream 0 a connection error (RFC 9113 6.9). A frame
+  of no bytes now returns nothing. Shown first by `fuzz_h2_conn` (the input `window-update-zero`).
 - **`agensio ctl logs --since` with a huge number, and a JSON access line with an absurd
   status, were undefined behaviour.** `since=99999999999999999999s` or `999999999999999w`
   overflowed a signed integer while the bound was computed, and a JSON line's `status` of 1e30

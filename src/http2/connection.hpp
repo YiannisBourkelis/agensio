@@ -1073,7 +1073,11 @@ private:
 
     // Bytes the handler consumed (or padding, or bytes discarded) are given back to the
     // peer: the stream's window when half of its grant is owed, the connection's likewise.
+    // A frame of no bytes returns nothing: a WINDOW_UPDATE of zero is the peer's PROTOCOL_ERROR
+    // (RFC 9113 6.9), a connection error on stream 0 (fuzz_h2_conn 2026-10-12: an empty DATA frame
+    // on a stream whose grant was low drew one).
     void return_window(H2Stream& s, std::uint32_t n, bool discarded) {
+        if (n == 0) return;
         return_conn_window(n);
         if (s.state == StreamState::closed || s.state == StreamState::half_closed_remote || s.body_done) return;
         s.recv_unreturned += n;
@@ -1088,6 +1092,7 @@ private:
         }
     }
     void return_conn_window(std::uint32_t n) {
+        if (n == 0) return;
         conn_unreturned_ += n;
         if (conn_unreturned_ >= kConnectionWindow / 2 || conn_recv_grant_ < kConnectionWindow / 4) {
             std::string wu;
