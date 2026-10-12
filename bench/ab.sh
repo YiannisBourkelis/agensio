@@ -76,7 +76,9 @@ for tool in wrk curl nc git cmake; do command -v "$tool" >/dev/null || { echo "m
 ulimit -n 65536 2>/dev/null || true
 
 # ---- base side: worktree + Release build (reuses the fetched asio of the main build) ----
-BASE_SHA="$(git -C "$ROOT" rev-parse --short "$BASE_REF")"
+# The commit, also for an annotated tag (whose own object a plain rev-parse names): the label of
+# the results and the worktree's directory, shared by a tag and its commit.
+BASE_SHA="$(git -C "$ROOT" rev-parse --short "$BASE_REF^{commit}")"
 BASE_DIR="$BENCH/tmp/ab/$BASE_SHA"
 if [ ! -d "$BASE_DIR" ]; then
   git -C "$ROOT" worktree add --detach "$BASE_DIR" "$BASE_SHA" >/dev/null
