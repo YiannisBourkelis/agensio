@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.0-alpha.73
+
+- **A trash restore could succeed with a log directory the server cannot enter.** When a restore
+  has to create the directory of a log or a password users file again, the root helper gives it
+  the server's group (`0750`), through which the server reaches the file after the privilege
+  drop; the result of that `chown` was never checked, so a failure left the directory root's
+  alone and the restore still answered ok. It is now checked (on the directory opened without
+  following a symlink), and a failure ends the restore with the reason and puts back what it
+  moved. Found through GCC's unused-result warning; root's `chown` does not fail in the test
+  machine, so no test shows the old behaviour, and `tests/trash.sh` now checks the path itself
+  (the users files' directory removed while the site is in the trash comes back root's, the
+  server's group, `0750`).
+
 ## 0.1.0-alpha.72 (2026-10-12)
 
 - Four new fuzz targets for parsers of client and administrator input that had none:

@@ -1238,7 +1238,19 @@ bool ensure_parent(const std::string& path, gid_t server_gid, bool logs, std::st
         why = parent + ": " + std::strerror(errno);
         return false;
     }
-    if (logs) (void)::chown(parent.c_str(), 0, server_gid);
+    if (logs) {
+        // The server reaches its logs and users files through this directory after the privilege
+        // drop: without the group it could not, so a failure stops the restore, which puts back
+        // what it moved (until 2026-10-12 the result went unchecked and the restore said ok).
+        const int fd = ::open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        const bool owned = fd >= 0 && ::fchown(fd, 0, server_gid) == 0;
+        const int e = errno;
+        if (fd >= 0) ::close(fd);
+        if (!owned) {
+            why = parent + ": cannot give it the server's group (" + std::strerror(e) + ")";
+            return false;
+        }
+    }
     return true;
 }
 

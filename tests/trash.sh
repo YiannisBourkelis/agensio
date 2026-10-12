@@ -99,11 +99,16 @@ check "the audit log: the delete with every path moved and the account kept" "ye
 mkdir -p $T/www/a.test/app; echo new > $T/www/a.test/app/index.html
 check "site-restore into a place that is not empty: refused naming it; nothing moved" "1 yes yes" "$(ctl site-restore $E1 --yes --reason trash > $T/out; echo -n "$? "; j '"yes" if "'$T'/www/a.test exists and is not empty" in d["error"] else d') $([ -f $TR/$E1/site/app/Gemfile ] && echo yes)"
 rm -rf $T/www/a.test
+# The users files' directory, empty while the site is in the trash, removed: the restore must
+# create it again as root's with the server's group, 0750, or fail (ensure_parent, 2026-10-12).
+rmdir $T/auth && AUTH_DIR=gone || AUTH_DIR=kept
 ctl site-restore $E1 --yes --reason trash > $T/restore.json; cp $T/restore.json $T/out
 check "site-restore into an empty place: the directory, the virtualenv, the logs, the environment and the site file back, the site served again; the entry gone" "True t1 yes yes yes yes yes 0" "$(j 'd["ok"]') $(stat -c %U $A/Gemfile) $([ -f $T/state/t1/venvs/a.test/bin/python ] && echo yes) $([ -f $T/logs/sites/a.test.log.1 ] && echo yes) $([ "$(stat -c '%U %a' $T/env/a.test.env)" = 'root 600' ] && echo yes) $([ -f $T/sites.d/a.test.toml ] && [ "$(stat -c %U $T/sites.d/a.test.toml)" = agensio ] && echo yes) $(ctl sites | grep -q '"a.test"' && echo yes) $(ctl trash > $T/out; j 'len(d["entries"])')"
 check "the restore's answer says the service must be rendered again; the audit log has the restore" "yes yes" "$(python3 -c "import json; d=json.load(open('$T/restore.json')); print('yes' if any('site_service_unit a.test' in x for x in d['next_steps']) else d['next_steps'])") $(grep -q "trash/$E1/restore (trash): restored a.test: $T/www/a.test" $T/logs/audit.log && echo yes)"
 check "the users file came back: root's, the server's group, 0640, and site-auth-users lists anna" "root agensio 640 yes" \
   "$(stat -c '%U %G %a' $T/auth/a.test.users) $(ctl site-auth-users a.test | grep -q '"name":"anna"' && echo yes)"
+check "a parent the restore had to create (the users files' directory) is root's with the server's group, 0750" "gone root agensio 750" \
+  "$AUTH_DIR $(stat -c '%U %G %a' $T/auth)"
 check "the root additions file came back beside the site file, root's, and the site shows it again" "root 644 True 1" "$(stat -c '%U %a' $T/sites.d/a.test.root.toml) $(ctl site a.test > $T/out; j 'd["root_additions"]["present"], int(d["root_additions"]["locations"])')"
 check "restoring an entry that does not exist: 409 naming it" "1 yes" "$(ctl site-restore a.test-20260101-000000 --yes --reason trash > $T/out; echo -n "$? "; j '"yes" if "no trash entry a.test-20260101-000000" in d["error"] else d')"
 check "an entry name that is not one: 400 before the helper" "400" "$(curl -sS -o /dev/null -w '%{http_code}' --unix-socket $CS -X POST -d '{"confirm":true}' http://control/v1/trash/evil/restore)"
