@@ -1,8 +1,9 @@
 # Response headers: `[[site.response_headers]]` and the security baseline
 
-> **Status: proposal (2026-10-12), not built.** Nothing in this document works in
-> 0.1.0-alpha.72; it is the design, written as the guide it will become, so each use case can be
-> checked against it before anything is built. It is the companion of `docs/redirects.md`, whose
+> **Status: being built.** `hsts` (section 5) since 0.1.0-alpha.75; `[[site.response_headers]]`
+> (section 2 without `endings`) since 0.1.0-alpha.89; `endings`, `path_check`'s fields, the
+> baseline per preset (section 4) and the agent's side (section 6) are the next steps of section 12.
+> The rest is the design, written as the guide it will become. It is the companion of `docs/redirects.md`, whose
 > `hsts` setting uses the mechanism described here. The research behind it is
 > `reports/Web server headers and redirects.md` (nine servers, the panels, the administrators'
 > complaints, the standards) and `research_notes/App default security headers/` (what each
@@ -553,7 +554,9 @@ where the request path changes.
    failing test first, a managed WordPress fixture over TLS whose PHP page, static file and 404
    carry one `Strict-Transport-Security`, with an application's own replaced, and none over plain
    HTTP; then the resolved list on the request, the three writers, the upstream loop.
-2. **`[[site.response_headers]]`**: the fields, `endings` on the served file, per-field resolution,
+2. **`[[site.response_headers]]`** (2a built in alpha.89: the fields, per-field resolution, `when`,
+   the refused names and the value checks, applied on every answer; 2b `endings`, 2c `path_check`
+   next): the fields, `endings` on the served file, per-field resolution,
    `when`, the refused names and the value checks, `path_check` with its preview. A property test
    checks the resolution against a brute-force reading of the rules (for random rule sets and paths,
    every field's decision equals the most specific rule naming it), and the HTTP/1, HTTP/2 and

@@ -71,6 +71,7 @@
 #include "http1/parser.hpp"
 #include "http_date.hpp"
 #include "mime.hpp"
+#include "core/response_fields.hpp"
 #include "core/site_fields.hpp"
 #include "core/site_notices.hpp"
 #include "net/cidr.hpp"
@@ -5796,6 +5797,206 @@ static void test_protection() {
 // hsts as a site key (alpha.75, docs/redirects.md 4): the field built once at load for every HTTPS
 // answer of the site; HSTS in a location's add_headers, which reached neither the PHP pages nor the
 // error answers, is refused with the key to use.
+// [[site.response_headers]] (alpha.89, docs/headers.md 2): the design's example resolved per field,
+// exact before prefix at one path, a brute-force reading of random rule sets agreeing with the nodes
+// for every path and kind of answer, and the writers' and the upstream loop's application.
+static void test_response_headers() {
+    namespace fs = std::filesystem;
+    using Verb = FieldDecision::Verb;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-hdr-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "www");
+    auto load = [&](const std::string& rules, const std::string& keys = "") {
+        std::ofstream(dir / "h.toml") << "[[site]]\nserver_name = [\"h.test\"]\nlisten = [\"127.0.0.1:18731\"]\nroot = \"www\"\n" + keys + rules;
+        return load_config(dir / "h.toml");
+    };
+    auto refused = [&](const std::string& rules, std::string_view text) {
+        try {
+            load(rules);
+        } catch (const std::exception& e) {
+            if (std::string_view(e.what()).find(text) != std::string_view::npos) return true;
+            std::printf("response_headers: refused, but not for \"%.*s\": %s\n", static_cast<int>(text.size()), text.data(), e.what());
+            return false;
+        }
+        std::printf("response_headers: loaded, expected refused for \"%.*s\"\n", static_cast<int>(text.size()), text.data());
+        return false;
+    };
+    // The design's 2.2: per field, the longest rule naming it; rules naming different fields all apply.
+    const Config cfg = load(
+        "[[site.response_headers]]\npath = \"/\"\nset = { \"Referrer-Policy\" = \"strict-origin-when-cross-origin\", \"X-Content-Type-Options\" = \"nosniff\" }\n"
+        "default = { \"X-Frame-Options\" = \"SAMEORIGIN\" }\n"
+        "[[site.response_headers]]\npath = \"/embed/\"\nremove = [\"X-Frame-Options\"]\n"
+        "[[site.response_headers]]\npath = \"/embed/\"\nwhen = \"success\"\nset = { \"Cache-Control\" = \"public, max-age=3600\" }\n");
+    const ResponseRules& rr = cfg.sites[0].response_headers;
+    auto decided = [](const HeaderSet& hs) {
+        std::string out;
+        for (const auto& f : hs.fields)
+            out += (out.empty() ? "" : " ") + f.name + "=" + (f.verb == Verb::set ? "set:" : f.verb == Verb::fallback ? "default:" : "remove") + f.value;
+        return out;
+    };
+    CHECK(rr.nodes.size() == 2 && rr.lookup("/page") == &rr.nodes.back() && rr.lookup("/") == &rr.nodes.back());
+    CHECK_EQ(decided(rr.lookup("/page")->success),
+             std::string("Referrer-Policy=set:strict-origin-when-cross-origin X-Content-Type-Options=set:nosniff X-Frame-Options=default:SAMEORIGIN"));
+    CHECK_EQ(decided(rr.lookup("/embed/w.html")->success),
+             std::string("Referrer-Policy=set:strict-origin-when-cross-origin X-Content-Type-Options=set:nosniff X-Frame-Options=remove Cache-Control=set:public, max-age=3600"));
+    CHECK_EQ(decided(rr.lookup("/embed/gone")->other),  // a 404: the success rule does not apply
+             std::string("Referrer-Policy=set:strict-origin-when-cross-origin X-Content-Type-Options=set:nosniff X-Frame-Options=remove"));
+    CHECK(rr.lookup("/Embed/x") == rr.lookup("/embed") && rr.lookup("/embedded") == rr.lookup("/"));  // any case, whole segments
+    CHECK(rr.lookup("/page")->success.h1 ==
+          "Referrer-Policy: strict-origin-when-cross-origin\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: SAMEORIGIN\r\n");
+    // Exact before prefix at one path; a path no rule covers has no node; a success rule gives way on an error.
+    {
+        const Config c = load("[[site.response_headers]]\npath = \"/a\"\nset = { \"X-A\" = \"p\", \"X-B\" = \"p\" }\n"
+                              "[[site.response_headers]]\npath = \"/a\"\nmatch = \"exact\"\nset = { \"X-A\" = \"e\" }\n"
+                              "[[site.response_headers]]\npath = \"/a/b\"\nwhen = \"success\"\nset = { \"X-B\" = \"s\" }\n");
+        const ResponseRules& r = c.sites[0].response_headers;
+        CHECK_EQ(decided(r.lookup("/a")->success), std::string("X-A=set:e X-B=set:p"));
+        CHECK_EQ(decided(r.lookup("/a/x")->success), std::string("X-A=set:p X-B=set:p"));
+        CHECK_EQ(decided(r.lookup("/a/b/c")->success), std::string("X-A=set:p X-B=set:s"));
+        CHECK_EQ(decided(r.lookup("/a/b/c")->other), std::string("X-A=set:p X-B=set:p"));
+        CHECK(r.lookup("/") == nullptr && r.lookup("/b") == nullptr && r.lookup("/ab") == nullptr);
+    }
+    // A brute-force reading of random rule sets: for every path and kind of answer, each field's
+    // decision is the most specific rule naming it that applies (docs/headers.md 12, step 2).
+    {
+        const std::vector<std::string> paths = {"/", "/a", "/a/b", "/b", "/a/b/c"};
+        const std::vector<std::string> fields = {"X-A", "X-B", "X-C", "X-D"};
+        const std::vector<std::string> probes = {"/", "/a", "/A", "/a/", "/a/x", "/a/b", "/a/b/c", "/a/b/c/d", "/ab", "/b", "/b/x", "/c"};
+        std::uint32_t seed = 12345;
+        auto rnd = [&](std::uint32_t n) { seed = seed * 1103515245u + 12345u; return (seed >> 16) % n; };
+        int mismatches = 0;
+        for (int round = 0; round < 300; ++round) {
+            SiteConfig site;
+            site.server_names = {"r.test"};
+            const std::uint32_t count = 1 + rnd(6);
+            for (std::uint32_t i = 0; i < count; ++i) {
+                HeaderRule r;
+                r.path = paths[rnd(static_cast<std::uint32_t>(paths.size()))];
+                r.exact = rnd(4) == 0;
+                r.success_only = rnd(3) == 0;
+                for (const auto& f : fields) {
+                    const std::uint32_t v = rnd(6);
+                    // one rule per field and path, as the load requires
+                    bool taken = false;
+                    for (const auto& o : site.response_headers.rules)
+                        if (o.path == r.path && o.exact == r.exact)
+                            for (const auto* l : {&o.set, &o.fallback})
+                                for (const auto& [n, _] : *l) taken = taken || n == f;
+                    for (const auto& o : site.response_headers.rules)
+                        if (o.path == r.path && o.exact == r.exact)
+                            for (const auto& n : o.remove) taken = taken || n == f;
+                    if (taken) continue;
+                    const std::string value = f + "@" + std::to_string(i);
+                    if (v == 0) r.set.emplace_back(f, value);
+                    else if (v == 1) r.fallback.emplace_back(f, value);
+                    else if (v == 2) r.remove.push_back(f);
+                }
+                if (r.set.empty() && r.fallback.empty() && r.remove.empty()) continue;
+                site.response_headers.rules.push_back(std::move(r));
+            }
+            build_response_headers(site, "random");
+            const ResponseRules& got = site.response_headers;
+            for (const auto& probe : probes)
+                for (const bool success : {true, false}) {
+                    const HeaderNode* node = got.lookup(probe);
+                    for (const auto& f : fields) {
+                        // brute force: every rule naming f that covers the probe and applies, the most specific
+                        const HeaderRule* best = nullptr;
+                        std::string verb, value;
+                        for (const auto& r : got.rules) {
+                            if (!response_rules::covers(r.path, r.exact, probe) || (!success && r.success_only)) continue;
+                            std::string v, val;
+                            for (const auto& [n, x] : r.set) if (n == f) { v = "set"; val = x; }
+                            for (const auto& [n, x] : r.fallback) if (n == f) { v = "default"; val = x; }
+                            for (const auto& n : r.remove) if (n == f) v = "remove";
+                            if (v.empty()) continue;
+                            const bool better = !best || r.path.size() > best->path.size() || (r.path.size() == best->path.size() && r.exact && !best->exact);
+                            if (better) { best = &r; verb = v; value = val; }
+                        }
+                        std::string seen;
+                        if (node) {
+                            const HeaderSet& hs = success ? node->success : node->other;
+                            for (const auto& d : hs.fields)
+                                if (d.name == f) seen = std::string(d.verb == Verb::set ? "set" : d.verb == Verb::fallback ? "default" : "remove") + (d.verb == Verb::remove ? "" : ":" + d.value);
+                        }
+                        const std::string want = best ? verb + (verb == "remove" ? "" : ":" + value) : "";
+                        if (seen != want && mismatches++ < 5)
+                            std::printf("response_headers resolution: round %d path %s %s field %s: nodes say \"%s\", the rules \"%s\"\n", round, probe.c_str(),
+                                        success ? "success" : "other", f.c_str(), seen.c_str(), want.c_str());
+                    }
+                }
+        }
+        CHECK(mismatches == 0);
+    }
+    // Applying them to agensio's own answer: set replaces every copy (add_headers' too), default fills a
+    // gap only, remove deletes; agensio's own block stands; behind a password the cache fields are the guard's.
+    {
+        const Config c = load("[[site.response_headers]]\npath = \"/\"\nset = { \"Cache-Control\" = \"no-cache\", \"X-S\" = \"1\" }\n"
+                              "default = { \"X-D\" = \"d\" }\nremove = [\"X-R\"]\n");
+        const HeaderNode* node = c.sites[0].response_headers.lookup("/x");
+        auto run = [&](Stream& s) {
+            std::string out;
+            if (const HeaderSet* hs = response_fields::pending(s))
+                response_fields::apply(s, *hs, [&](std::string_view n, std::string_view v) { out += std::string(n) + "=" + std::string(v) + ";"; });
+            return out;
+        };
+        Stream s;
+        s.header_node = node;
+        s.response.status = 200;
+        s.response.headers.add("Cache-Control", "public, max-age=60");  // a location's add_headers
+        s.response.headers.add("X-D", "app");
+        s.response.headers.add("X-R", "gone");
+        CHECK_EQ(run(s), std::string("X-D=app;Cache-Control=no-cache;X-S=1;"));
+        CHECK(!response_fields::plain(s));
+        s.response.headers.clear();
+        CHECK(response_fields::plain(s) && response_fields::pending(s)->h1 == "Cache-Control: no-cache\r\nX-S: 1\r\nX-D: d\r\n");
+        s.response.status = 403;  // agensio's own 403: its no-store stands, the other fields come
+        s.response.scratch = "Content-Type: text/html\r\nCache-Control: no-store\r\nContent-Length: 1\r\n";
+        s.response.prebuilt_headers = s.response.scratch;
+        s.response.own_fields = true;
+        CHECK_EQ(run(s), std::string("X-S=1;X-D=d;"));
+        s.response.own_fields = false;
+        s.response.prebuilt_headers = {};
+        s.response.status = 200;
+        s.auth.protected_path = true;  // behind a password: the guard's Cache-Control: private stays
+        s.response.headers.add("Cache-Control", "private");
+        CHECK_EQ(run(s), std::string("Cache-Control=private;X-S=1;X-D=d;"));
+        s.auth.protected_path = false;
+        s.response.fields_decided = true;  // an application's answer: decided in the upstream loop
+        CHECK(response_fields::pending(s) == nullptr);
+        // The upstream loop's half: the application's copies, then the rules' lines.
+        const HeaderSet& hs = node->success;
+        std::uint64_t present = 0;
+        CHECK(!response_fields::keep_upstream(hs, "cache-control", false, present) && !response_fields::keep_upstream(hs, "X-R", false, present) &&
+              response_fields::keep_upstream(hs, "X-D", false, present) && response_fields::keep_upstream(hs, "X-Other", false, present) &&
+              response_fields::keep_upstream(hs, "Cache-Control", true, present));
+        std::string block;
+        response_fields::append_upstream(block, hs, false, present);
+        CHECK_EQ(block, std::string("Cache-Control: no-cache\r\nX-S: 1\r\n"));
+    }
+    // What the load refuses, and what it notes.
+    CHECK(refused("[[site.response_headers]]\npath = \"/\"\nset = { \"Access-Control-Allow-Origin\" = \"*\", \"Access-Control-Allow-Credentials\" = \"true\" }\n",
+                  "browsers refuse"));
+    CHECK(refused("[[site.response_headers]]\npath = \"/\"\nset = { \"Expires\" = \"Thu, 01 Jan 2099 00:00:00 GMT\" }\n", "when = \"success\""));
+    CHECK(refused("[[site.response_headers]]\npath = \"/\"\nset = { \"X-A\" = \"1\", \"x-a\" = \"2\" }\n", "named twice in set"));
+    CHECK(refused("[[site.response_headers]]\npath = \"/\"\nset = { \"Access-Control-Allow-Origin\" = \"https://a.test, https://b.test\" }\n", "one origin"));
+    CHECK(refused("[[site.response_headers]]\npath = \"/\"\nset = { \"X-A\" = \"a\\u0007b\" }\n", "control character"));
+    CHECK(refused("[[site.response_headers]]\npath = \"/\"\n", "needs set, default or remove"));
+    CHECK(refused("[[site.response_headers]]\npath = \"/\"\nremove = [\"ETag\"]\n", "representation"));
+    {
+        std::string many;
+        for (int i = 0; i < 65; ++i) many += "[[site.response_headers]]\npath = \"/p" + std::to_string(i) + "\"\nset = { \"X-A\" = \"1\" }\n";
+        CHECK(refused(many, "at most 64"));
+    }
+    {
+        const Config ok = load("[[site.response_headers]]\npath = \"/\"\nset = { \"Cache-Control\" = \"no-cache\" }\nremove = [\"Strict-Transport-Security\", \"Server\"]\n");
+        CHECK(ok.sites[0].response_headers.nodes.size() == 1 && ok.sites[0].header_notes.empty());
+        const Config noted = load("[[site.response_headers]]\npath = \"/\"\nset = { \"Content-Security-Policy\" = \"default-src 'self'\", \"X-XSS-Protection\" = \"1\" }\n",
+                                  "app = \"php\"\nphp = { socket = \"unix:/run/php/x.sock\" }\n");
+        CHECK(noted.sites[0].header_notes.size() == 2);
+    }
+    fs::remove_all(dir);
+}
+
 // [[site.redirect]] (alpha.82, docs/redirects.md 5): what from and to accept, the Location written
 // byte by byte for the design's examples, the most specific rule, and the load's refusals and notes.
 static void test_redirect_rules() {
@@ -9339,6 +9540,7 @@ int main() {
     test_site_trusted_proxies();
     test_hsts_key();
     test_redirect_rules();
+    test_response_headers();
     test_site_isolation();
     test_served_record();
     test_hosting_isolation();

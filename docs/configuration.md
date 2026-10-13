@@ -2112,6 +2112,83 @@ the `Location` it sends and, over plain HTTP, the one hop; with proposed rules (
 `path-check`, MCP `path_check` `redirects`) it answers as if they applied and changes nothing, so a
 list is checked before it goes live. `site_show` lists the rules in force and what the load noted.
 
+## 14c. Response headers: `[[site.response_headers]]`
+
+0.1.0-alpha.89, the design in [headers.md](headers.md). Rules set, default or remove fields by path,
+on **every answer the site gives**: a file, a PHP page, a CGI script, a proxied application,
+agensio's own error pages (404, 403, 405, 413, 502, 504...), the password prompt, a redirect, an
+`OPTIONS` answer, a `304`. A request takes the same fields whichever location answers it and whatever
+internal hops it makes (`try_files`, a directory's index): rules match the path the client asked for.
+Not covered, because no site is known yet or the answer is not a site's: a malformed request (400), a
+name the listener does not serve (421), an ACME challenge, a `1xx`, the bytes of a WebSocket.
+
+```toml
+[[site.response_headers]]
+path = "/"
+set = { "Referrer-Policy" = "strict-origin-when-cross-origin", "X-Content-Type-Options" = "nosniff" }
+default = { "X-Frame-Options" = "SAMEORIGIN" }
+remove = ["X-Powered-By"]
+
+[[site.response_headers]]
+path = "/embed/"
+remove = ["X-Frame-Options"]          # a page another site may frame
+
+[[site.response_headers]]
+path = "/assets/"
+when = "success"
+set = { "Cache-Control" = "public, max-age=31536000, immutable" }
+```
+
+| key | values | default |
+|---|---|---|
+| `path` | a normalised path: a prefix covers it and everything below it on a segment boundary, in any capitalisation (`/assets`: `/assets/x`, never `/assetsx`); `"/"` the whole site | required |
+| `match` | `"prefix"` or `"exact"` | `"prefix"` |
+| `set` | field names and values: sent with this value, replacing every copy the answer had | none |
+| `default` | field names and values: sent only when the answer has no copy | none |
+| `remove` | field names: every copy deleted | none |
+| `when` | `"always"`, or `"success"` (2xx and 304 only) | `"always"` |
+
+- **Per field, the most specific rule decides.** For each field the rule with the longest path that
+  names it decides (at one path an exact rule before a prefix one); rules naming different fields
+  all apply, and the order they are written in never matters. A deeper rule changes the fields it
+  names and no others: `/embed/w.html` above keeps `Referrer-Policy` and `nosniff` from `/` and loses
+  `X-Frame-Options`. This is the opposite of nginx's `add_header`, where a nested block drops every
+  inherited field.
+- **`set` replaces, `default` fills a gap, `remove` deletes**, whoever put the field there: the
+  application, a location's `add_headers`. With `set` the browser never sees two copies; with
+  `default` the application's own value wins (WordPress's admin sends its own `X-Frame-Options`).
+  For a Content-Security-Policy on an application site use `default`: `set` would replace the
+  application's policy, often with nonces its pages need (noted by `-t`).
+- **`when = "success"`** applies a rule to 2xx and 304 answers only; on any other answer the next
+  rule naming the field decides. A `Cache-Control` or `Expires` that lets caches keep the answer
+  (`max-age` above 0, `s-maxage`, `public`, `immutable`) is refused without it, so a 404 is never
+  kept for a year; `no-store`, `no-cache`, `private` and `max-age=0` are accepted anywhere.
+- **What no rule loosens:** behind a password (`[[site.auth]]`) the answer stays `Cache-Control:
+  private` and the CDN fields stay dropped, so the rules leave those fields alone there; the fields
+  agensio writes on its own 401, 403 and 503 (`no-store`, `Retry-After`) stand.
+- **Refused at load, naming what to use instead:** the framing fields (`Connection`,
+  `Transfer-Encoding`, `Content-Length`...), the representation's (`Content-Type`, `ETag`, `Vary`,
+  `Date`...), `Location` and `Refresh` (a `[[site.redirect]]`), `Strict-Transport-Security` in `set`
+  or `default` (`hsts`; `remove` strips an application's own), `Server` (`[server] server_header`),
+  `Alt-Svc`, `Set-Cookie`, `Clear-Site-Data`, `Service-Worker-Allowed`, the password fields, the
+  obsolete pinning fields; a value that is empty, longer than 4 KB, holds a control character or a
+  `$` (no variables; request fields with variables are `proxy = { request_headers }`);
+  `X-Frame-Options` other than `DENY` or `SAMEORIGIN`; an `Access-Control-Allow-Origin` that is not
+  one origin, `*` or `null`, and `*` with `Access-Control-Allow-Credentials: true`; the same field
+  twice at one path and match, or in two verbs of one rule; more than 64 rules or field names, or
+  16 KB of values.
+- **Noted by `-t`, the error log and health:** a `set` of `Content-Security-Policy` on a site with
+  an `app` other than `static`; `X-XSS-Protection` other than `0`.
+- **Over HTTP/2 and HTTP/3** the names go in lower case, as those protocols require.
+- **Cost:** a site without rules pays one test; with rules, the request finds its path's fields
+  once, behind a test of the path's first byte, and a cached file over HTTP/1 takes them as one
+  prebuilt block.
+
+**On a managed site** the rules are not a `site_update` field yet (a later step of headers.md); a
+hand-written site file carries them. `hsts` stays its own key ([redirects.md](redirects.md) 4), and
+a location's `add_headers` keeps adding its fields to that location's successful answers; a rule's
+`set` and `remove` act on those too.
+
 ## 15. Control socket
 
 ```toml

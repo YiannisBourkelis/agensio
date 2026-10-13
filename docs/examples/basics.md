@@ -584,9 +584,10 @@ root = "/var/www/example.com/web"
 tls = "auto"
 hsts = true                    # Strict-Transport-Security, a year, on every HTTPS answer of the site
 
-[[site.location]]
-path = "/assets/"              # path and add_headers only: joins the location the site already has here
-add_headers = { "Cache-Control" = "public, max-age=31536000, immutable" }
+[[site.response_headers]]
+path = "/assets/"
+when = "success"               # 2xx and 304 only: a missing asset's 404 is never kept for a year
+set = { "Cache-Control" = "public, max-age=31536000, immutable" }
 ```
 
 **What it does.** `hsts` puts `Strict-Transport-Security` on every answer the site gives over
@@ -596,14 +597,13 @@ browser has seen it, it refuses plain http for that host until `max-age` runs ou
 https is known to work; `hsts = { max_age = "2y", subdomains = true }` sets the lifetime and
 `includeSubDomains`, the latter only when every subdomain has https too. A location's `add_headers`
 cannot send HSTS (until 0.1.0-alpha.75 that was the way, and it reached neither the PHP pages nor
-the errors). The `Cache-Control` field is added to the answers that serve a file under `/assets/`,
-a `304` revalidation included; error pages carry none. `immutable` belongs only on names that
-change when the content does; give other directories a short `max-age`, or nothing. A location with
-nothing but `path` and `add_headers` joins the location a preset (WordPress, Laravel, a proxy)
-or the implicit `/` already has at that path, its fields added and a field of the same name
-replaced (where the site has none, as for `/assets/` here, it is a location of its own with
-the site's settings); add any other key to it and it replaces that location instead, front
-controller and all.
+the errors). The `Cache-Control` rule is on every successful answer under `/assets/`, a `304`
+revalidation included, whichever location serves it, and replaces a lifetime the application or a
+preset sends there; a 404 carries none (a lifetime without `when = "success"` is refused at load).
+`immutable` belongs only on names that change when the content does; give other directories a
+short `max-age`, or nothing. A location's `add_headers` still works for the same purpose (the
+managed `--cache` below writes one), but it reaches only that location's successful answers; the
+rule reaches every answer of the path ([response headers](#security-fields-by-path)).
 
 **Check it.**
 
@@ -627,9 +627,67 @@ with `"cache": [{"path": "/assets/", "max_age": 31536000}]` added: the tool repl
 rules object, so a part left out is removed. A field no flag covers (`immutable`, another header
 on one path) goes into the site's root additions file, root's.
 
-**Reference:** [Locations](../configuration.md#6-locations-the-reference),
-[Customising a preset](../configuration.md#5-customising-a-preset),
+**Reference:** [Response headers](../configuration.md#14c-response-headers-siteresponse_headers),
+[Locations](../configuration.md#6-locations-the-reference),
 [HTTPS only](../configuration.md#https-only), [root additions](../configuration.md#15-control-socket).
+
+## Security fields by path
+
+**When:** the site should send the same security fields on every answer, PHP pages and error
+pages too, with one path that differs (a page other sites may frame), and drop what the
+application discloses about itself.
+
+```toml
+# /etc/agensio/agensio.toml: the main file, root's (once per host)
+include = ["sites.d/*.toml"]
+
+[server]
+acme = { email = "admin@example.com" }
+```
+
+```toml
+# /etc/agensio/sites.d/example.com.toml
+[[site]]
+server_name = ["example.com"]
+listen = ["0.0.0.0:443"]
+root = "/var/www/example.com/web"
+app = "php"
+php = { socket = "unix:/run/php/php-fpm.sock" }
+tls = "auto"
+
+[[site.response_headers]]
+path = "/"
+set = { "Referrer-Policy" = "strict-origin-when-cross-origin", "X-Content-Type-Options" = "nosniff" }
+default = { "X-Frame-Options" = "SAMEORIGIN" }   # the application's own wins where it sends one
+remove = ["X-Powered-By"]
+
+[[site.response_headers]]
+path = "/embed/"
+remove = ["X-Frame-Options"]                     # only this field changes below /embed/
+```
+
+**What it does.** Every answer of the site, a static file, a PHP page, agensio's own 404 or 403,
+gets `Referrer-Policy` and `nosniff` (`set`: an application's own copy is replaced, so the browser
+never sees two), `X-Frame-Options: SAMEORIGIN` where the application sent none (`default`), and no
+`X-Powered-By`. Below `/embed/` the frame field is removed and the other two stay: per field the
+most specific rule naming it decides, and the order of the rules does not matter, unlike nginx,
+where an `add_header` in a nested block drops every field inherited from above. Easy to get wrong:
+a `Content-Security-Policy` on an application site belongs in `default` (`set` would replace the
+application's own policy, `-t` notes it), and a cache lifetime needs `when = "success"`.
+
+**Check it.**
+
+```sh
+agensio -t -c /etc/agensio/agensio.toml      # refuses a field the server owns, a variable, a lifetime on errors
+curl -sI https://example.com/missing | grep -iE '^(referrer-policy|x-content-type-options|x-frame-options)'
+curl -sI https://example.com/embed/w.html | grep -ic x-frame-options     # 0
+```
+
+**On a managed site.** Not a `site_update` field yet ([headers.md](../headers.md) 12, step 4); until
+then the rules are a hand-written site file's.
+
+**Reference:** [Response headers](../configuration.md#14c-response-headers-siteresponse_headers),
+[headers.md](../headers.md) 2.
 
 ## A single-page application
 

@@ -30,6 +30,7 @@
 #include <asio.hpp>
 
 #include "config.hpp"
+#include "core/response_fields.hpp"
 #include "core/stream.hpp"
 #include "core/strings.hpp"
 #include "core/worker_state.hpp"
@@ -152,17 +153,23 @@ private:
         const bool keepalive_line = r.keep_alive && stream_->request.version_minor == 0;
         // The site's fields (core/site_fields.hpp: its HSTS on an HTTPS answer), prebuilt at load.
         const std::string_view site_lines = stream_->fields ? std::string_view(stream_->fields->h1) : std::string_view();
-        if (r.headers.empty() && !close_line && !keepalive_line && r.prebuilt_terminated && !source) {
-            if (r.alt_svc_line.empty() && site_lines.empty()) {
+        // The site's [[site.response_headers]] (core/response_fields.hpp): an answer with nothing for
+        // them to look at (a cached file) takes the node's prebuilt lines as they are.
+        const HeaderSet* rules = response_fields::pending(*stream_);
+        const bool rules_plain = rules && response_fields::plain(*stream_);
+        const std::string_view rule_lines = rules_plain ? std::string_view(rules->h1) : std::string_view();
+        if (r.headers.empty() && !close_line && !keepalive_line && r.prebuilt_terminated && !source && (!rules || rules_plain)) {
+            if (r.alt_svc_line.empty() && site_lines.empty() && rule_lines.empty()) {
                 block_ = r.prebuilt_headers;
                 tail_.clear();
                 return;
             }
-            // The alt-svc and site lines before the terminator: the block borrowed up to its last
-            // line, the prebuilt lines and the blank line copied into the tail (a few dozen bytes).
+            // The alt-svc, site and rule lines before the terminator: the block borrowed up to its
+            // last line, the prebuilt lines and the blank line copied into the tail.
             block_ = slice(r.prebuilt_headers, 0, r.prebuilt_headers.size() - 2);
             tail_.assign(r.alt_svc_line);
             tail_.append(site_lines);
+            tail_.append(rule_lines);
             tail_.append("\r\n");
             return;
         }
@@ -170,8 +177,13 @@ private:
             r.prebuilt_terminated ? slice(r.prebuilt_headers, 0, r.prebuilt_headers.size() - 2) : r.prebuilt_headers;
         tail_.assign(r.alt_svc_line);
         tail_.append(site_lines);
-        for (const HeaderField& h : r.headers)
-            tail_.append(h.name).append(": ").append(h.value).append("\r\n");
+        if (rules)
+            response_fields::apply(*stream_, *rules, [this](std::string_view name, std::string_view value) {
+                tail_.append(name).append(": ").append(value).append("\r\n");
+            });
+        else
+            for (const HeaderField& h : r.headers)
+                tail_.append(h.name).append(": ").append(h.value).append("\r\n");
         if (source_sized) {
             tail_.append("Content-Length: ");
             append_number(tail_, source_length);

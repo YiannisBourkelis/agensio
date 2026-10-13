@@ -7,6 +7,7 @@
 #include <system_error>
 
 #include "core/private_cache.hpp"
+#include "core/response_fields.hpp"
 #include "core/site_notices.hpp"
 #include "core/strings.hpp"
 #include "response.hpp"
@@ -170,6 +171,15 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
     const bool guarded = s.auth.protected_path;
     // The site's hsts replaces the application's own (docs/redirects.md 4.1): one field, the site's.
     const bool site_hsts = s.fields && !s.fields->hsts.empty();
+    // The site's [[site.response_headers]] for the path (docs/headers.md 2), decided here, in the loop
+    // that reads every field the application sent: set and remove drop its copies, a copy answers a
+    // default, then the rules' own lines, then the guards. Never on a 1xx.
+    const HeaderSet* rules = s.header_node && res.status >= 200
+                                 ? (response_fields::success(res.status) ? &s.header_node->success : &s.header_node->other)
+                                 : nullptr;
+    if (rules && rules->empty()) rules = nullptr;
+    std::uint64_t present = 0;
+    r.fields_decided = true;
     // Without one, until this generation of the site has seen its application's: one test per field.
     const SiteFields* watch = s.watch_fields && !s.watch_fields->application_noted.done.load(std::memory_order_relaxed) ? s.watch_fields : nullptr;
     const bool rewrite = proxied && loc.proxy.rewrite_redirects;
@@ -184,6 +194,7 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
             if (h.value != s.fields->hsts && !s.fields->hsts_noted.done.load(std::memory_order_relaxed)) note_hsts_narrowed(*s.fields, h.value, log);
             continue;
         }
+        if (rules && !response_fields::keep_upstream(*rules, h.name, guarded, present)) continue;
         if (watch && Headers::iequals(h.name, "strict-transport-security")) note_application_hsts(*watch, h.value);
         if (guarded) {
             if (Headers::iequals(h.name, "cache-control")) {
@@ -211,6 +222,7 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
     if (st == 200 || st == 201 || st == 204 || st == 206 || st == 301 || st == 302 || st == 303 || st == 304 ||
         st == 307 || st == 308)
         for (const auto& h : loc.add_headers) {
+            if (rules && !response_fields::keep_upstream(*rules, h.first, guarded, present)) continue;
             if (guarded && Headers::iequals(h.first, "cache-control")) {
                 private_cache::keep_directives(h.second, kept);
                 continue;
@@ -218,6 +230,7 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
             if (guarded && private_cache::shared_only_field(h.first)) continue;
             r.scratch.append(h.first).append(": ").append(h.second).append("\r\n");
         }
+    if (rules) response_fields::append_upstream(r.scratch, *rules, guarded, present);
     if (guarded) r.scratch.append("Cache-Control: private").append(kept.empty() ? "" : ", ").append(kept).append("\r\n");
     if (res.streamed) {  // buffering off, or the temp-file cap switched it mid-response
         r.prebuilt_headers = r.scratch;  // the writer adds Content-Length or chunked framing

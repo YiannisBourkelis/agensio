@@ -18,6 +18,7 @@
 
 #include "core/auth.hpp"
 #include "core/request.hpp"
+#include "core/response_rules.hpp"
 #include "core/site_fields.hpp"
 #include "net/cidr.hpp"
 #include "services/json.hpp"
@@ -263,6 +264,11 @@ struct SiteConfig {
     RedirectSet redirects;
     bool redirects_all = false;
     std::vector<std::pair<std::string, std::string>> redirect_notes;  // code, text
+    // [[site.response_headers]] (alpha.89, docs/headers.md 2, core/response_rules.hpp): the rules as
+    // written and their per-field resolution by path; header_notes, what -t, the error log and
+    // health say about them (a CSP set over an application's own, X-XSS-Protection turned on).
+    ResponseRules response_headers;
+    std::vector<std::pair<std::string, std::string>> header_notes;  // code, text
     // http (docs/redirects.md 2, alpha.76): what a request over plain HTTP gets. A TLS site on port
     // 443 also listens on port 80 at the same addresses (http_listen) and redirects there; on another
     // port it has none unless `http = { listen = [...] }` names them. A site without TLS serves plain
@@ -613,6 +619,9 @@ bool loopback_listen(std::string_view listen);
 // by the loader's own parse and checks against `site`, whose rules they replace (alpha.83): "" when
 // they load, else the loader's reason. The notes land in site.redirect_notes.
 std::string load_redirect_rules(const json::Value& rules, SiteConfig& site);
+// [[site.response_headers]] (docs/headers.md 2.2): the site's rules (response_headers.rules)
+// resolved per field into its nodes; throws as a load does on a combination browsers refuse.
+void build_response_headers(SiteConfig& site, const std::string& where);
 // The names a site file's [[site]] blocks claim, read as the loader reads a file set aside (its
 // text scanned when it is not TOML): what site_update names when it cannot help (alpha.80).
 std::vector<std::string> claimed_names(const std::string& file);

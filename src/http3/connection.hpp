@@ -23,6 +23,7 @@
 
 #include "config.hpp"
 #include "core/fields.hpp"
+#include "core/response_fields.hpp"
 #include "core/forwarded.hpp"
 #include "handlers/dispatch.hpp"
 #include "http/request_assembly.hpp"
@@ -638,7 +639,10 @@ private:
         } else if (!r.prebuilt_headers.empty()) {
             encode_text_block(sec, r.prebuilt_headers, s.section);
         }
-        for (const HeaderField& f : r.headers) append_lower(sec, f.name, f.value, s.section);
+        if (const HeaderSet* rules = response_fields::pending(s.stream))  // the site's response_headers
+            response_fields::apply(s.stream, *rules, [&](std::string_view name, std::string_view value) { append_lower(sec, name, value, s.section); });
+        else
+            for (const HeaderField& f : r.headers) append_lower(sec, f.name, f.value, s.section);
         std::string& px = s.section;  // free at this point: the request's section is long decoded
         px.clear();
         encoder_.prefix(px);

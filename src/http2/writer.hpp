@@ -36,6 +36,7 @@
 
 #include "config.hpp"
 #include "core/fields.hpp"
+#include "core/response_fields.hpp"
 #include "core/strings.hpp"
 #include "core/worker_state.hpp"
 #include "http1/writer.hpp"  // IsTlsStream
@@ -597,7 +598,10 @@ private:
         } else if (!r.prebuilt_headers.empty()) {
             encode_text_block(h, r.prebuilt_headers, s.scratch);
         }
-        for (const HeaderField& f : r.headers) append_lower(h, f.name, f.value, s.scratch);
+        if (const HeaderSet* rules = response_fields::pending(s.stream))  // the site's response_headers
+            response_fields::apply(s.stream, *rules, [&](std::string_view name, std::string_view value) { append_lower(h, name, value, s.scratch); });
+        else
+            for (const HeaderField& f : r.headers) append_lower(h, f.name, f.value, s.scratch);
         if (const StreamBody* source = source_of(r)) {
             std::uint64_t len = 0;
             s.source_sized = source->length(len);

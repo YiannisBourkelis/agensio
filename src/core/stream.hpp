@@ -12,6 +12,7 @@
 #include "core/host.hpp"
 #include "core/request.hpp"
 #include "core/response.hpp"
+#include "core/response_rules.hpp"
 #include "core/site_fields.hpp"
 
 namespace agensio {
@@ -96,6 +97,9 @@ struct Stream {
     // An HTTPS request to a site with no hsts line (docs/redirects.md 4.2): the HSTS its application
     // sends is noted for health (handlers/upstream_common.cpp). Null otherwise.
     const SiteFields* watch_fields = nullptr;
+    // The site's [[site.response_headers]] for the path asked for (core/response_rules.hpp), found
+    // once the site is known; null for a site without rules or a path none covers.
+    const HeaderNode* header_node = nullptr;
 
     void reset() {
         request.reset();
@@ -104,6 +108,7 @@ struct Stream {
         fields = nullptr;
         https_site = nullptr;
         watch_fields = nullptr;
+        header_node = nullptr;
     }
 };
 

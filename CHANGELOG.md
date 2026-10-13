@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.1.0-alpha.89
+
+- **`[[site.response_headers]]`: fields a site sets, defaults or removes by path** (`docs/headers.md` 2,
+  configuration.md 14c; step 2a of headers.md 12). `path`, `match`, `set` (replaces every copy, the
+  application's and a location's `add_headers` too), `default` (only where the answer has none),
+  `remove`, `when = "always" | "success"`. Per field the most specific rule naming it decides (the
+  longest path, an exact rule before a prefix one), rules naming different fields all apply, and
+  the order they are written in never matters; on an error a success-only rule gives way to the
+  next rule naming the field. On every answer the site gives: files, PHP, CGI, a proxied
+  application, agensio's own error pages, redirects, 401 and 403, over HTTP/1, HTTP/2 and HTTP/3.
+  Resolved at load into one node per rule path (`core/response_rules.hpp`), found once per request
+  behind a first-byte bitmap; an application's answer is decided in the upstream loop, agensio's own
+  where each writer sends its extra fields (`core/response_fields.hpp`), a cached file over HTTP/1
+  taking the node's lines as one prebuilt block. The guards stand: behind a password the rules leave
+  `Cache-Control` and the CDN fields to it, and agensio's own `no-store` and `Retry-After` on its 401,
+  403 and 503 are never replaced. Refused at load with the setting to use: the framing and
+  representation fields, `Location`, HSTS in `set` or `default` (`hsts`), `Server`, `Alt-Svc`,
+  `Set-Cookie` and the other fields of section 2.5; a value that is empty, over 4 KB, holds a control
+  character or a `$`; a cache lifetime without `when = "success"`; a frame field other than `DENY` or
+  `SAMEORIGIN`; a CORS origin list, `*` with credentials; a field twice at one path or in two verbs;
+  more than 64 rules or names or 16 KB of values. Noted by `-t`, the error log and health: a CSP
+  `set` on an application site, `X-XSS-Protection` other than `0`. `-t --explain` prints them. The
+  cookbook's Security fields by path, and its cache recipe now a success-only rule. The integration
+  checks (a PHP fixture whose own fields are replaced, kept or dropped, a deeper rule, a 404, a 403,
+  HTTP/2 and HTTP/3, the load's refusals and notes) failed on alpha.88; the unit test reads 300
+  random rule sets by brute force against the nodes. `bench/ab.sh HEAD -A -P -2`
+  (`ab-20261013-231522.md`): the static, HTTP/2 and proxy rows 0.95 to 1.03, `proxy-hdr` (the
+  upstream behind set, default and remove rules) 0.997; the new `headers` row against the same
+  fields from a location's `add_headers`, three rounds (`ab-20261013-232830.md`): 0.969, the rules'
+  prebuilt block cheaper than `add_headers`; `-3` three rounds (`ab-20261013-233320.md`): the h3
+  rows 0.96 to 1.06, the 100 KB one the loopback-loss row.
+
 ## 0.1.0-alpha.88 (2026-10-14)
 
 - **The COPR spec builds and installs on Fedora** (`packaging/rpm/agensio.spec`; COPR is not

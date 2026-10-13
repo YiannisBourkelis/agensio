@@ -333,6 +333,7 @@ void Dispatcher::auth_challenge(Stream& s, const AuthRule& rule) {
     r.scratch.append(rule.realm).append("\", charset=\"UTF-8\"\r\nCache-Control: no-store\r\nContent-Length: ");
     r.scratch.append(std::to_string(r.buffer.size())).append("\r\n");
     r.prebuilt_headers = r.scratch;
+    r.own_fields = true;  // its no-store (and Retry-After) stand over the site's rules (core/response_fields.hpp)
     r.content_type = "text/html; charset=utf-8";
     r.body = MemoryBody{std::string_view(r.buffer)};
 }
@@ -350,6 +351,7 @@ void Dispatcher::auth_plain_http(Stream& s) {
     r.scratch.assign("Content-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: ");
     r.scratch.append(std::to_string(r.buffer.size())).append("\r\n");
     r.prebuilt_headers = r.scratch;
+    r.own_fields = true;  // its no-store (and Retry-After) stand over the site's rules (core/response_fields.hpp)
     r.content_type = "text/html; charset=utf-8";
     r.body = MemoryBody{std::string_view(r.buffer)};
 }
@@ -366,6 +368,7 @@ void Dispatcher::auth_busy(Stream& s) {
     r.scratch.assign("Content-Type: text/html; charset=utf-8\r\nRetry-After: 1\r\nCache-Control: no-store\r\nContent-Length: ");
     r.scratch.append(std::to_string(r.buffer.size())).append("\r\n");
     r.prebuilt_headers = r.scratch;
+    r.own_fields = true;  // its no-store (and Retry-After) stand over the site's rules (core/response_fields.hpp)
     r.content_type = "text/html; charset=utf-8";
     r.body = MemoryBody{std::string_view(r.buffer)};
 }
@@ -395,6 +398,7 @@ void Dispatcher::refuse_access(Stream& s, std::string_view address) {
     r.scratch.assign("Content-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: ");
     r.scratch.append(std::to_string(r.buffer.size())).append("\r\n");
     r.prebuilt_headers = r.scratch;
+    r.own_fields = true;  // its no-store (and Retry-After) stand over the site's rules (core/response_fields.hpp)
     r.content_type = "text/html; charset=utf-8";
     r.body = MemoryBody{std::string_view(r.buffer)};
 }
@@ -624,6 +628,9 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
         return nullptr;
     }
     if (site->own_trusted_proxies && s.conn.trusted_peer) apply_site_trust(s.conn, *site);  // one flag test elsewhere
+    // [[site.response_headers]] (docs/headers.md 2): the node for the path the client asked for,
+    // found once, so every answer from here on (a redirect, a 403, a file, PHP) gets its fields.
+    if (!site->response_headers.empty()) s.header_node = site->response_headers.lookup(ws.path);
     // The site's fields for an HTTPS answer (its hsts, docs/redirects.md 4): from here on every answer
     // carries them, the error pages and redirects below included; a plain one never does (RFC 6797 7.2).
     // A site with no hsts line watches what its application sends instead (4.2), for health.

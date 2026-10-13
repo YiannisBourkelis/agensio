@@ -46,6 +46,11 @@ struct Response {
     // client and the origin (the handler's exchange holds the origin connection).
     bool upgrade = false;
     std::uint32_t tunnel_timeout_s = 0;  // idle limit for the tunnel, 0 = none
+    // The site's [[site.response_headers]] (core/response_fields.hpp): an application's answer
+    // decided in the upstream loop, so no writer applies them again; and a text block of agensio's
+    // own that holds fields of its own (no-store, Retry-After), which the rules leave standing.
+    bool fields_decided = false;
+    bool own_fields = false;
 
     // Resources the views above may point into.
     EntryPtr entry;
@@ -69,6 +74,8 @@ struct Response {
         upstream = nullptr;
         upgrade = false;
         tunnel_timeout_s = 0;
+        fields_decided = false;
+        own_fields = false;
         entry.reset();
         owned_file.close();
         scratch.clear();

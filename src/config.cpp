@@ -5,6 +5,7 @@
 #include "core/access.hpp"
 #include "core/redirect.hpp"
 #include "core/refuse.hpp"
+#include "core/private_cache.hpp"
 #include "core/cpus.hpp"
 #include "handlers/httparena.hpp"
 
@@ -1398,6 +1399,213 @@ void check_refuse_conflicts(const SiteConfig& site, const std::string& where) {
     }
 }
 
+// [[site.response_headers]] (alpha.89, docs/headers.md 2): the fields a site sets, defaults or
+// removes by path. Everything is checked here, once, so no request can carry a field the server
+// owns, a line break, a variable or a cache lifetime on an error answer; the rules are then
+// resolved per field into nodes (core/response_rules.hpp).
+namespace {
+
+// docs/headers.md 2.5: what is set elsewhere, and where. `removable`: remove accepts it (an
+// application's own HSTS, Server or cookies may be stripped), set and default never do.
+struct OwnedField {
+    std::string_view name;
+    bool removable;
+    std::string_view instead;
+};
+constexpr OwnedField kOwnedFields[] = {
+    {"connection", false, "the server writes the framing fields (HTTP/2 and HTTP/3 forbid the connection ones)"},
+    {"keep-alive", false, "the server writes the framing fields (HTTP/2 and HTTP/3 forbid the connection ones)"},
+    {"proxy-connection", false, "the server writes the framing fields (HTTP/2 and HTTP/3 forbid the connection ones)"},
+    {"te", false, "the server writes the framing fields"},
+    {"trailer", false, "the server writes the framing fields"},
+    {"transfer-encoding", false, "the server writes the framing fields"},
+    {"upgrade", false, "the server writes the framing fields"},
+    {"content-length", false, "the server writes the framing fields"},
+    {"content-range", false, "the server writes the framing fields"},
+    {"content-type", false, "the representation's own fields come from the built-in type table (by file extension) and the cache"},
+    {"content-encoding", false, "the representation's own fields come from the built-in type table (by file extension) and the cache"},
+    {"etag", false, "the representation's own fields come from the built-in type table (by file extension) and the cache"},
+    {"last-modified", false, "the representation's own fields come from the built-in type table (by file extension) and the cache"},
+    {"accept-ranges", false, "the representation's own fields come from the built-in type table (by file extension) and the cache"},
+    {"age", false, "the representation's own fields come from the built-in type table (by file extension) and the cache"},
+    {"date", false, "the server writes Date"},
+    {"vary", false, "the representation's own fields come from the built-in type table (by file extension) and the cache"},
+    {"location", true, "a redirect is a [[site.redirect]] rule (docs/redirects.md 5)"},
+    {"refresh", true, "a redirect is a [[site.redirect]] rule (docs/redirects.md 5)"},
+    {"strict-transport-security", true, "hsts on the site (hsts = true, or a table) sends it on every HTTPS answer, once, with a checked value; remove is accepted, to strip an application's own"},
+    {"server", true, "the Server field is [server] server_header"},
+    {"alt-svc", true, "Alt-Svc comes from [server] protocols and http3.alt_svc: a wrong one sends browsers to another server for the whole origin"},
+    {"set-cookie", true, "cookies are the application's: one from a rule could reach a parent domain on a shared host"},
+    {"clear-site-data", true, "Clear-Site-Data is the application's: it clears a whole registrable domain's data"},
+    {"service-worker-allowed", true, "Service-Worker-Allowed is the application's: it lifts a service worker's path limit"},
+    {"www-authenticate", true, "the password protocol is [[site.auth]]"},
+    {"proxy-authenticate", true, "the password protocol is [[site.auth]]"},
+    {"authentication-info", true, "the password protocol is [[site.auth]]"},
+    {"expect-ct", true, "none: obsolete"},
+    {"public-key-pins", true, "none: obsolete, and pinning can lock visitors out"},
+    {"public-key-pins-report-only", true, "none: obsolete, and pinning can lock visitors out"},
+};
+
+bool header_token(std::string_view name) {
+    if (name.empty() || name.size() > 128) return false;
+    for (const unsigned char c : name)
+        if (!(std::isalnum(c) || std::string_view("!#$%&'*+-.^_`|~").find(static_cast<char>(c)) != std::string_view::npos)) return false;
+    return true;
+}
+
+// RFC 9110 5.5: printable ASCII with inner spaces; no variables (docs/headers.md 2.6).
+std::string header_value_problem(std::string_view v) {
+    if (v.empty()) return "is empty: to send no such field, name it in remove";
+    if (v.size() > 4096) return "is longer than 4 KB";
+    if (v.front() == ' ' || v.back() == ' ') return "starts or ends with a space";
+    for (const unsigned char c : v)
+        if (c < 0x20 || c >= 0x7f) return "holds a control character or a byte outside printable ASCII (RFC 9110 5.5): a line break could start a field of its own";
+    if (v.find('$') != std::string_view::npos)
+        return "holds a $: response fields are fixed text, with no variables; fields with variables for an origin are proxy = { request_headers }";
+    return "";
+}
+
+// A Cache-Control (or a field only shared caches read) granting freshness: max-age above 0,
+// s-maxage, public, immutable (docs/headers.md 2.4).
+bool grants_freshness(std::string_view value) {
+    while (!value.empty()) {
+        const std::size_t comma = value.find(',');
+        std::string_view d = value.substr(0, comma);
+        value = comma == std::string_view::npos ? std::string_view() : value.substr(comma + 1);
+        while (!d.empty() && d.front() == ' ') d.remove_prefix(1);
+        while (!d.empty() && d.back() == ' ') d.remove_suffix(1);
+        const std::size_t eq = d.find('=');
+        const std::string name = to_lower(std::string(d.substr(0, eq)));
+        std::string_view arg = eq == std::string_view::npos ? std::string_view() : d.substr(eq + 1);
+        if (!arg.empty() && arg.front() == '"' && arg.back() == '"' && arg.size() >= 2) arg = arg.substr(1, arg.size() - 2);
+        if (name == "public" || name == "immutable" || name == "s-maxage") return true;
+        if (name == "max-age" && arg.find_first_not_of('0') != std::string_view::npos) return true;
+    }
+    return false;
+}
+
+// One origin, "*" or "null" (docs/headers.md 2.6).
+bool cors_origin(std::string_view v) {
+    if (v == "*" || v == "null") return true;
+    const std::size_t scheme = v.find("://");
+    if (scheme == std::string_view::npos || (v.substr(0, scheme) != "https" && v.substr(0, scheme) != "http")) return false;
+    const std::string_view authority = v.substr(scheme + 3);
+    return !authority.empty() && authority.find_first_of("/?#, @") == std::string_view::npos;
+}
+
+}  // namespace
+
+void parse_response_headers(const toml::node_view<const toml::node>& n, SiteConfig& site, const std::string& where) {
+    const auto* arr = n.as_array();
+    if (!arr) fail(where + ": 'response_headers' must be an array of tables ([[site.response_headers]])");
+    ResponseRules& rr = site.response_headers;
+    std::size_t idx = 0, value_bytes = 0;
+    std::vector<std::string> names;  // every field name the site's rules use, lower case
+    for (const auto& node : *arr) {
+        const std::string w = where + " [[response_headers]] #" + std::to_string(++idx);
+        const toml::table* t = node.as_table();
+        if (!t) fail(where + ": each [[site.response_headers]] must be a table");
+        check_keys(*t, {"[[site.response_headers]]"}, {}, w);
+        HeaderRule r;
+        const auto path = (*t)["path"].value<std::string>();
+        if (!path) fail(w + ".path is required: the path the rule covers, such as \"/assets/\", or \"/\" for the whole site");
+        if (const std::string why = check_access_path(*path); !why.empty()) fail(w + ".path: " + why);
+        r.path = *path;
+        const std::string match = (*t)["match"].value_or(std::string("prefix"));
+        if (match != "prefix" && match != "exact") fail(w + ".match must be \"prefix\" (the path and everything below it, whole segments) or \"exact\"");
+        r.exact = match == "exact";
+        if (!r.exact && r.path.size() > 1 && r.path.back() == '/') r.path.pop_back();  // "/assets/" covers what "/assets" does
+        const std::string when = (*t)["when"].value_or(std::string("always"));
+        if (when != "always" && when != "success") fail(w + ".when must be \"always\" (every answer) or \"success\" (2xx and 304 only)");
+        r.success_only = when == "success";
+        std::vector<std::pair<std::string, std::string_view>> seen;  // the rule's names, lower case, with their verb
+        auto field_name = [&](std::string_view verb, const std::string& name) {
+            if (!header_token(name)) fail(w + "." + std::string(verb) + ": '" + name + "' is not a field name (letters, digits and !#$%&'*+-.^_`|~, at most 128)");
+            const std::string lower = to_lower(name);
+            for (const OwnedField& o : kOwnedFields)
+                if (o.name == lower && !(verb == "remove" && o.removable))
+                    fail(w + "." + std::string(verb) + ": " + name + " is not a rule's to " + (verb == "remove" ? "remove" : "send") + ": " + std::string(o.instead) +
+                         (verb == "remove" ? "; remove accepts any name but the framing and representation fields" : ""));
+            for (const auto& [other, other_verb] : seen)
+                if (other == lower)
+                    fail(w + ": " + name + (other_verb == verb ? " is named twice in " + std::string(verb) : std::string(" is named in two of set, default and remove")) +
+                         "; one verb per field in a rule");
+            seen.emplace_back(lower, verb);
+            if (std::find(names.begin(), names.end(), lower) == names.end()) names.push_back(lower);
+        };
+        auto field_value = [&](std::string_view verb, const std::string& name, const std::string& value) {
+            if (const std::string why = header_value_problem(value); !why.empty()) fail(w + "." + std::string(verb) + ": the value of " + name + " " + why);
+            value_bytes += value.size();
+            const std::string lower = to_lower(name);
+            if ((lower == "cache-control" || private_cache::shared_only_field(lower)) && !r.success_only && grants_freshness(value))
+                fail(w + "." + std::string(verb) + ": " + name + " = \"" + value + "\" lets caches keep the answer, which on an error would keep the error too " +
+                     "(a 404 kept for a year); give the rule when = \"success\" (2xx and 304 only)");
+            if (lower == "expires" && !r.success_only && value != "0")
+                fail(w + "." + std::string(verb) + ": Expires lets caches keep the answer, an error too; give the rule when = \"success\" (2xx and 304 only)");
+            if (lower == "x-frame-options" && to_lower(value) != "deny" && to_lower(value) != "sameorigin")
+                fail(w + "." + std::string(verb) + ": X-Frame-Options must be DENY or SAMEORIGIN (ALLOW-FROM is ignored by every current browser; "
+                     "Content-Security-Policy: frame-ancestors names the sites that may frame a page)");
+            if (lower == "access-control-allow-origin" && !cors_origin(value))
+                fail(w + "." + std::string(verb) + ": Access-Control-Allow-Origin is one origin (https://app.example.com), \"*\" or \"null\"; "
+                     "several origins are not a rule's (the application answers them, from the request's Origin)");
+            if (lower == "x-xss-protection" && value != "0")
+                site.header_notes.emplace_back("header_xss_protection", "the rule for " + r.path + " sends X-XSS-Protection: " + value +
+                    ": Chrome, Edge and Firefox have no such filter, and where it existed it could be used against pages; send 0, or nothing");
+            if (lower == "content-security-policy" && verb == "set" && !site.app.empty() && site.app != "static")
+                site.header_notes.emplace_back("header_csp_set", "the rule for " + r.path + " sets Content-Security-Policy, replacing the policy the " +
+                    site.app + " application may send itself (often with nonces or hashes its pages need): use default, so the application's stays");
+        };
+        bool any = false;
+        for (std::string_view verb : {"set", "default"}) {
+            if (!t->contains(verb)) continue;
+            const toml::table* fields = (*t)[verb].as_table();
+            if (!fields) fail(w + "." + std::string(verb) + " must be a table of field names and values: " + std::string(verb) + " = { \"X-Frame-Options\" = \"SAMEORIGIN\" }");
+            auto& out = verb == "set" ? r.set : r.fallback;
+            for (const auto& [k, v] : *fields) {
+                const std::string name(k.str());
+                const auto value = v.value<std::string>();
+                if (!value) fail(w + "." + std::string(verb) + "." + name + " must be a string");
+                field_name(verb, name);
+                field_value(verb, name, *value);
+                out.emplace_back(name, *value);
+                any = true;
+            }
+        }
+        if (t->contains("remove")) {
+            const toml::array* list = (*t)["remove"].as_array();
+            if (!list) fail(w + ".remove must be a list of field names: remove = [\"X-Powered-By\"]");
+            for (const auto& e : *list) {
+                const auto name = e.value<std::string>();
+                if (!name) fail(w + ".remove: every entry is a field name");
+                field_name("remove", *name);
+                r.remove.push_back(*name);
+                any = true;
+            }
+        }
+        if (!any) fail(w + ": a rule needs set, default or remove");
+        // The same field twice at one path and match: which would decide is not written anywhere.
+        for (const HeaderRule& o : rr.rules) {
+            if (o.exact != r.exact || o.path.size() != r.path.size() || !response_rules::iequal_prefix(o.path, r.path)) continue;
+            auto names_of = [](const HeaderRule& h) {
+                std::vector<std::string> v;
+                for (const auto& f : h.set) v.push_back(to_lower(f.first));
+                for (const auto& f : h.fallback) v.push_back(to_lower(f.first));
+                for (const auto& f : h.remove) v.push_back(to_lower(f));
+                return v;
+            };
+            const auto mine = names_of(r), theirs = names_of(o);
+            for (const auto& m : mine)
+                if (std::find(theirs.begin(), theirs.end(), m) != theirs.end())
+                    fail(w + ": a second rule for " + r.path + (r.exact ? " (exact)" : "") + " names " + m + "; one rule per field and path");
+        }
+        rr.rules.push_back(std::move(r));
+    }
+    if (rr.rules.size() > 64) fail(where + ": " + std::to_string(rr.rules.size()) + " response_headers rules, at most 64");
+    if (names.size() > 64) fail(where + ": the response_headers rules name " + std::to_string(names.size()) + " fields, at most 64");
+    if (value_bytes > 16384) fail(where + ": the response_headers values come to " + std::to_string(value_bytes) + " bytes, at most 16 KB");
+    build_response_headers(site, where);
+}
+
 // [[site.auth]] (2026-10-08, docs/configuration.md 19b, design section 25). A user file is read
 // once per load and shared by every rule that names it; it belongs to the main configuration's
 // owner (root), is never writable by group or others and never readable by others, and is
@@ -1832,7 +2040,7 @@ std::string trusted_entry(const std::string& text, const Config& cfg, std::vecto
 
 
 void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, const std::string& where, std::vector<RootAdditions>* root_adds = nullptr) {
-    check_keys(t, {"[[site]]"}, {"auth", "access", "redirect"}, where);
+    check_keys(t, {"[[site]]"}, {"auth", "access", "redirect", "response_headers"}, where);
     SiteConfig site;
     for (auto& n : string_list(t["server_name"], (where + ".server_name").c_str()))
         site.server_names.push_back(to_lower(n));
@@ -2026,6 +2234,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     if (t.contains("access")) parse_access(t["access"], cfg, site, where);
     if (t.contains("refuse")) parse_refuse(t["refuse"], site, where);
     if (t.contains("auth")) parse_auth(t["auth"], cfg, site, base_dir, where);
+    if (t.contains("response_headers")) parse_response_headers(t["response_headers"], site, where);
     // Root additions for this site: parsed as hand-written locations after the file's own, so
     // they win over the preset's at their path and a headers-only one joins like any other;
     // the origin names the file for --explain and site_show. The same path twice (the managed
@@ -2386,6 +2595,22 @@ void explain_config(const Config& cfg, std::ostream& out) {
             out << "]\n";
             if (r.report) out << "mode = \"report\"\n";
         }
+        for (const auto& r : site.response_headers.rules) {
+            out << "\n[[site.response_headers]]\npath = \"" << (r.path.size() > 1 && !r.exact ? r.path + "/" : r.path) << "\"\n";
+            if (r.exact) out << "match = \"exact\"\n";
+            if (r.success_only) out << "when = \"success\"\n";
+            for (const auto& [verb, list] : {std::pair{"set", &r.set}, std::pair{"default", &r.fallback}}) {
+                if (list->empty()) continue;
+                out << verb << " = {";
+                for (std::size_t i = 0; i < list->size(); ++i) out << (i ? ", " : " ") << "\"" << (*list)[i].first << "\" = \"" << (*list)[i].second << "\"";
+                out << " }\n";
+            }
+            if (!r.remove.empty()) {
+                out << "remove = [";
+                for (std::size_t i = 0; i < r.remove.size(); ++i) out << (i ? ", " : "") << "\"" << r.remove[i] << "\"";
+                out << "]\n";
+            }
+        }
         for (const auto& r : site.auth) {
             out << "\n[[site.auth]]";
             if (r.origin == "preset:wordpress") out << "   # from preset:wordpress: " << r.path << " stays open for the public front end";
@@ -2736,6 +2961,10 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
     for (const auto& site : cfg.sites)
         for (const auto& [code, text] : site.redirect_notes)
             out.push_back({code, code == "redirect_skips_validation" ? "info" : "warning", site.server_names.front(), text});
+    // What parse_response_headers noted (docs/headers.md 7): a CSP set over an application's own,
+    // X-XSS-Protection turned on.
+    for (const auto& site : cfg.sites)
+        for (const auto& [code, text] : site.header_notes) out.push_back({code, "warning", site.server_names.front(), text});
     return out;
 }
 
@@ -4028,6 +4257,83 @@ std::string load_redirect_rules(const json::Value& rules, SiteConfig& site) {
         return e.what();
     }
     return "";
+}
+
+// Per field, the most specific rule naming it (docs/headers.md 2.2): one node per rule path, with
+// what a successful answer and any other one get there. A prefix node takes its ancestors' fields
+// (the prefix rules covering its path, shortest first) and then its own; an exact node the prefix
+// fields of its own path too, then its own; an `always` rule decides every answer, a `success` one
+// only 2xx and 304, so on an error the next rule naming the field decides.
+void build_response_headers(SiteConfig& site, const std::string& where) {
+    ResponseRules& rr = site.response_headers;
+    rr.nodes.clear();
+    rr.first = {};
+    struct Key {
+        std::string path;
+        bool exact;
+    };
+    std::vector<Key> keys;
+    for (const HeaderRule& r : rr.rules)
+        if (std::none_of(keys.begin(), keys.end(), [&](const Key& k) {
+                return k.exact == r.exact && k.path.size() == r.path.size() && response_rules::iequal_prefix(k.path, r.path);
+            }))
+            keys.push_back({r.path, r.exact});
+    auto same = [](const std::string& a, const std::string& b) { return a.size() == b.size() && response_rules::iequal_prefix(a, b); };
+    for (const Key& k : keys) {
+        HeaderNode node;
+        node.path = k.path;
+        node.exact = k.exact;
+        // The rule paths that decide here, shortest first: ancestors, the same path's prefix rules
+        // for an exact node, then the node's own.
+        std::vector<const Key*> chain;
+        for (const Key& a : keys) {
+            if (a.exact) continue;
+            if (!k.exact && same(a.path, k.path)) continue;
+            if (response_rules::covers(a.path, false, k.path)) chain.push_back(&a);
+        }
+        std::sort(chain.begin(), chain.end(), [](const Key* a, const Key* b) { return a->path.size() < b->path.size(); });
+        chain.push_back(&k);
+        for (const bool success : {true, false}) {
+            HeaderSet& hs = success ? node.success : node.other;
+            for (const Key* c : chain)
+                for (std::size_t ri = 0; ri < rr.rules.size(); ++ri) {
+                    const HeaderRule& r = rr.rules[ri];
+                    if (r.exact != c->exact || !same(r.path, c->path) || (!success && r.success_only)) continue;
+                    auto decide = [&](const std::string& name, FieldDecision::Verb verb, const std::string& value) {
+                        FieldDecision* d = nullptr;
+                        for (auto& f : hs.fields)
+                            if (Headers::iequals(f.name, name)) d = &f;
+                        if (!d) d = &hs.fields.emplace_back();
+                        d->name = name;
+                        d->verb = verb;
+                        d->value = value;
+                        d->cache_field = Headers::iequals(name, "cache-control") || private_cache::shared_only_field(name);
+                        d->rule = static_cast<std::uint16_t>(ri);
+                    };
+                    for (const auto& [name, value] : r.set) decide(name, FieldDecision::Verb::set, value);
+                    for (const auto& [name, value] : r.fallback) decide(name, FieldDecision::Verb::fallback, value);
+                    for (const auto& name : r.remove) decide(name, FieldDecision::Verb::remove, "");
+                }
+            bool any_origin = false, credentials = false;
+            for (const auto& f : hs.fields) {
+                if (f.verb == FieldDecision::Verb::remove) continue;
+                hs.h1.append(f.name).append(": ").append(f.value).append("\r\n");
+                any_origin = any_origin || (Headers::iequals(f.name, "access-control-allow-origin") && f.value == "*");
+                credentials = credentials || (Headers::iequals(f.name, "access-control-allow-credentials") && to_lower(f.value) == "true");
+            }
+            if (any_origin && credentials)
+                fail(where + ": the response_headers rules for " + k.path + " send Access-Control-Allow-Origin: * with Access-Control-Allow-Credentials: true, "
+                             "which browsers refuse; name the one origin that may send credentials");
+        }
+        rr.nodes.push_back(std::move(node));
+    }
+    // Longest path first; at one path the exact node first: lookup takes the first that covers.
+    std::stable_sort(rr.nodes.begin(), rr.nodes.end(), [](const HeaderNode& a, const HeaderNode& b) {
+        if (a.path.size() != b.path.size()) return a.path.size() > b.path.size();
+        return a.exact && !b.exact;
+    });
+    for (const HeaderNode& nd : rr.nodes)
+        if (!(nd.path.size() == 1 && !nd.exact)) access::mark_first(rr.first, response_rules::first_byte(nd.path));
 }
 
 }  // namespace agensio

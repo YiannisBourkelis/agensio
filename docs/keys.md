@@ -183,6 +183,7 @@ section of `docs/configuration.md` that explains the key.
 | `php` | table | (none) | php = { socket = ... } names an existing php-fpm; with user and no socket the pool is generated and the keys below size it. | reload | site-create (php_socket, php_children, php_version) and settings | 7 |
 | `proxy` | table | (none) | Defaults for the site's proxy locations (host, forwarded, headers, hide, redirects, tls, timeouts). | reload | site file | 12 |
 | `upstream` | URL or list | (none) | app = proxy, rails, redmine, django, wagtail or node: where the application listens; a list balances round-robin with passive health. | reload | site-create (upstream) | 4b |
+| `response_headers` | array of tables | none | [[site.response_headers]] rules: fields the site sets, defaults or removes by path, on every answer it gives (files, PHP, a proxied application, its own error pages and redirects); per field the most specific rule naming it decides. | reload | site file | 14c |
 | `location` | array of tables | (preset-dependent) | [[site.location]] blocks; a hand-written one replaces the preset's at its path, except one that sets only add_headers, which adds its fields to the preset's. | reload | site file | 6 |
 ## `php = {}`
 
@@ -301,6 +302,16 @@ section of `docs/configuration.md` that explains the key.
 | `plain_http` | enum: refuse \| allow | refuse | refuse: a request over plain HTTP is never asked for a password (the browser would send it in clear): a GET or HEAD goes to https when the site has it, anything else gets 403 saying to use HTTPS; a connection from this host and a request a trusted proxy forwarded as https are asked as usual (behind a trusted proxy, its X-Forwarded-Proto and the client it names decide, never its own loopback address). allow: asked anyway, for a tool on a network you trust; -t warns and health keeps a finding. | reload | site file | 19b |
 | `credentials` | enum: pass \| strip | pass on a site that runs PHP, strip otherwise | pass: the application receives Authorization (PHP_AUTH_USER and PHP_AUTH_PW; WordPress's loopback calls need them). strip: it never does. A client let in by skip_for never passes it (nothing was verified). PHP gets REMOTE_USER and AUTH_TYPE for a verified user. | reload | site file | 19b |
 | `forward_user` | field name | (none) | A proxy location sends the verified user name in this request field (X-Remote-User); the client's own field of that name is removed first. | reload | site file | 19b |
+## `[[site.response_headers]]`
+
+| key | type | default | meaning | applies | via | doc |
+|---|---|---|---|---|---|---|
+| `path` | string | (required) | The path the rule covers, normalised: a prefix covers it and everything below it on a segment boundary, in any capitalisation (/assets: /assets, /Assets/x, never /assetsx); "/" is the whole site. It matches the path the client asked for, never an internal target (try_files, a directory's index). | reload | site file | 14c |
+| `match` | enum: prefix \| exact | prefix | exact: this path alone. At one path an exact rule decides before a prefix one. | reload | site file | 14c |
+| `set` | table: field name to value | none | Fields sent with this value, replacing every copy the answer had (the application's, a location's add_headers): the browser never sees two. Fixed printable text, at most 4 KB, no $ variables. Not the server's own fields (framing, Content-Type, Date, Vary, Location, Server, Alt-Svc, Set-Cookie, the password fields, HSTS: hsts does that). | reload | site file | 14c |
+| `default` | table: field name to value | none | Fields sent only when the answer has no copy: the application's own wins. The verb for a Content-Security-Policy on an application site, which may send its own with nonces. | reload | site file | 14c |
+| `remove` | list of field names | none | Fields deleted from the answer, every copy, whoever put it there (X-Powered-By, an application's own Strict-Transport-Security); any name but the framing and representation fields. | reload | site file | 14c |
+| `when` | enum: always \| success | always | success: only 2xx and 304 answers; on any other the next rule naming the field decides. A Cache-Control or Expires that lets caches keep the answer (max-age above 0, s-maxage, public, immutable) needs it, so an error is never kept for a lifetime. | reload | site file | 14c |
 ## `[[site.redirect]]`
 
 | key | type | default | meaning | applies | via | doc |

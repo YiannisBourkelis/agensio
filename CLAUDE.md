@@ -510,6 +510,19 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (nineteen, each seeded from
   the application's own HSTS is noted once per generation (`hsts_from_application`), carried to health
   in `TlsFacts::application_hsts`, which then says so in place of `hsts_suggested`. `redirect = "https"` is refused; the
   `https://host` prefix form stays until `[[site.redirect]]`.
+- **Response headers** (alpha.89, `docs/headers.md` 2, `docs/configuration.md` 14c): `[[site.response_headers]]`
+  (`path`, `match`, `set`, `default`, `remove`, `when`) parsed and checked in `config.cpp`
+  (`parse_response_headers`: the owned names of 2.5 with the setting to use, values printable without `$`,
+  freshness only with `when = "success"`, the meaning checks, limits; notes `header_csp_set`,
+  `header_xss_protection` through `access_notices`) and resolved by `build_response_headers` into one
+  `HeaderNode` per rule path, each with a `success` and an `other` `HeaderSet` (per field the most specific
+  rule naming it; `core/response_rules.hpp`, lookup behind a first-byte bitmap); `Dispatcher::route` sets
+  `Stream::header_node` once the site is known; `apply_upstream_result` decides an application's answer in
+  its loop (`response_fields::keep_upstream`, `append_upstream`, `Response::fields_decided`), the three
+  writers agensio's own where they send the extra fields (`response_fields::apply`; HTTP/1 sends the set's
+  prebuilt `h1` on an answer with nothing to look at); `Response::own_fields` (the dispatcher's 401, 403,
+  503 blocks) keeps agensio's own fields standing, `s.auth.protected_path` leaves the cache fields to the
+  guard. Gate: `bench/ab.sh <ref> -A` (row `headers`), `-P` with `-A` (row `proxy-hdr`).
 - **Automatic certificates** (H3, `src/services/acme.*`, `services/json.hpp`): `tls = "auto"`
   plus `[server] acme = { email }`; ACME v2 with HTTP-01 against any RFC 8555 CA, JWS ES256
   and CSRs through OpenSSL. Placeholder certificate at start, order at once, challenge

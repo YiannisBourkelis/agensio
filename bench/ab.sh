@@ -37,6 +37,11 @@
 #             base before 0.1.0-alpha.82 gets the same site without rules) and "redir-hit:/x:64"
 #             (127.0.0.1:8099, a rule from / to another host, a 301 per request; a base before
 #             alpha.82 gets the whole-domain `redirect = "https://..."` key, the same answer).
+#             And "headers:/sub/index.html:64" (127.0.0.1:8092, [[site.response_headers]] at / and
+#             at /sub/, benchmarked on a file under the deeper rule: the node lookup and the fields
+#             on a cached file's HTTP/1 answer; a base before 0.1.0-alpha.89 gets the same fields
+#             from a location's add_headers, the same bytes, so the row measures the rules). With -P also "proxy-hdr:/json:64" (127.0.0.1:8091, the benchmark
+#             upstream behind a site with set, default and remove rules: the upstream loop's half).
 #   -r        rounds of base/new alternation (default 2)
 #   -d        wrk duration per case (default 5s)
 #   -t        wrk threads (default 4)
@@ -63,6 +68,7 @@ if [ $PROXY = 1 ]; then
   [ -x "$ROOT/build/agensio_upstream" ] || { echo "build/agensio_upstream missing: cmake --build build --target agensio_upstream"; exit 1; }
   [ -f "$BENCH/proxy/ab-site.toml" ] || { echo "bench/proxy/ab-site.toml missing (the proxy site for the gate, phase D1)"; exit 1; }
   SPECS+=("proxy:/json:64" "proxy:/big:64" "proxy:/slow?ms=20:256")
+  [ $ACCESS = 1 ] && SPECS+=("proxy-hdr:/json:64")
 fi
 
 if [ $H2 = 1 ]; then
@@ -110,7 +116,28 @@ sed "s#@WORKERS@#$WORKERS#g; s#@BENCH@#$BENCH#g; s#@SENDFILE_MIN@#${SENDFILE_MIN
 sed "s#@WORKERS@#$WORKERS#g; s#@BENCH@#$BENCH#g; s#@SENDFILE_MIN@#${SENDFILE_MIN:-48KB}#g; s#@ACCESS_LOG@#${ACCESS_LOG:-off}#g; s#@H3@#, \"h3\"#g" "$BENCH/agensio.toml" > "$BENCH/tmp/ab-agensio-h3.toml"
 # The access gate's two sites go into every config (before the proxy one is built from it).
 if [ $ACCESS = 1 ]; then
-  SPECS+=("access:/:64" "access-all:/:64" "refuse:/sub/index.html:64" "hsts:/:64" "redir-miss:/:64" "redir-hit:/x:64")
+  SPECS+=("access:/:64" "access-all:/:64" "refuse:/sub/index.html:64" "hsts:/:64" "redir-miss:/:64" "redir-hit:/x:64" "headers:/sub/index.html:64")
+  # Response headers (0.1.0-alpha.89, docs/headers.md 9): a rule at / and a deeper one, a file under
+  # the deeper one; a base before them gets the same site without rules. With -P, a proxied answer
+  # through set, default and remove rules, the base the same proxy site without them.
+  hdr_site='\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8092"]\nroot = "%s/www"\n'
+  printf "$hdr_site" "$BENCH" > "$BENCH/tmp/ab-hdr-none.toml"
+  { printf "$hdr_site" "$BENCH"
+    printf '\n[[site.response_headers]]\npath = "/"\nset = { "Referrer-Policy" = "strict-origin-when-cross-origin", "X-Content-Type-Options" = "nosniff" }\n'
+    printf 'default = { "X-Frame-Options" = "SAMEORIGIN" }\nremove = ["X-Powered-By"]\n'
+    printf '\n[[site.response_headers]]\npath = "/sub/"\nwhen = "success"\nset = { "Cache-Control" = "public, max-age=3600" }\n'
+  } > "$BENCH/tmp/ab-hdr-rules.toml"
+  # The same fields from a location's add_headers, the older mechanism: what a base before the rules
+  # loads, so both sides write the same bytes and the row measures the rules, not the fields.
+  { printf "$hdr_site" "$BENCH"
+    printf '\n[[site.location]]\npath = "/"\nadd_headers = { "Referrer-Policy" = "strict-origin-when-cross-origin", "X-Content-Type-Options" = "nosniff", "X-Frame-Options" = "SAMEORIGIN", "Cache-Control" = "public, max-age=3600" }\n'
+  } > "$BENCH/tmp/ab-hdr-loc.toml"
+  phdr_site='\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8091"]\nroot = "%s/www"\n\n[[site.location]]\npath = "/"\nupstream = "http://127.0.0.1:9100"\n'
+  printf "$phdr_site" "$BENCH" > "$BENCH/tmp/ab-phdr-none.toml"
+  { printf "$phdr_site" "$BENCH"
+    printf '\n[[site.response_headers]]\npath = "/"\nset = { "Referrer-Policy" = "strict-origin-when-cross-origin", "Content-Security-Policy" = "default-src \x27self\x27" }\n'
+    printf 'default = { "X-Frame-Options" = "SAMEORIGIN" }\nremove = ["X-Powered-By", "X-Upstream"]\n'
+  } > "$BENCH/tmp/ab-phdr-rules.toml"
   # Path redirects (0.1.0-alpha.82, docs/redirects.md 5): 1,000 exact rules a request does not meet,
   # and a hit; a base before them gets the same sites without rules and the whole-domain key.
   {
@@ -219,7 +246,7 @@ fi
 
 PID=""; SIDE_PROXY=0; SIDE_H2=0; SIDE_H3=0
 start() {  # binary
-  for port in 8080 8443 8093 8094 8095 8449 8098 8099; do
+  for port in 8080 8443 8091 8092 8093 8094 8095 8449 8098 8099; do
     nc -z 127.0.0.1 "$port" 2>/dev/null && { echo "port $port is busy; stop the running server first"; exit 1; }
   done
   local cfg="$BENCH/tmp/ab-agensio.toml"
@@ -243,6 +270,17 @@ start() {  # binary
       cat "$cfg" "$BENCH/tmp/$f" > "$BENCH/tmp/ab-side-redir.toml"
       if "$1" -t -c "$BENCH/tmp/ab-side-redir.toml" >/dev/null 2>&1; then cfg="$BENCH/tmp/ab-side-redir.toml"; echo "  (redirect rows: ${f#ab-redir-})"; break; fi
     done
+    local hdr="ab-hdr-rules.toml ab-hdr-loc.toml ab-hdr-none.toml"
+    for f in $hdr; do  # the response headers site in the form this side loads
+      cat "$cfg" "$BENCH/tmp/$f" > "$BENCH/tmp/ab-side-hdr.toml"
+      if "$1" -t -c "$BENCH/tmp/ab-side-hdr.toml" >/dev/null 2>&1; then cfg="$BENCH/tmp/ab-side-hdr.toml"; echo "  (headers row: ${f#ab-hdr-})"; break; fi
+    done
+    if [ $SIDE_PROXY = 1 ]; then
+      for f in ab-phdr-rules.toml ab-phdr-none.toml; do
+        cat "$cfg" "$BENCH/tmp/$f" > "$BENCH/tmp/ab-side-phdr.toml"
+        if "$1" -t -c "$BENCH/tmp/ab-side-phdr.toml" >/dev/null 2>&1; then cfg="$BENCH/tmp/ab-side-phdr.toml"; echo "  (proxy-hdr row: ${f#ab-phdr-})"; break; fi
+      done
+    fi
   fi
   (cd "$BENCH" && exec "$1" -c "$cfg") >>"$RAW/server.log" 2>&1 &
   PID=$!
@@ -287,6 +325,8 @@ measure() {  # side round -> appends "side round spec cpu_us rps" lines to $RAW/
       hsts) url="https://127.0.0.1:8449$path" ;;
       redir-miss) url="http://127.0.0.1:8098$path" ;;
       redir-hit) url="http://127.0.0.1:8099$path" ;;
+      headers) url="http://127.0.0.1:8092$path" ;;
+      proxy-hdr) [ $SIDE_PROXY = 1 ] || continue; url="http://127.0.0.1:8091$path" ;;
       auth) url="http://127.0.0.1:8096$path" ;;
       h2c) [ $SIDE_H2 = 1 ] || continue; url="http://127.0.0.1:8080$path" ;;
       h2) [ $SIDE_H2 = 1 ] || continue; url="https://127.0.0.1:8443$path" ;;
