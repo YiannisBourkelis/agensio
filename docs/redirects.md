@@ -3,10 +3,12 @@
 > **Status: proposal (2026-10-12), not built.** Nothing in this document works in
 > 0.1.0-alpha.72; it is the design, written as the guide it will become, so each use case could
 > be checked against it before anything is built. The questions the use cases raised and the
-> owner's decisions are in section 9, the check against the research in section 11, how it will
-> be built and tested in section 12. The research behind it is
-> `reports/Web server headers and redirects.md`; response headers (`[[site.headers]]`, the security
-> baseline per preset, and the mechanism `hsts` uses) are in `docs/headers.md`.
+> owner's decisions are in section 9, the check against the research in section 11, the check
+> against the applications' own configurations in section 12, how it will be built and tested in
+> section 13. The research behind it is `reports/Web server headers and redirects.md` and
+> `research_notes/Official configs vs redirects and headers/`; response headers
+> (`[[site.response_headers]]`, the security baseline per preset, and the mechanism `hsts` uses)
+> are in `docs/headers.md`.
 
 ## 1. The model
 
@@ -21,8 +23,10 @@ Four settings of a site decide where a request is sent before anything is served
 
 Every request meets them in this order, and each step is skipped when it does not apply:
 
-1. **ACME challenges** (`/.well-known/acme-challenge/...`) are answered first, on every name and
-   over plain HTTP, so no setting here can break a certificate's issue or renewal.
+1. **Certificate validation** (`/.well-known/acme-challenge/` and `/.well-known/pki-validation/`)
+   is answered first, on every name and over plain HTTP: agensio's own ACME tokens, else the site's
+   files there (a certificate tool that writes into the root, a CA checking a file), so no setting
+   here can break a certificate's issue or renewal, whoever obtains it.
 2. **Scheme**: over plain HTTP, `http` decides (redirect, serve, or no listener at all).
 3. **Host**: a name of the site that is not `canonical` is redirected to it.
 4. **Path**: the `[[site.redirect]]` rules, after the site's `refuse` patterns (a refused path is
@@ -256,7 +260,11 @@ hsts = true        # Strict-Transport-Security: max-age=31536000 (a year), this 
 The field goes on every answer the site gives over HTTPS: pages, files, PHP, a proxied
 application, errors and redirects. It is never sent over plain HTTP, where browsers must ignore it
 anyway (RFC 6797 7.2, 8.1). An application that sends its own is replaced, so the browser never
-sees two.
+sees two. The setting decides even when the application's value is stronger (a longer `max-age`,
+`includeSubDomains`: Mastodon, GitLab, Keycloak and Umami send one), so `max_age = 0` can always
+clear it. When the server replaces an application's value that was stronger, it notes the value
+once per site, and health reports `hsts_narrows_application` with it, so nobody weakens it
+unknowingly.
 
 ### 4.2 When health suggests it, and what `false` means
 
@@ -301,6 +309,8 @@ hsts = { max_age = "2y", subdomains = true }
 ```
 
 Every subdomain of the site's names is then HTTPS-only in browsers that saw it, for two years.
+`max_age` is a duration (`"1d"`, `"2y"`) or plain seconds (`63072000`), the form applications
+publish.
 `-t` and health list the other sites of this server that it binds, and warn about any of them
 without TLS: they would become unreachable.
 
@@ -334,8 +344,15 @@ its owner outside agensio.
 | `query` | `"keep"` or `"drop"` | `"keep"`; `"drop"` for a rule whose `from` names query parameters |
 | `cache` | a duration, or `"none"` (permanent statuses only) | `"1d"` |
 
-A prefix covers whole segments in any capitalisation: `from = "/blog"` matches `/blog`, `/Blog/`
-and `/blog/2024/post`, never `/blogger`. **When several rules match, the most specific decides,
+A prefix covers whole segments: `from = "/blog"` matches `/blog`, `/blog/` and `/blog/2024/post`,
+never `/blogger`. **Matching is case-sensitive**, as on every hosting platform: `/Blog` is another
+address, so a rule that only fixes the case (`/iOS/x` to `/ios/x`) is allowed. (Access and
+response-header rules match any capitalisation instead, because a missed spelling there weakens a
+protection.) An exact rule matches its own path only: `/docs` exact does not match `/docs/`, so a
+rule from exact `/docs` to `/docs/` is legal and is not a loop. Rules match the path the client
+asked for, normalised once, never a target that `try_files` or a directory's index reached
+internally: a rule from `/index.html` to `/` cannot catch a single-page application's fallback to
+its shell. **When several rules match, the most specific decides,
 never the order they are written in**: the longest `from`, as for access rules, and an exact rule
 before a prefix of the same path. Two rules with the same `from` are an error. Agents and people
 used to other platforms expect "first match wins": it does not apply here.
@@ -496,6 +513,9 @@ agensio writes every byte of it; nothing from the request is copied unencoded:
 - the query is copied with every byte outside what a query may hold percent-encoded, and the
   remainder's tab, CR and LF can never appear raw (browsers delete them before parsing, which
   would join `/` and `/evil`);
+- a `to` with its own query keeps it: the remainder joins the path of `to`, and the request's query
+  follows after `&` (`from = "/old"`, `to = "/new?src=old"`: `/old/x?a=1` goes to
+  `/new/x?src=old&a=1`);
 - a fragment in `to` is sent; without one, the browser keeps the fragment of the address it was
   given (RFC 9110 10.2.2), so `/help#billing` sent to `/support` arrives at `/support#billing`.
 
@@ -596,7 +616,8 @@ pattern (`/blog/x.html` to `/blog/x`) is one exact rule per page for now (5.4).
 ## 8. What `-t`, health and `path_check` say
 
 - **Refused at load:** a rule whose `to` falls under its own `from` with the remainder kept (it
-  would redirect forever), case included (`/About` to `/about`); rules that send each other
+  would redirect forever; an absolute `to` on the site's own names is compared as a path); rules
+  that send each other
   round in a cycle; a rule no request can reach because a `refuse` pattern covers its whole
   `from`; two rules with the same `from`; `canonical` not among the names, or a wildcard;
   `http = "serve"` with `hsts`; a `to` with user information, a scheme other than http(s), or
@@ -605,11 +626,13 @@ pattern (`/blog/x.html` to `/blog/x`) is one exact rule per page for now (5.4).
   target suggested; a rule from `/` with `remainder = "drop"` (every old page to one: a soft 404
   to search engines); a redirecting name the certificate does not cover; `hsts` subdomains binding
   sites without TLS; a redirect whose `from` lies under a password or access rule (the redirect
-  answers before them, so its target is visible to anyone).
+  answers before them, so its target is visible to anyone); a `from` that covers
+  `/.well-known/acme-challenge/` or `/.well-known/pki-validation/` (the rule skips them, 1).
 - **Suggested (info):** `hsts_suggested` for a TLS site with no `hsts` line whose real certificate
   has served for a week without a finding (section 4.2).
 - **Health, from the outside in:** `app_redirects_elsewhere` (the application's own address is
-  another name, 3.4); `proxy_scheme_missing` (a trusted proxy sends no `X-Forwarded-Proto`, 2.4).
+  another name, 3.4); `proxy_scheme_missing` (a trusted proxy sends no `X-Forwarded-Proto`, 2.4);
+  `hsts_narrows_application` (the server replaced a stronger HSTS the application sent, 4.1).
 - **`path_check`** names every step a request meets, with the exact `Location` and its cache
   lifetime: `http://www.example.com/blog/x: scheme (http = redirect), host (canonical
   example.com), rule /blog (301): 301 → https://example.com/news/x, cached 1 day`.
@@ -891,7 +914,9 @@ this design stands. Response headers are left to their own document.
 ### 11.2 Added by this check
 
 - A rule whose whole `from` a `refuse` pattern covers is refused: no request can reach it (8).
-- Cycles between rules and case-only loops are refused, not only a rule under its own `from` (8).
+- Cycles between rules are refused, not only a rule under its own `from` (8). (Case-only loops were
+  refused too while matching ignored case; since matching is case-sensitive, section 12, a rule
+  that only fixes the case is allowed.)
 - The query is copied encoded, tab, CR and LF can never appear raw, and the fragment rule is
   stated (5.3).
 - The agent's texts and `agensio ctl` help say what other platforms do differently: the most
@@ -904,33 +929,134 @@ this design stands. Response headers are left to their own document.
 1. **Preview:** `path_check` takes proposed `redirects` and answers as if they applied (8).
 2. **`410 Gone`:** a rule with `status = 410` and no `to` (5.1, 5.2, 7).
 3. **A catch-all's unknown names:** their HTTPS redirect carries no cache lifetime (7).
-4. **A fuzz target for `Location`:** `fuzz_redirect`, part of the build (12).
+4. **A fuzz target for `Location`:** `fuzz_redirect`, part of the build (13).
 5. **How many rules:** 1,000 per site file; a data file for larger lists later (6.3).
 
 ### 11.4 Left to the headers design
 
 The research's rows on response headers (the verbs, per-field resolution, `when = "success"`,
 the refused names, CORS, the baseline per preset, `add`/`merge`, retiring `add_headers`) belong to
-`[[site.headers]]` and the per-preset security headers: `docs/headers.md`.
+`[[site.response_headers]]` and the per-preset security headers: `docs/headers.md`.
 
-## 12. How it will be built and tested
+## 12. Checked against the applications' own configurations (2026-10-13)
+
+Three reviews read what applications and hosting platforms publish as their web server
+configuration, every redirect and response-field directive in it, and classified each against this
+design and `docs/headers.md` (notes, with every directive verbatim and its source:
+`research_notes/Official configs vs redirects and headers/`):
+
+- the official configurations of 21 PHP applications (Nextcloud, Magento, Shopware, PrestaShop,
+  Matomo, MediaWiki, Moodle, Joomla, Symfony, Craft, Kirby, Roundcube, FreshRSS, phpMyAdmin,
+  WordPress, Drupal, TYPO3, Grav, Kanboard, Laravel, Statamic): 151 directives;
+- the reverse-proxy configurations of 25 applications (Mastodon, Discourse, Ghost, GitLab, Gitea,
+  Forgejo, Grafana, Matrix Synapse and Element, Jellyfin, Home Assistant, Vaultwarden, Keycloak, n8n,
+  Plausible, Umami, Uptime Kuma, Rocket.Chat, Nextcloud AIO, Immich, Paperless-ngx, BookStack,
+  Outline, Metabase, Mattermost);
+- the redirect and header files of 8 static hosting platforms and the deployment guides of 16 site
+  generators and single-page frameworks, with about 6,000 real files from public repositories
+  (2,512 `_redirects` holding 47,025 rules, 610 `_headers`, 1,913 `netlify.toml`, samples of
+  `vercel.json` and `firebase.json`).
+
+### 12.1 What it confirmed
+
+- **Every redirect fits the model.** In the applications' configurations, each is plain HTTP to
+  HTTPS, a host, an exact path, or a whole-segment prefix that keeps the rest. In the real
+  `_redirects` files: exact moves 38.3 %, a section moved with the rest of its path 20.3 %, a section
+  to one page 6.8 %, `www`, another domain or HTTPS 10.1 %.
+- **Captures are rare.** A capture placed inside the target appears in 1 to 2.7 % of `_redirects`
+  lines; among the applications only WordPress multisite in subdirectories needs one, and it issues
+  that redirect itself. The single `*` within one segment stays the later step (5.4).
+- **No regex, no preload, no variables.** Six applications show `preload` and none needs it; the
+  only variables in redirects are the request's own path and query, which a prefix rule keeps.
+- **Conditions** on the browser's language or country appear in 0.4 % and 0.1 % of `_redirects`
+  files; on a user agent or a client address, in one application each (Nextcloud's WebDAV client,
+  Vaultwarden's admin), which work without them or have `[[site.access]]`.
+
+### 12.2 What it changed (decided 2026-10-13)
+
+1. **Matching is case-sensitive** (5.1), as on every hosting platform; a rule that only fixes the
+   case is allowed (0.5 % of `_redirects` lines).
+2. **Certificate validation is never redirected** (1): `/.well-known/acme-challenge/` and
+   `/.well-known/pki-validation/` are answered before the scheme, host and path steps, from agensio's
+   ACME manager or the site's files. Before this, the promise held only for `tls = "auto"`: a
+   certificate tool writing into the root, or Nextcloud's catch-all for `/.well-known/` copied as a
+   redirect, would have sent the CA elsewhere.
+3. **`hsts` replaces the application's own and health names a stronger one** (4.1): eight of the
+   proxied applications can send HSTS, and four send more than `hsts = true` does.
+4. **`max_age` takes plain seconds** (4.4): Mattermost, Paperless-ngx, Jellyfin and n8n publish
+   theirs that way.
+5. **An exact rule matches its own path only**, so exact `/x` to `/x/` is legal (5.1): Grafana,
+   BookStack and Jellyfin under a sub-path need it.
+6. **A `to` with a query keeps it**, the request's query after `&` (5.3).
+7. **Rules never match an internal target** (5.1): 28 of the `_redirects` files send `/index.html`
+   to `/`, which would break every route of a single-page application if it met the fallback.
+
+### 12.3 For the agent: rules imported from another platform
+
+The agent's texts carry what other platforms do differently, since a migration brings their files:
+
+- the same `_redirects` line without a status is a 301 on Netlify, a 302 on Cloudflare and a 308 on
+  Vercel (13.4 % of the files omit it): agensio requires the status, so the agent asks;
+- Netlify skips a rule whose path exists as a file unless the line ends in `!`; agensio always
+  applies a rule;
+- Netlify's `/old` matches `/old/` too; here an exact rule matches one spelling, so the agent writes
+  both when the old site answered both;
+- a placeholder at the end of the target (`/blog/* /news/:splat`) is a prefix rule; one in the
+  middle is not offered yet;
+- a line with status `200` is a rewrite, not a redirect: `try_files`, the front controller or the
+  single-page fallback;
+- the `/index.php/...` to `/...` redirect of Shopware, Symfony and Drupal's nginx recipe is a prefix
+  rule (a cookbook recipe).
+
+### 12.4 Found outside this design
+
+These are not redirects or response fields, but the reviews met them, and each is a step of its own:
+
+- **A client chooses the address a proxied application sees** (a bug): agensio passes a client's
+  own `X-Real-IP`, `CF-Connecting-IP` or `True-Client-IP` through to the origin unless the site
+  sets the field itself (`src/handlers/proxy.cpp`), and Vaultwarden (its login rate limits),
+  Rocket.Chat, Grafana, Discourse's container, Plausible and Umami read one of them first. 17 of
+  the 25 official configurations set `X-Real-IP` to the client's address.
+- **Error pages with their status**: `error_page = { 404 = "/404.html" }`. Ten of the 16 site
+  generators make a `404.html` and every platform serves it with a 404; here a `try_files`
+  fallback to it answers 200, a soft 404.
+- **Clean addresses**: `try_files` steps `$uri.html` and `$uri/index.html` (`/x` from `x.html`, or
+  from `x/index.html` without the hop to `/x/`), which eight and five generators ask for.
+- **The single-page fallback on a managed static site**: `rules.front_controller` naming an `.html`
+  file on `app = "static"`. It is the commonest rule of all (45.5 % of `_redirects` files) and needs a
+  root additions file today.
+- **A type table per site**: extensionless `.well-known` files, `.svgz` with its encoding
+  (Nextcloud, Drupal, TYPO3). There is only the built-in table today.
+- **Upstreams by host name**: three applications, and 3.8 % of `_redirects` files proxy a path to a
+  named host; `upstream` takes an address only.
+- **Internal rewrites that drop a segment**: Magento's versioned static addresses, PrestaShop's
+  image addresses, WordPress multisite in subdirectories.
+- **Recipes that work today**: Matrix's `/.well-known/matrix/server` and `client` as JSON files
+  through an exact location (tested on alpha.72), with `Access-Control-Allow-Origin` once rules
+  exist.
+
+## 13. How it will be built and tested
 
 Each step is its own commit, with tests that fail on the code before it, and an A/B where the
 request path changes (`bench/ab.sh <base> -A` with new rows: a site with 1,000 exact redirects on
 a path that meets none, a redirect hit, and a TLS site with `hsts` against one without).
 
 1. **The HSTS bug first:** a managed PHP site with `hsts: true` sends HSTS on its PHP pages and its
-   404s (fails today); `hsts` becomes a site setting.
+   404s (fails today); `hsts` becomes a site setting, through the mechanism of `docs/headers.md`,
+   replacing an application's own HSTS and noting a stronger one.
 2. **`http` and `canonical`:** one block for HTTP and HTTPS; `redirect = "https"` goes; the managed
-   files are rendered the new way.
-3. **`[[site.redirect]]`:** exact (with query parameters) and prefix rules, `410`, the checks of
+   files are rendered the new way; certificate validation is answered before both, from the site's
+   files too (the failing test first: a file under `/.well-known/acme-challenge/` on a site with
+   `http = "redirect"` is served over plain HTTP, not redirected).
+3. **`[[site.redirect]]`:** exact (with query parameters) and prefix rules, case-sensitive, `410`,
+   the checks of
    section 8, the preview, and `fuzz_redirect` over (`from`, `to`, path, query) asserting the
    `Location` is relative or names exactly the origin of `to`, never `//` or `/\`, never a
    control character.
-4. **Health:** `hsts_suggested`, `app_redirects_elsewhere`, `proxy_scheme_missing`, and the
-   certificate findings raised a level with `hsts`.
-5. **The agent's side:** `site_update` fields, `agensio ctl` flags, the MCP texts of 11.2, the
-   reference rows, the cookbook recipes linking here; this document installed with the others.
+4. **Health:** `hsts_suggested`, `hsts_narrows_application`, `app_redirects_elsewhere`,
+   `proxy_scheme_missing`, and the certificate findings raised a level with `hsts`.
+5. **The agent's side:** `site_update` fields, `agensio ctl` flags, the MCP texts of 11.2 and 12.3,
+   the reference rows, the cookbook recipes linking here; this document installed with the others.
 
 Sites without `http` redirects, `canonical`, `hsts` or `[[site.redirect]]` keep today's request
 path: one test of an empty site field, measured flat.

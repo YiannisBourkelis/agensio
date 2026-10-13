@@ -1,4 +1,4 @@
-# Response headers: `[[site.headers]]` and the security baseline
+# Response headers: `[[site.response_headers]]` and the security baseline
 
 > **Status: proposal (2026-10-12), not built.** Nothing in this document works in
 > 0.1.0-alpha.72; it is the design, written as the guide it will become, so each use case can be
@@ -6,8 +6,10 @@
 > `hsts` setting uses the mechanism described here. The research behind it is
 > `reports/Web server headers and redirects.md` (nine servers, the panels, the administrators'
 > complaints, the standards) and `research_notes/App default security headers/` (what each
-> application sends itself). Section 10 lists the decisions to take, section 11 how it will be
-> built and tested.
+> application sends itself) and `research_notes/Official configs vs redirects and headers/` (what
+> applications' official configurations ask for). Section 10 has the owner's decisions
+> (2026-10-13), section 11 the check against those configurations, section 12 how it will be built
+> and tested.
 
 ## 1. The model
 
@@ -17,9 +19,9 @@ change them:
 
 | setting | decides | default |
 |---|---|---|
-| the preset's baseline | what is safe without asking: `Referrer-Policy` where the application sent none, `nosniff` on the files and error pages agensio serves, the framework's `X-Powered-By` removed (section 4) | on for a site with `app`; `security_headers = false` turns it off |
+| the preset's baseline | what is safe without asking: `Referrer-Policy` where the application sent none, `nosniff` on the files and error pages agensio serves, the framework's `X-Powered-By` removed; on a static site, `no-cache` on its HTML (section 4) | on for a site with `app`; `security_headers = false` turns it off |
 | `hsts` | `Strict-Transport-Security` on every HTTPS answer (`docs/redirects.md` 4) | off |
-| `[[site.headers]]` | fields the administrator sets, defaults or removes, by path | none |
+| `[[site.response_headers]]` | fields the administrator sets, defaults or removes, by path | none |
 
 All three are resolved together, per field, when the configuration loads, and applied at one point:
 as the answer leaves. That point sees **every answer the site gives**: a static file, a PHP page, a
@@ -43,7 +45,7 @@ Inside one answer the order is fixed:
    agensio marks `Cache-Control: no-store` (401, 403, 421) keep it.
 4. **Framing**, which is the server's alone: `Content-Length`, `Transfer-Encoding`, `Connection`.
 
-## 2. `[[site.headers]]`
+## 2. `[[site.response_headers]]`
 
 ### 2.1 Fields
 
@@ -55,14 +57,23 @@ Inside one answer the order is fixed:
 | `default` | a table of field names and values: the field is sent only when the answer has none | none |
 | `remove` | a list of field names: every copy is deleted | none |
 | `when` | `"always"` or `"success"` (2xx and 304) | `"always"` |
+| `endings` | a list of file endings (`["svg"]`, `["woff", "woff2"]`): the rule applies only to files agensio serves from disk whose name ends so | none: every answer |
 
 A rule needs at least one of `set`, `default`, `remove`, and names a field in only one of them. A
 prefix covers whole segments in any capitalisation, as the access rules do: `path = "/admin"` covers
 `/admin`, `/Admin/` and `/admin/users`, never `/administrator`. At most 64 rules and 64 distinct field
 names per site.
 
+**`endings` reads the file agensio serves, not the address.** A rule with `endings` applies to an
+answer agensio makes from a file on disk, after `try_files` and a directory's index, when that
+file's name ends with one of them, in any case; it never applies to an application's answer. So
+`/about/`, served from `about/index.html`, is an `.html` answer, and so is a single-page
+application's route served from its shell; and a `/sitemap.xml` that PHP generates (WordPress with
+Yoast, Shopware) is the application's, untouched by a rule meant for `.xml` files on disk. That is
+how nginx behaves too: a `location ~ \.xml$` loses its fields when the request falls back to PHP.
+
 ```toml
-[[site.headers]]
+[[site.response_headers]]
 path = "/"
 set = { "Referrer-Policy" = "strict-origin-when-cross-origin" }
 default = { "X-Frame-Options" = "SAMEORIGIN" }
@@ -71,21 +82,23 @@ remove = ["X-Powered-By"]
 
 ### 2.2 Which rule decides: per field, the longest
 
-**For each field, the longest rule that names it decides; rules that name different fields all
-apply.** The order the rules are written in never matters, and nothing is inherited or dropped as a
-block: a deeper rule changes the fields it names and no others.
+**For each field, the most specific rule that names it decides; rules that name different fields
+all apply.** The most specific is the one with the longest path; at the same path, an exact rule
+before a prefix, and a rule whose `endings` the served file has before one without `endings`. The
+order the rules are written in never matters, and nothing is inherited or dropped as a block: a
+deeper rule changes the fields it names and no others.
 
 ```toml
-[[site.headers]]
+[[site.response_headers]]
 path = "/"
 set = { "Referrer-Policy" = "strict-origin-when-cross-origin", "X-Content-Type-Options" = "nosniff" }
 default = { "X-Frame-Options" = "SAMEORIGIN" }
 
-[[site.headers]]
+[[site.response_headers]]
 path = "/embed/"
 remove = ["X-Frame-Options"]
 
-[[site.headers]]
+[[site.response_headers]]
 path = "/embed/"
 when = "success"
 set = { "Cache-Control" = "public, max-age=3600" }
@@ -169,7 +182,7 @@ The usual three by hand, on a site whose pages no other site embeds and whose ap
 every script with its right type, with the application's own values winning where it sends them:
 
 ```toml
-[[site.headers]]
+[[site.response_headers]]
 path = "/"
 default = { "X-Content-Type-Options" = "nosniff", "Referrer-Policy" = "strict-origin-when-cross-origin", "X-Frame-Options" = "SAMEORIGIN" }
 ```
@@ -180,24 +193,35 @@ A rule at `/` sends `X-Frame-Options: SAMEORIGIN` (section 3.1); one directory i
 embedded by a partner:
 
 ```toml
-[[site.headers]]
+[[site.response_headers]]
 path = "/embed/"
 remove = ["X-Frame-Options"]
 default = { "Content-Security-Policy" = "frame-ancestors 'self' https://partner.example" }
 ```
 
-### 3.3 Fonts or files for another origin (CORS with one fixed value)
+### 3.3 Fields by kind of file: SVG that runs no script, fonts for another origin
+
+An SVG file can hold JavaScript, and an uploaded one opened directly would run it as the site.
+Shopware, Joomla and FreshRSS ship this field on every SVG for that reason; PrestaShop, TYPO3 and
+Craft let other origins load the fonts:
 
 ```toml
-[[site.headers]]
-path = "/fonts/"
+[[site.response_headers]]
+path = "/"
+endings = ["svg"]
+set = { "Content-Security-Policy" = "script-src 'none'" }
+
+[[site.response_headers]]
+path = "/"
+endings = ["woff", "woff2", "ttf", "otf"]
 set = { "Access-Control-Allow-Origin" = "*" }
 ```
 
-A fixed value (`*`, or one origin) is all a rule can say. Several allowed origins need the server to
-echo the request's `Origin` and add `Vary: Origin`, and credentials need more checks: that is the
-application's, or a typed `cors` setting later (section 10), never a list in one field, which
-browsers reject.
+Both apply to files agensio serves wherever they are; an application's answer is never touched
+(2.1). A fixed value (`*`, or one origin) is all a rule can say. Several allowed origins need the
+server to echo the request's `Origin` and add `Vary: Origin`, and credentials need more checks: that
+is the application's, or a typed `cors` setting later (section 10), never a list in one field,
+which browsers reject.
 
 ### 3.4 A staging copy kept out of search engines
 
@@ -206,7 +230,7 @@ browsers reject.
 server_name = ["staging.example.com"]
 # ...
 
-[[site.headers]]
+[[site.response_headers]]
 path = "/"
 set = { "X-Robots-Tag" = "noindex, nofollow" }
 ```
@@ -218,19 +242,33 @@ is meant to catch (section 7).
 ### 3.5 Long cache lifetimes for fingerprinted files
 
 ```toml
-[[site.headers]]
+[[site.response_headers]]
 path = "/assets/"
 when = "success"
 set = { "Cache-Control" = "public, max-age=31536000, immutable" }
 ```
 
 Only for files whose names change with their content (`app.3f9a1c.js`); otherwise a browser keeps
-the old file for a year. A managed site has this as `rules.cache` (`docs/configuration.md` 15).
+the old file for a year. A managed site has this as `rules.cache` with `immutable: true`
+(`docs/configuration.md` 15). The same by kind of file, for themes and plugins whose names do not
+change, with a shorter lifetime:
+
+```toml
+[[site.response_headers]]
+path = "/wp-content/"
+endings = ["css", "js", "png", "jpg", "webp", "svg", "woff2"]
+when = "success"
+set = { "Cache-Control" = "public, max-age=2592000" }
+```
+
+On a single-page application, keep the year-long rule off the paths its fallback answers: a route
+that falls back to the shell under `/assets/` would cache the shell for a year. `-t` warns about
+such a rule (section 7).
 
 ### 3.6 What an application discloses
 
 ```toml
-[[site.headers]]
+[[site.response_headers]]
 path = "/"
 remove = ["X-Powered-By", "X-Generator"]
 ```
@@ -242,7 +280,7 @@ payment widget. The safe path is the report-only field first, which browsers eva
 without enforcing:
 
 ```toml
-[[site.headers]]
+[[site.response_headers]]
 path = "/"
 default = { "Content-Security-Policy-Report-Only" = "default-src 'self'; img-src 'self' data:; frame-ancestors 'self'" }
 ```
@@ -272,6 +310,15 @@ works today**. Three things meet that bar:
 | `Referrer-Policy: strict-origin-when-cross-origin`, as `default` | every answer | it is what browsers do without the field (Chrome and Edge since 85, Firefox since 87, Safari since 15), so a current browser behaves as before; older browsers and scanners are told the same; an application's stricter value (Django's `same-origin`) wins |
 | `X-Content-Type-Options: nosniff` | agensio's own answers only: the files it serves and its error pages | agensio set their `Content-Type` itself, from a table that knows `.js`, `.mjs`, `.css`, `.wasm`; Drupal's and TYPO3's own `.htaccess` files add the same field to every file Apache serves |
 | `X-Powered-By` removed | the application's answers | no client reads it; PHP's own is already off in the pools agensio writes (`php_admin_flag[expose_php] = off`), so what is left is a framework's (`Express`, `Statamic`) |
+
+On `app = "static"`, where agensio serves every page itself, the baseline also sends
+`Cache-Control: no-cache` on the HTML files it serves (an `.html` file, a directory's
+`index.html`, a single-page application's shell). Today agensio sends no `Cache-Control` on a file,
+so browsers keep an HTML page for a guessed time (a tenth of its age since it last changed) and
+show an old version after a deploy; with `no-cache` they ask each time and get a `304` when nothing
+changed, as Netlify and Cloudflare do by default and Vite, VitePress and Gatsby ask for. It cannot
+break a page; it costs a conditional request per page view. A rule's own `Cache-Control` decides
+instead.
 
 Left out, because each one can break a working page and only the site's owner knows whether it
 does:
@@ -307,11 +354,11 @@ What each application sends itself was read in its 2026 releases' source
 | `django`, `wagtail` | `nosniff`, `Referrer-Policy: same-origin`, `Cross-Origin-Opener-Policy: same-origin`, `X-Frame-Options: DENY`, each only if absent; Wagtail's previews `SAMEORIGIN` | `nosniff` and `Referrer-Policy` on `/static/` and `/media/`, which agensio serves (the preset's `/media/` CSP and `nosniff` stay) | Django's settings are the place; nothing more |
 | `node` | Express: `X-Powered-By: Express` on everything, `nosniff` only on its own error pages; Uptime Kuma: `X-Frame-Options: SAMEORIGIN` unless its owner switched it off, no `X-Powered-By` | `Referrer-Policy`; `X-Powered-By` removed | a frame field, unless the application is embedded elsewhere (Uptime Kuma decides for itself) |
 | `proxy` | the application's | `Referrer-Policy`; `X-Powered-By` removed | depends on the application |
-| `static` | (agensio answers everything) | `Referrer-Policy` and `nosniff` on every answer | a frame field and a CSP, both safe to try on a site agensio serves alone |
+| `static` | (agensio answers everything) | `Referrer-Policy` and `nosniff` on every answer; `Cache-Control: no-cache` on HTML files | a frame field and a CSP, both safe to try on a site agensio serves alone |
 
-A `[[site.headers]]` rule overrides the baseline field by field (a `set` of another value, a `remove`),
-and `security_headers = false` turns the whole baseline off; `path_check` names the baseline as the
-source of each field it adds.
+A `[[site.response_headers]]` rule overrides the baseline field by field (a `set` of another value,
+a `remove`), and `security_headers = false` turns the whole baseline off; `path_check` names the
+baseline as the source of each field it adds.
 
 ## 5. HSTS through the same path
 
@@ -321,66 +368,83 @@ answers sent over TLS (HTTP/1 over TLS, HTTP/2 and HTTP/3; never over plain HTTP
 included, which today's managed `hsts: true` does not: it is rendered as a `[[site.location]]` at `/`
 with `add_headers`, which reaches neither the PHP pages (another location) nor any error answer. And
 as a `set`, it replaces an HSTS the application sends itself (a WordPress plugin, Drupal's Seckit),
-so browsers see one, as RFC 6797 8.1 requires.
+so browsers see one, as RFC 6797 8.1 requires. The setting decides even over a stronger value
+(Mastodon, GitLab, Keycloak and Umami send a longer `max-age` or `includeSubDomains`), so
+`max_age = 0` can always clear it; when it replaces a stronger one, the server notes the
+application's value once per site and health reports `hsts_narrows_application`.
 
 ## 6. Managed sites and the agent
 
-- `site_create` and `site_update` take `security_headers: false` (the baseline off) and `headers`, a
-  list of rules with the fields of section 2.1, sent whole like `rules` (the list replaces the site's;
-  `[]` clears it). They are rendered as `[[site.headers]]` in the managed file.
-- `agensio ctl site-update NAME --header PATH set|default NAME=VALUE`, `--header-remove PATH NAME`,
-  `--no-headers`, `--no-security-headers`; each flag given alone keeps the site's other rules.
+- `site_create` and `site_update` take `security_headers: false` (the baseline off) and
+  `response_headers`, a list of rules with the fields of section 2.1, sent whole like `rules` (the
+  list replaces the site's; `[]` clears it). They are rendered as `[[site.response_headers]]` in the
+  managed file.
+- `agensio ctl site-update NAME --response-header PATH set|default NAME=VALUE`,
+  `--response-header-remove PATH NAME`, `--no-response-headers`, `--no-security-headers`; each flag
+  given alone keeps the site's other rules.
 - **The fields the baseline leaves out are offered, not applied.** After `site_install`, and when the
   user asks about security headers or a scanner's grade, the agent goes through them one at a time
   with what each would break (section 4.1): a frame field only after asking whether any other site
   embeds the pages (WordPress post embeds, a status page, a widget); a CSP as
   `Content-Security-Policy-Report-Only` first, enforced only once the browser's console stays
-  clean; `hsts` when health suggests it. It checks the result with `path_check` and, from outside,
-  with the services of `docs/online-checks.md`.
+  clean; `hsts` when health suggests it. Where the application's own documentation configures a
+  field on every answer (Laravel's nginx page sends `X-Frame-Options` and `nosniff`; Joomla, Craft,
+  Nextcloud and Matomo do the same), the agent offers that value and names the page. `nosniff` on an
+  application's answers leaves out `204`, which iOS Safari otherwise offers as a download (Ghost).
+  It checks the result with `path_check` and, from outside, with the services of
+  `docs/online-checks.md`.
 - The MCP texts state what other servers do differently, because an agent brings their habits: the
   most specific rule decides, never the order; `set` replaces the application's field instead of
   adding a second; `default` is the verb for a CSP on an application site; cache lifetimes need
   `when = "success"`; a `noindex` belongs on a staging site only. Before applying, `path_check` with
-  proposed `headers` shows the fields a path would get; after, the same call confirms them.
+  proposed `response_headers` shows the fields a path would get; after, the same call confirms them.
 
 ## 7. What `-t`, health and `path_check` say
 
 - **Refused at load**: a name of section 2.5; a value outside section 2.6; a freshness-granting cache
-  field without `when = "success"`; two rules with the same `path` and `match` naming the same field;
-  a field named in two verbs of one rule; more than 64 rules or names, or 16 KB of values.
+  field without `when = "success"`; two rules with the same `path`, `match` and `endings` naming the
+  same field; a field named in two verbs of one rule; an ending agensio never serves as a file
+  (`php` on a PHP site, an ending the preset refuses); more than 64 rules or names, or 16 KB of
+  values.
 - **Warned**: a `set` of `Content-Security-Policy` on a site with `app` other than `static` (the
-  application may send its own: use `default`); `X-XSS-Protection` other than `0`.
+  application may send its own: use `default`); `X-XSS-Protection` other than `0`; a year-long
+  `Cache-Control` on a path the site's single-page fallback can answer (the shell would be kept
+  under an asset's address for a year).
 - **`path_check`** lists every field the site decides for the path, with its value and where the
-  decision came from: `referrer-policy: strict-origin-when-cross-origin (baseline wordpress, default:
-  the application's own wins)`, `x-content-type-options: nosniff (baseline, on the files and error
-  pages agensio serves)`, `cache-control: public, max-age=3600 (rule /embed/, success only)`,
-  `strict-transport-security: max-age=31536000 (hsts, over HTTPS)`, `x-powered-by: removed
-  (baseline)`, `x-frame-options: removed (rule /embed/)`. It also takes proposed `headers` and
-  answers as if they applied, and says which fields of section 4.1 the site does not send, for the
-  agent to offer.
-- **Health, later** (from the research's list): a security field the application sends twice; an
-  `X-Robots-Tag: noindex` on a site that looks live (no access or password rule at `/`, real
-  visitors in its log).
+  decision came from: `referrer-policy: strict-origin-when-cross-origin (baseline wordpress,
+  default: the application's own wins)`, `x-content-type-options: nosniff (baseline, on the files
+  and error pages agensio serves)`, `cache-control: public, max-age=3600 (rule /embed/, success
+  only)`, `strict-transport-security: max-age=31536000 (hsts, over HTTPS)`, `x-powered-by: removed
+  (baseline)`, `x-frame-options: removed (rule /embed/)`. It also takes proposed `response_headers`
+  and answers as if they applied, and says which fields of section 4.1 the site does not send, for
+  the agent to offer.
+- **Health, later** (from the research's list): a security field the application sends twice; a
+  rule's `X-Robots-Tag: noindex` on a site that looks live (no access or password rule at `/`, real
+  visitors in its log). Only a rule is judged, never an application's own: Nextcloud, Roundcube and
+  phpMyAdmin send `noindex` on purpose.
 
 ## 8. `add_headers` and the presets' own fields
 
-`add_headers` on a location stays, for the presets that use it (Laravel's `/build/` lifetime, Django's
-`/static/` and `/media/` fields, `rules.cache`) and for hand-written files that have it. It adds its
-fields to successful answers of that location only, so it suits cache lifetimes and nothing else;
-the documentation sends administrators to `[[site.headers]]`, and the managed renderer stops using
-`add_headers` for `hsts`. A rule can still override a location's field: `set` and `remove` act on
-every copy, `add_headers`' included, and `path_check` names both. Retiring `add_headers` (moving the
-presets' fields to `when = "success"` rules) is a later step, once one mechanism has proven itself.
+`add_headers` on a location stays, for the presets that use it (Laravel's `/build/` lifetime,
+Django's `/static/` and `/media/` fields, `rules.cache`) and for hand-written files that have it. It
+adds its fields to successful answers of that location only, so it suits cache lifetimes and nothing
+else; the documentation sends administrators to `[[site.response_headers]]`, and the managed
+renderer stops using `add_headers` for `hsts`. A rule can still override a location's field: `set`
+and `remove` act on every copy, `add_headers`' included, and `path_check` names both. Retiring
+`add_headers` (moving the presets' fields to `when = "success"` rules) is a later step, once one
+mechanism has proven itself.
 
 ## 9. Cost
 
-A site with no `app`, no `hsts` and no `[[site.headers]]` keeps today's request path: no lookup,
-one test of an empty pointer where the answer leaves, measured flat. With fields:
+A site with no `app`, no `hsts` and no `[[site.response_headers]]` keeps today's request path: no
+lookup, one test of an empty pointer where the answer leaves, measured flat. With fields:
 
 - **Which rules apply** is found once per request, when the site is known: a site whose rules are all
   at `/` (the baseline, `hsts`, a `/` rule) uses its resolved list directly; deeper rules sit behind a
   first-byte bitmap like the access rules' and a longest-prefix search over at most 64 paths. The
-  result is carried on the request, not the response, so an error page made later keeps it.
+  result is carried on the request, not the response, so an error page made later keeps it. Rules
+  with `endings` add one lookup by the served file's ending, made when agensio picks the file, on
+  sites that have such rules.
 - **HTTP/1**: the resolved fields are one prebuilt text block per path and kind of answer (success
   or not; agensio's own or the application's, for the baseline's `nosniff`), appended to the head,
   borrowed without a copy when nothing else is added, as the listener's `alt-svc` line is today.
@@ -395,10 +459,12 @@ one test of an empty pointer where the answer leaves, measured flat. With fields
   the deeper one), `-2` and `-3` for the HTTP/2 and HTTP/3 writers, `-P` for a proxied answer with
   `set` and `remove` rules.
 
-## 10. Decisions to take
+## 10. Decisions (2026-10-13)
 
-1. **The name**: `[[site.headers]]`. It cannot collide with `proxy = { headers }` in TOML, and the
-   one confusion an agent could make, a `$` variable in a response field, is refused with a pointer.
+1. **The name**: `[[site.response_headers]]`, so that nothing in its name overlaps with
+   `proxy = { headers }`, the request fields sent to an origin; a `$` variable in a response field,
+   the one confusion left, is refused with a pointer there. The managed field and the `agensio ctl`
+   flags follow it (`response_headers`, `--response-header`).
 2. **The baseline holds only what cannot break a page** (section 4.1): `Referrer-Policy` as
    `default` on every answer, `nosniff` on agensio's own answers, `X-Powered-By` removed from the
    application's. This narrows what was discussed on 2026-10-12 (`nosniff` everywhere, and
@@ -416,21 +482,84 @@ one test of an empty pointer where the answer leaves, measured flat. With fields
 5. **CORS with several origins**: not in rules; a typed `cors` setting later, when a real case asks
    for it.
 6. **`add_headers`**: kept for presets and hand-written files, no longer advertised; retired later.
+7. **Before building**: more use cases are checked against this design and `docs/redirects.md`
+   first; done, section 11.
+8. **`endings` reads the file agensio serves** (2.1), never the address and never an
+   application's answer; at the same path a rule with matching `endings` decides before one
+   without.
+9. **`no-cache` on HTML in the `static` baseline** (4.1).
+10. **`hsts` replaces an application's own HSTS even when it is stronger**, and health reports
+    `hsts_narrows_application` (section 5).
 
-## 11. How it will be built and tested
+## 11. Checked against the applications' own configurations (2026-10-13)
+
+The reviews of `docs/redirects.md` section 12 (the official configurations of 21 PHP applications
+and 25 proxied ones, 8 static hosting platforms and 16 site generators with about 6,000 real rule
+files) read every response-field directive too; the notes are in
+`research_notes/Official configs vs redirects and headers/`.
+
+### 11.1 What it confirmed
+
+- **No frame field in the baseline**: 21 of the 25 proxied applications decide framing themselves,
+  and Vaultwarden's own wiki shows an `X-Frame-Options: DENY` that would break its WebAuthn and Duo
+  pages.
+- **A CSP as `default`**: 20 of the 25 send their own policy, 10 with nonces or hashes that a `set`
+  would break; FreshRSS's guide asks the server not to overwrite its CSP.
+- **`Referrer-Policy` as `default`**: a site-wide `no-referrer` breaks Paperless-ngx's login, and
+  TYPO3's backend checks the referrer.
+- **Fixed values only**: no configuration needs the server to echo `Origin`; the only variables in
+  response fields are cache-debugging ones (Mastodon's `X-Cached`) and Mattermost's `X-Early-Data`.
+- **`set` replaces**: Drupal's and Nextcloud's Apache files pair `Header onsuccess unset` with
+  `Header always set` for one field, which is what `set` does in one step.
+- **How common the fields are**: security fields on every answer in 36.4 % of `_headers` files;
+  the commonest value of all is `public, max-age=31536000, immutable` (456 lines).
+- **Not needed**: ETag removal (TYPO3, PrestaShop and FreshRSS do it; it only costs revalidation),
+  `merge` or `append` verbs, `preload`, `Set-Cookie`, HPKP (commented examples only).
+
+### 11.2 What it changed (decided 2026-10-13)
+
+1. **`endings`** (2.1): 14 of the 21 PHP applications attach fields to file endings: a CSP on SVG
+   and PDF files (Shopware, Joomla, FreshRSS, MediaWiki, TYPO3), CORS on fonts and images
+   (PrestaShop, TYPO3, Craft), `no-store` on archives and previews (Magento, Matomo), lifetimes on
+   assets; so do 8.9 % of `_headers` and 8.7 % of `firebase.json` files. Five (Drupal, TYPO3,
+   PrestaShop, FreshRSS, Shopware's Caddy example) keep those fields off what PHP answers, which
+   the served-file reading does by itself.
+2. **`no-cache` on HTML in the `static` baseline** (4.1): 12.1 % of `_headers` files; Vite,
+   VitePress and Gatsby ask for it; Netlify and Cloudflare do it by default.
+3. **`immutable` in `rules.cache`** (3.5).
+4. **`hsts` over a stronger application value** (section 5).
+5. **The agent's offers follow the application's documentation** where it configures a field on
+   every answer: eight of the PHP applications' configurations send `nosniff`, five a frame field
+   (section 6).
+
+### 11.3 Left for later
+
+- **Path patterns** in a rule's `path` (`**/_app/immutable/` for Grav, `/js/container_*_preview.js`
+  for Matomo): two applications.
+- **Conditions on the query** (`immutable` only with `?v=`: Nextcloud, FreshRSS) and on statuses
+  beyond success (Ghost's `204`).
+- **A second, narrowing CSP** (BookStack and Gitea invite it; none needs it).
+
+What the reviews found outside both designs (the client-address fields passed to proxied
+applications, error pages with their status, clean addresses, a type table per site) is listed in
+`docs/redirects.md` 12.4.
+
+## 12. How it will be built and tested
 
 Each step is its own commit, with tests that fail on the code before it, and the A/B of section 9
 where the request path changes.
 
-1. **The mechanism, with `hsts` as its first user** (the HSTS bug, `docs/redirects.md` 12.1): the
+1. **The mechanism, with `hsts` as its first user** (the HSTS bug, `docs/redirects.md` 13.1): the
    failing test first, a managed WordPress fixture over TLS whose PHP page, static file and 404
    carry one `Strict-Transport-Security`, with an application's own replaced, and none over plain
    HTTP; then the resolved list on the request, the three writers, the upstream loop.
-2. **`[[site.headers]]`**: the fields, per-field resolution, `when`, the refused names and the value
-   checks, `path_check` with its preview. A property test checks the resolution against a brute-force
-   reading of the rules (for random rule sets and paths, every field's decision equals the longest
-   rule naming it), and the HTTP/1, HTTP/2 and HTTP/3 heads of one answer are compared field by field.
-3. **The baseline per preset** and `security_headers`, with the fixture sites of the integration
-   suite checked for the fields and for an application's own value winning.
+2. **`[[site.response_headers]]`**: the fields, `endings` on the served file, per-field resolution,
+   `when`, the refused names and the value checks, `path_check` with its preview. A property test
+   checks the resolution against a brute-force reading of the rules (for random rule sets and paths,
+   every field's decision equals the most specific rule naming it), and the HTTP/1, HTTP/2 and
+   HTTP/3 heads of one answer are compared field by field.
+3. **The baseline per preset** (with `no-cache` on a static site's HTML) and `security_headers`,
+   with the fixture sites of the integration suite checked for the fields and for an application's
+   own value winning.
 4. **The agent's side**: `site_update` fields, `agensio ctl` flags, the MCP texts of section 6, the
    reference rows, the cookbook recipes linking here; this document installed with the others.
