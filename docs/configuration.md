@@ -2085,7 +2085,8 @@ status = 410            # gone, no new address: search engines drop a 410 sooner
   rule a `refuse` pattern makes unreachable, a `to` with a user name, another scheme, `..`
   segments, a space or a control character, `cache` on a temporary status, more than 1,000 rules
   in a site.
-- **Noted** by `agensio -t`, the error log and health: a chain (a target the site redirects
+- **Noted** by `agensio -t`, the error log, health, `site_show` and, on a managed site, the answer of
+  the `site_create` or `site_update` that made it (`redirect_notes`, alpha.85): a chain (a target the site redirects
   again: point the first rule at the final target), a rule from `/` with `remainder = "drop"` (every
   old page to one address, which search engines read as a soft 404), a rule under an access or
   password rule (it answers first, so anyone sees where it sends), a rule over the certificate

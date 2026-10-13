@@ -717,7 +717,9 @@ pattern (`/blog/x.html` to `/blog/x`) is one exact rule per page for now (5.4).
   to search engines); a redirecting name the certificate does not cover; `hsts` subdomains binding
   sites without TLS; a redirect whose `from` lies under a password or access rule (the redirect
   answers before them, so its target is visible to anyone); a `from` that covers
-  `/.well-known/acme-challenge/` or `/.well-known/pki-validation/` (the rule skips them, 1).
+  `/.well-known/acme-challenge/` or `/.well-known/pki-validation/` (the rule skips them, 1). The
+  answer of the `site_create` or `site_update` that made one carries the same list
+  (`redirect_notes`, as the reload judged it; alpha.85), so the agent tells the user at once.
 - **Suggested (info):** `hsts_suggested` for a TLS site with no `hsts` line whose real certificate
   has served for a week without a finding (section 4.2).
 - **Health, from the outside in:** `app_redirects_elsewhere` (the application's own address is

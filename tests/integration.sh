@@ -1447,6 +1447,13 @@ print(d.get("redirect_location"), d.get("preview"), len(s.get("redirects", [])))
 p.stdin.close(); p.wait()
 PYT
 )"
+# The load's notes in the change's own answer (the alpha.83 report: ok and warnings [] for a chain that
+# -t, health and site_show then noted), as path_check's preview gives them.
+notes() { python3 -c 'import json; d=json.load(open("bench/tmp/ctl-reply.json")); print(" ".join(sorted({n["code"] for n in d.get("redirect_notes", [])})) or "none")'; }
+check "a change's answer carries the load's redirect notes: a chain made by site_update, one by site_create; none when there is nothing to note" \
+  "200 redirect_chain 201 redirect_chain 200 none" \
+  "$(cpost /v1/sites/rm.wild.test '{"redirects":[{"from":"/c1","match":"exact","to":"/c2","status":301},{"from":"/c2","match":"exact","to":"/c3","status":301}],"confirm":true,"reason":"rd"}') $(notes) $(cpost /v1/sites "{\"domain\":\"rn.wild.test\",\"https\":\"none\",\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/bench/www\",\"listen_plain\":\"127.0.0.1:8477\",\"redirects\":[{\"from\":\"/a\",\"match\":\"exact\",\"to\":\"/b\",\"status\":301},{\"from\":\"/b\",\"match\":\"exact\",\"to\":\"/c\",\"status\":301}],\"confirm\":true,\"reason\":\"rd\"}") $(notes) $(cpost /v1/sites/rm.wild.test '{"redirects":[{"from":"/c1","match":"exact","to":"/c3","status":301}],"confirm":true,"reason":"rd"}') $(notes)"
+cpost /v1/sites/rn.wild.test/delete '{"confirm":true,"reason":"rd"}' > /dev/null
 cpost /v1/sites/rm.wild.test/delete '{"confirm":true,"reason":"rd"}' > /dev/null
 # [[site.redirect]] (docs/redirects.md 5, alpha.82): the design's examples over HTTPS (relative
 # Locations), the order against refuse and the access rules, case and encoded separators, and over

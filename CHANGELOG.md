@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.0-alpha.85
+
+- **The load's redirect notes in the answer of the change that made them** (the alpha.83 report;
+  `docs/redirects.md` 8). `site_create` and `site_update` answered `ok` with `warnings: []` for rules
+  in a chain, which `-t`, health and `site_show` then noted; their answers now carry
+  `redirect_notes` (`{code, text}`: `redirect_chain`, `redirect_soft_404`,
+  `redirect_under_protection`, `redirect_skips_validation`), taken from the site as the reload just
+  loaded it, with its protections, refuse patterns and ports, as `path_check`'s preview gives them.
+  The MCP `redirects` text said the answer's warnings named a chain; it names `redirect_notes` now.
+  The integration check failed on alpha.84. Control-plane code only: no A/B.
+
 ## 0.1.0-alpha.84 (2026-10-13)
 
 - **Health: HSTS suggested once HTTPS has proven itself, certificate findings raised with it, and an

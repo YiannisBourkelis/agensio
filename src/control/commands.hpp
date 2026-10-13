@@ -68,6 +68,10 @@ const SiteConfig* find_site(const Config& cfg, std::string_view name);
 bool is_catch_all(const SiteConfig& s);
 bool listener_has_catch_all(const Config& cfg, const std::string& address);
 json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now, const TlsFacts* tls = nullptr);
+// What the load noted about a site's path redirects (docs/redirects.md 8: a chain, a soft 404, a rule
+// answering before a protection, one over certificate validation) as {code, text} objects: site_show,
+// path_check's preview and the answer of the change that made them give the same list.
+json::Value redirect_notes_json(const SiteConfig& s);
 // Access by client address (docs/configuration.md 19): what the site's rules decide for one
 // path and one client address, with the deciding rule and a one-line summary. `error` set
 // (and nothing answered) when the path or the address does not parse.

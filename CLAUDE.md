@@ -493,7 +493,7 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (nineteen, each seeded from
   from `/`) needs no root. Managed (alpha.83): `SiteSpec::redirects` judged by
   `load_redirect_rules` (the loader's parse and checks on JSON rules), rendered as tables; `ctl
   --redirect / --redirect-exact / --gone / --redirects-file`; `path_check` names the rule and takes
-  proposed ones as a preview (the handler loads them on a copy of the site); security page row 42.
+  proposed ones as a preview (the handler loads them on a copy of the site); the answer of `site_create` and `site_update` carries the reloaded site's `redirect_notes` (`control::redirect_notes_json`, the preview's and `site_show`'s form; alpha.85); security page row 42.
   Health (alpha.84, design 3.4 and 4.2): `hsts_suggested` (a week of a real certificate, no finding;
   `hsts = false` is a decided no, rendered for a managed site from `SiteSpec::hsts_decided`, `ctl
   --no-hsts`), `certificate_expiring` and `acme_renewal_failed` errors with `hsts`, and

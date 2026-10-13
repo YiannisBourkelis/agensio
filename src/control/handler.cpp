@@ -276,11 +276,7 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
         json::Value v = control::path_check(cfg, proposed.empty() ? *site : preview, control::query_value(req.target, "path"), error);
         if (!proposed.empty() && error.empty()) {
             v.set("preview", true);
-            if (!preview.redirect_notes.empty()) {
-                json::Value notes = json::Value::array();
-                for (const auto& [code, text] : preview.redirect_notes) notes.push(json::Value::object().set("code", code).set("text", text));
-                v.set("redirect_notes", std::move(notes));
-            }
+            if (!preview.redirect_notes.empty()) v.set("redirect_notes", control::redirect_notes_json(preview));
         }
         if (!error.empty()) reply(s, 400, json::Value::object().set("error", error));
         else reply(s, 200, v);
@@ -451,6 +447,14 @@ json::Value strings(const std::vector<std::string>& v) {
     json::Value a = json::Value::array();
     for (const auto& x : v) a.push(x);
     return a;
+}
+
+// The load's notes on a changed site's path redirects, as the reload just judged them with its
+// protections, refuse patterns and ports, in path_check's preview's form (the alpha.83 report: a chain
+// was noted by -t, health and site_show, and the answer of the change that made it said nothing).
+void add_redirect_notes(json::Value& answer, const Config& running, std::string_view domain) {
+    if (const SiteConfig* site = control::find_site(running, domain); site && !site->redirect_notes.empty())
+        answer.set("redirect_notes", control::redirect_notes_json(*site));
 }
 
 json::Value problems_json(const std::vector<control::Problem>& problems) {
@@ -1546,8 +1550,10 @@ void ControlHandler::site_create(Stream& s, const json::Value& body, std::string
     }
     finish_pool(s, spec, cfg, what, done, steps);
     for (const auto& p : protection_steps()) steps.push_back(p);
-    reply(s, 201, json::Value::object().set("ok", true).set("file", file.string()).set("spec", spec.to_json())
-                      .set("done", done).set("next_steps", strings(steps)).set("warnings", warnings));
+    json::Value answer = json::Value::object().set("ok", true).set("file", file.string()).set("spec", spec.to_json())
+                             .set("done", done).set("next_steps", strings(steps)).set("warnings", warnings);
+    add_redirect_notes(answer, backend_->running(), spec.domain);
+    reply(s, 201, answer);
 }
 
 void ControlHandler::finish_pool(Stream& s, const control::SiteSpec& spec, const Config& cfg, std::string_view what, json::Value& done, std::vector<std::string>& steps) {
@@ -1668,8 +1674,10 @@ void ControlHandler::site_update(Stream& s, std::string_view name, const json::V
     std::vector<std::string> steps = control::next_steps(spec, cfg);
     finish_pool(s, spec, cfg, what, done_now, steps);
     for (const auto& p : protection_steps()) steps.push_back(p);
-    reply(s, 200, json::Value::object().set("ok", true).set("file", file.string()).set("spec", spec.to_json())
-                      .set("done", done_now).set("next_steps", strings(steps)).set("warnings", warnings));
+    json::Value answer = json::Value::object().set("ok", true).set("file", file.string()).set("spec", spec.to_json())
+                             .set("done", done_now).set("next_steps", strings(steps)).set("warnings", warnings);
+    add_redirect_notes(answer, backend_->running(), spec.domain);
+    reply(s, 200, answer);
 }
 
 void ControlHandler::site_toggle(Stream& s, std::string_view name, std::string_view action, std::string_view what) {

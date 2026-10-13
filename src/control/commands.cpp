@@ -349,6 +349,12 @@ json::Value upstream_json(const UpstreamConfig& u) {
 
 }  // namespace
 
+json::Value redirect_notes_json(const SiteConfig& s) {
+    json::Value notes = json::Value::array();
+    for (const auto& [code, text] : s.redirect_notes) notes.push(json::Value::object().set("code", code).set("text", text));
+    return notes;
+}
+
 json::Value sites(const Config& cfg, std::time_t now, const TlsFacts* tls) {
     json::Value arr = json::Value::array();
     for (const auto& s : cfg.sites) arr.push(site_summary(s, now, tls));
@@ -797,11 +803,7 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now, const 
         json::Value list = json::Value::array();
         for (const auto& r : s.redirects.rules) list.push(redirect_rule_json(r));
         v.set("redirects", std::move(list));
-        if (!s.redirect_notes.empty()) {
-            json::Value notes = json::Value::array();
-            for (const auto& [code, text] : s.redirect_notes) notes.push(json::Value::object().set("code", code).set("text", text));
-            v.set("redirect_notes", std::move(notes));
-        }
+        if (!s.redirect_notes.empty()) v.set("redirect_notes", redirect_notes_json(s));
     }
     (void)cfg;
     return v;
