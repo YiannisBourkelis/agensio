@@ -1,6 +1,7 @@
 #include "handlers/proxy.hpp"
 
 #include <charconv>
+#include <cstdint>
 
 #include "handlers/upstream_common.hpp"
 #include "upstream/http_head.hpp"
@@ -48,6 +49,43 @@ void expand(std::string& out, std::string_view value, const Stream& s) {
         out.push_back('$');
         pos = dollar + 1;
     }
+}
+
+// The fields in which a client can name its own address to the application (2026-10-13, the
+// review of applications' proxy guides). The application sees agensio's loopback address as its
+// peer and believes such a field from there: Vaultwarden keys its login limits on X-Real-IP,
+// Grafana and Rocket.Chat read it first; Umami reads True-Client-IP, CF-Connecting-IP,
+// Fastly-Client-IP, X-NF-Client-Connection-IP, DO-Connecting-IP and X-AppEngine-User-IP before it
+// (src/lib/ip.ts), Plausible X-Plausible-IP, CF-Connecting-IP and B-Forwarded-For (remote_ip.ex),
+// Rails Client-IP (ActionDispatch::RemoteIp), the request-ip library the rest. X-Real-IP is
+// agensio's own and written by build_head; the others are a CDN's, passed from a trusted proxy only.
+enum class AddressClaim { none, real_ip, cdn };
+struct ClaimField {
+    std::string_view name;
+    AddressClaim kind;
+};
+constexpr ClaimField kClaimFields[] = {
+    {"x-real-ip", AddressClaim::real_ip},      {"client-ip", AddressClaim::cdn},          {"x-client-ip", AddressClaim::cdn},
+    {"x-forwarded", AddressClaim::cdn},        {"forwarded-for", AddressClaim::cdn},      {"true-client-ip", AddressClaim::cdn},
+    {"cf-pseudo-ipv4", AddressClaim::cdn},     {"x-plausible-ip", AddressClaim::cdn},     {"b-forwarded-for", AddressClaim::cdn},
+    {"cf-connecting-ip", AddressClaim::cdn},   {"fastly-client-ip", AddressClaim::cdn},   {"do-connecting-ip", AddressClaim::cdn},
+    {"cf-connecting-ipv6", AddressClaim::cdn}, {"x-cluster-client-ip", AddressClaim::cdn}, {"x-appengine-user-ip", AddressClaim::cdn},
+    {"x-nf-client-connection-ip", AddressClaim::cdn},
+};
+constexpr std::uint32_t claim_lengths() {
+    std::uint32_t mask = 0;
+    for (const ClaimField& f : kClaimFields) mask |= 1u << f.name.size();
+    return mask;
+}
+// The length first (a field of any other length costs one test), then the bytes against the few
+// names of that length; a browser's fields of a matching length (Accept-Encoding, Sec-Fetch-Mode,
+// Authorization) differ in their first bytes.
+AddressClaim address_claim(std::string_view name) noexcept {
+    constexpr std::uint32_t kLengths = claim_lengths();
+    if (name.size() >= 32 || ((kLengths >> name.size()) & 1u) == 0) return AddressClaim::none;
+    for (const ClaimField& f : kClaimFields)
+        if (f.name.size() == name.size() && Headers::iequals(name, f.name)) return f.kind;
+    return AddressClaim::none;
 }
 
 // RFC 7239 "for=" needs IPv6 literals bracketed and quoted.
@@ -116,6 +154,11 @@ bool ProxyHandler::build_head(std::string& out, const Stream& s, std::string_vie
         if (Headers::iequals(h.name, "x-forwarded-host")) { if (trusted) xfh = h.value; continue; }
         if (Headers::iequals(h.name, "x-forwarded-proto") || Headers::iequals(h.name, "x-forwarded-port")) continue;
         if (Headers::iequals(h.name, "forwarded")) { forwarded_lines = trusted; continue; }
+        // A client naming its own address: X-Real-IP is written below, a CDN's field passes only
+        // from a trusted proxy.
+        if (const AddressClaim claim = address_claim(h.name);
+            claim == AddressClaim::real_ip || (claim == AddressClaim::cdn && !trusted))
+            continue;
         out.append(h.name).append(": ").append(h.value).append("\r\n");
     }
     // A field the configuration sets replaces agensio's own line of that name: written once, below
@@ -151,6 +194,11 @@ bool ProxyHandler::build_head(std::string& out, const Stream& s, std::string_vie
         if (!host.empty()) out.append(";host=").append(host);
         out.append("\r\n");
     }
+    // X-Real-IP: the client this server believes, the address of its own logs and access rules
+    // (nginx's `proxy_set_header X-Real-IP $remote_addr`, which 17 of 25 applications' proxy guides
+    // set). A client's copy was dropped above; with forwarded = "off" the origin learns no address.
+    if (policy.forwarded != "off" && !configured("x-real-ip"))
+        out.append("X-Real-IP: ").append(s.conn.client_address.empty() ? s.conn.remote_address : s.conn.client_address).append("\r\n");
     // [[site.auth]]'s forward_user: the verified name, in a field the client's own copy of was removed.
     if (!s.auth.forward_field.empty() && !s.auth.user.empty() && !configured(s.auth.forward_field))
         out.append(s.auth.forward_field).append(": ").append(s.auth.user).append("\r\n");

@@ -326,7 +326,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (eighteen, each seeded from
   (Content-Length or chunked), decodes Content-Length, chunked and close-delimited
   bodies, skips 1xx, and keeps the connection when the origin allows. `ProxyHandler`
   builds the forwarded head (hop-by-hop stripped, Host through, X-Forwarded-For/Proto/
-  Host) and `handlers/upstream_common.*` holds what both handlers share (error page,
+  Host, `X-Real-IP` with the believed client; a client's own address fields dropped, a CDN's
+  passed from trusted proxies only: 2026-10-13, before which a client chose the address
+  Vaultwarden, Grafana or Umami saw) and `handlers/upstream_common.*` holds what both handlers share (error page,
   body collection, result to Response). Response-head parser in
   `src/upstream/http_head.hpp` (fuzzed). Gate: `bench/ab.sh <ref> -P`. Header policy
   (D2, `proxy = { host, forwarded, headers, hide, redirects }`, site table as defaults):
@@ -972,7 +974,8 @@ they tie, nginx 155-157k and agensio 153-158k, agensio at 5-6 % less CPU of its 
 at 164-168k vs 159-164k. Rule learned: every field forwarded costs the origin about 2-3 %
 on a hello-world, so agensio sends no `Connection: keep-alive` on kept connections
 (HTTP/1.1 is persistent) and `X-Forwarded-Host` only when Host was rewritten or a proxy in
-front set it (otherwise it repeats Host). WebSocket-shaped echo through 64 tunnels
+front set it (otherwise it repeats Host). `X-Real-IP` is the exception, sent since 2026-10-13:
+applications key their login limits and logs on it. WebSocket-shaped echo through 64 tunnels
 (`bench/proxy/ws.sh`, `proxy-ws-20260917-204524.md`): nginx 3.75 us and agensio 3.80 us
 of CPU per 1 KB message crossing the proxy twice, parity; the Python load generator
 bounds the rate at about 137k msg/s.

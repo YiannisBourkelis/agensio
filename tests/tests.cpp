@@ -3051,6 +3051,45 @@ static void test_proxy() {
     head.clear();
     ProxyHandler::build_head(head, st, st.request.target, policy);
     CHECK(head.find("Host: 127.0.0.1:9100\r\n") != std::string::npos && head.find("X-Forwarded") == std::string::npos);
+    {
+        // A client naming its own address (2026-10-13, the review of applications' proxy guides): an
+        // application behind agensio sees a loopback peer and believes such a field from it
+        // (Vaultwarden keys its login limits on X-Real-IP; Grafana, Rocket.Chat, Umami, Plausible and
+        // Rails read one first). X-Real-IP is agensio's own; a CDN's fields pass from a trusted proxy.
+        Stream c;
+        c.request.method_name = "GET";
+        c.request.headers.add("Host", "app.example.com");
+        for (const char* n : {"X-Real-IP", "x-real-ip", "CF-Connecting-IP", "CF-Connecting-IPv6", "CF-Pseudo-IPv4", "True-Client-IP",
+                              "Fastly-Client-IP", "X-NF-Client-Connection-IP", "DO-Connecting-IP", "B-Forwarded-For", "X-AppEngine-User-IP",
+                              "X-Plausible-IP", "X-Client-IP", "Client-IP", "X-Cluster-Client-IP", "X-Forwarded", "Forwarded-For"})
+            c.request.headers.add(n, "6.6.6.6");
+        c.conn.remote_address = "192.0.2.7";
+        UpstreamConfig p;
+        std::string h;
+        ProxyHandler::build_head(h, c, "/", p);
+        CHECK(h.find("6.6.6.6") == std::string::npos);
+        CHECK(h.find("X-Real-IP: 192.0.2.7\r\n") != std::string::npos && h.find("X-Real-IP") == h.rfind("X-Real-IP"));
+        // From a trusted proxy: X-Real-IP is still the client agensio resolved; the CDN's fields pass.
+        c.conn.trusted_peer = true;
+        c.conn.client_address = "203.0.113.5";
+        h.clear();
+        ProxyHandler::build_head(h, c, "/", p);
+        CHECK(h.find("X-Real-IP: 203.0.113.5\r\n") != std::string::npos && h.find("X-Real-IP") == h.rfind("X-Real-IP") &&
+              h.find("x-real-ip") == std::string::npos);
+        CHECK(h.find("CF-Connecting-IP: 6.6.6.6\r\n") != std::string::npos && h.find("True-Client-IP: 6.6.6.6\r\n") != std::string::npos);
+        // The site decides: "" sends none, and forwarded = "off" tells the origin no address at all.
+        p.set_headers = {{"X-Real-IP", ""}};
+        h.clear();
+        ProxyHandler::build_head(h, c, "/", p);
+        CHECK(h.find("X-Real-IP") == std::string::npos && h.find("x-real-ip") == std::string::npos);
+        p.set_headers = {};
+        p.forwarded = "off";
+        c.conn.trusted_peer = false;
+        c.conn.client_address = {};
+        h.clear();
+        ProxyHandler::build_head(h, c, "/", p);
+        CHECK(h.find("X-Real-IP") == std::string::npos && h.find("6.6.6.6") == std::string::npos);
+    }
     // An Upgrade request is recognised and its Upgrade field forwarded; not with a body.
     Stream ws;
     ws.request.method = Method::get;

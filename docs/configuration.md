@@ -1382,6 +1382,20 @@ suffix locations cannot rewrite.
   never appended to, so nothing from the open internet reaches the application as a
   believed address. Behind a trusted proxy the chain is appended to. `forwarded =
   "forwarded"` sends RFC 7239 `Forwarded` instead, `"both"` sends both, `"off"` neither.
+- `X-Real-IP` with the client as agensio knows it (the address of its logs and access rules,
+  forwarded-aware), as nginx's `proxy_set_header X-Real-IP $remote_addr` does and most
+  applications' proxy guides ask for (Vaultwarden, Grafana and Rocket.Chat read it first).
+  A client's own `X-Real-IP` is never passed on. `forwarded = "off"` sends none; `headers =
+  { "X-Real-IP" = "" }` removes it.
+- The fields in which a CDN names the client (`CF-Connecting-IP`, `CF-Connecting-IPv6`,
+  `CF-Pseudo-IPv4`, `True-Client-IP`, `Fastly-Client-IP`, `X-NF-Client-Connection-IP`,
+  `DO-Connecting-IP`, `B-Forwarded-For`, `X-AppEngine-User-IP`, `X-Plausible-IP`, `X-Client-IP`,
+  `Client-IP`, `X-Cluster-Client-IP`, `X-Forwarded`, `Forwarded-For`) only from a peer in
+  `server.trusted_proxies`: from anyone else they are dropped, since the application sees
+  agensio's loopback address as its peer and believes such a field from there (Umami and
+  Plausible read them before `X-Forwarded-For`, Rails reads `Client-IP`). Until 2026-10-13 a
+  client could set any of these, `X-Real-IP` included, and choose the address the application
+  saw.
 - Every other field except the hop-by-hop ones (`Connection` and whatever it lists,
   `Keep-Alive`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`, `Expect`) and the framing.
 - One `Cookie` line, whatever the client sent: a browser sends one `cookie` field per
@@ -1426,7 +1440,7 @@ on a location.
 |---|---|---|
 | `host` | `"pass"` | `"pass"` the client's Host, `"upstream"` the origin's address, or a literal name |
 | `forwarded` | `"x-forwarded"` | `"x-forwarded"`, `"forwarded"` (RFC 7239), `"both"`, `"off"` |
-| `headers` | none | fields set toward the origin, `{ "X-Real-IP" = "$remote_addr" }`; `""` removes; a field agensio writes itself (`Host`, `X-Forwarded-*`, `Forwarded`) named here replaces agensio's line, sent once |
+| `headers` | none | fields set toward the origin, `{ "X-Gateway" = "$host" }`; `""` removes (`"X-Real-IP" = ""` stops agensio's own); a field agensio writes itself (`Host`, `X-Forwarded-*`, `Forwarded`) named here replaces agensio's line, sent once |
 | `hide` | none | fields dropped from the origin's answer, `["X-Powered-By"]` |
 | `redirects` | `"rewrite"` | Location pointing at the origin (its address, or the name given as `host`) rewritten to this site, or `"pass"` |
 | `upgrade` | `true` | forward Upgrade requests and tunnel after a 101 (WebSocket) |

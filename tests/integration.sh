@@ -2121,6 +2121,16 @@ except OSError:
   check "proxy: RFC 7239 Forwarded added" "Forwarded: for=127.0.0.1;proto=http;host=127.0.0.1:8091" "$(echo "$H" | grep '^Forwarded:')"
   check "proxy: configured fields with variables" "X-Real-IP: 127.0.0.1 X-Site: http://127.0.0.1:8091" "$(echo "$H" | grep -E '^X-(Real-IP|Site):' | paste -sd' ')"
   check "proxy: configured empty value removes the client's field" "0" "$(echo "$H" | grep -c '^Accept:')"
+  # A client naming its own address (2026-10-13): the origin, which sees agensio's loopback address,
+  # gets agensio's X-Real-IP and none of the client's address fields; before, a client chose the
+  # address Vaultwarden, Grafana or Umami believed. 127.0.0.2 is a peer the server does not trust;
+  # from the trusted 127.0.0.1 the client is the one X-Forwarded-For names and a CDN's field passes.
+  H=$(curl -sS --interface 127.0.0.2 -H 'X-Real-IP: 6.6.6.6' -H 'CF-Connecting-IP: 6.6.6.6' -H 'True-Client-IP: 6.6.6.6' -H 'Client-IP: 6.6.6.6' $P/api/headers | tr -d '\r')
+  check "proxy: an untrusted client's X-Real-IP and CDN address fields never reach the origin; agensio's X-Real-IP does" "X-Real-IP: 127.0.0.2 0" \
+    "$(echo "$H" | grep -i '^X-Real-IP:') $(echo "$H" | grep -c '6\.6\.6\.6')"
+  H=$(curl -sS -H 'X-Forwarded-For: 203.0.113.9' -H 'X-Real-IP: 6.6.6.6' -H 'CF-Connecting-IP: 203.0.113.9' $P/api/headers | tr -d '\r')
+  check "proxy: behind a trusted proxy X-Real-IP is the client it names, and its CDN field passes" "X-Real-IP: 203.0.113.9 CF-Connecting-IP: 203.0.113.9 0" \
+    "$(echo "$H" | grep -i '^X-Real-IP:') $(echo "$H" | grep -i '^CF-Connecting-IP:') $(echo "$H" | grep -c '6\.6\.6\.6')"
   R=$(curl -sS -i $P/api/redirect | tr -d '\r')
   check "proxy: Location pointing at the origin rewritten to this site" "Location: http://127.0.0.1:8091/api/json" "$(echo "$R" | grep '^Location:')"
   check "proxy: origin header visible without hide" "1" "$(echo "$R" | grep -c '^X-Powered-By:')"

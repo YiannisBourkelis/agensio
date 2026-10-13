@@ -255,7 +255,10 @@ with.
 An upload is read in full before Rocket.Chat is contacted (to a temporary file above 256 KB),
 so a slow client never holds the application. Above `max_body_size` it is a `413` Rocket.Chat
 never sees: keep Rocket.Chat's own upload limit at or below it. Rocket.Chat builds its links
-from its `ROOT_URL` setting, which should be `https://chat.example.com`.
+from its `ROOT_URL` setting, which should be `https://chat.example.com`. It takes a visitor's
+address from `X-Real-IP`, which agensio sets to the client it believes; a client's own copy is
+never passed on (before 2026-10-13 it was, so a visitor could choose the address Rocket.Chat
+logged).
 
 **Check it.**
 
@@ -485,8 +488,8 @@ agensio ctl logs --level error --since 1h | grep tls_error
 
 ## Choose the headers the origin and the client see
 
-**When:** an origin expects its own host name or a field such as `X-Real-IP`, a second service
-reads RFC 7239 `Forwarded`, or answers carry fields that name the software behind.
+**When:** an origin expects its own host name or a field of its own, a second service reads RFC
+7239 `Forwarded`, or answers carry fields that name the software behind.
 
 ```toml
 # /etc/agensio/sites.d/portal.example.com.toml
@@ -496,17 +499,19 @@ listen = ["0.0.0.0:443"]
 tls = { cert = "/etc/ssl/portal.example.com/fullchain.pem", key = "/etc/ssl/portal.example.com/privkey.pem" }
 app = "proxy"
 upstream = "http://127.0.0.1:8080"
-proxy = { host = "portal.internal.example.com", headers = { "X-Real-IP" = "$remote_addr" }, hide = ["X-Powered-By", "X-AspNet-Version"] }
+proxy = { host = "portal.internal.example.com", headers = { "X-Portal" = "$scheme://$host" }, hide = ["X-Powered-By", "X-AspNet-Version"] }
 
 [[site.location]]
 path = "/partners/"
 upstream = "http://127.0.0.1:8090"
-proxy = { host = "pass", forwarded = "forwarded", headers = { "X-Gateway" = "portal" } }   # X-Real-IP and hide still apply
+proxy = { host = "pass", forwarded = "forwarded", headers = { "X-Gateway" = "portal" } }   # X-Portal and hide still apply
 ```
 
-**What it does.** By default the origin gets the client's `Host`, `X-Forwarded-For` and
-`X-Forwarded-Proto`; from a client that is not in `trusted_proxies`, those fields are replaced,
-never appended to. Here the main origin gets `Host: portal.internal.example.com` and, because
+**What it does.** By default the origin gets the client's `Host`, `X-Forwarded-For`,
+`X-Forwarded-Proto` and `X-Real-IP`; from a client that is not in `trusted_proxies`, those fields
+are replaced, never appended to, and the fields in which a CDN names the client
+(`CF-Connecting-IP`, `True-Client-IP`, `Client-IP` and the like) are dropped, so nobody chooses
+the address the application sees. Here the main origin gets `Host: portal.internal.example.com` and, because
 Host was rewritten, `X-Forwarded-Host: portal.example.com`. An application that builds links
 from `Host` then shows its internal name in its pages; its redirects come back to the site,
 since a redirect to the name given as `host`, like one to the origin's address
@@ -515,9 +520,10 @@ the address was). Keep `host = "pass"` unless the origin refuses other names.
 
 `headers` sets fields on every request, with `$host`, `$remote_addr` (the client, behind
 trusted proxies the forwarded one), `$scheme`, `$server_name` and `$server_port`; the client's
-own copy of such a field is dropped, so nobody can send an `X-Real-IP` of their choice, and
-`""` removes a client's field. A location's `proxy` table changes only what it names: its
-headers join the site's field by field, so `/partners/` gets `X-Real-IP` and `X-Gateway`
+own copy of such a field is dropped, so nobody can send one of their choice, and `""` removes a
+client's field (`"X-Real-IP" = ""` stops agensio's own). A location's `proxy` table changes only
+what it names: its headers join the site's field by field, so `/partners/` gets `X-Portal` and
+`X-Gateway`
 (nginx's `proxy_set_header` drops the outer ones). `forwarded = "forwarded"` sends `Forwarded:
 for=...;proto=https;host=...` instead of the `X-Forwarded-*` fields; `"both"` sends both,
 `"off"` neither. `hide` takes fields out of the answers; `Server` and `Date` are always

@@ -2,6 +2,24 @@
 
 ## 0.1.0-alpha.73
 
+- **A client could choose the address a proxied application saw.** agensio passed a client's own
+  `X-Real-IP`, `CF-Connecting-IP`, `True-Client-IP`, `Client-IP` and the like to the origin
+  unchanged unless the site set the field itself, and an application behind agensio sees
+  agensio's loopback address as its peer and believes such a field from there: Vaultwarden keys
+  its login rate limits on `X-Real-IP`, Grafana and Rocket.Chat read it first, Umami and
+  Plausible read the CDN fields before `X-Forwarded-For`, Rails reads `Client-IP`. Every proxied
+  request now carries `X-Real-IP` with the client agensio believes (the address of its own logs
+  and access rules, as 17 of the 25 applications' proxy guides reviewed ask), a client's own
+  copy is never passed on, and the fields in which a CDN names the client pass only from a peer in
+  `trusted_proxies`. `proxy = { headers = { "X-Real-IP" = "" } }` stops agensio's own, and
+  `forwarded = "off"` sends none. Found by the review of applications' proxy configurations
+  (`docs/redirects.md` 12.4); the unit test of the forwarded head failed before the fix, and two
+  integration checks send the fields from a trusted and an untrusted address. `bench/ab.sh HEAD
+  -P` (`ab-20261013-011921.md`): the proxy rows 1.012 (`/json`), 1.031 (100 KB) and 0.929 (a
+  20 ms origin), within the spread of the baseline run before the change (`ab-20261013-010522.md`,
+  `/json` 4.65 to 5.07 us on unchanged proxy code); the static rows flat. The origin parses one
+  more field, about 30 bytes.
+
 - **A trash restore could succeed with a log directory the server cannot enter.** When a restore
   has to create the directory of a log or a password users file again, the root helper gives it
   the server's group (`0750`), through which the server reaches the file after the privilege
