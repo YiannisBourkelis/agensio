@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.76
+## 0.1.0-alpha.76 (2026-10-13)
 
 - **One block for HTTP and HTTPS: a site's `http` key** (`docs/redirects.md` 2, configuration.md
   14). A TLS site on port 443 now also listens on port 80 at the same addresses and answers plain
