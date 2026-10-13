@@ -63,6 +63,7 @@ private:
     // handler then answers 405 only if the request resolves to an actual file.
     bool check_method(Stream& s, const LocationConfig& loc, WorkerState& ws);
     void redirect_https(Stream& s, const SiteConfig& site, WorkerState& ws);
+    void note_scheme_missing(const Stream& s, const SiteConfig& site, WorkerState& ws);
     bool redirect_host(Stream& s, const SiteConfig& site, WorkerState& ws);
     const RedirectRule* path_rule(const SiteConfig& site, Stream& s, WorkerState& ws, bool check_refuse);
     void answer_rule(Stream& s, const RedirectRule& r, std::string_view path, std::string_view origin);

@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "config.hpp"
+#include "core/site_notices.hpp"
 #include "control/loglines.hpp"
 #include "services/json.hpp"
 
@@ -117,6 +118,11 @@ struct Finding {
     std::string message;
     std::string fix;       // what to do, "" when nothing
 };
+// What requests saw that only health names (core/site_notices.hpp; docs/redirects.md 2.4, 4.1),
+// judged against the running configuration: proxy_scheme_missing seen in the last hour on a site
+// that still redirects plain HTTP and still trusts that proxy; hsts_narrows_application while the
+// application's value is still stronger than the site's hsts.
+std::vector<Finding> notice_findings(const Config& cfg, const std::vector<SiteNotice>& notices, std::time_t now);
 // The refusals at the workers' connection ceiling since start (Server::refusal_report),
 // merged over the workers, for one health finding whose fix follows from their shape
 // (2026-10-02: an agent must tell an attack from a low ceiling from stuck clients).

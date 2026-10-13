@@ -141,7 +141,7 @@ void CgiHandler::finish(Exchange& x, UpstreamResult& res) {
         x.done();
         return;
     }
-    apply_upstream_result(s, res, res.streamed ? x.req->body_source() : nullptr, "ok", *x.loc);
+    apply_upstream_result(s, res, res.streamed ? x.req->body_source() : nullptr, "ok", *x.loc, &log_);
     x.completed = true;
     x.done();
 }

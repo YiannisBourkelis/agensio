@@ -50,6 +50,13 @@ struct WorkerState {
     // A redirect's scheme and host when they change with a path rule's target in one hop
     // (docs/redirects.md 1; Dispatcher::redirect_https, redirect_host). Capacity retained.
     std::string redirect_origin;
+    // proxy_scheme_missing (docs/redirects.md 2.4, Dispatcher::note_scheme_missing): the sites this
+    // worker noted a trusted proxy without X-Forwarded-Proto for, each at most once a minute.
+    struct NoticeGate {
+        const void* site = nullptr;
+        std::time_t at = 0;
+    };
+    std::array<NoticeGate, 8> scheme_noted{};
     struct AccessLog {
         // Refusals: one line a second; the access log has every 403 with its client, so the
         // ones held back are only counted, and the count is written when the second is over.

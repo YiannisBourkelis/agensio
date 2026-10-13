@@ -2764,6 +2764,7 @@ constexpr WordPressOpening kWordPressOpenings[] = {
 };
 
 void finalize_site(SiteConfig& site) {
+    if (!site.server_names.empty()) site.tls_fields.site = site.server_names.front();  // what its answers note names it by
     bool has_root_prefix = false;
     for (const auto& loc : site.locations)
         if (!loc.exact && loc.path == "/") has_root_prefix = true;

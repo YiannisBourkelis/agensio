@@ -308,7 +308,7 @@ void ProxyHandler::finish(Exchange& x, UpstreamResult& res) {
         return;
     }
     if (!x.req->health_note().empty()) log_.warn("proxy " + x.req->health_note());  // a member down or back
-    apply_upstream_result(s, res, res.streamed ? x.req->body_source() : nullptr, "ok", loc);
+    apply_upstream_result(s, res, res.streamed ? x.req->body_source() : nullptr, "ok", loc, &log_);
     if (res.upgraded) {
         s.response.upgrade = true;
         s.response.tunnel_timeout_s = loc.proxy.tunnel_timeout_s;

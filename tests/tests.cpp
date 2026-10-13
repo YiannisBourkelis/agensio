@@ -71,6 +71,8 @@
 #include "http1/parser.hpp"
 #include "http_date.hpp"
 #include "mime.hpp"
+#include "core/site_fields.hpp"
+#include "core/site_notices.hpp"
 #include "net/cidr.hpp"
 #include "core/forwarded.hpp"
 #include "core/access.hpp"
@@ -8049,6 +8051,76 @@ static void test_access_rules() {
 // The agent's texts promise only what the configuration can do (the cookbook's finding, alpha.71): while
 // no location key redirects, the server instructions say a redirect of one path cannot be made, and
 // never offer one through root additions. A redirect key added later fails this until the text moves.
+// What requests see that only health names (docs/redirects.md 2.4, 4.1; alpha.86): the HSTS
+// comparison, the store's minute and bound, the copy-safe flag, and the findings judged against the
+// running configuration.
+static void test_site_notices() {
+    // RFC 6797 6.1: any case, quoted max-age, a directive twice or no max-age is a field browsers ignore.
+    CHECK(parse_hsts("max-age=31536000").valid && parse_hsts("max-age=31536000").max_age == 31536000);
+    CHECK(parse_hsts(" Max-Age=\"60\" ; includeSubDomains ;preload").max_age == 60 && parse_hsts("max-age=60; includesubdomains").subdomains);
+    CHECK(!parse_hsts("includeSubDomains").valid && !parse_hsts("max-age=1; max-age=2").valid && !parse_hsts("max-age=-1").valid &&
+          !parse_hsts("max-age=").valid && !parse_hsts("max-age=99999999999999999999").valid);
+    CHECK(hsts_stronger("max-age=63072000", "max-age=31536000") && hsts_stronger("max-age=31536000; includeSubDomains", "max-age=31536000") &&
+          hsts_stronger("max-age=31536000; preload", "max-age=31536000") && hsts_stronger("max-age=60", "max-age=0"));
+    CHECK(!hsts_stronger("max-age=5", "max-age=31536000") && !hsts_stronger("max-age=31536000", "max-age=31536000; includeSubDomains") &&
+          !hsts_stronger("includeSubDomains", "max-age=0") && !hsts_stronger("max-age=31536000", "max-age=31536000"));
+    // A copy starts unset: the next load of a site notes again.
+    SiteFields f;
+    f.hsts_noted.done = true;
+    const SiteFields g = f;
+    CHECK(f.hsts_noted.done && !g.hsts_noted.done);
+    // The store: a line for the error log at most once a minute per code, site and subject; bounded.
+    SiteNotices n;
+    CHECK(n.note("proxy_scheme_missing", "a.test", "10.0.0.1", 1000) && !n.note("proxy_scheme_missing", "a.test", "10.0.0.1", 1030) &&
+          n.note("proxy_scheme_missing", "a.test", "10.0.0.2", 1030) && n.note("proxy_scheme_missing", "a.test", "10.0.0.1", 1060));
+    auto snap = n.snapshot();
+    CHECK(snap.size() == 2 && snap[0].count == 3 && snap[0].first == 1000 && snap[0].last == 1060);
+    for (int i = 0; i < 100; ++i) n.note("proxy_scheme_missing", "s" + std::to_string(i) + ".test", "10.0.0.1", 2000 + i);
+    snap = n.snapshot();
+    CHECK(snap.size() == 64);
+    CHECK(std::none_of(snap.begin(), snap.end(), [](const SiteNotice& e) { return e.site == "a.test" || e.site == "s0.test"; }));  // the oldest gave way
+    // The findings, judged against the configuration running now.
+    Config cfg;
+    Cidr c;
+    std::string err;
+    CHECK(parse_cidr("127.0.0.1", c, err));
+    cfg.trusted_proxies.push_back(c);
+    CHECK(parse_cidr("10.0.0.0/8", c, err));
+    cfg.trusted_proxies.push_back(c);
+    SiteConfig a;
+    a.server_names = {"a.test"};
+    a.http_redirect = true;
+    a.own_trusted_proxies = true;
+    a.trusted_proxies = {c};  // 10.0.0.0/8 only
+    a.tls_fields.hsts = "max-age=31536000";
+    a.tls_fields.site = "a.test";
+    cfg.sites.push_back(a);
+    SiteConfig b = a;
+    b.server_names = {"b.test"};
+    b.http_redirect = false;
+    b.tls_fields.hsts.clear();
+    cfg.sites.push_back(b);
+    const std::time_t now = 100000;
+    std::vector<SiteNotice> seen = {
+        {"proxy_scheme_missing", "a.test", "10.1.2.3", now - 60, now - 60, 0, 1},       // named
+        {"proxy_scheme_missing", "a.test", "10.9.9.9", now - 7200, now - 4000, 0, 3},   // over an hour ago
+        {"proxy_scheme_missing", "a.test", "127.0.0.1", now, now, 0, 1},                 // the server trusts it, the site does not
+        {"proxy_scheme_missing", "b.test", "10.1.2.3", now, now, 0, 1},                  // b.test no longer redirects
+        {"proxy_scheme_missing", "gone.test", "10.1.2.3", now, now, 0, 1},               // no such site now
+        {"hsts_narrows_application", "a.test", "max-age=63072000; includeSubDomains", now, now, 0, 1},  // named
+        {"hsts_narrows_application", "a.test", "max-age=60", now, now, 0, 1},            // weaker than the site's now
+        {"hsts_narrows_application", "b.test", "max-age=63072000", now, now, 0, 1},      // b.test sends none: the application's goes out
+    };
+    const auto found = control::notice_findings(cfg, seen, now);
+    CHECK(found.size() == 2);
+    if (found.size() == 2) {
+        CHECK(found[0].code == "proxy_scheme_missing" && found[0].site == "a.test" && found[0].message.find("10.1.2.3") != std::string::npos &&
+              found[0].fix.find("X-Forwarded-Proto") != std::string::npos && found[0].severity == "warn");
+        CHECK(found[1].code == "hsts_narrows_application" && found[1].message.find("max-age=63072000; includeSubDomains") != std::string::npos &&
+              found[1].message.find("max-age=31536000") != std::string::npos && found[1].fix.find("hsts: false") != std::string::npos);
+    }
+}
+
 static void test_mcp_texts() {
     std::istringstream in("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\","
                           "\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"1\"}}}\n");
@@ -9257,6 +9329,7 @@ int main() {
     test_path_check();
     test_packaged_docs();
     test_packaged_logrotate();
+    test_site_notices();
     test_mcp_texts();
     test_drupal_php_rule();
     test_refusal_finding();

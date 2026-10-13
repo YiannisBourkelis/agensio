@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.0-alpha.86
+
+- **Health names what only requests show: a proxy that sends no scheme, an application's stronger
+  HSTS** (`docs/redirects.md` 2.4, 4.1). `proxy_scheme_missing` (warn): a proxy in `trusted_proxies`
+  whose requests carry no `X-Forwarded-Proto`, to a site whose plain HTTP redirects; agensio takes
+  them as plain HTTP (never as HTTPS on a guess) and redirects them, so visitors who used HTTPS at
+  the proxy loop. Noted on the redirect itself, each worker at most once a minute per site; health
+  names it for an hour while the site still redirects and still trusts the proxy, and the error log
+  once a minute, with the proxy's setting as the fix. `hsts_narrows_application` (warn): the
+  application's `Strict-Transport-Security` commits browsers to more than the site's `hsts` (a
+  longer `max-age`, `includeSubDomains`, `preload`; RFC 6797 6.1), which replaces it; noted on the
+  first such answer of each generation of the site (one relaxed load per later answer carrying the
+  field), named by health while it is still stronger than the site's, and by the error log;
+  `hsts = false` lets the application's through. Both through one store
+  (`core/site_notices.hpp`); a request that meets neither never reaches it. The MCP `health_check`
+  text, `docs/mcp.md`, `docs/tls.md` and configuration.md 14 name them. The two integration checks
+  failed on alpha.85. `bench/ab.sh HEAD -A -P` (`ab-20261013-204420.md`): every row 0.93 to 1.02 of
+  alpha.85's CPU per request, the proxy rows 0.96 to 1.00.
+
 ## 0.1.0-alpha.85 (2026-10-13)
 
 - **The load's redirect notes in the answer of the change that made them** (the alpha.83 report;

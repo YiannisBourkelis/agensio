@@ -240,6 +240,8 @@ mistaken for one in service.
 | `site_file_held_back` | error | a site's file is set aside; a certificate that did not load is one reason, named in the message | the message's error |
 | `no_http_redirect` | info | a TLS site on a port other than 443, without `http`: plain HTTP is not redirected | `http = { listen = ["0.0.0.0:80"] }`, the redirect keeps the TLS port |
 | `hsts_suggested` | info | a TLS site with no `hsts` line has served a real certificate for 7 days with no certificate finding | `hsts = true` once you accept what it commits to (2.7); `hsts = false` records a no and silences it |
+| `hsts_narrows_application` | warn | the application sends a stronger `Strict-Transport-Security` than the site's `hsts` (a longer max-age, `includeSubDomains`, `preload`), and the site's replaces it | the site's `hsts` set to the value meant, or `hsts = false` to let the application's through |
+| `proxy_scheme_missing` | warn | a trusted proxy sent requests without `X-Forwarded-Proto` to a site that redirects plain HTTP: its HTTPS visitors loop | the proxy sends `X-Forwarded-Proto`, or reaches the site over TLS ([redirects.md](redirects.md) 2.4) |
 | `app_redirects_elsewhere` | warn | a site with `canonical` whose application redirects its canonical home page to another of the site's names: a redirect loop | the application's own address set to the canonical name (the fix names the setting) |
 
 `agensio ctl site NAME` (MCP `site_show`) shows both: `tls` describes the file on disk and

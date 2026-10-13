@@ -499,7 +499,13 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (nineteen, each seeded from
   --no-hsts`), `certificate_expiring` and `acme_renewal_failed` errors with `hsts`, and
   `app_redirects_elsewhere` from `control/probe.*`: one blocking `GET /` per site with `canonical`
   to its own listener, run on a thread by `Server::health_async` (the control handler's deferred
-  reply), never on a worker, which may be the one that must answer it. `redirect = "https"` is refused; the
+  reply), never on a worker, which may be the one that must answer it. What the request path sees
+  (alpha.86, `core/site_notices.hpp`, one process-wide store under a mutex, written only behind a gate,
+  read by health through `control::notice_findings`): `proxy_scheme_missing` from `redirect_https`
+  (`Dispatcher::note_scheme_missing`: a trusted peer's request without `X-Forwarded-Proto`, the
+  worker's `scheme_noted` gate once a minute per site) and `hsts_narrows_application` from
+  `apply_upstream_result` (`hsts_stronger`, RFC 6797 6.1, once per generation through
+  `SiteFields::hsts_noted`, a copy-safe `NoteOnce`); each also an error-log line at most once a minute. `redirect = "https"` is refused; the
   `https://host` prefix form stays until `[[site.redirect]]`.
 - **Automatic certificates** (H3, `src/services/acme.*`, `services/json.hpp`): `tls = "auto"`
   plus `[server] acme = { email }`; ACME v2 with HTTP-01 against any RFC 8555 CA, JWS ES256

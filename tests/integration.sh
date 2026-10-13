@@ -1555,6 +1555,12 @@ check "redirect rules: a POST to a 308 is resent as a POST; the rest of the path
 check "redirect rules over plain HTTP: scheme, host and rule in one hop with the rule's status; a domain that moved goes to its new host in one hop from either scheme; certificate validation is not redirected" \
   "301 https://r.wild.test:8473/news/x max-age=86400 - | 301 https://shop.example.com/item/7?c=2 max-age=86400 - | 301 https://shop.example.com/item/7?c=2 max-age=86400 - | 404" \
   "$(hop http 8474 /blog/x r2.wild.test) | $(hop http 8476 '/item/7?c=2' m1.wild.test) | $(hop https 8475 '/item/7?c=2' m1.wild.test) | $(code -H 'Host: m1.wild.test' http://127.0.0.1:8476/.well-known/acme-challenge/x)"
+# A trusted proxy that sends no X-Forwarded-Proto (alpha.86, docs/redirects.md 2.4): the suite's
+# 127.0.0.1 is one, and the plain requests above are its requests; the site redirects them, so health
+# and, once a minute, the error log name the proxy. One that says https is served.
+check "proxy_scheme_missing: a trusted proxy sending no X-Forwarded-Proto to a site that redirects plain HTTP is named by health and the error log; one marked https is served" \
+  "yes yes 200" \
+  "$(curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); print("yes" if [f for f in d["findings"] if f["code"] == "proxy_scheme_missing" and f.get("site") == "r.wild.test" and "127.0.0.1" in f["message"] and "X-Forwarded-Proto" in f.get("fix", "")] else [f["code"] for f in d["findings"]])') $(grep -q 'proxy 127.0.0.1 sends no X-Forwarded-Proto to r.wild.test' bench/tmp/error.log && echo yes || echo no) $(code -H 'Host: r.wild.test' -H 'X-Forwarded-Proto: https' http://127.0.0.1:8474/)"
 rm -f bench/tmp/sites.d/redir.toml
 cpost /v1/reload '{"confirm":true,"reason":"redir"}' > /dev/null
 rt() {  # what -t says about one site's rules: rt RULES
@@ -1618,10 +1624,17 @@ if [ -n "$PHPFPM" ]; then
   if [ "$H3" = 1 ] && curl -V 2>/dev/null | grep -q HTTP3; then
     check "hsts: over HTTP/3 too (QPACK's static entry for the default value)" "max-age=31536000 max-age=31536000" "$(sts /wp-includes/nope.js --http3-only) $(sts / --http3-only)"
   fi
+  # An application's HSTS stronger than the site's (alpha.86, docs/redirects.md 4.1): replaced, and
+  # health names it with the value, so nobody weakens it unknowingly; a weaker one (hsts-own.php,
+  # max-age=5) is not named.
+  hfind() { curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); f=[f for f in d["findings"] if f["code"] == "hsts_narrows_application" and f.get("site") == "hsts.wild.test"]; print("none" if not f else ("yes" if "max-age=63072000; includeSubDomains" in f[0]["message"] else f[0]["message"]))'; }
+  check "hsts_narrows_application: a weaker application value is not named; a stronger one is replaced and named by health with its value, and in the error log" \
+    "none max-age=31536000 yes yes" \
+    "$(hfind) $(sts /hsts-strong.php) $(hfind) $(grep -q 'hsts.wild.test: the application sent Strict-Transport-Security: max-age=63072000; includeSubDomains' bench/tmp/error.log && echo yes || echo no)"
   # A no is recorded (alpha.84, docs/redirects.md 4.2): hsts = false in the file silences health's
   # hsts_suggested; the answers lose the field.
-  check "hsts: ctl --no-hsts records a decided no in the managed file, and the pages lose the field" "1 none" \
-    "$("$BIN" ctl site-update hsts.wild.test --no-hsts --yes --reason hsts --socket $CS > /dev/null; grep -c '^hsts = false' bench/tmp/sites.d/hsts.wild.test.toml) $(v=$(sts /); echo "${v:-none}")"
+  check "hsts: ctl --no-hsts records a decided no in the managed file, and the pages lose the field; the application's own then goes out, and health no longer names it" "1 none max-age=63072000; includeSubDomains none" \
+    "$("$BIN" ctl site-update hsts.wild.test --no-hsts --yes --reason hsts --socket $CS > /dev/null; grep -c '^hsts = false' bench/tmp/sites.d/hsts.wild.test.toml) $(v=$(sts /); echo "${v:-none}") $(sts /hsts-strong.php) $(hfind)"
   cpost /v1/sites/hsts.wild.test/delete '{"confirm":true,"reason":"hsts"}' > /dev/null
   # The validation prefixes over plain HTTP on a PHP site (alpha.77, the alpha.76 report): a token
   # file is served, anything else there is a 404 with nothing run, where before the front

@@ -8,6 +8,7 @@
 #include "core/access.hpp"
 #include "core/redirect.hpp"
 #include "core/refuse.hpp"
+#include "core/site_notices.hpp"
 #include "path.hpp"
 
 namespace agensio {
@@ -486,6 +487,7 @@ void Dispatcher::answer_rule(Stream& s, const RedirectRule& r, std::string_view 
 // the same hop with its own status (1). An HTTP/1.0 request without Host gets the site's first name.
 void Dispatcher::redirect_https(Stream& s, const SiteConfig& site, WorkerState& ws) {
     const Request& req = s.request;
+    if (s.conn.trusted_peer) note_scheme_missing(s, site, ws);  // a proxy's request redirected: did it say the scheme?
     std::string_view host, port;
     split_host(req.host.empty() ? std::string_view(site.server_names.front()) : req.host, host, port);
     if (host.empty() || host == "*") {
@@ -507,6 +509,32 @@ void Dispatcher::redirect_https(Stream& s, const SiteConfig& site, WorkerState& 
     location.assign(origin);
     append_target(location, req.target);
     redirect_answer(s, 308, location, listed ? "max-age=86400" : "no-store");
+}
+
+// A trusted proxy that sends no X-Forwarded-Proto (docs/redirects.md 2.4): its requests are taken as
+// plain HTTP, never served as HTTPS by guess, so a site that redirects plain HTTP sends every visitor
+// who used HTTPS at the proxy round again. The cause goes to health and, once a minute, the error
+// log; this worker writes it at most once a minute per site, from its own gate.
+void Dispatcher::note_scheme_missing(const Stream& s, const SiteConfig& site, WorkerState& ws) {
+    if (s.request.headers.contains("x-forwarded-proto") || site.server_names.empty()) return;
+    const std::time_t now = std::time(nullptr);
+    WorkerState::NoticeGate* gate = &ws.scheme_noted[0];
+    for (auto& g : ws.scheme_noted)
+        if (g.site == &site) {
+            gate = &g;
+            break;
+        } else if (g.at < gate->at) {
+            gate = &g;
+        }
+    if (gate->site == &site && now - gate->at < 60) return;
+    gate->site = &site;
+    gate->at = now;
+    const std::string proxy = s.conn.peer ? s.conn.peer->peer_ip().to_string() : std::string(s.conn.remote_address);
+    const std::string& name = site.server_names.front();
+    if (site_notices().note("proxy_scheme_missing", name, proxy, now) && log_ && log_->enabled(LogLevel::warn))
+        log_->warn("proxy " + proxy + " sends no X-Forwarded-Proto to " + name + ", which redirects plain HTTP: its requests are taken as plain HTTP "
+                   "and redirected to https://, so a visitor who used HTTPS at the proxy comes back through it and loops; make the proxy send "
+                   "X-Forwarded-Proto, or connect it to the site over TLS (docs/redirects.md 2.4)");
 }
 
 // canonical (docs/redirects.md 3): a listed name that is not the canonical one gets a 308 to it,

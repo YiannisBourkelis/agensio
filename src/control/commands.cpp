@@ -349,6 +349,44 @@ json::Value upstream_json(const UpstreamConfig& u) {
 
 }  // namespace
 
+std::vector<Finding> notice_findings(const Config& cfg, const std::vector<SiteNotice>& notices, std::time_t now) {
+    std::vector<Finding> out;
+    auto at = [](std::time_t t) {
+        std::tm tm{};
+        gmtime_r(&t, &tm);
+        char buf[32];
+        std::strftime(buf, sizeof buf, "%Y-%m-%d %H:%M UTC", &tm);
+        return std::string(buf);
+    };
+    for (const auto& n : notices) {
+        const SiteConfig* site = find_site(cfg, n.site);
+        if (!site) continue;
+        if (n.code == "proxy_scheme_missing") {
+            if (now - n.last > 3600 || !site->http_redirect) continue;
+            asio::error_code ec;
+            const asio::ip::address proxy = asio::ip::make_address(n.subject, ec);
+            if (ec || !in_any(site->own_trusted_proxies ? site->trusted_proxies : cfg.trusted_proxies, proxy)) continue;
+            out.push_back({"warn", "proxy_scheme_missing", n.site,
+                           "the trusted proxy " + n.subject + " sends no X-Forwarded-Proto to " + n.site + " (last at " + at(n.last) +
+                               "): agensio takes its requests as plain HTTP, never as HTTPS on a guess, and redirects them to https://, so a visitor "
+                               "who used HTTPS at the proxy comes back through it as plain HTTP and loops (too many redirects)",
+                           "make the proxy send X-Forwarded-Proto (nginx: proxy_set_header X-Forwarded-Proto $scheme; HAProxy: http-request "
+                           "set-header X-Forwarded-Proto https if { ssl_fc }), or connect it to the site over TLS (tls on the site; Cloudflare's "
+                           "Full (strict) mode) (docs/redirects.md 2.4)"});
+        } else if (n.code == "hsts_narrows_application") {
+            if (site->tls_fields.hsts.empty() || !hsts_stronger(n.subject, site->tls_fields.hsts)) continue;
+            out.push_back({"warn", "hsts_narrows_application", n.site,
+                           "the application sends Strict-Transport-Security: " + n.subject + " (noted " + at(n.last) +
+                               "), which commits browsers to more than the site's hsts (" + site->tls_fields.hsts +
+                               "); the site's replaces it, so visitors get the weaker one",
+                           "if the application's value is meant: the site's hsts set to match (hsts = { max_age = \"2y\", subdomains = true } in "
+                           "a hand-written site file), or hsts = false (site_update with hsts: false on a managed site) to let the application's "
+                           "through unchanged; if the site's is meant, nothing to do (docs/redirects.md 4.1)"});
+        }
+    }
+    return out;
+}
+
 json::Value redirect_notes_json(const SiteConfig& s) {
     json::Value notes = json::Value::array();
     for (const auto& [code, text] : s.redirect_notes) notes.push(json::Value::object().set("code", code).set("text", text));

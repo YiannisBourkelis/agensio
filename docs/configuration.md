@@ -1906,6 +1906,9 @@ request reaches agensio over plain HTTP. Such a site has no `tls`, and `http = "
 redirects only the visitors who really used plain HTTP: a request from a `trusted_proxies`
 address marked `X-Forwarded-Proto: https` is served (with the site's HSTS), one marked `http`,
 or a client that is not a trusted proxy, gets the `308` (section 10, [redirects.md](redirects.md) 2.4).
+A trusted proxy that sends no `X-Forwarded-Proto` at all is taken as plain HTTP, never as HTTPS on a
+guess, so its HTTPS visitors would loop; the error log (once a minute) and health
+(`proxy_scheme_missing`, 0.1.0-alpha.86) name the proxy and the site.
 
 **One canonical host: `canonical`** (0.1.0-alpha.81, [redirects.md](redirects.md) 3). One block
 lists every name; `canonical` names the one the others redirect to:
@@ -1964,7 +1967,9 @@ with the rule to write.
 
 **HSTS.** `hsts = true` sends `Strict-Transport-Security: max-age=31536000` (a year, this host
 only) on every answer the site gives over HTTPS: pages, files, PHP, a proxied application, error
-pages and redirects. An application's own copy is replaced, so browsers see one. A plain-HTTP
+pages and redirects. An application's own copy is replaced, so browsers see one; one that commits
+browsers to more (a longer `max-age`, `includeSubDomains`, `preload`) is noted in the error log and by
+health (`hsts_narrows_application`, 0.1.0-alpha.86), and `hsts = false` lets it through. A plain-HTTP
 answer never carries it (RFC 6797 7.2); behind a proxy that ends TLS, an answer the proxy marks
 `X-Forwarded-Proto: https` from `trusted_proxies` does. It is deliberately not automatic: once a
 browser has seen it, it refuses plain http for that host until `max-age` expires, so set it when

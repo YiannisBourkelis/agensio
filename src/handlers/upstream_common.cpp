@@ -2,10 +2,12 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <ctime>
 #include <string>
 #include <system_error>
 
 #include "core/private_cache.hpp"
+#include "core/site_notices.hpp"
 #include "core/strings.hpp"
 #include "response.hpp"
 
@@ -105,6 +107,16 @@ bool rewrite_location(std::string& out, std::string_view value, const Stream& s,
     return true;
 }
 
+// hsts_narrows_application (docs/redirects.md 4.1): the site's hsts replaces the application's own,
+// and one that committed browsers to more is noted, once per generation of the site, so nobody
+// weakens it unknowingly. A weaker or equal one is judged again on later answers.
+void note_hsts_narrowed(const SiteFields& f, std::string_view app, ErrorLog* log) {
+    if (!hsts_stronger(app, f.hsts) || f.hsts_noted.done.exchange(true, std::memory_order_relaxed)) return;
+    if (site_notices().note("hsts_narrows_application", f.site, app, std::time(nullptr)) && log && log->enabled(LogLevel::warn))
+        log->warn(f.site + ": the application sent Strict-Transport-Security: " + std::string(app) + ", stronger than the site's hsts (" + f.hsts +
+                  "), which replaced it; set the site's hsts to the value meant, or hsts = false to let the application's through (docs/redirects.md 4.1)");
+}
+
 bool hidden(std::string_view name, const LocationConfig& loc) {
     for (const auto& h : loc.proxy.hide)
         if (Headers::iequals(h, name)) return true;
@@ -134,7 +146,7 @@ bool upgrade_location(std::string& out, std::string_view value, const SiteConfig
 }
 
 void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<StreamBody> source, const char* log_name,
-                           const LocationConfig& loc) {
+                           const LocationConfig& loc, ErrorLog* log) {
     Response& r = s.response;
     const bool proxied = loc.kind == HandlerKind::proxy;
     r.reset();
@@ -158,7 +170,10 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
             Headers::iequals(h.name, "connection") || Headers::iequals(h.name, "keep-alive") ||
             Headers::iequals(h.name, "server") || Headers::iequals(h.name, "date"))
             continue;
-        if (site_hsts && Headers::iequals(h.name, "strict-transport-security")) continue;
+        if (site_hsts && Headers::iequals(h.name, "strict-transport-security")) {
+            if (h.value != s.fields->hsts && !s.fields->hsts_noted.done.load(std::memory_order_relaxed)) note_hsts_narrowed(*s.fields, h.value, log);
+            continue;
+        }
         if (guarded) {
             if (Headers::iequals(h.name, "cache-control")) {
                 private_cache::keep_directives(h.value, kept);

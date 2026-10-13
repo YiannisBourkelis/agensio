@@ -947,6 +947,8 @@ json::Value Server::health_with(const std::vector<control::Finding>& more) {
         extra.insert(extra.end(), more.begin(), more.end());
     }
     extra.insert(extra.end(), more.begin(), more.end());
+    const auto noticed = control::notice_findings(cfg, site_notices().snapshot(), std::time(nullptr));  // what requests saw
+    extra.insert(extra.end(), noticed.begin(), noticed.end());
     const control::TlsFacts tls = tls_facts();
     return control::health(cfg, cfg_, as_root, std::time(nullptr), extra, &tls);
 }

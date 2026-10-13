@@ -1156,9 +1156,11 @@ a path that meets none, a redirect hit, and a TLS site with `hsts` against one w
 4. **Health:** `hsts_suggested`, `hsts_narrows_application`, `app_redirects_elsewhere`,
    `proxy_scheme_missing`, and the certificate findings raised a level with `hsts`. 4a built in
    alpha.84: `hsts_suggested` (with `hsts = false` rendered for a managed site's decided no and
-   `ctl --no-hsts`), the two certificate findings raised, `app_redirects_elsewhere`; 4b
-   (`hsts_narrows_application`, `proxy_scheme_missing`) records what the request path sees, so it
-   comes with its A/B.
+   `ctl --no-hsts`), the two certificate findings raised, `app_redirects_elsewhere`; 4b in
+   alpha.86: `proxy_scheme_missing` (noted on the redirect of a trusted proxy's request without
+   `X-Forwarded-Proto`, each worker at most once a minute per site) and `hsts_narrows_application`
+   (noted on the first stronger application value per generation of the site), both through
+   `core/site_notices.hpp` to health and the error log, with the A/B of the request path.
 5. **The agent's side:** `site_update` fields, `agensio ctl` flags, the MCP texts of 11.2 and 12.3,
    the reference rows, the cookbook recipes linking here; this document installed with the others.
 

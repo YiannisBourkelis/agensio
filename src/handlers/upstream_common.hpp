@@ -11,6 +11,7 @@
 
 #include "config.hpp"
 #include "core/stream.hpp"
+#include "services/log.hpp"
 #include "upstream/client.hpp"
 
 namespace agensio {
@@ -32,8 +33,10 @@ void collect_request_body(Stream& s, UpstreamBodyInput& body, std::size_t memory
 // redirects an http:// one naming the site goes out as https://), the location's
 // add_headers on 2xx/3xx, and the body as the result carries it. `source` is the
 // streaming body when the result is streamed. `log_name` is the access log's upstream field.
+// On a site with hsts the application's own is replaced; a stronger one is noted once per
+// generation of the site for health and `log` (docs/redirects.md 4.1).
 void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<StreamBody> source, const char* log_name,
-                           const LocationConfig& loc);
+                           const LocationConfig& loc, ErrorLog* log);
 
 // docs/redirects.md 2.5: an application's own http:// Location naming one of the site's names (with
 // no port, port 80 or the site's TLS port, as the Host it was given) appended to `out` as https://
