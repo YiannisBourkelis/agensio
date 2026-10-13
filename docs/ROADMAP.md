@@ -459,8 +459,8 @@ deliverable, not a bare command set. Scope and rules agreed that day:
   missing decisions and a suggestion for each (a username derived from the domain,
   `https = "auto"`, the preset matching the files under the root); the agent turns that
   into questions and the MCP host asks for confirmation before the mutation. A new site
-  defaults to HTTPS-only: `tls = "auto"` on 443 and `redirect = "https"` on 80; plain
-  HTTP needs an explicit `https = "none"`.
+  defaults to HTTPS-only: `tls = "auto"` on 443, whose port 80 redirects (one block since
+  0.1.0-alpha.76, the site's `http` key); plain HTTP needs an explicit `https = "none"`.
 - **Root-only work is never executed by agensio or the bridge.** Creating the OS user,
   stopping or restarting the service, reloading php-fpm: the tool answers with the exact
   commands to run as root and states that it waits for them; the agent shows them, the
@@ -931,7 +931,8 @@ misbehaviour counters against every published attack class up to the 2026 HTTP/2
       certificate. Unit tests: JSON, base64url, JWS sign/verify, renewal rule, config rules.
       Same day: `redirect = "https"` (or an `https://host:port` prefix) on the plain site
       for HTTPS-only setups: 301 to the same host and target, no root needed, the
-      challenge still answered first; HSTS stays an explicit `add_headers`.
+      challenge still answered first; HSTS stays an explicit `add_headers`. (Replaced by `hsts`
+      in 0.1.0-alpha.75 and the TLS site's own `http` key in 0.1.0-alpha.76, docs/redirects.md.)
 - [ ] H3a Certificates, next: TLS-ALPN-01 (no port 80), **DNS-01 with a provider
       interface** (HTTP-01-only is the main criticism of nginx's 2025 module and DNS
       challenges are Caddy's second most upvoted request; wildcards need it), external

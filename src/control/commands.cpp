@@ -252,15 +252,18 @@ CertificateState certificate_state(const TlsConfig& tls, std::time_t now) {
     return st;
 }
 
-// Several sites may carry the name (the :80 redirect and the :443 site of an HTTPS-only
-// setup): the one that serves content wins, then the TLS one, then the first.
+// Several sites may carry the name (a site on other addresses, a whole-domain redirect beside
+// it): the one that serves content wins, then the TLS one, then the first.
 bool is_catch_all(const SiteConfig& s) {
     return s.is_default || std::find(s.server_names.begin(), s.server_names.end(), "*") != s.server_names.end();
 }
 
 bool listener_has_catch_all(const Config& cfg, const std::string& address) {
-    for (const auto& s : cfg.sites)
-        if (is_catch_all(s) && std::find(s.listen.begin(), s.listen.end(), address) != s.listen.end()) return true;
+    for (const auto& s : cfg.sites) {
+        if (!is_catch_all(s)) continue;
+        const std::vector<std::string> at = site_addresses(s);
+        if (std::find(at.begin(), at.end(), address) != at.end()) return true;
+    }
     return false;
 }
 
@@ -315,6 +318,7 @@ json::Value site_summary(const SiteConfig& s, std::time_t now, const TlsFacts* t
     v.set("root", s.root).set("app", s.app).set("user", s.user).set("group", s.group);
     v.set("encoded_slashes", s.encoded_slashes_allow ? "allow" : "deny");
     v.set("trusted_proxies", s.own_trusted_proxies ? strings(s.trusted_proxies_text) : json::Value(nullptr));  // null: [server]'s list
+    v.set("http", http_mode(s)).set("http_listen", strings(s.http_listen));  // what plain HTTP gets, and where (docs/redirects.md 2)
     if (!s.redirect.empty()) v.set("redirect", s.redirect);
     v.set("catch_all", is_catch_all(s));
     if (s.carried) v.set("last_good_version", true);  // its file was set aside on reload (design section 26)
@@ -1032,20 +1036,23 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
     }
 #endif
 
-    // Certificates, redirects and port 80.
+    // Certificates, redirects and port 80: the site's own plain addresses (http, docs/redirects.md
+    // 2), or a plain site of its own covering its names.
+    auto on_80 = [](const std::vector<std::string>& at) {
+        for (const auto& a : at)
+            if (a.ends_with(":80")) return true;
+        return false;
+    };
     auto has_plain = [&](const SiteConfig& tls_site, bool need_redirect, bool need_port_80) {
+        if (!tls_site.http_listen.empty() && (!need_redirect || tls_site.http_redirect) && (!need_port_80 || on_80(tls_site.http_listen))) return true;
         for (const auto& p : running.sites) {
             if (p.tls) continue;
-            if (need_redirect && p.redirect.empty()) continue;
+            if (need_redirect && !p.http_redirect && p.redirect.empty()) continue;
             bool covers = true;
             for (const auto& n : tls_site.server_names)
                 covers = covers && std::find(p.server_names.begin(), p.server_names.end(), n) != p.server_names.end();
             if (!covers) continue;
-            if (need_port_80) {
-                bool on_80 = false;
-                for (const auto& a : p.listen) on_80 = on_80 || a.ends_with(":80");
-                if (!on_80) continue;
-            }
+            if (need_port_80 && !on_80(p.listen)) continue;
             return true;
         }
         return false;
@@ -1142,11 +1149,12 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
                     acme_fix);
         }
         if (s.tls->automatic && !has_plain(s, false, true))
-            add("warn", "acme_needs_port_80", name, "tls = \"auto\" but no plain site on port 80 covers these names",
-                "add a [[site]] on 0.0.0.0:80 with the same server_name (redirect = \"https\")");
-        if (!has_plain(s, true, false))
-            add("info", "no_http_redirect", name, "no plain site redirects these names to https",
-                "add a [[site]] on port 80 with redirect = \"https\"");
+            add("warn", "acme_needs_port_80", name, "tls = \"auto\" but nothing answers plain HTTP on port 80 for these names (the CA's HTTP-01 check)",
+                s.http == SiteConfig::Http::off && s.http_given ? "remove http = \"off\" (a site on port 443 listens on port 80 beside it), or name the address: http = { listen = [\"0.0.0.0:80\"] }"
+                                                                : "name port 80 for the site: http = { listen = [\"0.0.0.0:80\"] }");
+        if (!s.http_given && !has_plain(s, true, false))
+            add("info", "no_http_redirect", name, "plain HTTP is not redirected to HTTPS for these names: the site listens on no port 443, so it opens no plain listener",
+                "name one, and the redirect keeps the site's TLS port: http = { listen = [\"0.0.0.0:80\"] }");
     }
     for (const auto& h : disk_held) held_finding(h, true);  // the next reload's, not said above
 

@@ -119,7 +119,8 @@ For every request, before any location is chosen, in this order:
 
 1. the path is normalised (percent-decoding, dot segments, duplicate slashes);
 2. an ACME HTTP-01 challenge is answered (so `tls = "auto"` works on a protected site);
-3. the site is found by its host; a site with `redirect = "https"` redirects;
+3. the site is found by its host; a whole-domain `redirect` redirects, and plain HTTP to a site
+   whose `http` is `"redirect"` gets its `308` to HTTPS (certificate validation paths excepted);
 4. `refuse` patterns (404);
 5. the access rules, `[[site.access]]` (403);
 6. **the password rules**;

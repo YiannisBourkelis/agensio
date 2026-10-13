@@ -132,14 +132,10 @@ error = "/var/log/agensio/error.log"
 admins = "agensio-admin"
 ```
 
-`/etc/agensio/sites.d/example.com.toml`, an HTTPS-only site:
+`/etc/agensio/sites.d/example.com.toml`, an HTTPS-only site (port 80 beside 443 answers plain
+HTTP with a redirect to HTTPS by itself):
 
 ```toml
-[[site]]
-server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:80"]
-redirect = "https"
-
 [[site]]
 server_name = ["example.com", "www.example.com"]
 listen = ["0.0.0.0:443"]

@@ -611,8 +611,8 @@ std::vector<AccessNotice> access_notices_for(const SiteSpec& spec, const Config&
     view.address_sets = cfg.address_sets;
     SiteConfig site;
     site.server_names = {spec.domain};
-    if (spec.https == "none" || !spec.redirect_http) site.listen.push_back(spec.listen_plain);
-    if (spec.https != "none") site.listen.push_back(spec.listen_tls);
+    site.listen.push_back(spec.https == "none" ? spec.listen_plain : spec.listen_tls);
+    if (spec.https != "none") site.http_listen.push_back(spec.listen_plain);
     json::Value all = json::Value::array();
     for (const auto& r : spec.rules["restricted"].items()) all.push(r);
     for (const auto& r : admin.items()) all.push(r);
@@ -856,6 +856,10 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
         error = "https as a table needs cert and key";
         return needs;
     }
+    if (spec.https != "none" && spec.hsts && !spec.redirect_http) {  // http = "serve" with hsts, refused at load too
+        error = "hsts with redirect_http false: HSTS tells browsers to use only HTTPS, which contradicts serving plain HTTP on purpose; drop one of them";
+        return needs;
+    }
     // A Rails application lives in app/ beside web/ (docs/design-site-operations.md 2b): its
     // directory holds config/master.key and the databases, and is never a document root.
     if (spec.root.empty() && spec.app != "proxy")
@@ -1011,22 +1015,21 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
             if (r.get("mode") == "report") s += "mode = \"report\"\n";
         }
     };
-    if (!tls || !spec.redirect_http) {
-        out += "\n[[site]]\nserver_name = " + toml_list(names) + "\nlisten = " + toml_list({spec.listen_plain}) + "\n";
-        site_body(out);
-        rules_locations(out);
-    } else {
-        out += "\n[[site]]\nserver_name = " + toml_list(names) + "\nlisten = " + toml_list({spec.listen_plain}) +
-               "\nredirect = \"https\"\n";
-    }
+    // One block for both schemes (docs/redirects.md 2, alpha.76): an HTTPS site answers its plain
+    // port by its http key, which is left out for the port 80 beside 443 that redirects.
+    out += "\n[[site]]\nserver_name = " + toml_list(names) + "\nlisten = " + toml_list({tls ? spec.listen_tls : spec.listen_plain}) + "\n";
+    site_body(out);
     if (tls) {
-        out += "\n[[site]]\nserver_name = " + toml_list(names) + "\nlisten = " + toml_list({spec.listen_tls}) + "\n";
-        site_body(out);
         if (spec.https == "auto") out += "tls = \"auto\"\n";
         else out += "tls = { cert = " + toml_string(spec.cert) + ", key = " + toml_string(spec.key) + " }\n";
+        const bool beside_443 = spec.listen_tls.ends_with(":443") && spec.listen_plain == spec.listen_tls.substr(0, spec.listen_tls.size() - 3) + "80";
+        if (!beside_443)
+            out += "http = { listen = " + toml_list({spec.listen_plain}) + (spec.redirect_http ? "" : ", mode = \"serve\"") + " }\n";
+        else if (!spec.redirect_http)
+            out += "http = \"serve\"\n";
         if (spec.hsts) out += "hsts = true   # Strict-Transport-Security on every HTTPS answer, a year (docs/redirects.md 4)\n";
-        rules_locations(out);
     }
+    rules_locations(out);
     return out;
 }
 
@@ -1148,11 +1151,10 @@ std::vector<Problem> preflight(const SiteSpec& spec, const Config& cfg, bool pri
     // looks like a permission problem.
     if (!privileged) {
         for (const std::string& address : {spec.listen_plain, spec.listen_tls}) {
-            const bool used = address == spec.listen_plain ? (spec.https == "none" || spec.redirect_http) : spec.https != "none";
-            if (!used) continue;
+            if (address == spec.listen_tls && spec.https == "none") continue;  // the plain port is always used (http)
             bool bound = false;
             for (const auto& s : cfg.sites)
-                for (const auto& l : s.listen) bound = bound || l == address;
+                for (const auto& l : site_addresses(s)) bound = bound || l == address;
             const std::size_t colon = address.rfind(':');
             const int port = colon == std::string::npos ? 0 : std::atoi(address.c_str() + colon + 1);
             if (!bound && port > 0 && port < 1024)

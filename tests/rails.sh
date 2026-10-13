@@ -122,7 +122,7 @@ ASSET=$(python3 -c "import json; m=json.load(open('$APP/public/assets/.manifest.
 check "a precompiled asset comes through agensio" "200" "$(curl -sS $H -o /dev/null -w '%{http_code}' https://r5.test:18543/assets/$ASSET)"
 check "a credential path is refused by agensio itself, never proxied to Puma (no x-request-id)" "404 no" "$(curl -sS $H -D $T/probe.h -o /dev/null -w '%{http_code}' https://r5.test:18543/config/master.key) $(grep -qi '^x-request-id' $T/probe.h && echo yes || echo no)"
 check "databases and logs by their ending, and all of /storage/, are refused by agensio (no x-request-id)" "404 404 no" "$(curl -sS $H -D $T/probe2.h -o /dev/null -w '%{http_code}' https://r5.test:18543/storage/production.sqlite3) $(curl -sS $H -o /dev/null -w '%{http_code}' https://r5.test:18543/x/y/production.LOG) $(grep -qi '^x-request-id' $T/probe2.h && echo yes || echo no)"
-check "plain http is redirected to https" "301" "$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: r5.test' http://127.0.0.1:18580/up)"
+check "plain http is redirected to https" "308" "$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: r5.test' http://127.0.0.1:18580/up)"
 check "the audit log has each task with the argv that ran" "5" "$(grep -c 'sites/r5.test/task (live): ran as r5 .* -> exit 0' $T/logs/audit.log)"
 check "health: no PHP finding and no unreadable-files finding for the Rails site" "no" "$(ctl health | grep -q 'php_tmp_missing\|pools_stale\|files_unreadable' && echo yes || echo no)"
 

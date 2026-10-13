@@ -162,7 +162,18 @@ section of `docs/configuration.md` that explains the key.
 
 | key | type | default | meaning | applies | via | doc |
 |---|---|---|---|---|---|---|
-| `redirect` | "https" or "https://host[:port]" | (none) | Answer every request with a 301 to https (same host) or to a fixed prefix; the site needs no root then. | reload | site-create (redirect_http) | 14 |
+| `http` | "redirect" \| "serve" \| "off" \| { listen, mode } | "redirect" for a TLS site on port 443, "off" for one elsewhere, "serve" without TLS | What a request over plain HTTP gets. A TLS site on port 443 also listens on port 80 at the same addresses and answers there with a 308 to the same name and path over HTTPS (kept a day); the ACME challenge and /.well-known/pki-validation/ are served from the site first. "serve" serves plain HTTP too (refused with hsts), "off" opens no plain listener. Without TLS, "redirect" is for a proxy in front that holds the certificate: requests a trusted proxy does not mark https are redirected. | reload (a new privileged port needs a restart) | site-create (redirect_http) | 14 |
+## `http = {}`
+
+| key | type | default | meaning | applies | via | doc |
+|---|---|---|---|---|---|---|
+| `listen` | list of host:port | (required in the table) | The plain addresses of a TLS site on another port than 443, or other than port 80 beside it; the redirect names the site's TLS port. | reload (a new privileged port needs a restart) | site-create (listen_plain) | 14 |
+| `mode` | "redirect" \| "serve" | "redirect" | What the plain addresses of the table answer: the 308 to HTTPS, or the site itself. | reload | site-create (redirect_http) | 14 |
+## `[[site]]`
+
+| key | type | default | meaning | applies | via | doc |
+|---|---|---|---|---|---|---|
+| `redirect` | "https://host[:port]" | (none) | Answer every request with a 301 to the prefix plus the path (a whole domain moved there); the site needs no root then. "https" is gone since 0.1.0-alpha.76: a TLS site redirects its own plain HTTP (http). | reload | site file | 14 |
 | `default` | bool | false | This site is its listener's catch-all (like server_name = ["*"]). | reload | site file | 1b |
 | `hidden_files` | bool | false | Serve dot-files (.env, .git) instead of answering 404; /.well-known/ at the root is served either way. | reload | site file | 1 |
 | `refuse` | list of path patterns | (none) | Paths the site answers 404 whichever location would serve them, gitignore-style: /vendor/ from the root (the directory and everything below), composer.json or *.yaml a name in any directory, '*' any run of characters within one segment (/ext/*/Resources/Private/), '**' any number of directories (/fileadmin/templates/**/*.ts). No regex and no order: a match is a 404, so no location can step around it. Case and trailing dots are ignored; checked before the locations, on every internal redirect and on a directory's index file. A pattern that would refuse the site's index, a try_files fallback or an exact location that runs something is an error. At most 64 patterns of 200 characters. For an application without a preset, its official server configuration's denials go here (rules.refuse on a managed site). | reload | site file, site-create (rules.refuse) | 6b |

@@ -1430,7 +1430,7 @@ void ControlHandler::site_create(Stream& s, const json::Value& body, std::string
                           "), not " + spec.app + ": the " + spec.app + " preset's refusals do not fit them (health reports it as preset_mismatch); use app: " + detected);
     }
     for (const std::string& address : {spec.listen_plain, spec.listen_tls}) {
-        const bool used = address == spec.listen_plain ? (spec.https == "none" || spec.redirect_http) : spec.https != "none";
+        const bool used = address == spec.listen_plain || spec.https != "none";  // the plain port always (http)
         if (used && !control::listener_has_catch_all(cfg, address))
             warnings.push("requests to " + address + " with a Host this site does not list answer 421 Misdirected Request "
                           "(also by IP address); add a site with server_name = [\"*\"] on it for a catch-all");

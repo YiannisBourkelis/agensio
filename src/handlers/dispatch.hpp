@@ -62,6 +62,7 @@ private:
     // so a POST to a Laravel route reaches /index.php as nginx would route it; the static
     // handler then answers 405 only if the request resolves to an actual file.
     bool check_method(Stream& s, const LocationConfig& loc, WorkerState& ws);
+    void redirect_prefix(Stream& s, const SiteConfig& site);
     void redirect_https(Stream& s, const SiteConfig& site);
     void misdirected(Stream& s);
     // [[site.access]] (core/access.hpp): every reading of `path` judged by its deciding rule.

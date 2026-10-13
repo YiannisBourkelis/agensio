@@ -261,13 +261,15 @@ listen = ["127.0.0.1:8448"]
 root = "{root}/bench/www"
 tls = {{ cert = "{root}/bench/tmp/certs-b/cert.pem", key = "{root}/bench/tmp/certs-b/key.pem" }}
 """
-# HTTPS-only sites (H3): the plain listener redirects, to the Host or to a fixed prefix.
+# Redirects on a plain listener: http = "redirect" (docs/redirects.md 2.4, a proxy in front holds
+# the certificate: what 127.0.0.1, a trusted proxy here, marks https is served), and a fixed prefix.
 text += f"""
 [[site]]
 server_name = ["redir.test"]
 listen = ["127.0.0.1:8092"]
 default = true
-redirect = "https"
+root = "{root}/bench/www"
+http = "redirect"
 
 [[site]]
 server_name = ["fixed.test"]
@@ -775,14 +777,18 @@ fi
 "$BIN" -t --explain -c bench/tmp/agensio-test.toml > bench/tmp/explain.out 2>bench/tmp/explain.err
 check "explain: preset expansion is printed" "yes" "$(grep -q '# from preset:laravel' bench/tmp/explain.out && echo yes)"
 check "explain: -t reports OK" "yes" "$("$BIN" -t -c bench/tmp/agensio-test.toml 2>/dev/null | grep -q 'is OK' && echo yes)"
-# ---- HTTPS only (H3): redirect = "https" on the plain site ----
+# ---- http = "redirect" on a plain site (docs/redirects.md 2.4) and a fixed prefix ----
 R=http://127.0.0.1:8092
-check "redirect: 301 to https on the same host, port dropped, query kept" "301 https://redir.test/a/b?x=1" "$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Host: redir.test:8092' "$R/a/b?x=1")"
+check "redirect: 308 to https on the same host, port dropped, query kept" "308 https://redir.test/a/b?x=1" "$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Host: redir.test:8092' "$R/a/b?x=1")"
 check "redirect: fixed prefix with a port" "301 https://secure.test:8443/p?q" "$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Host: fixed.test' "$R/p?q")"
-check "redirect: POST is redirected too, HEAD has no body" "301 301 0" "$(curl -sS -o /dev/null -w '%{http_code} ' -X POST -d a=b "$R/x" -H 'Host: redir.test')$(curl -sS -I -o /dev/null -w '%{http_code} %{size_download}' "$R/x" -H 'Host: redir.test')"
+check "redirect: POST is redirected too, method kept (308), HEAD has no body" "308 308 0" "$(curl -sS -o /dev/null -w '%{http_code} ' -X POST -d a=b "$R/x" -H 'Host: redir.test')$(curl -sS -I -o /dev/null -w '%{http_code} %{size_download}' "$R/x" -H 'Host: redir.test')"
 check "redirect: HTTP/1.0 without Host uses the site's name" "https://redir.test/y" "$(printf 'GET /y HTTP/1.0\r\n\r\n' | ncq 127.0.0.1 8092 | tr -d '\r' | awk '/^Location:/{print $2}')"
-check "redirect: an unknown ACME token is redirected, not served" "301" "$(code -H 'Host: redir.test' "$R/.well-known/acme-challenge/nothing")"
-check "redirect: keep-alive survives" "301 1 301 0" "$(curl -sS -o /dev/null -o /dev/null -w '%{http_code} %{num_connects} ' -H 'Host: redir.test' "$R/1" "$R/2" | sed 's/ $//')"
+check "redirect: an unknown ACME token is answered from the site's files (404), not redirected" "404" "$(code -H 'Host: redir.test' "$R/.well-known/acme-challenge/nothing")"
+check "redirect: keep-alive survives" "308 1 308 0" "$(curl -sS -o /dev/null -o /dev/null -w '%{http_code} %{num_connects} ' -H 'Host: redir.test' "$R/1" "$R/2" | sed 's/ $//')"
+check "redirect: a listed name is kept a day, a name only the catch-all took is never stored and written as sent" \
+  "max-age=86400 308 https://Other.Test/z no-store" \
+  "$(curl -sS -D - -o /dev/null -H 'Host: REDIR.test' "$R/z" | tr -d '\r' | grep -i '^cache-control:' | sed 's/^[^:]*: //') $(curl -sS -D - -o /dev/null -H 'Host: Other.Test' "$R/z" | tr -d '\r' | awk 'NR==1{c=$2} tolower($1)=="location:"{l=$2} tolower($1)=="cache-control:"{k=$2} END{print c, l, k}')"
+check "redirect: what a trusted proxy marks https is served, what it marks http is redirected" "200 308" "$(code -H 'Host: redir.test' -H 'X-Forwarded-Proto: https' "$R/") $(code -H 'Host: redir.test' -H 'X-Forwarded-Proto: http' "$R/")"
 
 # ---- control socket (F0/F1): status as the server's own user, roles, JSON errors ----
 CS=bench/tmp/control.sock
@@ -1026,7 +1032,7 @@ check "cookbook: every recipe of docs/examples.md loads and names what exists (t
 # One broken site file never stops the others (design section 26; tests/isolation.sh, its own server).
 check "isolation: a site file that does not load is set aside, the other sites serve (tests/isolation.sh)" "0" \
   "$(tests/isolation.sh "$BIN" > bench/tmp/isolation.out 2>&1; echo $?)"
-check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 187 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
+check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 190 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
 check "secrets: the presets catalogue lists each preset's credential files" "/wp-config.php /sites/default/settings.php" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["wordpress"]["secrets"][0], p["drupal"]["secrets"][0])')"
 check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$("$BIN" ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; "$BIN" ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
@@ -1326,6 +1332,21 @@ print(" ".join(out))
 PYT
 )"
 cpost /v1/sites/acc.test/delete '{"confirm":true,"reason":"acc"}' > /dev/null
+# Plain HTTP of an HTTPS site (docs/redirects.md 1, 2): certificate validation is answered from the
+# site's files before the redirect, so a tool that writes into the root (certbot --webroot, a CA's
+# file check) works; everything else gets a 308 to the TLS port, kept for a day. Before alpha.76 the
+# plain block was a separate `redirect = "https"` site with no root: a 301 for the challenge too, to
+# port 443 whatever port the site's TLS listened on.
+mkdir -p bench/tmp/certsite/.well-known/acme-challenge bench/tmp/certsite/.well-known/pki-validation
+printf 'tok1-body' > bench/tmp/certsite/.well-known/acme-challenge/tok1
+printf 'pki-body' > bench/tmp/certsite/.well-known/pki-validation/fileauth.txt
+printf 'home\n' > bench/tmp/certsite/index.html
+cpost /v1/sites "{\"domain\":\"certs.wild.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-wild/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-wild/key.pem\"},\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/bench/tmp/certsite\",\"listen_plain\":\"127.0.0.1:8454\",\"listen_tls\":\"127.0.0.1:8453\",\"confirm\":true,\"reason\":\"certs\"}" > /dev/null
+plain80() { curl -s -H 'Host: certs.wild.test' "$@"; }
+check "http: a managed HTTPS site's plain port serves the ACME challenge and a pki-validation file from the root, a missing one is 404, the rest is a 308 to the TLS port kept for a day" \
+  "tok1-body pki-body 404 308 https://certs.wild.test:8453/x?y=1 max-age=86400" \
+  "$(plain80 http://127.0.0.1:8454/.well-known/acme-challenge/tok1) $(plain80 http://127.0.0.1:8454/.well-known/pki-validation/fileauth.txt) $(code -H 'Host: certs.wild.test' http://127.0.0.1:8454/.well-known/acme-challenge/nope) $(plain80 -o /dev/null -w '%{http_code} %{redirect_url}' 'http://127.0.0.1:8454/x?y=1') $(plain80 -D - -o /dev/null http://127.0.0.1:8454/ | tr -d '\r' | grep -i '^cache-control:' | sed 's/^[^:]*: //')"
+cpost /v1/sites/certs.wild.test/delete '{"confirm":true,"reason":"certs"}' > /dev/null
 # rules.admin on a managed WordPress site (2026-10-07): the admin paths in one field, the
 # login page only on request, what the public site needs below /wp-admin kept open.
 if [ -n "$PHPFPM" ]; then
@@ -1731,7 +1752,7 @@ rm -f $P/comp.css
 # ---- Per-site protocols: a TLS listener kept at HTTP/1.1 while the server offers h2 ----
 check "protocols: a site with protocols = [\"h1\"] offers no h2 through ALPN; curl --http2 gets HTTP/1.1" "1.1 200 http/1.1" "$(command curl -sSk --http2 -H 'Host: b.test' -o /dev/null -w '%{http_version} %{http_code}' https://127.0.0.1:8447/) $(echo | openssl s_client -connect 127.0.0.1:8447 -alpn h2,http/1.1 2>/dev/null | grep -m1 '^ALPN protocol:' | sed 's/.*: //')"
 check "protocols: status names each listener's own protocols" "h1 | h2,h1$H3STATUS | h2c,h1" "$(curl -sS --unix-socket bench/tmp/control.sock http://control/v1/status | python3 -c 'import json,sys; d=json.load(sys.stdin); ls={l["address"]:",".join(l["protocols"]) for l in d["listeners"]}; print(ls["127.0.0.1:8447"], "|", ls["127.0.0.1:8443"], "|", ls["127.0.0.1:8080"])')"
-check "protocols: -t refuses two sites on one address with different lists" "yes" "$(printf '[[site]]\nlisten = ["127.0.0.1:18090"]\nroot = "%s/bench/www"\n[[site]]\nserver_name = ["b"]\nlisten = ["127.0.0.1:18090"]\nroot = "%s/bench/www"\nprotocols = ["h1"]\n' "$ROOT" "$ROOT" > bench/tmp/proto-bad.toml; out=$("$BIN" -t -c bench/tmp/proto-bad.toml 2>&1); echo "$out" | grep -q 'list different protocols' && echo yes || echo "$out" | head -c 300)"
+check "protocols: -t refuses two sites on one address with different lists (on a plain address, h2c: a plain listener speaks nothing else)" "yes" "$(printf '[server]\nprotocols = ["h2c", "h1"]\n[[site]]\nlisten = ["127.0.0.1:18090"]\nroot = "%s/bench/www"\n[[site]]\nserver_name = ["b"]\nlisten = ["127.0.0.1:18090"]\nroot = "%s/bench/www"\nprotocols = ["h1"]\n' "$ROOT" "$ROOT" > bench/tmp/proto-bad.toml; out=$("$BIN" -t -c bench/tmp/proto-bad.toml 2>&1); echo "$out" | grep -q 'list different protocols' && echo yes || echo "$out" | head -c 300)"
 
 # ---- The HttpArena benchmark handler (build option; the arena's validator is the full contract) ----
 if [ "$ARENA" = 1 ]; then

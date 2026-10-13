@@ -474,14 +474,17 @@ ProtectionInput protection_input(const Config& cfg, const UidLookup& uid_of, std
     in.error_log_warn = cfg.log.level != "error";
     for (const auto& s : cfg.sites) {
         if (!s.server_names.empty() && std::any_of(s.auth.begin(), s.auth.end(), [](const AuthRule& r) { return !r.open; })) add_unique(in.auth_sites, s.server_names.front());
-        for (const auto& l : s.listen) {
+        const std::size_t own = s.listen.size();
+        const std::vector<std::string> addresses = site_addresses(s);  // a TLS site's plain port 80 too (http)
+        for (std::size_t i = 0; i < addresses.size(); ++i) {
+            const std::string& l = addresses[i];
             const std::size_t colon = l.rfind(':');
             if (colon == std::string::npos) continue;
             const unsigned port = static_cast<unsigned>(std::atoi(l.c_str() + colon + 1));
             if (loopback_listen(l) || !port) continue;  // config.cpp: the parsed address, shared with health
             in.exposed = true;
             add_unique(in.tcp_ports, port);
-            if (s.tls && s.h3) add_unique(in.udp_ports, port);
+            if (i < own && s.tls && s.h3) add_unique(in.udp_ports, port);
         }
         const std::string name = s.server_names.empty() ? std::string() : s.server_names.front();
         LoginJail* jail = nullptr;

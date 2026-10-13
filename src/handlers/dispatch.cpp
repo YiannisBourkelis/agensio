@@ -397,38 +397,73 @@ void Dispatcher::refuse_access(Stream& s, std::string_view address) {
     r.body = MemoryBody{std::string_view(r.buffer)};
 }
 
-// `redirect = "https"`: 301 to the same host and target over https. The host comes from
-// the Host header without its port (the target listens on 443), or from the configured
-// prefix; an HTTP/1.0 request without Host gets the site's first name.
-void Dispatcher::redirect_https(Stream& s, const SiteConfig& site) {
-    const Request& req = s.request;
+namespace {
+
+// A redirect answer: the canned page for its status, the Location, and the cache lifetime when given.
+void redirect_answer(Stream& s, int status, std::string_view location, std::string_view cache_control) {
     Response& r = s.response;
-    std::string& location = r.scratch;
-    if (site.redirect == "https") {
-        std::string_view host = req.host;
-        if (host.empty()) host = site.server_names.front();
-        const std::size_t bracket = host.rfind(']');
-        const std::size_t colon = host.rfind(':');
-        if (colon != std::string_view::npos && (bracket == std::string_view::npos || colon > bracket))
-            host = host.substr(0, colon);
-        if (host.empty() || host == "*") {
-            static_.error(s, 400, false);
-            return;
-        }
-        location.assign("https://").append(host);
-    } else {
-        location.assign(site.redirect);
-    }
-    if (!req.target.empty() && req.target.front() == '/') location.append(req.target);
-    else location.push_back('/');
-    const ErrorPage& page = error_page(301);
-    r.status = 301;
-    r.head = req.method == Method::head;
+    const ErrorPage& page = error_page(status);
+    r.status = status;
+    r.head = s.request.method == Method::head;
     r.headers.add("Location", location);
+    if (!cache_control.empty()) r.headers.add("Cache-Control", cache_control);
     r.prebuilt_headers = page.headers;
     r.prebuilt_h2 = page.h2_headers;
     r.content_type = "text/html; charset=utf-8";
     r.body = MemoryBody{page.body};
+}
+
+void append_target(std::string& location, std::string_view target) {
+    if (!target.empty() && target.front() == '/') location.append(target);
+    else location.push_back('/');
+}
+
+// Certificate validation (docs/redirects.md 1): the ACME HTTP-01 tokens (RFC 8555 8.3) and a CA's
+// file check, which a certificate tool writes into the site's root; answered over plain HTTP from
+// the site's files before any redirect, so no setting can break a certificate's issue or renewal.
+bool certificate_validation(std::string_view path) noexcept {
+    return path.starts_with("/.well-known/acme-challenge/") || path.starts_with("/.well-known/pki-validation/");
+}
+
+}  // namespace
+
+// `redirect = "https://host[:port]"`: a whole domain moved, 301 to the prefix plus the target.
+void Dispatcher::redirect_prefix(Stream& s, const SiteConfig& site) {
+    std::string& location = s.response.scratch;
+    location.assign(site.redirect);
+    append_target(location, s.request.target);
+    redirect_answer(s, 301, location, "");
+}
+
+// http = "redirect" (docs/redirects.md 2, 7): 308 to the same name and target over https, on the
+// site's TLS port. A name the site lists is written as listed and the answer kept a day (without a
+// lifetime Chromium keeps a permanent redirect forever, and a mistake could not be undone); a name
+// only a catch-all took is the client's own choice, written as sent and never stored. An HTTP/1.0
+// request without Host gets the site's first name.
+void Dispatcher::redirect_https(Stream& s, const SiteConfig& site) {
+    const Request& req = s.request;
+    std::string_view host = req.host;
+    if (host.empty()) host = site.server_names.front();
+    const std::size_t bracket = host.rfind(']');
+    const std::size_t colon = host.rfind(':');
+    if (colon != std::string_view::npos && (bracket == std::string_view::npos || colon > bracket)) host = host.substr(0, colon);
+    if (!host.empty() && host.back() == '.') host.remove_suffix(1);
+    if (host.empty() || host == "*") {
+        static_.error(s, 400, false);
+        return;
+    }
+    bool listed = false;
+    for (const auto& n : site.server_names)
+        if (n != "*" && Headers::iequals(n, host)) {
+            host = n;
+            listed = true;
+            break;
+        }
+    std::string& location = s.response.scratch;
+    location.assign("https://").append(host);
+    if (site.https_port != 443) location.append(":").append(std::to_string(site.https_port));
+    append_target(location, req.target);
+    redirect_answer(s, 308, location, listed ? "max-age=86400" : "no-store");
 }
 
 // 421 Misdirected Request (RFC 9110 15.5.22): this listener, or on TLS this connection's
@@ -500,6 +535,13 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
     // carries them, the error pages and redirects below included; a plain one never does (RFC 6797 7.2).
     if (!site->tls_fields.empty() && (s.conn.tls || s.conn.forwarded_https)) s.fields = &site->tls_fields;
     if (!site->redirect.empty()) {
+        redirect_prefix(s, *site);
+        return nullptr;
+    }
+    // http = "redirect" (docs/redirects.md 2): plain HTTP, or a request a trusted proxy did not mark
+    // https, goes to HTTPS; certificate validation is served from the site first. One flag test
+    // for a site that does not redirect, and on TLS one more.
+    if (site->http_redirect && !s.conn.tls && !s.conn.forwarded_https && !certificate_validation(ws.path)) {
         redirect_https(s, *site);
         return nullptr;
     }

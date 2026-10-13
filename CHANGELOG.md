@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.1.0-alpha.76
+
+- **One block for HTTP and HTTPS: a site's `http` key** (`docs/redirects.md` 2, configuration.md
+  14). A TLS site on port 443 now also listens on port 80 at the same addresses and answers plain
+  HTTP itself with a `308` to the same name, path and query over HTTPS, with `Cache-Control:
+  max-age=86400` (Chromium keeps a permanent redirect without a lifetime forever; a name only a
+  catch-all took gets `no-store`). `http = "serve"` serves both schemes (refused with `hsts`),
+  `"off"` opens no plain listener, and `http = { listen = [...] }` names the plain addresses of a
+  TLS site on another port, whose redirect then names the TLS port (`mode = "serve"` serves
+  them). Without TLS, `http = "redirect"` is for a proxy in front that holds the certificate:
+  what a trusted proxy marks `X-Forwarded-Proto: https` is served, the rest redirected. Fixed
+  with it: certificate validation is answered from the site's files before the redirect
+  (`/.well-known/acme-challenge/`, `/.well-known/pki-validation/`), where the separate plain
+  block had no root and redirected them, so certbot's webroot mode needed the HTTPS site already
+  serving and a CA's file check failed; and a managed site whose TLS port is not 443 redirected
+  to port 443. Breaking: `redirect = "https"` is refused, naming `http`; a plain `[[site]]` for
+  the same names on port 80 now meets the TLS site's own port 80 and is refused as a name claimed
+  twice (the message names `http = "off"`); managed files are rendered as one block, and one
+  written before does not load (the new binary sets it aside, so `site-update` cannot reach it):
+  delete its plain block before the upgrade, adding `http = "serve"` to the TLS block when that
+  block served instead of redirecting, or `http = { listen = [...] }` when its address was not port
+  80 beside 443; that is the new rendering. The `https://host` prefix of `redirect` stays until
+  `[[site.redirect]]`; its port 80 comes with port 443 and goes straight to the prefix. Sites on
+  one plain address now agree on `h2c` alone (a plain listener speaks nothing else). The
+  integration check (a managed HTTPS site on port 8453 with its plain port on 8454: a challenge
+  and a pki-validation file, a missing one, the redirect and its lifetime) failed on alpha.75
+  with a 301 for all of them, to port 443. `bench/ab.sh HEAD -A -2` (`ab-20261013-141422.md`): the
+  1 KB and request-path rows 0.94 to 1.01 (plain, TLS, h2c, h2, access, refuse, hsts, auth), the
+  10 MB streams 1.00 and 1.05, within the run to run of the baseline of the same code
+  (`ab-20261013-133912.md`).
+
 ## 0.1.0-alpha.75 (2026-10-13)
 
 - **HSTS reached neither a managed site's PHP pages nor its error answers.** `hsts: true` on a
@@ -22,7 +53,8 @@
   plain block) failed on alpha.74. `bench/ab.sh HEAD -A -2 -3 -r 3` (`ab-20261013-130052.md`, a new
   `hsts` row: a TLS site with the key against the same field through `add_headers` on the base):
   every row 0.98 to 1.04, the HTTP/2 and HTTP/3 rows of sites without hsts flat, the hsts row 1.010.
- (2026-10-13)
+
+## 0.1.0-alpha.74 (2026-10-13)
 
 - **A field with `_` in its name reached a proxied origin.** The client-address fix of alpha.73
   dropped `X-Real-IP`, `Client-IP` and the CDN fields under their dashed names, but Rack and

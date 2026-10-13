@@ -237,11 +237,6 @@ admins = "agensio-admin"
 
 [[site]]
 server_name = ["shop.example.com", "www.shop.example.com"]
-listen = ["0.0.0.0:80"]
-redirect = "https"
-
-[[site]]
-server_name = ["shop.example.com", "www.shop.example.com"]
 listen = ["0.0.0.0:443"]
 root = "/var/www/shop.example.com/web"
 app = "wordpress"
@@ -610,12 +605,7 @@ host_protection = "external"            # the panel runs the firewall and fail2b
 # /etc/agensio/sites.d/example.com.toml: written by the panel
 [[site]]
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:80"]
-redirect = "https"
-
-[[site]]
-server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:443"]
+listen = ["0.0.0.0:443"]                           # port 80 beside it redirects to HTTPS (http, left out)
 root = "/var/www/example.com/web"                  # the panel's web/
 user = "web35"                                     # the panel's account for this site
 group = "client8"                                  # the customer's group: it reads the site's log

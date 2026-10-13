@@ -469,6 +469,14 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (eighteen, each seeded from
   reference by a unit test; the control role groups apply on reload (`Server::apply_control_groups`).
   `agensio reload` validates and signals
   `server.pid_file`. `tests/reload.sh` proves no request fails across reloads.
+- **Plain HTTP of a site** (alpha.76, `docs/redirects.md` 2, `docs/configuration.md` 14): the site
+  key `http` (`redirect` | `serve` | `off` | `{ listen, mode }`); a TLS site on 443 gets
+  `SiteConfig::http_listen` (port 80 at its addresses), plain listeners routing to the same site
+  (`Server::build_listeners`, `site_addresses`), counted as plain in `first_site_conflict`;
+  `Dispatcher::route` tests `http_redirect` once the site is known and answers `redirect_https`
+  (308, a day, `no-store` for a name only a catch-all took, the TLS port when not 443), the
+  certificate validation paths served from the site first. `redirect = "https"` is refused; the
+  `https://host` prefix form stays until `[[site.redirect]]`.
 - **Automatic certificates** (H3, `src/services/acme.*`, `services/json.hpp`): `tls = "auto"`
   plus `[server] acme = { email }`; ACME v2 with HTTP-01 against any RFC 8555 CA, JWS ES256
   and CSRs through OpenSSL. Placeholder certificate at start, order at once, challenge

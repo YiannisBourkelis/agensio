@@ -3,8 +3,8 @@
 Recipes for the first jobs on a new host: a site from a directory, HTTPS with a certificate
 agensio obtains itself or one you bring, one canonical host name, cache and security headers,
 several sites on one address, logs per site, larger uploads and pre-compressed files. Every
-other recipe of the cookbook builds on these; the port-80 site that sends visitors to https,
-which the other recipes leave out, is the one in the second recipe. The
+other recipe of the cookbook builds on these; a TLS site on port 443 sends plain HTTP visitors
+to https by itself (its `http` key, the second recipe). The
 [cookbook's index](../examples.md) says how a recipe is laid out and how to apply one.
 
 ## A static site
@@ -70,8 +70,7 @@ agensio ctl site-create --domain example.com --alias www.example.com --app stati
 ## HTTPS with a certificate agensio obtains itself
 
 **When:** the site's names resolve to this host and port 80 is reachable from the internet.
-This is the HTTPS every other recipe assumes, and the port-80 site below is the one each of
-them leaves out.
+This is the HTTPS every other recipe assumes; the plain port 80 comes with the TLS site.
 
 ```toml
 # /etc/agensio/agensio.toml: the main file, root's (once per host)
@@ -87,19 +86,18 @@ acme = { email = "admin@example.com" }   # the CA's contact for expiry warnings;
 # /etc/agensio/sites.d/example.com.toml
 [[site]]
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:80"]
-redirect = "https"             # 301 to the same host and path over https; needs no root
-
-[[site]]
-server_name = ["example.com", "www.example.com"]
 listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
 tls = "auto"                   # one certificate for every name above, obtained and renewed by agensio
+# http is left out: "redirect", so the site also listens on 0.0.0.0:80 and sends plain HTTP to HTTPS
 ```
 
-**What it does.** On port 80 every request gets a `301` to `https://` with the same host (its
-port dropped), path and query. The CA's validation requests, `/.well-known/acme-challenge/...`,
-are answered by agensio before any site or location rule, so the redirect never gets in their
+**What it does.** One block serves both schemes. On port 80 every request gets a `308` to
+`https://` with the same name, path and query, kept by browsers for a day
+(`Cache-Control: max-age=86400`), so a mistake is undone within one. The CA's validation
+requests, `/.well-known/acme-challenge/...`, are answered by agensio before any site or location
+rule, and a file there or under `/.well-known/pki-validation/` in the site's root is served over
+plain HTTP too (certbot's webroot mode, a CA's file check), so the redirect never gets in their
 way. At the first start a self-signed placeholder lets the TLS listener come up and an order is
 placed at once; the certificate replaces the placeholder through a reload, with no connection
 dropped. Once an hour the certificates are checked and renewed when a third of their lifetime
@@ -109,7 +107,9 @@ and the chain live in `/var/lib/agensio/acme/<first server_name>/`, the one tree
 Easy to get wrong: every name in `server_name` must resolve here, since the CA fetches the
 challenge for each; wildcard names and hosts without port 80 need DNS-01 or TLS-ALPN-01, which
 this release does not have; adding a name orders a new certificate at the next reload. To keep
-plain http serving the site too, give the port-80 site the same `root` instead of `redirect`.
+plain http serving the site too, `http = "serve"`; `http = "off"` opens no plain listener (port 80
+belongs to something else on the machine). Before 0.1.0-alpha.76 this took a second `[[site]]` on
+port 80 with `redirect = "https"`; that form is refused now, naming this one.
 
 **Check it.**
 
@@ -118,18 +118,19 @@ agensio -t -c /etc/agensio/agensio.toml && agensio reload
 agensio ctl logs --since 10m                          # "acme: certificate issued for example.com", or the CA's reason
 agensio ctl sites                                     # each certificate: issuer, names, days left, still the placeholder or not
 curl -sI 'http://example.com/a?b=1' | grep -i location   # https://example.com/a?b=1
-agensio ctl health                                    # tls = "auto" without a port-80 site, no redirect, certificate problems
+agensio ctl health                                    # tls = "auto" without port 80, no redirect, certificate problems
 ```
 
-**On a managed site.** `site-create` writes both sites; `[server] acme` must already be in the
-main file, root's, or `--https auto` is refused. `--no-redirect` keeps the plain site serving.
+**On a managed site.** `site-create` writes the same one block; `[server] acme` must already be in
+the main file, root's, or `--https auto` is refused. `--no-redirect` keeps plain http serving
+(`http = "serve"`, refused with `--hsts`).
 
 ```sh
 agensio ctl site-create --domain example.com --alias www.example.com --app static --root /var/www/example.com/web --user example --https auto --yes --reason "new site"
 agensio ctl cert-renew example.com --yes --reason "order again after the DNS fix"
 ```
 
-**MCP:** `site_create` with `https` `"auto"` (`redirect_http` false keeps plain http serving);
+**MCP:** `site_create` with `https` `"auto"` (`redirect_http` false keeps plain http serving, `http = "serve"`);
 `sites_list` for the certificate's state; `cert_renew` to order again now.
 
 **Reference:** [Automatic certificates](../configuration.md#automatic-certificates),
@@ -150,14 +151,10 @@ chown root:agensio /etc/ssl/example.com/privkey.pem && chmod 640 /etc/ssl/exampl
 # /etc/agensio/sites.d/example.com.toml
 [[site]]
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:80"]
-redirect = "https"
-
-[[site]]
-server_name = ["example.com", "www.example.com"]
 listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
 tls = { cert = "/etc/ssl/example.com/fullchain.pem", key = "/etc/ssl/example.com/privkey.pem" }
+# port 80 beside it redirects to HTTPS (http, left out), as in the recipe above
 ```
 
 **What it does.** A client that asks for one of the site's names gets this certificate;
@@ -218,11 +215,6 @@ agensio -t -c /etc/agensio/agensio.toml   # names anything on the way still clos
 # /etc/agensio/sites.d/example.com.toml
 [[site]]
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:80"]
-redirect = "https"
-
-[[site]]
-server_name = ["example.com", "www.example.com"]
 listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
 tls = { cert = "/etc/letsencrypt/live/example.com/fullchain.pem", key = "/etc/letsencrypt/live/example.com/privkey.pem" }
@@ -230,11 +222,6 @@ tls = { cert = "/etc/letsencrypt/live/example.com/fullchain.pem", key = "/etc/le
 
 ```toml
 # /etc/agensio/sites.d/shop.example.com.toml: another site under the same wildcard
-[[site]]
-server_name = ["shop.example.com"]
-listen = ["0.0.0.0:80"]
-redirect = "https"
-
 [[site]]
 server_name = ["shop.example.com"]
 listen = ["0.0.0.0:443"]
@@ -256,13 +243,14 @@ documentation suggests `0755` for them) and give the key the server's group, whi
 on every renewal. `agensio -t` and health (`tls_key_unreadable`) name whatever is still closed.
 
 An existing certbot that renews with `--webroot` works through agensio too: Let's Encrypt asks
-over port 80, the redirect sends it to https (it follows redirects to port 443 and does not check
-that certificate), and a location on the TLS site serves the file certbot wrote. agensio answers
-its own orders' tokens first, so this never disturbs a `tls = "auto"` site. For a certificate the
-site does not have yet, use DNS-01 or `tls = "auto"`: the https site must already serve.
+over port 80, and the site's plain port serves `/.well-known/acme-challenge/` from the site before
+it redirects anything else, so the file certbot wrote is answered there, also for a certificate
+the site does not have yet. With `-w` pointing at the site's own root nothing more is needed; with
+certbot's own directory a location maps it. agensio answers its own orders' tokens first, so this
+never disturbs a `tls = "auto"` site.
 
 ```toml
-# On each TLS site the certificate covers, for: certbot renew --webroot -w /var/lib/letsencrypt/webroot
+# On each site the certificate covers, for: certbot renew --webroot -w /var/lib/letsencrypt/webroot
 [[site.location]]
 path = "/.well-known/acme-challenge/"
 alias = "/var/lib/letsencrypt/webroot/.well-known/acme-challenge/"
@@ -303,15 +291,10 @@ acme = { email = "admin@example.com" }
 ```toml
 # /etc/agensio/sites.d/example.com.toml
 [[site]]
-server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:80"]
-redirect = "https://www.example.com"   # a prefix: the path and query are appended
-
-[[site]]
 server_name = ["example.com"]
 listen = ["0.0.0.0:443"]
 tls = "auto"                           # browsers check the certificate before they follow any redirect
-redirect = "https://www.example.com"
+redirect = "https://www.example.com"   # a prefix: the path and query are appended; its port 80 goes there too
 
 [[site]]
 server_name = ["www.example.com"]
@@ -320,14 +303,14 @@ root = "/var/www/example.com/web"
 tls = "auto"
 ```
 
-**What it does.** `http://example.com/x?y`, `http://www.example.com/x?y` and
-`https://example.com/x?y` all answer `301` to `https://www.example.com/x?y`, one hop each. The
-bare name's TLS site has a certificate of its own, since a browser verifies it before it reads
-the redirect; it serves nothing else. Swap the names to make the bare name canonical. A domain
-you moved away from takes the same two redirecting sites with the new host as the target.
-`redirect = "https"` (same host) is refused on a TLS site because it would loop; a prefix
-naming another host is fine there, and a prefix with a path (`https://www.example.com/blog`) is
-refused. Browsers keep a `301`, so try the target before you publish the change.
+**What it does.** `http://example.com/x?y` and `https://example.com/x?y` answer `301` to
+`https://www.example.com/x?y`, `http://www.example.com/x?y` a `308` there (the canonical site's own
+port 80), one hop each. The bare name's TLS site has a certificate of its own, since a browser
+verifies it before it reads the redirect; it serves nothing else, and its port 80, which comes
+with port 443, sends straight to the prefix. Swap the names to make the bare name canonical. A
+domain you moved away from takes the same redirecting site with the new host as the target. A
+prefix with a path (`https://www.example.com/blog`) is refused. Browsers keep a `301`, so try the
+target before you publish the change.
 
 **Check it.**
 
@@ -338,9 +321,8 @@ curl -sI https://www.example.com/ | head -1                 # 200
 ```
 
 **On a managed site.** No field makes a redirecting host. Create the canonical name as the
-managed site, then write the bare name's two redirecting sites by hand in a file of their own,
-`sites.d/example.com.toml`, its port-80 site listing `example.com` alone (the managed site
-already redirects `http://www.example.com`):
+managed site, then write the bare name's redirecting site by hand in a file of its own,
+`sites.d/example.com.toml`, listing `example.com` alone:
 
 ```sh
 agensio ctl site-create --domain www.example.com --app static --root /var/www/example.com/web --user example --https auto --yes --reason "canonical www"
@@ -365,23 +347,13 @@ acme = { email = "admin@example.com" }
 # /etc/agensio/sites.d/example.com.toml
 [[site]]
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:80"]
-redirect = "https"
-
-[[site]]
-server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:443"]
+listen = ["0.0.0.0:443"]       # and 0.0.0.0:80, redirecting to HTTPS (http, left out)
 root = "/var/www/example.com/web"
 tls = "auto"
 ```
 
 ```toml
 # /etc/agensio/sites.d/docs.example.com.toml
-[[site]]
-server_name = ["docs.example.com"]
-listen = ["0.0.0.0:80"]
-redirect = "https"
-
 [[site]]
 server_name = ["docs.example.com"]
 listen = ["0.0.0.0:443"]
@@ -503,11 +475,6 @@ acme = { email = "admin@example.com" }
 # /etc/agensio/sites.d/example.com.toml
 [[site]]
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:80"]
-redirect = "https"
-
-[[site]]
-server_name = ["example.com", "www.example.com"]
 listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
 tls = "auto"
@@ -593,8 +560,8 @@ add_headers = { "Cache-Control" = "public, max-age=31536000, immutable" }
 `200`, and the script draws the route. Without the `/assets/` location a missing or
 mistyped bundle would get the shell too, HTML where the browser expects JavaScript, which
 fails in the browser with a confusing error instead of a 404. The location gives `/assets/`
-its own `try_files`, so a file missing there is `404`. The port-80 site that redirects to
-https is the one in the second recipe.
+its own `try_files`, so a file missing there is `404`. Plain HTTP on port 80 redirects to
+https by itself (the second recipe).
 
 **Check it.**
 
@@ -630,16 +597,10 @@ level = "warn"
 # /etc/agensio/sites.d/example.com.toml
 [[site]]
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:80"]
-redirect = "https"
-access_log = "/var/log/agensio/sites/example.com/access.log"   # the redirects in the same file
-
-[[site]]
-server_name = ["example.com", "www.example.com"]
 listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
 tls = "auto"
-access_log = "/var/log/agensio/sites/example.com/access.log"
+access_log = "/var/log/agensio/sites/example.com/access.log"   # the port-80 redirects in the same file
 ```
 
 **What it does.** Each site writes the file its `access_log` names, or the server-wide one;

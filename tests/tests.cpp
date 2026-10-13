@@ -645,12 +645,15 @@ static void test_site_protocols() {
     CHECK(!a.sites[1].h2 && !a.sites[1].h2c && a.sites[1].alpn_wire == std::string("\x08http/1.1", 9) && a.sites[1].protocols == std::vector<std::string>{"h1"});
     bool refused = false;
     try {
-        load("[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n"
+        load("[server]\nprotocols = [\"h2c\", \"h1\"]\n[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n"
              "[[site]]\nserver_name = [\"b\"]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\nprotocols = [\"h1\"]\n");
     } catch (const std::exception& e) {
         refused = std::string(e.what()).find("share 127.0.0.1:18080 but list different protocols") != std::string::npos;
     }
     CHECK(refused);
+    // On a plain address only h2c is spoken (alpha.76: a TLS site's port 80 meets the plain sites there).
+    CHECK(load("[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\n"
+               "[[site]]\nserver_name = [\"b\"]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\nprotocols = [\"h1\"]\n").sites.size() == 2);
     refused = false;
     try {
         load("[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"www\"\nprotocols = [\"spdy\"]\n");
@@ -1750,10 +1753,10 @@ static void test_pools() {
     CHECK(refused("badpm.toml", server + shop + "php = { pm = \"forever\" }\n", "pm must be"));
     CHECK(refused("strict.toml", "[server]\nstrict_users = true\n[[site]]\nlisten = [\"127.0.0.1:1\"]\nroot = \"blog\"\n", "'user' is required"));
     // A site that only redirects serves nothing and runs nothing: it needs no user under
-    // strict_users, and site-create writes one for an HTTPS site's plain port (the cookbook's
-    // finding, alpha.71: every site-create with https was refused on such a host).
+    // strict_users (the cookbook's finding, alpha.71: until alpha.76 site-create wrote one for an
+    // HTTPS site's plain port, and every site-create with https was refused on such a host).
     {
-        write("strictredir.toml", "[server]\nstrict_users = true\n[[site]]\nserver_name = [\"r.test\"]\nlisten = [\"127.0.0.1:1\"]\nredirect = \"https\"\n");
+        write("strictredir.toml", "[server]\nstrict_users = true\n[[site]]\nserver_name = [\"r.test\"]\nlisten = [\"127.0.0.1:1\"]\nredirect = \"https://r.example\"\n");
         std::string why;
         try { (void)load_config(dir / "strictredir.toml"); } catch (const std::exception& e) { why = e.what(); }
         CHECK(why.empty());
@@ -2433,9 +2436,9 @@ static void test_tasks() {
               hr.add_headers.size() == 1 && hr.add_headers[0].first == "X-Robots-Tag");
         CHECK(!app_context(hc, hc.sites[0]).hsts && !app_context(hc, hc.sites[0]).https_redirect);
         write("hh.toml", "[[site]]\nserver_name = [\"h.test\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"app\"\napp = \"django\"\nproject = \"blog\"\n"
-                         "upstream = \"http://127.0.0.1:3009\"\nhsts = true\n");
+                         "upstream = \"http://127.0.0.1:3009\"\nhsts = true\nhttp = \"redirect\"\n");  // behind a proxy that holds the certificate
         const Config hh = load_config(dir / "hh.toml");
-        CHECK(app_context(hh, hh.sites[0]).hsts);  // the site's hsts key tells Django's settings (security.W004)
+        CHECK(app_context(hh, hh.sites[0]).hsts && app_context(hh, hh.sites[0]).https_redirect);  // the site's keys tell Django's settings (security.W004)
         write("hr.toml", rails + hsts_loc);
         CHECK(Router::location(load_config(dir / "hr.toml").sites[0], "/app/models/user.rb").kind == HandlerKind::proxy);
         fs::create_directories(dir / "wp");
@@ -3334,17 +3337,79 @@ static void test_acme() {
     CHECK(refused("[server]\nacme = { email = \"me@x.test\", directory = \"http://ca\" }\n" + site, "must be an https:// URL"));
     CHECK(refused("[server]\nacme = { email = \"nope\" }\n" + site, "server.acme.email"));
     CHECK(refused("[server]\nacme = \"yes\"\n" + site, "server.acme must be a table"));
-    // redirect = "https": no root needed, only on plain sites, "https" or an https://host[:port] prefix.
+    // redirect: an https://host[:port] prefix, no root needed, plain or TLS. "https" (the same host)
+    // went in alpha.76: a TLS site answers its own plain HTTP (http, below).
     {
-        std::ofstream(dir / "r.toml") << "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:80\"]\nredirect = \"https\"\n[[site]]\nserver_name = [\"b.test\"]\nlisten = [\"127.0.0.1:80\"]\nredirect = \"https://b.test:8443\"\n";
+        std::ofstream(dir / "r.toml") << "[[site]]\nserver_name = [\"b.test\"]\nlisten = [\"127.0.0.1:80\"]\nredirect = \"https://b.test:8443\"\n";
         const Config cfg = load_config(dir / "r.toml");
-        CHECK(cfg.sites.size() == 2 && cfg.sites[0].redirect == "https" && cfg.sites[1].redirect == "https://b.test:8443");
+        CHECK(cfg.sites.size() == 1 && cfg.sites[0].redirect == "https://b.test:8443" && cfg.sites[0].http == SiteConfig::Http::serve);
+        CHECK(cfg.sites[0].root.empty());  // a redirect site has no document root, never the configuration directory
     }
     const std::string plain = "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:80\"]\n";
+    CHECK(refused(plain + "redirect = \"https\"\n", "redirect = \"https\" is gone (alpha.76)"));
     CHECK(refused(plain + "redirect = \"http://a.test\"\n", "redirect must be"));
     CHECK(refused(plain + "redirect = \"https://a.test/path\"\n", "redirect must be"));
     CHECK(refused(plain + "redirect = true\n", "redirect must be a string"));
-    CHECK(refused("[server]\nacme = { email = \"me@x.test\" }\n" + plain + "redirect = \"https\"\ntls = \"auto\"\n", "would loop"));
+    // http (docs/redirects.md 2): a TLS site on 443 listens on port 80 beside it and redirects there;
+    // elsewhere it has no plain listener unless the table names one, and the redirect keeps its port.
+    const std::string acme = "[server]\nacme = { email = \"me@x.test\" }\n";
+    const std::string root = "root = \"" + dir.string() + "\"\ntls = \"auto\"\n";
+    auto load_one = [&](const std::string& body) {
+        std::ofstream(dir / "h.toml") << body;
+        return load_config(dir / "h.toml");
+    };
+    {
+        const Config c = load_one(acme + "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"0.0.0.0:443\", \"[::]:443\", \"127.0.0.1:8443\"]\n" + root);
+        const SiteConfig& s = c.sites[0];
+        CHECK(s.http == SiteConfig::Http::redirect && s.http_redirect && !s.http_given && s.https_port == 443 &&
+              s.http_listen == std::vector<std::string>({"0.0.0.0:80", ":::80"}) && site_addresses(s).size() == 5);
+        std::ostringstream explained_out;
+        explain_config(c, explained_out);
+        const std::string explained = explained_out.str();
+        CHECK(explained.find("http = { mode = \"redirect\", listen = [\"0.0.0.0:80\", \"[::]:80\"] }  # the default for port 443") != std::string::npos);
+    }
+    {
+        const Config c = load_one(acme + "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:8443\"]\n" + root);
+        CHECK(c.sites[0].http == SiteConfig::Http::off && !c.sites[0].http_redirect && c.sites[0].http_listen.empty());
+    }
+    {
+        const Config c = load_one(acme + "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:8443\"]\n" + root + "http = { listen = [\"127.0.0.1:8080\"] }\n");
+        CHECK(c.sites[0].http_redirect && c.sites[0].https_port == 8443 && c.sites[0].http_listen == std::vector<std::string>({"127.0.0.1:8080"}));
+        const Config d = load_one(acme + "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:8443\"]\n" + root + "http = { listen = [\"8080\"], mode = \"serve\" }\n");
+        CHECK(d.sites[0].http == SiteConfig::Http::serve && !d.sites[0].http_redirect && d.sites[0].http_listen == std::vector<std::string>({"0.0.0.0:8080"}));
+        const Config e = load_one(acme + "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:443\"]\n" + root + "http = \"off\"\nhsts = true\n");
+        CHECK(e.sites[0].http == SiteConfig::Http::off && e.sites[0].http_listen.empty() && e.sites[0].http_given);
+    }
+    const std::string on443 = acme + "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:443\"]\n" + root;
+    const std::string on8443 = acme + "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:8443\"]\n" + root;
+    CHECK(refused(on8443 + "http = \"redirect\"\n", "listens on no port 443: name the plain addresses, http = { listen"));
+    CHECK(refused(on8443 + "http = \"serve\"\n", "mode = \"serve\" }"));
+    CHECK(refused(on443 + "http = \"serve\"\nhsts = true\n", "contradicts serving plain HTTP on purpose"));
+    CHECK(refused(on443 + "http = \"sometimes\"\n", ".http must be \"redirect\", \"serve\", \"off\""));
+    CHECK(refused(on443 + "http = { listen = [\"127.0.0.1:443\"] }\n", "is one of the site's TLS addresses"));
+    CHECK(refused(on443 + "http = { listen = [] }\n", "http.listen names the plain addresses"));
+    CHECK(refused(on443 + "http = { listen = [\"127.0.0.1:80\"], mode = \"off\" }\n", "http.mode must be"));
+    CHECK(refused(on443 + "http = { listen = [\"127.0.0.1:80\"], port = 80 }\n", "port"));
+    CHECK(refused(plain + "root = \"" + dir.string() + "\"\nhttp = \"off\"\n", "leaves it nothing to answer"));
+    CHECK(refused(plain + "root = \"" + dir.string() + "\"\nhttp = { listen = [\"127.0.0.1:81\"] }\n", "answers plain HTTP on its own listen addresses"));
+    CHECK(refused(plain + "root = \"" + dir.string() + "\"\nhsts = true\n", "(behind a proxy that holds the certificate: http = \"redirect\")"));
+    {   // without TLS: served, or redirected when a proxy in front holds the certificate
+        const Config c = load_one(plain + "root = \"" + dir.string() + "\"\nhttp = \"redirect\"\nhsts = true\n");
+        CHECK(c.sites[0].http_redirect && c.sites[0].http_listen.empty());
+    }
+    // Port 80 beside 443 meets the other sites there as a plain site: a name once per address, one
+    // catch-all, TLS or plain; another name shares it.
+    const std::string plain80 = "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:80\"]\nroot = \"" + dir.string() + "\"\n";
+    CHECK(refused(on443 + plain80, "a.test on 127.0.0.1:80 is claimed by two sites"));
+    CHECK(refused(on443 + plain80, "its http key: http = \"off\" removes it"));
+    CHECK(refused(on443 + "[[site]]\nserver_name = [\"b.test\"]\nlisten = [\"127.0.0.1:80\"]\nroot = \"" + dir.string() + "\"\ntls = \"auto\"\n",
+                  "is used by both a TLS and a plain site (the plain HTTP of a.test"));
+    {
+        const Config c = load_one(on443 + "[[site]]\nserver_name = [\"b.test\"]\nlisten = [\"127.0.0.1:80\"]\nroot = \"" + dir.string() + "\"\n");
+        CHECK(c.sites.size() == 2 && c.held_back.empty());
+        const Config d = load_one(on443 + "http = \"off\"\n" + plain80);
+        CHECK(d.sites.size() == 2);
+    }
     {   // the bare name on 443 redirecting to www: allowed, with its own automatic certificate
         std::ofstream(dir / "c.toml") << "[server]\nacme = { email = \"me@x.test\" }\n" + plain + "redirect = \"https://www.a.test\"\ntls = \"auto\"\n";
         const Config cfg = load_config(dir / "c.toml");
@@ -3809,8 +3874,25 @@ static void test_control_sites() {
     spec.hsts = true;
     const std::string text = render_site(spec, "2026-09-18");
     CHECK(text.starts_with(kManagedMarker));
-    CHECK(text.find("listen = [\"0.0.0.0:80\"]\nredirect = \"https\"") != std::string::npos);
+    CHECK(text.find("redirect = ") == std::string::npos && text.find("\nhttp =") == std::string::npos);  // one block, port 80 beside 443 by default
+    CHECK(text.find("[[site]]") == text.rfind("[[site]]") && text.find("\"0.0.0.0:80\"]") == std::string::npos);
     CHECK(text.find("listen = [\"0.0.0.0:443\"]\nroot = ") != std::string::npos && text.find("app = \"laravel\"") != std::string::npos);
+    {   // another plain address is named, serving plain HTTP is http = "serve", which hsts refuses
+        SiteSpec other = spec;
+        other.listen_plain = "127.0.0.1:8452";
+        other.listen_tls = "127.0.0.1:8451";
+        CHECK(render_site(other, "x").find("http = { listen = [\"127.0.0.1:8452\"] }\n") != std::string::npos);
+        other.redirect_http = false;
+        CHECK(render_site(other, "x").find("http = { listen = [\"127.0.0.1:8452\"], mode = \"serve\" }\n") != std::string::npos);
+        SiteSpec serve = spec;
+        serve.redirect_http = false;
+        serve.hsts = false;
+        CHECK(render_site(serve, "x").find("\nhttp = \"serve\"\n") != std::string::npos);
+        std::string e;
+        CHECK(json::parse(R"({"redirect_http":false,"hsts":true})", body, err));
+        (void)apply_request(body, cfg, serve, e);
+        CHECK(e.find("hsts with redirect_http false") != std::string::npos);
+    }
     CHECK(text.find("user = \"shop\"") != std::string::npos && text.find("tls = \"auto\"") != std::string::npos);
     CHECK(text.find("\nhsts = true") != std::string::npos && text.find("server_name = [\"shop.test\", \"www.shop.test\"]") != std::string::npos);
     std::filesystem::create_directories(dir / "sites.d");
@@ -3846,7 +3928,8 @@ static void test_control_sites() {
         ok.php_socket = "127.0.0.1:9000";
         CHECK(write_site_file(site_file(cfg, "shop.test"), render_site(ok, "x"), err));
         const Config loaded = load_config(dir / "agensio.toml");
-        CHECK(loaded.sites.size() == 2 && loaded.sites[0].redirect == "https" && loaded.sites[1].tls && loaded.sites[1].tls->automatic && loaded.sites[1].app == "laravel");
+        CHECK(loaded.sites.size() == 1 && loaded.sites[0].http_redirect && loaded.sites[0].http_listen == std::vector<std::string>({"0.0.0.0:80"}) && loaded.sites[0].tls &&
+              loaded.sites[0].tls->automatic && loaded.sites[0].app == "laravel");  // one block for both schemes (alpha.76)
         // Per-site settings (F10): the allowlist, the ceilings, the refusals, the rendering.
         {
             json::Value out, given;
@@ -3905,7 +3988,7 @@ static void test_control_sites() {
                 if (tsite) {
                     const json::Value eff = effective_settings(*tsite, tcfg);
                     CHECK(eff["max_body_size"].get("value") == "200MB" && eff["max_body_size"].get("source") == "site" && eff["max_input_time"].get("source") == "default" && eff["children"]["value"].num() == 4);
-                    CHECK(body_limit_of(*tsite, tcfg) == 200u * 1024 * 1024 && body_limit_of(loaded.sites[1], loaded) == loaded.max_body_size);
+                    CHECK(body_limit_of(*tsite, tcfg) == 200u * 1024 * 1024 && body_limit_of(loaded.sites[0], loaded) == loaded.max_body_size);
                     const std::string pool = render_pool(tcfg, *tsite, "agensio");
                     CHECK(pool.find("php_admin_value[upload_max_filesize] = 200M") != std::string::npos && pool.find("php_admin_value[post_max_size] = 200M") != std::string::npos && pool.find("php_admin_value[max_input_time] = 60") != std::string::npos && pool.find("memory_limit] = 512MB") != std::string::npos);
                 }
@@ -3922,7 +4005,6 @@ static void test_control_sites() {
             json::parse(R"({"max_body_size":"65MB"})", g4, e2);
             CHECK(!apply_settings(g4, lim, false, o3).empty());
         }
-        CHECK(loaded.sites[0].root.empty());  // a redirect site has no document root, never the configuration directory
         CHECK(prerequisites(ok, loaded).empty());
         SiteSpec missing = ok;
         missing.user = "no-such-user-zz";
@@ -3931,8 +4013,7 @@ static void test_control_sites() {
         CHECK(pre.size() == 2 && pre[0].starts_with("useradd --system --no-create-home --home-dir /var/lib/agensio/no-such-user-zz") && pre[1].starts_with("mkdir -p"));
         // Every problem in one answer, with a code each; a privileged port on a dropped server is
         // a non-blocking "needs_restart", and not a problem at all while the server is still root.
-        missing.listen_tls = "0.0.0.0:444";  // privileged and not bound by `loaded` (which holds :80 and :443)
-        missing.redirect_http = false;       // so only the TLS listener is used
+        missing.listen_tls = "0.0.0.0:444";  // privileged and not bound by `loaded`, which holds :443 and, its http, :80
         const auto problems = preflight(missing, loaded, false);
         CHECK(problems.size() == 3 && problems[0].code == "missing_account" && problems[1].code == "root_missing" && problems[2].code == "needs_restart");
         CHECK(problems.size() == 3 && problems[0].blocks && problems[1].blocks && !problems[2].blocks && problems[2].run_as_root == "systemctl restart agensio");
@@ -4255,7 +4336,7 @@ static void test_control_sites() {
         CHECK(php_fpm_reload_command(php_cfg, "") == "systemctl reload php8.4-fpm");
         php_cfg.pools_dir = "/etc/php-fpm.d";
         CHECK(php_fpm_reload_command(php_cfg, "") == "systemctl reload php-fpm");
-        // A site with a user renders its own access log; the redirect stub has no root.
+        // A site with a user renders its own access log, in its one block.
         SiteSpec u = ok;
         u.user = "shop";
         u.access_log.clear();
@@ -4264,8 +4345,8 @@ static void test_control_sites() {
         (void)apply_request(json::Value::object(), loaded, u, e2);
         CHECK(u.access_log.ends_with("/sites/shop.test.log"));
         const std::string rendered = render_site(u, "x");
-        CHECK(rendered.find("access_log = ") != std::string::npos && rendered.find("redirect = \"https\"\n") != std::string::npos);
-        CHECK(rendered.find("redirect = \"https\"\nroot") == std::string::npos);
+        CHECK(rendered.find("access_log = ") != std::string::npos && rendered.find("redirect = ") == std::string::npos);
+        CHECK(rendered.find("[[site]]") == rendered.rfind("[[site]]"));  // one block for both schemes (alpha.76)
     }
     std::filesystem::remove_all(dir);
 }
@@ -4881,9 +4962,9 @@ static void test_server_account_and_rules() {
     bare.user.clear();
     files[site.php.address.path] = file(1001, 987, 0660);
     (void)check_hosting(bare, facts);  // must not crash; the outcome depends on the running uid
-    // The lookup prefers the site that serves content over its redirect stub.
+    // The lookup prefers the site that serves content over a whole-domain redirect beside it.
     Config two;
-    SiteConfig r; r.server_names = {"a.test"}; r.redirect = "https";
+    SiteConfig r; r.server_names = {"a.test"}; r.redirect = "https://b.test";
     SiteConfig t; t.server_names = {"a.test"}; t.tls = TlsConfig{}; t.app = "laravel";
     two.sites = {r, t};
     CHECK(control::find_site(two, "a.test") == &two.sites[1]);
@@ -5617,7 +5698,8 @@ static void test_hsts_key() {
     const fs::path dir = fs::temp_directory_path() / ("agensio-hsts-" + std::to_string(::getpid()));
     fs::create_directories(dir / "www");
     auto site = [&](const std::string& extra) {
-        std::ofstream(dir / "h.toml") << "[[site]]\nserver_name = [\"h.test\"]\nlisten = [\"127.0.0.1:18712\"]\nroot = \"www\"\n" + extra;
+        // plain, behind a proxy that holds the certificate: hsts with plain HTTP served is refused
+        std::ofstream(dir / "h.toml") << "[[site]]\nserver_name = [\"h.test\"]\nlisten = [\"127.0.0.1:18712\"]\nroot = \"www\"\nhttp = \"redirect\"\n" + extra;
     };
     auto value = [&](const std::string& extra) {
         site(extra);

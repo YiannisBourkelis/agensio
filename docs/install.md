@@ -127,12 +127,7 @@ The matching site file, `/etc/agensio/sites.d/example.com.toml`:
 ```toml
 [[site]]
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:80"]
-redirect = "https"
-
-[[site]]
-server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:443"]
+listen = ["0.0.0.0:443"]            # port 80 beside it redirects to HTTPS
 root = "/var/www/example.com/web"
 user = "web35"
 group = "client8"

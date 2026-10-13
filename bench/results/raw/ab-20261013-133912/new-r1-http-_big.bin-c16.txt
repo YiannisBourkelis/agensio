@@ -1,0 +1,8 @@
+Running 5s test @ http://127.0.0.1:8080/big.bin
+  4 threads and 16 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     5.75ms    3.39ms  26.70ms   75.77%
+    Req/Sec   728.72     85.01     0.93k    71.00%
+  14530 requests in 5.01s, 141.91GB read
+Requests/sec:   2899.91
+Transfer/sec:     28.32GB

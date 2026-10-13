@@ -220,10 +220,21 @@ struct SiteConfig {
     bool hq_interop = false;  // "hq-interop" in protocols: the interop runner's transport tests (AGENSIO_INTEROP builds only)
     std::string alpn_wire;
     std::string app;                        // preset: "laravel", "php", "static" or "" (none)
-    // `redirect = "https"`: every request gets a 301 to https://<Host><target>; a full
-    // "https://host[:port]" prefix names the target instead (canonical www host, another
-    // port), also allowed on a TLS site. No root needed.
+    // `redirect = "https://host[:port]"`: every request gets a 301 to that prefix plus the target
+    // (a whole domain moved), plain or TLS. No root needed. Until [[site.redirect]] (docs/redirects.md
+    // 5); the "https" form went in alpha.76, replaced by `http`.
     std::string redirect;
+    // http (docs/redirects.md 2, alpha.76): what a request over plain HTTP gets. A TLS site on port
+    // 443 also listens on port 80 at the same addresses (http_listen) and redirects there; on another
+    // port it has none unless `http = { listen = [...] }` names them. A site without TLS serves plain
+    // HTTP, or with "redirect" (a proxy in front holds the certificate) redirects the requests a
+    // trusted proxy does not mark https. http_redirect is the one flag a request tests.
+    enum class Http : std::uint8_t { serve, redirect, off };
+    Http http = Http::serve;
+    bool http_given = false;               // the key was written (health suggests nothing then)
+    bool http_redirect = false;            // plain requests get a 308 to https (certificate validation excepted)
+    std::vector<std::string> http_listen;  // a TLS site's plain addresses, normalised like listen
+    std::uint16_t https_port = 443;        // the port the redirect names (left out when 443)
     std::string root;                       // absolute document root, no trailing slash
     std::string project_root;               // the root as given, before a preset appended its public/ or web/ (site-install's target)
     // app = "django" | "wagtail": the project's Python package (NAME/settings, NAME/wsgi.py),
@@ -548,6 +559,16 @@ std::vector<AccessNotice> access_notices(const Config& cfg);
 bool loopback_listen(std::string_view listen);
 // The same address as written in a configuration: "[::1]:443" for IPv6.
 std::string display_listen(std::string_view listen);
+// Every address a site listens on: its own, then a TLS site's plain ones (http_listen).
+inline std::vector<std::string> site_addresses(const SiteConfig& s) {
+    std::vector<std::string> out = s.listen;
+    out.insert(out.end(), s.http_listen.begin(), s.http_listen.end());
+    return out;
+}
+// A site's http as written in a configuration: "redirect", "serve" or "off".
+inline const char* http_mode(const SiteConfig& s) noexcept {
+    return s.http == SiteConfig::Http::redirect ? "redirect" : s.http == SiteConfig::Http::serve ? "serve" : "off";
+}
 // The synthetic site the control listener routes to: one location of kind `control`.
 SiteConfig control_site();
 // Every value `app = "..."` accepts: "static", the PHP presets in table order, "proxy",
@@ -579,7 +600,7 @@ std::string check_project_name(std::string_view name);
 // origin as the base URL. Comma-separated, no spaces: environment values and unit lines.
 struct AppContext {
     std::string hosts, origins, base_url;
-    bool https_redirect = false;  // a plain-http block of the site redirects to https
+    bool https_redirect = false;  // the site redirects plain HTTP to https (its http key)
     bool hsts = false;            // a block of the site sends Strict-Transport-Security (its hsts key)
 };
 AppContext app_context(const Config& cfg, const SiteConfig& site);

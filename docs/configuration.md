@@ -1847,35 +1847,52 @@ What happens:
 ```toml
 [[site]]
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:80"]
-redirect = "https"
-
-[[site]]
-server_name = ["example.com", "www.example.com"]
 listen = ["0.0.0.0:443"]
 root = "/var/www/example/public"
 tls = "auto"
 hsts = true
 ```
 
-`redirect = "https"` answers every request on that site with a 301 to the same host and
-path over https (the Host header without its port, the query string kept). The site
-needs no `root`, no locations and no preset. The ACME validation still works on it: the
-challenge path is answered before the redirect. For a TLS listener on a non-standard port
-give the prefix instead: `redirect = "https://example.com:8443"`. A `redirect` on a site
-that itself has `tls` is refused (it would loop).
+**Plain HTTP is the site's `http` key** (0.1.0-alpha.76, [redirects.md](redirects.md) 2), so one
+block serves both schemes:
+
+| `http` | what a request over plain HTTP gets |
+|---|---|
+| left out, TLS on port 443 | `"redirect"`: the site also listens on port 80 at the same addresses (`0.0.0.0:443` gives `0.0.0.0:80`, `[::]:443` gives `[::]:80`) |
+| left out, TLS on another port | `"off"`: no plain listener (a table below names one) |
+| left out, no TLS | `"serve"`: a plain site, as before |
+| `"redirect"` | a `308` to `https://` with the same name, path and query |
+| `"serve"` | the site itself, over both schemes; refused with `hsts` (it tells browsers to use HTTPS only) |
+| `"off"` | no plain listener: port 80 belongs to something else on the machine |
+| `{ listen = ["0.0.0.0:8080"] }` | the plain addresses of a TLS site on another port; the redirect names the TLS port (`https://example.com:8443/...`); `mode = "serve"` serves them instead |
+
+The redirect is a `308`, which keeps the method (a form's POST stays a POST), with
+`Cache-Control: max-age=86400`: without a lifetime Chromium keeps a permanent redirect forever,
+so a mistake could never be undone for the visitors who saw it. The `Location` names the site's
+own spelling of the name; a name only a catch-all took (the client chose it) is written as sent
+and carries `Cache-Control: no-store`. Certificate validation is answered before it: agensio's
+own ACME tokens first, then the site's files under `/.well-known/acme-challenge/` and
+`/.well-known/pki-validation/` (certbot's webroot mode, a CA's file check), so no setting here
+breaks a certificate's issue or renewal; a file missing there is a `404`, never a redirect.
+
+The plain addresses meet the other sites there as a plain site does: a name answers for one
+site on an address, an address has one catch-all and is plain or TLS for every site on it. A
+separate plain `[[site]]` for the same names on port 80, the form before 0.1.0-alpha.76, is
+refused with the conflict, which names `http = "off"`; `redirect = "https"` itself is refused,
+naming this key. Remove the plain block when you move a file over.
+
+**Behind a proxy that holds the certificate** (a load balancer, a CDN's "Flexible" mode), every
+request reaches agensio over plain HTTP. Such a site has no `tls`, and `http = "redirect"`
+redirects only the visitors who really used plain HTTP: a request from a `trusted_proxies`
+address marked `X-Forwarded-Proto: https` is served (with the site's HSTS), one marked `http`,
+or a client that is not a trusted proxy, gets the `308` (section 10, [redirects.md](redirects.md) 2.4).
 
 **One canonical host.** To serve everything from `www.example.com` and send the bare
-name there, give the bare name its own redirecting sites, on both ports. The one on 443
-needs a certificate too (browsers check it before following any redirect), which
-`tls = "auto"` provides:
+name there, give the bare name a redirecting site of its own. It needs a certificate too
+(browsers check it before following any redirect), which `tls = "auto"` provides, and its port
+80, which comes with port 443, redirects straight to the prefix:
 
 ```toml
-[[site]]
-server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:80"]
-redirect = "https://www.example.com"
-
 [[site]]
 server_name = ["example.com"]
 listen = ["0.0.0.0:443"]
@@ -1889,10 +1906,11 @@ root = "/var/www/example.com/web"
 tls = "auto"
 ```
 
-`http://example.com/x?y`, `http://www.example.com/x?y` and `https://example.com/x?y`
-all answer 301 to `https://www.example.com/x?y`. The same shape with the names swapped
-makes the bare name canonical. `redirect = "https"` (same host) is refused on a TLS site
-because it would loop; a prefix naming another host is fine there.
+`http://example.com/x?y` and `https://example.com/x?y` answer `301` to
+`https://www.example.com/x?y`, `http://www.example.com/x?y` the `308` there, one hop each. The
+same shape with the names swapped makes the bare name canonical. A `redirect` is an
+`https://host[:port]` prefix; the path and query are appended, and a prefix with a path is
+refused.
 
 **HSTS.** `hsts = true` sends `Strict-Transport-Security: max-age=31536000` (a year, this host
 only) on every answer the site gives over HTTPS: pages, files, PHP, a proxied application, error
@@ -1992,7 +2010,7 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 | `site-task-output NAME [--offset N] [--length N] [--raw]` | admin | the whole output of the site's last task (see `site-task`), up to 64 KB per call from `offset`, with `next_offset` (null at the end), `kept_all` (false when the task printed more than the 1 MB kept) and the task's name and time; 404 when no task ran since the server started |
 | `site-tasks NAME` | viewer | the named tasks the site's preset offers (`app = "rails"`: seven; `"redmine"`: eight; `"django"` and `"wagtail"`: nine each, with the site's `project` and `virtualenv`; `"node"`: two, with its `entry`), each with its summary, its parameters (name, meaning, pattern, required), whether it downloads, whether the directory must be empty, its effective time limit (the row's, capped by `[control] task_limits.timeout`) and its `interpreter`: the program, whether the interpreter rule accepts it and, when not, why and the package command; `run_as_root` at the top lists every missing package once, so root installs them before the first task; the account that runs them (`runs_as`), the directory, the task running now; a site of another preset has none |
 | `settings [NAME]` | viewer | the per-site limits `site-create` and `site-update` accept under `settings`: for each key its type, unit and spellings, meaning, default and its origin, minimum, the ceiling from `[control] site_limits`, what changing it costs (agensio reload, php-fpm reload) and what it derives; with a site, the current value and whether it comes from the site, the server or a built-in default. `site NAME` reports the same `settings` |
-| `health` | viewer | findings with `severity`, `code`, `site`, `message`, `fix` (also `files_unreadable`: files under a document root, the preset's upload directory first, that the server's account cannot open and that answer 404 with no log line; `php_tmp_missing`; `php_fpm_hard_reload`; `php_pool_resident`, judged from the pool file php-fpm runs; `preset_mismatch`: the files under a site's directory belong to another application than its `app` says, with the application detected and the `app` to set; `archives_in_root`: backup archives and database dumps under a served tree, the directories a preset never answers excepted; `site_env_unsafe`: the site environments' directory is not root's alone, or a site's file is open to others, not root's or has a second link (checked by the helper, read-only), with the `chown`/`chmod` line; `site_env_orphan`: a deleted site's environment file, with its `rm -f`; `site_env_unchecked`: the helper was busy with a task): configuration on disk invalid or failing the hosting rules, restart-only settings changed, running as root, certificate unreadable / still the placeholder / expired / expiring within 14 days (manual), `tls = "auto"` without a plain port-80 site for the names, no http-to-https redirect, application sites sharing the server's account, generated pools out of date, errors in the last 24 hours. `ok` is true when nothing above info level was found |
+| `health` | viewer | findings with `severity`, `code`, `site`, `message`, `fix` (also `files_unreadable`: files under a document root, the preset's upload directory first, that the server's account cannot open and that answer 404 with no log line; `php_tmp_missing`; `php_fpm_hard_reload`; `php_pool_resident`, judged from the pool file php-fpm runs; `preset_mismatch`: the files under a site's directory belong to another application than its `app` says, with the application detected and the `app` to set; `archives_in_root`: backup archives and database dumps under a served tree, the directories a preset never answers excepted; `site_env_unsafe`: the site environments' directory is not root's alone, or a site's file is open to others, not root's or has a second link (checked by the helper, read-only), with the `chown`/`chmod` line; `site_env_orphan`: a deleted site's environment file, with its `rm -f`; `site_env_unchecked`: the helper was busy with a task): configuration on disk invalid or failing the hosting rules, restart-only settings changed, running as root, certificate unreadable / still the placeholder / expired / expiring within 14 days (manual), `tls = "auto"` with nothing answering plain HTTP on port 80 for the names, a TLS site on another port than 443 whose plain HTTP is not redirected, application sites sharing the server's account, generated pools out of date, errors in the last 24 hours. `ok` is true when nothing above info level was found |
 
 **Changes** (`POST` with a JSON body; every one needs `"confirm": true`, takes a
 `"reason"` that goes to the audit log, and answers 428 without the confirmation):
@@ -2001,7 +2019,7 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 |---|---|---|
 | `reload` | operator | the same as `agensio reload`: validate the file on disk, bind, switch; 409 with the reason when refused, nothing changed then |
 | `logs-reopen` | operator | reopen every log file (what `SIGUSR1` does) |
-| `site-create` | admin | writes `sites.d/<domain>.toml`, validates, reloads. Fields: `domain`, `aliases`, `https` (`auto`, `none`, or `{cert, key}`), `redirect_http` (default true), `hsts`, `user` (an account name; `no_user: true` or JSON `null` for none; the words null, none, nil and system accounts are refused, never turned into commands), `group`, `app`, `root`, `upstream`, `project` (app = django or wagtail: the project's Python package), `php_socket`, `php_children`, `php_version`, `listen_plain`, `listen_tls`, `rules` (an application's own server guidelines as bounded rules, below). Until `https`, `root` (or `upstream`), `app`, `user` and, for a Django site, `project` are decided it answers 422 with the open questions and a suggestion each (a user name from the domain, the app the files under root suggest); when the account or the root directory does not exist it answers 409 with the commands to run as root and waits for the same command again. A new site is HTTPS-only: the plain site redirects. |
+| `site-create` | admin | writes `sites.d/<domain>.toml`, validates, reloads. Fields: `domain`, `aliases`, `https` (`auto`, `none`, or `{cert, key}`), `redirect_http` (default true: plain HTTP redirects; false is `http = "serve"`, refused with `hsts`), `hsts`, `user` (an account name; `no_user: true` or JSON `null` for none; the words null, none, nil and system accounts are refused, never turned into commands), `group`, `app`, `root`, `upstream`, `project` (app = django or wagtail: the project's Python package), `php_socket`, `php_children`, `php_version`, `listen_plain`, `listen_tls`, `rules` (an application's own server guidelines as bounded rules, below). Until `https`, `root` (or `upstream`), `app`, `user` and, for a Django site, `project` are decided it answers 422 with the open questions and a suggestion each (a user name from the domain, the app the files under root suggest); when the account or the root directory does not exist it answers 409 with the commands to run as root and waits for the same command again. A new site is HTTPS-only, one block for both schemes: its plain port redirects (the site's `http`). |
 | `site-create` answers | | 422 with `needs` while decisions are open; 409 `prerequisites missing` with `problems` (every one at once, each with a `code`, a `detail` and its `run_as_root` command: `missing_account`, `missing_group`, `root_missing`, `root_unreadable`, `certificate_missing`) plus the flat `run_as_root` list; 202 `needs_restart` when the site adds a privileged port the dropped server cannot bind by a reload (the file is written and valid, `systemctl restart agensio` serves it); 201 with `next_steps` (separate commands: `agensio pools`, then the php-fpm reload) and `warnings`. `dry_run: true` runs every check and returns the file that would be written without writing or reloading |
 | `site-update NAME` | admin | the same fields on a site `site-create` wrote (the file carries its spec on its first line); a hand-written file is refused with 409, edit it yourself. `settings = {key: value}` (CLI `--set KEY=VALUE`, repeatable) sets the per-site limits: `max_body_size` (any site), and for a PHP site with its own user (a generated pool) `memory_limit`, `max_execution_time`, `max_input_time`, `children`, `pm`, `max_requests`. Each value is checked against `[control] site_limits` and refused above it naming the key, the value and the ceiling; a key outside that list (`extra`, `open_basedir`, any ini name) is refused as unknown, whatever it is. The answer's `done` lists what was written and reloaded: the site file and agensio, and the php-fpm pool and php-fpm when a pool key changed (a php-fpm reload briefly affects every PHP site unless `process_control_timeout` is set) |
 | `site-disable NAME`, `site-enable NAME` | admin | renames the file to `.disabled` and back, reloads |

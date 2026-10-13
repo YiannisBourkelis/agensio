@@ -40,21 +40,20 @@ acme = { email = "admin@example.com" }
 # /etc/agensio/sites.d/example.com.toml
 [[site]]
 server_name = ["example.com", "www.example.com"]
-listen = ["0.0.0.0:80"]
-redirect = "https"
-
-[[site]]
-server_name = ["example.com", "www.example.com"]
 listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
 tls = "auto"
 ```
 
 - Every name in `server_name` resolves to this host, and port 80 reaches it from the internet:
-  the CA fetches `http://<name>/.well-known/acme-challenge/<token>`. A plain site on port 80
-  for the same names must exist (here the redirect); agensio answers the challenge itself,
-  before any site, location, redirect or access rule, so nothing in your configuration can get
-  in its way. Health warns (`acme_needs_port_80`) when no plain site covers the names.
+  the CA fetches `http://<name>/.well-known/acme-challenge/<token>`. A site on port 443 listens
+  on port 80 beside it by itself (`http`, left out, is `"redirect"`: plain HTTP gets a `308` to
+  HTTPS, docs/configuration.md 14); agensio answers the challenge itself, before any site,
+  location, redirect or access rule, so nothing in your configuration can get in its way, and a
+  file under `/.well-known/acme-challenge/` or `/.well-known/pki-validation/` in the site's root
+  is served before the redirect too (certbot's webroot mode, a CA's file check). Health warns
+  (`acme_needs_port_80`) when nothing answers plain HTTP on port 80 for the names
+  (`http = "off"`, or a TLS port other than 443 without `http = { listen = [...] }`).
 - Real host names: no `*` and no wildcard (they need DNS-01, which agensio does not do yet).
 - An email for the account: the CA sends expiry warnings there; it never appears in a
   certificate.
@@ -232,10 +231,10 @@ mistaken for one in service.
 | `certificate_not_loaded` | warn, error under 7 days left | the file on disk is newer than the certificate served; the message says why: loaded at the next hourly check (or now with `cert-renew`), or the server could not load it, with the error | `cert-renew NAME`; if it could not be loaded, the fix of `tls_key_unreadable` or the file corrected |
 | `acme_renewal_failed` | warn | the last automatic order failed, with the CA's message; retried every hour | correct what the CA says (DNS, port 80, a firewall, a CDN in front), then `cert-renew NAME` |
 | `acme_renewal_overdue` | error | a day past the renewal point (a third of the lifetime left), with the last failure | the same, now |
-| `acme_needs_port_80` | warn | `tls = "auto"` but no plain site on port 80 covers the names | add the port-80 site (2.1) |
+| `acme_needs_port_80` | warn | `tls = "auto"` but nothing answers plain HTTP on port 80 for the names | remove `http = "off"`, or name port 80: `http = { listen = ["0.0.0.0:80"] }` (2.1) |
 | `tls_key_unreadable` | warn | the server's account cannot read a certificate or key after the start | root runs the lines given (3.2) |
 | `site_file_held_back` | error | a site's file is set aside; a certificate that did not load is one reason, named in the message | the message's error |
-| `no_http_redirect` | info | no plain site redirects these names to https | add `redirect = "https"` on port 80 |
+| `no_http_redirect` | info | a TLS site on a port other than 443, without `http`: plain HTTP is not redirected | `http = { listen = ["0.0.0.0:80"] }`, the redirect keeps the TLS port |
 
 `agensio ctl site NAME` (MCP `site_show`) shows both: `tls` describes the file on disk and
 `tls.served` the certificate in memory, `same_as_disk` false while a newer file waits.

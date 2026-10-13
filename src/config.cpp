@@ -1601,6 +1601,68 @@ void parse_hsts(const toml::node_view<const toml::node>& n, SiteConfig& site, co
     site.tls_fields.h1 = "Strict-Transport-Security: " + site.tls_fields.hsts + "\r\n";
 }
 
+// http (docs/redirects.md 2, alpha.76): what a request over plain HTTP gets, after tls and hsts. A
+// TLS site on port 443 listens on port 80 at the same addresses by default; elsewhere it has no plain
+// listener until `http = { listen = [...] }` names one, and its redirect keeps the TLS port.
+void parse_http(const toml::table& t, SiteConfig& site, const std::string& where) {
+    const bool tls = site.tls.has_value();
+    std::string mode;  // "" for a TLS site that did not say: redirect where it listens on 443, else off
+    std::vector<std::string> listen;
+    bool listen_given = false;
+    site.http_given = t.contains("http");
+    if (!site.http_given) {
+        if (!tls) mode = "serve";
+    } else if (auto s = t["http"].value<std::string>()) {
+        mode = to_lower(*s);
+        if (mode != "redirect" && mode != "serve" && mode != "off")
+            fail(where + ".http must be \"redirect\", \"serve\", \"off\" or a table: http = { listen = [\"0.0.0.0:8080\"] }");
+    } else if (const toml::table* ht = t["http"].as_table()) {
+        check_keys(*ht, {"http = {}"}, {}, where + ".http");
+        if (!tls)
+            fail(where + ".http = { listen }: a site without TLS answers plain HTTP on its own listen addresses; "
+                         "use http = \"redirect\" (a proxy in front holds the certificate) or leave it out");
+        mode = to_lower((*ht)["mode"].value_or(std::string("redirect")));
+        if (mode != "redirect" && mode != "serve") fail(where + ".http.mode must be \"redirect\" (the default) or \"serve\"");
+        for (const auto& l : string_list((*ht)["listen"], (where + ".http.listen").c_str())) listen.push_back(normalise_listen(l));
+        if (listen.empty()) fail(where + ".http.listen names the plain addresses: http = { listen = [\"0.0.0.0:8080\"] }");
+        listen_given = true;
+    } else {
+        fail(where + ".http must be \"redirect\", \"serve\", \"off\" or a table: http = { listen = [\"0.0.0.0:8080\"] }");
+    }
+    if (!tls) {
+        if (mode == "off") fail(where + ".http = \"off\" on a site without TLS leaves it nothing to answer; give it tls, or remove the site");
+        site.http = mode == "redirect" ? SiteConfig::Http::redirect : SiteConfig::Http::serve;
+    } else if (mode == "off") {
+        site.http = SiteConfig::Http::off;
+    } else {
+        if (!listen_given) {
+            for (const auto& l : site.listen)
+                if (l.ends_with(":443")) listen.push_back(l.substr(0, l.size() - 3) + "80");
+            if (listen.empty() && !mode.empty())
+                fail(where + ".http = \"" + mode + "\" on a site that listens on no port 443: name the plain addresses, http = { listen = [\"0.0.0.0:8080\"]" +
+                     (mode == "serve" ? ", mode = \"serve\"" : "") + " }");
+        }
+        if (listen.empty()) {
+            site.http = SiteConfig::Http::off;  // the default off port 443
+        } else {
+            site.http = mode == "serve" ? SiteConfig::Http::serve : SiteConfig::Http::redirect;
+            for (const auto& l : listen)
+                if (std::find(site.listen.begin(), site.listen.end(), l) != site.listen.end())
+                    fail(where + ".http.listen: " + display_listen(l) + " is one of the site's TLS addresses; plain HTTP needs an address of its own");
+            // The port the redirect names: 443 for the port 80 derived from it, else the first TLS address's.
+            if (listen_given) {
+                const std::string& first = site.listen.front();
+                site.https_port = static_cast<std::uint16_t>(std::stoi(first.substr(first.rfind(':') + 1)));
+            }
+            site.http_listen = std::move(listen);
+        }
+    }
+    site.http_redirect = site.http == SiteConfig::Http::redirect;
+    if (site.http == SiteConfig::Http::serve && site.hsts == SiteConfig::Hsts::on)
+        fail(where + ": http = \"serve\" with hsts: HSTS tells browsers to use only HTTPS, which contradicts serving plain HTTP on purpose; "
+                     "drop one of them" + std::string(tls ? "" : " (behind a proxy that holds the certificate: http = \"redirect\")"));
+}
+
 // One entry of trusted_proxies, the server's or a site's (2026-10-13): an address, a range or an
 // [addresses] set; never "any", which would believe every client's forwarded address.
 std::string trusted_entry(const std::string& text, const Config& cfg, std::vector<Cidr>& out) {
@@ -1632,10 +1694,12 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     if (!site.app.empty() && site.app != "static" && !proxy_app(site.app) && !php_preset(site.app))
         fail(where + ": app must be " + preset_names());
     if (auto r = t["redirect"].value<std::string>()) {
-        if (*r != "https" && (!r->starts_with("https://") || r->size() <= 8 || r->find('/', 8) != std::string::npos))
-            fail(where + ".redirect must be \"https\" or an \"https://host[:port]\" prefix");
-        if (*r == "https" && t.contains("tls"))
-            fail(where + ".redirect = \"https\" on a TLS site would loop; give the target host: \"https://www.example.com\"");
+        if (*r == "https")
+            fail(where + ".redirect = \"https\" is gone (alpha.76): a TLS site answers plain HTTP itself with a redirect to HTTPS (its http key, "
+                         "docs/configuration.md 14). Remove this [[site]] block; behind a proxy that holds the certificate, set http = \"redirect\" "
+                         "on the site instead");
+        if (!r->starts_with("https://") || r->size() <= 8 || r->find('/', 8) != std::string::npos)
+            fail(where + ".redirect must be an \"https://host[:port]\" prefix (a whole domain moved there)");
         site.redirect = *r;
     } else if (t.contains("redirect")) {
         fail(where + ".redirect must be a string");
@@ -1711,7 +1775,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     site.group = account_name(t["group"], where + ".group");
     if (!site.group.empty() && site.user.empty()) fail(where + ": 'group' needs 'user'");
     // A site that only redirects serves no file and runs no code (no root; the dispatcher answers it
-    // before routing): nothing to isolate, and site-create writes one for an HTTPS site's plain port.
+    // before routing): nothing to isolate.
     if (cfg.strict_users && site.user.empty() && site.redirect.empty()) fail(where + ": 'user' is required (server.strict_users)");
     parse_pool(t["php"].as_table(), base_dir, cfg, site, root_given, where, runs_php(t, site));
 
@@ -1779,6 +1843,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
         }
     }
     if (t.contains("hsts")) parse_hsts(t["hsts"], site, where);
+    parse_http(t, site, where);
     if (auto a = t["access_log"].value<std::string>())
         site.access_log = (*a == "off" || a->empty()) ? std::string() : resolve(base_dir, *a).string();
     else site.access_log = cfg.log.access;
@@ -1981,7 +2046,7 @@ AppContext app_context(const Config& cfg, const SiteConfig& site) {
     for (const auto& s : cfg.sites) {
         if (s.server_names.empty() || s.server_names.front() != first) continue;
         if (s.tls) tls = true;
-        if (s.redirect == "https" || s.redirect.starts_with("https://")) a.https_redirect = true;
+        if (s.http_redirect || s.redirect.starts_with("https://")) a.https_redirect = true;
         if (s.hsts == SiteConfig::Hsts::on) a.hsts = true;
     }
     const std::string scheme = tls ? "https://" : "http://";
@@ -2102,6 +2167,13 @@ void explain_config(const Config& cfg, std::ostream& out) {
         else if (site.tls)
             out << "tls = { cert = \"" << site.tls->cert.string() << "\", key = \"" << site.tls->key.string()
                 << "\" }\n";
+        if (!site.http_listen.empty()) {
+            out << "http = { mode = \"" << http_mode(site) << "\", listen = [";
+            for (std::size_t i = 0; i < site.http_listen.size(); ++i) out << (i ? ", " : "") << "\"" << display_listen(site.http_listen[i]) << "\"";
+            out << "] }" << (site.http_given ? "" : "  # the default for port 443") << "\n";
+        } else {
+            out << "http = \"" << http_mode(site) << "\"" << (site.http_given ? "" : "  # the default") << "\n";
+        }
         if (!site.redirect.empty()) out << "redirect = \"" << site.redirect << "\"\n";
         if (!site.user.empty()) out << "user = \"" << site.user << "\"\n";
         if (!site.group.empty()) out << "group = \"" << site.group << "\"\n";
@@ -2321,7 +2393,7 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
     for (const auto& site : cfg.sites) {
         const std::string& name = site.server_names.front();
         bool v6_listener = false;
-        for (const auto& l : site.listen) v6_listener = v6_listener || std::count(l.begin(), l.end(), ':') > 1;  // stored unbracketed: "::1:443"
+        for (const auto& l : site_addresses(site)) v6_listener = v6_listener || std::count(l.begin(), l.end(), ':') > 1;  // stored unbracketed: "::1:443"
         for (const auto& r : site.access) {
             const std::string rule = "rule " + r.path + (r.exact ? " (exact)" : "");
             if (!r.exact && r.path == "/")
@@ -2368,10 +2440,11 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
             if (r.exact && !r.open && proxied_script(r.path)) proxied_notice("password", r.path);
         // Passwords asked over plain HTTP on a listener the network reaches (plain_http = "allow"):
         // they cross it readable. Here so -t says it too, and judged by the address: [::1] is
-        // loopback like 127.0.0.1 (the alpha.58 report's finding 4).
-        if (!site.tls) {
+        // loopback like 127.0.0.1 (the alpha.58 report's finding 4). A site whose plain HTTP
+        // redirects never asks there; a TLS site serving it (http = "serve") asks on its plain addresses.
+        if (site.http == SiteConfig::Http::serve) {
             std::string outside;
-            for (const auto& l : site.listen)
+            for (const auto& l : site.tls ? site.http_listen : site.listen)
                 if (!loopback_listen(l)) outside += (outside.empty() ? "" : ", ") + display_listen(l);
             if (!outside.empty())
                 for (const auto& r : site.auth)
@@ -2459,19 +2532,20 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
     };
     std::set<std::string> ipv4_ports;  // the ports some site listens on with an IPv4 address
     for (const auto& site : cfg.sites)
-        for (const auto& l : site.listen) {
+        for (const auto& l : site_addresses(site)) {
             asio::ip::address a;
             std::string p;
             if (endpoint_of(l, a, p) && a.is_v4()) ipv4_ports.insert(p);
         }
     for (const auto& site : cfg.sites) {
         std::set<std::string> own_ipv4;
-        for (const auto& l : site.listen) {
+        const std::vector<std::string> addresses = site_addresses(site);
+        for (const auto& l : addresses) {
             asio::ip::address a;
             std::string p;
             if (endpoint_of(l, a, p) && a.is_v4()) own_ipv4.insert(p);
         }
-        for (const auto& l : site.listen) {
+        for (const auto& l : addresses) {
             asio::ip::address a;
             std::string p;
             if (!endpoint_of(l, a, p) || !a.is_v6() || !a.to_v6().is_unspecified() || !ipv4_ports.count(p) || own_ipv4.count(p)) continue;
@@ -2646,37 +2720,57 @@ std::string auth_users_problem(const std::string& path, const Config& cfg) {
 // silently winning (the cookbook's finding, 2026-10-09).
 std::optional<SiteConflict> first_site_conflict(const Config& cfg) {
     const auto& sites = cfg.sites;
-    // A listener speaks one set of protocols: every site on an address must name the same.
+    // Every address a site listens on and whether it is TLS there: its own, then a TLS site's
+    // plain ones (http, docs/redirects.md 2), which meet the other sites on that address as a plain
+    // site does.
+    struct Address {
+        const std::string* text;
+        bool tls;
+        bool from_http;
+    };
+    std::vector<std::vector<Address>> at(sites.size());
+    for (std::size_t i = 0; i < sites.size(); ++i) {
+        for (const auto& a : sites[i].listen) at[i].push_back({&a, sites[i].tls.has_value(), false});
+        for (const auto& a : sites[i].http_listen) at[i].push_back({&a, false, true});
+    }
+    auto from_http = [&](std::size_t i, const Address& a) {
+        return a.from_http ? " (the plain HTTP of " + sites[i].server_names.front() + "'s TLS site, its http key: http = \"off\" removes it)" : std::string();
+    };
+    // A listener speaks one set of protocols: every site on an address must name the same (on a
+    // plain address only h2c is spoken).
     for (std::size_t i = 0; i < sites.size(); ++i)
         for (std::size_t j = 0; j < i; ++j)
-            for (const std::string& a : sites[i].listen)
-                for (const std::string& b : sites[j].listen)
-                    if (a == b && sites[i].protocols != sites[j].protocols)
-                        return SiteConflict{j, i, "sites " + sites[j].server_names.front() + " and " + sites[i].server_names.front() + " share " + a +
+            for (const Address& a : at[i])
+                for (const Address& b : at[j])
+                    if (*a.text == *b.text && a.tls == b.tls && (a.tls ? sites[i].protocols != sites[j].protocols : sites[i].h2c != sites[j].h2c))
+                        return SiteConflict{j, i, "sites " + sites[j].server_names.front() + " and " + sites[i].server_names.front() + " share " + *a.text +
                                                       " but list different protocols; sites on one address must agree"};
     // Sites sharing a listen address must agree on TLS on/off.
     for (std::size_t i = 0; i < sites.size(); ++i)
         for (std::size_t j = 0; j < i; ++j)
-            for (const auto& la : sites[i].listen)
-                for (const auto& lb : sites[j].listen)
-                    if (la == lb && sites[i].tls.has_value() != sites[j].tls.has_value())
-                        return SiteConflict{j, i, "listen address " + la + " is used by both a TLS and a plain site"};
+            for (const Address& a : at[i])
+                for (const Address& b : at[j])
+                    if (*a.text == *b.text && a.tls != b.tls)
+                        return SiteConflict{j, i, "listen address " + *a.text + " is used by both a TLS and a plain site" + from_http(j, b) + from_http(i, a)};
     // A name answers on an address for one site, and an address has one catch-all.
     auto catch_all = [](const SiteConfig& x) {
         return x.is_default || std::find(x.server_names.begin(), x.server_names.end(), "*") != x.server_names.end();
     };
     for (std::size_t i = 0; i < sites.size(); ++i)
         for (std::size_t j = 0; j < i; ++j)
-            for (const auto& la : sites[i].listen) {
-                if (std::find(sites[j].listen.begin(), sites[j].listen.end(), la) == sites[j].listen.end()) continue;
+            for (const Address& a : at[i]) {
+                const auto b = std::find_if(at[j].begin(), at[j].end(), [&](const Address& x) { return *x.text == *a.text; });
+                if (b == at[j].end()) continue;
+                const std::string la = *a.text;
+                const std::string why = from_http(j, *b) + from_http(i, a);
                 for (const auto& n : sites[i].server_names)
                     if (n != "*" && std::find(sites[j].server_names.begin(), sites[j].server_names.end(), n) != sites[j].server_names.end())
                         return SiteConflict{j, i, n + " on " + display_listen(la) + " is claimed by two sites (" + fs::path(sites[j].source).filename().string() +
-                                                      " and " + fs::path(sites[i].source).filename().string() + "); a name answers for one site on an address"};
+                                                      " and " + fs::path(sites[i].source).filename().string() + "); a name answers for one site on an address" + why};
                 if (catch_all(sites[i]) && catch_all(sites[j]))
                     return SiteConflict{j, i, display_listen(la) + " has two catch-all sites (" + sites[j].server_names.front() + " in " +
                                                   fs::path(sites[j].source).filename().string() + ", " + sites[i].server_names.front() + " in " +
-                                                  fs::path(sites[i].source).filename().string() + "); an address has one"};
+                                                  fs::path(sites[i].source).filename().string() + "); an address has one" + why};
             }
     // One user, one pool: sites of the same user share it and must size it alike; sites of
     // different users never share a socket, whatever they say.
@@ -2771,6 +2865,21 @@ SiteClaim claim_of(const toml::table& t) {
         } catch (const std::exception&) {
         }
     }
+    // A TLS site's plain addresses (http, docs/redirects.md 2): named, or port 80 beside its 443.
+    if (t.contains("tls") && t["http"].value<std::string>().value_or("") != "off") {
+        const std::size_t own = c.listen.size();
+        if (const toml::table* ht = t["http"].as_table()) {
+            for (auto& l : strings((*ht)["listen"])) {
+                try {
+                    c.listen.push_back(normalise_listen(l));
+                } catch (const std::exception&) {
+                }
+            }
+        } else {
+            for (std::size_t i = 0; i < own; ++i)
+                if (c.listen[i].ends_with(":443")) c.listen.push_back(c.listen[i].substr(0, c.listen[i].size() - 3) + "80");
+        }
+    }
     c.catch_all = t["default"].value_or(false) || std::find(c.names.begin(), c.names.end(), "*") != c.names.end();
     return c;
 }
@@ -2783,8 +2892,8 @@ std::vector<SiteClaim> claims_of(const toml::table& file) {
     return out;
 }
 
-// The same from a file that is not TOML: the server_name, listen and default lines directly under
-// each [[site]] header, each parsed alone (an array may span up to 32 lines).
+// The same from a file that is not TOML: the server_name, listen, default, tls and http lines
+// directly under each [[site]] header, each parsed alone (an array may span up to 32 lines).
 std::vector<SiteClaim> claims_of_text(std::string_view text, bool& names_unread) {
     std::vector<SiteClaim> out;
     toml::table head;
@@ -2851,7 +2960,7 @@ std::vector<SiteClaim> claims_of_text(std::string_view text, bool& names_unread)
         if (eq == std::string_view::npos) continue;
         std::string_view k = t.substr(0, eq);
         while (!k.empty() && (k.back() == ' ' || k.back() == '\t')) k.remove_suffix(1);
-        if (k != "server_name" && k != "listen" && k != "default") continue;
+        if (k != "server_name" && k != "listen" && k != "default" && k != "tls" && k != "http") continue;
         key = std::string(k);
         chunk = std::string(t);
         depth = depth_of(t);

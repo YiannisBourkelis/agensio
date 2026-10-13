@@ -89,6 +89,10 @@ tls = "auto"
 http = { listen = ["0.0.0.0:8080"] }   # plain requests there: 308 → https://example.com:8443/...
 ```
 
+`http = { listen = [...], mode = "serve" }` serves the site on those addresses instead (added when
+the step was built, alpha.76: a managed site with `redirect_http` false on ports of its own needs
+it).
+
 ### 2.3 A site that is plain HTTP only
 
 ```toml
@@ -681,8 +685,9 @@ pattern (`/blog/x.html` to `/blog/x`) is one exact rule per page for now (5.4).
   otherwise: without it, Chromium keeps a 301 or 308 forever, and a mistake could never be undone
   for the visitors who saw it.
 - `http` and `canonical` redirects are `308`. On a catch-all site, the HTTPS redirect for a name
-  the site does not list (the client chose it) carries no cache lifetime, so no shared cache
-  keeps a redirect for a name this server does not know.
+  the site does not list (the client chose it) carries no cache lifetime but `Cache-Control:
+  no-store` (a `308` is cacheable by default), so no cache keeps a redirect for a name this server
+  does not know.
 - A maintenance window is not a redirect: search engines want `503` with `Retry-After`. That is
   a setting of its own for a later step (`maintenance = { until = ..., allow = ["@office"] }`).
 
@@ -1122,7 +1127,8 @@ a path that meets none, a redirect hit, and a TLS site with `hsts` against one w
 2. **`http` and `canonical`:** one block for HTTP and HTTPS; `redirect = "https"` goes; the managed
    files are rendered the new way; certificate validation is answered before both, from the site's
    files too (the failing test first: a file under `/.well-known/acme-challenge/` on a site with
-   `http = "redirect"` is served over plain HTTP, not redirected).
+   `http = "redirect"` is served over plain HTTP, not redirected). `http` built in alpha.76 (2a);
+   the application's own `http://` Location (2.5) and `canonical` (2b) next.
 3. **`[[site.redirect]]`:** exact (with query parameters) and prefix rules, case-sensitive, `410`,
    the checks of
    section 8, the preview, and `fuzz_redirect` over (`from`, `to`, path, query) asserting the

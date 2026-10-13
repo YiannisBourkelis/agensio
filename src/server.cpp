@@ -472,7 +472,12 @@ std::vector<std::string> Server::load_certificates(Generation& gen, const Genera
 void Server::build_listeners(Generation& gen) {
     auto& listeners = gen.listeners;
     for (const auto& site : gen.cfg.sites) {
-        for (const auto& address : site.listen) {
+        // The site's own addresses, then its plain ones (http, docs/redirects.md 2): a TLS site's
+        // port 80 is a plain listener routing to the same site, which answers there by its http.
+        const std::size_t own = site.listen.size();
+        for (std::size_t ai = 0; ai < own + site.http_listen.size(); ++ai) {
+            const std::string& address = ai < own ? site.listen[ai] : site.http_listen[ai - own];
+            const bool tls = ai < own && site.tls.has_value();
             Listener* l = nullptr;
             for (auto& existing : listeners)
                 if (existing.address == address) {
@@ -486,12 +491,12 @@ void Server::build_listeners(Generation& gen) {
                 l->endpoint = parse_endpoint(address);
                 l->address_text = l->endpoint.address().to_string();
                 l->port = l->endpoint.port();
-                l->tls = site.tls.has_value();
+                l->tls = tls;
                 l->h2 = site.h2;
                 l->h2c = site.h2c;
-                l->h3 = site.h3 && site.tls.has_value();
+                l->h3 = site.h3 && tls;
                 l->access_sink = gen.cfg.log.access_sink;
-                l->hq = site.hq_interop && site.tls.has_value();
+                l->hq = site.hq_interop && tls;
                 if (l->h3 && gen.cfg.http3.alt_svc) {  // design 7.4
                     l->alt_svc = "h3=\":" + std::to_string(l->port) + "\"; ma=86400";
                     l->alt_svc_line = "alt-svc: " + l->alt_svc + "\r\n";
@@ -507,7 +512,7 @@ void Server::build_listeners(Generation& gen) {
 #ifdef AGENSIO_HAS_TLS
             // One context per certificate on the listener; the first one starts every
             // handshake and the SNI callback switches to the site's own.
-            if (site.tls && !l->tls_contexts.contains(site.tls->cert.string())) {
+            if (tls && !l->tls_contexts.contains(site.tls->cert.string())) {
                 auto ctx = std::make_shared<asio::ssl::context>(asio::ssl::context::tls_server);
                 ctx->set_options(asio::ssl::context::default_workarounds | asio::ssl::context::no_sslv2 |
                                  asio::ssl::context::no_sslv3 | asio::ssl::context::no_tlsv1 |
@@ -1034,6 +1039,12 @@ json::Value Server::status() {
         json::Value site = json::Value::object().set("server_name", std::move(names)).set("listen", std::move(listen));
         site.set("root", s.root).set("app", s.app).set("user", s.user);
         site.set("tls", !s.tls ? "none" : s.tls->automatic ? "auto" : "manual");
+        site.set("http", http_mode(s));
+        if (!s.http_listen.empty()) {
+            json::Value plain = json::Value::array();
+            for (const auto& a : s.http_listen) plain.push(a);
+            site.set("http_listen", std::move(plain));
+        }
         if (!s.redirect.empty()) site.set("redirect", s.redirect);
         sites.push(std::move(site));
     }
