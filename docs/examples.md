@@ -105,6 +105,7 @@ start them and the warning goes. What a key needs (a reload, a restart, root) is
 - [A password in front of a proxied tool that wants the user's name](examples/protection.md#a-password-in-front-of-a-proxied-tool-that-wants-the-users-name): `forward_user`, the password kept from the application.
 - [Refuse what an application never serves](examples/protection.md#refuse-what-an-application-never-serves): `refuse` patterns.
 - [Judge the real client behind a CDN or load balancer](examples/protection.md#judge-the-real-client-behind-a-cdn-or-load-balancer): `trusted_proxies`.
+- [Two sites behind two CDNs](examples/protection.md#two-sites-behind-two-cdns): a site's own `trusted_proxies`, the `[addresses]` sets in both lists.
 - [Let fail2ban count failed logins](examples/protection.md#let-fail2ban-count-failed-logins): `login_paths` and the rendered jails.
 
 ## Hosting: accounts, the control plane, agents

@@ -2,6 +2,20 @@
 
 ## 0.1.0-alpha.73
 
+- **A site names the proxies that speak for it** (`docs/redirects.md` 2.4, decided 2026-10-13).
+  With several proxies in `[server] trusted_proxies` every site believed all of them, and a CDN's
+  addresses are shared by all its customers, so a customer of one CDN could name the client and
+  the scheme of a site behind another. `trusted_proxies` on a `[[site]]` narrows the server's list
+  for that site (`[]` believes none, for a site visitors reach directly): a request from a proxy
+  the server trusts and the site does not is the peer's own, its address the client of the access
+  rules, the logs, fail2ban, `REMOTE_ADDR` and the origin's `X-Real-IP`, its scheme the
+  connection's. Each entry must lie within the server's list, which only root widens. Both lists
+  take the `[addresses]` sets (`@cdn_a`). `site_update` and `site_create` take `trusted_proxies`
+  (`null` back to the server's list), `agensio ctl` `--trusted-proxy`, `--no-trusted-proxies` and
+  `--trusted-proxies-default`; `site_show` and `sites_list` show it; health reports
+  `site_trusts_every_proxy` when the server lists two or more sets and a site names none. A site
+  without the key pays one test of a flag per request: `bench/ab.sh HEAD -A` (`ab-20261013-021721.md`)
+  0.96 to 1.03 on every row, the access rows 0.99 to 1.03, within noise.
 - **fail2ban could ban a trusted proxy for the whole host.** A proxy in `[server] trusted_proxies`
   reaches the access log under its own address when it sends a request without
   `X-Forwarded-For`, and the rendered jails counted it like any client, so ten posts to a login

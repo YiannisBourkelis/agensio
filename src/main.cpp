@@ -297,6 +297,10 @@ int main(int argc, char** argv) {
                              "        --login-path PATH (site-create and site-update, repeatable): where the application posts\n"
                              "                    credentials, on top of the preset's known paths; the fail2ban jail counts attempts there;\n"
                              "                    given together they replace the site's list; --no-login-paths clears\n"
+                             "        --trusted-proxy ENTRY (site-create and site-update, repeatable): an address, a range or an\n"
+                             "                    @set of [server] trusted_proxies that speaks for this site (a CDN in front of it);\n"
+                             "                    given together they replace the site's list; --no-trusted-proxies believes none\n"
+                             "                    (visitors connect directly), --trusted-proxies-default goes back to the server's list\n"
                              "        --private PATH, --entry-point /x.php, --cache PATH=SECONDS, --front-controller /x.php\n"
                              "                    (site-create and site-update, repeatable): an application's own rules, which only\n"
                              "                    make the site serve less; each replaces its own part (the private paths, the entry\n"
@@ -522,6 +526,13 @@ int main(int argc, char** argv) {
                     list.push(v);
                     body.set("login_paths", list);
                 } else if (b == "--no-login-paths") body.set("login_paths", agensio::json::Value::array());
+                else if (b == "--trusted-proxy") {
+                    std::string v; value(v);
+                    agensio::json::Value list = body["trusted_proxies"].is_array() ? body["trusted_proxies"] : agensio::json::Value::array();
+                    list.push(v);
+                    body.set("trusted_proxies", list);
+                } else if (b == "--no-trusted-proxies") body.set("trusted_proxies", agensio::json::Value::array());
+                else if (b == "--trusted-proxies-default") body.set("trusted_proxies", agensio::json::Value(nullptr));
                 else if (b == "--nft" || b == "--jail" || b == "--unit") { raw = true; raw_part = b.substr(2); }
                 else if (b == "--filter") { raw = true; raw_part = "filter"; value(raw_filter); }
                 else if (b == "--php-socket") field("php_socket");

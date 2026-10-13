@@ -625,7 +625,7 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (eighteen, each seeded from
   `warn` line a second per worker, held refusals counted and written by the flush tick
   (`WorkerState::access_log`, `Dispatcher::access_log_tick`); `mode = "report"` names each rule
   and client once a minute with a limiter of its own. The address:
-  `ConnectionInfo::client_ip` behind `trusted_proxies`, else the connection's `PeerSource`
+  `ConnectionInfo::client_ip` behind `trusted_proxies` (both the server's list and a site's own, which narrows it: alpha.73, `apply_site_trust` in `Dispatcher::route` treats a peer the site does not name as the client itself; the lists take `[addresses]` sets), else the connection's `PeerSource`
   (HTTP/1 has it from `accept(2)` itself since alpha.58, `Acceptor::peer`, `set_peer_endpoint`: no `getpeername`, and an address even after the client reset; before, it asked the socket when first needed, and a client that reset mid-response was logged as `-`). WordPress keeps `/wp-admin/admin-ajax.php` and the login page's
   `/wp-admin/css`, `js`, `images` (shields: nothing runs there) and `load-styles.php`, `load-scripts.php` (the
   login page's concatenation, exact; `kWordPressOpenings` in `config.cpp`, shared with `[[site.auth]]`) open

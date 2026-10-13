@@ -278,6 +278,18 @@ redirect = "https://secure.test:8443"
 if os.path.exists(f"{root}/build/agensio_upstream"):
     text += f"""
 [[site]]
+server_name = ["tp.test"]
+listen = ["127.0.0.1:8091"]
+root = "{root}/bench/www"
+trusted_proxies = []   # believes no proxy: a request through the server's trusted 127.0.0.1 is 127.0.0.1's own
+proxy = {{ idle_timeout = 1 }}   # the pool of 127.0.0.1:9107 is shared with proxy.test: the same limits
+
+[[site.location]]
+path = "/api/"
+upstream = "http://127.0.0.1:9107/"
+"""
+    text += f"""
+[[site]]
 server_name = ["proxy.test"]
 default = true
 listen = ["127.0.0.1:8091"]
@@ -1008,7 +1020,7 @@ check "cookbook: every recipe of docs/examples.md loads and names what exists (t
 # One broken site file never stops the others (design section 26; tests/isolation.sh, its own server).
 check "isolation: a site file that does not load is set aside, the other sites serve (tests/isolation.sh)" "0" \
   "$(tests/isolation.sh "$BIN" > bench/tmp/isolation.out 2>&1; echo $?)"
-check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 183 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
+check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 184 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
 check "secrets: the presets catalogue lists each preset's credential files" "/wp-config.php /sites/default/settings.php" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["wordpress"]["secrets"][0], p["drupal"]["secrets"][0])')"
 check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$("$BIN" ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; "$BIN" ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
@@ -1276,6 +1288,11 @@ check "access: an unknown set is refused with the sets that exist; config_refere
 check "access: site_update's answer carries the notes -t prints for the rules (a site restricted as a whole)" "200 yes" "$(cpost /v1/sites/acc.test '{"rules":{"restricted":[{"path":"/","allow":["10.0.0.0/8"]}]},"dry_run":true,"confirm":true,"reason":"acc"}') $(python3 -c 'import json; w=json.load(open("bench/tmp/ctl-reply.json")).get("warnings") or []; print("yes" if any("restricted as a whole" in x for x in w) else "no")')"
 check "access: access-check answers refused and allowed with the deciding rule" "refused allowed" "$("$BIN" ctl access-check acc.test / 127.0.0.1 --socket $CS | grep -o '^refused') $("$BIN" ctl access-check acc.test /x 10.1.2.3 --socket $CS | grep -o '^allowed')"
 check "access: ctl --restrict sets a rule, --no-restrict clears it" "1 0" "$("$BIN" ctl site-update acc.test --restrict /admin=127.0.0.1,10.0.0.0/8 --yes --reason acc --socket $CS > /dev/null; grep -c 'path = "/admin"' bench/tmp/sites.d/acc.test.toml) $("$BIN" ctl site-update acc.test --no-restrict --yes --reason acc --socket $CS > /dev/null; grep -c '^\[\[site.access\]\]' bench/tmp/sites.d/acc.test.toml)"
+# A managed site's own trusted_proxies (2026-10-13, docs/redirects.md 2.4): written to the file, an entry
+# outside [server] trusted_proxies (here 127.0.0.1) refused with the reason, [] for none, and back to the
+# server's list.
+check "trusted_proxies on a managed site: --trusted-proxy writes it, one outside the server's list is refused, --no-trusted-proxies is [], --trusted-proxies-default removes it" "1 400 yes 1 0" \
+  "$("$BIN" ctl site-update acc.test --trusted-proxy 127.0.0.1 --yes --reason tp --socket $CS > /dev/null; grep -c '^trusted_proxies = \["127.0.0.1"\]' bench/tmp/sites.d/acc.test.toml) $(cpost /v1/sites/acc.test '{"trusted_proxies":["10.0.0.1"],"confirm":true,"reason":"tp"}') $(grep -q 'is not within \[server\] trusted_proxies' bench/tmp/ctl-reply.json && echo yes) $("$BIN" ctl site-update acc.test --no-trusted-proxies --yes --reason tp --socket $CS > /dev/null; grep -c '^trusted_proxies = \[\]' bench/tmp/sites.d/acc.test.toml) $("$BIN" ctl site-update acc.test --trusted-proxies-default --yes --reason tp --socket $CS > /dev/null; grep -c '^trusted_proxies' bench/tmp/sites.d/acc.test.toml)"
 # A rule flag given alone replaces its own part of the rules and keeps the rest (2026-10-09, the
 # cookbook's finding: --cache or --private alone sent a rules object without the others, which the
 # server replaces whole, so the site's address rules and refused paths were dropped unseen).
@@ -2131,6 +2148,12 @@ except OSError:
   H=$(curl -sS -H 'X-Forwarded-For: 203.0.113.9' -H 'X-Real-IP: 6.6.6.6' -H 'CF-Connecting-IP: 203.0.113.9' $P/api/headers | tr -d '\r')
   check "proxy: behind a trusted proxy X-Real-IP is the client it names, and its CDN field passes" "X-Real-IP: 203.0.113.9 CF-Connecting-IP: 203.0.113.9 0" \
     "$(echo "$H" | grep -i '^X-Real-IP:') $(echo "$H" | grep -i '^CF-Connecting-IP:') $(echo "$H" | grep -c '6\.6\.6\.6')"
+  # A site's own trusted_proxies (2026-10-13, docs/redirects.md 2.4): tp.test believes no proxy, so a
+  # request through the server's trusted 127.0.0.1 is 127.0.0.1's own (its X-Forwarded-For and the CDN
+  # field are not believed); proxy.test, without the key, believes it (the check above).
+  H=$(curl -sS -H 'Host: tp.test' -H 'X-Forwarded-For: 203.0.113.9' -H 'CF-Connecting-IP: 203.0.113.9' $P/api/headers | tr -d '\r')
+  check "trusted_proxies on a site: a proxy the server trusts and the site does not speaks for nobody there; the origin sees the peer" "X-Real-IP: 127.0.0.1 X-Forwarded-For: 127.0.0.1 0" \
+    "$(echo "$H" | grep -i '^X-Real-IP:') $(echo "$H" | grep -i '^X-Forwarded-For:') $(echo "$H" | grep -c '203\.0\.113\.9')"
   R=$(curl -sS -i $P/api/redirect | tr -d '\r')
   check "proxy: Location pointing at the origin rewritten to this site" "Location: http://127.0.0.1:8091/api/json" "$(echo "$R" | grep '^Location:')"
   check "proxy: origin header visible without hide" "1" "$(echo "$R" | grep -c '^X-Powered-By:')"

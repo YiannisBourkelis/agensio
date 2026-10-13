@@ -247,6 +247,12 @@ struct SiteConfig {
     // 404 on every filesystem-backed location, Apache's Off. Proxy locations pass the raw
     // target either way.
     bool encoded_slashes_allow = false;
+    // The site's own trusted_proxies (2026-10-13, docs/redirects.md 2.4): which of the server's
+    // trusted proxies speak for this site, within the server's list; own and empty believes none.
+    // Without the key the server's list holds and a request pays one test of the flag.
+    bool own_trusted_proxies = false;
+    std::vector<Cidr> trusted_proxies;
+    std::vector<std::string> trusted_proxies_text;  // as written
     // Sorted for Router::location: exact before prefix, longer before shorter, "/" last.
     std::vector<LocationConfig> locations;
     // Root additions (docs/design-site-operations.md 20): the files beside the managed site
@@ -391,6 +397,7 @@ struct Config {
     // rightmost untrusted address becomes the client (REMOTE_ADDR, access log) and the
     // scheme sets HTTPS / REQUEST_SCHEME for FastCGI. Empty (default): headers are ignored.
     std::vector<Cidr> trusted_proxies;
+    std::vector<std::string> trusted_proxies_text;  // as written, sets by name ("@cdn_a"): health, site_show
     // [addresses] (2026-10-07): named address sets the sites' access rules name as "@name", so
     // one edit reaches every site that uses them; checked and expanded at load.
     std::map<std::string, std::vector<std::string>> address_sets;
@@ -508,6 +515,9 @@ std::string check_access_path(std::string_view path);
 // One allow entry: "any", "@set" (from cfg.address_sets) or an address or range; appended to
 // `out` (a set's members) unless it is "any".
 std::string access_entry(std::string_view text, const Config& cfg, std::vector<Cidr>& out, bool& any);
+// One entry of a site's trusted_proxies (2026-10-13): an address, a range or an [addresses] set,
+// never "any", each range within [server] trusted_proxies; "" or the reason. Shared with site_update.
+std::string site_trusted_entry(const std::string& text, const Config& cfg, std::vector<Cidr>& out);
 // What -t, the error log at start and reload, and health say about the sites' access rules:
 // an entry that holds a trusted proxy, a loopback entry with no local proxy trusted, an IPv4-only
 // list on a site reachable over IPv6, a single IPv6 address, a whole site restricted.

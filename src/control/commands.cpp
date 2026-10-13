@@ -296,6 +296,7 @@ json::Value site_summary(const SiteConfig& s, std::time_t now, const TlsFacts* t
     v.set("server_name", strings(s.server_names)).set("listen", strings(s.listen));
     v.set("root", s.root).set("app", s.app).set("user", s.user).set("group", s.group);
     v.set("encoded_slashes", s.encoded_slashes_allow ? "allow" : "deny");
+    v.set("trusted_proxies", s.own_trusted_proxies ? strings(s.trusted_proxies_text) : json::Value(nullptr));  // null: [server]'s list
     if (!s.redirect.empty()) v.set("redirect", s.redirect);
     v.set("catch_all", is_catch_all(s));
     if (s.carried) v.set("last_good_version", true);  // its file was set aside on reload (design section 26)
@@ -1247,6 +1248,22 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
             std::to_string(a.count) + " archive(s) or database dump(s) under the document root, e.g. " + a.example + " (" + size + ")" +
                 (a.seen >= 2000 ? ", the first 2000 files looked at" : ""),
             "move backups and dumps out of the document root (a backup plugin's directory too) and delete stale ones; nothing served should hold a copy of the site");
+    }
+    // A server that trusts several proxies (two or more named sets: CDNs in front of different
+    // sites): a site naming none of its own believes them all, so the customers of one CDN can name
+    // the client of a site behind another (2026-10-13, docs/redirects.md 2.4).
+    if (std::count_if(running.trusted_proxies_text.begin(), running.trusted_proxies_text.end(), [](const std::string& t) { return !t.empty() && t[0] == '@'; }) >= 2) {
+        std::string sites;
+        std::size_t n = 0;
+        for (const auto& s : running.sites)
+            if (!s.own_trusted_proxies && s.redirect.empty()) sites += (n++ ? ", " : "") + s.server_names.front();
+        std::string sets;
+        for (const auto& t : running.trusted_proxies_text) sets += (sets.empty() ? "" : ", ") + t;
+        if (n)
+            add("info", "site_trusts_every_proxy", n == 1 ? sites : "",
+                sites + (n == 1 ? " believes" : " believe") + " every proxy of [server] trusted_proxies (" + sets +
+                    "): a request through any of them speaks for " + (n == 1 ? "it" : "them") + ", so a customer of one CDN can name the client of a site behind another",
+                "give each site the proxies in front of it: trusted_proxies = [\"@set\"] (site-update NAME --trusted-proxy @set), or [] for a site whose visitors connect directly (--no-trusted-proxies)");
     }
     // Root additions whose site is gone (disabled or deleted, design section 20): the loader
     // keeps them with a warning; this says what to do.

@@ -20,6 +20,17 @@ const asio::ip::address& client_ip(ConnectionInfo& c) {
     return c.peer ? c.peer->peer_ip() : none;
 }
 
+// A site's own trusted_proxies (2026-10-13, docs/redirects.md 2.4): a proxy the server believes and
+// this site does not speaks for nobody here, so the request is the peer's own: its address and its
+// scheme, for the access and password rules, the logs, PHP and the origin alike.
+void apply_site_trust(ConnectionInfo& c, const SiteConfig& site) {
+    if (c.peer && in_any(site.trusted_proxies, c.peer->peer_ip())) return;
+    c.trusted_peer = false;
+    c.client_address = {};
+    c.client_ip = asio::ip::address();
+    c.forwarded_https = false;
+}
+
 // [[site.auth]]: the rule that asks for a password on some reading of the path, or null. An open
 // rule decides its path only when no other reading falls under a rule that asks: the stricter wins.
 const AuthRule* protecting_rule(const SiteConfig& site, std::string_view path, std::string& scratch) {
@@ -484,6 +495,7 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
         misdirected(s);
         return nullptr;
     }
+    if (site->own_trusted_proxies && s.conn.trusted_peer) apply_site_trust(s.conn, *site);  // one flag test elsewhere
     if (!site->redirect.empty()) {
         redirect_https(s, *site);
         return nullptr;

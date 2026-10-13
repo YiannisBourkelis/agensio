@@ -1132,6 +1132,45 @@ and an IPv6 entry never matches an IPv4 client. Entries with a zone id (`fe80::1
 refused. A reload that changes the list applies to connections already open from their
 next request on.
 
+The list also takes the `[addresses]` sets of the access rules (section 19), so a CDN's
+published ranges live in one place:
+
+```toml
+[addresses]
+cdn_a = ["173.245.48.0/20", "103.21.244.0/22"]
+cdn_b = ["198.51.100.0/24"]
+
+[server]
+trusted_proxies = ["@cdn_a", "@cdn_b"]
+```
+
+**A site's own list.** With several proxies on the server, every site believes all of them,
+and a CDN's addresses are shared by all its customers: anyone can point CDN B at this server
+and send requests for a site behind CDN A. A site therefore names the proxies that speak for
+it:
+
+```toml
+[[site]]
+server_name = ["example.com"]
+trusted_proxies = ["@cdn_a"]     # only CDN A speaks for this site
+
+[[site]]
+server_name = ["example2.com"]
+trusted_proxies = []             # visitors connect directly: no proxy speaks for this site
+```
+
+A request from a proxy the server trusts and the site does not is then the peer's own: its
+address is the client (access rules, password exceptions, the logs, fail2ban, `REMOTE_ADDR`,
+the origin's `X-Real-IP`) and its scheme is the connection's. Each entry must lie within the
+server's list, which only root widens in the main file: a site that could add ranges would make
+the server believe forged addresses for it, and those reach fail2ban, whose bans hold for the
+whole host. Without the key a site believes the server's whole list, and pays nothing per
+request; health reports `site_trusts_every_proxy` when the server lists two or more sets and a
+site names none. A managed site sets it with `site_update` (`trusted_proxies`, `null` back to
+the server's list) or `agensio ctl site-update NAME --trusted-proxy @cdn_a`,
+`--no-trusted-proxies`, `--trusted-proxies-default`. The fail2ban jails agensio renders never ban
+a trusted proxy (`docs/fail2ban.md`).
+
 ## 11. Hosting: one user per site
 
 `user = "web1"` on a site makes PHP for that site run as `web1` in a php-fpm pool that

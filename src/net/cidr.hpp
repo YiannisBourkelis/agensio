@@ -70,6 +70,12 @@ struct Cidr {
 
     bool contains(const asio::ip::address& given) const noexcept { return matches(key_of(given)); }
 
+    // Whether every address of this entry lies in `outer` (a site's trusted_proxies inside the
+    // server's, 2026-10-13).
+    bool within(const Cidr& outer) const noexcept {
+        return v6 == outer.v6 && prefix >= outer.prefix && (net_hi & outer.mask_hi) == outer.net_hi && (net_lo & outer.mask_lo) == outer.net_lo;
+    }
+
     // "203.0.113.0/24", "2001:db8:5::/64": what config_reference, -t and health show.
     std::string text() const {
         asio::ip::address a;

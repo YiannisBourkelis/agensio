@@ -166,7 +166,7 @@ request as plain (it never serves plain HTTP by mistake), and says why: the erro
 minute, and health (`proxy_scheme_missing`) name the proxy, "173.245.49.12 sends no
 X-Forwarded-Proto; its requests are taken as plain HTTP", so the loop has a visible cause.
 
-#### Sites behind different proxies: a site's own `trusted_proxies` (decided 2026-10-13)
+#### Sites behind different proxies: a site's own `trusted_proxies` (decided 2026-10-13, built in alpha.73)
 
 One list for the server means every site believes every proxy on it. With two sites behind two
 CDNs, `example.com` would believe CDN B too. A CDN's addresses are shared by all its customers:
@@ -234,10 +234,10 @@ Two rules come with it:
   when it sends a request without `X-Forwarded-For` and when a site does not trust it, and a ban in
   the host's firewall would cut off every visitor that proxy carries, for every site behind it.
   Built in alpha.73, with the server's list (`docs/fail2ban.md` 2a, 4).
-- **What a site believes is visible.** `site_show` lists the proxies a site trusts; `access_check`
-  and `path_check` judge with the site's list; health notes, on a server whose list names more than
-  one set, each site that names none of its own (`site_trusts_every_proxy`, info), with the line to
-  add.
+- **What a site believes is visible.** `site_show` lists the proxies a site trusts; health notes, on
+  a server whose list names more than one set, the sites that name none of their own
+  (`site_trusts_every_proxy`, info), with the line to add. (`access_check` and `path_check` take a
+  client address or none, so the list does not enter them.)
 
 ### 2.5 An application's own `http://` redirects
 
@@ -1136,10 +1136,9 @@ a path that meets none, a redirect hit, and a TLS site with `hsts` against one w
 Sites without `http` redirects, `canonical`, `hsts` or `[[site.redirect]]` keep today's request
 path: one test of an empty site field, measured flat.
 
-A site's own `trusted_proxies` (2.4) does not wait for these steps. It comes first, before the
-client-address fix of 12.4, which depends on it: the key and its narrowing check, the named sets
-in both lists, the site's list applied once the site is known (the failing test first: a request
-for a site from a proxy the server trusts and the site does not is redirected and logged with the
-proxy's address), `ignoreip` in the rendered jails, `site_show`, `access_check`, `path_check`,
-health, the `site_update` field, the reference row, the cookbook recipe and the MCP texts, with
-`bench/ab.sh <base> -A` for the routing step.
+A site's own `trusted_proxies` (2.4) did not wait for these steps. It was built in alpha.73, after
+the client-address fix of 12.4, which reads the same per-request trust and so follows a site's
+list: the key and its narrowing check, the named sets in both lists, the site's list applied once
+the site is known, `ignoreip` in the rendered jails, `site_show`, health, the `site_update` field
+and `ctl` flags, the reference rows, the cookbook recipe and the MCP texts, with `bench/ab.sh
+<base> -A` for the routing step.

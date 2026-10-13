@@ -1543,6 +1543,22 @@ void parse_auth(const toml::node_view<const toml::node>& n, Config& cfg, SiteCon
 #endif
 }
 
+// One entry of trusted_proxies, the server's or a site's (2026-10-13): an address, a range or an
+// [addresses] set; never "any", which would believe every client's forwarded address.
+std::string trusted_entry(const std::string& text, const Config& cfg, std::vector<Cidr>& out) {
+    if (text == "any") return "'any' would believe every client's forwarded address; name the proxies";
+    if (!text.empty() && text[0] == '@') {
+        bool any = false;  // a set holds addresses and ranges only
+        return access_entry(text, cfg, out, any);
+    }
+    Cidr c;
+    std::string err;
+    if (!parse_cidr(text, c, err)) return err + " (an address, a range such as 173.245.48.0/20, or a set such as @cdn)";
+    out.push_back(c);
+    return "";
+}
+
+
 void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, const std::string& where, std::vector<RootAdditions>* root_adds = nullptr) {
     check_keys(t, {"[[site]]"}, {"auth", "access"}, where);
     SiteConfig site;
@@ -1692,6 +1708,17 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
         site.encoded_slashes_allow = v == "allow";
     } else if (t.contains("encoded_slashes")) {
         fail(where + ".encoded_slashes must be a string: \"deny\" or \"allow\"");
+    }
+    // A site's own trusted_proxies (2026-10-13, docs/redirects.md 2.4): which of the server's trusted
+    // proxies speak for this site. It only narrows: a site that could add ranges would make the
+    // server believe forged addresses for it, and those reach the jails, whose bans hold host-wide.
+    if (t.contains("trusted_proxies")) {
+        if (!t["trusted_proxies"].is_array()) fail(where + ".trusted_proxies must be a list of addresses, ranges or @sets ([] believes no proxy)");
+        site.own_trusted_proxies = true;
+        for (const auto& text : string_list(t["trusted_proxies"], (where + ".trusted_proxies").c_str())) {
+            if (const std::string why = site_trusted_entry(text, cfg, site.trusted_proxies); !why.empty()) fail(where + ".trusted_proxies: " + why);
+            site.trusted_proxies_text.push_back(text);
+        }
     }
     if (auto a = t["access_log"].value<std::string>())
         site.access_log = (*a == "off" || a->empty()) ? std::string() : resolve(base_dir, *a).string();
@@ -2192,6 +2219,18 @@ std::string access_entry(std::string_view text, const Config& cfg, std::vector<C
     std::string err;
     if (!parse_cidr(text, c, err)) return err + " (an address, a range such as 203.0.113.0/24, a set such as @office, or any)";
     out.push_back(c);
+    return "";
+}
+
+std::string site_trusted_entry(const std::string& text, const Config& cfg, std::vector<Cidr>& out) {
+    std::vector<Cidr> got;
+    if (std::string why = trusted_entry(text, cfg, got); !why.empty()) return why;
+    for (const Cidr& c : got) {
+        if (std::none_of(cfg.trusted_proxies.begin(), cfg.trusted_proxies.end(), [&](const Cidr& o) { return c.within(o); }))
+            return (text[0] == '@' ? c.text() + " (in " + text + ")" : text) +
+                   " is not within [server] trusted_proxies: a site's list only narrows the server's, which root sets in the main file";
+        out.push_back(c);
+    }
     return "";
 }
 
@@ -2952,12 +2991,8 @@ Config load_config(const fs::path& path, const Config* running, bool use_record)
         if (auto a = (*h)["alt_svc"].value<bool>()) cfg.http3.alt_svc = *a;
         else if ((*h)["alt_svc"]) fail("server.http3.alt_svc must be true or false");
     }
-    for (const auto& text : string_list(server["trusted_proxies"], "server.trusted_proxies")) {
-        Cidr c;
-        std::string err;
-        if (!parse_cidr(text, c, err)) fail("server.trusted_proxies: " + err);
-        cfg.trusted_proxies.push_back(c);
-    }
+    // Resolved once [addresses] is known (its sets may be named here, 2026-10-13).
+    cfg.trusted_proxies_text = string_list(server["trusted_proxies"], "server.trusted_proxies");
     cfg.user = account_name(server["user"], "server.user");
     cfg.group = account_name(server["group"], "server.group");
     if (auto d = server["pools"].value<std::string>()) cfg.pools_dir = resolve(base_dir, *d).string();
@@ -3108,6 +3143,8 @@ Config load_config(const fs::path& path, const Config* running, bool use_record)
     } else if (root.contains("addresses")) {
         fail("'addresses' must be a table: [addresses] office = [\"203.0.113.7\", \"2001:db8:5::/64\"]");
     }
+    for (const auto& text : cfg.trusted_proxies_text)
+        if (const std::string why = trusted_entry(text, cfg, cfg.trusted_proxies); !why.empty()) fail("server.trusted_proxies: " + why);
     parse_sites_from(root, base_dir, cfg, path.filename().string(), &additions, cfg.config_path.string());
     for (const auto& site : cfg.sites)  // the main file's sites share its fate
         if (auto f = failed_additions.find(site.server_names.front()); f != failed_additions.end())

@@ -5554,6 +5554,62 @@ static void test_protection() {
     fs::remove_all(dir);
 }
 
+// A site's own trusted_proxies (2026-10-13, docs/redirects.md 2.4): the server's list takes named
+// sets; a site's narrows it ([] believes no proxy) and never widens it, since a site that could add
+// ranges would make the server believe forged addresses, which reach fail2ban.
+static void test_site_trusted_proxies() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-tp-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "www");
+    auto write = [&](const std::string& text) { std::ofstream(dir / "t.toml") << text; };
+    auto refused = [&](const std::string& text, const char* needle) {
+        write(text);
+        try {
+            load_config(dir / "t.toml");
+            std::printf("trusted_proxies: loaded, expected '%s'\n", needle);
+            return false;
+        } catch (const std::exception& e) {
+            const bool hit = std::string(e.what()).find(needle) != std::string::npos;
+            if (!hit) std::printf("trusted_proxies: expected '%s', got '%s'\n", needle, e.what());
+            return hit;
+        }
+    };
+    const std::string head = "[addresses]\ncdn_a = [\"173.245.48.0/20\", \"2400:cb00::/32\"]\ncdn_b = [\"198.51.100.0/24\"]\n"
+                             "[server]\ntrusted_proxies = [\"@cdn_a\", \"@cdn_b\", \"127.0.0.1\"]\n";
+    auto site = [](const char* name, const std::string& extra) {
+        return std::string("[[site]]\nserver_name = [\"") + name + "\"]\nlisten = [\"127.0.0.1:18711\"]\nroot = \"www\"\n" + extra;
+    };
+    auto ip = [](const char* a) { return asio::ip::make_address(a); };
+    write(head + site("a.test", "trusted_proxies = [\"@cdn_a\"]\n") + site("b.test", "trusted_proxies = [\"198.51.100.0/25\"]\n") +
+          site("c.test", "trusted_proxies = []\n") + site("d.test", ""));
+    try {
+        const Config cfg = load_config(dir / "t.toml");
+        CHECK(cfg.trusted_proxies.size() == 4 && in_any(cfg.trusted_proxies, ip("2400:cb00::1")) && in_any(cfg.trusted_proxies, ip("198.51.100.200")));
+        const SiteConfig &a = cfg.sites[0], &b = cfg.sites[1], &c = cfg.sites[2], &d = cfg.sites[3];
+        CHECK(a.own_trusted_proxies && a.trusted_proxies.size() == 2 && in_any(a.trusted_proxies, ip("173.245.48.9")) &&
+              !in_any(a.trusted_proxies, ip("198.51.100.9")) && !in_any(a.trusted_proxies, ip("127.0.0.1")));
+        CHECK(b.own_trusted_proxies && in_any(b.trusted_proxies, ip("198.51.100.9")) && !in_any(b.trusted_proxies, ip("198.51.100.200")));
+        CHECK(c.own_trusted_proxies && c.trusted_proxies.empty());
+        CHECK(!d.own_trusted_proxies && d.trusted_proxies.empty());
+        // Two sets on the server: health names the site that names none of its own, d.test alone.
+        const auto hf = control::health_findings(cfg, cfg, false, std::time(nullptr));
+        const auto it = std::find_if(hf.begin(), hf.end(), [](const control::Finding& f) { return f.code == "site_trusts_every_proxy"; });
+        CHECK(it != hf.end() && it->site == "d.test" && it->message.find("@cdn_a, @cdn_b, 127.0.0.1") != std::string::npos &&
+              it->fix.find("--trusted-proxy @set") != std::string::npos &&
+              std::count_if(hf.begin(), hf.end(), [](const control::Finding& f) { return f.code == "site_trusts_every_proxy"; }) == 1);
+    } catch (const std::exception& e) {
+        std::printf("trusted_proxies: %s\n", e.what());
+        CHECK(false);
+    }
+    CHECK(refused(head + site("x.test", "trusted_proxies = [\"198.51.0.0/16\"]\n"), "trusted_proxies: 198.51.0.0/16 is not within [server] trusted_proxies"));
+    CHECK(refused(head + site("x.test", "trusted_proxies = [\"203.0.113.7\"]\n"), "203.0.113.7 is not within [server] trusted_proxies"));
+    CHECK(refused(head + site("x.test", "trusted_proxies = [\"any\"]\n"), "trusted_proxies: 'any'"));
+    CHECK(refused(head + site("x.test", "trusted_proxies = [\"@nosuch\"]\n"), "no address set '@nosuch'"));
+    CHECK(refused("[server]\ntrusted_proxies = [\"@nosuch\"]\n" + site("x.test", ""), "server.trusted_proxies: no address set '@nosuch'"));
+    CHECK(refused("[server]\ntrusted_proxies = [\"any\"]\n" + site("x.test", ""), "server.trusted_proxies: 'any'"));
+    fs::remove_all(dir);
+}
+
 // Unknown keys are refused (2026-10-09, the cookbook's finding): a misspelt key in any table,
 // the main file's top level, an included file, a site, a location and their sub-tables, stops
 // the load with the nearest key; before, most tables ignored it (`refsue` refused nothing).
@@ -8675,6 +8731,7 @@ int main() {
     test_quic_stateless();
 #endif
     test_unknown_keys();
+    test_site_trusted_proxies();
     test_site_isolation();
     test_served_record();
     test_hosting_isolation();

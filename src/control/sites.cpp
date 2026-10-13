@@ -56,6 +56,12 @@ std::string toml_list(const std::vector<std::string>& v) {
 }
 
 bool has_key(const json::Value& v, std::string_view key) { return !v[key].is_null(); }
+// A key given at all, null included (trusted_proxies: null goes back to the server's list).
+bool given(const json::Value& v, std::string_view key) {
+    for (const auto& [k, value] : v.members())
+        if (k == key) return true;
+    return false;
+}
 
 }  // namespace
 
@@ -65,6 +71,7 @@ json::Value SiteSpec::to_json() const {
     if (https == "manual") v.set("cert", cert).set("key", key);
     v.set("redirect_http", redirect_http).set("hsts", hsts).set("user", user).set("no_user", user.empty()).set("group", group);
     if (encoded_slashes == "allow") v.set("encoded_slashes", encoded_slashes);
+    if (own_trusted_proxies) v.set("trusted_proxies", strings(trusted_proxies));
     v.set("app", app).set("root", root);
     if (!upstream.empty()) v.set("upstream", upstream);
     if (!project.empty()) v.set("project", project);
@@ -91,6 +98,8 @@ bool SiteSpec::from_json(const json::Value& v, SiteSpec& out) {
     if (has_key(v, "redirect_http")) out.redirect_http = v["redirect_http"].boolean();
     if (has_key(v, "hsts")) out.hsts = v["hsts"].boolean();
     out.encoded_slashes = v.get("encoded_slashes") == "allow" ? "allow" : "";
+    out.own_trusted_proxies = has_key(v, "trusted_proxies");
+    out.trusted_proxies = string_list(v["trusted_proxies"]);
     out.user = v.get("user");
     out.user_decided = true;
     out.no_user = out.user.empty();
@@ -724,6 +733,35 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
         }
         spec.login_paths = lp;
     }
+    // The proxies that speak for this site (2026-10-13, docs/redirects.md 2.4): given whole, each an
+    // address, a range or an [addresses] set within [server] trusted_proxies (checked here as the load
+    // does), at most 32; [] believes no proxy, null goes back to the server's list.
+    if (given(body, "trusted_proxies")) {
+        const json::Value& tp = body["trusted_proxies"];
+        if (tp.is_null()) {
+            spec.own_trusted_proxies = false;
+            spec.trusted_proxies.clear();
+        } else if (!tp.is_array() || tp.items().size() > 32) {
+            error = "trusted_proxies must be a list of at most 32 addresses, ranges or @sets within [server] trusted_proxies ([] believes no proxy, null goes back to the server's list)";
+            return needs;
+        } else {
+            std::vector<std::string> list;
+            for (const auto& e : tp.items()) {
+                if (!e.is_string()) {
+                    error = "trusted_proxies: each entry is a string: an address, a range or an @set";
+                    return needs;
+                }
+                std::vector<Cidr> got;
+                if (const std::string why = site_trusted_entry(std::string(e.str()), cfg, got); !why.empty()) {
+                    error = "trusted_proxies: " + why;
+                    return needs;
+                }
+                if (std::find(list.begin(), list.end(), std::string(e.str())) == list.end()) list.emplace_back(e.str());
+            }
+            spec.own_trusted_proxies = true;
+            spec.trusted_proxies = list;
+        }
+    }
     if (has_key(body, "access_log")) spec.access_log = body.get("access_log");
     if (has_key(body, "listen_plain")) spec.listen_plain = body.get("listen_plain");
     if (has_key(body, "listen_tls")) spec.listen_tls = body.get("listen_tls");
@@ -879,6 +917,7 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
         if (!spec.user.empty() && !spec.access_log.empty()) s += "access_log = " + toml_string(spec.access_log) + "\n";
         if (!spec.login_paths.empty()) s += "login_paths = " + toml_list(spec.login_paths) + "   # fail2ban counts login attempts here (agensio ctl protection)\n";
         if (spec.encoded_slashes == "allow") s += "encoded_slashes = \"allow\"   # a %2F in the path is decoded and looked up (Apache's NoDecode), not 404\n";
+        if (spec.own_trusted_proxies) s += "trusted_proxies = " + toml_list(spec.trusted_proxies) + "   # the proxies that speak for this site, within [server] trusted_proxies\n";
         if (spec.rules.is_object() && !spec.rules["refuse"].items().empty()) {
             std::vector<std::string> patterns;
             for (const auto& p : spec.rules["refuse"].items()) patterns.emplace_back(p.str());

@@ -442,6 +442,71 @@ tail -f /var/log/agensio/access.log      # the visitors' addresses, not the load
 
 **Reference:** [Behind a reverse proxy or load balancer](../configuration.md#10-behind-a-reverse-proxy-or-load-balancer).
 
+## Two sites behind two CDNs
+
+**When:** one site sits behind one CDN and another behind a second, or one is reached directly,
+and each should believe only its own proxy: a CDN's addresses are shared by all its customers, so
+anyone can point it at this server and send requests for the other site.
+
+```toml
+# /etc/agensio/agensio.toml: the main file, root's (once per host)
+include = ["sites.d/*.toml"]
+
+[server]
+trusted_proxies = ["@cdn_a", "@cdn_b"]   # every proxy allowed in front of this server
+
+[addresses]
+cdn_a = ["173.245.48.0/20", "103.21.244.0/22"]   # the CDNs' published ranges, kept in one place
+cdn_b = ["198.51.100.0/24"]
+```
+
+```toml
+# /etc/agensio/sites.d/example.com.toml
+[[site]]
+server_name = ["example.com"]
+listen = ["0.0.0.0:80"]              # CDN A ends TLS and forwards plain HTTP
+root = "/var/www/example.com/web"
+trusted_proxies = ["@cdn_a"]         # only CDN A speaks for this site
+```
+
+```toml
+# /etc/agensio/sites.d/example2.com.toml
+[[site]]
+server_name = ["example2.com"]
+listen = ["0.0.0.0:80"]
+root = "/var/www/example2.com/web"
+trusted_proxies = ["@cdn_b"]         # only CDN B
+```
+
+**What it does.** A request for `example.com` through CDN A is judged by the client CDN A names
+in `X-Forwarded-For`, and its scheme by `X-Forwarded-Proto`. The same request through CDN B is
+CDN B's own: its address is the client (in the access rules, the logs, fail2ban, `REMOTE_ADDR`)
+and its scheme is the connection's, so CDN B's customers cannot speak for `example.com`. Each
+site's list must lie within the server's, which only root widens; `trusted_proxies = []` is for a
+site whose visitors connect directly. A site without the key believes the whole server list, and
+health then reports `site_trusts_every_proxy`. A trusted proxy is never banned by the jails
+agensio renders.
+
+**Check it.**
+
+```sh
+agensio -t                                    # an entry outside [server] trusted_proxies is refused, named
+agensio ctl site example.com | grep -A2 trusted_proxies
+agensio ctl health | grep site_trusts_every_proxy   # sites that still believe every proxy
+```
+
+**On a managed site.**
+
+```sh
+agensio ctl site-update example.com --trusted-proxy @cdn_a --yes --reason "behind CDN A"
+agensio ctl site-update example2.com --no-trusted-proxies --yes --reason "visitors connect directly"
+```
+
+**MCP:** `site_update` with `trusted_proxies` (`["@cdn_a"]`, `[]` for none, `null` for the server's
+list); `site_show` lists it; `health_check` reports `site_trusts_every_proxy`.
+
+**Reference:** [Behind a reverse proxy or load balancer](../configuration.md#10-behind-a-reverse-proxy-or-load-balancer).
+
 ## Let fail2ban count failed logins
 
 **When:** an application's login form is guessed at, and you want the address banned after a
