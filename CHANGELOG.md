@@ -2,6 +2,14 @@
 
 ## 0.1.0-alpha.73
 
+- **`proxy = { headers = { ... } }` is now `request_headers`** (breaking): the fields agensio sends
+  to the origin with the request, named for the way they go, beside the response fields of the
+  coming `[[site.response_headers]]` (`docs/headers.md`). There is no alias: the old name is
+  refused at load like any unknown key (`.proxy: unknown key 'headers'`, with the table's keys
+  listed), so a main file that uses it does not start and a site file that uses it is set aside
+  until renamed. Check before upgrading with the new binary's `agensio -t`. Also: a field error in
+  `add_headers`, a proxy's request fields, `cgi.env` or `php.extra` named `add_headers` whichever
+  table it was in; it now names the table written.
 - **A client could choose the address a proxied application saw.** agensio passed a client's own
   `X-Real-IP`, `CF-Connecting-IP`, `True-Client-IP`, `Client-IP` and the like to the origin
   unchanged unless the site set the field itself, and an application behind agensio sees
@@ -11,7 +19,7 @@
   request now carries `X-Real-IP` with the client agensio believes (the address of its own logs
   and access rules, as 17 of the 25 applications' proxy guides reviewed ask), a client's own
   copy is never passed on, and the fields in which a CDN names the client pass only from a peer in
-  `trusted_proxies`. `proxy = { headers = { "X-Real-IP" = "" } }` stops agensio's own, and
+  `trusted_proxies`. `proxy = { request_headers = { "X-Real-IP" = "" } }` stops agensio's own, and
   `forwarded = "off"` sends none. Found by the review of applications' proxy configurations
   (`docs/redirects.md` 12.4); the unit test of the forwarded head failed before the fix, and two
   integration checks send the fields from a trusted and an untrusted address. `bench/ab.sh HEAD

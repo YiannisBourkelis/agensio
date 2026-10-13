@@ -201,7 +201,7 @@ section of `docs/configuration.md` that explains the key.
 |---|---|---|---|---|---|---|
 | `host` | string | (passed through) | The Host header sent to the origin; $host and other variables allowed. | reload | site file | 12 |
 | `forwarded` | enum: x-forwarded \| forwarded \| both \| off | x-forwarded | Which client-address fields go to the origin: X-Forwarded-For/Proto/Host, RFC 7239 Forwarded, both, or none; X-Real-IP with the client agensio believes goes with all but off. A client's own values are replaced unless it is a trusted proxy, whose chain is appended to; a client's X-Real-IP is never passed on, and a CDN's client fields (CF-Connecting-IP, True-Client-IP, Client-IP and the like) only from a trusted proxy. | reload | site file | 12 |
-| `headers` | table | {} | Fields added to the forwarded request, with $ variables; one agensio writes itself (Host, X-Forwarded-*, Forwarded, X-Real-IP) is replaced, sent once; "" removes (X-Real-IP = "" stops agensio's own). | reload | site file | 12 |
+| `request_headers` | table | {} | Fields added to the request forwarded to the origin, with $ variables; one agensio writes itself (Host, X-Forwarded-*, Forwarded, X-Real-IP) is replaced, sent once; "" removes (X-Real-IP = "" stops agensio's own). | reload | site file | 12 |
 | `hide` | list | [] | Response fields removed before the client sees them. | reload | site file | 12 |
 | `redirects` | enum: rewrite \| pass | rewrite | Rewrite a Location that points at the origin (its address, or the name given as host) to this site. | reload | site file | 12 |
 | `tls` | table { verify, ca, server_name } | verify = true | TLS to the origin: verification, a CA bundle, the SNI name. | reload | site file | 12 |

@@ -301,12 +301,12 @@ upstream = "http://127.0.0.1:9199"
 [[site.location]]                       # D2: header policy
 path = "/policy/"
 upstream = "http://127.0.0.1:9107/"
-proxy = {{ host = "app.internal", forwarded = "both", headers = {{ "X-Real-IP" = "$remote_addr", "X-Site" = "$scheme://$host", "Accept" = "" }}, hide = ["X-Powered-By"] }}
+proxy = {{ host = "app.internal", forwarded = "both", request_headers = {{ "X-Real-IP" = "$remote_addr", "X-Site" = "$scheme://$host", "Accept" = "" }}, hide = ["X-Powered-By"] }}
 
 [[site.location]]                       # a configured field agensio also writes replaces agensio's own line
 path = "/dup/"
 upstream = "http://127.0.0.1:9107/"
-proxy = {{ forwarded = "both", headers = {{ "X-Forwarded-Proto" = "https", "Host" = "configured.test", "Forwarded" = "for=192.0.2.9" }} }}
+proxy = {{ forwarded = "both", request_headers = {{ "X-Forwarded-Proto" = "https", "Host" = "configured.test", "Forwarded" = "for=192.0.2.9" }} }}
 
 [[site.location]]                       # D4: a group of two origins, round-robin
 path = "/group/"

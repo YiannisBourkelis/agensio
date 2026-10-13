@@ -166,7 +166,7 @@ is refused at load, and the message names the setting to use:
 A value is fixed text: printable ASCII with inner spaces, no leading or trailing space, no control
 character (RFC 9110 5.5), at most 4 KB, and 16 KB for all of a site's rules together. It is checked
 once, at load, so no request can put a line break into an answer. There are no variables: a `$` in a
-value is refused with a pointer to `proxy = { headers }`, which is where request fields with
+value is refused with a pointer to `proxy = { request_headers }`, which is where request fields with
 variables go to an origin. A few values are checked for meaning too: `X-Frame-Options` is `DENY` or
 `SAMEORIGIN` (`ALLOW-FROM` is ignored by every current browser); `Access-Control-Allow-Origin` is one
 origin, `*` or `null`, never `*` together with `Access-Control-Allow-Credentials: true`;
@@ -462,7 +462,7 @@ lookup, one test of an empty pointer where the answer leaves, measured flat. Wit
 ## 10. Decisions (2026-10-13)
 
 1. **The name**: `[[site.response_headers]]`, so that nothing in its name overlaps with
-   `proxy = { headers }`, the request fields sent to an origin; a `$` variable in a response field,
+   `proxy = { request_headers }`, the request fields sent to an origin; a `$` variable in a response field,
    the one confusion left, is refused with a pointer there. The managed field and the `agensio ctl`
    flags follow it (`response_headers`, `--response-header`).
 2. **The baseline holds only what cannot break a page** (section 4.1): `Referrer-Policy` as

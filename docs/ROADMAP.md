@@ -306,7 +306,7 @@ Small on purpose: the first real applications need forms, logins and uploads; th
       X-Forwarded-For/Proto/Host always set and, from a peer that is not a trusted proxy,
       replaced rather than appended (nothing a client sends is believed); `forwarded =
       "x-forwarded" | "forwarded" | "both" | "off"` (RFC 7239 with bracketed IPv6);
-      `headers = { name = "value" }` toward the origin with `$host`, `$remote_addr`,
+      `request_headers = { name = "value" }` (named `headers` until 2026-10-13) toward the origin with `$host`, `$remote_addr`,
       `$scheme`, `$server_name`, `$server_port`, `""` removing, site and location tables
       merged per field (no `proxy_set_header` reset trap); `hide = [...]` on the way back;
       `redirects = "rewrite"` (a Location naming the origin becomes this site and location)

@@ -499,12 +499,12 @@ listen = ["0.0.0.0:443"]
 tls = { cert = "/etc/ssl/portal.example.com/fullchain.pem", key = "/etc/ssl/portal.example.com/privkey.pem" }
 app = "proxy"
 upstream = "http://127.0.0.1:8080"
-proxy = { host = "portal.internal.example.com", headers = { "X-Portal" = "$scheme://$host" }, hide = ["X-Powered-By", "X-AspNet-Version"] }
+proxy = { host = "portal.internal.example.com", request_headers = { "X-Portal" = "$scheme://$host" }, hide = ["X-Powered-By", "X-AspNet-Version"] }
 
 [[site.location]]
 path = "/partners/"
 upstream = "http://127.0.0.1:8090"
-proxy = { host = "pass", forwarded = "forwarded", headers = { "X-Gateway" = "portal" } }   # X-Portal and hide still apply
+proxy = { host = "pass", forwarded = "forwarded", request_headers = { "X-Gateway" = "portal" } }   # X-Portal and hide still apply
 ```
 
 **What it does.** By default the origin gets the client's `Host`, `X-Forwarded-For`,
@@ -518,16 +518,15 @@ since a redirect to the name given as `host`, like one to the origin's address
 (`http://127.0.0.1:8080/...`), points at the origin and is rewritten (before 0.1.0-alpha.71 only
 the address was). Keep `host = "pass"` unless the origin refuses other names.
 
-`headers` sets fields on every request, with `$host`, `$remote_addr` (the client, behind
-trusted proxies the forwarded one), `$scheme`, `$server_name` and `$server_port`; the client's
-own copy of such a field is dropped, so nobody can send one of their choice, and `""` removes a
-client's field (`"X-Real-IP" = ""` stops agensio's own). A location's `proxy` table changes only
-what it names: its headers join the site's field by field, so `/partners/` gets `X-Portal` and
-`X-Gateway`
-(nginx's `proxy_set_header` drops the outer ones). `forwarded = "forwarded"` sends `Forwarded:
-for=...;proto=https;host=...` instead of the `X-Forwarded-*` fields; `"both"` sends both,
-`"off"` neither. `hide` takes fields out of the answers; `Server` and `Date` are always
-agensio's own.
+`request_headers` sets fields on every request to the origin, with `$host`, `$remote_addr` (the
+client, behind trusted proxies the forwarded one), `$scheme`, `$server_name` and `$server_port`;
+the client's own copy of such a field is dropped, so nobody can send one of their choice, and
+`""` removes a client's field (`"X-Real-IP" = ""` stops agensio's own). A location's `proxy`
+table changes only what it names: its request headers join the site's field by field, so
+`/partners/` gets `X-Portal` and `X-Gateway` (nginx's `proxy_set_header` drops the outer ones).
+`forwarded = "forwarded"` sends `Forwarded: for=...;proto=https;host=...` instead of the
+`X-Forwarded-*` fields; `"both"` sends both, `"off"` neither. `hide` takes fields out of the
+answers; `Server` and `Date` are always agensio's own.
 
 `X-Forwarded-*`, `Forwarded` and `Host` are agensio's own: `host` and `forwarded` choose them.
 One of them named in `headers` replaces agensio's line of that name, so the origin gets it once

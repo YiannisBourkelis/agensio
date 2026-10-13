@@ -287,10 +287,10 @@ void parse_proxy_policy(const toml::table& t, const fs::path& base_dir, Upstream
             out.forwarded != "off")
             fail(where + ".forwarded must be \"x-forwarded\", \"forwarded\", \"both\" or \"off\"");
     }
-    if (t.contains("headers")) {
-        auto* ht = t["headers"].as_table();
-        if (!ht) fail(where + ".headers must be a table");
-        for (auto& [name, value] : headers_of(ht, where)) {
+    if (t.contains("request_headers")) {
+        auto* ht = t["request_headers"].as_table();
+        if (!ht) fail(where + ".request_headers must be a table");
+        for (auto& [name, value] : headers_of(ht, where + ".request_headers")) {
             bool replaced = false;
             for (auto& existing : out.set_headers)
                 if (Headers::iequals(existing.first, name)) {
@@ -395,18 +395,20 @@ void parse_fcgi_table(const toml::table& t, const fs::path& base_dir, FcgiConfig
     out.retry_after = std::to_string(wait_s < 1 ? 1 : wait_s);
 }
 
+// `where` names the table itself (".add_headers", a proxy's ".request_headers"), so a message
+// points at the key the administrator wrote.
 std::vector<std::pair<std::string, std::string>> headers_of(const toml::table* t, const std::string& where) {
     std::vector<std::pair<std::string, std::string>> out;
     if (!t) return out;
     for (auto& [name, node] : *t) {
         auto value = node.value<std::string>();
-        if (!value) fail(where + ".add_headers." + std::string(name.str()) + " must be a string");
+        if (!value) fail(where + "." + std::string(name.str()) + " must be a string");
         for (unsigned char c : name.str())
             if (c <= 0x20 || c == ':' || c == 0x7f)
-                fail(where + ".add_headers: bad field name '" + std::string(name.str()) + "'");
+                fail(where + ": bad field name '" + std::string(name.str()) + "'");
         for (unsigned char c : *value)
             if ((c < 0x20 && c != '\t') || c == 0x7f)
-                fail(where + ".add_headers." + std::string(name.str()) + ": control character in value");
+                fail(where + "." + std::string(name.str()) + ": control character in value");
         out.emplace_back(std::string(name.str()), *value);
     }
     return out;
@@ -509,7 +511,7 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
     loc.try_files = t.contains("try_files") ? try_files_of(t["try_files"], where) : site.try_files;
     loc.hidden_files = t["hidden_files"].value_or(site.hidden_files);
     loc.symlinks_deny = symlinks_deny_of(t["symlinks"], site.symlinks_deny, where);
-    if (auto ht = t["add_headers"].as_table()) loc.add_headers = headers_of(ht, where);
+    if (auto ht = t["add_headers"].as_table()) loc.add_headers = headers_of(ht, where + ".add_headers");
     else if (t.contains("add_headers")) fail(where + ": 'add_headers' must be a table");
     {
         bool only = !loc.add_headers.empty() && match == "prefix";
@@ -597,7 +599,7 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
             if ((*ct).contains("env")) {
                 auto* et = (*ct)["env"].as_table();
                 if (!et) fail(where + ".cgi.env must be a table");
-                for (auto& [name, value] : headers_of(et, where + ".cgi")) {
+                for (auto& [name, value] : headers_of(et, where + ".cgi.env")) {
                     if (name.find('=') != std::string::npos) fail(where + ".cgi.env: bad name '" + name + "'");
                     loc.cgi.env.emplace_back(name, value);
                 }
@@ -1197,7 +1199,7 @@ void parse_pool(const toml::table* php, const fs::path& base_dir, const Config& 
             fail(w + ".pm must be \"static\", \"dynamic\" or \"ondemand\"");
         for (const auto& text : string_list((*php)["open_basedir"], (w + ".open_basedir").c_str()))
             pool.open_basedir.push_back(resolve(base_dir, text).string());
-        for (const auto& [k, v] : headers_of((*php)["extra"].as_table(), w))  // same shape: name = "value"
+        for (const auto& [k, v] : headers_of((*php)["extra"].as_table(), w + ".extra"))  // same shape: name = "value"
             pool.extra.emplace_back(k, v);
         for (const auto& [k, v] : pool.extra)
             if (k.find_first_of("[]=\n") != std::string::npos || v.find('\n') != std::string::npos)
@@ -2126,7 +2128,7 @@ void explain_config(const Config& cfg, std::ostream& out) {
                         break;
                     }
                 if (!loc.proxy.set_headers.empty()) {
-                    out << "proxy.headers = {";
+                    out << "proxy.request_headers = {";
                     for (std::size_t i = 0; i < loc.proxy.set_headers.size(); ++i)
                         out << (i ? ", " : " ") << '"' << loc.proxy.set_headers[i].first << "\" = \""
                             << loc.proxy.set_headers[i].second << '"';

@@ -3108,8 +3108,8 @@ static void test_proxy() {
     head.clear();
     CHECK(!ProxyHandler::build_head(head, ws, ws.request.target, p2) && head.find("Upgrade:") == std::string::npos);
     // The policy keys through the loader, site defaults refined by the location.
-    write("policy.toml", "[[site]]\nlisten = [\"127.0.0.1:18097\"]\nroot = \"www\"\nproxy = { forwarded = \"both\", hide = [\"X-Powered-By\"], headers = { \"X-A\" = \"1\" } }\n"
-                         "[[site.location]]\npath = \"/\"\nupstream = \"http://127.0.0.1:9100\"\nproxy = { host = \"app.internal\", headers = { \"X-A\" = \"2\", \"X-B\" = \"$host\" }, redirects = \"pass\" }\n");
+    write("policy.toml", "[[site]]\nlisten = [\"127.0.0.1:18097\"]\nroot = \"www\"\nproxy = { forwarded = \"both\", hide = [\"X-Powered-By\"], request_headers = { \"X-A\" = \"1\" } }\n"
+                         "[[site.location]]\npath = \"/\"\nupstream = \"http://127.0.0.1:9100\"\nproxy = { host = \"app.internal\", request_headers = { \"X-A\" = \"2\", \"X-B\" = \"$host\" }, redirects = \"pass\" }\n");
     const Config pcfg = load_config(dir / "policy.toml");  // keep the Config alive behind the reference
     const LocationConfig& pl = Router::location(pcfg.sites[0], "/");
     CHECK(pl.proxy.forwarded == "both" && pl.proxy.host == "app.internal" && !pl.proxy.rewrite_redirects);
@@ -5577,16 +5577,21 @@ static void test_unknown_keys() {
     CHECK(refused(site + "[[site.location]]\npath = \"/c/\"\ncgi = { interpeter = \"/bin/sh\" }\n", ".cgi: unknown key 'interpeter' (did you mean 'interpreter'?)"));
     CHECK(refused(site + "[[site.location]]\npath = \"/api/\"\nupstream = \"http://127.0.0.1:9\"\nproxy = { hide = [\"X-Powered-By\"], read_timout = 5 }\n",
                   ".proxy: unknown key 'read_timout'"));
+    // proxy.headers became request_headers (2026-10-13), with no alias: the old key is refused like
+    // any unknown one, the table's keys listed; a field's message names the key written.
+    CHECK(refused(site + "proxy = { headers = { \"X-A\" = \"1\" } }\n", ".proxy: unknown key 'headers'"));
+    CHECK(refused(site + "proxy = { request_headers = { \"X-A\" = 1 } }\n", ".proxy.request_headers.X-A must be a string"));
+    CHECK(refused(site + "[[site.location]]\npath = \"/a/\"\nadd_headers = { \"Bad Name\" = \"v\" }\n", ".add_headers: bad field name 'Bad Name'"));
     // An included file holds sites only: a [server] there was ignored before.
     write("sites.d/a.toml", "[server]\nworkers = 2\n" + site);
     CHECK(refused("include = [\"sites.d/*.toml\"]\n", "a.toml: unknown key 'server'; an included file holds [[site]] tables"));
     fs::remove(dir / "sites.d/a.toml");
     // Every legitimate table still loads: the keys a reference row gives, the free-form tables
-    // (add_headers, proxy headers, cgi env, address sets) and the sub-tables.
+    // (add_headers, proxy request_headers, cgi env, address sets) and the sub-tables.
     write("ok.toml", "include = [\"sites.d/*.toml\"]\n[server]\nworkers = 1\nhttp2 = { max_concurrent_streams = 64 }\n[cache]\nmax_size = \"64MB\"\n"
                      "[log]\nlevel = \"warn\"\naccess = \"off\"\n[addresses]\noffice = [\"203.0.113.0/24\"]\n" + site +
                      "php = { socket = \"unix:/run/x.sock\", read_timeout = 30 }\n"
-                     "proxy = { headers = { \"X-Any-Name\" = \"$host\" }, tls = { verify = false } }\n"
+                     "proxy = { request_headers = { \"X-Any-Name\" = \"$host\" }, tls = { verify = false } }\n"
                      "[[site.location]]\npath = \"/a/\"\nadd_headers = { \"X-Custom-Field\" = \"1\" }\n"
                      "[[site.location]]\npath = \"/c/\"\ncgi = { env = { \"ANY_NAME\" = \"1\" }, read_timeout = 5 }\n"
                      "[[site.location]]\npath = \"/f/\"\nhandler = \"fastcgi\"\nfastcgi = { socket = \"unix:/run/y.sock\", read_timeout = 9 }\n"
