@@ -73,6 +73,7 @@
 #include "net/cidr.hpp"
 #include "core/forwarded.hpp"
 #include "core/access.hpp"
+#include "core/redirect.hpp"
 #include "core/refuse.hpp"
 #include "core/private_cache.hpp"
 #ifdef AGENSIO_HAS_AUTH
@@ -1757,7 +1758,7 @@ static void test_pools() {
     // strict_users (the cookbook's finding, alpha.71: until alpha.76 site-create wrote one for an
     // HTTPS site's plain port, and every site-create with https was refused on such a host).
     {
-        write("strictredir.toml", "[server]\nstrict_users = true\n[[site]]\nserver_name = [\"r.test\"]\nlisten = [\"127.0.0.1:1\"]\nredirect = \"https://r.example\"\n");
+        write("strictredir.toml", "[server]\nstrict_users = true\n[[site]]\nserver_name = [\"r.test\"]\nlisten = [\"127.0.0.1:1\"]\n[[site.redirect]]\nfrom = \"/\"\nto = \"https://r.example\"\nstatus = 301\n");
         std::string why;
         try { (void)load_config(dir / "strictredir.toml"); } catch (const std::exception& e) { why = e.what(); }
         CHECK(why.empty());
@@ -3338,19 +3339,18 @@ static void test_acme() {
     CHECK(refused("[server]\nacme = { email = \"me@x.test\", directory = \"http://ca\" }\n" + site, "must be an https:// URL"));
     CHECK(refused("[server]\nacme = { email = \"nope\" }\n" + site, "server.acme.email"));
     CHECK(refused("[server]\nacme = \"yes\"\n" + site, "server.acme must be a table"));
-    // redirect: an https://host[:port] prefix, no root needed, plain or TLS. "https" (the same host)
-    // went in alpha.76: a TLS site answers its own plain HTTP (http, below).
+    // A site a rule from / answers whole needs no root (alpha.82, [[site.redirect]]); the string key
+    // `redirect` went then ("https", the same host, in alpha.76: a TLS site answers its own plain HTTP).
     {
-        std::ofstream(dir / "r.toml") << "[[site]]\nserver_name = [\"b.test\"]\nlisten = [\"127.0.0.1:80\"]\nredirect = \"https://b.test:8443\"\n";
+        std::ofstream(dir / "r.toml") << "[[site]]\nserver_name = [\"b.test\"]\nlisten = [\"127.0.0.1:80\"]\n[[site.redirect]]\nfrom = \"/\"\nto = \"https://b.test:8443\"\nstatus = 301\n";
         const Config cfg = load_config(dir / "r.toml");
-        CHECK(cfg.sites.size() == 1 && cfg.sites[0].redirect == "https://b.test:8443" && cfg.sites[0].http == SiteConfig::Http::serve);
+        CHECK(cfg.sites.size() == 1 && cfg.sites[0].redirects_all && cfg.sites[0].redirects.rules.size() == 1 && cfg.sites[0].http == SiteConfig::Http::serve);
         CHECK(cfg.sites[0].root.empty());  // a redirect site has no document root, never the configuration directory
     }
     const std::string plain = "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:80\"]\n";
     CHECK(refused(plain + "redirect = \"https\"\n", "redirect = \"https\" is gone (alpha.76)"));
-    CHECK(refused(plain + "redirect = \"http://a.test\"\n", "redirect must be"));
-    CHECK(refused(plain + "redirect = \"https://a.test/path\"\n", "redirect must be"));
-    CHECK(refused(plain + "redirect = true\n", "redirect must be a string"));
+    CHECK(refused(plain + "redirect = \"https://a.test\"\n", "is gone (alpha.82): a whole domain moved is a rule, [[site.redirect]] with from = \"/\", to = \"https://a.test\""));
+    CHECK(refused(plain + "redirect = true\n", "'redirect' must be an array of tables ([[site.redirect]]"));
     // http (docs/redirects.md 2): a TLS site on 443 listens on port 80 beside it and redirects there;
     // elsewhere it has no plain listener unless the table names one, and the redirect keeps its port.
     const std::string acme = "[server]\nacme = { email = \"me@x.test\" }\n";
@@ -3448,9 +3448,9 @@ static void test_acme() {
         CHECK(d.sites.size() == 2);
     }
     {   // the bare name on 443 redirecting to www: allowed, with its own automatic certificate
-        std::ofstream(dir / "c.toml") << "[server]\nacme = { email = \"me@x.test\" }\n" + plain + "redirect = \"https://www.a.test\"\ntls = \"auto\"\n";
+        std::ofstream(dir / "c.toml") << "[server]\nacme = { email = \"me@x.test\" }\n" + plain + "tls = \"auto\"\n[[site.redirect]]\nfrom = \"/\"\nto = \"https://www.a.test\"\nstatus = 301\n";
         const Config cfg = load_config(dir / "c.toml");
-        CHECK(cfg.sites.size() == 1 && cfg.sites[0].redirect == "https://www.a.test" && cfg.sites[0].tls && cfg.sites[0].tls->automatic);
+        CHECK(cfg.sites.size() == 1 && cfg.sites[0].redirects_all && cfg.sites[0].tls && cfg.sites[0].tls->automatic);
     }
     std::filesystem::remove_all(dir);
 }
@@ -4046,7 +4046,7 @@ static void test_control_sites() {
             CHECK(loads);
             if (loads) {
                 const SiteConfig* tsite = nullptr;
-                for (const auto& st : tcfg.sites) if (st.user == "shop" && !st.redirect.empty() == false && st.tls) tsite = &st;
+                for (const auto& st : tcfg.sites) if (st.user == "shop" && !st.redirects_all && st.tls) tsite = &st;
                 CHECK(tsite && tsite->max_body_size == 200u * 1024 * 1024 && tsite->pool.memory_limit == "512MB" && tsite->pool.children == 4 && tsite->pool.pm == "dynamic" && tsite->pool.max_execution_time == 120);
                 if (tsite) {
                     const json::Value eff = effective_settings(*tsite, tcfg);
@@ -5027,7 +5027,7 @@ static void test_server_account_and_rules() {
     (void)check_hosting(bare, facts);  // must not crash; the outcome depends on the running uid
     // The lookup prefers the site that serves content over a whole-domain redirect beside it.
     Config two;
-    SiteConfig r; r.server_names = {"a.test"}; r.redirect = "https://b.test";
+    SiteConfig r; r.server_names = {"a.test"}; r.redirects_all = true;
     SiteConfig t; t.server_names = {"a.test"}; t.tls = TlsConfig{}; t.app = "laravel";
     two.sites = {r, t};
     CHECK(control::find_site(two, "a.test") == &two.sites[1]);
@@ -5756,6 +5756,127 @@ static void test_protection() {
 // hsts as a site key (alpha.75, docs/redirects.md 4): the field built once at load for every HTTPS
 // answer of the site; HSTS in a location's add_headers, which reached neither the PHP pages nor the
 // error answers, is refused with the key to use.
+// [[site.redirect]] (alpha.82, docs/redirects.md 5): what from and to accept, the Location written
+// byte by byte for the design's examples, the most specific rule, and the load's refusals and notes.
+static void test_redirect_rules() {
+    namespace fs = std::filesystem;
+    using namespace agensio::redirect;
+    auto from_err = [](std::string_view text, bool exact) {
+        RedirectRule r;
+        return compile_from(text, exact, r);
+    };
+    auto to_err = [](std::string_view text) {
+        RedirectRule r;
+        return compile_to(text, r);
+    };
+    CHECK(from_err("/blog", false).empty() && from_err("/", false).empty() && from_err("/old/", false).empty());
+    CHECK(from_err("blog", false).find("starting with '/'") != std::string::npos);
+    CHECK(from_err("/a/../b", false).find("normalised") != std::string::npos && from_err("/a//b", false).find("normalised") != std::string::npos);
+    CHECK(from_err("/caf%C3%A9", false).find("no %-escapes") != std::string::npos);
+    CHECK(from_err("/a?x=1", false).find("only an exact rule") != std::string::npos && from_err("/a#f", true).find("fragment") != std::string::npos);
+    CHECK(from_err("/a?x=1&x=2", true).find("twice") != std::string::npos && from_err("/a?", true).find("names no query") != std::string::npos);
+    {
+        RedirectRule r;
+        CHECK(compile_from("/index.php?page=about&lang=el%20gr", true, r).empty() && r.from == "/index.php" && r.params.size() == 2 && r.params[1].second == "el gr");
+    }
+    CHECK(to_err("/news").empty() && to_err("https://docs.example.com").empty() && to_err("/caf%C3%A9?q=a%20b#x").empty());
+    {
+        RedirectRule r;
+        CHECK(compile_to("https://Docs.Example.com:8443/x?y=1#z", r).empty() && r.origin == "https://docs.example.com:8443" && r.to_path == "/x" &&
+              r.to_query == "y=1" && r.to_fragment == "z");
+    }
+    for (std::string_view bad : {"//evil.com", "javascript:alert(1)", "ftp://x.test/", "news", "https://user@x.test/", "https://", "/a b", "/a\\b",
+                                 "/a/../b", "/a/./b", "/%zz", "https://x.test:99999999/", "https://ex ample/", "/\t"})
+        CHECK(!to_err(bad).empty());
+    // The design's examples (5.2, 5.3): relative targets, one '/' at the join, the target's query first.
+    auto rule = [](std::string_view from, bool exact, std::string_view to) {
+        RedirectRule r;
+        (void)compile_from(from, exact, r);
+        (void)compile_to(to, r);
+        r.keep_query = r.params.empty();
+        return r;
+    };
+    auto loc = [](const RedirectRule& r, std::string_view path, std::string_view query, std::string_view origin = {}) {
+        std::string out;
+        write_location(out, r, path, query, origin);
+        return out;
+    };
+    const RedirectRule blog = rule("/blog", false, "/news");
+    CHECK_EQ(loc(blog, "/blog", ""), std::string("/news"));
+    CHECK_EQ(loc(blog, "/blog/", ""), std::string("/news/"));
+    CHECK_EQ(loc(blog, "/blog/2024/post", "x=1"), std::string("/news/2024/post?x=1"));
+    CHECK_EQ(loc(blog, "/blog/a b?#\\%", "q=\001a b#"), std::string("/news/a%20b%3F%23%5C%25?q=%01a%20b%23"));
+    CHECK_EQ(loc(rule("/old/", false, "/"), "/old/x", ""), std::string("/x"));
+    CHECK_EQ(loc(rule("/old", false, "/"), "/old/x", ""), std::string("/x"));
+    CHECK_EQ(loc(rule("/old/", false, "/new"), "/old/x", ""), std::string("/new/x"));
+    CHECK_EQ(loc(rule("/docs", false, "https://docs.example.com"), "/docs/install", "v=2"), std::string("https://docs.example.com/install?v=2"));
+    CHECK_EQ(loc(rule("/", false, "https://new.example"), "/", ""), std::string("https://new.example/"));
+    CHECK_EQ(loc(rule("/help", true, "/support?tab=faq#contact"), "/help", "lang=el"), std::string("/support?tab=faq&lang=el#contact"));
+    CHECK_EQ(loc(rule("/index.php?page=about", true, "/about"), "/index.php", "page=about"), std::string("/about"));
+    CHECK_EQ(loc(blog, "/blog/x", "a=1", "https://example.com"), std::string("https://example.com/news/x?a=1"));  // one hop with the scheme
+    // The most specific rule decides: the longest prefix, an exact rule before a prefix, the most parameters.
+    RedirectSet set;
+    set.rules = {rule("/blog", false, "/a"), rule("/blog/2024", false, "/b"), rule("/blog/2024", true, "/c"), rule("/p?x=1", true, "/d"),
+                 rule("/p?x=1&y=2", true, "/e"), rule("/p", true, "/f"), rule("/Q", false, "/g")};
+    index(set);
+    auto to_of = [&](std::string_view path, std::string_view query = {}) {
+        const RedirectRule* r = match(set, path, query, false);
+        return r ? r->to : std::string("none");
+    };
+    CHECK_EQ(to_of("/blog/x"), std::string("/a"));
+    CHECK_EQ(to_of("/blog/2024/x"), std::string("/b"));
+    CHECK_EQ(to_of("/blog/2024"), std::string("/c"));
+    CHECK_EQ(to_of("/blogger"), std::string("none"));
+    CHECK_EQ(to_of("/p", "y=2&x=1"), std::string("/e"));
+    CHECK_EQ(to_of("/p", "x=1&z=3"), std::string("/d"));
+    CHECK_EQ(to_of("/p", "x=%31"), std::string("/d"));  // the value decoded
+    CHECK_EQ(to_of("/p", "x=2"), std::string("/f"));
+    CHECK_EQ(to_of("/q/x"), std::string("none"));       // case-sensitive
+    CHECK(match(set, "/blog/x", "", true) == nullptr);   // an encoded separator: no prefix rule
+    // The load: refusals, a site a rule from / answers whole without a root, the notes.
+    const fs::path dir = fs::temp_directory_path() / ("agensio-redir-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "www");
+    auto load = [&](const std::string& site_keys, const std::string& rules) {
+        std::ofstream(dir / "r.toml") << "[[site]]\nserver_name = [\"r.test\"]\nlisten = [\"127.0.0.1:18731\"]\n" + site_keys + rules;
+        try {
+            const Config c = load_config(dir / "r.toml");
+            std::string notes;
+            for (const auto& [code, text] : c.sites[0].redirect_notes) notes += code + ";";
+            return "ok:" + notes;
+        } catch (const std::exception& e) {
+            return std::string("refused: ") + e.what();
+        }
+    };
+    const std::string root = "root = \"www\"\n";
+    auto rr = [](std::string_view from, std::string_view extra) { return "[[site.redirect]]\nfrom = \"" + std::string(from) + "\"\n" + std::string(extra); };
+    CHECK_EQ(load("", rr("/", "to = \"https://new.test\"\nstatus = 301\n")), std::string("ok:"));  // no root needed
+    CHECK(load(root, rr("/a", "to = \"/b\"\n")).find("'status' is required") != std::string::npos);
+    CHECK(load(root, rr("/a", "to = \"/b\"\nstatus = 303\n")).find(".status must be 301, 302, 307, 308 or 410") != std::string::npos);
+    CHECK(load(root, rr("/a", "status = 301\n")).find("'to' is required") != std::string::npos);
+    CHECK(load(root, rr("/a", "to = \"/b\"\nstatus = 410\n")).find("a 410 (gone) has no target") != std::string::npos);
+    CHECK(load(root, rr("/a", "to = \"/b\"\nstatus = 302\ncache = \"1d\"\n")).find(".cache is for a permanent redirect") != std::string::npos);
+    CHECK(load(root, rr("/a", "match = \"exact\"\nto = \"/b\"\nstatus = 301\nremainder = \"drop\"\n")).find(".remainder is for a prefix rule") != std::string::npos);
+    CHECK(load(root, rr("/a", "to = \"/b\"\nstatus = 301\nkind = 1\n")).find("unknown key 'kind'") != std::string::npos);
+    CHECK(load(root, rr("/a", "to = \"/a/b\"\nstatus = 301\n")).find("redirect in a circle") != std::string::npos);
+    CHECK(load(root, rr("/a", "match = \"exact\"\nto = \"/a\"\nstatus = 301\n")).find("redirect in a circle") != std::string::npos);
+    CHECK_EQ(load(root, rr("/docs", "match = \"exact\"\nto = \"/docs/\"\nstatus = 301\n")), std::string("ok:"));  // its own path only: no loop
+    CHECK(load(root, rr("/a", "to = \"/b\"\nstatus = 301\n") + rr("/b", "to = \"/a\"\nstatus = 301\n")).find("redirect in a circle") != std::string::npos);
+    CHECK(load(root, rr("/a", "to = \"http://r.test:18731/a/x\"\nstatus = 301\n")).find("redirect in a circle") != std::string::npos);  // the site's own name and port
+    CHECK_EQ(load(root, rr("/a", "to = \"https://r.test/a/x\"\nstatus = 301\n")), std::string("ok:"));  // its name over https: another listener
+    CHECK_EQ(load(root, rr("/a", "to = \"https://other.test/a/x\"\nstatus = 301\n")), std::string("ok:"));
+    CHECK(load(root, rr("/a", "to = \"/b\"\nstatus = 301\n") + rr("/a", "to = \"/c\"\nstatus = 302\n")).find("two [[site.redirect]] rules") != std::string::npos);
+    CHECK(load(root + "refuse = [\"/vendor/\"]\n", rr("/vendor", "to = \"/b\"\nstatus = 301\n")).find("can never apply") != std::string::npos);
+    CHECK_EQ(load(root, rr("/a", "match = \"exact\"\nto = \"/b\"\nstatus = 301\n") + rr("/b", "match = \"exact\"\nto = \"/c\"\nstatus = 301\n")),
+             std::string("ok:redirect_chain;"));
+    CHECK_EQ(load(root, rr("/", "to = \"https://other.test\"\nstatus = 301\nremainder = \"drop\"\n")), std::string("ok:redirect_soft_404;"));
+    CHECK(load(root, rr("/", "to = \"/home\"\nstatus = 301\nremainder = \"drop\"\n")).find("redirect in a circle") != std::string::npos);  // /home is under / again
+    CHECK_EQ(load(root, rr("/.well-known", "to = \"https://other.test\"\nstatus = 301\n")), std::string("ok:redirect_skips_validation;"));
+    CHECK_EQ(load(root + "[[site.access]]\npath = \"/admin\"\nallow = [\"10.0.0.0/8\"]\n", rr("/admin/old", "to = \"/admin/new\"\nstatus = 301\n")),
+             std::string("ok:redirect_under_protection;"));
+    CHECK(load(root + "redirect = \"https://new.test\"\n", "").find("is gone (alpha.82)") != std::string::npos);
+    fs::remove_all(dir);
+}
+
 static void test_hsts_key() {
     namespace fs = std::filesystem;
     const fs::path dir = fs::temp_directory_path() / ("agensio-hsts-" + std::to_string(::getpid()));
@@ -8990,6 +9111,7 @@ int main() {
     test_unknown_keys();
     test_site_trusted_proxies();
     test_hsts_key();
+    test_redirect_rules();
     test_site_isolation();
     test_served_record();
     test_hosting_isolation();

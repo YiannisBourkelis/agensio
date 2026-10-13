@@ -281,9 +281,10 @@ When you ask for what no field covers (a header on one path, an alias outside th
 second upstream, CGI), the agent does not edit the site's file, which would unmanage it. It
 hands you the exact `[[location]]` block for the site's root additions file,
 `sites.d/<domain>.root.toml`, root's alone, with `site = "<domain>"` on its first line, then
-`agensio reload`, and reads the result back with `site_show`. A redirect of one path cannot be
-made yet (no location key redirects), and the agent says so; a whole domain sent to another
-(`redirect = "https://new.example"`, path and query kept) is a site file of its own that root
+`agensio reload`, and reads the result back with `site_show`. A redirect of one path of a managed
+site cannot be made through the tools yet, and the agent says so (hand-written site files take
+`[[site.redirect]]` rules, docs/configuration.md 14b); a whole domain sent to another (a site of
+its own with one rule from `/` to `https://new.example`, path and query kept) is a site file root
 writes, which the agent hands you.
 
 An existing application comes as an archive. For Writebook the agent calls

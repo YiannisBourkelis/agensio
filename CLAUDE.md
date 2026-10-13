@@ -183,7 +183,7 @@ Source map (`src/`, files move into subdirectories as they are touched, see the 
   fuzzed), `http_client` (`HttpRequest`: HTTP/1.1 framing both ways, keep-alive rules).
 - top level, not yet moved: `config`, `path`, `mime`, `http_date`, `file`, `cache`,
   `response` (status lines, error pages), `tls_stream.hpp`, `server`, `main`.
-Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (eighteen, each seeded from
+Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (nineteen, each seeded from
 `tests/fuzz/regressions/<name>/`, all run by `scripts/fuzz-all.sh`).
 
 ## Architecture (as implemented)
@@ -483,7 +483,14 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (eighteen, each seeded from
   site's exact names; `before_routing` (`http_redirect` or `canonical_redirect`) is the one flag
   the route tests; `redirect_https` names the canonical host for another listed name (its own with
   `hsts`, 4.3) and `redirect_host` sends one over HTTPS, scheme and port kept; managed field
-  `canonical`, `ctl --canonical`. `redirect = "https"` is refused; the
+  `canonical`, `ctl --canonical`. `[[site.redirect]]` (alpha.82, design section 5,
+  `docs/configuration.md` 14b): `core/redirect.hpp` compiles `from`/`to`, indexes the rules
+  (`RedirectSet`: exact by path, prefixes longest first behind a first-byte bitset), matches and
+  writes the Location; `parse_redirects` and `check_redirects` in `config.cpp` (circles followed
+  on the site's names and ports, duplicates, refuse-unreachable, notes through `access_notices`);
+  `Dispatcher::route` after `refuse`, and `redirect_https`/`redirect_host` take a matching rule
+  into the same hop; `fuzz_redirect`. The string key `redirect` is gone; `redirects_all` (a rule
+  from `/`) needs no root. `redirect = "https"` is refused; the
   `https://host` prefix form stays until `[[site.redirect]]`.
 - **Automatic certificates** (H3, `src/services/acme.*`, `services/json.hpp`): `tls = "auto"`
   plus `[server] acme = { email }`; ACME v2 with HTTP-01 against any RFC 8555 CA, JWS ES256

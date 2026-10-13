@@ -1928,7 +1928,9 @@ tls = "auto"                        # one certificate covering both names
 
 The redirect keeps the path and the query and is kept a day (`Cache-Control: max-age=86400`);
 over HTTPS, and on a site that serves plain HTTP, the scheme and the port the client used are
-kept. With `hsts` on, a plain request for another name goes to that name's HTTPS first, which then
+kept: the port its Host field names, which a browser always sends for a port other than 80 or
+443 (a test with `curl -H 'Host: www.example.com' http://127.0.0.1:8080/` names none, so its
+redirect goes to the default port; `--resolve` keeps the port in Host). With `hsts` on, a plain request for another name goes to that name's HTTPS first, which then
 redirects to the canonical name with HSTS, so the other name learns HSTS too (redirects.md 4.3).
 `canonical` must be one of the site's exact `server_name` entries; only the names the site lists
 redirect, so a request by IP address or for a name only a catch-all takes is answered as before,
@@ -1939,21 +1941,25 @@ and the tasks is the canonical one. The same with the names swapped makes the ba
 A managed site sets it with `site_update` `canonical` (`agensio ctl site-update NAME --canonical
 www.example.com`).
 
-**A domain moved away** to another host is a site of its own with a prefix: `redirect =
-"https://www.example.org"` sends every request there with a `301`, path and query appended. It
-needs a certificate for its names too (browsers check it before following any redirect), which
-`tls = "auto"` provides, and its port 80, which comes with port 443, redirects straight to the
-prefix:
+**A domain moved away** to another host is a site of its own with one rule from `/`
+(section 14b): every request goes there with a `301`, path and query kept. It needs a certificate
+for its names too (browsers check it before following any redirect), which `tls = "auto"`
+provides, and its port 80, which comes with port 443, goes straight to the new host in one hop:
 
 ```toml
 [[site]]
 server_name = ["example.net", "www.example.net"]
 listen = ["0.0.0.0:443"]
 tls = "auto"
-redirect = "https://www.example.org"
+
+[[site.redirect]]
+from = "/"
+to = "https://www.example.org"
+status = 301
 ```
 
-A prefix with a path is refused.
+Until 0.1.0-alpha.82 this was the string key `redirect = "https://www.example.org"`, refused now
+with the rule to write.
 
 **HSTS.** `hsts = true` sends `Strict-Transport-Security: max-age=31536000` (a year, this host
 only) on every answer the site gives over HTTPS: pages, files, PHP, a proxied application, error
@@ -1992,6 +1998,99 @@ Testing against a local CA: `tests/acme.sh build/agensio` starts Pebble (Let's E
 test server, `bench/acme/docker-compose.yml`), orders a certificate for
 `host.docker.internal` over port 5002, verifies the served chain against Pebble's root
 and checks that a restart keeps the certificate.
+
+## 14b. Path redirects: `[[site.redirect]]`
+
+The design, with the reasons and what the research of nine servers and many applications found, is
+[redirects.md](redirects.md) section 5. A rule sends one path, or a section, somewhere else:
+
+```toml
+[[site.redirect]]
+from = "/blog"          # a section: /blog, /blog/ and /blog/2024/post, never /blogger
+to = "/news"
+status = 301            # required: 301, 302, 307, 308 or 410
+
+[[site.redirect]]
+from = "/about-us"
+match = "exact"         # this path alone
+to = "/about"
+status = 301
+
+[[site.redirect]]
+from = "/index.php?page=contact"   # an old address that put the page in the query: exact rules only
+match = "exact"
+to = "/contact"
+status = 301
+
+[[site.redirect]]
+from = "/press-2019"
+status = 410            # gone, no new address: search engines drop a 410 sooner than a 404
+```
+
+| request | answer |
+|---|---|
+| `/blog/2024/post?x=1` | `301 → /news/2024/post?x=1` |
+| `/blogger` | served (not the segment `blog`) |
+| `/about-us?ref=mail` | `301 → /about?ref=mail` |
+| `/index.php?lang=el&page=contact` | `301 → /contact` (any order, other parameters ignored, the old query dropped) |
+| `/press-2019/photos` | `410 Gone` |
+
+| field | values | default |
+|---|---|---|
+| `from` | a normalised path, case-sensitive; an exact rule may add the query parameters it requires | required |
+| `match` | `"prefix"` (whole segments) or `"exact"` | `"prefix"` |
+| `to` | a path on this site, or an `https://` or `http://` URL | required, none with `410` |
+| `status` | `301`, `302`, `307`, `308`, or `410` | required |
+| `remainder` | `"keep"` or `"drop"` (prefix rules) | `"keep"` |
+| `query` | `"keep"` or `"drop"` | `"keep"`; `"drop"` for a rule whose `from` names query parameters |
+| `cache` | a duration (`"1d"`, `"30d"`, seconds) or `"none"`; permanent statuses only | `"1d"` |
+
+- **The most specific rule decides, never the order:** the longest `from`, and an exact rule
+  before a prefix of the same path. Two rules with the same `from` are refused. People used to
+  other platforms expect "the first match wins": it does not apply here.
+- **Matching is case-sensitive**, as on every hosting platform: `/Blog` is another address, so a
+  rule that only fixes the case is allowed. An exact rule matches its own path only: exact `/docs`
+  does not match `/docs/`, so a rule from exact `/docs` to `/docs/` is legal.
+- **Rules match the path the client asked for**, normalised once, never a target `try_files` or a
+  directory's index reached internally: a rule from `/index.html` to `/` cannot catch a
+  single-page application's fallback to its shell.
+- **What a rule keeps:** a prefix rule's rest of the path follows its target (`remainder =
+  "drop"` sends a whole section to one page); the request's query follows the target's own after
+  `&` (`query = "drop"` leaves old tracking parameters behind); a fragment in `to` is sent, and
+  without one the browser keeps the one it had (RFC 9110 10.2.2).
+- **Which status:** `301` or `308` when the move is final, `302` or `307` while testing or for
+  something temporary; `307` and `308` keep a POST a POST, `301` and `302` turn it into a GET in
+  every browser. Permanent redirects carry `Cache-Control: max-age=86400` unless `cache` says
+  otherwise: without a lifetime Chromium keeps a `301` or `308` forever, and a mistake could never
+  be undone for the visitors who saw it.
+- **Where rules stand:** certificate validation over plain HTTP first (section 14, never
+  redirected), then the scheme (`http`) and the host (`canonical`), then `refuse` (a refused path
+  is a `404`, never redirected), then the rules, then the access and password rules (a redirect
+  reveals no content, and its target meets its own rules), then the locations. Scheme, host and
+  rule are one hop: `http://www.example.com/blog/x` goes straight to
+  `https://example.com/news/x` with the rule's status. With `hsts` on, a plain request for a name
+  that is not canonical goes to that name's HTTPS first (4.3 of the design).
+- **The `Location` is written by agensio, byte by byte:** a target on the site stays relative (it
+  never depends on the Host the client sent); the rest of the path and the query are
+  percent-encoded again, so no control character, space or backslash reaches it; one `/` at the
+  join (`from = "/old/"`, `to = "/"`: `/old/x` goes to `/x`); a path that spelled a separator as
+  `%2F` or `%5C` is not redirected by a prefix rule.
+- **Refused at load:** a rule that would redirect forever or rules that redirect each other in a
+  circle (each rule's target is followed through the site's own rules), the same `from` twice, a
+  rule a `refuse` pattern makes unreachable, a `to` with a user name, another scheme, `..`
+  segments, a space or a control character, `cache` on a temporary status, more than 1,000 rules
+  in a site.
+- **Noted** by `agensio -t`, the error log and health: a chain (a target the site redirects
+  again: point the first rule at the final target), a rule from `/` with `remainder = "drop"` (every
+  old page to one address, which search engines read as a soft 404), a rule under an access or
+  password rule (it answers first, so anyone sees where it sends), a rule over the certificate
+  validation paths.
+- **Cost:** exact rules are found in a hash table and prefix rules behind a test of the path's
+  first byte, so a site with many rules pays a lookup, and one without pays one test.
+
+A site that only redirects, a rule from `/` to another host, needs no `root`. Rules are written in
+a hand-written site file; a managed site gets them through `site_update` in the next release.
+Since 0.1.0-alpha.82, when the string key `redirect = "https://host"` went.
 
 ## 15. Control socket
 

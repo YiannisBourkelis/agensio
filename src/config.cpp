@@ -3,6 +3,7 @@
 #include "control/reference.hpp"
 
 #include "core/access.hpp"
+#include "core/redirect.hpp"
 #include "core/refuse.hpp"
 #include "core/cpus.hpp"
 #include "handlers/httparena.hpp"
@@ -1601,6 +1602,157 @@ void parse_hsts(const toml::node_view<const toml::node>& n, SiteConfig& site, co
     site.tls_fields.h1 = "Strict-Transport-Security: " + site.tls_fields.hsts + "\r\n";
 }
 
+// [[site.redirect]] (docs/redirects.md 5, alpha.82): each rule compiled as it is read; the checks
+// across a site's rules wait for check_redirects, once its refuse, access and password rules are in.
+void parse_redirects(const toml::array& arr, SiteConfig& site, const std::string& where) {
+    std::size_t idx = 0;
+    for (const auto& node : arr) {
+        const std::string w = where + " [[redirect]] #" + std::to_string(++idx);
+        const toml::table* t = node.as_table();
+        if (!t) fail(where + ": each [[site.redirect]] must be a table");
+        check_keys(*t, {"[[site.redirect]]"}, {}, w);
+        RedirectRule r;
+        const std::string match = (*t)["match"].value_or(std::string("prefix"));
+        if (match != "prefix" && match != "exact") fail(w + ".match must be \"prefix\" (whole segments, the default) or \"exact\"");
+        const auto from = (*t)["from"].value<std::string>();
+        if (!from) fail(w + ": 'from' is required: the path the rule redirects (\"/old-page\")");
+        if (const std::string why = redirect::compile_from(*from, match == "exact", r); !why.empty()) fail(w + ": " + why);
+        const auto status = (*t)["status"].value<std::int64_t>();
+        if (!status)
+            fail(w + ": 'status' is required: 301 or 308 for a page that moved for good, 302 or 307 for now (307 and 308 keep a POST a POST), "
+                     "410 for one that is gone");
+        if (*status != 301 && *status != 302 && *status != 307 && *status != 308 && *status != 410)
+            fail(w + ".status must be 301, 302, 307, 308 or 410");
+        r.status = static_cast<int>(*status);
+        if (r.status == 410) {
+            if (t->contains("to")) fail(w + ": a 410 (gone) has no target; remove 'to'");
+            if (t->contains("remainder") || t->contains("query")) fail(w + ": a 410 (gone) has no target, so remainder and query do nothing; remove them");
+        } else if (const auto to = (*t)["to"].value<std::string>()) {
+            if (const std::string why = redirect::compile_to(*to, r); !why.empty()) fail(w + ": " + why);
+        } else {
+            fail(w + ": 'to' is required: a path of this site (\"/new\") or an https:// URL (status = 410 for a page that is gone)");
+        }
+        if (auto rem = (*t)["remainder"].value<std::string>()) {
+            if (r.exact) fail(w + ".remainder is for a prefix rule: an exact rule has no rest of the path");
+            if (*rem != "keep" && *rem != "drop") fail(w + ".remainder must be \"keep\" (the default) or \"drop\"");
+            r.keep_remainder = *rem == "keep";
+        } else if (t->contains("remainder")) {
+            fail(w + ".remainder must be \"keep\" or \"drop\"");
+        }
+        r.keep_query = r.params.empty();  // a rule that names the old query's parameters drops it by default
+        if (auto q = (*t)["query"].value<std::string>()) {
+            if (*q != "keep" && *q != "drop") fail(w + ".query must be \"keep\" or \"drop\"");
+            r.keep_query = *q == "keep";
+        } else if (t->contains("query")) {
+            fail(w + ".query must be \"keep\" or \"drop\"");
+        }
+        const bool permanent = r.status == 301 || r.status == 308;
+        std::uint64_t secs = 86400;  // a mistaken permanent redirect is undone within a day (docs/redirects.md 7)
+        bool lifetime = permanent;
+        if (t->contains("cache")) {
+            if (!permanent) fail(w + ".cache is for a permanent redirect (301, 308): browsers keep no " + std::to_string(r.status) + " anyway");
+            if ((*t)["cache"].value<std::string>().value_or("") == "none") lifetime = false;
+            else if (!hsts_age((*t)["cache"], secs)) fail(w + ".cache must be a duration (\"1d\", \"30d\", seconds), at most ten years, or \"none\"");
+        }
+        if (lifetime) r.cache_control = "max-age=" + std::to_string(secs);
+        site.redirects.rules.push_back(std::move(r));
+        if (site.redirects.rules.size() > redirect::kMaxRules)
+            fail(where + ": more than " + std::to_string(redirect::kMaxRules) + " [[site.redirect]] rules (docs/redirects.md 6.3)");
+    }
+    for (const auto& r : site.redirects.rules)
+        if (!r.exact && r.from == "/") site.redirects_all = true;
+    redirect::index(site.redirects);
+}
+
+// The checks across a site's rules (docs/redirects.md 8), after its other rules are in: refused
+// what can never work (the same from twice, rules in a circle, a rule refuse makes unreachable),
+// noted what works badly. A rule's target is followed through the site's own rules, ten hops at most.
+void check_redirects(SiteConfig& site, const std::string& where) {
+    auto& rules = site.redirects.rules;
+    if (rules.empty()) return;
+    auto described = [](const RedirectRule& r) { return "from = \"" + r.text + "\"" + (r.exact ? " (exact)" : ""); };
+    std::set<std::string> seen;
+    for (const auto& r : rules) {
+        std::vector<std::pair<std::string, std::string>> params = r.params;
+        std::sort(params.begin(), params.end());
+        std::string key = std::string(r.exact ? "=" : "^") + r.from;
+        for (const auto& [n, v] : params) key += "&" + n + "=" + v;
+        if (!seen.insert(key).second)
+            fail(where + ": two [[site.redirect]] rules have " + described(r) + "; the most specific rule decides, so one of them would never apply");
+    }
+    std::string scratch;
+    if (!site.refuse.empty())
+        for (const auto& r : rules) {
+            const bool own = refuse::decide(site.refuse, r.from, scratch) != nullptr;
+            const bool below = r.exact || refuse::decide(site.refuse, r.from.back() == '/' ? r.from + "x" : r.from + "/x", scratch) != nullptr;
+            if (own && below) fail(where + ": the [[site.redirect]] rule " + described(r) + " can never apply: refuse answers 404 there first (a refused path is never redirected)");
+        }
+    // An absolute target names this site only on a port it listens on for that scheme (http://b.test
+    // sent to https://b.test:8443 is another listener, not a loop); behind a proxy that holds the
+    // certificate (no tls, http = "redirect") https on 443 is the site too.
+    auto on_site_port = [&](std::string_view origin) {
+        const bool https = origin.starts_with("https://");
+        const std::string_view hostport = origin.substr(https ? 8 : 7);
+        const std::size_t bracket = hostport.rfind(']'), colon = hostport.rfind(':');
+        const std::string port = colon != std::string_view::npos && (bracket == std::string_view::npos || colon > bracket)
+                                     ? std::string(hostport.substr(colon + 1))
+                                     : std::string(https ? "443" : "80");
+        auto has = [&](const std::vector<std::string>& at) {
+            for (const auto& a : at)
+                if (a.substr(a.rfind(':') + 1) == port) return true;
+            return false;
+        };
+        if (https) return site.tls ? has(site.listen) : (site.http_redirect && port == "443");
+        return site.tls ? has(site.http_listen) : has(site.listen);
+    };
+    std::string loc, path, query;
+    for (const auto& start : rules) {
+        // A request the rule takes, then its target through the rules again.
+        path = start.exact ? start.from : start.from + (start.from.back() == '/' ? "probe" : "/probe");
+        query.clear();
+        for (const auto& [n, v] : start.params) query += (query.empty() ? "" : "&") + n + "=" + v;
+        std::vector<const RedirectRule*> chain;
+        const RedirectRule* r = &start;
+        while (r) {
+            if (std::find(chain.begin(), chain.end(), r) != chain.end() || chain.size() == 10) {
+                std::string circle;
+                for (const auto* c : chain) circle += described(*c) + " -> ";
+                fail(where + ": [[site.redirect]] rules redirect in a circle: " + circle + described(*r) + "; a browser would follow them until it gives up");
+            }
+            chain.push_back(r);
+            std::string next_path, next_query;
+            if (!redirect::target_on_site(*r, site.server_names, next_path, next_query) || (!r->origin.empty() && !on_site_port(r->origin))) break;
+            redirect::write_location(loc, *r, path, r->keep_query ? std::string_view(query) : std::string_view(), "");
+            std::string_view l = loc;
+            if (!r->origin.empty()) l.remove_prefix(r->origin.size());
+            const std::size_t q = l.find('?'), h = l.find('#');
+            if (!redirect::decode(l.substr(0, std::min(q, h)), path)) break;
+            query = q == std::string_view::npos ? std::string() : std::string(l.substr(q + 1, h == std::string_view::npos ? std::string_view::npos : h - q - 1));
+            r = redirect::match(site.redirects, path, query, false);
+        }
+        if (chain.size() > 1)
+            site.redirect_notes.emplace_back("redirect_chain", "the rule " + described(start) + " sends to a path the rule " + described(*chain[1]) +
+                                                                   " redirects again: point it at the final target, one hop for browsers and search engines");
+        if (!start.exact && start.from == "/" && !start.keep_remainder && start.status != 410)
+            site.redirect_notes.emplace_back("redirect_soft_404", "the rule from = \"/\" sends every page to one address (remainder = \"drop\"): search engines read that as a "
+                                                                  "soft 404; send each old address to its new one, and 410 what is gone");
+        if (const AccessRule* a = access::rule_for(site, start.from); a && !a->any)
+            site.redirect_notes.emplace_back("redirect_under_protection", "the rule " + described(start) + " lies under the access rule for " + a->path +
+                                                                              " and answers before it: anyone can see where it sends");
+        if (const AuthRule* a = access::auth_rule_for(site, start.from); a && !a->open)
+            site.redirect_notes.emplace_back("redirect_under_protection", "the rule " + described(start) + " lies under the password rule for " + a->path +
+                                                                              " and answers before it: anyone can see where it sends");
+        // Named for a rule that names /.well-known itself; a rule from "/" (a domain that moved) means
+        // to leave validation alone, which it does.
+        const bool validation = start.from.starts_with("/.well-known") &&
+                                (redirect::covers(start, "/.well-known/acme-challenge/x") || redirect::covers(start, "/.well-known/pki-validation/x") ||
+                                 start.from.starts_with("/.well-known/acme-challenge/") || start.from.starts_with("/.well-known/pki-validation/"));
+        if (validation)
+            site.redirect_notes.emplace_back("redirect_skips_validation", "the rule " + described(start) + " covers certificate validation (/.well-known/acme-challenge/, "
+                                                                          "/.well-known/pki-validation/): over plain HTTP those are answered before it, over HTTPS it applies");
+    }
+}
+
 // http (docs/redirects.md 2, alpha.76): what a request over plain HTTP gets, after tls and hsts. A
 // TLS site on port 443 listens on port 80 at the same addresses by default; elsewhere it has no plain
 // listener until `http = { listen = [...] }` names one, and its redirect keeps the TLS port.
@@ -1680,7 +1832,7 @@ std::string trusted_entry(const std::string& text, const Config& cfg, std::vecto
 
 
 void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, const std::string& where, std::vector<RootAdditions>* root_adds = nullptr) {
-    check_keys(t, {"[[site]]"}, {"auth", "access"}, where);
+    check_keys(t, {"[[site]]"}, {"auth", "access", "redirect"}, where);
     SiteConfig site;
     for (auto& n : string_list(t["server_name"], (where + ".server_name").c_str()))
         site.server_names.push_back(to_lower(n));
@@ -1698,17 +1850,17 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
             fail(where + ".redirect = \"https\" is gone (alpha.76): a TLS site answers plain HTTP itself with a redirect to HTTPS (its http key, "
                          "docs/configuration.md 14). Remove this [[site]] block; behind a proxy that holds the certificate, set http = \"redirect\" "
                          "on the site instead");
-        if (!r->starts_with("https://") || r->size() <= 8 || r->find('/', 8) != std::string::npos)
-            fail(where + ".redirect must be an \"https://host[:port]\" prefix (a whole domain moved there)");
-        site.redirect = *r;
+        fail(where + ".redirect = \"" + *r + "\" is gone (alpha.82): a whole domain moved is a rule, [[site.redirect]] with from = \"/\", to = \"" + *r +
+             "\" and status = 301 (docs/configuration.md 14b)");
+    } else if (const toml::array* arr = t["redirect"].as_array()) {
+        parse_redirects(*arr, site, where);
     } else if (t.contains("redirect")) {
-        fail(where + ".redirect must be a string");
+        fail(where + ": 'redirect' must be an array of tables ([[site.redirect]] with from, to and status)");
     }
     auto root = t["root"].value<std::string>();
-    if (!root && site.app != "proxy" && site.redirect.empty()) fail(where + ": 'root' is required");
-    if (root && !site.redirect.empty()) fail(where + ": a redirect site serves nothing; remove 'root'");
-    // A proxied or redirecting site needs no document root: it gets none (the static handler
-    // answers 404 for an empty root), never the configuration directory.
+    if (!root && site.app != "proxy" && !site.redirects_all) fail(where + ": 'root' is required");
+    // A proxied site, or one a rule from "/" answers whole, needs no document root: it gets none
+    // (the static handler answers 404 for an empty root), never the configuration directory.
     site.root = root ? resolve_root(base_dir, *root, where) : std::string();
     site.max_body_size = size_node(t["max_body_size"], 0, (where + ".max_body_size").c_str());
     if (auto p = t["project"].value<std::string>()) {
@@ -1725,7 +1877,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     } else if (t.contains("entry")) {
         fail(where + ".entry must be a string");
     }
-    if (python_app(site.app) && site.redirect.empty() && site.project.empty())
+    if (python_app(site.app) && !site.redirects_all && site.project.empty())
         fail(where + ": app = \"" + site.app + "\" needs project = \"NAME\", the project's Python package (NAME/settings, NAME/wsgi.py)");
     // The paths credentials are posted to, for the fail2ban jail `agensio ctl protection`
     // renders (2026-10-02): on top of the preset's own; never read when serving.
@@ -1776,7 +1928,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     if (!site.group.empty() && site.user.empty()) fail(where + ": 'group' needs 'user'");
     // A site that only redirects serves no file and runs no code (no root; the dispatcher answers it
     // before routing): nothing to isolate.
-    if (cfg.strict_users && site.user.empty() && site.redirect.empty()) fail(where + ": 'user' is required (server.strict_users)");
+    if (cfg.strict_users && site.user.empty() && !site.redirects_all) fail(where + ": 'user' is required (server.strict_users)");
     parse_pool(t["php"].as_table(), base_dir, cfg, site, root_given, where, runs_php(t, site));
 
     if (auto mode = t["tls"].value<std::string>()) {
@@ -1937,6 +2089,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     for (const auto& add : for_root)
         if (LocationConfig* into = find_at("/")) merge_into(*into, add);
     check_refuse_conflicts(site, where);
+    check_redirects(site, where);
     cfg.sites.push_back(std::move(site));
 }
 
@@ -2058,7 +2211,7 @@ AppContext app_context(const Config& cfg, const SiteConfig& site) {
     for (const auto& s : cfg.sites) {
         if (s.server_names.empty() || s.server_names.front() != first) continue;
         if (s.tls) tls = true;
-        if (s.http_redirect || s.redirect.starts_with("https://")) a.https_redirect = true;
+        if (s.http_redirect) a.https_redirect = true;
         if (s.hsts == SiteConfig::Hsts::on) a.hsts = true;
     }
     const std::string scheme = tls ? "https://" : "http://";
@@ -2188,7 +2341,6 @@ void explain_config(const Config& cfg, std::ostream& out) {
             out << "http = \"" << http_mode(site) << "\"" << (site.http_given ? "" : "  # the default") << "\n";
         }
         if (!site.canonical.empty()) out << "canonical = \"" << site.canonical << "\"\n";
-        if (!site.redirect.empty()) out << "redirect = \"" << site.redirect << "\"\n";
         if (!site.user.empty()) out << "user = \"" << site.user << "\"\n";
         if (!site.group.empty()) out << "group = \"" << site.group << "\"\n";
         if (site.php.configured) print_fcgi(out, "php", site.php);
@@ -2214,6 +2366,15 @@ void explain_config(const Config& cfg, std::ostream& out) {
                        "# (name.bak, name~, name.txt, stem.bak, .name.swp, #name#), whatever hidden_files says\n";
                 break;
             }
+        for (const auto& r : site.redirects.rules) {  // docs/configuration.md 14b
+            out << "\n[[site.redirect]]\nfrom = \"" << r.text << "\"\n";
+            if (r.exact) out << "match = \"exact\"\n";
+            if (r.status != 410) out << "to = \"" << r.to << "\"\n";
+            out << "status = " << r.status << "\n";
+            if (!r.exact && r.status != 410 && !r.keep_remainder) out << "remainder = \"drop\"\n";
+            if (r.status != 410 && r.keep_query != r.params.empty()) out << "query = \"" << (r.keep_query ? "keep" : "drop") << "\"\n";
+            if (r.status == 301 || r.status == 308) out << "cache = " << (r.cache_control.empty() ? std::string("\"none\"") : r.cache_control.substr(8)) << "   # seconds\n";
+        }
         for (const auto& r : site.access) {
             out << "\n[[site.access]]";
             if (r.origin == "preset:wordpress") out << "   # from preset:wordpress: " << r.path << " stays open for the public front end";
@@ -2570,6 +2731,11 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
                                   " to its listen to serve IPv4 clients too"});
         }
     }
+    // What check_redirects noted (docs/redirects.md 8): chains, a soft 404, a rule answering before a
+    // protection, a rule over certificate validation.
+    for (const auto& site : cfg.sites)
+        for (const auto& [code, text] : site.redirect_notes)
+            out.push_back({code, code == "redirect_skips_validation" ? "info" : "warning", site.server_names.front(), text});
     return out;
 }
 

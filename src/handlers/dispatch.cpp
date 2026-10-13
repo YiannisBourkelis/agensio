@@ -6,6 +6,7 @@
 #include "response.hpp"
 
 #include "core/access.hpp"
+#include "core/redirect.hpp"
 #include "core/refuse.hpp"
 #include "path.hpp"
 
@@ -428,14 +429,6 @@ bool certificate_validation(std::string_view path) noexcept {
 
 }  // namespace
 
-// `redirect = "https://host[:port]"`: a whole domain moved, 301 to the prefix plus the target.
-void Dispatcher::redirect_prefix(Stream& s, const SiteConfig& site) {
-    std::string& location = s.response.scratch;
-    location.assign(site.redirect);
-    append_target(location, s.request.target);
-    redirect_answer(s, 301, location, "");
-}
-
 namespace {
 
 // The Host field's name and port ("example.com:8080", "[::1]:8080"), the name without a final dot.
@@ -458,16 +451,40 @@ const std::string* listed_name(const SiteConfig& site, std::string_view name) {
     return nullptr;
 }
 
+std::string_view query_of(std::string_view target) noexcept {
+    const std::size_t q = target.find('?');
+    return q == std::string_view::npos ? std::string_view() : target.substr(q + 1);
+}
+
 }  // namespace
+
+// A path rule for this request (docs/redirects.md 5), or null: none on a path `refuse` answers (a
+// refused path is never redirected; the route checks it itself before the rules' own step).
+const RedirectRule* Dispatcher::path_rule(const SiteConfig& site, Stream& s, WorkerState& ws, bool check_refuse) {
+    if (site.redirects.empty()) return nullptr;
+    if (check_refuse && !site.refuse.empty() && refuse::decide(site.refuse, ws.path, ws.access_scratch)) return nullptr;
+    return redirect::match(site.redirects, ws.path, query_of(s.request.target), ws.encoded_separator);
+}
+
+// A rule's answer: 410 Gone, or its status with the Location core/redirect.hpp writes (`origin`
+// before a target of the site when the scheme or the host changes in the same hop) and its lifetime.
+void Dispatcher::answer_rule(Stream& s, const RedirectRule& r, std::string_view path, std::string_view origin) {
+    if (r.status == 410) {
+        static_.error(s, 410, s.request.keep_alive);
+        return;
+    }
+    redirect::write_location(s.response.scratch, r, path, query_of(s.request.target), origin);
+    redirect_answer(s, r.status, s.response.scratch, r.cache_control);
+}
 
 // http = "redirect" (docs/redirects.md 2, 7): 308 to the same name and target over https, on the
 // site's TLS port. A name the site lists is written as listed and the answer kept a day (without a
 // lifetime Chromium keeps a permanent redirect forever, and a mistake could not be undone); a name
 // only a catch-all took is the client's own choice, written as sent and never stored. With
 // `canonical`, another listed name goes straight to the canonical one (scheme and host in one hop,
-// 1), unless hsts is on: then to its own HTTPS first, so it learns HSTS too (4.3). An HTTP/1.0
-// request without Host gets the site's first name.
-void Dispatcher::redirect_https(Stream& s, const SiteConfig& site) {
+// 1), unless hsts is on: then to its own HTTPS first, so it learns HSTS too (4.3). A path rule joins
+// the same hop with its own status (1). An HTTP/1.0 request without Host gets the site's first name.
+void Dispatcher::redirect_https(Stream& s, const SiteConfig& site, WorkerState& ws) {
     const Request& req = s.request;
     std::string_view host, port;
     split_host(req.host.empty() ? std::string_view(site.server_names.front()) : req.host, host, port);
@@ -476,24 +493,39 @@ void Dispatcher::redirect_https(Stream& s, const SiteConfig& site) {
         return;
     }
     const std::string* listed = listed_name(site, host);
-    if (listed) host = (site.canonical_redirect && site.hsts != SiteConfig::Hsts::on) ? std::string_view(site.canonical) : std::string_view(*listed);
+    const bool same_name_first = listed && site.canonical_redirect && site.hsts == SiteConfig::Hsts::on && *listed != site.canonical;
+    if (listed) host = (site.canonical_redirect && !same_name_first) ? std::string_view(site.canonical) : std::string_view(*listed);
+    std::string& origin = ws.redirect_origin;
+    origin.assign("https://").append(host);
+    if (site.https_port != 443) origin.append(":").append(std::to_string(site.https_port));
+    if (!same_name_first)
+        if (const RedirectRule* rule = path_rule(site, s, ws, true)) {
+            answer_rule(s, *rule, ws.path, origin);
+            return;
+        }
     std::string& location = s.response.scratch;
-    location.assign("https://").append(host);
-    if (site.https_port != 443) location.append(":").append(std::to_string(site.https_port));
+    location.assign(origin);
     append_target(location, req.target);
     redirect_answer(s, 308, location, listed ? "max-age=86400" : "no-store");
 }
 
 // canonical (docs/redirects.md 3): a listed name that is not the canonical one gets a 308 to it,
-// with the scheme and the port the client used, path and query kept, a day. False, nothing
-// answered, for the canonical name, a name the site does not list (a catch-all's) or none.
-bool Dispatcher::redirect_host(Stream& s, const SiteConfig& site) {
+// with the scheme and the port the client used, path and query kept, a day, or a path rule's answer
+// under the canonical name in the same hop. False, nothing answered, for the canonical name, a name
+// the site does not list (a catch-all's) or none.
+bool Dispatcher::redirect_host(Stream& s, const SiteConfig& site, WorkerState& ws) {
     std::string_view host, port;
     split_host(s.request.host, host, port);
     if (host.empty() || Headers::iequals(host, site.canonical) || !listed_name(site, host)) return false;
+    std::string& origin = ws.redirect_origin;
+    origin.assign(s.conn.tls || s.conn.forwarded_https ? "https://" : "http://").append(site.canonical);
+    if (!port.empty() && port.find_first_not_of("0123456789") == std::string_view::npos) origin.append(":").append(port);
+    if (const RedirectRule* rule = path_rule(site, s, ws, true)) {
+        answer_rule(s, *rule, ws.path, origin);
+        return true;
+    }
     std::string& location = s.response.scratch;
-    location.assign(s.conn.tls || s.conn.forwarded_https ? "https://" : "http://").append(site.canonical);
-    if (!port.empty() && port.find_first_not_of("0123456789") == std::string_view::npos) location.append(":").append(port);
+    location.assign(origin);
     append_target(location, s.request.target);
     redirect_answer(s, 308, location, "max-age=86400");
     return true;
@@ -567,10 +599,6 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
     // The site's fields for an HTTPS answer (its hsts, docs/redirects.md 4): from here on every answer
     // carries them, the error pages and redirects below included; a plain one never does (RFC 6797 7.2).
     if (!site->tls_fields.empty() && (s.conn.tls || s.conn.forwarded_https)) s.fields = &site->tls_fields;
-    if (!site->redirect.empty()) {
-        redirect_prefix(s, *site);
-        return nullptr;
-    }
     // http = "redirect" (docs/redirects.md 2): plain HTTP, or a request a trusted proxy did not mark
     // https, goes to HTTPS; certificate validation gets the site's files there and nothing else
     // (its validation location, below). canonical (3): another of the site's names goes to the
@@ -582,13 +610,13 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
         const bool validating = plain && certificate_validation(ws.path);
         if (plain && site->http_redirect) {
             if (!validating) {
-                redirect_https(s, *site);
+                redirect_https(s, *site, ws);
                 return nullptr;
             }
             validation = true;
         } else {
             if (site->http_redirect) s.https_site = site;  // its application's http:// Locations go out as https:// (2.5)
-            if (site->canonical_redirect && !validating && redirect_host(s, *site)) return nullptr;
+            if (site->canonical_redirect && !validating && redirect_host(s, *site, ws)) return nullptr;
         }
     }
     // `refuse` and [[site.access]] before any location is chosen: whichever would serve the
@@ -598,6 +626,14 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
         static_.error(s, 404, req.keep_alive);
         return nullptr;
     }
+    // [[site.redirect]] (docs/redirects.md 5): after refuse, before the access and password rules (a
+    // redirect reveals no content, and its target meets its own rules); certificate validation over
+    // plain HTTP is answered before any rule (1). One test of an empty set for a site without rules.
+    if (!site->redirects.empty() && !(!s.conn.tls && !s.conn.forwarded_https && certificate_validation(ws.path)))
+        if (const RedirectRule* rule = redirect::match(site->redirects, ws.path, query_of(req.target), ws.encoded_separator)) {
+            answer_rule(s, *rule, ws.path, "");
+            return nullptr;
+        }
     if (!site->access.empty() && !admit(s, *site, ws.path, ws)) return nullptr;
     // [[site.auth]] after the address rules, before any location is chosen.
     if (!site->auth.empty())

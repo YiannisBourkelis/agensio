@@ -274,7 +274,7 @@ const SiteConfig* find_site(const Config& cfg, std::string_view name) {
     for (const auto& s : cfg.sites)
         for (const auto& n : s.server_names)
             if (n == want) {
-                const int score = (s.redirect.empty() ? 2 : 0) + (s.tls ? 1 : 0);
+                const int score = (s.redirects_all ? 0 : 2) + (s.tls ? 1 : 0);
                 if (score > best_score) {
                     best = &s;
                     best_score = score;
@@ -319,7 +319,8 @@ json::Value site_summary(const SiteConfig& s, std::time_t now, const TlsFacts* t
     v.set("encoded_slashes", s.encoded_slashes_allow ? "allow" : "deny");
     v.set("trusted_proxies", s.own_trusted_proxies ? strings(s.trusted_proxies_text) : json::Value(nullptr));  // null: [server]'s list
     v.set("http", http_mode(s)).set("http_listen", strings(s.http_listen));  // what plain HTTP gets, and where (docs/redirects.md 2)
-    if (!s.redirect.empty()) v.set("redirect", s.redirect);
+    v.set("redirects", static_cast<double>(s.redirects.rules.size()));  // [[site.redirect]] rules (docs/redirects.md 5)
+    if (s.redirects_all) v.set("redirects_all", true);  // a rule from "/" answers every request
     v.set("catch_all", is_catch_all(s));
     if (s.carried) v.set("last_good_version", true);  // its file was set aside on reload (design section 26)
     v.set("access_log", s.access_log);
@@ -1066,7 +1067,7 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
         if (!tls_site.http_listen.empty() && (!need_redirect || tls_site.http_redirect) && (!need_port_80 || on_80(tls_site.http_listen))) return true;
         for (const auto& p : running.sites) {
             if (p.tls) continue;
-            if (need_redirect && !p.http_redirect && p.redirect.empty()) continue;
+            if (need_redirect && !p.http_redirect && !p.redirects_all) continue;
             bool covers = true;
             for (const auto& n : tls_site.server_names)
                 covers = covers && std::find(p.server_names.begin(), p.server_names.end(), n) != p.server_names.end();
@@ -1272,7 +1273,7 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
     // borrowed preset's refusals do not fit, and what the application's own .htaccess would
     // have protected is served (2026-09-23: Grav on the drupal preset published its backup).
     for (const auto& s : running.sites) {
-        if (s.root.empty() || !s.redirect.empty() || s.app.empty() || s.app == "static" || proxy_app(s.app)) continue;
+        if (s.root.empty() || s.redirects_all || s.app.empty() || s.app == "static" || proxy_app(s.app)) continue;
         const std::string detected = detect_app(s.project_root.empty() ? s.root : s.project_root);
         if (detected.empty() || detected == s.app || detected == "static" || detected == "proxy" || detected == "node" || detected == "php") continue;
         add("warn", "preset_mismatch", s.server_names.front(),
@@ -1284,7 +1285,7 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
     // Backup archives and database dumps inside a served tree are one path or one preset
     // away from being public, whatever the preset refuses today.
     for (const auto& s : running.sites) {
-        if (s.root.empty() || !s.redirect.empty() || s.app.empty() || s.app == "static" || proxy_app(s.app)) continue;
+        if (s.root.empty() || s.redirects_all || s.app.empty() || s.app == "static" || proxy_app(s.app)) continue;
         const ArchivesInRoot a = archives_in_root(s, 2000);
         if (a.count == 0) continue;
         const std::string size = a.example_bytes >= 1024 * 1024 ? std::to_string((a.example_bytes + 512 * 1024) / (1024 * 1024)) + " MB"
@@ -1301,7 +1302,7 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
         std::string sites;
         std::size_t n = 0;
         for (const auto& s : running.sites)
-            if (!s.own_trusted_proxies && s.redirect.empty()) sites += (n++ ? ", " : "") + s.server_names.front();
+            if (!s.own_trusted_proxies && !s.redirects_all) sites += (n++ ? ", " : "") + s.server_names.front();
         std::string sets;
         for (const auto& t : running.trusted_proxies_text) sets += (sets.empty() ? "" : ", ") + t;
         if (n)
@@ -1344,7 +1345,7 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
         for (const auto& s : running.sites) {
             // A proxy-family site serves nothing from its root (every request goes to the
             // upstream), so what the server cannot read there answers no 404.
-            if (s.root.empty() || !s.redirect.empty() || proxy_app(s.app)) continue;
+            if (s.root.empty() || s.redirects_all || proxy_app(s.app)) continue;
             const UnreadableFiles u = unreadable_files(s, secret_paths(s), 2000);
             if (u.unreadable == 0) continue;
             const FileFacts& f = u.example_facts;

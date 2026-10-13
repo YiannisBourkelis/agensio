@@ -4,7 +4,8 @@ One directory per fuzz target (`tests/fuzz/fuzz_<name>.cpp`), named without the 
 prefix. `scripts/fuzz-all.sh` seeds each target with its directory; new inputs go to a scratch
 corpus, never here. `agensio_tests` replays `parser/`, `chunked/`, `fcgi/`, `path/` and `json/`
 on every build with the invariants the fuzzers assert. Hand-written attack strings, the seeds
-that show a target its input format (`refuse/`: patterns, an empty line, paths), and the
+that show a target its input format (`refuse/`: patterns, an empty line, paths; `redirect/`: rules
+as three lines, from, to and flags, an empty line, then request targets), and the
 fuzzers' most interesting corpus entries live here.
 
 Rule: any input that crashes, hangs, or violates an invariant in a fuzzer or in production

@@ -53,6 +53,7 @@ start them and the warning goes. What a key needs (a reload, a restart, root) is
 - [HTTPS with certificate files you manage](examples/basics.md#https-with-certificate-files-you-manage): `tls = { cert, key }`, renewal by `agensio reload`, and a key the server's account can read.
 - [Certificates from certbot](examples/basics.md#certificates-from-certbot): a wildcard over DNS-01, the key the server's account must read, renewals loaded by themselves or by a deploy hook, an existing `--webroot` certbot.
 - [One canonical host](examples/basics.md#one-canonical-host): the bare name redirected to www in one hop, or the reverse.
+- [Pages and sections that moved, and a domain that moved](examples/basics.md#pages-and-sections-that-moved-and-a-domain-that-moved): `[[site.redirect]]` rules, exact or a whole section, a POST kept, 410 for what is gone, and an old domain sent to its new host in one hop.
 - [Several sites on one address, and the catch-all](examples/basics.md#several-sites-on-one-address-and-the-catch-all): sites matched by name, certificates by SNI, 421 for unknown names, and one catch-all.
 - [A mistake in one site's file](examples/basics.md#a-mistake-in-one-sites-file): one file set aside, the other sites served, its last good version kept on reload; `-t --strict`, health.
 - [Long cache lifetimes for assets, and HSTS](examples/basics.md#long-cache-lifetimes-for-assets-and-hsts): the site's `hsts` key, `add_headers` per location, and when a location joins the preset's instead of replacing it.

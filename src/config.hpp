@@ -12,6 +12,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "core/auth.hpp"
@@ -204,6 +206,39 @@ struct RefuseSet {
     bool empty() const noexcept { return patterns.empty(); }
 };
 
+// One [[site.redirect]] rule (docs/redirects.md 5, alpha.82), compiled by core/redirect.hpp: the
+// path the client asked for (normalised, case-sensitive) and, for an exact rule, the query
+// parameters it requires; the target split so the Location is written byte by byte.
+struct RedirectRule {
+    std::string text;  // `from` as written, for messages
+    std::string from;  // the normalised path
+    std::vector<std::pair<std::string, std::string>> params;  // an exact rule's query parameters, decoded
+    bool exact = false;
+    int status = 301;  // 301, 302, 307, 308 or 410 (no target)
+    std::string to;    // as written
+    std::string origin;  // "https://host[:port]" for an absolute target, "" for a path of the site
+    std::string to_path, to_query, to_fragment;  // already valid in a URI; the query and fragment without ? and #
+    bool keep_remainder = true;  // prefix rules: the rest of the path follows the target
+    bool keep_query = true;      // the request's query follows the target's
+    std::string cache_control;   // "max-age=N" for a permanent rule unless cache = "none"; "" otherwise
+};
+
+// A site's rules and what redirect::index builds over them: exact rules by path (several when they
+// name different query parameters, most parameters first), prefix rules longest first behind a test
+// of the path's first byte, so a site without rules pays nothing and one with many pays a lookup.
+struct RedirectSet {
+    struct Hash {
+        using is_transparent = void;
+        std::size_t operator()(std::string_view s) const noexcept { return std::hash<std::string_view>{}(s); }
+    };
+    std::vector<RedirectRule> rules;
+    std::unordered_map<std::string, std::vector<std::uint16_t>, Hash, std::equal_to<>> exact;
+    std::vector<std::uint16_t> prefixes;
+    std::array<std::uint64_t, 4> first{};  // a bit per first byte after '/' of a prefix rule
+    bool root_prefix = false;              // a prefix rule from "/": every path is a candidate
+    bool empty() const noexcept { return rules.empty(); }
+};
+
 struct SiteConfig {
     std::vector<std::string> server_names;  // lower-case host names, "*" matches anything
     std::string user;   // hosting: PHP runs as this user in its own pool, logs are owned by it
@@ -220,10 +255,14 @@ struct SiteConfig {
     bool hq_interop = false;  // "hq-interop" in protocols: the interop runner's transport tests (AGENSIO_INTEROP builds only)
     std::string alpn_wire;
     std::string app;                        // preset: "laravel", "php", "static" or "" (none)
-    // `redirect = "https://host[:port]"`: every request gets a 301 to that prefix plus the target
-    // (a whole domain moved), plain or TLS. No root needed. Until [[site.redirect]] (docs/redirects.md
-    // 5); the "https" form went in alpha.76, replaced by `http`.
-    std::string redirect;
+    // [[site.redirect]] (docs/redirects.md 5, alpha.82): path redirects, checked after `refuse` and
+    // before the access and password rules. redirects_all: a prefix rule from "/" answers every
+    // request (a whole domain moved), so the site needs no root. redirect_notes: what -t, the error
+    // log and health say about the rules (chains, a soft 404, a rule under a protection). The string
+    // `redirect` key went in alpha.82 ("https" in alpha.76).
+    RedirectSet redirects;
+    bool redirects_all = false;
+    std::vector<std::pair<std::string, std::string>> redirect_notes;  // code, text
     // http (docs/redirects.md 2, alpha.76): what a request over plain HTTP gets. A TLS site on port
     // 443 also listens on port 80 at the same addresses (http_listen) and redirects there; on another
     // port it has none unless `http = { listen = [...] }` names them. A site without TLS serves plain
@@ -558,7 +597,8 @@ std::string site_trusted_entry(const std::string& text, const Config& cfg, std::
 struct AccessNotice {
     std::string code;      // access_allows_proxy, access_loopback, access_ipv4_only, access_single_ipv6, access_site_restricted,
                            // exact_rule_proxied_script, auth_plain_http, auth_users_mixed_methods, php_keep_conn_ondemand,
-                           // php_keep_conn_exceeds_children, listen_ipv6_only
+                           // php_keep_conn_exceeds_children, listen_ipv6_only, redirect_chain, redirect_soft_404,
+                           // redirect_under_protection, redirect_skips_validation
     std::string severity;  // "warning" or "info"
     std::string site, text;
 };

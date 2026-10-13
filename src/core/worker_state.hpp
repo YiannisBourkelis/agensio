@@ -47,6 +47,9 @@ struct WorkerState {
     // Access by client address (core/access.hpp): the other readings of a path a site's rules
     // test, and the error log's limits for its lines (Dispatcher::admit, access_log_tick).
     std::string access_scratch;
+    // A redirect's scheme and host when they change with a path rule's target in one hop
+    // (docs/redirects.md 1; Dispatcher::redirect_https, redirect_host). Capacity retained.
+    std::string redirect_origin;
     struct AccessLog {
         // Refusals: one line a second; the access log has every 403 with its client, so the
         // ones held back are only counted, and the count is written when the second is over.

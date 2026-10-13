@@ -262,7 +262,8 @@ root = "{root}/bench/www"
 tls = {{ cert = "{root}/bench/tmp/certs-b/cert.pem", key = "{root}/bench/tmp/certs-b/key.pem" }}
 """
 # Redirects on a plain listener: http = "redirect" (docs/redirects.md 2.4, a proxy in front holds
-# the certificate: what 127.0.0.1, a trusted proxy here, marks https is served), and a fixed prefix.
+# the certificate: what 127.0.0.1, a trusted proxy here, marks https is served), and a domain that
+# moved: a rule from / to another host (the string key `redirect` until alpha.82).
 text += f"""
 [[site]]
 server_name = ["redir.test"]
@@ -274,7 +275,11 @@ http = "redirect"
 [[site]]
 server_name = ["fixed.test"]
 listen = ["127.0.0.1:8092"]
-redirect = "https://secure.test:8443"
+
+[[site.redirect]]
+from = "/"
+to = "https://secure.test:8443"
+status = 301
 """
 # The reverse proxy (D1) in front of the benchmark upstream on 127.0.0.1:9107, on its own port.
 if os.path.exists(f"{root}/build/agensio_upstream"):
@@ -780,7 +785,7 @@ check "explain: -t reports OK" "yes" "$("$BIN" -t -c bench/tmp/agensio-test.toml
 # ---- http = "redirect" on a plain site (docs/redirects.md 2.4) and a fixed prefix ----
 R=http://127.0.0.1:8092
 check "redirect: 308 to https on the same host, port dropped, query kept" "308 https://redir.test/a/b?x=1" "$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Host: redir.test:8092' "$R/a/b?x=1")"
-check "redirect: fixed prefix with a port" "301 https://secure.test:8443/p?q" "$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Host: fixed.test' "$R/p?q")"
+check "redirect: a domain that moved, a rule from / to a host with a port, keeps the path and query" "301 https://secure.test:8443/p?q" "$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Host: fixed.test' "$R/p?q")"
 check "redirect: POST is redirected too, method kept (308), HEAD has no body" "308 308 0" "$(curl -sS -o /dev/null -w '%{http_code} ' -X POST -d a=b "$R/x" -H 'Host: redir.test')$(curl -sS -I -o /dev/null -w '%{http_code} %{size_download}' "$R/x" -H 'Host: redir.test')"
 check "redirect: HTTP/1.0 without Host uses the site's name" "https://redir.test/y" "$(printf 'GET /y HTTP/1.0\r\n\r\n' | ncq 127.0.0.1 8092 | tr -d '\r' | awk '/^Location:/{print $2}')"
 check "redirect: an unknown ACME token is answered from the site's files (404), not redirected" "404" "$(code -H 'Host: redir.test' "$R/.well-known/acme-challenge/nothing")"
@@ -1032,7 +1037,7 @@ check "cookbook: every recipe of docs/examples.md loads and names what exists (t
 # One broken site file never stops the others (design section 26; tests/isolation.sh, its own server).
 check "isolation: a site file that does not load is set aside, the other sites serve (tests/isolation.sh)" "0" \
   "$(tests/isolation.sh "$BIN" > bench/tmp/isolation.out 2>&1; echo $?)"
-check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 191 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
+check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 197 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
 check "secrets: the presets catalogue lists each preset's credential files" "/wp-config.php /sites/default/settings.php" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["wordpress"]["secrets"][0], p["drupal"]["secrets"][0])')"
 check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$("$BIN" ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; "$BIN" ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
@@ -1417,6 +1422,118 @@ check "canonical on a managed site: a name that is not the site's is refused, th
   "400 201 yes 308 https://cm.wild.test:8471/y max-age=86400 -" \
   "$(cpost /v1/sites "{\"domain\":\"cm.wild.test\",\"aliases\":[\"cm2.wild.test\"],\"canonical\":\"x.wild.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-wild/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-wild/key.pem\"},\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/bench/www\",\"listen_plain\":\"127.0.0.1:8472\",\"listen_tls\":\"127.0.0.1:8471\",\"confirm\":true,\"reason\":\"canon\"}") $(cpost /v1/sites "{\"domain\":\"cm.wild.test\",\"aliases\":[\"cm2.wild.test\"],\"canonical\":\"cm.wild.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-wild/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-wild/key.pem\"},\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/bench/www\",\"listen_plain\":\"127.0.0.1:8472\",\"listen_tls\":\"127.0.0.1:8471\",\"confirm\":true,\"reason\":\"canon\"}") $(grep -q '^canonical = "cm.wild.test"' bench/tmp/sites.d/cm.wild.test.toml && echo yes || echo no) $(hop https 8471 /y cm2.wild.test)"
 cpost /v1/sites/cm.wild.test/delete '{"confirm":true,"reason":"canon"}' > /dev/null
+# [[site.redirect]] (docs/redirects.md 5, alpha.82): the design's examples over HTTPS (relative
+# Locations), the order against refuse and the access rules, case and encoded separators, and over
+# plain HTTP scheme, host and rule in one hop; a domain that moved; the load refusals and notes.
+cat > bench/tmp/sites.d/redir.toml <<REDIR
+[[site]]
+server_name = ["r.wild.test", "r2.wild.test"]
+canonical = "r.wild.test"
+listen = ["127.0.0.1:8473"]
+http = { listen = ["127.0.0.1:8474"] }
+root = "$ROOT/bench/www"
+tls = { cert = "$ROOT/bench/tmp/certs-wild/cert.pem", key = "$ROOT/bench/tmp/certs-wild/key.pem" }
+refuse = ["/area/hidden/"]
+
+[[site.access]]
+path = "/private"
+allow = ["10.0.0.0/8"]
+
+[[site.redirect]]
+from = "/blog"
+to = "/news"
+status = 301
+
+[[site.redirect]]
+from = "/about-us"
+match = "exact"
+to = "/about"
+status = 301
+
+[[site.redirect]]
+from = "/index.php?page=contact"
+match = "exact"
+to = "/contact"
+status = 301
+
+[[site.redirect]]
+from = "/catalog"
+to = "/shop"
+status = 301
+remainder = "drop"
+query = "drop"
+
+[[site.redirect]]
+from = "/docs"
+to = "https://docs.example.com"
+status = 301
+
+[[site.redirect]]
+from = "/contact/send"
+match = "exact"
+to = "/api/contact"
+status = 308
+
+[[site.redirect]]
+from = "/press-2019"
+status = 410
+
+[[site.redirect]]
+from = "/help"
+match = "exact"
+to = "/support?tab=faq#contact"
+status = 302
+
+[[site.redirect]]
+from = "/old/"
+to = "/"
+status = 301
+cache = "30d"
+
+[[site.redirect]]
+from = "/private"
+to = "/elsewhere"
+status = 301
+
+[[site.redirect]]
+from = "/area"
+to = "/zone"
+status = 301
+
+[[site]]
+server_name = ["m1.wild.test"]
+listen = ["127.0.0.1:8475"]
+http = { listen = ["127.0.0.1:8476"] }
+tls = { cert = "$ROOT/bench/tmp/certs-wild/cert.pem", key = "$ROOT/bench/tmp/certs-wild/key.pem" }
+
+[[site.redirect]]
+from = "/"
+to = "https://shop.example.com"
+status = 301
+REDIR
+cpost /v1/reload '{"confirm":true,"reason":"redir"}' > /dev/null
+rh() { hop https 8473 "$1" r.wild.test; }
+check "redirect rules: a section with its rest and query, a near name untouched, case-sensitive, exact with and without its query parameters, a section to one page, another host, a 410, a target's own query and fragment, one slash at the join with its own lifetime" \
+  "301 /news/2024/post?x=1 max-age=86400 - | 404 | 404 | 301 /about?ref=mail max-age=86400 - | 404 | 301 /contact max-age=86400 - | 404 | 301 /shop max-age=86400 - | 301 https://docs.example.com/install?v=2 max-age=86400 - | 410 - - - | 302 /support?tab=faq&lang=el#contact - - | 301 /x max-age=2592000 -" \
+  "$(rh '/blog/2024/post?x=1') | $(rh /blogger | cut -d' ' -f1) | $(rh /Blog/x | cut -d' ' -f1) | $(rh '/about-us?ref=mail') | $(rh /about-us/team | cut -d' ' -f1) | $(rh '/index.php?lang=el&page=contact') | $(rh '/index.php?page=other' | cut -d' ' -f1) | $(rh '/catalog/item/77?utm_source=x') | $(rh '/docs/install?v=2') | $(rh /press-2019/photos) | $(rh '/help?lang=el') | $(rh /old/x)"
+check "redirect rules: a POST to a 308 is resent as a POST; the rest of the path is encoded again; an encoded separator is not redirected by a prefix; a refused path is a 404, never redirected; a rule answers before an access rule" \
+  "308 /api/contact | 301 /news/a%20b%3Fc | 404 | 404 | 301 /elsewhere/a" \
+  "$(curl -sk -X POST -d a=b -D - -o /dev/null --resolve r.wild.test:8473:127.0.0.1 https://r.wild.test:8473/contact/send | tr -d '\r' | awk 'NR==1{c=$2} tolower($1)=="location:"{l=$2} END{print c, l}') | $(rh '/blog/a%20b%3Fc' | cut -d' ' -f1,2) | $(rh '/blog/x%2Fy' | cut -d' ' -f1) | $(rh /area/hidden/y | cut -d' ' -f1) | $(rh /private/a | cut -d' ' -f1,2)"
+check "redirect rules over plain HTTP: scheme, host and rule in one hop with the rule's status; a domain that moved goes to its new host in one hop from either scheme; certificate validation is not redirected" \
+  "301 https://r.wild.test:8473/news/x max-age=86400 - | 301 https://shop.example.com/item/7?c=2 max-age=86400 - | 301 https://shop.example.com/item/7?c=2 max-age=86400 - | 404" \
+  "$(hop http 8474 /blog/x r2.wild.test) | $(hop http 8476 '/item/7?c=2' m1.wild.test) | $(hop https 8475 '/item/7?c=2' m1.wild.test) | $(code -H 'Host: m1.wild.test' http://127.0.0.1:8476/.well-known/acme-challenge/x)"
+rm -f bench/tmp/sites.d/redir.toml
+cpost /v1/reload '{"confirm":true,"reason":"redir"}' > /dev/null
+rt() {  # what -t says about one site's rules: rt RULES
+  printf '[[site]]\nserver_name = ["t.test"]\nlisten = ["127.0.0.1:18099"]\nroot = "%s/bench/www"\n%s' "$ROOT" "$1" > bench/tmp/redir-t.toml
+  "$BIN" -t -c bench/tmp/redir-t.toml 2>&1 | tr '\n' ' '
+}
+rtq() {  # yes when -t's answer for the rules holds the text (matched in the shell: no pipe for pipefail to see break)
+  case "$(rt "$1")" in *"$2"*) echo yes ;; *) echo no ;; esac
+}
+check "redirect rules at load: a rule under its own target loops, two rules in a circle, the same from twice, the old string key: each refused, naming why; a chain is noted" \
+  "yes yes yes yes yes" \
+  "$(rtq "$(printf '[[site.redirect]]\nfrom = "/a"\nto = "/a/b"\nstatus = 301\n')" 'redirect in a circle') $(rtq "$(printf '[[site.redirect]]\nfrom = "/x"\nmatch = "exact"\nto = "/y"\nstatus = 301\n[[site.redirect]]\nfrom = "/y"\nmatch = "exact"\nto = "/x"\nstatus = 301\n')" 'redirect in a circle') $(rtq "$(printf '[[site.redirect]]\nfrom = "/x"\nto = "/y"\nstatus = 301\n[[site.redirect]]\nfrom = "/x"\nto = "/z"\nstatus = 302\n')" 'two [[site.redirect]] rules') $(rtq 'redirect = "https://new.test"' 'is gone (alpha.82)') $(rtq "$(printf '[[site.redirect]]\nfrom = "/x"\nmatch = "exact"\nto = "/y"\nstatus = 301\n[[site.redirect]]\nfrom = "/y"\nmatch = "exact"\nto = "/z"\nstatus = 301\n')" 'redirects again')"
 # A managed file in a form this version refuses (alpha.78): set aside like any file that does not
 # load, and site-update reaches it by its domain, renders it again from its first line and serves the
 # site; health names the command. Before, site-update answered 404 (no such site) and root edited

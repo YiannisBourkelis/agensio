@@ -1045,7 +1045,7 @@ json::Value Server::status() {
             for (const auto& a : s.http_listen) plain.push(a);
             site.set("http_listen", std::move(plain));
         }
-        if (!s.redirect.empty()) site.set("redirect", s.redirect);
+        if (!s.redirects.empty()) site.set("redirects", static_cast<double>(s.redirects.rules.size()));
         sites.push(std::move(site));
     }
     v.set("sites", std::move(sites));

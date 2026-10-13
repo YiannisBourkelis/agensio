@@ -308,8 +308,8 @@ choice later costs months of settling and logs every visitor out (cookies belong
 the application the same address (WordPress `home` and `siteurl`, Laravel `APP_URL`, Drupal
 `$base_url`), or it redirects back and the two loop. With `hsts = true` a plain request for the
 bare name goes to its own HTTPS first and then to `www`, so the bare name learns HSTS too. A domain
-you moved away from entirely is another site with a prefix, `redirect = "https://www.example.org"`
-([HTTPS only](../configuration.md#https-only)).
+you moved away from entirely is another site with one rule from `/` to the new host (the recipe
+below).
 
 **Check it.**
 
@@ -330,6 +330,94 @@ agensio ctl site-update example.com --canonical example.com --yes --reason "the 
 
 **Reference:** [HTTPS only](../configuration.md#https-only), where the same shape is explained,
 and [redirects.md](../redirects.md) 3.
+
+## Pages and sections that moved, and a domain that moved
+
+**When:** addresses changed in a redesign or a move, and old links, bookmarks and search engines
+should land on the new ones.
+
+```toml
+# /etc/agensio/agensio.toml: the main file, root's (once per host)
+include = ["sites.d/*.toml"]
+
+[server]
+acme = { email = "admin@example.com" }
+```
+
+```toml
+# /etc/agensio/sites.d/example.com.toml
+[[site]]
+server_name = ["example.com"]
+listen = ["0.0.0.0:443"]
+root = "/var/www/example.com/web"
+tls = "auto"
+
+[[site.redirect]]
+from = "/blog"                 # the section and everything below it: /blog/2024/x -> /news/2024/x
+to = "/news"
+status = 301
+
+[[site.redirect]]
+from = "/about-us"
+match = "exact"                # this page alone
+to = "/about"
+status = 301
+
+[[site.redirect]]
+from = "/?p=123"               # WordPress's plain permalinks: the page was in the query
+match = "exact"
+to = "/2024/hello-world/"
+status = 301
+
+[[site.redirect]]
+from = "/contact/send"         # a form handler that moved: 308 keeps the POST a POST
+match = "exact"
+to = "/api/contact"
+status = 308
+
+[[site.redirect]]
+from = "/press-2019"
+status = 410                   # gone, nothing replaces it
+```
+
+```toml
+# /etc/agensio/sites.d/old-shop.com.toml: a domain that moved, kept for a year or more
+[[site]]
+server_name = ["old-shop.com", "www.old-shop.com"]
+listen = ["0.0.0.0:443"]
+tls = "auto"                   # its https:// links show the redirect, not a certificate error
+
+[[site.redirect]]
+from = "/"
+to = "https://shop.example.com"
+status = 301
+```
+
+**What it does.** `/blog/2024/x?y=1` answers `301` to `/news/2024/x?y=1`, `/blogger` is served (only
+whole segments match), `/?p=123&utm_source=x` goes to `/2024/hello-world/` (the parameters a rule
+names must be there, others are ignored, and the old query is dropped), a POST to `/contact/send`
+is resent to `/api/contact`, and anything under `/press-2019` is `410 Gone`. The most specific rule
+decides, never the order they are written in, and matching is case-sensitive. A plain-HTTP request
+takes scheme and rule in one hop: `http://www.old-shop.com/item/7` answers `301` to
+`https://shop.example.com/item/7`. Permanent redirects carry `Cache-Control: max-age=86400`, so a
+mistake is undone within a day (`cache = "30d"` once the rule is right); use `302` or `307` while
+testing. Easy to get wrong: a rule to a path another rule redirects again is a chain (`agensio
+-t` names it); sending every old page to the home page (`from = "/"` with `remainder = "drop"`)
+looks like a soft 404 to search engines.
+
+**Check it.**
+
+```sh
+agensio -t -c /etc/agensio/agensio.toml       # refuses loops and duplicates, notes chains
+curl -sI 'https://example.com/blog/2024/x?y=1' | grep -iE '^(HTTP|location|cache-control)'
+curl -sI 'http://www.old-shop.com/item/7' | grep -i location     # https://shop.example.com/item/7, one hop
+```
+
+**On a managed site.** Not yet: the `site_update` field for rules comes in the next release; until
+then a site with rules is a hand-written file.
+
+**Reference:** [Path redirects](../configuration.md#14b-path-redirects-siteredirect),
+[redirects.md](../redirects.md) 5 and 6.
 
 ## Several sites on one address, and the catch-all
 
@@ -367,7 +455,11 @@ tls = "auto"                   # a certificate of its own, chosen by the name th
 [[site]]
 server_name = ["*"]            # every Host no other site on this address lists, and requests by IP address
 listen = ["0.0.0.0:80"]
-redirect = "https://www.example.com"
+
+[[site.redirect]]
+from = "/"
+to = "https://www.example.com"
+status = 302                   # for now: a catch-all's target may change
 ```
 
 **What it does.** A request goes to the site that lists its Host, compared without regard to

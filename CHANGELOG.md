@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.1.0-alpha.82
+
+- **Path redirects: `[[site.redirect]]`** (`docs/redirects.md` 5, configuration.md 14b). A rule
+  sends a path or a section elsewhere: `from` (a normalised path, case-sensitive; an exact rule may
+  name the query parameters it requires, in any order), `match` (`"prefix"`, whole segments, or
+  `"exact"`), `to` (a path of the site or an http(s) URL), a required `status` (301, 302, 307, 308,
+  or 410 with no target), `remainder` and `query` (`"keep"` or `"drop"`), `cache` (how long browsers
+  keep a permanent one, a day by default). The most specific rule decides, never the order:
+  exact rules are looked up in a hash table, prefix rules longest first behind a test of the path's
+  first byte. Rules stand after `refuse` and before the access and password rules; from plain HTTP
+  the scheme, the host (`canonical`) and a rule are one hop with the rule's status. agensio writes
+  the Location byte by byte (`core/redirect.hpp`): a target of the site stays relative, the rest of
+  the path and the query are encoded again, one `/` at the join, never `//` or `/\` at the start,
+  an absolute one names exactly the host of `to`; a path that spelled a separator as `%2F` is not
+  redirected by a prefix; certificate validation over plain HTTP is never redirected. The load
+  refuses a rule under its own target or rules in a circle (each target followed through the
+  site's rules, on the site's own names and ports), the same `from` twice, a rule `refuse` makes
+  unreachable, a `to` with a user name, another scheme, `..`, a space or a control character,
+  `cache` on a temporary status, more than 1,000 rules; it notes chains, a rule from `/` dropping
+  the rest (a soft 404), a rule under an access or password rule, one over the validation paths
+  (`-t`, the error log, health). A new fuzzer, `fuzz_redirect`, holds the Location to those
+  promises and the index to a scan of every rule. Breaking: the string key `redirect =
+  "https://host"` is refused, naming the rule to write (`from = "/"`); a site a rule from `/`
+  answers whole needs no root. Managed sites get rules through `site_update` in the next release.
+  The integration checks (the design's examples, the order against refuse and an access rule,
+  case and encoded separators, one hop with `canonical`, a domain that moved, the load's
+  refusals and a chain) failed on alpha.81. `bench/ab.sh HEAD -A -2` (`ab-20261013-171835.md`, two new rows: 1,000 exact
+  rules on a path none names against the same site without rules, and a rule from `/` against the
+  old key's 301): every row 0.96 to 1.05, alpha.81 against itself 0.98 to 1.07
+  (`ab-20261013-164453.md`); the gate's rows again with three rounds (`ab-20261013-172448.md`):
+  the miss 0.990, the hit 1.010 (with its `Cache-Control`, which the old answer did not carry).
+
 ## 0.1.0-alpha.81 (2026-10-13)
 
 - **One name for a site: `canonical`** (`docs/redirects.md` 3, configuration.md 14). A site lists

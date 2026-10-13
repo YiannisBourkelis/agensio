@@ -263,6 +263,15 @@ Every target five minutes on its corpus, twelve at once, ASan and UBSan, clang 1
 | fuzz_auth_users | 32.93 M | 609 | clean |
 | fuzz_log_line | 4.52 M | 901 | four UBSan reports, missed (2026-10-12 above) |
 
+2026-10-13, `fuzz_redirect` (alpha.82, `[[site.redirect]]`, `core/redirect.hpp`): rules compiled as
+the loader does, request targets normalised and looked up as the dispatcher does. The index must
+agree with a scan of every rule for the most specific one, and every Location written holds no
+control character, space or backslash; a relative one never starts with `//` or `/\` (another host
+to a browser), an absolute one starts with exactly the target's origin and then `/`, so no path or
+query moves it to another host. 120 s beside `fuzz_refuse` and `fuzz_path`, three at once, ASan and
+UBSan (`scripts/fuzz-all.sh -t 120 -j 3 redirect refuse path`): `fuzz_redirect` 3.46 M runs and
+1,212 edges, `fuzz_refuse` 2.11 M, `fuzz_path` 4.08 M, all clean.
+
 2026-10-09, the password users (step 4b of design section 25): the unit tests, `tests/auth.sh`
 (27 checks) and `tests/provision.sh` with the sanitizer build, its reports kept with
 `ASAN_OPTIONS=log_path=` since the helper suite's own directory is removed at its end. One
