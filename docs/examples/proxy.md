@@ -511,7 +511,9 @@ proxy = { host = "pass", forwarded = "forwarded", request_headers = { "X-Gateway
 `X-Forwarded-Proto` and `X-Real-IP`; from a client that is not in `trusted_proxies`, those fields
 are replaced, never appended to, and the fields in which a CDN names the client
 (`CF-Connecting-IP`, `True-Client-IP`, `Client-IP` and the like) are dropped, so nobody chooses
-the address the application sees. Here the main origin gets `Host: portal.internal.example.com` and, because
+the address the application sees. A field with `_` in its name never reaches the origin, from
+anyone (Rack and Puma would read `Client_IP` as `Client-IP`), and there is no switch to pass
+one: a client that needs a field of its own sends it with `-`. Here the main origin gets `Host: portal.internal.example.com` and, because
 Host was rewritten, `X-Forwarded-Host: portal.example.com`. An application that builds links
 from `Host` then shows its internal name in its pages; its redirects come back to the site,
 since a redirect to the name given as `host`, like one to the origin's address
