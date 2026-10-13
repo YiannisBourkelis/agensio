@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.83
+## 0.1.0-alpha.83 (2026-10-13)
 
 - **Path redirects on a managed site, and `path_check` for them** (`docs/redirects.md` 5, 8,
   configuration.md 14b). `site_create` / `site_update` take `redirects`, the site's rules as
