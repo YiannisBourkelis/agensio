@@ -5873,6 +5873,16 @@ static void test_redirect_rules() {
     CHECK_EQ(to_of("/p", "x=2"), std::string("/f"));
     CHECK_EQ(to_of("/q/x"), std::string("none"));       // case-sensitive
     CHECK(match(set, "/blog/x", "", true) == nullptr);   // an encoded separator: no prefix rule
+    // A from ending in '/' covers only the paths below it (the cookbook's /index.php/ recipe, the
+    // design's 12.3): the front controller itself, which forms post to, is left alone.
+    {
+        RedirectSet front;
+        front.rules = {rule("/index.php/", false, "/")};
+        index(front);
+        CHECK(match(front, "/index.php", "", false) == nullptr && match(front, "/index.php", "q=node/1", false) == nullptr);
+        const RedirectRule* r = match(front, "/index.php/node/1", "x=1", false);
+        CHECK(r != nullptr && r && loc(*r, "/index.php/node/1", "x=1") == "/node/1?x=1");
+    }
     // The load: refusals, a site a rule from / answers whole without a root, the notes.
     const fs::path dir = fs::temp_directory_path() / ("agensio-redir-" + std::to_string(::getpid()));
     fs::create_directories(dir / "www");
@@ -8204,7 +8214,7 @@ static void test_packaged_docs() {
     const std::string list = cmake.substr(at, cmake.find(')', at) - at);
     const std::set<std::string> developers = {"CODE_STYLE.md", "ROADMAP.md", "legacy-analysis.md", "linux-dev-setup.md",
                                               "web-server-feedback.md", "security-audit-2026-10-07.md", "third-party-bugs.md",
-                                              "redirects.md", "headers.md"};  // proposals until the features are built; then installed
+                                              "headers.md"};  // a proposal until the feature is built; then installed
     std::size_t guides = 0;
     for (const auto& e : fs::directory_iterator(fs::path(AGENSIO_SOURCE_DIR) / "docs")) {
         const std::string name = e.path().filename().string();

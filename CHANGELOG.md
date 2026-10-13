@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.0-alpha.87
+
+- **The redirects guide installed, and the `/index.php/` recipe** (`docs/redirects.md` 12.3, 13
+  step 5). `docs/redirects.md` is built (alpha.75 to alpha.86), so it is installed with the other
+  guides that point to its sections (health's fixes, `docs/tls.md`, configuration.md 14), and its
+  status says what is not built yet. The cookbook's new recipe, Old addresses with /index.php/ in
+  them (`docs/examples/php.md`), is Drupal's nginx `rewrite ^/index.php/(.*) /$1 permanent;` as one
+  rule from `/index.php/` to `/`: a `from` ending in `/` covers only the paths below it, so
+  `/index.php` itself, where forms post, runs as before (a unit check holds the matching to it).
+  The MCP `redirects` text says the same for an agent migrating such a site. Documentation and
+  texts only: no A/B.
+
 ## 0.1.0-alpha.86 (2026-10-14)
 
 - **Health names what only requests show: a proxy that sends no scheme, an application's stronger

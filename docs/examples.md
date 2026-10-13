@@ -69,6 +69,7 @@ start them and the warning goes. What a key needs (a reload, a restart, root) is
 - [WordPress on its own account](examples/php.md#wordpress-on-its-own-account): `user` and the php-fpm pool agensio generates, what the preset runs and refuses, `agensio pools` and the php-fpm reload.
 - [Laravel](examples/php.md#laravel): the project as `root` with `public/` served, only `/index.php` runs, and the project's secrets kept private.
 - [Drupal](examples/php.md#drupal): the PHP that Drupal's own `.htaccess` lets run, `sites/default/files`, and `site-install` plus `site-copy` for `settings.php`.
+- [Old addresses with /index.php/ in them](examples/php.md#old-addresses-with-indexphp-in-them): one rule from `/index.php/` to `/`, so old links move to the clean addresses while `/index.php` itself, which forms post to, runs as before.
 - [Grav](examples/php.md#grav): only `index.php` runs, Grav's private directories, and why the preset must be the application's.
 - [A PHP application without a preset, from its own rules](examples/php.md#a-php-application-without-a-preset-from-its-own-rules): `app = "php"` narrowed to Kanboard's entry points, front controller, cached assets and `refuse` patterns, or the same as `rules`.
 - [Use a php-fpm pool you already run](examples/php.md#use-a-php-fpm-pool-you-already-run): `php = { socket }`, socket permissions, and pool keys that need a generated pool.

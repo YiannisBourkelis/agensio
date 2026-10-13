@@ -214,6 +214,64 @@ agensio ctl site-copy magazine.example.com --from sites/default/default.settings
 **Reference:** [Drupal](../configuration.md#4c-drupal-app--drupal),
 [Control socket](../configuration.md#15-control-socket) (`site-install`, `site-copy`, root additions).
 
+## Old addresses with /index.php/ in them
+
+**When:** a PHP application (Drupal, Symfony, Shopware, Laravel) once answered its pages as
+`/index.php/node/1` and now has clean addresses (`/node/1`), and links, bookmarks and search
+engines should move to the clean ones. This is the `rewrite ^/index.php/(.*) /$1 permanent;` of
+Drupal's nginx recipe, written as a rule.
+
+```toml
+# /etc/agensio/agensio.toml: the main file, root's (once per host)
+include = ["sites.d/*.toml"]
+
+[server]
+acme = { email = "admin@example.com" }
+```
+
+```toml
+# /etc/agensio/sites.d/magazine.example.com.toml
+[[site]]
+server_name = ["magazine.example.com"]
+listen = ["0.0.0.0:443"]
+root = "/var/www/magazine.example.com/project"
+app = "drupal"
+user = "magazine"
+tls = "auto"
+
+[[site.redirect]]
+from = "/index.php/"           # ends in '/': only the paths below it, never /index.php itself
+to = "/"
+status = 301
+```
+
+**What it does.** `/index.php/node/1?page=2` answers `301` to `/node/1?page=2`, the rest of the
+path and the query kept, and the clean address then runs the front controller as always. `/index.php`
+itself, with or without a query, runs as before: forms post to it, and a redirect would turn a POST
+into a GET. Easy to get wrong: `from = "/index.php"` without the slash covers `/index.php` too.
+
+**Check it.**
+
+```sh
+agensio -t -c /etc/agensio/agensio.toml
+curl -sI 'https://magazine.example.com/index.php/node/1?page=2' | grep -iE '^(HTTP|location)'   # 301, /node/1?page=2
+agensio ctl path-check magazine.example.com /index.php/node/1     # the rule and its Location
+agensio ctl path-check magazine.example.com /index.php            # runs the front controller
+```
+
+**On a managed site.** The rule is one flag; `path-check` with it first is a preview that changes
+nothing:
+
+```sh
+agensio ctl path-check magazine.example.com /index.php/node/1 --redirect "/index.php/ / 301"
+agensio ctl site-update magazine.example.com --redirect "/index.php/ / 301" --yes --reason "clean addresses"
+```
+
+**MCP:** `path_check` with `redirects` first, then `site_update` with `redirects`.
+
+**Reference:** [Path redirects](../configuration.md#14b-path-redirects-siteredirect),
+[Drupal](../configuration.md#4c-drupal-app--drupal).
+
 ## Grav
 
 **When:** a Grav site, the admin plugin included.

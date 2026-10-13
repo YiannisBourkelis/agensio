@@ -1,11 +1,12 @@
 # HTTPS, canonical names, HSTS and redirects
 
-> **Status: proposal (2026-10-12), not built.** Nothing in this document works in
-> 0.1.0-alpha.72; it is the design, written as the guide it will become, so each use case could
-> be checked against it before anything is built. The questions the use cases raised and the
-> owner's decisions are in section 9, the check against the research in section 11, the check
-> against the applications' own configurations in section 12, how it will be built and tested in
-> section 13. The research behind it is `reports/Web server headers and redirects.md` and
+> **Status: built, 0.1.0-alpha.75 to alpha.87** (section 13 says which step came in which
+> release). It was written first as the design, in the form of the guide it became, so each use
+> case could be checked against it before anything was built. The questions the use cases raised
+> and the owner's decisions are in section 9, the check against the research in section 11, the
+> check against the applications' own configurations in section 12. Not built yet: a data file for
+> more than 1,000 rules (6.3), the maintenance setting (7), a placeholder inside a target (12.3).
+> The research behind it is `reports/Web server headers and redirects.md` and
 > `research_notes/Official configs vs redirects and headers/`; response headers
 > (`[[site.response_headers]]`, the security baseline per preset, and the mechanism `hsts` uses)
 > are in `docs/headers.md`.
@@ -1163,6 +1164,8 @@ a path that meets none, a redirect hit, and a TLS site with `hsts` against one w
    `core/site_notices.hpp` to health and the error log, with the A/B of the request path.
 5. **The agent's side:** `site_update` fields, `agensio ctl` flags, the MCP texts of 11.2 and 12.3,
    the reference rows, the cookbook recipes linking here; this document installed with the others.
+   The fields, flags and texts came with their steps (alpha.81 to alpha.86); alpha.87 adds the
+   cookbook's `/index.php/` recipe of 12.3 and installs this document.
 
 Sites without `http` redirects, `canonical`, `hsts` or `[[site.redirect]]` keep today's request
 path: one test of an empty site field, measured flat.
