@@ -1,6 +1,8 @@
 #include "handlers/upstream_common.hpp"
 
+#include <algorithm>
 #include <cerrno>
+#include <string>
 #include <system_error>
 
 #include "core/private_cache.hpp"
@@ -111,6 +113,26 @@ bool hidden(std::string_view name, const LocationConfig& loc) {
 
 }  // namespace
 
+bool upgrade_location(std::string& out, std::string_view value, const SiteConfig& site) {
+    if (value.size() < 8 || !Headers::iequals(value.substr(0, 7), "http://")) return false;
+    const std::string_view rest = value.substr(7);
+    const std::size_t end = std::min(rest.find_first_of("/?#"), rest.size());
+    const std::string_view authority = rest.substr(0, end);
+    std::string_view host = authority;
+    if (const std::size_t colon = authority.rfind(':'); colon != std::string_view::npos) {
+        const std::string_view port = authority.substr(colon + 1);
+        host = authority.substr(0, colon);
+        if (port != "80" && port != std::to_string(site.https_port)) return false;  // another service's port
+    }
+    bool named = false;
+    for (const auto& n : site.server_names) named = named || (n != "*" && Headers::iequals(n, host));
+    if (!named) return false;
+    out.append("https://").append(host);
+    if (site.https_port != 443) out.append(":").append(std::to_string(site.https_port));
+    out.append(rest.substr(end));
+    return true;
+}
+
 void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<StreamBody> source, const char* log_name,
                            const LocationConfig& loc) {
     Response& r = s.response;
@@ -128,6 +150,7 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
     const bool guarded = s.auth.protected_path;
     // The site's hsts replaces the application's own (docs/redirects.md 4.1): one field, the site's.
     const bool site_hsts = s.fields && !s.fields->hsts.empty();
+    const bool rewrite = proxied && loc.proxy.rewrite_redirects;
     std::string kept;  // the application's Cache-Control directives a protected answer keeps
     r.scratch.reserve(res.head.size() + 64);
     for (const HeaderField& h : res.headers) {
@@ -144,9 +167,12 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
             if (private_cache::shared_only_field(h.name)) continue;
         }
         if (proxied && hidden(h.name, loc)) continue;
-        if (proxied && loc.proxy.rewrite_redirects && Headers::iequals(h.name, "location")) {
+        // A Location naming the origin is the site's (proxy.redirects); one naming the site over
+        // http:// on a site whose plain HTTP redirects is https:// (docs/redirects.md 2.5).
+        if ((rewrite || s.https_site) && Headers::iequals(h.name, "location")) {
             r.scratch.append("Location: ");
-            if (!rewrite_location(r.scratch, h.value, s, loc)) r.scratch.append(h.value);
+            if (!(rewrite && rewrite_location(r.scratch, h.value, s, loc)) && !(s.https_site && upgrade_location(r.scratch, h.value, *s.https_site)))
+                r.scratch.append(h.value);
             r.scratch.append("\r\n");
             continue;
         }

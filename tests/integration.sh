@@ -1355,6 +1355,19 @@ cpost /v1/sites "{\"domain\":\"certp.wild.test\",\"https\":{\"cert\":\"$ROOT/ben
 check "http: a proxied site's plain port answers the validation prefixes itself (404), never through the application" "404 404 308" \
   "$(code -H 'Host: certp.wild.test' http://127.0.0.1:8456/.well-known/acme-challenge/x) $(code -H 'Host: certp.wild.test' http://127.0.0.1:8456/.well-known/pki-validation/x.txt) $(code -H 'Host: certp.wild.test' http://127.0.0.1:8456/x)"
 cpost /v1/sites/certp.wild.test/delete '{"confirm":true,"reason":"certs"}' > /dev/null
+# A proxied application's own http:// Location for the Host it was given (docs/redirects.md 2.5,
+# alpha.79): the benchmark upstream's /host-redirect builds it from Host, as an application that does
+# not trust its proxy does; /redirect names the origin's own address, which the proxy's rewrite
+# already turned into the site (https, as the request came).
+if [ -x build/agensio_upstream ]; then
+  build/agensio_upstream -p 9111 >/dev/null 2>&1 & UP9111=$!
+  cpost /v1/sites "{\"domain\":\"certu.wild.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-wild/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-wild/key.pem\"},\"user\":null,\"app\":\"proxy\",\"upstream\":\"http://127.0.0.1:9111\",\"listen_plain\":\"127.0.0.1:8463\",\"listen_tls\":\"127.0.0.1:8462\",\"confirm\":true,\"reason\":\"certs\"}" > /dev/null
+  locu() { curl -sk -D - -o /dev/null --resolve certu.wild.test:8462:127.0.0.1 "https://certu.wild.test:8462$1" | tr -d '\r' | awk 'tolower($1)=="location:"{print $2}'; }
+  check "http: a proxied application's http:// Location for the Host it was given is sent as https://; one naming the origin is the site's as before" \
+    "https://certu.wild.test:8462/json https://certu.wild.test:8462/json" "$(locu /host-redirect) $(locu /redirect)"
+  cpost /v1/sites/certu.wild.test/delete '{"confirm":true,"reason":"certs"}' > /dev/null
+  kill $UP9111 2>/dev/null; wait $UP9111 2>/dev/null
+fi
 # A managed file in a form this version refuses (alpha.78): set aside like any file that does not
 # load, and site-update reaches it by its domain, renders it again from its first line and serves the
 # site; health names the command. Before, site-update answered 404 (no such site) and root edited
@@ -1413,6 +1426,17 @@ if [ -n "$PHPFPM" ]; then
   check "http: over plain HTTP the validation prefixes of a PHP site are its files only: the token served; a missing path, the directory and a .php file there 404 with nothing run; over HTTPS the front controller still answers" \
     "tok2-body 404 404 404 no front-ran" \
     "$(curl -s -H 'Host: certwp.wild.test' http://127.0.0.1:8458/.well-known/acme-challenge/tok2) $(wp80 /.well-known/acme-challenge/nope) $(wp80 /.well-known/acme-challenge/) $(wp80 /.well-known/acme-challenge/x.php) $(curl -s -H 'Host: certwp.wild.test' http://127.0.0.1:8458/.well-known/pki-validation/nope | grep -q ran && echo yes || echo no) $(curl -sk --resolve certwp.wild.test:8457:127.0.0.1 https://certwp.wild.test:8457/.well-known/acme-challenge/nope)"
+  # An application's own http:// Location for the site's name goes out as https:// on the TLS port
+  # (docs/redirects.md 2.5, alpha.79): without it every such redirect took a hop through the plain
+  # port. Built from the Host the application was given (with the port), without a port, or another
+  # host, which passes as sent.
+  printf '<?php header("Location: http://" . $_SERVER["HTTP_HOST"] . "/login?x=1", true, 302);' > bench/tmp/certwp/own.php
+  printf '<?php header("Location: http://certwp.wild.test/bare", true, 302);' > bench/tmp/certwp/bare.php
+  printf '<?php header("Location: http://other.example/x", true, 302);' > bench/tmp/certwp/far.php
+  loc443() { curl -sk -D - -o /dev/null --resolve certwp.wild.test:8457:127.0.0.1 "https://certwp.wild.test:8457$1" | tr -d '\r' | awk 'tolower($1)=="location:"{print $2}'; }
+  check "http: a PHP application's own http:// Location for the site's name is sent as https:// on the TLS port; another host's passes" \
+    "https://certwp.wild.test:8457/login?x=1 https://certwp.wild.test:8457/bare http://other.example/x" \
+    "$(loc443 /own.php) $(loc443 /bare.php) $(loc443 /far.php)"
   cpost /v1/sites/certwp.wild.test/delete '{"confirm":true,"reason":"certs"}' > /dev/null
   # TYPO3 without a preset (2026-10-08, the alpha.53 report's third finding): app = "php" and the
   # rules an agent translates from TYPO3 13.4's documented nginx configuration, through the MCP

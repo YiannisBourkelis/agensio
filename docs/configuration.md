@@ -1489,7 +1489,7 @@ on a location.
 | `forwarded` | `"x-forwarded"` | `"x-forwarded"`, `"forwarded"` (RFC 7239), `"both"`, `"off"` |
 | `request_headers` | none | fields set toward the origin, `{ "X-Gateway" = "$host" }`; `""` removes (`"X-Real-IP" = ""` stops agensio's own); a field agensio writes itself (`Host`, `X-Forwarded-*`, `Forwarded`) named here replaces agensio's line, sent once |
 | `hide` | none | fields dropped from the origin's answer, `["X-Powered-By"]` |
-| `redirects` | `"rewrite"` | Location pointing at the origin (its address, or the name given as `host`) rewritten to this site, or `"pass"` |
+| `redirects` | `"rewrite"` | Location pointing at the origin (its address, or the name given as `host`) rewritten to this site, or `"pass"`. Apart from it, on a site whose plain HTTP redirects (`http`, section 14) an `http://` Location naming the site goes out as `https://` |
 | `upgrade` | `true` | forward Upgrade requests and tunnel after a 101 (WebSocket) |
 | `tunnel_timeout` | 0 | seconds a tunnel may stay idle in both directions; 0 = no limit |
 | `buffering` | `true` | collect the whole answer (memory, then a temp file above `buffer_max`) so a slow client never holds the origin; `false` streams with backpressure |
@@ -1884,6 +1884,15 @@ anything else there is a `404`, never a redirect, with nothing run (no front con
 no `try_files` fallback, no proxied application; a proxied preset, whose root is a project
 directory, answers `404` to all of it), so no application answers plain HTTP there. Before
 0.1.0-alpha.77 those requests went through the site's locations.
+
+**An application's own `http://` redirects.** An application that does not trust agensio as
+its proxy builds its redirects from what it sees, plain HTTP: `Location:
+http://example.com/login`. On a site whose `http` is `"redirect"`, such a Location naming one of
+the site's names (without a port, with port 80, or with the TLS port, as the Host the application
+was given) goes out as `https://` on the site's TLS port, for proxied, PHP and CGI answers alike
+(nginx's `proxy_redirect http:// https://`), so the visitor takes no hop through the plain port.
+Any other Location passes as the application sent it. The application is still better told to
+trust the proxy (section 10), so its links and cookies are right too. Since 0.1.0-alpha.79.
 
 The plain addresses meet the other sites there as a plain site does: a name answers for one
 site on an address, an address has one catch-all and is plain or TLS for every site on it. A

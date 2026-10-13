@@ -56,6 +56,7 @@
 #include "handlers/fastcgi.hpp"
 #include "handlers/httparena.hpp"
 #include "handlers/static.hpp"
+#include "handlers/upstream_common.hpp"
 #include "core/fields.hpp"
 #include "http2/frame.hpp"
 #include "http2/hpack.hpp"
@@ -3389,6 +3390,19 @@ static void test_acme() {
     {
         const Config c = load_one(acme + "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:8443\"]\n" + root + "http = { listen = [\"127.0.0.1:8080\"] }\n");
         CHECK(c.sites[0].http_redirect && c.sites[0].https_port == 8443 && c.sites[0].http_listen == std::vector<std::string>({"127.0.0.1:8080"}));
+        // An application's own http:// Location for the site's name goes out as https:// on the TLS
+        // port (docs/redirects.md 2.5): without a port, port 80 or the TLS port, as the Host it was
+        // given; any other host or port, another scheme or a relative one passes.
+        auto up = [&](std::string_view v) {
+            std::string out;
+            return upgrade_location(out, v, c.sites[0]) ? out : "kept";
+        };
+        CHECK_EQ(up("http://a.test/login?x=1#f"), std::string("https://a.test:8443/login?x=1#f"));
+        CHECK_EQ(up("HTTP://A.TEST:8443/x"), std::string("https://A.TEST:8443/x"));
+        CHECK_EQ(up("http://a.test:80"), std::string("https://a.test:8443"));
+        CHECK_EQ(up("http://a.test?q"), std::string("https://a.test:8443?q"));
+        for (std::string_view v : {"http://a.test:8080/x", "http://b.test/x", "http://a.test.evil/x", "https://a.test/x", "/login", "http://", "http://[::1]/x"})
+            CHECK_EQ(up(v), std::string("kept"));
         const Config d = load_one(acme + "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:8443\"]\n" + root + "http = { listen = [\"8080\"], mode = \"serve\" }\n");
         CHECK(d.sites[0].http == SiteConfig::Http::serve && !d.sites[0].http_redirect && d.sites[0].http_listen == std::vector<std::string>({"0.0.0.0:8080"}));
         const Config e = load_one(acme + "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:443\"]\n" + root + "http = \"off\"\nhsts = true\n");

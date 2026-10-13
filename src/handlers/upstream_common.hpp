@@ -28,10 +28,16 @@ void collect_request_body(Stream& s, UpstreamBodyInput& body, std::size_t memory
 
 // The client's response from a successful exchange: status, every head field except the
 // framing and connection ones the writer owns (and, for a proxy location, the fields it
-// hides; a Location naming the origin is rewritten to this site), the location's
+// hides; a Location naming the origin is rewritten to this site, and on a site whose plain HTTP
+// redirects an http:// one naming the site goes out as https://), the location's
 // add_headers on 2xx/3xx, and the body as the result carries it. `source` is the
 // streaming body when the result is streamed. `log_name` is the access log's upstream field.
 void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<StreamBody> source, const char* log_name,
                            const LocationConfig& loc);
+
+// docs/redirects.md 2.5: an application's own http:// Location naming one of the site's names (with
+// no port, port 80 or the site's TLS port, as the Host it was given) appended to `out` as https://
+// on the TLS port, nginx's proxy_redirect http:// https://; false, nothing appended, for any other.
+bool upgrade_location(std::string& out, std::string_view value, const SiteConfig& site);
 
 }  // namespace agensio

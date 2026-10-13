@@ -16,6 +16,8 @@
 
 namespace agensio {
 
+struct SiteConfig;  // config.hpp
+
 // The connection's peer, parsed, asked for on first need: an access rule of the site
 // (core/access.hpp, 2026-10-07). HTTP/1 reads it from the socket then, once per connection,
 // and never for a connection whose requests need nothing else; HTTP/2 and HTTP/3 hold it.
@@ -87,12 +89,17 @@ struct Stream {
     // The fields the request's site sets on this answer (core/site_fields.hpp), once the site is
     // known: on the request rather than the response, so an error page made later keeps them.
     const SiteFields* fields = nullptr;
+    // An HTTPS request to a site whose plain HTTP redirects (docs/redirects.md 2.5): its
+    // application's own http:// Location for the site's names goes out as https://
+    // (handlers/upstream_common.cpp). Set only for such a site.
+    const SiteConfig* https_site = nullptr;
 
     void reset() {
         request.reset();
         response.reset();
         auth.reset();
         fields = nullptr;
+        https_site = nullptr;
     }
 };
 

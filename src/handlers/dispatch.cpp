@@ -541,15 +541,18 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
     }
     // http = "redirect" (docs/redirects.md 2): plain HTTP, or a request a trusted proxy did not mark
     // https, goes to HTTPS; certificate validation gets the site's files there and nothing else
-    // (its validation location, below). One flag test for a site that does not redirect, and on TLS
-    // one more.
+    // (its validation location, below). One flag test for a site that does not redirect.
     bool validation = false;
-    if (site->http_redirect && !s.conn.tls && !s.conn.forwarded_https) {
-        if (!certificate_validation(ws.path)) {
-            redirect_https(s, *site);
-            return nullptr;
+    if (site->http_redirect) {
+        if (!s.conn.tls && !s.conn.forwarded_https) {
+            if (!certificate_validation(ws.path)) {
+                redirect_https(s, *site);
+                return nullptr;
+            }
+            validation = true;
+        } else {
+            s.https_site = site;  // its application's http:// Locations go out as https:// (2.5)
         }
-        validation = true;
     }
     // `refuse` and [[site.access]] before any location is chosen: whichever would serve the
     // path (a .php suffix, a proxy) cannot step around them, nginx's regex-location trap. A

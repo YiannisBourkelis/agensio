@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.0-alpha.79
+
+- **An application's own `http://` redirects go out as `https://`** (`docs/redirects.md` 2.5). An
+  application that does not trust agensio as its proxy builds its redirects from what it sees,
+  plain HTTP, so on an HTTPS site every such redirect sent the visitor through the plain port's
+  `308` first. On a site whose `http` is `"redirect"`, a Location naming one of the site's names
+  (no port, port 80 or the TLS port, as the Host the application was given) now goes out as
+  `https://` on the site's TLS port, for proxied, PHP and CGI answers alike, after the proxy's own
+  rewrite of a Location naming the origin; any other Location passes as sent. The integration
+  checks (a PHP script and a proxied origin redirecting to `http://` plus the Host they were given)
+  failed on alpha.78. `bench/ab.sh HEAD -A -2 -P` (`ab-20261013-155027.md`): every row 0.96 to
+  1.04, the proxy rows 0.99 to 1.01; alpha.78 against itself (`ab-20261013-153721.md`) moved 0.95
+  to 1.05.
+
 ## 0.1.0-alpha.78 (2026-10-13)
 
 - **`site-update` repairs a managed file a newer version refuses.** When a release changes the form

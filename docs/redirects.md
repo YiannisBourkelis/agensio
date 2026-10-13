@@ -254,7 +254,10 @@ extra hop through the redirect of 2.1, and a form's POST would arrive as a GET. 
 redirects plain HTTP, agensio upgrades such a `Location` to `https://` when it names one of the
 site's own names, for proxied, PHP and CGI answers alike (nginx's `proxy_redirect http://
 https://`). Only the scheme of the site's own names changes; any other `Location` passes as the
-application sent it. The application is still better told to trust the proxy (10.3).
+application sent it. The application is still better told to trust the proxy (10.3). Built in
+alpha.79: a name of the site without a port, with port 80 or with its TLS port (the Host the
+application was given) becomes `https://` on the TLS port; another port is another service and
+passes.
 
 ## 3. One name: `canonical`
 
@@ -1130,8 +1133,8 @@ a path that meets none, a redirect hit, and a TLS site with `hsts` against one w
 2. **`http` and `canonical`:** one block for HTTP and HTTPS; `redirect = "https"` goes; the managed
    files are rendered the new way; certificate validation is answered before both, from the site's
    files too (the failing test first: a file under `/.well-known/acme-challenge/` on a site with
-   `http = "redirect"` is served over plain HTTP, not redirected). `http` built in alpha.76 (2a);
-   the application's own `http://` Location (2.5) and `canonical` (2b) next.
+   `http = "redirect"` is served over plain HTTP, not redirected). `http` built in alpha.76 (2a),
+   the application's own `http://` Location (2.5) in alpha.79; `canonical` (2b) next.
 3. **`[[site.redirect]]`:** exact (with query parameters) and prefix rules, case-sensitive, `410`,
    the checks of
    section 8, the preview, and `fuzz_redirect` over (`from`, `to`, path, query) asserting the
