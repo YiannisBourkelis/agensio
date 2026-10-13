@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.85
+## 0.1.0-alpha.85 (2026-10-13)
 
 - **The load's redirect notes in the answer of the change that made them** (the alpha.83 report;
   `docs/redirects.md` 8). `site_create` and `site_update` answered `ok` with `warnings: []` for rules
