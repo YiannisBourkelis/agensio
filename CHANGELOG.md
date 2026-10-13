@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.74
+## 0.1.0-alpha.74 (2026-10-13)
 
 - **A field with `_` in its name reached a proxied origin.** The client-address fix of alpha.73
   dropped `X-Real-IP`, `Client-IP` and the CDN fields under their dashed names, but Rack and
