@@ -51,7 +51,8 @@ tls = "auto"
   HTTPS, docs/configuration.md 14); agensio answers the challenge itself, before any site,
   location, redirect or access rule, so nothing in your configuration can get in its way, and a
   file under `/.well-known/acme-challenge/` or `/.well-known/pki-validation/` in the site's root
-  is served before the redirect too (certbot's webroot mode, a CA's file check). Health warns
+  is served before the redirect too (certbot's webroot mode, a CA's file check); only a file,
+  else `404`, with nothing run there over plain HTTP. Health warns
   (`acme_needs_port_80`) when nothing answers plain HTTP on port 80 for the names
   (`http = "off"`, or a TLS port other than 443 without `http = { listen = [...] }`).
 - Real host names: no `*` and no wildcard (they need DNS-01, which agensio does not do yet).

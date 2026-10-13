@@ -475,7 +475,8 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (eighteen, each seeded from
   (`Server::build_listeners`, `site_addresses`), counted as plain in `first_site_conflict`;
   `Dispatcher::route` tests `http_redirect` once the site is known and answers `redirect_https`
   (308, a day, `no-store` for a name only a catch-all took, the TLS port when not 443), the
-  certificate validation paths served from the site first. `redirect = "https"` is refused; the
+  certificate validation paths served from the site's files only (`SiteConfig::validation`, built
+  by `finalize_site`: a file of the root or 404, nothing run; none for a proxied preset; alpha.77). `redirect = "https"` is refused; the
   `https://host` prefix form stays until `[[site.redirect]]`.
 - **Automatic certificates** (H3, `src/services/acme.*`, `services/json.hpp`): `tls = "auto"`
   plus `[server] acme = { email }`; ACME v2 with HTTP-01 against any RFC 8555 CA, JWS ES256

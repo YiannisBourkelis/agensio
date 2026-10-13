@@ -1873,7 +1873,11 @@ own spelling of the name; a name only a catch-all took (the client chose it) is 
 and carries `Cache-Control: no-store`. Certificate validation is answered before it: agensio's
 own ACME tokens first, then the site's files under `/.well-known/acme-challenge/` and
 `/.well-known/pki-validation/` (certbot's webroot mode, a CA's file check), so no setting here
-breaks a certificate's issue or renewal; a file missing there is a `404`, never a redirect.
+breaks a certificate's issue or renewal. Only files: a regular file under the root is served, and
+anything else there is a `404`, never a redirect, with nothing run (no front controller, no PHP,
+no `try_files` fallback, no proxied application; a proxied preset, whose root is a project
+directory, answers `404` to all of it), so no application answers plain HTTP there. Before
+0.1.0-alpha.77 those requests went through the site's locations.
 
 The plain addresses meet the other sites there as a plain site does: a name answers for one
 site on an address, an address has one catch-all and is plain or TLS for every site on it. A

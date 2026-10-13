@@ -1347,6 +1347,14 @@ check "http: a managed HTTPS site's plain port serves the ACME challenge and a p
   "tok1-body pki-body 404 308 https://certs.wild.test:8453/x?y=1 max-age=86400" \
   "$(plain80 http://127.0.0.1:8454/.well-known/acme-challenge/tok1) $(plain80 http://127.0.0.1:8454/.well-known/pki-validation/fileauth.txt) $(code -H 'Host: certs.wild.test' http://127.0.0.1:8454/.well-known/acme-challenge/nope) $(plain80 -o /dev/null -w '%{http_code} %{redirect_url}' 'http://127.0.0.1:8454/x?y=1') $(plain80 -D - -o /dev/null http://127.0.0.1:8454/ | tr -d '\r' | grep -i '^cache-control:' | sed 's/^[^:]*: //')"
 cpost /v1/sites/certs.wild.test/delete '{"confirm":true,"reason":"certs"}' > /dev/null
+# ...and only its files (alpha.77, the alpha.76 report): before, the two prefixes went through the
+# site's whole routing over plain HTTP, into a front controller, a .php location or a proxied
+# application. A proxied preset's root is a project directory, so nothing is served there: the
+# upstream here is dead, and a request that reached it would be a 502.
+cpost /v1/sites "{\"domain\":\"certp.wild.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-wild/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-wild/key.pem\"},\"user\":null,\"app\":\"proxy\",\"upstream\":\"http://127.0.0.1:1\",\"listen_plain\":\"127.0.0.1:8456\",\"listen_tls\":\"127.0.0.1:8455\",\"confirm\":true,\"reason\":\"certs\"}" > /dev/null
+check "http: a proxied site's plain port answers the validation prefixes itself (404), never through the application" "404 404 308" \
+  "$(code -H 'Host: certp.wild.test' http://127.0.0.1:8456/.well-known/acme-challenge/x) $(code -H 'Host: certp.wild.test' http://127.0.0.1:8456/.well-known/pki-validation/x.txt) $(code -H 'Host: certp.wild.test' http://127.0.0.1:8456/x)"
+cpost /v1/sites/certp.wild.test/delete '{"confirm":true,"reason":"certs"}' > /dev/null
 # rules.admin on a managed WordPress site (2026-10-07): the admin paths in one field, the
 # login page only on request, what the public site needs below /wp-admin kept open.
 if [ -n "$PHPFPM" ]; then
@@ -1368,6 +1376,20 @@ if [ -n "$PHPFPM" ]; then
     check "hsts: over HTTP/3 too (QPACK's static entry for the default value)" "max-age=31536000 max-age=31536000" "$(sts /wp-includes/nope.js --http3-only) $(sts / --http3-only)"
   fi
   cpost /v1/sites/hsts.wild.test/delete '{"confirm":true,"reason":"hsts"}' > /dev/null
+  # The validation prefixes over plain HTTP on a PHP site (alpha.77, the alpha.76 report): a token
+  # file is served, anything else there is a 404 with nothing run, where before the front
+  # controller answered a missing path (Kanboard set a session cookie over plain HTTP) and a .php
+  # file there ran. Over HTTPS the application still decides.
+  mkdir -p bench/tmp/certwp/.well-known/acme-challenge
+  printf '<?php echo "front-ran";' > bench/tmp/certwp/index.php
+  printf '<?php echo "php-ran";' > bench/tmp/certwp/.well-known/acme-challenge/x.php
+  printf 'tok2-body' > bench/tmp/certwp/.well-known/acme-challenge/tok2
+  cpost /v1/sites "{\"domain\":\"certwp.wild.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-wild/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-wild/key.pem\"},\"user\":null,\"app\":\"wordpress\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"root\":\"$ROOT/bench/tmp/certwp\",\"listen_plain\":\"127.0.0.1:8458\",\"listen_tls\":\"127.0.0.1:8457\",\"confirm\":true,\"reason\":\"certs\"}" > /dev/null
+  wp80() { curl -s -o /dev/null -w '%{http_code}' -H 'Host: certwp.wild.test' "http://127.0.0.1:8458$1"; }
+  check "http: over plain HTTP the validation prefixes of a PHP site are its files only: the token served; a missing path, the directory and a .php file there 404 with nothing run; over HTTPS the front controller still answers" \
+    "tok2-body 404 404 404 no front-ran" \
+    "$(curl -s -H 'Host: certwp.wild.test' http://127.0.0.1:8458/.well-known/acme-challenge/tok2) $(wp80 /.well-known/acme-challenge/nope) $(wp80 /.well-known/acme-challenge/) $(wp80 /.well-known/acme-challenge/x.php) $(curl -s -H 'Host: certwp.wild.test' http://127.0.0.1:8458/.well-known/pki-validation/nope | grep -q ran && echo yes || echo no) $(curl -sk --resolve certwp.wild.test:8457:127.0.0.1 https://certwp.wild.test:8457/.well-known/acme-challenge/nope)"
+  cpost /v1/sites/certwp.wild.test/delete '{"confirm":true,"reason":"certs"}' > /dev/null
   # TYPO3 without a preset (2026-10-08, the alpha.53 report's third finding): app = "php" and the
   # rules an agent translates from TYPO3 13.4's documented nginx configuration, through the MCP
   # bridge as an agent does it: path_check before, site_update as a dry run, then applied,

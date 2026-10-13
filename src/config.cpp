@@ -2602,6 +2602,21 @@ void finalize_site(SiteConfig& site) {
     static std::atomic<std::uint64_t> next_id{1};
     for (auto& loc : site.locations)
         if (loc.id == 0) loc.id = next_id.fetch_add(1, std::memory_order_relaxed);
+    // Certificate validation over the plain HTTP the site redirects (docs/redirects.md 1): the
+    // site's files there and nothing else, whatever its locations would run (the alpha.76 report:
+    // a front controller set a session cookie over plain HTTP, a proxied application answered).
+    if (site.http_redirect) {
+        LocationConfig& v = site.validation;
+        v.path = "/.well-known/";
+        v.root = proxy_app(site.app) ? std::string() : site.root;  // an empty root answers 404
+        v.try_files = {TryStep{TryStep::Kind::uri, {}, 0}, TryStep{TryStep::Kind::status, {}, 404}};
+        v.symlinks_deny = site.symlinks_deny;
+        v.deny_suffixes = php_suffixes();
+        for (const auto& b : source_backup_suffixes())
+            if (std::find(v.deny_suffixes.begin(), v.deny_suffixes.end(), b) == v.deny_suffixes.end()) v.deny_suffixes.push_back(b);
+        v.origin = "http";
+        if (v.id == 0) v.id = next_id.fetch_add(1, std::memory_order_relaxed);
+    }
     // An https origin's kept connections are pooled with the location's TLS policy, so one
     // opened under one policy never serves a location with another (2026-10-09, the
     // cookbook's finding). Length-prefixed: no two policies spell the same key.

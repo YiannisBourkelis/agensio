@@ -3367,6 +3367,20 @@ static void test_acme() {
         explain_config(c, explained_out);
         const std::string explained = explained_out.str();
         CHECK(explained.find("http = { mode = \"redirect\", listen = [\"0.0.0.0:80\", \"[::]:80\"] }  # the default for port 443") != std::string::npos);
+        // Certificate validation over its plain HTTP (alpha.77, the alpha.76 report): the root's files
+        // only, nothing that runs, no fallback; path_check says it beside the HTTPS steps.
+        const LocationConfig& v = s.validation;
+        CHECK(v.kind == HandlerKind::static_ && v.root == s.root && !v.root.empty() && v.id != 0 && v.index.empty() && v.try_files.size() == 2 &&
+              v.try_files[0].kind == TryStep::Kind::uri && v.try_files[1].kind == TryStep::Kind::status && v.try_files[1].status == 404 &&
+              std::find(v.deny_suffixes.begin(), v.deny_suffixes.end(), ".php") != v.deny_suffixes.end());
+        std::string why;
+        CHECK_EQ(std::string(control::path_check(c, s, "/.well-known/acme-challenge/x", why).get("plain_http")),
+                 std::string("a regular file under the root, else 404: certificate validation over plain HTTP, nothing runs and nothing falls back"));
+        CHECK_EQ(std::string(control::path_check(c, s, "/x", why).get("plain_http")), std::string("308 to https (http = \"redirect\")"));
+    }
+    {   // a proxied preset's root is a project directory: nothing is served there
+        const Config c = load_one(acme + "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"0.0.0.0:443\"]\napp = \"proxy\"\nupstream = \"http://127.0.0.1:3000\"\ntls = \"auto\"\n");
+        CHECK(c.sites[0].http_redirect && c.sites[0].validation.root.empty() && c.sites[0].validation.kind == HandlerKind::static_);
     }
     {
         const Config c = load_one(acme + "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:8443\"]\n" + root);

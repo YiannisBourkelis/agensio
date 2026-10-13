@@ -26,7 +26,10 @@ Every request meets them in this order, and each step is skipped when it does no
 1. **Certificate validation** (`/.well-known/acme-challenge/` and `/.well-known/pki-validation/`)
    is answered first, on every name and over plain HTTP: agensio's own ACME tokens, else the site's
    files there (a certificate tool that writes into the root, a CA checking a file), so no setting
-   here can break a certificate's issue or renewal, whoever obtains it.
+   here can break a certificate's issue or renewal, whoever obtains it. Only its files: a regular
+   file under the root, else `404`, nothing run and no fallback, so no application answers plain
+   HTTP there (alpha.77, the alpha.76 report: the first build sent those requests through the
+   site's locations, into a front controller or a proxied application).
 2. **Scheme**: over plain HTTP, `http` decides (redirect, serve, or no listener at all).
 3. **Host**: a name of the site that is not `canonical` is redirected to it.
 4. **Path**: the `[[site.redirect]]` rules, after the site's `refuse` patterns (a refused path is

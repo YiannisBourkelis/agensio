@@ -471,6 +471,21 @@ json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_vi
     std::vector<RuleLocation> ruled;
     if (is_managed) ruled = rule_locations(managed);
     json::Value v = json::Value::object().set("site", site.server_names.front()).set("path", path);
+    // What the same GET gets over plain HTTP (docs/redirects.md 1, 2), the steps below being the
+    // HTTPS answer: the redirect, or under the certificate validation prefixes the files only.
+    if (site.tls || site.http_redirect) {
+        const bool validation = path.starts_with("/.well-known/acme-challenge/") || path.starts_with("/.well-known/pki-validation/");
+        if (site.http_redirect && validation)
+            v.set("plain_http", site.validation.root.empty()
+                                    ? "404: certificate validation over plain HTTP is answered from the site's files, and this site serves none from its project directory"
+                                    : "a regular file under the root, else 404: certificate validation over plain HTTP, nothing runs and nothing falls back");
+        else if (site.http_redirect)
+            v.set("plain_http", std::string("308 to https (http = \"redirect\")"));
+        else if (site.http == SiteConfig::Http::serve)
+            v.set("plain_http", std::string("the same answer (http = \"serve\")"));
+        else
+            v.set("plain_http", std::string("no plain listener (http = \"off\")"));
+    }
     json::Value steps = json::Value::array();
     auto from_of = [&](const LocationConfig& l) -> std::string {
         if (!l.origin.empty()) return l.origin;

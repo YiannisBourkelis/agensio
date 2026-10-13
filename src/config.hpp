@@ -235,6 +235,12 @@ struct SiteConfig {
     bool http_redirect = false;            // plain requests get a 308 to https (certificate validation excepted)
     std::vector<std::string> http_listen;  // a TLS site's plain addresses, normalised like listen
     std::uint16_t https_port = 443;        // the port the redirect names (left out when 443)
+    // What a plain request the site redirects gets under /.well-known/acme-challenge/ and
+    // /.well-known/pki-validation/ (docs/redirects.md 1, alpha.77): a regular file of the root, else
+    // 404; nothing runs, no index, no fallback, the PHP endings and source backups refused; no root
+    // for a proxied preset, whose root is a project directory. Built by finalize_site when
+    // http_redirect; before alpha.77 those requests went through the site's locations.
+    LocationConfig validation;
     std::string root;                       // absolute document root, no trailing slash
     std::string project_root;               // the root as given, before a preset appended its public/ or web/ (site-install's target)
     // app = "django" | "wagtail": the project's Python package (NAME/settings, NAME/wsgi.py),

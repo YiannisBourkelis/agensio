@@ -420,7 +420,8 @@ void append_target(std::string& location, std::string_view target) {
 
 // Certificate validation (docs/redirects.md 1): the ACME HTTP-01 tokens (RFC 8555 8.3) and a CA's
 // file check, which a certificate tool writes into the site's root; answered over plain HTTP from
-// the site's files before any redirect, so no setting can break a certificate's issue or renewal.
+// the site's files before any redirect, so no setting can break a certificate's issue or renewal,
+// and from its files only (SiteConfig::validation), so no application runs over plain HTTP there.
 bool certificate_validation(std::string_view path) noexcept {
     return path.starts_with("/.well-known/acme-challenge/") || path.starts_with("/.well-known/pki-validation/");
 }
@@ -539,11 +540,16 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
         return nullptr;
     }
     // http = "redirect" (docs/redirects.md 2): plain HTTP, or a request a trusted proxy did not mark
-    // https, goes to HTTPS; certificate validation is served from the site first. One flag test
-    // for a site that does not redirect, and on TLS one more.
-    if (site->http_redirect && !s.conn.tls && !s.conn.forwarded_https && !certificate_validation(ws.path)) {
-        redirect_https(s, *site);
-        return nullptr;
+    // https, goes to HTTPS; certificate validation gets the site's files there and nothing else
+    // (its validation location, below). One flag test for a site that does not redirect, and on TLS
+    // one more.
+    bool validation = false;
+    if (site->http_redirect && !s.conn.tls && !s.conn.forwarded_https) {
+        if (!certificate_validation(ws.path)) {
+            redirect_https(s, *site);
+            return nullptr;
+        }
+        validation = true;
     }
     // `refuse` and [[site.access]] before any location is chosen: whichever would serve the
     // path (a .php suffix, a proxy) cannot step around them, nginx's regex-location trap. A
@@ -560,7 +566,7 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
                 case AuthOutcome::answered: return nullptr;
                 case AuthOutcome::pending: return &auth_pending();
             }
-    const LocationConfig* loc = &Router::location(*site, ws.path);
+    const LocationConfig* loc = validation ? &site->validation : &Router::location(*site, ws.path);
     // A separator spelled as a percent escape (%2F, %5C) never names a file: 404 before any
     // handler that resolves paths on disk runs, Apache's AllowEncodedSlashes Off (2026-10-02
     // alpha.45 report: /x%2F..%2Fwp-login.php reached the script). A proxied application

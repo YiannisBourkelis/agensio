@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.0-alpha.77
+
+- **Over plain HTTP the certificate validation prefixes reached the site's applications.** alpha.76
+  let `/.well-known/acme-challenge/` and `/.well-known/pki-validation/` past a site's redirect so
+  a file there could be served, but the request then went through the site's whole routing: on
+  the test host a missing path ran Kanboard's front controller, which redirected to its login and
+  set a session cookie over plain HTTP, Drupal answered its own 404, a Node application was
+  proxied and answered 200, and a `.php` file there would have run. Those requests now get one
+  location of the site built at load: a regular file under the root, else `404`, with no index, no
+  fallback, nothing run and the PHP endings and source backups refused; a proxied preset (rails,
+  redmine, django, wagtail, node, proxy), whose root is a project directory, answers `404` to all
+  of it. agensio's own ACME tokens are answered before any site as before, and over HTTPS the site
+  is unchanged. `path_check` gives `plain_http` on an HTTPS site: what the same GET gets over plain
+  HTTP. Reported from the alpha.76 test host; the integration checks (a managed WordPress site: a
+  missing path, the directory and a `.php` file under the challenge prefix, and a proxied site in
+  front of a dead origin, which answered 502) failed on alpha.76. `bench/ab.sh HEAD -A -2`
+  (`ab-20261013-150429.md`): every row 0.93 to 1.03, within the same session's baseline of alpha.76
+  against itself (`ab-20261013-145128.md`, 0.93 to 1.08).
+
 ## 0.1.0-alpha.76 (2026-10-13)
 
 - **One block for HTTP and HTTPS: a site's `http` key** (`docs/redirects.md` 2, configuration.md

@@ -98,7 +98,8 @@ tls = "auto"                   # one certificate for every name above, obtained 
 requests, `/.well-known/acme-challenge/...`, are answered by agensio before any site or location
 rule, and a file there or under `/.well-known/pki-validation/` in the site's root is served over
 plain HTTP too (certbot's webroot mode, a CA's file check), so the redirect never gets in their
-way. At the first start a self-signed placeholder lets the TLS listener come up and an order is
+way; only files: anything else under those two prefixes is a `404`, and no application runs over
+plain HTTP. At the first start a self-signed placeholder lets the TLS listener come up and an order is
 placed at once; the certificate replaces the placeholder through a reload, with no connection
 dropped. Once an hour the certificates are checked and renewed when a third of their lifetime
 is left; a failed order is logged with the CA's reason and tried again an hour later while the
