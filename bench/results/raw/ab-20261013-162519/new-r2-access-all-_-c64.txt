@@ -1,0 +1,8 @@
+Running 5s test @ http://127.0.0.1:8095/
+  4 threads and 64 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   145.05us   53.23us   4.28ms   80.78%
+    Req/Sec   111.29k    17.46k  128.93k    81.86%
+  2255380 requests in 5.10s, 2.56GB read
+Requests/sec: 442220.10
+Transfer/sec:    513.25MB

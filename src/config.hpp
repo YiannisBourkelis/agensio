@@ -235,6 +235,12 @@ struct SiteConfig {
     bool http_redirect = false;            // plain requests get a 308 to https (certificate validation excepted)
     std::vector<std::string> http_listen;  // a TLS site's plain addresses, normalised like listen
     std::uint16_t https_port = 443;        // the port the redirect names (left out when 443)
+    // canonical (docs/redirects.md 3, alpha.81): the one name of the site its other listed names
+    // redirect to (308, path and query kept); "" for none. canonical_redirect when there is another
+    // name; before_routing (http_redirect or canonical_redirect) is the one flag a request tests.
+    std::string canonical;
+    bool canonical_redirect = false;
+    bool before_routing = false;
     // What a plain request the site redirects gets under /.well-known/acme-challenge/ and
     // /.well-known/pki-validation/ (docs/redirects.md 1, alpha.77): a regular file of the root, else
     // 404; nothing runs, no index, no fallback, the PHP endings and source backups refused; no root

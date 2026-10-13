@@ -305,6 +305,9 @@ server_name = ["shop.example.com", "*.oldshop.com"]
 canonical = "shop.example.com"     # must be an exact name of the site, never a wildcard
 ```
 
+(As built in alpha.81 only exact names redirect: the router matches a site by its exact names, so
+a `*.` entry takes no requests by itself yet. Wildcard routing is a step of its own.)
+
 ### 3.3 What is checked
 
 - `canonical` must be one of the site's `server_name` entries: it never points at another site.
@@ -1134,7 +1137,9 @@ a path that meets none, a redirect hit, and a TLS site with `hsts` against one w
    files are rendered the new way; certificate validation is answered before both, from the site's
    files too (the failing test first: a file under `/.well-known/acme-challenge/` on a site with
    `http = "redirect"` is served over plain HTTP, not redirected). `http` built in alpha.76 (2a),
-   the application's own `http://` Location (2.5) in alpha.79; `canonical` (2b) next.
+   the application's own `http://` Location (2.5) in alpha.79, `canonical` (2b) in alpha.81 with
+   its `site_update` field and `ctl` flag (pulled forward from step 5 for the cookbook's managed
+   recipe).
 3. **`[[site.redirect]]`:** exact (with query parameters) and prefix rules, case-sensitive, `410`,
    the checks of
    section 8, the preview, and `fuzz_redirect` over (`from`, `to`, path, query) asserting the

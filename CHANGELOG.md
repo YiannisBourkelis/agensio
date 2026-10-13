@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.0-alpha.81
+
+- **One name for a site: `canonical`** (`docs/redirects.md` 3, configuration.md 14). A site lists
+  every name in one block and `canonical` names the one the others redirect to: a `308`, path and
+  query kept, kept a day; over plain HTTP the scheme and the host in one hop, or with `hsts` the
+  name's own HTTPS first so it learns HSTS too (4.3); over HTTPS, and on a site that serves plain
+  HTTP, the scheme and the port the client used kept. It must be one of the site's exact names;
+  only listed names redirect (a catch-all's names and IP addresses are answered as before), and
+  certificate validation over plain HTTP is answered on every name. The base URL handed to Django
+  and the tasks is the canonical one. Managed sites: `site_create` / `site_update` `canonical`
+  (the domain or an alias, refused otherwise, checked again when the aliases change), `agensio
+  ctl --canonical NAME` / `--no-canonical`, so the cookbook's canonical-host recipe is one site
+  file instead of two, managed. A site without it, or without `http` redirects, still pays one
+  flag test before routing. The integration checks (three hand-written sites and a managed one)
+  failed on alpha.80, where the key did not load. `bench/ab.sh HEAD -A -2`
+  (`ab-20261013-162519.md`): every row 0.96 to 1.05, within the same session's baseline of alpha.80
+  against itself (`ab-20261013-161306.md`, 0.94 to 1.07).
+
 ## 0.1.0-alpha.80 (2026-10-13)
 
 - **`site-update` says why it cannot help with a hand-written file set aside** (the alpha.78

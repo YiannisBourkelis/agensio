@@ -173,6 +173,7 @@ section of `docs/configuration.md` that explains the key.
 
 | key | type | default | meaning | applies | via | doc |
 |---|---|---|---|---|---|---|
+| `canonical` | string, one of server_name | (none: every name serves) | The one of the site's names its other listed names redirect to: a 308, path and query kept, a day; over plain HTTP scheme and host in one hop (with hsts, the name's own HTTPS first, so it learns HSTS too). Certificate validation over plain HTTP is answered on every name; a name the site does not list is not redirected. Set the application's own address to it. | reload | site-create (canonical) | 14 |
 | `redirect` | "https://host[:port]" | (none) | Answer every request with a 301 to the prefix plus the path (a whole domain moved there); the site needs no root then. "https" is gone since 0.1.0-alpha.76: a TLS site redirects its own plain HTTP (http). | reload | site file | 14 |
 | `default` | bool | false | This site is its listener's catch-all (like server_name = ["*"]). | reload | site file | 1b |
 | `hidden_files` | bool | false | Serve dot-files (.env, .git) instead of answering 404; /.well-known/ at the root is served either way. | reload | site file | 1 |

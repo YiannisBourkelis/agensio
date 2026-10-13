@@ -21,6 +21,7 @@ struct SiteSpec {
     bool redirect_http = true;
     bool hsts = false;
     std::string encoded_slashes;  // "" (deny, the default) | "allow": a %2F or %5C in the path decoded and looked up (2026-10-02)
+    std::string canonical;        // the domain or an alias the other names redirect to (docs/redirects.md 3); "" none
     // The proxies that speak for this site (2026-10-13, docs/redirects.md 2.4): entries as written,
     // within [server] trusted_proxies; own and empty believes none; not own: the server's list.
     bool own_trusted_proxies = false;

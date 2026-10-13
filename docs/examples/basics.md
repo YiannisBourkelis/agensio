@@ -292,26 +292,24 @@ acme = { email = "admin@example.com" }
 ```toml
 # /etc/agensio/sites.d/example.com.toml
 [[site]]
-server_name = ["example.com"]
-listen = ["0.0.0.0:443"]
-tls = "auto"                           # browsers check the certificate before they follow any redirect
-redirect = "https://www.example.com"   # a prefix: the path and query are appended; its port 80 goes there too
-
-[[site]]
-server_name = ["www.example.com"]
+server_name = ["example.com", "www.example.com"]
+canonical = "www.example.com"          # the other names redirect here
 listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
-tls = "auto"
+tls = "auto"                           # one certificate for both names: browsers check it before they follow a redirect
 ```
 
-**What it does.** `http://example.com/x?y` and `https://example.com/x?y` answer `301` to
-`https://www.example.com/x?y`, `http://www.example.com/x?y` a `308` there (the canonical site's own
-port 80), one hop each. The bare name's TLS site has a certificate of its own, since a browser
-verifies it before it reads the redirect; it serves nothing else, and its port 80, which comes
-with port 443, sends straight to the prefix. Swap the names to make the bare name canonical. A
-domain you moved away from takes the same redirecting site with the new host as the target. A
-prefix with a path (`https://www.example.com/blog`) is refused. Browsers keep a `301`, so try the
-target before you publish the change.
+**What it does.** `https://example.com/x?y`, `http://example.com/x?y` and
+`http://www.example.com/x?y` all answer `308` to `https://www.example.com/x?y`, one hop each (scheme
+and host together), kept by browsers for a day so a wrong choice is undone within one; only
+`https://www.example.com` serves the site. Swap the names to make the bare name canonical. Choose
+once: search engines treat the two as separate hosts and rank neither higher, but changing the
+choice later costs months of settling and logs every visitor out (cookies belong to a host). Tell
+the application the same address (WordPress `home` and `siteurl`, Laravel `APP_URL`, Drupal
+`$base_url`), or it redirects back and the two loop. With `hsts = true` a plain request for the
+bare name goes to its own HTTPS first and then to `www`, so the bare name learns HSTS too. A domain
+you moved away from entirely is another site with a prefix, `redirect = "https://www.example.org"`
+([HTTPS only](../configuration.md#https-only)).
 
 **Check it.**
 
@@ -321,15 +319,17 @@ curl -sI 'https://example.com/x?y=1' | grep -i location     # the same
 curl -sI https://www.example.com/ | head -1                 # 200
 ```
 
-**On a managed site.** No field makes a redirecting host. Create the canonical name as the
-managed site, then write the bare name's redirecting site by hand in a file of its own,
-`sites.d/example.com.toml`, listing `example.com` alone:
+**On a managed site.** `--canonical` names the domain or one of its aliases:
 
 ```sh
-agensio ctl site-create --domain www.example.com --app static --root /var/www/example.com/web --user example --https auto --yes --reason "canonical www"
+agensio ctl site-create --domain example.com --alias www.example.com --canonical www.example.com --app static --root /var/www/example.com/web --user example --https auto --yes --reason "canonical www"
+agensio ctl site-update example.com --canonical example.com --yes --reason "the bare name instead"
 ```
 
-**Reference:** [HTTPS only](../configuration.md#https-only), where the same shape is explained.
+**MCP:** `site_create` or `site_update` with `canonical` = `"www.example.com"` (`""` clears it).
+
+**Reference:** [HTTPS only](../configuration.md#https-only), where the same shape is explained,
+and [redirects.md](../redirects.md) 3.
 
 ## Several sites on one address, and the catch-all
 

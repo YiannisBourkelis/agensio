@@ -1907,30 +1907,53 @@ redirects only the visitors who really used plain HTTP: a request from a `truste
 address marked `X-Forwarded-Proto: https` is served (with the site's HSTS), one marked `http`,
 or a client that is not a trusted proxy, gets the `308` (section 10, [redirects.md](redirects.md) 2.4).
 
-**One canonical host.** To serve everything from `www.example.com` and send the bare
-name there, give the bare name a redirecting site of its own. It needs a certificate too
-(browsers check it before following any redirect), which `tls = "auto"` provides, and its port
-80, which comes with port 443, redirects straight to the prefix:
+**One canonical host: `canonical`** (0.1.0-alpha.81, [redirects.md](redirects.md) 3). One block
+lists every name; `canonical` names the one the others redirect to:
 
 ```toml
 [[site]]
-server_name = ["example.com"]
-listen = ["0.0.0.0:443"]
-tls = "auto"
-redirect = "https://www.example.com"
-
-[[site]]
-server_name = ["www.example.com"]
+server_name = ["example.com", "www.example.com"]
+canonical = "www.example.com"
 listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
-tls = "auto"
+tls = "auto"                        # one certificate covering both names
 ```
 
-`http://example.com/x?y` and `https://example.com/x?y` answer `301` to
-`https://www.example.com/x?y`, `http://www.example.com/x?y` the `308` there, one hop each. The
-same shape with the names swapped makes the bare name canonical. A `redirect` is an
-`https://host[:port]` prefix; the path and query are appended, and a prefix with a path is
-refused.
+| request | answer |
+|---|---|
+| `https://example.com/x?y` | `308 → https://www.example.com/x?y` |
+| `http://example.com/x?y` | `308 → https://www.example.com/x?y`, scheme and host in one hop |
+| `http://www.example.com/x?y` | `308 → https://www.example.com/x?y` |
+| `https://www.example.com/x?y` | served |
+
+The redirect keeps the path and the query and is kept a day (`Cache-Control: max-age=86400`);
+over HTTPS, and on a site that serves plain HTTP, the scheme and the port the client used are
+kept. With `hsts` on, a plain request for another name goes to that name's HTTPS first, which then
+redirects to the canonical name with HSTS, so the other name learns HSTS too (redirects.md 4.3).
+`canonical` must be one of the site's exact `server_name` entries; only the names the site lists
+redirect, so a request by IP address or for a name only a catch-all takes is answered as before,
+and certificate validation over plain HTTP is answered on every name. Set the application's own
+address to the canonical `https://` one (WordPress `home` and `siteurl`, Laravel `APP_URL`,
+Drupal `$base_url`), or the two redirect each other; the base URL agensio hands Django's settings
+and the tasks is the canonical one. The same with the names swapped makes the bare name canonical.
+A managed site sets it with `site_update` `canonical` (`agensio ctl site-update NAME --canonical
+www.example.com`).
+
+**A domain moved away** to another host is a site of its own with a prefix: `redirect =
+"https://www.example.org"` sends every request there with a `301`, path and query appended. It
+needs a certificate for its names too (browsers check it before following any redirect), which
+`tls = "auto"` provides, and its port 80, which comes with port 443, redirects straight to the
+prefix:
+
+```toml
+[[site]]
+server_name = ["example.net", "www.example.net"]
+listen = ["0.0.0.0:443"]
+tls = "auto"
+redirect = "https://www.example.org"
+```
+
+A prefix with a path is refused.
 
 **HSTS.** `hsts = true` sends `Strict-Transport-Security: max-age=31536000` (a year, this host
 only) on every answer the site gives over HTTPS: pages, files, PHP, a proxied application, error
@@ -2039,7 +2062,7 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 |---|---|---|
 | `reload` | operator | the same as `agensio reload`: validate the file on disk, bind, switch; 409 with the reason when refused, nothing changed then |
 | `logs-reopen` | operator | reopen every log file (what `SIGUSR1` does) |
-| `site-create` | admin | writes `sites.d/<domain>.toml`, validates, reloads. Fields: `domain`, `aliases`, `https` (`auto`, `none`, or `{cert, key}`), `redirect_http` (default true: plain HTTP redirects; false is `http = "serve"`, refused with `hsts`), `hsts`, `user` (an account name; `no_user: true` or JSON `null` for none; the words null, none, nil and system accounts are refused, never turned into commands), `group`, `app`, `root`, `upstream`, `project` (app = django or wagtail: the project's Python package), `php_socket`, `php_children`, `php_version`, `listen_plain`, `listen_tls`, `rules` (an application's own server guidelines as bounded rules, below). Until `https`, `root` (or `upstream`), `app`, `user` and, for a Django site, `project` are decided it answers 422 with the open questions and a suggestion each (a user name from the domain, the app the files under root suggest); when the account or the root directory does not exist it answers 409 with the commands to run as root and waits for the same command again. A new site is HTTPS-only, one block for both schemes: its plain port redirects (the site's `http`). |
+| `site-create` | admin | writes `sites.d/<domain>.toml`, validates, reloads. Fields: `domain`, `aliases`, `https` (`auto`, `none`, or `{cert, key}`), `redirect_http` (default true: plain HTTP redirects; false is `http = "serve"`, refused with `hsts`), `hsts`, `canonical` (the domain or an alias the other names redirect to; `""` clears it), `user` (an account name; `no_user: true` or JSON `null` for none; the words null, none, nil and system accounts are refused, never turned into commands), `group`, `app`, `root`, `upstream`, `project` (app = django or wagtail: the project's Python package), `php_socket`, `php_children`, `php_version`, `listen_plain`, `listen_tls`, `rules` (an application's own server guidelines as bounded rules, below). Until `https`, `root` (or `upstream`), `app`, `user` and, for a Django site, `project` are decided it answers 422 with the open questions and a suggestion each (a user name from the domain, the app the files under root suggest); when the account or the root directory does not exist it answers 409 with the commands to run as root and waits for the same command again. A new site is HTTPS-only, one block for both schemes: its plain port redirects (the site's `http`). |
 | `site-create` answers | | 422 with `needs` while decisions are open; 409 `prerequisites missing` with `problems` (every one at once, each with a `code`, a `detail` and its `run_as_root` command: `missing_account`, `missing_group`, `root_missing`, `root_unreadable`, `certificate_missing`) plus the flat `run_as_root` list; 202 `needs_restart` when the site adds a privileged port the dropped server cannot bind by a reload (the file is written and valid, `systemctl restart agensio` serves it); 201 with `next_steps` (separate commands: `agensio pools`, then the php-fpm reload) and `warnings`. `dry_run: true` runs every check and returns the file that would be written without writing or reloading |
 | `site-update NAME` | admin | the same fields on a site `site-create` wrote (the file carries its spec on its first line); a hand-written file is refused with 409, edit it yourself. It writes the file in this version's form whatever fields it is given, none included, also when the file was set aside (a form an earlier version wrote that this one refuses); a hand-written file set aside is refused with 409, naming the file and the loader's error. `settings = {key: value}` (CLI `--set KEY=VALUE`, repeatable) sets the per-site limits: `max_body_size` (any site), and for a PHP site with its own user (a generated pool) `memory_limit`, `max_execution_time`, `max_input_time`, `children`, `pm`, `max_requests`. Each value is checked against `[control] site_limits` and refused above it naming the key, the value and the ceiling; a key outside that list (`extra`, `open_basedir`, any ini name) is refused as unknown, whatever it is. The answer's `done` lists what was written and reloaded: the site file and agensio, and the php-fpm pool and php-fpm when a pool key changed (a php-fpm reload briefly affects every PHP site unless `process_control_timeout` is set) |
 | `site-disable NAME`, `site-enable NAME` | admin | renames the file to `.disabled` and back, reloads |

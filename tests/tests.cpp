@@ -3379,6 +3379,15 @@ static void test_acme() {
                  std::string("a regular file under the root, else 404: certificate validation over plain HTTP, nothing runs and nothing falls back"));
         CHECK_EQ(std::string(control::path_check(c, s, "/x", why).get("plain_http")), std::string("308 to https (http = \"redirect\")"));
     }
+    {   // canonical (docs/redirects.md 3, alpha.81): one of the site's exact names; the base URL applications get
+        const Config c = load_one(acme + "[[site]]\nserver_name = [\"a.test\", \"www.a.test\"]\ncanonical = \"WWW.a.test\"\nlisten = [\"0.0.0.0:443\"]\n" + root);
+        CHECK(c.sites[0].canonical == "www.a.test" && c.sites[0].canonical_redirect && c.sites[0].before_routing && app_context(c, c.sites[0]).base_url == "https://www.a.test");
+        const Config one = load_one(acme + "[[site]]\nserver_name = [\"a.test\"]\ncanonical = \"a.test\"\nlisten = [\"127.0.0.1:8443\"]\n" + root);
+        CHECK(one.sites[0].canonical == "a.test" && !one.sites[0].canonical_redirect && !one.sites[0].before_routing);  // nothing else to redirect, port 8443: no http
+        CHECK(refused(acme + "[[site]]\nserver_name = [\"a.test\", \"b.test\"]\ncanonical = \"c.test\"\nlisten = [\"0.0.0.0:443\"]\n" + root, "is not one of the site's server_name entries"));
+        CHECK(refused(acme + "[[site]]\nserver_name = [\"*\", \"b.test\"]\ncanonical = \"*\"\nlisten = [\"0.0.0.0:80\"]\nroot = \"" + dir.string() + "\"\n", "never a wildcard"));
+        CHECK(refused(acme + "[[site]]\nserver_name = [\"a.test\"]\ncanonical = true\nlisten = [\"0.0.0.0:443\"]\n" + root, ".canonical must be a string"));
+    }
     {   // a proxied preset's root is a project directory: nothing is served there
         const Config c = load_one(acme + "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"0.0.0.0:443\"]\napp = \"proxy\"\nupstream = \"http://127.0.0.1:3000\"\ntls = \"auto\"\n");
         CHECK(c.sites[0].http_redirect && c.sites[0].validation.root.empty() && c.sites[0].validation.kind == HandlerKind::static_);
@@ -3920,6 +3929,18 @@ static void test_control_sites() {
         CHECK(json::parse(R"({"redirect_http":false,"hsts":true})", body, err));
         (void)apply_request(body, cfg, serve, e);
         CHECK(e.find("hsts with redirect_http false") != std::string::npos);
+        // canonical: the domain or an alias, rendered as the key; an alias removed under it is refused
+        SiteSpec canon = spec;
+        canon.canonical = "www.shop.test";
+        CHECK(render_site(canon, "x").find("\ncanonical = \"www.shop.test\"") != std::string::npos);
+        std::string ce;
+        CHECK(json::parse(R"({"canonical":"other.test"})", body, err));
+        (void)apply_request(body, cfg, canon, ce);
+        CHECK(ce.find("canonical must be the site's domain or one of its aliases") != std::string::npos);
+        ce.clear();
+        CHECK(json::parse(R"({"aliases":[]})", body, err));
+        (void)apply_request(body, cfg, canon, ce);
+        CHECK(ce.find("an alias it named was removed") != std::string::npos);
     }
     CHECK(text.find("user = \"shop\"") != std::string::npos && text.find("tls = \"auto\"") != std::string::npos);
     CHECK(text.find("\nhsts = true") != std::string::npos && text.find("server_name = [\"shop.test\", \"www.shop.test\"]") != std::string::npos);

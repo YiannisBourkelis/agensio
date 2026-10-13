@@ -1844,6 +1844,18 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     }
     if (t.contains("hsts")) parse_hsts(t["hsts"], site, where);
     parse_http(t, site, where);
+    // canonical (docs/redirects.md 3): one of the site's own exact names; it never points elsewhere.
+    if (auto c = t["canonical"].value<std::string>()) {
+        const std::string name = to_lower(*c);
+        if (name.find('*') != std::string::npos) fail(where + ".canonical must be an exact name of the site, never a wildcard or \"*\"");
+        if (std::find(site.server_names.begin(), site.server_names.end(), name) == site.server_names.end())
+            fail(where + ".canonical = \"" + name + "\" is not one of the site's server_name entries; it names the site's own name the others redirect to");
+        site.canonical = name;
+        for (const auto& n : site.server_names) site.canonical_redirect = site.canonical_redirect || (n != name && n.find('*') == std::string::npos);
+    } else if (t.contains("canonical")) {
+        fail(where + ".canonical must be a string: the one of the site's names the others redirect to");
+    }
+    site.before_routing = site.http_redirect || site.canonical_redirect;
     if (auto a = t["access_log"].value<std::string>())
         site.access_log = (*a == "off" || a->empty()) ? std::string() : resolve(base_dir, *a).string();
     else site.access_log = cfg.log.access;
@@ -2059,6 +2071,7 @@ AppContext app_context(const Config& cfg, const SiteConfig& site) {
         a.origins += (a.origins.empty() ? "" : ",") + scheme + (wild ? "*" + host : host);
         if (a.base_url.empty() && !wild) a.base_url = scheme + host;
     }
+    if (!site.canonical.empty()) a.base_url = scheme + site.canonical;  // the only name the application sees (docs/redirects.md 3.4)
     return a;
 }
 
@@ -2174,6 +2187,7 @@ void explain_config(const Config& cfg, std::ostream& out) {
         } else {
             out << "http = \"" << http_mode(site) << "\"" << (site.http_given ? "" : "  # the default") << "\n";
         }
+        if (!site.canonical.empty()) out << "canonical = \"" << site.canonical << "\"\n";
         if (!site.redirect.empty()) out << "redirect = \"" << site.redirect << "\"\n";
         if (!site.user.empty()) out << "user = \"" << site.user << "\"\n";
         if (!site.group.empty()) out << "group = \"" << site.group << "\"\n";

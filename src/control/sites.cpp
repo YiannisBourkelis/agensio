@@ -71,6 +71,7 @@ json::Value SiteSpec::to_json() const {
     if (https == "manual") v.set("cert", cert).set("key", key);
     v.set("redirect_http", redirect_http).set("hsts", hsts).set("user", user).set("no_user", user.empty()).set("group", group);
     if (encoded_slashes == "allow") v.set("encoded_slashes", encoded_slashes);
+    if (!canonical.empty()) v.set("canonical", canonical);
     if (own_trusted_proxies) v.set("trusted_proxies", strings(trusted_proxies));
     v.set("app", app).set("root", root);
     if (!upstream.empty()) v.set("upstream", upstream);
@@ -98,6 +99,7 @@ bool SiteSpec::from_json(const json::Value& v, SiteSpec& out) {
     if (has_key(v, "redirect_http")) out.redirect_http = v["redirect_http"].boolean();
     if (has_key(v, "hsts")) out.hsts = v["hsts"].boolean();
     out.encoded_slashes = v.get("encoded_slashes") == "allow" ? "allow" : "";
+    out.canonical = v.get("canonical");
     out.own_trusted_proxies = has_key(v, "trusted_proxies");
     out.trusted_proxies = string_list(v["trusted_proxies"]);
     out.user = v.get("user");
@@ -644,6 +646,17 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
             error = "alias '" + a + "' is not a host name";
             return needs;
         }
+    // canonical (docs/redirects.md 3): the domain or one of the aliases, checked again whenever the
+    // aliases change, so an alias removed never leaves a canonical name the site does not have.
+    if (has_key(body, "canonical")) {
+        spec.canonical = std::string(body.get("canonical"));
+        for (auto& c : spec.canonical) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    if (!spec.canonical.empty() && spec.canonical != spec.domain && std::find(spec.aliases.begin(), spec.aliases.end(), spec.canonical) == spec.aliases.end()) {
+        error = "canonical must be the site's domain or one of its aliases (the name the others redirect to); '" + spec.canonical + "' is neither"
+                + std::string(has_key(body, "canonical") ? "" : ": an alias it named was removed, so give canonical again or \"\" for none");
+        return needs;
+    }
     if (has_key(body, "https")) {
         const json::Value& h = body["https"];
         if (h.is_object()) {
@@ -1018,6 +1031,7 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
     // One block for both schemes (docs/redirects.md 2, alpha.76): an HTTPS site answers its plain
     // port by its http key, which is left out for the port 80 beside 443 that redirects.
     out += "\n[[site]]\nserver_name = " + toml_list(names) + "\nlisten = " + toml_list({tls ? spec.listen_tls : spec.listen_plain}) + "\n";
+    if (!spec.canonical.empty()) out += "canonical = " + toml_string(spec.canonical) + "   # the other names redirect here (docs/redirects.md 3)\n";
     site_body(out);
     if (tls) {
         if (spec.https == "auto") out += "tls = \"auto\"\n";

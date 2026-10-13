@@ -479,7 +479,11 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (eighteen, each seeded from
   by `finalize_site`: a file of the root or 404, nothing run; none for a proxied preset; alpha.77).
   An HTTPS request to such a site records it (`Stream::https_site`), and `apply_upstream_result`
   sends an application's `http://` Location naming the site as `https://` (`upgrade_location`,
-  after the proxy's origin rewrite; alpha.79). `redirect = "https"` is refused; the
+  after the proxy's origin rewrite; alpha.79). `canonical` (alpha.81, design section 3): one of the
+  site's exact names; `before_routing` (`http_redirect` or `canonical_redirect`) is the one flag
+  the route tests; `redirect_https` names the canonical host for another listed name (its own with
+  `hsts`, 4.3) and `redirect_host` sends one over HTTPS, scheme and port kept; managed field
+  `canonical`, `ctl --canonical`. `redirect = "https"` is refused; the
   `https://host` prefix form stays until `[[site.redirect]]`.
 - **Automatic certificates** (H3, `src/services/acme.*`, `services/json.hpp`): `tls = "auto"`
   plus `[server] acme = { email }`; ACME v2 with HTTP-01 against any RFC 8555 CA, JWS ES256

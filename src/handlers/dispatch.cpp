@@ -436,35 +436,67 @@ void Dispatcher::redirect_prefix(Stream& s, const SiteConfig& site) {
     redirect_answer(s, 301, location, "");
 }
 
+namespace {
+
+// The Host field's name and port ("example.com:8080", "[::1]:8080"), the name without a final dot.
+void split_host(std::string_view host, std::string_view& name, std::string_view& port) {
+    const std::size_t bracket = host.rfind(']');
+    const std::size_t colon = host.rfind(':');
+    port = {};
+    if (colon != std::string_view::npos && (bracket == std::string_view::npos || colon > bracket)) {
+        port = host.substr(colon + 1);
+        host = host.substr(0, colon);
+    }
+    if (!host.empty() && host.back() == '.') host.remove_suffix(1);
+    name = host;
+}
+
+// The site's own spelling of `name` when it lists it, else null.
+const std::string* listed_name(const SiteConfig& site, std::string_view name) {
+    for (const auto& n : site.server_names)
+        if (n != "*" && Headers::iequals(n, name)) return &n;
+    return nullptr;
+}
+
+}  // namespace
+
 // http = "redirect" (docs/redirects.md 2, 7): 308 to the same name and target over https, on the
 // site's TLS port. A name the site lists is written as listed and the answer kept a day (without a
 // lifetime Chromium keeps a permanent redirect forever, and a mistake could not be undone); a name
-// only a catch-all took is the client's own choice, written as sent and never stored. An HTTP/1.0
+// only a catch-all took is the client's own choice, written as sent and never stored. With
+// `canonical`, another listed name goes straight to the canonical one (scheme and host in one hop,
+// 1), unless hsts is on: then to its own HTTPS first, so it learns HSTS too (4.3). An HTTP/1.0
 // request without Host gets the site's first name.
 void Dispatcher::redirect_https(Stream& s, const SiteConfig& site) {
     const Request& req = s.request;
-    std::string_view host = req.host;
-    if (host.empty()) host = site.server_names.front();
-    const std::size_t bracket = host.rfind(']');
-    const std::size_t colon = host.rfind(':');
-    if (colon != std::string_view::npos && (bracket == std::string_view::npos || colon > bracket)) host = host.substr(0, colon);
-    if (!host.empty() && host.back() == '.') host.remove_suffix(1);
+    std::string_view host, port;
+    split_host(req.host.empty() ? std::string_view(site.server_names.front()) : req.host, host, port);
     if (host.empty() || host == "*") {
         static_.error(s, 400, false);
         return;
     }
-    bool listed = false;
-    for (const auto& n : site.server_names)
-        if (n != "*" && Headers::iequals(n, host)) {
-            host = n;
-            listed = true;
-            break;
-        }
+    const std::string* listed = listed_name(site, host);
+    if (listed) host = (site.canonical_redirect && site.hsts != SiteConfig::Hsts::on) ? std::string_view(site.canonical) : std::string_view(*listed);
     std::string& location = s.response.scratch;
     location.assign("https://").append(host);
     if (site.https_port != 443) location.append(":").append(std::to_string(site.https_port));
     append_target(location, req.target);
     redirect_answer(s, 308, location, listed ? "max-age=86400" : "no-store");
+}
+
+// canonical (docs/redirects.md 3): a listed name that is not the canonical one gets a 308 to it,
+// with the scheme and the port the client used, path and query kept, a day. False, nothing
+// answered, for the canonical name, a name the site does not list (a catch-all's) or none.
+bool Dispatcher::redirect_host(Stream& s, const SiteConfig& site) {
+    std::string_view host, port;
+    split_host(s.request.host, host, port);
+    if (host.empty() || Headers::iequals(host, site.canonical) || !listed_name(site, host)) return false;
+    std::string& location = s.response.scratch;
+    location.assign(s.conn.tls || s.conn.forwarded_https ? "https://" : "http://").append(site.canonical);
+    if (!port.empty() && port.find_first_not_of("0123456789") == std::string_view::npos) location.append(":").append(port);
+    append_target(location, s.request.target);
+    redirect_answer(s, 308, location, "max-age=86400");
+    return true;
 }
 
 // 421 Misdirected Request (RFC 9110 15.5.22): this listener, or on TLS this connection's
@@ -541,17 +573,22 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
     }
     // http = "redirect" (docs/redirects.md 2): plain HTTP, or a request a trusted proxy did not mark
     // https, goes to HTTPS; certificate validation gets the site's files there and nothing else
-    // (its validation location, below). One flag test for a site that does not redirect.
+    // (its validation location, below). canonical (3): another of the site's names goes to the
+    // canonical one, with the scheme in one hop; certificate validation over plain HTTP is answered
+    // on every name (1). One flag test for a site that does neither.
     bool validation = false;
-    if (site->http_redirect) {
-        if (!s.conn.tls && !s.conn.forwarded_https) {
-            if (!certificate_validation(ws.path)) {
+    if (site->before_routing) {
+        const bool plain = !s.conn.tls && !s.conn.forwarded_https;
+        const bool validating = plain && certificate_validation(ws.path);
+        if (plain && site->http_redirect) {
+            if (!validating) {
                 redirect_https(s, *site);
                 return nullptr;
             }
             validation = true;
         } else {
-            s.https_site = site;  // its application's http:// Locations go out as https:// (2.5)
+            if (site->http_redirect) s.https_site = site;  // its application's http:// Locations go out as https:// (2.5)
+            if (site->canonical_redirect && !validating && redirect_host(s, *site)) return nullptr;
         }
     }
     // `refuse` and [[site.access]] before any location is chosen: whichever would serve the

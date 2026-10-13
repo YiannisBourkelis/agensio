@@ -1032,7 +1032,7 @@ check "cookbook: every recipe of docs/examples.md loads and names what exists (t
 # One broken site file never stops the others (design section 26; tests/isolation.sh, its own server).
 check "isolation: a site file that does not load is set aside, the other sites serve (tests/isolation.sh)" "0" \
   "$(tests/isolation.sh "$BIN" > bench/tmp/isolation.out 2>&1; echo $?)"
-check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 190 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
+check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 191 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
 check "secrets: the presets catalogue lists each preset's credential files" "/wp-config.php /sites/default/settings.php" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["wordpress"]["secrets"][0], p["drupal"]["secrets"][0])')"
 check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$("$BIN" ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; "$BIN" ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
@@ -1368,6 +1368,55 @@ if [ -x build/agensio_upstream ]; then
   cpost /v1/sites/certu.wild.test/delete '{"confirm":true,"reason":"certs"}' > /dev/null
   kill $UP9111 2>/dev/null; wait $UP9111 2>/dev/null
 fi
+# canonical (docs/redirects.md 3, alpha.81): the site's other names redirect to it with a 308, path
+# and query kept, a day; over plain HTTP scheme and host in one hop, or with hsts the same name's
+# HTTPS first (4.3); certificate validation over plain HTTP is answered on every name; a name the
+# site does not list is not redirected. A file of its own, so a version without the key sets it aside.
+cat > bench/tmp/sites.d/canon.toml <<CANON
+[[site]]
+server_name = ["c.wild.test", "c2.wild.test"]
+canonical = "c.wild.test"
+listen = ["127.0.0.1:8465"]
+http = { listen = ["127.0.0.1:8466"] }
+root = "$ROOT/bench/www"
+tls = { cert = "$ROOT/bench/tmp/certs-wild/cert.pem", key = "$ROOT/bench/tmp/certs-wild/key.pem" }
+
+[[site]]
+server_name = ["d.wild.test", "d2.wild.test"]
+canonical = "d.wild.test"
+listen = ["127.0.0.1:8467"]
+http = { listen = ["127.0.0.1:8468"] }
+root = "$ROOT/bench/www"
+tls = { cert = "$ROOT/bench/tmp/certs-wild/cert.pem", key = "$ROOT/bench/tmp/certs-wild/key.pem" }
+hsts = true
+
+[[site]]
+server_name = ["e.wild.test", "e2.wild.test"]
+canonical = "e.wild.test"
+listen = ["127.0.0.1:8469"]
+root = "$ROOT/bench/www"
+CANON
+cpost /v1/reload '{"confirm":true,"reason":"canon"}' > /dev/null
+hop() {  # "status location cache-control hsts" of one request: hop SCHEME PORT PATH NAME
+  curl -sk -D - -o /dev/null --resolve "$4:$2:127.0.0.1" "$1://$4:$2$3" 2>/dev/null | tr -d '\r' | awk 'NR==1{c=$2} tolower($1)=="location:"{l=$2} tolower($1)=="cache-control:"{k=$2} tolower($1)=="strict-transport-security:"{h="hsts"} END{print c, (l ? l : "-"), (k ? k : "-"), (h ? h : "-")}'
+}
+check "canonical: another name over HTTPS goes to the canonical one (port kept), over plain HTTP in one hop with the scheme, the canonical name over plain HTTP to its HTTPS; a challenge over plain HTTP is answered on every name; the canonical name serves" \
+  "308 https://c.wild.test:8465/a?b=1 max-age=86400 - | 308 https://c.wild.test:8465/a?b=1 max-age=86400 - | 308 https://c.wild.test:8465/a max-age=86400 - | 404 | 200" \
+  "$(hop https 8465 '/a?b=1' c2.wild.test) | $(hop http 8466 '/a?b=1' c2.wild.test) | $(hop http 8466 /a c.wild.test) | $(code -H 'Host: c2.wild.test' http://127.0.0.1:8466/.well-known/acme-challenge/x) | $(code -k --resolve c.wild.test:8465:127.0.0.1 https://c.wild.test:8465/)"
+check "canonical with hsts: plain HTTP for another name goes to that name's HTTPS first, which redirects to the canonical one with HSTS; the canonical one serves with HSTS" \
+  "308 https://d2.wild.test:8467/x max-age=86400 - | 308 https://d.wild.test:8467/x max-age=86400 hsts | 200 - - hsts" \
+  "$(hop http 8468 /x d2.wild.test) | $(hop https 8467 /x d2.wild.test) | $(hop https 8467 / d.wild.test)"
+check "canonical on a plain site: another name goes to the canonical one over plain HTTP, port kept; a name the site does not list is not redirected" \
+  "308 http://e.wild.test:8469/x max-age=86400 - | 421" \
+  "$(hop http 8469 /x e2.wild.test) | $(code -H 'Host: other.test' http://127.0.0.1:8469/x)"
+rm -f bench/tmp/sites.d/canon.toml
+cpost /v1/reload '{"confirm":true,"reason":"canon"}' > /dev/null
+# The same through the control plane: site-create's canonical, one of the site's names, rendered as
+# the key; any other name refused.
+check "canonical on a managed site: a name that is not the site's is refused, the alias redirects to the domain" \
+  "400 201 yes 308 https://cm.wild.test:8471/y max-age=86400 -" \
+  "$(cpost /v1/sites "{\"domain\":\"cm.wild.test\",\"aliases\":[\"cm2.wild.test\"],\"canonical\":\"x.wild.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-wild/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-wild/key.pem\"},\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/bench/www\",\"listen_plain\":\"127.0.0.1:8472\",\"listen_tls\":\"127.0.0.1:8471\",\"confirm\":true,\"reason\":\"canon\"}") $(cpost /v1/sites "{\"domain\":\"cm.wild.test\",\"aliases\":[\"cm2.wild.test\"],\"canonical\":\"cm.wild.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-wild/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-wild/key.pem\"},\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/bench/www\",\"listen_plain\":\"127.0.0.1:8472\",\"listen_tls\":\"127.0.0.1:8471\",\"confirm\":true,\"reason\":\"canon\"}") $(grep -q '^canonical = "cm.wild.test"' bench/tmp/sites.d/cm.wild.test.toml && echo yes || echo no) $(hop https 8471 /y cm2.wild.test)"
+cpost /v1/sites/cm.wild.test/delete '{"confirm":true,"reason":"canon"}' > /dev/null
 # A managed file in a form this version refuses (alpha.78): set aside like any file that does not
 # load, and site-update reaches it by its domain, renders it again from its first line and serves the
 # site; health names the command. Before, site-update answered 404 (no such site) and root edited
