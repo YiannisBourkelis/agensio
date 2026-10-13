@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.88
+## 0.1.0-alpha.88 (2026-10-14)
 
 - **The COPR spec builds and installs on Fedora** (`packaging/rpm/agensio.spec`; COPR is not
   enabled yet, the release's `.rpm` comes from CPack and was not affected). Built from the alpha.87
