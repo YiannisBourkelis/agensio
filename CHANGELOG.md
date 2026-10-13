@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.86
+## 0.1.0-alpha.86 (2026-10-14)
 
 - **Health names what only requests show: a proxy that sends no scheme, an application's stronger
   HSTS** (`docs/redirects.md` 2.4, 4.1). `proxy_scheme_missing` (warn): a proxy in `trusted_proxies`
