@@ -1355,6 +1355,30 @@ cpost /v1/sites "{\"domain\":\"certp.wild.test\",\"https\":{\"cert\":\"$ROOT/ben
 check "http: a proxied site's plain port answers the validation prefixes itself (404), never through the application" "404 404 308" \
   "$(code -H 'Host: certp.wild.test' http://127.0.0.1:8456/.well-known/acme-challenge/x) $(code -H 'Host: certp.wild.test' http://127.0.0.1:8456/.well-known/pki-validation/x.txt) $(code -H 'Host: certp.wild.test' http://127.0.0.1:8456/x)"
 cpost /v1/sites/certp.wild.test/delete '{"confirm":true,"reason":"certs"}' > /dev/null
+# A managed file in a form this version refuses (alpha.78): set aside like any file that does not
+# load, and site-update reaches it by its domain, renders it again from its first line and serves the
+# site; health names the command. Before, site-update answered 404 (no such site) and root edited
+# the file by hand (alpha.75's hsts, alpha.76's plain block, the alpha.76 report's note).
+cpost /v1/sites "{\"domain\":\"old.wild.test\",\"https\":\"none\",\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/bench/www\",\"listen_plain\":\"127.0.0.1:8459\",\"dry_run\":true,\"confirm\":true,\"reason\":\"old\"}" > /dev/null
+python3 - "$ROOT" <<'PYT'
+import json, sys
+root = sys.argv[1]
+first = json.load(open(f"{root}/bench/tmp/ctl-reply.json"))["would_write"].splitlines()[0]
+open(f"{root}/bench/tmp/sites.d/old.wild.test.toml", "w").write(first + """
+
+[[site]]
+server_name = ["old.wild.test"]
+listen = ["127.0.0.1:8460"]
+redirect = "https"   # an HTTPS site's plain block as alpha.75 wrote it, refused since alpha.76
+""")
+PYT
+cpost /v1/reload '{"confirm":true,"reason":"old"}' > /dev/null
+check "site-update: a managed file in a form this version refuses is set aside; health names site-update, which renders it again from its first line and serves the site" \
+  "000 yes 200 200 no" \
+  "$(code -H 'Host: old.wild.test' http://127.0.0.1:8459/ 2>/dev/null) $(curl -sS --unix-socket $CS http://control/v1/health | grep -q 'agensio ctl site-update old.wild.test --yes' && echo yes || echo no) $(cpost /v1/sites/old.wild.test '{"confirm":true,"reason":"old"}') $(code -H 'Host: old.wild.test' http://127.0.0.1:8459/) $(grep -q 'redirect = ' bench/tmp/sites.d/old.wild.test.toml && echo yes || echo no)"
+cpost /v1/sites/old.wild.test/delete '{"confirm":true,"reason":"old"}' > /dev/null
+rm -f bench/tmp/sites.d/old.wild.test.toml bench/tmp/sites.d/old.wild.test.toml.bak
+cpost /v1/reload '{"confirm":true,"reason":"old"}' > /dev/null
 # rules.admin on a managed WordPress site (2026-10-07): the admin paths in one field, the
 # login page only on request, what the public site needs below /wp-admin kept open.
 if [ -n "$PHPFPM" ]; then

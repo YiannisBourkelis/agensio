@@ -1540,12 +1540,15 @@ void ControlHandler::finish_pool(Stream& s, const control::SiteSpec& spec, const
 void ControlHandler::site_update(Stream& s, std::string_view name, const json::Value& body, std::string_view what) {
     const Config& cfg = backend_->running();
     const SiteConfig* existing = control::find_site(cfg, name);
-    if (!existing) {
+    // A managed file the running configuration set aside (an earlier version wrote a form this one
+    // refuses, alpha.78): rendered again from its first line like any update, by its domain or alias.
+    const std::filesystem::path held = existing ? std::filesystem::path() : control::held_back_managed(cfg, name);
+    if (!existing && held.empty()) {
         reply(s, 404, json::Value::object().set("error", "no such site").set("site", std::string(name)));
         return;
     }
     control::SiteSpec spec;
-    const auto file = control::site_file(cfg, existing->server_names.front());
+    const auto file = existing ? control::site_file(cfg, existing->server_names.front()) : held;
     if (!control::read_managed(file, spec)) {
         reply(s, 409, json::Value::object().set("error", "this site is not managed by agensio ctl (hand-written or edited)")
                           .set("file", file.string())
@@ -1621,6 +1624,7 @@ void ControlHandler::site_update(Stream& s, std::string_view name, const json::V
     }
     audit_peer(s, what, "updated " + file.string());
     json::Value done_now = done;
+    if (!held.empty()) done_now.push("the site's file was set aside; rendered again from its first line with this version");
     done_now.push("site file " + file.string() + " written, agensio reloaded");
     std::vector<std::string> steps = control::next_steps(spec, cfg);
     finish_pool(s, spec, cfg, what, done_now, steps);

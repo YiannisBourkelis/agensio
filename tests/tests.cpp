@@ -3914,6 +3914,14 @@ static void test_control_sites() {
     CHECK(write_site_file(site_file(cfg, "shop.test"), text, err) && err.empty());
     SiteSpec back;
     CHECK(read_managed(site_file(cfg, "shop.test"), back) && back.domain == "shop.test" && back.user == "shop" && back.user_decided && back.hsts && back.aliases.size() == 1);
+    {   // a managed file the configuration set aside, found by its domain or an alias (alpha.78: site_update renders it again)
+        Config held = cfg;
+        held.held_back.push_back({site_file(cfg, "shop.test").string(), "refused"});
+        std::string domain;
+        CHECK(held_back_managed(held, "WWW.shop.test", &domain) == site_file(cfg, "shop.test") && domain == "shop.test");
+        CHECK(held_back_managed(held, "shop.test") == site_file(cfg, "shop.test") && held_back_managed(held, "other.test").empty() &&
+              held_back_managed(cfg, "shop.test").empty());
+    }
     CHECK(write_site_file(site_file(cfg, "shop.test"), text + "\n", err) && std::filesystem::exists(dir / "sites.d" / "shop.test.toml.bak"));
     std::ofstream(dir / "sites.d" / "hand.toml") << "[[site]]\n";
     CHECK(!read_managed(dir / "sites.d" / "hand.toml", back));

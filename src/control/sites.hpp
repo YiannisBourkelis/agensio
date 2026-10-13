@@ -121,6 +121,10 @@ bool read_managed(const std::filesystem::path& file, SiteSpec& out);
 // <config dir>/sites.d and the file of a domain there.
 std::filesystem::path sites_dir(const Config& cfg);
 std::filesystem::path site_file(const Config& cfg, std::string_view domain);
+// The managed file of a site whose file the configuration set aside (Config::held_back), by its
+// domain or one of its aliases, or "": what site_update renders again from the file's first line
+// when an earlier version wrote a form this one refuses (alpha.78). Its domain into `domain`.
+std::filesystem::path held_back_managed(const Config& cfg, std::string_view name, std::string* domain = nullptr);
 // True when an include pattern of the main file covers sites.d/*.toml.
 bool sites_dir_included(const Config& cfg);
 // Atomic write with a .bak of anything overwritten; false with `error`.

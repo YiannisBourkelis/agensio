@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.0-alpha.78
+
+- **`site-update` repairs a managed file a newer version refuses.** When a release changes the form
+  of the files the control plane writes (alpha.75's `hsts`, alpha.76's plain block), a managed file
+  written before is set aside like any file that does not load, and `site-update` answered "no
+  such site" for it, so root had to edit the file by hand before upgrading (the alpha.76 report's
+  note). `site-update NAME` now also reaches a managed file the running configuration set aside,
+  by its domain or an alias, and with no other field writes it again in this version's form from
+  its first line, validates and reloads; health's `site_file_held_back` names `agensio ctl
+  site-update NAME --yes` for such a file (not for one set aside for its certificate). No
+  automatic migration: while agensio is in alpha a release may still change these forms. The
+  integration check (a managed file with a body this version refuses, never loaded) failed on
+  alpha.77 with 404.
+
 ## 0.1.0-alpha.77 (2026-10-13)
 
 - **Over plain HTTP the certificate validation prefixes reached the site's applications.** alpha.76

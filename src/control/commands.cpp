@@ -994,6 +994,10 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
         if (h.hosting)
             add("error", "hosting_rule", "", std::move(msg),
                 "fix the owner or mode the message names, then reload; the other sites are not affected");
+        else if (SiteSpec spec; !h.certificate && read_managed(h.file, spec))  // the control plane's own file (alpha.78)
+            add("error", "site_file_held_back", spec.domain, std::move(msg),
+                "agensio ctl site-update " + spec.domain + " --yes (MCP site_update) renders it again from its first line with this "
+                "version, which repairs a form an earlier version wrote; if the error remains, it names what to change through site-update");
         else
             add("error", "site_file_held_back", "", std::move(msg),
                 "fix " + name + " (agensio -t names the error), then reload; the other sites are not affected");

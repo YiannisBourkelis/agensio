@@ -1046,6 +1046,20 @@ fs::path sites_dir(const Config& cfg) { return cfg.config_path.parent_path() / "
 
 fs::path site_file(const Config& cfg, std::string_view domain) { return sites_dir(cfg) / (std::string(domain) + ".toml"); }
 
+fs::path held_back_managed(const Config& cfg, std::string_view name, std::string* domain) {
+    std::string want(name);
+    for (auto& c : want) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (const auto& h : cfg.held_back) {
+        SiteSpec spec;
+        std::error_code ec;
+        if (!read_managed(h.file, spec) || !fs::equivalent(h.file, site_file(cfg, spec.domain), ec)) continue;  // the file site_update writes
+        if (spec.domain != want && std::find(spec.aliases.begin(), spec.aliases.end(), want) == spec.aliases.end()) continue;
+        if (domain) *domain = spec.domain;
+        return h.file;
+    }
+    return {};
+}
+
 bool sites_dir_included(const Config& cfg) {
     for (const auto& p : cfg.includes)
         if (p == "sites.d/*.toml" || p == "./sites.d/*.toml" || p.ends_with("/sites.d/*.toml")) return true;
