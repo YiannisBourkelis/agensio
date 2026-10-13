@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.78
+## 0.1.0-alpha.78 (2026-10-13)
 
 - **`site-update` repairs a managed file a newer version refuses.** When a release changes the form
   of the files the control plane writes (alpha.75's `hsts`, alpha.76's plain block), a managed file
