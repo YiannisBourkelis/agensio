@@ -56,7 +56,12 @@ Two tiers of jails come out of that file.
 These jails need nothing from the application. They read agensio's access logs, which are
 in the combined format (`[log] format = "combined"`, the default; JSON logs are not read)
 with the client address first. Behind a load balancer or CDN, `server.trusted_proxies`
-makes that address the real client's, so bans hit the right one.
+makes that address the real client's, so bans hit the right one. A trusted proxy itself is
+never banned: every agensio jail lists the trusted proxies, with loopback, in `ignoreip`. A
+proxy's own address reaches the log when it sends a request without `X-Forwarded-For`, and a
+ban in the host's firewall would cut off every visitor it carries, for every site behind it
+(alpha.73; render the jail again after upgrading, health says so). A host without trusted
+proxies renders no `ignoreip`, so the `[DEFAULT]` one holds.
 
 | jail | counts | threshold | ban |
 |---|---|---|---|
@@ -303,6 +308,22 @@ after agensio's, since `jail.d` is read in alphabetical order:
 [DEFAULT]
 ignoreip = 127.0.0.1/8 ::1 198.51.100.7
 ```
+
+On a host with `server.trusted_proxies`, agensio's jails carry an `ignoreip` of their own (the
+proxies), and a jail's own line wins over `[DEFAULT]`'s. Extend the jails you could trip yourself
+in the same file, which fail2ban reads after agensio's; `known/` adds to the line agensio wrote:
+
+```ini
+[agensio-login]
+ignoreip = %(known/ignoreip)s 198.51.100.7
+
+[agensio-auth]
+ignoreip = %(known/ignoreip)s 198.51.100.7
+```
+
+agensio's file cannot do this itself: `%(default/ignoreip)s` or `%(known/ignoreip)s` there stops
+fail2ban altogether on a host whose `[DEFAULT]` has no `ignoreip`, which is the stock
+configuration (fail2ban 1.1.0, "Bad value substitution"; `jail.conf(5)`).
 
 **Changing a threshold or excluding an API.** Override a section in the same local file;
 never edit `agensio.conf`, which the next rendering replaces:

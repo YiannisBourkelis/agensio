@@ -2,6 +2,19 @@
 
 ## 0.1.0-alpha.73
 
+- **fail2ban could ban a trusted proxy for the whole host.** A proxy in `[server] trusted_proxies`
+  reaches the access log under its own address when it sends a request without
+  `X-Forwarded-For`, and the rendered jails counted it like any client, so ten posts to a login
+  path through it banned the proxy in the host's firewall and cut off every visitor it carries,
+  for every site behind it. On a host with trusted proxies every agensio jail now lists them, with
+  loopback, in `ignoreip`. The line is plain: `%(default/ignoreip)s` or `%(known/ignoreip)s` in
+  agensio's file stops fail2ban altogether where `[DEFAULT]` defines no `ignoreip`, the stock
+  configuration (tried on 1.1.0). A jail's own line wins over `[DEFAULT]`'s, so on such a host an
+  administrator's own addresses go into the jails they could trip, with `known/`, in a file read
+  after agensio's (`docs/fail2ban.md` 4). A host without trusted proxies renders as before. Render
+  the jail again after upgrading; health reports the installed one stale. The unit test of the
+  renderer failed before the change; `tests/protection.sh` loads the file into fail2ban and reads
+  the lists back.
 - **`proxy = { headers = { ... } }` is now `request_headers`** (breaking): the fields agensio sends
   to the origin with the request, named for the way they go, beside the response fields of the
   coming `[[site.response_headers]]` (`docs/headers.md`). There is no alias: the old name is

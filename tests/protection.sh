@@ -221,6 +221,16 @@ ctl site-delete wp.test --yes --reason prot > /dev/null; ctl site-delete dr.test
 ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload > /dev/null; sleep 0.5
 check "the two sites deleted and the jail rendered again: no failure jail, no finding about them" "0 0" "$(grep -c -E '^\[agensio-(wordpress|drupal)' /etc/fail2ban/jail.d/agensio.conf) $(codes | tr ' ' '\n' | grep -c fail2ban_failures_unseen)"
 
+# A trusted proxy is never banned (2026-10-13, docs/redirects.md 2.4): with [server] trusted_proxies every
+# jail carries them and loopback in ignoreip (replacing [DEFAULT]'s; interpolating it stops fail2ban 1.1
+# where [DEFAULT] has none), and fail2ban loads the file. Rendered offline from a copy of the
+# configuration, then the server's own rendering is put back.
+sed 's/^\[server\]$/[server]\ntrusted_proxies = ["198.51.100.0\/24", "2001:db8:5::\/48"]/' $T/agensio.toml > $T/tp.toml
+"$BIN" protection -c $T/tp.toml --jail > /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload > /dev/null; sleep 0.5
+check "with trusted proxies every jail ignores them and loopback, and fail2ban runs the file" "yes yes yes" \
+  "$(fail2ban-client get agensio-login ignoreip | grep -q '198.51.100.0/24' && fail2ban-client get agensio-login ignoreip | grep -q '2001:db8:5::/48' && echo yes) $(fail2ban-client get agensio-scan ignoreip | grep -qE '127\.0\.0\.[01]/8' && echo yes) $(fail2ban-client status | grep -q 'agensio-login' && fail2ban-client status | grep -q 'agensio-scan' && echo yes)"
+ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload > /dev/null; sleep 0.5
+
 # 6. host_protection = "external" and "off".
 nft delete table inet agensio
 write_config 'host_protection = "external"'; ctl reload --yes --reason prot > /dev/null

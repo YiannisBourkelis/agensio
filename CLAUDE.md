@@ -1161,7 +1161,9 @@ Each item was benchmarked before and after on the reduced matrix (`bench/run.sh 
    `fail2ban_jail_stale`, `fail2ban_log_format`, `fail2ban_blind`, `protection_unchecked`;
    `[control] host_protection = "external"` for a panel host, `"off"` to skip. Security page
    row 37; `tests/protection.sh` (the `agensio-devbox:host` image with `--cap-add NET_ADMIN`).
-   The login jail matches every spelling of a path (`spelling_regex`, the filter's `<sep>`
+   Every jail lists `[server] trusted_proxies` and loopback in `ignoreip` (alpha.73), so a proxy
+   is never banned host-wide; a plain line, since interpolating `[DEFAULT]`'s stops fail2ban 1.1
+   where none is defined (`docs/fail2ban.md` 4). The login jail matches every spelling of a path (`spelling_regex`, the filter's `<sep>`
    variable), one jail per access log; the failure tier (`FailureJail`, `kFailureTiers`:
    WordPress through the WP fail2ban plugin, Drupal through its Syslog module) is rendered
    enabled only when its filter and log exist, else with the user's steps; agensio installs

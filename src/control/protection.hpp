@@ -106,6 +106,7 @@ struct ProtectionInput {
     bool exposed = false;                     // at least one listener is not loopback
     std::string firewall_file;                // where this host keeps the ruleset: <config dir>/firewall.nft
     std::string host_protection = "check";    // [control] host_protection
+    std::vector<std::string> trusted_proxies; // [server] trusted_proxies: every jail ignores them, never bans a proxy
 };
 // The uid of an account on this host, nullopt when it does not exist: the server asks
 // getpwnam, the tests describe a machine. `journal` forces the mode (the tests again); by

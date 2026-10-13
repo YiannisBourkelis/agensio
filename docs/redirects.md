@@ -233,7 +233,7 @@ Two rules come with it:
   `[server] trusted_proxies` in `ignoreip` (jail.conf(5)). A proxy's own address reaches the log
   when it sends a request without `X-Forwarded-For` and when a site does not trust it, and a ban in
   the host's firewall would cut off every visitor that proxy carries, for every site behind it.
-  Today's jails lack this.
+  Built in alpha.73, with the server's list (`docs/fail2ban.md` 2a, 4).
 - **What a site believes is visible.** `site_show` lists the proxies a site trusts; `access_check`
   and `path_check` judge with the site's list; health notes, on a server whose list names more than
   one set, each site that names none of its own (`site_trusts_every_proxy`, info), with the line to

@@ -468,6 +468,7 @@ ProtectionInput protection_input(const Config& cfg, const UidLookup& uid_of, std
     ProtectionInput in;
     in.firewall_file = (cfg.config_path.parent_path() / "firewall.nft").string();
     in.host_protection = cfg.control.host_protection;
+    for (const auto& c : cfg.trusted_proxies) in.trusted_proxies.push_back(c.text());
     in.combined = !cfg.log.json;
     if (cfg.log.error != "stderr") in.error_log = cfg.log.error;
     in.error_log_warn = cfg.log.level != "error";
@@ -708,6 +709,20 @@ std::string render_jail(const ProtectionInput& in) {
     s += "# a host whose firewall is managed otherwise sets banaction in its jail.local.\n";
     if (!in.combined)
         s += "#\n# NOTE: this host's access logs are JSON ([log] format = \"json\"); these filters read the combined\n# format only, so nothing here matches until the format is combined.\n";
+    // A trusted proxy is never banned (2026-10-13, docs/redirects.md 2.4): its own address reaches
+    // the logs when it sends no X-Forwarded-For, and a ban would cut off every visitor it carries,
+    // for every site behind it. The list replaces [DEFAULT]'s ignoreip for these jails: extending it
+    // with known/ or default/ interpolation stops fail2ban 1.1 whole where [DEFAULT] defines none, as
+    // on a stock install (docs/fail2ban-ref/man/jail.conf.5.txt, ignoreip and known/; tried on
+    // 1.1.0). A host without trusted proxies renders no line, so [DEFAULT]'s holds as before.
+    std::string banaction = "banaction = nftables-multiport\n";
+    if (!in.trusted_proxies.empty()) {
+        banaction += "ignoreip  = 127.0.0.1/8 ::1 " + join(in.trusted_proxies, " ") + "\n";
+        s += "#\n# This server's trusted proxies are never banned (ignoreip in every jail): a proxy's own address reaches\n";
+        s += "# the logs when it sends no X-Forwarded-For, and a ban would cut off every visitor it carries. The line\n";
+        s += "# replaces jail.local's [DEFAULT] ignoreip for these jails; to add addresses of your own, extend it in\n";
+        s += "# jail.local, which fail2ban reads after this file, with the known/ignoreip interpolation (docs/fail2ban.md).\n";
+    }
     // One login jail per access log, with the paths of the sites that write it, in every
     // spelling; a host without a known login path gets the jail disabled with the reason.
     std::vector<LoginJail> jails = in.login_jails;
@@ -726,7 +741,7 @@ std::string render_jail(const ProtectionInput& in) {
         s += "port      = " + ports + "\n";
         s += "filter    = agensio-login" + (paths.empty() ? std::string() : "[paths=\"" + paths + "\"]") + "\n";
         s += "logpath   = " + (j.log.empty() ? logpath : j.log) + "\n";
-        s += "banaction = nftables-multiport\n";
+        s += banaction;
         s += "maxretry  = 10\n";
         s += "findtime  = 10m\n";
         s += "bantime   = 1h\n";
@@ -760,7 +775,7 @@ std::string render_jail(const ProtectionInput& in) {
         } else {
             s += "logpath   = " + f.log + "\n";
         }
-        s += "banaction = nftables-multiport\n";
+        s += banaction;
         s += "maxretry  = " + std::to_string(f.maxretry) + "\n";
         s += "findtime  = " + f.findtime + "\n";
         s += "bantime   = " + f.bantime + "\n";
@@ -781,7 +796,7 @@ std::string render_jail(const ProtectionInput& in) {
     s += "port      = " + ports + "\n";
     s += "filter    = agensio-auth\n";
     if (!in.error_log.empty()) s += "logpath   = " + in.error_log + "\n";
-    s += "banaction = nftables-multiport\n";
+    s += banaction;
     s += "maxretry  = 10\n";
     s += "findtime  = 10m\n";
     s += "bantime   = 1h\n";
@@ -792,7 +807,7 @@ std::string render_jail(const ProtectionInput& in) {
     s += "port      = " + ports + "\n";
     s += "filter    = agensio-denied\n";
     s += "logpath   = " + logpath + "\n";
-    s += "banaction = nftables-multiport\n";
+    s += banaction;
     s += "maxretry  = 10\n";
     s += "findtime  = 10m\n";
     s += "bantime   = 1h\n";
@@ -802,7 +817,7 @@ std::string render_jail(const ProtectionInput& in) {
     s += "port      = " + ports + "\n";
     s += "filter    = agensio-scan\n";
     s += "logpath   = " + logpath + "\n";
-    s += "banaction = nftables-multiport\n";
+    s += banaction;
     s += "maxretry  = 40\n";
     s += "findtime  = 5m\n";
     s += "bantime   = 1h\n";
@@ -813,7 +828,7 @@ std::string render_jail(const ProtectionInput& in) {
     s += "port      = " + ports + "\n";
     s += "filter    = agensio-post\n";
     s += "logpath   = " + logpath + "\n";
-    s += "banaction = nftables-multiport\n";
+    s += banaction;
     s += "maxretry  = 120\n";
     s += "findtime  = 2m\n";
     s += "bantime   = 30m\n";

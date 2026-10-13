@@ -4936,6 +4936,25 @@ static void test_protection() {
             const ProtectionInput ai = protection_input(ac);
             CHECK((ai.auth_sites == std::vector<std::string>{"wp.test"}) && ai.error_log == "/var/log/agensio/error.log" && !ai.error_log_warn);
         }
+        {
+            // A trusted proxy is never banned (2026-10-13, docs/redirects.md 2.4): its own address
+            // reaches a log when it sends no X-Forwarded-For, and a ban in the host's firewall cuts
+            // off every visitor it carries. Every agensio jail ignores the server's trusted proxies
+            // and loopback; a host without trusted proxies renders no ignoreip, so [DEFAULT]'s holds.
+            std::ofstream(dir / "tp.toml") << "[server]\nworkers = 1\ntrusted_proxies = [\"173.245.48.0/20\", \"2400:cb00::/32\"]\n[log]\naccess = \"access.log\"\nerror = \"error.log\"\n"
+                                              "[[site]]\nserver_name = [\"wp.test\"]\nlisten = [\"0.0.0.0:8080\"]\nroot = \"www\"\napp = \"wordpress\"\nphp = { socket = \"unix:/run/php/x.sock\" }\n";
+            const std::string jail = render_jail(protection_input(load_config(dir / "tp.toml")));
+            std::size_t sections = 0, ignored = 0;
+            for (std::size_t at = jail.find("\n[agensio-"); at != std::string::npos; at = jail.find("\n[agensio-", at + 1)) {
+                ++sections;
+                const std::size_t end = jail.find("\n[", at + 1);
+                const std::string body = jail.substr(at, end == std::string::npos ? std::string::npos : end - at);
+                if (body.find("\nignoreip  = 127.0.0.1/8 ::1 173.245.48.0/20 2400:cb00::/32\n") != std::string::npos) ++ignored;
+            }
+            if (ignored != sections) std::printf("protection: %zu of %zu jails ignore the trusted proxies\n", ignored, sections);
+            CHECK(sections >= 6 && ignored == sections);
+            CHECK(render_jail(in).find("ignoreip") == std::string::npos);
+        }
         // The failure tier: the WordPress site brings the plugin's two jails, enabled only with the
         // filter and the log on the host (both looked for; here neither is asserted, the flags are
         // set by hand below), the needs naming the admin panel and root's copy, never an install.
