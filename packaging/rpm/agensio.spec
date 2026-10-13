@@ -28,6 +28,11 @@ through its Model Context Protocol server over SSH.
 
 %install
 %cmake_install
+# The directories %files owns with their modes; the .deb makes them in postinst.
+install -d %{buildroot}/var/log/agensio %{buildroot}/var/lib/agensio %{buildroot}/var/www/html
+# The account and groups for rpm (user(agensio), group(agensio) from the owners in %files);
+# %pre still makes them where rpm does not read sysusers.d (EPEL 9).
+install -Dm0644 packaging/agensio.sysusers %{buildroot}%{_sysusersdir}/agensio.conf
 
 %pre
 getent group agensio >/dev/null || groupadd -r agensio
@@ -47,12 +52,13 @@ exit 0
 
 %files
 %license LICENSE
-%doc README.md CHANGELOG.md docs/configuration.md docs/install.md docs/mcp.md docs/fail2ban.md docs/auth.md
+%{_docdir}/%{name}/
 %{_sbindir}/agensio
 %config(noreplace) %attr(0640,root,agensio) %{_sysconfdir}/agensio/agensio.toml
 %config(noreplace) %{_sysconfdir}/agensio/sites.d/default.toml
 %config(noreplace) %{_sysconfdir}/logrotate.d/agensio
 %{_unitdir}/agensio.service
+%{_sysusersdir}/agensio.conf
 %{_unitdir}/agensio-firewall.service
 %{_datadir}/agensio/www/index.html
 %{_datadir}/agensio/firewall/agensio.nft

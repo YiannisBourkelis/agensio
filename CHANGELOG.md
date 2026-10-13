@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.0-alpha.88
+
+- **The COPR spec builds and installs on Fedora** (`packaging/rpm/agensio.spec`; COPR is not
+  enabled yet, the release's `.rpm` comes from CPack and was not affected). Built from the alpha.87
+  tree in `fedora:latest` (Fedora 44), it failed three ways: `%files` owned `/var/log/agensio`,
+  `/var/lib/agensio` and `/var/www/html`, which nothing in `%install` made (since the spec was
+  written); its own `%doc` list left the guides CMake installs (`tls.md`, `keys.md`, `redirects.md`,
+  the cookbook, `LICENSE`) as files no package owned; and Fedora's rpm requires `user(agensio)` and
+  `group(agensio)` for the owners in `%files`, which only a sysusers.d file provides. The spec now
+  makes the directories, packs the documentation directory CMake fills, and installs
+  `packaging/agensio.sysusers` as `/usr/lib/sysusers.d/agensio.conf`; `%pre` still makes the account
+  where rpm reads no sysusers.d (EPEL 9). `tests/rpm.sh` (new; docker, the first run fetches the
+  build dependencies) builds it from the working tree, installs it and checks the guides, the
+  owners and `agensio -t`: it failed on the old spec and passes now. Packaging only: no A/B.
+
 ## 0.1.0-alpha.87 (2026-10-14)
 
 - **Health says an application already sends HSTS instead of suggesting the site's over it** (the

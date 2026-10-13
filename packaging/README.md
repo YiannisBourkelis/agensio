@@ -11,6 +11,13 @@
   unit test holds the files to the renderers, so regenerate them after a change there.
 - `deb/`: maintainer scripts for the `.deb` that CPack builds (`cpack -G DEB` in the build directory).
 - `rpm/agensio.spec`: for COPR (builds from the tag's tarball); CPack also builds an `.rpm` with the same scripts.
+  It lists its files itself, so a file CMake installs that it does not name, or a directory it names
+  that nothing makes, fails the build: it packs the documentation directory CMake fills, makes the
+  `/var` directories it owns, and installs `agensio.sysusers` as `/usr/lib/sysusers.d/agensio.conf`,
+  which provides the `user(agensio)` and `group(agensio)` Fedora's rpm requires for the owners in
+  `%files`. `tests/rpm.sh` builds it from the working tree in a Fedora container, installs it and
+  checks the guides, the owners and `agensio -t`; run it after any change to the spec or to what
+  CMake installs.
 - `arch/`: `PKGBUILD` and install hooks; the release workflow's `arch` job builds the binary
   `.pkg.tar.zst` from it in an Arch container and attaches it to the release
   (`sudo pacman -U ./agensio-*.pkg.tar.zst`); the same file is what the AUR will publish.

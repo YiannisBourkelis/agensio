@@ -1,0 +1,6 @@
+# The service account and its groups (sysusers.d(5)): the RPM installs this as
+# /usr/lib/sysusers.d/agensio.conf, which provides user(agensio) and group(agensio) to rpm on
+# Fedora; the .deb makes them in its postinst. agensio-admin: the control socket's admins.
+g agensio -
+g agensio-admin -
+u agensio - "agensio web server" /var/lib/agensio /sbin/nologin
