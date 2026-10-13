@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.0-alpha.80
+
+- **`site-update` says why it cannot help with a hand-written file set aside** (the alpha.78
+  report's notes). It answered "no such site" for a site whose hand-written file did not load; it
+  now answers 409 with the file and the loader's error, since only an edit by hand mends it. The
+  site is found by the names its file claims, read as the loader reads a file set aside (its text
+  scanned when it is not TOML), on that error path only. The texts that said a managed file set
+  aside is written again "with no other field" now say what alpha.78 does: with any fields or none.
+  The integration check (a hand-written file in a refused form) failed on alpha.79 with 404.
+  Control-plane code only: no A/B.
+
 ## 0.1.0-alpha.79 (2026-10-13)
 
 - **An application's own `http://` redirects go out as `https://`** (`docs/redirects.md` 2.5). An

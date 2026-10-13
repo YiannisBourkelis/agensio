@@ -563,6 +563,9 @@ std::vector<AccessNotice> access_notices(const Config& cfg);
 // address, never its spelling (the alpha.58 report's finding 4: "[::1]" was looked for and "::1"
 // stored). Health, -t and the host-protection renderer share it.
 bool loopback_listen(std::string_view listen);
+// The names a site file's [[site]] blocks claim, read as the loader reads a file set aside (its
+// text scanned when it is not TOML): what site_update names when it cannot help (alpha.80).
+std::vector<std::string> claimed_names(const std::string& file);
 // The same address as written in a configuration: "[::1]:443" for IPv6.
 std::string display_listen(std::string_view listen);
 // Every address a site listens on: its own, then a TLS site's plain ones (http_listen).

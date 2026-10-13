@@ -125,6 +125,9 @@ std::filesystem::path site_file(const Config& cfg, std::string_view domain);
 // domain or one of its aliases, or "": what site_update renders again from the file's first line
 // when an earlier version wrote a form this one refuses (alpha.78). Its domain into `domain`.
 std::filesystem::path held_back_managed(const Config& cfg, std::string_view name, std::string* domain = nullptr);
+// Any file the configuration set aside whose [[site]] blocks claim `name`, or null: a hand-written
+// file site_update cannot render, named in its refusal (alpha.80).
+const Config::HeldBack* held_back_named(const Config& cfg, std::string_view name);
 // True when an include pattern of the main file covers sites.d/*.toml.
 bool sites_dir_included(const Config& cfg);
 // Atomic write with a .bak of anything overwritten; false with `error`.

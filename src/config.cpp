@@ -2989,6 +2989,25 @@ std::vector<SiteClaim> claims_of_text(std::string_view text, bool& names_unread)
 
 }  // namespace
 
+std::vector<std::string> claimed_names(const std::string& file) {
+    std::string text;
+    {
+        std::ifstream in(file, std::ios::binary);
+        text.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    }
+    std::vector<SiteClaim> claims;
+    try {
+        claims = claims_of(toml::parse(text));
+    } catch (const std::exception&) {
+        bool unread = false;
+        claims = claims_of_text(text, unread);
+    }
+    std::vector<std::string> out;
+    for (const auto& c : claims)
+        for (const auto& n : c.names) out.push_back(n);
+    return out;
+}
+
 // How firmly a file holds its names in a conflict (design section 26): served and unchanged (or
 // carried) 2, served but edited 1, new 0. Served means by the running configuration on a reload,
 // and at a start by the record of the last start or reload (Config::served_before, the alpha.63

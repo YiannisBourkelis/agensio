@@ -3935,6 +3935,12 @@ static void test_control_sites() {
         CHECK(held_back_managed(held, "WWW.shop.test", &domain) == site_file(cfg, "shop.test") && domain == "shop.test");
         CHECK(held_back_managed(held, "shop.test") == site_file(cfg, "shop.test") && held_back_managed(held, "other.test").empty() &&
               held_back_managed(cfg, "shop.test").empty());
+        // a hand-written one, not TOML: its names read as the loader reads them (alpha.80: site_update names it)
+        std::ofstream(dir / "hand2.toml") << "[[site]]\nserver_name = [\"Hand.test\", \"h2.test\"]\nlisten = [\"127.0.0.1:1\"]\nrefsue =\n";
+        held.held_back.push_back({(dir / "hand2.toml").string(), "broken"});
+        const Config::HeldBack* named = held_back_named(held, "HAND.test");
+        CHECK(named && named->file.ends_with("hand2.toml") && held_back_named(held, "h2.test") == named && !held_back_named(held, "x.test"));
+        CHECK(held_back_named(held, "www.shop.test") && held_back_named(held, "www.shop.test")->file == site_file(cfg, "shop.test").string());
     }
     CHECK(write_site_file(site_file(cfg, "shop.test"), text + "\n", err) && std::filesystem::exists(dir / "sites.d" / "shop.test.toml.bak"));
     std::ofstream(dir / "sites.d" / "hand.toml") << "[[site]]\n";

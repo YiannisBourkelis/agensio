@@ -1046,6 +1046,16 @@ fs::path sites_dir(const Config& cfg) { return cfg.config_path.parent_path() / "
 
 fs::path site_file(const Config& cfg, std::string_view domain) { return sites_dir(cfg) / (std::string(domain) + ".toml"); }
 
+const Config::HeldBack* held_back_named(const Config& cfg, std::string_view name) {
+    std::string want(name);
+    for (auto& c : want) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (const auto& h : cfg.held_back) {
+        const std::vector<std::string> names = claimed_names(h.file);
+        if (std::find(names.begin(), names.end(), want) != names.end()) return &h;
+    }
+    return nullptr;
+}
+
 fs::path held_back_managed(const Config& cfg, std::string_view name, std::string* domain) {
     std::string want(name);
     for (auto& c : want) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));

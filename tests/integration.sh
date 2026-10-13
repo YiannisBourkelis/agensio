@@ -1391,6 +1391,13 @@ check "site-update: a managed file in a form this version refuses is set aside; 
   "$(code -H 'Host: old.wild.test' http://127.0.0.1:8459/ 2>/dev/null) $(curl -sS --unix-socket $CS http://control/v1/health | grep -q 'agensio ctl site-update old.wild.test --yes' && echo yes || echo no) $(cpost /v1/sites/old.wild.test '{"confirm":true,"reason":"old"}') $(code -H 'Host: old.wild.test' http://127.0.0.1:8459/) $(grep -q 'redirect = ' bench/tmp/sites.d/old.wild.test.toml && echo yes || echo no)"
 cpost /v1/sites/old.wild.test/delete '{"confirm":true,"reason":"old"}' > /dev/null
 rm -f bench/tmp/sites.d/old.wild.test.toml bench/tmp/sites.d/old.wild.test.toml.bak
+# A hand-written file set aside (alpha.80, the alpha.78 report's note): site-update says why it
+# cannot help, naming the file and the loader's error, where it answered "no such site".
+printf '[[site]]\nserver_name = ["hand.wild.test"]\nlisten = ["127.0.0.1:8464"]\nredirect = "https"\n' > bench/tmp/sites.d/hand.wild.test.toml
+cpost /v1/reload '{"confirm":true,"reason":"old"}' > /dev/null
+check "site-update: a hand-written file set aside is named, not managed, with the loader's error" "409 yes yes" \
+  "$(cpost /v1/sites/hand.wild.test '{"confirm":true,"reason":"hand"}') $(python3 -c 'import json; d=json.load(open("bench/tmp/ctl-reply.json")); print("yes" if "not managed" in d.get("error", "") and d.get("file", "").endswith("hand.wild.test.toml") else d)') $(grep -q 'is gone' bench/tmp/ctl-reply.json && echo yes || echo no)"
+rm -f bench/tmp/sites.d/hand.wild.test.toml
 cpost /v1/reload '{"confirm":true,"reason":"old"}' > /dev/null
 # rules.admin on a managed WordPress site (2026-10-07): the admin paths in one field, the
 # login page only on request, what the public site needs below /wp-admin kept open.

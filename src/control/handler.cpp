@@ -1544,6 +1544,12 @@ void ControlHandler::site_update(Stream& s, std::string_view name, const json::V
     // refuses, alpha.78): rendered again from its first line like any update, by its domain or alias.
     const std::filesystem::path held = existing ? std::filesystem::path() : control::held_back_managed(cfg, name);
     if (!existing && held.empty()) {
+        // A hand-written file set aside (alpha.80, the alpha.78 report): say so, it is root's to fix.
+        if (const Config::HeldBack* h = control::held_back_named(cfg, name)) {
+            reply(s, 409, json::Value::object().set("error", "the site's file is set aside and not managed by agensio ctl: fix it by hand (agensio -t names the error), then reload")
+                              .set("file", h->file).set("detail", h->error));
+            return;
+        }
         reply(s, 404, json::Value::object().set("error", "no such site").set("site", std::string(name)));
         return;
     }
