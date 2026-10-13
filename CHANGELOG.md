@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.87
+## 0.1.0-alpha.87 (2026-10-14)
 
 - **Health says an application already sends HSTS instead of suggesting the site's over it** (the
   alpha.86 report; `docs/redirects.md` 4.2). Kanboard (`ENABLE_HSTS`) and Rails (`force_ssl`) send
