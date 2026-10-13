@@ -490,7 +490,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (nineteen, each seeded from
   on the site's names and ports, duplicates, refuse-unreachable, notes through `access_notices`);
   `Dispatcher::route` after `refuse`, and `redirect_https`/`redirect_host` take a matching rule
   into the same hop; `fuzz_redirect`. The string key `redirect` is gone; `redirects_all` (a rule
-  from `/`) needs no root. `redirect = "https"` is refused; the
+  from `/`) needs no root. Managed (alpha.83): `SiteSpec::redirects` judged by
+  `load_redirect_rules` (the loader's parse and checks on JSON rules), rendered as tables; `ctl
+  --redirect / --redirect-exact / --gone / --redirects-file`; `path_check` names the rule and takes
+  proposed ones as a preview (the handler loads them on a copy of the site); security page row 42. `redirect = "https"` is refused; the
   `https://host` prefix form stays until `[[site.redirect]]`.
 - **Automatic certificates** (H3, `src/services/acme.*`, `services/json.hpp`): `tls = "auto"`
   plus `[server] acme = { email }`; ACME v2 with HTTP-01 against any RFC 8555 CA, JWS ES256

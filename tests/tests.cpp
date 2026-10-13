@@ -3941,6 +3941,33 @@ static void test_control_sites() {
         CHECK(json::parse(R"({"aliases":[]})", body, err));
         (void)apply_request(body, cfg, canon, ce);
         CHECK(ce.find("an alias it named was removed") != std::string::npos);
+        // redirects (alpha.83): the list judged by the loader's own parse, rendered as the file's tables, [] clears
+        SiteSpec rd = spec;
+        rd.canonical.clear();
+        std::string re;
+        CHECK(json::parse(R"({"redirects":[{"from":"/blog","to":"/news","status":301},{"from":"/old","match":"exact","status":410}]})", body, err));
+        (void)apply_request(body, cfg, rd, re);
+        CHECK(re.empty() && rd.redirects.items().size() == 2);
+        const std::string rt = render_site(rd, "x");
+        CHECK(rt.find("\n[[site.redirect]]\nfrom = \"/blog\"\nto = \"/news\"\nstatus = 301\n") != std::string::npos &&
+              rt.find("\n[[site.redirect]]\nfrom = \"/old\"\nmatch = \"exact\"\nstatus = 410\n") != std::string::npos);
+        SiteSpec back_rd;
+        CHECK(SiteSpec::from_json(rd.to_json(), back_rd) && back_rd.redirects.items().size() == 2);
+        CHECK(json::parse(R"({"redirects":[{"from":"/a","to":"/b"}]})", body, err));
+        (void)apply_request(body, cfg, rd, re);
+        CHECK(re.find("'status' is required") != std::string::npos);
+        re.clear();
+        CHECK(json::parse(R"({"redirects":[{"from":"/a","to":"/a/b","status":301}]})", body, err));
+        (void)apply_request(body, cfg, rd, re);
+        CHECK(re.find("redirect in a circle") != std::string::npos);
+        re.clear();
+        CHECK(json::parse(R"({"redirects":[{"from":"/a","to":"/b","status":301,"color":"red"}]})", body, err));
+        (void)apply_request(body, cfg, rd, re);
+        CHECK(re.find("unknown key 'color'") != std::string::npos);
+        re.clear();
+        CHECK(json::parse(R"({"redirects":[]})", body, err));
+        (void)apply_request(body, cfg, rd, re);
+        CHECK(re.empty() && rd.redirects.items().empty() && render_site(rd, "x").find("[[site.redirect]]") == std::string::npos);
     }
     CHECK(text.find("user = \"shop\"") != std::string::npos && text.find("tls = \"auto\"") != std::string::npos);
     CHECK(text.find("\nhsts = true") != std::string::npos && text.find("server_name = [\"shop.test\", \"www.shop.test\"]") != std::string::npos);
@@ -5874,6 +5901,26 @@ static void test_redirect_rules() {
     CHECK_EQ(load(root + "[[site.access]]\npath = \"/admin\"\nallow = [\"10.0.0.0/8\"]\n", rr("/admin/old", "to = \"/admin/new\"\nstatus = 301\n")),
              std::string("ok:redirect_under_protection;"));
     CHECK(load(root + "redirect = \"https://new.test\"\n", "").find("is gone (alpha.82)") != std::string::npos);
+    // path_check names the deciding rule (alpha.83): after refuse, before access; the preview's loader.
+    std::ofstream(dir / "r.toml") << "[[site]]\nserver_name = [\"r.test\"]\nlisten = [\"127.0.0.1:18731\"]\nroot = \"www\"\nrefuse = [\"/blog/secret/\"]\n" +
+                                         rr("/blog", "to = \"/news\"\nstatus = 301\n") + rr("/gone", "status = 410\n") +
+                                         rr("/index.php?page=about", "match = \"exact\"\nto = \"/about\"\nstatus = 301\n");
+    const Config pc = load_config(dir / "r.toml");
+    std::string perr;
+    json::Value pv = control::path_check(pc, pc.sites[0], "/blog/2024/x?y=1", perr);
+    CHECK(perr.empty() && pv.get("decision") == "redirect" && pv["status"].num() == 301 && pv.get("redirect_location") == "/news/2024/x?y=1" &&
+          pv["redirect"].get("from") == "/blog" && pv["redirect"].get("cache_control") == "max-age=86400");
+    CHECK(control::path_check(pc, pc.sites[0], "/gone/x", perr).get("decision") == "gone");
+    CHECK(control::path_check(pc, pc.sites[0], "/index.php?page=about", perr).get("redirect_location") == "/about");
+    CHECK(control::path_check(pc, pc.sites[0], "/blog/secret/x", perr).get("decision") == "refused");  // refuse first
+    CHECK(control::path_check(pc, pc.sites[0], "/blogger", perr).get("decision") != "redirect");
+    SiteConfig preview = pc.sites[0];
+    json::Value proposed;
+    CHECK(json::parse(R"([{"from":"/blogger","match":"exact","to":"/b","status":302}])", proposed, perr));
+    CHECK(load_redirect_rules(proposed, preview).empty() && preview.redirects.rules.size() == 1 && pc.sites[0].redirects.rules.size() == 3);
+    CHECK(control::path_check(pc, preview, "/blogger", perr).get("redirect_location") == "/b");
+    CHECK(json::parse(R"([{"from":"/x","to":"/x/y","status":301}])", proposed, perr));
+    CHECK(load_redirect_rules(proposed, preview).find("redirect in a circle") != std::string::npos);
     fs::remove_all(dir);
 }
 
@@ -7965,7 +8012,9 @@ static void test_mcp_texts() {
         CHECK(word.find('_') == std::string::npos || word == "run_as_root" || names.count(word));
         i = j == i ? i + 1 : j;
     }
-    CHECK(update.find("no location key redirects") != std::string::npos && ins.find("(a redirect,") == std::string::npos);
+    // Path redirects are site_update's redirects field (alpha.83), never a root additions file.
+    CHECK(update.find("is redirects (the field says how") != std::string::npos && update.find("never a root additions file") != std::string::npos &&
+          ins.find("(a redirect,") == std::string::npos);
 }
 
 static void test_packaged_logrotate() {

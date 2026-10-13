@@ -11,6 +11,7 @@
 #endif
 #include <iostream>
 #include <iterator>
+#include <sstream>
 #include <string>
 
 #include "config.hpp"
@@ -77,6 +78,7 @@ void usage() {
                  "                           site-task-output NAME [--offset N] [--length N] [--raw] (admin)\n"
                  "                      site-update NAME --set KEY=VALUE ... (settings [NAME] lists the keys and ceilings)\n"
                  "                      site-update NAME --login-path /login ... (where the fail2ban jail counts attempts)\n"
+                 "                      site-update NAME --redirect \"/blog /news 301\" --gone /old ... (path redirects)\n"
                  "                      site-update NAME --restrict PATH=ADDR[,ADDR...] ... (only those addresses reach PATH)\n"
                  "                      site-update NAME --restrict-admin ADDR[,ADDR...] [--admin-login] [--admin-language L]...\n"
                  "                      site-update NAME --auth PATH | --auth-exact PATH | --auth-open PATH ... [--auth-realm TEXT]\n"
@@ -333,9 +335,19 @@ int main(int argc, char** argv) {
                              "                    composer.json or *.yaml in any directory, * within one segment\n"
                              "                    (/ext/*/Resources/Private/), ** any number of directories (/a/**/*.ts); given\n"
                              "                    together they replace the site's list and keep its other rules; --no-refuse clears it\n"
+                             "        --redirect \"FROM TO STATUS\", --redirect-exact \"FROM TO STATUS\", --gone FROM (site-create,\n"
+                             "                    site-update and path-check, repeatable): path redirects. FROM and everything below it\n"
+                             "                    (or FROM alone; an exact one may name query parameters: /index.php?page=about) to TO,\n"
+                             "                    a path of the site or an https:// URL; STATUS 301 or 308 for a move for good, 302 or 307\n"
+                             "                    for now (307 and 308 keep a POST a POST); --gone FROM answers 410. The most specific\n"
+                             "                    rule decides, never the order; the rest of the path and the query are kept.\n"
+                             "                    --redirects-file F adds a JSON list ([{\"from\", \"to\", \"status\", \"match\", \"remainder\",\n"
+                             "                    \"query\", \"cache\"}], a migration's list); given together they replace the site's rules;\n"
+                             "                    --no-redirects clears them. With path-check they are a preview: nothing changes\n"
                              "        path-check NAME PATH: what the site does with a GET for PATH and why, as the server decides\n"
-                             "                    it: refused (by which refuse pattern or refusal by name), the file served, the script run,\n"
-                             "                    the application it goes to; every step on the way (try_files, index, redirects) (viewer)\n"
+                             "                    it: refused (by which refuse pattern or refusal by name), redirected (by which rule, to\n"
+                             "                    which Location), the file served, the script run, the application it goes to; every\n"
+                             "                    step on the way (try_files, index, internal redirects) (viewer)\n"
                              "        access-check NAME PATH ADDRESS: which access rule decides PATH for a client at ADDRESS,\n"
                              "                    allowed or refused (viewer); the path as the client sends it, the address as the\n"
                              "                    server sees it (the 403 page shows it)\n"
@@ -529,6 +541,38 @@ int main(int argc, char** argv) {
                     list.push(v);
                     body.set("login_paths", list);
                 } else if (b == "--no-login-paths") body.set("login_paths", agensio::json::Value::array());
+                else if (b == "--redirect" || b == "--redirect-exact" || b == "--gone") {
+                    // Path redirects (docs/redirects.md 5): "FROM TO STATUS", the target and the status the
+                    // last two words (a path may hold '=', a target ':'); --gone FROM is a 410.
+                    std::string v; value(v);
+                    agensio::json::Value rule = agensio::json::Value::object();
+                    if (b == "--gone") {
+                        rule.set("from", v).set("status", 410);
+                    } else {
+                        const std::size_t s2 = v.rfind(' ');
+                        const std::size_t s1 = s2 == std::string::npos || s2 == 0 ? std::string::npos : v.rfind(' ', s2 - 1);
+                        if (s1 == std::string::npos || s1 == 0) { std::cerr << "ctl: " << b << " needs \"FROM TO STATUS\" (for example: \"/blog /news 301\")\n"; return 2; }
+                        rule.set("from", v.substr(0, s1)).set("to", v.substr(s1 + 1, s2 - s1 - 1)).set("status", std::atoi(v.c_str() + s2 + 1));
+                        if (b == "--redirect-exact") rule.set("match", "exact");
+                    }
+                    agensio::json::Value list = body["redirects"].is_array() ? body["redirects"] : agensio::json::Value::array();
+                    list.push(rule);
+                    body.set("redirects", list);
+                } else if (b == "--redirects-file") {  // a JSON list of rules: a migration's list
+                    std::string v; value(v);
+                    std::ifstream in(v);
+                    std::stringstream text;
+                    text << in.rdbuf();
+                    agensio::json::Value given;
+                    std::string why;
+                    if (!in || !agensio::json::parse(text.str(), given, why) || !given.is_array()) {
+                        std::cerr << "ctl: --redirects-file " << v << " is not a readable JSON list of rules ([{\"from\": \"/old\", \"to\": \"/new\", \"status\": 301}])" << (why.empty() ? "" : ": " + why) << "\n";
+                        return 2;
+                    }
+                    agensio::json::Value list = body["redirects"].is_array() ? body["redirects"] : agensio::json::Value::array();
+                    for (const auto& r : given.items()) list.push(r);
+                    body.set("redirects", list);
+                } else if (b == "--no-redirects") body.set("redirects", agensio::json::Value::array());
                 else if (b == "--trusted-proxy") {
                     std::string v; value(v);
                     agensio::json::Value list = body["trusted_proxies"].is_array() ? body["trusted_proxies"] : agensio::json::Value::array();
@@ -651,6 +695,14 @@ int main(int argc, char** argv) {
                     else { char h[4]; std::snprintf(h, sizeof h, "%%%02X", static_cast<unsigned char>(c)); q += h; }
                 }
                 path = "/v1/sites/" + site_name + "/path?path=" + q;
+                if (body["redirects"].is_array()) {  // proposed rules: a preview, nothing changes
+                    std::string r;
+                    for (const char c : body["redirects"].dump()) {
+                        if (std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-' || c == '_' || c == ':') r.push_back(c);
+                        else { char h[4]; std::snprintf(h, sizeof h, "%%%02X", static_cast<unsigned char>(c)); r += h; }
+                    }
+                    path += "&redirects=" + r;
+                }
             }
             else if (command == "validate") path = "/v1/config/validate";
             else if (command == "logs") path = "/v1/logs" + query;

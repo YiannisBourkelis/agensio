@@ -609,6 +609,10 @@ std::vector<AccessNotice> access_notices(const Config& cfg);
 // address, never its spelling (the alpha.58 report's finding 4: "[::1]" was looked for and "::1"
 // stored). Health, -t and the host-protection renderer share it.
 bool loopback_listen(std::string_view listen);
+// [[site.redirect]] rules sent as JSON objects (site_update's redirects, path_check's preview), judged
+// by the loader's own parse and checks against `site`, whose rules they replace (alpha.83): "" when
+// they load, else the loader's reason. The notes land in site.redirect_notes.
+std::string load_redirect_rules(const json::Value& rules, SiteConfig& site);
 // The names a site file's [[site]] blocks claim, read as the loader reads a file set aside (its
 // text scanned when it is not TOML): what site_update names when it cannot help (alpha.80).
 std::vector<std::string> claimed_names(const std::string& file);

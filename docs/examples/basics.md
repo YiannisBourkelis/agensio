@@ -413,8 +413,19 @@ curl -sI 'https://example.com/blog/2024/x?y=1' | grep -iE '^(HTTP|location|cache
 curl -sI 'http://www.old-shop.com/item/7' | grep -i location     # https://shop.example.com/item/7, one hop
 ```
 
-**On a managed site.** Not yet: the `site_update` field for rules comes in the next release; until
-then a site with rules is a hand-written file.
+**On a managed site.** The flags give the target and the status as the last two words; given
+together they replace the site's rules. `path-check` with proposed rules is a preview that
+changes nothing.
+
+```sh
+agensio ctl path-check example.com /blog/2024/x --redirect "/blog /news 301"          # the preview first
+agensio ctl site-update example.com --redirect "/blog /news 301" --redirect-exact "/about-us /about 301" --gone /press-2019 --yes --reason "the redesign's moves"
+agensio ctl site-update example.com --redirects-file moves.json --yes --reason "the old site's sitemap"   # [{"from": ..., "to": ..., "status": 301}, ...]
+agensio ctl path-check example.com /blog/2024/x                                         # the rule, the Location, the one hop
+```
+
+**MCP:** `site_update` with `redirects` = `[{"from": "/blog", "to": "/news", "status": 301}, ...]`
+(the list whole, `[]` clears it); `path_check` with `redirects` to preview; `site_show` lists them.
 
 **Reference:** [Path redirects](../configuration.md#14b-path-redirects-siteredirect),
 [redirects.md](../redirects.md) 5 and 6.

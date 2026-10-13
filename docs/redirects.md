@@ -1141,8 +1141,9 @@ a path that meets none, a redirect hit, and a TLS site with `hsts` against one w
    its `site_update` field and `ctl` flag (pulled forward from step 5 for the cookbook's managed
    recipe).
 3. **`[[site.redirect]]`** (3a built in alpha.82: the rules, the one hop, the load checks and
-   notes, `fuzz_redirect`, the string key `redirect` gone; 3b next: `site_update`, `path_check` and
-   its preview, the MCP texts): exact (with query parameters) and prefix rules, case-sensitive, `410`,
+   notes, `fuzz_redirect`, the string key `redirect` gone; 3b in alpha.83: `site_update`'s
+   `redirects` and the `ctl` flags, pulled forward from step 5 with the MCP texts of 11.2 and 12.3,
+   `path_check` naming the rule and its preview): exact (with query parameters) and prefix rules, case-sensitive, `410`,
    the checks of
    section 8, the preview, and `fuzz_redirect` over (`from`, `to`, path, query) asserting the
    `Location` is relative or names exactly the origin of `to`, never `//` or `/\`, never a

@@ -43,6 +43,10 @@ struct SiteSpec {
     // only .php that run], "cache": [{"path", "max_age"}], "front_controller": "/index.php"};
     // normalised by check_rules, rendered as locations of the managed file.
     json::Value rules;
+    // Path redirects (docs/redirects.md 5, alpha.83): [[site.redirect]] rules as objects (from,
+    // match, to, status, remainder, query, cache), the list sent whole; judged by the loader's own
+    // parse and checks (load_redirect_rules) and rendered as tables of the managed file.
+    json::Value redirects;
     // Where the application's login form or authenticating API is posted to, on top of the
     // preset's known paths (2026-10-02): the rendered fail2ban jail counts attempts there;
     // nothing is served or refused by it. Plain paths (check_login_path), at most 16.

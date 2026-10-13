@@ -256,7 +256,32 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
             return false;
         }
         std::string error;
-        json::Value v = control::path_check(cfg, *site, control::query_value(req.target, "path"), error);
+        // Proposed path redirects (docs/redirects.md 8, alpha.83): the answer as if they replaced the
+        // site's own, checked as the loader would; nothing changes.
+        const std::string proposed = control::query_value(req.target, "redirects");
+        SiteConfig preview;
+        if (!proposed.empty()) {
+            json::Value rules;
+            std::string perr;
+            if (!json::parse(proposed, rules, perr)) {
+                reply(s, 400, json::Value::object().set("error", "redirects is not JSON: " + perr));
+                return false;
+            }
+            preview = *site;
+            if (const std::string why = load_redirect_rules(rules, preview); !why.empty()) {
+                reply(s, 400, json::Value::object().set("error", why));
+                return false;
+            }
+        }
+        json::Value v = control::path_check(cfg, proposed.empty() ? *site : preview, control::query_value(req.target, "path"), error);
+        if (!proposed.empty() && error.empty()) {
+            v.set("preview", true);
+            if (!preview.redirect_notes.empty()) {
+                json::Value notes = json::Value::array();
+                for (const auto& [code, text] : preview.redirect_notes) notes.push(json::Value::object().set("code", code).set("text", text));
+                v.set("redirect_notes", std::move(notes));
+            }
+        }
         if (!error.empty()) reply(s, 400, json::Value::object().set("error", error));
         else reply(s, 200, v);
     } else if (path.starts_with("/v1/sites/") && path.ends_with("/tasks")) {

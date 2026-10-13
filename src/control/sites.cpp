@@ -82,6 +82,7 @@ json::Value SiteSpec::to_json() const {
     if (!php_version.empty()) v.set("php_version", php_version);
     if (settings.is_object() && !settings.members().empty()) v.set("settings", settings);
     if (rules.is_object() && !rules.members().empty()) v.set("rules", rules);
+    if (!redirects.items().empty()) v.set("redirects", redirects);
     if (!login_paths.empty()) v.set("login_paths", strings(login_paths));
     if (!access_log.empty()) v.set("access_log", access_log);
     v.set("listen_plain", listen_plain).set("listen_tls", listen_tls);
@@ -116,6 +117,7 @@ bool SiteSpec::from_json(const json::Value& v, SiteSpec& out) {
     out.php_version = v.get("php_version");
     if (v["settings"].is_object()) out.settings = v["settings"];
     if (v["rules"].is_object()) out.rules = v["rules"];
+    if (v["redirects"].is_array()) out.redirects = v["redirects"];
     out.login_paths = string_list(v["login_paths"]);
     if (out.settings["children"].type() == json::Value::Type::number) out.php_children = static_cast<int>(out.settings["children"].num());
     out.access_log = v.get("access_log");
@@ -721,6 +723,24 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
         }
         spec.rules = normalised;
     }
+    // Path redirects (docs/redirects.md 5, alpha.83): the whole list ([] or null clears it), judged
+    // by the loader's own parse and checks on the site's names; the reload judges them again with
+    // the site's refuse patterns, ports and protections, and undoes a refused change.
+    if (has_key(body, "redirects")) {
+        const json::Value& given = body["redirects"];
+        if (given.is_null() || (given.is_array() && given.items().empty())) {
+            spec.redirects = json::Value();
+        } else {
+            SiteConfig probe;
+            probe.server_names = {spec.domain};
+            for (const auto& a : spec.aliases) probe.server_names.push_back(a);
+            if (const std::string why = load_redirect_rules(given, probe); !why.empty()) {
+                error = why;
+                return needs;
+            }
+            spec.redirects = given;
+        }
+    }
     // The login paths (2026-10-02): given whole, each a plain URL path (check_login_path), at
     // most 16, [] clears them. They change no location: the fail2ban jail counts attempts there.
     if (has_key(body, "login_paths")) {
@@ -1044,6 +1064,13 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
         if (spec.hsts) out += "hsts = true   # Strict-Transport-Security on every HTTPS answer, a year (docs/redirects.md 4)\n";
     }
     rules_locations(out);
+    // Path redirects as the site file's own tables; their keys are the reference's (load_redirect_rules
+    // refused any other), their values strings or numbers.
+    for (const auto& r : spec.redirects.items()) {
+        out += "\n[[site.redirect]]\n";
+        for (const auto& [k, v] : r.members())
+            out += k + " = " + (v.is_string() ? toml_string(v.str()) : std::to_string(static_cast<long long>(v.num()))) + "\n";
+    }
     return out;
 }
 

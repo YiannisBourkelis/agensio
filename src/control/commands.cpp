@@ -1,6 +1,7 @@
 #include "control/commands.hpp"
 
 #include "core/access.hpp"
+#include "core/redirect.hpp"
 #include "core/refuse.hpp"
 #include "core/router.hpp"
 #include "core/script_split.hpp"
@@ -328,6 +329,17 @@ json::Value site_summary(const SiteConfig& s, std::time_t now, const TlsFacts* t
     return v;
 }
 
+// A [[site.redirect]] rule as site_show and path_check give it (docs/redirects.md 5): as written,
+// with the lifetime it sends.
+json::Value redirect_rule_json(const RedirectRule& r) {
+    json::Value j = json::Value::object().set("from", r.text).set("match", r.exact ? "exact" : "prefix").set("status", r.status);
+    if (r.status != 410) j.set("to", r.to);
+    if (!r.exact && r.status != 410 && !r.keep_remainder) j.set("remainder", "drop");
+    if (r.status != 410 && r.keep_query == !r.params.empty()) j.set("query", r.keep_query ? "keep" : "drop");
+    j.set("cache_control", r.cache_control.empty() ? json::Value(nullptr) : json::Value(r.cache_control));
+    return j;
+}
+
 json::Value upstream_json(const UpstreamConfig& u) {
     json::Value a = json::Value::array();
     for (const auto& addr : u.addresses) a.push(addr.key);
@@ -517,6 +529,33 @@ json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_vi
                                               (other ? ", for the way an application may read it (a ;parameter, a second decoding or the path after a script)" : ""));
         }
         if (!site.refuse.empty()) steps.push(path + ": no refuse pattern matches");
+        // Path redirects (docs/redirects.md 5): after refuse, before the access and password rules,
+        // on the path the client asked for only, never a target try_files or an index reached.
+        if (hop == 0 && !site.redirects.empty()) {
+            const std::size_t qm = raw_path.find('?');
+            const std::string_view query = qm == std::string_view::npos ? std::string_view() : raw_path.substr(qm + 1);
+            if (const RedirectRule* r = redirect::match(site.redirects, path, query, encoded)) {
+                v.set("redirect", redirect_rule_json(*r));
+                if (r->status == 410) return finish("gone", 410, "410: the rule from \"" + r->text + "\" answers that " + path + " is gone, with no new address");
+                std::string loc;
+                redirect::write_location(loc, *r, path, query, "");
+                v.set("redirect_location", loc);
+                const bool validation = path.starts_with("/.well-known/acme-challenge/") || path.starts_with("/.well-known/pki-validation/");
+                if (site.http_redirect && !validation) {  // from plain HTTP: scheme and rule in one hop (docs/redirects.md 1)
+                    std::string name = site.canonical.empty() ? site.server_names.front() : site.canonical;
+                    if (name == "*") name = "<the name asked>";
+                    std::string origin = "https://" + name + (site.https_port != 443 ? ":" + std::to_string(site.https_port) : std::string());
+                    std::string hop_loc;
+                    redirect::write_location(hop_loc, *r, path, query, origin);
+                    v.set("plain_http", std::to_string(r->status) + " to " + hop_loc + " in one hop: the scheme and the rule");
+                }
+                return finish("redirect", r->status,
+                              std::to_string(r->status) + " to " + loc + " by the rule from \"" + r->text + "\"" + (r->exact ? " (exact)" : "") +
+                                  (r->cache_control.empty() ? std::string() : ", which browsers keep (" + r->cache_control + ")") +
+                                  "; it answers before the site's access and password rules");
+            }
+            steps.push(path + ": no redirect rule matches");
+        }
         // The script the path runs, which an exact rule judges too (access::script_of, the alpha.58
         // report's finding 1): named, and a rule that covers it shown as the path's.
         std::string script;
@@ -752,6 +791,17 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now, const 
         json::Value list = json::Value::array();
         for (const auto& p : s.refuse.patterns) list.push(p.text);
         v.set("refuse", std::move(list));
+    }
+    // Path redirects (docs/redirects.md 5): the rules in force, and what the load noted about them.
+    if (!s.redirects.empty()) {
+        json::Value list = json::Value::array();
+        for (const auto& r : s.redirects.rules) list.push(redirect_rule_json(r));
+        v.set("redirects", std::move(list));
+        if (!s.redirect_notes.empty()) {
+            json::Value notes = json::Value::array();
+            for (const auto& [code, text] : s.redirect_notes) notes.push(json::Value::object().set("code", code).set("text", text));
+            v.set("redirect_notes", std::move(notes));
+        }
     }
     (void)cfg;
     return v;

@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.1.0-alpha.83
+
+- **Path redirects on a managed site, and `path_check` for them** (`docs/redirects.md` 5, 8,
+  configuration.md 14b). `site_create` / `site_update` take `redirects`, the site's rules as
+  objects (`from`, `to`, `status`, `match`, `remainder`, `query`, `cache`), the list sent whole
+  (`[]` clears it), judged by the loader's own parse and checks before the file is written and by
+  the reload after, which undoes a refused change; they are rendered as the file's
+  `[[site.redirect]]` tables. `agensio ctl --redirect "FROM TO STATUS"`, `--redirect-exact`,
+  `--gone FROM`, `--redirects-file rules.json` (a migration's list), `--no-redirects`; given together
+  they replace the list. `path_check` names the rule that decides a path (`decision` redirect or
+  gone, `redirect`, `redirect_location`, and `plain_http` the one hop from plain HTTP), after
+  `refuse` and before the access rules as a request meets them; with proposed rules (`ctl
+  path-check NAME PATH --redirect ...`, MCP `path_check` `redirects`) it answers as if they applied,
+  checked as the loader would, and changes nothing (`preview: true`, the load's notes). `site_show`
+  lists the rules in force and their notes. The MCP texts carry what other platforms do
+  differently (the most specific rule decides, not the first; a status always given; a placeholder
+  at the end of a target is a prefix rule; a status 200 line is a rewrite). Security page row 42.
+  The integration checks (a managed site's rules through `site_create`, the `ctl` flags,
+  `path-check` and a preview through `ctl` and MCP) failed on alpha.82. Control-plane code only:
+  no A/B.
+
 ## 0.1.0-alpha.82 (2026-10-13)
 
 - **Path redirects: `[[site.redirect]]`** (`docs/redirects.md` 5, configuration.md 14b). A rule

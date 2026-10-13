@@ -4001,4 +4001,31 @@ SiteConfig control_site() {
     return site;
 }
 
+// [[site.redirect]] rules sent as JSON (alpha.83): the loader's own parse and checks (config.hpp).
+std::string load_redirect_rules(const json::Value& rules, SiteConfig& site) {
+    if (!rules.is_array()) return "redirects must be a list of rules: [{\"from\": \"/old\", \"to\": \"/new\", \"status\": 301}] ([] for none)";
+    // The rules as the TOML tables a site file holds, so the loader's own parse and checks judge them.
+    toml::array arr;
+    for (const auto& r : rules.items()) {
+        if (!r.is_object()) return "each redirect is an object: {\"from\": \"/old\", \"to\": \"/new\", \"status\": 301}";
+        toml::table t;
+        for (const auto& [k, v] : r.members()) {
+            if (v.is_string()) t.insert(k, std::string(v.str()));
+            else if (v.type() == json::Value::Type::number) t.insert(k, static_cast<std::int64_t>(v.num()));
+            else return "redirect field '" + k + "' must be a string or a number";
+        }
+        arr.push_back(std::move(t));
+    }
+    site.redirects = {};
+    site.redirects_all = false;
+    site.redirect_notes.clear();
+    try {
+        parse_redirects(arr, site, "redirects");
+        check_redirects(site, "redirects");
+    } catch (const std::exception& e) {
+        return e.what();
+    }
+    return "";
+}
+
 }  // namespace agensio

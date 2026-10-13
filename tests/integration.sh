@@ -1422,6 +1422,32 @@ check "canonical on a managed site: a name that is not the site's is refused, th
   "400 201 yes 308 https://cm.wild.test:8471/y max-age=86400 -" \
   "$(cpost /v1/sites "{\"domain\":\"cm.wild.test\",\"aliases\":[\"cm2.wild.test\"],\"canonical\":\"x.wild.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-wild/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-wild/key.pem\"},\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/bench/www\",\"listen_plain\":\"127.0.0.1:8472\",\"listen_tls\":\"127.0.0.1:8471\",\"confirm\":true,\"reason\":\"canon\"}") $(cpost /v1/sites "{\"domain\":\"cm.wild.test\",\"aliases\":[\"cm2.wild.test\"],\"canonical\":\"cm.wild.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-wild/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-wild/key.pem\"},\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/bench/www\",\"listen_plain\":\"127.0.0.1:8472\",\"listen_tls\":\"127.0.0.1:8471\",\"confirm\":true,\"reason\":\"canon\"}") $(grep -q '^canonical = "cm.wild.test"' bench/tmp/sites.d/cm.wild.test.toml && echo yes || echo no) $(hop https 8471 /y cm2.wild.test)"
 cpost /v1/sites/cm.wild.test/delete '{"confirm":true,"reason":"canon"}' > /dev/null
+# Path redirects on a managed site (alpha.83, docs/redirects.md 5, 8): site_create's redirects
+# rendered as the file's tables, the ctl flags replacing the list, path-check naming the rule, a
+# preview of proposed rules through ctl and MCP that changes nothing, site_show listing the rules.
+check "redirects on a managed site: site_create renders them, a request is redirected; a rule that loops is refused" \
+  "201 yes 301 /news/x 400" \
+  "$(cpost /v1/sites "{\"domain\":\"rm.wild.test\",\"https\":\"none\",\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/bench/www\",\"listen_plain\":\"127.0.0.1:8477\",\"redirects\":[{\"from\":\"/blog\",\"to\":\"/news\",\"status\":301}],\"confirm\":true,\"reason\":\"rd\"}") $(grep -q '^\[\[site.redirect\]\]' bench/tmp/sites.d/rm.wild.test.toml && echo yes || echo no) $(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Host: rm.wild.test' http://127.0.0.1:8477/blog/x | sed 's#http://127.0.0.1:8477##') $(cpost /v1/sites/rm.wild.test '{"redirects":[{"from":"/a","to":"/a/b","status":301}],"confirm":true,"reason":"rd"}')"
+"$BIN" ctl site-update rm.wild.test --redirect "/old /new 308" --gone /press --yes --reason rd --socket $CS > /dev/null 2>&1
+check "redirects through ctl: the flags replace the list, --gone answers 410; path-check names the rule and the Location" \
+  "308 410 404 redirect /new/x" \
+  "$(code -H 'Host: rm.wild.test' http://127.0.0.1:8477/old/x) $(code -H 'Host: rm.wild.test' http://127.0.0.1:8477/press) $(code -H 'Host: rm.wild.test' http://127.0.0.1:8477/blog/x) $("$BIN" ctl path-check rm.wild.test /old/x --socket $CS 2>/dev/null | python3 -c 'import json,sys; t=sys.stdin.read(); d=json.loads(t[t.index("{"):]); print(d["decision"], d["redirect_location"])')"
+check "a preview of proposed rules through ctl and MCP: path-check answers as if they applied, the site is unchanged; site_show lists the rules in force" \
+  "/offers True 404 /sale True 2" \
+  "$("$BIN" ctl path-check rm.wild.test /promo --redirect-exact '/promo /offers 302' --socket $CS 2>/dev/null | python3 -c 'import json,sys; t=sys.stdin.read(); d=json.loads(t[t.index("{"):]); print(d.get("redirect_location"), d.get("preview"))') $(code -H 'Host: rm.wild.test' http://127.0.0.1:8477/promo) $(python3 - "$BIN" "$CS" <<'PYT'
+import json, subprocess, sys
+p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+def rpc(i, method, params):
+    p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": i, "method": method, "params": params}) + "\n"); p.stdin.flush()
+    return json.loads(p.stdout.readline())
+r = rpc(1, "tools/call", {"name": "path_check", "arguments": {"name": "rm.wild.test", "path": "/summer", "redirects": [{"from": "/summer", "match": "exact", "to": "/sale", "status": 302}]}})["result"]
+d = r.get("structuredContent") or {}
+s = rpc(2, "tools/call", {"name": "site_show", "arguments": {"name": "rm.wild.test"}})["result"].get("structuredContent") or {}
+print(d.get("redirect_location"), d.get("preview"), len(s.get("redirects", [])))
+p.stdin.close(); p.wait()
+PYT
+)"
+cpost /v1/sites/rm.wild.test/delete '{"confirm":true,"reason":"rd"}' > /dev/null
 # [[site.redirect]] (docs/redirects.md 5, alpha.82): the design's examples over HTTPS (relative
 # Locations), the order against refuse and the access rules, case and encoded separators, and over
 # plain HTTP scheme, host and rule in one hop; a domain that moved; the load refusals and notes.
