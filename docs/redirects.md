@@ -132,11 +132,11 @@ http = "redirect"                # redirect only clients that really used plain 
 |---|---|
 | `X-Forwarded-Proto: https`, `/shop` | served |
 | `X-Forwarded-Proto: http`, `/shop` | `308 → https://example.com/shop` |
-| no `X-Forwarded-Proto` | `308 → https://...`, taken as plain HTTP; the error log and health name the proxy (2.5) |
+| no `X-Forwarded-Proto` | `308 → https://...`, taken as plain HTTP; the error log and health name the proxy (below) |
 | a client that is not a trusted proxy, sending `X-Forwarded-Proto: https` | `308 → https://...`: the field is not believed from it |
 
 `trusted_proxies` is a key of `[server]`, so it lives in the main configuration file (root's); the
-site itself can be in its own file under `sites.d/`. The key does not put the server behind the
+site itself can be in its own file under `sites.d/`, and can narrow the list for itself (below). The key does not put the server behind the
 proxy: it says to believe `X-Forwarded-For` and `X-Forwarded-Proto` from those addresses only, so
 a site whose visitors connect directly is unaffected, and both share port 80, the site being chosen
 by name as always:
@@ -165,6 +165,79 @@ visitors who came over HTTPS would be redirected again and again. agensio still 
 request as plain (it never serves plain HTTP by mistake), and says why: the error log, once a
 minute, and health (`proxy_scheme_missing`) name the proxy, "173.245.49.12 sends no
 X-Forwarded-Proto; its requests are taken as plain HTTP", so the loop has a visible cause.
+
+#### Sites behind different proxies: a site's own `trusted_proxies` (decided 2026-10-13)
+
+One list for the server means every site believes every proxy on it. With two sites behind two
+CDNs, `example.com` would believe CDN B too. A CDN's addresses are shared by all its customers:
+anyone can open an account with CDN B, point it at this server's address and send requests for
+`example.com`, and agensio would believe what they carry: the scheme, and the client address that
+access rules, password exceptions (`skip_for`), the logs, fail2ban and PHP's `REMOTE_ADDR` rely
+on. agensio takes the rightmost address it does not trust from `X-Forwarded-For`, so a field a
+client forged is ignored; what remains is a CDN that lets its customers' own edge code write those
+fields, and each CDN on the list adds its customers to everyone a site believes. So a site names
+the proxies that speak for it:
+
+```toml
+[addresses]
+cdn_a = ["173.245.48.0/20", "103.21.244.0/22"]
+cdn_b = ["198.51.100.0/24"]
+
+[server]
+trusted_proxies = ["@cdn_a", "@cdn_b"]      # every proxy allowed in front of this server
+
+[[site]]
+server_name = ["example.com"]
+listen = ["0.0.0.0:80"]
+root = "/var/www/example.com/web"
+http = "redirect"
+trusted_proxies = ["@cdn_a"]                # only CDN A speaks for this site
+```
+
+```toml
+# /etc/agensio/sites.d/example2.com.toml
+[[site]]
+server_name = ["example2.com"]
+listen = ["0.0.0.0:80"]
+root = "/var/www/example2.com/web"
+http = "redirect"
+trusted_proxies = ["@cdn_b"]                # only CDN B
+```
+
+| request | from | answer |
+|---|---|---|
+| `example.com`, `X-Forwarded-Proto: https` | CDN A | served; the client is the one CDN A names |
+| `example.com`, `X-Forwarded-Proto: https` | CDN B | `308 → https://example.com/...`: CDN B does not speak for this site, so the request is an ordinary visitor's, CDN B's address its client |
+| `example2.com`, `X-Forwarded-Proto: https` | CDN B | served |
+
+Without the key a site believes the server's whole list, as today; `trusted_proxies = []` makes a
+site whose visitors connect directly believe no proxy at all.
+
+1. **A site's list narrows, never widens.** Each entry must lie within the server's list; one that
+   does not is refused at load, naming it. Root decides in the main file which proxies may be
+   believed at all; a site, in its own file or through `site_update`, only picks among them. A
+   site that could add ranges would let whoever manages it make the server believe forged
+   addresses for it, and those would reach its access log, where fail2ban, whose bans hold for the
+   whole host, could be steered to ban anyone.
+2. **Named sets**: `trusted_proxies`, in `[server]` and in a site, takes the `[addresses]` sets the
+   access rules use (`@cdn_a`) beside ranges, so a CDN's published ranges live in one place and one
+   edit follows its changes.
+3. **Cost only where used**: a site without its own list keeps today's path, trust decided once per
+   connection from the server's list. A site with one adds one range check per request once the
+   site is known; the server's list still decides what is answered before a site is known (a
+   malformed request, a 421).
+
+Two rules come with it:
+
+- **No jail bans a trusted proxy.** The fail2ban jails agensio renders carry every range of
+  `[server] trusted_proxies` in `ignoreip` (jail.conf(5)). A proxy's own address reaches the log
+  when it sends a request without `X-Forwarded-For` and when a site does not trust it, and a ban in
+  the host's firewall would cut off every visitor that proxy carries, for every site behind it.
+  Today's jails lack this.
+- **What a site believes is visible.** `site_show` lists the proxies a site trusts; `access_check`
+  and `path_check` judge with the site's list; health notes, on a server whose list names more than
+  one set, each site that names none of its own (`site_trusts_every_proxy`, info), with the line to
+  add.
 
 ### 2.5 An application's own `http://` redirects
 
@@ -621,7 +694,7 @@ pattern (`/blog/x.html` to `/blog/x`) is one exact rule per page for now (5.4).
   round in a cycle; a rule no request can reach because a `refuse` pattern covers its whole
   `from`; two rules with the same `from`; `canonical` not among the names, or a wildcard;
   `http = "serve"` with `hsts`; a `to` with user information, a scheme other than http(s), or
-  control characters.
+  control characters; a site's `trusted_proxies` entry outside the server's list (2.4).
 - **Warned:** a chain (a rule's target is itself redirected by this site), with the direct
   target suggested; a rule from `/` with `remainder = "drop"` (every old page to one: a soft 404
   to search engines); a redirecting name the certificate does not cover; `hsts` subdomains binding
@@ -632,7 +705,8 @@ pattern (`/blog/x.html` to `/blog/x`) is one exact rule per page for now (5.4).
   has served for a week without a finding (section 4.2).
 - **Health, from the outside in:** `app_redirects_elsewhere` (the application's own address is
   another name, 3.4); `proxy_scheme_missing` (a trusted proxy sends no `X-Forwarded-Proto`, 2.4);
-  `hsts_narrows_application` (the server replaced a stronger HSTS the application sent, 4.1).
+  `hsts_narrows_application` (the server replaced a stronger HSTS the application sent, 4.1);
+  `site_trusts_every_proxy` (a site believes every proxy of a server that lists several, 2.4).
 - **`path_check`** names every step a request meets, with the exact `Location` and its cache
   lifetime: `http://www.example.com/blog/x: scheme (http = redirect), host (canonical
   example.com), rule /blog (301): 301 → https://example.com/news/x, cached 1 day`.
@@ -1016,7 +1090,8 @@ These are not redirects or response fields, but the reviews met them, and each i
   own `X-Real-IP`, `CF-Connecting-IP` or `True-Client-IP` through to the origin unless the site
   sets the field itself (`src/handlers/proxy.cpp`), and Vaultwarden (its login rate limits),
   Rocket.Chat, Grafana, Discourse's container, Plausible and Umami read one of them first. 17 of
-  the 25 official configurations set `X-Real-IP` to the client's address.
+  the 25 official configurations set `X-Real-IP` to the client's address. The fix follows a site's
+  own `trusted_proxies` (2.4): "from a trusted proxy" means trusted for that site.
 - **Error pages with their status**: `error_page = { 404 = "/404.html" }`. Ten of the 16 site
   generators make a `404.html` and every platform serves it with a 404; here a `try_files`
   fallback to it answers 200, a soft 404.
@@ -1060,3 +1135,11 @@ a path that meets none, a redirect hit, and a TLS site with `hsts` against one w
 
 Sites without `http` redirects, `canonical`, `hsts` or `[[site.redirect]]` keep today's request
 path: one test of an empty site field, measured flat.
+
+A site's own `trusted_proxies` (2.4) does not wait for these steps. It comes first, before the
+client-address fix of 12.4, which depends on it: the key and its narrowing check, the named sets
+in both lists, the site's list applied once the site is known (the failing test first: a request
+for a site from a proxy the server trusts and the site does not is redirected and logged with the
+proxy's address), `ignoreip` in the rendered jails, `site_show`, `access_check`, `path_check`,
+health, the `site_update` field, the reference row, the cookbook recipe and the MCP texts, with
+`bench/ab.sh <base> -A` for the routing step.
