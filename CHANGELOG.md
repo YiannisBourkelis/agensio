@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.82
+## 0.1.0-alpha.82 (2026-10-13)
 
 - **Path redirects: `[[site.redirect]]`** (`docs/redirects.md` 5, configuration.md 14b). A rule
   sends a path or a section elsewhere: `from` (a normalised path, case-sensitive; an exact rule may
