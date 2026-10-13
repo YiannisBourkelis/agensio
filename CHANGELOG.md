@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.84
+## 0.1.0-alpha.84 (2026-10-13)
 
 - **Health: HSTS suggested once HTTPS has proven itself, certificate findings raised with it, and an
   application that loops against `canonical`** (`docs/redirects.md` 3.4, 4.2; `docs/tls.md` 5).
