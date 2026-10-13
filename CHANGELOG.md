@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.75
+## 0.1.0-alpha.75 (2026-10-13)
 
 - **HSTS reached neither a managed site's PHP pages nor its error answers.** `hsts: true` on a
   managed site was rendered as a `/` location with `add_headers`, and a location's fields go only
