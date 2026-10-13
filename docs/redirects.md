@@ -1116,7 +1116,7 @@ Each step is its own commit, with tests that fail on the code before it, and an 
 request path changes (`bench/ab.sh <base> -A` with new rows: a site with 1,000 exact redirects on
 a path that meets none, a redirect hit, and a TLS site with `hsts` against one without).
 
-1. **The HSTS bug first:** a managed PHP site with `hsts: true` sends HSTS on its PHP pages and its
+1. **The HSTS bug first** (built in alpha.75): a managed PHP site with `hsts: true` sends HSTS on its PHP pages and its
    404s (fails today); `hsts` becomes a site setting, through the mechanism of `docs/headers.md`,
    replacing an application's own HSTS and noting a stronger one.
 2. **`http` and `canonical`:** one block for HTTP and HTTPS; `redirect = "https"` goes; the managed

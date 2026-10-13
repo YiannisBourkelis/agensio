@@ -1026,7 +1026,7 @@ check "cookbook: every recipe of docs/examples.md loads and names what exists (t
 # One broken site file never stops the others (design section 26; tests/isolation.sh, its own server).
 check "isolation: a site file that does not load is set aside, the other sites serve (tests/isolation.sh)" "0" \
   "$(tests/isolation.sh "$BIN" > bench/tmp/isolation.out 2>&1; echo $?)"
-check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 184 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
+check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 187 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
 check "secrets: the presets catalogue lists each preset's credential files" "/wp-config.php /sites/default/settings.php" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["wordpress"]["secrets"][0], p["drupal"]["secrets"][0])')"
 check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$("$BIN" ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; "$BIN" ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
@@ -1334,6 +1334,19 @@ if [ -n "$PHPFPM" ]; then
   check "access: rules.admin on a managed WordPress site refuses the admin, keeps admin-ajax.php, the login page and its files open" "200 1 403 200 200 200 200" "$(cpost /v1/sites/wpm.test '{"rules":{"admin":{"allow":["10.0.0.0/8"]}},"confirm":true,"reason":"adm"}') $(grep -c '^\[\[site.access\]\]   # rules: admin' bench/tmp/sites.d/wpm.test.toml) $(wpm /wp-admin/) $(wpm /wp-admin/admin-ajax.php) $(wpm /wp-login.php) $(wpm /wp-admin/css/login.css) $(wpm /wp-admin/load-styles.php)"
   check "access: rules.admin with login: true refuses the login page too; access-check names the admin rule; cleared, the admin answers again" "200 403 refused 200 200" "$(cpost /v1/sites/wpm.test '{"rules":{"admin":{"allow":["10.0.0.0/8"],"login":true}},"confirm":true,"reason":"adm"}') $(wpm /wp-login.php) $("$BIN" ctl access-check wpm.test /wp-login.php 127.0.0.1 --socket $CS | grep -o '^refused') $(cpost /v1/sites/wpm.test '{"rules":{},"confirm":true,"reason":"adm"}') $(wpm /wp-admin/)"
   cpost /v1/sites/wpm.test/delete '{"confirm":true,"reason":"adm"}' > /dev/null
+  # HSTS on every HTTPS answer of a managed site (docs/redirects.md 13.1, headers.md 12.1): before
+  # alpha.75 `hsts: true` was rendered as a / location with add_headers, which reached neither the PHP
+  # pages (another location) nor any error answer. One field each, an application's own replaced
+  # (hsts-own.php sends max-age=5), none over plain HTTP (the site's plain block redirects).
+  cpost /v1/sites "{\"domain\":\"hsts.wild.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-wild/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-wild/key.pem\"},\"hsts\":true,\"user\":null,\"app\":\"wordpress\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"root\":\"$ROOT/tests/wordpress\",\"listen_plain\":\"127.0.0.1:8452\",\"listen_tls\":\"127.0.0.1:8451\",\"confirm\":true,\"reason\":\"hsts\"}" > /dev/null
+  sts() { curl -sk ${2:-} -D - -o /dev/null --resolve hsts.wild.test:8451:127.0.0.1 "https://hsts.wild.test:8451$1" | tr -d '\r' | grep -i '^strict-transport-security:' | sed 's/^[^:]*: //' | paste -sd'|'; }
+  check "hsts: one Strict-Transport-Security on a managed site's PHP page, login page, static file, 404 and over an application's own; none over plain HTTP; HTTP/2 too" \
+    "max-age=31536000 max-age=31536000 max-age=31536000 max-age=31536000 max-age=31536000 0 max-age=31536000" \
+    "$(sts /) $(sts /wp-login.php) $(sts /wp-includes/wp.js) $(sts /wp-includes/nope.js) $(sts /hsts-own.php) $(curl -s -D - -o /dev/null -H 'Host: hsts.wild.test' http://127.0.0.1:8452/ | tr -d '\r' | grep -ci '^strict-transport-security:') $(sts /wp-includes/nope.js --http2)"
+  if [ "$H3" = 1 ] && curl -V 2>/dev/null | grep -q HTTP3; then
+    check "hsts: over HTTP/3 too (QPACK's static entry for the default value)" "max-age=31536000 max-age=31536000" "$(sts /wp-includes/nope.js --http3-only) $(sts / --http3-only)"
+  fi
+  cpost /v1/sites/hsts.wild.test/delete '{"confirm":true,"reason":"hsts"}' > /dev/null
   # TYPO3 without a preset (2026-10-08, the alpha.53 report's third finding): app = "php" and the
   # rules an agent translates from TYPO3 13.4's documented nginx configuration, through the MCP
   # bridge as an agent does it: path_check before, site_update as a dry run, then applied,

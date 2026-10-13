@@ -629,6 +629,7 @@ private:
         qpack::append_status(sec, r.status);
         if (!ws.server_line.empty()) encoder_.server(sec, cfg_.server_header);
         encoder_.date(sec, ws.now, ws.date.at(ws.now));
+        if (s.stream.fields && !s.stream.fields->hsts.empty()) encoder_.hsts(sec, s.stream.fields->hsts);  // the site's hsts
         if (!r.prebuilt_h3.empty()) {
             if (!r.content_type.empty()) encoder_.content_type(sec, r.content_type);
             if (!r.content_encoding.empty()) qpack::append_field(sec, "content-encoding", r.content_encoding);

@@ -373,6 +373,22 @@ static void test_hpack_encoder() {
     e.field(b3, "content-length", "3");
     e.field(b3, "vary", "Accept-Encoding");
     CHECK(same(decode(d, b3), {{"date", "Wed, 24 Sep 2026 10:00:01 GMT"}, {"etag", "\"abc\""}, {"set-cookie", "a=1"}, {"content-length", "3"}, {"vary", "Accept-Encoding"}}));
+    // A site's hsts (alpha.75, docs/redirects.md 4): inserted once by its static name (56), then one
+    // index byte; another site's value on the same connection takes an entry of its own.
+    {
+        Encoder he;  // a connection of its own: the checks below count the first one's entries
+        Decoder hd(4096);
+        std::string b4, b5, b6;
+        he.begin(b4);
+        he.hsts(b4, "max-age=31536000");
+        CHECK(same(decode(hd, b4), {{"strict-transport-security", "max-age=31536000"}}));
+        he.begin(b5);
+        he.hsts(b5, "max-age=31536000");
+        CHECK(b5.size() == 1 && same(decode(hd, b5), {{"strict-transport-security", "max-age=31536000"}}));
+        he.begin(b6);
+        he.hsts(b6, "max-age=63072000; includeSubDomains");
+        CHECK(same(decode(hd, b6), {{"strict-transport-security", "max-age=63072000; includeSubDomains"}}));
+    }
     CHECK(e.table_entries() == 5 && d.table_entries() == 5 && b3.find("\x1f\x28") != std::string::npos);  // set-cookie never indexed: 0001 + index 55
     // Fill the table with content types until server is evicted: it is re-inserted, the
     // decoder agrees at every step.
@@ -2405,17 +2421,21 @@ static void test_tasks() {
         CHECK(refused(django_site + "project = \"My-Site\"\n", "not a Python package name"));
         CHECK(check_project_name("mysite").empty() && check_project_name("my_site2").empty() && check_project_name("_x").empty() && !check_project_name("2site").empty() &&
               !check_project_name("django").empty() && !check_project_name("a.b").empty() && !check_project_name("").empty());
-        // A managed site file's HSTS "/" location (only add_headers) joins the preset's "/":
-        // before 2026-09-28 it replaced it, so a proxy preset's site served its project
-        // directory from disk (source included) and a PHP preset lost its front controller.
-        const std::string hsts_loc = "\n[[site.location]]\npath = \"/\"\nadd_headers = { \"Strict-Transport-Security\" = \"max-age=31536000\" }\n";
+        // A "/" location with only add_headers joins the preset's "/": before 2026-09-28 it replaced
+        // it, so a proxy preset's site served its project directory from disk (source included) and
+        // a PHP preset lost its front controller. (Until alpha.75 managed files sent HSTS that way.)
+        const std::string hsts_loc = "\n[[site.location]]\npath = \"/\"\nadd_headers = { \"X-Robots-Tag\" = \"noindex\" }\n";
         write("h.toml", "[[site]]\nserver_name = [\"h.test\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"app\"\napp = \"django\"\nproject = \"blog\"\n"
                         "upstream = \"http://127.0.0.1:3009\"\n" + hsts_loc);
         const Config hc = load_config(dir / "h.toml");
         const LocationConfig& hr = Router::location(hc.sites[0], "/blog/settings.py");
         CHECK(hr.kind == HandlerKind::proxy && hr.origin == "preset:django" && refused_suffix("/blog/settings.py", hr.deny_suffixes) &&
-              hr.add_headers.size() == 1 && hr.add_headers[0].first == "Strict-Transport-Security");
-        CHECK(app_context(hc, hc.sites[0]).hsts && !app_context(hc, hc.sites[0]).https_redirect);
+              hr.add_headers.size() == 1 && hr.add_headers[0].first == "X-Robots-Tag");
+        CHECK(!app_context(hc, hc.sites[0]).hsts && !app_context(hc, hc.sites[0]).https_redirect);
+        write("hh.toml", "[[site]]\nserver_name = [\"h.test\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"app\"\napp = \"django\"\nproject = \"blog\"\n"
+                         "upstream = \"http://127.0.0.1:3009\"\nhsts = true\n");
+        const Config hh = load_config(dir / "hh.toml");
+        CHECK(app_context(hh, hh.sites[0]).hsts);  // the site's hsts key tells Django's settings (security.W004)
         write("hr.toml", rails + hsts_loc);
         CHECK(Router::location(load_config(dir / "hr.toml").sites[0], "/app/models/user.rb").kind == HandlerKind::proxy);
         fs::create_directories(dir / "wp");
@@ -2447,7 +2467,7 @@ static void test_tasks() {
             hs.listen_plain = "127.0.0.1:1";
             hs.listen_tls = "127.0.0.1:2";
             const std::string file = control::render_site(hs, "x");
-            CHECK(file.find("Strict-Transport-Security") != npos);
+            CHECK(file.find("\nhsts = true") != npos && file.find("add_headers = { \"Strict-Transport-Security\"") == npos);
         }
         // The unit: PATH names each directory once (alpha.35 report, P4 d).
         write("p.toml", wag);
@@ -3792,7 +3812,7 @@ static void test_control_sites() {
     CHECK(text.find("listen = [\"0.0.0.0:80\"]\nredirect = \"https\"") != std::string::npos);
     CHECK(text.find("listen = [\"0.0.0.0:443\"]\nroot = ") != std::string::npos && text.find("app = \"laravel\"") != std::string::npos);
     CHECK(text.find("user = \"shop\"") != std::string::npos && text.find("tls = \"auto\"") != std::string::npos);
-    CHECK(text.find("Strict-Transport-Security") != std::string::npos && text.find("server_name = [\"shop.test\", \"www.shop.test\"]") != std::string::npos);
+    CHECK(text.find("\nhsts = true") != std::string::npos && text.find("server_name = [\"shop.test\", \"www.shop.test\"]") != std::string::npos);
     std::filesystem::create_directories(dir / "sites.d");
     err.clear();
     CHECK(write_site_file(site_file(cfg, "shop.test"), text, err) && err.empty());
@@ -5586,6 +5606,55 @@ static void test_protection() {
     unseen.failure_jails[0].filter_installed = false;
     ufiles.installed_jail = render_jail(unseen);
     CHECK(codes(unseen, none, ufiles) == "warn:firewall_limits_missing warn:fail2ban_missing");  // without our jails running, fail2ban_missing says it all
+    fs::remove_all(dir);
+}
+
+// hsts as a site key (alpha.75, docs/redirects.md 4): the field built once at load for every HTTPS
+// answer of the site; HSTS in a location's add_headers, which reached neither the PHP pages nor the
+// error answers, is refused with the key to use.
+static void test_hsts_key() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-hsts-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "www");
+    auto site = [&](const std::string& extra) {
+        std::ofstream(dir / "h.toml") << "[[site]]\nserver_name = [\"h.test\"]\nlisten = [\"127.0.0.1:18712\"]\nroot = \"www\"\n" + extra;
+    };
+    auto value = [&](const std::string& extra) {
+        site(extra);
+        try {
+            return load_config(dir / "h.toml").sites[0].tls_fields.hsts;
+        } catch (const std::exception& e) {
+            return std::string("refused: ") + e.what();
+        }
+    };
+    CHECK_EQ(value("hsts = true\n"), std::string("max-age=31536000"));
+    CHECK_EQ(value("hsts = { max_age = \"2y\", subdomains = true }\n"), std::string("max-age=63072000; includeSubDomains"));
+    CHECK_EQ(value("hsts = { max_age = 63072000 }\n"), std::string("max-age=63072000"));
+    CHECK_EQ(value("hsts = { max_age = \"1d\" }\n"), std::string("max-age=86400"));
+    CHECK_EQ(value("hsts = { max_age = 0 }\n"), std::string("max-age=0"));  // tells browsers to forget it
+    CHECK_EQ(value("hsts = { max_age = 315360000 }\n"), std::string("max-age=315360000"));
+    CHECK_EQ(value("hsts = false\n"), std::string());
+    CHECK_EQ(value(""), std::string());
+    site("hsts = true\n");
+    CHECK(load_config(dir / "h.toml").sites[0].tls_fields.h1 == "Strict-Transport-Security: max-age=31536000\r\n");
+    site("hsts = false\n");
+    CHECK(load_config(dir / "h.toml").sites[0].hsts == SiteConfig::Hsts::off);
+    site("");
+    CHECK(load_config(dir / "h.toml").sites[0].hsts == SiteConfig::Hsts::unset);
+    auto refused = [&](const std::string& extra, const char* needle) {
+        const std::string v = value(extra);
+        const bool hit = v.starts_with("refused: ") && v.find(needle) != std::string::npos;
+        if (!hit) std::printf("hsts: expected '%s', got '%s'\n", needle, v.c_str());
+        return hit;
+    };
+    CHECK(refused("hsts = { max_age = \"11y\" }\n", "at most ten years"));
+    CHECK(refused("hsts = { max_age = \"2x\" }\n", ".hsts.max_age must be seconds"));
+    CHECK(refused("hsts = { max_age = -1 }\n", ".hsts.max_age must be seconds"));
+    CHECK(refused("hsts = { subdomains = \"yes\" }\n", ".hsts.subdomains must be true or false"));
+    CHECK(refused("hsts = { preload = true }\n", "unknown key 'preload'"));
+    CHECK(refused("hsts = \"on\"\n", ".hsts must be true, false or a table"));
+    CHECK(refused("[[site.location]]\npath = \"/\"\nadd_headers = { \"Strict-Transport-Security\" = \"max-age=31536000\" }\n",
+                  "Strict-Transport-Security is the site's hsts key"));
     fs::remove_all(dir);
 }
 
@@ -7871,6 +7940,14 @@ static void test_qpack() {
     CHECK(got[3].name == "content-length" && got[3].value == "55");
     CHECK(got[4].name == "x-custom" && got[4].value == "v");
     CHECK(got[5].name == ":status" && got[5].value == "299");
+    // A site's hsts over HTTP/3 (alpha.75): the default value is the static entry 56, one byte.
+    {
+        qpack::Encoder qe;
+        std::string h;
+        qe.hsts(h, "max-age=31536000");
+        CHECK(h.size() == 1 && static_cast<unsigned char>(h[0]) == 0xf8);  // 11 + 111000: static index 56
+        CHECK(qpack::static_pair("strict-transport-security", "max-age=31536000", i) && i == 56);
+    }
     // A dynamic reference is refused (the table capacity is 0), as is a bad prefix.
     std::string dyn = std::string("\0\0", 2) + std::string("\x80", 1);
     arena.clear();
@@ -8767,6 +8844,7 @@ int main() {
 #endif
     test_unknown_keys();
     test_site_trusted_proxies();
+    test_hsts_key();
     test_site_isolation();
     test_served_record();
     test_hosting_isolation();

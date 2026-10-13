@@ -160,6 +160,12 @@ public:
     void date(std::string& out, std::time_t second, std::string_view value);
     void content_type(std::string& out, std::string_view value);
     void alt_svc(std::string& out, std::string_view value) { memo_field(out, 83, "alt-svc", value, alt_svc_); }
+    // strict-transport-security (a site's hsts, docs/redirects.md 4): the default value is the static
+    // entry 56 (RFC 9204 appendix A), one byte; any other remembered by name reference.
+    void hsts(std::string& out, std::string_view value) {
+        if (value == "max-age=31536000") append_indexed(out, 56);
+        else memo_field(out, 56, "strict-transport-security", value, hsts_);
+    }
     // Any field by static name index, remembered in `memo` (a scan of the table otherwise).
     struct Memo {
         std::uint64_t abs = 0;
@@ -238,7 +244,7 @@ private:
     std::size_t blocking_ = 0;  // pending sections that may block the peer
     Section* current_ = nullptr;
     std::uint64_t base_ = 0;
-    Memo server_, alt_svc_, ct_;
+    Memo server_, alt_svc_, ct_, hsts_;
     // The last content-type value's static lookup (eleven values are rows of appendix A): a
     // value repeats across a connection's answers, so the table is searched once per change.
     std::string ct_seen_;

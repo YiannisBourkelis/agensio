@@ -511,23 +511,23 @@ server_name = ["example.com", "www.example.com"]
 listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
 tls = "auto"
+hsts = true                    # Strict-Transport-Security, a year, on every HTTPS answer of the site
 
 [[site.location]]
-path = "/"                     # path and add_headers only: joins the location the site already has here
-add_headers = { "Strict-Transport-Security" = "max-age=31536000" }
-
-[[site.location]]
-path = "/assets/"              # a location's fields are its own: repeat HSTS here to keep it on every answer
-add_headers = { "Strict-Transport-Security" = "max-age=31536000", "Cache-Control" = "public, max-age=31536000, immutable" }
+path = "/assets/"              # path and add_headers only: joins the location the site already has here
+add_headers = { "Cache-Control" = "public, max-age=31536000, immutable" }
 ```
 
-**What it does.** The fields are added to the answers that serve a file, a `304` revalidation
-included; error pages carry none. A request is served by one location, the longest prefix that
-matches, and gets that location's fields only: without the repeat, files under `/assets/` would
-carry no HSTS. `immutable` belongs only on names that change when the content does; give other
-directories a short `max-age`, or nothing. HSTS is never added on its own: once a browser has
-seen it, it refuses plain http for that host until `max-age` runs out, so add it when https is
-known to work, and `includeSubDomains` only when every subdomain has https too. A location with
+**What it does.** `hsts` puts `Strict-Transport-Security` on every answer the site gives over
+HTTPS (pages, files, PHP, a proxied application, error pages and redirects), replacing one the
+application sends itself, and never on a plain-HTTP answer. It is never on by default: once a
+browser has seen it, it refuses plain http for that host until `max-age` runs out, so add it when
+https is known to work; `hsts = { max_age = "2y", subdomains = true }` sets the lifetime and
+`includeSubDomains`, the latter only when every subdomain has https too. A location's `add_headers`
+cannot send HSTS (until 0.1.0-alpha.75 that was the way, and it reached neither the PHP pages nor
+the errors). The `Cache-Control` field is added to the answers that serve a file under `/assets/`,
+a `304` revalidation included; error pages carry none. `immutable` belongs only on names that
+change when the content does; give other directories a short `max-age`, or nothing. A location with
 nothing but `path` and `add_headers` joins the location a preset (WordPress, Laravel, a proxy)
 or the implicit `/` already has at that path, its fields added and a field of the same name
 replaced (where the site has none, as for `/assets/` here, it is a location of its own with
@@ -542,7 +542,7 @@ curl -sI https://example.com/assets/app.3f9a1c2b.js | grep -i -e cache-control -
 agensio ctl site example.com                          # every location with the headers it adds
 ```
 
-**On a managed site.** `--hsts` puts HSTS on the `/` location as above; `--cache` makes a
+**On a managed site.** `--hsts` writes `hsts = true` as above; `--cache` makes a
 directory served from disk with `Cache-Control: public, max-age=N` (no `immutable`), where
 nothing runs. Each flag replaces its own part of the site's rules and keeps the others
 (passwords, address rules, refused paths; before 0.1.0-alpha.61 `--cache` alone dropped them):

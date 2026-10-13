@@ -513,6 +513,11 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
     loc.symlinks_deny = symlinks_deny_of(t["symlinks"], site.symlinks_deny, where);
     if (auto ht = t["add_headers"].as_table()) loc.add_headers = headers_of(ht, where + ".add_headers");
     else if (t.contains("add_headers")) fail(where + ": 'add_headers' must be a table");
+    for (const auto& h : loc.add_headers)  // one way to send HSTS (2026-10-13, docs/redirects.md 4)
+        if (Headers::iequals(h.first, "Strict-Transport-Security"))
+            fail(where + ".add_headers: Strict-Transport-Security is the site's hsts key (hsts = true, or hsts = { max_age = \"2y\", "
+                         "subdomains = true }), which sends it on every HTTPS answer of the site; a location's add_headers reached "
+                         "neither the PHP pages nor the error answers");
     {
         bool only = !loc.add_headers.empty() && match == "prefix";
         for (const auto& [key, value] : t) {
@@ -1543,6 +1548,59 @@ void parse_auth(const toml::node_view<const toml::node>& n, Config& cfg, SiteCon
 #endif
 }
 
+// hsts's max_age: seconds (63072000), or a number with s, m, h, d, w or y ("2y"); at most ten years,
+// the longest any application guide reviewed publishes (n8n, Jellyfin: 315360000).
+bool hsts_age(const toml::node_view<const toml::node>& n, std::uint64_t& out) {
+    constexpr std::uint64_t kMax = 315360000;
+    if (auto i = n.value<std::int64_t>()) {
+        if (*i < 0 || static_cast<std::uint64_t>(*i) > kMax) return false;
+        out = static_cast<std::uint64_t>(*i);
+        return true;
+    }
+    auto text = n.value<std::string>();
+    if (!text || text->size() < 2) return false;
+    std::uint64_t unit = 0;
+    switch (text->back()) {
+        case 's': unit = 1; break;
+        case 'm': unit = 60; break;
+        case 'h': unit = 3600; break;
+        case 'd': unit = 86400; break;
+        case 'w': unit = 7 * 86400; break;
+        case 'y': unit = 365 * 86400; break;
+        default: return false;
+    }
+    std::uint64_t v = 0;
+    for (std::size_t i = 0; i + 1 < text->size(); ++i) {
+        const char c = (*text)[i];
+        if (c < '0' || c > '9' || v > kMax) return false;
+        v = v * 10 + static_cast<std::uint64_t>(c - '0');
+    }
+    if (v > kMax / unit) return false;
+    out = v * unit;
+    return true;
+}
+
+// hsts (2026-10-13, docs/redirects.md 4): true is a year for this host; a table names max_age and
+// subdomains; false decides it off. The value is built once here, for the writers.
+void parse_hsts(const toml::node_view<const toml::node>& n, SiteConfig& site, const std::string& where) {
+    if (auto b = n.value<bool>()) {
+        site.hsts = *b ? SiteConfig::Hsts::on : SiteConfig::Hsts::off;
+    } else if (const toml::table* t = n.as_table()) {
+        check_keys(*t, {"hsts = {}"}, {}, where + ".hsts");
+        site.hsts = SiteConfig::Hsts::on;
+        if (t->contains("max_age") && !hsts_age((*t)["max_age"], site.hsts_max_age))
+            fail(where + ".hsts.max_age must be seconds (63072000) or a number with s, m, h, d, w or y (\"2y\"), at most ten years; "
+                         "0 tells browsers to forget the host's HSTS");
+        if (auto sd = (*t)["subdomains"].value<bool>()) site.hsts_subdomains = *sd;
+        else if (t->contains("subdomains")) fail(where + ".hsts.subdomains must be true or false");
+    } else {
+        fail(where + ".hsts must be true, false or a table: hsts = { max_age = \"2y\", subdomains = true }");
+    }
+    if (site.hsts != SiteConfig::Hsts::on) return;
+    site.tls_fields.hsts = "max-age=" + std::to_string(site.hsts_max_age) + (site.hsts_subdomains ? "; includeSubDomains" : "");
+    site.tls_fields.h1 = "Strict-Transport-Security: " + site.tls_fields.hsts + "\r\n";
+}
+
 // One entry of trusted_proxies, the server's or a site's (2026-10-13): an address, a range or an
 // [addresses] set; never "any", which would believe every client's forwarded address.
 std::string trusted_entry(const std::string& text, const Config& cfg, std::vector<Cidr>& out) {
@@ -1720,6 +1778,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
             site.trusted_proxies_text.push_back(text);
         }
     }
+    if (t.contains("hsts")) parse_hsts(t["hsts"], site, where);
     if (auto a = t["access_log"].value<std::string>())
         site.access_log = (*a == "off" || a->empty()) ? std::string() : resolve(base_dir, *a).string();
     else site.access_log = cfg.log.access;
@@ -1923,9 +1982,7 @@ AppContext app_context(const Config& cfg, const SiteConfig& site) {
         if (s.server_names.empty() || s.server_names.front() != first) continue;
         if (s.tls) tls = true;
         if (s.redirect == "https" || s.redirect.starts_with("https://")) a.https_redirect = true;
-        for (const auto& l : s.locations)
-            for (const auto& h : l.add_headers)
-                if (Headers::iequals(h.first, "Strict-Transport-Security")) a.hsts = true;
+        if (s.hsts == SiteConfig::Hsts::on) a.hsts = true;
     }
     const std::string scheme = tls ? "https://" : "http://";
     for (const auto& n : site.server_names) {

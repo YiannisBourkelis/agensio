@@ -150,22 +150,26 @@ private:
         }
         const bool close_line = !r.keep_alive;
         const bool keepalive_line = r.keep_alive && stream_->request.version_minor == 0;
+        // The site's fields (core/site_fields.hpp: its HSTS on an HTTPS answer), prebuilt at load.
+        const std::string_view site_lines = stream_->fields ? std::string_view(stream_->fields->h1) : std::string_view();
         if (r.headers.empty() && !close_line && !keepalive_line && r.prebuilt_terminated && !source) {
-            if (r.alt_svc_line.empty()) {
+            if (r.alt_svc_line.empty() && site_lines.empty()) {
                 block_ = r.prebuilt_headers;
                 tail_.clear();
                 return;
             }
-            // The alt-svc line before the terminator: the block borrowed up to its last line,
-            // the prebuilt line and the blank line copied into the tail (a few dozen bytes).
+            // The alt-svc and site lines before the terminator: the block borrowed up to its last
+            // line, the prebuilt lines and the blank line copied into the tail (a few dozen bytes).
             block_ = slice(r.prebuilt_headers, 0, r.prebuilt_headers.size() - 2);
             tail_.assign(r.alt_svc_line);
+            tail_.append(site_lines);
             tail_.append("\r\n");
             return;
         }
         block_ =
             r.prebuilt_terminated ? slice(r.prebuilt_headers, 0, r.prebuilt_headers.size() - 2) : r.prebuilt_headers;
         tail_.assign(r.alt_svc_line);
+        tail_.append(site_lines);
         for (const HeaderField& h : r.headers)
             tail_.append(h.name).append(": ").append(h.value).append("\r\n");
         if (source_sized) {

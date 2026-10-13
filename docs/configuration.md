@@ -1855,10 +1855,7 @@ server_name = ["example.com", "www.example.com"]
 listen = ["0.0.0.0:443"]
 root = "/var/www/example/public"
 tls = "auto"
-
-[[site.location]]
-path = "/"
-add_headers = { "Strict-Transport-Security" = "max-age=31536000" }
+hsts = true
 ```
 
 `redirect = "https"` answers every request on that site with a 301 to the same host and
@@ -1897,10 +1894,25 @@ all answer 301 to `https://www.example.com/x?y`. The same shape with the names s
 makes the bare name canonical. `redirect = "https"` (same host) is refused on a TLS site
 because it would loop; a prefix naming another host is fine there.
 
-The `Strict-Transport-Security` header is deliberately not automatic: once a browser has
-seen it, it refuses plain http for that host until `max-age` expires, so set it when the
-https site is known to work. `add_headers` on the `/` location puts it on every response
-of the site.
+**HSTS.** `hsts = true` sends `Strict-Transport-Security: max-age=31536000` (a year, this host
+only) on every answer the site gives over HTTPS: pages, files, PHP, a proxied application, error
+pages and redirects. An application's own copy is replaced, so browsers see one. A plain-HTTP
+answer never carries it (RFC 6797 7.2); behind a proxy that ends TLS, an answer the proxy marks
+`X-Forwarded-Proto: https` from `trusted_proxies` does. It is deliberately not automatic: once a
+browser has seen it, it refuses plain http for that host until `max-age` expires, so set it when
+the https site is known to work. The table form sets the rest:
+
+```toml
+hsts = { max_age = "2y", subdomains = true }   # seconds, or s m h d w y; at most ten years
+hsts = { max_age = 0 }                         # tells browsers to forget it: keep it for as long as the old max_age
+hsts = false                                   # decided off
+```
+
+`subdomains` (`includeSubDomains`) makes every subdomain HTTPS-only in browsers that saw it,
+including ones on other servers; a subdomain without TLS becomes unreachable. Preload is not
+offered. A location's `add_headers` cannot carry `Strict-Transport-Security` (refused at load):
+until 0.1.0-alpha.75 it did, and reached neither the PHP pages nor the error answers. A managed
+site sets it with `site_update` `hsts: true` (`agensio ctl site-update NAME --hsts`).
 
 Rules checked by `agensio -t`: `tls = "auto"` needs `[server] acme`; `server_name` must
 list real host names (no `*`, no wildcards: those need DNS-01, which is not in this

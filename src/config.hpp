@@ -16,6 +16,7 @@
 
 #include "core/auth.hpp"
 #include "core/request.hpp"
+#include "core/site_fields.hpp"
 #include "net/cidr.hpp"
 #include "services/json.hpp"
 #include "upstream/options.hpp"
@@ -253,6 +254,16 @@ struct SiteConfig {
     bool own_trusted_proxies = false;
     std::vector<Cidr> trusted_proxies;
     std::vector<std::string> trusted_proxies_text;  // as written
+    // hsts (2026-10-13, docs/redirects.md 4): Strict-Transport-Security on every HTTPS answer of the
+    // site, PHP, proxied and errors included, replacing an application's own. Not written is off and
+    // undecided (health may suggest it later); false is decided off.
+    enum class Hsts : std::uint8_t { unset, off, on };
+    Hsts hsts = Hsts::unset;
+    std::uint64_t hsts_max_age = 31536000;  // a year
+    bool hsts_subdomains = false;
+    // What the site adds to the answers it gives over TLS (or that a trusted proxy marks https),
+    // resolved at load: the request points at it once the site is known (core/site_fields.hpp).
+    SiteFields tls_fields;
     // Sorted for Router::location: exact before prefix, longer before shorter, "/" last.
     std::vector<LocationConfig> locations;
     // Root additions (docs/design-site-operations.md 20): the files beside the managed site
@@ -569,7 +580,7 @@ std::string check_project_name(std::string_view name);
 struct AppContext {
     std::string hosts, origins, base_url;
     bool https_redirect = false;  // a plain-http block of the site redirects to https
-    bool hsts = false;            // a block of the site sends Strict-Transport-Security (add_headers)
+    bool hsts = false;            // a block of the site sends Strict-Transport-Security (its hsts key)
 };
 AppContext app_context(const Config& cfg, const SiteConfig& site);
 // A PHP preset (a row of the PHP preset table).

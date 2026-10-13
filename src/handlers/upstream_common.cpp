@@ -126,6 +126,8 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
     // A password-protected path (core/private_cache.hpp): the answer is never one a shared cache
     // may keep, whatever the application said; an open path pays one test per field.
     const bool guarded = s.auth.protected_path;
+    // The site's hsts replaces the application's own (docs/redirects.md 4.1): one field, the site's.
+    const bool site_hsts = s.fields && !s.fields->hsts.empty();
     std::string kept;  // the application's Cache-Control directives a protected answer keeps
     r.scratch.reserve(res.head.size() + 64);
     for (const HeaderField& h : res.headers) {
@@ -133,6 +135,7 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
             Headers::iequals(h.name, "connection") || Headers::iequals(h.name, "keep-alive") ||
             Headers::iequals(h.name, "server") || Headers::iequals(h.name, "date"))
             continue;
+        if (site_hsts && Headers::iequals(h.name, "strict-transport-security")) continue;
         if (guarded) {
             if (Headers::iequals(h.name, "cache-control")) {
                 private_cache::keep_directives(h.value, kept);

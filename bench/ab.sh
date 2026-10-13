@@ -29,6 +29,9 @@
 #             without `refuse` ignores the key and serves the same file). core/refuse.hpp too.
 #             And "auth:/:64" (127.0.0.1:8096, [[site.auth]] on the whole site, wrk sending a
 #             remembered login with every request): what a protected page costs per request.
+#             And "hsts:/:64" (https://127.0.0.1:8449, a TLS site sending HSTS on the 1 KB answer:
+#             the site's hsts key, or for a base before 0.1.0-alpha.75 a / location's add_headers):
+#             what the per-request site fields cost on the HTTP/1 path.
 #   -r        rounds of base/new alternation (default 2)
 #   -d        wrk duration per case (default 5s)
 #   -t        wrk threads (default 4)
@@ -102,7 +105,31 @@ sed "s#@WORKERS@#$WORKERS#g; s#@BENCH@#$BENCH#g; s#@SENDFILE_MIN@#${SENDFILE_MIN
 sed "s#@WORKERS@#$WORKERS#g; s#@BENCH@#$BENCH#g; s#@SENDFILE_MIN@#${SENDFILE_MIN:-48KB}#g; s#@ACCESS_LOG@#${ACCESS_LOG:-off}#g; s#@H3@#, \"h3\"#g" "$BENCH/agensio.toml" > "$BENCH/tmp/ab-agensio-h3.toml"
 # The access gate's two sites go into every config (before the proxy one is built from it).
 if [ $ACCESS = 1 ]; then
-  SPECS+=("access:/:64" "access-all:/:64" "refuse:/sub/index.html:64")
+  SPECS+=("access:/:64" "access-all:/:64" "refuse:/sub/index.html:64" "hsts:/:64")
+  # A TLS site on 8449 that sends HSTS on the 1 KB answer: the site's hsts key (0.1.0-alpha.75 on),
+  # or for a base before it the / location's add_headers, the same field on that answer; each
+  # side gets the form its binary loads (start below).
+  cat > "$BENCH/tmp/ab-hsts-key.toml" <<HSTS_KEY
+
+[[site]]
+server_name = ["*"]
+listen = ["127.0.0.1:8449"]
+root = "$BENCH/www"
+tls = { cert = "$BENCH/certs/cert.pem", key = "$BENCH/certs/key.pem" }
+hsts = true
+HSTS_KEY
+  cat > "$BENCH/tmp/ab-hsts-loc.toml" <<HSTS_LOC
+
+[[site]]
+server_name = ["*"]
+listen = ["127.0.0.1:8449"]
+root = "$BENCH/www"
+tls = { cert = "$BENCH/certs/cert.pem", key = "$BENCH/certs/key.pem" }
+
+[[site.location]]
+path = "/"
+add_headers = { "Strict-Transport-Security" = "max-age=31536000" }
+HSTS_LOC
   # [[site.auth]] on the whole site, a remembered login sent with every request (as a browser
   # does): what a protected page costs. The user file comes from the new binary's passwd.
   if printf 'secret\n' | "$ROOT/build/agensio" passwd anna > "$BENCH/tmp/ab-users" 2>/dev/null; then
@@ -179,7 +206,7 @@ fi
 
 PID=""; SIDE_PROXY=0; SIDE_H2=0; SIDE_H3=0
 start() {  # binary
-  for port in 8080 8443 8093 8094 8095; do
+  for port in 8080 8443 8093 8094 8095 8449; do
     nc -z 127.0.0.1 "$port" 2>/dev/null && { echo "port $port is busy; stop the running server first"; exit 1; }
   done
   local cfg="$BENCH/tmp/ab-agensio.toml"
@@ -192,6 +219,13 @@ start() {  # binary
   if [ $H3 = 1 ] && [ $PROXY = 0 ]; then
     if "$1" -t -c "$BENCH/tmp/ab-agensio-h3.toml" >/dev/null 2>&1; then cfg="$BENCH/tmp/ab-agensio-h3.toml"; SIDE_H3=1
     else echo "  (this side has no HTTP/3: no h3 rows)"; fi
+  fi
+  if [ $ACCESS = 1 ]; then  # the HSTS site in the form this side loads
+    local f
+    for f in ab-hsts-key.toml ab-hsts-loc.toml; do
+      cat "$cfg" "$BENCH/tmp/$f" > "$BENCH/tmp/ab-side.toml"
+      if "$1" -t -c "$BENCH/tmp/ab-side.toml" >/dev/null 2>&1; then cfg="$BENCH/tmp/ab-side.toml"; echo "  (hsts row: ${f#ab-hsts-})"; break; fi
+    done
   fi
   (cd "$BENCH" && exec "$1" -c "$cfg") >>"$RAW/server.log" 2>&1 &
   PID=$!
@@ -233,6 +267,7 @@ measure() {  # side round -> appends "side round spec cpu_us rps" lines to $RAW/
       access) url="http://127.0.0.1:8094$path" ;;
       access-all) url="http://127.0.0.1:8095$path" ;;
       refuse) url="http://127.0.0.1:8097$path" ;;
+      hsts) url="https://127.0.0.1:8449$path" ;;
       auth) url="http://127.0.0.1:8096$path" ;;
       h2c) [ $SIDE_H2 = 1 ] || continue; url="http://127.0.0.1:8080$path" ;;
       h2) [ $SIDE_H2 = 1 ] || continue; url="https://127.0.0.1:8443$path" ;;

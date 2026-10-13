@@ -250,6 +250,13 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (eighteen, each seeded from
   that write and one 64 KB piece goes on in 64 KB pieces, each refreshing the idle clock
   (alpha.57, audit 2.2: a 4 MB cached file over TLS had to reach the client within one idle
   timeout). Uncached large files stream in 64 KB chunks from an open fd (`sendfile` on Linux later).
+  A site's own fields (alpha.75, `core/site_fields.hpp`, `SiteConfig::tls_fields`): its `hsts`
+  value built at load; `Dispatcher::route` points `Stream::fields` at it for an answer over TLS (or
+  a trusted proxy's https), so every answer of the site carries it, error pages included; the
+  HTTP/1 writer copies the line beside `alt-svc`, HPACK inserts it once per connection by static
+  name 56, QPACK sends the default value as static entry 56; the upstream loop drops the
+  application's own. `add_headers` refuses the field. HTTP/1 sets `conn.tls` at construction
+  (the rest of its connection info is filled on need, after routing).
 - **MIME**: static extension table compiled in (nginx `mime.types` equivalent), overridable
   from config.
 - **Config**: TOML (vendored toml++). `[server]`, `[cache]`, `[[site]]` with `server_name`,

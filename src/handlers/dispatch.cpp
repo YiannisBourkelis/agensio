@@ -496,6 +496,9 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
         return nullptr;
     }
     if (site->own_trusted_proxies && s.conn.trusted_peer) apply_site_trust(s.conn, *site);  // one flag test elsewhere
+    // The site's fields for an HTTPS answer (its hsts, docs/redirects.md 4): from here on every answer
+    // carries them, the error pages and redirects below included; a plain one never does (RFC 6797 7.2).
+    if (!site->tls_fields.empty() && (s.conn.tls || s.conn.forwarded_https)) s.fields = &site->tls_fields;
     if (!site->redirect.empty()) {
         redirect_https(s, *site);
         return nullptr;

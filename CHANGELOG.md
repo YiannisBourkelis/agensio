@@ -1,6 +1,28 @@
 # Changelog
 
-## 0.1.0-alpha.74 (2026-10-13)
+## 0.1.0-alpha.75
+
+- **HSTS reached neither a managed site's PHP pages nor its error answers.** `hsts: true` on a
+  managed site was rendered as a `/` location with `add_headers`, and a location's fields go only
+  on that location's successful file answers: a WordPress page (the `.php` location), a file under
+  `/wp-includes/` (a location of its own) and every 404 went without it, and an HSTS the
+  application sent passed beside it. `hsts` is now a `[[site]]` key (`true`, `false`, or `{
+  max_age, subdomains }`, `max_age` as seconds or a duration, at most ten years, 0 to make browsers
+  forget it) sent on every answer the site gives over HTTPS, or that a trusted proxy marks https:
+  files, PHP, CGI, proxied applications, error pages and redirects, over HTTP/1, HTTP/2 and HTTP/3,
+  replacing the application's own; never over plain HTTP or h2c. The value is built at load; the
+  request points at it once the site is known (`SiteFields`, the mechanism the coming
+  `[[site.response_headers]]` reuses, `docs/headers.md`); the HTTP/1 head copies the line beside
+  `alt-svc`, HTTP/2 inserts it once per connection by its static name and then sends one index
+  byte, HTTP/3 sends the default value as QPACK's static entry, one byte. Breaking:
+  `Strict-Transport-Security` in `add_headers` is refused, naming the key, and managed files are
+  rendered with `hsts = true`; re-render a managed site with `agensio ctl site-update NAME --hsts`.
+  The integration check (a managed WordPress site over TLS: its front page, login page, a static
+  file, a 404 and a script sending its own `max-age=5`, over HTTP/1, HTTP/2 and HTTP/3, and its
+  plain block) failed on alpha.74. `bench/ab.sh HEAD -A -2 -3 -r 3` (`ab-20261013-130052.md`, a new
+  `hsts` row: a TLS site with the key against the same field through `add_headers` on the base):
+  every row 0.98 to 1.04, the HTTP/2 and HTTP/3 rows of sites without hsts flat, the hsts row 1.010.
+ (2026-10-13)
 
 - **A field with `_` in its name reached a proxied origin.** The client-address fix of alpha.73
   dropped `X-Real-IP`, `Client-IP` and the CDN fields under their dashed names, but Rack and

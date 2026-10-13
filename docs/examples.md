@@ -55,7 +55,7 @@ start them and the warning goes. What a key needs (a reload, a restart, root) is
 - [One canonical host](examples/basics.md#one-canonical-host): the bare name redirected to www in one hop, or the reverse.
 - [Several sites on one address, and the catch-all](examples/basics.md#several-sites-on-one-address-and-the-catch-all): sites matched by name, certificates by SNI, 421 for unknown names, and one catch-all.
 - [A mistake in one site's file](examples/basics.md#a-mistake-in-one-sites-file): one file set aside, the other sites served, its last good version kept on reload; `-t --strict`, health.
-- [Long cache lifetimes for assets, and HSTS](examples/basics.md#long-cache-lifetimes-for-assets-and-hsts): `add_headers` per location, and when a location joins the preset's instead of replacing it.
+- [Long cache lifetimes for assets, and HSTS](examples/basics.md#long-cache-lifetimes-for-assets-and-hsts): the site's `hsts` key, `add_headers` per location, and when a location joins the preset's instead of replacing it.
 - [A single-page application](examples/basics.md#a-single-page-application): `try_files` to the shell, with missing assets still answered 404.
 - [An access log per site, and JSON logs](examples/basics.md#an-access-log-per-site-and-json-logs): `access_log`, `[log] format`, log rotation, and why JSON costs you fail2ban.
 - [Larger uploads for one site](examples/basics.md#larger-uploads-for-one-site): a site's own `max_body_size`, the 413 and its error-log line, and the PHP pool's upload limits.

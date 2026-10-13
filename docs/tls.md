@@ -111,6 +111,16 @@ OCSP stapling. For a wildcard today, use certbot with a DNS plugin (section 3.4)
 `site_create` with `https: "auto"`) writes both sites; the server's main file needs `[server]
 acme` once, which only root edits.
 
+### 2.7 HSTS, once HTTPS works
+
+`hsts = true` on the site (`agensio ctl site-update example.com --hsts`, MCP `site_update` with
+`hsts: true`) tells browsers to use only HTTPS for the host for a year: every answer the site gives
+over HTTPS carries `Strict-Transport-Security`, PHP pages and errors included. Turn it on only once
+the certificate has renewed at least once without trouble: from then on an expired or wrong
+certificate is a hard error in those browsers, with no way to click past it, until it is fixed.
+`docs/configuration.md` 14 has the other forms (a longer `max_age`, subdomains, `max_age = 0` to make
+browsers forget it).
+
 ## 3. Your own certificate files
 
 ### 3.1 The files

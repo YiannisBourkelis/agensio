@@ -549,7 +549,7 @@ applications, error pages with their status, clean addresses, a type table per s
 Each step is its own commit, with tests that fail on the code before it, and the A/B of section 9
 where the request path changes.
 
-1. **The mechanism, with `hsts` as its first user** (the HSTS bug, `docs/redirects.md` 13.1): the
+1. **The mechanism, with `hsts` as its first user** (built in alpha.75; the HSTS bug, `docs/redirects.md` 13.1): the
    failing test first, a managed WordPress fixture over TLS whose PHP page, static file and 404
    carry one `Strict-Transport-Security`, with an application's own replaced, and none over plain
    HTTP; then the resolved list on the request, the three writers, the upstream loop.

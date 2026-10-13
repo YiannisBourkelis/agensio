@@ -12,6 +12,7 @@
 #include "core/host.hpp"
 #include "core/request.hpp"
 #include "core/response.hpp"
+#include "core/site_fields.hpp"
 
 namespace agensio {
 
@@ -83,11 +84,15 @@ struct Stream {
     Response response;
     ConnectionInfo conn;  // not reset between requests
     AuthState auth;
+    // The fields the request's site sets on this answer (core/site_fields.hpp), once the site is
+    // known: on the request rather than the response, so an error page made later keeps them.
+    const SiteFields* fields = nullptr;
 
     void reset() {
         request.reset();
         response.reset();
         auth.reset();
+        fields = nullptr;
     }
 };
 

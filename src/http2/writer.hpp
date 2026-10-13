@@ -588,6 +588,7 @@ private:
         }
         encoder_.date(h, ws.now, ws.date.at(ws.now), ws.h2_date_insert);
         if (!r.alt_svc.empty()) encoder_.alt_svc(h, r.alt_svc);
+        if (s.stream.fields && !s.stream.fields->hsts.empty()) encoder_.hsts(h, s.stream.fields->hsts);  // the site's hsts
         if (!r.prebuilt_h2.empty()) {
             if (!r.content_type.empty()) encoder_.content_type(h, r.content_type);
             if (!r.content_encoding.empty()) encoder_.field(h, "content-encoding", r.content_encoding);

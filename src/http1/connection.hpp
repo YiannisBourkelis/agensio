@@ -74,6 +74,9 @@ public:
         worker_.connections.fetch_add(1, std::memory_order_relaxed);
         stream_.conn.peer = this;
         stream_.conn.auth_memo = &auth_memo_;  // [[site.auth]]: this connection's last verified login
+        // Known from the socket's type: set before the first request, since routing reads it (a
+        // site's hsts on TLS answers) and the rest of the connection's info is filled only on need.
+        stream_.conn.tls = IsTlsStream<Socket>::value;
     }
 
     // An access rule asks for the peer's address (core/stream.hpp PeerSource): the socket is

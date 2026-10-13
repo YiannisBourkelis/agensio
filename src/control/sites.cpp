@@ -1024,9 +1024,8 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
         site_body(out);
         if (spec.https == "auto") out += "tls = \"auto\"\n";
         else out += "tls = { cert = " + toml_string(spec.cert) + ", key = " + toml_string(spec.key) + " }\n";
+        if (spec.hsts) out += "hsts = true   # Strict-Transport-Security on every HTTPS answer, a year (docs/redirects.md 4)\n";
         rules_locations(out);
-        if (spec.hsts)
-            out += "\n[[site.location]]\npath = \"/\"\nadd_headers = { \"Strict-Transport-Security\" = \"max-age=31536000\" }\n";
     }
     return out;
 }

@@ -271,6 +271,21 @@ void Encoder::alt_svc(std::string& out, std::string_view value) {
     append_literal(out, "alt-svc", value);
 }
 
+void Encoder::hsts(std::string& out, std::string_view value) {
+    if (alive(hsts_seq_) && hsts_value_ == value) {
+        append_indexed(out, index_of(hsts_seq_));
+        return;
+    }
+    if (max_ > 0 && insert("strict-transport-security", value)) {
+        hsts_seq_ = next_seq_ - 1;
+        hsts_value_.assign(value);
+        append_integer(out, 56, 6, 0x40);  // literal with incremental indexing, name: static 56 (RFC 7541 appendix A)
+        append_string(out, value);
+        return;
+    }
+    append_literal(out, "strict-transport-security", value);
+}
+
 void Encoder::date(std::string& out, std::time_t second, std::string_view value, std::string_view insert_bytes) {
     if (second == date_second_ && alive(date_seq_)) {
         append_indexed(out, index_of(date_seq_));
