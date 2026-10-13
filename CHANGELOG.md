@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.73
+## 0.1.0-alpha.73 (2026-10-13)
 
 - **An explicit `status=5xx` showed every access-log line.** The logs query read a status by its
   first digit through `atoi`, so `5xx`, the documented default given explicitly (as an agent does
