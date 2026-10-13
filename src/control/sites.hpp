@@ -20,6 +20,7 @@ struct SiteSpec {
     std::string cert, key;  // manual
     bool redirect_http = true;
     bool hsts = false;
+    bool hsts_decided = false;  // hsts given at all: false is then rendered as a decided no (health stops suggesting it)
     std::string encoded_slashes;  // "" (deny, the default) | "allow": a %2F or %5C in the path decoded and looked up (2026-10-02)
     std::string canonical;        // the domain or an alias the other names redirect to (docs/redirects.md 3); "" none
     // The proxies that speak for this site (2026-10-13, docs/redirects.md 2.4): entries as written,

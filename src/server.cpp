@@ -8,6 +8,7 @@
 #include "core/cpus.hpp"
 #include "control/commands.hpp"
 #include "control/peer.hpp"
+#include "control/probe.hpp"
 #include "control/protection.hpp"
 #include "services/install.hpp"
 #include "services/pools.hpp"
@@ -874,7 +875,24 @@ json::Value Server::logs(std::string_view target) {
     return control::logs(gen_->cfg, q);
 }
 
-json::Value Server::health() {
+json::Value Server::health() { return health_with({}); }
+
+// What only a request to a site shows (control/probe.hpp, docs/redirects.md 3.4): the canonical
+// sites asked over loopback on a thread of their own, from a copy of what the probes need, since
+// this worker may be the one that has to answer them; health is then made here as always.
+void Server::health_async(std::function<void(json::Value)> done) {
+    std::vector<control::CanonicalProbe> probes = control::canonical_probes(gen_->cfg);
+    if (probes.empty()) {
+        done(health_with({}));
+        return;
+    }
+    std::thread([this, probes = std::move(probes), done = std::move(done)] {
+        std::vector<control::Finding> found = control::run_canonical_probes(probes);
+        asio::post(workers_[0]->ctx, [this, found = std::move(found), done] { done(health_with(found)); });
+    }).detach();
+}
+
+json::Value Server::health_with(const std::vector<control::Finding>& more) {
 #ifdef _WIN32
     const bool as_root = false;
 #else
@@ -928,6 +946,7 @@ json::Value Server::health() {
         const auto more = control::protection_findings(in, control::read_probe(probe, in), files);
         extra.insert(extra.end(), more.begin(), more.end());
     }
+    extra.insert(extra.end(), more.begin(), more.end());
     const control::TlsFacts tls = tls_facts();
     return control::health(cfg, cfg_, as_root, std::time(nullptr), extra, &tls);
 }

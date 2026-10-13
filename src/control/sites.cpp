@@ -69,7 +69,7 @@ json::Value SiteSpec::to_json() const {
     json::Value v = json::Value::object();
     v.set("domain", domain).set("aliases", strings(aliases)).set("https", https);
     if (https == "manual") v.set("cert", cert).set("key", key);
-    v.set("redirect_http", redirect_http).set("hsts", hsts).set("user", user).set("no_user", user.empty()).set("group", group);
+    v.set("redirect_http", redirect_http).set("hsts", hsts).set("hsts_decided", hsts_decided).set("user", user).set("no_user", user.empty()).set("group", group);
     if (encoded_slashes == "allow") v.set("encoded_slashes", encoded_slashes);
     if (!canonical.empty()) v.set("canonical", canonical);
     if (own_trusted_proxies) v.set("trusted_proxies", strings(trusted_proxies));
@@ -99,6 +99,7 @@ bool SiteSpec::from_json(const json::Value& v, SiteSpec& out) {
     out.key = v.get("key");
     if (has_key(v, "redirect_http")) out.redirect_http = v["redirect_http"].boolean();
     if (has_key(v, "hsts")) out.hsts = v["hsts"].boolean();
+    out.hsts_decided = v["hsts_decided"].boolean() || out.hsts;
     out.encoded_slashes = v.get("encoded_slashes") == "allow" ? "allow" : "";
     out.canonical = v.get("canonical");
     out.own_trusted_proxies = has_key(v, "trusted_proxies");
@@ -670,7 +671,10 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
         }
     }
     if (has_key(body, "redirect_http")) spec.redirect_http = body["redirect_http"].boolean();
-    if (has_key(body, "hsts")) spec.hsts = body["hsts"].boolean();
+    if (has_key(body, "hsts")) {
+        spec.hsts = body["hsts"].boolean();
+        spec.hsts_decided = true;  // a no is kept as a no (docs/redirects.md 4.2)
+    }
     if (has_key(body, "encoded_slashes")) {
         const std::string_view es = body.get("encoded_slashes");
         if (es != "deny" && es != "allow") {
@@ -1062,6 +1066,7 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
         else if (!spec.redirect_http)
             out += "http = \"serve\"\n";
         if (spec.hsts) out += "hsts = true   # Strict-Transport-Security on every HTTPS answer, a year (docs/redirects.md 4)\n";
+        else if (spec.hsts_decided) out += "hsts = false   # decided off: health no longer suggests it (docs/redirects.md 4.2)\n";
     }
     rules_locations(out);
     // Path redirects as the site file's own tables; their keys are the reference's (load_redirect_rules

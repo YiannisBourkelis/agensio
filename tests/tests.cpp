@@ -26,6 +26,7 @@
 #include "services/acme.hpp"
 #include "control/roles.hpp"
 #include "control/commands.hpp"
+#include "control/probe.hpp"
 #include "control/protection.hpp"
 #include "core/strings.hpp"
 #include "control/reference.hpp"
@@ -3968,6 +3969,16 @@ static void test_control_sites() {
         CHECK(json::parse(R"({"redirects":[]})", body, err));
         (void)apply_request(body, cfg, rd, re);
         CHECK(re.empty() && rd.redirects.items().empty() && render_site(rd, "x").find("[[site.redirect]]") == std::string::npos);
+        // hsts: false given is a decided no, rendered so health stops suggesting it (alpha.84)
+        SiteSpec no_hsts = rd;
+        no_hsts.hsts = false;
+        no_hsts.hsts_decided = false;
+        CHECK(render_site(no_hsts, "x").find("\nhsts") == std::string::npos);
+        CHECK(json::parse(R"({"hsts":false})", body, err));
+        (void)apply_request(body, cfg, no_hsts, re);
+        CHECK(no_hsts.hsts_decided && render_site(no_hsts, "x").find("\nhsts = false") != std::string::npos);
+        SiteSpec no_back;
+        CHECK(SiteSpec::from_json(no_hsts.to_json(), no_back) && no_back.hsts_decided && !no_back.hsts);
     }
     CHECK(text.find("user = \"shop\"") != std::string::npos && text.find("tls = \"auto\"") != std::string::npos);
     CHECK(text.find("\nhsts = true") != std::string::npos && text.find("server_name = [\"shop.test\", \"www.shop.test\"]") != std::string::npos);
@@ -6164,6 +6175,67 @@ static void test_served_certificates() {
     }
     // Without the running server's facts the file stands in: here it is missing.
     CHECK(find(control::health_findings(cfg, cfg, false, now), "certificate_unreadable"));
+    // With hsts on a visitor cannot click past a certificate error (docs/redirects.md 4.2, alpha.84):
+    // the findings that lead to one rise a level and say why.
+    cfg.sites[0].hsts = SiteConfig::Hsts::on;
+    {
+        const auto f = control::health_findings(cfg, cfg, false, now, &facts);
+        const Finding* e = find(f, "certificate_expiring");
+        CHECK(e && e->severity == "error" && e->message.find("hsts is on") != npos);
+    }
+    cfg.sites[0].tls->automatic = true;
+    facts.served[pair].not_after = now + 50 * day;
+    facts.served[pair].days_left = 50;
+    {
+        const Finding* w = find(control::health_findings(cfg, cfg, false, now, &facts), "acme_renewal_failed");
+        CHECK(w && w->severity == "error" && w->message.find("no way past it") != npos);
+    }
+    // hsts_suggested: a real certificate for a week with nothing open, no hsts line, not serving plain HTTP.
+    facts.acme_failures.clear();
+    cfg.sites[0].hsts = SiteConfig::Hsts::unset;
+    cfg.sites[0].http = SiteConfig::Http::redirect;  // a site built by hand defaults to serving plain HTTP
+    {
+        const Finding* h = find(control::health_findings(cfg, cfg, false, now, &facts), "hsts_suggested");
+        CHECK(h && h->severity == "info" && h->fix.find("hsts: true") != npos && h->fix.find("hsts = false records a decided no") != npos);
+    }
+    facts.served[pair].not_before = now - 3 * day;  // renewed three days ago: a week is not up
+    CHECK(!find(control::health_findings(cfg, cfg, false, now, &facts), "hsts_suggested"));
+    facts.served[pair].not_before = now - 40 * day;
+    cfg.sites[0].hsts = SiteConfig::Hsts::off;  // decided
+    CHECK(!find(control::health_findings(cfg, cfg, false, now, &facts), "hsts_suggested"));
+    cfg.sites[0].hsts = SiteConfig::Hsts::unset;
+    cfg.sites[0].http = SiteConfig::Http::serve;  // plain HTTP served on purpose
+    CHECK(!find(control::health_findings(cfg, cfg, false, now, &facts), "hsts_suggested"));
+    cfg.sites[0].http = SiteConfig::Http::redirect;
+    facts.acme_failures[tls.cert.string()] = {now - 3600, "timeout"};  // something open about the certificate
+    CHECK(!find(control::health_findings(cfg, cfg, false, now, &facts), "hsts_suggested"));
+    // app_redirects_elsewhere (docs/redirects.md 3.4): what the probe judges, and where it asks.
+    control::CanonicalProbe p;
+    p.site = "example.com";
+    p.canonical = "example.com";
+    p.app = "wordpress";
+    p.names = {"example.com", "www.example.com"};
+    p.tls = true;
+    const auto elsewhere = control::judge_canonical_answer(p, 301, "https://www.example.com/");
+    CHECK(elsewhere && elsewhere->code == "app_redirects_elsewhere" && elsewhere->severity == "warn" &&
+          elsewhere->fix.find("wp option update home https://example.com") != npos && elsewhere->message.find("too many redirects") != npos);
+    CHECK(control::judge_canonical_answer(p, 302, "https://WWW.Example.com:443/x")); // the name in any case, with a port
+    CHECK(!control::judge_canonical_answer(p, 301, "https://example.com/en/"));     // its own name
+    CHECK(!control::judge_canonical_answer(p, 301, "/wp-admin/install.php"));         // relative
+    CHECK(!control::judge_canonical_answer(p, 301, "https://other.example/"));        // another site's
+    CHECK(!control::judge_canonical_answer(p, 200, "https://www.example.com/"));      // not a redirect
+    Config pc;
+    SiteConfig cs;
+    cs.server_names = {"example.com", "www.example.com"};
+    cs.canonical = "example.com";
+    cs.canonical_redirect = true;
+    cs.listen = {"0.0.0.0:443"};
+    cs.tls = TlsConfig{};
+    pc.sites.push_back(cs);
+    cs.canonical_redirect = false;  // one name, or no canonical: nothing to ask
+    pc.sites.push_back(cs);
+    const auto probes = control::canonical_probes(pc);
+    CHECK(probes.size() == 1 && probes[0].host == "127.0.0.1" && probes[0].port == "443" && probes[0].tls && probes[0].canonical == "example.com");
 }
 
 // A certificate or key the server's account cannot read after the privilege drop (the certificate

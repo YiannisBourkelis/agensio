@@ -1611,6 +1611,10 @@ if [ -n "$PHPFPM" ]; then
   if [ "$H3" = 1 ] && curl -V 2>/dev/null | grep -q HTTP3; then
     check "hsts: over HTTP/3 too (QPACK's static entry for the default value)" "max-age=31536000 max-age=31536000" "$(sts /wp-includes/nope.js --http3-only) $(sts / --http3-only)"
   fi
+  # A no is recorded (alpha.84, docs/redirects.md 4.2): hsts = false in the file silences health's
+  # hsts_suggested; the answers lose the field.
+  check "hsts: ctl --no-hsts records a decided no in the managed file, and the pages lose the field" "1 none" \
+    "$("$BIN" ctl site-update hsts.wild.test --no-hsts --yes --reason hsts --socket $CS > /dev/null; grep -c '^hsts = false' bench/tmp/sites.d/hsts.wild.test.toml) $(v=$(sts /); echo "${v:-none}")"
   cpost /v1/sites/hsts.wild.test/delete '{"confirm":true,"reason":"hsts"}' > /dev/null
   # The validation prefixes over plain HTTP on a PHP site (alpha.77, the alpha.76 report): a token
   # file is served, anything else there is a 404 with nothing run, where before the front
@@ -1637,6 +1641,16 @@ if [ -n "$PHPFPM" ]; then
     "https://certwp.wild.test:8457/login?x=1 https://certwp.wild.test:8457/bare http://other.example/x" \
     "$(loc443 /own.php) $(loc443 /bare.php) $(loc443 /far.php)"
   cpost /v1/sites/certwp.wild.test/delete '{"confirm":true,"reason":"certs"}' > /dev/null
+  # app_redirects_elsewhere (alpha.84, docs/redirects.md 3.4): health asks a canonical site's home
+  # page over loopback, off the worker's loop. An application whose own address is the other name
+  # (WordPress's home) redirects there, and the site sends it back: a loop health names, with the
+  # setting to change.
+  mkdir -p bench/tmp/canonwp
+  printf '<?php header("Location: https://cw2.wild.test:8479/", true, 301);' > bench/tmp/canonwp/index.php
+  cpost /v1/sites "{\"domain\":\"cw.wild.test\",\"aliases\":[\"cw2.wild.test\"],\"canonical\":\"cw.wild.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-wild/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-wild/key.pem\"},\"user\":null,\"app\":\"wordpress\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"root\":\"$ROOT/bench/tmp/canonwp\",\"listen_plain\":\"127.0.0.1:8480\",\"listen_tls\":\"127.0.0.1:8479\",\"confirm\":true,\"reason\":\"canon\"}" > /dev/null
+  check "health: a canonical site whose application redirects to its other name is named, with the application's setting" "yes" \
+    "$(curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); print("yes" if [f for f in d["findings"] if f["code"] == "app_redirects_elsewhere" and f.get("site") == "cw.wild.test" and "wp option update home https://cw.wild.test" in f.get("fix", "")] else [f["code"] for f in d["findings"]])')"
+  cpost /v1/sites/cw.wild.test/delete '{"confirm":true,"reason":"canon"}' > /dev/null
   # TYPO3 without a preset (2026-10-08, the alpha.53 report's third finding): app = "php" and the
   # rules an agent translates from TYPO3 13.4's documented nginx configuration, through the MCP
   # bridge as an agent does it: path_check before, site_update as a dry run, then applied,

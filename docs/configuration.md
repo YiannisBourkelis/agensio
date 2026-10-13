@@ -1936,7 +1936,8 @@ redirects to the canonical name with HSTS, so the other name learns HSTS too (re
 redirect, so a request by IP address or for a name only a catch-all takes is answered as before,
 and certificate validation over plain HTTP is answered on every name. Set the application's own
 address to the canonical `https://` one (WordPress `home` and `siteurl`, Laravel `APP_URL`,
-Drupal `$base_url`), or the two redirect each other; the base URL agensio hands Django's settings
+Drupal `$base_url`), or the two redirect each other (health asks each such site for its home page
+and reports `app_redirects_elsewhere` with the setting, redirects.md 3.4); the base URL agensio hands Django's settings
 and the tasks is the canonical one. The same with the names swapped makes the bare name canonical.
 A managed site sets it with `site_update` `canonical` (`agensio ctl site-update NAME --canonical
 www.example.com`).
@@ -1979,7 +1980,11 @@ hsts = false                                   # decided off
 including ones on other servers; a subdomain without TLS becomes unreachable. Preload is not
 offered. A location's `add_headers` cannot carry `Strict-Transport-Security` (refused at load):
 until 0.1.0-alpha.75 it did, and reached neither the PHP pages nor the error answers. A managed
-site sets it with `site_update` `hsts: true` (`agensio ctl site-update NAME --hsts`).
+site sets it with `site_update` `hsts: true` (`agensio ctl site-update NAME --hsts`). Health suggests
+it (`hsts_suggested`, info) once the site has served a real certificate for a week with no
+certificate finding; `hsts = false` (`hsts: false`, `--no-hsts`) records a decided no and silences
+that, and with `hsts` on the certificate findings `certificate_expiring` and `acme_renewal_failed`
+are errors ([redirects.md](redirects.md) 4.2).
 
 Rules checked by `agensio -t`: `tls = "auto"` needs `[server] acme`; `server_name` must
 list real host names (no `*`, no wildcards: those need DNS-01, which is not in this

@@ -145,6 +145,7 @@ set(AGENSIO_CORE_SOURCES
   src/control/commands.cpp
   src/control/loglines.cpp
   src/control/protection.cpp
+  src/control/probe.cpp
   src/control/sites.cpp
   src/control/settings.cpp
   src/control/reference.cpp

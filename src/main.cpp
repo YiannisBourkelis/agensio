@@ -60,7 +60,7 @@ void usage() {
                  "                      site-create --domain D [--alias A]... [--https auto|none] [--cert F --key F]\n"
                  "                           [--user U|--no-user] [--group G] [--app static|php|laravel|drupal|wordpress|grav|proxy|rails|redmine|django|wagtail|node]\n"
                  "                           [--root DIR] [--upstream URL] [--project NAME] [--entry FILE] [--php-socket S] [--php-children N]\n"
-                 "                           [--no-redirect] [--hsts] [--canonical NAME] [--listen-plain A] [--listen-tls A]\n"
+                 "                           [--no-redirect] [--hsts|--no-hsts] [--canonical NAME] [--listen-plain A] [--listen-tls A]\n"
                  "                      site-update NAME (same flags) | site-disable NAME | site-enable NAME |\n"
                  "                      site-delete NAME [--files] | site-restore ENTRY | trash-delete ENTRY | trash | cert-renew NAME |\n"
                  "                      site-install NAME [--url https://... | --file UPLOAD | --version V] [--sha256 H]\n"
@@ -291,7 +291,8 @@ int main(int argc, char** argv) {
                              "        site-restore ENTRY | trash-delete ENTRY | trash-expire (the trash's entries: `trash` lists them)\n"
                              "        site-create --domain D [--alias A]... [--https auto|none] [--cert F --key F] [--user U|--no-user]\n"
                              "                    [--group G] [--app NAME] [--root DIR] [--upstream URL] [--project NAME] [--entry FILE] [--php-socket S]\n"
-                             "                    [--php-children N] [--php-version V] [--no-redirect] [--hsts] [--canonical NAME] [--listen-plain A] [--listen-tls A]\n"
+                             "                    [--php-children N] [--php-version V] [--no-redirect] [--canonical NAME] [--listen-plain A] [--listen-tls A]\n"
+                             "                    [--hsts | --no-hsts] (HSTS for a year; --no-hsts records a decided no, which silences health's hsts_suggested)\n"
                              "                    [--canonical NAME | --no-canonical] (the domain or an alias the site's other names redirect to)\n"
                              "                    [--encoded-slashes deny|allow] (allow: a %2F in the path is decoded and looked up, Apache's NoDecode,\n"
                              "                    for an application that encodes a slash inside a path segment; deny, the default, answers 404)\n"
@@ -587,6 +588,7 @@ int main(int argc, char** argv) {
                 else if (b == "--php-version") field("php_version");
                 else if (b == "--no-redirect") body.set("redirect_http", false);
                 else if (b == "--hsts") body.set("hsts", true);
+                else if (b == "--no-hsts") body.set("hsts", false);
                 else if (b == "--encoded-slashes") field("encoded_slashes");
                 else if (b == "--canonical") field("canonical");
                 else if (b == "--no-canonical") body.set("canonical", "");

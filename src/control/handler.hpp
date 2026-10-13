@@ -29,6 +29,9 @@ struct ControlBackend {
     virtual json::Value validate() = 0;
     virtual json::Value logs(std::string_view target) = 0;  // the request target with its query
     virtual json::Value health() = 0;
+    // Health with what only a request to the sites shows (control/probe.hpp): the requests on a thread
+    // of their own, the answer posted back to the control socket's worker.
+    virtual void health_async(std::function<void(json::Value)> done) = 0;
     // Mutations (F3). Each returns false with `error` when refused; nothing changed then.
     // `must_load`: the site file the change wrote; the reload is refused if that file would be
     // set aside (docs/design-site-operations.md 26), so a change is never reported done for a

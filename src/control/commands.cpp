@@ -1144,6 +1144,13 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
     for (const auto& s : running.sites) {
         if (!s.tls) continue;
         const std::string name = s.server_names.front();
+        const std::size_t findings_before = out.size();
+        // With hsts on a visitor cannot click past a certificate error: the findings that lead to
+        // one rise a level and say so (docs/redirects.md 4.2).
+        const bool hsts = s.hsts == SiteConfig::Hsts::on;
+        const std::string hsts_why = hsts ? "; hsts is on, so browsers that saw it refuse the site with a hard error once the certificate expires, "
+                                            "with no way past it"
+                                          : "";
         const std::string pair = s.tls->cert.string() + '\n' + s.tls->key.string();
         const CertificateState disk = certificate_state(*s.tls, now);
         const CertificateState* served = nullptr;
@@ -1161,7 +1168,7 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
             add("error", "certificate_expired", name, what + " expired on " + date(st.not_after),
                 s.tls->automatic ? "read the acme lines in the error log" : "install a new certificate and reload");
         } else if (!s.tls->automatic && st.days_left < 14) {
-            add("warn", "certificate_expiring", name, what + " expires in " + std::to_string(st.days_left) + " days (" + date(st.not_after) + ")",
+            add(hsts ? "error" : "warn", "certificate_expiring", name, what + " expires in " + std::to_string(st.days_left) + " days (" + date(st.not_after) + ")" + hsts_why,
                 "renew it and reload, or switch to tls = \"auto\"");
         }
         // A newer certificate on disk than the one served: a reload not yet made, or one that
@@ -1213,9 +1220,9 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
                         (failure.empty() ? std::string("no failed attempt since the start: read the acme lines of the error log") : failure),
                     acme_fix);
             else if (!failure.empty())
-                add("warn", "acme_renewal_failed", name,
+                add(hsts ? "error" : "warn", "acme_renewal_failed", name,
                     failure + "; the manager tries again every hour, the certificate served expires in " + std::to_string(served->days_left) + " days (" +
-                        date(served->not_after) + ")",
+                        date(served->not_after) + ")" + hsts_why,
                     acme_fix);
         }
         if (s.tls->automatic && !has_plain(s, false, true))
@@ -1225,6 +1232,19 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
         if (!s.http_given && !has_plain(s, true, false))
             add("info", "no_http_redirect", name, "plain HTTP is not redirected to HTTPS for these names: the site listens on no port 443, so it opens no plain listener",
                 "name one, and the redirect keeps the site's TLS port: http = { listen = [\"0.0.0.0:80\"] }");
+        // hsts_suggested (docs/redirects.md 4.2): HTTPS has proven itself, a real certificate for a
+        // week with nothing open about it, and the site has not decided (no hsts line; false is a
+        // decided no). Never for a site serving plain HTTP on purpose.
+        bool cert_trouble = false;
+        for (std::size_t i = findings_before; i < out.size(); ++i)
+            cert_trouble = cert_trouble || out[i].code.starts_with("certificate_") || out[i].code.starts_with("acme_renewal");
+        if (s.hsts == SiteConfig::Hsts::unset && s.http != SiteConfig::Http::serve && st.present && !st.placeholder && !cert_trouble &&
+            st.not_before > 0 && now - st.not_before >= 7 * 86400)
+            add("info", "hsts_suggested", name,
+                "HTTPS has served a real certificate since " + date(st.not_before) + " with nothing to report: hsts would tell browsers to use only HTTPS "
+                "for this site from their first visit on, and to refuse it on a certificate error rather than let a visitor click past it",
+                "when the user agrees: hsts = true in the site file (site_update with hsts: true on a managed site), a year; hsts = false records a "
+                "decided no and silences this");
     }
     for (const auto& h : disk_held) held_finding(h, true);  // the next reload's, not said above
 

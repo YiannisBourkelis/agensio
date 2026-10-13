@@ -420,8 +420,16 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
         reply(s, 200, preset_catalog());
     } else if (path == "/v1/uploads") {
         reply(s, 200, uploads_list());
-    } else {
+    } else if (!done) {
         reply(s, 200, backend_->health());
+    } else {
+        // Health asks the canonical sites over loopback (control/probe.hpp) on a thread of its own,
+        // never on this worker, which may be the one that has to answer: the reply comes back here.
+        backend_->health_async([this, &s, done](json::Value v) {
+            reply(s, 200, v);
+            done();
+        });
+        return true;
     }
     return false;
 }

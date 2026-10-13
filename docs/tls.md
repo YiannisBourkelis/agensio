@@ -119,7 +119,10 @@ over HTTPS carries `Strict-Transport-Security`, PHP pages and errors included. T
 the certificate has renewed at least once without trouble: from then on an expired or wrong
 certificate is a hard error in those browsers, with no way to click past it, until it is fixed.
 `docs/configuration.md` 14 has the other forms (a longer `max_age`, subdomains, `max_age = 0` to make
-browsers forget it).
+browsers forget it). Health suggests it (`hsts_suggested`, section 5) once a site has served a real
+certificate for a week with no certificate finding; `hsts = false` (MCP `site_update` with `hsts:
+false`, `agensio ctl site-update NAME --no-hsts`) records that you decided against it and silences the suggestion. With `hsts` on,
+`certificate_expiring` and `acme_renewal_failed` are errors, not warnings.
 
 ## 3. Your own certificate files
 
@@ -227,15 +230,17 @@ mistaken for one in service.
 | Finding | Severity | Means | Do |
 |---|---|---|---|
 | `certificate_expired` | error | the certificate served has expired | automatic: see `acme_renewal_*`; your own: install a renewed one, `cert-renew` |
-| `certificate_expiring` | warn | your own certificate served expires within 14 days | renew it; the hourly check or `cert-renew` loads it |
+| `certificate_expiring` | warn, error with `hsts` | your own certificate served expires within 14 days | renew it; the hourly check or `cert-renew` loads it |
 | `certificate_not_issued` | error | an automatic site still serves its placeholder | names resolving here, port 80 reachable; the acme lines of the error log |
 | `certificate_not_loaded` | warn, error under 7 days left | the file on disk is newer than the certificate served; the message says why: loaded at the next hourly check (or now with `cert-renew`), or the server could not load it, with the error | `cert-renew NAME`; if it could not be loaded, the fix of `tls_key_unreadable` or the file corrected |
-| `acme_renewal_failed` | warn | the last automatic order failed, with the CA's message; retried every hour | correct what the CA says (DNS, port 80, a firewall, a CDN in front), then `cert-renew NAME` |
+| `acme_renewal_failed` | warn, error with `hsts` | the last automatic order failed, with the CA's message; retried every hour | correct what the CA says (DNS, port 80, a firewall, a CDN in front), then `cert-renew NAME` |
 | `acme_renewal_overdue` | error | a day past the renewal point (a third of the lifetime left), with the last failure | the same, now |
 | `acme_needs_port_80` | warn | `tls = "auto"` but nothing answers plain HTTP on port 80 for the names | remove `http = "off"`, or name port 80: `http = { listen = ["0.0.0.0:80"] }` (2.1) |
 | `tls_key_unreadable` | warn | the server's account cannot read a certificate or key after the start | root runs the lines given (3.2) |
 | `site_file_held_back` | error | a site's file is set aside; a certificate that did not load is one reason, named in the message | the message's error |
 | `no_http_redirect` | info | a TLS site on a port other than 443, without `http`: plain HTTP is not redirected | `http = { listen = ["0.0.0.0:80"] }`, the redirect keeps the TLS port |
+| `hsts_suggested` | info | a TLS site with no `hsts` line has served a real certificate for 7 days with no certificate finding | `hsts = true` once you accept what it commits to (2.7); `hsts = false` records a no and silences it |
+| `app_redirects_elsewhere` | warn | a site with `canonical` whose application redirects its canonical home page to another of the site's names: a redirect loop | the application's own address set to the canonical name (the fix names the setting) |
 
 `agensio ctl site NAME` (MCP `site_show`) shows both: `tls` describes the file on disk and
 `tls.served` the certificate in memory, `same_as_disk` false while a newer file waits.

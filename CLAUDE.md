@@ -493,7 +493,13 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (nineteen, each seeded from
   from `/`) needs no root. Managed (alpha.83): `SiteSpec::redirects` judged by
   `load_redirect_rules` (the loader's parse and checks on JSON rules), rendered as tables; `ctl
   --redirect / --redirect-exact / --gone / --redirects-file`; `path_check` names the rule and takes
-  proposed ones as a preview (the handler loads them on a copy of the site); security page row 42. `redirect = "https"` is refused; the
+  proposed ones as a preview (the handler loads them on a copy of the site); security page row 42.
+  Health (alpha.84, design 3.4 and 4.2): `hsts_suggested` (a week of a real certificate, no finding;
+  `hsts = false` is a decided no, rendered for a managed site from `SiteSpec::hsts_decided`, `ctl
+  --no-hsts`), `certificate_expiring` and `acme_renewal_failed` errors with `hsts`, and
+  `app_redirects_elsewhere` from `control/probe.*`: one blocking `GET /` per site with `canonical`
+  to its own listener, run on a thread by `Server::health_async` (the control handler's deferred
+  reply), never on a worker, which may be the one that must answer it. `redirect = "https"` is refused; the
   `https://host` prefix form stays until `[[site.redirect]]`.
 - **Automatic certificates** (H3, `src/services/acme.*`, `services/json.hpp`): `tls = "auto"`
   plus `[server] acme = { email }`; ACME v2 with HTTP-01 against any RFC 8555 CA, JWS ES256

@@ -332,8 +332,11 @@ the canonical address from the first visit.
 
 Health checks it for every site with `canonical`: it asks the site once, over loopback, for its
 canonical home page, and if the answer redirects to another of the site's names it reports
-`app_redirects_elsewhere` with the setting to change (WordPress's `home`, Laravel's `APP_URL`,
-Drupal's `$base_url`).
+`app_redirects_elsewhere` with the setting to change (WordPress's `home` and `siteurl`, Laravel's
+`APP_URL`, Drupal's `$base_url`, Grav's `custom_base_url`, Redmine's host name). The request is
+`GET /` with the canonical name as Host (and as SNI over TLS), `Connection: close`, at most three
+seconds per step, on a thread of its own and never on a worker, which may be the one that has to
+answer it (built in alpha.84). A site that does not answer gives no finding here.
 
 ## 4. HSTS: `hsts`
 
@@ -1149,7 +1152,11 @@ a path that meets none, a redirect hit, and a TLS site with `hsts` against one w
    `Location` is relative or names exactly the origin of `to`, never `//` or `/\`, never a
    control character.
 4. **Health:** `hsts_suggested`, `hsts_narrows_application`, `app_redirects_elsewhere`,
-   `proxy_scheme_missing`, and the certificate findings raised a level with `hsts`.
+   `proxy_scheme_missing`, and the certificate findings raised a level with `hsts`. 4a built in
+   alpha.84: `hsts_suggested` (with `hsts = false` rendered for a managed site's decided no and
+   `ctl --no-hsts`), the two certificate findings raised, `app_redirects_elsewhere`; 4b
+   (`hsts_narrows_application`, `proxy_scheme_missing`) records what the request path sees, so it
+   comes with its A/B.
 5. **The agent's side:** `site_update` fields, `agensio ctl` flags, the MCP texts of 11.2 and 12.3,
    the reference rows, the cookbook recipes linking here; this document installed with the others.
 

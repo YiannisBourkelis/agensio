@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.1.0-alpha.84
+
+- **Health: HSTS suggested once HTTPS has proven itself, certificate findings raised with it, and an
+  application that loops against `canonical`** (`docs/redirects.md` 3.4, 4.2; `docs/tls.md` 5).
+  `hsts_suggested` (info): a TLS site with no `hsts` line, not `http = "serve"`, whose real
+  certificate (not the placeholder) has served for 7 days with no certificate finding open; the fix
+  says what HSTS commits to. `hsts = false` is a decided no that silences it: a managed site renders
+  it (`hsts_decided` in the spec line, set whenever `site_update` sends `hsts`), and `agensio ctl
+  --no-hsts` sends it. With `hsts` on, `certificate_expiring` and `acme_renewal_failed` are errors
+  and say why: a visitor can no longer click past an expired certificate.
+  `app_redirects_elsewhere` (warn): for each site with `canonical`, health asks the site's own
+  listener once for the canonical home page (`GET /`, Host and SNI the canonical name, three seconds
+  per step) and reports an answer redirecting to another of the site's names, a loop with
+  agensio's redirect back, with the application's setting to change (WordPress's `home` and
+  `siteurl`, Laravel's `APP_URL`, Drupal's `$base_url`, Grav's `custom_base_url`, Django's and
+  Wagtail's, Redmine's host name). The requests block, so health runs them on a thread of its own
+  and answers when they are done (`Server::health_async`, `control/probe.*`), never on a worker that
+  may have to answer them; a server with no such site answers as before. The MCP `health_check`
+  text and `docs/mcp.md` name the three. The integration check for the loop failed on alpha.83.
+  Control-plane code only: no A/B.
+
 ## 0.1.0-alpha.83 (2026-10-13)
 
 - **Path redirects on a managed site, and `path_check` for them** (`docs/redirects.md` 5, 8,
