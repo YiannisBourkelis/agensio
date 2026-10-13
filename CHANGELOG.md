@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.77
+## 0.1.0-alpha.77 (2026-10-13)
 
 - **Over plain HTTP the certificate validation prefixes reached the site's applications.** alpha.76
   let `/.well-known/acme-challenge/` and `/.well-known/pki-validation/` past a site's redirect so
