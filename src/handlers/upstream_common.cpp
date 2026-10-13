@@ -117,6 +117,14 @@ void note_hsts_narrowed(const SiteFields& f, std::string_view app, ErrorLog* log
                   "), which replaced it; set the site's hsts to the value meant, or hsts = false to let the application's through (docs/redirects.md 4.1)");
 }
 
+// A site with no hsts line (docs/redirects.md 4.2): the HSTS its application sends goes out as it is,
+// and is noted once per generation of the site, so health says the application already sends it
+// (hsts_from_application) rather than suggesting the site's own over it.
+void note_application_hsts(const SiteFields& f, std::string_view app) {
+    if (!f.application_noted.done.exchange(true, std::memory_order_relaxed))
+        site_notices().note("hsts_from_application", f.site, app, std::time(nullptr));
+}
+
 bool hidden(std::string_view name, const LocationConfig& loc) {
     for (const auto& h : loc.proxy.hide)
         if (Headers::iequals(h, name)) return true;
@@ -162,6 +170,8 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
     const bool guarded = s.auth.protected_path;
     // The site's hsts replaces the application's own (docs/redirects.md 4.1): one field, the site's.
     const bool site_hsts = s.fields && !s.fields->hsts.empty();
+    // Without one, until this generation of the site has seen its application's: one test per field.
+    const SiteFields* watch = s.watch_fields && !s.watch_fields->application_noted.done.load(std::memory_order_relaxed) ? s.watch_fields : nullptr;
     const bool rewrite = proxied && loc.proxy.rewrite_redirects;
     std::string kept;  // the application's Cache-Control directives a protected answer keeps
     r.scratch.reserve(res.head.size() + 64);
@@ -174,6 +184,7 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
             if (h.value != s.fields->hsts && !s.fields->hsts_noted.done.load(std::memory_order_relaxed)) note_hsts_narrowed(*s.fields, h.value, log);
             continue;
         }
+        if (watch && Headers::iequals(h.name, "strict-transport-security")) note_application_hsts(*watch, h.value);
         if (guarded) {
             if (Headers::iequals(h.name, "cache-control")) {
                 private_cache::keep_directives(h.value, kept);

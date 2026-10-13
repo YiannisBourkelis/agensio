@@ -1987,8 +1987,9 @@ offered. A location's `add_headers` cannot carry `Strict-Transport-Security` (re
 until 0.1.0-alpha.75 it did, and reached neither the PHP pages nor the error answers. A managed
 site sets it with `site_update` `hsts: true` (`agensio ctl site-update NAME --hsts`). Health suggests
 it (`hsts_suggested`, info) once the site has served a real certificate for a week with no
-certificate finding; `hsts = false` (`hsts: false`, `--no-hsts`) records a decided no and silences
-that, and with `hsts` on the certificate findings `certificate_expiring` and `acme_renewal_failed`
+certificate finding, or says the application already sends its own (`hsts_from_application`, with
+its value, which `hsts = true` would replace); `hsts = false` (`hsts: false`, `--no-hsts`) records a
+decided no and silences that, and with `hsts` on the certificate findings `certificate_expiring` and `acme_renewal_failed`
 are errors ([redirects.md](redirects.md) 4.2).
 
 Rules checked by `agensio -t`: `tls = "auto"` needs `[server] acme`; `server_name` must

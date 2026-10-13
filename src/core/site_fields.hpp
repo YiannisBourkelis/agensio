@@ -31,6 +31,10 @@ struct SiteFields {
     // hsts_narrows_application (docs/redirects.md 4.1): set once this generation of the site has
     // noted an application's stronger HSTS, so a later answer carrying it costs one load.
     NoteOnce hsts_noted;
+    // A site with no hsts line (4.2): the HSTS its application sends itself is noted, once per
+    // generation, so health tells the user so instead of suggesting the site's own over it.
+    bool watch_application = false;
+    NoteOnce application_noted;
     bool empty() const noexcept { return h1.empty(); }
 };
 

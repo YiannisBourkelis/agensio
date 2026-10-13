@@ -1671,6 +1671,20 @@ if [ -n "$PHPFPM" ]; then
   check "health: a canonical site whose application redirects to its other name is named, with the application's setting" "yes" \
     "$(curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); print("yes" if [f for f in d["findings"] if f["code"] == "app_redirects_elsewhere" and f.get("site") == "cw.wild.test" and "wp option update home https://cw.wild.test" in f.get("fix", "")] else [f["code"] for f in d["findings"]])')"
   cpost /v1/sites/cw.wild.test/delete '{"confirm":true,"reason":"canon"}' > /dev/null
+  # An application's own HSTS on a site with no hsts line (alpha.87, docs/redirects.md 4.2, the
+  # alpha.86 report): health suggests the site's until the application's field has gone out, then says
+  # the application sends it, with its value and the hsts table that would match it. The certificate
+  # is dated a month back, so the suggestion's week is up.
+  mkdir -p bench/tmp/certs-old
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout bench/tmp/certs-old/key.pem -out bench/tmp/certs-old/cert.pem \
+    -not_before "$(date -u -d '30 days ago' +%Y%m%d%H%M%SZ)" -not_after "$(date -u -d '60 days' +%Y%m%d%H%M%SZ)" \
+    -subj "/CN=*.old.test" -addext "subjectAltName=DNS:*.old.test" >/dev/null 2>&1
+  cpost /v1/sites "{\"domain\":\"ah.old.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-old/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-old/key.pem\"},\"user\":null,\"app\":\"wordpress\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"root\":\"$ROOT/tests/wordpress\",\"listen_plain\":\"127.0.0.1:8482\",\"listen_tls\":\"127.0.0.1:8481\",\"confirm\":true,\"reason\":\"apphsts\"}" > /dev/null
+  hcodes() { curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); print(",".join(sorted(f["code"] for f in d["findings"] if f.get("site") == "ah.old.test" and f["code"].startswith("hsts_"))) or "none")'; }
+  check "hsts_from_application: a site without an hsts line is suggested HSTS until its application's own goes out, then told the application sends it, with the value and the table that matches it" \
+    "hsts_suggested max-age=63072000; includeSubDomains hsts_from_application yes" \
+    "$(hcodes) $(curl -sk -D - -o /dev/null --resolve ah.old.test:8481:127.0.0.1 https://ah.old.test:8481/hsts-strong.php | tr -d '\r' | grep -i '^strict-transport-security:' | sed 's/^[^:]*: //') $(hcodes) $(curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); f=[f for f in d["findings"] if f["code"] == "hsts_from_application" and f.get("site") == "ah.old.test"]; print("yes" if f and "max-age=63072000; includeSubDomains" in f[0]["message"] and "hsts = { max_age = 63072000, subdomains = true }" in f[0]["fix"] else f)')"
+  cpost /v1/sites/ah.old.test/delete '{"confirm":true,"reason":"apphsts"}' > /dev/null
   # TYPO3 without a preset (2026-10-08, the alpha.53 report's third finding): app = "php" and the
   # rules an agent translates from TYPO3 13.4's documented nginx configuration, through the MCP
   # bridge as an agent does it: path_check before, site_update as a dry run, then applied,

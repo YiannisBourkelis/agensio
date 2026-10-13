@@ -1278,8 +1278,32 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
         bool cert_trouble = false;
         for (std::size_t i = findings_before; i < out.size(); ++i)
             cert_trouble = cert_trouble || out[i].code.starts_with("certificate_") || out[i].code.starts_with("acme_renewal");
+        // An application that sends its own (Kanboard's ENABLE_HSTS, Rails' force_ssl) is said instead:
+        // hsts = true would replace its field, and with a weaker one when it commits to more (the
+        // alpha.86 report).
+        const auto sent = tls ? tls->application_hsts.find(name) : decltype(tls->application_hsts)::const_iterator{};
+        const bool app_sends = tls && sent != tls->application_hsts.end();
         if (s.hsts == SiteConfig::Hsts::unset && s.http != SiteConfig::Http::serve && st.present && !st.placeholder && !cert_trouble &&
-            st.not_before > 0 && now - st.not_before >= 7 * 86400)
+            st.not_before > 0 && now - st.not_before >= 7 * 86400 && app_sends) {
+            const std::string& value = sent->second.first;
+            const HstsValue v = parse_hsts(value);
+            const std::string decided = "nothing is needed; hsts = false records that the application's field is the one and silences this "
+                                        "(site_update with hsts: false on a managed site)";
+            std::string fix;
+            if (hsts_stronger(value, "max-age=31536000"))
+                fix = decided + "; hsts = true would replace it with a weaker one (a year, this host only), which hsts_narrows_application then reports. "
+                      "For agensio to send it on every answer, error pages and files included, match it in a hand-written site file: hsts = { max_age = " +
+                      std::to_string(v.max_age) + (v.subdomains ? ", subdomains = true" : "") + " }" +
+                      (v.preload ? " (preload, which agensio does not send, stays the application's alone: keep hsts = false for it)" : "");
+            else
+                fix = decided + "; hsts = true makes agensio send max-age=31536000 on every answer instead, error pages and files included, replacing "
+                      "the application's";
+            add("info", "hsts_from_application", name,
+                "the application sends Strict-Transport-Security: " + value + " itself (seen " + date(sent->second.second) +
+                    ") and agensio passes it on, so browsers that see it already keep to HTTPS for this site",
+                fix);
+        } else if (s.hsts == SiteConfig::Hsts::unset && s.http != SiteConfig::Http::serve && st.present && !st.placeholder && !cert_trouble &&
+                   st.not_before > 0 && now - st.not_before >= 7 * 86400)
             add("info", "hsts_suggested", name,
                 "HTTPS has served a real certificate since " + date(st.not_before) + " with nothing to report: hsts would tell browsers to use only HTTPS "
                 "for this site from their first visit on, and to refuse it on a certificate error rather than let a visitor click past it",

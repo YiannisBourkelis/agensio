@@ -505,7 +505,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (nineteen, each seeded from
   (`Dispatcher::note_scheme_missing`: a trusted peer's request without `X-Forwarded-Proto`, the
   worker's `scheme_noted` gate once a minute per site) and `hsts_narrows_application` from
   `apply_upstream_result` (`hsts_stronger`, RFC 6797 6.1, once per generation through
-  `SiteFields::hsts_noted`, a copy-safe `NoteOnce`); each also an error-log line at most once a minute. `redirect = "https"` is refused; the
+  `SiteFields::hsts_noted`, a copy-safe `NoteOnce`); each also an error-log line at most once a minute.
+  On a site with no `hsts` line (alpha.87) `Stream::watch_fields` points at its fields over HTTPS and
+  the application's own HSTS is noted once per generation (`hsts_from_application`), carried to health
+  in `TlsFacts::application_hsts`, which then says so in place of `hsts_suggested`. `redirect = "https"` is refused; the
   `https://host` prefix form stays until `[[site.redirect]]`.
 - **Automatic certificates** (H3, `src/services/acme.*`, `services/json.hpp`): `tls = "auto"`
   plus `[server] acme = { email }`; ACME v2 with HTTP-01 against any RFC 8555 CA, JWS ES256

@@ -59,6 +59,9 @@ struct TlsFacts {
     std::map<std::string, CertificateState> served;                              // by "cert\nkey"
     std::map<std::string, std::pair<std::time_t, std::string>> acme_failures;  // by cert path: when, the error
     std::map<std::string, std::string> load_errors;  // by "cert\nkey": why its files did not load the last time (T3)
+    // By site name: the HSTS its application sent while the site had no hsts line, and when
+    // (core/site_notices.hpp, docs/redirects.md 4.2): hsts_from_application instead of hsts_suggested.
+    std::map<std::string, std::pair<std::string, std::time_t>> application_hsts;
 };
 
 // With `tls` each TLS site's `tls` carries `served`: the certificate in memory (step T2).

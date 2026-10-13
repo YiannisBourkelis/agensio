@@ -6221,6 +6221,30 @@ static void test_served_certificates() {
     cfg.sites[0].http = SiteConfig::Http::redirect;
     facts.acme_failures[tls.cert.string()] = {now - 3600, "timeout"};  // something open about the certificate
     CHECK(!find(control::health_findings(cfg, cfg, false, now, &facts), "hsts_suggested"));
+    // An application that sends its own HSTS (the alpha.86 report: Kanboard's ENABLE_HSTS, Rails'
+    // force_ssl): said, with its value, instead of suggesting the site's over it.
+    facts.acme_failures.clear();
+    const std::string site_name = cfg.sites[0].server_names.front();
+    facts.application_hsts[site_name] = {"max-age=63072000; includeSubDomains", now - 600};
+    {
+        const auto f = control::health_findings(cfg, cfg, false, now, &facts);
+        const Finding* a = find(f, "hsts_from_application");
+        CHECK(!find(f, "hsts_suggested") && a && a->severity == "info" && a->message.find("max-age=63072000; includeSubDomains") != npos &&
+              a->fix.find("hsts = false records") != npos && a->fix.find("weaker") != npos &&
+              a->fix.find("hsts = { max_age = 63072000, subdomains = true }") != npos);
+    }
+    facts.application_hsts[site_name] = {"max-age=31536000", now - 600};  // the same as a year: no warning of a weaker one
+    {
+        const Finding* a = find(control::health_findings(cfg, cfg, false, now, &facts), "hsts_from_application");
+        CHECK(a && a->fix.find("weaker") == npos && a->fix.find("replacing the application's") != npos);
+    }
+    cfg.sites[0].hsts = SiteConfig::Hsts::off;  // decided: nothing said either way
+    {
+        const auto f = control::health_findings(cfg, cfg, false, now, &facts);
+        CHECK(!find(f, "hsts_from_application") && !find(f, "hsts_suggested"));
+    }
+    cfg.sites[0].hsts = SiteConfig::Hsts::unset;
+    facts.application_hsts.clear();
     // app_redirects_elsewhere (docs/redirects.md 3.4): what the probe judges, and where it asks.
     control::CanonicalProbe p;
     p.site = "example.com";

@@ -421,6 +421,11 @@ control::TlsFacts Server::tls_facts() {
     for (const auto& [path, f] : acme_.failures())
         facts.acme_failures.emplace(path, std::make_pair(std::chrono::system_clock::to_time_t(f.at), f.error));
     facts.load_errors = cert_load_errors_;
+    for (const auto& n : site_notices().snapshot())  // the latest an application of each site sent
+        if (n.code == "hsts_from_application") {
+            auto& seen = facts.application_hsts[n.site];
+            if (n.last >= seen.second) seen = {n.subject, n.last};
+        }
 #endif
     return facts;
 }

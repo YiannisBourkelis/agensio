@@ -366,6 +366,13 @@ health suggests it once HTTPS has proven itself:
   a real certificate (not the startup placeholder) for at least 7 days with no certificate finding
   open. The fix is `hsts = true` (`site_update` with `hsts: true` for a managed site), with what it
   commits to. Not raised for a site without TLS of its own (a proxy in front may set HSTS itself).
+- **An application that sends its own** (Kanboard's `ENABLE_HSTS`, Rails' `force_ssl`, Mastodon):
+  on a site with no `hsts` line its field goes out as it is, and once one answer has carried it,
+  health says so instead of the suggestion (`hsts_from_application`, info, with the value; built in
+  alpha.87, the alpha.86 report). `hsts = true` would replace it, and with a weaker one when the
+  application's commits to more, which `hsts_narrows_application` would then report; the fix says
+  `hsts = false` records that the application's is the one, or gives the `{ max_age, subdomains }`
+  that matches it.
 - **No line means "not decided", `hsts = false` means "decided: off"**: health stays quiet about a
   site that says `false`. The agent writes it when the user declines, so the suggestion does not
   come back.

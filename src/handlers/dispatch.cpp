@@ -626,7 +626,11 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
     if (site->own_trusted_proxies && s.conn.trusted_peer) apply_site_trust(s.conn, *site);  // one flag test elsewhere
     // The site's fields for an HTTPS answer (its hsts, docs/redirects.md 4): from here on every answer
     // carries them, the error pages and redirects below included; a plain one never does (RFC 6797 7.2).
-    if (!site->tls_fields.empty() && (s.conn.tls || s.conn.forwarded_https)) s.fields = &site->tls_fields;
+    // A site with no hsts line watches what its application sends instead (4.2), for health.
+    if (s.conn.tls || s.conn.forwarded_https) {
+        if (!site->tls_fields.empty()) s.fields = &site->tls_fields;
+        else if (site->tls_fields.watch_application) s.watch_fields = &site->tls_fields;
+    }
     // http = "redirect" (docs/redirects.md 2): plain HTTP, or a request a trusted proxy did not mark
     // https, goes to HTTPS; certificate validation gets the site's files there and nothing else
     // (its validation location, below). canonical (3): another of the site's names goes to the

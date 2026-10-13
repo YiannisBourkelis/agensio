@@ -2,6 +2,24 @@
 
 ## 0.1.0-alpha.87
 
+- **Health says an application already sends HSTS instead of suggesting the site's over it** (the
+  alpha.86 report; `docs/redirects.md` 4.2). Kanboard (`ENABLE_HSTS`) and Rails (`force_ssl`) send
+  their own `Strict-Transport-Security`, and `hsts_suggested` advised `hsts = true`, which replaces
+  the field and, for Rails' two years with `includeSubDomains`, with a weaker one that
+  `hsts_narrows_application` then reported. On a site with no `hsts` line the application's field
+  goes out as it is and is noted on the first HTTPS answer that carries it, once per generation of
+  the site (`SiteFields::watch_application` and `application_noted`; until then one size
+  comparison per response field, nothing on a site with `hsts` or without an upstream); health then
+  gives `hsts_from_application` (info) in place of the suggestion: the value, that nothing is needed,
+  `hsts = false` to record it, and, when the application's commits to more than a year for this
+  host, the `hsts = { max_age, subdomains }` table that matches it and why `hsts = true` would weaken
+  it. The integration check (a managed site with a month-old certificate and an application sending
+  two years with `includeSubDomains`) failed on alpha.86's code. `bench/ab.sh HEAD -A -P`
+  (`ab-20261013-220307.md`, two rounds): 0.975 to 1.032; again with three rounds
+  (`ab-20261013-220852.md`): 0.975 to 1.015 but for the 20 ms proxy row at 1.064, whose base alone
+  moved 6.50 to 6.99 us between the runs; that row and the other proxy rows with five rounds
+  (`ab-20261013-221738.md`): 1.012 to 1.019, the rounds of both sides overlapping.
+
 - **The redirects guide installed, and the `/index.php/` recipe** (`docs/redirects.md` 12.3, 13
   step 5). `docs/redirects.md` is built (alpha.75 to alpha.86), so it is installed with the other
   guides that point to its sections (health's fixes, `docs/tls.md`, configuration.md 14), and its
