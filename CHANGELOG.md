@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.89
+## 0.1.0-alpha.89 (2026-10-14)
 
 - **`[[site.response_headers]]`: fields a site sets, defaults or removes by path** (`docs/headers.md` 2,
   configuration.md 14c; step 2a of headers.md 12). `path`, `match`, `set` (replaces every copy, the
