@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.80
+## 0.1.0-alpha.80 (2026-10-13)
 
 - **`site-update` says why it cannot help with a hand-written file set aside** (the alpha.78
   report's notes). It answered "no such site" for a site whose hand-written file did not load; it
