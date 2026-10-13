@@ -3369,6 +3369,18 @@ static void test_control_commands() {
     CHECK(parse_since("999999999999999w", now, t) && t == 0 && parse_since("12d", now, t) && t == 0);
     CHECK(parse_log_line(R"({"time":"2026-09-18T18:44:39+00:00","status":1e30})", l) && l.status == 0);
     CHECK(parse_log_line(R"({"time":"2026-09-18T18:44:39+00:00","status":-1})", l) && l.status == 0);
+    // The access-log status filter (alpha.72 report: an explicit "5xx", the documented default, was
+    // read by atoi as 5 and showed every line as an error). A class is that class and above, as
+    // "4xx" was; a number only when it is all digits; anything else is refused, never guessed at.
+    {
+        int m = 500;
+        CHECK(status_filter("5xx", m) && m == 500 && status_filter("4xx", m) && m == 400 && status_filter("4XX", m) && m == 400);
+        CHECK(status_filter("2xx", m) && m == 200 && status_filter("all", m) && m == 0 && status_filter("404", m) && m == 404);
+        m = 500;
+        CHECK(status_filter("", m) && m == 500);  // not given: the default stands
+        CHECK(!status_filter("abc", m) && !status_filter("5x", m) && !status_filter("50x", m) && !status_filter("1000", m) &&
+              !status_filter("6xx", m) && !status_filter("-1", m) && m == 500);
+    }
     CHECK(query_value("/v1/logs?site=a.test&since=3h&x=a%20b+c", "since") == "3h");
     CHECK(query_value("/v1/logs?site=a.test&since=3h&x=a%20b+c", "x") == "a b c");
     CHECK(query_value("/v1/logs?site=a.test", "nope").empty() && query_value("/v1/logs", "site").empty());

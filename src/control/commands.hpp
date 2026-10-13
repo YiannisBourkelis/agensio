@@ -31,6 +31,10 @@ struct LogQuery {
 void scan_log(const std::filesystem::path& file, std::string_view source, const LogQuery& q,
               std::vector<LogLine>& out, bool& truncated);
 json::Value logs(const Config& cfg, const LogQuery& q);
+// The access-log status filter of a logs query: "all", a class ("5xx", "4xx": that class and
+// above), or a status ("404": that status and above); "" leaves `min` as it is. False for a
+// value it does not understand, `min` unchanged.
+bool status_filter(std::string_view text, int& min);
 
 // ---- sites and certificates ----
 

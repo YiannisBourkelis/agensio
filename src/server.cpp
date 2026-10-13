@@ -863,10 +863,7 @@ json::Value Server::logs(std::string_view target) {
     if (since.empty() || !control::parse_since(since, now, q.since)) q.since = now - 3600;
     const std::string level = control::query_value(target, "level");
     if (level == "error" || level == "warn" || level == "info") q.level = level;
-    const std::string status = control::query_value(target, "status");
-    if (status == "all") q.status_min = 0;
-    else if (status == "4xx") q.status_min = 400;
-    else if (!status.empty() && std::isdigit(static_cast<unsigned char>(status[0]))) q.status_min = std::atoi(status.c_str());
+    control::status_filter(control::query_value(target, "status"), q.status_min);
     const std::string limit = control::query_value(target, "limit");
     if (!limit.empty()) q.limit = static_cast<std::size_t>(std::clamp(std::atol(limit.c_str()), 1L, 5000L));
     return control::logs(gen_->cfg, q);

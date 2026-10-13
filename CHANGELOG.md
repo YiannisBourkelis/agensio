@@ -2,6 +2,15 @@
 
 ## 0.1.0-alpha.73
 
+- **An explicit `status=5xx` showed every access-log line.** The logs query read a status by its
+  first digit through `atoi`, so `5xx`, the documented default given explicitly (as an agent does
+  through MCP `logs_query`), became "status 5 and above": 2xx and 3xx lines came back as if they
+  were errors; any other value it did not know was misread too. A class (`5xx`, `4xx`, `3xx`,
+  `2xx`, any case) now means that class and above, `all` everything, a status of at most three
+  digits that status and above; anything else is refused with a 400 naming the forms
+  (`control::status_filter`, the control handler). Reported from the alpha.72 test host; the
+  unit test failed with the old parsing moved unchanged into the function, and an integration
+  check reads the 4xx and 2xx lines the suite wrote through the socket.
 - **A site names the proxies that speak for it** (`docs/redirects.md` 2.4, decided 2026-10-13).
   With several proxies in `[server] trusted_proxies` every site believed all of them, and a CDN's
   addresses are shared by all its customers, so a customer of one CDN could name the client and

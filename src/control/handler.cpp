@@ -381,8 +381,14 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
     } else if (path == "/v1/logs") {
         // A site that does not exist is a 404, as for the other site commands: a mistyped name
         // answered "count 0" read as "no errors" (2026-10-02 alpha.43 report).
+        int status_min = 500;
         if (const std::string site = control::query_value(req.target, "site"); !site.empty() && !control::find_site(backend_->running(), site))
             reply(s, 404, json::Value::object().set("error", "no such site").set("site", site));
+        else if (const std::string status = control::query_value(req.target, "status"); !control::status_filter(status, status_min))
+            // Never guessed at: a filter misread shows the wrong lines as if they were the answer.
+            reply(s, 400, json::Value::object()
+                              .set("error", "status must be 5xx (the default), another class such as 4xx (that class and above), all, or a status such as 404 (that status and above)")
+                              .set("status", status));
         else
             reply(s, 200, backend_->logs(req.target));
     } else if (path == "/v1/presets") {

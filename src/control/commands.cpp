@@ -96,6 +96,24 @@ void scan_log(const fs::path& file, std::string_view source, const LogQuery& q, 
     out.insert(out.end(), found.begin(), found.end());
 }
 
+// alpha.72 report: "5xx", the documented default given explicitly, went to atoi as 5, so every line
+// was shown as an error; any other value it did not know was read as something else too.
+bool status_filter(std::string_view status, int& min) {
+    if (status.empty()) return true;
+    auto lower = [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c + 32) : c; };
+    if (status.size() == 3 && lower(status[0]) == 'a' && lower(status[1]) == 'l' && lower(status[2]) == 'l') {
+        min = 0;
+        return true;
+    }
+    if (status.size() == 3 && status[0] >= '1' && status[0] <= '5' && lower(status[1]) == 'x' && lower(status[2]) == 'x') {
+        min = (status[0] - '0') * 100;
+        return true;
+    }
+    if (status.size() > 3 || !std::all_of(status.begin(), status.end(), [](char c) { return c >= '0' && c <= '9'; })) return false;
+    min = std::atoi(std::string(status).c_str());
+    return true;
+}
+
 json::Value logs(const Config& cfg, const LogQuery& q) {
     std::vector<LogLine> lines;
     bool truncated = false;
