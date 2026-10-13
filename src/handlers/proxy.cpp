@@ -130,6 +130,12 @@ bool ProxyHandler::build_head(std::string& out, const Stream& s, std::string_vie
         if (http::is_hop_by_hop(h.name) || Headers::iequals(h.name, "expect") ||
             (!connection.empty() && http::connection_lists(connection, h.name)))
             continue;
+        // A field with '_' in its name never reaches the origin (alpha.73 report): Rack and Puma read
+        // Client_IP as HTTP_CLIENT_IP (Rails' IpSpoofAttackError: a 500 on every page) and
+        // X_Remote_User as the field forward_user writes, around the dashed names agensio guards.
+        // FastCGI and CGI drop them too (FcgiHandler::append_http_params); nginx does by default
+        // (underscores_in_headers off).
+        if (h.name.find('_') != std::string_view::npos) continue;
         if (configured(h.name)) continue;  // set below from the configuration
         // One Cookie line for the origin, the crumbs in the order received (RFC 6265 5.4:
         // at most one Cookie field; Rack reads the first line only). HTTP/2 and HTTP/3 join

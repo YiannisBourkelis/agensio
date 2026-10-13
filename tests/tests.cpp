@@ -3090,6 +3090,29 @@ static void test_proxy() {
         ProxyHandler::build_head(h, c, "/", p);
         CHECK(h.find("X-Real-IP") == std::string::npos && h.find("6.6.6.6") == std::string::npos);
     }
+    {
+        // A field with '_' in its name never reaches a proxied origin (alpha.73 report): Rack and Puma
+        // build their environment CGI-style, so Client_IP is the HTTP_CLIENT_IP that Rails checks
+        // against X-Forwarded-For (an IpSpoofAttackError, a 500 on every page), and X_Remote_User the
+        // field forward_user writes. FastCGI and CGI drop them already; nginx does by default.
+        Stream u;
+        u.request.method_name = "GET";
+        u.request.headers.add("Host", "app.example.com");
+        for (const char* n : {"X_Real_IP", "Client_IP", "X_Forwarded_For", "x_remote_user", "X_Custom"}) u.request.headers.add(n, "13.13.13.13");
+        u.request.headers.add("X-Custom", "kept");
+        u.conn.remote_address = "192.0.2.7";
+        u.auth.forward_field = "X-Remote-User";
+        u.auth.user = "anna";
+        UpstreamConfig p;
+        std::string h;
+        ProxyHandler::build_head(h, u, "/", p);
+        CHECK(h.find("13.13.13.13") == std::string::npos && h.find("X-Custom: kept\r\n") != std::string::npos);
+        CHECK(h.find("X-Remote-User: anna\r\n") != std::string::npos && h.find("Remote") == h.rfind("Remote"));
+        u.conn.trusted_peer = true;  // the rule does not depend on trust: a proxy in front cannot pass one either
+        h.clear();
+        ProxyHandler::build_head(h, u, "/", p);
+        CHECK(h.find("13.13.13.13") == std::string::npos);
+    }
     // An Upgrade request is recognised and its Upgrade field forwarded; not with a body.
     Stream ws;
     ws.request.method = Method::get;

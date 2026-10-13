@@ -327,7 +327,8 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (eighteen, each seeded from
   bodies, skips 1xx, and keeps the connection when the origin allows. `ProxyHandler`
   builds the forwarded head (hop-by-hop stripped, Host through, X-Forwarded-For/Proto/
   Host, `X-Real-IP` with the believed client; a client's own address fields dropped, a CDN's
-  passed from trusted proxies only: 2026-10-13, before which a client chose the address
+  passed from trusted proxies only, and every field with `_` in its name dropped (alpha.74: Rack and
+  Puma read `Client_IP` as `HTTP_CLIENT_IP`): 2026-10-13, before which a client chose the address
   Vaultwarden, Grafana or Umami saw) and `handlers/upstream_common.*` holds what both handlers share (error page,
   body collection, result to Response). Response-head parser in
   `src/upstream/http_head.hpp` (fuzzed). Gate: `bench/ab.sh <ref> -P`. Header policy

@@ -1436,7 +1436,12 @@ suffix locations cannot rewrite.
   client could set any of these, `X-Real-IP` included, and choose the address the application
   saw.
 - Every other field except the hop-by-hop ones (`Connection` and whatever it lists,
-  `Keep-Alive`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`, `Expect`) and the framing.
+  `Keep-Alive`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`, `Expect`), the framing, and any
+  field with `_` in its name: Rack and Puma, like CGI, read `Client_IP` as `HTTP_CLIENT_IP` and
+  `X_Real_IP` as `HTTP_X_REAL_IP`, the fields agensio guards under their dashed names, so such a
+  field could name the client or the user, or make a Rails application answer 500 on every page
+  (alpha.74). FastCGI and CGI drop them the same way, and nginx does by default
+  (`underscores_in_headers off`).
 - One `Cookie` line, whatever the client sent: a browser sends one `cookie` field per
   cookie over HTTP/2 and HTTP/3, and they are joined with `; ` in the order received (RFC
   9113 8.2.3, RFC 9114 4.2.1), as are two `Cookie` lines from an HTTP/1.1 client, so an

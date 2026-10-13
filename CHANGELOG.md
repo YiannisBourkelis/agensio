@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.0-alpha.74
+
+- **A field with `_` in its name reached a proxied origin.** The client-address fix of alpha.73
+  dropped `X-Real-IP`, `Client-IP` and the CDN fields under their dashed names, but Rack and
+  Puma build their environment CGI-style, so `Client_IP` reached a Rails application as the
+  `HTTP_CLIENT_IP` it checks against `X-Forwarded-For`: one request answered 500 on every page
+  (`ActionDispatch::RemoteIp::IpSpoofAttackError`, seen on Writebook and Redmine), and with the
+  check off `Client_IP` chose the address Rails saw; `X_Remote_User` passed beside the field
+  `forward_user` writes, so a client let in by `skip_for` or on an open path could name a user.
+  Every client field with `_` in its name is now dropped toward a proxied origin, from any peer,
+  as FastCGI and CGI already did and nginx does by default (`underscores_in_headers off`).
+  Reported from the alpha.73 test host; the unit test of the forwarded head failed before the
+  change, and an integration check sends the fields through the proxy. `bench/ab.sh HEAD -P -r 3`
+  (`ab-20261013-111454.md`): proxy `/json` 1.004, 100 KB 1.012, the static rows 0.95 to 0.99; the
+  20 ms-origin row 1.090, a row that read 1.073 with the same code on both sides in the baseline run
+  before the change (`ab-20261013-110321.md`).
+
 ## 0.1.0-alpha.73 (2026-10-13)
 
 - **An explicit `status=5xx` showed every access-log line.** The logs query read a status by its

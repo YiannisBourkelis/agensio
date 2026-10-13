@@ -2154,6 +2154,11 @@ except OSError:
   H=$(curl -sS -H 'X-Forwarded-For: 203.0.113.9' -H 'X-Real-IP: 6.6.6.6' -H 'CF-Connecting-IP: 203.0.113.9' $P/api/headers | tr -d '\r')
   check "proxy: behind a trusted proxy X-Real-IP is the client it names, and its CDN field passes" "X-Real-IP: 203.0.113.9 CF-Connecting-IP: 203.0.113.9 0" \
     "$(echo "$H" | grep -i '^X-Real-IP:') $(echo "$H" | grep -i '^CF-Connecting-IP:') $(echo "$H" | grep -c '6\.6\.6\.6')"
+  # A field with '_' in its name never reaches the origin (alpha.73 report): Rack and Puma read
+  # Client_IP as HTTP_CLIENT_IP, which Rails checks against X-Forwarded-For (a 500 on every page).
+  H=$(curl -sS --interface 127.0.0.2 -H 'X_Real_IP: 13.13.13.13' -H 'Client_IP: 14.14.14.14' -H 'X_Remote_User: admin' -H 'X-Custom: kept' $P/api/headers | tr -d '\r')
+  check "proxy: fields with an underscore in the name (X_Real_IP, Client_IP, X_Remote_User) never reach the origin; a dashed field does" "0 X-Custom: kept" \
+    "$(echo "$H" | grep -c -E '13\.13\.13\.13|14\.14\.14\.14|admin') $(echo "$H" | grep -i '^X-Custom:')"
   # A site's own trusted_proxies (2026-10-13, docs/redirects.md 2.4): tp.test believes no proxy, so a
   # request through the server's trusted 127.0.0.1 is 127.0.0.1's own (its X-Forwarded-For and the CDN
   # field are not believed); proxy.test, without the key, believes it (the check above).

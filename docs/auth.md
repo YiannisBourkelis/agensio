@@ -226,7 +226,9 @@ sites without `[[site.auth]]` pay nothing.
   `open = true`.
 - **The user**: PHP and CGI get `REMOTE_USER` and `AUTH_TYPE = Basic`; a proxied application
   gets the name in the field `forward_user` names, and a client's own field of that name is
-  dropped, so it cannot claim to be someone. A client let in by `skip_for` has no user.
+  dropped, so it cannot claim to be someone; so is any field with `_` in its name, which Rack and
+  Puma read as the dashed one (`X_Remote_User` as `HTTP_X_REMOTE_USER`; before alpha.74 it
+  passed). A client let in by `skip_for` has no user.
 - **Caches**: every answer on a protected path is one no shared cache (a CDN, Varnish, a
   caching proxy) may keep, so none serves it to someone without the password:
   - a file agensio serves itself carries `Cache-Control: private`, in place of a preset's
