@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.79
+## 0.1.0-alpha.79 (2026-10-13)
 
 - **An application's own `http://` redirects go out as `https://`** (`docs/redirects.md` 2.5). An
   application that does not trust agensio as its proxy builds its redirects from what it sees,
