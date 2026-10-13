@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.81
+## 0.1.0-alpha.81 (2026-10-13)
 
 - **One name for a site: `canonical`** (`docs/redirects.md` 3, configuration.md 14). A site lists
   every name in one block and `canonical` names the one the others redirect to: a `308`, path and
