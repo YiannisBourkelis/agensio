@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.92
+## 0.1.0-alpha.92 (2026-10-14)
 
 - **`path_check` names every field a path's answer gets, and previews proposed rules**
   (`docs/headers.md` 7, configuration.md 14c; step 2c of headers.md 12). Its answer carries
