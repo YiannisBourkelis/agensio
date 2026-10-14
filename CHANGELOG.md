@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.94
+## 0.1.0-alpha.94 (2026-10-14)
 
 - **Health names what a live site's home page goes without: `response_headers_suggested`**
   (`docs/headers.md` 7; the test host's request's last part). For each live HTTPS site (TLS, an `app`,
