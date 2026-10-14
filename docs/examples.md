@@ -58,6 +58,7 @@ start them and the warning goes. What a key needs (a reload, a restart, root) is
 - [A mistake in one site's file](examples/basics.md#a-mistake-in-one-sites-file): one file set aside, the other sites served, its last good version kept on reload; `-t --strict`, health.
 - [Long cache lifetimes for assets, and HSTS](examples/basics.md#long-cache-lifetimes-for-assets-and-hsts): the site's `hsts` key, and a year's `Cache-Control` on `/assets/` as a `when = "success"` rule, so a missing asset's 404 is never kept.
 - [Security fields by path](examples/basics.md#security-fields-by-path): `[[site.response_headers]]` on every answer, PHP and error pages too: `set` replaces the application's copy, `default` fills a gap, `remove` drops `X-Powered-By`, and a deeper rule changes only the fields it names.
+- [Fields by kind of file](examples/basics.md#fields-by-kind-of-file): `endings` on a rule, the files agensio serves by their ending (an SVG that runs no script, fonts for another origin), never a page PHP makes.
 - [A single-page application](examples/basics.md#a-single-page-application): `try_files` to the shell, with missing assets still answered 404.
 - [An access log per site, and JSON logs](examples/basics.md#an-access-log-per-site-and-json-logs): `access_log`, `[log] format`, log rotation, and why JSON costs you fail2ban.
 - [Larger uploads for one site](examples/basics.md#larger-uploads-for-one-site): a site's own `max_body_size`, the 413 and its error-log line, and the PHP pool's upload limits.

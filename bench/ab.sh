@@ -39,8 +39,10 @@
 #             alpha.82 gets the whole-domain `redirect = "https://..."` key, the same answer).
 #             And "headers:/sub/index.html:64" (127.0.0.1:8092, [[site.response_headers]] at / and
 #             at /sub/, benchmarked on a file under the deeper rule: the node lookup and the fields
-#             on a cached file's HTTP/1 answer; a base before 0.1.0-alpha.89 gets the same fields
-#             from a location's add_headers, the same bytes, so the row measures the rules). With -P also "proxy-hdr:/json:64" (127.0.0.1:8091, the benchmark
+#             on a cached file's HTTP/1 answer, and since 0.1.0-alpha.90 a rule with endings for
+#             html files; a base before endings gets that field from a rule without them, one before
+#             0.1.0-alpha.89 all of them from a location's add_headers: the same bytes on both sides,
+#             so the row measures the rules). With -P also "proxy-hdr:/json:64" (127.0.0.1:8091, the benchmark
 #             upstream behind a site with set, default and remove rules: the upstream loop's half).
 #   -r        rounds of base/new alternation (default 2)
 #   -d        wrk duration per case (default 5s)
@@ -126,11 +128,19 @@ if [ $ACCESS = 1 ]; then
     printf '\n[[site.response_headers]]\npath = "/"\nset = { "Referrer-Policy" = "strict-origin-when-cross-origin", "X-Content-Type-Options" = "nosniff" }\n'
     printf 'default = { "X-Frame-Options" = "SAMEORIGIN" }\nremove = ["X-Powered-By"]\n'
     printf '\n[[site.response_headers]]\npath = "/sub/"\nwhen = "success"\nset = { "Cache-Control" = "public, max-age=3600" }\n'
+  } > "$BENCH/tmp/ab-hdr-base.toml"
+  # endings (0.1.0-alpha.90): one more field on the html files; a base before endings gets the same
+  # field from a rule without them, the same bytes, so the row measures the ending's lookup.
+  { cat "$BENCH/tmp/ab-hdr-base.toml"
+    printf '\n[[site.response_headers]]\npath = "/"\nendings = ["html"]\nset = { "X-Kind" = "page" }\n'
   } > "$BENCH/tmp/ab-hdr-rules.toml"
+  { cat "$BENCH/tmp/ab-hdr-base.toml"
+    printf '\n[[site.response_headers]]\npath = "/"\nset = { "X-Kind" = "page" }\n'
+  } > "$BENCH/tmp/ab-hdr-plain.toml"
   # The same fields from a location's add_headers, the older mechanism: what a base before the rules
   # loads, so both sides write the same bytes and the row measures the rules, not the fields.
   { printf "$hdr_site" "$BENCH"
-    printf '\n[[site.location]]\npath = "/"\nadd_headers = { "Referrer-Policy" = "strict-origin-when-cross-origin", "X-Content-Type-Options" = "nosniff", "X-Frame-Options" = "SAMEORIGIN", "Cache-Control" = "public, max-age=3600" }\n'
+    printf '\n[[site.location]]\npath = "/"\nadd_headers = { "Referrer-Policy" = "strict-origin-when-cross-origin", "X-Content-Type-Options" = "nosniff", "X-Frame-Options" = "SAMEORIGIN", "Cache-Control" = "public, max-age=3600", "X-Kind" = "page" }\n'
   } > "$BENCH/tmp/ab-hdr-loc.toml"
   phdr_site='\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8091"]\nroot = "%s/www"\n\n[[site.location]]\npath = "/"\nupstream = "http://127.0.0.1:9100"\n'
   printf "$phdr_site" "$BENCH" > "$BENCH/tmp/ab-phdr-none.toml"
@@ -270,7 +280,7 @@ start() {  # binary
       cat "$cfg" "$BENCH/tmp/$f" > "$BENCH/tmp/ab-side-redir.toml"
       if "$1" -t -c "$BENCH/tmp/ab-side-redir.toml" >/dev/null 2>&1; then cfg="$BENCH/tmp/ab-side-redir.toml"; echo "  (redirect rows: ${f#ab-redir-})"; break; fi
     done
-    local hdr="ab-hdr-rules.toml ab-hdr-loc.toml ab-hdr-none.toml"
+    local hdr="ab-hdr-rules.toml ab-hdr-plain.toml ab-hdr-loc.toml ab-hdr-none.toml"
     for f in $hdr; do  # the response headers site in the form this side loads
       cat "$cfg" "$BENCH/tmp/$f" > "$BENCH/tmp/ab-side-hdr.toml"
       if "$1" -t -c "$BENCH/tmp/ab-side-hdr.toml" >/dev/null 2>&1; then cfg="$BENCH/tmp/ab-side-hdr.toml"; echo "  (headers row: ${f#ab-hdr-})"; break; fi

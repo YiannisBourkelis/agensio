@@ -522,7 +522,11 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (nineteen, each seeded from
   writers agensio's own where they send the extra fields (`response_fields::apply`; HTTP/1 sends the set's
   prebuilt `h1` on an answer with nothing to look at); `Response::own_fields` (the dispatcher's 401, 403,
   503 blocks) keeps agensio's own fields standing, `s.auth.protected_path` leaves the cache fields to the
-  guard. Gate: `bench/ab.sh <ref> -A` (row `headers`), `-P` with `-A` (row `proxy-hdr`).
+  guard. `endings` (alpha.90): a node's `by_ending` holds one pair of sets per ending its chain names
+  (longest first; an ending inside another counts for it, `response_rules::ending_within`), chosen by
+  `response_fields::served_file` where the static handler answers with a file (its name before a twin),
+  `Stream::header_ending`; `check_header_endings` refuses an ending PHP runs or the root refuses.
+  Gate: `bench/ab.sh <ref> -A` (row `headers`), `-P` with `-A` (row `proxy-hdr`).
 - **Automatic certificates** (H3, `src/services/acme.*`, `services/json.hpp`): `tls = "auto"`
   plus `[server] acme = { email }`; ACME v2 with HTTP-01 against any RFC 8555 CA, JWS ES256
   and CSRs through OpenSSL. Placeholder certificate at start, order at once, challenge

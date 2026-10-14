@@ -3,6 +3,7 @@
 #include "http2/hpack.hpp"
 #include "http3/qpack.hpp"
 
+#include "core/response_fields.hpp"
 #include "http1/range.hpp"
 
 #include <charconv>
@@ -538,6 +539,7 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
             raw->last_access.store(now, std::memory_order_relaxed);
         // Exactly one strong reference is taken for the duration of the response.
         EntryPtr ref = fetched ? std::move(fetched) : *local;
+        response_fields::served_file(s, raw->file_path);  // endings rules read the file's name (docs/headers.md 2.1)
         serve_entry(s, std::move(ref));
         add_headers(s, loc, ws.path);
         return Outcome::done;
@@ -579,6 +581,7 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
         EntryPtr canonical = cache_.insert(key, entry);
         if (canonical) ws.local.insert(key, canonical);
         else canonical = std::move(entry);  // cache full for this size class: serve once, uncached
+        response_fields::served_file(s, ws.fs_path);
         serve_entry(s, std::move(canonical));
         add_headers(s, loc, ws.path);
         return Outcome::done;
@@ -596,12 +599,14 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
         EntryPtr canonical = cache_.insert(key, entry);
         if (canonical) {
             ws.local.insert(key, canonical);
+            response_fields::served_file(s, ws.fs_path);
             serve_entry(s, std::move(canonical));
             add_headers(s, loc, ws.path);
             return Outcome::done;
         }
         f = std::move(entry->fd);  // store refused it: serve once from the open file
     }
+    response_fields::served_file(s, ws.fs_path);
     serve_file(s, std::move(f), fi, ws);
     add_headers(s, loc, ws.path);
     return Outcome::done;

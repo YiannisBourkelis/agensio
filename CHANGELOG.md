@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.1.0-alpha.90
+
+- **`endings` on `[[site.response_headers]]`: fields by kind of file** (`docs/headers.md` 2.1, 3.3,
+  configuration.md 14c; step 2b of headers.md 12). `endings = ["svg"]` (any case, a leading dot
+  allowed, `tar.gz` too) applies a rule only to the files agensio serves whose name ends so, read
+  where the static handler answers with a file (after `try_files` and a directory's index, the name
+  before a pre-compressed twin), never to an application's answer or an error page. At one path a
+  rule whose endings the file has decides before one without, a longer path before both; an ending
+  inside another counts for it (`gz` for `a.tar.gz`). Each node holds one pair of sets per ending its
+  rules name; a request that served a file points at the pair for its ending. Refused at load: two
+  rules at one path naming one field with endings that meet (the same, or one inside the other), an
+  ending the site never serves itself (`php` where PHP runs it, one its preset answers 404 for); a
+  CSP `set` with endings is no longer noted (it never meets the application's answer). The cookbook's
+  Fields by kind of file (an SVG that runs no script, fonts for another origin). The integration
+  checks (an SVG, an HTML file and a directory's index, a deeper path's rule winning, a PHP answer
+  and a 404 untouched, HTTP/2, the load's refusals) failed on alpha.89; the unit test's brute-force
+  reading now draws endings and served files too (400 rule sets). `bench/ab.sh HEAD -A -P -2`
+  (`ab-20261014-000223.md`, a noisy run: the base's own rounds 2.00 to 2.26 on the 1 KB row):
+  0.93 to 1.06 but for `proxy /slow` (1.139) and `headers` (1.078); the access rows again with three
+  rounds (`ab-20261014-001005.md`): `headers` (an endings rule against the same field from a rule
+  without one) 1.008, the rest 0.96 to 1.03.
+
 ## 0.1.0-alpha.89 (2026-10-14)
 
 - **`[[site.response_headers]]`: fields a site sets, defaults or removes by path** (`docs/headers.md` 2,

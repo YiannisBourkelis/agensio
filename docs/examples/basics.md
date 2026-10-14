@@ -689,6 +689,66 @@ then the rules are a hand-written site file's.
 **Reference:** [Response headers](../configuration.md#14c-response-headers-siteresponse_headers),
 [headers.md](../headers.md) 2.
 
+## Fields by kind of file
+
+**When:** some kinds of file need a field of their own wherever they are: an uploaded SVG can hold
+JavaScript that would run as the site if the file is opened directly, and web fonts must be
+loadable from another of your origins. Shopware, Joomla and FreshRSS ship the first, PrestaShop,
+TYPO3 and Craft the second.
+
+```toml
+# /etc/agensio/agensio.toml: the main file, root's (once per host)
+include = ["sites.d/*.toml"]
+
+[server]
+acme = { email = "admin@example.com" }
+```
+
+```toml
+# /etc/agensio/sites.d/example.com.toml
+[[site]]
+server_name = ["example.com"]
+listen = ["0.0.0.0:443"]
+root = "/var/www/example.com/web"
+app = "php"
+php = { socket = "unix:/run/php/php-fpm.sock" }
+tls = "auto"
+
+[[site.response_headers]]
+path = "/"
+endings = ["svg"]
+set = { "Content-Security-Policy" = "script-src 'none'" }
+
+[[site.response_headers]]
+path = "/"
+endings = ["woff", "woff2", "ttf", "otf"]
+set = { "Access-Control-Allow-Origin" = "https://shop.example.com" }
+```
+
+**What it does.** Every SVG file agensio serves, under any directory, carries a policy that runs no
+script, and every font a CORS field for the shop's origin. `endings` reads the file agensio
+serves, after `try_files` and a directory's index, never the address: a page PHP makes is never
+touched, whatever its URL ends with, and a missing file's 404 gets nothing. At one path a rule with
+endings decides before one without, and a longer path before both. A rule's value is fixed text:
+several allowed origins need the server to echo the request's `Origin` with `Vary: Origin`, which
+is the application's, so a list in one field is refused, and so is `*` with credentials. Easy to
+get wrong: `endings = ["php"]` on a PHP site is refused (PHP runs those files; a rule for PHP's
+answers has no endings).
+
+**Check it.**
+
+```sh
+agensio -t -c /etc/agensio/agensio.toml
+curl -sI https://example.com/uploads/logo.svg | grep -i content-security-policy
+curl -sI https://example.com/fonts/inter.woff2 | grep -i access-control-allow-origin
+```
+
+**On a managed site.** Not a `site_update` field yet ([headers.md](../headers.md) 12, step 4); until
+then the rules are a hand-written site file's.
+
+**Reference:** [Response headers](../configuration.md#14c-response-headers-siteresponse_headers),
+[headers.md](../headers.md) 3.3.
+
 ## A single-page application
 
 **When:** a client-side application (React, Vue, Svelte) routes on the browser, so

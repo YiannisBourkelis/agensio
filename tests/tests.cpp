@@ -5855,40 +5855,90 @@ static void test_response_headers() {
         CHECK_EQ(decided(r.lookup("/a/b/c")->other), std::string("X-A=set:p X-B=set:p"));
         CHECK(r.lookup("/") == nullptr && r.lookup("/b") == nullptr && r.lookup("/ab") == nullptr);
     }
-    // A brute-force reading of random rule sets: for every path and kind of answer, each field's
-    // decision is the most specific rule naming it that applies (docs/headers.md 12, step 2).
+    // endings: the served file's name in any case, a nested ending inside a longer one, none for no file.
+    {
+        const Config c = load("[[site.response_headers]]\npath = \"/\"\nset = { \"X-A\" = \"all\" }\n"
+                              "[[site.response_headers]]\npath = \"/\"\nendings = [\"svg\"]\nset = { \"X-A\" = \"svg\" }\n"
+                              "[[site.response_headers]]\npath = \"/d\"\nendings = [\"gz\"]\nset = { \"X-G\" = \"gz\" }\n"
+                              "[[site.response_headers]]\npath = \"/\"\nendings = [\".tar.gz\"]\nset = { \"X-T\" = \"tar\" }\n");
+        const ResponseRules& r = c.sites[0].response_headers;
+        CHECK(r.endings);
+        const HeaderNode* root = r.lookup("/x");
+        const HeaderNode* d = r.lookup("/d/x");
+        CHECK(root && d && response_rules::ending_sets(*root, "/srv/www/logo.SVG") && !response_rules::ending_sets(*root, "/srv/www/logo.svgz") &&
+              !response_rules::ending_sets(*root, "/srv/www/svg"));
+        CHECK_EQ(decided(response_rules::ending_sets(*root, "/w/logo.svg")->success), std::string("X-A=set:svg"));
+        CHECK_EQ(decided(root->success), std::string("X-A=set:all"));
+        CHECK_EQ(decided(response_rules::ending_sets(*d, "/w/a.tar.gz")->success), std::string("X-A=set:all X-T=set:tar X-G=set:gz"));  // gz inside tar.gz
+        CHECK_EQ(decided(response_rules::ending_sets(*d, "/w/b.gz")->success), std::string("X-A=set:all X-G=set:gz"));
+        Stream s;
+        s.header_node = root;
+        response_fields::served_file(s, "/w/x.svg");
+        CHECK(s.header_ending && response_fields::pending(s) && response_fields::pending(s)->h1 == "X-A: svg\r\n");
+    }
+    CHECK(refused("[[site.response_headers]]\npath = \"/\"\nendings = [\"gz\"]\nset = { \"X-A\" = \"1\" }\n"
+                  "[[site.response_headers]]\npath = \"/\"\nendings = [\"tar.gz\"]\nset = { \"X-A\" = \"2\" }\n", "a second rule"));
+    CHECK(refused("[[site.response_headers]]\npath = \"/\"\nendings = [\"s vg\"]\nset = { \"X-A\" = \"1\" }\n", "not a file ending"));
+    // A brute-force reading of random rule sets: for every path, kind of answer and served file, each
+    // field's decision is the most specific rule naming it that applies (docs/headers.md 12, step 2):
+    // the longest path, then exact, then a rule whose endings the file has.
     {
         const std::vector<std::string> paths = {"/", "/a", "/a/b", "/b", "/a/b/c"};
         const std::vector<std::string> fields = {"X-A", "X-B", "X-C", "X-D"};
+        const std::vector<std::string> all_endings = {"svg", "html", "gz", "tar.gz"};
         const std::vector<std::string> probes = {"/", "/a", "/A", "/a/", "/a/x", "/a/b", "/a/b/c", "/a/b/c/d", "/ab", "/b", "/b/x", "/c"};
+        const std::vector<std::string> files = {"", "x.svg", "y.HTML", "a.tar.gz", "b.gz", "c.txt"};  // "": no file (an application, an error)
         std::uint32_t seed = 12345;
         auto rnd = [&](std::uint32_t n) { seed = seed * 1103515245u + 12345u; return (seed >> 16) % n; };
+        auto meet = [](const std::vector<std::string>& a, const std::vector<std::string>& b) {
+            if (a.empty() && b.empty()) return true;
+            for (const auto& x : a)
+                for (const auto& y : b)
+                    if (response_rules::ending_within(x, y) || response_rules::ending_within(y, x)) return true;
+            return false;
+        };
+        auto has = [](const HeaderRule& r, const std::string& f) {
+            for (const auto& [n, _] : r.set) if (n == f) return true;
+            for (const auto& [n, _] : r.fallback) if (n == f) return true;
+            for (const auto& n : r.remove) if (n == f) return true;
+            return false;
+        };
+        auto file_has = [](const std::string& file, const std::vector<std::string>& endings) {
+            for (const auto& e : endings) {
+                const std::string lower = [&] { std::string l = file; for (auto& c : l) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c))); return l; }();
+                if (lower.size() > e.size() + 1 && lower.compare(lower.size() - e.size() - 1, std::string::npos, "." + e) == 0) return true;
+            }
+            return false;
+        };
         int mismatches = 0;
-        for (int round = 0; round < 300; ++round) {
+        for (int round = 0; round < 400; ++round) {
             SiteConfig site;
             site.server_names = {"r.test"};
-            const std::uint32_t count = 1 + rnd(6);
+            const std::uint32_t count = 1 + rnd(7);
             for (std::uint32_t i = 0; i < count; ++i) {
                 HeaderRule r;
                 r.path = paths[rnd(static_cast<std::uint32_t>(paths.size()))];
                 r.exact = rnd(4) == 0;
                 r.success_only = rnd(3) == 0;
+                if (rnd(3) == 0) {
+                    r.endings.push_back(all_endings[rnd(4)]);
+                    if (rnd(2) == 0) {
+                        const std::string& e = all_endings[rnd(4)];
+                        if (std::find(r.endings.begin(), r.endings.end(), e) == r.endings.end()) r.endings.push_back(e);
+                    }
+                }
                 for (const auto& f : fields) {
                     const std::uint32_t v = rnd(6);
-                    // one rule per field and path, as the load requires
+                    if (v > 2) continue;
+                    // as the load requires: one rule per field, path and meeting endings
                     bool taken = false;
                     for (const auto& o : site.response_headers.rules)
-                        if (o.path == r.path && o.exact == r.exact)
-                            for (const auto* l : {&o.set, &o.fallback})
-                                for (const auto& [n, _] : *l) taken = taken || n == f;
-                    for (const auto& o : site.response_headers.rules)
-                        if (o.path == r.path && o.exact == r.exact)
-                            for (const auto& n : o.remove) taken = taken || n == f;
+                        taken = taken || (o.path == r.path && o.exact == r.exact && has(o, f) && meet(o.endings, r.endings));
                     if (taken) continue;
                     const std::string value = f + "@" + std::to_string(i);
                     if (v == 0) r.set.emplace_back(f, value);
                     else if (v == 1) r.fallback.emplace_back(f, value);
-                    else if (v == 2) r.remove.push_back(f);
+                    else r.remove.push_back(f);
                 }
                 if (r.set.empty() && r.fallback.empty() && r.remove.empty()) continue;
                 site.response_headers.rules.push_back(std::move(r));
@@ -5896,34 +5946,42 @@ static void test_response_headers() {
             build_response_headers(site, "random");
             const ResponseRules& got = site.response_headers;
             for (const auto& probe : probes)
-                for (const bool success : {true, false}) {
-                    const HeaderNode* node = got.lookup(probe);
-                    for (const auto& f : fields) {
-                        // brute force: every rule naming f that covers the probe and applies, the most specific
-                        const HeaderRule* best = nullptr;
-                        std::string verb, value;
-                        for (const auto& r : got.rules) {
-                            if (!response_rules::covers(r.path, r.exact, probe) || (!success && r.success_only)) continue;
-                            std::string v, val;
-                            for (const auto& [n, x] : r.set) if (n == f) { v = "set"; val = x; }
-                            for (const auto& [n, x] : r.fallback) if (n == f) { v = "default"; val = x; }
-                            for (const auto& n : r.remove) if (n == f) v = "remove";
-                            if (v.empty()) continue;
-                            const bool better = !best || r.path.size() > best->path.size() || (r.path.size() == best->path.size() && r.exact && !best->exact);
-                            if (better) { best = &r; verb = v; value = val; }
+                for (const auto& file : files)
+                    for (const bool success : {true, false}) {
+                        const HeaderNode* node = got.lookup(probe);
+                        const EndingSets* es = node && !file.empty() ? response_rules::ending_sets(*node, "/srv" + probe + "/" + file) : nullptr;
+                        for (const auto& f : fields) {
+                            const HeaderRule* best = nullptr;
+                            bool best_ending = false;
+                            std::string verb, value;
+                            for (const auto& r : got.rules) {
+                                if (!response_rules::covers(r.path, r.exact, probe) || (!success && r.success_only) || !has(r, f)) continue;
+                                const bool ending = !r.endings.empty();
+                                if (ending && (file.empty() || !file_has(file, r.endings))) continue;
+                                const bool better = !best || r.path.size() > best->path.size() ||
+                                                    (r.path.size() == best->path.size() && r.exact && !best->exact) ||
+                                                    (r.path.size() == best->path.size() && r.exact == best->exact && ending && !best_ending);
+                                if (!better) continue;
+                                best = &r;
+                                best_ending = ending;
+                                verb.clear();
+                                for (const auto& [n, x] : r.set) if (n == f) { verb = "set"; value = x; }
+                                for (const auto& [n, x] : r.fallback) if (n == f) { verb = "default"; value = x; }
+                                for (const auto& n : r.remove) if (n == f) verb = "remove";
+                            }
+                            std::string seen;
+                            if (node) {
+                                const HeaderSet& hs = es ? (success ? es->success : es->other) : (success ? node->success : node->other);
+                                for (const auto& d : hs.fields)
+                                    if (d.name == f)
+                                        seen = std::string(d.verb == Verb::set ? "set" : d.verb == Verb::fallback ? "default" : "remove") + (d.verb == Verb::remove ? "" : ":" + d.value);
+                            }
+                            const std::string want = best ? verb + (verb == "remove" ? "" : ":" + value) : "";
+                            if (seen != want && mismatches++ < 5)
+                                std::printf("response_headers resolution: round %d path %s file %s %s field %s: nodes say \"%s\", the rules \"%s\"\n", round, probe.c_str(),
+                                            file.c_str(), success ? "success" : "other", f.c_str(), seen.c_str(), want.c_str());
                         }
-                        std::string seen;
-                        if (node) {
-                            const HeaderSet& hs = success ? node->success : node->other;
-                            for (const auto& d : hs.fields)
-                                if (d.name == f) seen = std::string(d.verb == Verb::set ? "set" : d.verb == Verb::fallback ? "default" : "remove") + (d.verb == Verb::remove ? "" : ":" + d.value);
-                        }
-                        const std::string want = best ? verb + (verb == "remove" ? "" : ":" + value) : "";
-                        if (seen != want && mismatches++ < 5)
-                            std::printf("response_headers resolution: round %d path %s %s field %s: nodes say \"%s\", the rules \"%s\"\n", round, probe.c_str(),
-                                        success ? "success" : "other", f.c_str(), seen.c_str(), want.c_str());
                     }
-                }
         }
         CHECK(mismatches == 0);
     }
@@ -5993,6 +6051,9 @@ static void test_response_headers() {
         const Config noted = load("[[site.response_headers]]\npath = \"/\"\nset = { \"Content-Security-Policy\" = \"default-src 'self'\", \"X-XSS-Protection\" = \"1\" }\n",
                                   "app = \"php\"\nphp = { socket = \"unix:/run/php/x.sock\" }\n");
         CHECK(noted.sites[0].header_notes.size() == 2);
+        const Config files = load("[[site.response_headers]]\npath = \"/\"\nendings = [\"svg\"]\nset = { \"Content-Security-Policy\" = \"script-src 'none'\" }\n",
+                                  "app = \"php\"\nphp = { socket = \"unix:/run/php/x.sock\" }\n");
+        CHECK(files.sites[0].header_notes.empty());  // an endings rule never meets the application's answer
     }
     fs::remove_all(dir);
 }

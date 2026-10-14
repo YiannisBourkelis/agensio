@@ -2137,6 +2137,11 @@ remove = ["X-Frame-Options"]          # a page another site may frame
 path = "/assets/"
 when = "success"
 set = { "Cache-Control" = "public, max-age=31536000, immutable" }
+
+[[site.response_headers]]
+path = "/"
+endings = ["svg"]                     # the SVG files agensio serves: no script runs in one opened alone
+set = { "Content-Security-Policy" = "script-src 'none'" }
 ```
 
 | key | values | default |
@@ -2147,6 +2152,7 @@ set = { "Cache-Control" = "public, max-age=31536000, immutable" }
 | `default` | field names and values: sent only when the answer has no copy | none |
 | `remove` | field names: every copy deleted | none |
 | `when` | `"always"`, or `"success"` (2xx and 304 only) | `"always"` |
+| `endings` | file endings (`["svg"]`, `["woff", "woff2"]`, `"tar.gz"`; any case, a leading dot allowed): only the files agensio serves whose name ends so | none: every answer |
 
 - **Per field, the most specific rule decides.** For each field the rule with the longest path that
   names it decides (at one path an exact rule before a prefix one); rules naming different fields
@@ -2159,6 +2165,17 @@ set = { "Cache-Control" = "public, max-age=31536000, immutable" }
   `default` the application's own value wins (WordPress's admin sends its own `X-Frame-Options`).
   For a Content-Security-Policy on an application site use `default`: `set` would replace the
   application's policy, often with nonces its pages need (noted by `-t`).
+- **`endings` reads the file agensio serves, not the address** (0.1.0-alpha.90): a rule with
+  `endings` applies to an answer agensio makes from a file on disk, after `try_files` and a
+  directory's index, when that file's name ends with one of them; never to an application's answer
+  or an error page. So `/about/`, served from `about/index.html`, is an `html` answer, a single-page
+  application's routes served from its shell are too, and a `/sitemap.xml` that PHP makes is the
+  application's, untouched by a rule for `xml` files, as nginx's `location ~ \.xml$` loses its
+  fields when the request falls back to PHP. At one path a rule whose endings the file has decides
+  before one without; a longer path still decides before both. An ending inside another counts for
+  it (`gz` for `a.tar.gz`), so two rules at one path naming one field with such endings are
+  refused, as are endings the site never serves itself: `php` where PHP runs it, an ending its preset
+  answers 404 for (`inc`, `log`, `sql` on a PHP preset).
 - **`when = "success"`** applies a rule to 2xx and 304 answers only; on any other answer the next
   rule naming the field decides. A `Cache-Control` or `Expires` that lets caches keep the answer
   (`max-age` above 0, `s-maxage`, `public`, `immutable`) is refused without it, so a 404 is never
@@ -2182,7 +2199,8 @@ set = { "Cache-Control" = "public, max-age=31536000, immutable" }
 - **Over HTTP/2 and HTTP/3** the names go in lower case, as those protocols require.
 - **Cost:** a site without rules pays one test; with rules, the request finds its path's fields
   once, behind a test of the path's first byte, and a cached file over HTTP/1 takes them as one
-  prebuilt block.
+  prebuilt block. Rules with `endings` add one comparison of the served file's name per ending a
+  rule of its path names, made when agensio picks the file.
 
 **On a managed site** the rules are not a `site_update` field yet (a later step of headers.md); a
 hand-written site file carries them. `hsts` stays its own key ([redirects.md](redirects.md) 4), and

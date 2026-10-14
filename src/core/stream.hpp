@@ -100,6 +100,9 @@ struct Stream {
     // The site's [[site.response_headers]] for the path asked for (core/response_rules.hpp), found
     // once the site is known; null for a site without rules or a path none covers.
     const HeaderNode* header_node = nullptr;
+    // The node's sets for the file agensio serves, when a rule names its ending (endings, 2.1): set
+    // when the static handler answers with a file, never for an application's answer.
+    const EndingSets* header_ending = nullptr;
 
     void reset() {
         request.reset();
@@ -109,6 +112,7 @@ struct Stream {
         https_site = nullptr;
         watch_fields = nullptr;
         header_node = nullptr;
+        header_ending = nullptr;
     }
 };
 

@@ -1518,6 +1518,22 @@ void parse_response_headers(const toml::node_view<const toml::node>& n, SiteConf
         const std::string when = (*t)["when"].value_or(std::string("always"));
         if (when != "always" && when != "success") fail(w + ".when must be \"always\" (every answer) or \"success\" (2xx and 304 only)");
         r.success_only = when == "success";
+        if (t->contains("endings")) {
+            const toml::array* list = (*t)["endings"].as_array();
+            if (!list || list->empty())
+                fail(w + ".endings must be a list of file endings: endings = [\"svg\"] (the files agensio serves from disk whose name ends so)");
+            for (const auto& e : *list) {
+                const auto v = e.value<std::string>();
+                if (!v) fail(w + ".endings: every entry is a file ending such as \"svg\"");
+                std::string end = to_lower(*v);
+                if (!end.empty() && end.front() == '.') end.erase(0, 1);
+                bool ok = !end.empty() && end.size() <= 16 && end.front() != '.' && end.back() != '.';
+                for (const unsigned char c : end) ok = ok && (std::isalnum(c) || c == '.' || c == '-' || c == '_');
+                if (!ok) fail(w + ".endings: '" + *v + "' is not a file ending (letters, digits, '.', '-' or '_', at most 16: \"svg\", \"tar.gz\")");
+                if (std::find(r.endings.begin(), r.endings.end(), end) == r.endings.end()) r.endings.push_back(end);
+            }
+            if (r.endings.size() > 16) fail(w + ".endings: at most 16 endings in a rule");
+        }
         std::vector<std::pair<std::string, std::string_view>> seen;  // the rule's names, lower case, with their verb
         auto field_name = [&](std::string_view verb, const std::string& name) {
             if (!header_token(name)) fail(w + "." + std::string(verb) + ": '" + name + "' is not a field name (letters, digits and !#$%&'*+-.^_`|~, at most 128)");
@@ -1551,7 +1567,7 @@ void parse_response_headers(const toml::node_view<const toml::node>& n, SiteConf
             if (lower == "x-xss-protection" && value != "0")
                 site.header_notes.emplace_back("header_xss_protection", "the rule for " + r.path + " sends X-XSS-Protection: " + value +
                     ": Chrome, Edge and Firefox have no such filter, and where it existed it could be used against pages; send 0, or nothing");
-            if (lower == "content-security-policy" && verb == "set" && !site.app.empty() && site.app != "static")
+            if (lower == "content-security-policy" && verb == "set" && !site.app.empty() && site.app != "static" && r.endings.empty())  // endings: files only
                 site.header_notes.emplace_back("header_csp_set", "the rule for " + r.path + " sets Content-Security-Policy, replacing the policy the " +
                     site.app + " application may send itself (often with nonces or hashes its pages need): use default, so the application's stays");
         };
@@ -1586,6 +1602,16 @@ void parse_response_headers(const toml::node_view<const toml::node>& n, SiteConf
         // The same field twice at one path and match: which would decide is not written anywhere.
         for (const HeaderRule& o : rr.rules) {
             if (o.exact != r.exact || o.path.size() != r.path.size() || !response_rules::iequal_prefix(o.path, r.path)) continue;
+            // Rules with endings and without are both allowed at one path (the endings one decides for
+            // its files); two whose endings meet, or two without, would leave the choice unwritten.
+            // Endings meet when a file can have both: the same one, or one inside the other (gz, tar.gz).
+            const bool meet = (o.endings.empty() && r.endings.empty()) ||
+                              std::any_of(r.endings.begin(), r.endings.end(), [&](const std::string& e) {
+                                  return std::any_of(o.endings.begin(), o.endings.end(), [&](const std::string& f) {
+                                      return response_rules::ending_within(e, f) || response_rules::ending_within(f, e);
+                                  });
+                              });
+            if (!meet) continue;
             auto names_of = [](const HeaderRule& h) {
                 std::vector<std::string> v;
                 for (const auto& f : h.set) v.push_back(to_lower(f.first));
@@ -1596,7 +1622,8 @@ void parse_response_headers(const toml::node_view<const toml::node>& n, SiteConf
             const auto mine = names_of(r), theirs = names_of(o);
             for (const auto& m : mine)
                 if (std::find(theirs.begin(), theirs.end(), m) != theirs.end())
-                    fail(w + ": a second rule for " + r.path + (r.exact ? " (exact)" : "") + " names " + m + "; one rule per field and path");
+                    fail(w + ": a second rule for " + r.path + (r.exact ? " (exact)" : "") + (r.endings.empty() ? "" : " and these endings") + " names " + m +
+                         "; one rule per field and path");
         }
         rr.rules.push_back(std::move(r));
     }
@@ -1604,6 +1631,27 @@ void parse_response_headers(const toml::node_view<const toml::node>& n, SiteConf
     if (names.size() > 64) fail(where + ": the response_headers rules name " + std::to_string(names.size()) + " fields, at most 64");
     if (value_bytes > 16384) fail(where + ": the response_headers values come to " + std::to_string(value_bytes) + " bytes, at most 16 KB");
     build_response_headers(site, where);
+}
+
+// endings (docs/headers.md 7): an ending agensio never serves as a file on this site is a rule that
+// can never apply: PHP or another handler runs those files (a suffix location), or the root's
+// shield answers 404 for them (a preset's refused endings). Checked once the preset is expanded.
+void check_header_endings(const SiteConfig& site, const std::string& where) {
+    for (const HeaderRule& r : site.response_headers.rules)
+        for (const std::string& e : r.endings) {
+            const std::string dot = "." + e;
+            for (const LocationConfig& l : site.locations) {
+                if (l.suffix && Headers::iequals(l.path, dot) && l.kind != HandlerKind::static_)
+                    fail(where + ": the response_headers rule for " + r.path + " names the ending " + e + ", but agensio never serves ." + e +
+                         " files on this site: " + (l.kind == HandlerKind::fastcgi ? "PHP runs them" : "a handler runs them") +
+                         "; a rule for those answers has no endings");
+                if (!l.suffix && !l.exact && l.path == "/")
+                    for (const std::string& d : l.deny_suffixes)
+                        if (Headers::iequals(d, dot))
+                            fail(where + ": the response_headers rule for " + r.path + " names the ending " + e + ", which this site answers 404 for (." + e +
+                                 " files are refused, never served)");
+            }
+        }
 }
 
 // [[site.auth]] (2026-10-08, docs/configuration.md 19b, design section 25). A user file is read
@@ -2299,6 +2347,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
         if (LocationConfig* into = find_at("/")) merge_into(*into, add);
     check_refuse_conflicts(site, where);
     check_redirects(site, where);
+    check_header_endings(site, where);
     cfg.sites.push_back(std::move(site));
 }
 
@@ -2599,6 +2648,11 @@ void explain_config(const Config& cfg, std::ostream& out) {
             out << "\n[[site.response_headers]]\npath = \"" << (r.path.size() > 1 && !r.exact ? r.path + "/" : r.path) << "\"\n";
             if (r.exact) out << "match = \"exact\"\n";
             if (r.success_only) out << "when = \"success\"\n";
+            if (!r.endings.empty()) {
+                out << "endings = [";
+                for (std::size_t i = 0; i < r.endings.size(); ++i) out << (i ? ", " : "") << "\"" << r.endings[i] << "\"";
+                out << "]\n";
+            }
             for (const auto& [verb, list] : {std::pair{"set", &r.set}, std::pair{"default", &r.fallback}}) {
                 if (list->empty()) continue;
                 out << verb << " = {";
@@ -4268,16 +4322,19 @@ void build_response_headers(SiteConfig& site, const std::string& where) {
     ResponseRules& rr = site.response_headers;
     rr.nodes.clear();
     rr.first = {};
+    rr.endings = false;
     struct Key {
         std::string path;
         bool exact;
     };
     std::vector<Key> keys;
-    for (const HeaderRule& r : rr.rules)
+    for (const HeaderRule& r : rr.rules) {
+        rr.endings = rr.endings || !r.endings.empty();
         if (std::none_of(keys.begin(), keys.end(), [&](const Key& k) {
                 return k.exact == r.exact && k.path.size() == r.path.size() && response_rules::iequal_prefix(k.path, r.path);
             }))
             keys.push_back({r.path, r.exact});
+    }
     auto same = [](const std::string& a, const std::string& b) { return a.size() == b.size() && response_rules::iequal_prefix(a, b); };
     for (const Key& k : keys) {
         HeaderNode node;
@@ -4293,26 +4350,34 @@ void build_response_headers(SiteConfig& site, const std::string& where) {
         }
         std::sort(chain.begin(), chain.end(), [](const Key* a, const Key* b) { return a->path.size() < b->path.size(); });
         chain.push_back(&k);
-        for (const bool success : {true, false}) {
-            HeaderSet& hs = success ? node.success : node.other;
+        // One kind of answer: at each path of the chain the rules without endings, then (for a file
+        // with `ending`) the ones naming it, each later decision replacing an earlier one.
+        auto fill = [&](HeaderSet& hs, bool success, const std::string* ending) {
             for (const Key* c : chain)
-                for (std::size_t ri = 0; ri < rr.rules.size(); ++ri) {
-                    const HeaderRule& r = rr.rules[ri];
-                    if (r.exact != c->exact || !same(r.path, c->path) || (!success && r.success_only)) continue;
-                    auto decide = [&](const std::string& name, FieldDecision::Verb verb, const std::string& value) {
-                        FieldDecision* d = nullptr;
-                        for (auto& f : hs.fields)
-                            if (Headers::iequals(f.name, name)) d = &f;
-                        if (!d) d = &hs.fields.emplace_back();
-                        d->name = name;
-                        d->verb = verb;
-                        d->value = value;
-                        d->cache_field = Headers::iequals(name, "cache-control") || private_cache::shared_only_field(name);
-                        d->rule = static_cast<std::uint16_t>(ri);
-                    };
-                    for (const auto& [name, value] : r.set) decide(name, FieldDecision::Verb::set, value);
-                    for (const auto& [name, value] : r.fallback) decide(name, FieldDecision::Verb::fallback, value);
-                    for (const auto& name : r.remove) decide(name, FieldDecision::Verb::remove, "");
+                for (const int pass : {0, 1}) {
+                    if (pass == 1 && !ending) break;
+                    for (std::size_t ri = 0; ri < rr.rules.size(); ++ri) {
+                        const HeaderRule& r = rr.rules[ri];
+                        if (r.exact != c->exact || !same(r.path, c->path) || (!success && r.success_only)) continue;
+                        if (pass == 0 ? !r.endings.empty()
+                                      : std::none_of(r.endings.begin(), r.endings.end(),
+                                                     [&](const std::string& e) { return response_rules::ending_within(e, *ending); }))
+                            continue;
+                        auto decide = [&](const std::string& name, FieldDecision::Verb verb, const std::string& value) {
+                            FieldDecision* d = nullptr;
+                            for (auto& f : hs.fields)
+                                if (Headers::iequals(f.name, name)) d = &f;
+                            if (!d) d = &hs.fields.emplace_back();
+                            d->name = name;
+                            d->verb = verb;
+                            d->value = value;
+                            d->cache_field = Headers::iequals(name, "cache-control") || private_cache::shared_only_field(name);
+                            d->rule = static_cast<std::uint16_t>(ri);
+                        };
+                        for (const auto& [name, value] : r.set) decide(name, FieldDecision::Verb::set, value);
+                        for (const auto& [name, value] : r.fallback) decide(name, FieldDecision::Verb::fallback, value);
+                        for (const auto& name : r.remove) decide(name, FieldDecision::Verb::remove, "");
+                    }
                 }
             bool any_origin = false, credentials = false;
             for (const auto& f : hs.fields) {
@@ -4322,8 +4387,25 @@ void build_response_headers(SiteConfig& site, const std::string& where) {
                 credentials = credentials || (Headers::iequals(f.name, "access-control-allow-credentials") && to_lower(f.value) == "true");
             }
             if (any_origin && credentials)
-                fail(where + ": the response_headers rules for " + k.path + " send Access-Control-Allow-Origin: * with Access-Control-Allow-Credentials: true, "
-                             "which browsers refuse; name the one origin that may send credentials");
+                fail(where + ": the response_headers rules for " + k.path + (ending ? " (." + *ending + " files)" : std::string()) +
+                     " send Access-Control-Allow-Origin: * with Access-Control-Allow-Credentials: true, which browsers refuse; name the one origin that "
+                     "may send credentials");
+        };
+        fill(node.success, true, nullptr);
+        fill(node.other, false, nullptr);
+        std::vector<std::string> endings;  // every ending a rule of the chain names
+        for (const Key* c : chain)
+            for (const HeaderRule& r : rr.rules)
+                if (r.exact == c->exact && same(r.path, c->path))
+                    for (const std::string& e : r.endings)
+                        if (std::find(endings.begin(), endings.end(), e) == endings.end()) endings.push_back(e);
+        std::stable_sort(endings.begin(), endings.end(), [](const std::string& a, const std::string& b) { return a.size() > b.size(); });
+        for (const std::string& e : endings) {
+            EndingSets es;
+            es.ending = e;
+            fill(es.success, true, &e);
+            fill(es.other, false, &e);
+            node.by_ending.push_back(std::move(es));
         }
         rr.nodes.push_back(std::move(node));
     }

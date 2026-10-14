@@ -1037,7 +1037,7 @@ check "cookbook: every recipe of docs/examples.md loads and names what exists (t
 # One broken site file never stops the others (design section 26; tests/isolation.sh, its own server).
 check "isolation: a site file that does not load is set aside, the other sites serve (tests/isolation.sh)" "0" \
   "$(tests/isolation.sh "$BIN" > bench/tmp/isolation.out 2>&1; echo $?)"
-check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 204 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
+check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 205 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
 check "secrets: the presets catalogue lists each preset's credential files" "/wp-config.php /sites/default/settings.php" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["wordpress"]["secrets"][0], p["drupal"]["secrets"][0])')"
 check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$("$BIN" ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; "$BIN" ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
@@ -1791,27 +1791,44 @@ path = "/embed/"
 when = "success"
 set = { "Cache-Control" = "public, max-age=3600" }
 
+[[site.response_headers]]
+path = "/"
+endings = ["svg"]
+set = { "Content-Security-Policy" = "script-src 'none'" }
+
+[[site.response_headers]]
+path = "/"
+endings = [".html"]
+set = { "Cache-Control" = "no-cache" }
+
 [[site.access]]
 path = "/private"
 allow = ["10.0.0.0/8"]
 HDR
   cpost /v1/reload '{"confirm":true,"reason":"headers"}' > /dev/null
   hd() {  # the fields the rules decide, every copy, "name=value" sorted and joined: hd URL [curl options]
-    curl -sk -D - -o /dev/null --resolve h.wild.test:8484:127.0.0.1 "${@:2}" "$1" | tr -d '\r' | awk -F': ' 'tolower($1) ~ /^(referrer-policy|x-content-type-options|x-frame-options|x-powered-by|cache-control)$/ {print tolower($1) "=" $2}' | sort | paste -sd'|'
+    curl -sk -D - -o /dev/null --resolve h.wild.test:8484:127.0.0.1 "${@:2}" "$1" | tr -d '\r' | awk -F': ' 'tolower($1) ~ /^(referrer-policy|x-content-type-options|x-frame-options|x-powered-by|cache-control|content-security-policy)$/ {print tolower($1) "=" $2}' | sort | paste -sd'|'
   }
   RP='referrer-policy=strict-origin-when-cross-origin'; NS='x-content-type-options=nosniff'
   check "response_headers over HTTP/1: a static page gets set and default; a PHP answer has its Referrer-Policy replaced, its X-Frame-Options kept (default), X-Powered-By removed" \
-    "$RP|$NS|x-frame-options=SAMEORIGIN ; $RP|$NS|x-frame-options=DENY" \
+    "cache-control=no-cache|$RP|$NS|x-frame-options=SAMEORIGIN ; $RP|$NS|x-frame-options=DENY" \
     "$(hd http://h.wild.test:8483/ -H 'Host: h.wild.test' --resolve h.wild.test:8483:127.0.0.1) ; $(hd http://h.wild.test:8483/app.php --resolve h.wild.test:8483:127.0.0.1)"
   check "response_headers: a deeper rule changes only the fields it names; a success-only rule on the found page, not on a 404; agensio's 403 keeps its no-store and gets the site's fields" \
     "cache-control=public, max-age=3600|$RP|$NS ; $RP|$NS ; cache-control=no-store|$RP|$NS|x-frame-options=SAMEORIGIN" \
     "$(hd http://h.wild.test:8483/embed/w.html --resolve h.wild.test:8483:127.0.0.1) ; $(hd http://h.wild.test:8483/embed/gone --resolve h.wild.test:8483:127.0.0.1) ; $(hd http://h.wild.test:8483/private/x --resolve h.wild.test:8483:127.0.0.1)"
   check "response_headers over HTTP/2: the same fields on a static page, a PHP answer and the embed page" \
-    "$RP|$NS|x-frame-options=SAMEORIGIN ; $RP|$NS|x-frame-options=DENY ; cache-control=public, max-age=3600|$RP|$NS" \
+    "cache-control=no-cache|$RP|$NS|x-frame-options=SAMEORIGIN ; $RP|$NS|x-frame-options=DENY ; cache-control=public, max-age=3600|$RP|$NS" \
     "$(hd https://h.wild.test:8484/ --http2) ; $(hd https://h.wild.test:8484/app.php --http2) ; $(hd https://h.wild.test:8484/embed/w.html --http2)"
   [ $H3 = 1 ] && check "response_headers over HTTP/3: the same fields on a static page and a PHP answer" \
-    "$RP|$NS|x-frame-options=SAMEORIGIN ; $RP|$NS|x-frame-options=DENY" \
+    "cache-control=no-cache|$RP|$NS|x-frame-options=SAMEORIGIN ; $RP|$NS|x-frame-options=DENY" \
     "$(hd https://h.wild.test:8484/ --http3-only) ; $(hd https://h.wild.test:8484/app.php --http3-only)"
+  # endings (alpha.90, docs/headers.md 2.1): the file agensio serves, a directory's index included;
+  # at one path the endings rule decides, a deeper path's rule still wins; never an application's
+  # answer or a missing file's 404.
+  check "response_headers endings: an svg gets its CSP, an html file and a directory's index the html rule; a deeper path's rule wins; not a PHP answer, not a 404" \
+    "content-security-policy=script-src 'none'|$RP|$NS|x-frame-options=SAMEORIGIN ; cache-control=no-cache|$RP|$NS|x-frame-options=SAMEORIGIN ; cache-control=public, max-age=3600|$RP|$NS ; $RP|$NS|x-frame-options=DENY ; $RP|$NS|x-frame-options=SAMEORIGIN" \
+    "$(hd http://h.wild.test:8483/logo.svg --resolve h.wild.test:8483:127.0.0.1) ; $(hd http://h.wild.test:8483/about/ --resolve h.wild.test:8483:127.0.0.1) ; $(hd http://h.wild.test:8483/embed/w.html --resolve h.wild.test:8483:127.0.0.1) ; $(hd http://h.wild.test:8483/app.php --resolve h.wild.test:8483:127.0.0.1) ; $(hd http://h.wild.test:8483/nope.svg --resolve h.wild.test:8483:127.0.0.1)"
+  check "response_headers endings over HTTP/2: the svg's CSP" "content-security-policy=script-src 'none'|$RP|$NS|x-frame-options=SAMEORIGIN" "$(hd https://h.wild.test:8484/logo.svg --http2)"
   rm -f bench/tmp/sites.d/hdr.toml
   cpost /v1/reload '{"confirm":true,"reason":"headers"}' > /dev/null
 fi
@@ -1826,6 +1843,11 @@ hq() {  # yes when -t's answer for one site's response_headers holds the text: h
 check "response_headers at load: Location, Set-Cookie, Content-Type and HSTS are refused with the setting to use; a \$ value; a lifetime without when = success; ALLOW-FROM; a field twice at one path; a field in two verbs" \
   "yes yes yes yes yes yes yes yes yes" \
   "$(hq "$(printf '[[site.response_headers]]\npath = "/"\nset = { "Location" = "/x" }\n')" '[[site.redirect]]') $(hq "$(printf '[[site.response_headers]]\npath = "/"\ndefault = { "Set-Cookie" = "a=b" }\n')" "the application's") $(hq "$(printf '[[site.response_headers]]\npath = "/"\nremove = ["Content-Type"]\n')" 'type table') $(hq "$(printf '[[site.response_headers]]\npath = "/"\nset = { "Strict-Transport-Security" = "max-age=1" }\n')" 'hsts') $(hq "$(printf '[[site.response_headers]]\npath = "/"\nset = { "X-Who" = "$remote_addr" }\n')" 'request_headers') $(hq "$(printf '[[site.response_headers]]\npath = "/assets/"\nset = { "Cache-Control" = "public, max-age=31536000, immutable" }\n')" 'when = "success"') $(hq "$(printf '[[site.response_headers]]\npath = "/"\nset = { "X-Frame-Options" = "ALLOW-FROM https://a.test" }\n')" 'DENY or SAMEORIGIN') $(hq "$(printf '[[site.response_headers]]\npath = "/a"\nset = { "X-A" = "1" }\n[[site.response_headers]]\npath = "/a/"\nremove = ["x-a"]\n')" 'a second rule') $(hq "$(printf '[[site.response_headers]]\npath = "/"\nset = { "X-A" = "1" }\nremove = ["X-A"]\n')" 'in two of')"
+check "response_headers endings at load: php on a PHP site (PHP runs it) and an ending the preset refuses are refused; two rules whose endings meet; a leading dot is accepted" \
+  "yes yes yes yes" \
+  "$(hq "$(printf '[[site.response_headers]]\npath = "/"\nendings = ["php"]\nset = { "X-A" = "1" }\n')" 'PHP runs them' 'app = "php"
+php = { socket = "unix:/run/php/x.sock" }') $(hq "$(printf '[[site.response_headers]]\npath = "/"\nendings = ["inc"]\nset = { "X-A" = "1" }\n')" 'answers 404' 'app = "php"
+php = { socket = "unix:/run/php/x.sock" }') $(hq "$(printf '[[site.response_headers]]\npath = "/"\nendings = ["svg"]\nset = { "X-A" = "1" }\n[[site.response_headers]]\npath = "/"\nendings = ["pdf", "svg"]\nset = { "X-A" = "2" }\n')" 'a second rule') $(hq "$(printf '[[site.response_headers]]\npath = "/"\nendings = [".SVG"]\nset = { "X-A" = "1" }\n')" 'is OK')"
 check "response_headers at load: a CSP set on an application site and X-XSS-Protection other than 0 are noted, and the site loads" \
   "yes yes yes" \
   "$(hq "$(printf '[[site.response_headers]]\npath = "/"\nset = { "Content-Security-Policy" = "default-src '"'"'self'"'"'" }\n')" 'use default' 'app = "php"

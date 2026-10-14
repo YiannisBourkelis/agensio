@@ -32,8 +32,17 @@ inline int find(const HeaderSet& hs, std::string_view name) noexcept {
 // application's answer the upstream loop has decided.
 inline const HeaderSet* pending(const Stream& s) noexcept {
     if (!s.header_node || s.response.fields_decided) return nullptr;
-    const HeaderSet& hs = success(s.response.status) ? s.header_node->success : s.header_node->other;
+    const bool ok = success(s.response.status);
+    const HeaderSet& hs = s.header_ending ? (ok ? s.header_ending->success : s.header_ending->other)
+                                          : (ok ? s.header_node->success : s.header_node->other);
     return hs.empty() ? nullptr : &hs;
+}
+
+// The static handler answers with a file (its name on disk, before a pre-compressed twin): the
+// node's sets for its ending, when a rule names it (endings, docs/headers.md 2.1). One test on a
+// node without endings.
+inline void served_file(Stream& s, std::string_view file) noexcept {
+    if (s.header_node && !s.header_node->by_ending.empty()) s.header_ending = response_rules::ending_sets(*s.header_node, file);
 }
 
 // Whether the HTTP/1 writer may send hs.h1 as it is: the answer has nothing for the rules to look
