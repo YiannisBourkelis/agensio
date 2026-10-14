@@ -6534,6 +6534,46 @@ static void test_served_certificates() {
     pc.sites.push_back(cs);
     const auto probes = control::canonical_probes(pc);
     CHECK(probes.size() == 1 && probes[0].host == "127.0.0.1" && probes[0].port == "443" && probes[0].tls && probes[0].canonical == "example.com");
+#ifdef AGENSIO_HAS_TLS
+    // hsts_probes (the alpha.87/88 report's note): the sites where hsts_suggested could show and
+    // nothing is noted yet, asked by their canonical name; never one the store already knows.
+    {
+        Config hc;
+        control::TlsFacts tf;
+        const std::time_t t = 2000000000;
+        SiteConfig a;
+        a.server_names = {"app.test", "www.app.test"};
+        a.listen = {"0.0.0.0:443"};
+        a.tls = TlsConfig{};
+        a.tls->cert = "/c.pem";
+        a.tls->key = "/k.pem";
+        a.app = "rails";
+        a.http = SiteConfig::Http::redirect;
+        a.canonical = "www.app.test";
+        a.canonical_redirect = true;
+        control::CertificateState st;
+        st.present = true;
+        st.not_before = t - 30 * 86400;
+        tf.served["/c.pem\n/k.pem"] = st;
+        hc.sites.push_back(a);
+        SiteConfig b = a;  // static: no application to send a field of its own
+        b.server_names = {"static.test"};
+        b.app = "static";
+        hc.sites.push_back(b);
+        SiteConfig c = a;  // hsts decided
+        c.server_names = {"decided.test"};
+        c.hsts = SiteConfig::Hsts::off;
+        hc.sites.push_back(c);
+        SiteConfig d = a;  // already noted
+        d.server_names = {"noted.test"};
+        hc.sites.push_back(d);
+        tf.application_hsts["noted.test"] = {"max-age=1", t};
+        const auto hp = control::hsts_probes(hc, tf, t);
+        CHECK(hp.size() == 1 && hp[0].site == "app.test" && hp[0].canonical == "www.app.test" && hp[0].tls && hp[0].host == "127.0.0.1");
+        tf.served["/c.pem\n/k.pem"].not_before = t - 3 * 86400;  // a week is not up
+        CHECK(control::hsts_probes(hc, tf, t).empty());
+    }
+#endif
 }
 
 // A certificate or key the server's account cannot read after the privilege drop (the certificate

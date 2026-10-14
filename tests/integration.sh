@@ -1685,6 +1685,14 @@ if [ -n "$PHPFPM" ]; then
     "hsts_suggested max-age=63072000; includeSubDomains hsts_from_application yes" \
     "$(hcodes) $(curl -sk -D - -o /dev/null --resolve ah.old.test:8481:127.0.0.1 https://ah.old.test:8481/hsts-strong.php | tr -d '\r' | grep -i '^strict-transport-security:' | sed 's/^[^:]*: //') $(hcodes) $(curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); f=[f for f in d["findings"] if f["code"] == "hsts_from_application" and f.get("site") == "ah.old.test"]; print("yes" if f and "max-age=63072000; includeSubDomains" in f[0]["message"] and "hsts = { max_age = 63072000, subdomains = true }" in f[0]["fix"] else f)')"
   cpost /v1/sites/ah.old.test/delete '{"confirm":true,"reason":"apphsts"}' > /dev/null
+  # Before any visitor (alpha.91, the alpha.87/88 report's note): until an application's own HSTS had
+  # gone out once since the start, health suggested the site's over it; now health asks such a site
+  # once for / (off the workers), so the first health call already knows.
+  cpost /v1/sites "{\"domain\":\"ap.old.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-old/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-old/key.pem\"},\"user\":null,\"app\":\"php\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"root\":\"$ROOT/tests/hstsapp\",\"listen_plain\":\"127.0.0.1:8486\",\"listen_tls\":\"127.0.0.1:8485\",\"confirm\":true,\"reason\":\"probe\"}" > /dev/null
+  check "hsts_from_application before any visitor: health's own request for / finds the application's field, so the first health call does not suggest the site's" \
+    "hsts_from_application" \
+    "$(curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); print(",".join(sorted(f["code"] for f in d["findings"] if f.get("site") == "ap.old.test" and f["code"].startswith("hsts_"))) or "none")')"
+  cpost /v1/sites/ap.old.test/delete '{"confirm":true,"reason":"probe"}' > /dev/null
   # TYPO3 without a preset (2026-10-08, the alpha.53 report's third finding): app = "php" and the
   # rules an agent translates from TYPO3 13.4's documented nginx configuration, through the MCP
   # bridge as an agent does it: path_check before, site_update as a dry run, then applied,

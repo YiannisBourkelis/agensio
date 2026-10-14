@@ -508,7 +508,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (nineteen, each seeded from
   `SiteFields::hsts_noted`, a copy-safe `NoteOnce`); each also an error-log line at most once a minute.
   On a site with no `hsts` line (alpha.87) `Stream::watch_fields` points at its fields over HTTPS and
   the application's own HSTS is noted once per generation (`hsts_from_application`), carried to health
-  in `TlsFacts::application_hsts`, which then says so in place of `hsts_suggested`. `redirect = "https"` is refused; the
+  in `TlsFacts::application_hsts`, which then says so in place of `hsts_suggested`; until an answer has
+  carried it, `Server::health_async` sends `control::hsts_probes` (the sites where the suggestion could
+  show, by their canonical name) a `GET /` first, the request path noting the field (alpha.91); the
+  probes' requests go out in parallel (`fetch_heads`). `redirect = "https"` is refused; the
   `https://host` prefix form stays until `[[site.redirect]]`.
 - **Response headers** (alpha.89, `docs/headers.md` 2, `docs/configuration.md` 14c): `[[site.response_headers]]`
   (`path`, `match`, `set`, `default`, `remove`, `when`) parsed and checked in `config.cpp`

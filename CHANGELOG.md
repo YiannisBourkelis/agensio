@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.0-alpha.91
+
+- **Health knows an application's own HSTS before any visitor came** (the alpha.87/88 report's
+  note; `docs/redirects.md` 4.2). The request path notes an application's HSTS only once an HTTPS
+  answer has carried it, so after a start health suggested the site's own over it until the first
+  visitor (a reload keeps the note: the store outlives generations). Health now asks each site where
+  the suggestion could show (no `hsts` line, not `http = "serve"`, an application behind it, a real
+  certificate served for a week, nothing noted yet) once for `/`, by its canonical name, on its own
+  thread (`control::hsts_probes`, `run_hsts_probes`); the answer goes through the request path,
+  which notes the field, and `hsts_from_application` follows. A site already noted is never asked
+  again. The probes' requests, the canonical ones too, now go out in parallel, so health waits for
+  the slowest site, not the sum. The integration check (a managed site whose application sends HSTS
+  on `/`, health's first call) failed on alpha.90. Control-plane code only: no A/B.
+
 ## 0.1.0-alpha.90 (2026-10-14)
 
 - **`endings` on `[[site.response_headers]]`: fields by kind of file** (`docs/headers.md` 2.1, 3.3,

@@ -887,11 +887,15 @@ json::Value Server::health() { return health_with({}); }
 // this worker may be the one that has to answer them; health is then made here as always.
 void Server::health_async(std::function<void(json::Value)> done) {
     std::vector<control::CanonicalProbe> probes = control::canonical_probes(gen_->cfg);
-    if (probes.empty()) {
+    // A site whose application's own HSTS no answer has carried yet is asked for / first, so
+    // health says the application sends it instead of suggesting the site's (docs/redirects.md 4.2).
+    std::vector<control::CanonicalProbe> hsts = control::hsts_probes(gen_->cfg, tls_facts(), std::time(nullptr));
+    if (probes.empty() && hsts.empty()) {
         done(health_with({}));
         return;
     }
-    std::thread([this, probes = std::move(probes), done = std::move(done)] {
+    std::thread([this, probes = std::move(probes), hsts = std::move(hsts), done = std::move(done)] {
+        control::run_hsts_probes(hsts);
         std::vector<control::Finding> found = control::run_canonical_probes(probes);
         asio::post(workers_[0]->ctx, [this, found = std::move(found), done] { done(health_with(found)); });
     }).detach();

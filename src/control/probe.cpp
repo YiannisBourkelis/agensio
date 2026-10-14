@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <thread>
 
 #ifndef _WIN32
 #include <netdb.h>
@@ -106,6 +107,31 @@ std::string fetch_head(const CanonicalProbe& p, int timeout_ms) {
 }
 #endif
 
+#ifndef _WIN32
+// Every probe's head, the requests at the same time (at most 32 at once), so health waits for the
+// slowest site, not the sum of them.
+std::vector<std::string> fetch_heads(const std::vector<CanonicalProbe>& probes, int timeout_ms) {
+    std::vector<std::string> heads(probes.size());
+    for (std::size_t from = 0; from < probes.size(); from += 32) {
+        std::vector<std::thread> batch;
+        for (std::size_t i = from; i < std::min(probes.size(), from + 32); ++i)
+            batch.emplace_back([&probes, &heads, i, timeout_ms] { heads[i] = fetch_head(probes[i], timeout_ms); });
+        for (auto& t : batch) t.join();
+    }
+    return heads;
+}
+#endif
+
+// A site's listener as a probe asks it: its first address, a wildcard one over loopback.
+void probe_address(const SiteConfig& s, CanonicalProbe& p) {
+    const std::string& at = s.listen.front();  // normalised "host:port", an IPv6 host unbracketed
+    const std::size_t colon = at.rfind(':');
+    p.host = at.substr(0, colon);
+    p.port = at.substr(colon + 1);
+    if (p.host == "0.0.0.0") p.host = "127.0.0.1";
+    else if (p.host == "::") p.host = "::1";
+}
+
 }  // namespace
 
 std::vector<CanonicalProbe> canonical_probes(const Config& cfg) {
@@ -121,12 +147,7 @@ std::vector<CanonicalProbe> canonical_probes(const Config& cfg) {
         p.app = s.app;
         p.names = s.server_names;
         p.tls = s.tls.has_value();
-        const std::string& at = s.listen.front();  // normalised "host:port", an IPv6 host unbracketed
-        const std::size_t colon = at.rfind(':');
-        p.host = at.substr(0, colon);
-        p.port = at.substr(colon + 1);
-        if (p.host == "0.0.0.0") p.host = "127.0.0.1";
-        else if (p.host == "::") p.host = "::1";
+        probe_address(s, p);
         out.push_back(std::move(p));
     }
     return out;
@@ -154,8 +175,10 @@ std::optional<Finding> judge_canonical_answer(const CanonicalProbe& p, int statu
 std::vector<Finding> run_canonical_probes(const std::vector<CanonicalProbe>& probes, int timeout_ms) {
     std::vector<Finding> out;
 #ifndef _WIN32
-    for (const auto& p : probes) {
-        const std::string head = fetch_head(p, timeout_ms);
+    const std::vector<std::string> heads = fetch_heads(probes, timeout_ms);
+    for (std::size_t n = 0; n < probes.size(); ++n) {
+        const CanonicalProbe& p = probes[n];
+        const std::string& head = heads[n];
         if (!head.starts_with("HTTP/1.")) continue;
         const std::size_t sp = head.find(' ');
         const int status = sp == std::string::npos ? 0 : std::atoi(head.c_str() + sp + 1);
@@ -177,6 +200,45 @@ std::vector<Finding> run_canonical_probes(const std::vector<CanonicalProbe>& pro
     (void)timeout_ms;
 #endif
     return out;
+}
+
+std::vector<CanonicalProbe> hsts_probes(const Config& cfg, const TlsFacts& tls, std::time_t now) {
+    std::vector<CanonicalProbe> out;
+#ifdef AGENSIO_HAS_TLS
+    for (const auto& s : cfg.sites) {
+        // As hsts_suggested: no hsts line, plain HTTP not served on purpose; an application that can
+        // send a field of its own; a real certificate served for a week.
+        if (!s.tls || s.hsts != SiteConfig::Hsts::unset || s.http == SiteConfig::Http::serve || s.app.empty() || s.app == "static" || s.listen.empty())
+            continue;
+        const std::string& name = s.server_names.front();
+        if (name == "*" || tls.application_hsts.count(name)) continue;  // already known
+        const auto st = tls.served.find(s.tls->cert.string() + '\n' + s.tls->key.string());
+        if (st == tls.served.end() || !st->second.present || st->second.placeholder || st->second.not_before <= 0 || now - st->second.not_before < 7 * 86400)
+            continue;
+        CanonicalProbe p;
+        p.site = name;
+        p.canonical = s.canonical_redirect ? s.canonical : name;  // another name is redirected before the application sees it
+        p.app = s.app;
+        p.names = s.server_names;
+        p.tls = true;
+        probe_address(s, p);
+        out.push_back(std::move(p));
+    }
+#else
+    (void)cfg;
+    (void)tls;
+    (void)now;
+#endif
+    return out;
+}
+
+void run_hsts_probes(const std::vector<CanonicalProbe>& probes, int timeout_ms) {
+#ifndef _WIN32
+    (void)fetch_heads(probes, timeout_ms);  // the answers went through the request path, which noted the fields
+#else
+    (void)probes;
+    (void)timeout_ms;
+#endif
 }
 
 }  // namespace agensio::control

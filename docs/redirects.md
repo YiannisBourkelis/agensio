@@ -369,7 +369,9 @@ health suggests it once HTTPS has proven itself:
 - **An application that sends its own** (Kanboard's `ENABLE_HSTS`, Rails' `force_ssl`, Mastodon):
   on a site with no `hsts` line its field goes out as it is, and once one answer has carried it,
   health says so instead of the suggestion (`hsts_from_application`, info, with the value; built in
-  alpha.87, the alpha.86 report). `hsts = true` would replace it, and with a weaker one when the
+  alpha.87, the alpha.86 report). When no answer has carried it since the start, health asks the
+  site once for its home page, by its canonical name, off the workers (alpha.91, the alpha.87/88
+  report's note), so the first health call after a start already knows. `hsts = true` would replace it, and with a weaker one when the
   application's commits to more, which `hsts_narrows_application` would then report; the fix says
   `hsts = false` records that the application's is the one, or gives the `{ max_age, subdomains }`
   that matches it.
