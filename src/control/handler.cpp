@@ -258,25 +258,38 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
         std::string error;
         // Proposed path redirects (docs/redirects.md 8, alpha.83): the answer as if they replaced the
         // site's own, checked as the loader would; nothing changes.
+        // Proposed [[site.response_headers]] likewise (docs/headers.md 7, alpha.92), alone or with them.
         const std::string proposed = control::query_value(req.target, "redirects");
+        const std::string proposed_headers = control::query_value(req.target, "response_headers");
         SiteConfig preview;
-        if (!proposed.empty()) {
+        if (!proposed.empty() || !proposed_headers.empty()) preview = *site;
+        auto load = [&](const std::string& text, const char* what, auto&& loader) {
             json::Value rules;
             std::string perr;
-            if (!json::parse(proposed, rules, perr)) {
-                reply(s, 400, json::Value::object().set("error", "redirects is not JSON: " + perr));
+            if (!json::parse(text, rules, perr)) {
+                reply(s, 400, json::Value::object().set("error", std::string(what) + " is not JSON: " + perr));
                 return false;
             }
-            preview = *site;
-            if (const std::string why = load_redirect_rules(rules, preview); !why.empty()) {
+            if (const std::string why = loader(rules, preview); !why.empty()) {
                 reply(s, 400, json::Value::object().set("error", why));
                 return false;
             }
-        }
-        json::Value v = control::path_check(cfg, proposed.empty() ? *site : preview, control::query_value(req.target, "path"), error);
-        if (!proposed.empty() && error.empty()) {
+            return true;
+        };
+        if (!proposed.empty() && !load(proposed, "redirects", [](const json::Value& r, SiteConfig& p) { return load_redirect_rules(r, p); })) return false;
+        if (!proposed_headers.empty() &&
+            !load(proposed_headers, "response_headers", [](const json::Value& r, SiteConfig& p) { return load_response_header_rules(r, p); }))
+            return false;
+        const bool previewing = !proposed.empty() || !proposed_headers.empty();
+        json::Value v = control::path_check(cfg, previewing ? preview : *site, control::query_value(req.target, "path"), error);
+        if (previewing && error.empty()) {
             v.set("preview", true);
             if (!preview.redirect_notes.empty()) v.set("redirect_notes", control::redirect_notes_json(preview));
+            if (!preview.header_notes.empty()) {
+                json::Value notes = json::Value::array();
+                for (const auto& [code, text] : preview.header_notes) notes.push(json::Value::object().set("code", code).set("text", text));
+                v.set("response_header_notes", std::move(notes));
+            }
         }
         if (!error.empty()) reply(s, 400, json::Value::object().set("error", error));
         else reply(s, 200, v);

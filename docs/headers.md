@@ -1,8 +1,9 @@
 # Response headers: `[[site.response_headers]]` and the security baseline
 
 > **Status: being built.** `hsts` (section 5) since 0.1.0-alpha.75; `[[site.response_headers]]`
-> (section 2) since 0.1.0-alpha.89, its `endings` since alpha.90; `path_check`'s fields, the
-> baseline per preset (section 4) and the agent's side (section 6) are the next steps of section 12.
+> (section 2) since 0.1.0-alpha.89, its `endings` since alpha.90, `path_check`'s fields and preview
+> (section 7) since alpha.92; the baseline per preset (section 4) and the agent's side (section 6) are
+> the next steps of section 12.
 > The rest is the design, written as the guide it will become. It is the companion of `docs/redirects.md`, whose
 > `hsts` setting uses the mechanism described here. The research behind it is
 > `reports/Web server headers and redirects.md` (nine servers, the panels, the administrators'
@@ -556,7 +557,8 @@ where the request path changes.
    HTTP; then the resolved list on the request, the three writers, the upstream loop.
 2. **`[[site.response_headers]]`** (2a built in alpha.89: the fields, per-field resolution, `when`,
    the refused names and the value checks, applied on every answer; 2b `endings` in alpha.90, an
-   ending inside another counting for it (`gz` in `tar.gz`); 2c `path_check` next): the fields,
+   ending inside another counting for it (`gz` in `tar.gz`); 2c in alpha.92, `path_check` naming each
+   field's decision and previewing proposed rules): the fields,
    `endings` on the served file, per-field resolution,
    `when`, the refused names and the value checks, `path_check` with its preview. A property test
    checks the resolution against a brute-force reading of the rules (for random rule sets and paths,

@@ -1837,6 +1837,27 @@ HDR
     "content-security-policy=script-src 'none'|$RP|$NS|x-frame-options=SAMEORIGIN ; cache-control=no-cache|$RP|$NS|x-frame-options=SAMEORIGIN ; cache-control=public, max-age=3600|$RP|$NS ; $RP|$NS|x-frame-options=DENY ; $RP|$NS|x-frame-options=SAMEORIGIN" \
     "$(hd http://h.wild.test:8483/logo.svg --resolve h.wild.test:8483:127.0.0.1) ; $(hd http://h.wild.test:8483/about/ --resolve h.wild.test:8483:127.0.0.1) ; $(hd http://h.wild.test:8483/embed/w.html --resolve h.wild.test:8483:127.0.0.1) ; $(hd http://h.wild.test:8483/app.php --resolve h.wild.test:8483:127.0.0.1) ; $(hd http://h.wild.test:8483/nope.svg --resolve h.wild.test:8483:127.0.0.1)"
   check "response_headers endings over HTTP/2: the svg's CSP" "content-security-policy=script-src 'none'|$RP|$NS|x-frame-options=SAMEORIGIN" "$(hd https://h.wild.test:8484/logo.svg --http2)"
+  # path_check names each field's decision (alpha.92, docs/headers.md 7): the found page with its
+  # deeper rule and its ending, a PHP answer (the application's own fields, then these), a 404; with
+  # proposed rules it answers as if they applied and changes nothing.
+  pc() { curl -sS --unix-socket $CS -G "http://control/v1/sites/h.wild.test/path" --data-urlencode "path=$1" ${2:+--data-urlencode "response_headers=$2"}; }
+  check "path_check names each field's decision: the embed page (a deeper rule, its success-only lifetime), a PHP answer, a 404; a preview of proposed rules changes nothing" \
+    "static | referrer-policy: strict-origin-when-cross-origin (rule /) | x-content-type-options: nosniff (rule /) | x-frame-options: removed (rule /embed) | x-powered-by: removed (rule /) | cache-control: public, max-age=3600 (rule /embed, success only) ; runs x-frame-options: SAMEORIGIN unless the answer has its own (rule /) x-powered-by: removed (rule /) no-error-list ; not_found cache-control-none ; True x-new: 1 (rule /x) ; absent" \
+    "$(pc /embed/w.html | python3 -c 'import json,sys; d=json.load(sys.stdin); print(" | ".join([d["decision"]] + [f["text"] for f in d["response_headers"]]))') ; $(pc /app.php | python3 -c 'import json,sys; d=json.load(sys.stdin); t=[f["text"] for f in d["response_headers"]]; print(d["decision"], " ".join(x for x in t if x.startswith(("x-powered-by", "x-frame-options"))), "no-error-list" if "response_headers_on_error" not in d else "error-list")') ; $(pc /embed/gone | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["decision"], "cache-control-none" if not [f for f in d["response_headers"] if f["field"] == "Cache-Control"] else "cache-control")') ; $(pc /x '[{"path": "/x", "set": {"X-New": "1"}}]' | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("preview"), " ".join(f["text"] for f in d["response_headers"] if f["field"] == "X-New"))') ; $(pc /x | python3 -c 'import json,sys; d=json.load(sys.stdin); print("present" if [f for f in d.get("response_headers", []) if f["field"] == "X-New"] else "absent")')"
+  check "path_check's preview refuses proposed rules as the load does, and an MCP path_check carries response_headers" \
+    "400 yes ; x-frame-options: removed (rule /embed)" \
+    "$(curl -sS -o bench/tmp/pc-reply.json -w '%{http_code}' --unix-socket $CS -G "http://control/v1/sites/h.wild.test/path" --data-urlencode "path=/" --data-urlencode 'response_headers=[{"path": "/", "set": {"Location": "/y"}}]') $(grep -q 'site.redirect' bench/tmp/pc-reply.json && echo yes || echo no) ; $(python3 - "$BIN" "$CS" <<'PYT'
+import json, subprocess, sys
+p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+def rpc(i, method, params):
+    p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": i, "method": method, "params": params}) + "\n"); p.stdin.flush()
+    return json.loads(p.stdout.readline())
+r = rpc(1, "tools/call", {"name": "path_check", "arguments": {"name": "h.wild.test", "path": "/embed/w.html"}})["result"]
+d = r.get("structuredContent") or {}
+print(" ".join(f["text"] for f in d.get("response_headers", []) if f["field"] == "X-Frame-Options"))
+p.stdin.close(); p.wait()
+PYT
+)"
   rm -f bench/tmp/sites.d/hdr.toml
   cpost /v1/reload '{"confirm":true,"reason":"headers"}' > /dev/null
 fi

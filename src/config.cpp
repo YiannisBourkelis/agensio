@@ -4418,4 +4418,50 @@ void build_response_headers(SiteConfig& site, const std::string& where) {
         if (!(nd.path.size() == 1 && !nd.exact)) access::mark_first(rr.first, response_rules::first_byte(nd.path));
 }
 
+// [[site.response_headers]] rules sent as JSON (path_check's preview, docs/headers.md 7): the tables a
+// site file holds, judged by the loader's own parse and checks, endings included.
+std::string load_response_header_rules(const json::Value& rules, SiteConfig& site) {
+    if (!rules.is_array())
+        return "response_headers must be a list of rules: [{\"path\": \"/\", \"set\": {\"X-Frame-Options\": \"SAMEORIGIN\"}}] ([] for none)";
+    toml::array arr;
+    for (const auto& r : rules.items()) {
+        if (!r.is_object()) return "each response_headers rule is an object: {\"path\": \"/\", \"set\": {\"Referrer-Policy\": \"no-referrer\"}}";
+        toml::table t;
+        for (const auto& [k, v] : r.members()) {
+            if (v.is_string()) {
+                t.insert(k, std::string(v.str()));
+            } else if (v.is_object()) {
+                toml::table fields;
+                for (const auto& [name, value] : v.members()) {
+                    if (!value.is_string()) return "response_headers field '" + k + "." + name + "' must be a string";
+                    fields.insert(name, std::string(value.str()));
+                }
+                t.insert(k, std::move(fields));
+            } else if (v.is_array()) {
+                toml::array list;
+                for (const auto& e : v.items()) {
+                    if (!e.is_string()) return "response_headers field '" + k + "' must be a list of strings";
+                    list.push_back(std::string(e.str()));
+                }
+                t.insert(k, std::move(list));
+            } else {
+                return "response_headers field '" + k + "' must be a string, an object of fields or a list";
+            }
+        }
+        arr.push_back(std::move(t));
+    }
+    site.response_headers = {};
+    site.header_notes.clear();
+    toml::table holder;
+    holder.insert("response_headers", std::move(arr));
+    try {
+        const toml::table& rules_table = holder;
+        parse_response_headers(rules_table["response_headers"], site, "response_headers");
+        check_header_endings(site, "response_headers");
+    } catch (const std::exception& e) {
+        return e.what();
+    }
+    return "";
+}
+
 }  // namespace agensio

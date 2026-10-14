@@ -2202,6 +2202,14 @@ set = { "Content-Security-Policy" = "script-src 'none'" }
   prebuilt block. Rules with `endings` add one comparison of the served file's name per ending a
   rule of its path names, made when agensio picks the file.
 
+**What a path gets:** `path_check` (`agensio ctl path-check NAME PATH`, MCP `path_check`, 0.1.0-alpha.92)
+lists every field the site decides on that answer, with its verb, value and the deciding rule
+(`cache-control: public, max-age=3600 (rule /embed, success only)`, `x-frame-options: removed (rule
+/embed)`, `strict-transport-security: ... (hsts, over HTTPS)`): for a file it serves, the fields for
+its ending; for an application's answer those of a successful one and, where they differ, of any
+other status. With proposed rules (MCP `path_check` `response_headers`, the rules as objects) it
+answers as if they replaced the site's, checked as the load would, and changes nothing.
+
 **On a managed site** the rules are not a `site_update` field yet (a later step of headers.md); a
 hand-written site file carries them. `hsts` stays its own key ([redirects.md](redirects.md) 4), and
 a location's `add_headers` keeps adding its fields to that location's successful answers; a rule's

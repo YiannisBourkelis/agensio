@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.0-alpha.92
+
+- **`path_check` names every field a path's answer gets, and previews proposed rules**
+  (`docs/headers.md` 7, configuration.md 14c; step 2c of headers.md 12). Its answer carries
+  `response_headers`: each field the site decides (its `[[site.response_headers]]` rules and `hsts`)
+  with its verb, value, the deciding rule (`path`, `match`, `when`, `endings`) and a line to tell the
+  user (`cache-control: public, max-age=3600 (rule /embed, success only)`); for a file it serves the
+  fields for its ending, for agensio's own 404 or redirect those of a non-success answer, for an
+  application's answer those of a successful one and `response_headers_on_error` where other
+  statuses get other fields. With proposed rules (the control API's `response_headers` query, MCP
+  `path_check` `response_headers`, the rules as objects) it answers as if they replaced the site's,
+  judged by the loader's own parse and checks (`load_response_header_rules`), with
+  `response_header_notes`, and changes nothing. The MCP texts say what the fields mean and what other
+  servers do differently. The integration checks (the embed page, a PHP answer, a 404, a preview, a
+  refused proposal, MCP) failed on alpha.91. Control-plane code only: no A/B.
+
 ## 0.1.0-alpha.91 (2026-10-14)
 
 - **Health knows an application's own HSTS before any visitor came** (the alpha.87/88 report's

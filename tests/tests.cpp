@@ -6031,6 +6031,21 @@ static void test_response_headers() {
         response_fields::append_upstream(block, hs, false, present);
         CHECK_EQ(block, std::string("Cache-Control: no-cache\r\nX-S: 1\r\n"));
     }
+    // path_check's preview: proposed rules as JSON, judged by the same parse and checks.
+    {
+        SiteConfig site = cfg.sites[0];
+        json::Value rules;
+        std::string err;
+        CHECK(json::parse(R"([{"path": "/x/", "match": "prefix", "set": {"X-New": "1"}, "remove": ["X-Old"], "when": "always", "endings": ["svg"]}])", rules, err));
+        CHECK(load_response_header_rules(rules, site).empty() && site.response_headers.rules.size() == 1 && site.response_headers.rules[0].path == "/x" &&
+              site.response_headers.endings && site.response_headers.lookup("/x/a") != nullptr && site.response_headers.lookup("/page") == nullptr);
+        CHECK(json::parse(R"([{"path": "/", "set": {"Location": "/y"}}])", rules, err));
+        CHECK(load_response_header_rules(rules, site).find("[[site.redirect]]") != std::string::npos);
+        CHECK(json::parse(R"([{"path": "/", "set": {"X-A": 1}}])", rules, err));
+        CHECK(load_response_header_rules(rules, site).find("must be a string") != std::string::npos);
+        CHECK(json::parse(R"([{"path": "/", "set": {"X-XSS-Protection": "1"}}])", rules, err));
+        CHECK(load_response_header_rules(rules, site).empty() && site.header_notes.size() == 1);
+    }
     // What the load refuses, and what it notes.
     CHECK(refused("[[site.response_headers]]\npath = \"/\"\nset = { \"Access-Control-Allow-Origin\" = \"*\", \"Access-Control-Allow-Credentials\" = \"true\" }\n",
                   "browsers refuse"));

@@ -622,6 +622,9 @@ std::string load_redirect_rules(const json::Value& rules, SiteConfig& site);
 // [[site.response_headers]] (docs/headers.md 2.2): the site's rules (response_headers.rules)
 // resolved per field into its nodes; throws as a load does on a combination browsers refuse.
 void build_response_headers(SiteConfig& site, const std::string& where);
+// Proposed rules as JSON (path_check's preview), replacing the site's: the loader's parse and checks;
+// "" when they load, else why. The notes land in site.header_notes.
+std::string load_response_header_rules(const json::Value& rules, SiteConfig& site);
 // The names a site file's [[site]] blocks claim, read as the loader reads a file set aside (its
 // text scanned when it is not TOML): what site_update names when it cannot help (alpha.80).
 std::vector<std::string> claimed_names(const std::string& file);

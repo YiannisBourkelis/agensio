@@ -510,6 +510,60 @@ json::Value access_check(const Config& cfg, const SiteConfig& site, std::string_
     return v;
 }
 
+// The fields the site decides for path_check's answer (docs/headers.md 7): each with its verb, value
+// and the deciding rule, and a line to tell the user; HSTS first, over HTTPS. An application's answer
+// gets the fields of a successful one and, where they differ, those of any other status; agensio's
+// own answer the kind its status is; a file it serves the fields for its ending.
+void header_fields(json::Value& v, const SiteConfig& site, const HeaderNode* node, std::string_view decision, int status, std::string_view file) {
+    const bool app = decision == "runs" || decision == "proxied" || decision == "handled";
+    const EndingSets* es = node && !file.empty() ? response_rules::ending_sets(*node, file) : nullptr;
+    auto list = [&](bool success) {
+        json::Value out = json::Value::array();
+        if (!site.tls_fields.hsts.empty())
+            out.push(json::Value::object()
+                         .set("field", "Strict-Transport-Security")
+                         .set("verb", "set")
+                         .set("value", site.tls_fields.hsts)
+                         .set("rule", "hsts")
+                         .set("text", "strict-transport-security: " + site.tls_fields.hsts + " (hsts, over HTTPS)"));
+        if (!node) return out;
+        const HeaderSet& hs = es ? (success ? es->success : es->other) : (success ? node->success : node->other);
+        for (const FieldDecision& d : hs.fields) {
+            const HeaderRule& r = site.response_headers.rules[d.rule];
+            const char* verb = d.verb == FieldDecision::Verb::set ? "set" : d.verb == FieldDecision::Verb::fallback ? "default" : "remove";
+            json::Value rule = json::Value::object().set("path", r.path).set("match", r.exact ? "exact" : "prefix");
+            if (r.success_only) rule.set("when", "success");
+            std::string files;
+            if (!r.endings.empty()) {
+                json::Value endings = json::Value::array();
+                for (const auto& e : r.endings) {
+                    endings.push(e);
+                    files += (files.empty() ? "." : ", .") + e;
+                }
+                rule.set("endings", std::move(endings));
+            }
+            std::string lower = d.name;
+            for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            std::string text = lower + ": " + (d.verb == FieldDecision::Verb::remove ? std::string("removed")
+                                               : d.verb == FieldDecision::Verb::fallback ? d.value + " unless the answer has its own" : d.value);
+            text += " (rule " + r.path + (r.exact ? " exact" : "") + (r.success_only ? ", success only" : "") + (files.empty() ? "" : ", " + files + " files") + ")";
+            json::Value item = json::Value::object().set("field", d.name).set("verb", verb);
+            if (d.verb != FieldDecision::Verb::remove) item.set("value", d.value);
+            out.push(item.set("rule", std::move(rule)).set("text", text));
+        }
+        return out;
+    };
+    if (app) {
+        json::Value ok = list(true), other = list(false);
+        if (other.dump() != ok.dump()) v.set("response_headers_on_error", std::move(other));
+        v.set("response_headers", std::move(ok));
+        v.set("response_headers_note", "the application's answer: its own fields go out, then these decide (set replaces its copy, default only fills a "
+                                       "gap, remove drops it); response_headers_on_error for a status other than 2xx and 304");
+    } else {
+        v.set("response_headers", list((status >= 200 && status < 300) || status == 304));
+    }
+}
+
 // path_check (2026-10-08, docs/configuration.md 6b): what a site does with one GET for a path,
 // in the order a worker decides it, and why: the refuse patterns, the location, its refusals
 // by name, try_files and the index, every internal redirect again, then the file served, the
@@ -554,10 +608,13 @@ json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_vi
         const std::string from = from_of(l);
         return "location " + l.path + " (" + (l.exact ? "exact" : l.suffix ? "suffix" : "prefix") + ", " + l.handler + (from.empty() ? "" : ", from " + from) + ")";
     };
-    auto finish = [&](const char* decision, int status, const std::string& summary) {
+    // [[site.response_headers]] match the path asked for, never an internal target (docs/headers.md 1).
+    const HeaderNode* header_node = site.response_headers.lookup(path);
+    auto finish = [&](const char* decision, int status, const std::string& summary, std::string_view file = {}) {
         v.set("decision", decision);
         if (status) v.set("status", status);
         v.set("summary", summary).set("steps", std::move(steps));
+        if (header_node || !site.tls_fields.hsts.empty()) header_fields(v, site, header_node, decision, status, file);
         return v;
     };
     auto stat_is = [](const std::string& f, bool dir) {
@@ -708,7 +765,7 @@ json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_vi
                 const int r = index_of(file);
                 if (r == 1) {
                     v.set("file", file);
-                    return finish("static", 200, "200: the index " + file + " (" + describe(loc) + ")");
+                    return finish("static", 200, "200: the index " + file + " (" + describe(loc) + ")", file);
                 }
                 if (r == 2) continue;
                 if (stat_is(fs_of(path), true)) return finish("forbidden", 403, "403: a directory without an index file");
@@ -717,7 +774,7 @@ json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_vi
             file = fs_of(path);
             if (stat_is(file, false)) {
                 v.set("file", file);
-                return finish("static", 200, "200: the file " + file + " (" + describe(loc) + ")");
+                return finish("static", 200, "200: the file " + file + " (" + describe(loc) + ")", file);
             }
             if (stat_is(file, true)) return finish("redirect", 301, "301 to " + path + "/: a directory");
             return finish("not_found", 404, "404: no file " + file);
@@ -727,7 +784,7 @@ json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_vi
                 case TryStep::Kind::uri:
                     if (!dir_uri && stat_is(fs_of(path), false)) {
                         v.set("file", fs_of(path));
-                        return finish("static", 200, "200: the file " + fs_of(path) + " (" + describe(loc) + ")");
+                        return finish("static", 200, "200: the file " + fs_of(path) + " (" + describe(loc) + ")", fs_of(path));
                     }
                     break;
                 case TryStep::Kind::uri_dir:
@@ -735,7 +792,7 @@ json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_vi
                         const int r = index_of(file);
                         if (r == 1) {
                             v.set("file", file);
-                            return finish("static", 200, "200: the index " + file + " (" + describe(loc) + ")");
+                            return finish("static", 200, "200: the index " + file + " (" + describe(loc) + ")", file);
                         }
                         if (r == 2) next = true;
                     } else if (stat_is(fs_of(path), true)) {
