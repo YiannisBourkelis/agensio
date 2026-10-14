@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.93
+## 0.1.0-alpha.93 (2026-10-14)
 
 - **`fuzz_response_headers`: the response header rules under libFuzzer** (`tests/fuzz/`, seeds in
   `tests/fuzz/regressions/response_headers/`). Rules and probes from the input load as `path_check`'s
