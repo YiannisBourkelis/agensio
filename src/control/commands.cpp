@@ -529,9 +529,12 @@ void header_fields(json::Value& v, const SiteConfig& site, const HeaderNode* nod
         if (!node) return out;
         const HeaderSet& hs = es ? (success ? es->success : es->other) : (success ? node->success : node->other);
         for (const FieldDecision& d : hs.fields) {
+            if (app && d.own_only) continue;  // the baseline's nosniff: agensio's own answers, never the application's
             const HeaderRule& r = site.response_headers.rules[d.rule];
             const char* verb = d.verb == FieldDecision::Verb::set ? "set" : d.verb == FieldDecision::Verb::fallback ? "default" : "remove";
             json::Value rule = json::Value::object().set("path", r.path).set("match", r.exact ? "exact" : "prefix");
+            const std::string baseline = r.baseline ? (site.app.empty() ? std::string("static") : site.app) : std::string();
+            if (r.baseline) rule.set("baseline", baseline);
             if (r.success_only) rule.set("when", "success");
             std::string files;
             if (!r.endings.empty()) {
@@ -546,7 +549,8 @@ void header_fields(json::Value& v, const SiteConfig& site, const HeaderNode* nod
             for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             std::string text = lower + ": " + (d.verb == FieldDecision::Verb::remove ? std::string("removed")
                                                : d.verb == FieldDecision::Verb::fallback ? d.value + " unless the answer has its own" : d.value);
-            text += " (rule " + r.path + (r.exact ? " exact" : "") + (r.success_only ? ", success only" : "") + (files.empty() ? "" : ", " + files + " files") + ")";
+            text += (r.baseline ? " (baseline " + baseline : " (rule " + r.path + (r.exact ? " exact" : "")) + (r.success_only ? ", success only" : "") +
+                    (files.empty() ? "" : ", " + files + " files") + (d.own_only ? ", on the files and error pages agensio serves" : "") + ")";
             json::Value item = json::Value::object().set("field", d.name).set("verb", verb);
             if (d.verb != FieldDecision::Verb::remove) item.set("value", d.value);
             out.push(item.set("rule", std::move(rule)).set("text", text));

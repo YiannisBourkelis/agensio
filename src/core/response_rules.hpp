@@ -4,8 +4,9 @@
 // rules naming different fields all apply, and the order they are written in never matters. The
 // result is one node per rule path, each with what a successful answer (2xx, 304) and any other
 // answer get, so a request finds its node once, when its site is known, and the writers and the
-// upstream loop apply it (core/response_fields.hpp). A site without rules has no nodes and pays
-// one test of an empty vector.
+// upstream loop apply it (core/response_fields.hpp). A site with `app` also has the security
+// baseline's rules (docs/headers.md 4); a site with neither has no nodes and pays one test of an
+// empty vector.
 #pragma once
 
 #include <array>
@@ -26,6 +27,11 @@ struct HeaderRule {
     // endings (2.1): only the files agensio serves from disk whose name ends so ("svg", "tar.gz"; lower
     // case, no leading dot), never an application's answer; empty: every answer of the path.
     std::vector<std::string> endings;
+    // The security baseline (docs/headers.md 4), added by the loader after the written rules: it
+    // decides below every rule written at its path; `own_only` for a field agensio adds to its own
+    // answers alone (nosniff on the files and error pages it serves, never an application's answer).
+    bool baseline = false;
+    bool own_only = false;
 };
 
 // One field's decision for the answers of a node.
@@ -35,6 +41,7 @@ struct FieldDecision {
     std::string value;  // set and default; empty for remove
     Verb verb = Verb::set;
     bool cache_field = false;  // Cache-Control or a field only shared caches read: the password guard decides those
+    bool own_only = false;     // agensio's own answers only: an application's answer neither loses nor gains the field
     std::uint16_t rule = 0;    // the deciding rule, an index into ResponseRules::rules (a copy of the site keeps it)
 };
 

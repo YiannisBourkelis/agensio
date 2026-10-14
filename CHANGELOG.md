@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.1.0-alpha.94
+
+- **The security baseline: a site with `app` sends what cannot break a page, without a rule**
+  (`docs/headers.md` 4, step 3 of its section 12; `docs/configuration.md` 14c). `Referrer-Policy:
+  strict-origin-when-cross-origin` on every answer that has none (an application's own wins),
+  `X-Content-Type-Options: nosniff` on the files and error pages agensio serves (never on an
+  application's answer, where a script sent with the wrong type would stop working), `X-Powered-By`
+  removed, and on `app = "static"` `Cache-Control: no-cache` on the `.html` and `.htm` files it serves,
+  successful answers only, so a deploy shows at once. Built as rules at `/` marked as the baseline's
+  (`HeaderRule::baseline`), resolved below every written rule at their path, its `endings` rule
+  included, so a `[[site.response_headers]]` rule naming one of the fields decides; `nosniff` and
+  `no-cache` are `default`s, so a location's `add_headers` copy stands (a cached directory's own
+  lifetime), and `nosniff` is marked for agensio's own answers (`FieldDecision::own_only`), which the
+  upstream loop leaves as the application sent them. The site key `security_headers` (`false` turns it
+  off, `true` gives a site without `app` the static site's); a site without `app`, the benchmark
+  templates among them, gets none. Together with a site's rules it names at most 64 fields. `-t
+  --explain` says it in a comment; `path_check` names it as each field's source (`(baseline
+  wordpress)`, `nosniff` "on the files and error pages agensio serves", left out of an application's
+  answer), and its preview keeps it under proposed rules. A managed static site's file now names `app
+  = "static"`, which the renderer left out, so it gets the static baseline; an existing one gains the
+  line at its next change. `fuzz_response_headers` models the baseline (its site is php, static or
+  without app by the input's length; fifteen minutes on ten processes, 14.8 M runs, 3,066 edges, clean). The cookbook's "The security baseline a preset site gets";
+  `bench/ab.sh -A` has the row `baseline` (a static site's cached page).
+
 ## 0.1.0-alpha.93 (2026-10-14)
 
 - **`fuzz_response_headers`: the response header rules under libFuzzer** (`tests/fuzz/`, seeds in

@@ -6075,6 +6075,156 @@ static void test_response_headers() {
 
 // [[site.redirect]] (alpha.82, docs/redirects.md 5): what from and to accept, the Location written
 // byte by byte for the design's examples, the most specific rule, and the load's refusals and notes.
+// The security baseline (docs/headers.md 4, alpha.94): what a site with app gets without asking,
+// below every rule written at its path; nosniff on agensio's own answers only; on app = "static"
+// no-cache on the HTML it serves; security_headers turns it off, or on for a site without app.
+static void test_security_baseline() {
+    namespace fs = std::filesystem;
+    using Verb = FieldDecision::Verb;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-base-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "www");
+    std::ofstream(dir / "www" / "index.html") << "<p>hi</p>";
+    auto load = [&](const std::string& keys, const std::string& rules = "") {
+        std::ofstream(dir / "b.toml") << "[[site]]\nserver_name = [\"b.test\"]\nlisten = [\"127.0.0.1:18741\"]\nroot = \"www\"\n" + keys + rules;
+        return load_config(dir / "b.toml");
+    };
+    auto decided = [](const HeaderSet& hs) {
+        std::string out;
+        for (const auto& f : hs.fields)
+            out += (out.empty() ? "" : " ") + f.name + "=" + (f.verb == Verb::set ? "set:" : f.verb == Verb::fallback ? "default:" : "remove") + f.value +
+                   (f.own_only ? "(own)" : "");
+        return out;
+    };
+    const std::string RP = "Referrer-Policy=default:strict-origin-when-cross-origin", XPB = "X-Powered-By=remove",
+                      NS = "X-Content-Type-Options=default:nosniff(own)";
+    // app = "static": the three fields on every answer, no-cache on the HTML files it serves.
+    {
+        const Config c = load("app = \"static\"\n");
+        const ResponseRules& rr = c.sites[0].response_headers;
+        const HeaderNode* n = rr.lookup("/any/page");
+        CHECK(n && rr.nodes.size() == 1 && rr.endings);
+        CHECK_EQ(decided(n->success), RP + " " + XPB + " " + NS);
+        CHECK_EQ(decided(n->other), RP + " " + XPB + " " + NS);
+        CHECK(n->success.h1 == "Referrer-Policy: strict-origin-when-cross-origin\r\nX-Content-Type-Options: nosniff\r\n");
+        const EndingSets* html = response_rules::ending_sets(*n, "/srv/www/Index.HTML");
+        CHECK(html && decided(html->success) == RP + " " + XPB + " " + NS + " Cache-Control=default:no-cache");
+        CHECK(html && decided(html->other) == RP + " " + XPB + " " + NS);  // success only
+        CHECK(response_rules::ending_sets(*n, "/srv/www/page.htm") && !response_rules::ending_sets(*n, "/srv/www/style.css"));
+        // An application's answer (a proxy location on such a site): its own nosniff passes, none is
+        // added; X-Powered-By goes; Referrer-Policy fills a gap only.
+        std::uint64_t present = 0;
+        CHECK(!response_fields::keep_upstream(n->success, "x-powered-by", false, present));
+        CHECK(response_fields::keep_upstream(n->success, "X-Content-Type-Options", false, present) && present == 0);
+        std::string block;
+        response_fields::append_upstream(block, n->success, false, present);
+        CHECK_EQ(block, std::string("Referrer-Policy: strict-origin-when-cross-origin\r\n"));
+        CHECK(response_fields::keep_upstream(n->success, "Referrer-Policy", false, present));
+        block.clear();
+        response_fields::append_upstream(block, n->success, false, present);
+        CHECK(block.empty());
+        // agensio's own answer gets nosniff, a location's own copy answering it.
+        Stream s;
+        s.header_node = n;
+        s.response.status = 404;
+        s.response.headers.add("X-Content-Type-Options", "nosniff");
+        std::string own;
+        response_fields::apply(s, *response_fields::pending(s), [&](std::string_view name, std::string_view value) {
+            own.append(name).append("=").append(value).append(";");
+        });
+        CHECK_EQ(own, std::string("X-Content-Type-Options=nosniff;Referrer-Policy=strict-origin-when-cross-origin;"));
+        // path_check names the baseline, with where nosniff applies; -t --explain says it in a comment.
+        std::string error;
+        const json::Value pc = control::path_check(c, c.sites[0], "/", error);
+        std::string texts;
+        for (const auto& f : pc["response_headers"].items()) texts += std::string(f["text"].str()) + " | ";
+        CHECK(error.empty() && texts.find("referrer-policy: strict-origin-when-cross-origin unless the answer has its own (baseline static) | ") != std::string::npos &&
+              texts.find("x-content-type-options: nosniff unless the answer has its own (baseline static, on the files and error pages agensio serves) | ") != std::string::npos &&
+              texts.find("x-powered-by: removed (baseline static) | ") != std::string::npos &&
+              texts.find("cache-control: no-cache unless the answer has its own (baseline static, success only, .html, .htm files) | ") != std::string::npos);
+        std::ostringstream ex;
+        explain_config(c, ex);
+        CHECK(ex.str().find("# security baseline (app = \"static\"; security_headers = false turns it off): Referrer-Policy") != std::string::npos &&
+              ex.str().find("\n[[site.response_headers]]\n") == std::string::npos);  // a comment, never a table a reload would see twice
+        // path_check's preview of proposed rules keeps the baseline beneath them.
+        SiteConfig copy = c.sites[0];
+        json::Value none = json::Value::array();
+        CHECK(load_response_header_rules(none, copy).empty() && copy.response_headers.lookup("/") && decided(copy.response_headers.lookup("/")->success) == RP + " " + XPB + " " + NS);
+    }
+    // A PHP preset: no HTML lifetime (the application's pages are its own).
+    {
+        std::ofstream(dir / "www" / "index.php") << "<?php echo 1;";
+        const Config c = load("app = \"php\"\nphp = { socket = \"unix:/nonexistent/fpm.sock\" }\n");
+        const ResponseRules& rr = c.sites[0].response_headers;
+        CHECK(rr.lookup("/index.php") && !rr.endings && decided(rr.lookup("/index.php")->success) == RP + " " + XPB + " " + NS);
+        std::string error;
+        const json::Value pc = control::path_check(c, c.sites[0], "/index.php", error);
+        std::string texts;
+        for (const auto& f : pc["response_headers"].items()) texts += std::string(f["text"].str()) + " | ";
+        CHECK(pc["decision"].str() == "runs" && texts.find("referrer-policy") != std::string::npos &&
+              texts.find("x-content-type-options") == std::string::npos);  // not on PHP's answer
+        fs::remove(dir / "www" / "index.php");
+    }
+    // security_headers: off on a preset, on (the static baseline) without app; none without app.
+    CHECK(load("app = \"static\"\nsecurity_headers = false\n").sites[0].response_headers.empty());
+    CHECK(load("").sites[0].response_headers.empty());
+    {
+        const Config c = load("security_headers = true\n");
+        CHECK(c.sites[0].response_headers.lookup("/") && c.sites[0].response_headers.endings);
+    }
+    {
+        bool refused = false;
+        try {
+            load("security_headers = \"yes\"\n");
+        } catch (const std::exception& e) {
+            refused = std::string_view(e.what()).find("security_headers must be true or false") != std::string_view::npos;
+        }
+        CHECK(refused);
+    }
+    // A rule written at "/" decides over the baseline's field, its endings rule included; a deeper
+    // rule decides below it; the baseline's other fields stay.
+    {
+        const Config c = load("app = \"static\"\n",
+                              "[[site.response_headers]]\npath = \"/\"\nset = { \"Referrer-Policy\" = \"no-referrer\", \"Cache-Control\" = \"no-store\" }\n"
+                              "remove = [\"X-Content-Type-Options\"]\n"
+                              "[[site.response_headers]]\npath = \"/docs/\"\ndefault = { \"Referrer-Policy\" = \"same-origin\" }\n");
+        const ResponseRules& rr = c.sites[0].response_headers;
+        const HeaderNode* top = rr.lookup("/");
+        // The written fields in their order (a TOML table's: by name), then what the baseline adds: X-Powered-By's removal.
+        CHECK(top && decided(top->success) == "Cache-Control=set:no-store Referrer-Policy=set:no-referrer X-Content-Type-Options=remove " + XPB);
+        const EndingSets* html = top ? response_rules::ending_sets(*top, "index.html") : nullptr;
+        CHECK(html && decided(html->success) == "Cache-Control=set:no-store Referrer-Policy=set:no-referrer X-Content-Type-Options=remove " + XPB);
+        CHECK(rr.lookup("/docs/a") && decided(rr.lookup("/docs/a")->success) ==
+                                          "Cache-Control=set:no-store Referrer-Policy=default:same-origin X-Content-Type-Options=remove " + XPB);
+    }
+    // At most 64 field names with the baseline's: 60 written and the static baseline's 4 load, 61 do not.
+    auto many = [](int n) {
+        std::string r = "[[site.response_headers]]\npath = \"/\"\nset = {";
+        for (int i = 0; i < n; ++i) r += (i ? ", " : " ") + std::string("\"X-F") + std::to_string(i) + "\" = \"1\"";
+        return r + " }\n";
+    };
+    CHECK(load("app = \"static\"\n", many(60)).sites[0].response_headers.lookup("/"));
+    {
+        bool refused = false;
+        try {
+            load("app = \"static\"\n", many(61));
+        } catch (const std::exception& e) {
+            refused = std::string_view(e.what()).find("security_headers = false") != std::string_view::npos;
+        }
+        CHECK(refused);
+    }
+    // A managed static site names its preset, so it gets the static baseline.
+    {
+        control::SiteSpec spec;
+        spec.domain = "m.test";
+        spec.root = "/srv/m";
+        spec.app = "";
+        CHECK(control::render_site(spec, "x").find("\napp = \"static\"\n") != std::string::npos);
+        spec.app = "static";
+        CHECK(control::render_site(spec, "x").find("\napp = \"static\"\n") != std::string::npos);
+    }
+    fs::remove_all(dir);
+}
+
 static void test_redirect_rules() {
     namespace fs = std::filesystem;
     using namespace agensio::redirect;
@@ -9695,6 +9845,7 @@ int main() {
     test_hsts_key();
     test_redirect_rules();
     test_response_headers();
+    test_security_baseline();
     test_site_isolation();
     test_served_record();
     test_hosting_isolation();

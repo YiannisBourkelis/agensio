@@ -951,7 +951,9 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
             if (node_app(spec.app) && !spec.entry.empty()) s += "entry = " + toml_string(spec.entry) + "\n";
         } else {
             s += "root = " + toml_string(spec.root) + "\n";
-            if (!spec.app.empty() && spec.app != "static") s += "app = " + toml_string(spec.app) + "\n";
+            // Named for a static site too (alpha.94): a site with app gets its preset's security
+            // baseline (docs/headers.md 4), which a file without the line would not.
+            s += "app = " + toml_string(spec.app.empty() ? std::string("static") : spec.app) + "\n";
         }
         if (!spec.user.empty()) s += "user = " + toml_string(spec.user) + "\n";
         if (!spec.group.empty()) s += "group = " + toml_string(spec.group) + "\n";

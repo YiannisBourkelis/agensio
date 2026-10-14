@@ -269,6 +269,9 @@ struct SiteConfig {
     // health say about them (a CSP set over an application's own, X-XSS-Protection turned on).
     ResponseRules response_headers;
     std::vector<std::pair<std::string, std::string>> header_notes;  // code, text
+    // security_headers (alpha.94, docs/headers.md 4): the preset's baseline, rules marked `baseline`
+    // in response_headers below every written one; unset: on for a site with app, off without.
+    std::optional<bool> security_headers;
     // http (docs/redirects.md 2, alpha.76): what a request over plain HTTP gets. A TLS site on port
     // 443 also listens on port 80 at the same addresses (http_listen) and redirects there; on another
     // port it has none unless `http = { listen = [...] }` names them. A site without TLS serves plain

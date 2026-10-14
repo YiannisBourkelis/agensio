@@ -92,12 +92,13 @@ void apply(const Stream& s, const HeaderSet& hs, Emit&& emit) {
 
 // For an application's answer, in the upstream loop: whether its field (or a location's
 // add_headers field) goes out; a set or remove decision drops every copy, and a copy answers a
-// default. Behind a password the guard decides the cache fields.
+// default. Behind a password the guard decides the cache fields; a decision for agensio's own
+// answers (the baseline's nosniff) leaves the application's field as it is.
 inline bool keep_upstream(const HeaderSet& hs, std::string_view name, bool guarded, std::uint64_t& present) noexcept {
     const int i = find(hs, name);
     if (i < 0) return true;
     const FieldDecision& d = hs.fields[static_cast<std::size_t>(i)];
-    if (guarded && d.cache_field) return true;
+    if ((guarded && d.cache_field) || d.own_only) return true;
     if (d.verb != FieldDecision::Verb::fallback) return false;
     present |= bit(static_cast<std::size_t>(i));
     return true;
@@ -107,7 +108,7 @@ inline bool keep_upstream(const HeaderSet& hs, std::string_view name, bool guard
 inline void append_upstream(std::string& out, const HeaderSet& hs, bool guarded, std::uint64_t present) {
     for (std::size_t i = 0; i < hs.fields.size(); ++i) {
         const FieldDecision& d = hs.fields[i];
-        if (d.verb == FieldDecision::Verb::remove || (guarded && d.cache_field)) continue;
+        if (d.verb == FieldDecision::Verb::remove || (guarded && d.cache_field) || d.own_only) continue;
         if (d.verb == FieldDecision::Verb::fallback && (present & bit(i))) continue;
         out.append(d.name).append(": ").append(d.value).append("\r\n");
     }

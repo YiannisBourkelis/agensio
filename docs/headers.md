@@ -2,8 +2,8 @@
 
 > **Status: being built.** `hsts` (section 5) since 0.1.0-alpha.75; `[[site.response_headers]]`
 > (section 2) since 0.1.0-alpha.89, its `endings` since alpha.90, `path_check`'s fields and preview
-> (section 7) since alpha.92; the baseline per preset (section 4) and the agent's side (section 6) are
-> the next steps of section 12.
+> (section 7) since alpha.92, the baseline per preset and `security_headers` (section 4) since
+> alpha.94; the agent's side (section 6) is the next step of section 12.
 > The rest is the design, written as the guide it will become. It is the companion of `docs/redirects.md`, whose
 > `hsts` setting uses the mechanism described here. The research behind it is
 > `reports/Web server headers and redirects.md` (nine servers, the panels, the administrators'
@@ -352,7 +352,7 @@ What each application sends itself was read in its 2026 releases' source
 | `laravel` | nothing (`FrameGuard` exists, not registered); Statamic `X-Powered-By: Statamic` | `Referrer-Policy`; `nosniff` on files; Statamic's `X-Powered-By` removed | a frame field, unless the application is embedded elsewhere |
 | `grav` | the 1.7 admin plugin: `X-Frame-Options: DENY` on admin pages; core nothing | `Referrer-Policy`; `nosniff` on files | a frame field on the front end |
 | `php` (TYPO3, Kanboard, any other) | TYPO3 13 and 14: the backend sends a frame field, `nosniff`, `Referrer-Policy` and a CSP, the front end nothing; Kanboard: a CSP, `nosniff`, `X-Frame-Options: DENY`, `X-XSS-Protection: 1; mode=block` on every answer | `Referrer-Policy` where the application sends none; `nosniff` on files, as TYPO3's `.htaccess` does | TYPO3's front end: a frame field, unless pages are embedded elsewhere |
-| `rails`, `redmine` | on every controller answer: `X-Frame-Options: SAMEORIGIN`, `nosniff`, `Referrer-Policy`, `X-Permitted-Cross-Domain-Policies: none`, `X-XSS-Protection` (`0` on Rails 7.1 and later, `1; mode=block` on Redmine, which keeps the older defaults); `public/` files through Rails' own file server, with none of them | `Referrer-Policy` and `nosniff` on agensio's error pages; nothing on Rails' answers | `config.action_dispatch.default_headers` is the application's; nothing more |
+| `rails`, `redmine` | on every controller answer: `X-Frame-Options: SAMEORIGIN`, `nosniff`, `Referrer-Policy`, `X-Permitted-Cross-Domain-Policies: none`, `X-XSS-Protection` (`0` on Rails 7.1 and later, `1; mode=block` on Redmine, which keeps the older defaults); `public/` files through Rails' own file server, with none of them | `nosniff` on agensio's error pages; `Referrer-Policy` where Rails sends none (the `public/` files its own file server answers) | `config.action_dispatch.default_headers` is the application's; nothing more |
 | `django`, `wagtail` | `nosniff`, `Referrer-Policy: same-origin`, `Cross-Origin-Opener-Policy: same-origin`, `X-Frame-Options: DENY`, each only if absent; Wagtail's previews `SAMEORIGIN` | `nosniff` and `Referrer-Policy` on `/static/` and `/media/`, which agensio serves (the preset's `/media/` CSP and `nosniff` stay) | Django's settings are the place; nothing more |
 | `node` | Express: `X-Powered-By: Express` on everything, `nosniff` only on its own error pages; Uptime Kuma: `X-Frame-Options: SAMEORIGIN` unless its owner switched it off, no `X-Powered-By` | `Referrer-Policy`; `X-Powered-By` removed | a frame field, unless the application is embedded elsewhere (Uptime Kuma decides for itself) |
 | `proxy` | the application's | `Referrer-Policy`; `X-Powered-By` removed | depends on the application |
@@ -566,6 +566,11 @@ where the request path changes.
    HTTP/3 heads of one answer are compared field by field.
 3. **The baseline per preset** (with `no-cache` on a static site's HTML) and `security_headers`,
    with the fixture sites of the integration suite checked for the fields and for an application's
-   own value winning.
+   own value winning (built in alpha.94: the baseline is rules at `/` marked as the baseline's, below
+   every written rule at their path, its `endings` rule included, so a written rule naming a field
+   decides; `nosniff` and `no-cache` are `default`s, so a location's `add_headers` copy stands, and
+   `nosniff` is marked for agensio's own answers, which the upstream loop leaves alone; a managed
+   static site's file names `app = "static"`, which the renderer left out before; the baseline and
+   the site's rules name at most 64 fields together).
 4. **The agent's side**: `site_update` fields, `agensio ctl` flags, the MCP texts of section 6, the
    reference rows, the cookbook recipes linking here; this document installed with the others.

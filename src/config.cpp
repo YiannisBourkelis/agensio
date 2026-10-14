@@ -1654,6 +1654,57 @@ void check_header_endings(const SiteConfig& site, const std::string& where) {
         }
 }
 
+// The security baseline (alpha.94, docs/headers.md 4): what is safe to add to the answers of a site
+// with app without asking, as rules at "/" below every written one: Referrer-Policy where the answer
+// has none, nosniff on agensio's own answers (the files and error pages it serves; never an
+// application's, where a script sent with the wrong type would stop working), X-Powered-By removed;
+// on a static site (and one without app given security_headers = true) no-cache on the HTML files it
+// serves, so a deploy shows at once. A written rule naming one of these fields decides instead. Run
+// once the written rules are parsed and checked, and again by path_check's preview, which parses
+// proposed ones anew.
+void add_security_baseline(SiteConfig& site, const std::string& where) {
+    ResponseRules& rr = site.response_headers;
+    const bool had = std::erase_if(rr.rules, [](const HeaderRule& r) { return r.baseline; }) > 0;
+    if (!site.security_headers.value_or(!site.app.empty())) {
+        if (had) build_response_headers(site, where);
+        return;
+    }
+    std::vector<HeaderRule> add(2);
+    add[0].fallback = {{"Referrer-Policy", "strict-origin-when-cross-origin"}};
+    add[0].remove = {"X-Powered-By"};
+    add[1].fallback = {{"X-Content-Type-Options", "nosniff"}};
+    add[1].own_only = true;
+    if (site.app.empty() || site.app == "static") {
+        HeaderRule html;
+        html.success_only = true;
+        html.endings = {"html", "htm"};
+        html.fallback = {{"Cache-Control", "no-cache"}};
+        add.push_back(std::move(html));
+    }
+    // At most 64 field names with the written rules': the presence test of a resolved set is a bitmask.
+    std::vector<std::string> names;
+    auto note = [&](const HeaderRule& r) {
+        auto one = [&](const std::string& n) {
+            if (std::string l = to_lower(n); std::find(names.begin(), names.end(), l) == names.end()) names.push_back(std::move(l));
+        };
+        for (const auto& f : r.set) one(f.first);
+        for (const auto& f : r.fallback) one(f.first);
+        for (const auto& f : r.remove) one(f);
+    };
+    for (const HeaderRule& r : rr.rules) note(r);
+    const std::size_t written = names.size();
+    for (const HeaderRule& r : add) note(r);
+    if (names.size() > 64)
+        fail(where + ": the response_headers rules name " + std::to_string(written) + " fields and the security baseline " +
+             std::to_string(names.size() - written) + " more, at most 64 together; name fewer, or turn the baseline off with security_headers = false");
+    for (HeaderRule& r : add) {
+        r.path = "/";
+        r.baseline = true;
+        rr.rules.push_back(std::move(r));
+    }
+    build_response_headers(site, where);
+}
+
 // [[site.auth]] (2026-10-08, docs/configuration.md 19b, design section 25). A user file is read
 // once per load and shared by every rule that names it; it belongs to the main configuration's
 // owner (root), is never writable by group or others and never readable by others, and is
@@ -2283,6 +2334,11 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     if (t.contains("refuse")) parse_refuse(t["refuse"], site, where);
     if (t.contains("auth")) parse_auth(t["auth"], cfg, site, base_dir, where);
     if (t.contains("response_headers")) parse_response_headers(t["response_headers"], site, where);
+    if (t.contains("security_headers")) {
+        const auto on = t["security_headers"].value<bool>();
+        if (!on) fail(where + ".security_headers must be true or false (the preset's security baseline, docs/headers.md 4)");
+        site.security_headers = *on;
+    }
     // Root additions for this site: parsed as hand-written locations after the file's own, so
     // they win over the preset's at their path and a headers-only one joins like any other;
     // the origin names the file for --explain and site_show. The same path twice (the managed
@@ -2348,6 +2404,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     check_refuse_conflicts(site, where);
     check_redirects(site, where);
     check_header_endings(site, where);
+    add_security_baseline(site, where);
     cfg.sites.push_back(std::move(site));
 }
 
@@ -2599,6 +2656,7 @@ void explain_config(const Config& cfg, std::ostream& out) {
             out << "http = \"" << http_mode(site) << "\"" << (site.http_given ? "" : "  # the default") << "\n";
         }
         if (!site.canonical.empty()) out << "canonical = \"" << site.canonical << "\"\n";
+        if (site.security_headers) out << "security_headers = " << (*site.security_headers ? "true" : "false") << "\n";
         if (!site.user.empty()) out << "user = \"" << site.user << "\"\n";
         if (!site.group.empty()) out << "group = \"" << site.group << "\"\n";
         if (site.php.configured) print_fcgi(out, "php", site.php);
@@ -2644,7 +2702,16 @@ void explain_config(const Config& cfg, std::ostream& out) {
             out << "]\n";
             if (r.report) out << "mode = \"report\"\n";
         }
+        const auto& hr = site.response_headers.rules;
+        if (std::any_of(hr.begin(), hr.end(), [](const HeaderRule& r) { return r.baseline; }))
+            out << "\n# security baseline ("
+                << (site.app.empty() ? std::string("security_headers = true, a static site's") : "app = \"" + site.app + "\"; security_headers = false turns it off")
+                << "): Referrer-Policy: strict-origin-when-cross-origin where the answer has none, X-Content-Type-Options: nosniff on the files and "
+                   "error pages agensio serves, X-Powered-By removed"
+                << (site.app.empty() || site.app == "static" ? ", Cache-Control: no-cache on the HTML files it serves" : "")
+                << "; a [[site.response_headers]] rule naming one of them decides instead\n";
         for (const auto& r : site.response_headers.rules) {
+            if (r.baseline) continue;
             out << "\n[[site.response_headers]]\npath = \"" << (r.path.size() > 1 && !r.exact ? r.path + "/" : r.path) << "\"\n";
             if (r.exact) out << "match = \"exact\"\n";
             if (r.success_only) out << "when = \"success\"\n";
@@ -4351,34 +4418,41 @@ void build_response_headers(SiteConfig& site, const std::string& where) {
         std::sort(chain.begin(), chain.end(), [](const Key* a, const Key* b) { return a->path.size() < b->path.size(); });
         chain.push_back(&k);
         // One kind of answer: at each path of the chain the rules without endings, then (for a file
-        // with `ending`) the ones naming it, each later decision replacing an earlier one.
+        // with `ending`) the ones naming it, each later decision replacing an earlier one. After the
+        // written rules of a path, the security baseline's only fill the fields they left undecided,
+        // so a written rule naming a field decides, its endings rule included (docs/headers.md 4.2),
+        // and the written fields keep their order. The baseline sits at "/" alone, the first path of
+        // every chain, so nothing before it can have decided a field.
         auto fill = [&](HeaderSet& hs, bool success, const std::string* ending) {
             for (const Key* c : chain)
-                for (const int pass : {0, 1}) {
-                    if (pass == 1 && !ending) break;
-                    for (std::size_t ri = 0; ri < rr.rules.size(); ++ri) {
-                        const HeaderRule& r = rr.rules[ri];
-                        if (r.exact != c->exact || !same(r.path, c->path) || (!success && r.success_only)) continue;
-                        if (pass == 0 ? !r.endings.empty()
-                                      : std::none_of(r.endings.begin(), r.endings.end(),
-                                                     [&](const std::string& e) { return response_rules::ending_within(e, *ending); }))
-                            continue;
-                        auto decide = [&](const std::string& name, FieldDecision::Verb verb, const std::string& value) {
-                            FieldDecision* d = nullptr;
-                            for (auto& f : hs.fields)
-                                if (Headers::iequals(f.name, name)) d = &f;
-                            if (!d) d = &hs.fields.emplace_back();
-                            d->name = name;
-                            d->verb = verb;
-                            d->value = value;
-                            d->cache_field = Headers::iequals(name, "cache-control") || private_cache::shared_only_field(name);
-                            d->rule = static_cast<std::uint16_t>(ri);
-                        };
-                        for (const auto& [name, value] : r.set) decide(name, FieldDecision::Verb::set, value);
-                        for (const auto& [name, value] : r.fallback) decide(name, FieldDecision::Verb::fallback, value);
-                        for (const auto& name : r.remove) decide(name, FieldDecision::Verb::remove, "");
+                for (const bool written : {true, false})
+                    for (const int pass : {0, 1}) {
+                        if (pass == 1 && !ending) break;
+                        for (std::size_t ri = 0; ri < rr.rules.size(); ++ri) {
+                            const HeaderRule& r = rr.rules[ri];
+                            if (r.baseline == written || r.exact != c->exact || !same(r.path, c->path) || (!success && r.success_only)) continue;
+                            if (pass == 0 ? !r.endings.empty()
+                                          : std::none_of(r.endings.begin(), r.endings.end(),
+                                                         [&](const std::string& e) { return response_rules::ending_within(e, *ending); }))
+                                continue;
+                            auto decide = [&](const std::string& name, FieldDecision::Verb verb, const std::string& value, bool own_only) {
+                                FieldDecision* d = nullptr;
+                                for (auto& f : hs.fields)
+                                    if (Headers::iequals(f.name, name)) d = &f;
+                                if (d && r.baseline) return;  // decided by a written rule of this path
+                                if (!d) d = &hs.fields.emplace_back();
+                                d->name = name;
+                                d->verb = verb;
+                                d->value = value;
+                                d->cache_field = Headers::iequals(name, "cache-control") || private_cache::shared_only_field(name);
+                                d->own_only = own_only;
+                                d->rule = static_cast<std::uint16_t>(ri);
+                            };
+                            for (const auto& [name, value] : r.set) decide(name, FieldDecision::Verb::set, value, r.own_only);
+                            for (const auto& [name, value] : r.fallback) decide(name, FieldDecision::Verb::fallback, value, r.own_only);
+                            for (const auto& name : r.remove) decide(name, FieldDecision::Verb::remove, "", r.own_only);
+                        }
                     }
-                }
             bool any_origin = false, credentials = false;
             for (const auto& f : hs.fields) {
                 if (f.verb == FieldDecision::Verb::remove) continue;
@@ -4458,6 +4532,7 @@ std::string load_response_header_rules(const json::Value& rules, SiteConfig& sit
         const toml::table& rules_table = holder;
         parse_response_headers(rules_table["response_headers"], site, "response_headers");
         check_header_endings(site, "response_headers");
+        add_security_baseline(site, "response_headers");
     } catch (const std::exception& e) {
         return e.what();
     }

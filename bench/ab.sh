@@ -42,7 +42,11 @@
 #             on a cached file's HTTP/1 answer, and since 0.1.0-alpha.90 a rule with endings for
 #             html files; a base before endings gets that field from a rule without them, one before
 #             0.1.0-alpha.89 all of them from a location's add_headers: the same bytes on both sides,
-#             so the row measures the rules). With -P also "proxy-hdr:/json:64" (127.0.0.1:8091, the benchmark
+#             so the row measures the rules). And "baseline:/:64" (127.0.0.1:8090, a site with
+#             app = "static" serving its cached 1 KB index.html, the same file on both sides: from
+#             0.1.0-alpha.94 its security baseline, three fields through a node at / with the html
+#             ending, against none before: what a static site pays for the baseline on upgrading).
+#             With -P also "proxy-hdr:/json:64" (127.0.0.1:8091, the benchmark
 #             upstream behind a site with set, default and remove rules: the upstream loop's half).
 #   -r        rounds of base/new alternation (default 2)
 #   -d        wrk duration per case (default 5s)
@@ -118,11 +122,14 @@ sed "s#@WORKERS@#$WORKERS#g; s#@BENCH@#$BENCH#g; s#@SENDFILE_MIN@#${SENDFILE_MIN
 sed "s#@WORKERS@#$WORKERS#g; s#@BENCH@#$BENCH#g; s#@SENDFILE_MIN@#${SENDFILE_MIN:-48KB}#g; s#@ACCESS_LOG@#${ACCESS_LOG:-off}#g; s#@H3@#, \"h3\"#g" "$BENCH/agensio.toml" > "$BENCH/tmp/ab-agensio-h3.toml"
 # The access gate's two sites go into every config (before the proxy one is built from it).
 if [ $ACCESS = 1 ]; then
-  SPECS+=("access:/:64" "access-all:/:64" "refuse:/sub/index.html:64" "hsts:/:64" "redir-miss:/:64" "redir-hit:/x:64" "headers:/sub/index.html:64")
+  SPECS+=("access:/:64" "access-all:/:64" "refuse:/sub/index.html:64" "hsts:/:64" "redir-miss:/:64" "redir-hit:/x:64" "headers:/sub/index.html:64" "baseline:/:64")
   # Response headers (0.1.0-alpha.89, docs/headers.md 9): a rule at / and a deeper one, a file under
   # the deeper one; a base before them gets the same site without rules. With -P, a proxied answer
   # through set, default and remove rules, the base the same proxy site without them.
   hdr_site='\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8092"]\nroot = "%s/www"\n'
+  # The security baseline (0.1.0-alpha.94, docs/headers.md 4): a static preset site, one config for
+  # both sides; a base before the baseline serves it without the fields.
+  printf '\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8090"]\nroot = "%s/www"\napp = "static"\n' "$BENCH" > "$BENCH/tmp/ab-baseline.toml"
   printf "$hdr_site" "$BENCH" > "$BENCH/tmp/ab-hdr-none.toml"
   { printf "$hdr_site" "$BENCH"
     printf '\n[[site.response_headers]]\npath = "/"\nset = { "Referrer-Policy" = "strict-origin-when-cross-origin", "X-Content-Type-Options" = "nosniff" }\n'
@@ -280,6 +287,7 @@ start() {  # binary
       cat "$cfg" "$BENCH/tmp/$f" > "$BENCH/tmp/ab-side-redir.toml"
       if "$1" -t -c "$BENCH/tmp/ab-side-redir.toml" >/dev/null 2>&1; then cfg="$BENCH/tmp/ab-side-redir.toml"; echo "  (redirect rows: ${f#ab-redir-})"; break; fi
     done
+    cat "$cfg" "$BENCH/tmp/ab-baseline.toml" > "$BENCH/tmp/ab-side-base.toml" && cfg="$BENCH/tmp/ab-side-base.toml"  # every side loads it
     local hdr="ab-hdr-rules.toml ab-hdr-plain.toml ab-hdr-loc.toml ab-hdr-none.toml"
     for f in $hdr; do  # the response headers site in the form this side loads
       cat "$cfg" "$BENCH/tmp/$f" > "$BENCH/tmp/ab-side-hdr.toml"
@@ -336,6 +344,7 @@ measure() {  # side round -> appends "side round spec cpu_us rps" lines to $RAW/
       redir-miss) url="http://127.0.0.1:8098$path" ;;
       redir-hit) url="http://127.0.0.1:8099$path" ;;
       headers) url="http://127.0.0.1:8092$path" ;;
+      baseline) url="http://127.0.0.1:8090$path" ;;
       proxy-hdr) [ $SIDE_PROXY = 1 ] || continue; url="http://127.0.0.1:8091$path" ;;
       auth) url="http://127.0.0.1:8096$path" ;;
       h2c) [ $SIDE_H2 = 1 ] || continue; url="http://127.0.0.1:8080$path" ;;

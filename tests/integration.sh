@@ -1037,7 +1037,7 @@ check "cookbook: every recipe of docs/examples.md loads and names what exists (t
 # One broken site file never stops the others (design section 26; tests/isolation.sh, its own server).
 check "isolation: a site file that does not load is set aside, the other sites serve (tests/isolation.sh)" "0" \
   "$(tests/isolation.sh "$BIN" > bench/tmp/isolation.out 2>&1; echo $?)"
-check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 205 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
+check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 206 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
 check "secrets: the presets catalogue lists each preset's credential files" "/wp-config.php /sites/default/settings.php" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["wordpress"]["secrets"][0], p["drupal"]["secrets"][0])')"
 check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$("$BIN" ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; "$BIN" ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
@@ -1889,6 +1889,43 @@ check "a head over one HTTP/2 frame: 16 KB of rule fields arrive whole over HTTP
 [ $H3 = 1 ] && check "a head of 16 KB of rule fields arrives whole over HTTP/3 too (one HEADERS frame, its length a varint)" "200 3 4" "$(big --http3-only)"
 rm -f bench/tmp/sites.d/hbig.toml
 cpost /v1/reload '{"confirm":true,"reason":"bighead"}' > /dev/null
+# The security baseline (alpha.94, docs/headers.md 4): a site with app gets Referrer-Policy where the
+# answer has none, nosniff on the files and error pages agensio serves (never on an application's
+# answer), X-Powered-By removed, and on app = "static" no-cache on its HTML; security_headers = false
+# turns it off; a site without app gets none. The same fields over HTTP/1, HTTP/2 and HTTP/3.
+{
+  printf '[[site]]\nserver_name = ["bs.wild.test"]\nlisten = ["127.0.0.1:8488"]\nhttp = { listen = ["127.0.0.1:8489"], mode = "serve" }\nroot = "%s/bench/www"\napp = "static"\ntls = { cert = "%s/bench/tmp/certs-wild/cert.pem", key = "%s/bench/tmp/certs-wild/key.pem" }\n\n' "$ROOT" "$ROOT" "$ROOT"
+  printf '[[site]]\nserver_name = ["bo.wild.test"]\nlisten = ["127.0.0.1:8488"]\nhttp = { listen = ["127.0.0.1:8489"], mode = "serve" }\nroot = "%s/bench/www"\napp = "static"\nsecurity_headers = false\ntls = { cert = "%s/bench/tmp/certs-wild/cert.pem", key = "%s/bench/tmp/certs-wild/key.pem" }\n\n' "$ROOT" "$ROOT" "$ROOT"
+  printf '[[site]]\nserver_name = ["bn.wild.test"]\nlisten = ["127.0.0.1:8488"]\nhttp = { listen = ["127.0.0.1:8489"], mode = "serve" }\nroot = "%s/bench/www"\ntls = { cert = "%s/bench/tmp/certs-wild/cert.pem", key = "%s/bench/tmp/certs-wild/key.pem" }\n\n' "$ROOT" "$ROOT" "$ROOT"
+  [ -n "$PHPFPM" ] && printf '[[site]]\nserver_name = ["bp.wild.test"]\nlisten = ["127.0.0.1:8488"]\nhttp = { listen = ["127.0.0.1:8489"], mode = "serve" }\nroot = "%s/tests/headers"\napp = "php"\nphp = { socket = "unix:%s/bench/tmp/php/fpm.sock" }\ntls = { cert = "%s/bench/tmp/certs-wild/cert.pem", key = "%s/bench/tmp/certs-wild/key.pem" }\n\n' "$ROOT" "$ROOT" "$ROOT" "$ROOT"
+  [ -n "$UP_PID" ] && printf '[[site]]\nserver_name = ["bx.wild.test"]\nlisten = ["127.0.0.1:8488"]\nhttp = { listen = ["127.0.0.1:8489"], mode = "serve" }\napp = "proxy"\nupstream = "http://127.0.0.1:9107"\nproxy = { idle_timeout = 1 }\ntls = { cert = "%s/bench/tmp/certs-wild/cert.pem", key = "%s/bench/tmp/certs-wild/key.pem" }\n' "$ROOT" "$ROOT"
+} > bench/tmp/sites.d/base.toml
+cpost /v1/reload '{"confirm":true,"reason":"baseline"}' > /dev/null
+bh() {  # host path [curl options]: the baseline's fields of one answer over plain HTTP, every copy, "name=value" sorted
+  curl -sk -D - -o /dev/null --resolve "$1:8489:127.0.0.1" --resolve "$1:8488:127.0.0.1" "${@:3}" "http://$1:8489$2" | tr -d '\r' |
+    awk -F': ' 'tolower($1) ~ /^(referrer-policy|x-content-type-options|x-powered-by|cache-control|x-frame-options)$/ {print tolower($1) "=" $2}' | sort | paste -sd'|'
+}
+bht() {  # host path curl-protocol-option: the same over TLS
+  curl -sk -D - -o /dev/null --resolve "$1:8488:127.0.0.1" "$3" "https://$1:8488$2" | tr -d '\r' |
+    awk -F': ' 'tolower($1) ~ /^(referrer-policy|x-content-type-options|x-powered-by|cache-control|x-frame-options)$/ {print tolower($1) "=" $2}' | sort | paste -sd'|'
+}
+BRP='referrer-policy=strict-origin-when-cross-origin'; BNS='x-content-type-options=nosniff'
+check "security baseline, app = static: the HTML gets no-cache, a stylesheet and a 404 the two fields; off with security_headers = false; none without app" \
+  "cache-control=no-cache|$BRP|$BNS ; $BRP|$BNS ; $BRP|$BNS ;  ; " \
+  "$(bh bs.wild.test /) ; $(bh bs.wild.test /style.css) ; $(bh bs.wild.test /nope) ; $(bh bo.wild.test /) ; $(bh bn.wild.test /)"
+check "security baseline over HTTP/2: the same fields on the static site's page and stylesheet" \
+  "cache-control=no-cache|$BRP|$BNS ; $BRP|$BNS" "$(bht bs.wild.test / --http2) ; $(bht bs.wild.test /style.css --http2)"
+[ $H3 = 1 ] && check "security baseline over HTTP/3: the same fields on the static site's page" "cache-control=no-cache|$BRP|$BNS" "$(bht bs.wild.test / --http3-only)"
+[ -n "$PHPFPM" ] && check "security baseline, app = php: the application's own Referrer-Policy wins and its X-Powered-By goes, no nosniff on PHP's answers; a PHP answer without one gets the default; its files and 404s get nosniff" \
+  "referrer-policy=unsafe-url|x-frame-options=DENY ; $BRP ; $BRP|$BNS ; $BRP|$BNS" \
+  "$(bh bp.wild.test /app.php) ; $(bh bp.wild.test /plain.php) ; $(bh bp.wild.test /logo.svg) ; $(bh bp.wild.test /nope.svg)"
+[ -n "$UP_PID" ] && check "security baseline, app = proxy: the default on a proxied answer, the origin's X-Powered-By removed, no nosniff" \
+  "$BRP ; $BRP" "$(bh bx.wild.test /json) ; $(bh bx.wild.test /redirect)"
+check "security baseline: path_check names it as the source; -t --explain says it in a comment" \
+  "referrer-policy: strict-origin-when-cross-origin unless the answer has its own (baseline static) ; yes" \
+  "$(curl -sS --unix-socket $CS -G "http://control/v1/sites/bs.wild.test/path" --data-urlencode "path=/style.css" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(" ".join(f["text"] for f in d["response_headers"] if f["field"] == "Referrer-Policy"))') ; $(t=$("$BIN" -t --explain -c bench/tmp/agensio-test.toml 2>/dev/null); grep -q '# security baseline (app = "static"; security_headers = false turns it off)' <<< "$t" && echo yes || echo no)"
+rm -f bench/tmp/sites.d/base.toml
+cpost /v1/reload '{"confirm":true,"reason":"baseline"}' > /dev/null
 # [[site.response_headers]] at load (alpha.89, docs/headers.md 2.5, 2.6, 7): what is set elsewhere is
 # refused naming the setting, a value with a variable or a line break, a lifetime without when =
 # "success", a frame field browsers ignore, the same field twice at one path or in two verbs of one

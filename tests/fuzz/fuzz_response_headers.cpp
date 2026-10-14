@@ -13,7 +13,10 @@
 //   - the guards stand: behind a password the cache fields are untouched, a field of agensio's own
 //     block is never replaced, removed or doubled;
 //   - HTTP/1's prebuilt lines equal what the general path writes for an answer with nothing to look at;
-//   - the node's decisions agree with a scan of every rule for the most specific one naming a field.
+//   - the node's decisions agree with a scan of every rule for the most specific one naming a field,
+//     the security baseline's (docs/headers.md 4: the site is php, static or without app by the
+//     input's length) below the written ones at its path, its nosniff leaving an application's
+//     answer as it was.
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -108,8 +111,11 @@ const HeaderRule* scan(const std::vector<HeaderRule>& rules, std::string_view pa
                 has = has || (file_l.size() > e.size() + 1 && file_l.compare(file_l.size() - e.size() - 1, std::string::npos, "." + e) == 0);
             if (file.empty() || !has) continue;
         }
+        // Longer path, then exact before prefix, then (one path and match) a written rule before the
+        // security baseline's, then a rule whose endings the file has.
+        const bool same_place = best && r.path.size() == best->path.size() && r.exact == best->exact;
         const bool better = !best || r.path.size() > best->path.size() || (r.path.size() == best->path.size() && r.exact && !best->exact) ||
-                            (r.path.size() == best->path.size() && r.exact == best->exact && ending && !best_ending);
+                            (same_place && !r.baseline && best->baseline) || (same_place && r.baseline == best->baseline && ending && !best_ending);
         if (!better) continue;
         best = &r;
         best_ending = ending;
@@ -151,7 +157,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     }
     agensio::SiteConfig site;
     site.server_names = {"f.test"};
-    site.app = (size % 3 == 0) ? "php" : "";
+    site.app = size % 3 == 0 ? "php" : size % 3 == 1 ? "static" : "";  // the first two with the security baseline
     if (!agensio::load_response_header_rules(rules, site).empty()) return 0;  // refused, as a load would
     const agensio::ResponseRules& rr = site.response_headers;
     for (const auto& n : rr.nodes) {
@@ -264,7 +270,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
         if (hs)
             for (const FieldDecision& d : hs->fields) {
                 const std::size_t before = copies(fields, d.name), after = copies(out, d.name);
-                const bool standing = (!upstream && own && before > 0) || (guarded && d.cache_field);
+                // A decision for agensio's own answers (the baseline's nosniff) leaves an application's field as it is.
+                const bool standing = (!upstream && own && before > 0) || (guarded && d.cache_field) || (upstream && d.own_only);
                 if (standing) {
                     assert(after == before);
                     continue;

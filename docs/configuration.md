@@ -2205,6 +2205,36 @@ set = { "Content-Security-Policy" = "script-src 'none'" }
   prebuilt block. Rules with `endings` add one comparison of the served file's name per ending a
   rule of its path names, made when agensio picks the file.
 
+**The security baseline** (0.1.0-alpha.94, [headers.md](headers.md) 4). A site with `app` gets,
+without a rule, only what cannot break a page that works today:
+
+| field | on which answers |
+|---|---|
+| `Referrer-Policy: strict-origin-when-cross-origin`, as a `default` | every answer that has none: what current browsers do without the field, told to older ones and scanners; an application's own value (Django's `same-origin`) wins |
+| `X-Content-Type-Options: nosniff`, as a `default` | the files and error pages agensio serves, whose type it set itself; never an application's answer, where a script sent with the wrong type would stop working |
+| `X-Powered-By` removed | every answer: no client reads it (a framework's, as `Express` or `Statamic`; PHP's own is off in the pools agensio writes) |
+| `Cache-Control: no-cache`, as a `default`, success only | on `app = "static"`: the `.html` and `.htm` files it serves (a page, a directory's index, a single-page application's shell), so a deploy shows at once; browsers revalidate and get a `304` when nothing changed |
+
+```toml
+[[site]]
+server_name = ["shop.example.com"]
+app = "wordpress"
+security_headers = false    # the baseline off; true gives a site without app the static site's
+```
+
+A rule naming one of these fields decides instead, at any path, `/` included, and its `endings`
+rule too: `set = { "Referrer-Policy" = "no-referrer" }` at `/` replaces the baseline's,
+`remove = ["X-Content-Type-Options"]` drops it. A location's `add_headers` copy of a field answers
+the baseline's `default` (a cached directory's own `Cache-Control` stays). What the baseline leaves
+out (a frame field, a Content-Security-Policy, `Permissions-Policy`, `nosniff` on an application's
+answers) can break a working page and is the owner's decision, one at a time (headers.md 4.1). A site
+without `app` (a hand-written minimal site, the benchmark templates) gets no baseline; a managed
+static site names `app = "static"` in its file since 0.1.0-alpha.94, written at its next change.
+`-t --explain` says the baseline in a comment, `path_check` names it as the source of each field
+(`referrer-policy: strict-origin-when-cross-origin unless the answer has its own (baseline
+wordpress)`). Together with a site's rules it may name at most 64 fields. Cost: the site's answers take
+its fields as rules at `/` do, one prebuilt block on a cached file over HTTP/1.
+
 **What a path gets:** `path_check` (`agensio ctl path-check NAME PATH`, MCP `path_check`, 0.1.0-alpha.92)
 lists every field the site decides on that answer, with its verb, value and the deciding rule
 (`cache-control: public, max-age=3600 (rule /embed, success only)`, `x-frame-options: removed (rule

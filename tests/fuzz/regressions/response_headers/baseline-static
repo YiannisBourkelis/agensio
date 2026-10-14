@@ -1,0 +1,6 @@
+/docs		default	Referrer-Policy	same-origin
+/		remove	X-Content-Type-Options		
+
+/	d	/srv/www/index.html	
+/docs/a	d		u	X-Content-Type-Options:nosniff	X-Powered-By:Express
+/style.css	d	/srv/www/style.css	o	Cache-Control:no-store

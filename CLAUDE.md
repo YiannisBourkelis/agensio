@@ -534,7 +534,13 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty, each seeded from
   `path_check` (alpha.92, `control::header_fields`) lists each field's decision for the answer it
   describes (the node of the path asked, the served file's ending), and the endpoint's
   `response_headers` query loads proposed rules on a copy of the site (`load_response_header_rules`).
-  Gate: `bench/ab.sh <ref> -A` (row `headers`), `-P` with `-A` (row `proxy-hdr`).
+  The security baseline (alpha.94, `docs/headers.md` 4, site key `security_headers`, on with `app`):
+  `add_security_baseline` in `config.cpp` appends rules at `/` marked `HeaderRule::baseline`, which
+  `build_response_headers` resolves below every written rule at their path (endings included):
+  `Referrer-Policy` and `nosniff` as defaults, `X-Powered-By` removed, a static site's `no-cache` on
+  `.html`/`.htm`; `nosniff` is `own_only`, skipped by `keep_upstream`/`append_upstream` and by
+  `path_check` for an application's answer; the managed renderer writes `app = "static"`.
+  Gate: `bench/ab.sh <ref> -A` (rows `headers` and `baseline`), `-P` with `-A` (row `proxy-hdr`).
 - **Automatic certificates** (H3, `src/services/acme.*`, `services/json.hpp`): `tls = "auto"`
   plus `[server] acme = { email }`; ACME v2 with HTTP-01 against any RFC 8555 CA, JWS ES256
   and CSRs through OpenSSL. Placeholder certificate at start, order at once, challenge

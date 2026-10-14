@@ -633,6 +633,71 @@ on one path) goes into the site's root additions file, root's.
 [Locations](../configuration.md#6-locations-the-reference),
 [HTTPS only](../configuration.md#https-only), [root additions](../configuration.md#15-control-socket).
 
+## The security baseline a preset site gets
+
+**When:** you want to know which security fields a site sends without any rule, or a site must send
+none of them.
+
+```toml
+# /etc/agensio/agensio.toml: the main file, root's (once per host)
+include = ["sites.d/*.toml"]
+
+[server]
+acme = { email = "admin@example.com" }
+```
+
+```toml
+# /etc/agensio/sites.d/example.com.toml
+[[site]]
+server_name = ["example.com"]
+listen = ["0.0.0.0:443"]
+root = "/var/www/example.com/web"
+app = "wordpress"
+php = { socket = "unix:/run/php/php-fpm.sock" }
+tls = "auto"
+
+[[site]]
+server_name = ["docs.example.com"]
+listen = ["0.0.0.0:443"]
+root = "/var/www/docs.example.com/web"
+app = "static"
+tls = "auto"
+
+[[site]]
+server_name = ["legacy.example.com"]
+listen = ["0.0.0.0:443"]
+root = "/var/www/legacy.example.com/web"
+app = "static"
+security_headers = false                       # the baseline off for this site
+tls = "auto"
+```
+
+**What it does.** A site with `app` gets, without a rule, only what cannot break a page that works
+today: `Referrer-Policy: strict-origin-when-cross-origin` on every answer that has none (WordPress's
+own on its admin pages wins), `X-Content-Type-Options: nosniff` on the files and error pages agensio
+serves (never on what PHP answers, where a script sent with the wrong type would stop working), and
+no `X-Powered-By`. The static site also sends `Cache-Control: no-cache` on its HTML pages, so a deploy
+shows at once (browsers revalidate and get a `304` when nothing changed). A frame field, a
+Content-Security-Policy and `nosniff` on PHP's answers are left out: each can break a working page
+(the next recipe adds them where you know it does not). A `[[site.response_headers]]` rule naming one
+of these fields decides instead; `security_headers = false` turns the whole baseline off, and a site
+without `app` gets none.
+
+**Check it.**
+
+```sh
+agensio -t --explain -c /etc/agensio/agensio.toml | grep 'security baseline'   # one comment per site that has it
+agensio ctl path-check docs.example.com /index.html                           # each field, "(baseline static)"
+curl -sI https://docs.example.com/ | grep -iE '^(referrer-policy|x-content-type-options|cache-control)'
+```
+
+**On a managed site.** The baseline is on for every managed site (a static one names `app =
+"static"` in its file since 0.1.0-alpha.94, at its next change); turning it off is a `site_update`
+field with the agent's side of [headers.md](../headers.md) 12 (step 4), until then root's question.
+
+**Reference:** [Response headers](../configuration.md#14c-response-headers-siteresponse_headers),
+[headers.md](../headers.md) 4.
+
 ## Security fields by path
 
 **When:** the site should send the same security fields on every answer, PHP pages and error
@@ -675,7 +740,9 @@ never sees two), `X-Frame-Options: SAMEORIGIN` where the application sent none (
 most specific rule naming it decides, and the order of the rules does not matter, unlike nginx,
 where an `add_header` in a nested block drops every field inherited from above. Easy to get wrong:
 a `Content-Security-Policy` on an application site belongs in `default` (`set` would replace the
-application's own policy, `-t` notes it), and a cache lifetime needs `when = "success"`.
+application's own policy, `-t` notes it), and a cache lifetime needs `when = "success"`. With `app` the
+site already has the baseline of the recipe above; these rules decide over it, so `nosniff` here
+reaches PHP's answers too, a choice made knowing the application's scripts carry their types.
 
 **Check it.**
 
