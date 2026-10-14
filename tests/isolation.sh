@@ -345,7 +345,7 @@ chmod 600 "$CT/w/key.pem"; mv "$T/agensio.toml.good" "$T/agensio.toml"; rm -f "$
 # The hourly watch (here every second, AGENSIO_CERT_WATCH_SECONDS): a certificate renewed on disk
 # by another tool (certbot) is loaded by itself, no reload, no cert-renew.
 S4=$T/watch; mkdir -p "$S4/sites.d" "$S4/logs" "$CT/s4"; mkcert "$CT/s4" 30
-printf 'include = ["sites.d/*.toml"]\n[server]\nworkers = 1\npid_file = "%s/agensio.pid"\n[log]\naccess = "off"\nerror = "%s/logs/error.log"\n' "$S4" "$S4" > "$S4/agensio.toml"
+printf 'include = ["sites.d/*.toml"]\n[server]\nworkers = 1\npid_file = "%s/agensio.pid"\n[log]\naccess = "off"\nerror = "%s/logs/error.log"\n[control]\nsocket = "%s/control.sock"\nsites_root = "%s/www"\nprovision = false\n' "$S4" "$S4" "$S4" "$T" > "$S4/agensio.toml"
 tls_site "$CT/s4" 18315 > "$S4/sites.d/t.toml"
 AGENSIO_CERT_WATCH_SECONDS=1 "$BIN" -c "$S4/agensio.toml" > "$S4/server.out" 2>&1 & S4PID=$!
 for _ in $(seq 1 50); do nc -z 127.0.0.1 18315 2>/dev/null && break; sleep 0.1; done
@@ -353,6 +353,18 @@ mkcert "$CT/next" 60; cp "$CT/next/cert.pem" "$CT/next/key.pem" "$CT/s4/"
 for _ in $(seq 1 50); do [ "$(served_fp 18315)" = "$(disk_fp "$CT/s4")" ] && break; sleep 0.1; done
 check "the watch loads a certificate renewed on disk by itself, and logs it" "yes yes" \
   "$([ -n "$(disk_fp "$CT/s4")" ] && [ "$(served_fp 18315)" = "$(disk_fp "$CT/s4")" ] && echo yes) $(grep -q 'certificates refreshed' "$S4/logs/error.log" && echo yes)"
+# Status shows the watch at work (its interval, the pairs, its runs, what it loaded) and health has
+# nothing to say about it; the main server's, an hour apart, has not run yet.
+watch_status() {  # socket: interval, pairs, ran or never, the last run recent or not, loaded and failed since the start
+  "$BIN" ctl status --socket "$1" 2>/dev/null | python3 -c 'import json,sys
+w = json.load(sys.stdin)["certificate_watch"]
+ago = w["last_run_s_ago"]
+print(w["interval_s"], w["pairs"], "ran" if w["runs"] >= 1 else "never", "none" if ago is None else "recent" if ago < 3 else "old",
+      "next" if 0 <= w["next_run_in_s"] <= w["interval_s"] else "bad", w["loaded"], w["failed"])'
+}
+check "status: the watch runs every second over the one pair, loaded the renewal, nothing failed; health quiet about it" "1 1 ran recent next 1 0 no" \
+  "$(watch_status "$S4/control.sock") $(h=$("$BIN" ctl health --socket "$S4/control.sock" 2>/dev/null); grep -q '"certificate_watch_stalled"' <<< "$h" && echo stalled || echo no)"
+check "status: the main server's watch, hourly, has not run yet" "3600 never none next" "$(watch_status "$CS" | cut -d' ' -f1,3-5)"
 kill $S4PID 2>/dev/null; wait $S4PID 2>/dev/null
 
 # A broken main file still refuses the reload, as before: the main file is all or nothing.

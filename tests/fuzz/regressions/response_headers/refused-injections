@@ -1,0 +1,6 @@
+/		set	X-A	a
+Set-Cookie: x=1
+/		set	Location	/x
+/		set	X-B	$var
+
+/	d		

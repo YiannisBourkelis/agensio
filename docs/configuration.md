@@ -1769,7 +1769,10 @@ own files at once and answers what happened (`loaded the certificate valid until
 `unchanged`, or why it could not be loaded, the certificate served staying); a renewal hook can
 run it instead of `agensio reload`. A pair that does not load keeps the certificate served and its
 error goes to health (`certificate_not_loaded`). Before 0.1.0-alpha.64 nothing watched the files:
-a renewal waited for a reload, which another file's error could refuse.
+a renewal waited for a reload, which another file's error could refuse. `agensio ctl status` (MCP
+`server_status`) shows the watch at work under `certificate_watch` (its last and next run, the pairs,
+what it loaded), and health says `certificate_watch_stalled` when it is two runs late
+([tls.md](tls.md) 3.3).
 
 **A key the server's account must read.** With `server.user`, the start reads every certificate
 and key as root and each reload after that as that account (its group and supplementary groups),

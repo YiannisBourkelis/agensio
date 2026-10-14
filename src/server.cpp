@@ -421,6 +421,12 @@ control::TlsFacts Server::tls_facts() {
     for (const auto& [path, f] : acme_.failures())
         facts.acme_failures.emplace(path, std::make_pair(std::chrono::system_clock::to_time_t(f.at), f.error));
     facts.load_errors = cert_load_errors_;
+    if (cert_watch_.armed != std::chrono::steady_clock::time_point{}) {  // armed at the start (certificate_watch_stalled)
+        const auto since = std::chrono::steady_clock::now() - (cert_watch_.runs ? cert_watch_.last : cert_watch_.armed);
+        facts.watch.interval_s = static_cast<long>(cert_watch_interval_.count());
+        facts.watch.runs = cert_watch_.runs;
+        facts.watch.since_s = static_cast<long>(std::chrono::duration_cast<std::chrono::seconds>(since).count());
+    }
     for (const auto& n : site_notices().snapshot())  // the latest an application of each site sent
         if (n.code == "hsts_from_application") {
             auto& seen = facts.application_hsts[n.site];
@@ -1011,6 +1017,32 @@ json::Value Server::status() {
     v.set("auth_verifications", static_cast<double>(auth_verifier_ ? auth_verifier_->verifications() : 0));
 #else
     v.set("auth_verifications", 0.0);  // built without authentication: the same field, nothing run
+#endif
+    // The watch of the certificate files (step T3, docs/tls.md 3.3): how often it runs, over how many
+    // pairs, when it ran and runs next, and what it loaded; health's certificate_watch_stalled judges it.
+#ifdef AGENSIO_HAS_TLS
+    {
+        using clock = std::chrono::steady_clock;
+        const clock::time_point now = clock::now();
+        const CertWatchRecord& r = cert_watch_;
+        json::Value w = json::Value::object();
+        w.set("interval_s", static_cast<double>(cert_watch_interval_.count()))
+            .set("pairs", static_cast<double>(gen_->certificates.size()))
+            .set("runs", static_cast<double>(r.runs))
+            .set("last_run_s_ago", r.runs ? json::Value(std::chrono::duration<double>(now - r.last).count()) : json::Value(nullptr))
+            .set("next_run_in_s", std::max(0.0, std::chrono::duration<double>((r.runs ? r.last : r.armed) + cert_watch_interval_ - now).count()))
+            .set("loaded", static_cast<double>(r.loaded))
+            .set("failed", static_cast<double>(r.failed));
+        if (r.runs)
+            w.set("last_run", json::Value::object()
+                                  .set("changed", static_cast<double>(r.last_changed))
+                                  .set("loaded", static_cast<double>(r.last_tally.loaded))
+                                  .set("unchanged", static_cast<double>(r.last_tally.unchanged))
+                                  .set("failed", static_cast<double>(r.last_tally.failed)));
+        v.set("certificate_watch", std::move(w));
+    }
+#else
+    v.set("certificate_watch", json::Value(nullptr));  // built without TLS: no certificates to watch
 #endif
     {
         using tp = std::chrono::steady_clock::time_point;
@@ -1817,8 +1849,9 @@ bool Server::switch_to(const std::shared_ptr<Generation>& gen, std::string& erro
 // pair that loads and differs is switched in; one that does not load keeps the certificate
 // served, its error kept for health; nothing changed, nothing switches. `report`: one line per
 // pair looked at. False when a pair could not be loaded or the switch was refused.
-bool Server::refresh_certificates(std::string& error, const std::vector<std::string>& only, std::vector<std::string>& report) {
+bool Server::refresh_certificates(std::string& error, const std::vector<std::string>& only, std::vector<std::string>& report, RefreshTally* tally) {
 #ifdef AGENSIO_HAS_TLS
+    RefreshTally count;
     auto gen = std::make_shared<Generation>();
     gen->cfg = gen_->cfg;
     bool changed = false, failed = false;
@@ -1857,25 +1890,30 @@ bool Server::refresh_certificates(std::string& error, const std::vector<std::str
             report.push_back("site " + name + ": the certificate could not be loaded: " + why + "; the certificate loaded before keeps serving (valid until " +
                              until(ctx) + ")");
             failed = true;
+            ++count.failed;
             continue;
         }
         cert_load_errors_.erase(pair);
         if (X509_cmp(SSL_CTX_get0_certificate(fresh->native_handle()), SSL_CTX_get0_certificate(ctx->native_handle())) == 0) {
             gen->certificates.emplace(pair, ctx);
             report.push_back("site " + name + ": unchanged, the certificate served is the file's (valid until " + until(ctx) + ")");
+            ++count.unchanged;
             continue;
         }
         report.push_back("site " + name + ": loaded the certificate valid until " + until(fresh));
         loaded.push_back(report.back());
         gen->certificates.emplace(pair, std::move(fresh));
         changed = true;
+        ++count.loaded;
     }
+    if (tally) *tally = count;
     for (const auto& line : report)
         if (line.find("could not be loaded") != std::string::npos) error_log_.warn("certificate refresh: " + line);
     if (changed) {
         std::size_t bound = 0, closed = 0;
         if (!switch_to(gen, error, bound, closed, false)) {
             error_log_.error("certificate refresh refused: " + error);
+            if (tally) *tally = RefreshTally{0, count.unchanged, count.failed + count.loaded};  // none of them is served
             return false;
         }
         std::string all;
@@ -1887,6 +1925,7 @@ bool Server::refresh_certificates(std::string& error, const std::vector<std::str
 #else
     (void)only;
     (void)report;
+    (void)tally;
     error = "built without TLS";
     return false;
 #endif
@@ -1897,7 +1936,10 @@ bool Server::refresh_certificates(std::string& error, const std::vector<std::str
 // certificate another tool renews (certbot) is served within the hour, without a reload.
 void Server::arm_certificate_watch() {
 #ifdef AGENSIO_HAS_TLS
-    if (!cert_watch_timer_) cert_watch_timer_ = std::make_unique<asio::steady_timer>(workers_[0]->ctx);
+    if (!cert_watch_timer_) {
+        cert_watch_timer_ = std::make_unique<asio::steady_timer>(workers_[0]->ctx);
+        cert_watch_.armed = std::chrono::steady_clock::now();
+    }
     cert_watch_timer_->expires_after(cert_watch_interval_);
     cert_watch_timer_->async_wait([this](const asio::error_code& ec) {
         if (ec || stopping_) return;
@@ -1911,11 +1953,18 @@ void Server::arm_certificate_watch() {
             if (it == cert_stamps_.end()) cert_stamps_[pair] = now;
             else if (it->second != now) changed.push_back(pair);
         }
+        RefreshTally tally;
         if (!changed.empty()) {
             std::string error;
             std::vector<std::string> report;
-            refresh_certificates(error, changed, report);
+            refresh_certificates(error, changed, report, &tally);
         }
+        cert_watch_.last = std::chrono::steady_clock::now();
+        ++cert_watch_.runs;
+        cert_watch_.loaded += tally.loaded;
+        cert_watch_.failed += tally.failed;
+        cert_watch_.last_changed = changed.size();
+        cert_watch_.last_tally = tally;
         arm_certificate_watch();
     });
 #endif

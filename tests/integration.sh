@@ -981,7 +981,7 @@ check "root additions: site_show names the file before it exists, with the first
 printf 'site = "frag.test"\n\n[[location]]\npath = "/outside/"\nalias = "%s/bench/www/"\nadd_headers = { "X-Root-Addition" = "yes" }\n\n[[location]]\npath = "/assets/"\nadd_headers = { "X-Extra" = "1" }\n' "$ROOT" > $RA; chmod 644 $RA
 check "root additions: after a reload the alias outside the root is served with its header, site_show reports the file and its two locations, explain marks their origin" "200 200 yes true 2 0 yes" "$(cpost /v1/reload '{"confirm":true,"reason":"ra"}') $(curl -sS -D bench/tmp/ra.h -o /dev/null -w '%{http_code}' -H 'Host: frag.test' http://127.0.0.1:8096/outside/index.html) $(grep -qi '^x-root-addition: yes' bench/tmp/ra.h && echo yes) $(curl -sS --unix-socket $CS http://control/v1/sites/frag.test | python3 -c 'import json,sys; d=json.load(sys.stdin)["root_additions"]; print(str(d["present"]).lower(), int(d["locations"]))') $("$BIN" -t --explain -c bench/tmp/agensio-test.toml > bench/tmp/ra-explain.out 2> bench/tmp/ra-explain.err; echo -n "$? "; grep -q '# from root:frag.test.root.toml' bench/tmp/ra-explain.out && echo yes || tail -c 400 bench/tmp/ra-explain.err)"
 check "root additions: the site stays managed (site_update works, the additions stay served); a rule at an added path is refused naming the file and undone; a group-writable file sets the site's file aside, its running version serving" "200 200 409 yes 200 200 yes 200 200" "$(cpost /v1/sites/frag.test '{"aliases":["www.frag.test"],"confirm":true,"reason":"ra"}') $(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: frag.test' http://127.0.0.1:8096/outside/index.html) $(cpost /v1/sites/frag.test '{"rules":{"private":["/assets/"]},"confirm":true,"reason":"ra"}') $(grep -q 'frag.test.root.toml \[\[location\]\] #2: duplicate location' bench/tmp/ctl-reply.json && echo yes) $(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: frag.test' http://127.0.0.1:8096/outside/index.html) $(chmod 664 $RA; cpost /v1/reload '{"confirm":true,"reason":"ra"}') $(grep -q 'writable by its group' bench/tmp/ctl-reply.json && echo yes; chmod 644 $RA) $(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: frag.test' http://127.0.0.1:8096/outside/index.html) $(cpost /v1/reload '{"confirm":true,"reason":"ra"}')"
-check "root additions: a disabled site leaves an orphan the load keeps with a warning; health says so with the fix; enabling brings it back" "200 yes yes 200 0" "$(cpost /v1/sites/frag.test/disable '{"confirm":true,"reason":"ra"}') $(curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); f=[x for x in d["findings"] if x["code"] == "root_additions_orphan"]; print("yes" if len(f) == 1 and f[0]["site"] == "frag.test" and "disabled" in f[0]["message"] and "site-enable frag.test" in f[0]["fix"] else f)') $("$BIN" -t -c bench/tmp/agensio-test.toml 2>&1 >/dev/null | grep -q 'frag.test.root.toml holds root additions for site frag.test' && echo yes) $(cpost /v1/sites/frag.test/enable '{"confirm":true,"reason":"ra"}') $(curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len([x for x in d["findings"] if x["code"] == "root_additions_orphan"]))')"
+check "root additions: a disabled site leaves an orphan the load keeps with a warning; health says so with the fix; enabling brings it back" "200 yes yes 200 0" "$(cpost /v1/sites/frag.test/disable '{"confirm":true,"reason":"ra"}') $(curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); f=[x for x in d["findings"] if x["code"] == "root_additions_orphan"]; print("yes" if len(f) == 1 and f[0]["site"] == "frag.test" and "disabled" in f[0]["message"] and "site-enable frag.test" in f[0]["fix"] else f)') $(t=$("$BIN" -t -c bench/tmp/agensio-test.toml 2>&1 >/dev/null); grep -q 'frag.test.root.toml holds root additions for site frag.test' <<< "$t" && echo yes) $(cpost /v1/sites/frag.test/enable '{"confirm":true,"reason":"ra"}') $(curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len([x for x in d["findings"] if x["code"] == "root_additions_orphan"]))')"
 check "root additions: a plain delete sets the file aside as .bak beside the site file's .bak, still there to rename back, names it in the answer; no orphan warning follows" "200 yes yes yes yes 0" "$(cpost /v1/sites/frag.test/delete '{"confirm":true,"reason":"ra"}') $([ -f $RA.bak ] && [ ! -e $RA ] && echo yes) $([ -f bench/tmp/sites.d/frag.test.toml.bak ] && echo yes) $(python3 -c "import json; d=json.load(open('bench/tmp/ctl-reply.json')); print('yes' if d['root_additions_set_aside'] == ['$ROOT/$RA.bak'] and 'rename both back' in d['root_additions_note'] else d)") $(grep -q "sites/frag.test/delete (ra): delete .*; root additions set aside: $ROOT/$RA -> $ROOT/$RA.bak" bench/tmp/audit.log && echo yes) $("$BIN" -t -c bench/tmp/agensio-test.toml 2>&1 >/dev/null | grep -c 'holds root additions')"
 rm -f $RA.bak
 check "mcp: pip_install asks the user in the client's dialog; no dialog, a decline or an unticked box is a refusal with the terminal command; an agent's user_confirmed is dropped; a message during the dialog waits its turn" "refused elicitation/create warn declined unticked 3 9 yes nodialog" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
@@ -1025,7 +1025,7 @@ print(" ".join(out))
 PYT
 )"
 check "the audit log: the accepted run is recorded as the user's confirmation in the client's dialog, the declined ones are not there" "1" "$(grep -c 'sites/dj.test/task (t): running task pip_install packages=wagtail in .*, confirmed by the user in the MCP client.s dialog (test 1.0)' bench/tmp/audit.log)"
-check "the control API refuses pip_install without the user's own confirmation, even with confirm; a dry run through ctl warns of nothing" "428 yes" "$(cpost /v1/sites/dj.test/task '{"task":"pip_install","params":{"packages":"wagtail"},"confirm":true,"reason":"agent"}') $("$BIN" ctl site-task dj.test pip_install --param packages=wagtail --dry-run --yes --socket $CS 2>&1 >/dev/null | grep -q 'WARNING' && echo no || echo yes)"
+check "the control API refuses pip_install without the user's own confirmation, even with confirm; a dry run through ctl warns of nothing" "428 yes" "$(cpost /v1/sites/dj.test/task '{"task":"pip_install","params":{"packages":"wagtail"},"confirm":true,"reason":"agent"}') $(t=$("$BIN" ctl site-task dj.test pip_install --param packages=wagtail --dry-run --yes --socket $CS 2>&1 >/dev/null); grep -q 'WARNING' <<< "$t" && echo no || echo yes)"
 # Without the helper, as the server's own account: the template row needs the application's
 # Gemfile first; the unit is refused for a site without an account of its own.
 check "database_config needs the application first; site-unit refuses a site without its own account" "409 yes 409 yes" "$(cpost /v1/sites/rails.test/task '{"task":"database_config","confirm":true,"reason":"t"}') $(grep -q 'Gemfile, which does not exist' bench/tmp/ctl-reply.json && echo yes) $(curl -sS -o bench/tmp/unit.json -w '%{http_code}' --unix-socket $CS http://control/v1/sites/rails.test/unit) $(grep -q 'no account of its own' bench/tmp/unit.json && echo yes)"
@@ -1861,6 +1861,34 @@ PYT
   rm -f bench/tmp/sites.d/hdr.toml
   cpost /v1/reload '{"confirm":true,"reason":"headers"}' > /dev/null
 fi
+# A head larger than one HTTP/2 frame (alpha.93, RFC 9113 4.2, 6.10): the rules' 16 KB of values on a
+# static answer go out as HEADERS and CONTINUATION frames, each within the client's
+# SETTINGS_MAX_FRAME_SIZE; before, one HEADERS frame over 16,384 bytes was a FRAME_SIZE_ERROR that
+# closed the client's connection (an application's large head too). '{' has a long Huffman code, so
+# the encoder sends the values raw.
+BIGV=$(head -c 4096 /dev/zero | tr '\0' '{')
+cat > bench/tmp/sites.d/hbig.toml <<HBIG
+[[site]]
+server_name = ["hb.wild.test"]
+listen = ["127.0.0.1:8487"]
+http = "off"
+root = "$ROOT/bench/www"
+tls = { cert = "$ROOT/bench/tmp/certs-wild/cert.pem", key = "$ROOT/bench/tmp/certs-wild/key.pem" }
+
+[[site.response_headers]]
+path = "/"
+set = { "X-Big-1" = "$BIGV", "X-Big-2" = "$BIGV", "X-Big-3" = "$BIGV", "X-Big-4" = "$BIGV" }
+HBIG
+cpost /v1/reload '{"confirm":true,"reason":"bighead"}' > /dev/null
+big() {  # "status protocol fields" of one answer: the X-Big fields that arrived whole
+  command curl -sk -D bench/tmp/big-head.txt -o /dev/null -w '%{http_code} %{http_version}' --resolve hb.wild.test:8487:127.0.0.1 "$@" https://hb.wild.test:8487/
+  echo " $(tr -d '\r' < bench/tmp/big-head.txt | grep -ic "^x-big-[1-4]: {\{4096\}$")"
+}
+check "a head over one HTTP/2 frame: 16 KB of rule fields arrive whole over HTTP/1 and HTTP/2 (HEADERS then CONTINUATION)" \
+  "200 1.1 4 ; 200 2 4" "$(big --http1.1) ; $(big --http2)"
+[ $H3 = 1 ] && check "a head of 16 KB of rule fields arrives whole over HTTP/3 too (one HEADERS frame, its length a varint)" "200 3 4" "$(big --http3-only)"
+rm -f bench/tmp/sites.d/hbig.toml
+cpost /v1/reload '{"confirm":true,"reason":"bighead"}' > /dev/null
 # [[site.response_headers]] at load (alpha.89, docs/headers.md 2.5, 2.6, 7): what is set elsewhere is
 # refused naming the setting, a value with a variable or a line break, a lifetime without when =
 # "success", a frame field browsers ignore, the same field twice at one path or in two verbs of one
@@ -2451,7 +2479,10 @@ check "streamed file replaced: new body" "$S2" "$(curl -sS http://127.0.0.1:8080
 check "streamed file replaced: new length" "6291456" "$(curl -sSI http://127.0.0.1:8080/stream.bin | tr -d '\r' | awk '/^Content-Length/{print $2}')"
 rm -f bench/www/stream.bin
 
-kill $PID; wait $PID 2>/dev/null
+# A clean stop: exit 0, and a sanitizer build reports nothing on the way out (2026-10-14: the
+# certificate watch's timer outlived worker 0's context at every exit of a server with TLS).
+kill $PID; wait $PID 2>/dev/null; rc=$?
+check "SIGTERM stops the server with exit 0; no sanitizer report in its stderr" "0 0" "$rc $(grep -c 'ERROR: AddressSanitizer\|runtime error:' bench/tmp/server.err)"
 
 # Second instance with symlinks = "deny", hidden_files = true and a 2-request keep-alive cap.
 # One worker here: the FastCGI pool limits are per worker, so the 503 check needs both
@@ -2498,7 +2529,7 @@ if [ -n "$FPM_PID" ]; then
   check "access log: upstream field for php" "yes" "$(grep -q '"target":"/php/".*"upstream":"ok"}$' bench/tmp/access.log && echo yes)"
   kill $FPM_PID; wait $FPM_PID 2>/dev/null; FPM_PID=""; sleep 0.3
   check "php: fpm gone gives 502" "502" "$(code http://127.0.0.1:8080/php/)"
-  check "-t warns about the unreachable upstream" "yes" "$("$BIN" -t -c bench/tmp/agensio-test.toml 2>&1 >/dev/null | grep -q 'warning: fastcgi upstream' && echo yes)"
+  check "-t warns about the unreachable upstream" "yes" "$(t=$("$BIN" -t -c bench/tmp/agensio-test.toml 2>&1 >/dev/null); grep -q 'warning: fastcgi upstream' <<< "$t" && echo yes)"
   check "php: 502 reason names the socket" "yes" "$(grep -q -E 'socket_missing|connect_refused' bench/tmp/error.log && echo yes)"
 fi
 # Range requests (E1) on a cached file (1 KB index, served from memory), a cached file above
@@ -2736,7 +2767,7 @@ PYT
   check "proxy: Upgrade to an origin path that ignores it is a normal answer" "200" "$(code -H 'Connection: Upgrade' -H 'Upgrade: websocket' $P/json)"
   sleep 1.2
   check "access log: the 101 logged with upstream=upgrade" "yes" "$(grep -q '"target":"/tunnel".*"status":101.*"upstream":"upgrade"' bench/tmp/access.log && echo yes)"
-  check "proxy: -t warns about the unreachable origin" "yes" "$("$BIN" -t -c bench/tmp/agensio-test.toml 2>&1 >/dev/null | grep -q 'warning: proxy upstream 127.0.0.1:9199' && echo yes)"
+  check "proxy: -t warns about the unreachable origin" "yes" "$(t=$("$BIN" -t -c bench/tmp/agensio-test.toml 2>&1 >/dev/null); grep -q 'warning: proxy upstream 127.0.0.1:9199' <<< "$t" && echo yes)"
   sleep 1.2
   check "access log: upstream field for the proxy" "yes" "$(grep -q '"target":"/json".*"upstream":"ok"}$' bench/tmp/access.log && echo yes)"
 fi

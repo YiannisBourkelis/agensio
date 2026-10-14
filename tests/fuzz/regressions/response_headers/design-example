@@ -1,0 +1,10 @@
+/		set	Referrer-Policy	strict-origin-when-cross-origin
+/		default	X-Frame-Options	SAMEORIGIN
+/		remove	X-Powered-By
+/embed/		remove	X-Frame-Options
+/embed/	s	set	Cache-Control	public, max-age=3600
+
+/embed/w.html	d	/srv/www/embed/w.html		X-Frame-Options:DENY
+/embed/gone	,		
+/x.php	d		u	X-Powered-By:PHP	X-Frame-Options:DENY	Referrer-Policy:same-origin
+/private	/		o	Cache-Control:no-store

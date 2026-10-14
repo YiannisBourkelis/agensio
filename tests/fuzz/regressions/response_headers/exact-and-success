@@ -1,0 +1,8 @@
+/a		set	X-A	p
+/a	e	set	X-A	e
+/a/b	s	set	X-B	s
+/		set	Access-Control-Allow-Origin	https://a.test
+
+/a	d		
+/A/b/c	,		
+/ab	d		

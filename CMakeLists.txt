@@ -307,6 +307,12 @@ if(AGENSIO_FUZZ)
   target_link_libraries(fuzz_h2_conn PRIVATE agensio_core_fuzz)
   target_compile_options(fuzz_h2_conn PRIVATE -fsanitize=fuzzer)
   target_link_options(fuzz_h2_conn PRIVATE -fsanitize=fuzzer)
+  # [[site.response_headers]]: the loader's parse, checks and resolution, then the writers' and the
+  # upstream loop's application, held to their invariants (tests/fuzz/fuzz_response_headers.cpp).
+  add_executable(fuzz_response_headers tests/fuzz/fuzz_response_headers.cpp)
+  target_link_libraries(fuzz_response_headers PRIVATE agensio_core_fuzz)
+  target_compile_options(fuzz_response_headers PRIVATE -fsanitize=fuzzer)
+  target_link_options(fuzz_response_headers PRIVATE -fsanitize=fuzzer)
 endif()
 
 # ---------------------------------------------------------------- install and packages (H7)

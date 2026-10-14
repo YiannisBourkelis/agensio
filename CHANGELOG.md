@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.1.0-alpha.93
+
+- **`fuzz_response_headers`: the response header rules under libFuzzer** (`tests/fuzz/`, seeds in
+  `tests/fuzz/regressions/response_headers/`). Rules and probes from the input load as `path_check`'s
+  preview loads them (the parse, the checks and the resolution of a site file, endings included) and
+  are applied as the writers and the upstream loop apply them, held to their invariants: no value a
+  rule sends holds a byte outside printable ASCII and no rule sends a field the server owns; `set`
+  leaves one copy, `remove` none, `default` adds one only into a gap, an undecided field passes in
+  order; the password guard's cache fields and agensio's own block stand; HTTP/1's prebuilt lines are
+  what the general path writes; the node's decisions agree with a scan of every rule. Twenty minutes
+  in the campaign of 2026-10-14: 5.0 M runs, 2,905 edges, clean (`docs/security-control-plane.md`).
+- **HTTP/2: a response head larger than one frame goes out as CONTINUATION frames** (RFC 9113 4.2,
+  6.2, 6.10; `docs/design-http2.md` 6.1). The writer put any head in one HEADERS frame, so a block
+  over the client's `SETTINGS_MAX_FRAME_SIZE` (16,384 bytes unless it asks for more) was a
+  `FRAME_SIZE_ERROR` that closed the client's connection and every stream on it: an application's
+  large head, and since alpha.89 a site's `[[site.response_headers]]`, whose 16 KB of values fit one
+  answer. Found by the security pass over the response headers: 16 KB of rule fields arrived whole
+  over HTTP/1 and not at all over HTTP/2. `Writer::close_headers` now writes HEADERS (with
+  END_STREAM when due) and CONTINUATION frames, contiguous, within the client's frame size, the last
+  with END_HEADERS; a head that fits is one frame as before, and only the rare large one pays a
+  copy of its tail. The integration check failed on alpha.92 and passes; h2spec passes on both
+  listeners; `fuzz_h2_conn`'s site gains response header rules and a head over one frame on `/dir`,
+  under its frame-size checks. A/B against alpha.92 with the HTTP/2 rows, three rounds
+  (`bench/results/ab-20261014-045459.md`): every row 0.93 to 1.02, the HTTP/2 rows 0.93 to 1.01.
+- **A server with TLS read freed memory on its way out** (`src/server.hpp`). The certificate
+  watch's timer (step T3, alpha.64) runs on worker 0's context but was declared before the workers,
+  so it was destroyed after that context had freed its timer service: a heap use-after-free in
+  `~Server` at every stop of a server serving TLS, after every request was answered and the
+  listeners were closed, never on a request. It is the same fault the restart and trash timers had
+  until 2026-10-09; the watch's timer now sits beside them, after `workers_`. Found by the sanitizer
+  build in the security pass: the HTTP/3 attack suite counted the report as a failed row, while the
+  integration suite never read its main server's stderr. It does now: SIGTERM must stop that server
+  with exit 0 and no sanitizer report, a check that failed on the unfixed tree (`1 1`) and passes.
+- **Four integration checks no longer depend on the timing of a pipe**: `agensio -t` or `ctl`
+  piped into `grep -q` under `pipefail` failed when grep matched and exited while the binary, whose
+  stderr is unbuffered, still had a line to write (SIGPIPE): the sanitizer build failed the two
+  unreachable-upstream warnings this way, though `-t` printed both, and the pip_install dry run's
+  check could have passed with the warning present. They match the captured text now, as the
+  rendered-file checks do since 2026-10-07. And the unit tests of a build without OpenSSL pass
+  again: since alpha.84 one check expected a TLS site among the canonical probes, which such a build
+  leaves out on purpose (it has no TLS client to ask with).
+- **The certificate watch can be seen at work: `certificate_watch` in status,
+  `certificate_watch_stalled` in health** (`docs/tls.md` 3.3 and 5). The hourly check of the
+  certificate and key files wrote to the error log only when it loaded a pair or could not, so
+  nothing showed that it ran. `agensio ctl status` (MCP `server_status`) carries
+  `certificate_watch`: its interval, the pairs it watches, its runs since the start, how long ago it
+  last ran (null before the first run, an hour after the start) and when it runs next, the pairs
+  loaded and failed since the start, and what the last run found (changed, loaded, unchanged,
+  failed); null in a build without TLS. Health warns `certificate_watch_stalled` for the server when
+  the watch has not run for two of its intervals, since a file another tool renews then waits for
+  `cert-renew`. The MCP texts say where the certificates' state is: every site's at once in
+  `sites_list`, the watch in `server_status` (the server instructions' map names both), what is wrong
+  in `health_check`, whose `certificate_not_loaded` no longer says a reload loads the file (the hourly
+  check or `cert_renew` does). No log line per run: a run that finds nothing is silent, as before.
+  Nothing on the request path: the hourly timer counts its runs, on worker 0.
+
 ## 0.1.0-alpha.92 (2026-10-14)
 
 - **`path_check` names every field a path's answer gets, and previews proposed rules**

@@ -62,6 +62,14 @@ struct TlsFacts {
     // By site name: the HSTS its application sent while the site had no hsts line, and when
     // (core/site_notices.hpp, docs/redirects.md 4.2): hsts_from_application instead of hsts_suggested.
     std::map<std::string, std::pair<std::string, std::time_t>> application_hsts;
+    // The watch of the certificate files (step T3, docs/tls.md 3.3): how often it runs, how many
+    // times it has, and how long ago it last did (since the start before its first run), on the
+    // steady clock; interval 0: no watch (a build without TLS). certificate_watch_stalled.
+    struct Watch {
+        long interval_s = 0;
+        unsigned long runs = 0;
+        long since_s = 0;
+    } watch;
 };
 
 // With `tls` each TLS site's `tls` carries `served`: the certificate in memory (step T2).

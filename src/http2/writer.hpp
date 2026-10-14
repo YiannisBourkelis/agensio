@@ -167,9 +167,7 @@ public:
         const std::size_t at = out_.size();
         build_head(s, out_);
         const bool end = body.empty();
-        write_frame_header(reinterpret_cast<unsigned char*>(out_.data() + at),  // NOLINT: bytes
-                           static_cast<std::uint32_t>(out_.size() - at - kFrameHeaderSize), FrameType::headers,
-                           static_cast<std::uint8_t>(flag::end_headers | (end ? flag::end_stream : 0)), s.id);
+        close_headers(at, end, s.id);
         if (!end) {
             data_frame(s.id, body, true);
             s.send_window -= static_cast<std::int32_t>(body.size());
@@ -386,9 +384,7 @@ private:
                 if (const auto* m = std::get_if<MemoryBody>(&r.body)) end = m->data.empty();
                 else if (const auto* f = std::get_if<FileBody>(&r.body)) end = f->size == 0;
             }
-            write_frame_header(reinterpret_cast<unsigned char*>(out_.data() + at),  // NOLINT: bytes
-                               static_cast<std::uint32_t>(out_.size() - at - kFrameHeaderSize), FrameType::headers,
-                               static_cast<std::uint8_t>(flag::end_headers | (end ? flag::end_stream : 0)), s.id);
+            close_headers(at, end, s.id);
             bytes += out_.size() - at;
             s.head_sent = s.responded = true;
             if (end) {
@@ -544,6 +540,34 @@ private:
     }
 
     // ---- the head ----
+
+    // The head build_head put at out_[at] (a frame header slot, then the block): one HEADERS frame
+    // when the block fits the peer's SETTINGS_MAX_FRAME_SIZE, else HEADERS and CONTINUATION frames,
+    // contiguous, the last with END_HEADERS (RFC 9113 4.2, 6.2, 6.10). Before, one HEADERS frame
+    // carried any block, and one over the peer's frame size (an application's large cookies, a
+    // site's response fields: up to 16 KB of values) was a FRAME_SIZE_ERROR that closed the client's
+    // connection. A block that large is rare, so the split copies its tail once.
+    void close_headers(std::size_t at, bool end_stream, std::uint32_t id) {
+        const std::size_t len = out_.size() - at - kFrameHeaderSize;
+        const std::size_t max = max_frame_;
+        const auto es = static_cast<std::uint8_t>(end_stream ? flag::end_stream : 0);
+        auto header_at = [this](std::size_t pos) { return reinterpret_cast<unsigned char*>(out_.data() + pos); };  // NOLINT: bytes
+        if (len <= max) {
+            write_frame_header(header_at(at), static_cast<std::uint32_t>(len), FrameType::headers, static_cast<std::uint8_t>(flag::end_headers | es), id);
+            return;
+        }
+        const std::string rest(out_, at + kFrameHeaderSize + max);  // the block past the first frame
+        out_.resize(at + kFrameHeaderSize + max);
+        write_frame_header(header_at(at), static_cast<std::uint32_t>(max), FrameType::headers, es, id);
+        for (std::size_t off = 0; off < rest.size(); off += max) {
+            const std::size_t n = std::min(max, rest.size() - off);
+            const std::size_t h = out_.size();
+            out_.resize(h + kFrameHeaderSize);
+            write_frame_header(header_at(h), static_cast<std::uint32_t>(n), FrameType::continuation,
+                               off + n == rest.size() ? flag::end_headers : std::uint8_t{0}, id);
+            out_.append(rest, off, n);
+        }
+    }
 
     // "Name: value\r\n" lines (an upstream's or a handler's text block) to HPACK literals;
     // connection-specific fields are dropped (RFC 9113 8.2.2).

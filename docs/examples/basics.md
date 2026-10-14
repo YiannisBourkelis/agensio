@@ -263,6 +263,8 @@ alias = "/var/lib/letsencrypt/webroot/.well-known/acme-challenge/"
 agensio ctl cert-renew example.com --yes     # "loaded the certificate valid until ...", or "unchanged"
 certbot renew --dry-run                      # the renewal itself works
 agensio ctl site shop.example.com            # tls.served: the certificate in memory, same_as_disk true
+agensio ctl sites                            # every site's certificate at once, on disk and served
+agensio ctl status                           # certificate_watch: the hourly check of the files, its last and next run
 agensio ctl health                           # certificate_not_loaded or tls_key_unreadable if something waits
 ```
 

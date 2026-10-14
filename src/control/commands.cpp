@@ -1367,6 +1367,20 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
                 "when the user agrees: hsts = true in the site file (site_update with hsts: true on a managed site), a year; hsts = false records a "
                 "decided no and silences this");
     }
+    // The watch of the certificate files (step T3) late by more than one run: a certificate another
+    // tool renews (certbot) waits until cert-renew. Said once, for the server; never with nothing served.
+    if (tls && tls->watch.interval_s > 0 && !tls->served.empty() && tls->watch.since_s > 2 * tls->watch.interval_s) {
+        const auto& w = tls->watch;
+        const std::size_t n = tls->served.size();
+        add("warn", "certificate_watch_stalled", "",
+            std::string(w.runs ? "the certificate watch last ran " + ago_text(static_cast<double>(w.since_s)) + " ago"
+                               : "the certificate watch has not run since the start, " + ago_text(static_cast<double>(w.since_s)) + " ago") +
+                "; it checks the files of " + std::to_string(n) + (n == 1 ? " certificate " : " certificates ") +
+                (w.interval_s == 3600 ? std::string("every hour") : "every " + ago_text(static_cast<double>(w.interval_s))) +
+                ", so a certificate renewed on disk by another tool (certbot) is not loaded until it runs",
+            "agensio ctl cert-renew NAME --yes (MCP cert_renew) loads a site's renewed files now; a restart of the server starts the watch "
+            "again. A watch that stops is a bug: the error log around its last run may say why");
+    }
     for (const auto& h : disk_held) held_finding(h, true);  // the next reload's, not said above
 
     // A per-site log the site user cannot read (created by a reload after the privilege

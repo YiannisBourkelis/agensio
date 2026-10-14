@@ -99,12 +99,21 @@ std::string config_text(const std::string& d) {
            "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"" + d + "/www\"\ndefault = true\n"
            "refuse = [\"/secret/\", \"*.bak\"]\n"
            "[[site.access]]\npath = \"/private\"\nallow = [\"10.0.0.0/8\"]\n"
+           // [[site.response_headers]] (docs/headers.md 2): fields on every answer of a.test.
+           "[[site.response_headers]]\npath = \"/\"\nset = { \"X-Content-Type-Options\" = \"nosniff\" }\n"
+           "default = { \"X-Frame-Options\" = \"SAMEORIGIN\" }\nremove = [\"X-Powered-By\"]\n"
+           "[[site.response_headers]]\npath = \"/\"\nendings = [\"css\"]\nwhen = \"success\"\nset = { \"Cache-Control\" = \"public, max-age=60\" }\n"
            "[[site.location]]\npath = \"/spa/\"\ntry_files = [\"$uri\", \"/index.html\"]\n"
            "[[site.location]]\npath = \"/app/\"\nupstream = \"http://127.0.0.1:1\"\n"
            "[[site.location]]\npath = \".php\"\nmatch = \"suffix\"\nhandler = \"fastcgi\"\n"
            "fastcgi = { socket = \"unix:" + d + "/no-php.sock\" }\n"
            "[[site]]\nserver_name = [\"b.test\"]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"" + d + "/www2\"\n"
-           "max_body_size = \"1KB\"\n";
+           "max_body_size = \"1KB\"\n"
+           // b.test's answers under /dir carry a head over one frame (the site's whole 16 KB of values;
+           // '{' has a long Huffman code, so they go raw), which must go out as HEADERS and
+           // CONTINUATION within the client's SETTINGS_MAX_FRAME_SIZE (RFC 9113 4.2).
+           "[[site.response_headers]]\npath = \"/dir\"\nset = { \"X-Big-1\" = \"" + std::string(4096, '{') + "\", \"X-Big-2\" = \"" + std::string(4096, '{') +
+           "\", \"X-Big-3\" = \"" + std::string(4096, '{') + "\", \"X-Big-4\" = \"" + std::string(4096, '{') + "\" }\n";
 }
 
 // What Server's constructor and build_listeners do for one plain h2c listener, without a socket.

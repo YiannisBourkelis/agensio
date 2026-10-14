@@ -183,6 +183,24 @@ certificate served staying (exit status 1). Run as root (certbot's hooks are) it
 permission. `agensio reload` loads them too, but reads every configuration file as well; the
 refresh reads none (section 4).
 
+The watch writes to the error log only when it acts: `certificates refreshed: site ...: loaded the
+certificate valid until ...`, or `certificate refresh: site ...: the certificate could not be
+loaded: ...` (once per change of the files, not every hour). A run that finds nothing changed is
+silent. To see it at work, `agensio ctl status` (MCP `server_status`) carries `certificate_watch`:
+
+| field | means |
+|---|---|
+| `interval_s` | how often it runs: 3600 |
+| `pairs` | the certificate and key pairs it watches, one per distinct pair the sites name |
+| `runs` | runs since the start; the first comes an hour after it |
+| `last_run_s_ago`, `next_run_in_s` | when it last ran (null before its first run) and when it runs next |
+| `loaded`, `failed` | since the start: renewed pairs it loaded, and changed pairs it could not load (health's `certificate_not_loaded` says why) |
+| `last_run` | what the last run found: `changed` pairs, and of those `loaded`, `unchanged` (the files hold the certificate served), `failed` |
+
+Health reports `certificate_watch_stalled` when the watch has not run for two of its intervals
+(section 5). Every site's certificate at once, the file on disk and the one served, is `agensio ctl
+sites` (MCP `sites_list`).
+
 ### 3.4 certbot
 
 The cookbook's [Certificates from certbot](examples/basics.md#certificates-from-certbot) recipe
@@ -233,6 +251,7 @@ mistaken for one in service.
 | `certificate_expiring` | warn, error with `hsts` | your own certificate served expires within 14 days | renew it; the hourly check or `cert-renew` loads it |
 | `certificate_not_issued` | error | an automatic site still serves its placeholder | names resolving here, port 80 reachable; the acme lines of the error log |
 | `certificate_not_loaded` | warn, error under 7 days left | the file on disk is newer than the certificate served; the message says why: loaded at the next hourly check (or now with `cert-renew`), or the server could not load it, with the error | `cert-renew NAME`; if it could not be loaded, the fix of `tls_key_unreadable` or the file corrected |
+| `certificate_watch_stalled` | warn | the hourly watch of the certificate files (3.3) has not run for two of its intervals, so a file renewed by another tool waits; for the server, not a site | `cert-renew NAME` loads a site's files now; a restart starts the watch again. A watch that stops is a bug: report it with the error log around its last run |
 | `acme_renewal_failed` | warn, error with `hsts` | the last automatic order failed, with the CA's message; retried every hour | correct what the CA says (DNS, port 80, a firewall, a CDN in front), then `cert-renew NAME` |
 | `acme_renewal_overdue` | error | a day past the renewal point (a third of the lifetime left), with the last failure | the same, now |
 | `acme_needs_port_80` | warn | `tls = "auto"` but nothing answers plain HTTP on port 80 for the names | remove `http = "off"`, or name port 80: `http = { listen = ["0.0.0.0:80"] }` (2.1) |
@@ -282,9 +301,11 @@ x509 -noout -issuer -enddate -fingerprint -sha256`.
 ```sh
 agensio -t -c /etc/agensio/agensio.toml         # loads every pair as the start does; names files the server's account cannot read
 agensio ctl health                              # every finding of section 5
+agensio ctl sites                               # every site's certificate at once: tls and tls.served
 agensio ctl site example.com                    # tls (the file) and tls.served (the certificate in memory)
+agensio ctl status                              # certificate_watch: the hourly check of the files, its last and next run
 agensio ctl cert-renew example.com --yes        # automatic: order now; your own files: load them now
 agensio ctl logs --level info --since 1d        # the acme lines and the refreshes
 ```
 
-MCP: `health_check`, `site_show`, `sites_list`, `cert_renew`, `logs_query`.
+MCP: `health_check`, `site_show`, `sites_list`, `server_status`, `cert_renew`, `logs_query`.

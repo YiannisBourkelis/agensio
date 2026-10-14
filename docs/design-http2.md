@@ -236,6 +236,14 @@ and a larger frame is a `FRAME_SIZE_ERROR` connection error before a byte of it 
 buffered. Unknown frame types are ignored as the RFC requires; padding is validated;
 frame header fields are read with bounds checks (CERT INT30, ARR30).
 
+What the server sends keeps to the client's `SETTINGS_MAX_FRAME_SIZE` the same way: a response
+head whose block is larger than one frame goes out as HEADERS and CONTINUATION frames, contiguous,
+the last with END_HEADERS (RFC 9113 4.2, 6.2, 6.10; `Writer::close_headers`, 0.1.0-alpha.93).
+Until then one HEADERS frame carried any block, and a head over 16,384 bytes (an application's
+large cookies, a site's response fields, up to 16 KB of values) was a `FRAME_SIZE_ERROR` that
+closed the client's connection. `fuzz_h2_conn` meets such a head on `/dir` and checks every frame
+against the client's setting.
+
 ### 6.2 HPACK
 
 Decoder: the 61-entry static table; a dynamic table as a ring of bytes capped at the

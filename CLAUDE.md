@@ -183,7 +183,7 @@ Source map (`src/`, files move into subdirectories as they are touched, see the 
   fuzzed), `http_client` (`HttpRequest`: HTTP/1.1 framing both ways, keep-alive rules).
 - top level, not yet moved: `config`, `path`, `mime`, `http_date`, `file`, `cache`,
   `response` (status lines, error pages), `tls_stream.hpp`, `server`, `main`.
-Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (nineteen, each seeded from
+Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty, each seeded from
 `tests/fuzz/regressions/<name>/`, all run by `scripts/fuzz-all.sh`).
 
 ## Architecture (as implemented)
@@ -295,7 +295,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (nineteen, each seeded from
   loaded): the running configuration's certificates read again, no configuration file read; ACME
   uses it after an order, an hourly watch (`arm_certificate_watch`, one stat per file,
   `AGENSIO_CERT_WATCH_SECONDS` for the tests) for changed files, `cert-renew` for a site's own
-  files. `docs/tls.md` is the administrator's guide (T4); keep it current with any change here.
+  files; the watch's runs in status (`certificate_watch`, `Server::cert_watch_`, counts from
+  `RefreshTally`) and health `certificate_watch_stalled` two intervals late (`TlsFacts::watch`,
+  alpha.93). `docs/tls.md` is the administrator's guide (T4); keep it current with any change here.
 - **Request bodies** (A3): the HTTP/1 connection is the pull source behind
   `Request::body` (`StreamBody`: `async_read` with backpressure), decoding Content-Length
   or chunked (`http1/chunked.hpp`, fuzzed) from its receive buffer and socket.

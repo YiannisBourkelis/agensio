@@ -6476,7 +6476,8 @@ static void test_served_certificates() {
     facts.served[pair].not_after = now + 50 * day;
     facts.served[pair].days_left = 50;
     {
-        const Finding* w = find(control::health_findings(cfg, cfg, false, now, &facts), "acme_renewal_failed");
+        const auto findings = control::health_findings(cfg, cfg, false, now, &facts);  // kept: find points into it
+        const Finding* w = find(findings, "acme_renewal_failed");
         CHECK(w && w->severity == "error" && w->message.find("no way past it") != npos);
     }
     // hsts_suggested: a real certificate for a week with nothing open, no hsts line, not serving plain HTTP.
@@ -6484,7 +6485,8 @@ static void test_served_certificates() {
     cfg.sites[0].hsts = SiteConfig::Hsts::unset;
     cfg.sites[0].http = SiteConfig::Http::redirect;  // a site built by hand defaults to serving plain HTTP
     {
-        const Finding* h = find(control::health_findings(cfg, cfg, false, now, &facts), "hsts_suggested");
+        const auto findings = control::health_findings(cfg, cfg, false, now, &facts);  // kept: find points into it
+        const Finding* h = find(findings, "hsts_suggested");
         CHECK(h && h->severity == "info" && h->fix.find("hsts: true") != npos && h->fix.find("hsts = false records a decided no") != npos);
     }
     facts.served[pair].not_before = now - 3 * day;  // renewed three days ago: a week is not up
@@ -6512,7 +6514,8 @@ static void test_served_certificates() {
     }
     facts.application_hsts[site_name] = {"max-age=31536000", now - 600};  // the same as a year: no warning of a weaker one
     {
-        const Finding* a = find(control::health_findings(cfg, cfg, false, now, &facts), "hsts_from_application");
+        const auto findings = control::health_findings(cfg, cfg, false, now, &facts);  // kept: find points into it
+        const Finding* a = find(findings, "hsts_from_application");
         CHECK(a && a->fix.find("weaker") == npos && a->fix.find("replacing the application's") != npos);
     }
     cfg.sites[0].hsts = SiteConfig::Hsts::off;  // decided: nothing said either way
@@ -6522,6 +6525,37 @@ static void test_served_certificates() {
     }
     cfg.sites[0].hsts = SiteConfig::Hsts::unset;
     facts.application_hsts.clear();
+    // certificate_watch_stalled (docs/tls.md 5): the watch of the certificate files (step T3) has not
+    // run for two of its intervals, so a file another tool renews is not loaded by itself.
+    facts.watch.interval_s = 3600;
+    facts.watch.runs = 5;
+    facts.watch.since_s = 1800;
+    CHECK(!find(control::health_findings(cfg, cfg, false, now, &facts), "certificate_watch_stalled"));
+    facts.watch.since_s = 2 * 3600;  // two intervals: the next run may be under way
+    CHECK(!find(control::health_findings(cfg, cfg, false, now, &facts), "certificate_watch_stalled"));
+    facts.watch.since_s = 2 * 3600 + 1;
+    {
+        const auto findings = control::health_findings(cfg, cfg, false, now, &facts);  // kept: find points into it
+        const Finding* w = find(findings, "certificate_watch_stalled");
+        CHECK(w && w->severity == "warn" && w->site.empty() && w->message.find("last ran 2 h ago") != npos &&
+              w->message.find("every hour") != npos && w->message.find("1 certificate") != npos &&
+              w->fix.find("agensio ctl cert-renew") != npos && w->fix.find("restart") != npos);
+        CHECK(find(findings, "hsts_suggested"));  // server-wide: not the site's certificate trouble, which would hold it back
+    }
+    facts.watch.runs = 0;  // not once since the start
+    {
+        const auto findings = control::health_findings(cfg, cfg, false, now, &facts);  // kept: find points into it
+        const Finding* w = find(findings, "certificate_watch_stalled");
+        CHECK(w && w->message.find("has not run since the start, 2 h ago") != npos);
+    }
+    {
+        control::TlsFacts none = facts;  // no certificate served: nothing to watch
+        none.served.clear();
+        CHECK(!find(control::health_findings(cfg, cfg, false, now, &none), "certificate_watch_stalled"));
+    }
+    facts.watch.interval_s = 0;  // no watch (a build without TLS)
+    CHECK(!find(control::health_findings(cfg, cfg, false, now, &facts), "certificate_watch_stalled"));
+    facts.watch = {};
     // app_redirects_elsewhere (docs/redirects.md 3.4): what the probe judges, and where it asks.
     control::CanonicalProbe p;
     p.site = "example.com";
@@ -6548,7 +6582,11 @@ static void test_served_certificates() {
     cs.canonical_redirect = false;  // one name, or no canonical: nothing to ask
     pc.sites.push_back(cs);
     const auto probes = control::canonical_probes(pc);
+#ifdef AGENSIO_HAS_TLS
     CHECK(probes.size() == 1 && probes[0].host == "127.0.0.1" && probes[0].port == "443" && probes[0].tls && probes[0].canonical == "example.com");
+#else
+    CHECK(probes.empty());  // no TLS client to ask with: a TLS site is not probed
+#endif
 #ifdef AGENSIO_HAS_TLS
     // hsts_probes (the alpha.87/88 report's note): the sites where hsts_suggested could show and
     // nothing is noted yet, asked by their canonical name; never one the store already knows.

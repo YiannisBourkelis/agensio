@@ -165,6 +165,49 @@ devbox): the one-call paths and each refusal.
 
 ## Sanitizer and fuzz record
 
+2026-10-14, the security pass over the response headers (`[[site.response_headers]]`, alpha.89 to
+alpha.92): every target twenty minutes on its corpus, twelve at once (`scripts/fuzz-all.sh -t 1200`),
+ASan and UBSan, clang; the new `fuzz_response_headers` among them. No finding, no timeout, no
+sanitizer line in any log. Then `fuzz_h2_conn` with the response header rules in its site and a
+head over one frame on `b.test`'s `/dir` (fifteen minutes on ten processes, `-fork=10`): 2.34 M runs,
+11,449 edges, clean, after the CONTINUATION fix of alpha.93; a head over one frame was a
+`FRAME_SIZE_ERROR` before it (found by the integration check, not the fuzzer, whose site had no head
+that large). The unit tests under ASan and UBSan (`build-asan`, GCC 14) found a use after free in
+three of the tests themselves (a pointer into the vector `health_findings` returns, kept past the
+temporary), fixed. The integration suite on that build found one in the server: a heap use after
+free in `~Server` at every stop of a server with TLS (the certificate watch's timer, declared before
+`workers_`, destroyed after worker 0's context; the HTTP/3 attack suite had counted the same report
+as a failed row), fixed in alpha.93 with a check that the main server stops with exit 0 and no
+report; and two checks that failed on the timing of a pipe (`-t | grep -q` under `pipefail`), not on
+the server, rewritten with two more of the same form. Rerun after the fixes: the unit tests and the
+integration suite (716 checks, the HTTP/3 attack suite with both Retry modes among them) pass on
+that build with no report in any server's stderr. The builds without OpenSSL and without libxcrypt
+link and pass their unit tests, the first after a test fix: since alpha.84 one check there expected
+a TLS site among the canonical probes, which that build leaves out on purpose.
+
+| target | runs | edges | result |
+|---|---|---|---|
+| fuzz_parser | 368.92 M | 240 | clean |
+| fuzz_chunked | 870.98 M | 63 | clean |
+| fuzz_fcgi | 492.30 M | 96 | clean |
+| fuzz_http_head | 456.89 M | 152 | clean |
+| fuzz_path | 96.18 M | 236 | clean |
+| fuzz_json | 51.20 M | 557 | clean |
+| fuzz_archive | 90.83 M | 646 | clean |
+| fuzz_hpack | 12.35 M | 530 | clean |
+| fuzz_hpack_roundtrip | 1.05 M | 466 | clean |
+| fuzz_qpack | 41.18 M | 647 | clean |
+| fuzz_quic_packet | 221.94 M | 217 | clean |
+| fuzz_transport_params | 1,137.38 M | 211 | clean |
+| fuzz_quic_conn | 3.36 M | 1,560 | clean |
+| fuzz_refuse | 10.08 M | 875 | clean |
+| fuzz_redirect | 20.52 M | 1,230 | clean |
+| fuzz_fields | 51.07 M | 610 | clean |
+| fuzz_auth_users | 95.56 M | 498 | clean |
+| fuzz_log_line | 21.63 M | 753 | clean |
+| fuzz_response_headers (new) | 5.00 M | 2,905 | clean |
+| fuzz_h2_conn | 3.35 M, then 2.34 M in 15 min on 10 with the rules | 10,519, 11,449 | clean |
+
 2026-10-12, the campaign after the UBSan correction and the five HTTP/2 fixes (d85b590), with
 undefined behaviour fatal for the first time: every target thirty minutes on its corpus, one
 process each and eighteen at once (`scripts/fuzz-all.sh -t 1800 -j 18`), ASan and UBSan, clang

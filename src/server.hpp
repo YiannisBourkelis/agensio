@@ -233,15 +233,28 @@ private:
     void record_served();          // after a start and a reload
     bool record_warned_ = false;
     // The certificate refresh and its hourly watch (step T3).
-    bool refresh_certificates(std::string& error, const std::vector<std::string>& only, std::vector<std::string>& report);
+    // What one refresh did with the pairs it read: loaded (a new certificate served), unchanged (the
+    // files hold the one served), failed (could not be loaded, or the switch was refused).
+    struct RefreshTally {
+        std::size_t loaded = 0, unchanged = 0, failed = 0;
+    };
+    bool refresh_certificates(std::string& error, const std::vector<std::string>& only, std::vector<std::string>& report,
+                              RefreshTally* tally = nullptr);
     void arm_certificate_watch();
 #ifdef AGENSIO_HAS_TLS
     static std::string pair_stamp(const TlsConfig& t);
 #endif
     std::map<std::string, std::string> cert_stamps_;       // by pair: the files as last loaded (or tried)
     std::map<std::string, std::string> cert_load_errors_;  // by pair: why its files did not load, last time
-    std::unique_ptr<asio::steady_timer> cert_watch_timer_;
-    std::chrono::seconds cert_watch_interval_{3600};
+    std::chrono::seconds cert_watch_interval_{3600};       // the watch's timer is declared after workers_
+    // What the watch has done, for status and health's certificate_watch_stalled; worker 0's, as the
+    // timer is. `armed` is the start (the first run is due an interval later), `last` {} before it.
+    struct CertWatchRecord {
+        std::chrono::steady_clock::time_point armed{}, last{};
+        unsigned long runs = 0, loaded = 0, failed = 0;  // since the start
+        std::size_t last_changed = 0;                    // the last run's pairs whose files changed
+        RefreshTally last_tally;                         // and what loading them did
+    } cert_watch_;
     void build_workers();
     std::size_t open_acceptor(const Listener& listener, Worker& worker, bool reuse_port);
     void open_acceptor_socket(Acceptor& acc, const Listener& listener, bool reuse_port);
@@ -329,9 +342,11 @@ private:
     std::vector<std::unique_ptr<Worker>> workers_;
     // Timers on worker 0's context. Declared after workers_, so they are destroyed first: a timer
     // destroyed after its context's timer service reads freed memory (2026-10-09, the sanitizer
-    // build at every exit with the helper running, which arms the trash timer).
+    // build at every exit with the helper running, which arms the trash timer; 2026-10-14, the
+    // certificate watch's, declared above until then, at every exit of a server with TLS).
     std::unique_ptr<asio::steady_timer> restart_timer_;
-    std::unique_ptr<asio::steady_timer> trash_timer_;  // hourly: expired trash entries removed through the helper
+    std::unique_ptr<asio::steady_timer> trash_timer_;       // hourly: expired trash entries removed through the helper
+    std::unique_ptr<asio::steady_timer> cert_watch_timer_;  // hourly: certificate files changed on disk (step T3)
     // [[site.auth]]'s verification pool. Declared after workers_, so it is destroyed first: its
     // threads post results into the workers' contexts and must stop before those go. Only in a
     // build with authentication (core/auth.cpp is compiled only then).

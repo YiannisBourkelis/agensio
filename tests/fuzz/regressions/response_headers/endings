@@ -1,0 +1,8 @@
+/		set	X-A	all
+/		set	X-A	svg	svg
+/d		set	X-G	gz	gz
+/		set	X-T	tar	.tar.gz
+
+/d/a.tar.gz	d	/w/d/a.tar.gz	
+/x.SVG	d	/w/x.SVG	
+/d/b.gz	,	/w/d/b.gz	

@@ -1,0 +1,6 @@
+/		set	Cache-Control	no-cache
+/		set	X-S	1
+/		default	X-D	d
+
+/a	d		p	Cache-Control:private	X-D:app
+/a	d		u	Cache-Control:public	Cache-Control:max-age=1	X-D:one	X-D:two
