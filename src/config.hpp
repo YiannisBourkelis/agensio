@@ -272,6 +272,10 @@ struct SiteConfig {
     // response_headers_baseline (alpha.94, docs/headers.md 4): the preset's baseline, rules marked `baseline`
     // in response_headers below every written one; unset: on for a site with app, off without.
     std::optional<bool> response_headers_baseline;
+    // response_headers_offer_declined (alpha.94, docs/headers.md 7): the offered fields (4.1) the owner
+    // said the site must not send, in their canonical spelling; path_check's offer and health's
+    // response_headers_suggested leave them out.
+    std::vector<std::string> response_headers_offer_declined;
     // http (docs/redirects.md 2, alpha.76): what a request over plain HTTP gets. A TLS site on port
     // 443 also listens on port 80 at the same addresses (http_listen) and redirects there; on another
     // port it has none unless `http = { listen = [...] }` names them. A site without TLS serves plain
@@ -625,6 +629,10 @@ std::string load_redirect_rules(const json::Value& rules, SiteConfig& site);
 // [[site.response_headers]] (docs/headers.md 2.2): the site's rules (response_headers.rules)
 // resolved per field into its nodes; throws as a load does on a combination browsers refuse.
 void build_response_headers(SiteConfig& site, const std::string& where);
+// The fields path_check offers and health suggests (docs/headers.md 4.1, 7), which
+// response_headers_offer_declined may name: the canonical spelling of `name` (any case), or "".
+std::string offered_response_field(std::string_view name);
+inline constexpr std::string_view kOfferedResponseFields = "X-Frame-Options, Content-Security-Policy, Permissions-Policy, X-Content-Type-Options";
 // Proposed rules as JSON (path_check's preview), replacing the site's: the loader's parse and checks;
 // "" when they load, else why. The notes land in site.header_notes.
 std::string load_response_header_rules(const json::Value& rules, SiteConfig& site);

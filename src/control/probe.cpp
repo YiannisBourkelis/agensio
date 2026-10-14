@@ -241,4 +241,94 @@ void run_hsts_probes(const std::vector<CanonicalProbe>& probes, int timeout_ms) 
 #endif
 }
 
+std::vector<CanonicalProbe> header_probes(const Config& cfg, const TlsFacts& tls, std::time_t now) {
+    std::vector<CanonicalProbe> out;
+#ifdef AGENSIO_HAS_TLS
+    for (const auto& s : cfg.sites) {
+        if (!s.tls || s.app.empty() || s.listen.empty() || s.redirects_all) continue;
+        const std::string& name = s.server_names.front();
+        if (name == "*") continue;
+        const auto st = tls.served.find(s.tls->cert.string() + '\n' + s.tls->key.string());
+        if (st == tls.served.end() || !st->second.present || st->second.placeholder || st->second.not_before <= 0 || now - st->second.not_before < 7 * 86400)
+            continue;
+        CanonicalProbe p;
+        p.site = name;
+        p.canonical = s.canonical_redirect ? s.canonical : name;  // another name is redirected before the page
+        p.app = s.app;
+        p.names = s.server_names;
+        p.tls = true;
+        p.declined = s.response_headers_offer_declined;
+        probe_address(s, p);
+        out.push_back(std::move(p));
+    }
+#else
+    (void)cfg;
+    (void)tls;
+    (void)now;
+#endif
+    return out;
+}
+
+std::optional<Finding> judge_header_answer(const CanonicalProbe& p, int status, const std::vector<std::pair<std::string, std::string>>& fields) {
+    if (status < 200 || status > 299) return std::nullopt;  // a redirect, a login, an error: not the page a scanner grades
+    auto has = [&](std::string_view name) {
+        for (const auto& [n, v] : fields)
+            if (lower(n) == name) return true;
+        return false;
+    };
+    bool frame_ancestors = false;
+    for (const auto& [n, v] : fields) frame_ancestors = frame_ancestors || (lower(n) == "content-security-policy" && lower(v).find("frame-ancestors") != std::string::npos);
+    std::vector<std::string> missing;
+    auto need = [&](const char* field, bool present) {
+        if (!present && std::find(p.declined.begin(), p.declined.end(), field) == p.declined.end()) missing.emplace_back(field);
+    };
+    need("X-Frame-Options", has("x-frame-options") || frame_ancestors);
+    need("Content-Security-Policy", has("content-security-policy") || has("content-security-policy-report-only"));
+    need("Permissions-Policy", has("permissions-policy"));
+    need("X-Content-Type-Options", has("x-content-type-options"));
+    if (missing.empty()) return std::nullopt;
+    std::string list;
+    for (const auto& m : missing) list += (list.empty() ? "" : ", ") + m;
+    auto missed = [&](const char* f) { return std::find(missing.begin(), missing.end(), f) != missing.end(); };
+    std::string fix = "offer them to the user one at a time, with what each could break (path_check on / lists them under response_headers_offer), "
+                      "and add the ones agreed through site_update with response_headers";
+    if (missed("X-Frame-Options")) fix += "; a frame field only after asking whether another site embeds the pages (WordPress post embeds, a status page, a widget)";
+    if (missed("Content-Security-Policy")) fix += "; a CSP as Content-Security-Policy-Report-Only first, as a default, enforced once the browser console stays clean";
+    if (missed("X-Content-Type-Options")) fix += "; nosniff on the application's answers only when its scripts carry their types";
+    fix += ". A field the user does not want goes in response_headers_offer_declined, which stops this naming it";
+    return Finding{"info", "response_headers_suggested", p.site,
+                   "the home page (https://" + p.canonical + "/) goes without " + list +
+                       ": the application sends none of them and no rule adds them; scanners such as securityheaders.com mark each one missing",
+                   fix};
+}
+
+std::vector<Finding> run_header_probes(const std::vector<CanonicalProbe>& probes, int timeout_ms) {
+    std::vector<Finding> out;
+#ifndef _WIN32
+    const std::vector<std::string> heads = fetch_heads(probes, timeout_ms);
+    for (std::size_t n = 0; n < probes.size(); ++n) {
+        const std::string& head = heads[n];
+        if (!head.starts_with("HTTP/1.")) continue;  // no answer: health has its own findings for that
+        const std::size_t sp = head.find(' ');
+        const int status = sp == std::string::npos ? 0 : std::atoi(head.c_str() + sp + 1);
+        std::vector<std::pair<std::string, std::string>> fields;
+        for (std::size_t at = head.find("\r\n"); at != std::string::npos && at + 2 < head.size(); at = head.find("\r\n", at + 2)) {
+            const std::size_t end = head.find("\r\n", at + 2);
+            const std::string_view line = std::string_view(head).substr(at + 2, end == std::string::npos ? std::string_view::npos : end - at - 2);
+            if (line.empty()) break;
+            const std::size_t colon = line.find(':');
+            if (colon == std::string_view::npos || colon == 0) continue;
+            std::string_view v = line.substr(colon + 1);
+            while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.remove_prefix(1);
+            fields.emplace_back(std::string(line.substr(0, colon)), std::string(v));
+        }
+        if (auto f = judge_header_answer(probes[n], status, fields)) out.push_back(std::move(*f));
+    }
+#else
+    (void)probes;
+    (void)timeout_ms;
+#endif
+    return out;
+}
+
 }  // namespace agensio::control

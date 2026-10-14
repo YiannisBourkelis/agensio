@@ -83,6 +83,7 @@ void usage() {
                  "                           [--response-header-remove \"/ X-Powered-By\"] [--response-headers-file F.json]\n"
                  "                           (the site's response header rules, the list replaced; --no-response-headers)\n"
                  "                           --no-response-headers-baseline | --response-headers-baseline (the preset's own fields)\n"
+                 "                           --decline-response-header NAME ... | --no-declined-response-headers (offered, declined)\n"
                  "                      site-update NAME --restrict PATH=ADDR[,ADDR...] ... (only those addresses reach PATH)\n"
                  "                      site-update NAME --restrict-admin ADDR[,ADDR...] [--admin-login] [--admin-language L]...\n"
                  "                      site-update NAME --auth PATH | --auth-exact PATH | --auth-open PATH ... [--auth-realm TEXT]\n"
@@ -358,6 +359,11 @@ int main(int argc, char** argv) {
                              "                    --no-response-headers clears it. --no-response-headers-baseline turns the preset's own\n"
                              "                    fields off (Referrer-Policy, nosniff on its files, no X-Powered-By), --response-headers-baseline\n"
                              "                    back on. Check with path-check NAME PATH (response_headers, response_headers_offer)\n"
+                             "        --decline-response-header NAME (site-create and site-update, repeatable): an offered field the\n"
+                             "                    site must not send (X-Frame-Options when other sites embed its pages, Content-Security-Policy,\n"
+                             "                    Permissions-Policy, X-Content-Type-Options): health's response_headers_suggested and\n"
+                             "                    path-check's offer stop naming it; given together they replace the list;\n"
+                             "                    --no-declined-response-headers clears it\n"
                              "        path-check NAME PATH: what the site does with a GET for PATH and why, as the server decides\n"
                              "                    it: refused (by which refuse pattern or refusal by name), redirected (by which rule, to\n"
                              "                    which Location), the file served, the script run, the application it goes to; every\n"
@@ -643,6 +649,12 @@ int main(int argc, char** argv) {
                     for (const auto& r : given.items()) header_file_rules.push(r);
                     headers_given = true;
                 } else if (b == "--no-response-headers") headers_given = true;
+                else if (b == "--decline-response-header") {  // an offered field the site must not send; given together they replace the list
+                    std::string v; value(v);
+                    agensio::json::Value list = body["response_headers_offer_declined"].is_array() ? body["response_headers_offer_declined"] : agensio::json::Value::array();
+                    list.push(v);
+                    body.set("response_headers_offer_declined", list);
+                } else if (b == "--no-declined-response-headers") body.set("response_headers_offer_declined", agensio::json::Value::array());
                 else if (b == "--no-response-headers-baseline") body.set("response_headers_baseline", false);
                 else if (b == "--response-headers-baseline") body.set("response_headers_baseline", true);
                 else if (b == "--trusted-proxy") {

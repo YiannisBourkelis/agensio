@@ -56,6 +56,8 @@ struct SiteSpec {
     // site always has an app); false is rendered, true is the default.
     json::Value response_headers;
     std::optional<bool> response_headers_baseline;
+    // The offered fields the owner declined (docs/headers.md 7): canonical names, the list sent whole.
+    std::vector<std::string> response_headers_offer_declined;
     // Where the application's login form or authenticating API is posted to, on top of the
     // preset's known paths (2026-10-02): the rendered fail2ban jail counts attempts there;
     // nothing is served or refused by it. Plain paths (check_login_path), at most 16.

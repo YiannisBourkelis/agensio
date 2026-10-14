@@ -2262,7 +2262,23 @@ agensio ctl site-update example.com --no-response-headers-baseline --yes       #
 The flags of one command make the whole list (the flags naming one path one prefix rule, then the
 file's rules), as `--redirect` does; `agensio ctl site NAME` shows the list in the file's JSON form.
 `path_check` on a page also lists `response_headers_offer`: the fields of headers.md 4.1 nothing the
-site decides sends there, each with what it could break, for the agent to offer one at a time. `hsts`
+site decides sends there, each with what it could break, for the agent to offer one at a time.
+
+**What a live site's home page goes without** (0.1.0-alpha.94): for each live HTTPS site (TLS, an
+`app`, a real certificate served for a week) health asks the home page once, over loopback off the
+workers, and reports `response_headers_suggested` (info) naming the fields of headers.md 4.1 its
+answer lacks: a frame field (or `frame-ancestors` in a CSP), a CSP (report-only counts),
+`Permissions-Policy`, `nosniff`; an application's own fields count, a redirect or an error is not
+judged. What the owner decided against goes in the site key `response_headers_offer_declined`:
+
+```toml
+response_headers_offer_declined = ["X-Frame-Options"]   # other sites embed its pages
+```
+
+It names only those four fields (any case; HSTS is declined with `hsts = false`), sends and removes
+nothing, and the finding and `path_check`'s offer leave them out; managed: `site_update`'s field of
+the same name, `agensio ctl site-update NAME --decline-response-header X-Frame-Options`
+(`--no-declined-response-headers` clears the list). `hsts`
 stays its own key ([redirects.md](redirects.md) 4), and a location's `add_headers` keeps adding its
 fields to that location's successful answers; a rule's `set` and `remove` act on those too.
 

@@ -2,6 +2,22 @@
 
 ## 0.1.0-alpha.94
 
+- **Health names what a live site's home page goes without: `response_headers_suggested`**
+  (`docs/headers.md` 7; the test host's request's last part). For each live HTTPS site (TLS, an `app`,
+  a real certificate served for a week, as for `hsts_suggested`) health asks the home page once, over
+  loopback on its own thread (`control::header_probes`, `run_header_probes` over the probes'
+  `fetch_heads`), and reports, as info, the fields of headers.md 4.1 its real answer lacks: a frame
+  field (`X-Frame-Options`, or `frame-ancestors` in a CSP), a CSP (report-only counts),
+  `Permissions-Policy`, `nosniff`; an application's own fields count (Uptime Kuma, Django send theirs),
+  a redirect or an error is not judged, HSTS stays `hsts_suggested`'s (`judge_header_answer`). The fix
+  sends the agent to offer them one at a time with `path_check`'s `response_headers_offer`. A site so
+  asked needs no HSTS probe of its own: the same request notes an application's HSTS. The new site key
+  `response_headers_offer_declined` records the fields the owner refused (the four names, any case,
+  kept in their canonical spelling; HSTS is `hsts = false`'s); the finding and `path_check`'s offer leave
+  them out, and it sends and removes nothing. Managed: the `site_update` field of the same name,
+  `agensio ctl site-update --decline-response-header NAME` (the list replaced) and
+  `--no-declined-response-headers`; `site_show` and `path_check` show the list. Reference row,
+  `docs/keys.md`, the MCP texts (`health_check`, `path_check`, `site_update`), the cookbook.
 - **Response headers on managed sites** (`docs/headers.md` 6, step 4 of its section 12; asked for by the
   test host: a managed WordPress site graded D on securityheaders.com, and neither `site_update`, its
   root additions file nor a hand edit could carry `[[site.response_headers]]`). `site_create` and

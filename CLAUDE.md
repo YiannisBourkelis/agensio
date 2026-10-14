@@ -545,6 +545,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty, each seeded from
   `ctl --response-header / --response-header-remove / --response-headers-file / --no-response-headers`;
   `site_show` lists them; `path_check` on a page answers `response_headers_offer` (headers.md 4.1's
   fields nothing decides there, each with what it breaks). The key was `security_headers` before release.
+  Health's `response_headers_suggested` (`control/probe.*`: `header_probes`, `judge_header_answer`,
+  `run_header_probes`, in `Server::health_async` beside the HSTS probes, which skip those sites):
+  a live HTTPS site's home page read for 4.1's fields; `response_headers_offer_declined` silences them.
   Gate: `bench/ab.sh <ref> -A` (rows `headers` and `baseline`), `-P` with `-A` (row `proxy-hdr`).
 - **Automatic certificates** (H3, `src/services/acme.*`, `services/json.hpp`): `tls = "auto"`
   plus `[server] acme = { email }`; ACME v2 with HTTP-01 against any RFC 8555 CA, JWS ES256

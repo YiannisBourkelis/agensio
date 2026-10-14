@@ -2334,6 +2334,19 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     if (t.contains("refuse")) parse_refuse(t["refuse"], site, where);
     if (t.contains("auth")) parse_auth(t["auth"], cfg, site, base_dir, where);
     if (t.contains("response_headers")) parse_response_headers(t["response_headers"], site, where);
+    if (t.contains("response_headers_offer_declined")) {
+        const toml::array* list = t["response_headers_offer_declined"].as_array();
+        if (!list) fail(where + ".response_headers_offer_declined must be a list of field names: [\"X-Frame-Options\"] (the offered fields the site must not send)");
+        for (const auto& e : *list) {
+            const auto v = e.value<std::string>();
+            const std::string name = v ? offered_response_field(*v) : std::string();
+            if (name.empty())
+                fail(where + ".response_headers_offer_declined: '" + (v ? *v : std::string("?")) + "' is not one of the fields offered (" +
+                     std::string(kOfferedResponseFields) + "); HSTS is declined with hsts = false");
+            auto& d = site.response_headers_offer_declined;
+            if (std::find(d.begin(), d.end(), name) == d.end()) d.push_back(name);
+        }
+    }
     if (t.contains("response_headers_baseline")) {
         const auto on = t["response_headers_baseline"].value<bool>();
         if (!on) fail(where + ".response_headers_baseline must be true or false (the preset's security baseline, docs/headers.md 4)");
@@ -2657,6 +2670,7 @@ void explain_config(const Config& cfg, std::ostream& out) {
         }
         if (!site.canonical.empty()) out << "canonical = \"" << site.canonical << "\"\n";
         if (site.response_headers_baseline) out << "response_headers_baseline = " << (*site.response_headers_baseline ? "true" : "false") << "\n";
+        if (!site.response_headers_offer_declined.empty()) print_list(out, "response_headers_offer_declined", site.response_headers_offer_declined);
         if (!site.user.empty()) out << "user = \"" << site.user << "\"\n";
         if (!site.group.empty()) out << "group = \"" << site.group << "\"\n";
         if (site.php.configured) print_fcgi(out, "php", site.php);
@@ -4490,6 +4504,12 @@ void build_response_headers(SiteConfig& site, const std::string& where) {
     });
     for (const HeaderNode& nd : rr.nodes)
         if (!(nd.path.size() == 1 && !nd.exact)) access::mark_first(rr.first, response_rules::first_byte(nd.path));
+}
+
+std::string offered_response_field(std::string_view name) {
+    for (const std::string_view f : {"X-Frame-Options", "Content-Security-Policy", "Permissions-Policy", "X-Content-Type-Options"})
+        if (Headers::iequals(f, name)) return std::string(f);
+    return {};
 }
 
 // [[site.response_headers]] rules sent as JSON (path_check's preview, docs/headers.md 7): the tables a

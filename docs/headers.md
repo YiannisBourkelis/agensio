@@ -4,7 +4,8 @@
 > 2) since 0.1.0-alpha.89, its `endings` since alpha.90, `path_check`'s fields and preview (section 7)
 > since alpha.92; the baseline per preset and `response_headers_baseline` (section 4), the managed
 > sites' fields, `agensio ctl`'s flags and `path_check`'s `response_headers_offer` (sections 6 and 7)
-> since alpha.94. Health's checks of section 7 ("later") and section 11.3 are not built.
+> since alpha.94, with health's `response_headers_suggested` and `response_headers_offer_declined`
+> (section 7). Health's checks marked "later" in section 7 and section 11.3 are not built.
 > The rest is the design, written as the guide it will become. It is the companion of `docs/redirects.md`, whose
 > `hsts` setting uses the mechanism described here. The research behind it is
 > `reports/Web server headers and redirects.md` (nine servers, the panels, the administrators'
@@ -426,6 +427,18 @@ application's value once per site and health reports `hsts_narrows_application`.
   (baseline)`, `x-frame-options: removed (rule /embed/)`. It also takes proposed `response_headers`
   and answers as if they applied, and says which fields of section 4.1 the site does not send, for
   the agent to offer.
+- **Health: `response_headers_suggested`** (info, alpha.94, asked for by the test host): for a live
+  HTTPS site (TLS, an `app`, a real certificate served for a week, as for `hsts_suggested`) health
+  asks the home page once, over loopback on its own thread, and names the fields of 4.1 the answer
+  goes without: a frame field (`X-Frame-Options`, or `frame-ancestors` in a CSP), a CSP (a
+  `Content-Security-Policy-Report-Only` counts), `Permissions-Policy`, `nosniff`. It reads the real
+  answer, so an application that sends its own (Uptime Kuma, Django) gets no finding; a redirect or
+  an error is not judged; HSTS stays `hsts_suggested`'s. The fix sends the agent to offer them one at
+  a time with `path_check`'s `response_headers_offer`. What the owner refuses is recorded in
+  `response_headers_offer_declined` (the four field names, any case; managed: the `site_update`
+  field, `agensio ctl --decline-response-header NAME`), which this finding and `path_check`'s offer
+  then leave out; it sends and removes nothing. That request also notes an application's own HSTS,
+  so such a site needs no separate HSTS probe.
 - **Health, later** (from the research's list): a security field the application sends twice; a
   rule's `X-Robots-Tag: noindex` on a site that looks live (no access or password rule at `/`, real
   visitors in its log). Only a rule is judged, never an application's own: Nextcloud, Roundcube and

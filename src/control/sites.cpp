@@ -85,6 +85,7 @@ json::Value SiteSpec::to_json() const {
     if (!redirects.items().empty()) v.set("redirects", redirects);
     if (!response_headers.items().empty()) v.set("response_headers", response_headers);
     if (response_headers_baseline) v.set("response_headers_baseline", *response_headers_baseline);
+    if (!response_headers_offer_declined.empty()) v.set("response_headers_offer_declined", strings(response_headers_offer_declined));
     if (!login_paths.empty()) v.set("login_paths", strings(login_paths));
     if (!access_log.empty()) v.set("access_log", access_log);
     v.set("listen_plain", listen_plain).set("listen_tls", listen_tls);
@@ -123,6 +124,7 @@ bool SiteSpec::from_json(const json::Value& v, SiteSpec& out) {
     if (v["redirects"].is_array()) out.redirects = v["redirects"];
     if (v["response_headers"].is_array()) out.response_headers = v["response_headers"];
     if (v["response_headers_baseline"].type() == json::Value::Type::boolean) out.response_headers_baseline = v["response_headers_baseline"].boolean();
+    out.response_headers_offer_declined = string_list(v["response_headers_offer_declined"]);
     out.login_paths = string_list(v["login_paths"]);
     if (out.settings["children"].type() == json::Value::Type::number) out.php_children = static_cast<int>(out.settings["children"].num());
     out.access_log = v.get("access_log");
@@ -783,6 +785,26 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
             spec.response_headers = rules;
         }
     }
+    // The offered fields the owner declined (docs/headers.md 7): given whole, each one of the fields
+    // path_check offers, in any case; [] or null clears them.
+    if (given(body, "response_headers_offer_declined")) {
+        const json::Value& list = body["response_headers_offer_declined"];
+        std::vector<std::string> names;
+        if (!list.is_null() && !list.is_array()) {
+            error = "response_headers_offer_declined must be a list of field names: [\"X-Frame-Options\"] ([] clears it)";
+            return needs;
+        }
+        for (const auto& e : list.items()) {
+            const std::string name = e.is_string() ? offered_response_field(e.str()) : std::string();
+            if (name.empty()) {
+                error = "response_headers_offer_declined: '" + (e.is_string() ? e.str() : std::string("?")) + "' is not one of the fields offered (" +
+                        std::string(kOfferedResponseFields) + "); HSTS is declined with hsts: false";
+                return needs;
+            }
+            if (std::find(names.begin(), names.end(), name) == names.end()) names.push_back(name);
+        }
+        spec.response_headers_offer_declined = names;
+    }
     // The login paths (2026-10-02): given whole, each a plain URL path (check_login_path), at
     // most 16, [] clears them. They change no location: the fail2ban jail counts attempts there.
     if (has_key(body, "login_paths")) {
@@ -1110,6 +1132,9 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
     }
     if (spec.response_headers_baseline && !*spec.response_headers_baseline)
         out += "response_headers_baseline = false   # the preset's baseline of response fields off (docs/headers.md 4)\n";
+    if (!spec.response_headers_offer_declined.empty())
+        out += "response_headers_offer_declined = " + toml_list(spec.response_headers_offer_declined) +
+               "   # offered, declined by the owner: health and path_check no longer suggest them (docs/headers.md 7)\n";
     rules_locations(out);
     // Path redirects as the site file's own tables; their keys are the reference's (load_redirect_rules
     // refused any other), their values strings or numbers.

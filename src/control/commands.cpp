@@ -616,7 +616,11 @@ void header_fields(json::Value& v, const SiteConfig& site, const HeaderNode* nod
         for (const auto& f : hs->fields)
             frame_ancestors = frame_ancestors || (Headers::iequals(f.name, "content-security-policy") && f.value.find("frame-ancestors") != std::string::npos);
     json::Value offer = json::Value::array();
-    auto add = [&](const char* field, std::string breaks) { offer.push(json::Value::object().set("field", field).set("breaks", std::move(breaks))); };
+    const auto& declined = site.response_headers_offer_declined;  // the owner's no (response_headers_offer_declined)
+    auto add = [&](const char* field, std::string breaks) {
+        if (std::find(declined.begin(), declined.end(), field) == declined.end())
+            offer.push(json::Value::object().set("field", field).set("breaks", std::move(breaks)));
+    };
     if (!decided("X-Frame-Options") && !frame_ancestors)
         add("X-Frame-Options", "every embedding of these pages on another site: WordPress post embeds, a status page, a widget or a booking form; ask "
                                "whether another site frames them. SAMEORIGIN keeps the site's own frames (frame-ancestors 'self' in a CSP does the same)");
@@ -634,6 +638,11 @@ void header_fields(json::Value& v, const SiteConfig& site, const HeaderNode* nod
     if (site.tls && site.tls_fields.hsts.empty() && site.hsts != SiteConfig::Hsts::off)
         add("Strict-Transport-Security", "plain HTTP, and clicking past a certificate warning, for its whole max-age; the site's hsts field, never a rule");
     if (!offer.items().empty()) v.set("response_headers_offer", std::move(offer));
+    if (!declined.empty()) {
+        json::Value list = json::Value::array();
+        for (const auto& d : declined) list.push(d);
+        v.set("response_headers_offer_declined", std::move(list));
+    }
 }
 
 // path_check (2026-10-08, docs/configuration.md 6b): what a site does with one GET for a path,
@@ -985,6 +994,11 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now, const 
         }
         if (!list.items().empty()) v.set("response_headers", std::move(list));
         v.set("response_headers_baseline", baseline);
+        if (!s.response_headers_offer_declined.empty()) {
+            json::Value declined = json::Value::array();
+            for (const auto& d : s.response_headers_offer_declined) declined.push(d);
+            v.set("response_headers_offer_declined", std::move(declined));
+        }
         if (!s.header_notes.empty()) v.set("response_header_notes", header_notes_json(s));
     }
     (void)cfg;

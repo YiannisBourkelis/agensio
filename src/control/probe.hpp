@@ -24,6 +24,7 @@ struct CanonicalProbe {
     std::vector<std::string> names;  // every name the site lists
     std::string host, port;          // the site's listener, a wildcard address asked over loopback
     bool tls = false;
+    std::vector<std::string> declined;  // header probes: the offered fields the owner declined
 };
 
 // One probe per site whose other names redirect to its canonical one, copied out of the
@@ -42,5 +43,17 @@ std::vector<Finding> run_canonical_probes(const std::vector<CanonicalProbe>& pro
 // week, nothing noted yet) once for its home page; the server's own request path notes the field.
 std::vector<CanonicalProbe> hsts_probes(const Config& cfg, const TlsFacts& tls, std::time_t now);
 void run_hsts_probes(const std::vector<CanonicalProbe>& probes, int timeout_ms = 3000);
+
+// response_headers_suggested (docs/headers.md 7, alpha.94): the fields the baseline leaves to the owner
+// (4.1: a frame field, a CSP, Permissions-Policy, nosniff) a live HTTPS site's home page goes without,
+// read from its real answer, so the application's own count. A live site as for hsts_suggested: TLS,
+// an app, a real certificate served for a week; asked by its canonical name, with what it declined.
+std::vector<CanonicalProbe> header_probes(const Config& cfg, const TlsFacts& tls, std::time_t now);
+// The finding a home page's answer gives (its fields, names in any case), or none: a 2xx missing an
+// offered field the site has not declined.
+std::optional<Finding> judge_header_answer(const CanonicalProbe& p, int status, const std::vector<std::pair<std::string, std::string>>& fields);
+// Every probe, one request each, at most `timeout_ms` per step, all at once; the answers go through
+// the request path too, which notes an application's own HSTS (so hsts_probes need not ask again).
+std::vector<Finding> run_header_probes(const std::vector<CanonicalProbe>& probes, int timeout_ms = 3000);
 
 }  // namespace agensio::control

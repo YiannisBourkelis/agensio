@@ -1075,7 +1075,7 @@ check "cookbook: every recipe of docs/examples.md loads and names what exists (t
 # One broken site file never stops the others (design section 26; tests/isolation.sh, its own server).
 check "isolation: a site file that does not load is set aside, the other sites serve (tests/isolation.sh)" "0" \
   "$(tests/isolation.sh "$BIN" > bench/tmp/isolation.out 2>&1; echo $?)"
-check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 206 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
+check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 207 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
 check "secrets: the presets catalogue lists each preset's credential files" "/wp-config.php /sites/default/settings.php" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["wordpress"]["secrets"][0], p["drupal"]["secrets"][0])')"
 check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$("$BIN" ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; "$BIN" ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
@@ -1731,6 +1731,21 @@ if [ -n "$PHPFPM" ]; then
     "hsts_from_application" \
     "$(curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); print(",".join(sorted(f["code"] for f in d["findings"] if f.get("site") == "ap.old.test" and f["code"].startswith("hsts_"))) or "none")')"
   cpost /v1/sites/ap.old.test/delete '{"confirm":true,"reason":"probe"}' > /dev/null
+  # response_headers_suggested (alpha.94, docs/headers.md 7): health asks a live HTTPS site's home page
+  # (a certificate a month old) and names the offered fields it goes without; a rule that sends one
+  # takes it off, response_headers_offer_declined records a no, which path_check's offer honours too;
+  # ctl's flags do the same.
+  cpost /v1/sites "{\"domain\":\"rh.old.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-old/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-old/key.pem\"},\"user\":null,\"app\":\"php\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"root\":\"$ROOT/tests/headers\",\"listen_plain\":\"127.0.0.1:8490\",\"listen_tls\":\"127.0.0.1:8491\",\"confirm\":true,\"reason\":\"suggest\"}" > /dev/null
+  rhs() {  # the fields health says rh.old.test's home page goes without, or none
+    curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); f=[x for x in d["findings"] if x.get("site") == "rh.old.test" and x["code"] == "response_headers_suggested"]; print(f[0]["message"].split(" goes without ")[1].split(":")[0] if f else "none")'
+  }
+  check "response_headers_suggested: the home page goes without the offered fields; a rule that sends two leaves one; declined, none; path_check's offer leaves it out" \
+    "X-Frame-Options, Content-Security-Policy, Permissions-Policy ; 200 Content-Security-Policy ; 200 none ; X-Frame-Options Permissions-Policy|Content-Security-Policy Strict-Transport-Security" \
+    "$(rhs) ; $(cpost /v1/sites/rh.old.test '{"response_headers":[{"path":"/","set":{"X-Frame-Options":"SAMEORIGIN","Permissions-Policy":"camera=()"}}],"confirm":true,"reason":"suggest"}') $(rhs) ; $(cpost /v1/sites/rh.old.test '{"response_headers_offer_declined":["content-security-policy"],"confirm":true,"reason":"suggest"}') $(rhs) ; $(cpost /v1/sites/rh.old.test '{"response_headers":[],"response_headers_offer_declined":["X-Frame-Options","Permissions-Policy"],"confirm":true,"reason":"suggest"}' > /dev/null; curl -sS --unix-socket $CS -G http://control/v1/sites/rh.old.test/path --data-urlencode path=/ | python3 -c 'import json,sys; d=json.load(sys.stdin); print(" ".join(d.get("response_headers_offer_declined", [])) + "|" + " ".join(x["field"] for x in d.get("response_headers_offer", [])))')"
+  check "ctl site-update --decline-response-header replaces the declined list; --no-declined-response-headers clears it" \
+    "0 Content-Security-Policy, Permissions-Policy ; 0 X-Frame-Options, Content-Security-Policy, Permissions-Policy" \
+    "$("$BIN" ctl site-update rh.old.test --decline-response-header X-Frame-Options --yes --reason suggest --socket $CS > /dev/null 2>&1; echo -n "$? "; rhs) ; $("$BIN" ctl site-update rh.old.test --no-declined-response-headers --yes --reason suggest --socket $CS > /dev/null 2>&1; echo -n "$? "; rhs)"
+  cpost /v1/sites/rh.old.test/delete '{"confirm":true,"reason":"suggest"}' > /dev/null
   # TYPO3 without a preset (2026-10-08, the alpha.53 report's third finding): app = "php" and the
   # rules an agent translates from TYPO3 13.4's documented nginx configuration, through the MCP
   # bridge as an agent does it: path_check before, site_update as a dry run, then applied,

@@ -773,7 +773,15 @@ agensio ctl path-check example.com /             # each field's decision, and re
 
 The agent offers what the baseline leaves out one field at a time, with what each could break (a
 frame field only after asking whether another site embeds the pages), never all at once
-([headers.md](../headers.md) 6).
+([headers.md](../headers.md) 6). Health's `response_headers_suggested` names what a live HTTPS
+site's home page goes without, the application's own fields counted; a field the user refuses is
+recorded so it is no longer suggested (in a site file, `response_headers_offer_declined =
+["X-Frame-Options"]`):
+
+```sh
+agensio ctl health                                                    # response_headers_suggested, per site
+agensio ctl site-update example.com --decline-response-header X-Frame-Options --yes --reason "posts are embedded elsewhere"
+```
 
 **Reference:** [Response headers](../configuration.md#14c-response-headers-siteresponse_headers),
 [headers.md](../headers.md) 2.

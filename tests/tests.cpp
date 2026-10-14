@@ -6311,6 +6311,157 @@ static void test_managed_response_headers() {
     fs::remove_all(dir);
 }
 
+// response_headers_suggested (docs/headers.md 7, alpha.94): health reads a live HTTPS site's home page
+// and names the offered fields (headers.md 4.1) it goes without, an application's own counting;
+// response_headers_offer_declined records the ones the owner said no to, which health and
+// path_check's offer then leave out.
+static void test_header_suggestions() {
+    namespace fs = std::filesystem;
+    using control::Finding;
+    constexpr auto npos = std::string::npos;
+    const std::time_t now = std::time(nullptr), day = 86400;
+    using Fields = std::vector<std::pair<std::string, std::string>>;
+    control::CanonicalProbe p;
+    p.site = "shop.test";
+    p.canonical = "shop.test";
+    p.app = "wordpress";
+    // A WordPress home page with the baseline's fields only: the frame field, the CSP and
+    // Permissions-Policy are named, nosniff too (PHP's answer does not get the baseline's).
+    {
+        const auto f = control::judge_header_answer(p, 200, Fields{{"referrer-policy", "strict-origin-when-cross-origin"}, {"content-type", "text/html"}});
+        CHECK(f && f->code == "response_headers_suggested" && f->severity == "info" && f->site == "shop.test" &&
+              f->message.find("X-Frame-Options, Content-Security-Policy, Permissions-Policy, X-Content-Type-Options") != npos &&
+              f->fix.find("path_check") != npos && f->fix.find("response_headers_offer_declined") != npos &&
+              f->fix.find("Content-Security-Policy-Report-Only") != npos && f->fix.find("embeds") != npos);
+    }
+    // frame-ancestors in a CSP is the frame field; a report-only policy counts for the CSP; any case.
+    {
+        const auto f = control::judge_header_answer(p, 200, Fields{{"Content-Security-Policy-Report-Only", "default-src 'self'"},
+                                                                   {"content-security-policy", "frame-ancestors 'self'"}, {"X-Content-Type-Options", "nosniff"}});
+        CHECK(f && f->message.find("Permissions-Policy") != npos && f->message.find("X-Frame-Options") == npos && f->message.find("Content-Security-Policy") == npos &&
+              f->message.find("X-Content-Type-Options") == npos);
+    }
+    // All present, a redirect, an error: nothing to say.
+    CHECK(!control::judge_header_answer(p, 200, Fields{{"x-frame-options", "SAMEORIGIN"}, {"content-security-policy", "default-src 'self'"},
+                                                       {"permissions-policy", "camera=()"}, {"x-content-type-options", "nosniff"}}));
+    CHECK(!control::judge_header_answer(p, 301, Fields{}) && !control::judge_header_answer(p, 503, Fields{}));
+    // Declined fields are never named; all of the missing ones declined is no finding.
+    p.declined = {"X-Frame-Options", "Content-Security-Policy"};
+    {
+        const auto f = control::judge_header_answer(p, 200, Fields{{"x-content-type-options", "nosniff"}});
+        CHECK(f && f->message.find("Permissions-Policy") != npos && f->message.find("X-Frame-Options") == npos && f->message.find("Content-Security-Policy") == npos);
+    }
+    p.declined.push_back("Permissions-Policy");
+    CHECK(!control::judge_header_answer(p, 200, Fields{{"x-content-type-options", "nosniff"}}));
+
+    // Which sites are asked: a TLS site with app serving a real certificate for a week, by its
+    // canonical name, with what it declined; not a fresh certificate, a placeholder, a site without app.
+    const fs::path dir = fs::temp_directory_path() / ("agensio-sugg-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "www");
+    auto load = [&](const std::string& keys) {  // a plain site: the key's parse, path_check
+        std::ofstream(dir / "s.toml") << "[[site]]\nserver_name = [\"shop.test\"]\nlisten = [\"127.0.0.1:18761\"]\nroot = \"www\"\n" + keys;
+        return load_config(dir / "s.toml");
+    };
+    Config tc;
+    {
+        SiteConfig ts;
+        ts.server_names = {"shop.test", "www.shop.test"};
+        ts.listen = {"0.0.0.0:443"};
+        TlsConfig t;
+        t.cert = "/nonexistent/c.pem";
+        t.key = "/nonexistent/k.pem";
+        ts.tls = t;
+        ts.app = "static";
+        ts.canonical = "www.shop.test";
+        ts.canonical_redirect = true;
+        ts.response_headers_offer_declined = {"X-Frame-Options"};
+        tc.sites.push_back(ts);
+    }
+    control::TlsFacts facts;
+    control::CertificateState served;
+    served.present = true;
+    served.not_before = now - 30 * day;
+    served.not_after = now + 60 * day;
+    served.days_left = 60;
+    facts.served["/nonexistent/c.pem\n/nonexistent/k.pem"] = served;
+    {
+        const auto probes = control::header_probes(tc, facts, now);
+#ifdef AGENSIO_HAS_TLS
+        CHECK(probes.size() == 1 && probes[0].site == "shop.test" && probes[0].canonical == "www.shop.test" && probes[0].tls && probes[0].host == "127.0.0.1" &&
+              probes[0].port == "443" && probes[0].declined == std::vector<std::string>{"X-Frame-Options"});
+#else
+        CHECK(probes.empty());  // no TLS client to ask with
+#endif
+        CHECK(load("app = \"static\"\nresponse_headers_offer_declined = [\"x-frame-options\", \"X-FRAME-OPTIONS\"]\n").sites[0].response_headers_offer_declined ==
+              std::vector<std::string>{"X-Frame-Options"});  // the canonical spelling, once
+    }
+    {
+        Config none = tc;
+        none.sites[0].app.clear();
+        CHECK(control::header_probes(none, facts, now).empty());  // no app
+        none = tc;
+        none.sites[0].tls.reset();
+        CHECK(control::header_probes(none, facts, now).empty());  // plain HTTP
+        control::TlsFacts fresh = facts;
+        fresh.served.begin()->second.not_before = now - 2 * day;
+        CHECK(control::header_probes(tc, fresh, now).empty());
+        fresh.served.begin()->second.not_before = now - 30 * day;
+        fresh.served.begin()->second.placeholder = true;
+        CHECK(control::header_probes(tc, fresh, now).empty());
+    }
+    // The key takes the offered fields only, in any case, each once.
+    {
+        bool refused = false;
+        try {
+            load("app = \"static\"\nresponse_headers_offer_declined = [\"Referrer-Policy\"]\n");
+        } catch (const std::exception& e) {
+            refused = std::string_view(e.what()).find("X-Frame-Options, Content-Security-Policy, Permissions-Policy, X-Content-Type-Options") != npos;
+        }
+        CHECK(refused);
+    }
+    // path_check's offer leaves the declined fields out and names them.
+    {
+        std::ofstream(dir / "www" / "index.html") << "<p>hi</p>";
+        const Config c = load("app = \"static\"\nresponse_headers_offer_declined = [\"X-Frame-Options\", \"permissions-policy\"]\n");
+        std::string error;
+        const json::Value pc = control::path_check(c, c.sites[0], "/", error);
+        std::string offered, declined;
+        for (const auto& o : pc["response_headers_offer"].items()) offered += std::string(o.get("field")) + " ";
+        for (const auto& d : pc["response_headers_offer_declined"].items()) declined += d.str() + " ";
+        CHECK(error.empty() && offered.find("Content-Security-Policy") != npos && offered.find("X-Frame-Options") == npos && offered.find("Permissions-Policy") == npos &&
+              declined == "X-Frame-Options Permissions-Policy ");
+    }
+    // On a managed site: the field taken whole and checked, carried in the spec and the file.
+    {
+        control::SiteSpec spec;
+        spec.domain = "m.test";
+        spec.https = "none";
+        spec.app = "static";
+        spec.root = (dir / "www").string();
+        spec.no_user = true;
+        spec.user_decided = true;
+        Config cfg;
+        cfg.config_path = dir / "agensio.toml";
+        json::Value body;
+        std::string err;
+        CHECK(json::parse(R"J({"response_headers_offer_declined": ["x-frame-options", "Content-Security-Policy"]})J", body, err));
+        CHECK(control::apply_request(body, cfg, spec, err).empty() && err.empty() &&
+              spec.response_headers_offer_declined == (std::vector<std::string>{"X-Frame-Options", "Content-Security-Policy"}));
+        control::SiteSpec back;
+        CHECK(control::SiteSpec::from_json(spec.to_json(), back) && back.response_headers_offer_declined == spec.response_headers_offer_declined);
+        CHECK(control::render_site(spec, "x").find("\nresponse_headers_offer_declined = [\"X-Frame-Options\", \"Content-Security-Policy\"]") != npos);
+        CHECK(json::parse(R"J({"response_headers_offer_declined": ["Server"]})J", body, err));
+        err.clear();
+        control::apply_request(body, cfg, back, err);
+        CHECK(err.find("X-Frame-Options, Content-Security-Policy, Permissions-Policy, X-Content-Type-Options") != npos);
+        CHECK(json::parse(R"J({"response_headers_offer_declined": []})J", body, err));
+        err.clear();
+        CHECK(control::apply_request(body, cfg, spec, err).empty() && spec.response_headers_offer_declined.empty() &&
+              control::render_site(spec, "x").find("response_headers_offer_declined") == npos);
+    }
+    fs::remove_all(dir);
+}
+
 static void test_redirect_rules() {
     namespace fs = std::filesystem;
     using namespace agensio::redirect;
@@ -9932,6 +10083,7 @@ int main() {
     test_response_headers();
     test_security_baseline();
     test_managed_response_headers();
+    test_header_suggestions();
     test_site_isolation();
     test_served_record();
     test_hosting_isolation();

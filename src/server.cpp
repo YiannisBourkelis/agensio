@@ -895,14 +895,23 @@ void Server::health_async(std::function<void(json::Value)> done) {
     std::vector<control::CanonicalProbe> probes = control::canonical_probes(gen_->cfg);
     // A site whose application's own HSTS no answer has carried yet is asked for / first, so
     // health says the application sends it instead of suggesting the site's (docs/redirects.md 4.2).
-    std::vector<control::CanonicalProbe> hsts = control::hsts_probes(gen_->cfg, tls_facts(), std::time(nullptr));
-    if (probes.empty() && hsts.empty()) {
+    const control::TlsFacts facts = tls_facts();
+    std::vector<control::CanonicalProbe> hsts = control::hsts_probes(gen_->cfg, facts, std::time(nullptr));
+    // A live HTTPS site's home page read for the offered fields it goes without (docs/headers.md 7);
+    // that request goes through the request path too, so such a site needs no HSTS probe of its own.
+    std::vector<control::CanonicalProbe> headers = control::header_probes(gen_->cfg, facts, std::time(nullptr));
+    std::erase_if(hsts, [&](const control::CanonicalProbe& h) {
+        return std::any_of(headers.begin(), headers.end(), [&](const control::CanonicalProbe& p) { return p.site == h.site; });
+    });
+    if (probes.empty() && hsts.empty() && headers.empty()) {
         done(health_with({}));
         return;
     }
-    std::thread([this, probes = std::move(probes), hsts = std::move(hsts), done = std::move(done)] {
+    std::thread([this, probes = std::move(probes), hsts = std::move(hsts), headers = std::move(headers), done = std::move(done)] {
         control::run_hsts_probes(hsts);
         std::vector<control::Finding> found = control::run_canonical_probes(probes);
+        const std::vector<control::Finding> suggested = control::run_header_probes(headers);
+        found.insert(found.end(), suggested.begin(), suggested.end());
         asio::post(workers_[0]->ctx, [this, found = std::move(found), done] { done(health_with(found)); });
     }).detach();
 }
