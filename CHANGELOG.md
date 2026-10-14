@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.91
+## 0.1.0-alpha.91 (2026-10-14)
 
 - **Health knows an application's own HSTS before any visitor came** (the alpha.87/88 report's
   note; `docs/redirects.md` 4.2). The request path notes an application's HSTS only once an HTTPS
