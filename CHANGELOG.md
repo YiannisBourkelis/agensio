@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.90
+## 0.1.0-alpha.90 (2026-10-14)
 
 - **`endings` on `[[site.response_headers]]`: fields by kind of file** (`docs/headers.md` 2.1, 3.3,
   configuration.md 14c; step 2b of headers.md 12). `endings = ["svg"]` (any case, a leading dot
