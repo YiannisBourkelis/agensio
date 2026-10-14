@@ -79,6 +79,10 @@ void usage() {
                  "                      site-update NAME --set KEY=VALUE ... (settings [NAME] lists the keys and ceilings)\n"
                  "                      site-update NAME --login-path /login ... (where the fail2ban jail counts attempts)\n"
                  "                      site-update NAME --redirect \"/blog /news 301\" --gone /old ... (path redirects)\n"
+                 "                      site-update NAME --response-header \"/ set X-Frame-Options=SAMEORIGIN\" ...\n"
+                 "                           [--response-header-remove \"/ X-Powered-By\"] [--response-headers-file F.json]\n"
+                 "                           (the site's response header rules, the list replaced; --no-response-headers)\n"
+                 "                           --no-response-headers-baseline | --response-headers-baseline (the preset's own fields)\n"
                  "                      site-update NAME --restrict PATH=ADDR[,ADDR...] ... (only those addresses reach PATH)\n"
                  "                      site-update NAME --restrict-admin ADDR[,ADDR...] [--admin-login] [--admin-language L]...\n"
                  "                      site-update NAME --auth PATH | --auth-exact PATH | --auth-open PATH ... [--auth-realm TEXT]\n"
@@ -345,6 +349,15 @@ int main(int argc, char** argv) {
                              "                    --redirects-file F adds a JSON list ([{\"from\", \"to\", \"status\", \"match\", \"remainder\",\n"
                              "                    \"query\", \"cache\"}], a migration's list); given together they replace the site's rules;\n"
                              "                    --no-redirects clears them. With path-check they are a preview: nothing changes\n"
+                             "        --response-header \"PATH set|default NAME=VALUE\", --response-header-remove \"PATH NAME\"\n"
+                             "                    (site-create and site-update, repeatable): the site's response header rules on every\n"
+                             "                    answer of PATH and below it; the most specific rule naming a field decides; set replaces\n"
+                             "                    the application's copy, default only fills a gap, remove deletes; the flags of one path\n"
+                             "                    make one rule. --response-headers-file F adds a JSON list ([{\"path\", \"set\", \"default\",\n"
+                             "                    \"remove\", \"match\", \"when\", \"endings\"}]). Given together they replace the site's list;\n"
+                             "                    --no-response-headers clears it. --no-response-headers-baseline turns the preset's own\n"
+                             "                    fields off (Referrer-Policy, nosniff on its files, no X-Powered-By), --response-headers-baseline\n"
+                             "                    back on. Check with path-check NAME PATH (response_headers, response_headers_offer)\n"
                              "        path-check NAME PATH: what the site does with a GET for PATH and why, as the server decides\n"
                              "                    it: refused (by which refuse pattern or refusal by name), redirected (by which rule, to\n"
                              "                    which Location), the file served, the script run, the application it goes to; every\n"
@@ -412,6 +425,11 @@ int main(int argc, char** argv) {
             bool auth_plain = false, auth_given = false;                      // --auth-plain-http; any auth flag or --no-auth: rules.auth replaced
             bool app_rules_given = false;  // --private, --entry-point, --cache, --front-controller: each replaces its own part
             bool no_rules = false;         // --no-rules: every rule of the site removed
+            // --response-header, --response-header-remove, --response-headers-file, --no-response-headers:
+            // the site's response_headers list replaced, the flags naming one path made one rule.
+            std::vector<std::pair<std::string, agensio::json::Value>> header_rules;
+            agensio::json::Value header_file_rules = agensio::json::Value::array();
+            bool headers_given = false;
             bool raw = false;
             agensio::json::Value body = agensio::json::Value::object();
             agensio::json::Value aliases = agensio::json::Value::array();
@@ -574,6 +592,59 @@ int main(int argc, char** argv) {
                     for (const auto& r : given.items()) list.push(r);
                     body.set("redirects", list);
                 } else if (b == "--no-redirects") body.set("redirects", agensio::json::Value::array());
+                else if (b == "--response-header" || b == "--response-header-remove") {
+                    // Response headers (docs/headers.md 6): "PATH set NAME=VALUE" or "PATH default NAME=VALUE"
+                    // (the value may hold spaces and '='), and with -remove "PATH NAME"; a prefix rule on every
+                    // answer, the flags of one path one rule. match, when and endings: --response-headers-file.
+                    std::string v; value(v);
+                    const std::size_t s1 = v.find(' ');
+                    if (s1 == std::string::npos || s1 == 0) {
+                        std::cerr << "ctl: " << b << (b == "--response-header" ? " needs \"PATH set|default NAME=VALUE\" (for example: \"/ set X-Frame-Options=SAMEORIGIN\")\n"
+                                                                              : " needs \"PATH NAME\" (for example: \"/ X-Powered-By\")\n");
+                        return 2;
+                    }
+                    const std::string path = v.substr(0, s1);
+                    std::string verb = "remove", rest = v.substr(s1 + 1);
+                    if (b == "--response-header") {
+                        const std::size_t s2 = v.find(' ', s1 + 1);
+                        verb = v.substr(s1 + 1, s2 == std::string::npos ? std::string::npos : s2 - s1 - 1);
+                        rest = s2 == std::string::npos ? std::string() : v.substr(s2 + 1);
+                        if ((verb != "set" && verb != "default") || rest.find('=') == std::string::npos || rest.front() == '=') {
+                            std::cerr << "ctl: --response-header needs \"PATH set|default NAME=VALUE\" (for example: \"/ default Content-Security-Policy=default-src 'self'\")\n";
+                            return 2;
+                        }
+                    }
+                    auto at = std::find_if(header_rules.begin(), header_rules.end(), [&](const auto& r) { return r.first == path; });
+                    if (at == header_rules.end()) at = header_rules.insert(header_rules.end(), {path, agensio::json::Value::object().set("path", path)});
+                    agensio::json::Value& rule = at->second;
+                    if (verb == "remove") {
+                        agensio::json::Value list = rule["remove"].is_array() ? rule["remove"] : agensio::json::Value::array();
+                        list.push(rest);
+                        rule.set("remove", list);
+                    } else {
+                        const std::size_t eq = rest.find('=');
+                        agensio::json::Value fields = rule[verb].is_object() ? rule[verb] : agensio::json::Value::object();
+                        fields.set(rest.substr(0, eq), rest.substr(eq + 1));
+                        rule.set(verb, fields);
+                    }
+                    headers_given = true;
+                } else if (b == "--response-headers-file") {  // a JSON list of rules, with match, when and endings
+                    std::string v; value(v);
+                    std::ifstream in(v);
+                    std::stringstream text;
+                    text << in.rdbuf();
+                    agensio::json::Value given;
+                    std::string why;
+                    if (!in || !agensio::json::parse(text.str(), given, why) || !given.is_array()) {
+                        std::cerr << "ctl: --response-headers-file " << v << " is not a readable JSON list of rules ([{\"path\": \"/\", \"set\": {\"X-Frame-Options\": \"SAMEORIGIN\"}}])"
+                                  << (why.empty() ? "" : ": " + why) << "\n";
+                        return 2;
+                    }
+                    for (const auto& r : given.items()) header_file_rules.push(r);
+                    headers_given = true;
+                } else if (b == "--no-response-headers") headers_given = true;
+                else if (b == "--no-response-headers-baseline") body.set("response_headers_baseline", false);
+                else if (b == "--response-headers-baseline") body.set("response_headers_baseline", true);
                 else if (b == "--trusted-proxy") {
                     std::string v; value(v);
                     agensio::json::Value list = body["trusted_proxies"].is_array() ? body["trusted_proxies"] : agensio::json::Value::array();
@@ -799,6 +870,12 @@ int main(int argc, char** argv) {
                 } catch (const std::exception&) {
                     socket_path = agensio::default_control_socket();  // the file may be unreadable for this user
                 }
+            }
+            if (headers_given) {  // the whole list: the flags' rules, then the file's
+                agensio::json::Value list = agensio::json::Value::array();
+                for (auto& [path, rule] : header_rules) list.push(std::move(rule));
+                for (const auto& r : header_file_rules.items()) list.push(r);
+                body.set("response_headers", list);
             }
             // A new site's rules are what this command says.
             if (refuse_given && command == "site-create") {

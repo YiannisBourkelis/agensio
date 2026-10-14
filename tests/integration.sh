@@ -834,6 +834,44 @@ check "control: site-create warns that the new listener has no catch-all" "yes" 
 check "control: the managed file carries its spec and is listed by sites" "yes yes" "$(head -1 bench/tmp/sites.d/created.test.toml | grep -q '^# agensio:managed {"domain":"created.test"' && echo yes) $(curl -sS --unix-socket $CS http://control/v1/sites | grep -q '"server_name":\["created.test","www.created.test"\]' && echo yes)"
 check "control: no_user: true on update is accepted and keeps the site without an account" "200 true" "$(cpost /v1/sites/created.test '{"no_user":true,"confirm":true}') $(python3 -c 'import json; print(str(json.load(open("bench/tmp/ctl-reply.json"))["spec"]["no_user"]).lower())')"
 check "control: site-update adds an alias without re-asking decided fields" "200 created" "$(cpost /v1/sites/created.test '{"aliases":["www.created.test","m.created.test"],"confirm":true}') $(curl -sS -H 'Host: m.created.test' http://127.0.0.1:8094/)"
+# Response headers on a managed site (alpha.94, docs/headers.md 6, the test host's request: a managed
+# WordPress site could not carry them): site_update takes the rules whole, judged as the load judges
+# them; the file carries them as tables; every answer gets them over the baseline; a refused rule
+# leaves the file as it was; response_headers_baseline turns the baseline off; ctl's flags; site_show shows
+# them; path_check names what the site does not send, to offer; the MCP tools take both fields.
+ch() {  # path: created.test's fields of interest, "name=value" sorted
+  curl -sS -D - -o /dev/null -H 'Host: created.test' "http://127.0.0.1:8094$1" | tr -d '\r' |
+    awk -F': ' 'tolower($1) ~ /^(referrer-policy|x-content-type-options|x-frame-options|permissions-policy|cache-control|x-xss-protection|content-security-policy)$/ {print tolower($1) "=" $2}' | sort | paste -sd'|'
+}
+MRP='referrer-policy=strict-origin-when-cross-origin'; MNS='x-content-type-options=nosniff'
+check "managed response_headers: site_update takes the rules, the file carries them as tables, the page and a 404 get them over the baseline; the answer carries what the load noted" \
+  "200 2 yes cache-control=no-cache|permissions-policy=camera=()|$MRP|$MNS|x-frame-options=SAMEORIGIN|x-xss-protection=1; mode=block ; $MRP|$MNS" \
+  "$(cpost /v1/sites/created.test '{"response_headers":[{"path":"/","set":{"X-Frame-Options":"SAMEORIGIN","Permissions-Policy":"camera=()","X-XSS-Protection":"1; mode=block"}},{"path":"/embed/","remove":["X-Frame-Options","Permissions-Policy","X-XSS-Protection"]}],"confirm":true,"reason":"headers"}') $(grep -c '^\[\[site.response_headers\]\]$' bench/tmp/sites.d/created.test.toml) $(grep -q '"code":"header_xss_protection"' bench/tmp/ctl-reply.json && echo yes) $(ch /) ; $(ch /embed/gone)"
+MSUM=$(md5sum < bench/tmp/sites.d/created.test.toml)
+check "managed response_headers: a rule the load refuses is refused with its reason, the file as it was" "400 yes yes" \
+  "$(cpost /v1/sites/created.test '{"response_headers":[{"path":"/","set":{"Set-Cookie":"a=b"}}],"confirm":true,"reason":"headers"}') $(grep -q "cookies are the application's" bench/tmp/ctl-reply.json && echo yes) $([ "$(md5sum < bench/tmp/sites.d/created.test.toml)" = "$MSUM" ] && echo yes)"
+check "managed response_headers_baseline: false turns the baseline off and keeps the rules, null brings it back" \
+  "200 yes permissions-policy=camera=()|x-frame-options=SAMEORIGIN|x-xss-protection=1; mode=block ; 200 no cache-control=no-cache|permissions-policy=camera=()|$MRP|$MNS|x-frame-options=SAMEORIGIN|x-xss-protection=1; mode=block" \
+  "$(cpost /v1/sites/created.test '{"response_headers_baseline":false,"confirm":true,"reason":"headers"}') $(grep -q '^response_headers_baseline = false' bench/tmp/sites.d/created.test.toml && echo yes || echo no) $(ch /) ; $(cpost /v1/sites/created.test '{"response_headers_baseline":null,"confirm":true,"reason":"headers"}') $(grep -q '^response_headers_baseline' bench/tmp/sites.d/created.test.toml && echo yes || echo no) $(ch /)"
+check "managed response_headers: site_show shows the rules in the form site_update takes and the baseline's state" "2 / SAMEORIGIN true" \
+  "$(curl -sS --unix-socket $CS http://control/v1/sites/created.test | python3 -c 'import json,sys; d=json.load(sys.stdin); r=d["response_headers"]; print(len(r), r[0]["path"], r[0]["set"]["X-Frame-Options"], str(d["response_headers_baseline"]).lower())')"
+check "ctl site-update: --response-header and --response-header-remove replace the rules (one rule per path); --no-response-headers-baseline, --response-headers-baseline; --no-response-headers leaves the baseline" \
+  "0 1 cache-control=no-cache|content-security-policy=default-src 'self'|$MRP|$MNS|x-frame-options=DENY ; content-security-policy=default-src 'self'|x-frame-options=DENY ; cache-control=no-cache|content-security-policy=default-src 'self'|$MRP|$MNS|x-frame-options=DENY ; 0 cache-control=no-cache|$MRP|$MNS" \
+  "$("$BIN" ctl site-update created.test --response-header "/ set X-Frame-Options=DENY" --response-header "/ default Content-Security-Policy=default-src 'self'" --response-header-remove "/ X-Powered-By" --yes --reason headers --socket $CS > /dev/null 2>&1; echo -n "$? "; grep -c '^\[\[site.response_headers\]\]$' bench/tmp/sites.d/created.test.toml) $(ch /) ; $("$BIN" ctl site-update created.test --no-response-headers-baseline --yes --reason headers --socket $CS > /dev/null 2>&1; ch /) ; $("$BIN" ctl site-update created.test --response-headers-baseline --yes --reason headers --socket $CS > /dev/null 2>&1; ch /) ; $("$BIN" ctl site-update created.test --no-response-headers --yes --reason headers --socket $CS > /dev/null 2>&1; echo -n "$? "; ch /)"
+check "path_check names the fields the site does not send, each with what it could break, for the agent to offer" "Content-Security-Policy Permissions-Policy X-Frame-Options yes" \
+  "$(curl -sS --unix-socket $CS -G http://control/v1/sites/created.test/path --data-urlencode path=/ | python3 -c 'import json,sys; d=json.load(sys.stdin); o=d.get("response_headers_offer", []); print(" ".join(sorted(x["field"] for x in o)), "yes" if o and all(x.get("breaks") for x in o) else "no")')"
+check "MCP site_create and site_update take response_headers and response_headers_baseline" "yes yes" "$(python3 - "$BIN" "$CS" <<'PYT'
+import json, subprocess, sys
+p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}) + "\n"); p.stdin.flush()
+tools = {t["name"]: t for t in json.loads(p.stdout.readline())["result"]["tools"]}
+def has(name):
+    props = tools.get(name, {}).get("inputSchema", {}).get("properties", {})
+    return "yes" if "response_headers" in props and "response_headers_baseline" in props else "no"
+print(has("site_create"), has("site_update"))
+p.stdin.close(); p.wait()
+PYT
+)"
 check "control: a hand-written site cannot be updated" "409" "$(cpost /v1/sites/laravel.test '{"aliases":["x.test"],"confirm":true}')"
 check "control: site-disable stops serving, keeps the file" "200 000 yes" "$(cpost /v1/sites/created.test/disable '{"confirm":true}') $(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:8094/ 2>/dev/null) $([ -f bench/tmp/sites.d/created.test.toml.disabled ] && echo yes)"
 check "control: site-enable brings it back" "200 created" "$(cpost /v1/sites/created.test/enable '{"confirm":true}') $(curl -sS -H 'Host: created.test' http://127.0.0.1:8094/)"
@@ -1891,11 +1929,11 @@ rm -f bench/tmp/sites.d/hbig.toml
 cpost /v1/reload '{"confirm":true,"reason":"bighead"}' > /dev/null
 # The security baseline (alpha.94, docs/headers.md 4): a site with app gets Referrer-Policy where the
 # answer has none, nosniff on the files and error pages agensio serves (never on an application's
-# answer), X-Powered-By removed, and on app = "static" no-cache on its HTML; security_headers = false
+# answer), X-Powered-By removed, and on app = "static" no-cache on its HTML; response_headers_baseline = false
 # turns it off; a site without app gets none. The same fields over HTTP/1, HTTP/2 and HTTP/3.
 {
   printf '[[site]]\nserver_name = ["bs.wild.test"]\nlisten = ["127.0.0.1:8488"]\nhttp = { listen = ["127.0.0.1:8489"], mode = "serve" }\nroot = "%s/bench/www"\napp = "static"\ntls = { cert = "%s/bench/tmp/certs-wild/cert.pem", key = "%s/bench/tmp/certs-wild/key.pem" }\n\n' "$ROOT" "$ROOT" "$ROOT"
-  printf '[[site]]\nserver_name = ["bo.wild.test"]\nlisten = ["127.0.0.1:8488"]\nhttp = { listen = ["127.0.0.1:8489"], mode = "serve" }\nroot = "%s/bench/www"\napp = "static"\nsecurity_headers = false\ntls = { cert = "%s/bench/tmp/certs-wild/cert.pem", key = "%s/bench/tmp/certs-wild/key.pem" }\n\n' "$ROOT" "$ROOT" "$ROOT"
+  printf '[[site]]\nserver_name = ["bo.wild.test"]\nlisten = ["127.0.0.1:8488"]\nhttp = { listen = ["127.0.0.1:8489"], mode = "serve" }\nroot = "%s/bench/www"\napp = "static"\nresponse_headers_baseline = false\ntls = { cert = "%s/bench/tmp/certs-wild/cert.pem", key = "%s/bench/tmp/certs-wild/key.pem" }\n\n' "$ROOT" "$ROOT" "$ROOT"
   printf '[[site]]\nserver_name = ["bn.wild.test"]\nlisten = ["127.0.0.1:8488"]\nhttp = { listen = ["127.0.0.1:8489"], mode = "serve" }\nroot = "%s/bench/www"\ntls = { cert = "%s/bench/tmp/certs-wild/cert.pem", key = "%s/bench/tmp/certs-wild/key.pem" }\n\n' "$ROOT" "$ROOT" "$ROOT"
   [ -n "$PHPFPM" ] && printf '[[site]]\nserver_name = ["bp.wild.test"]\nlisten = ["127.0.0.1:8488"]\nhttp = { listen = ["127.0.0.1:8489"], mode = "serve" }\nroot = "%s/tests/headers"\napp = "php"\nphp = { socket = "unix:%s/bench/tmp/php/fpm.sock" }\ntls = { cert = "%s/bench/tmp/certs-wild/cert.pem", key = "%s/bench/tmp/certs-wild/key.pem" }\n\n' "$ROOT" "$ROOT" "$ROOT" "$ROOT"
   [ -n "$UP_PID" ] && printf '[[site]]\nserver_name = ["bx.wild.test"]\nlisten = ["127.0.0.1:8488"]\nhttp = { listen = ["127.0.0.1:8489"], mode = "serve" }\napp = "proxy"\nupstream = "http://127.0.0.1:9107"\nproxy = { idle_timeout = 1 }\ntls = { cert = "%s/bench/tmp/certs-wild/cert.pem", key = "%s/bench/tmp/certs-wild/key.pem" }\n' "$ROOT" "$ROOT"
@@ -1910,7 +1948,7 @@ bht() {  # host path curl-protocol-option: the same over TLS
     awk -F': ' 'tolower($1) ~ /^(referrer-policy|x-content-type-options|x-powered-by|cache-control|x-frame-options)$/ {print tolower($1) "=" $2}' | sort | paste -sd'|'
 }
 BRP='referrer-policy=strict-origin-when-cross-origin'; BNS='x-content-type-options=nosniff'
-check "security baseline, app = static: the HTML gets no-cache, a stylesheet and a 404 the two fields; off with security_headers = false; none without app" \
+check "security baseline, app = static: the HTML gets no-cache, a stylesheet and a 404 the two fields; off with response_headers_baseline = false; none without app" \
   "cache-control=no-cache|$BRP|$BNS ; $BRP|$BNS ; $BRP|$BNS ;  ; " \
   "$(bh bs.wild.test /) ; $(bh bs.wild.test /style.css) ; $(bh bs.wild.test /nope) ; $(bh bo.wild.test /) ; $(bh bn.wild.test /)"
 check "security baseline over HTTP/2: the same fields on the static site's page and stylesheet" \
@@ -1923,7 +1961,7 @@ check "security baseline over HTTP/2: the same fields on the static site's page 
   "$BRP ; $BRP" "$(bh bx.wild.test /json) ; $(bh bx.wild.test /redirect)"
 check "security baseline: path_check names it as the source; -t --explain says it in a comment" \
   "referrer-policy: strict-origin-when-cross-origin unless the answer has its own (baseline static) ; yes" \
-  "$(curl -sS --unix-socket $CS -G "http://control/v1/sites/bs.wild.test/path" --data-urlencode "path=/style.css" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(" ".join(f["text"] for f in d["response_headers"] if f["field"] == "Referrer-Policy"))') ; $(t=$("$BIN" -t --explain -c bench/tmp/agensio-test.toml 2>/dev/null); grep -q '# security baseline (app = "static"; security_headers = false turns it off)' <<< "$t" && echo yes || echo no)"
+  "$(curl -sS --unix-socket $CS -G "http://control/v1/sites/bs.wild.test/path" --data-urlencode "path=/style.css" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(" ".join(f["text"] for f in d["response_headers"] if f["field"] == "Referrer-Policy"))') ; $(t=$("$BIN" -t --explain -c bench/tmp/agensio-test.toml 2>/dev/null); grep -q '# security baseline (app = "static"; response_headers_baseline = false turns it off)' <<< "$t" && echo yes || echo no)"
 rm -f bench/tmp/sites.d/base.toml
 cpost /v1/reload '{"confirm":true,"reason":"baseline"}' > /dev/null
 # [[site.response_headers]] at load (alpha.89, docs/headers.md 2.5, 2.6, 7): what is set elsewhere is

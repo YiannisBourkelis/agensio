@@ -668,7 +668,7 @@ server_name = ["legacy.example.com"]
 listen = ["0.0.0.0:443"]
 root = "/var/www/legacy.example.com/web"
 app = "static"
-security_headers = false                       # the baseline off for this site
+response_headers_baseline = false                       # the baseline off for this site
 tls = "auto"
 ```
 
@@ -680,7 +680,7 @@ no `X-Powered-By`. The static site also sends `Cache-Control: no-cache` on its H
 shows at once (browsers revalidate and get a `304` when nothing changed). A frame field, a
 Content-Security-Policy and `nosniff` on PHP's answers are left out: each can break a working page
 (the next recipe adds them where you know it does not). A `[[site.response_headers]]` rule naming one
-of these fields decides instead; `security_headers = false` turns the whole baseline off, and a site
+of these fields decides instead; `response_headers_baseline = false` turns the whole baseline off, and a site
 without `app` gets none.
 
 **Check it.**
@@ -692,8 +692,13 @@ curl -sI https://docs.example.com/ | grep -iE '^(referrer-policy|x-content-type-
 ```
 
 **On a managed site.** The baseline is on for every managed site (a static one names `app =
-"static"` in its file since 0.1.0-alpha.94, at its next change); turning it off is a `site_update`
-field with the agent's side of [headers.md](../headers.md) 12 (step 4), until then root's question.
+"static"` in its file since 0.1.0-alpha.94, at its next change); it is turned off, and back on, by
+one field (MCP `site_update` with `response_headers_baseline: false`, `null` back on):
+
+```sh
+agensio ctl site-update legacy.example.com --no-response-headers-baseline --yes --reason "the application sends its own"
+agensio ctl site-update legacy.example.com --response-headers-baseline --yes
+```
 
 **Reference:** [Response headers](../configuration.md#14c-response-headers-siteresponse_headers),
 [headers.md](../headers.md) 4.
@@ -752,8 +757,23 @@ curl -sI https://example.com/missing | grep -iE '^(referrer-policy|x-content-typ
 curl -sI https://example.com/embed/w.html | grep -ic x-frame-options     # 0
 ```
 
-**On a managed site.** Not a `site_update` field yet ([headers.md](../headers.md) 12, step 4); until
-then the rules are a hand-written site file's.
+**On a managed site.** The same rules through `site_update` (0.1.0-alpha.94): MCP `response_headers`
+with the rules as objects, or the flags, which make the whole list (one prefix rule per path):
+
+```sh
+agensio ctl site-update example.com \
+    --response-header "/ set Referrer-Policy=strict-origin-when-cross-origin" \
+    --response-header "/ set X-Content-Type-Options=nosniff" \
+    --response-header "/ default X-Frame-Options=SAMEORIGIN" \
+    --response-header-remove "/ X-Powered-By" \
+    --response-header-remove "/embed/ X-Frame-Options" --yes --reason "security fields"
+agensio ctl site example.com                     # response_headers: the list in the form site_update takes
+agensio ctl path-check example.com /             # each field's decision, and response_headers_offer
+```
+
+The agent offers what the baseline leaves out one field at a time, with what each could break (a
+frame field only after asking whether another site embeds the pages), never all at once
+([headers.md](../headers.md) 6).
 
 **Reference:** [Response headers](../configuration.md#14c-response-headers-siteresponse_headers),
 [headers.md](../headers.md) 2.
@@ -812,8 +832,16 @@ curl -sI https://example.com/uploads/logo.svg | grep -i content-security-policy
 curl -sI https://example.com/fonts/inter.woff2 | grep -i access-control-allow-origin
 ```
 
-**On a managed site.** Not a `site_update` field yet ([headers.md](../headers.md) 12, step 4); until
-then the rules are a hand-written site file's.
+**On a managed site.** Rules with `endings` (or `match`, `when`) come from a JSON list, the same
+objects MCP `site_update` takes as `response_headers`:
+
+```sh
+cat > rules.json <<'EOF'
+[{"path": "/", "endings": ["svg"], "set": {"Content-Security-Policy": "script-src 'none'"}},
+ {"path": "/", "endings": ["woff", "woff2", "ttf", "otf"], "set": {"Access-Control-Allow-Origin": "https://shop.example.com"}}]
+EOF
+agensio ctl site-update example.com --response-headers-file rules.json --yes --reason "fields by kind of file"
+```
 
 **Reference:** [Response headers](../configuration.md#14c-response-headers-siteresponse_headers),
 [headers.md](../headers.md) 3.3.

@@ -4,6 +4,7 @@
 #pragma once
 
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -48,6 +49,13 @@ struct SiteSpec {
     // match, to, status, remainder, query, cache), the list sent whole; judged by the loader's own
     // parse and checks (load_redirect_rules) and rendered as tables of the managed file.
     json::Value redirects;
+    // Response headers (docs/headers.md 6, alpha.94): [[site.response_headers]] rules as objects (path,
+    // match, when, endings, set, default, remove), the list sent whole; judged by the loader's own
+    // parse and checks (load_response_header_rules) and rendered as tables of the managed file.
+    // response_headers_baseline: the preset's baseline (docs/headers.md 4), unset is on (a managed
+    // site always has an app); false is rendered, true is the default.
+    json::Value response_headers;
+    std::optional<bool> response_headers_baseline;
     // Where the application's login form or authenticating API is posted to, on top of the
     // preset's known paths (2026-10-02): the rendered fail2ban jail counts attempts there;
     // nothing is served or refused by it. Plain paths (check_login_path), at most 16.

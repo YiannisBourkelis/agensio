@@ -393,6 +393,40 @@ json::Value redirect_notes_json(const SiteConfig& s) {
     return notes;
 }
 
+json::Value header_notes_json(const SiteConfig& s) {
+    json::Value notes = json::Value::array();
+    for (const auto& [code, text] : s.header_notes) notes.push(json::Value::object().set("code", code).set("text", text));
+    return notes;
+}
+
+namespace {
+
+// One written [[site.response_headers]] rule in the form site_update takes (docs/headers.md 6).
+json::Value response_header_rule_json(const HeaderRule& r) {
+    json::Value v = json::Value::object().set("path", r.path.size() > 1 && !r.exact ? r.path + "/" : r.path);
+    if (r.exact) v.set("match", "exact");
+    if (r.success_only) v.set("when", "success");
+    if (!r.endings.empty()) {
+        json::Value e = json::Value::array();
+        for (const auto& x : r.endings) e.push(x);
+        v.set("endings", std::move(e));
+    }
+    for (const auto& [verb, list] : {std::pair{"set", &r.set}, std::pair{"default", &r.fallback}}) {
+        if (list->empty()) continue;
+        json::Value fields = json::Value::object();
+        for (const auto& [name, value] : *list) fields.set(name, value);
+        v.set(verb, std::move(fields));
+    }
+    if (!r.remove.empty()) {
+        json::Value names = json::Value::array();
+        for (const auto& n : r.remove) names.push(n);
+        v.set("remove", std::move(names));
+    }
+    return v;
+}
+
+}  // namespace
+
 json::Value sites(const Config& cfg, std::time_t now, const TlsFacts* tls) {
     json::Value arr = json::Value::array();
     for (const auto& s : cfg.sites) arr.push(site_summary(s, now, tls));
@@ -566,6 +600,40 @@ void header_fields(json::Value& v, const SiteConfig& site, const HeaderNode* nod
     } else {
         v.set("response_headers", list((status >= 200 && status < 300) || status == 304));
     }
+    // The fields of docs/headers.md 4.1 the baseline leaves to the owner, when nothing the site decides
+    // sends them on this page's answer: what the agent offers, one at a time, with what each could
+    // break (headers.md 6). The application may send some itself; nothing is fetched here.
+    if (!app && decision != "static") return;
+    const HeaderSet* hs = node ? (es ? &es->success : &node->success) : nullptr;
+    auto decided = [&](std::string_view name) {
+        if (hs)
+            for (const auto& f : hs->fields)
+                if (Headers::iequals(f.name, name)) return !(app && f.own_only);  // the baseline's nosniff is not the application's
+        return false;
+    };
+    bool frame_ancestors = false;
+    if (hs)
+        for (const auto& f : hs->fields)
+            frame_ancestors = frame_ancestors || (Headers::iequals(f.name, "content-security-policy") && f.value.find("frame-ancestors") != std::string::npos);
+    json::Value offer = json::Value::array();
+    auto add = [&](const char* field, std::string breaks) { offer.push(json::Value::object().set("field", field).set("breaks", std::move(breaks))); };
+    if (!decided("X-Frame-Options") && !frame_ancestors)
+        add("X-Frame-Options", "every embedding of these pages on another site: WordPress post embeds, a status page, a widget or a booking form; ask "
+                               "whether another site frames them. SAMEORIGIN keeps the site's own frames (frame-ancestors 'self' in a CSP does the same)");
+    if (!decided("Content-Security-Policy") && !decided("Content-Security-Policy-Report-Only"))
+        add("Content-Security-Policy", "whatever the policy does not foresee: inline scripts, an analytics or chat tag, a payment form; offer it as "
+                                       "Content-Security-Policy-Report-Only first, as a default so the application's own policy wins, and enforce it once "
+                                       "the browser console stays clean on the main pages");
+    if (!decided("Permissions-Policy"))
+        add("Permissions-Policy", "a browser feature the site uses: the camera or microphone of a video call, geolocation for a store finder, payment; "
+                                  "name only features it does not use (camera=(), microphone=(), geolocation=())");
+    if (!decided("X-Content-Type-Options"))
+        add("X-Content-Type-Options", app ? "a script the application sends with the wrong type (JavaScript printed under text/html, JSONP as "
+                                            "application/json) stops working; on the application's answers only when its scripts carry their types"
+                                          : "nothing on the files agensio serves, whose type it sets itself: the baseline sends it (response_headers_baseline)");
+    if (site.tls && site.tls_fields.hsts.empty() && site.hsts != SiteConfig::Hsts::off)
+        add("Strict-Transport-Security", "plain HTTP, and clicking past a certificate warning, for its whole max-age; the site's hsts field, never a rule");
+    if (!offer.items().empty()) v.set("response_headers_offer", std::move(offer));
 }
 
 // path_check (2026-10-08, docs/configuration.md 6b): what a site does with one GET for a path,
@@ -618,7 +686,9 @@ json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_vi
         v.set("decision", decision);
         if (status) v.set("status", status);
         v.set("summary", summary).set("steps", std::move(steps));
-        if (header_node || !site.tls_fields.hsts.empty()) header_fields(v, site, header_node, decision, status, file);
+        const std::string_view d = decision;
+        const bool page = d == "static" || d == "runs" || d == "proxied" || d == "handled";  // for response_headers_offer
+        if (header_node || !site.tls_fields.hsts.empty() || page) header_fields(v, site, header_node, decision, status, file);
         return v;
     };
     auto stat_is = [](const std::string& f, bool dir) {
@@ -903,6 +973,19 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now, const 
         for (const auto& r : s.redirects.rules) list.push(redirect_rule_json(r));
         v.set("redirects", std::move(list));
         if (!s.redirect_notes.empty()) v.set("redirect_notes", redirect_notes_json(s));
+    }
+    // Response headers (docs/headers.md 2, 4, 6): the rules written, in the form site_update takes,
+    // whether the preset's baseline is on, and what the load noted.
+    {
+        json::Value list = json::Value::array();
+        bool baseline = false;
+        for (const auto& r : s.response_headers.rules) {
+            if (r.baseline) baseline = true;
+            else list.push(response_header_rule_json(r));
+        }
+        if (!list.items().empty()) v.set("response_headers", std::move(list));
+        v.set("response_headers_baseline", baseline);
+        if (!s.header_notes.empty()) v.set("response_header_notes", header_notes_json(s));
     }
     (void)cfg;
     return v;

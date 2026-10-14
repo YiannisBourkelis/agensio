@@ -83,6 +83,8 @@ json::Value SiteSpec::to_json() const {
     if (settings.is_object() && !settings.members().empty()) v.set("settings", settings);
     if (rules.is_object() && !rules.members().empty()) v.set("rules", rules);
     if (!redirects.items().empty()) v.set("redirects", redirects);
+    if (!response_headers.items().empty()) v.set("response_headers", response_headers);
+    if (response_headers_baseline) v.set("response_headers_baseline", *response_headers_baseline);
     if (!login_paths.empty()) v.set("login_paths", strings(login_paths));
     if (!access_log.empty()) v.set("access_log", access_log);
     v.set("listen_plain", listen_plain).set("listen_tls", listen_tls);
@@ -119,6 +121,8 @@ bool SiteSpec::from_json(const json::Value& v, SiteSpec& out) {
     if (v["settings"].is_object()) out.settings = v["settings"];
     if (v["rules"].is_object()) out.rules = v["rules"];
     if (v["redirects"].is_array()) out.redirects = v["redirects"];
+    if (v["response_headers"].is_array()) out.response_headers = v["response_headers"];
+    if (v["response_headers_baseline"].type() == json::Value::Type::boolean) out.response_headers_baseline = v["response_headers_baseline"].boolean();
     out.login_paths = string_list(v["login_paths"]);
     if (out.settings["children"].type() == json::Value::Type::number) out.php_children = static_cast<int>(out.settings["children"].num());
     out.access_log = v.get("access_log");
@@ -745,6 +749,40 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
             spec.redirects = given;
         }
     }
+    // The preset's response headers baseline (docs/headers.md 4): false turns it off, true or null
+    // keeps the default (on).
+    if (given(body, "response_headers_baseline")) {  // null included: back to the default
+        const json::Value& b = body["response_headers_baseline"];
+        if (b.is_null()) {
+            spec.response_headers_baseline.reset();
+        } else if (b.type() == json::Value::Type::boolean) {
+            if (b.boolean()) spec.response_headers_baseline.reset();
+            else spec.response_headers_baseline = false;
+        } else {
+            error = "response_headers_baseline must be true or false (the preset's baseline of response fields, docs/headers.md 4), or null for the default (on)";
+            return needs;
+        }
+    }
+    // Response headers (docs/headers.md 6, alpha.94; the test host's request: a managed site could not
+    // carry them): the whole list ([] or null clears it), judged by the loader's own parse and checks
+    // on the site's app (a CSP set over an application's own is noted); the reload judges the endings
+    // against the preset's locations again, and undoes a refused change.
+    if (given(body, "response_headers")) {  // null included: clears them, as []
+        const json::Value& rules = body["response_headers"];
+        if (rules.is_null() || (rules.is_array() && rules.items().empty())) {
+            spec.response_headers = json::Value();
+        } else {
+            SiteConfig probe;
+            probe.server_names = {spec.domain};
+            probe.app = spec.app.empty() ? "static" : spec.app;
+            probe.response_headers_baseline = spec.response_headers_baseline;  // its fields count toward the 64
+            if (const std::string why = load_response_header_rules(rules, probe); !why.empty()) {
+                error = why;
+                return needs;
+            }
+            spec.response_headers = rules;
+        }
+    }
     // The login paths (2026-10-02): given whole, each a plain URL path (check_login_path), at
     // most 16, [] clears them. They change no location: the fail2ban jail counts attempts there.
     if (has_key(body, "login_paths")) {
@@ -1070,6 +1108,8 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
         if (spec.hsts) out += "hsts = true   # Strict-Transport-Security on every HTTPS answer, a year (docs/redirects.md 4)\n";
         else if (spec.hsts_decided) out += "hsts = false   # decided off: health no longer suggests it (docs/redirects.md 4.2)\n";
     }
+    if (spec.response_headers_baseline && !*spec.response_headers_baseline)
+        out += "response_headers_baseline = false   # the preset's baseline of response fields off (docs/headers.md 4)\n";
     rules_locations(out);
     // Path redirects as the site file's own tables; their keys are the reference's (load_redirect_rules
     // refused any other), their values strings or numbers.
@@ -1077,6 +1117,29 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
         out += "\n[[site.redirect]]\n";
         for (const auto& [k, v] : r.members())
             out += k + " = " + (v.is_string() ? toml_string(v.str()) : std::to_string(static_cast<long long>(v.num()))) + "\n";
+    }
+    // Response headers as the site file's own tables, in the reference's key order; load_response_header_rules
+    // refused any other key and every value it could not hold (a line break, a $, a field the server owns),
+    // and toml_string escapes the quotes and backslashes a printable value may have.
+    for (const auto& r : spec.response_headers.items()) {
+        out += "\n[[site.response_headers]]\n";
+        for (const char* k : {"path", "match", "when"})
+            if (r[k].is_string()) out += std::string(k) + " = " + toml_string(r[k].str()) + "\n";
+        auto list = [&](const json::Value& l) {
+            std::vector<std::string> v;
+            for (const auto& e : l.items())
+                if (e.is_string()) v.push_back(e.str());
+            return toml_list(v);
+        };
+        if (r["endings"].is_array()) out += "endings = " + list(r["endings"]) + "\n";
+        for (const char* k : {"set", "default"}) {
+            if (!r[k].is_object()) continue;
+            std::string fields;
+            for (const auto& [name, value] : r[k].members())
+                if (value.is_string()) fields += (fields.empty() ? " " : ", ") + toml_string(name) + " = " + toml_string(value.str());
+            out += std::string(k) + " = {" + fields + " }\n";
+        }
+        if (r["remove"].is_array()) out += "remove = " + list(r["remove"]) + "\n";
     }
     return out;
 }

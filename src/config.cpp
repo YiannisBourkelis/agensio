@@ -1658,14 +1658,14 @@ void check_header_endings(const SiteConfig& site, const std::string& where) {
 // with app without asking, as rules at "/" below every written one: Referrer-Policy where the answer
 // has none, nosniff on agensio's own answers (the files and error pages it serves; never an
 // application's, where a script sent with the wrong type would stop working), X-Powered-By removed;
-// on a static site (and one without app given security_headers = true) no-cache on the HTML files it
+// on a static site (and one without app given response_headers_baseline = true) no-cache on the HTML files it
 // serves, so a deploy shows at once. A written rule naming one of these fields decides instead. Run
 // once the written rules are parsed and checked, and again by path_check's preview, which parses
 // proposed ones anew.
 void add_security_baseline(SiteConfig& site, const std::string& where) {
     ResponseRules& rr = site.response_headers;
     const bool had = std::erase_if(rr.rules, [](const HeaderRule& r) { return r.baseline; }) > 0;
-    if (!site.security_headers.value_or(!site.app.empty())) {
+    if (!site.response_headers_baseline.value_or(!site.app.empty())) {
         if (had) build_response_headers(site, where);
         return;
     }
@@ -1696,7 +1696,7 @@ void add_security_baseline(SiteConfig& site, const std::string& where) {
     for (const HeaderRule& r : add) note(r);
     if (names.size() > 64)
         fail(where + ": the response_headers rules name " + std::to_string(written) + " fields and the security baseline " +
-             std::to_string(names.size() - written) + " more, at most 64 together; name fewer, or turn the baseline off with security_headers = false");
+             std::to_string(names.size() - written) + " more, at most 64 together; name fewer, or turn the baseline off with response_headers_baseline = false");
     for (HeaderRule& r : add) {
         r.path = "/";
         r.baseline = true;
@@ -2334,10 +2334,10 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     if (t.contains("refuse")) parse_refuse(t["refuse"], site, where);
     if (t.contains("auth")) parse_auth(t["auth"], cfg, site, base_dir, where);
     if (t.contains("response_headers")) parse_response_headers(t["response_headers"], site, where);
-    if (t.contains("security_headers")) {
-        const auto on = t["security_headers"].value<bool>();
-        if (!on) fail(where + ".security_headers must be true or false (the preset's security baseline, docs/headers.md 4)");
-        site.security_headers = *on;
+    if (t.contains("response_headers_baseline")) {
+        const auto on = t["response_headers_baseline"].value<bool>();
+        if (!on) fail(where + ".response_headers_baseline must be true or false (the preset's security baseline, docs/headers.md 4)");
+        site.response_headers_baseline = *on;
     }
     // Root additions for this site: parsed as hand-written locations after the file's own, so
     // they win over the preset's at their path and a headers-only one joins like any other;
@@ -2656,7 +2656,7 @@ void explain_config(const Config& cfg, std::ostream& out) {
             out << "http = \"" << http_mode(site) << "\"" << (site.http_given ? "" : "  # the default") << "\n";
         }
         if (!site.canonical.empty()) out << "canonical = \"" << site.canonical << "\"\n";
-        if (site.security_headers) out << "security_headers = " << (*site.security_headers ? "true" : "false") << "\n";
+        if (site.response_headers_baseline) out << "response_headers_baseline = " << (*site.response_headers_baseline ? "true" : "false") << "\n";
         if (!site.user.empty()) out << "user = \"" << site.user << "\"\n";
         if (!site.group.empty()) out << "group = \"" << site.group << "\"\n";
         if (site.php.configured) print_fcgi(out, "php", site.php);
@@ -2705,7 +2705,7 @@ void explain_config(const Config& cfg, std::ostream& out) {
         const auto& hr = site.response_headers.rules;
         if (std::any_of(hr.begin(), hr.end(), [](const HeaderRule& r) { return r.baseline; }))
             out << "\n# security baseline ("
-                << (site.app.empty() ? std::string("security_headers = true, a static site's") : "app = \"" + site.app + "\"; security_headers = false turns it off")
+                << (site.app.empty() ? std::string("response_headers_baseline = true, a static site's") : "app = \"" + site.app + "\"; response_headers_baseline = false turns it off")
                 << "): Referrer-Policy: strict-origin-when-cross-origin where the answer has none, X-Content-Type-Options: nosniff on the files and "
                    "error pages agensio serves, X-Powered-By removed"
                 << (site.app.empty() || site.app == "static" ? ", Cache-Control: no-cache on the HTML files it serves" : "")

@@ -2,6 +2,29 @@
 
 ## 0.1.0-alpha.94
 
+- **Response headers on managed sites** (`docs/headers.md` 6, step 4 of its section 12; asked for by the
+  test host: a managed WordPress site graded D on securityheaders.com, and neither `site_update`, its
+  root additions file nor a hand edit could carry `[[site.response_headers]]`). `site_create` and
+  `site_update` take `response_headers`, the rules as objects (`path`, `match`, `when`, `endings`, `set`,
+  `default`, `remove`), sent whole (`[]` or `null` clears them), judged by the load's own parse and
+  checks (`load_response_header_rules`, as `path_check`'s preview is) on the site's app, and
+  `response_headers_baseline` (`false` off, `true` or `null` back to the default); the managed file
+  carries them as `[[site.response_headers]]` tables (keys and values through `toml_string`, so a
+  value's quotes and backslashes load back as written) and `response_headers_baseline = false`;
+  `site_show` lists the written rules in the form `site_update` takes with the baseline's state; the
+  change's answer carries `response_header_notes`. `agensio ctl site-update`: `--response-header "PATH
+  set|default NAME=VALUE"`, `--response-header-remove "PATH NAME"`, `--response-headers-file F.json` (for
+  `match`, `when`, `endings`), `--no-response-headers`, `--no-response-headers-baseline`,
+  `--response-headers-baseline`; the flags of one command make the whole list, one prefix rule per path,
+  as `--redirect` does. `path_check` on a page lists `response_headers_offer`: the fields of headers.md
+  4.1 nothing the site decides sends there (a frame field, a CSP, `Permissions-Policy`, `nosniff` on an
+  application's answer, HSTS on a TLS site without `hsts`), each with what it could break. The MCP
+  texts carry section 6: what to offer one at a time and what each breaks, what other servers do
+  differently (the most specific rule decides; `set` replaces; `default` for a CSP; lifetimes need
+  `when = "success"`), preview with `path_check` before and confirm after; the server instructions'
+  map names response headers under `site_create` and `site_update`. The reference rows name the
+  managed fields; `docs/headers.md` is installed with the guides; the cookbook's header recipes show
+  the managed way.
 - **The security baseline: a site with `app` sends what cannot break a page, without a rule**
   (`docs/headers.md` 4, step 3 of its section 12; `docs/configuration.md` 14c). `Referrer-Policy:
   strict-origin-when-cross-origin` on every answer that has none (an application's own wins),
@@ -13,7 +36,8 @@
   included, so a `[[site.response_headers]]` rule naming one of the fields decides; `nosniff` and
   `no-cache` are `default`s, so a location's `add_headers` copy stands (a cached directory's own
   lifetime), and `nosniff` is marked for agensio's own answers (`FieldDecision::own_only`), which the
-  upstream loop leaves as the application sent them. The site key `security_headers` (`false` turns it
+  upstream loop leaves as the application sent them. The site key `response_headers_baseline` (first named
+  `security_headers`, which did not say whether it covers requests or responses; renamed before the release; `false` turns it
   off, `true` gives a site without `app` the static site's); a site without `app`, the benchmark
   templates among them, gets none. Together with a site's rules it names at most 64 fields. `-t
   --explain` says it in a comment; `path_check` names it as each field's source (`(baseline

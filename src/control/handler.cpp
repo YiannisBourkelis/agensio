@@ -285,11 +285,7 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
         if (previewing && error.empty()) {
             v.set("preview", true);
             if (!preview.redirect_notes.empty()) v.set("redirect_notes", control::redirect_notes_json(preview));
-            if (!preview.header_notes.empty()) {
-                json::Value notes = json::Value::array();
-                for (const auto& [code, text] : preview.header_notes) notes.push(json::Value::object().set("code", code).set("text", text));
-                v.set("response_header_notes", std::move(notes));
-            }
+            if (!preview.header_notes.empty()) v.set("response_header_notes", control::header_notes_json(preview));
         }
         if (!error.empty()) reply(s, 400, json::Value::object().set("error", error));
         else reply(s, 200, v);
@@ -468,6 +464,10 @@ json::Value strings(const std::vector<std::string>& v) {
 void add_redirect_notes(json::Value& answer, const Config& running, std::string_view domain) {
     if (const SiteConfig* site = control::find_site(running, domain); site && !site->redirect_notes.empty())
         answer.set("redirect_notes", control::redirect_notes_json(*site));
+    // Its response header rules likewise (docs/headers.md 7, alpha.94): a CSP set over an application's
+    // own, X-XSS-Protection turned on.
+    if (const SiteConfig* site = control::find_site(running, domain); site && !site->header_notes.empty())
+        answer.set("response_header_notes", control::header_notes_json(*site));
 }
 
 json::Value problems_json(const std::vector<control::Problem>& problems) {

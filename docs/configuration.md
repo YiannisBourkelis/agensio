@@ -2219,7 +2219,7 @@ without a rule, only what cannot break a page that works today:
 [[site]]
 server_name = ["shop.example.com"]
 app = "wordpress"
-security_headers = false    # the baseline off; true gives a site without app the static site's
+response_headers_baseline = false    # the baseline off; true gives a site without app the static site's
 ```
 
 A rule naming one of these fields decides instead, at any path, `/` included, and its `endings`
@@ -2243,10 +2243,28 @@ its ending; for an application's answer those of a successful one and, where the
 other status. With proposed rules (MCP `path_check` `response_headers`, the rules as objects) it
 answers as if they replaced the site's, checked as the load would, and changes nothing.
 
-**On a managed site** the rules are not a `site_update` field yet (a later step of headers.md); a
-hand-written site file carries them. `hsts` stays its own key ([redirects.md](redirects.md) 4), and
-a location's `add_headers` keeps adding its fields to that location's successful answers; a rule's
-`set` and `remove` act on those too.
+**On a managed site** (0.1.0-alpha.94, [headers.md](headers.md) 6): `site_create` and `site_update`
+(MCP, the control API) take `response_headers`, the rules as objects with the keys above, sent whole
+(`[]` clears them), judged by the load's own parse and checks, and `response_headers_baseline`
+(`false` turns the baseline off, `true` or `null` back on); the managed file carries them as
+`[[site.response_headers]]` tables, `site_show` lists them in the same form, and the change's answer
+carries `response_header_notes`. `agensio ctl site-update NAME`:
+
+```sh
+agensio ctl site-update example.com --response-header "/ set X-Frame-Options=SAMEORIGIN" \
+    --response-header "/ default Content-Security-Policy-Report-Only=default-src 'self'" \
+    --response-header-remove "/embed/ X-Frame-Options" --yes --reason "security headers"
+agensio ctl site-update example.com --response-headers-file rules.json --yes   # match, when, endings
+agensio ctl site-update example.com --no-response-headers --yes                # the rules removed
+agensio ctl site-update example.com --no-response-headers-baseline --yes       # the baseline off
+```
+
+The flags of one command make the whole list (the flags naming one path one prefix rule, then the
+file's rules), as `--redirect` does; `agensio ctl site NAME` shows the list in the file's JSON form.
+`path_check` on a page also lists `response_headers_offer`: the fields of headers.md 4.1 nothing the
+site decides sends there, each with what it could break, for the agent to offer one at a time. `hsts`
+stays its own key ([redirects.md](redirects.md) 4), and a location's `add_headers` keeps adding its
+fields to that location's successful answers; a rule's `set` and `remove` act on those too.
 
 ## 15. Control socket
 

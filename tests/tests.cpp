@@ -6077,7 +6077,7 @@ static void test_response_headers() {
 // byte by byte for the design's examples, the most specific rule, and the load's refusals and notes.
 // The security baseline (docs/headers.md 4, alpha.94): what a site with app gets without asking,
 // below every rule written at its path; nosniff on agensio's own answers only; on app = "static"
-// no-cache on the HTML it serves; security_headers turns it off, or on for a site without app.
+// no-cache on the HTML it serves; response_headers_baseline turns it off, or on for a site without app.
 static void test_security_baseline() {
     namespace fs = std::filesystem;
     using Verb = FieldDecision::Verb;
@@ -6143,7 +6143,7 @@ static void test_security_baseline() {
               texts.find("cache-control: no-cache unless the answer has its own (baseline static, success only, .html, .htm files) | ") != std::string::npos);
         std::ostringstream ex;
         explain_config(c, ex);
-        CHECK(ex.str().find("# security baseline (app = \"static\"; security_headers = false turns it off): Referrer-Policy") != std::string::npos &&
+        CHECK(ex.str().find("# security baseline (app = \"static\"; response_headers_baseline = false turns it off): Referrer-Policy") != std::string::npos &&
               ex.str().find("\n[[site.response_headers]]\n") == std::string::npos);  // a comment, never a table a reload would see twice
         // path_check's preview of proposed rules keeps the baseline beneath them.
         SiteConfig copy = c.sites[0];
@@ -6164,19 +6164,19 @@ static void test_security_baseline() {
               texts.find("x-content-type-options") == std::string::npos);  // not on PHP's answer
         fs::remove(dir / "www" / "index.php");
     }
-    // security_headers: off on a preset, on (the static baseline) without app; none without app.
-    CHECK(load("app = \"static\"\nsecurity_headers = false\n").sites[0].response_headers.empty());
+    // response_headers_baseline: off on a preset, on (the static baseline) without app; none without app.
+    CHECK(load("app = \"static\"\nresponse_headers_baseline = false\n").sites[0].response_headers.empty());
     CHECK(load("").sites[0].response_headers.empty());
     {
-        const Config c = load("security_headers = true\n");
+        const Config c = load("response_headers_baseline = true\n");
         CHECK(c.sites[0].response_headers.lookup("/") && c.sites[0].response_headers.endings);
     }
     {
         bool refused = false;
         try {
-            load("security_headers = \"yes\"\n");
+            load("response_headers_baseline = \"yes\"\n");
         } catch (const std::exception& e) {
-            refused = std::string_view(e.what()).find("security_headers must be true or false") != std::string_view::npos;
+            refused = std::string_view(e.what()).find("response_headers_baseline must be true or false") != std::string_view::npos;
         }
         CHECK(refused);
     }
@@ -6208,7 +6208,7 @@ static void test_security_baseline() {
         try {
             load("app = \"static\"\n", many(61));
         } catch (const std::exception& e) {
-            refused = std::string_view(e.what()).find("security_headers = false") != std::string_view::npos;
+            refused = std::string_view(e.what()).find("response_headers_baseline = false") != std::string_view::npos;
         }
         CHECK(refused);
     }
@@ -6221,6 +6221,92 @@ static void test_security_baseline() {
         CHECK(control::render_site(spec, "x").find("\napp = \"static\"\n") != std::string::npos);
         spec.app = "static";
         CHECK(control::render_site(spec, "x").find("\napp = \"static\"\n") != std::string::npos);
+    }
+    fs::remove_all(dir);
+}
+
+// Response headers on managed sites (docs/headers.md 6, alpha.94): site_create and site_update take
+// the rules whole, judged by the loader's own parse and checks; the managed file carries them as
+// tables that load back to the same rules, quotes and backslashes included; response_headers_baseline turns
+// the baseline off; site_show shows them; path_check names what the site does not send, to offer.
+static void test_managed_response_headers() {
+    namespace fs = std::filesystem;
+    using control::SiteSpec;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-mhdr-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "web");
+    std::ofstream(dir / "web" / "index.html") << "<p>hi</p>";
+    Config cfg;
+    cfg.config_path = dir / "agensio.toml";
+    SiteSpec spec;
+    spec.domain = "m.test";
+    spec.https = "none";
+    spec.app = "static";
+    spec.root = (dir / "web").string();
+    spec.no_user = true;
+    spec.user_decided = true;
+    spec.listen_plain = "127.0.0.1:18751";
+    json::Value body;
+    std::string err;
+    CHECK(json::parse(R"J({"response_headers": [
+        {"path": "/", "set": {"X-Frame-Options": "SAMEORIGIN", "Permissions-Policy": "camera=(), geolocation=()"}, "remove": ["X-Powered-By"]},
+        {"path": "/embed/", "remove": ["X-Frame-Options"]},
+        {"path": "/assets/", "when": "success", "set": {"Cache-Control": "public, max-age=31536000, immutable"}},
+        {"path": "/", "endings": ["svg"], "set": {"Content-Security-Policy": "script-src 'none'; style-src \"x\\y\""}},
+        {"path": "/p", "match": "exact", "default": {"X-Robots-Tag": "noindex"}}],
+        "response_headers_baseline": false})J", body, err));
+    CHECK(control::apply_request(body, cfg, spec, err).empty() && err.empty());
+    CHECK(spec.response_headers.items().size() == 5 && spec.response_headers_baseline == std::optional<bool>(false));
+    // The spec's JSON (the managed file's first line) keeps both.
+    {
+        SiteSpec back;
+        CHECK(SiteSpec::from_json(spec.to_json(), back) && back.response_headers.dump() == spec.response_headers.dump() && back.response_headers_baseline == std::optional<bool>(false));
+    }
+    // Rendered as the site file's own tables, which load back to the same rules.
+    const std::string text = control::render_site(spec, "x");
+    CHECK(text.find("\n[[site.response_headers]]\npath = \"/\"\n") != std::string::npos && text.find("\nresponse_headers_baseline = false") != std::string::npos &&
+          text.find("match = \"exact\"\n") != std::string::npos && text.find("when = \"success\"\n") != std::string::npos &&
+          text.find("endings = [\"svg\"]\n") != std::string::npos);
+    std::ofstream(dir / "m.toml") << text;
+    {
+        const Config c = load_config(dir / "m.toml");
+        const SiteConfig& s = c.sites.at(0);
+        std::size_t written = 0;
+        for (const auto& r : s.response_headers.rules) written += r.baseline ? 0 : 1;
+        CHECK(written == 5 && !s.response_headers_baseline.value_or(true));
+        const HeaderNode* svg_node = s.response_headers.lookup("/logo.svg");
+        const EndingSets* svg = svg_node ? response_rules::ending_sets(*svg_node, "logo.svg") : nullptr;
+        bool csp = false;
+        if (svg)
+            for (const auto& f : svg->success.fields) csp = csp || (f.name == "Content-Security-Policy" && f.value == "script-src 'none'; style-src \"x\\y\"");
+        CHECK(csp);  // the value's quotes and backslash survived the file
+        // site_show: the rules as written, in the form site_update takes, and the baseline's state.
+        const json::Value shown = control::site(c, s, std::time(nullptr));
+        CHECK(shown["response_headers"].items().size() == 5 && shown["response_headers"].items()[0].get("path") == "/" &&
+              shown["response_headers_baseline"].type() == json::Value::Type::boolean && !shown["response_headers_baseline"].boolean());
+        // path_check: the fields of docs/headers.md 4.1 no rule decides here, each with what it could break.
+        std::string error;
+        const json::Value pc = control::path_check(c, s, "/", error);
+        std::string offered;
+        for (const auto& o : pc["response_headers_offer"].items()) offered += std::string(o.get("field")) + (o.get("breaks").empty() ? "(no reason)" : "") + " ";
+        CHECK(error.empty() && offered.find("Content-Security-Policy ") != std::string::npos && offered.find("X-Frame-Options") == std::string::npos &&
+              offered.find("Permissions-Policy") == std::string::npos && offered.find("(no reason)") == std::string::npos);
+    }
+    // A rule the loader refuses is refused here with its reason; [] clears, null goes back to the default.
+    {
+        SiteSpec bad = spec;
+        CHECK(json::parse(R"J({"response_headers": [{"path": "/", "set": {"Location": "/x"}}]})J", body, err));
+        err.clear();
+        control::apply_request(body, cfg, bad, err);
+        CHECK(err.find("[[site.redirect]]") != std::string::npos && bad.response_headers.dump() == spec.response_headers.dump());
+        CHECK(json::parse(R"J({"response_headers": [{"path": "/", "set": {"X-A": "a\nb"}}]})J", body, err));
+        err.clear();
+        control::apply_request(body, cfg, bad, err);
+        CHECK(err.find("control character") != std::string::npos);
+        CHECK(json::parse(R"J({"response_headers": [], "response_headers_baseline": null})J", body, err));
+        err.clear();
+        CHECK(control::apply_request(body, cfg, bad, err).empty() && err.empty() && bad.response_headers.items().empty() && !bad.response_headers_baseline);
+        const std::string plain = control::render_site(bad, "x");
+        CHECK(plain.find("[[site.response_headers]]") == std::string::npos && plain.find("response_headers_baseline") == std::string::npos);
     }
     fs::remove_all(dir);
 }
@@ -8742,8 +8828,7 @@ static void test_packaged_docs() {
     CHECK(at != std::string::npos);
     const std::string list = cmake.substr(at, cmake.find(')', at) - at);
     const std::set<std::string> developers = {"CODE_STYLE.md", "ROADMAP.md", "legacy-analysis.md", "linux-dev-setup.md",
-                                              "web-server-feedback.md", "security-audit-2026-10-07.md", "third-party-bugs.md",
-                                              "headers.md"};  // a proposal until the feature is built; then installed
+                                              "web-server-feedback.md", "security-audit-2026-10-07.md", "third-party-bugs.md"};
     std::size_t guides = 0;
     for (const auto& e : fs::directory_iterator(fs::path(AGENSIO_SOURCE_DIR) / "docs")) {
         const std::string name = e.path().filename().string();
@@ -9846,6 +9931,7 @@ int main() {
     test_redirect_rules();
     test_response_headers();
     test_security_baseline();
+    test_managed_response_headers();
     test_site_isolation();
     test_served_record();
     test_hosting_isolation();

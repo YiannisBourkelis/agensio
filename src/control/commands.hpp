@@ -84,6 +84,9 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now, const 
 // answering before a protection, one over certificate validation) as {code, text} objects: site_show,
 // path_check's preview and the answer of the change that made them give the same list.
 json::Value redirect_notes_json(const SiteConfig& s);
+// What the load noted about a site's response header rules (a CSP set over an application's own,
+// X-XSS-Protection turned on), as {code, text}: site_show, path_check's preview and the change's answer.
+json::Value header_notes_json(const SiteConfig& s);
 // Access by client address (docs/configuration.md 19): what the site's rules decide for one
 // path and one client address, with the deciding rule and a one-line summary. `error` set
 // (and nothing answered) when the path or the address does not parse.

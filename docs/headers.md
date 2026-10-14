@@ -1,9 +1,10 @@
 # Response headers: `[[site.response_headers]]` and the security baseline
 
-> **Status: being built.** `hsts` (section 5) since 0.1.0-alpha.75; `[[site.response_headers]]`
-> (section 2) since 0.1.0-alpha.89, its `endings` since alpha.90, `path_check`'s fields and preview
-> (section 7) since alpha.92, the baseline per preset and `security_headers` (section 4) since
-> alpha.94; the agent's side (section 6) is the next step of section 12.
+> **Status: built.** `hsts` (section 5) since 0.1.0-alpha.75; `[[site.response_headers]]` (section
+> 2) since 0.1.0-alpha.89, its `endings` since alpha.90, `path_check`'s fields and preview (section 7)
+> since alpha.92; the baseline per preset and `response_headers_baseline` (section 4), the managed
+> sites' fields, `agensio ctl`'s flags and `path_check`'s `response_headers_offer` (sections 6 and 7)
+> since alpha.94. Health's checks of section 7 ("later") and section 11.3 are not built.
 > The rest is the design, written as the guide it will become. It is the companion of `docs/redirects.md`, whose
 > `hsts` setting uses the mechanism described here. The research behind it is
 > `reports/Web server headers and redirects.md` (nine servers, the panels, the administrators'
@@ -21,7 +22,7 @@ change them:
 
 | setting | decides | default |
 |---|---|---|
-| the preset's baseline | what is safe without asking: `Referrer-Policy` where the application sent none, `nosniff` on the files and error pages agensio serves, the framework's `X-Powered-By` removed; on a static site, `no-cache` on its HTML (section 4) | on for a site with `app`; `security_headers = false` turns it off |
+| the preset's baseline | what is safe without asking: `Referrer-Policy` where the application sent none, `nosniff` on the files and error pages agensio serves, the framework's `X-Powered-By` removed; on a static site, `no-cache` on its HTML (section 4) | on for a site with `app`; `response_headers_baseline = false` turns it off |
 | `hsts` | `Strict-Transport-Security` on every HTTPS answer (`docs/redirects.md` 4) | off |
 | `[[site.response_headers]]` | fields the administrator sets, defaults or removes, by path | none |
 
@@ -179,7 +180,7 @@ against pages, and Chrome, Edge and Firefox have none).
 
 ### 3.1 Security fields on a hand-written site
 
-A site without `app` gets no baseline (`security_headers = true` gives it the `static` preset's).
+A site without `app` gets no baseline (`response_headers_baseline = true` gives it the `static` preset's).
 The usual three by hand, on a site whose pages no other site embeds and whose application serves
 every script with its right type, with the application's own values winning where it sends them:
 
@@ -359,7 +360,7 @@ What each application sends itself was read in its 2026 releases' source
 | `static` | (agensio answers everything) | `Referrer-Policy` and `nosniff` on every answer; `Cache-Control: no-cache` on HTML files | a frame field and a CSP, both safe to try on a site agensio serves alone |
 
 A `[[site.response_headers]]` rule overrides the baseline field by field (a `set` of another value,
-a `remove`), and `security_headers = false` turns the whole baseline off; `path_check` names the
+a `remove`), and `response_headers_baseline = false` turns the whole baseline off; `path_check` names the
 baseline as the source of each field it adds.
 
 ## 5. HSTS through the same path
@@ -377,13 +378,18 @@ application's value once per site and health reports `hsts_narrows_application`.
 
 ## 6. Managed sites and the agent
 
-- `site_create` and `site_update` take `security_headers: false` (the baseline off) and
-  `response_headers`, a list of rules with the fields of section 2.1, sent whole like `rules` (the
-  list replaces the site's; `[]` clears it). They are rendered as `[[site.response_headers]]` in the
-  managed file.
-- `agensio ctl site-update NAME --response-header PATH set|default NAME=VALUE`,
-  `--response-header-remove PATH NAME`, `--no-response-headers`, `--no-security-headers`; each flag
-  given alone keeps the site's other rules.
+- `site_create` and `site_update` take `response_headers_baseline: false` (the baseline off; `true`
+  or `null` back on) and `response_headers`, a list of rules with the fields of section 2.1, sent
+  whole like `redirects` (the list replaces the site's; `[]` clears it), judged by the load's own
+  parse and checks (`load_response_header_rules`, as `path_check`'s preview is). They are rendered as
+  `[[site.response_headers]]` in the managed file; `site_show` lists them in the same form, and the
+  change's answer carries `response_header_notes`. (The key was first named `security_headers`, which
+  did not say which direction it covers; renamed before release.)
+- `agensio ctl site-update NAME --response-header "PATH set|default NAME=VALUE"` (the value may hold
+  spaces), `--response-header-remove "PATH NAME"`, `--response-headers-file FILE` (a JSON list, for
+  `match`, `when` and `endings`), `--no-response-headers`, `--no-response-headers-baseline` and
+  `--response-headers-baseline`; the flags of one command make the whole list, the flags naming one
+  path one prefix rule, as `--redirect` does; the site's other settings are kept.
 - **The fields the baseline leaves out are offered, not applied.** After `site_install`, and when the
   user asks about security headers or a scanner's grade, the agent goes through them one at a time
   with what each would break (section 4.1): a frame field only after asking whether any other site
@@ -477,7 +483,7 @@ lookup, one test of an empty pointer where the answer leaves, measured flat. Wit
    answers has the same record with scripts of the wrong type. Both are offered by the agent
    instead, after asking (section 6).
 3. **Sites without `app` get no baseline**: hand-written minimal sites and the benchmark templates
-   stay as they are; `security_headers = true` gives such a site the `static` preset's baseline.
+   stay as they are; `response_headers_baseline = true` gives such a site the `static` preset's baseline.
 4. **`X-Powered-By`**: removed by the baseline from the application's answers; PHP's own is already
    off in the pools agensio writes. `X-Generator` (Drupal) stays unless a rule removes it: it names
    the application, which a scanner learns from the pages anyway.
@@ -564,7 +570,7 @@ where the request path changes.
    checks the resolution against a brute-force reading of the rules (for random rule sets and paths,
    every field's decision equals the most specific rule naming it), and the HTTP/1, HTTP/2 and
    HTTP/3 heads of one answer are compared field by field.
-3. **The baseline per preset** (with `no-cache` on a static site's HTML) and `security_headers`,
+3. **The baseline per preset** (with `no-cache` on a static site's HTML) and `response_headers_baseline`,
    with the fixture sites of the integration suite checked for the fields and for an application's
    own value winning (built in alpha.94: the baseline is rules at `/` marked as the baseline's, below
    every written rule at their path, its `endings` rule included, so a written rule naming a field
@@ -573,4 +579,7 @@ where the request path changes.
    static site's file names `app = "static"`, which the renderer left out before; the baseline and
    the site's rules name at most 64 fields together).
 4. **The agent's side**: `site_update` fields, `agensio ctl` flags, the MCP texts of section 6, the
-   reference rows, the cookbook recipes linking here; this document installed with the others.
+   reference rows, the cookbook recipes linking here; this document installed with the others (built
+   in alpha.94, asked for by the test host: a managed WordPress site graded D on securityheaders.com
+   and had no way to carry rules; `path_check`'s `response_headers_offer` lists, for a page, the
+   fields of 4.1 nothing the site decides sends there, each with what it could break).
