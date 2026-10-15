@@ -8,6 +8,7 @@
 #include "handlers/static.hpp"
 #include "core/strings.hpp"
 
+#include "control/protection.hpp"
 #include "control/settings.hpp"
 #include "control/sites.hpp"
 
@@ -1687,6 +1688,37 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
     if (!lines.empty())
         add("warn", "recent_errors", "", std::to_string(lines.size()) + (truncated ? "+" : "") + " error(s) in the last 24 hours; last: " + lines.back().text,
             "agensio ctl logs --since 24h --level error");
+    // The files root loads or runs that agensio renders (the alpha.94 report): the fail2ban jail, the
+    // firewall ruleset and its unit, the sites' application units, the generated php-fpm pools.
+    {
+        std::vector<std::string> files{std::string(kJailFile), protection_input(running).firewall_file, "/etc/systemd/system/" + std::string(kFirewallUnit)};
+        for (const auto& s : running.sites)
+            if (!s.user.empty() && service_app(s.app)) files.push_back("/etc/systemd/system/agensio-app-" + s.user + ".service");
+        if (const fs::path dir = pools_dir(running, ""); !dir.empty())
+            for (const auto& s : running.sites)
+                if (s.pool.generated) files.push_back((dir / (s.pool.name + ".conf")).string());
+        std::sort(files.begin(), files.end());
+        files.erase(std::unique(files.begin(), files.end()), files.end());
+        for (auto& f : root_file_findings(files, system_facts())) out.push_back(std::move(f));
+    }
+    return out;
+}
+
+std::vector<Finding> root_file_findings(const std::vector<std::string>& files, const HostFacts& facts) {
+    std::vector<Finding> out;
+    for (const auto& f : files) {
+        FileFacts st;
+        if (!facts.stat || !facts.stat(f, st) || st.is_dir || (st.mode & 022) == 0) continue;
+        char mode[8] = {};
+        std::snprintf(mode, sizeof mode, "%04o", st.mode & 07777);
+        const bool anyone = (st.mode & 002) != 0;
+        std::string group = facts.group_name ? facts.group_name(st.gid) : std::string();
+        if (group.empty()) group = "gid " + std::to_string(st.gid);
+        out.push_back(Finding{anyone ? "error" : "warn", "root_file_writable", "",
+                              f + " is " + mode + ": root loads or runs it, so " + (anyone ? std::string("anyone on the host") : "any member of group " + group) +
+                                  " can change what root does (a shell's `>` gives the file root's umask; agensio writes it 0644 with --out)",
+                              "as root: chmod go-w " + f});
+    }
     return out;
 }
 

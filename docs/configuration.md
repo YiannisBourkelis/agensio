@@ -626,7 +626,7 @@ directory, the loopback port of its `upstream`, the Ruby of `[control] runtimes`
 file. Root puts it in place:
 
 ```sh
-agensio ctl site-unit ag7.example.com --raw > /etc/systemd/system/agensio-app-ag7.service
+agensio ctl site-unit ag7.example.com --out /etc/systemd/system/agensio-app-ag7.service
 systemctl daemon-reload && systemctl enable --now agensio-app-ag7.service
 ```
 
@@ -683,7 +683,7 @@ agensio ctl site-env-set pm.example.com --set DATABASE_URL=sqlite3:db/production
 for t in database_config gemfile_local bundle_install db_migrate; do agensio ctl site-task pm.example.com $t --yes --reason redmine; done
 agensio ctl site-task pm.example.com load_default_data --param lang=en --yes --reason redmine
 agensio ctl site-task pm.example.com assets_precompile --yes --reason redmine
-agensio ctl site-unit pm.example.com --raw > /etc/systemd/system/agensio-app-pm.service   # as root, then enable it
+agensio ctl site-unit pm.example.com --out /etc/systemd/system/agensio-app-pm.service   # as root, then enable it
 ```
 
 ## 4e. Django and Wagtail: `app = "django"`, `app = "wagtail"`
@@ -823,7 +823,7 @@ for t in startproject pip_install_requirements; do agensio ctl site-task ag8.exa
 agensio ctl site-env-set ag8.example.com --generate DJANGO_SECRET_KEY --generate DJANGO_SUPERUSER_PASSWORD --yes --reason wagtail
 for t in django_settings migrate collectstatic; do agensio ctl site-task ag8.example.com $t --yes --reason wagtail; done
 agensio ctl site-task ag8.example.com createsuperuser --param username=admin --param email=admin@example.com --yes --reason wagtail
-agensio ctl site-unit ag8.example.com --raw > /etc/systemd/system/agensio-app-ag8.service   # as root, then enable it
+agensio ctl site-unit ag8.example.com --out /etc/systemd/system/agensio-app-ag8.service   # as root, then enable it
 ```
 
 ## 4f. Node.js: `app = "node"`
@@ -893,7 +893,7 @@ agensio ctl site-task ag9.example.com npm_ci --yes --reason kuma
 agensio ctl site-task ag9.example.com npm_run --param script=download-dist --yes --reason kuma
 agensio ctl site-env-set ag9.example.com --set DATA_DIR=/var/lib/agensio/ag9/data/ --set UPTIME_KUMA_DB_TYPE=sqlite --yes --reason kuma
 agensio ctl site-update ag9.example.com --entry server/server.js --yes --reason kuma
-agensio ctl site-unit ag9.example.com --raw > /etc/systemd/system/agensio-app-ag9.service   # as root, then enable it
+agensio ctl site-unit ag9.example.com --out /etc/systemd/system/agensio-app-ag9.service   # as root, then enable it
 ```
 
 Kuma, like WordPress's installer and Writebook's first run, creates its admin in the browser
@@ -2979,7 +2979,7 @@ harmless (it deletes and recreates its own table). Root applies it the way netwo
 does, commit-confirmed, so a mistake undoes itself:
 
 ```sh
-agensio ctl protection --nft > /etc/agensio/firewall.nft          # the ruleset for this host's ports
+agensio ctl protection --nft --out /etc/agensio/firewall.nft          # the ruleset for this host's ports
 nft -f /etc/agensio/firewall.nft                                     # in the kernel only; a reboot drops it
 systemd-run --on-active=10min --unit agensio-firewall-trial /usr/sbin/nft delete table inet agensio
 #   ... the site answers, this SSH session is alive, `agensio ctl protection` says covered ...
@@ -3012,9 +3012,22 @@ are static and shipped; the jail file carries what is the host's:
 
 ```sh
 install -m 644 /usr/share/agensio/fail2ban/filter.d/agensio-*.conf /etc/fail2ban/filter.d/
-agensio ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf     # this host's logs, ports, login paths
+agensio ctl protection --jail --out /etc/fail2ban/jail.d/agensio.conf     # this host's logs, ports, login paths
 fail2ban-client reload
 ```
+
+**Files root loads are written by agensio itself** (0.1.0-alpha.95): `--out FILE` on `agensio ctl
+protection --jail`, `--nft`, `--unit` and `--filter NAME`, on `agensio protection` (the render from the
+configuration alone) and on `agensio ctl site-unit NAME` writes the file whole, `0644` whatever root's
+umask, through a temporary file renamed into place. When the render fails (the server stopped, the
+socket unreachable, a refused call) the file is left as it was and the command exits non-zero, so the
+reload after it is not run when the steps are chained with `&&`. A shell's `>` did neither: the file took
+root's umask (`0664` under a umask of `0002`, writable by root's group, and root loads it), and the
+shell emptied it before `agensio` ran, so a failed render left an empty jail that `fail2ban-client
+reload` then loaded. Health's `root_file_writable` names the jail, the ruleset, the firewall unit, a
+site's application unit or a generated php-fpm pool that its group or anyone may write (a warning for
+the group, an error for anyone), with the `chmod go-w` that fixes it; `agensio pools` rewrites a pool
+file of a loose mode.
 
 The login paths come from two places. A preset knows its application's: `wordpress`
 `/wp-login.php` and `/xmlrpc.php` (one `system.multicall` tries hundreds of passwords; a

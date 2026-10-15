@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace agensio {
@@ -17,6 +18,14 @@ struct FileInfo {
 
 // stat() without opening. Returns false if the path does not exist or is inaccessible.
 bool stat_path(const char* path, FileInfo& out) noexcept;
+
+// A file root loads or runs (a fail2ban jail, an nftables ruleset, a systemd unit, a php-fpm pool)
+// written whole or not at all (the alpha.94 report): a temporary file beside `path`, created with
+// `mode` itself and never the caller's umask, its bytes flushed to disk, then renamed over `path`.
+// Readers see the old file or the new one, never an empty or half one, and an existing file of a
+// looser mode is replaced by one of `mode`. On any error the old file is untouched and nothing is
+// left behind. Returns "" or why.
+std::string write_file_atomic(const std::string& path, std::string_view text, unsigned mode = 0644);
 
 class File {
 public:

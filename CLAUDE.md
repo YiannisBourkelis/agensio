@@ -1256,7 +1256,11 @@ Each item was benchmarked before and after on the reduced matrix (`bench/run.sh 
    WordPress through the WP fail2ban plugin, Drupal through its Syslog module) is rendered
    enabled only when its filter and log exist, else with the user's steps; agensio installs
    no plugin and changes no application, it suggests (2026-10-03). `docs/fail2ban.md` is the
-   administrator's guide: the jails, what each application type gets, what to add.
+   administrator's guide: the jails, what each application type gets, what to add. Root's files (the jail, the ruleset, the firewall unit, the sites' units,
+   the generated pools) are written by agensio itself (`--out`, `write_file_atomic` in `file.cpp`:
+   whole, `0644` whatever the umask, untouched when a render fails; alpha.95, the alpha.94 report), the
+   steps root is given chain with `&&`, and health `root_file_writable` names a loose one. Rule: never
+   hand root a shell's `>` into a file root loads.
 
 7. **Every accepted socket is non-blocking at accept** (2026-10-04, after a live freeze):
    Asio 1.38 passes `MSG_DONTWAIT` to each of its own receive and send calls and never sets

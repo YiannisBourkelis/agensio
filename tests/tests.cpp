@@ -2333,7 +2333,7 @@ static void test_tasks() {
               text.find("Environment=PATH=/opt/ruby/bin:/usr/local/bin:/usr/bin:/bin\n") != std::string::npos &&
               text.find("ExecStart=/opt/ruby/bin/bundle exec puma -e production -b tcp://127.0.0.1:3000\n") != std::string::npos &&
               text.find("WorkingDirectory=" + rs.root + "\n") != std::string::npos && text.find("EnvironmentFile=-" + (dir / "env").string() + "/r.test.env\n") != std::string::npos &&
-              u["run_as_root"].items()[0].str() == "agensio ctl site-unit r.test --raw > /etc/systemd/system/agensio-app-r1.service");
+              u["run_as_root"].items()[0].str() == "agensio ctl site-unit r.test --out /etc/systemd/system/agensio-app-r1.service");
         SiteConfig nouser = rs;
         nouser.user.clear();
         CHECK(control::service_unit(nouser, cfg).get("error").find("no account of its own") != std::string_view::npos);
@@ -5204,7 +5204,7 @@ static void test_protection() {
               in.failure_jails[0].needs[0].find("WordPress admin panel") != std::string::npos && in.failure_jails[0].needs[0].find("agensio installs no plugin") != std::string::npos &&
               in.failure_jails[0].needs[1].find("https://downloads.wordpress.org/plugin/wp-fail2ban.latest-stable.zip") != std::string::npos &&
               in.failure_jails[0].needs[1].find("or read " + (dir / "www").string() + "/wp-content/plugins/wp-fail2ban/filters.d/wordpress-hard.conf") != std::string::npos &&
-              in.failure_jails[0].needs.back().find("agensio ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf; fail2ban-client reload") != std::string::npos);
+              in.failure_jails[0].needs.back().find("agensio ctl protection --jail --out /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload") != std::string::npos);
         {
             ProtectionInput fi = in;
             fi.failure_jails[0].filter_installed = false;
@@ -5491,7 +5491,7 @@ static void test_protection() {
               (firewall_keep_commands(in) == std::vector<std::string>{"systemctl stop agensio-firewall-trial.timer", "systemctl enable --now agensio-firewall.service"}));
         ProtectionInput odd = in;
         odd.firewall_file = "/srv/agensio/firewall.nft";
-        CHECK(firewall_keep_commands(odd).size() == 4 && firewall_keep_commands(odd)[1] == "agensio ctl protection --unit > /etc/systemd/system/agensio-firewall.service");
+        CHECK(firewall_keep_commands(odd).size() == 4 && firewall_keep_commands(odd)[1] == "agensio ctl protection --unit --out /etc/systemd/system/agensio-firewall.service");
         CHECK(fail2ban_install_commands().size() == 3 && fail2ban_install_commands()[0].find("filter.d/agensio-post.conf /usr/share/agensio/fail2ban/filter.d/agensio-denied.conf /etc/fail2ban/filter.d/") != std::string::npos);
     }
     // The helper's answer, read: nft's JSON (our table with counters, a foreign rule through a
@@ -5571,6 +5571,13 @@ static void test_protection() {
         const json::Value& jails = r["fail2ban"]["detected"]["jails"];
         CHECK(jails.items().size() == 2 && jails.items()[0]["files"].is_null() && jails.items()[0]["files_count"].num() == 1 && jails.items()[1]["files"].items().size() == 2);
         CHECK(r.get("summary") == "the firewall limits are loaded and enabled at boot; fail2ban reads the access logs (1 address(es) banned now, 3 since start)");
+        // The files root loads are written by agensio itself (--out, the alpha.94 report): never a shell's
+        // `>`, which takes root's umask and leaves the file empty (or holding an error) when the render
+        // fails; a step that loads one follows with &&.
+        const std::string all = r.dump();
+        CHECK(all.find(" > /") == std::string::npos && all.find("; fail2ban-client reload") == std::string::npos && all.find("; nft -f") == std::string::npos &&
+              all.find("agensio ctl protection --nft --out " + in.firewall_file) != std::string::npos &&
+              all.find("agensio ctl protection --jail --out /etc/fail2ban/jail.d/agensio.conf") != std::string::npos);
     }
     // The states, one by one.
     ProtectionFiles stale = files;
@@ -5585,13 +5592,13 @@ static void test_protection() {
         CHECK(codes(in, probe, oldf) == "warn:fail2ban_filter_stale" && f[0].message.starts_with("the installed filter(s) agensio-login in /etc/fail2ban/filter.d/ differ") &&
               f[0].fix == "as root: install -m 644 /usr/share/agensio/fail2ban/filter.d/agensio-login.conf /usr/share/agensio/fail2ban/filter.d/agensio-auth.conf "
                           "/usr/share/agensio/fail2ban/filter.d/agensio-scan.conf /usr/share/agensio/fail2ban/filter.d/agensio-post.conf "
-                          "/usr/share/agensio/fail2ban/filter.d/agensio-denied.conf /etc/fail2ban/filter.d/; fail2ban-client reload");
+                          "/usr/share/agensio/fail2ban/filter.d/agensio-denied.conf /etc/fail2ban/filter.d/ && fail2ban-client reload");
         const json::Value r = protection_report(in, probe, oldf);
         CHECK(r["fail2ban"]["installed_filters"].get("state") == "stale" && r["fail2ban"]["installed_filters"]["stale"].items().size() == 1 &&
               r.get("summary").find("the installed filter(s) agensio-login are older than the shipped text") != std::string_view::npos);
         oldf.installed_jail = "[agensio-login]\nenabled = true\n";
         const auto g = protection_findings(in, probe, oldf);
-        CHECK(codes(in, probe, oldf) == "warn:fail2ban_filter_stale info:fail2ban_jail_stale" && g[0].fix.find("; agensio ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf; fail2ban-client reload") != std::string::npos &&
+        CHECK(codes(in, probe, oldf) == "warn:fail2ban_filter_stale info:fail2ban_jail_stale" && g[0].fix.find(" && agensio ctl protection --jail --out /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload") != std::string::npos &&
               g[1].fix.starts_with("as root: install -m 644 "));
         ProtectionFiles none = files;
         none.installed_filters.clear();
@@ -5614,7 +5621,7 @@ static void test_protection() {
         {
             const auto f = protection_findings(ai, p0, af);
             CHECK(codes(ai, p0, af) == "warn:fail2ban_auth_unseen" && f[0].message.find("failed passwords on shop.test are not counted: no fail2ban jail reads the error log /var/log/agensio/error.log") != npos &&
-                  f[0].fix.find("; agensio ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf; fail2ban-client reload") != npos);
+                  f[0].fix.find(" && agensio ctl protection --jail --out /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload") != npos);
             const json::Value r = protection_report(ai, p0, af);
             CHECK(!r["auth"]["counted"].boolean() && r["auth"]["jail_enabled"].boolean() && r["auth"].get("error_log") == "/var/log/agensio/error.log" &&
                   r["auth"]["sites"].items().size() == 1 && r.get("summary").find("; failed passwords are not counted (no jail reads the error log)") != std::string_view::npos);
@@ -5677,10 +5684,10 @@ static void test_protection() {
         const auto f = protection_findings(in, none, files);
         CHECK(codes(in, none, files) == "warn:firewall_limits_missing warn:fail2ban_missing");
         CHECK(f[0].message.starts_with("no per-address limit on the web ports (80, 443) in the kernel's firewall") &&
-              f[0].fix.find("agensio ctl protection --nft > /etc/agensio/firewall.nft; nft -f /etc/agensio/firewall.nft; systemd-run --on-active=10min") != std::string::npos &&
+              f[0].fix.find("agensio ctl protection --nft --out /etc/agensio/firewall.nft && nft -f /etc/agensio/firewall.nft && systemd-run --on-active=10min") != std::string::npos &&
               f[0].fix.find("then keep it: systemctl stop agensio-firewall-trial.timer; systemctl enable --now agensio-firewall.service") != std::string::npos);
         CHECK(f[1].message.starts_with("no fail2ban jail reads agensio's access logs (/var/log/agensio/access.log, /var/log/agensio/wp.log)") && f[1].message.find("/login, /wp-login.php") != std::string::npos &&
-              f[1].fix.find("agensio ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf; fail2ban-client reload") != std::string::npos);
+              f[1].fix.find("agensio ctl protection --jail --out /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload") != std::string::npos);
         ProtectionInput ext = in;
         ext.host_protection = "external";
         CHECK(codes(ext, none, files) == "info:firewall_limits_missing info:fail2ban_missing" && protection_findings(ext, none, files)[0].message.find("managed outside agensio") != std::string::npos);
@@ -6459,6 +6466,63 @@ static void test_header_suggestions() {
         CHECK(control::apply_request(body, cfg, spec, err).empty() && spec.response_headers_offer_declined.empty() &&
               control::render_site(spec, "x").find("response_headers_offer_declined") == npos);
     }
+    fs::remove_all(dir);
+}
+
+// Files root loads or runs, written by agensio itself (the alpha.94 report): whole or not at all, with
+// their own mode whatever the umask, and health naming one a group or anyone else may write.
+static void test_root_files() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-rootfile-" + std::to_string(::getpid()));
+    fs::create_directories(dir);
+    const std::string file = (dir / "agensio.conf").string();
+    auto mode_of = [](const std::string& f) {
+        struct stat st {};
+        return ::stat(f.c_str(), &st) == 0 ? static_cast<unsigned>(st.st_mode & 07777) : 0u;
+    };
+    auto read = [](const std::string& f) {
+        std::ifstream in(f);
+        return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    };
+    auto leftovers = [&] {
+        std::size_t n = 0;
+        for (const auto& e : fs::directory_iterator(dir)) n += e.path().filename().string() != "agensio.conf" ? 1 : 0;
+        return n;
+    };
+    const mode_t old_umask = ::umask(0002);  // the report's root shell: files 0664 under `>`
+    CHECK(write_file_atomic(file, "[agensio-login]\nenabled = true\n").empty() && mode_of(file) == 0644 && read(file) == "[agensio-login]\nenabled = true\n");
+    ::chmod(file.c_str(), 0664);  // an older `>` left it group-writable: replaced by one of the right mode
+    CHECK(write_file_atomic(file, "new\n").empty() && mode_of(file) == 0644 && read(file) == "new\n" && leftovers() == 0);
+    CHECK(write_file_atomic(file, "unit\n", 0600).empty() && mode_of(file) == 0600);
+    ::umask(old_umask);
+    // A failure leaves the old file as it was and nothing beside it.
+    CHECK(!write_file_atomic((dir / "missing" / "x.conf").string(), "x").empty());
+    if (::geteuid() != 0) {  // root writes into a read-only directory anyway
+        ::chmod(dir.c_str(), 0555);
+        const std::string why = write_file_atomic(file, "lost\n");
+        ::chmod(dir.c_str(), 0755);
+        CHECK(!why.empty() && why.find(file) != std::string::npos && read(file) == "unit\n" && leftovers() == 0);
+    }
+    // Health: a file root loads that its group or anyone may write, named with the line that fixes it.
+    std::map<std::string, FileFacts> machine;
+    machine["/etc/fail2ban/jail.d/agensio.conf"] = {false, 0, 0, 0664};
+    machine["/etc/agensio/firewall.nft"] = {false, 0, 0, 0644};
+    machine["/etc/systemd/system/agensio-app-ag6.service"] = {false, 0, 0, 0666};
+    HostFacts facts;
+    facts.stat = [&](const std::string& p, FileFacts& out) {
+        const auto it = machine.find(p);
+        if (it == machine.end()) return false;
+        out = it->second;
+        return true;
+    };
+    facts.group_name = [](unsigned gid) { return gid == 0 ? std::string("root") : std::string(); };
+    const auto found = control::root_file_findings({"/etc/fail2ban/jail.d/agensio.conf", "/etc/agensio/firewall.nft", "/etc/systemd/system/agensio-app-ag6.service",
+                                                   "/etc/systemd/system/agensio-firewall.service"},
+                                                  facts);
+    CHECK(found.size() == 2 && found[0].code == "root_file_writable" && found[0].severity == "warn" &&
+          found[0].message.find("/etc/fail2ban/jail.d/agensio.conf is 0664") != std::string::npos && found[0].message.find("group root") != std::string::npos &&
+          found[0].fix == "as root: chmod go-w /etc/fail2ban/jail.d/agensio.conf" && found[1].severity == "error" &&
+          found[1].message.find("anyone on the host") != std::string::npos);
     fs::remove_all(dir);
 }
 
@@ -10084,6 +10148,7 @@ int main() {
     test_security_baseline();
     test_managed_response_headers();
     test_header_suggestions();
+    test_root_files();
     test_site_isolation();
     test_served_record();
     test_hosting_isolation();

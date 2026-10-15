@@ -1392,7 +1392,7 @@ json::Value service_unit(const SiteConfig& site, const Config& cfg) {
     std::string u;
     u += "# agensio: the application service of " + name + " (" + server + "), rendered by `agensio ctl site-unit " + name + "` from the site,\n";
     u += "# [control] runtimes and the site's environment file, until agensio manages it (roadmap F14). As root:\n";
-    u += "#   agensio ctl site-unit " + name + " --raw > /etc/systemd/system/" + unit_name + "\n";
+    u += "#   agensio ctl site-unit " + name + " --out /etc/systemd/system/" + unit_name + "   (written whole, 0644)\n";
     u += "#   systemctl daemon-reload && systemctl enable --now " + unit_name + "\n";
     u += "[Unit]\n";
     const std::string what = site.app == "redmine" ? "Redmine" : site.app == "wagtail" ? "Wagtail site" : python ? "Django application"
@@ -1446,7 +1446,7 @@ json::Value service_unit(const SiteConfig& site, const Config& cfg) {
     u += "CapabilityBoundingSet=\nMemoryMax=1G\nTasksMax=256\n\n";
     u += "[Install]\nWantedBy=multi-user.target\n";
     json::Value cmds = json::Value::array()
-                           .push("agensio ctl site-unit " + name + " --raw > /etc/systemd/system/" + unit_name)
+                           .push("agensio ctl site-unit " + name + " --out /etc/systemd/system/" + unit_name)
                            .push("systemctl daemon-reload")
                            .push("systemctl enable --now " + unit_name);
     std::string hint = "root installs it with run_as_root (the unit runs " + std::string(server) + " as " + site.user + ", never as root); after a change to the site's "

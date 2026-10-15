@@ -74,7 +74,7 @@ agensio ctl site-create --domain notes.example.com --app node --root /var/www/no
 agensio ctl site-install notes.example.com --url https://example.com/releases/notes-1.4.0.tar.gz --sha256 <published sha256> --yes --reason "notes application"
 agensio ctl site-task notes.example.com npm_ci --yes --reason "notes application"
 agensio ctl site-update notes.example.com --entry server.js --yes --reason "notes application"
-agensio ctl site-unit notes.example.com --raw > /etc/systemd/system/agensio-app-notes.service   # as root
+agensio ctl site-unit notes.example.com --out /etc/systemd/system/agensio-app-notes.service   # as root
 systemctl daemon-reload && systemctl enable --now agensio-app-notes.service
 ```
 
@@ -144,7 +144,7 @@ environment Puma gets from the unit:
 agensio ctl site-create --domain projects.example.com --app rails --root /var/www/projects.example.com/app --user projects --upstream http://127.0.0.1:3000 --yes --reason "projects application"
 agensio ctl site-install projects.example.com --url https://example.com/releases/projects-2.1.0.tar.gz --sha256 <published sha256> --yes --reason "projects application"
 for t in bundle_install db_prepare assets_precompile; do agensio ctl site-task projects.example.com $t --yes --reason "projects application"; done
-agensio ctl site-unit projects.example.com --raw > /etc/systemd/system/agensio-app-projects.service   # as root
+agensio ctl site-unit projects.example.com --out /etc/systemd/system/agensio-app-projects.service   # as root
 systemctl daemon-reload && systemctl enable --now agensio-app-projects.service
 ```
 
@@ -214,7 +214,7 @@ agensio ctl site-install cms.example.com --file mysite.tar.gz --yes --reason "wa
 for t in venv_create pip_install_requirements; do agensio ctl site-task cms.example.com $t --yes --reason "wagtail site"; done
 agensio ctl site-task cms.example.com pip_install --param "packages=gunicorn" --yes --reason "wagtail site"   # prints a warning; your --yes confirms it
 for t in django_settings migrate collectstatic; do agensio ctl site-task cms.example.com $t --yes --reason "wagtail site"; done
-agensio ctl site-unit cms.example.com --raw > /etc/systemd/system/agensio-app-cms.service   # as root, then enable it
+agensio ctl site-unit cms.example.com --out /etc/systemd/system/agensio-app-cms.service   # as root, then enable it
 ```
 
 **MCP:** `site_create` with `app` "wagtail", `project` and `settings`

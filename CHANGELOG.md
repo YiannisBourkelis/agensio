@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.1.0-alpha.95
+
+- **Files root loads are written by agensio itself, whole and `0644`: `--out`** (the alpha.94 report
+  from the test host; `docs/configuration.md` 18, security page row 37). The commands root was given
+  wrote the fail2ban jail, the firewall ruleset, the firewall unit and the sites' application units
+  with a shell's `>`. The file then took root's umask: on the test host, whose root shell had `0002`,
+  all of them were `0664`, writable by root's group, and root loads or runs each of them. And the
+  shell emptied the file before `agensio ctl` ran, so a failed render (the server stopped, the socket
+  unreachable, a refused call) left an empty jail that the `; fail2ban-client reload` after it loaded,
+  dropping every agensio jail without a word; a refused call (any answer but 200) even wrote the
+  server's JSON error into the jail. Now `--out FILE` on `agensio ctl protection --jail`, `--nft`,
+  `--unit` and `--filter NAME`, on `agensio protection` and on `agensio ctl site-unit NAME` writes the
+  file through `write_file_atomic` (`file.cpp`): a hidden temporary file beside it, created with
+  `O_EXCL | O_NOFOLLOW` and given its mode with `fchmod` whatever the umask, flushed to disk and
+  renamed over the target (which also replaces a `0664` file with a `0644` one); on any failure the
+  old file is untouched, nothing is left beside it, and the command exits non-zero. `agensio pools`
+  writes its pool files the same way (before, the temporary file took the umask's mode until a
+  `chmod`) and rewrites one of a loose mode even when its text is current, without calling that
+  stale. Every command root is given chains its steps with `&&` (bash, dash and fish 3 or later), so a
+  reload never follows a render that failed; stopping the firewall trial's timer keeps its `;`, since it
+  fails harmlessly once the timer has fired. Changed: `protection_show` (`fail2ban.install`,
+  `firewall.trial` and `keep`, `failure_jails` `needs`, every finding's fix), the answers of
+  `site_create`/`site_update` that ask for a re-render, `site_service_unit`'s `run_as_root` and the
+  unit's header, the jail's and the ruleset's header comments and their packaged copies, the MCP texts
+  (`protection_show` and `site_service_unit` tell the agent never to rewrite them as a `>`), the
+  `ctl` usage, `docs/configuration.md` 18, `docs/fail2ban.md`, the cookbook, the root suites. Health
+  `root_file_writable` (warn, error when anyone may write; `control::root_file_findings`, a `stat`
+  each) names the jail, the ruleset, the firewall unit, a site's application unit or a generated pool
+  that its group or anyone may write, with the `chmod go-w` that fixes it.
+
 ## 0.1.0-alpha.94 (2026-10-14)
 
 - **Health names what a live site's home page goes without: `response_headers_suggested`**

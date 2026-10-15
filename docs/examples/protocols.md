@@ -196,7 +196,7 @@ curl -sI https://www.example.com/ | grep -i '^alt-svc'      # alt-svc: h3=":443"
 curl -sI --http3-only https://www.example.com/ | head -1    # HTTP/3 200; from another host, so the firewall is on the path
 agensio ctl status                                          # the listener's protocols: h2, h1, h3
 sysctl net.core.rmem_max                                    # 8388608; 212992 is the untuned cap
-agensio ctl protection --nft > /etc/agensio/firewall.nft    # only if you use agensio's table: then nft -f it again
+agensio ctl protection --nft --out /etc/agensio/firewall.nft    # only if you use agensio's table: then nft -f it again
 ```
 
 curl needs HTTP/3 support for `--http3-only` (`curl -V` lists `HTTP3`).

@@ -1,6 +1,7 @@
 #!/usr/sbin/nft -f
 # agensio: per-address limits on the web ports, in a table of its own (docs/configuration.md 18).
-# Rendered by `agensio ctl protection --nft` for this host's listeners; the packaged copy at
+# Rendered by `agensio ctl protection --nft --out FILE` for this host's listeners (written whole, 0644,
+# never a shell's `>`); the packaged copy at
 # /usr/share/agensio/firewall/agensio.nft is the rendering for ports 80 and 443.
 # Nothing outside `table inet agensio` is touched: no other table, chain or rule, no policy, so
 # the distribution's firewall, a panel's rules, ufw and firewalld keep theirs and this keeps its own.

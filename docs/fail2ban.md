@@ -39,9 +39,13 @@ Install, as root:
 
 ```sh
 install -m 644 /usr/share/agensio/fail2ban/filter.d/agensio-*.conf /etc/fail2ban/filter.d/
-agensio ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf
+agensio ctl protection --jail --out /etc/fail2ban/jail.d/agensio.conf
 fail2ban-client reload
 ```
+
+`--out` writes the jail whole and `0644` whatever root's umask, and leaves it as it was when the
+render fails; never a shell's `>`, which empties the file first, so a failed render left an empty
+jail for the reload to load ([configuration.md](configuration.md) 18).
 
 The jail file is rendered from the sites that exist, so adding a site, a log or a login path
 makes the installed copy stale; health says so (`fail2ban_jail_stale`) and the second and
@@ -223,7 +227,7 @@ Test it on the host's own log: `fail2ban-regex /var/log/agensio/error.log agensi
   cd /tmp && curl -fsSLO https://downloads.wordpress.org/plugin/wp-fail2ban.latest-stable.zip \
     && unzip -o -j wp-fail2ban.latest-stable.zip wp-fail2ban/filters.d/wordpress-hard.conf \
                                                wp-fail2ban/filters.d/wordpress-soft.conf -d /etc/fail2ban/filter.d/
-  agensio ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload
+  agensio ctl protection --jail --out /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload
   ```
 
   Behind a trusted proxy the plugin needs `WP_FAIL2BAN_PROXIES` in `wp-config.php` so that

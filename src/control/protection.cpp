@@ -206,7 +206,7 @@ std::vector<std::string> tier_needs(const std::string& app, const std::string& r
     if (journal && !unidentified.empty())
         out.push_back("give " + join(unidentified, ", ") + " an account of its own (site_update with user; the PHP pool then runs as it), so that its journal lines carry a trusted _UID: the jail reads no line of a site it cannot tell from any other process on the host, since SYSLOG_IDENTIFIER is whatever a writer claims");
     if (!journal && !log_present) out.push_back("the log " + log + " is not on this host although a syslog daemon runs: have it write that file, or stop the daemon and the jail reads the journal");
-    out.push_back("then render the jail again, as root: agensio ctl protection --jail > " + std::string(kJailFile) + "; fail2ban-client reload");
+    out.push_back("then render the jail again, as root: agensio ctl protection --jail --out " + std::string(kJailFile) + " && fail2ban-client reload");
     return out;
 }
 
@@ -460,7 +460,15 @@ json::Value ports_json(const std::vector<unsigned>& v) {
     return a;
 }
 
-std::string ports_to_shell(const std::vector<std::string>& cmds) { return join(cmds, "; "); }
+// Root's steps as one line, each run only when the one before it worked (the alpha.94 report: with `;`
+// a render that failed was still loaded). `&&` is the same in bash, dash and fish 3 and later.
+std::string ports_to_shell(const std::vector<std::string>& cmds) { return join(cmds, " && "); }
+// The keep steps: stopping the trial's timer fails harmlessly once it has fired, and must not stop the
+// rest, which loads and enables the ruleset again.
+std::string keep_to_shell(const std::vector<std::string>& cmds) {
+    if (cmds.empty()) return {};
+    return cmds.front() + (cmds.size() > 1 ? "; " + join(std::vector<std::string>(cmds.begin() + 1, cmds.end()), " && ") : std::string());
+}
 
 }  // namespace
 
@@ -638,7 +646,8 @@ std::string render_nft(const ProtectionInput& in) {
     std::string s;
     s += "#!/usr/sbin/nft -f\n";
     s += "# agensio: per-address limits on the web ports, in a table of its own (docs/configuration.md 18).\n";
-    s += "# Rendered by `agensio ctl protection --nft` for this host's listeners; the packaged copy at\n";
+    s += "# Rendered by `agensio ctl protection --nft --out FILE` for this host's listeners (written whole, 0644,\n";
+    s += "# never a shell's `>`); the packaged copy at\n";
     s += "# " + shipped("firewall/agensio.nft") + " is the rendering for ports 80 and 443.\n";
     s += "# Nothing outside `table inet agensio` is touched: no other table, chain or rule, no policy, so\n";
     s += "# the distribution's firewall, a panel's rules, ufw and firewalld keep theirs and this keeps its own.\n";
@@ -704,9 +713,11 @@ std::string render_jail(const ProtectionInput& in) {
     s += "# `agensio ctl protection --jail` for this host: its web ports, its logs and the login\n";
     s += "# paths of its sites (each preset's, plus every site's login_paths), one login jail per log, and for a\n";
     s += "# preset whose application logs its failed logins (WordPress with the WP fail2ban plugin, Drupal with its\n";
-    s += "# Syslog module) a jail over that log, counting failures rather than attempts. Install as\n";
-    s += "# " + std::string(kJailFile) + " with the filters from " + shipped("fail2ban/filter.d") + ", then\n";
-    s += "# `fail2ban-client reload`; render again when a site is added (health says when this file is stale).\n";
+    s += "# Syslog module) a jail over that log, counting failures rather than attempts. Installed as\n";
+    s += "# " + std::string(kJailFile) + " by `agensio ctl protection --jail --out " + std::string(kJailFile) + "` (written\n";
+    s += "# whole, 0644; never a shell's `>`, which takes root's umask and empties the file when the render fails),\n";
+    s += "# with the filters from " + shipped("fail2ban/filter.d") + ", then `fail2ban-client reload`; render again when a\n";
+    s += "# site is added (health says when this file is stale).\n";
     s += "# The access logs are in the combined format: the client address is the first field (behind a trusted\n";
     s += "# proxy, the one X-Forwarded-For named), as in the error log's lines. Bans go through nftables into fail2ban's own table;\n";
     s += "# a host whose firewall is managed otherwise sets banaction in its jail.local.\n";
@@ -861,14 +872,14 @@ std::string render_firewall_unit(const ProtectionInput& in) {
 const std::vector<ProtectionFilter>& protection_filters() { return shipped_filters(); }
 
 std::vector<std::string> firewall_trial_commands(const ProtectionInput& in) {
-    return {"agensio ctl protection --nft > " + in.firewall_file, "nft -f " + in.firewall_file,
+    return {"agensio ctl protection --nft --out " + in.firewall_file, "nft -f " + in.firewall_file,
             "systemd-run --on-active=10min --unit " + std::string(kFirewallTrialUnit) + " /usr/sbin/nft delete table inet agensio"};
 }
 
 std::vector<std::string> firewall_keep_commands(const ProtectionInput& in) {
     std::vector<std::string> out{"systemctl stop " + std::string(kFirewallTrialUnit) + ".timer"};
     if (in.firewall_file != kDefaultFirewallFile) {
-        out.push_back("agensio ctl protection --unit > /etc/systemd/system/" + std::string(kFirewallUnit));
+        out.push_back("agensio ctl protection --unit --out /etc/systemd/system/" + std::string(kFirewallUnit));
         out.push_back("systemctl daemon-reload");
     }
     out.push_back("systemctl enable --now " + std::string(kFirewallUnit));
@@ -892,7 +903,7 @@ std::vector<std::string> installed_filter_paths() {
 }
 
 std::vector<std::string> fail2ban_install_commands() {
-    return {filter_install_command(), "agensio ctl protection --jail > " + std::string(kJailFile), "fail2ban-client reload"};
+    return {filter_install_command(), "agensio ctl protection --jail --out " + std::string(kJailFile), "fail2ban-client reload"};
 }
 
 ProtectionProbe read_probe(const json::Value& reply, const ProtectionInput& in) {
@@ -1166,7 +1177,7 @@ std::vector<Finding> protection_findings(const ProtectionInput& in, const Protec
     const std::string missing = in.host_protection == "external" ? "info" : "warn";
     const Verdict v = judge(in, probe, files);
     const std::string trial = ports_to_shell(firewall_trial_commands(in));
-    const std::string keep = ports_to_shell(firewall_keep_commands(in));
+    const std::string keep = keep_to_shell(firewall_keep_commands(in));
     const std::string f2b = ports_to_shell(fail2ban_install_commands());
     const std::string ports = join_ports(in.tcp_ports);
     if (!probe.checked) {
@@ -1183,7 +1194,7 @@ std::vector<Finding> protection_findings(const ProtectionInput& in, const Protec
                               (v.ours ? "the agensio firewall table is loaded but covers no limit on port(s) " + join_ports(v.uncovered_tcp) + ": the listeners changed since it was rendered"
                                       : "no per-address limit on the web ports (" + join_ports(v.uncovered_tcp) + ") in the kernel's firewall: one client can hold every connection slot, and the ceiling refuses the rest without telling it apart") +
                                   (in.host_protection == "external" ? " ([control] host_protection = \"external\": managed outside agensio)" : ""),
-                              (v.ours ? "render it again and reload it, as root: agensio ctl protection --nft > " + in.firewall_file + "; nft -f " + in.firewall_file
+                              (v.ours ? "render it again and reload it, as root: agensio ctl protection --nft --out " + in.firewall_file + " && nft -f " + in.firewall_file
                                       : "as root, a trial that undoes itself in ten minutes: " + trial + "; check the site and this session still answer, then keep it: " + keep) +
                                   " (protection_show has the ruleset and every step)"});
     } else if (v.ours) {
@@ -1197,7 +1208,7 @@ std::vector<Finding> protection_findings(const ProtectionInput& in, const Protec
                                   "as root: " + keep});
         if (!v.uncovered_udp.empty())
             out.push_back(Finding{"info", "firewall_quic_unlimited", "", "QUIC on port(s) " + join_ports(v.uncovered_udp) + " has no per-address handshake limit in the loaded table: it was rendered before h3 was enabled",
-                                  "render it again and reload it, as root: agensio ctl protection --nft > " + in.firewall_file + "; nft -f " + in.firewall_file});
+                                  "render it again and reload it, as root: agensio ctl protection --nft --out " + in.firewall_file + " && nft -f " + in.firewall_file});
     }
     // fail2ban
     if (!in.combined) {
@@ -1211,11 +1222,11 @@ std::vector<Finding> protection_findings(const ProtectionInput& in, const Protec
                               (v.f2b_down ? std::string("fail2ban is installed but not running") : "no fail2ban jail reads agensio's access logs (" + join(in.logs, ", ") + ")") +
                                   ": nothing bans an address that tries passwords against " + (in.login_paths.empty() ? std::string("the sites") : join(in.login_paths, ", ")) + " or scans for files" +
                                   (in.host_protection == "external" ? " ([control] host_protection = \"external\": managed outside agensio)" : ""),
-                              "as root: " + f2b + (v.f2b_down ? "; systemctl enable --now fail2ban" : "") + " (protection_show has the jails and the filters)"});
+                              "as root: " + f2b + (v.f2b_down ? " && systemctl enable --now fail2ban" : "") + " (protection_show has the jails and the filters)"});
     } else {
         // The jails are agensio's: the filter files and the jail file against what this build
         // ships and renders (alpha.44 report: an upgrade changed a filter and the old copy ran on).
-        const std::string reinstall = v.filters_state == "stale" || v.filters_state == "partial" ? filter_install_command() + "; " : std::string();
+        const std::string reinstall = v.filters_state == "stale" || v.filters_state == "partial" ? filter_install_command() + " && " : std::string();
         // All four absent is a host whose own jails read our logs (a panel's): nothing to say.
         if (v.filters_state == "stale" || v.filters_state == "partial")
             out.push_back(Finding{"warn", "fail2ban_filter_stale", "",
@@ -1223,16 +1234,16 @@ std::vector<Finding> protection_findings(const ProtectionInput& in, const Protec
                                       (v.stale_filters.empty() || v.missing_filters.empty() ? "" : "; ") +
                                       (v.missing_filters.empty() ? std::string() : "the filter(s) " + join(v.missing_filters, ", ") + " are not installed") +
                                       ": the jails run with what an older build matched",
-                                  "as root: " + filter_install_command() + "; " + (v.jail_state == "stale" ? "agensio ctl protection --jail > " + std::string(kJailFile) + "; " : std::string()) + "fail2ban-client reload"});
+                                  "as root: " + filter_install_command() + " && " + (v.jail_state == "stale" ? "agensio ctl protection --jail --out " + std::string(kJailFile) + " && " : std::string()) + "fail2ban-client reload"});
         if (v.jail_state == "stale")
             out.push_back(Finding{"info", "fail2ban_jail_stale", "", std::string(kJailFile) + " is older than this host's rendering (a site, a log or a login path was added since)",
-                                  "as root: " + reinstall + "agensio ctl protection --jail > " + std::string(kJailFile) + "; fail2ban-client reload"});
+                                  "as root: " + reinstall + "agensio ctl protection --jail --out " + std::string(kJailFile) + " && fail2ban-client reload"});
     }
     // Failed passwords ([[site.auth]], 2026-10-08): counted from the error log by agensio-auth; the
     // filter of alpha.57 and before counted every 401 of the access logs, the challenge included.
     if (v.f2b_ours && !in.auth_sites.empty()) {
         const std::string sites = join(in.auth_sites, ", ");
-        const std::string render = "as root: " + filter_install_command() + "; agensio ctl protection --jail > " + std::string(kJailFile) + "; fail2ban-client reload";
+        const std::string render = "as root: " + filter_install_command() + " && agensio ctl protection --jail --out " + std::string(kJailFile) + " && fail2ban-client reload";
         if (v.auth_counts_challenges)
             out.push_back(Finding{"warn", "fail2ban_auth_challenges", "",
                                   "the installed agensio-auth filter is an older build's and counts every 401 in the access logs: the first request of every visitor to a password-protected path of " +

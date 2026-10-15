@@ -15,6 +15,10 @@
 #include "control/loglines.hpp"
 #include "services/json.hpp"
 
+namespace agensio {
+struct HostFacts;
+}
+
 namespace agensio::control {
 
 // ---- logs ----
@@ -157,6 +161,10 @@ Finding refusal_finding(const RefusalReport& r);
 // recent errors, pending restart, root, shared accounts, stale pools.
 // With `tls` (the running server's) the certificates are judged as served, else as on disk.
 std::vector<Finding> health_findings(const Config& running, const Config& boot, bool as_root, std::time_t now, const TlsFacts* tls = nullptr);
+// Files root loads or runs that agensio renders (the alpha.94 report: written with a shell's `>` under a
+// root umask of 0002 they were 0664): each one its group or anyone may write, a warn or an error, with
+// the chmod that fixes it. `facts.stat` decides; a missing file is nothing to say.
+std::vector<Finding> root_file_findings(const std::vector<std::string>& files, const HostFacts& facts);
 // `extra`: findings the caller gathered where this process cannot look (the sites'
 // environment files, through the helper), appended as they are.
 json::Value health(const Config& running, const Config& boot, bool as_root, std::time_t now, const std::vector<Finding>& extra = {},

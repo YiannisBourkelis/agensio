@@ -1,6 +1,7 @@
 #include "file.hpp"
 
 #ifdef _WIN32
+#include <cstdio>
 #include <fcntl.h>
 #include <io.h>
 #include <sys/stat.h>
@@ -10,6 +11,7 @@
 #include <climits>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -317,6 +319,70 @@ bool File::read_all(void* buf, std::size_t len) const noexcept {
         done += static_cast<std::size_t>(n);
     }
     return true;
+}
+
+
+std::string write_file_atomic(const std::string& path, std::string_view text, unsigned mode) {
+#ifdef _WIN32
+    // Not a host whose root loads these files; whole or not at all still holds for the reader.
+    (void)mode;
+    const std::string tmp = path + ".agensio-tmp";
+    std::FILE* f = std::fopen(tmp.c_str(), "wb");
+    if (!f) return "cannot write " + path;
+    const bool ok = std::fwrite(text.data(), 1, text.size(), f) == text.size();
+    if (std::fclose(f) != 0 || !ok) {
+        std::remove(tmp.c_str());
+        return "cannot write " + path;
+    }
+    std::remove(path.c_str());
+    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
+        std::remove(tmp.c_str());
+        return "cannot replace " + path;
+    }
+    return {};
+#else
+    const std::size_t slash = path.rfind('/');
+    const std::string dir = slash == std::string::npos ? std::string(".") : slash == 0 ? std::string("/") : path.substr(0, slash);
+    const std::string base = slash == std::string::npos ? path : path.substr(slash + 1);
+    if (base.empty() || base == "." || base == "..") return "cannot write " + path + ": not a file name";
+    // Beside the target, so the rename stays on one filesystem and is atomic; hidden; created with
+    // O_EXCL and O_NOFOLLOW, so nothing that already stands at the name (a planted link) is written
+    // through; the mode set with fchmod, whatever the umask took from it.
+    std::string tmp;
+    int fd = -1;
+    for (unsigned n = 0; n < 100 && fd < 0; ++n) {
+        tmp = dir + "/." + base + ".agensio-" + std::to_string(::getpid()) + "-" + std::to_string(n);
+        fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, static_cast<mode_t>(mode & 07777));
+        if (fd < 0 && errno != EEXIST) return "cannot write " + path + ": " + std::strerror(errno);
+    }
+    if (fd < 0) return "cannot write " + path + ": no free temporary name beside it";
+    auto fail = [&](const char* step) {
+        const std::string why = "cannot write " + path + ": " + step + ": " + std::strerror(errno);
+        if (fd >= 0) ::close(fd);
+        ::unlink(tmp.c_str());
+        return why;
+    };
+    if (::fchmod(fd, static_cast<mode_t>(mode & 07777)) != 0) return fail("chmod");
+    for (std::size_t done = 0; done < text.size();) {
+        const ssize_t n = ::write(fd, text.data() + done, text.size() - done);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return fail("write");
+        }
+        done += static_cast<std::size_t>(n);
+    }
+    if (::fsync(fd) != 0) return fail("fsync");
+    const int closed = ::close(fd);
+    fd = -1;
+    if (closed != 0) return fail("close");
+    if (::rename(tmp.c_str(), path.c_str()) != 0) return fail("rename");
+    // The directory entry too, so the new file is the one found after a crash.
+    if (const int d = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC); d >= 0) {
+        ::fsync(d);
+        ::close(d);
+    }
+    return {};
+#endif
 }
 
 }  // namespace agensio

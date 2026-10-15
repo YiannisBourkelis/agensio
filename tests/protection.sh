@@ -81,17 +81,17 @@ codes() { ctl health | python3 -c 'import json,sys; d=json.load(sys.stdin); prin
 prot() { ctl protection > $T/prot.json; python3 -c "import json; d=json.load(open('$T/prot.json')); print($1)"; }
 
 # 1. Nothing in place: both missing, with root's commands.
-check "health: a public listener without firewall limits or a fail2ban jail: both missing (fail2ban installed but not running), the fixes are root's trial and install commands" "warn:firewall_limits_missing warn:fail2ban_missing yes yes" "$(codes) $(ctl health | grep -q "nft -f $T/firewall.nft; systemd-run --on-active=10min --unit agensio-firewall-trial" && echo yes) $(ctl health | grep -q 'fail2ban is installed but not running' && echo yes)"
+check "health: a public listener without firewall limits or a fail2ban jail: both missing (fail2ban installed but not running), the fixes are root's trial and install commands" "warn:firewall_limits_missing warn:fail2ban_missing yes yes" "$(codes) $(ctl health | grep -q "nft -f $T/firewall.nft && systemd-run --on-active=10min --unit agensio-firewall-trial" && echo yes) $(ctl health | grep -q 'fail2ban is installed but not running' && echo yes)"
 check "protection: checked through the helper; nft present, no table, port 18880 uncovered; fail2ban present; the rendered files name the host's port, log and login path; the trial writes the config directory's firewall.nft; the unit's keep step renders the unit for that path" "True True False False [18880] True no-limit yes yes yes 4" "$(prot 'd["firewall"]["detected"]["checked"], d["firewall"]["detected"]["nft_available"], d["firewall"]["detected"]["table_loaded"], d["firewall"]["detected"]["covered"], d["firewall"]["detected"]["uncovered_tcp_ports"], d["fail2ban"]["detected"]["fail2ban_available"], "no-limit" if d["summary"].startswith("no per-address limit on port(s) 18880") else d["summary"]') $(grep -q 'tcp dport { 18880 }' <(ctl protection --nft) && echo yes) $(ctl protection --jail | grep -q "^logpath   = $T/logs/access.log" && ctl protection --jail | grep -qF 'agensio-login[paths="' && ctl protection --jail | grep -qF '(?:l|\x25[46]C)(?:o|\x25[46]F)(?:g|\x25[46]7)(?:i|\x25[46]9)(?:n|\x25[46]E)' && echo yes) $(ctl protection --unit | grep -q "ConditionPathExists=$T/firewall.nft" && echo yes) $(prot 'len(d["firewall"]["keep"])')"
 
 # 2. The ruleset loaded (twice: the file is idempotent): covered; a reboot's fate unknown here.
-ctl protection --nft > $T/firewall.nft
+ctl protection --nft --out $T/firewall.nft
 check "the rendered ruleset loads, and loads again over itself; the table carries its four counted rules" "0 0 4" "$(nft -f $T/firewall.nft; echo -n "$? "; nft -f $T/firewall.nft; echo -n "$? "; nft list table inet agensio | grep -c 'comment "agensio:')"
 check "health: the limits are loaded and cover the port; whether they survive a reboot could not be told (no systemd here), so the keep commands are the fix; the file on disk is current" "info:firewall_limits_unsaved warn:fail2ban_missing True True [18880] 4 True True yes" "$(codes) $(prot 'd["firewall"]["detected"]["table_loaded"], d["firewall"]["detected"]["covered"], d["firewall"]["detected"]["limited_tcp_ports"], len(d["firewall"]["detected"]["rules"]), d["firewall"]["file_present"], d["firewall"]["file_current"]') $(ctl health | grep -q 'could not be told' && echo yes)"
 
 # 3. fail2ban with the shipped filters and the rendered jail, reading the site's access log.
 install -m 644 $ROOT/packaging/fail2ban/filter.d/agensio-*.conf /etc/fail2ban/filter.d/
-ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf
+ctl protection --jail --out /etc/fail2ban/jail.d/agensio.conf
 printf '[DEFAULT]\nignoreip =\nignoreself = false\nbackend = polling\n[sshd]\nenabled = false\n' > /etc/fail2ban/jail.d/zz-agensio-test.conf   # loopback bannable here (ignoreself is on by default), no inotify, no sshd log
 mkdir -p /run/fail2ban
 fail2ban-client -x start > $T/f2b-start.out 2>&1
@@ -132,7 +132,7 @@ check "unbanned: the site answers again" "200" "$(curl -sS -o /dev/null -w '%{ht
 
 # 5. A site added later: the loaded table misses its port and the installed jail is stale; rendering again heals both.
 ctl site-create --domain lp.test --app static --no-user --https none --root $T/www2 --listen-plain 0.0.0.0:18881 --login-path /signin --login-path '/?controller=AuthController&action=check' --yes --reason prot > $T/create.json
-check "a second site on another port with its own login paths (one through the query string) is created; its answer's next_steps carry root's re-render lines for the jail and the ruleset; health: the loaded table covers no limit on 18881 and the jail file is stale" "True jail+nft warn:firewall_limits_missing info:fail2ban_jail_stale yes yes" "$(python3 -c "import json; d=json.load(open('$T/create.json')); print(d['ok']); ns=' '.join(d['next_steps']); print(('jail' if 'fail2ban jail on disk is older' in ns and 'agensio ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf; fail2ban-client reload' in ns else 'nojail') + '+' + ('nft' if 'firewall ruleset on disk is older' in ns and 'nft -f $T/firewall.nft' in ns else 'nonft'))" | tr '\n' ' ' | sed 's/ $//') $(codes) $(ctl health | grep -q 'covers no limit on port(s) 18881' && echo yes) $(ctl protection --jail | grep -c '^filter    = agensio-login\[paths="' | sed 's/^1$/yes/')"
+check "a second site on another port with its own login paths (one through the query string) is created; its answer's next_steps carry root's re-render lines for the jail and the ruleset; health: the loaded table covers no limit on 18881 and the jail file is stale" "True jail+nft warn:firewall_limits_missing info:fail2ban_jail_stale yes yes" "$(python3 -c "import json; d=json.load(open('$T/create.json')); print(d['ok']); ns=' '.join(d['next_steps']); print(('jail' if 'fail2ban jail on disk is older' in ns and 'agensio ctl protection --jail --out /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload' in ns else 'nojail') + '+' + ('nft' if 'firewall ruleset on disk is older' in ns and 'nft -f $T/firewall.nft' in ns else 'nonft'))" | tr '\n' ' ' | sed 's/ $//') $(codes) $(ctl health | grep -q 'covers no limit on port(s) 18881' && echo yes) $(ctl protection --jail | grep -c '^filter    = agensio-login\[paths="' | sed 's/^1$/yes/')"
 # The alpha.44 report's spellings: the log holds the request as the client sent it, so the
 # rendered filter must match every spelling the server and the applications accept.
 : > $T/spell.log; i=0
@@ -157,8 +157,8 @@ with open(sys.argv[1], "w") as f:
     for i, p in enumerate(lines): f.write('203.0.113.9 - - [02/Oct/2026:10:01:%02d +0000] "POST %s HTTP/1.1" 302 0 "-" "x"\n' % (i, p))
 PYT
 check "ten request lines of up to 16 KB of slashes and dot segments, with and without the query login's parameters, are decided within 5 s, linear time (the alpha.45 grammar took seconds, the alpha.46 one minutes for the query login)" "7 matched, 3 missed" "$(timeout 5 fail2ban-regex $T/slow.log "agensio-login[paths=\"$PATHS\"]" 2>&1 | sed -n 's/^Lines: [0-9]* lines, [0-9]* ignored, \([0-9]* matched, [0-9]* missed\)$/\1/p')"
-ctl protection --nft > $T/firewall.nft && nft -f $T/firewall.nft
-ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload > /dev/null
+ctl protection --nft --out $T/firewall.nft && nft -f $T/firewall.nft
+ctl protection --jail --out /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload > /dev/null
 sleep 0.5
 check "rendered and loaded again: both ports covered, the jail current" "info:firewall_limits_unsaved [18880, 18881] same" "$(codes) $(prot 'd["firewall"]["detected"]["limited_tcp_ports"], d["fail2ban"]["installed_jail"]')"
 
@@ -171,7 +171,7 @@ check "an installed filter of an older build: health warns naming it (and the ja
 # host with a password-protected site health names the consequence, not only the stale file.
 printf '[INCLUDES]\nbefore = common.conf\n\n[Definition]\nfailregex = ^<HOST> \\S+ \\S+ \\[\\] "\\S+ \\S+ HTTP/\\S+" (?:401|403) \nignoreregex =\ndatepattern = ^[^\\[]*\\[({DATE})\n' > /etc/fail2ban/filter.d/agensio-auth.conf
 check "the alpha.57 agensio-auth filter installed: health warns that it counts each browser's first request to /private, besides the stale file" "info:firewall_limits_unsaved warn:fail2ban_filter_stale info:fail2ban_jail_stale warn:fail2ban_auth_challenges yes" "$(codes) $(ctl health | grep -q 'bans the people who have the password' && echo yes)"
-cp $T/auth.bak /etc/fail2ban/filter.d/agensio-auth.conf; ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload > /dev/null; sleep 0.5
+cp $T/auth.bak /etc/fail2ban/filter.d/agensio-auth.conf; ctl protection --jail --out /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload > /dev/null; sleep 0.5
 check "filters and jail reinstalled: back to the one informational finding" "info:firewall_limits_unsaved same same" "$(codes) $(prot 'd["fail2ban"]["installed_filters"]["state"], d["fail2ban"]["installed_jail"]')"
 
 # 5c. The failure tier (2026-10-03): a WordPress site brings the WP fail2ban plugin's two jails and a
@@ -199,7 +199,7 @@ check "a journald-only host: the failure jails read the journal under each site 
 drupal_unseen() { ctl health | python3 -c 'import json,sys; d=json.load(sys.stdin); f=[x for x in d["findings"] if x["code"] == "fail2ban_failures_unseen" and "(drupal)" in x["message"]]; m=f[0]["message"] if f else ""; x=f[0]["fix"] if f else ""; print(len(f), "journal" if "read the journal and it holds no line matching SYSLOG_IDENTIFIER=drupal _UID=" in m and "from the last 30 days, so Drupal" in m else "-", "unread" if "read no line of dr2.test (no account of its own: the site'"'"'s user is not set), which no trusted journal field tells" in m else "-", "module" if x.startswith("enable Drupal") and "render the jail again" not in x else "account" if x.startswith("give dr2.test") else "-")'; }
 check "journald-only host, nothing from Drupal in the journal: the enabled drupal-auth jail keeps the finding, which also names the site it cannot read, with the Syslog module as the fix; protection says journal_seen false; two findings, one per application" "1 journal unread module False 2" "$(drupal_unseen) $(prot '[f["journal_seen"] for f in d["failure_jails"] if f["app"] == "drupal"][0]') $(codes | tr ' ' '\n' | grep -c fail2ban_failures_unseen)"
 ctl site-delete dr2.test --yes --reason prot > /dev/null
-ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload > /dev/null; sleep 0.5
+ctl protection --jail --out /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload > /dev/null; sleep 0.5
 check "the site without an account deleted: the finding keeps only the journal's silence" "1 journal - module" "$(drupal_unseen)"
 mv /usr/bin/journalctl /usr/bin/journalctl.real
 printf '#!/bin/sh\ncase "$*" in *SYSLOG_IDENTIFIER=drupal*) echo "https://dr.test|1696327202|user|203.0.113.9|https://dr.test/user/login|https://dr.test/user/login|0||Login attempt failed for admin.";; esac\n' > /usr/bin/journalctl; chmod 755 /usr/bin/journalctl
@@ -207,18 +207,18 @@ check "a journal with one Drupal line under the account's uid: the finding is go
 mv /usr/bin/journalctl.real /usr/bin/journalctl
 # With a syslog daemon present (its pid file here), the jails read the files, absent for now.
 touch /run/rsyslogd.pid
-ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload > /dev/null; sleep 0.5
+ctl protection --jail --out /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload > /dev/null; sleep 0.5
 check "a WordPress and a Drupal site with a syslog daemon but no log files: three failure jails render disabled with the needs (the plugin from the admin panel, root's filter copy from the release, the Syslog module, the daemon's file), fail2ban accepts the file, health says the failed logins are counted only as attempts" "True True 3 3 yes yes yes 2" "$(python3 -c "import json; print(json.load(open('$T/wp.json'))['ok'], json.load(open('$T/dr.json'))['ok'])") $(grep -c -E '^\[agensio-(wordpress-soft|wordpress-hard|drupal-auth)\]' /etc/fail2ban/jail.d/agensio.conf) $(grep -A12 '^\[agensio-' /etc/fail2ban/jail.d/agensio.conf | grep -c '^# Disabled: the filter\|^# Disabled: the log') $(grep -q '^#   install and activate the WP fail2ban plugin from the WordPress admin panel' /etc/fail2ban/jail.d/agensio.conf && echo yes) $(grep -q "or read $T/www/wp.test/wp-content/plugins/wp-fail2ban/filters.d/wordpress-hard.conf" /etc/fail2ban/jail.d/agensio.conf && echo yes) $(grep -q '^#   enable Drupal.s Syslog module' /etc/fail2ban/jail.d/agensio.conf && echo yes) $(codes | tr ' ' '\n' | grep -c fail2ban_failures_unseen)"
 check "protection lists the failure jails with their state and needs (fail2ban ships drupal-auth, so that filter is installed; the plugin's are not)" "agensio-wordpress-soft:False:False agensio-wordpress-hard:False:False agensio-drupal-auth:False:True" "$(prot '" ".join(f["name"] + ":" + str(f["enabled"]) + ":" + str(f["filter_installed"]) for f in d["failure_jails"])')"
 printf '[Definition]\nfailregex = ^.*wordpress\\(\\S+\\)\\[\\d+\\]: Authentication failure for \\S+ from <HOST>$\nignoreregex =\n' > /etc/fail2ban/filter.d/wordpress-soft.conf
 printf '[Definition]\nfailregex = ^.*wordpress\\(\\S+\\)\\[\\d+\\]: Blocked user enumeration attempt from <HOST>$\nignoreregex =\n' > /etc/fail2ban/filter.d/wordpress-hard.conf
 printf 'Oct  3 10:00:01 host wordpress(wp.test)[123]: Authentication failure for admin from 203.0.113.9\n' > /var/log/auth.log
 printf 'Oct  3 10:00:02 host drupal: https://dr.test|1696327202|user|203.0.113.9|https://dr.test/user/login|https://dr.test/user/login|0||Login attempt failed for admin.\n' > /var/log/syslog
-ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload > /dev/null; sleep 0.5
+ctl protection --jail --out /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload > /dev/null; sleep 0.5
 check "with the filters and the logs in place: the three jails render enabled, fail2ban runs them, the plugin's line and Drupal's Syslog line match (fail2ban's own drupal-auth filter), the finding is gone" "3 3 yes 1 1 0" "$(grep -A4 -E '^\[agensio-(wordpress-soft|wordpress-hard|drupal-auth)\]' /etc/fail2ban/jail.d/agensio.conf | grep -c '^enabled   = true') $(fail2ban-client status | sed -n 's/.*Jail list:[[:space:]]*//p' | tr ',' '\n' | grep -c -E 'agensio-(wordpress-soft|wordpress-hard|drupal-auth)') $(prot '"yes" if all(f["enabled"] for f in d["failure_jails"]) else d["failure_jails"]') $(fail2ban-regex /var/log/auth.log wordpress-soft 2>&1 | sed -n 's/^Lines: [0-9]* lines, [0-9]* ignored, \([0-9]*\) matched, .*/\1/p') $(fail2ban-regex /var/log/syslog drupal-auth 2>&1 | sed -n 's/^Lines: [0-9]* lines, [0-9]* ignored, \([0-9]*\) matched, .*/\1/p') $(codes | tr ' ' '\n' | grep -c fail2ban_failures_unseen)"
 rm -f /etc/fail2ban/filter.d/wordpress-soft.conf /etc/fail2ban/filter.d/wordpress-hard.conf /run/rsyslogd.pid
 ctl site-delete wp.test --yes --reason prot > /dev/null; ctl site-delete dr.test --yes --reason prot > /dev/null
-ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload > /dev/null; sleep 0.5
+ctl protection --jail --out /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload > /dev/null; sleep 0.5
 check "the two sites deleted and the jail rendered again: no failure jail, no finding about them" "0 0" "$(grep -c -E '^\[agensio-(wordpress|drupal)' /etc/fail2ban/jail.d/agensio.conf) $(codes | tr ' ' '\n' | grep -c fail2ban_failures_unseen)"
 
 # A trusted proxy is never banned (2026-10-13, docs/redirects.md 2.4): with [server] trusted_proxies every
@@ -226,10 +226,10 @@ check "the two sites deleted and the jail rendered again: no failure jail, no fi
 # where [DEFAULT] has none), and fail2ban loads the file. Rendered offline from a copy of the
 # configuration, then the server's own rendering is put back.
 sed 's/^\[server\]$/[server]\ntrusted_proxies = ["198.51.100.0\/24", "2001:db8:5::\/48"]/' $T/agensio.toml > $T/tp.toml
-"$BIN" protection -c $T/tp.toml --jail > /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload > /dev/null; sleep 0.5
+"$BIN" protection -c $T/tp.toml --jail --out /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload > /dev/null; sleep 0.5
 check "with trusted proxies every jail ignores them and loopback, and fail2ban runs the file" "yes yes yes" \
   "$(fail2ban-client get agensio-login ignoreip | grep -q '198.51.100.0/24' && fail2ban-client get agensio-login ignoreip | grep -q '2001:db8:5::/48' && echo yes) $(fail2ban-client get agensio-scan ignoreip | grep -qE '127\.0\.0\.[01]/8' && echo yes) $(fail2ban-client status | grep -q 'agensio-login' && fail2ban-client status | grep -q 'agensio-scan' && echo yes)"
-ctl protection --jail > /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload > /dev/null; sleep 0.5
+ctl protection --jail --out /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload > /dev/null; sleep 0.5
 
 # 6. host_protection = "external" and "off".
 nft delete table inet agensio

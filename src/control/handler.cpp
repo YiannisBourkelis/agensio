@@ -889,10 +889,10 @@ std::vector<std::string> ControlHandler::protection_steps() {
         for (std::size_t i = 0; i < paths.size(); ++i)
             if (const auto text = read_whole_file(paths[i]); text && *text != control::protection_filters()[i].text) filters_differ = true;
         out.push_back("the fail2ban jail on disk is older than this change (the sites' login paths, logs or ports): until root renders it again the new paths are not counted; as root: " +
-                      (filters_differ ? control::filter_install_command() + "; " : std::string()) + "agensio ctl protection --jail > " + std::string(control::kJailFile) + "; fail2ban-client reload");
+                      (filters_differ ? control::filter_install_command() + " && " : std::string()) + "agensio ctl protection --jail --out " + std::string(control::kJailFile) + " && fail2ban-client reload");
     }
     if (const auto nft = read_whole_file(in.firewall_file); nft && *nft != control::render_nft(in))
-        out.push_back("the firewall ruleset on disk is older than this change (the public ports): as root: agensio ctl protection --nft > " + in.firewall_file + "; nft -f " + in.firewall_file);
+        out.push_back("the firewall ruleset on disk is older than this change (the public ports): as root: agensio ctl protection --nft --out " + in.firewall_file + " && nft -f " + in.firewall_file);
     return out;
 }
 

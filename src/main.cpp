@@ -15,6 +15,7 @@
 #include <string>
 
 #include "config.hpp"
+#include "file.hpp"
 #include "control/client.hpp"
 #include "control/mcp.hpp"
 #include "control/protection.hpp"
@@ -73,7 +74,7 @@ void usage() {
                  "                           [--note TEXT | --no-note] [--lock | --unlock] | site-auth-user-delete NAME USER\n"
                  "                           (site-auth-users NAME lists them; a managed site's passwords; admin)\n"
                  "                      application service (read; rails, redmine, django, wagtail, node):\n"
-                 "                           site-unit NAME [--raw] | site-service NAME |\n"
+                 "                           site-unit NAME [--raw | --out FILE] | site-service NAME |\n"
                  "                           site-service-logs NAME [--lines N] [--since 3h] [--raw] (admin) |\n"
                  "                           site-task-output NAME [--offset N] [--length N] [--raw] (admin)\n"
                  "                      site-update NAME --set KEY=VALUE ... (settings [NAME] lists the keys and ceilings)\n"
@@ -92,16 +93,18 @@ void usage() {
                  "                      site-update NAME --refuse PATTERN ... (paths answered 404, gitignore-style; --no-refuse)\n"
                  "                      access-check NAME PATH ADDRESS: what the site's access rules decide for that client\n"
                  "                      path-check NAME PATH: what the site does with PATH and why (refuse, location, file, script)\n"
-                 "                      protection [--nft | --jail | --unit | --filter NAME]: the firewall ruleset and the\n"
-                 "                           fail2ban jails rendered for this host, with what is in place (--nft and the\n"
-                 "                           others print one file alone, for root to redirect into place)\n"
+                 "                      protection [--nft | --jail | --unit | --filter NAME] [--out FILE]: the firewall\n"
+                 "                           ruleset and the fail2ban jails rendered for this host, with what is in place;\n"
+                 "                           --nft and the others print one file alone, --out FILE writes it whole, 0644,\n"
+                 "                           and leaves it as it was when the render fails (never a shell's `>`)\n"
                  "                      Uploads: upload NAME [FILE] (stdin by default) | uploads | uploads-delete NAME\n"
                  "  mcp                 Model Context Protocol server on stdin/stdout for an AI agent host,\n"
                  "                      exposing the control commands as tools as the invoking user\n"
                  "                      (spawn it locally or over SSH: ssh admin@host agensio mcp)\n"
                  "  protection          render the host protection files from the configuration alone, no server\n"
-                 "                      needed: --nft | --jail | --unit | --filter NAME print one file; --defaults renders\n"
-                 "                      the packaged copies (ports 80 and 443) instead of this configuration's listeners\n"
+                 "                      needed: --nft | --jail | --unit | --filter NAME print one file, --out FILE writes it\n"
+                 "                      (whole, 0644); --defaults renders the packaged copies (ports 80 and 443) instead of\n"
+                 "                      this configuration's listeners\n"
                  "  pools               write the php-fpm pool of every site with `user` into the pool\n"
                  "                      directory (server.pools or the distro's); exit 3 when files changed\n"
                  "                      (reload php-fpm), 0 when up to date; --dry-run only reports\n";
@@ -216,7 +219,7 @@ int main(int argc, char** argv) {
 #endif
         }
         else if (a == "protection" && i == 1) {  // the host protection files, rendered from the configuration alone
-            std::string part, filter;
+            std::string part, filter, out;
             bool defaults = false;
             for (int j = i + 1; j < argc; ++j) {
                 std::string b = argv[j];
@@ -224,7 +227,12 @@ int main(int argc, char** argv) {
                 else if (b == "--nft" || b == "--jail" || b == "--unit") part = b.substr(2);
                 else if (b == "--filter" && j + 1 < argc) { part = "filter"; filter = argv[++j]; }
                 else if (b == "--defaults") defaults = true;
+                else if (b == "--out" && j + 1 < argc) out = argv[++j];  // written by this process, whole, 0644 (the alpha.94 report)
                 else { std::cerr << "protection: unexpected argument " << b << "\n"; return 2; }
+            }
+            if (!out.empty() && part.empty()) {
+                std::cerr << "protection: --out FILE goes with --nft, --jail, --unit or --filter NAME\n";
+                return 2;
             }
             agensio::control::ProtectionInput in;
             if (defaults) in = agensio::control::default_protection_input();
@@ -236,17 +244,31 @@ int main(int argc, char** argv) {
                     return 1;
                 }
             }
-            if (part == "nft") std::cout << agensio::control::render_nft(in);
-            else if (part == "jail") std::cout << agensio::control::render_jail(in);
-            else if (part == "unit") std::cout << agensio::control::render_firewall_unit(in);
+            std::string text;
+            if (part == "nft") text = agensio::control::render_nft(in);
+            else if (part == "jail") text = agensio::control::render_jail(in);
+            else if (part == "unit") text = agensio::control::render_firewall_unit(in);
             else if (part == "filter") {
                 for (const auto& f : agensio::control::protection_filters())
-                    if (filter == f.name) { std::cout << f.text; return 0; }
-                std::cerr << "protection: no filter " << filter << " (agensio-login, agensio-auth, agensio-scan, agensio-post, agensio-denied)\n";
-                return 2;
-            } else {
-                std::cout << agensio::control::protection_report(in, agensio::control::read_probe(agensio::json::Value(nullptr), in), {}).dump() << "\n";
+                    if (filter == f.name) text = f.text;
+                if (text.empty()) {
+                    std::cerr << "protection: no filter " << filter << " (agensio-login, agensio-auth, agensio-scan, agensio-post, agensio-denied)\n";
+                    return 2;
+                }
             }
+            if (!part.empty()) {
+                if (out.empty()) {
+                    std::cout << text;
+                    return 0;
+                }
+                if (const std::string why = agensio::write_file_atomic(out, text); !why.empty()) {
+                    std::cerr << "protection: " << why << "; the file is unchanged\n";
+                    return 1;
+                }
+                std::cout << "wrote " << out << "\n";
+                return 0;
+            }
+            std::cout << agensio::control::protection_report(in, agensio::control::read_probe(agensio::json::Value(nullptr), in), {}).dump() << "\n";
             return 0;
         }
         else if (a == "mcp" && i == 1) {
@@ -271,12 +293,14 @@ int main(int argc, char** argv) {
             auto ctl_usage = [] {
                 std::cout << "usage: agensio ctl <command> [options] [--socket PATH] [-c config.toml]\n"
                              "read:   status | sites | site NAME | validate | health | presets | uploads | settings [NAME] | reference | trash |\n"
-                             "        protection [--nft | --jail | --unit | --filter NAME] (the firewall ruleset and the fail2ban jails rendered\n"
+                             "        protection [--nft | --jail | --unit | --filter NAME] [--out FILE] (the firewall ruleset and the fail2ban jails rendered\n"
                              "                    for this host's listeners, logs and login paths, the root commands that try, keep and remove\n"
                              "                    them, and what the kernel and fail2ban do now; one file alone with --nft, --jail, --unit or\n"
-                             "                    --filter agensio-login|agensio-auth|agensio-scan|agensio-post|agensio-denied, for root to redirect into place) |\n"
-                             "        site-unit NAME [--raw] (the unit that runs the site's application, rendered for root: Puma for rails\n"
-                             "                    and redmine, Gunicorn for django and wagtail, node for node; --raw prints the unit alone) |\n"
+                             "                    --filter agensio-login|agensio-auth|agensio-scan|agensio-post|agensio-denied; --out FILE writes it in place,\n"
+                             "                    whole and 0644 whatever root's umask, and leaves it as it was when the render fails: never a shell's `>`) |\n"
+                             "        site-unit NAME [--raw | --out FILE] (the unit that runs the site's application, rendered for root: Puma for rails\n"
+                             "                    and redmine, Gunicorn for django and wagtail, node for node; --raw prints the unit alone, --out FILE\n"
+                             "                    writes it in place, whole and 0644) |\n"
                              "        site-service NAME (whether the site's application service, agensio-app-USER.service, runs, from\n"
                              "                    systemctl show) |\n"
                              "        site-service-logs NAME [--lines N] [--since 30m|3h|2d] [--raw] (admin, audited: its journal;\n"
@@ -418,6 +442,7 @@ int main(int argc, char** argv) {
                     return 0;
                 }
             std::string command, socket_path, site_name, query, upload_file, reveal, raw_part, raw_filter;
+            std::string out_file;  // --out: protection --nft/--jail/--unit/--filter, site-unit (the alpha.94 report)
             std::string check_path, check_address;  // access-check NAME PATH ADDRESS, path-check NAME PATH
             agensio::json::Value restrict_rules = agensio::json::Value::array();  // --restrict / --restrict-exact
             bool restrict_given = false;  // --restrict, --restrict-exact or --no-restrict: rules.restricted is replaced
@@ -666,6 +691,7 @@ int main(int argc, char** argv) {
                 else if (b == "--trusted-proxies-default") body.set("trusted_proxies", agensio::json::Value(nullptr));
                 else if (b == "--nft" || b == "--jail" || b == "--unit") { raw = true; raw_part = b.substr(2); }
                 else if (b == "--filter") { raw = true; raw_part = "filter"; value(raw_filter); }
+                else if (b == "--out") value(out_file);
                 else if (b == "--php-socket") field("php_socket");
                 else if (b == "--php-children") { std::string v; value(v); body.set("php_children", std::atoi(v.c_str())); }
                 else if (b == "--php-version") field("php_version");
@@ -956,6 +982,10 @@ int main(int argc, char** argv) {
                 if (auth_given && !auth_rules.items().empty()) merged.set("auth", auth_rules);
                 body.set("rules", merged);
             }
+            if (!out_file.empty() && !(command == "protection" && raw) && command != "site-unit") {
+                std::cerr << "ctl: --out FILE goes with protection --nft, --jail, --unit or --filter NAME, or with site-unit NAME\n";
+                return 2;
+            }
             agensio::ControlReply reply;
             std::string error;
             if (!agensio::control_request(socket_path, method, path, upload ? upload_bytes : mutation ? body.dump() : std::string(), reply, error)) {
@@ -966,8 +996,41 @@ int main(int argc, char** argv) {
                 std::cerr << "this command changes the server: add --yes (and --reason \"why\") to confirm\n";
                 return 1;
             }
+            // --out FILE (the alpha.94 report): a file root loads (a jail, a ruleset, a unit) written by
+            // this process, whole, with its own mode, never through a shell's `>`, which takes root's
+            // umask and empties the file, or fills it with the error, when the render fails. Anything but
+            // a complete render leaves the file as it was and exits non-zero.
+            if (!out_file.empty()) {
+                std::string text;
+                agensio::json::Value u;
+                std::string perr;
+                if (reply.status == 200 && agensio::json::parse(reply.body, u, perr)) {
+                    if (command == "site-unit") text = u.get("unit");
+                    else if (raw_part == "nft") text = u["firewall"].get("ruleset");
+                    else if (raw_part == "unit") text = u["firewall"].get("unit_text");
+                    else if (raw_part == "jail") text = u["fail2ban"].get("jail");
+                    else if (raw_part == "filter") {
+                        text = u["fail2ban"]["filters"].get(raw_filter);
+                        if (text.empty()) {
+                            std::cerr << "protection: no filter " << raw_filter << " (agensio-login, agensio-auth, agensio-scan, agensio-post, agensio-denied); "
+                                      << out_file << " is unchanged\n";
+                            return 2;
+                        }
+                    }
+                }
+                if (text.empty()) {
+                    std::cerr << "ctl: " << out_file << " is unchanged: the server answered " << reply.status << ": " << reply.body << "\n";
+                    return 1;
+                }
+                if (const std::string why = agensio::write_file_atomic(out_file, text); !why.empty()) {
+                    std::cerr << "ctl: " << why << "; the file is unchanged\n";
+                    return 1;
+                }
+                std::cout << "wrote " << out_file << "\n";
+                return 0;
+            }
             if (raw && (command == "site-unit" || command == "site-service-logs" || command == "site-task-output") && reply.status == 200) {
-                // The unit alone, for root to redirect into place; the journal's or the task's lines alone.
+                // The unit alone (--out writes it into place); the journal's or the task's lines alone.
                 agensio::json::Value u;
                 std::string perr;
                 if (agensio::json::parse(reply.body, u, perr)) {
@@ -976,8 +1039,8 @@ int main(int argc, char** argv) {
                 }
             }
             if (raw && command == "protection" && reply.status == 200) {
-                // One of the host protection files alone (--nft, --jail, --unit, --filter NAME), for root
-                // to redirect into place.
+                // One of the host protection files alone (--nft, --jail, --unit, --filter NAME), to read;
+                // --out writes it into place.
                 agensio::json::Value u;
                 std::string perr;
                 if (agensio::json::parse(reply.body, u, perr)) {
