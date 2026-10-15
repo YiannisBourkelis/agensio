@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.95
+## 0.1.0-alpha.95 (2026-10-16)
 
 - **Files root loads are written by agensio itself, whole and `0644`: `--out`** (the alpha.94 report
   from the test host; `docs/configuration.md` 18, security page row 37). The commands root was given
