@@ -465,8 +465,11 @@ archives and database dumps under any served tree (`.zip`, `.tar.gz`, `.7z`, `.s
 served should hold a copy of the site. The SQL an application ships with its code is not
 counted: TYPO3's `ext_tables.sql` and `ext_tables_static+adt.sql` in an extension's directory
 (beside its `ext_emconf.php` or `composer.json`), and an uncompressed `.sql` file of up to 64 KB
-with no data statement (no `INSERT`, `REPLACE` or `COPY ... FROM stdin`), which defines tables
-and holds no rows. A larger file, a compressed one and anything else that may hold rows is.
+whose statements all define tables (`CREATE TABLE`, `CREATE INDEX`, `CREATE VIEW`, `ALTER TABLE`,
+`DROP TABLE`, `DROP INDEX`, `DROP VIEW`; comments aside), which holds no rows and no credential. A
+larger file, a compressed one, one that ends inside a quote and one with any other statement
+(`INSERT`, `UPDATE`, `COPY`, `SET`, `GRANT`, `CREATE USER ... IDENTIFIED BY`, MySQL's `/*! ... */`
+lines) is.
 
 ## 4d. Grav: `app = "grav"`
 

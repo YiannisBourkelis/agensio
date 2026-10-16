@@ -11,6 +11,7 @@
 #include "control/protection.hpp"
 #include "control/settings.hpp"
 #include "control/sites.hpp"
+#include "control/sql_scan.hpp"
 
 #ifndef _WIN32
 #include <sys/stat.h>
@@ -1155,10 +1156,11 @@ bool application_schema(const fs::path& file, std::string_view lower) {
     return fs::is_regular_file(dir / "ext_emconf.php", ec) || fs::is_regular_file(dir / "composer.json", ec);
 }
 
-// An uncompressed .sql file of at most 64 KB without a data statement (no INSERT or REPLACE, no COPY
-// ... FROM stdin) defines tables and holds no rows, so nothing of the site is in it (an application's
-// schema or upgrade file; a dump made without data). A larger file, one that cannot be read and
-// anything else that may hold rows count; a keyword in a comment or a view counts too, the safe side.
+// An uncompressed .sql file of at most 64 KB whose statements all define tables (control/sql_scan.hpp)
+// holds no rows and no credential, so nothing of the site is in it: an application's schema or upgrade
+// file. A larger file, one that cannot be read, one that ends inside a quote or a comment and one with
+// any other statement count (the alpha.96 report: a file of UPDATE statements with a password hash and
+// a key passed the keyword rule of alpha.96).
 bool sql_without_rows(const fs::path& file) {
     constexpr std::size_t kMax = 64 * 1024;
     std::ifstream in(file, std::ios::binary);
@@ -1167,17 +1169,8 @@ bool sql_without_rows(const fs::path& file) {
     in.read(text.data(), static_cast<std::streamsize>(text.size()));
     text.resize(static_cast<std::size_t>(in.gcount()));
     if (text.size() > kMax) return false;
-    for (char& c : text) c = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
-    const auto ident = [&](std::size_t i) {
-        const unsigned char c = static_cast<unsigned char>(text[i]);
-        return std::isalnum(c) != 0 || c == '_';
-    };
-    const auto word = [&](std::string_view w) {
-        for (std::size_t at = text.find(w); at != std::string::npos; at = text.find(w, at + 1))
-            if ((at == 0 || !ident(at - 1)) && (at + w.size() == text.size() || !ident(at + w.size()))) return true;
-        return false;
-    };
-    return !word("insert") && !word("replace") && text.find("from stdin") == std::string::npos;
+    const sql::Scan scan = sql::scan(text);
+    return scan.definitions_only && !scan.open;
 }
 
 }  // namespace

@@ -28,6 +28,7 @@
 #include "control/commands.hpp"
 #include "control/probe.hpp"
 #include "control/protection.hpp"
+#include "control/sql_scan.hpp"
 #include "core/strings.hpp"
 #include "control/reference.hpp"
 #include "control/mcp.hpp"
@@ -6522,10 +6523,42 @@ static void test_header_suggestions() {
 // application ships with its code, which holds no copy of the site (the alpha.95 report: TYPO3's
 // typo3/sysext/extbase/ext_tables.sql named as a dump). The names TYPO3 reserves in an extension's
 // directory (ext_tables.sql, ext_tables_static+adt.sql, beside its ext_emconf.php or composer.json)
-// and a small uncompressed .sql file without a data statement are not counted; anything that may hold
-// rows still is, a reserved name outside an extension's directory included.
+// and a small uncompressed .sql file whose statements all define tables are not counted; anything that
+// may hold rows or a credential still is, a reserved name outside an extension's directory included.
 static void test_archives_in_root() {
     namespace fs = std::filesystem;
+    // The statement scanner (control/sql_scan.hpp): table definitions only, judged statement by statement.
+    struct SqlCase {
+        const char* text;
+        bool definitions_only;
+        bool open;
+    };
+    const SqlCase sql_cases[] = {
+        {"", true, false},
+        {"CREATE TABLE a (b int);", true, false},
+        {"create table x(y int);\nalter table x add z int;\ndrop index i on x;\ndrop view v;", true, false},
+        {"CREATE TABLE`x`(y int);CREATE UNIQUE INDEX i ON x (y);CREATE TEMPORARY TABLE t (u int);;", true, false},
+        {"CREATE TABLE a (b varchar(9) DEFAULT 'x;INSERT' COMMENT 'it''s', c text DEFAULT 'a\\'b;c');", true, false},
+        {"# c\n-- c\n/* c; INSERT */ CREATE INDEX i ON a (b); DROP TABLE IF EXISTS c;", true, false},
+        {"CREATE TABLE a (b int) -- ; INSERT INTO a VALUES (1);", true, false},  // comments are not read
+        {"UPDATE wp_users SET user_pass='$P$B' WHERE ID=1;", false, false},
+        {"CREATE USER 'u'@'%' IDENTIFIED BY 'pw';", false, false},
+        {"GRANT ALL ON *.* TO u;", false, false},
+        {"/*!40101 SET NAMES utf8 */;\nCREATE TABLE a (b int);", false, false},
+        {"CREATE TABLE a (b int); INSERT INTO a VALUES (1)", false, false},
+        {"PRAGMA foreign_keys=OFF;", false, false},
+        {"SET x = 1;", false, false},
+        {"CREATE", false, false},
+        {"CREATEX TABLE a (b int);", false, false},
+        {"CREATE FUNCTION f() RETURNS int AS $$ SELECT 1 $$;", false, false},
+        {"'unterminated", false, true},
+        {"CREATE TABLE a (b int); /* open", true, true},
+    };
+    for (const auto& c : sql_cases) {
+        const control::sql::Scan scan = control::sql::scan(c.text);
+        if (scan.definitions_only != c.definitions_only || scan.open != c.open) std::printf("sql scan: %s\n", c.text);
+        CHECK(scan.definitions_only == c.definitions_only && scan.open == c.open);
+    }
     const fs::path dir = fs::temp_directory_path() / ("agensio-archives-" + std::to_string(::getpid()));
     fs::remove_all(dir);
     auto put = [&](const std::string& rel, const std::string& text) {
@@ -6553,8 +6586,16 @@ static void test_archives_in_root() {
     put("typo3/sysext/core/ext_tables.sql.gz", "\x1f\x8b");  // a reserved name compressed is no longer the application's
     put("ext_tables_static+adt.sql", "INSERT INTO be_users VALUES (1, 'admin', '$argon2i$x');\n");  // no extension here
     put("INSERTS.sql", "insert\tignore into t values (1);\n");  // a keyword spelled any way
+    // Only table definitions are exempt (the alpha.96 report: a file of UPDATE statements with a password
+    // hash and a key was taken for a schema): every other statement counts, a credential in DDL too.
+    put("db/schema-commented.sql", "# Table structure\n-- note\n/* block */\nCREATE TABLE t (a varchar(9) DEFAULT 'x;y' COMMENT 'it''s');\n"
+                                   "CREATE UNIQUE INDEX i ON t (a);\nDROP TABLE IF EXISTS old;\n");  // not counted
+    put("db/fix.sql", "UPDATE wp_users SET user_pass='$P$Bxyz' WHERE ID=1;\nUPDATE wp_options SET option_value='sk_live_x' WHERE option_id=9;\n");
+    put("db/user.sql", "CREATE USER 'wp'@'localhost' IDENTIFIED BY 'secret';\n");
+    put("db/nodata-dump.sql", "/*!40101 SET NAMES utf8mb4 */;\nCREATE TABLE t (a int);\n");  // MySQL's executable comment is code
+    put("db/unterminated.sql", "CREATE TABLE t (a text DEFAULT 'x);\n");  // ends inside a quote
     const control::ArchivesInRoot a = control::archives_in_root(site, 2000);
-    CHECK(a.count == 10 && a.seen == 16);
+    CHECK(a.count == 14 && a.seen == 21);
     fs::remove_all(dir);
 }
 

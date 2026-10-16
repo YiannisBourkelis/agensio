@@ -1,0 +1,9 @@
+#
+# Table structure for table 'tx_extbase_domain_model_category'
+#
+CREATE TABLE tx_extbase_domain_model_category (
+	uid int(11) unsigned DEFAULT '0' NOT NULL,
+	title varchar(255) DEFAULT '' NOT NULL,
+	PRIMARY KEY (uid),
+	KEY parent (pid)
+);

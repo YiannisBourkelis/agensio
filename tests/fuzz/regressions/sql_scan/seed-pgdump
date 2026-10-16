@@ -1,0 +1,6 @@
+SET statement_timeout = 0;
+CREATE TABLE public.users (id integer, name text DEFAULT 'it''s');
+COPY public.users (id, name) FROM stdin;
+1	admin
+\.
+CREATE FUNCTION f() RETURNS int AS $$ SELECT 1; $$ LANGUAGE sql;

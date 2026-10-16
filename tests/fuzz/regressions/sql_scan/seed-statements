@@ -1,0 +1,2 @@
+UPDATE wp_users SET user_pass='$P$Bxyz' WHERE ID=1; -- the fix
+CREATE USER "wp"@"localhost" IDENTIFIED BY 'secret'; /* block ; comment */ # hash comment

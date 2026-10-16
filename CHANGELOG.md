@@ -11,6 +11,19 @@
   an empty word or one starting with `--` is no value, "WHO: FLAG needs a value" on one line of stderr,
   exit 2, nothing on stdout (a value that truly starts with `--` is written `./--name`); an unknown
   top-level argument prints the usage on stderr. Integration check, failing on alpha.96.
+- **A `.sql` file is exempt from `archives_in_root` only when it defines tables** (the same report: a
+  `db/fix.sql` of `UPDATE wp_users SET user_pass='$P$B...'` and `UPDATE wp_options SET
+  option_value='sk_live_...'`, no `INSERT`, was taken for a schema by alpha.96's keyword rule). The
+  rule is inverted: `control/sql_scan.hpp` splits the text into statements on `;` outside quotes and
+  comments and judges each by its first two words; a file is exempt only when every statement is
+  `CREATE TABLE`, `CREATE INDEX` (`UNIQUE`, `FULLTEXT`, `SPATIAL`), `CREATE VIEW`, `CREATE TEMPORARY
+  TABLE`, `ALTER TABLE`, `DROP TABLE`, `DROP INDEX` or `DROP VIEW`. Anything else counts: `UPDATE`, `SET`,
+  `GRANT`, `CREATE USER ... IDENTIFIED BY` (a password in DDL), `PRAGMA`, MySQL's executable `/*! ... */`
+  comments (so a mysqldump without its rows counts), and a file that ends inside a quote. Comments are
+  not read. The scanner is header-only, linear and has its fuzz target, `fuzz_sql_scan` (a comment
+  appended changes nothing; a data statement after any text not ending in a quote or a comment is
+  found; 45 minutes on one core and 15 on twenty-four, 356 M runs, clean). Unit test, failing on alpha.96; the MCP text of `health_check` and
+  `docs/configuration.md` 4c say it.
 
 ## 0.1.0-alpha.96 (2026-10-16)
 
