@@ -165,6 +165,40 @@ devbox): the one-call paths and each refusal.
 
 ## Sanitizer and fuzz record
 
+2026-10-16, the release check of 0.1.0-alpha.96 (4819aab), which also covers alpha.94 and alpha.95:
+both were tagged with no run recorded here. Every target five minutes on its corpus
+(`scripts/fuzz-all.sh -t 300`, ASan and UBSan, clang), twenty targets: no finding, no timeout, no
+sanitizer line in any log. The unit tests, the integration suite (735 checks) and the Pebble suite
+on the sanitizer build (`build-asan`, GCC 14): clean, no report in the suite's output or in any
+server's own output file. The release build: unit, reload (24), auth (48), pools (26), control (27)
+and Pebble (21) suites pass; the reload suite first failed on a `bench/tmp/reload` left by a run as
+root, which the account the suite runs as could not write (removed, then 24 of 24). The builds
+without OpenSSL and without libxcrypt link and pass their unit tests. The A/B against alpha.95
+(`ab-20261016-022440.md` with every row set but HTTP/3, `ab-20261016-025547.md` for HTTP/3): flat.
+
+| target | runs | edges | result |
+|---|---|---|---|
+| fuzz_archive | 21.62 M | 641 | clean |
+| fuzz_auth_users | 28.10 M | 498 | clean |
+| fuzz_chunked | 206.05 M | 63 | clean |
+| fuzz_fcgi | 102.48 M | 96 | clean |
+| fuzz_fields | 15.14 M | 571 | clean |
+| fuzz_h2_conn | 1.13 M | 11,277 | clean |
+| fuzz_hpack | 3.92 M | 529 | clean |
+| fuzz_hpack_roundtrip | 0.45 M | 466 | clean |
+| fuzz_http_head | 109.91 M | 152 | clean |
+| fuzz_json | 8.64 M | 554 | clean |
+| fuzz_log_line | 8.84 M | 725 | clean |
+| fuzz_parser | 75.74 M | 240 | clean |
+| fuzz_path | 19.74 M | 236 | clean |
+| fuzz_qpack | 11.68 M | 647 | clean |
+| fuzz_quic_conn | 0.86 M | 1,545 | clean |
+| fuzz_quic_packet | 46.10 M | 217 | clean |
+| fuzz_redirect | 9.68 M | 1,230 | clean |
+| fuzz_refuse | 5.03 M | 875 | clean |
+| fuzz_response_headers | 1.50 M | 2,964 | clean |
+| fuzz_transport_params | 284.96 M | 211 | clean |
+
 2026-10-14, the security pass over the response headers (`[[site.response_headers]]`, alpha.89 to
 alpha.92): every target twenty minutes on its corpus, twelve at once (`scripts/fuzz-all.sh -t 1200`),
 ASan and UBSan, clang; the new `fuzz_response_headers` among them. No finding, no timeout, no
