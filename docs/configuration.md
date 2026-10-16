@@ -3027,7 +3027,10 @@ protection --jail`, `--nft`, `--unit` and `--filter NAME`, on `agensio protectio
 configuration alone) and on `agensio ctl site-unit NAME` writes the file whole, `0644` whatever root's
 umask, through a temporary file renamed into place. When the render fails (the server stopped, the
 socket unreachable, a refused call) the file is left as it was and the command exits non-zero, so the
-reload after it is not run when the steps are chained with `&&`. A shell's `>` did neither: the file took
+reload after it is not run when the steps are chained with `&&`. A finding's fix carries its steps
+joined that way; the lists `protection_show` and `site-unit` answer (`fail2ban.install`,
+`firewall.trial`, `firewall.keep`, `run_as_root`) are the same steps one per item, to run in order,
+each only after the one before it succeeded. A shell's `>` did neither: the file took
 root's umask (`0664` under a umask of `0002`, writable by root's group, and root loads it), and the
 shell emptied it before `agensio` ran, so a failed render left an empty jail that `fail2ban-client
 reload` then loaded. Health's `root_file_writable` names the jail, the ruleset, the firewall unit, a

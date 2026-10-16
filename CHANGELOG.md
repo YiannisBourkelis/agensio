@@ -32,6 +32,17 @@
   now names an upgrade that changed a jail beside a site, a log or a login path added. Unit test, failing on
   alpha.95; the MCP texts of `protection_show` and `health_check`, `docs/fail2ban.md`,
   `docs/configuration.md` 18 and `tests/protection.sh` follow.
+- **The lists of root's steps say how to run them** (the same report). alpha.95's note that every
+  command root is given chains its steps with `&&` held for the one-line fixes (a finding's `fix`,
+  `failure_jails` `needs`, the unit's header), not for the lists: `protection_show`'s
+  `fail2ban.install`, `firewall.trial` and `firewall.keep` and `site_service_unit`'s `run_as_root` are
+  steps one per item, and `protection_show`'s description said each ran only when the one before it
+  worked, which holds only when they are run that way. The lists stay one step per item, to show and
+  run one at a time; the MCP texts of `protection_show` and `site_service_unit` now tell the agent
+  to give them in order, each only after the one before it succeeded, stopping at one that fails;
+  `docs/configuration.md` 18, `docs/mcp.md`'s example and the security page's row 37 say the same.
+  With `--out` a render that fails leaves the file as it was, so a step run after a failed one no
+  longer damages anything.
 
 ## 0.1.0-alpha.95 (2026-10-16)
 

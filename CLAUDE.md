@@ -1258,8 +1258,9 @@ Each item was benchmarked before and after on the reduced matrix (`bench/run.sh 
    no plugin and changes no application, it suggests (2026-10-03). `docs/fail2ban.md` is the
    administrator's guide: the jails, what each application type gets, what to add. Root's files (the jail, the ruleset, the firewall unit, the sites' units,
    the generated pools) are written by agensio itself (`--out`, `write_file_atomic` in `file.cpp`:
-   whole, `0644` whatever the umask, untouched when a render fails; alpha.95, the alpha.94 report), the
-   steps root is given chain with `&&`, and health `root_file_writable` names a loose one. Rule: never
+   whole, `0644` whatever the umask, untouched when a render fails; alpha.95, the alpha.94 report), a fix
+   given as one line chains its steps with `&&` (the lists of steps say to run each after the one before
+   it succeeded), and health `root_file_writable` names a loose one. Rule: never
    hand root a shell's `>` into a file root loads.
 
 7. **Every accepted socket is non-blocking at accept** (2026-10-04, after a live freeze):

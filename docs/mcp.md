@@ -302,7 +302,8 @@ the agent never writes a secret into a file of the application or into a unit.
 > **Agent:** calls `health_check` and `protection_show`. The host has a public listener and
 > neither the firewall limits nor a fail2ban jail: it explains the split (the server's
 > ceiling refused the overflow, the firewall and fail2ban are root's), shows the three trial
-> commands exactly, says that the timer undoes them in ten minutes unless kept, and asks you
+> commands exactly, to run in order, each once the one before it worked, says that the timer
+> undoes them in ten minutes unless kept, and asks you
 > to check the site and your SSH session, then shows the two keep commands and the
 > fail2ban install. For the Kanboard site, whose preset cannot know the login path, it asks
 > where the form posts and sets `login_paths` with `site_update` before rendering the jail.
