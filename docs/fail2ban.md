@@ -51,9 +51,13 @@ The jail file is rendered from the sites that exist, so adding a site, a log or 
 makes the installed copy stale; health says so (`fail2ban_jail_stale`) and the second and
 third lines above refresh it. An upgrade that changes a shipped filter is reported the same
 way (`fail2ban_filter_stale`), with the first line ahead of the others. The comparison skips
-comment lines (a line whose first non-blank character is `#`, a comment to fail2ban and nft): an
-upgrade that rewords only the comments leaves the jails and their matching as they were, and health
-says just that, as information, with the line that renders the file again and no reload. A site
+comment lines (a line whose first non-blank character is `#`, a comment to fail2ban and nft): when
+only comments differ, from an upgrade that reworded them or a note added by hand, the jails and their
+matching are as they were, and health says just that, as information, with the line that renders the
+file again and no reload. Rendering replaces the file, comments and hand edits included: settings
+and notes of your own go into `/etc/fail2ban/jail.d/agensio.local` (and a filter's into
+`filter.d/NAME.local`), which fail2ban reads after the `.conf` (jail.conf(5),
+`docs/fail2ban-ref/man/jail.conf.5.txt`) and agensio never writes; the jail file's header says so. A site
 change through the control plane puts the same lines into the answer's `next_steps` when they apply.
 
 Two tiers of jails come out of that file.

@@ -5630,8 +5630,14 @@ static void test_protection() {
         ProtectionFiles cj = files;
         cj.installed_jail = reworded(render_jail(in));
         const auto f = protection_findings(in, probe, cj);
-        CHECK(codes(in, probe, cj) == "info:fail2ban_jail_stale" && f[0].message.find("only its comments") != npos && f[0].message.find("was added") == npos &&
-              f[0].fix.starts_with("as root: agensio ctl protection --jail --out /etc/fail2ban/jail.d/agensio.conf") && f[0].fix.find("fail2ban-client reload") == npos);
+        // The comparison cannot tell an upgrade's wording from a note added by hand (the alpha.96 report):
+        // the message names both, and rendering again replaces the file, so an administrator's own notes
+        // and settings belong in jail.d/agensio.local, read after it (jail.conf(5)), never written by agensio.
+        CHECK(codes(in, probe, cj) == "info:fail2ban_jail_stale" && f[0].message.find("only comment lines differ") != npos &&
+              f[0].message.find("added by hand") != npos && f[0].message.find("older build") == npos && f[0].message.find("was added") == npos &&
+              f[0].fix.starts_with("as root: agensio ctl protection --jail --out /etc/fail2ban/jail.d/agensio.conf") && f[0].fix.find("fail2ban-client reload") == npos &&
+              f[0].fix.find("/etc/fail2ban/jail.d/agensio.local") != npos);
+        CHECK(render_jail(in).find("/etc/fail2ban/jail.d/agensio.local") != npos);  // the file says it too
         CHECK(protection_report(in, probe, cj)["fail2ban"].get("installed_jail") == "comments");
         ProtectionFiles blank = files;
         blank.installed_jail = render_jail(in) + "\n";
@@ -5641,13 +5647,16 @@ static void test_protection() {
         j.replace(j.find("\nenabled   = true"), 17, "\n# enabled   = true");
         off.installed_jail = j;
         CHECK(protection_report(in, probe, off)["fail2ban"].get("installed_jail") == "stale" &&
-              protection_findings(in, probe, off)[0].fix.find("fail2ban-client reload") != npos);
+              protection_findings(in, probe, off)[0].fix.find("fail2ban-client reload") != npos &&
+              protection_findings(in, probe, off)[0].message.find("edited by hand") != npos &&
+              protection_findings(in, probe, off)[0].fix.find("/etc/fail2ban/jail.d/agensio.local") != npos);
         ProtectionFiles cf = files;
         cf.installed_filters[2] = reworded(*cf.installed_filters[2]);
         const auto g = protection_findings(in, probe, cf);
         const json::Value r = protection_report(in, probe, cf);
-        CHECK(codes(in, probe, cf) == "info:fail2ban_filter_stale" && g[0].message.find("agensio-scan") != npos && g[0].message.find("only their comments") != npos &&
-              g[0].fix.starts_with("as root: install -m 644 ") && g[0].fix.find("fail2ban-client reload") == npos &&
+        CHECK(codes(in, probe, cf) == "info:fail2ban_filter_stale" && g[0].message.find("agensio-scan") != npos && g[0].message.find("only comment lines differ") != npos &&
+              g[0].message.find("added by hand") != npos && g[0].message.find("older build") == npos &&
+              g[0].fix.starts_with("as root: install -m 644 ") && g[0].fix.find("fail2ban-client reload") == npos && g[0].fix.find(".local") != npos &&
               r["fail2ban"]["installed_filters"].get("state") == "comments" && r["fail2ban"]["installed_filters"]["comments"].items().size() == 1 &&
               r["fail2ban"]["installed_filters"]["stale"].items().empty());
         ProtectionFiles fw = files;

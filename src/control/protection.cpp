@@ -721,6 +721,10 @@ std::string render_jail(const ProtectionInput& in) {
     s += "# The access logs are in the combined format: the client address is the first field (behind a trusted\n";
     s += "# proxy, the one X-Forwarded-For named), as in the error log's lines. Bans go through nftables into fail2ban's own table;\n";
     s += "# a host whose firewall is managed otherwise sets banaction in its jail.local.\n";
+    // Rendering again replaces this file, comments included (the alpha.96 report): an administrator's
+    // own settings and notes go where fail2ban reads them after it and agensio never writes.
+    s += "# Rendering again replaces this file. Settings and notes of your own go into\n";
+    s += "# /etc/fail2ban/jail.d/agensio.local, which fail2ban reads after it (jail.conf(5)).\n";
     if (!in.combined)
         s += "#\n# NOTE: this host's access logs are JSON ([log] format = \"json\"); these filters read the combined\n# format only, so nothing here matches until the format is combined.\n";
     // A trusted proxy is never banned (2026-10-13, docs/redirects.md 2.4): its own address reaches
@@ -1265,17 +1269,26 @@ std::vector<Finding> protection_findings(const ProtectionInput& in, const Protec
                                       (v.missing_filters.empty() ? std::string() : "the filter(s) " + join(v.missing_filters, ", ") + " are not installed") +
                                       ": the jails run with what an older build matched",
                                   "as root: " + filter_install_command() + " && " + (v.jail_state != "same" ? "agensio ctl protection --jail --out " + std::string(kJailFile) + " && " : std::string()) + "fail2ban-client reload"});
-        else if (v.filters_state == "comments")  // the same matching: an older build's comments only
+        else if (v.filters_state == "comments")  // the same matching, other comments: an upgrade's or a hand's
             out.push_back(Finding{"info", "fail2ban_filter_stale", "",
-                                  "the installed filter(s) " + join(v.comment_filters, ", ") + " in /etc/fail2ban/filter.d/ match as this build's do; only their comments are an older build's text",
-                                  "as root: " + filter_install_command() + " (at any time: the matching is unchanged, no reload is needed)"});
+                                  "the installed filter(s) " + join(v.comment_filters, ", ") +
+                                      " in /etc/fail2ban/filter.d/ match as this build's do; only comment lines differ from the shipped text (an upgrade reworded them, or comments were added by hand)",
+                                  "as root: " + filter_install_command() +
+                                      " (at any time: the matching is unchanged, no reload is needed; installing replaces the files, comments included, and a change of your own "
+                                      "belongs in /etc/fail2ban/filter.d/NAME.local, which fail2ban reads after NAME.conf)"});
+        // Rendering again replaces the file whatever made it differ, so a setting or a note of the
+        // administrator's own is lost unless it lives in the .local file fail2ban reads after it.
+        const std::string own = "; settings and notes of your own in that file go into /etc/fail2ban/jail.d/agensio.local first, which fail2ban reads after it and agensio never writes";
         if (v.jail_state == "stale")
-            out.push_back(Finding{"info", "fail2ban_jail_stale", "", std::string(kJailFile) + " differs from this host's rendering in its jails (a site, a log or a login path was added since, or an upgrade changed a jail)",
-                                  "as root: " + reinstall + "agensio ctl protection --jail --out " + std::string(kJailFile) + " && fail2ban-client reload"});
-        else if (v.jail_state == "comments")  // the same jails: an older build's comments only (the alpha.95 report)
-            out.push_back(Finding{"info", "fail2ban_jail_stale", "", std::string(kJailFile) + " holds this host's jails; only its comments are an older build's text (an upgrade reworded them)",
+            out.push_back(Finding{"info", "fail2ban_jail_stale", "",
+                                  std::string(kJailFile) + " differs from this host's rendering in its jails (a site, a log or a login path was added since, an upgrade changed a jail, or it was edited by hand)",
+                                  "as root: " + reinstall + "agensio ctl protection --jail --out " + std::string(kJailFile) + " && fail2ban-client reload (rendering again replaces the file" + own + ")"});
+        else if (v.jail_state == "comments")  // the same jails, other comments (the alpha.95 and alpha.96 reports)
+            out.push_back(Finding{"info", "fail2ban_jail_stale", "",
+                                  std::string(kJailFile) + " holds this host's jails; only comment lines differ from this build's rendering (an upgrade reworded them, or comments were added by hand)",
                                   "as root: " + reinstall + "agensio ctl protection --jail --out " + std::string(kJailFile) +
-                                      (reinstall.empty() ? " (at any time: the jails are unchanged, no reload is needed)" : " && fail2ban-client reload")});
+                                      (reinstall.empty() ? " (at any time: the jails are unchanged, no reload is needed; " : " && fail2ban-client reload (") +
+                                      "rendering again replaces the file" + own + ")"});
     }
     // Failed passwords ([[site.auth]], 2026-10-08): counted from the error log by agensio-auth; the
     // filter of alpha.57 and before counted every 401 of the access logs, the challenge included.

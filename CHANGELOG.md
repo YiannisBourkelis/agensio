@@ -33,6 +33,18 @@
   against 47 k on one. `-print_funcs=0` stops a symbolizer starting for every newly covered function,
   which with every target starting at once stalled six of them for half a minute; a crash's report is
   still symbolized. `docs/security-control-plane.md` says it with the procedure.
+- **The jail finding names a hand edit, and where the administrator's own settings go** (the alpha.96
+  report). With a `# test` line added by hand, health said the jail's comments were "an older build's
+  text (an upgrade reworded them)", and its fix, rendering again, deleted the note. The comparison
+  cannot tell an upgrade's wording from a note: `fail2ban_jail_stale` now says "only comment lines
+  differ from this build's rendering (an upgrade reworded them, or comments were added by hand)", a
+  stale jail's reasons include "edited by hand", and both fixes say that rendering replaces the file
+  and that settings and notes of one's own go into `/etc/fail2ban/jail.d/agensio.local`, which
+  fail2ban reads after it (jail.conf(5)) and agensio never writes; the filter finding likewise, with
+  `filter.d/NAME.local`. The rendered jail's header says it too (the packaged copy rendered again):
+  on an upgraded host health names the jail's comments once, as information. The MCP texts of
+  `protection_show` and `health_check` tell the agent to ask about the user's own lines before giving
+  root the render; `docs/fail2ban.md` and `docs/configuration.md` 18. Unit test, failing on alpha.96.
 
 ## 0.1.0-alpha.96 (2026-10-16)
 
