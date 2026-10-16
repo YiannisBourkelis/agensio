@@ -28,8 +28,8 @@
 
 namespace {
 
-void usage() {
-    std::cout << "agensio " AGENSIO_VERSION
+void usage(std::ostream& out = std::cout) {
+    out << "agensio " AGENSIO_VERSION
                  " - a fast static web server built on Asio\n\n"
                  "usage: agensio [-c config.toml] [-t] [-v]\n"
                  "       agensio pools [-c config.toml] [--out DIR] [--dry-run]\n"
@@ -110,6 +110,20 @@ void usage() {
                  "                      (reload php-fpm), 0 when up to date; --dry-run only reports\n";
 }
 
+// The value of the flag at argv[j], into `into` (the alpha.95 and alpha.96 reports). None when the flag is
+// the last word, when the next word is a flag (`--out --nft` wrote the jail into a file named --nft) or
+// when it is empty (`--socket ""` fell back to the configured socket): one line on stderr, "WHO: FLAG
+// needs a value", and the caller exits 2. A value that truly starts with "--" is written ./--name.
+bool flag_value(int argc, char** argv, int& j, std::string& into, std::string_view who) {
+    const std::string_view next = j + 1 < argc ? std::string_view(argv[j + 1]) : std::string_view();
+    if (next.empty() || next.starts_with("--")) {
+        std::cerr << who << ": " << argv[j] << " needs a value\n";
+        return false;
+    }
+    into = argv[++j];
+    return true;
+}
+
 // Without -c: the working directory first (development), then the system locations, so
 // `agensio`, `agensio -t` and `agensio reload` need no arguments on an installed machine.
 std::filesystem::path default_config() {
@@ -161,8 +175,11 @@ int main(int argc, char** argv) {
     std::filesystem::path pools_out;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
-        if ((a == "-c" || a == "--config") && i + 1 < argc) config_path = argv[++i];
-        else if (a == "-t" || a == "--test") test_only = true;
+        if (a == "-c" || a == "--config") {
+            std::string v;
+            if (!flag_value(argc, argv, i, v, "agensio")) return 2;
+            config_path = v;
+        } else if (a == "-t" || a == "--test") test_only = true;
         else if (a == "--explain") explain = true;
         else if (a == "--strict") strict = true;
         else if (a == "pools" && i == 1) pools = true;
@@ -179,10 +196,13 @@ int main(int argc, char** argv) {
             unsigned long cost = 0;
             for (int j = i + 1; j < argc; ++j) {
                 std::string b = argv[j];
-                if (b == "--method" && j + 1 < argc) method = argv[++j];
-                else if (b == "--cost" && j + 1 < argc) {
+                if (b == "--method") {
+                    if (!flag_value(argc, argv, j, method, "passwd")) return 2;
+                } else if (b == "--cost") {
+                    std::string v;
+                    if (!flag_value(argc, argv, j, v, "passwd")) return 2;
                     try {
-                        cost = std::stoul(argv[++j]);
+                        cost = std::stoul(v);
                     } catch (const std::exception&) {
                         std::cerr << "passwd: --cost takes a number\n";
                         return 2;
@@ -223,15 +243,18 @@ int main(int argc, char** argv) {
             bool defaults = false;
             for (int j = i + 1; j < argc; ++j) {
                 std::string b = argv[j];
-                if ((b == "-c" || b == "--config") && j + 1 < argc) config_path = argv[++j];
-                else if (b == "--nft" || b == "--jail" || b == "--unit") part = b.substr(2);
-                else if (b == "--filter" && j + 1 < argc) { part = "filter"; filter = argv[++j]; }
-                else if (b == "--defaults") defaults = true;
-                else if (b == "--out" && j + 1 < argc) {  // written by this process, whole, 0644 (the alpha.94 report)
-                    out = argv[++j];
-                    if (out.empty()) { std::cerr << "protection: --out needs a file name; nothing was written\n"; return 2; }
-                }
-                else { std::cerr << "protection: unexpected argument " << b << "\n"; return 2; }
+                if (b == "-c" || b == "--config") {
+                    std::string v;
+                    if (!flag_value(argc, argv, j, v, "protection")) return 2;
+                    config_path = v;
+                } else if (b == "--nft" || b == "--jail" || b == "--unit") part = b.substr(2);
+                else if (b == "--filter") {
+                    part = "filter";
+                    if (!flag_value(argc, argv, j, filter, "protection")) return 2;
+                } else if (b == "--defaults") defaults = true;
+                else if (b == "--out") {  // written by this process, whole, 0644 (the alpha.94 report)
+                    if (!flag_value(argc, argv, j, out, "protection")) return 2;
+                } else { std::cerr << "protection: unexpected argument " << b << "\n"; return 2; }
             }
             if (!out.empty() && part.empty()) {
                 std::cerr << "protection: --out FILE goes with --nft, --jail, --unit or --filter NAME\n";
@@ -278,9 +301,13 @@ int main(int argc, char** argv) {
             std::string socket_path;
             for (int j = i + 1; j < argc; ++j) {
                 std::string b = argv[j];
-                if (b == "--socket" && j + 1 < argc) socket_path = argv[++j];
-                else if ((b == "-c" || b == "--config") && j + 1 < argc) config_path = argv[++j];
-                else { std::cerr << "mcp: unexpected argument " << b << "\n"; return 2; }
+                if (b == "--socket") {
+                    if (!flag_value(argc, argv, j, socket_path, "mcp")) return 2;
+                } else if (b == "-c" || b == "--config") {
+                    std::string v;
+                    if (!flag_value(argc, argv, j, v, "mcp")) return 2;
+                    config_path = v;
+                } else { std::cerr << "mcp: unexpected argument " << b << "\n"; return 2; }
             }
             if (socket_path.empty()) {
                 try {
@@ -469,15 +496,13 @@ int main(int argc, char** argv) {
             agensio::json::Value aliases = agensio::json::Value::array();
             bool yes = false;
             bool prompt = false;  // site-auth-user-set --prompt: the password asked and hashed here
-            std::string missing_value;  // the flag given last without its value
-            bool out_given = false;
-            for (int j = i + 1; j < argc; ++j) {
+            bool missing_value = false;  // a flag without its value, said by flag_value
+            for (int j = i + 1; j < argc && !missing_value; ++j) {
                 std::string b = argv[j];
                 // A flag without its value is a usage error (the alpha.95 report: `--out "$F"` with F unset
                 // printed the jail and exited 0, so the `&& fail2ban-client reload` after it ran).
                 auto value = [&](std::string& into) {
-                    if (j + 1 < argc) into = argv[++j];
-                    else if (missing_value.empty()) missing_value = b;
+                    if (!missing_value && !flag_value(argc, argv, j, into, "ctl")) missing_value = true;
                 };
                 auto field = [&](const char* key) { std::string v; value(v); body.set(key, v); };
                 if (b == "--socket") value(socket_path);
@@ -701,7 +726,7 @@ int main(int argc, char** argv) {
                 else if (b == "--trusted-proxies-default") body.set("trusted_proxies", agensio::json::Value(nullptr));
                 else if (b == "--nft" || b == "--jail" || b == "--unit") { raw = true; raw_part = b.substr(2); }
                 else if (b == "--filter") { raw = true; raw_part = "filter"; value(raw_filter); }
-                else if (b == "--out") { value(out_file); out_given = true; }
+                else if (b == "--out") value(out_file);
                 else if (b == "--php-socket") field("php_socket");
                 else if (b == "--php-children") { std::string v; value(v); body.set("php_children", std::atoi(v.c_str())); }
                 else if (b == "--php-version") field("php_version");
@@ -768,14 +793,7 @@ int main(int argc, char** argv) {
                 else if (command == "upload" && upload_file.empty()) upload_file = b;
                 else { std::cerr << "ctl: unexpected argument " << b << "\n"; return 2; }
             }
-            if (!missing_value.empty()) {
-                std::cerr << "ctl: " << missing_value << " needs a value\n";
-                return 2;
-            }
-            if (out_given && out_file.empty()) {
-                std::cerr << "ctl: --out needs a file name; nothing was written\n";
-                return 2;
-            }
+            if (missing_value) return 2;
             if (!aliases.items().empty()) body.set("aliases", aliases);
             if (command == "site-env-set" && body["settings"].is_object()) {  // --set KEY=VALUE names variables here, not settings
                 agensio::json::Value nb = agensio::json::Value::object();
@@ -1090,12 +1108,10 @@ int main(int argc, char** argv) {
             std::cout << reply.body;
             return reply.status < 300 ? 0 : 1;
         }
-        else if (pools && a == "--out" && i + 1 < argc) {
-            pools_out = argv[++i];
-            if (pools_out.empty()) {  // not the distro's directory by default
-                std::cerr << "pools: --out needs a directory; nothing was written\n";
-                return 2;
-            }
+        else if (pools && a == "--out") {  // an empty or missing one is not the distro's directory by default
+            std::string v;
+            if (!flag_value(argc, argv, i, v, "pools")) return 2;
+            pools_out = v;
         }
         else if (pools && a == "--dry-run") dry_run = true;
         else if (a == "-v" || a == "--version") {
@@ -1106,7 +1122,7 @@ int main(int argc, char** argv) {
             return 0;
         } else {
             std::cerr << "unknown argument: " << a << "\n";
-            usage();
+            usage(std::cerr);  // a usage error: stdout stays empty
             return 2;
         }
     }

@@ -1191,6 +1191,23 @@ check "ctl --raw: a refused call (no such site, a WordPress site's unit, which c
   "1 0 1 ; 1 0 1 ; 1 0 ; 1 0" \
   "$("$BIN" ctl site-unit nosuch.test --raw --socket $CS > $o 2> $e; echo -n "$? "; wc -c < $o | tr '\n' ' '; grep -c 'no such site' $e) ; $("$BIN" ctl site-unit wp.test --raw --socket $CS > $o 2> $e; echo -n "$? "; wc -c < $o | tr '\n' ' '; grep -c 'answered 409' $e) ; $("$BIN" ctl site-service-logs nosuch.test --raw --socket $CS > $o 2> /dev/null; echo -n "$? "; wc -c < $o) ; $("$BIN" ctl site-task-output nosuch.test --raw --socket $CS > $o 2> /dev/null; echo -n "$? "; wc -c < $o)"
 rm -f $FW $o $e bench/tmp/jail-out.conf bench/tmp/unit-out.service
+# A value that is the next flag, or an empty word, is no value (the alpha.96 report: `--out --nft` wrote
+# the jail into a file named --nft, `--socket ""` fell back to the configured socket, and the three
+# commands said it three ways, pools with its whole usage on stdout): every command says "needs a value"
+# on one line of stderr, exit 2, nothing on stdout. They run in an empty directory, where a file named
+# after a flag would show.
+A=bench/tmp/argcheck; rm -rf $A; mkdir -p $A
+AB=$(readlink -f "$BIN"); ACS=$ROOT/$CS; ACF=$ROOT/bench/tmp/agensio-test.toml
+nv() {  # agensio's arguments: its exit status, the bytes on stdout, "said" for one line naming the missing value, the files left
+  (cd $A && "$AB" "$@" > ../argcheck.out 2> ../argcheck.err < /dev/null; echo -n "$? ")
+  echo -n "$(wc -c < bench/tmp/argcheck.out) "
+  [ "$(wc -l < bench/tmp/argcheck.err)" = 1 ] && grep -q 'needs a value' bench/tmp/argcheck.err && echo -n "said " || echo -n "unsaid "
+  ls -A $A | wc -l
+}
+check "a flag whose value is the next flag or empty: one line, needs a value, exit 2, nothing on stdout, no file (ctl, protection, pools, mcp, passwd)" \
+  "2 0 said 0 ; 2 0 said 0 ; 2 0 said 0 ; 2 0 said 0 ; 2 0 said 0 ; 2 0 said 0 ; 2 0 said 0 ; 2 0 said 0 ; 2 0 said 0 ; 2 0 said 0" \
+  "$(nv ctl protection --jail --socket $ACS --out --nft) ; $(nv ctl site-unit wp.test --socket $ACS --out --raw) ; $(nv ctl logs --socket $ACS --since --limit 3) ; $(nv ctl status --socket "") ; $(nv protection -c $ACF --jail --out) ; $(nv protection -c $ACF --jail --out --nft) ; $(nv pools -c $ACF --out) ; $(nv pools -c "" --dry-run) ; $(nv mcp --socket) ; $(nv passwd --method)"
+rm -rf $A bench/tmp/argcheck.out bench/tmp/argcheck.err
 mkdir -p bench/tmp/sites/lp.test/www
 check "login_paths: through site_create and --login-path, into the managed file, site_show and the rendered jail; a bad path is refused; [] clears" "201 2 1 yes 1 400 yes 200 none" "$(cpost /v1/sites "{\"domain\":\"lp.test\",\"https\":\"none\",\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/bench/tmp/sites/lp.test/www\",\"listen_plain\":\"127.0.0.1:8096\",\"login_paths\":[\"/login\",\"/api/token\"],\"confirm\":true,\"reason\":\"lp\"}") $(curl -sS --unix-socket $CS http://control/v1/sites/lp.test | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["login_paths"]))') $(grep -c '^login_paths = \["/login", "/api/token"\]' bench/tmp/sites.d/lp.test.toml) $(grep -qF '(?:t|\x25[57]4)(?:o|\x25[46]F)(?:k|\x25[46]B)(?:e|\x25[46]5)(?:n|\x25[46]E)' <<< "$("$BIN" ctl protection --jail --socket $CS)" && echo yes) $("$BIN" ctl site-update lp.test --login-path /signin --login-path /signin --yes --reason lp --socket $CS > /dev/null && grep -c '^login_paths = \["/signin"\]' bench/tmp/sites.d/lp.test.toml) $(cpost /v1/sites/lp.test '{"login_paths":["signin"],"confirm":true}') $(grep -q "must start with '/'" bench/tmp/ctl-reply.json && echo yes) $("$BIN" ctl site-update lp.test --no-login-paths --yes --reason lp --socket $CS > /dev/null; grep -c '^login_paths' bench/tmp/sites.d/lp.test.toml | sed 's/^0$/200/') $(curl -sS --unix-socket $CS http://control/v1/sites/lp.test | python3 -c 'import json,sys; print(json.load(sys.stdin).get("login_paths", "none"))')"
 cpost /v1/sites/lp.test/delete '{"confirm":true,"reason":"lp"}' > /dev/null

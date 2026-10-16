@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.0-alpha.97
+
+- **A flag's value is never the next flag, nor empty** (the alpha.96 report from the test host).
+  `agensio ctl protection --jail --out --nft` exited 0 and wrote the jail into a file named `--nft`,
+  `ctl site-unit NAME --out --raw` one named `--raw`, `ctl logs --since --limit 3` took `--limit` as the
+  duration, `--socket ""` fell back to the configured socket, and the commands said a missing value
+  three ways (`agensio pools ... --out` with its whole 7 KB usage on stdout). One helper now reads every
+  flag's value in `agensio ctl`, `protection`, `pools`, `mcp`, `passwd` and the top level: the last word,
+  an empty word or one starting with `--` is no value, "WHO: FLAG needs a value" on one line of stderr,
+  exit 2, nothing on stdout (a value that truly starts with `--` is written `./--name`); an unknown
+  top-level argument prints the usage on stderr. Integration check, failing on alpha.96.
+
 ## 0.1.0-alpha.96 (2026-10-16)
 
 - **A flag without its value is a usage error** (the alpha.95 report from the test host). `agensio
