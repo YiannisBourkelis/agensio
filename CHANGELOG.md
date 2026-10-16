@@ -18,6 +18,20 @@
   `tests/tasks.sh` expected that form as the unit's first root step, which alpha.95 replaced with
   `--out`. Units rendered before alpha.95 carry the old line in their header: render them again with
   `--out`. Integration check, failing on alpha.95.
+- **An upgrade that rewords comments no longer calls the jail stale** (the same report). alpha.95 changed
+  only comment lines of the jail (its install line, a disabled jail's steps), and on every upgraded
+  host health reported `fail2ban_jail_stale`, "a site, a log or a login path was added since", with
+  nothing added; `protection_show` gave the ruleset `file_current: false` for the same reason. The
+  jail file, the filters and the ruleset file are now compared without their comment lines (a line
+  whose first non-blank character is `#`, a comment to fail2ban, jail.conf(5), and to nft; every
+  other line counts, a blank one included), with a third state, `comments`: `installed_jail`,
+  `installed_filters.state` (and its `comments` list) and the ruleset's `firewall.file_state`, which
+  replaces `file_current` (`same`, `comments`, `stale`). A jail whose comments alone are an older
+  build's is still named, as information, with the true reason and the render line without a reload;
+  a filter likewise (`fail2ban_filter_stale` as info, the install line alone). A stale jail's message
+  now names an upgrade that changed a jail beside a site, a log or a login path added. Unit test, failing on
+  alpha.95; the MCP texts of `protection_show` and `health_check`, `docs/fail2ban.md`,
+  `docs/configuration.md` 18 and `tests/protection.sh` follow.
 
 ## 0.1.0-alpha.95 (2026-10-16)
 

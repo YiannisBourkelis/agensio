@@ -50,8 +50,11 @@ jail for the reload to load ([configuration.md](configuration.md) 18).
 The jail file is rendered from the sites that exist, so adding a site, a log or a login path
 makes the installed copy stale; health says so (`fail2ban_jail_stale`) and the second and
 third lines above refresh it. An upgrade that changes a shipped filter is reported the same
-way (`fail2ban_filter_stale`), with the first line ahead of the others. A site change through
-the control plane puts the same lines into the answer's `next_steps` when they apply.
+way (`fail2ban_filter_stale`), with the first line ahead of the others. The comparison skips
+comment lines (a line whose first non-blank character is `#`, a comment to fail2ban and nft): an
+upgrade that rewords only the comments leaves the jails and their matching as they were, and health
+says just that, as information, with the line that renders the file again and no reload. A site
+change through the control plane puts the same lines into the answer's `next_steps` when they apply.
 
 Two tiers of jails come out of that file.
 

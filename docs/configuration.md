@@ -3126,7 +3126,9 @@ unknowable without systemd), `firewall_quic_unlimited` (the table predates `h3`)
 `fail2ban_missing` (not installed, not running, or no jail reads agensio's logs),
 `fail2ban_jail_stale`, `fail2ban_filter_stale` (an upgrade changed a shipped filter and the
 installed copy is the old one: the jails match what the older build matched, so the install
-line comes first), `fail2ban_log_format` (JSON logs), `fail2ban_blind` (a site without
+line comes first; comment lines are not compared, so a file whose comments alone are an older
+build's is named as such, information with no reload; `protection_show`'s `firewall.file_state`
+says the same of the ruleset file), `fail2ban_log_format` (JSON logs), `fail2ban_blind` (a site without
 an access log), `protection_unchecked` (no helper). Nothing is reported for a host whose
 listeners are all on loopback. `agensio ctl protection` shows the same with the detail: the
 ports each table limits, each of agensio's rules with its hit counter, the jails with the

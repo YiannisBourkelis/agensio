@@ -5564,7 +5564,7 @@ static void test_protection() {
         const json::Value r = protection_report(in, probe, files);
         CHECK(r["ok"].boolean() && r["exposed"].boolean() && r["ports"]["tcp"].items().size() == 2 && r["firewall"]["detected"]["covered"].boolean() &&
               r["firewall"]["detected"]["table_loaded"].boolean() && r["firewall"]["detected"].get("unit_state") == "enabled" && r["firewall"]["detected"]["rules"].items().size() == 3 &&
-              r["firewall"]["trial"].items().size() == 3 && r["firewall"]["file_current"].boolean() && r["fail2ban"].get("installed_jail") == "same" &&
+              r["firewall"]["trial"].items().size() == 3 && r["firewall"].get("file_state") == "same" && r["fail2ban"].get("installed_jail") == "same" &&
               r["fail2ban"]["detected"]["covered"].boolean() && r["fail2ban"]["detected"]["banned"].num() == 1 && r["fail2ban"]["filters"]["agensio-login"].is_string() &&
               r["findings"].items().empty());
         // A jail of someone else's: its file count, not its files (the Samba jail of the report).
@@ -5606,6 +5606,44 @@ static void test_protection() {
         ProtectionFiles part = files;
         part.installed_filters[3].reset();
         CHECK(protection_report(in, probe, part)["fail2ban"]["installed_filters"].get("state") == "partial" && protection_findings(in, probe, part)[0].message.find("agensio-post are not installed") != std::string::npos);
+    }
+    // An upgrade that changed only comments (the alpha.95 report: the jail's install line and a disabled
+    // jail's steps): the jails, the filters and the ruleset are this build's, so nothing is called stale
+    // for a reason it does not have. A line whose first non-blank character is `#` is a comment
+    // (jail.conf(5), docs/fail2ban-ref/man/jail.conf.5.txt; nft(8)); every other line counts, a blank one
+    // and a rule turned into a comment included.
+    {
+        constexpr auto npos = std::string::npos;
+        auto reworded = [](const std::string& text) { return "# an older build's install line\n" + text + "    # an older build's step\n"; };
+        ProtectionFiles cj = files;
+        cj.installed_jail = reworded(render_jail(in));
+        const auto f = protection_findings(in, probe, cj);
+        CHECK(codes(in, probe, cj) == "info:fail2ban_jail_stale" && f[0].message.find("only its comments") != npos && f[0].message.find("was added") == npos &&
+              f[0].fix.starts_with("as root: agensio ctl protection --jail --out /etc/fail2ban/jail.d/agensio.conf") && f[0].fix.find("fail2ban-client reload") == npos);
+        CHECK(protection_report(in, probe, cj)["fail2ban"].get("installed_jail") == "comments");
+        ProtectionFiles blank = files;
+        blank.installed_jail = render_jail(in) + "\n";
+        CHECK(protection_report(in, probe, blank)["fail2ban"].get("installed_jail") == "stale");
+        ProtectionFiles off = files;
+        std::string j = render_jail(in);
+        j.replace(j.find("\nenabled   = true"), 17, "\n# enabled   = true");
+        off.installed_jail = j;
+        CHECK(protection_report(in, probe, off)["fail2ban"].get("installed_jail") == "stale" &&
+              protection_findings(in, probe, off)[0].fix.find("fail2ban-client reload") != npos);
+        ProtectionFiles cf = files;
+        cf.installed_filters[2] = reworded(*cf.installed_filters[2]);
+        const auto g = protection_findings(in, probe, cf);
+        const json::Value r = protection_report(in, probe, cf);
+        CHECK(codes(in, probe, cf) == "info:fail2ban_filter_stale" && g[0].message.find("agensio-scan") != npos && g[0].message.find("only their comments") != npos &&
+              g[0].fix.starts_with("as root: install -m 644 ") && g[0].fix.find("fail2ban-client reload") == npos &&
+              r["fail2ban"]["installed_filters"].get("state") == "comments" && r["fail2ban"]["installed_filters"]["comments"].items().size() == 1 &&
+              r["fail2ban"]["installed_filters"]["stale"].items().empty());
+        ProtectionFiles fw = files;
+        CHECK(protection_report(in, probe, fw)["firewall"].get("file_state") == "same");
+        fw.firewall_file = reworded(render_nft(in));
+        CHECK(protection_report(in, probe, fw)["firewall"].get("file_state") == "comments" && codes(in, probe, fw).empty());
+        fw.firewall_file = render_nft(in) + "add table inet other\n";
+        CHECK(protection_report(in, probe, fw)["firewall"].get("file_state") == "stale");
     }
     // Failed passwords ([[site.auth]], 2026-10-08): a site with one and no jail on the error log
     // (the installed jail an older build's); the jail in place; the agensio-auth filter of

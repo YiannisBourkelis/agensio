@@ -999,6 +999,31 @@ ProtectionProbe read_probe(const json::Value& reply, const ProtectionInput& in) 
 
 namespace {
 
+// The text without its comment lines. A line whose first non-blank character is `#` is a comment to
+// fail2ban (jail.conf(5), docs/fail2ban-ref/man/jail.conf.5.txt: "use '#' for comment lines") and to
+// nft, so two files that differ only there load the same jails and rules (the alpha.95 report: an
+// upgrade reworded the jail's install line and every host's jail was called stale, "a site was
+// added"). Every other line counts, a blank one included: inside a fail2ban value it can matter.
+std::string without_comment_lines(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    while (!text.empty()) {
+        const std::size_t end = text.find('\n');
+        const std::string_view line = text.substr(0, end == std::string_view::npos ? text.size() : end + 1);
+        const std::size_t first = line.find_first_not_of(" \t");
+        if (first == std::string_view::npos || line[first] != '#') out += line;
+        text.remove_prefix(line.size());
+    }
+    return out;
+}
+
+// A file on disk against what this build renders or ships: "same", "comments" (only comment lines
+// differ: an older build's text, the same jails or rules) or "stale".
+const char* compare_installed(std::string_view installed, std::string_view current) {
+    if (installed == current) return "same";
+    return without_comment_lines(installed) == without_comment_lines(current) ? "comments" : "stale";
+}
+
 // The states the findings and the report share.
 struct Verdict {
     bool nft_missing = false;      // nft not installed
@@ -1011,9 +1036,9 @@ struct Verdict {
     bool f2b_missing = false;      // fail2ban not installed
     bool f2b_down = false;         // installed, not running
     bool f2b_ours = false;         // a jail reads one of our logs
-    std::string jail_state;        // "same" | "stale" | "missing" (our jail file on disk against the rendering)
-    std::string filters_state;     // "same" | "stale" | "missing" | "partial" (the installed filters against the shipped text)
-    std::vector<std::string> stale_filters, missing_filters;
+    std::string jail_state;        // "same" | "comments" | "stale" | "missing" (our jail file on disk against the rendering)
+    std::string filters_state;     // "same" | "comments" | "stale" | "missing" | "partial" (the installed filters against the shipped text)
+    std::vector<std::string> stale_filters, missing_filters, comment_filters;
     std::uint64_t banned = 0, total_banned = 0;
     // Failed passwords: a jail reads the error log; the installed agensio-auth filter is the one
     // of alpha.57 and before, which counted every 401 of the access logs.
@@ -1047,13 +1072,17 @@ Verdict judge(const ProtectionInput& in, const ProtectionProbe& probe, const Pro
         if (std::string_view(shipped_filters()[i].name) == "agensio-auth" && files.installed_filters[i] && files.installed_filters[i]->find("(?:401|403)") != std::string::npos)
             v.auth_counts_challenges = true;
     if (!files.installed_jail) v.jail_state = "missing";
-    else v.jail_state = *files.installed_jail == render_jail(in) ? "same" : "stale";
+    else v.jail_state = compare_installed(*files.installed_jail, render_jail(in));
     for (std::size_t i = 0; i < shipped_filters().size(); ++i) {
         const std::optional<std::string>* got = i < files.installed_filters.size() ? &files.installed_filters[i] : nullptr;
         if (!got || !*got) v.missing_filters.emplace_back(shipped_filters()[i].name);
-        else if (**got != shipped_filters()[i].text) v.stale_filters.emplace_back(shipped_filters()[i].name);
+        else if (const std::string_view state = compare_installed(**got, shipped_filters()[i].text); state == "stale") v.stale_filters.emplace_back(shipped_filters()[i].name);
+        else if (state == "comments") v.comment_filters.emplace_back(shipped_filters()[i].name);
     }
-    v.filters_state = !v.stale_filters.empty() ? "stale" : v.missing_filters.size() == shipped_filters().size() ? "missing" : v.missing_filters.empty() ? "same" : "partial";
+    v.filters_state = !v.stale_filters.empty() ? "stale"
+                      : v.missing_filters.size() == shipped_filters().size() ? "missing"
+                      : !v.missing_filters.empty() ? "partial"
+                      : !v.comment_filters.empty() ? "comments" : "same";
     return v;
 }
 
@@ -1095,7 +1124,7 @@ json::Value protection_report(const ProtectionInput& in, const ProtectionProbe& 
     fw.set("ruleset", render_nft(in)).set("unit_text", render_firewall_unit(in));
     fw.set("trial", strings_json(firewall_trial_commands(in))).set("keep", strings_json(firewall_keep_commands(in))).set("remove", strings_json(firewall_remove_commands()));
     fw.set("file_present", files.firewall_file.has_value());
-    if (files.firewall_file) fw.set("file_current", *files.firewall_file == render_nft(in));
+    if (files.firewall_file) fw.set("file_state", compare_installed(*files.firewall_file, render_nft(in)));
     json::Value det = json::Value::object().set("checked", probe.checked);
     if (!probe.checked) det.set("why", probe.why);
     else {
@@ -1120,7 +1149,8 @@ json::Value protection_report(const ProtectionInput& in, const ProtectionProbe& 
     json::Value filters = json::Value::object();
     for (const auto& f : shipped_filters()) filters.set(f.name, f.text);
     fb.set("filters", std::move(filters)).set("install", strings_json(fail2ban_install_commands())).set("installed_jail", v.jail_state);
-    fb.set("installed_filters", json::Value::object().set("state", v.filters_state).set("stale", strings_json(v.stale_filters)).set("missing", strings_json(v.missing_filters)));
+    fb.set("installed_filters", json::Value::object().set("state", v.filters_state).set("stale", strings_json(v.stale_filters)).set("missing", strings_json(v.missing_filters))
+                                     .set("comments", strings_json(v.comment_filters)));
     json::Value fdet = json::Value::object().set("checked", probe.checked);
     if (!probe.checked) fdet.set("why", probe.why);
     else {
@@ -1234,10 +1264,18 @@ std::vector<Finding> protection_findings(const ProtectionInput& in, const Protec
                                       (v.stale_filters.empty() || v.missing_filters.empty() ? "" : "; ") +
                                       (v.missing_filters.empty() ? std::string() : "the filter(s) " + join(v.missing_filters, ", ") + " are not installed") +
                                       ": the jails run with what an older build matched",
-                                  "as root: " + filter_install_command() + " && " + (v.jail_state == "stale" ? "agensio ctl protection --jail --out " + std::string(kJailFile) + " && " : std::string()) + "fail2ban-client reload"});
+                                  "as root: " + filter_install_command() + " && " + (v.jail_state != "same" ? "agensio ctl protection --jail --out " + std::string(kJailFile) + " && " : std::string()) + "fail2ban-client reload"});
+        else if (v.filters_state == "comments")  // the same matching: an older build's comments only
+            out.push_back(Finding{"info", "fail2ban_filter_stale", "",
+                                  "the installed filter(s) " + join(v.comment_filters, ", ") + " in /etc/fail2ban/filter.d/ match as this build's do; only their comments are an older build's text",
+                                  "as root: " + filter_install_command() + " (at any time: the matching is unchanged, no reload is needed)"});
         if (v.jail_state == "stale")
-            out.push_back(Finding{"info", "fail2ban_jail_stale", "", std::string(kJailFile) + " is older than this host's rendering (a site, a log or a login path was added since)",
+            out.push_back(Finding{"info", "fail2ban_jail_stale", "", std::string(kJailFile) + " differs from this host's rendering in its jails (a site, a log or a login path was added since, or an upgrade changed a jail)",
                                   "as root: " + reinstall + "agensio ctl protection --jail --out " + std::string(kJailFile) + " && fail2ban-client reload"});
+        else if (v.jail_state == "comments")  // the same jails: an older build's comments only (the alpha.95 report)
+            out.push_back(Finding{"info", "fail2ban_jail_stale", "", std::string(kJailFile) + " holds this host's jails; only its comments are an older build's text (an upgrade reworded them)",
+                                  "as root: " + reinstall + "agensio ctl protection --jail --out " + std::string(kJailFile) +
+                                      (reinstall.empty() ? " (at any time: the jails are unchanged, no reload is needed)" : " && fail2ban-client reload")});
     }
     // Failed passwords ([[site.auth]], 2026-10-08): counted from the error log by agensio-auth; the
     // filter of alpha.57 and before counted every 401 of the access logs, the challenge included.
