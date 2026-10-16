@@ -439,8 +439,14 @@ scripts/fuzz-all.sh -t 300      # every target, five minutes each on its corpus;
 `scripts/fuzz-all.sh` configures `build-fuzz-all` with clang++ and TLS on, so `fuzz_quic_conn`
 is built where OpenSSL has the QUIC API (3.5, the devbox); new inputs go to a scratch
 corpus under `bench/tmp/`, and an input worth keeping is copied into
-`tests/fuzz/regressions/<target>/` by hand. The weekly CI job (`.github/workflows/fuzz.yml`)
-runs the same script and the sanitizer build on Ubuntu 24.04, without `fuzz_quic_conn`.
+`tests/fuzz/regressions/<target>/` by hand. It sizes the run to the machine (2026-10-17): as many
+processes as the cores, or as the free memory holds at 600 MB each, every target at once when they
+fit, so the campaign takes one `-t`, and the processes left over shared among the targets through
+libFuzzer's `-jobs` on one corpus each: a single target after a parser change gets them all
+(`scripts/fuzz-all.sh -t 30 sql_scan` ran 24 processes at 1.2 M runs a second, against 47 k on one
+core). `-j` and `-w` set the targets at once and the processes per target by hand. The weekly CI job
+(`.github/workflows/fuzz.yml`) runs the same script and the sanitizer build on Ubuntu 24.04, without
+`fuzz_quic_conn`.
 
 
 ## HTTP/2 (phase G)

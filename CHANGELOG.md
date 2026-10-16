@@ -24,6 +24,15 @@
   appended changes nothing; a data statement after any text not ending in a quote or a comment is
   found; 45 minutes on one core and 15 on twenty-four, 356 M runs, clean). Unit test, failing on alpha.96; the MCP text of `health_check` and
   `docs/configuration.md` 4c say it.
+- **`scripts/fuzz-all.sh` uses the whole machine.** It ran half the cores, so the twenty-one targets
+  went in two waves of `-t` each, and a target alone (the hour after a parser change) on one core. Now
+  it starts as many processes as the cores, or as the free memory holds at 600 MB each, runs every
+  target at once when they fit, and shares the processes left over among the targets through
+  libFuzzer's `-jobs` on one corpus each (`-w` sets them by hand): the campaign of twenty-one targets
+  takes one `-t` (22 s for `-t 20`), and `fuzz_sql_scan` alone 1.2 M runs a second on 24 processes
+  against 47 k on one. `-print_funcs=0` stops a symbolizer starting for every newly covered function,
+  which with every target starting at once stalled six of them for half a minute; a crash's report is
+  still symbolized. `docs/security-control-plane.md` says it with the procedure.
 
 ## 0.1.0-alpha.96 (2026-10-16)
 
