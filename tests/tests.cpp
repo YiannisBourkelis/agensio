@@ -6518,6 +6518,46 @@ static void test_header_suggestions() {
     fs::remove_all(dir);
 }
 
+// Backup archives and database dumps under a served tree (health's archives_in_root), and the SQL an
+// application ships with its code, which holds no copy of the site (the alpha.95 report: TYPO3's
+// typo3/sysext/extbase/ext_tables.sql named as a dump). The names TYPO3 reserves in an extension's
+// directory (ext_tables.sql, ext_tables_static+adt.sql, beside its ext_emconf.php or composer.json)
+// and a small uncompressed .sql file without a data statement are not counted; anything that may hold
+// rows still is, a reserved name outside an extension's directory included.
+static void test_archives_in_root() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-archives-" + std::to_string(::getpid()));
+    fs::remove_all(dir);
+    auto put = [&](const std::string& rel, const std::string& text) {
+        fs::create_directories((dir / rel).parent_path());
+        std::ofstream(dir / rel) << text;
+    };
+    SiteConfig site;
+    site.root = dir.string();
+    // An application's own SQL: none counted.
+    put("typo3/sysext/extbase/ext_emconf.php", "<?php\n");
+    put("typo3/sysext/extbase/ext_tables.sql", "CREATE TABLE tx_extbase_domain_model_category (\n\tuid int(11) NOT NULL\n);\n");
+    put("typo3/sysext/core/composer.json", "{}\n");
+    put("typo3/sysext/core/ext_tables_static+adt.sql", "INSERT INTO sys_static (uid) VALUES (1);\n");
+    put("vendor/app/Schema/Sql/upgrade-2.0.sql", "ALTER TABLE users ADD COLUMN note TEXT;\n-- copy the column later\n");
+    put("vendor/app/Schema/Sql/mysql.SQL", "create table settings (option varchar(100));\n");
+    CHECK(control::archives_in_root(site, 2000).count == 0);
+    // What may hold rows: every one counted.
+    put("backup/site.sql", "-- MySQL dump 10.13\nCREATE TABLE users (id int);\nINSERT INTO `users` VALUES (1,'admin','$2y$10$x');\n");
+    put("dump-lower.sql", "create table t (id int);\ninsert into t values (1);\n");
+    put("pg.sql", "COPY public.users (id, name) FROM stdin;\n1\tadmin\n\\.\n");
+    put("replace.sql", "REPLACE INTO options VALUES ('siteurl', 'x');\n");
+    put("big.sql", "CREATE TABLE t (id int);\n" + std::string(70 * 1024, ' '));  // past the 64 KB read: counted unread
+    put("db.sql.gz", "\x1f\x8b");
+    put("site.zip", "PK");
+    put("typo3/sysext/core/ext_tables.sql.gz", "\x1f\x8b");  // a reserved name compressed is no longer the application's
+    put("ext_tables_static+adt.sql", "INSERT INTO be_users VALUES (1, 'admin', '$argon2i$x');\n");  // no extension here
+    put("INSERTS.sql", "insert\tignore into t values (1);\n");  // a keyword spelled any way
+    const control::ArchivesInRoot a = control::archives_in_root(site, 2000);
+    CHECK(a.count == 10 && a.seen == 16);
+    fs::remove_all(dir);
+}
+
 // Files root loads or runs, written by agensio itself (the alpha.94 report): whole or not at all, with
 // their own mode whatever the umask, and health naming one a group or anyone else may write.
 static void test_root_files() {
@@ -10197,6 +10237,7 @@ int main() {
     test_security_baseline();
     test_managed_response_headers();
     test_header_suggestions();
+    test_archives_in_root();
     test_root_files();
     test_site_isolation();
     test_served_record();

@@ -48,6 +48,14 @@
   dry run says "would fix the mode of" and the real run "fixed the mode of", beside "would write" and
   "wrote". Unit test (the dry run, then the run, of a `0664` pool file whose text is current), failing
   on alpha.95.
+- **`archives_in_root` no longer counts the SQL an application ships** (the test host's health:
+  `typo3/sysext/extbase/ext_tables.sql`, a TYPO3 extension's table definitions, named as a database
+  dump). Not counted now: TYPO3's reserved `ext_tables.sql` and `ext_tables_static+adt.sql` in an
+  extension's directory (beside its `ext_emconf.php` or `composer.json`; the same name elsewhere is
+  still found), and an uncompressed `.sql` file of up to 64 KB with no data statement (no `INSERT`,
+  `REPLACE` or `COPY ... FROM stdin`, any case), which defines tables and holds no rows. A larger file,
+  a compressed one and anything else that may hold rows still counts. The MCP text of `health_check`
+  and `docs/configuration.md` 4c say it. Unit test (`test_archives_in_root`), failing on alpha.95.
 
 ## 0.1.0-alpha.95 (2026-10-16)
 

@@ -462,7 +462,11 @@ for Grav, `artisan`, `core/lib/Drupal.php`, `wp-config.php`) and the `app` to se
 `site-create` warns the same way when the directory already holds files. Backup
 archives and database dumps under any served tree (`.zip`, `.tar.gz`, `.7z`, `.sql`,
 ...) are reported as `archives_in_root`, whatever the preset refuses today: nothing
-served should hold a copy of the site.
+served should hold a copy of the site. The SQL an application ships with its code is not
+counted: TYPO3's `ext_tables.sql` and `ext_tables_static+adt.sql` in an extension's directory
+(beside its `ext_emconf.php` or `composer.json`), and an uncompressed `.sql` file of up to 64 KB
+with no data statement (no `INSERT`, `REPLACE` or `COPY ... FROM stdin`), which defines tables
+and holds no rows. A larger file, a compressed one and anything else that may hold rows is.
 
 ## 4d. Grav: `app = "grav"`
 

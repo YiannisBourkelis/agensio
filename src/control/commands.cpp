@@ -1142,6 +1142,46 @@ UnreadableFiles unreadable_files(const SiteConfig& site, const std::vector<std::
     return r;
 }
 
+namespace {
+
+// SQL an application ships with its code, which holds no copy of the site (the alpha.95 report: TYPO3's
+// typo3/sysext/extbase/ext_tables.sql named as a dump). The names TYPO3 reserves in an extension's
+// directory for its tables and their static rows count only there, beside the extension's
+// ext_emconf.php or composer.json, so a dump given such a name elsewhere is still found.
+bool application_schema(const fs::path& file, std::string_view lower) {
+    if (lower != "ext_tables.sql" && lower != "ext_tables_static+adt.sql") return false;
+    std::error_code ec;
+    const fs::path dir = file.parent_path();
+    return fs::is_regular_file(dir / "ext_emconf.php", ec) || fs::is_regular_file(dir / "composer.json", ec);
+}
+
+// An uncompressed .sql file of at most 64 KB without a data statement (no INSERT or REPLACE, no COPY
+// ... FROM stdin) defines tables and holds no rows, so nothing of the site is in it (an application's
+// schema or upgrade file; a dump made without data). A larger file, one that cannot be read and
+// anything else that may hold rows count; a keyword in a comment or a view counts too, the safe side.
+bool sql_without_rows(const fs::path& file) {
+    constexpr std::size_t kMax = 64 * 1024;
+    std::ifstream in(file, std::ios::binary);
+    if (!in) return false;
+    std::string text(kMax + 1, '\0');
+    in.read(text.data(), static_cast<std::streamsize>(text.size()));
+    text.resize(static_cast<std::size_t>(in.gcount()));
+    if (text.size() > kMax) return false;
+    for (char& c : text) c = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
+    const auto ident = [&](std::size_t i) {
+        const unsigned char c = static_cast<unsigned char>(text[i]);
+        return std::isalnum(c) != 0 || c == '_';
+    };
+    const auto word = [&](std::string_view w) {
+        for (std::size_t at = text.find(w); at != std::string::npos; at = text.find(w, at + 1))
+            if ((at == 0 || !ident(at - 1)) && (at + w.size() == text.size() || !ident(at + w.size()))) return true;
+        return false;
+    };
+    return !word("insert") && !word("replace") && text.find("from stdin") == std::string::npos;
+}
+
+}  // namespace
+
 // Backup archives and database dumps under a document root (2026-09-23 live report: a
 // Grav site's backup/ held a 23 MB zip with the admin account and the salt, and the log
 // that named it was served). Bounded like unreadable_files; hidden directories skipped.
@@ -1175,6 +1215,8 @@ ArchivesInRoot archives_in_root(const SiteConfig& site, std::size_t budget) {
             if (lower.size() > n && lower.compare(lower.size() - n, n, e) == 0) { hit = true; break; }
         }
         if (!hit) continue;
+        if (application_schema(it->path(), lower)) continue;
+        if (lower.ends_with(".sql") && sql_without_rows(it->path())) continue;
         const std::uintmax_t size = it->file_size(ec);
         if (r.count++ == 0) {
             r.example = it->path().string();
