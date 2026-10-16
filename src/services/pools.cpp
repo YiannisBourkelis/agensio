@@ -604,7 +604,7 @@ int write_pools(const Config& cfg, const fs::path& out_dir, bool dry_run, std::o
             return 1;
         }
         if (current != p.text) changed = true;  // a mode alone needs no php-fpm reload, and is not stale
-        out << (current == p.text ? "fixing the mode of" : verb) << " " << file.string() << "\n";
+        out << (current != p.text ? verb : dry_run ? "would fix the mode of" : "fixed the mode of") << " " << file.string() << "\n";
         if (dry_run) continue;
         // Whole or not at all, 0644 whatever the umask (the alpha.94 report): the file php-fpm reads is
         // the old one or the new one, never a half one.

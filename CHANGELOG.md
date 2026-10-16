@@ -43,6 +43,11 @@
   `docs/configuration.md` 18, `docs/mcp.md`'s example and the security page's row 37 say the same.
   With `--out` a render that fails leaves the file as it was, so a step run after a failed one no
   longer damages anything.
+- **`agensio pools --dry-run` says it would fix a mode** (the same report). A pool file of a loose
+  mode (`0664`) was listed as "fixing the mode of" under `--dry-run`, which left it `0664`; now the
+  dry run says "would fix the mode of" and the real run "fixed the mode of", beside "would write" and
+  "wrote". Unit test (the dry run, then the run, of a `0664` pool file whose text is current), failing
+  on alpha.95.
 
 ## 0.1.0-alpha.95 (2026-10-16)
 

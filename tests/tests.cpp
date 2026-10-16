@@ -1728,6 +1728,17 @@ static void test_pools() {
     CHECK(write_pools(cfg, dir / "pool.d", false, log) == 3);
     CHECK(fs::is_regular_file(dir / "pool.d" / "agensio-web2.conf") && fs::is_directory(dir / "state" / "web2" / "sessions"));
     CHECK(write_pools(cfg, dir / "pool.d", false, log) == 0);
+    // A pool file of a loose mode (the alpha.94 report: written under root's umask 0002) is set to 0644
+    // even when its text is current, which needs no php-fpm reload; --dry-run says it would and leaves
+    // it (the alpha.95 report: it said "fixing the mode of" and the file stayed 0664).
+    {
+        const fs::path pool = dir / "pool.d" / "agensio-web2.conf";
+        const auto mode = [&] { return static_cast<unsigned>(fs::status(pool).permissions()) & 0777u; };
+        fs::permissions(pool, static_cast<fs::perms>(0664));
+        std::ostringstream dry, real;
+        CHECK(write_pools(cfg, dir / "pool.d", true, dry) == 0 && dry.str().find("would fix the mode of " + pool.string()) != std::string::npos && mode() == 0664);
+        CHECK(write_pools(cfg, dir / "pool.d", false, real) == 0 && real.str().find("fixed the mode of " + pool.string()) != std::string::npos && mode() == 0644);
+    }
     write("b.toml", server + shop + "\n");
     Config one = load_config(dir / "b.toml");
     // While a site file is set aside (design section 26) no pool is taken for stale: its sites are
