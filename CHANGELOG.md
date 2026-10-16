@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.96
+## 0.1.0-alpha.96 (2026-10-16)
 
 - **A flag without its value is a usage error** (the alpha.95 report from the test host). `agensio
   ctl` skipped a flag given last without its value, so `agensio ctl protection --jail --out "$F" &&
