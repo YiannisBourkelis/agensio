@@ -1075,6 +1075,13 @@ int main(int argc, char** argv) {
                     return 0;
                 }
             }
+            // Raw output is the text alone: anything else goes to stderr, so a refused call never lands in a
+            // file a shell redirects stdout to (the alpha.95 report: `site-unit --raw > f` filled f with the
+            // server's JSON error).
+            if (raw && (command == "site-unit" || command == "site-service-logs" || command == "site-task-output" || command == "protection")) {
+                std::cerr << "ctl: the server answered " << reply.status << ": " << reply.body << (reply.body.ends_with('\n') ? "" : "\n");
+                return 1;
+            }
             if ((command == "access-check" || command == "path-check") && reply.status == 200) {  // the verdict first, the details after
                 agensio::json::Value u;
                 std::string perr;

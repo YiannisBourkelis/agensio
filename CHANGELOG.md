@@ -9,6 +9,15 @@
   value", and an empty `--out` exits 2 on `agensio ctl`, `agensio protection` and `agensio pools`
   (which wrote into the distro's pool directory in its place), nothing on stdout, nothing written.
   Integration check, failing on alpha.95.
+- **Raw output is the text alone** (the same report). `agensio ctl site-unit NAME --raw > f` of a
+  refused call (a WordPress site's 409, a site that does not exist) exited 1 with the server's JSON
+  error in `f`. Now in every raw mode (`--raw` of `site-unit`, `site-service-logs` and
+  `site-task-output`; `protection --nft`, `--jail`, `--unit`, `--filter NAME`) anything but the text
+  goes to stderr and stdout stays empty. `docs/configuration.md` says it beside the command table, with
+  the exit codes, and its `site-unit` row no longer suggests `--raw > /etc/systemd/system/...`;
+  `tests/tasks.sh` expected that form as the unit's first root step, which alpha.95 replaced with
+  `--out`. Units rendered before alpha.95 carry the old line in their header: render them again with
+  `--out`. Integration check, failing on alpha.95.
 
 ## 0.1.0-alpha.95 (2026-10-16)
 
