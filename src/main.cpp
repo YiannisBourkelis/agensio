@@ -227,7 +227,10 @@ int main(int argc, char** argv) {
                 else if (b == "--nft" || b == "--jail" || b == "--unit") part = b.substr(2);
                 else if (b == "--filter" && j + 1 < argc) { part = "filter"; filter = argv[++j]; }
                 else if (b == "--defaults") defaults = true;
-                else if (b == "--out" && j + 1 < argc) out = argv[++j];  // written by this process, whole, 0644 (the alpha.94 report)
+                else if (b == "--out" && j + 1 < argc) {  // written by this process, whole, 0644 (the alpha.94 report)
+                    out = argv[++j];
+                    if (out.empty()) { std::cerr << "protection: --out needs a file name; nothing was written\n"; return 2; }
+                }
                 else { std::cerr << "protection: unexpected argument " << b << "\n"; return 2; }
             }
             if (!out.empty() && part.empty()) {
@@ -466,9 +469,16 @@ int main(int argc, char** argv) {
             agensio::json::Value aliases = agensio::json::Value::array();
             bool yes = false;
             bool prompt = false;  // site-auth-user-set --prompt: the password asked and hashed here
+            std::string missing_value;  // the flag given last without its value
+            bool out_given = false;
             for (int j = i + 1; j < argc; ++j) {
                 std::string b = argv[j];
-                auto value = [&](std::string& into) { if (j + 1 < argc) into = argv[++j]; };
+                // A flag without its value is a usage error (the alpha.95 report: `--out "$F"` with F unset
+                // printed the jail and exited 0, so the `&& fail2ban-client reload` after it ran).
+                auto value = [&](std::string& into) {
+                    if (j + 1 < argc) into = argv[++j];
+                    else if (missing_value.empty()) missing_value = b;
+                };
                 auto field = [&](const char* key) { std::string v; value(v); body.set(key, v); };
                 if (b == "--socket") value(socket_path);
                 else if (b == "-c" || b == "--config") { std::string v; value(v); config_path = v; }
@@ -691,7 +701,7 @@ int main(int argc, char** argv) {
                 else if (b == "--trusted-proxies-default") body.set("trusted_proxies", agensio::json::Value(nullptr));
                 else if (b == "--nft" || b == "--jail" || b == "--unit") { raw = true; raw_part = b.substr(2); }
                 else if (b == "--filter") { raw = true; raw_part = "filter"; value(raw_filter); }
-                else if (b == "--out") value(out_file);
+                else if (b == "--out") { value(out_file); out_given = true; }
                 else if (b == "--php-socket") field("php_socket");
                 else if (b == "--php-children") { std::string v; value(v); body.set("php_children", std::atoi(v.c_str())); }
                 else if (b == "--php-version") field("php_version");
@@ -757,6 +767,14 @@ int main(int argc, char** argv) {
                 else if (command == "path-check" && check_path.empty()) check_path = b;
                 else if (command == "upload" && upload_file.empty()) upload_file = b;
                 else { std::cerr << "ctl: unexpected argument " << b << "\n"; return 2; }
+            }
+            if (!missing_value.empty()) {
+                std::cerr << "ctl: " << missing_value << " needs a value\n";
+                return 2;
+            }
+            if (out_given && out_file.empty()) {
+                std::cerr << "ctl: --out needs a file name; nothing was written\n";
+                return 2;
             }
             if (!aliases.items().empty()) body.set("aliases", aliases);
             if (command == "site-env-set" && body["settings"].is_object()) {  // --set KEY=VALUE names variables here, not settings
@@ -1065,7 +1083,13 @@ int main(int argc, char** argv) {
             std::cout << reply.body;
             return reply.status < 300 ? 0 : 1;
         }
-        else if (pools && a == "--out" && i + 1 < argc) pools_out = argv[++i];
+        else if (pools && a == "--out" && i + 1 < argc) {
+            pools_out = argv[++i];
+            if (pools_out.empty()) {  // not the distro's directory by default
+                std::cerr << "pools: --out needs a directory; nothing was written\n";
+                return 2;
+            }
+        }
         else if (pools && a == "--dry-run") dry_run = true;
         else if (a == "-v" || a == "--version") {
             std::cout << "agensio " AGENSIO_VERSION "\n";

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.0-alpha.96
+
+- **A flag without its value is a usage error** (the alpha.95 report from the test host). `agensio
+  ctl` skipped a flag given last without its value, so `agensio ctl protection --jail --out "$F" &&
+  fail2ban-client reload` with `F` unset printed the jail, exited 0, and the reload ran with the file
+  never written; `--out ""` did the same. Now any `ctl` flag without its value exits 2 with "needs a
+  value", and an empty `--out` exits 2 on `agensio ctl`, `agensio protection` and `agensio pools`
+  (which wrote into the distro's pool directory in its place), nothing on stdout, nothing written.
+  Integration check, failing on alpha.95.
+
 ## 0.1.0-alpha.95 (2026-10-16)
 
 - **Files root loads are written by agensio itself, whole and `0644`: `--out`** (the alpha.94 report
