@@ -33,6 +33,13 @@
   answer carries `archives_accepted`, and `null` clears it as `[]` does (as it does `response_headers`);
   `login_paths` takes `null` the same way. Unit tests failing on alpha.97; the MCP texts of
   `site_show` and of both fields, `docs/configuration.md` 1.
+- **A path's value never starts with `-`** (the same report). `agensio -c -t` took `-t` for the
+  configuration file (exit 1, "File could not be opened"), as `--out -x` wrote a file named `-x` and
+  `mcp --socket -x` dialled one: the value check treated only `--` words as flags, while the top
+  level's are `-c`, `-t`, `-v`. The value of `-c`, `--config`, `--out` and `--socket`, on every
+  command, is no value when it starts with `-`: "WHO: FLAG needs a value", exit 2; a file so named is
+  written `./-name`. Other values may still start with one (`--set k=-1`, a `--note`). Integration
+  check, failing on alpha.97.
 
 ## 0.1.0-alpha.97 (2026-10-17)
 

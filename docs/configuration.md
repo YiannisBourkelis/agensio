@@ -2386,7 +2386,8 @@ uid, gid, role, command and outcome. Rotated with the other logs (`SIGUSR1`).
 
 `agensio ctl` prints the JSON answer and exits 0 on a success, 1 otherwise, and 2 for a usage error
 (an unknown argument, or a flag without its value: none, an empty one, or the next flag, so `--out
---nft` writes no file named `--nft`; a value that starts with `--` is written `./--name`). `agensio
+--nft` writes no file named `--nft`; a value that starts with `--` is written `./--name`, and a path,
+the value of `-c`, `--config`, `--out` or `--socket`, that starts with `-` likewise: `-c ./-t`). `agensio
 protection`, `pools`, `mcp` and `passwd` say a missing value the same way, one line on stderr. With `--raw`, and with `protection
 --nft`, `--jail`, `--unit` or `--filter NAME`, stdout carries the text alone: a refused call prints
 nothing there and says why on stderr, so `> file` never catches an error. A file root loads is written
