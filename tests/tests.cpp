@@ -6140,13 +6140,42 @@ static void test_response_headers() {
     CHECK(refused("[[site.response_headers]]\npath = \"/\"\nset = { \"X-A\" = \"a\\u0007b\" }\n", "control character"));
     CHECK(refused("[[site.response_headers]]\npath = \"/\"\n", "needs set, default or remove"));
     CHECK(refused("[[site.response_headers]]\npath = \"/\"\nremove = [\"ETag\"]\n", "representation"));
+    // The review of 2026-10-14, D1 to D3: a remove that breaks agensio's own redirects (a directory without
+    // its slash, a [[site.redirect]] answer: a 301 with no target), one that does nothing (Server is
+    // agensio's, [server] server_header the switch), and an origin any page can claim (sandboxed frames,
+    // data: URLs and local files send "null").
+    CHECK(refused("[[site.response_headers]]\npath = \"/\"\nremove = [\"Location\"]\n", "no target"));
+    CHECK(refused("[[site.response_headers]]\npath = \"/\"\nremove = [\"Refresh\"]\n", "[[site.redirect]]"));
+    CHECK(refused("[[site.response_headers]]\npath = \"/\"\nremove = [\"Server\"]\n", "server_header = \"\""));
+    CHECK(refused("[[site.response_headers]]\npath = \"/\"\nset = { \"Access-Control-Allow-Origin\" = \"null\" }\n", "any page can claim"));
+    CHECK(refused("[[site.response_headers]]\npath = \"/\"\ndefault = { \"Access-Control-Allow-Origin\" = \"null\" }\n", "any page can claim"));
+    {
+        // Through site_update and path_check's preview: the same parse.
+        SiteConfig site = cfg.sites[0];
+        json::Value rules;
+        std::string err;
+        CHECK(json::parse(R"([{"path": "/", "remove": ["location"]}])", rules, err) && load_response_header_rules(rules, site).find("no target") != std::string::npos);
+        CHECK(json::parse(R"([{"path": "/api/", "set": {"Access-Control-Allow-Origin": "null"}}])", rules, err) &&
+              load_response_header_rules(rules, site).find("any page can claim") != std::string::npos);
+    }
+    {
+        // A remove of Alt-Svc or Strict-Transport-Security takes the application's copy only: agensio's own
+        // (protocols and http3.alt_svc, the site's hsts) stays, and path_check says so (D2).
+        const Config c = load("[[site.response_headers]]\npath = \"/\"\nremove = [\"Alt-Svc\", \"Strict-Transport-Security\"]\n");
+        std::string error;
+        const json::Value pc = control::path_check(c, c.sites[0], "/", error);
+        std::string texts;
+        for (const auto& f : pc["response_headers"].items()) texts += std::string(f["text"].str()) + " | ";
+        CHECK(error.empty() && texts.find("alt-svc: removed from an application's answer only; agensio's own") != std::string::npos &&
+              texts.find("strict-transport-security: removed from an application's answer only; the site's hsts") != std::string::npos);
+    }
     {
         std::string many;
         for (int i = 0; i < 65; ++i) many += "[[site.response_headers]]\npath = \"/p" + std::to_string(i) + "\"\nset = { \"X-A\" = \"1\" }\n";
         CHECK(refused(many, "at most 64"));
     }
     {
-        const Config ok = load("[[site.response_headers]]\npath = \"/\"\nset = { \"Cache-Control\" = \"no-cache\" }\nremove = [\"Strict-Transport-Security\", \"Server\"]\n");
+        const Config ok = load("[[site.response_headers]]\npath = \"/\"\nset = { \"Cache-Control\" = \"no-cache\" }\nremove = [\"Strict-Transport-Security\", \"Alt-Svc\"]\n");  // an application's copies; Server is refused since the review's D2
         CHECK(ok.sites[0].response_headers.nodes.size() == 1 && ok.sites[0].header_notes.empty());
         const Config noted = load("[[site.response_headers]]\npath = \"/\"\nset = { \"Content-Security-Policy\" = \"default-src 'self'\", \"X-XSS-Protection\" = \"1\" }\n",
                                   "app = \"php\"\nphp = { socket = \"unix:/run/php/x.sock\" }\n");

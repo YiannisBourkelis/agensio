@@ -583,7 +583,12 @@ void header_fields(json::Value& v, const SiteConfig& site, const HeaderNode* nod
             }
             std::string lower = d.name;
             for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            std::string text = lower + ": " + (d.verb == FieldDecision::Verb::remove ? std::string("removed")
+            // A remove of Alt-Svc or Strict-Transport-Security takes an application's copy only: agensio's own
+            // stays (the review's D2: path_check said "removed").
+            const char* removed = lower == "alt-svc"                     ? "removed from an application's answer only; agensio's own (protocols, http3.alt_svc) stays"
+                                  : lower == "strict-transport-security" ? "removed from an application's answer only; the site's hsts stays"
+                                                                         : "removed";
+            std::string text = lower + ": " + (d.verb == FieldDecision::Verb::remove ? std::string(removed)
                                                : d.verb == FieldDecision::Verb::fallback ? d.value + " unless the answer has its own" : d.value);
             text += (r.baseline ? " (baseline " + baseline : " (rule " + r.path + (r.exact ? " exact" : "")) + (r.success_only ? ", success only" : "") +
                     (files.empty() ? "" : ", " + files + " files") + (d.own_only ? ", on the files and error pages agensio serves" : "") + ")";

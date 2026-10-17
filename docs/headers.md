@@ -155,15 +155,17 @@ is refused at load, and the message names the setting to use:
 |---|---|---|
 | `Connection`, `Keep-Alive`, `Proxy-Connection`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`, `Content-Length`, `Content-Range` | framing: a wrong value breaks the connection or splits responses; HTTP/2 and HTTP/3 forbid the connection fields | the server writes them |
 | `Content-Type`, `Content-Encoding`, `ETag`, `Last-Modified`, `Accept-Ranges`, `Age`, `Date`, `Vary` | the representation's own description, prebuilt into cached files and kept consistent with them | the built-in type table (by file extension) and the cache |
-| `Location`, `Refresh` | redirects | `[[site.redirect]]` (`docs/redirects.md`) |
+| `Location`, `Refresh` | redirects; a `remove` too, since agensio's own redirects carry them (a directory without its slash, a `[[site.redirect]]` answer) and a 301 without `Location` has no target | `[[site.redirect]]` (`docs/redirects.md`) |
 | `Strict-Transport-Security` in `set` or `default` | sent over HTTPS only, once, with a checked value | `hsts` (`remove` is accepted, to strip an application's own) |
-| `Server` | server-wide | `[server] server_header` |
-| `Alt-Svc` | can send browsers to another server for the whole origin | `[server] protocols`, `http3.alt_svc` |
+| `Server` | server-wide and agensio's own, on every answer: a `remove` did nothing (until 0.1.0-alpha.99 it loaded and `path_check` called it removed) | `[server] server_header` (`""` sends none) |
+| `Alt-Svc` | can send browsers to another server for the whole origin | `[server] protocols`, `http3.alt_svc` (`remove` strips an application's own; agensio's stays) |
 | `Set-Cookie`, `Clear-Site-Data`, `Service-Worker-Allowed` | reach beyond the site on a shared host: a cookie for a parent domain, clearing a whole registrable domain's data, lifting a service worker's path limit | the application's |
 | `WWW-Authenticate`, `Proxy-Authenticate`, `Authentication-Info` | the password protocol | `[[site.auth]]` |
 | `Expect-CT`, `Public-Key-Pins`, `Public-Key-Pins-Report-Only` | obsolete; pinning can lock visitors out | none |
 
-`remove` accepts any name but the framing and representation fields.
+`remove` takes any other name, and `Strict-Transport-Security` and `Alt-Svc` too, for an
+application's own copy: agensio's own (the site's `hsts`, the `alt-svc` of HTTP/3) stays, and
+`path_check` says so ("removed from an application's answer only").
 
 ### 2.6 Values
 
@@ -173,7 +175,9 @@ once, at load, so no request can put a line break into an answer. There are no v
 value is refused with a pointer to `proxy = { request_headers }`, which is where request fields with
 variables go to an origin. A few values are checked for meaning too: `X-Frame-Options` is `DENY` or
 `SAMEORIGIN` (`ALLOW-FROM` is ignored by every current browser); `Access-Control-Allow-Origin` is one
-origin, `*` or `null`, never `*` together with `Access-Control-Allow-Credentials: true`;
+origin or `*`, never `*` together with `Access-Control-Allow-Credentials: true`, and never `null`:
+it is the origin of sandboxed frames, `data:` URLs and local files, which any page can claim, so any
+site could read the answers, with credentials a signed-in visitor's (MDN's warning; 0.1.0-alpha.99);
 `X-XSS-Protection` other than `0` gets a warning (the filter it turned on could itself be abused
 against pages, and Chrome, Edge and Firefox have none).
 

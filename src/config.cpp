@@ -1411,6 +1411,7 @@ struct OwnedField {
     std::string_view name;
     bool removable;
     std::string_view instead;
+    std::string_view instead_remove = {};  // why a remove is refused, when it is not the same reason
 };
 constexpr OwnedField kOwnedFields[] = {
     {"connection", false, "the server writes the framing fields (HTTP/2 and HTTP/3 forbid the connection ones)"},
@@ -1430,10 +1431,16 @@ constexpr OwnedField kOwnedFields[] = {
     {"age", false, "the representation's own fields come from the built-in type table (by file extension) and the cache"},
     {"date", false, "the server writes Date"},
     {"vary", false, "the representation's own fields come from the built-in type table (by file extension) and the cache"},
-    {"location", true, "a redirect is a [[site.redirect]] rule (docs/redirects.md 5)"},
-    {"refresh", true, "a redirect is a [[site.redirect]] rule (docs/redirects.md 5)"},
+    // A remove broke agensio's own redirects (the review of 2026-10-14, D1): a directory without its
+    // slash and a [[site.redirect]] answer went out as a 301 with no target.
+    {"location", false, "a redirect is a [[site.redirect]] rule (docs/redirects.md 5)",
+     "agensio's own redirects carry it (a directory without its slash, a [[site.redirect]] answer), and without it a 301 has no target; a redirect is changed with "
+     "[[site.redirect]] (docs/redirects.md 5)"},
+    {"refresh", false, "a redirect is a [[site.redirect]] rule (docs/redirects.md 5)"},
     {"strict-transport-security", true, "hsts on the site (hsts = true, or a table) sends it on every HTTPS answer, once, with a checked value; remove is accepted, to strip an application's own"},
-    {"server", true, "the Server field is [server] server_header"},
+    // A remove did nothing while path_check said "removed" (D2): the field is agensio's own.
+    {"server", false, "the Server field is [server] server_header",
+     "the Server field is agensio's own, on every answer whatever a rule says: [server] server_header = \"\" sends none (root's main file)"},
     {"alt-svc", true, "Alt-Svc comes from [server] protocols and http3.alt_svc: a wrong one sends browsers to another server for the whole origin"},
     {"set-cookie", true, "cookies are the application's: one from a rule could reach a parent domain on a shared host"},
     {"clear-site-data", true, "Clear-Site-Data is the application's: it clears a whole registrable domain's data"},
@@ -1484,9 +1491,9 @@ bool grants_freshness(std::string_view value) {
     return false;
 }
 
-// One origin, "*" or "null" (docs/headers.md 2.6).
+// One origin or "*" (docs/headers.md 2.6); "null" is refused apart (the review's D3).
 bool cors_origin(std::string_view v) {
-    if (v == "*" || v == "null") return true;
+    if (v == "*") return true;
     const std::size_t scheme = v.find("://");
     if (scheme == std::string_view::npos || (v.substr(0, scheme) != "https" && v.substr(0, scheme) != "http")) return false;
     const std::string_view authority = v.substr(scheme + 3);
@@ -1540,8 +1547,8 @@ void parse_response_headers(const toml::node_view<const toml::node>& n, SiteConf
             const std::string lower = to_lower(name);
             for (const OwnedField& o : kOwnedFields)
                 if (o.name == lower && !(verb == "remove" && o.removable))
-                    fail(w + "." + std::string(verb) + ": " + name + " is not a rule's to " + (verb == "remove" ? "remove" : "send") + ": " + std::string(o.instead) +
-                         (verb == "remove" ? "; remove accepts any name but the framing and representation fields" : ""));
+                    fail(w + "." + std::string(verb) + ": " + name + " is not a rule's to " + (verb == "remove" ? "remove" : "send") + ": " +
+                         std::string(verb == "remove" && !o.instead_remove.empty() ? o.instead_remove : o.instead) + (verb == "remove" ? "; remove takes every other name" : ""));
             for (const auto& [other, other_verb] : seen)
                 if (other == lower)
                     fail(w + ": " + name + (other_verb == verb ? " is named twice in " + std::string(verb) : std::string(" is named in two of set, default and remove")) +
@@ -1561,8 +1568,15 @@ void parse_response_headers(const toml::node_view<const toml::node>& n, SiteConf
             if (lower == "x-frame-options" && to_lower(value) != "deny" && to_lower(value) != "sameorigin")
                 fail(w + "." + std::string(verb) + ": X-Frame-Options must be DENY or SAMEORIGIN (ALLOW-FROM is ignored by every current browser; "
                      "Content-Security-Policy: frame-ancestors names the sites that may frame a page)");
+            // "null" is the origin of sandboxed frames, data: URLs and local files, which any page can make
+            // its own (the review of 2026-10-14, D3; MDN): with it any site reads these answers, with
+            // Allow-Credentials a signed-in visitor's.
+            if (lower == "access-control-allow-origin" && value == "null")
+                fail(w + "." + std::string(verb) + ": Access-Control-Allow-Origin \"null\" is the origin of sandboxed frames, data: URLs and local files, which any page "
+                     "can claim: any site could read these answers (with Allow-Credentials, a signed-in visitor's); name the origin (https://app.example.com), or \"*\" "
+                     "for a public answer without credentials");
             if (lower == "access-control-allow-origin" && !cors_origin(value))
-                fail(w + "." + std::string(verb) + ": Access-Control-Allow-Origin is one origin (https://app.example.com), \"*\" or \"null\"; "
+                fail(w + "." + std::string(verb) + ": Access-Control-Allow-Origin is one origin (https://app.example.com) or \"*\"; "
                      "several origins are not a rule's (the application answers them, from the request's Origin)");
             if (lower == "x-xss-protection" && value != "0")
                 site.header_notes.emplace_back("header_xss_protection", "the rule for " + r.path + " sends X-XSS-Protection: " + value +

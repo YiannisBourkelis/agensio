@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.0-alpha.99
+
+- **Response-header rules refuse what can only break or mislead** (the review of the redirects,
+  HSTS and response-header work, 2026-10-14, defects D1 to D3):
+  - `remove = ["Location"]` (and `Refresh`) was accepted, and agensio's own redirects, a directory
+    without its slash and every `[[site.redirect]]` answer, went out as a 301 with no target: refused
+    in every verb, naming `[[site.redirect]]`.
+  - `remove = ["Server"]` was accepted and did nothing, `Server: agensio` staying on every answer
+    while `path_check` said "removed": refused, naming `[server] server_header = ""`. A remove of
+    `Alt-Svc` or `Strict-Transport-Security` strips an application's copy only, and `path_check` now
+    says so ("removed from an application's answer only; agensio's own ... stays").
+  - `Access-Control-Allow-Origin: "null"` was accepted, also with `Access-Control-Allow-Credentials:
+    true`: it is the origin of sandboxed frames, `data:` URLs and local files, which any page can
+    claim, so any site could read the answers, with credentials a signed-in visitor's (MDN). Refused,
+    naming a real origin or `*` without credentials.
+  In a site file and through `site_update` and `path_check`'s preview alike (one parse). Unit tests
+  failing on alpha.98; `docs/headers.md` 2.5 and 2.6, `docs/configuration.md` 14c, the MCP text of
+  the `response_headers` field.
+
 ## 0.1.0-alpha.98 (2026-10-17)
 
 - **`public_archives`, and every found archive judged by what a request for it gets** (the alpha.97

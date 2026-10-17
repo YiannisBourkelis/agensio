@@ -2246,13 +2246,16 @@ set = { "Content-Security-Policy" = "script-src 'none'" }
   agensio writes on its own 401, 403 and 503 (`no-store`, `Retry-After`) stand.
 - **Refused at load, naming what to use instead:** the framing fields (`Connection`,
   `Transfer-Encoding`, `Content-Length`...), the representation's (`Content-Type`, `ETag`, `Vary`,
-  `Date`...), `Location` and `Refresh` (a `[[site.redirect]]`), `Strict-Transport-Security` in `set`
-  or `default` (`hsts`; `remove` strips an application's own), `Server` (`[server] server_header`),
-  `Alt-Svc`, `Set-Cookie`, `Clear-Site-Data`, `Service-Worker-Allowed`, the password fields, the
+  `Date`...), `Location` and `Refresh` in any verb, `remove` included (a `[[site.redirect]]`: a 301
+  without `Location` has no target), `Strict-Transport-Security` in `set` or `default` (`hsts`;
+  `remove` strips an application's own), `Server` in any verb (`[server] server_header`, `""` for
+  none: agensio writes it on every answer), `Alt-Svc` in `set` or `default` (`remove` strips an
+  application's own), `Set-Cookie`, `Clear-Site-Data`, `Service-Worker-Allowed`, the password fields, the
   obsolete pinning fields; a value that is empty, longer than 4 KB, holds a control character or a
   `$` (no variables; request fields with variables are `proxy = { request_headers }`);
   `X-Frame-Options` other than `DENY` or `SAMEORIGIN`; an `Access-Control-Allow-Origin` that is not
-  one origin, `*` or `null`, and `*` with `Access-Control-Allow-Credentials: true`; the same field
+  one origin or `*` (`null` is refused: any page can claim it), and `*` with
+  `Access-Control-Allow-Credentials: true`; the same field
   twice at one path and match, or in two verbs of one rule; more than 64 rules or field names, or
   16 KB of values.
 - **Noted by `-t`, the error log and health:** a `set` of `Content-Security-Policy` on a site with
