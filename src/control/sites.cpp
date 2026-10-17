@@ -808,8 +808,9 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
         spec.response_headers_offer_declined = names;
     }
     // The login paths (2026-10-02): given whole, each a plain URL path (check_login_path), at
-    // most 16, [] clears them. They change no location: the fail2ban jail counts attempts there.
-    if (has_key(body, "login_paths")) {
+    // most 16, [] or null clears them. They change no location: the fail2ban jail counts attempts there.
+    if (given(body, "login_paths") && body["login_paths"].is_null()) spec.login_paths.clear();
+    else if (has_key(body, "login_paths")) {
         if (!body["login_paths"].is_array()) {
             error = "login_paths must be a list of URL paths: [\"/login\"] ([] clears them)";
             return needs;
@@ -833,8 +834,10 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
         spec.login_paths = lp;
     }
     // The archives and dumps served on purpose (2026-10-17): given whole, each a path as served
-    // (check_accepted_path), at most 64, [] clears them. Health's archives_in_root alone reads them.
-    if (has_key(body, "archives_accepted")) {
+    // (check_accepted_path), at most 64, [] or null clears them (null answered ok and kept the list
+    // until the alpha.97 report). Health's archives_in_root alone reads them.
+    if (given(body, "archives_accepted") && body["archives_accepted"].is_null()) spec.archives_accepted.clear();
+    else if (has_key(body, "archives_accepted")) {
         if (!body["archives_accepted"].is_array() || body["archives_accepted"].items().size() > 64) {
             error = "archives_accepted must be a list of at most 64 paths as served from the site's root: [\"/downloads/world.sql.gz\"], a directory ending in / ([] clears them)";
             return needs;

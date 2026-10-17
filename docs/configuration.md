@@ -138,9 +138,10 @@ Health counts those as accepted, in the finding's message, instead of naming the
 refuses and moves nothing, and holds exact paths and directories only (no wildcards, `*`, `?` or
 `[`, never `/` alone, at most 64), so a dump that lands elsewhere by mistake is still named; a
 directory written without its `/` (`/db`) accepts nothing below it, and the finding says so. It works on any site: on a PHP site
-it accepts an archive kept on purpose. Managed: `site_update`'s field of the same name, `agensio
-ctl site-update NAME --archive-accepted /downloads/world-cities.sql.gz` (repeatable, the list
-replaced; `--no-archives-accepted` clears it).
+it accepts an archive kept on purpose. Managed: `site_update`'s field of the same name (the list
+sent whole, `[]` or `null` clears it), `agensio ctl site-update NAME --archive-accepted
+/downloads/world-cities.sql.gz` (repeatable, the list replaced; `--no-archives-accepted` clears it);
+`site_show` and `agensio ctl site NAME` list the current ones.
 
 ## 1b. Which site answers a request
 

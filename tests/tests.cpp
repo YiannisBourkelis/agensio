@@ -6679,6 +6679,9 @@ static void test_archives_in_root() {
     {
         const Config cfg = load("app = \"static\"\narchives_accepted = [\"/db/\", \"/db/\", \"/dumps/my file+1.sql\"]\n");
         CHECK(cfg.sites[0].archives_accepted == (std::vector<std::string>{"/db/", "/dumps/my file+1.sql"}));
+        // site_show lists them (the alpha.97 report: an agent adding a path saw none of those it would drop).
+        const json::Value shown = control::site(cfg, cfg.sites[0], std::time(nullptr));
+        CHECK(shown["archives_accepted"].items().size() == 2 && shown["archives_accepted"].items()[1].str() == "/dumps/my file+1.sql");
         const auto hf = control::health_findings(cfg, cfg, false, std::time(nullptr));
         const auto f = std::find_if(hf.begin(), hf.end(), [](const control::Finding& x) { return x.code == "archives_in_root"; });
         CHECK(f != hf.end() && f->severity == "warn" && f->site == "data.test" && f->message.find("served as they stand") != std::string::npos &&
@@ -6724,6 +6727,13 @@ static void test_archives_in_root() {
         err.clear();
         CHECK(control::apply_request(body, cfg, spec, err).empty() && spec.archives_accepted.empty() &&
               control::render_site(spec, "x").find("archives_accepted") == std::string::npos);
+        // null clears the list as [] does, as it does response_headers (the alpha.97 report: it answered
+        // ok and left the list), and the login paths the same way.
+        spec.archives_accepted = {"/db/"};
+        spec.login_paths = {"/login"};
+        CHECK(json::parse(R"J({"archives_accepted": null, "login_paths": null})J", body, err));
+        err.clear();
+        CHECK(control::apply_request(body, cfg, spec, err).empty() && err.empty() && spec.archives_accepted.empty() && spec.login_paths.empty());
     }
     fs::remove_all(cdir);
     fs::remove_all(dir);

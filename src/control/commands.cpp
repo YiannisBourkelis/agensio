@@ -919,6 +919,9 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now, const 
             if (std::find(lp.begin(), lp.end(), p) == lp.end()) lp.push_back(p);
         if (!lp.empty()) v.set("login_paths", strings(lp));
     }
+    // The archives and dumps served on purpose, so an agent changing the list sees what it replaces
+    // (the alpha.97 report).
+    if (!s.archives_accepted.empty()) v.set("archives_accepted", strings(s.archives_accepted));
     // The locations a managed site's rules render are hand-written to the loader; labelled
     // "rules" here, beside preset:<app> and root:<file>, so an agent can tell them apart
     // (2026-10-02 report: 17 of a Kanboard site's 19 locations said nothing).

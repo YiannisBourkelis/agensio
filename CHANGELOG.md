@@ -26,6 +26,13 @@
   finding names an entry that is a directory on disk without its `/` ("'/db' is a directory: write
   '/db/'"). Unit tests failing on alpha.97; the reference row, `docs/keys.md`, the MCP field's text and
   `docs/configuration.md` 1.
+- **`site_show` lists `archives_accepted`, and `null` clears it** (the same report). Neither MCP
+  `site_show` nor `agensio ctl site NAME` carried the list, while `site_update` and
+  `--archive-accepted` replace it whole, so an agent adding one path could not see the ones it would
+  drop; and `site_update` with `"archives_accepted": null` answered ok and kept the list. The site's
+  answer carries `archives_accepted`, and `null` clears it as `[]` does (as it does `response_headers`);
+  `login_paths` takes `null` the same way. Unit tests failing on alpha.97; the MCP texts of
+  `site_show` and of both fields, `docs/configuration.md` 1.
 
 ## 0.1.0-alpha.97 (2026-10-17)
 
