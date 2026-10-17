@@ -47,7 +47,10 @@
 #             0.1.0-alpha.94 its security baseline, three fields through a node at / with the html
 #             ending, against none before: what a static site pays for the baseline on upgrading).
 #             With -P also "proxy-hdr:/json:64" (127.0.0.1:8091, the benchmark
-#             upstream behind a site with set, default and remove rules: the upstream loop's half).
+#             upstream behind a site with set, default and remove rules: the upstream loop's half)
+#             and "proxy-cache:/json:64" (127.0.0.1:8089, the same site with a success-only
+#             Cache-Control set too, the same bytes on both sides: from 0.1.0-alpha.99 the read of
+#             the answer's fields a cache decision adds before that loop, docs/headers.md 2.4).
 #   -r        rounds of base/new alternation (default 2)
 #   -d        wrk duration per case (default 5s)
 #   -t        wrk threads (default 4)
@@ -74,7 +77,7 @@ if [ $PROXY = 1 ]; then
   [ -x "$ROOT/build/agensio_upstream" ] || { echo "build/agensio_upstream missing: cmake --build build --target agensio_upstream"; exit 1; }
   [ -f "$BENCH/proxy/ab-site.toml" ] || { echo "bench/proxy/ab-site.toml missing (the proxy site for the gate, phase D1)"; exit 1; }
   SPECS+=("proxy:/json:64" "proxy:/big:64" "proxy:/slow?ms=20:256")
-  [ $ACCESS = 1 ] && SPECS+=("proxy-hdr:/json:64")
+  [ $ACCESS = 1 ] && SPECS+=("proxy-hdr:/json:64" "proxy-cache:/json:64")
 fi
 
 if [ $H2 = 1 ]; then
@@ -155,6 +158,13 @@ if [ $ACCESS = 1 ]; then
     printf '\n[[site.response_headers]]\npath = "/"\nset = { "Referrer-Policy" = "strict-origin-when-cross-origin", "Content-Security-Policy" = "default-src \x27self\x27" }\n'
     printf 'default = { "X-Frame-Options" = "SAMEORIGIN" }\nremove = ["X-Powered-By", "X-Upstream"]\n'
   } > "$BENCH/tmp/ab-phdr-rules.toml"
+  pcache_site='\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8089"]\nroot = "%s/www"\n\n[[site.location]]\npath = "/"\nupstream = "http://127.0.0.1:9100"\n'
+  printf "$pcache_site" "$BENCH" > "$BENCH/tmp/ab-pcache-none.toml"
+  { printf "$pcache_site" "$BENCH"
+    printf '\n[[site.response_headers]]\npath = "/"\nset = { "Referrer-Policy" = "strict-origin-when-cross-origin", "Content-Security-Policy" = "default-src \x27self\x27" }\n'
+    printf 'default = { "X-Frame-Options" = "SAMEORIGIN" }\nremove = ["X-Powered-By", "X-Upstream"]\n'
+    printf '\n[[site.response_headers]]\npath = "/"\nwhen = "success"\nset = { "Cache-Control" = "public, max-age=60" }\n'
+  } > "$BENCH/tmp/ab-pcache-rules.toml"
   # Path redirects (0.1.0-alpha.82, docs/redirects.md 5): 1,000 exact rules a request does not meet,
   # and a hit; a base before them gets the same sites without rules and the whole-domain key.
   {
@@ -298,6 +308,10 @@ start() {  # binary
         cat "$cfg" "$BENCH/tmp/$f" > "$BENCH/tmp/ab-side-phdr.toml"
         if "$1" -t -c "$BENCH/tmp/ab-side-phdr.toml" >/dev/null 2>&1; then cfg="$BENCH/tmp/ab-side-phdr.toml"; echo "  (proxy-hdr row: ${f#ab-phdr-})"; break; fi
       done
+      for f in ab-pcache-rules.toml ab-pcache-none.toml; do
+        cat "$cfg" "$BENCH/tmp/$f" > "$BENCH/tmp/ab-side-pcache.toml"
+        if "$1" -t -c "$BENCH/tmp/ab-side-pcache.toml" >/dev/null 2>&1; then cfg="$BENCH/tmp/ab-side-pcache.toml"; echo "  (proxy-cache row: ${f#ab-pcache-})"; break; fi
+      done
     fi
   fi
   (cd "$BENCH" && exec "$1" -c "$cfg") >>"$RAW/server.log" 2>&1 &
@@ -346,6 +360,7 @@ measure() {  # side round -> appends "side round spec cpu_us rps" lines to $RAW/
       headers) url="http://127.0.0.1:8092$path" ;;
       baseline) url="http://127.0.0.1:8090$path" ;;
       proxy-hdr) [ $SIDE_PROXY = 1 ] || continue; url="http://127.0.0.1:8091$path" ;;
+      proxy-cache) [ $SIDE_PROXY = 1 ] || continue; url="http://127.0.0.1:8089$path" ;;
       auth) url="http://127.0.0.1:8096$path" ;;
       h2c) [ $SIDE_H2 = 1 ] || continue; url="http://127.0.0.1:8080$path" ;;
       h2) [ $SIDE_H2 = 1 ] || continue; url="https://127.0.0.1:8443$path" ;;

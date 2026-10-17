@@ -1,0 +1,17 @@
+/pub	s	set	Cache-Control	public, max-age=3600, immutable
+/pub	s	set	CDN-Cache-Control	max-age=60
+/def	s	default	Cache-Control	max-age=600
+/def	s	default	Expires	Thu, 01 Dec 2033 16:00:00 GMT
+/bare		remove	Cache-Control
+/strict		set	Cache-Control	no-cache
+
+/pub/a	d		u	Set-Cookie:a=b
+/pub/a	d		u	Cache-Control:private
+/pub/a	d		ua
+/def/x	d		u	Set-Cookie:a
+/def/x	d		u	Cache-Control:no-cache
+/bare/a	d		u	Cache-Control:no-store
+/bare/a	d		u	Cache-Control:public, max-age=9
+/strict/a	d		u	Cache-Control:no-store
+/pub/a	d		u	CDN-Cache-Control:no-store	Cache-Control:max-age=5
+/pub/a	d		pu	Set-Cookie:a	Cache-Control:public

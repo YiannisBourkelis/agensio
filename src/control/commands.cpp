@@ -1,6 +1,7 @@
 #include "control/commands.hpp"
 
 #include "core/access.hpp"
+#include "core/private_cache.hpp"
 #include "core/redirect.hpp"
 #include "core/refuse.hpp"
 #include "core/router.hpp"
@@ -592,6 +593,13 @@ void header_fields(json::Value& v, const SiteConfig& site, const HeaderNode* nod
                                                : d.verb == FieldDecision::Verb::fallback ? d.value + " unless the answer has its own" : d.value);
             text += (r.baseline ? " (baseline " + baseline : " (rule " + r.path + (r.exact ? " exact" : "")) + (r.success_only ? ", success only" : "") +
                     (files.empty() ? "" : ", " + files + " files") + (d.own_only ? ", on the files and error pages agensio serves" : "") + ")";
+            // What gives way on an application's answer (docs/headers.md 2.4, the review's D4).
+            if (app && d.cache_field && d.verb != FieldDecision::Verb::fallback && !(d.restricts & private_cache::kNoStore))
+                text += d.verb == FieldDecision::Verb::remove ? "; not where the application's says no-store, private or no-cache, which stands"
+                                                              : "; where the application's says no-store, private or no-cache that this value does not, its own stands";
+            if (app && d.lifetime)
+                text += d.cache_control ? "; an answer that sets a cookie or answers a request with Authorization gets " + d.private_value
+                                        : std::string("; none on an answer that sets a cookie or answers a request with Authorization");
             json::Value item = json::Value::object().set("field", d.name).set("verb", verb);
             if (d.verb != FieldDecision::Verb::remove) item.set("value", d.value);
             out.push(item.set("rule", std::move(rule)).set("text", text));
@@ -603,7 +611,8 @@ void header_fields(json::Value& v, const SiteConfig& site, const HeaderNode* nod
         if (other.dump() != ok.dump()) v.set("response_headers_on_error", std::move(other));
         v.set("response_headers", std::move(ok));
         v.set("response_headers_note", "the application's answer: its own fields go out, then these decide (set replaces its copy, default only fills a "
-                                       "gap, remove drops it); response_headers_on_error for a status other than 2xx and 304");
+                                       "gap, remove drops it), except that its no-store, private and no-cache stand and an answer that is one user's gets "
+                                       "no shared cache lifetime; response_headers_on_error for a status other than 2xx and 304");
     } else {
         v.set("response_headers", list((status >= 200 && status < 300) || status == 304));
     }

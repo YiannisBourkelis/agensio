@@ -548,7 +548,14 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-one, each seeded fr
   Health's `response_headers_suggested` (`control/probe.*`: `header_probes`, `judge_header_answer`,
   `run_header_probes`, in `Server::health_async` beside the HSTS probes, which skip those sites):
   a live HTTPS site's home page read for 4.1's fields; `response_headers_offer_declined` silences them.
-  Gate: `bench/ab.sh <ref> -A` (rows `headers` and `baseline`), `-P` with `-A` (row `proxy-hdr`).
+  Cache guards (alpha.99, the review's D4, headers.md 2.4): a set holding a cache decision
+  (`HeaderSet::cache_watch`) has the upstream loop read the answer first (`response_fields::note_cache`,
+  `settle`): the application's `no-store`, `private`, `no-cache` stand over a rule's cache field whose
+  value does not hold them (`private_cache::restrictions`, `covers`; `Upstream::stands`), and an answer
+  with `Set-Cookie` or to a request with `Authorization` gets no rule's shared lifetime
+  (`FieldDecision::lifetime`, `private_value`); `header_cache_set` notes a lifetime `set` over an app.
+  Gate: `bench/ab.sh <ref> -A` (rows `headers` and `baseline`), `-P` with `-A` (rows `proxy-hdr` and
+  `proxy-cache`, the latter with a `Cache-Control` set: the read before the loop).
 - **Automatic certificates** (H3, `src/services/acme.*`, `services/json.hpp`): `tls = "auto"`
   plus `[server] acme = { email }`; ACME v2 with HTTP-01 against any RFC 8555 CA, JWS ES256
   and CSRs through OpenSSL. Placeholder certificate at start, order at once, challenge

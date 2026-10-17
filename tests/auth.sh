@@ -333,7 +333,8 @@ ctl site-auth-user-delete users.test bob --yes --reason gone > "$T/out"
 ctl site-auth-user-delete users.test anna --yes --reason gone > "$T/out.last"
 check "deleting a user: refused at once; the last user of a file a rule uses stays (lock it, or remove the rule first)" "deleted 401 False yes 200" \
   "$(jv 'd.get("action")') $(code -u bob:typed-pass $U/private/doc.html) $(python3 -c "import json; d=json.load(open('$T/out.last')); print(d.get('ok'), 'yes' if 'the last user' in d.get('error', '') else d)") $(code -u "anna:$PW2" $U/private/doc.html)"
-# MCP: the three tools (admin), a generated password answered, a hash from the agent dropped.
+# MCP: the three tools (admin), a generated password answered, a hash from the agent refused (it
+# was dropped before 0.1.0-alpha.99, whose bridge refuses an argument the schema does not list).
 python3 - "$BIN" "$CS" > "$T/mcp.out" <<'PYT'
 import json, subprocess, sys
 p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
@@ -348,14 +349,14 @@ pw = r["structuredContent"].get("password", "")
 out.append("pw" if len(pw) == 19 else repr(r))
 h = open(sys.argv[2].replace("control.sock", "auth/users.test.users")).read().split("anna:")[1].split(":")[0].split("\n")[0]
 r = rpc(3, "tools/call", {"name": "site_auth_user_set", "arguments": {"name": "users.test", "user": "dave", "hash": h, "confirm": True, "reason": "mcp"}})
-out.append("dropped" if r["isError"] and "a new user needs" in r["content"][-1]["text"] else repr(r))
+out.append("refused" if r["isError"] and "never through the agent" in r["content"][-1]["text"] else repr(r))
 r = rpc(4, "tools/call", {"name": "site_auth_users", "arguments": {"name": "users.test"}})
 out.append(",".join(u["name"] for u in r["structuredContent"]["users"]))
 p.stdin.close(); p.wait()
 print(" ".join(out))
 PYT
-check "mcp: site_auth_users read-only, site_auth_user_delete destructive, no hash argument; a generated password answered; a hash the agent sends is dropped" \
-  "True True nohash pw dropped anna,carol" "$(cat "$T/mcp.out")"
+check "mcp: site_auth_users read-only, site_auth_user_delete destructive, no hash argument; a generated password answered; a hash the agent sends is refused, no user made" \
+  "True True nohash pw refused anna,carol" "$(cat "$T/mcp.out")"
 # rules.auth on a managed site (2026-10-09, step 4c): refused until the site has a user and on a new
 # site; then the site asks where the rule says, an open rule frees one file, site_show and path_check
 # name the rule, health reads the users file the way the next load will, --no-auth removes it.

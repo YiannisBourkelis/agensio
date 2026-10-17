@@ -1577,6 +1577,16 @@ void parse_response_headers(const toml::node_view<const toml::node>& n, SiteConf
             if (lower == "content-security-policy" && verb == "set" && !site.app.empty() && site.app != "static" && r.endings.empty())  // endings: files only
                 site.header_notes.emplace_back("header_csp_set", "the rule for " + r.path + " sets Content-Security-Policy, replacing the policy the " +
                     site.app + " application may send itself (often with nonces or hashes its pages need): use default, so the application's stays");
+            // The review of 2026-10-14, D4: nginx's add_header appends, so a translated configuration
+            // meant the application's value to stay. Its private, no-store and no-cache do stay, and a
+            // cookie's answer goes private (docs/headers.md 2.4); what remains is the page it marks with
+            // nothing, or with a shorter lifetime of its own.
+            if (lower == "cache-control" && verb == "set" && !site.app.empty() && site.app != "static" && r.endings.empty() && private_cache::shared_lifetime(value))
+                site.header_notes.emplace_back("header_cache_set", "the rule for " + r.path + " sets Cache-Control: " + value + " over the " + site.app +
+                    " application's answers, replacing the lifetimes it gives: agensio keeps its private, no-store and no-cache and sends an answer that sets a "
+                    "cookie or answers a request with Authorization as private, but a CDN or proxy keeps any other page for the rule's lifetime, also one that "
+                    "shows a signed-in visitor's data without saying so; use default, so the application's own Cache-Control stands, on the paths of public "
+                    "pages only");
         };
         bool any = false;
         for (std::string_view verb : {"set", "default"}) {
@@ -4507,8 +4517,23 @@ void build_response_headers(SiteConfig& site, const std::string& where) {
                                 d->name = name;
                                 d->verb = verb;
                                 d->value = value;
-                                d->cache_field = Headers::iequals(name, "cache-control") || private_cache::shared_only_field(name);
+                                d->cache_control = Headers::iequals(name, "cache-control");
+                                d->cache_field = d->cache_control || private_cache::shared_only_field(name);
                                 d->own_only = own_only;
+                                // What the value says to caches (docs/headers.md 2.4): a field only shared
+                                // caches read gives a lifetime unless it restricts (Edge-Control's own
+                                // syntax included), Expires unless it is 0.
+                                d->restricts = verb == FieldDecision::Verb::remove ? 0 : private_cache::restrictions(value, false);
+                                d->lifetime = verb != FieldDecision::Verb::remove &&
+                                              (d->cache_control ? private_cache::shared_lifetime(value)
+                                               : d->cache_field ? d->restricts == 0
+                                                                : Headers::iequals(name, "expires") && value != "0");
+                                d->private_value.clear();
+                                if (d->lifetime && d->cache_control) {
+                                    std::string kept;
+                                    private_cache::keep_directives(value, kept);
+                                    d->private_value = kept.empty() ? "private" : "private, " + kept;
+                                }
                                 d->rule = static_cast<std::uint16_t>(ri);
                             };
                             for (const auto& [name, value] : r.set) decide(name, FieldDecision::Verb::set, value, r.own_only);
@@ -4518,6 +4543,7 @@ void build_response_headers(SiteConfig& site, const std::string& where) {
                     }
             bool any_origin = false, credentials = false;
             for (const auto& f : hs.fields) {
+                hs.cache_watch = hs.cache_watch || f.cache_field || f.lifetime;
                 if (f.verb == FieldDecision::Verb::remove) continue;
                 hs.h1.append(f.name).append(": ").append(f.value).append("\r\n");
                 any_origin = any_origin || (Headers::iequals(f.name, "access-control-allow-origin") && f.value == "*");

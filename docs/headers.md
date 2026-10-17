@@ -137,7 +137,7 @@ Field names are matched in any case and written as given (lowercased over HTTP/2
 narrows what the first allows, but `set` replaces the application's policy with the rule's. On an
 application site, use `default` for a CSP, so a policy the application sends stays.
 
-### 2.4 `when = "success"`
+### 2.4 Cache fields: `when = "success"`, and what the application says
 
 A rule with `when = "success"` applies to `2xx` and `304` answers only; the others (`"always"`, the
 default) to every answer. A cache lifetime belongs on success only: a year-long `immutable` on a 404
@@ -145,6 +145,42 @@ keeps the error in every browser and CDN for a year (reported against Caddy on a
 `Cache-Control` or `Expires` that grants freshness (`max-age` above 0, `s-maxage`, `public`,
 `immutable`, a future date) is refused in a rule without `when = "success"`; `no-store`, `no-cache`,
 `private` and `max-age=0` are accepted anywhere.
+
+**A rule never makes an application's answer one a cache may hand to another visitor** (2026-10-17,
+the review's D4). nginx's `add_header` appends, so a configuration translated from nginx meant the
+application's own `Cache-Control` to stay, and a `set` replaces it. Two guards, for an application's
+answer (PHP, a proxied application, CGI):
+
+- **Its restrictions stand.** Where the application's `Cache-Control` says `no-store` (no cache keeps
+  the answer, RFC 9111 5.2.2.5), `private` (no shared cache does, 5.2.2.7) or `no-cache` (none reuses
+  it without asking, 5.2.2.4), a rule's `set` or `remove` of the field applies only when its own value
+  holds those restrictions too (`no-store` holds all three); otherwise the application's copies go
+  out as they are and the rule's line is left out. So `set = { "Cache-Control" = "no-store" }` still
+  replaces an application's `private, max-age=600`, while `public, max-age=3600` leaves PHP's session
+  answer (`no-store, no-cache, must-revalidate`) and WordPress's signed-in pages (`no-cache,
+  must-revalidate, max-age=0, no-store, private`) as they are. The same holds for the fields only
+  shared caches read (`CDN-Cache-Control` and its vendor forms, `Surrogate-Control`,
+  `Edge-Control`): a CDN that follows one ignores `Cache-Control` (RFC 9213 2.2), so a rule's
+  lifetime there is left out where the answer has no such field and its `Cache-Control` restricts,
+  and an application's own `CDN-Cache-Control: no-store` stands.
+- **An answer that is one user's gets no shared lifetime from a rule.** `Set-Cookie` does not stop a
+  cache (RFC 9111 7.3): a CDN that keeps the answer hands the cookie, a session, to the next visitor.
+  An answer that sets a cookie, or answers a request with `Authorization` (which a shared cache may
+  reuse only when the answer says `public`, `s-maxage` or `must-revalidate`, 3.5), gets a rule's `Cache-Control` lifetime as
+  `private` with the browser's directives kept (`public, max-age=3600, immutable` goes out as
+  `private, max-age=3600, immutable`, the password guard's form), and no rule's `Expires` or lifetime
+  in a field only shared caches read; where that leaves it without `Cache-Control` (a rule's `remove`
+  of it included), it carries `Cache-Control: private`. A lifetime is `public`, a shared freshness above 0 (`s-maxage`, else
+  `max-age`) or `stale-while-revalidate` / `stale-if-error` above 0 (RFC 5861), in a value without
+  `no-store`, `private` or `no-cache`; any value of a field only shared caches read without those
+  three counts as one.
+
+What neither guard sees: a page the application marks with nothing that still shows a visitor's
+data (read from the request's cookie, without setting one). So a `set` of a lifetime over an
+application site is noted at load (`header_cache_set`, section 7): use `default`, so the
+application's own `Cache-Control` stands, on the paths of public pages only. agensio's own answers
+(files, error pages, redirects) carry no visitor's data and get a rule's value as written; behind a
+password (`[[site.auth]]`) the guard decides every answer's cache fields (`docs/auth.md`).
 
 ### 2.5 What is set elsewhere
 
@@ -420,7 +456,10 @@ application's value once per site and health reports `hsts_narrows_application`.
   (`php` on a PHP site, an ending the preset refuses); more than 64 rules or names, or 16 KB of
   values.
 - **Warned**: a `set` of `Content-Security-Policy` on a site with `app` other than `static` (the
-  application may send its own: use `default`); `X-XSS-Protection` other than `0`; a year-long
+  application may send its own: use `default`); a `set` of a `Cache-Control` lifetime on such a site
+  (`header_cache_set`: the guards of 2.4 keep the application's restrictions and a cookie's answer,
+  not a page it marks with nothing; use `default`, on public pages' paths); `X-XSS-Protection` other
+  than `0`; a year-long
   `Cache-Control` on a path the site's single-page fallback can answer (the shell would be kept
   under an asset's address for a year).
 - **`path_check`** lists every field the site decides for the path, with its value and where the
@@ -478,11 +517,14 @@ lookup, one test of an empty pointer where the answer leaves, measured flat. Wit
   one or two bytes.
 - **An application's answer**: `set`, `remove` and the presence test of `default` are folded into the
   loop that already reads every field the application sent; a site without rules pays nothing more
-  there.
+  there. Where a rule decides a cache field or sends a lifetime (2.4), the answer's fields are read
+  once more before that loop, for its `Cache-Control`, its fields for CDNs and `Set-Cookie`, and the
+  request for `Authorization`: only on those paths.
 - **The gate**: `bench/ab.sh <base> -A` with two new rows (a site with `app = "static"` and its
   baseline, serving a cached 1 KB file; a site with a rule at `/` and a deeper one, on a path under
   the deeper one), `-2` and `-3` for the HTTP/2 and HTTP/3 writers, `-P` for a proxied answer with
-  `set` and `remove` rules.
+  `set` and `remove` rules (`proxy-hdr`) and with a `Cache-Control` set too (`proxy-cache`, the read
+  of 2.4's guards).
 
 ## 10. Decisions (2026-10-13)
 

@@ -1939,6 +1939,11 @@ when = "success"
 set = { "Cache-Control" = "public, max-age=3600" }
 
 [[site.response_headers]]
+path = "/cache/"
+when = "success"
+set = { "Cache-Control" = "public, max-age=3600" }
+
+[[site.response_headers]]
 path = "/"
 endings = ["svg"]
 set = { "Content-Security-Policy" = "script-src 'none'" }
@@ -1969,6 +1974,16 @@ HDR
   [ $H3 = 1 ] && check "response_headers over HTTP/3: the same fields on a static page and a PHP answer" \
     "cache-control=no-cache|$RP|$NS|x-frame-options=SAMEORIGIN ; $RP|$NS|x-frame-options=DENY" \
     "$(hd https://h.wild.test:8484/ --http3-only) ; $(hd https://h.wild.test:8484/app.php --http3-only)"
+  # A rule's lifetime and what the application says to caches (docs/headers.md 2.4, the review's D4):
+  # PHP's session no-store stands; an answer with a cookie, or to a request with Authorization, gets
+  # the lifetime private (RFC 9111 7.3, 3.5); one with a lifetime of its own gets the rule's.
+  XF='x-frame-options=SAMEORIGIN'
+  check "response_headers and caches: the application's no-store stands over a rule's lifetime; a cookie's answer and one to a request with Authorization go private; a page with its own lifetime gets the rule's" \
+    "cache-control=no-store, no-cache, must-revalidate|$RP|$NS|$XF ; cache-control=private, max-age=3600|$RP|$NS|$XF ; cache-control=private, max-age=3600|$RP|$NS|$XF ; cache-control=public, max-age=3600|$RP|$NS|$XF" \
+    "$(hd http://h.wild.test:8483/cache/session.php --resolve h.wild.test:8483:127.0.0.1) ; $(hd http://h.wild.test:8483/cache/cookie.php --resolve h.wild.test:8483:127.0.0.1) ; $(hd http://h.wild.test:8483/cache/open.php -H 'Authorization: Bearer fixture' --resolve h.wild.test:8483:127.0.0.1) ; $(hd http://h.wild.test:8483/cache/open.php --resolve h.wild.test:8483:127.0.0.1)"
+  check "response_headers and caches over HTTP/2: the session's no-store stands, the cookie's answer goes private" \
+    "cache-control=no-store, no-cache, must-revalidate|$RP|$NS|$XF ; cache-control=private, max-age=3600|$RP|$NS|$XF" \
+    "$(hd https://h.wild.test:8484/cache/session.php --http2) ; $(hd https://h.wild.test:8484/cache/cookie.php --http2)"
   # endings (alpha.90, docs/headers.md 2.1): the file agensio serves, a directory's index included;
   # at one path the endings rule decides, a deeper path's rule still wins; never an application's
   # answer or a missing file's 404.
@@ -2081,9 +2096,11 @@ check "response_headers endings at load: php on a PHP site (PHP runs it) and an 
   "$(hq "$(printf '[[site.response_headers]]\npath = "/"\nendings = ["php"]\nset = { "X-A" = "1" }\n')" 'PHP runs them' 'app = "php"
 php = { socket = "unix:/run/php/x.sock" }') $(hq "$(printf '[[site.response_headers]]\npath = "/"\nendings = ["inc"]\nset = { "X-A" = "1" }\n')" 'answers 404' 'app = "php"
 php = { socket = "unix:/run/php/x.sock" }') $(hq "$(printf '[[site.response_headers]]\npath = "/"\nendings = ["svg"]\nset = { "X-A" = "1" }\n[[site.response_headers]]\npath = "/"\nendings = ["pdf", "svg"]\nset = { "X-A" = "2" }\n')" 'a second rule') $(hq "$(printf '[[site.response_headers]]\npath = "/"\nendings = [".SVG"]\nset = { "X-A" = "1" }\n')" 'is OK')"
-check "response_headers at load: a CSP set on an application site and X-XSS-Protection other than 0 are noted, and the site loads" \
-  "yes yes yes" \
+check "response_headers at load: a CSP set on an application site, a lifetime set over one (not a default) and X-XSS-Protection other than 0 are noted, and the site loads" \
+  "yes yes no yes yes" \
   "$(hq "$(printf '[[site.response_headers]]\npath = "/"\nset = { "Content-Security-Policy" = "default-src '"'"'self'"'"'" }\n')" 'use default' 'app = "php"
+php = { socket = "unix:/run/php/x.sock" }') $(hq "$(printf '[[site.response_headers]]\npath = "/"\nwhen = "success"\nset = { "Cache-Control" = "public, max-age=600" }\n')" 'replacing the lifetimes it gives' 'app = "php"
+php = { socket = "unix:/run/php/x.sock" }') $(hq "$(printf '[[site.response_headers]]\npath = "/"\nwhen = "success"\ndefault = { "Cache-Control" = "public, max-age=600" }\n')" 'replacing the lifetimes it gives' 'app = "php"
 php = { socket = "unix:/run/php/x.sock" }') $(hq "$(printf '[[site.response_headers]]\npath = "/"\nset = { "X-XSS-Protection" = "1; mode=block" }\n')" 'X-XSS-Protection') $(hq "$(printf '[[site.response_headers]]\npath = "/"\nset = { "X-XSS-Protection" = "1; mode=block" }\n')" 'is OK')"
 # rules.refuse on a managed site (2026-10-08): rendered as the site's refuse; a bad pattern is
 # answered with what to write instead; one that would refuse the site's index is refused by

@@ -42,6 +42,15 @@ struct FieldDecision {
     Verb verb = Verb::set;
     bool cache_field = false;  // Cache-Control or a field only shared caches read: the password guard decides those
     bool own_only = false;     // agensio's own answers only: an application's answer neither loses nor gains the field
+    // What the value says to caches (core/private_cache.hpp, docs/headers.md 2.4): its restrictions,
+    // which must hold the application's for a set or remove of a cache field to replace its copy;
+    // whether it lets a shared cache keep the answer (Cache-Control with a shared lifetime, a
+    // field only shared caches read without a restriction, Expires), never on an answer that is one
+    // user's; and for Cache-Control the private value such an answer gets in its place.
+    bool cache_control = false;
+    std::uint8_t restricts = 0;
+    bool lifetime = false;
+    std::string private_value;
     std::uint16_t rule = 0;    // the deciding rule, an index into ResponseRules::rules (a copy of the site keeps it)
 };
 
@@ -51,6 +60,7 @@ struct FieldDecision {
 struct HeaderSet {
     std::vector<FieldDecision> fields;
     std::string h1;
+    bool cache_watch = false;  // a decision on a cache field or with a lifetime: the upstream loop reads the answer's first
     bool empty() const noexcept { return fields.empty(); }
 };
 

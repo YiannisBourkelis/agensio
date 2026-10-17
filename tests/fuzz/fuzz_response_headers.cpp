@@ -2,7 +2,8 @@
 // docs/headers.md 2): the input is rules, one per line (path, flags, verb, name, value, endings,
 // separated by tabs; flags 'e' exact, 's' success only), up to an empty line, then probes (path,
 // status, served file, flags, then the answer's own fields as name:value separated by tabs; flags
-// 'p' behind a password, 'o' the fields sit in agensio's own block, 'u' an application's answer).
+// 'p' behind a password, 'o' the fields sit in agensio's own block, 'u' an application's answer,
+// 'a' the request carried Authorization).
 // The rules load as path_check's preview loads them (the parse, checks and resolution of a site
 // file); for each probe the node is the one a request finds and the fields are applied as the
 // writers and the upstream loop apply them. Whatever the input:
@@ -13,6 +14,10 @@
 //   - the guards stand: behind a password the cache fields are untouched, a field of agensio's own
 //     block is never replaced, removed or doubled;
 //   - HTTP/1's prebuilt lines equal what the general path writes for an answer with nothing to look at;
+//   - an application's answer keeps the restrictions of its Cache-Control (no-store, private,
+//     no-cache) and of each field only shared caches read, whatever a rule sets or removes, and
+//     one that is one user's (Set-Cookie, a request with Authorization) gets no line from a rule
+//     that lets a shared cache keep it (docs/headers.md 2.4);
 //   - the node's decisions agree with a scan of every rule for the most specific one naming a field,
 //     the security baseline's (docs/headers.md 4: the site is php, static or without app by the
 //     input's length) below the written ones at its path, its nosniff leaving an application's
@@ -180,7 +185,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
         const std::string_view file = f.size() > 2 ? f[2] : std::string_view();
         const std::string_view flags = f.size() > 3 ? f[3] : std::string_view();
         const bool guarded = flags.find('p') != std::string_view::npos, own = flags.find('o') != std::string_view::npos,
-                   upstream = flags.find('u') != std::string_view::npos;
+                   upstream = flags.find('u') != std::string_view::npos, credentials = flags.find('a') != std::string_view::npos;
         std::vector<std::pair<std::string, std::string>> fields;  // the answer's own, names as tokens
         for (std::size_t i = 4; i < f.size() && fields.size() < 24; ++i) {
             const std::size_t colon = f[i].find(':');
@@ -220,21 +225,36 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
         // What goes out, by name: the answer's own fields, then the rules'.
         std::vector<std::pair<std::string, std::string>> out;
         const HeaderSet* hs = nullptr;
+        agensio::response_fields::Upstream seen;
+        std::size_t from_rules = 0;                         // out[from_rules...] are the rules' lines
+        std::size_t added_private = std::string::npos;      // the Cache-Control: private one user's answer got
         if (upstream) {
             hs = s.header_node && status >= 200 ? (success ? &s.header_node->success : &s.header_node->other) : nullptr;
             if (hs && hs->empty()) hs = nullptr;
-            std::uint64_t present = 0;
+            if (hs && hs->cache_watch && !guarded) {
+                for (const auto& [n, v] : fields) agensio::response_fields::note_cache(*hs, n, v, seen);
+                seen.personal = seen.personal || credentials;
+                agensio::response_fields::settle(*hs, seen);
+            }
             std::string block;
             for (const auto& [n, v] : fields)
-                if (!hs || agensio::response_fields::keep_upstream(*hs, n, guarded, present)) out.emplace_back(n, v);
+                if (!hs || agensio::response_fields::keep_upstream(*hs, n, guarded, seen)) out.emplace_back(n, v);
+            from_rules = out.size();
             if (hs) {
-                agensio::response_fields::append_upstream(block, *hs, guarded, present);
+                agensio::response_fields::append_upstream(block, *hs, guarded, seen);
                 for (const std::string_view l : split(block, '\n')) {
                     if (l.empty()) continue;
                     assert(l.back() == '\r');
                     const std::size_t colon = l.find(": ");
                     assert(colon != std::string_view::npos);
                     out.emplace_back(std::string(l.substr(0, colon)), std::string(l.substr(colon + 2, l.size() - colon - 3)));
+                    // A Cache-Control line no rule wrote: none names it, or one removes it.
+                    const int cc = agensio::response_fields::find(*hs, "cache-control");
+                    if (Headers::iequals(out.back().first, "cache-control") &&
+                        (cc < 0 || hs->fields[static_cast<std::size_t>(cc)].verb == FieldDecision::Verb::remove)) {
+                        assert(out.back().second == "private" && seen.personal && added_private == std::string::npos);
+                        added_private = out.size() - 1;
+                    }
                 }
             }
         } else {
@@ -268,12 +288,22 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
             return c;
         };
         if (hs)
-            for (const FieldDecision& d : hs->fields) {
-                const std::size_t before = copies(fields, d.name), after = copies(out, d.name);
-                // A decision for agensio's own answers (the baseline's nosniff) leaves an application's field as it is.
-                const bool standing = (!upstream && own && before > 0) || (guarded && d.cache_field) || (upstream && d.own_only);
+            for (std::size_t i = 0; i < hs->fields.size(); ++i) {
+                const FieldDecision& d = hs->fields[i];
+                const std::size_t before = copies(fields, d.name),
+                                  after = copies(out, d.name) - (added_private != std::string::npos && d.cache_control ? 1 : 0);
+                // A decision for agensio's own answers (the baseline's nosniff) leaves an application's
+                // field as it is, and so does a cache decision that gives way to its restrictions.
+                const bool standing = (!upstream && own && before > 0) || (guarded && d.cache_field) || (upstream && d.own_only) ||
+                                      (upstream && (seen.stands & agensio::response_fields::bit(i)));
                 if (standing) {
                     assert(after == before);
+                    continue;
+                }
+                // One user's answer: a lifetime the rules give shared caches is left out, or for
+                // Cache-Control sent private.
+                if (upstream && seen.personal && d.lifetime && !d.cache_control && d.verb != FieldDecision::Verb::remove) {
+                    assert(after == (d.verb == FieldDecision::Verb::set ? 0 : before));
                     continue;
                 }
                 if (d.verb == FieldDecision::Verb::set) assert(after == 1);
@@ -284,9 +314,45 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
         std::vector<std::pair<std::string, std::string>> kept_in, kept_out;
         for (const auto& fv : fields)
             if (!hs || agensio::response_fields::find(*hs, fv.first) < 0) kept_in.push_back(fv);
-        for (const auto& fv : out)
-            if (!hs || agensio::response_fields::find(*hs, fv.first) < 0) kept_out.push_back(fv);
+        for (std::size_t i = 0; i < out.size(); ++i)
+            if ((!hs || agensio::response_fields::find(*hs, out[i].first) < 0) && i != added_private) kept_out.push_back(out[i]);
         assert(kept_in == kept_out);
+
+        // What an application's answer says to caches (docs/headers.md 2.4): the restrictions of its
+        // Cache-Control and of each field only shared caches read stand (a field it lacks answers to
+        // its Cache-Control's, which a CDN would otherwise follow), and one user's answer gets no
+        // rule's line letting a shared cache keep it.
+        if (upstream && !guarded) {
+            using namespace agensio::private_cache;
+            auto bits = [&](const std::vector<std::pair<std::string, std::string>>& list, std::string_view name, bool& any) {
+                std::uint8_t b = 0;
+                any = false;
+                for (const auto& [n, v] : list)
+                    if (Headers::iequals(n, name)) {
+                        b |= restrictions(v, true);
+                        any = true;
+                    }
+                return b;
+            };
+            bool app_cc = false, out_cc = false;
+            const std::uint8_t app_bits = bits(fields, "cache-control", app_cc), out_bits = bits(out, "cache-control", out_cc);
+            assert(covers(out_bits, app_bits));
+            for (const auto& [n, _] : out)
+                if (shared_only_field(n)) {
+                    bool app_has = false, out_has = false;
+                    const std::uint8_t app_field = bits(fields, n, app_has), out_field = bits(out, n, out_has);
+                    assert(covers(out_field, app_has ? app_field : app_bits));
+                }
+            bool cookie = credentials;
+            for (const auto& [n, _] : fields) cookie = cookie || Headers::iequals(n, "set-cookie");
+            if (cookie)
+                for (std::size_t i = from_rules; i < out.size(); ++i) {
+                    const auto& [n, v] = out[i];
+                    if (Headers::iequals(n, "cache-control")) assert(!shared_lifetime(v));
+                    if (shared_only_field(n)) assert(restrictions(v, false) != 0);
+                    if (Headers::iequals(n, "expires")) assert(v == "0");
+                }
+        }
     }
     return 0;
 }

@@ -178,7 +178,21 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
                                  ? (response_fields::success(res.status) ? &s.header_node->success : &s.header_node->other)
                                  : nullptr;
     if (rules && rules->empty()) rules = nullptr;
-    std::uint64_t present = 0;
+    // Configured response fields, on the statuses nginx's add_header applies to.
+    const int st = res.status;
+    const bool add_status = st == 200 || st == 201 || st == 204 || st == 206 || st == 301 || st == 302 || st == 303 || st == 304 ||
+                            st == 307 || st == 308;
+    // A rule's cache decision reads what the answer says to caches first (docs/headers.md 2.4): the
+    // application's restrictions stand, and an answer that is one user's gets no shared lifetime.
+    response_fields::Upstream seen;
+    if (rules && rules->cache_watch && !guarded) {
+        for (const HeaderField& h : res.headers)
+            if (!(proxied && hidden(h.name, loc))) response_fields::note_cache(*rules, h.name, h.value, seen);
+        if (add_status)
+            for (const auto& h : loc.add_headers) response_fields::note_cache(*rules, h.first, h.second, seen);
+        seen.personal = seen.personal || !s.request.headers.get("authorization").empty();
+        response_fields::settle(*rules, seen);
+    }
     r.fields_decided = true;
     // Without one, until this generation of the site has seen its application's: one test per field.
     const SiteFields* watch = s.watch_fields && !s.watch_fields->application_noted.done.load(std::memory_order_relaxed) ? s.watch_fields : nullptr;
@@ -194,7 +208,7 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
             if (h.value != s.fields->hsts && !s.fields->hsts_noted.done.load(std::memory_order_relaxed)) note_hsts_narrowed(*s.fields, h.value, log);
             continue;
         }
-        if (rules && !response_fields::keep_upstream(*rules, h.name, guarded, present)) continue;
+        if (rules && !response_fields::keep_upstream(*rules, h.name, guarded, seen)) continue;
         if (watch && Headers::iequals(h.name, "strict-transport-security")) note_application_hsts(*watch, h.value);
         if (guarded) {
             if (Headers::iequals(h.name, "cache-control")) {
@@ -217,12 +231,9 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
     }
     // 101: the writer adds no framing (no body) and the client needs the switch confirmed.
     if (res.upgraded) r.scratch.append("Connection: upgrade\r\n");
-    // Configured response fields, on the statuses nginx's add_header applies to.
-    const int st = res.status;
-    if (st == 200 || st == 201 || st == 204 || st == 206 || st == 301 || st == 302 || st == 303 || st == 304 ||
-        st == 307 || st == 308)
+    if (add_status)
         for (const auto& h : loc.add_headers) {
-            if (rules && !response_fields::keep_upstream(*rules, h.first, guarded, present)) continue;
+            if (rules && !response_fields::keep_upstream(*rules, h.first, guarded, seen)) continue;
             if (guarded && Headers::iequals(h.first, "cache-control")) {
                 private_cache::keep_directives(h.second, kept);
                 continue;
@@ -230,7 +241,7 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
             if (guarded && private_cache::shared_only_field(h.first)) continue;
             r.scratch.append(h.first).append(": ").append(h.second).append("\r\n");
         }
-    if (rules) response_fields::append_upstream(r.scratch, *rules, guarded, present);
+    if (rules) response_fields::append_upstream(r.scratch, *rules, guarded, seen);
     if (guarded) r.scratch.append("Cache-Control: private").append(kept.empty() ? "" : ", ").append(kept).append("\r\n");
     if (res.streamed) {  // buffering off, or the temp-file cap switched it mid-response
         r.prebuilt_headers = r.scratch;  // the writer adds Content-Length or chunked framing

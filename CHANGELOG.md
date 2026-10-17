@@ -18,6 +18,30 @@
   In a site file and through `site_update` and `path_check`'s preview alike (one parse). Unit tests
   failing on alpha.98; `docs/headers.md` 2.5 and 2.6, `docs/configuration.md` 14c, the MCP text of
   the `response_headers` field.
+- **A response-header rule never makes an application's answer one a cache hands to another
+  visitor** (the same review, D4; `docs/headers.md` 2.4). `set = { "Cache-Control" = "public,
+  max-age=3600" }` over a PHP path replaced PHP's session answer (`no-store, no-cache,
+  must-revalidate`), WordPress's signed-in pages and an answer setting a session cookie alike, so a
+  CDN could keep a signed-in page or hand the cookie to the next visitor; nginx's `add_header`
+  appends, so a configuration translated from nginx meant the application's value to stay. Now, on
+  an application's answer (RFC 9111):
+  - its `Cache-Control` saying `no-store`, `private` or `no-cache` (5.2.2.5, 5.2.2.7, 5.2.2.4) stands
+    over a rule's `set` or `remove` whose value does not say them too (`no-store` says all three, so a
+    stricter rule still replaces), and a rule's lifetime in `CDN-Cache-Control`, `Surrogate-Control` or
+    `Edge-Control`, which a CDN follows in place of `Cache-Control` (RFC 9213 2.2), is left out over
+    it; an application's own CDN field with such a restriction stands too;
+  - an answer that sets a cookie (which does not stop a cache, 7.3) or answers a request with
+    `Authorization` (3.5) gets a rule's `Cache-Control` lifetime as `private` with the browser's
+    directives (`private, max-age=3600`), no rule's `Expires` or CDN lifetime, and `Cache-Control:
+    private` where that leaves it none (a rule's `remove` of it included). A lifetime: `public`, `s-maxage` (else `max-age`) above 0,
+    `stale-while-revalidate` or `stale-if-error` above 0 (RFC 5861, now in `docs/rfc/`).
+  A `set` of a lifetime over an application site is noted at load (`header_cache_set`: use `default`,
+  on public pages' paths), since a page the application marks with nothing is still kept; `path_check`
+  says what gives way. The answer's fields are read once more before the upstream loop only where a
+  rule decides a cache field: `bench/ab.sh -P -A` has a `proxy-cache` row for it, flat (0.996). Unit test of every case, a fuzz invariant (the application's
+  restrictions are never lost; one user's answer gets no rule's lifetime), integration checks over
+  HTTP/1 and HTTP/2 with PHP's session answer, a cookie and `Authorization`, failing on the commit
+  before; `docs/headers.md` 2.4, 7 and 9, `docs/configuration.md` 14c, the MCP texts.
 - **An unknown tool argument or site field is refused, naming the nearest** (the alpha.98 report).
   MCP `site_update` with `"bogus_field"`, a misspelt `"public_archive"` or the old
   `"archives_accepted"` answered ok and wrote nothing, so an agent told the user the change was made;

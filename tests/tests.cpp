@@ -6108,7 +6108,7 @@ static void test_response_headers() {
         CHECK(response_fields::pending(s) == nullptr);
         // The upstream loop's half: the application's copies, then the rules' lines.
         const HeaderSet& hs = node->success;
-        std::uint64_t present = 0;
+        response_fields::Upstream present;
         CHECK(!response_fields::keep_upstream(hs, "cache-control", false, present) && !response_fields::keep_upstream(hs, "X-R", false, present) &&
               response_fields::keep_upstream(hs, "X-D", false, present) && response_fields::keep_upstream(hs, "X-Other", false, present) &&
               response_fields::keep_upstream(hs, "Cache-Control", true, present));
@@ -6226,9 +6226,9 @@ static void test_security_baseline() {
         CHECK(response_rules::ending_sets(*n, "/srv/www/page.htm") && !response_rules::ending_sets(*n, "/srv/www/style.css"));
         // An application's answer (a proxy location on such a site): its own nosniff passes, none is
         // added; X-Powered-By goes; Referrer-Policy fills a gap only.
-        std::uint64_t present = 0;
+        response_fields::Upstream present;
         CHECK(!response_fields::keep_upstream(n->success, "x-powered-by", false, present));
-        CHECK(response_fields::keep_upstream(n->success, "X-Content-Type-Options", false, present) && present == 0);
+        CHECK(response_fields::keep_upstream(n->success, "X-Content-Type-Options", false, present) && present.present == 0);
         std::string block;
         response_fields::append_upstream(block, n->success, false, present);
         CHECK_EQ(block, std::string("Referrer-Policy: strict-origin-when-cross-origin\r\n"));
@@ -8953,6 +8953,111 @@ static void test_private_cache() {
     for (const char* f : {"Cache-Control", "-cache-control", "Expires", "Vary", "Content-Type", "X-Control"}) CHECK(!private_cache::shared_only_field(f));
 }
 
+// What a response-header rule may change in an application's answer for caches (2026-10-17, the
+// review's D4, docs/headers.md 2.4): its no-store, private and no-cache stand over a rule's value
+// that drops them (RFC 9111 5.2.2), and an answer that is one user's (Set-Cookie, 7.3; a request
+// with Authorization, 3.5) gets no lifetime a shared cache may use from a rule.
+static void test_rule_cache_fields() {
+    namespace fs = std::filesystem;
+    using namespace private_cache;
+    CHECK(restrictions("no-store", false) == kNoStore && restrictions("Private, max-age=60", false) == kPrivate);
+    CHECK(restrictions("no-cache, must-revalidate, max-age=0, no-store, private", false) == (kNoStore | kPrivate | kNoCache));
+    CHECK(restrictions("private=\"Set-Cookie\", max-age=60", true) == kPrivate && restrictions("private=\"Set-Cookie\", max-age=60", false) == 0);
+    CHECK(restrictions("no-cache=\"a,b\"", true) == kNoCache && restrictions("public, max-age=3600", true) == 0 && restrictions("x-no-store", true) == 0);
+    CHECK(covers(kNoStore, kPrivate | kNoCache) && covers(kPrivate | kNoCache, kNoCache) && covers(0, 0));
+    CHECK(!covers(kNoCache, kNoStore) && !covers(kPrivate, kNoCache) && !covers(0, kPrivate));
+    for (const char* v : {"public", "max-age=60", "public, max-age=3600, immutable", "s-maxage=60, max-age=0", "max-age=0, stale-while-revalidate=30",
+                          "max-age=0, stale-if-error=600", "max-age=x", "PUBLIC", "private=\"Set-Cookie\", max-age=60"})
+        CHECK(shared_lifetime(v));
+    for (const char* v : {"max-age=0", "no-cache", "private, max-age=3600", "no-store, public", "public, no-cache", "max-age=600, s-maxage=0",
+                          "must-revalidate", "immutable", "", "max-age=00, stale-while-revalidate=0"})
+        CHECK(!shared_lifetime(v));
+
+    const fs::path dir = fs::temp_directory_path() / ("agensio-rcache-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "www");
+    std::ofstream(dir / "h.toml") << "[[site]]\nserver_name = [\"h.test\"]\nlisten = [\"127.0.0.1:18732\"]\nroot = \"www\"\napp = \"php\"\n"
+                                     "response_headers_baseline = false\nphp = { socket = \"unix:/run/php/fpm.sock\" }\n"
+                                     "[[site.response_headers]]\npath = \"/pub\"\nwhen = \"success\"\n"
+                                     "set = { \"Cache-Control\" = \"public, max-age=3600, immutable\", \"CDN-Cache-Control\" = \"max-age=86400\" }\n"
+                                     "[[site.response_headers]]\npath = \"/def\"\nwhen = \"success\"\n"
+                                     "default = { \"Cache-Control\" = \"max-age=600\", \"Expires\" = \"Thu, 01 Dec 2033 16:00:00 GMT\" }\n"
+                                     "[[site.response_headers]]\npath = \"/strict\"\nset = { \"Cache-Control\" = \"no-store\" }\n"
+                                     "[[site.response_headers]]\npath = \"/revalidate\"\nset = { \"Cache-Control\" = \"no-cache\" }\n"
+                                     "[[site.response_headers]]\npath = \"/bare\"\nremove = [\"Cache-Control\"]\n"
+                                     "[[site.response_headers]]\npath = \"/bare/cdn\"\nwhen = \"success\"\nset = { \"CDN-Cache-Control\" = \"max-age=60\" }\n"
+                                     "[[site.response_headers]]\npath = \"/cdn\"\nwhen = \"success\"\ndefault = { \"CDN-Cache-Control\" = \"max-age=86400\" }\n";
+    const Config c = load_config(dir / "h.toml");
+    fs::remove_all(dir);
+    const SiteConfig& site = c.sites[0];
+    // The load notes the set of a lifetime over the application (suggesting default); not the default,
+    // not a stricter value.
+    std::size_t noted = 0;
+    for (const auto& [code, text] : site.header_notes)
+        if (code == "header_cache_set") noted += text.find("the rule for /pub") != std::string::npos && text.find("use default") != std::string::npos;
+    CHECK(noted == 1 && site.header_notes.size() == 1);
+    // The answer as the upstream loop writes it: the application's fields kept, then the rules' lines.
+    auto answer = [&](std::string_view path, std::initializer_list<std::pair<const char*, const char*>> fields, bool credentials = false) {
+        const HeaderNode* n = site.response_headers.lookup(path);
+        CHECK(n != nullptr);
+        if (!n) return std::string("(no node)");
+        const HeaderSet& hs = n->success;
+        response_fields::Upstream u;
+        if (hs.cache_watch) {
+            for (const auto& [name, value] : fields) response_fields::note_cache(hs, name, value, u);
+            u.personal = u.personal || credentials;
+            response_fields::settle(hs, u);
+        }
+        std::string out;
+        for (const auto& [name, value] : fields)
+            if (response_fields::keep_upstream(hs, name, false, u)) out.append(name).append(": ").append(value).append("\r\n");
+        response_fields::append_upstream(out, hs, false, u);
+        return out;
+    };
+    // A lifetime set: an application's page without a word to caches gets it (a table's fields in
+    // name order, as toml++ keeps them).
+    CHECK_EQ(answer("/pub/a", {{"Content-Type", "text/html"}}),
+             std::string("Content-Type: text/html\r\nCDN-Cache-Control: max-age=86400\r\nCache-Control: public, max-age=3600, immutable\r\n"));
+    CHECK_EQ(answer("/pub/a", {{"Cache-Control", "max-age=60"}}),
+             std::string("CDN-Cache-Control: max-age=86400\r\nCache-Control: public, max-age=3600, immutable\r\n"));
+    // Its private, no-store or no-cache stand, whole, and the CDN gets no field to follow over them.
+    for (const char* v : {"private", "no-store", "no-cache, must-revalidate", "no-store, no-cache, must-revalidate, max-age=0", "private=\"Set-Cookie\", max-age=60"})
+        CHECK_EQ(answer("/pub/a", {{"Cache-Control", v}}), "Cache-Control: " + std::string(v) + "\r\n");
+    // Two lines: the application's every copy stays.
+    CHECK_EQ(answer("/pub/a", {{"Cache-Control", "max-age=60"}, {"Cache-Control", "private"}}),
+             std::string("Cache-Control: max-age=60\r\nCache-Control: private\r\n"));
+    // Its own CDN field with no-store stands; one without restrictions is replaced.
+    CHECK_EQ(answer("/pub/a", {{"CDN-Cache-Control", "no-store"}}), std::string("CDN-Cache-Control: no-store\r\nCache-Control: public, max-age=3600, immutable\r\n"));
+    CHECK_EQ(answer("/pub/a", {{"CDN-Cache-Control", "max-age=5"}}),
+             std::string("CDN-Cache-Control: max-age=86400\r\nCache-Control: public, max-age=3600, immutable\r\n"));
+    // A cookie: the lifetime goes private, the browser's directives kept; the CDN field is left out.
+    CHECK_EQ(answer("/pub/a", {{"Set-Cookie", "sid=1; HttpOnly"}}), std::string("Set-Cookie: sid=1; HttpOnly\r\nCache-Control: private, max-age=3600, immutable\r\n"));
+    CHECK_EQ(answer("/pub/a", {{"Set-Cookie", "sid=1"}, {"Cache-Control", "no-cache"}}), std::string("Set-Cookie: sid=1\r\nCache-Control: no-cache\r\n"));
+    // A request with Authorization, as a cookie.
+    CHECK_EQ(answer("/pub/a", {}, true), std::string("Cache-Control: private, max-age=3600, immutable\r\n"));
+    // A stricter set replaces what it holds, and gives way where it does not.
+    CHECK_EQ(answer("/strict/a", {{"Cache-Control", "private, max-age=600"}}), std::string("Cache-Control: no-store\r\n"));
+    CHECK_EQ(answer("/revalidate/a", {{"Cache-Control", "no-cache, max-age=0"}}), std::string("Cache-Control: no-cache\r\n"));
+    CHECK_EQ(answer("/revalidate/a", {{"Cache-Control", "no-store"}}), std::string("Cache-Control: no-store\r\n"));
+    CHECK_EQ(answer("/revalidate/a", {{"Cache-Control", "private"}}), std::string("Cache-Control: private\r\n"));
+    CHECK_EQ(answer("/revalidate/a", {{"Cache-Control", "public, max-age=60"}, {"Set-Cookie", "a=b"}}), std::string("Set-Cookie: a=b\r\nCache-Control: no-cache\r\n"));
+    // A remove takes a Cache-Control that restricts nothing, never one that does.
+    CHECK_EQ(answer("/bare/a", {{"Cache-Control", "public, max-age=60"}}), std::string());
+    CHECK_EQ(answer("/bare/a", {{"Cache-Control", "private"}}), std::string("Cache-Control: private\r\n"));
+    // A remove of Cache-Control and a CDN lifetime (the fuzzer's case): on a cookie's answer the
+    // lifetime is left out and the answer, left without Cache-Control, says private all the same.
+    CHECK_EQ(answer("/bare/cdn/a", {{"Cache-Control", "max-age=5"}}), std::string("CDN-Cache-Control: max-age=60\r\n"));
+    CHECK_EQ(answer("/bare/cdn/a", {{"Set-Cookie", "a=b"}, {"Cache-Control", "max-age=5"}}), std::string("Set-Cookie: a=b\r\nCache-Control: private\r\n"));
+    // Defaults: the application's own answers them; a cookie's answer gets the lifetime private and no Expires.
+    CHECK_EQ(answer("/def/a", {}), std::string("Cache-Control: max-age=600\r\nExpires: Thu, 01 Dec 2033 16:00:00 GMT\r\n"));
+    CHECK_EQ(answer("/def/a", {{"Cache-Control", "no-cache"}}), std::string("Cache-Control: no-cache\r\nExpires: Thu, 01 Dec 2033 16:00:00 GMT\r\n"));
+    CHECK_EQ(answer("/def/a", {{"Set-Cookie", "a=b"}}), std::string("Set-Cookie: a=b\r\nCache-Control: private, max-age=600\r\n"));
+    // A CDN default: where the application restricts, none; on a cookie's answer none, and private.
+    CHECK_EQ(answer("/cdn/a", {}), std::string("CDN-Cache-Control: max-age=86400\r\n"));
+    CHECK_EQ(answer("/cdn/a", {{"Cache-Control", "private"}}), std::string("Cache-Control: private\r\n"));
+    CHECK_EQ(answer("/cdn/a", {{"Set-Cookie", "a=b"}}), std::string("Set-Cookie: a=b\r\nCache-Control: private\r\n"));
+    CHECK_EQ(answer("/cdn/a", {{"Set-Cookie", "a=b"}, {"Cache-Control", "max-age=60"}}), std::string("Set-Cookie: a=b\r\nCache-Control: max-age=60\r\n"));
+}
+
 // Exact rules and the script that runs (2026-10-09, the alpha.58 report, finding 1): an exact rule
 // on a script covers every path that runs that script, as the location serving the path splits it
 // (FastCGI at the first ".php/", the directory's index of a FastCGI location, CGI's longest leading
@@ -10605,6 +10710,7 @@ int main() {
     test_hsts_key();
     test_redirect_rules();
     test_response_headers();
+    test_rule_cache_fields();
     test_security_baseline();
     test_managed_response_headers();
     test_header_suggestions();

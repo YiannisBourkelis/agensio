@@ -2243,7 +2243,15 @@ set = { "Content-Security-Policy" = "script-src 'none'" }
   kept for a year; `no-store`, `no-cache`, `private` and `max-age=0` are accepted anywhere.
 - **What no rule loosens:** behind a password (`[[site.auth]]`) the answer stays `Cache-Control:
   private` and the CDN fields stay dropped, so the rules leave those fields alone there; the fields
-  agensio writes on its own 401, 403 and 503 (`no-store`, `Retry-After`) stand.
+  agensio writes on its own 401, 403 and 503 (`no-store`, `Retry-After`) stand. On an application's
+  answer (0.1.0-alpha.99, [headers.md](headers.md) 2.4): its `Cache-Control` saying `no-store`,
+  `private` or `no-cache` stands over a rule's `set` or `remove` whose value does not say them too
+  (`no-store` says all three), and a rule's lifetime in `CDN-Cache-Control` and the other CDN fields
+  is left out over it; an answer that sets a cookie or answers a request with `Authorization` gets a
+  rule's `Cache-Control` lifetime as `private` (`private, max-age=3600` for `public, max-age=3600`)
+  and no rule's `Expires` or CDN lifetime (RFC 9111 7.3, 3.5). A `set` of a lifetime over an
+  application site is noted by `-t`: `default` keeps the application's own value, and a page it marks
+  with nothing is kept by a CDN whatever it shows.
 - **Refused at load, naming what to use instead:** the framing fields (`Connection`,
   `Transfer-Encoding`, `Content-Length`...), the representation's (`Content-Type`, `ETag`, `Vary`,
   `Date`...), `Location` and `Refresh` in any verb, `remove` included (a `[[site.redirect]]`: a 301

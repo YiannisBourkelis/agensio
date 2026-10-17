@@ -602,6 +602,9 @@ cannot send HSTS (until 0.1.0-alpha.75 that was the way, and it reached neither 
 the errors). The `Cache-Control` rule is on every successful answer under `/assets/`, a `304`
 revalidation included, whichever location serves it, and replaces a lifetime the application or a
 preset sends there; a 404 carries none (a lifetime without `when = "success"` is refused at load).
+It never loosens an application's answer: its `no-store`, `private` or `no-cache` stands, and an
+answer that sets a cookie or answers a request with `Authorization` gets the lifetime as `private`,
+so no CDN hands it to the next visitor ([response headers, 2.4](../headers.md#24-cache-fields-when--success-and-what-the-application-says)).
 `immutable` belongs only on names that change when the content does; give other directories a
 short `max-age`, or nothing. A location's `add_headers` still works for the same purpose (the
 managed `--cache` below writes one), but it reaches only that location's successful answers; the
