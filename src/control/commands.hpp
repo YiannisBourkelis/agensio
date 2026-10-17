@@ -115,18 +115,28 @@ bool php_fpm_hard_reload(const Config& cfg, std::string& file);
 
 // Backup archives and database dumps found under a document root (health, archives_in_root). A
 // static site or one without app is searched for dumps only (dumps_only): it serves everything as it
-// stands, so an archive there is a download offered on purpose. What the site's archives_accepted
-// names is counted apart, in accepted.
+// stands, so an archive there is a download offered on purpose. What the site's public_archives
+// names is counted apart, in listed_public.
 struct ArchivesInRoot {
+    struct Found {
+        std::string path;    // the file
+        std::string served;  // its path as served from the root, the form public_archives and refuse take
+        std::uint64_t bytes = 0;
+    };
+    static constexpr std::size_t kKept = 50;  // the files kept, which health judges one by one
     std::size_t seen = 0;
-    std::size_t count = 0;
-    std::size_t accepted = 0;
+    std::size_t count = 0;  // found and not listed in public_archives
+    std::size_t listed_public = 0;
     bool dumps_only = false;
-    std::string example;         // the file
-    std::string example_served;  // its path as served from the root, the form archives_accepted takes
-    std::uint64_t example_bytes = 0;
+    std::vector<Found> files;            // the first kKept of count
     std::vector<std::string> unslashed;  // entries that name a directory without the "/" that covers what is below it
 };
+// What a request for a found file gets today, by the decision path_check explains (2026-10-17):
+// served to anyone; kept by the owner's own rule (a refuse pattern, a managed site's rules, a location
+// of the site file or of root additions); kept only by the preset's defaults; served only to some
+// (an access rule, a password).
+enum class ArchiveExposure { served, owner, preset, restricted };
+ArchiveExposure archive_exposure(const Config& cfg, const SiteConfig& site, const std::string& served);
 ArchivesInRoot archives_in_root(const SiteConfig& site, std::size_t budget);
 
 // What one php-fpm pool keeps resident: its child processes and their memory (Linux /proc).

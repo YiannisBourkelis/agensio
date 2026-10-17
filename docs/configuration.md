@@ -121,27 +121,40 @@ static site and one without `app` for dumps: a `.sql` file that holds data (one 
 all define tables does not count), `.sql.gz`, `.sql.bz2`, `.sql.xz`, `.sql.zst`, `.sqlite`,
 `.sqlite3`, `.db` (not Windows' `Thumbs.db`) and pg_dump's `.dump`, and any of these inside an
 archive or a compression (phpMyAdmin's zipped export `export.sql.zip`, `backup.sql.tar.gz`,
-`app.sqlite.gz`), which leaves it a dump; the message says they are
-served as they stand and names each with its path as served. Archives (`.zip`, `.tar.gz`, ...)
-are not named there: on a static site they are downloads offered on purpose. A dump the owner
-publishes on purpose (an open dataset, a tutorial's sample database) is recorded in
-`archives_accepted`, by its path as served or a directory ending in `/` for all below it:
+`app.sqlite.gz`), which leaves it a dump. Archives (`.zip`, `.tar.gz`, ...) are not named there:
+on a static site they are downloads offered on purpose. Every file found, on any site, is judged by
+what a request for it gets today, the decision `path_check` explains:
+
+| a request for the file | health |
+|---|---|
+| gets it, from anyone | **warn**: anyone can download it |
+| is refused by the site's own `refuse` (or a managed site's `rules`) | nothing: the owner decided |
+| is refused only by the preset's defaults | info: not served today, a preset change would serve it |
+| gets it from some addresses or with a password only | info |
+| names a path listed in `public_archives` | counted as public on purpose |
+
+The message names each file with its path as served, and the fix offers both keys with it. What a
+file is decides which: a backup or a dump nobody needs is moved out of the document root or deleted;
+a file the owner publishes for download on purpose (an open dataset, a tutorial's sample database)
+goes in `public_archives`; a file the application needs where it is, which nobody downloads, goes in
+`refuse` (section 6b), which answers 404 for it and so also silences the finding:
 
 ```toml
 [[site]]
 server_name = ["data.example.com"]
 app = "static"
-archives_accepted = ["/downloads/world-cities.sql.gz", "/datasets/"]   # published on purpose
+public_archives = ["/downloads/world-cities.sql.gz", "/datasets/"]   # published on purpose
+refuse = ["/backups/"]                                                 # kept in the tree, never served
 ```
 
-Health counts those as accepted, in the finding's message, instead of naming them; the key serves,
-refuses and moves nothing, and holds exact paths and directories only (no wildcards, `*`, `?` or
-`[`, never `/` alone, at most 64), so a dump that lands elsewhere by mistake is still named; a
-directory written without its `/` (`/db`) accepts nothing below it, and the finding says so. It works on any site: on a PHP site
-it accepts an archive kept on purpose. Managed: `site_update`'s field of the same name (the list
-sent whole, `[]` or `null` clears it), `agensio ctl site-update NAME --archive-accepted
-/downloads/world-cities.sql.gz` (repeatable, the list replaced; `--no-archives-accepted` clears it);
-`site_show` and `agensio ctl site NAME` list the current ones.
+`public_archives` serves, refuses and moves nothing, and holds exact paths and directories only (a
+directory ending in `/` covers all below it; no wildcards, `*`, `?` or `[`; never `/` alone; at most
+64), so a dump that lands elsewhere by mistake is still named; a directory written without its `/`
+(`/db`) covers nothing below it, and the finding says so. A path listed there that the site's
+`refuse` answers 404 is a contradiction `-t` and health name (`public_archive_refused`). Managed:
+`site_update`'s field of the same name (the list sent whole, `[]` or `null` clears it), `agensio ctl
+site-update NAME --public-archive /downloads/world-cities.sql.gz` (repeatable, the list replaced;
+`--no-public-archives` clears it); `site_show` and `agensio ctl site NAME` list the current ones.
 
 ## 1b. Which site answers a request
 
@@ -491,8 +504,10 @@ for Grav, `artisan`, `core/lib/Drupal.php`, `wp-config.php`) and the `app` to se
 archives and database dumps under any served tree (`.zip`, `.tar.gz`, `.7z`, `.sql`, `.sql.gz`
 and the other compressed dumps, `.sqlite`, `.db`, `.dump`, ...) are reported as
 `archives_in_root`, whatever the preset refuses today: nothing served should hold a copy of the
-site. A static site and one without `app` are searched for the dumps alone (section 1, where
-`archives_accepted` records the files served on purpose). A file an application writes itself is
+site. Each is judged by what a request for it gets today: a warning when anyone can download it,
+information when only the preset's defaults keep it or only some reach it, nothing when the site's
+own `refuse` covers it (section 1, with `public_archives` for the files published on purpose). A
+static site and one without `app` are searched for the dumps alone. A file an application writes itself is
 not counted either: on a Grav site the API plugin's `user/data/grav-security-probe.zip` (32 bytes,
 up to 1 KB taken), which it writes to check that `user/data/` stays private and writes again when
 it is deleted; a larger file of that name, or any other archive there, still is. The SQL an application ships with its code is not

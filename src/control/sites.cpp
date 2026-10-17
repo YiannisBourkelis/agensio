@@ -87,7 +87,7 @@ json::Value SiteSpec::to_json() const {
     if (response_headers_baseline) v.set("response_headers_baseline", *response_headers_baseline);
     if (!response_headers_offer_declined.empty()) v.set("response_headers_offer_declined", strings(response_headers_offer_declined));
     if (!login_paths.empty()) v.set("login_paths", strings(login_paths));
-    if (!archives_accepted.empty()) v.set("archives_accepted", strings(archives_accepted));
+    if (!public_archives.empty()) v.set("public_archives", strings(public_archives));
     if (!access_log.empty()) v.set("access_log", access_log);
     v.set("listen_plain", listen_plain).set("listen_tls", listen_tls);
     return v;
@@ -127,7 +127,7 @@ bool SiteSpec::from_json(const json::Value& v, SiteSpec& out) {
     if (v["response_headers_baseline"].type() == json::Value::Type::boolean) out.response_headers_baseline = v["response_headers_baseline"].boolean();
     out.response_headers_offer_declined = string_list(v["response_headers_offer_declined"]);
     out.login_paths = string_list(v["login_paths"]);
-    out.archives_accepted = string_list(v["archives_accepted"]);
+    out.public_archives = string_list(v["public_archives"]);
     if (out.settings["children"].type() == json::Value::Type::number) out.php_children = static_cast<int>(out.settings["children"].num());
     out.access_log = v.get("access_log");
     if (has_key(v, "listen_plain")) out.listen_plain = v.get("listen_plain");
@@ -834,27 +834,27 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
         spec.login_paths = lp;
     }
     // The archives and dumps served on purpose (2026-10-17): given whole, each a path as served
-    // (check_accepted_path), at most 64, [] or null clears them (null answered ok and kept the list
+    // (check_public_archive), at most 64, [] or null clears them (null answered ok and kept the list
     // until the alpha.97 report). Health's archives_in_root alone reads them.
-    if (given(body, "archives_accepted") && body["archives_accepted"].is_null()) spec.archives_accepted.clear();
-    else if (has_key(body, "archives_accepted")) {
-        if (!body["archives_accepted"].is_array() || body["archives_accepted"].items().size() > 64) {
-            error = "archives_accepted must be a list of at most 64 paths as served from the site's root: [\"/downloads/world.sql.gz\"], a directory ending in / ([] clears them)";
+    if (given(body, "public_archives") && body["public_archives"].is_null()) spec.public_archives.clear();
+    else if (has_key(body, "public_archives")) {
+        if (!body["public_archives"].is_array() || body["public_archives"].items().size() > 64) {
+            error = "public_archives must be a list of at most 64 paths as served from the site's root: [\"/downloads/world.sql.gz\"], a directory ending in / ([] clears them)";
             return needs;
         }
         std::vector<std::string> aa;
-        for (const auto& p : body["archives_accepted"].items()) {
+        for (const auto& p : body["public_archives"].items()) {
             if (!p.is_string()) {
-                error = "archives_accepted: each entry is a string path (\"/downloads/world.sql.gz\")";
+                error = "public_archives: each entry is a string path (\"/downloads/world.sql.gz\")";
                 return needs;
             }
-            if (const std::string why = check_accepted_path(std::string(p.str())); !why.empty()) {
-                error = "archives_accepted: " + why;
+            if (const std::string why = check_public_archive(std::string(p.str())); !why.empty()) {
+                error = "public_archives: " + why;
                 return needs;
             }
             if (std::find(aa.begin(), aa.end(), std::string(p.str())) == aa.end()) aa.emplace_back(p.str());
         }
-        spec.archives_accepted = aa;
+        spec.public_archives = aa;
     }
     // The proxies that speak for this site (2026-10-13, docs/redirects.md 2.4): given whole, each an
     // address, a range or an [addresses] set within [server] trusted_proxies (checked here as the load
@@ -1045,8 +1045,8 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
         if (!spec.group.empty()) s += "group = " + toml_string(spec.group) + "\n";
         if (!spec.user.empty() && !spec.access_log.empty()) s += "access_log = " + toml_string(spec.access_log) + "\n";
         if (!spec.login_paths.empty()) s += "login_paths = " + toml_list(spec.login_paths) + "   # fail2ban counts login attempts here (agensio ctl protection)\n";
-        if (!spec.archives_accepted.empty())
-            s += "archives_accepted = " + toml_list(spec.archives_accepted) + "   # served on purpose: health's archives_in_root accepts them\n";
+        if (!spec.public_archives.empty())
+            s += "public_archives = " + toml_list(spec.public_archives) + "   # served on purpose: health's archives_in_root accepts them\n";
         if (spec.encoded_slashes == "allow") s += "encoded_slashes = \"allow\"   # a %2F in the path is decoded and looked up (Apache's NoDecode), not 404\n";
         if (spec.own_trusted_proxies) s += "trusted_proxies = " + toml_list(spec.trusted_proxies) + "   # the proxies that speak for this site, within [server] trusted_proxies\n";
         if (spec.rules.is_object() && !spec.rules["refuse"].items().empty()) {

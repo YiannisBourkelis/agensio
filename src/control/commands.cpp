@@ -921,7 +921,7 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now, const 
     }
     // The archives and dumps served on purpose, so an agent changing the list sees what it replaces
     // (the alpha.97 report).
-    if (!s.archives_accepted.empty()) v.set("archives_accepted", strings(s.archives_accepted));
+    if (!s.public_archives.empty()) v.set("public_archives", strings(s.public_archives));
     // The locations a managed site's rules render are hand-written to the loader; labelled
     // "rules" here, beside preset:<app> and root:<file>, so an agent can tell them apart
     // (2026-10-02 report: 17 of a Kanboard site's 19 locations said nothing).
@@ -1214,14 +1214,14 @@ ArchivesInRoot archives_in_root(const SiteConfig& site, std::size_t budget) {
     r.dumps_only = site.app.empty() || site.app == "static";
     std::string root = site.root;
     while (root.size() > 1 && root.back() == '/') root.pop_back();
-    const auto accepted = [&](std::string_view served) {
-        for (const auto& a : site.archives_accepted)
+    const auto listed_public = [&](std::string_view served) {
+        for (const auto& a : site.public_archives)
             if (a.back() == '/' ? served.starts_with(a) : served == a) return true;
         return false;
     };
     // "/db" for a directory accepts nothing below it, only "/db/" does (the alpha.97 report): the
     // finding says how to write it.
-    for (const auto& a : site.archives_accepted) {
+    for (const auto& a : site.public_archives) {
         std::error_code dec;
         if (a.back() != '/' && fs::is_directory(root + a, dec)) r.unslashed.push_back(a);
     }
@@ -1261,26 +1261,37 @@ ArchivesInRoot archives_in_root(const SiteConfig& site, std::size_t budget) {
         const std::string path = it->path().string();
         const std::string served = path.size() > root.size() && path.compare(0, root.size(), root) == 0 ? path.substr(root.size()) : "/" + name;
         if (std::error_code sec; application_probe(site, served, it->file_size(sec)) && !sec) continue;
-        if (accepted(served)) {
-            ++r.accepted;
+        if (listed_public(served)) {
+            ++r.listed_public;
             continue;
         }
         const std::uintmax_t size = it->file_size(ec);
-        if (r.count++ == 0) {
-            r.example = path;
-            r.example_served = served;
-            r.example_bytes = ec ? 0 : static_cast<std::uint64_t>(size);
-        }
+        if (r.count++ < ArchivesInRoot::kKept) r.files.push_back({path, served, ec ? 0 : static_cast<std::uint64_t>(size)});
     }
     return r;
 }
 
+ArchiveExposure archive_exposure(const Config& cfg, const SiteConfig& site, const std::string& served) {
+    std::string error;
+    const json::Value pc = path_check(cfg, site, served, error);
+    if (!error.empty() || !pc.is_object()) return ArchiveExposure::served;  // cannot tell: the safe side
+    if (!pc["refused_by"].is_null()) return ArchiveExposure::owner;          // the site's own refuse pattern
+    if (pc.get("decision") == "static") {                                     // the file itself, 200
+        const AccessRule* ar = access::rule_for(site, served);
+        const AuthRule* pr = access::auth_rule_for(site, served);
+        return (ar && !ar->any) || (pr && !pr->open) ? ArchiveExposure::restricted : ArchiveExposure::served;
+    }
+    // Refused, not found or redirected: by a location the preset brought, or by the owner's (the site
+    // file's, a managed site's rules, root additions; a redirect rule is the owner's too).
+    return pc["location"].get("from").starts_with("preset:") ? ArchiveExposure::preset : ArchiveExposure::owner;
+}
+
 namespace {
 
-// archives_accepted entries that name a directory without its "/", for the finding's message.
+// public_archives entries that name a directory without its "/", for the finding's message.
 std::string unslashed_note(const std::vector<std::string>& dirs) {
     std::string out;
-    for (const auto& d : dirs) out += "; '" + d + "' is a directory: write '" + d + "/' in archives_accepted for all below it";
+    for (const auto& d : dirs) out += "; '" + d + "' is a directory: write '" + d + "/' in public_archives for all below it";
     return out;
 }
 
@@ -1691,28 +1702,53 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
                 "'s own .htaccess would protect may be served",
             "set app = \"" + detected + "\" (site-update " + s.server_names.front() + " with app: " + detected + " for a managed site)");
     }
-    // Backup archives and database dumps inside a served tree are one path or one preset
-    // away from being public, whatever the preset refuses today.
-    // A static site and one without app too, for its dumps alone: it serves them as they stand (the
-    // alpha.96 report: a dump was downloadable there and health said nothing). What the owner serves on
-    // purpose is named in archives_accepted.
+    // Backup archives and database dumps inside a served tree, each judged by what a request for it gets
+    // today (2026-10-17, the alpha.97 discussion): served to anyone, a warning; kept by the preset's
+    // defaults alone or served only to some, information (a preset or location change would serve it);
+    // refused by the owner's own rule, nothing to say. A static site and one without app for their
+    // dumps alone (the alpha.96 report: a dump was downloadable there and health said nothing). What the
+    // owner publishes on purpose is listed in public_archives, what stays in the tree goes in refuse.
     for (const auto& s : running.sites) {
         if (s.root.empty() || s.redirects_all || proxy_app(s.app)) continue;
         const ArchivesInRoot a = archives_in_root(s, 2000);
         if (a.count == 0) continue;
-        const std::string size = a.example_bytes >= 1024 * 1024 ? std::to_string((a.example_bytes + 512 * 1024) / (1024 * 1024)) + " MB"
-                                                                : std::to_string((a.example_bytes + 512) / 1024) + " KB";
+        std::vector<const ArchivesInRoot::Found*> open, kept;
+        for (const auto& f : a.files) switch (archive_exposure(running, s, f.served)) {
+                case ArchiveExposure::served: open.push_back(&f); break;
+                case ArchiveExposure::preset:
+                case ArchiveExposure::restricted: kept.push_back(&f); break;
+                case ArchiveExposure::owner: break;
+            }
+        const std::size_t unjudged = a.count - a.files.size();  // beyond the files judged: taken as served, the safe side
+        const std::size_t open_n = open.size() + unjudged;
+        if (open_n == 0 && kept.empty()) continue;
+        const auto size = [](std::uint64_t b) {
+            return b >= 1024 * 1024 ? std::to_string((b + 512 * 1024) / (1024 * 1024)) + " MB" : std::to_string((b + 512) / 1024) + " KB";
+        };
+        const auto example = [&](const ArchivesInRoot::Found& f) { return ", e.g. " + f.path + " (served as " + f.served + ", " + size(f.bytes) + ")"; };
+        const std::string kind = a.dumps_only ? "database dump(s)" : "archive(s) or database dump(s)";
         const std::string name = s.server_names.empty() ? std::string("*") : s.server_names.front();
-        add("warn", "archives_in_root", name,
-            (a.dumps_only ? std::to_string(a.count) + " database dump(s) under the document root, served as they stand: anyone can download them"
-                          : std::to_string(a.count) + " archive(s) or database dump(s) under the document root") +
-                ", e.g. " + a.example + " (served as " + a.example_served + ", " + size + ")" +
-                (a.accepted ? ", " + std::to_string(a.accepted) + " more accepted (archives_accepted)" : "") +
-                (a.seen >= 2000 ? ", the first 2000 files looked at" : "") + unslashed_note(a.unslashed),
-            "move backups and dumps out of the document root (a backup plugin's directory too) and delete stale ones; nothing served should hold a copy of the "
-            "site. One the owner serves on purpose is named in the site's archives_accepted, as served: [" + json::Value(a.example_served).dump() +
-                "], a directory ending in / for all below it (a managed site: site_update archives_accepted, agensio ctl site-update " + name +
-                " --archive-accepted PATH; otherwise the site file's key)");
+        std::string message;
+        if (open_n)
+            message = std::to_string(open_n) + " " + kind + " under the document root served as they stand: anyone can download them" +
+                      (open.empty() ? std::string() : example(*open.front())) +
+                      (unjudged ? " (" + std::to_string(unjudged) + " beyond the first " + std::to_string(ArchivesInRoot::kKept) + " not judged, taken as served)" : "");
+        if (!kept.empty())
+            message += (open_n ? "; " + std::to_string(kept.size()) + " more not served today" : std::to_string(kept.size()) + " " + kind +
+                                                                                                  " under the document root not served today") +
+                       " (refused by the preset's defaults, or kept to the addresses or the password of a rule, which a change of preset or location would undo)" +
+                       example(*kept.front());
+        if (a.listed_public) message += ", " + std::to_string(a.listed_public) + " more public on purpose (public_archives)";
+        if (a.seen >= 2000) message += ", the first 2000 files looked at";
+        message += unslashed_note(a.unslashed);
+        const std::string path = json::Value((open.empty() ? kept.front() : open.front())->served).dump();
+        add(open_n ? "warn" : "info", "archives_in_root", name, message,
+            "ask the owner what each file is, and never decide it alone: a backup or a dump nobody needs is moved out of the document root or deleted "
+            "(a backup plugin's directory too), since nothing served should hold a copy of the site; a file published for download on purpose goes in "
+            "the site's public_archives, as served: [" + path + "]; a file the application needs where it is, which nobody downloads, goes in refuse: [" +
+                path + "], which answers 404 for it and stops this naming it. A directory ending in / covers all below it; a backup or a dump of the "
+                "site's own data is never public. A managed site: site_update public_archives or rules.refuse (agensio ctl site-update " + name +
+                " --public-archive PATH or --refuse PATH); otherwise the site file's keys");
     }
     // A server that trusts several proxies (two or more named sets: CDNs in front of different
     // sites): a site naming none of its own believes them all, so the customers of one CDN can name

@@ -2,6 +2,28 @@
 
 ## 0.1.0-alpha.98
 
+- **`public_archives`, and every found archive judged by what a request for it gets** (the alpha.97
+  report's Grav probe, and the discussion after it). Health warned the same way about a dump anyone
+  could download and about an application's own file the preset refused, and the one key to silence
+  either, `archives_accepted`, meant "published on purpose", which the second is not. Two changes:
+  - `archives_accepted` is renamed `public_archives` (the managed field, `agensio ctl site-update
+    --public-archive PATH` and `--no-public-archives`), for files published for download on purpose; a
+    file the application keeps in the tree that nobody downloads goes in the existing `refuse`, which
+    answers 404 for it. No new key: `refuse` makes the claim true where a health-only key would silence
+    the warning while the file stayed downloadable.
+  - `archives_in_root` judges each file found (the first 50; any beyond, as served) by the decision
+    `path_check` explains (`control::archive_exposure`): served to anyone, a warning ("anyone can
+    download them"); refused by the site's own `refuse`, a managed site's `rules` or a location the
+    owner wrote, nothing; refused only by the preset's defaults, or reached only from some addresses or
+    with a password, information ("not served today: a change of preset or location would undo it").
+    The fix tells the agent to ask the user what each file is and offers both keys with the path as
+    served; never a backup or a dump of the site's data as public.
+  A path in `public_archives` that the site's `refuse` answers 404 is named by `-t` and health
+  (`public_archive_refused`). `docs/configuration.md` 1 (the table of what health says) and 4c, the
+  reference row and `docs/keys.md`, the MCP texts of `health_check` and the field, and the cookbook
+  recipe (now "Dumps and archives under a site's root: published, or kept private"). Unit tests for
+  each kind of exposure, the contradiction and the rename; the integration checks' severities.
+
 - **A dump inside an archive is a dump** (the alpha.97 report from the test host). On a static site
   phpMyAdmin's zipped export `db/export.sql.zip`, a `db/export.sql.7z` and a `db/backup.sql.tar.gz`
   were served and `archives_in_root` named none of them, taking them for downloads; on a PHP site

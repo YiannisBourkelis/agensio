@@ -1071,10 +1071,11 @@ curl -sI https://example.com/assets/app.3f9a1c2b.js | grep -i content-encoding  
 **Reference:** [Static site](../configuration.md#1-static-site) (pre-compressed files),
 [keys](../keys.md#cache).
 
-## A dataset or a sample database offered for download
+## Dumps and archives under a site's root: published, or kept private
 
-**When:** a static site publishes a database dump or a database file on purpose (an open dataset,
-the sample database of a tutorial), and health names it as a dump anyone can download.
+**When:** health names a database dump or an archive under a site's root (`archives_in_root`), and
+the file is one of two things: published for download on purpose (an open dataset, the sample
+database of a tutorial), or a file the application needs where it is but nobody downloads.
 
 ```toml
 # /etc/agensio/sites.d/data.example.com.toml
@@ -1083,36 +1084,42 @@ server_name = ["data.example.com"]
 listen = ["0.0.0.0:80"]
 root = "/var/www/data.example.com/web"
 app = "static"
-archives_accepted = ["/downloads/world-cities.sql.gz", "/datasets/"]   # published on purpose
+public_archives = ["/downloads/world-cities.sql.gz", "/datasets/"]   # published on purpose
+refuse = ["/backups/"]                                                 # kept in the tree, never served
 ```
 
-**What it does.** Health's `archives_in_root` searches every served tree for backups and dumps.
-On a static site, or one without `app`, it names database dumps alone, since the site serves them
-as they stand: a `.sql` that holds data, `.sql.gz` and the other compressed dumps, `.sqlite`,
-`.db`, pg_dump's `.dump`, and any of them inside an archive (`export.sql.zip`); any other `.zip`
-or `.tar.gz` there is a download offered on purpose. The
-file `archives_accepted` names, and every file under the directory it names with a trailing `/`,
-is counted as accepted in the finding's message instead of being named. Nothing about serving
-changes: health alone reads the key. It holds exact paths and directories, never `/` alone, so a
-dump that lands anywhere else by mistake is still named. The finding gives each file's path as
-served, the form the key takes.
+**What it does.** Health searches every served tree for backups and dumps (on a static site, or one
+without `app`, for dumps alone: a `.sql` that holds data, `.sql.gz` and the other compressed dumps,
+`.sqlite`, `.db`, pg_dump's `.dump`, and any of them inside an archive, `export.sql.zip`; any other
+`.zip` there is a download offered on purpose), and judges each by what a request for it gets
+today: a warning when anyone can download it, information when only the preset's defaults or an
+address or password rule keep it, nothing when the site's own `refuse` covers it. The finding names
+each file with its path as served, the form both keys take. A file under `public_archives` (a path,
+or every file below a directory ending in `/`) is counted as public on purpose; serving does not
+change. A file under `refuse` is answered 404 whatever exists, so it is kept from everyone and the
+finding is silent. A backup or a dump nobody needs belongs in neither: move it out of the root, or
+delete it. A path in both keys is a contradiction `-t` names (`public_archive_refused`).
 
 **Check it.**
 
 ```sh
 agensio -t -c /etc/agensio/agensio.toml && agensio reload
-agensio ctl health | grep -A3 archives_in_root        # nothing, or only what is not accepted
+agensio ctl health | grep -A3 archives_in_root        # nothing, or only what is neither published nor refused
+agensio ctl path-check data.example.com /backups/site.sql   # 404, refused by the site's refuse pattern
 ```
 
-**On a managed site.** The flag is repeatable; given together they replace the list, and
-`--no-archives-accepted` clears it:
+**On a managed site.** Each flag is repeatable; given together they replace the list:
 
 ```sh
-agensio ctl site-update data.example.com --archive-accepted /downloads/world-cities.sql.gz --archive-accepted /datasets/ --yes --reason "published on purpose"
+agensio ctl site-update data.example.com --public-archive /downloads/world-cities.sql.gz --public-archive /datasets/ --yes --reason "published on purpose"
+agensio ctl site-update data.example.com --refuse /backups/ --yes --reason "kept in the tree, never served"
 ```
 
-**MCP:** `site_update` with `archives_accepted` `["/downloads/world-cities.sql.gz", "/datasets/"]`,
-once the user has confirmed that each file is meant to be downloaded by anyone.
+`--no-public-archives` and `--no-refuse` clear them.
+
+**MCP:** `site_update` with `public_archives` `["/downloads/world-cities.sql.gz", "/datasets/"]`
+once the user has confirmed that each file is meant to be downloaded by anyone, or with `rules`
+`{"refuse": ["/backups/"]}` for what stays in the tree; the agent asks which, never decides.
 
 **Reference:** [Static site](../configuration.md#1-static-site) (dumps served as they stand),
-[keys](../keys.md) (`archives_accepted`).
+[Refused paths](../configuration.md#6b-refused-paths-refuse), [keys](../keys.md) (`public_archives`).

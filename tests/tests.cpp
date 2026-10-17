@@ -6648,7 +6648,7 @@ static void test_archives_in_root() {
     put("images/Thumbs.db", "x");
     put("downloads/manual.tar.gz", "\x1f\x8b");
     const control::ArchivesInRoot a = control::archives_in_root(site, 2000);
-    CHECK(a.count == 22 && a.seen == 30 && a.accepted == 0 && !a.dumps_only);
+    CHECK(a.count == 22 && a.seen == 30 && a.listed_public == 0 && !a.dumps_only && a.files.size() == 22);
     // A static site, or one without app, serves everything as it stands: its dumps are counted, its
     // archives are downloads offered on purpose and are not (2026-10-17, the alpha.96 report).
     SiteConfig plain = site;
@@ -6657,13 +6657,15 @@ static void test_archives_in_root() {
     CHECK(st.count == 20 && st.seen == 30 && st.dumps_only);
     plain.app.clear();
     CHECK(control::archives_in_root(plain, 2000).count == 20);
-    // archives_accepted: what the owner serves on purpose, files or a directory as served from the root;
+    // public_archives: what the owner serves on purpose, files or a directory as served from the root;
     // only what would be counted is counted as accepted, and the example names the path as served.
-    site.archives_accepted = {"/db/", "/site.zip", "/big.sql"};
-    plain.archives_accepted = site.archives_accepted;
+    site.public_archives = {"/db/", "/site.zip", "/big.sql"};
+    plain.public_archives = site.public_archives;
     const control::ArchivesInRoot pa = control::archives_in_root(site, 2000), sa = control::archives_in_root(plain, 2000);
-    CHECK(pa.count == 16 && pa.accepted == 6 && sa.count == 15 && sa.accepted == 5);
-    CHECK(sa.example_served.starts_with("/") && sa.example.ends_with(sa.example_served) && !sa.example_served.starts_with("/db/"));
+    CHECK(pa.count == 16 && pa.listed_public == 6 && sa.count == 15 && sa.listed_public == 5);
+    CHECK(sa.files.size() == 15 && std::all_of(sa.files.begin(), sa.files.end(), [](const control::ArchivesInRoot::Found& f) {
+              return f.served.starts_with("/") && f.path.ends_with(f.served) && !f.served.starts_with("/db/");
+          }));
 
     // The key in a site file, refused when it is not a path as served; health's finding on a static site.
     const fs::path cdir = fs::temp_directory_path() / ("agensio-archives-cfg-" + std::to_string(::getpid()));
@@ -6681,39 +6683,39 @@ static void test_archives_in_root() {
             return std::string(e.what()).find(needle) != std::string::npos;
         }
     };
-    CHECK(refused("archives_accepted = [\"db/x.sql\"]\n", "must start with '/'"));
-    CHECK(refused("archives_accepted = [\"/\"]\n", "whole site"));
-    CHECK(refused("archives_accepted = [\"/a/../b.sql\"]\n", "segment"));
-    CHECK(refused("archives_accepted = [\"/a//b.sql\"]\n", "segment"));
-    CHECK(refused("archives_accepted = \"/a.sql\"\n", "must be a list"));
+    CHECK(refused("public_archives = [\"db/x.sql\"]\n", "must start with '/'"));
+    CHECK(refused("public_archives = [\"/\"]\n", "whole site"));
+    CHECK(refused("public_archives = [\"/a/../b.sql\"]\n", "segment"));
+    CHECK(refused("public_archives = [\"/a//b.sql\"]\n", "segment"));
+    CHECK(refused("public_archives = \"/a.sql\"\n", "must be a list"));
     // An entry that can never match (the alpha.97 report: "/db/*.sql" loaded and accepted nothing).
-    CHECK(refused("archives_accepted = [\"/db/*.sql\"]\n", "no wildcards"));
-    CHECK(refused("archives_accepted = [\"/db/dump?.sql\"]\n", "no wildcards"));
-    CHECK(refused("archives_accepted = [\"/db/[ab].sql\"]\n", "no wildcards"));
+    CHECK(refused("public_archives = [\"/db/*.sql\"]\n", "no wildcards"));
+    CHECK(refused("public_archives = [\"/db/dump?.sql\"]\n", "no wildcards"));
+    CHECK(refused("public_archives = [\"/db/[ab].sql\"]\n", "no wildcards"));
     {
-        std::string many = "archives_accepted = [";
+        std::string many = "public_archives = [";
         for (int i = 0; i < 65; ++i) many += (i ? ", " : "") + std::string("\"/f") + std::to_string(i) + ".sql\"";
         CHECK(refused(many + "]\n", "at most 64"));
     }
     {
-        const Config cfg = load("app = \"static\"\narchives_accepted = [\"/db/\", \"/db/\", \"/dumps/my file+1.sql\"]\n");
-        CHECK(cfg.sites[0].archives_accepted == (std::vector<std::string>{"/db/", "/dumps/my file+1.sql"}));
+        const Config cfg = load("app = \"static\"\npublic_archives = [\"/db/\", \"/db/\", \"/dumps/my file+1.sql\"]\n");
+        CHECK(cfg.sites[0].public_archives == (std::vector<std::string>{"/db/", "/dumps/my file+1.sql"}));
         // site_show lists them (the alpha.97 report: an agent adding a path saw none of those it would drop).
         const json::Value shown = control::site(cfg, cfg.sites[0], std::time(nullptr));
-        CHECK(shown["archives_accepted"].items().size() == 2 && shown["archives_accepted"].items()[1].str() == "/dumps/my file+1.sql");
+        CHECK(shown["public_archives"].items().size() == 2 && shown["public_archives"].items()[1].str() == "/dumps/my file+1.sql");
         const auto hf = control::health_findings(cfg, cfg, false, std::time(nullptr));
         const auto f = std::find_if(hf.begin(), hf.end(), [](const control::Finding& x) { return x.code == "archives_in_root"; });
         CHECK(f != hf.end() && f->severity == "warn" && f->site == "data.test" && f->message.find("served as they stand") != std::string::npos &&
-              f->message.find("4 more accepted") != std::string::npos && f->message.find("(served as /") != std::string::npos &&
-              f->fix.find("archives_accepted") != std::string::npos);
+              f->message.find("4 more public on purpose (public_archives)") != std::string::npos && f->message.find("(served as /") != std::string::npos &&
+              f->fix.find("public_archives") != std::string::npos);
     }
     {
         // A directory written without its "/" accepts nothing below it: the finding says how to write it.
-        const Config cfg = load("app = \"static\"\narchives_accepted = [\"/db\"]\n");
+        const Config cfg = load("app = \"static\"\npublic_archives = [\"/db\"]\n");
         const auto hf = control::health_findings(cfg, cfg, false, std::time(nullptr));
         const auto f = std::find_if(hf.begin(), hf.end(), [](const control::Finding& x) { return x.code == "archives_in_root"; });
         CHECK(f != hf.end() && f->message.find("'/db' is a directory: write '/db/'") != std::string::npos &&
-              f->message.find("more accepted") == std::string::npos);
+              f->message.find("public on purpose") == std::string::npos);
     }
     // On a managed site: the list taken whole and checked, carried in the spec and the file.
     {
@@ -6728,34 +6730,82 @@ static void test_archives_in_root() {
         cfg.config_path = cdir / "agensio.toml";
         json::Value body;
         std::string err;
-        CHECK(json::parse(R"J({"archives_accepted": ["/datasets/", "/world.sql.gz", "/world.sql.gz"]})J", body, err));
+        CHECK(json::parse(R"J({"public_archives": ["/datasets/", "/world.sql.gz", "/world.sql.gz"]})J", body, err));
         CHECK(control::apply_request(body, cfg, spec, err).empty() && err.empty() &&
-              spec.archives_accepted == (std::vector<std::string>{"/datasets/", "/world.sql.gz"}));
+              spec.public_archives == (std::vector<std::string>{"/datasets/", "/world.sql.gz"}));
         control::SiteSpec back;
-        CHECK(control::SiteSpec::from_json(spec.to_json(), back) && back.archives_accepted == spec.archives_accepted);
-        CHECK(control::render_site(spec, "x").find("\narchives_accepted = [\"/datasets/\", \"/world.sql.gz\"]") != std::string::npos);
-        CHECK(json::parse(R"J({"archives_accepted": ["world.sql.gz"]})J", body, err));
+        CHECK(control::SiteSpec::from_json(spec.to_json(), back) && back.public_archives == spec.public_archives);
+        CHECK(control::render_site(spec, "x").find("\npublic_archives = [\"/datasets/\", \"/world.sql.gz\"]") != std::string::npos);
+        CHECK(json::parse(R"J({"public_archives": ["world.sql.gz"]})J", body, err));
         err.clear();
         control::apply_request(body, cfg, back, err);
-        CHECK(err.find("archives_accepted") != std::string::npos && err.find("must start with '/'") != std::string::npos);
-        CHECK(json::parse(R"J({"archives_accepted": ["/db/*.sql"]})J", body, err));
+        CHECK(err.find("public_archives") != std::string::npos && err.find("must start with '/'") != std::string::npos);
+        CHECK(json::parse(R"J({"public_archives": ["/db/*.sql"]})J", body, err));
         err.clear();
         control::apply_request(body, cfg, back, err);
         CHECK(err.find("no wildcards") != std::string::npos);
-        CHECK(json::parse(R"J({"archives_accepted": []})J", body, err));
+        CHECK(json::parse(R"J({"public_archives": []})J", body, err));
         err.clear();
-        CHECK(control::apply_request(body, cfg, spec, err).empty() && spec.archives_accepted.empty() &&
-              control::render_site(spec, "x").find("archives_accepted") == std::string::npos);
+        CHECK(control::apply_request(body, cfg, spec, err).empty() && spec.public_archives.empty() &&
+              control::render_site(spec, "x").find("public_archives") == std::string::npos);
         // null clears the list as [] does, as it does response_headers (the alpha.97 report: it answered
         // ok and left the list), and the login paths the same way.
-        spec.archives_accepted = {"/db/"};
+        spec.public_archives = {"/db/"};
         spec.login_paths = {"/login"};
-        CHECK(json::parse(R"J({"archives_accepted": null, "login_paths": null})J", body, err));
+        CHECK(json::parse(R"J({"public_archives": null, "login_paths": null})J", body, err));
         err.clear();
-        CHECK(control::apply_request(body, cfg, spec, err).empty() && err.empty() && spec.archives_accepted.empty() && spec.login_paths.empty());
+        CHECK(control::apply_request(body, cfg, spec, err).empty() && err.empty() && spec.public_archives.empty() && spec.login_paths.empty());
     }
     fs::remove_all(cdir);
     fs::remove_all(dir);
+
+    // Each found file judged by what a request for it gets today (2026-10-17): served to anyone, a warning;
+    // refused by the owner's own refuse pattern, nothing; refused by the preset's defaults alone, or kept
+    // to the addresses of an access rule, information; the fix names both keys with the served path.
+    {
+        const fs::path edir = fs::temp_directory_path() / ("agensio-archives-exposure-" + std::to_string(::getpid()));
+        fs::remove_all(edir);
+        auto eput = [&](const std::string& rel) {
+            fs::create_directories((edir / "www" / rel).parent_path());
+            std::ofstream(edir / "www" / rel) << "INSERT INTO t VALUES (1);\n";
+        };
+        auto finding = [&](const std::string& keys) {
+            std::ofstream(edir / "agensio.toml") << "[[site]]\nserver_name = [\"e.test\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"" +
+                                                         (edir / "www").string() + "\"\n" + keys;
+            const Config cfg = load_config(edir / "agensio.toml");
+            const auto hf = control::health_findings(cfg, cfg, false, std::time(nullptr));
+            const auto f = std::find_if(hf.begin(), hf.end(), [](const control::Finding& x) { return x.code == "archives_in_root"; });
+            return f == hf.end() ? control::Finding{} : *f;
+        };
+        eput("backups/site.sql");
+        // Served to anyone on a static site: a warning, the fix offering both keys with the path as served.
+        control::Finding f = finding("app = \"static\"\n");
+        CHECK(f.severity == "warn" && f.message.starts_with("1 database dump(s) under the document root served as they stand") &&
+              f.fix.find("public_archives, as served: [\"/backups/site.sql\"]") != std::string::npos &&
+              f.fix.find("refuse: [\"/backups/site.sql\"]") != std::string::npos && f.fix.find("never decide it alone") != std::string::npos);
+        // Refused by the owner's own pattern: nothing to say; by a public_archives entry: counted, no finding.
+        CHECK(finding("app = \"static\"\nrefuse = [\"/backups/\"]\n").code.empty());
+        // Listed as public and refused: the two keys say opposite things, -t and health say so.
+        {
+            std::ofstream(edir / "agensio.toml") << "[[site]]\nserver_name = [\"e.test\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"" + (edir / "www").string() +
+                                                         "\"\napp = \"static\"\nrefuse = [\"/backups/\"]\npublic_archives = [\"/backups/site.sql\", \"/backups/\", \"/open/\"]\n";
+            const auto notes = access_notices(load_config(edir / "agensio.toml"));
+            CHECK(std::count_if(notes.begin(), notes.end(), [](const AccessNotice& n) { return n.code == "public_archive_refused"; }) == 2);
+        }
+        CHECK(finding("app = \"static\"\npublic_archives = [\"/backups/\"]\n").code.empty());
+        // Kept to some addresses: information.
+        f = finding("app = \"static\"\n[[site.access]]\npath = \"/backups/\"\nallow = [\"10.0.0.0/8\"]\n");
+        CHECK(f.severity == "info" && f.message.find("not served today") != std::string::npos);
+        // Refused by the preset's defaults alone (the PHP presets refuse .sql): information, with both keys.
+        f = finding("app = \"php\"\nphp = { socket = \"unix:/run/php/fpm.sock\" }\n");
+        CHECK(f.severity == "info" && f.message.find("refused by the preset's defaults") != std::string::npos &&
+              f.fix.find("refuse: [\"/backups/site.sql\"]") != std::string::npos);
+        // One served and one kept: a warning naming both.
+        eput("open/dump.sql");
+        f = finding("app = \"static\"\n[[site.access]]\npath = \"/backups/\"\nallow = [\"10.0.0.0/8\"]\n");
+        CHECK(f.severity == "warn" && f.message.starts_with("1 database dump(s)") && f.message.find("; 1 more not served today") != std::string::npos);
+        fs::remove_all(edir);
+    }
 
     // A dump inside an archive or a compression is a dump (the alpha.97 report: phpMyAdmin's zipped
     // export, export.sql.zip, a .sql.7z and a backup.sql.tar.gz were all served on a static site and

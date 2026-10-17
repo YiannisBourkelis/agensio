@@ -2198,14 +2198,14 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     }
     // The archives and dumps served on purpose (2026-10-17): health's archives_in_root counts them as
     // accepted; never read when serving.
-    if (t.contains("archives_accepted")) {
-        if (!t["archives_accepted"].is_array())
-            fail(where + ".archives_accepted must be a list of paths as served from the site's root ([\"/downloads/world.sql.gz\"], a directory ending in \"/\")");
-        for (const auto& p : string_list(t["archives_accepted"], (where + ".archives_accepted").c_str())) {
-            if (const std::string why = check_accepted_path(p); !why.empty()) fail(where + ".archives_accepted: " + why);
-            if (std::find(site.archives_accepted.begin(), site.archives_accepted.end(), p) == site.archives_accepted.end()) site.archives_accepted.push_back(p);
+    if (t.contains("public_archives")) {
+        if (!t["public_archives"].is_array())
+            fail(where + ".public_archives must be a list of paths as served from the site's root ([\"/downloads/world.sql.gz\"], a directory ending in \"/\")");
+        for (const auto& p : string_list(t["public_archives"], (where + ".public_archives").c_str())) {
+            if (const std::string why = check_public_archive(p); !why.empty()) fail(where + ".public_archives: " + why);
+            if (std::find(site.public_archives.begin(), site.public_archives.end(), p) == site.public_archives.end()) site.public_archives.push_back(p);
         }
-        if (site.archives_accepted.size() > 64) fail(where + ".archives_accepted: at most 64 paths");
+        if (site.public_archives.size() > 64) fail(where + ".public_archives: at most 64 paths");
     }
     const std::string root_given = site.root;  // the project directory (open_basedir starts there)
     site.project_root = root_given;
@@ -2694,7 +2694,7 @@ void explain_config(const Config& cfg, std::ostream& out) {
             << (site.symlinks_deny ? "deny" : "allow") << "\"\n";
         out << "access_log = \"" << (site.access_log.empty() ? "off" : site.access_log) << "\"\n";
         if (!site.login_paths.empty()) print_list(out, "login_paths", site.login_paths);
-        if (!site.archives_accepted.empty()) print_list(out, "archives_accepted", site.archives_accepted);
+        if (!site.public_archives.empty()) print_list(out, "public_archives", site.public_archives);
         if (!site.refuse.empty()) {
             std::vector<std::string> texts;
             for (const auto& p : site.refuse.patterns) texts.push_back(p.text);
@@ -2939,6 +2939,14 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
 #endif
     for (const auto& site : cfg.sites) {
         const std::string& name = site.server_names.front();
+        // A path listed as public that the site's own refuse pattern answers 404 (2026-10-17): the two
+        // keys say opposite things, and the file is not public.
+        for (const auto& p : site.public_archives)
+            if (const RefusePattern* r = refuse::match(site.refuse, p.back() == '/' ? p + "x" : p))
+                out.push_back({"public_archive_refused", "warning", name,
+                               name + " lists " + p + " in public_archives, and its refuse pattern '" + r->text +
+                                   "' answers 404 for it: it is not public; take it out of one of the two (refuse to keep it from everyone, "
+                                   "public_archives to publish it)"});
         bool v6_listener = false;
         for (const auto& l : site_addresses(site)) v6_listener = v6_listener || std::count(l.begin(), l.end(), ':') > 1;  // stored unbracketed: "::1:443"
         for (const auto& r : site.access) {
@@ -4325,7 +4333,7 @@ std::vector<std::string> preset_login_paths(const std::string& app) {
     return out;
 }
 
-std::string check_accepted_path(const std::string& p) {
+std::string check_public_archive(const std::string& p) {
     const std::string shown = "'" + p.substr(0, 80) + (p.size() > 80 ? "...'" : "'");
     if (p.empty() || p[0] != '/') return shown + " must start with '/' (a path as served from the site's root)";
     if (p == "/") return "'/' would accept the whole site: name the files, or a directory ending in '/'";

@@ -874,15 +874,15 @@ PYT
 )"
 # A dump on a static site is downloadable as it stands (the alpha.96 report: health said nothing about
 # it): health names it with its path as served, a zip there is a download and is not named, and
-# archives_accepted through site-update records it as served on purpose; cleared, it is named again.
+# public_archives through site-update records it as served on purpose; cleared, it is named again.
 W=bench/tmp/sites/created.test/web
 mkdir -p $W/db; printf "INSERT INTO users VALUES (1,'admin','x');\n" > $W/db/dump.sql; echo PK > $W/site.zip
 aih() {  # created.test's archives_in_root finding: the count it names and whether it gives the served path, or none
   curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; f=[x for x in json.load(sys.stdin)["findings"] if x["code"]=="archives_in_root" and x["site"]=="created.test"]; print((f[0]["message"].split()[0] + (" served-as" if "served as they stand" in f[0]["message"] and "(served as /db/dump.sql," in f[0]["message"] else " ?")) if f else "none")'
 }
-check "health: a dump on a static site is named, served as it stands, a zip there not; archives_accepted through site-update accepts it, --no-archives-accepted names it again" \
+check "health: a dump on a static site is named, served as it stands, a zip there not; public_archives through site-update accepts it, --no-public-archives names it again" \
   "200 1 served-as ; 0 yes none ; 0 1 served-as" \
-  "$(code -H 'Host: created.test' http://127.0.0.1:8094/db/dump.sql) $(aih) ; $("$BIN" ctl site-update created.test --archive-accepted /db/ --socket $CS --yes --reason "published" > /dev/null; echo -n "$? "; grep -q '^archives_accepted = \["/db/"\]' bench/tmp/sites.d/created.test.toml && echo -n "yes " || echo -n "no "; aih) ; $("$BIN" ctl site-update created.test --no-archives-accepted --socket $CS --yes --reason "unpublished" > /dev/null; echo -n "$? "; aih)"
+  "$(code -H 'Host: created.test' http://127.0.0.1:8094/db/dump.sql) $(aih) ; $("$BIN" ctl site-update created.test --public-archive /db/ --socket $CS --yes --reason "published" > /dev/null; echo -n "$? "; grep -q '^public_archives = \["/db/"\]' bench/tmp/sites.d/created.test.toml && echo -n "yes " || echo -n "no "; aih) ; $("$BIN" ctl site-update created.test --no-public-archives --socket $CS --yes --reason "unpublished" > /dev/null; echo -n "$? "; aih)"
 rm -rf $W/db $W/site.zip
 check "control: a hand-written site cannot be updated" "409" "$(cpost /v1/sites/laravel.test '{"aliases":["x.test"],"confirm":true}')"
 check "control: site-disable stops serving, keeps the file" "200 000 yes" "$(cpost /v1/sites/created.test/disable '{"confirm":true}') $(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:8094/ 2>/dev/null) $([ -f bench/tmp/sites.d/created.test.toml.disabled ] && echo yes)"
@@ -2288,12 +2288,13 @@ import json,sys
 f=[x for x in json.load(sys.stdin)["findings"] if x["code"]=="preset_mismatch"]
 print(",".join(sorted(x["site"] for x in f)), "yes" if len(f)==1 and f[0]["severity"]=="warn" and "look like grav (bin/grav and system/defines.php), but app = \"drupal\"" in f[0]["message"] else f, "yes" if f and f[0]["fix"].startswith("set app = \"grav\" (site-update gravmis.test with app: grav") else "no")')"
   # drupal.test's tests/drupal/web/data.sqlite (the fixture of the check that the preset refuses it) is a
-  # database file under the root: named too since the dump endings grew (2026-10-17).
+  # database file under the root: named too since the dump endings grew, as information since files are
+  # judged by what a request gets (the preset refuses it); gravmis.test's backup is served, a warning.
   check "health: archives_in_root names the archive under a served tree with its size and its path as served, a database file too; a directory the preset never answers is not searched" "drupal.test,gravmis.test 1 yes yes yes" "$(curl -sS --unix-socket bench/tmp/control.sock http://control/v1/health | python3 -c '
 import json,sys
 f=[x for x in json.load(sys.stdin)["findings"] if x["code"]=="archives_in_root"]
 g=[x for x in f if x["site"]=="gravmis.test"]; d=[x for x in f if x["site"]=="drupal.test"]
-print(",".join(sorted(x["site"] for x in f)), g[0]["message"].split(" ")[0] if g else "-", "yes" if g and "tests/grav/backup/default_site_backup--20260923-101010.zip (served as /backup/default_site_backup--20260923-101010.zip, 0 KB)" in g[0]["message"] else g, "yes" if g and g[0]["fix"].startswith("move backups and dumps out of the document root") else "no", "yes" if d and "(served as /data.sqlite," in d[0]["message"] else d)')"
+print(",".join(sorted(x["site"] for x in f)), g[0]["message"].split(" ")[0] if g else "-", "yes" if g and "tests/grav/backup/default_site_backup--20260923-101010.zip (served as /backup/default_site_backup--20260923-101010.zip, 0 KB)" in g[0]["message"] else g, "yes" if g and g[0]["fix"].startswith("ask the owner what each file is") and g[0]["severity"]=="warn" else "no", "yes" if d and "(served as /data.sqlite," in d[0]["message"] and d[0]["severity"]=="info" and "not served today" in d[0]["message"] else d)')"
   check "control: site-create on a directory holding another application warns, names the marker and the app to use" "yes" "$(cpost /v1/sites "{\"domain\":\"gravwarn.test\",\"https\":\"none\",\"user\":null,\"app\":\"wordpress\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"root\":\"$ROOT/tests/grav\",\"listen_plain\":\"127.0.0.1:8093\",\"dry_run\":true,\"confirm\":true}" > /dev/null; grep -q '"warnings":\["the files under [^"]*tests/grav look like grav (bin/grav and system/defines.php), not wordpress: the wordpress preset.s refusals do not fit them (health reports it as preset_mismatch); use app: grav"' bench/tmp/ctl-reply.json && echo yes || cat bench/tmp/ctl-reply.json)"
   # A directory's index file is one the site would answer by name (alpha.53 report: on the drupal
   # preset /sub/ served sub/index.php as source while /sub/index.php was 404). Since alpha.55 an
