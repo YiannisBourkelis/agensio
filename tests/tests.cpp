@@ -6560,6 +6560,18 @@ static void test_archives_in_root() {
         {"CREATE", false, false},
         {"CREATEX TABLE a (b int);", false, false},
         {"CREATE FUNCTION f() RETURNS int AS $$ SELECT 1 $$;", false, false},
+        // Data written as definitions (the alpha.97 report): a table made from a query or from values,
+        // a view whose body holds a literal; a plain view, a quoted DEFAULT, a generated column and
+        // words that only contain "select" stay definitions.
+        {"CREATE TABLE s AS SELECT 'sk_live_abc' AS k;", false, false},
+        {"CREATE TABLE s SELECT 'sk_live_abc' AS k;", false, false},
+        {"create temporary table s as values (1, 'sk');", false, false},
+        {"CREATE VIEW v AS SELECT 'sk_live_abc' AS k;", false, false},
+        {"CREATE TABLE s AS SELECT", false, false},  // the word last, at the end of the text
+        {"CREATE VIEW v AS SELECT a, b FROM t WHERE c = 1;", true, false},
+        {"CREATE TABLE t (a varchar(9) DEFAULT 'x', b int GENERATED ALWAYS AS (a + 1));", true, false},
+        {"CREATE TABLE selected (values_x int, selection int);", true, false},
+        {"CREATE INDEX i ON t (a) WHERE status = 'active';", true, false},
         {"'unterminated", false, true},
         {"CREATE TABLE a (b int); /* open", true, true},
     };

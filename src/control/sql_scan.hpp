@@ -19,7 +19,11 @@ struct Scan {
 // CREATE TABLE, CREATE INDEX, CREATE VIEW, CREATE UNIQUE | FULLTEXT | SPATIAL (INDEX), CREATE
 // TEMPORARY (TABLE), ALTER TABLE, DROP TABLE, DROP INDEX or DROP VIEW, in any case; anything else may
 // carry data or a secret (INSERT, UPDATE, REPLACE, COPY, SET, GRANT, CREATE USER ... IDENTIFIED BY,
-// PRAGMA, a statement that starts with a symbol). Comments are `-- ...` and `# ...` to the end of the
+// PRAGMA, a statement that starts with a symbol). A table made from a query or from values carries
+// data too (CREATE TABLE s AS SELECT 'sk_live_...', MySQL's CREATE TABLE s SELECT ..., PostgreSQL's
+// CREATE TABLE s AS VALUES (...): the word SELECT or VALUES in the statement), and so does a view whose
+// body holds a '...' literal (the alpha.97 report); a quoted DEFAULT, a generated column and a plain
+// view stay definitions. Comments are `-- ...` and `# ...` to the end of the
 // line and `/* ... */`, and are not read; MySQL's executable comments (`/*!40101 SET ... */`, which
 // mysqldump writes) are code, so a dump counts even without its rows. Quotes are '...', "..." and
 // `...`, a backslash escaping the next character and a doubled quote reading as two quotes. One pass,
@@ -36,19 +40,31 @@ inline Scan scan(std::string_view t) {
     int ntok = 0;  // tokens seen in the statement, at most 2 kept
     int cur = -1;  // the word being read, when it is one of the two
     bool in_word = false;
+    // The word being read wherever it stands (one cut at 8 letters is no keyword asked for), and
+    // what the statement holds beyond its first two tokens: the word SELECT or VALUES, a '...' literal.
+    char word[8] = {};
+    std::size_t wlen = 0;
+    bool query = false, literal = false;
+    const auto end_word = [&] {
+        if (in_word && (std::string_view(word, wlen) == "select" || std::string_view(word, wlen) == "values")) query = true;
+        in_word = false;
+        wlen = 0;
+    };
     const auto is = [&](int i, std::string_view w) { return !symbol[i] && std::string_view(tok[i], tlen[i]) == w; };
     const auto defines_tables = [&] {
         if (ntok == 0) return true;  // an empty statement: `;;`, or comments alone
         if (ntok < 2) return false;
-        if (is(0, "create"))
-            return is(1, "table") || is(1, "index") || is(1, "view") || is(1, "unique") || is(1, "fulltext") || is(1, "spatial") ||
-                   is(1, "temporary");
+        if (is(0, "create") && (is(1, "table") || is(1, "temporary"))) return !query;  // not made from a query or values
+        if (is(0, "create") && is(1, "view")) return !literal;                       // no value in its body
+        if (is(0, "create")) return is(1, "index") || is(1, "unique") || is(1, "fulltext") || is(1, "spatial");
         if (is(0, "alter")) return is(1, "table");
         if (is(0, "drop")) return is(1, "table") || is(1, "index") || is(1, "view");
         return false;
     };
     const auto end_statement = [&] {
+        end_word();
         if (!defines_tables()) r.definitions_only = false;
+        query = literal = false;
         ntok = 0;
         tlen[0] = tlen[1] = 0;
         symbol[0] = symbol[1] = false;
@@ -56,7 +72,7 @@ inline Scan scan(std::string_view t) {
         in_word = false;
     };
     const auto add_symbol = [&] {
-        in_word = false;
+        end_word();
         if (ntok < 2) symbol[ntok++] = true;
     };
     for (std::size_t i = 0; i < t.size(); ++i) {
@@ -84,10 +100,12 @@ inline Scan scan(std::string_view t) {
                 in_word = true;
                 cur = ntok < 2 ? ntok++ : -1;
             }
-            if (cur >= 0 && tlen[cur] < sizeof tok[0]) tok[cur][tlen[cur]++] = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
+            const char lower = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
+            if (cur >= 0 && tlen[cur] < sizeof tok[0]) tok[cur][tlen[cur]++] = lower;
+            if (wlen < sizeof word) word[wlen++] = lower;
             continue;
         }
-        in_word = false;
+        end_word();
         if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v') continue;
         if (c == '-' && next == '-') {
             st = State::line_comment;
@@ -100,6 +118,7 @@ inline Scan scan(std::string_view t) {
         } else if (c == '\'' || c == '"' || c == '`') {
             quote = c;
             st = State::quote;
+            if (c == '\'') literal = true;
             add_symbol();
         } else if (c == ';') {
             end_statement();

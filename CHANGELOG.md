@@ -10,6 +10,15 @@
   `.7z`, `.rar`, `.tar` and its compressed forms, `.gz`, `.bz2`, `.xz`, `.zst`) is a dump on every
   site; any other archive on a static site stays a download. Unit test, failing on alpha.97; the MCP
   text of `health_check`, `docs/configuration.md` 1 and the cookbook recipe say it.
+- **Data written as table definitions counts** (the same report). A lone `CREATE TABLE s AS SELECT
+  'sk_live_abc' AS k;`, MySQL's `CREATE TABLE s SELECT ...`, PostgreSQL's `CREATE TABLE s AS VALUES
+  (1, 'sk_live_abc');` and `CREATE VIEW v AS SELECT 'sk_live_abc' AS k;` were taken for a schema by
+  their first two words and served on a static site unnamed. The scanner (`control/sql_scan.hpp`)
+  now counts a `CREATE TABLE` (or `CREATE TEMPORARY TABLE`) holding the word `SELECT` or `VALUES`
+  outside quotes and comments, and a `CREATE VIEW` whose body holds a `'...'` literal; a quoted
+  `DEFAULT`, a generated column, a plain view and a partial index's `WHERE` stay definitions. Unit
+  cases failing on alpha.97, a new seed for `fuzz_sql_scan` and ten minutes of it on every core;
+  the MCP text of `health_check` and `docs/configuration.md` 4c.
 
 ## 0.1.0-alpha.97 (2026-10-17)
 

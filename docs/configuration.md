@@ -494,7 +494,10 @@ site. A static site and one without `app` are searched for the dumps alone (sect
 counted: TYPO3's `ext_tables.sql` and `ext_tables_static+adt.sql` in an extension's directory
 (beside its `ext_emconf.php` or `composer.json`), and an uncompressed `.sql` file of up to 64 KB
 whose statements all define tables (`CREATE TABLE`, `CREATE INDEX`, `CREATE VIEW`, `ALTER TABLE`,
-`DROP TABLE`, `DROP INDEX`, `DROP VIEW`; comments aside), which holds no rows and no credential. A
+`DROP TABLE`, `DROP INDEX`, `DROP VIEW`; comments aside), which holds no rows and no credential; a
+table made from a query or from values (`CREATE TABLE s AS SELECT 'sk_live_...'`, MySQL's `CREATE
+TABLE s SELECT ...`, `CREATE TABLE s AS VALUES (...)`) and a view whose body holds a `'...'` literal
+carry data and count, while a quoted `DEFAULT` and a generated column do not. A
 larger file, a compressed one, one that ends inside a quote and one with any other statement
 (`INSERT`, `UPDATE`, `COPY`, `SET`, `GRANT`, `CREATE USER ... IDENTIFIED BY`, MySQL's `/*! ... */`
 lines) is.
