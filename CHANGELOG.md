@@ -31,6 +31,11 @@
   Unit tests failing on alpha.98 (the bridge driven over a pipe, `apply_request`); integration checks
   through MCP and the socket; the dialog check now expects an agent's `user_confirmed` refused;
   `docs/mcp.md`, `docs/configuration.md` 15.
+- **The tar shorthands and the other compressions are archive endings** (the same report). On a static
+  site `b.sql.tar.zst`, `b.sql.tbz2`, `b.sql.txz` and `b.sql.tzst` were served and named nowhere, and on
+  a PHP site `site.tar.zst` was no archive. `archives_in_root` knows `.tbz`, `.tbz2`, `.txz`, `.tar.zst`,
+  `.tzst`, `.tar.lz4`, `.tar.lzma`, `.tar.lz` and `.tlz` as archives, and takes them off, with `.lz4`,
+  `.lzma` and `.lz`, before looking for a dump inside. Unit test failing on alpha.98.
 
 ## 0.1.0-alpha.98 (2026-10-17)
 

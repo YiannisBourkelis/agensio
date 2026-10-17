@@ -6848,13 +6848,18 @@ static void test_archives_in_root() {
     for (const char* f : {"db/export.sql.zip", "db/export.sql.7z", "db/backup.sql.tar.gz", "db/backup.sql.tgz", "db/old.SQL.RAR", "data/app.sqlite.gz",
                           "data/app.db.zip", "data/pg.dump.xz"})
         wput(f);
-    for (const char* f : {"downloads/manual.tar.gz", "downloads/photos.zip", "release.tar.xz"}) wput(f);
+    // The tar shorthands and the other compressions (the alpha.98 report: b.sql.tar.zst, .tbz2, .txz and
+    // .tzst were served on a static site and named nowhere).
+    for (const char* f : {"more/b.sql.tar.zst", "more/b.sql.tzst", "more/b.sql.tbz", "more/b.sql.tbz2", "more/b.sql.txz", "more/b.sql.tar.lz4",
+                          "more/b.sql.lz4"})
+        wput(f);
+    for (const char* f : {"downloads/manual.tar.gz", "downloads/photos.zip", "release.tar.xz", "release.tar.zst"}) wput(f);
     SiteConfig wrapped;
     wrapped.root = wdir.string();
     wrapped.app = "static";
-    CHECK(control::archives_in_root(wrapped, 2000).count == 8);
+    CHECK(control::archives_in_root(wrapped, 2000).count == 15);
     wrapped.app = "php";
-    CHECK(control::archives_in_root(wrapped, 2000).count == 11);
+    CHECK(control::archives_in_root(wrapped, 2000).count == 19);
     fs::remove_all(wdir);
 
     // Grav's API plugin writes user/data/grav-security-probe.zip (32 bytes) to check that user/data is

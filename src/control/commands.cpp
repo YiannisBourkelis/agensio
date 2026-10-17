@@ -1209,13 +1209,17 @@ bool sql_without_rows(const fs::path& file) {
 ArchivesInRoot archives_in_root(const SiteConfig& site, std::size_t budget) {
     ArchivesInRoot r;
     if (site.root.empty()) return r;
-    static const char* const kArchives[] = {".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".7z", ".rar"};
+    // The tar shorthands and the compressions beside gzip, bzip2 and xz too (the alpha.98 report:
+    // b.sql.tar.zst, .tbz2, .txz and .tzst were served on a static site and named nowhere).
+    static const char* const kArchives[] = {".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz", ".tbz2", ".tar.xz", ".txz", ".tar.zst", ".tzst",
+                                            ".tar.lz4", ".tar.lzma", ".tar.lz", ".tlz", ".7z", ".rar"};
     // Dumps and database files themselves (the alpha.96 report: a static site serves them as they are;
     // the PHP presets refuse .sqlite, .sqlite3 and .db), and the same inside one archive or compression,
     // which leaves them dumps (the alpha.97 report: phpMyAdmin's zipped export, export.sql.zip, and a
     // backup.sql.tar.gz were taken for downloads on a static site).
     static const char* const kDumps[] = {".sql", ".sqlite", ".sqlite3", ".db", ".dump"};
-    static const char* const kWrappers[] = {".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".7z", ".rar", ".gz", ".bz2", ".xz", ".zst"};
+    static const char* const kWrappers[] = {".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz", ".tbz2", ".tar.xz", ".txz", ".tar.zst", ".tzst",
+                                            ".tar.lz4", ".tar.lzma", ".tar.lz", ".tlz", ".7z", ".rar", ".gz", ".bz2", ".xz", ".zst", ".lz4", ".lzma", ".lz"};
     r.dumps_only = site.app.empty() || site.app == "static";
     std::string root = site.root;
     while (root.size() > 1 && root.back() == '/') root.pop_back();
