@@ -119,7 +119,9 @@ encoded_slashes = "allow"      # the application encodes slashes inside path seg
 left there is a download anyone can make. Health's `archives_in_root` (section 4c) searches a
 static site and one without `app` for dumps: a `.sql` file that holds data (one whose statements
 all define tables does not count), `.sql.gz`, `.sql.bz2`, `.sql.xz`, `.sql.zst`, `.sqlite`,
-`.sqlite3`, `.db` (not Windows' `Thumbs.db`) and pg_dump's `.dump`; the message says they are
+`.sqlite3`, `.db` (not Windows' `Thumbs.db`) and pg_dump's `.dump`, and any of these inside an
+archive or a compression (phpMyAdmin's zipped export `export.sql.zip`, `backup.sql.tar.gz`,
+`app.sqlite.gz`), which leaves it a dump; the message says they are
 served as they stand and names each with its path as served. Archives (`.zip`, `.tar.gz`, ...)
 are not named there: on a static site they are downloads offered on purpose. A dump the owner
 publishes on purpose (an open dataset, a tutorial's sample database) is recorded in

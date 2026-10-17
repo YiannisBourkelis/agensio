@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.0-alpha.98
+
+- **A dump inside an archive is a dump** (the alpha.97 report from the test host). On a static site
+  phpMyAdmin's zipped export `db/export.sql.zip`, a `db/export.sql.7z` and a `db/backup.sql.tar.gz`
+  were served and `archives_in_root` named none of them, taking them for downloads; on a PHP site
+  `app.sqlite.gz` and `pg.dump.xz` matched no ending at all. A name that ends like a dump (`.sql`,
+  `.sqlite`, `.sqlite3`, `.db`, `.dump`) once one archive or compression ending is taken off (`.zip`,
+  `.7z`, `.rar`, `.tar` and its compressed forms, `.gz`, `.bz2`, `.xz`, `.zst`) is a dump on every
+  site; any other archive on a static site stays a download. Unit test, failing on alpha.97; the MCP
+  text of `health_check`, `docs/configuration.md` 1 and the cookbook recipe say it.
+
 ## 0.1.0-alpha.97 (2026-10-17)
 
 - **A flag's value is never the next flag, nor empty** (the alpha.96 report from the test host).

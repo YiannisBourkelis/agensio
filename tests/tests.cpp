@@ -6699,6 +6699,27 @@ static void test_archives_in_root() {
     }
     fs::remove_all(cdir);
     fs::remove_all(dir);
+
+    // A dump inside an archive or a compression is a dump (the alpha.97 report: phpMyAdmin's zipped
+    // export, export.sql.zip, a .sql.7z and a backup.sql.tar.gz were all served on a static site and
+    // taken for downloads); an archive of anything else stays a download there.
+    const fs::path wdir = fs::temp_directory_path() / ("agensio-archives-wrapped-" + std::to_string(::getpid()));
+    fs::remove_all(wdir);
+    auto wput = [&](const std::string& rel) {
+        fs::create_directories((wdir / rel).parent_path());
+        std::ofstream(wdir / rel) << "x";
+    };
+    for (const char* f : {"db/export.sql.zip", "db/export.sql.7z", "db/backup.sql.tar.gz", "db/backup.sql.tgz", "db/old.SQL.RAR", "data/app.sqlite.gz",
+                          "data/app.db.zip", "data/pg.dump.xz"})
+        wput(f);
+    for (const char* f : {"downloads/manual.tar.gz", "downloads/photos.zip", "release.tar.xz"}) wput(f);
+    SiteConfig wrapped;
+    wrapped.root = wdir.string();
+    wrapped.app = "static";
+    CHECK(control::archives_in_root(wrapped, 2000).count == 8);
+    wrapped.app = "php";
+    CHECK(control::archives_in_root(wrapped, 2000).count == 11);
+    fs::remove_all(wdir);
 }
 
 // Files root loads or runs, written by agensio itself (the alpha.94 report): whole or not at all, with

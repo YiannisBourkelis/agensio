@@ -1089,7 +1089,8 @@ archives_accepted = ["/downloads/world-cities.sql.gz", "/datasets/"]   # publish
 **What it does.** Health's `archives_in_root` searches every served tree for backups and dumps.
 On a static site, or one without `app`, it names database dumps alone, since the site serves them
 as they stand: a `.sql` that holds data, `.sql.gz` and the other compressed dumps, `.sqlite`,
-`.db`, pg_dump's `.dump`; a `.zip` or a `.tar.gz` there is a download offered on purpose. The
+`.db`, pg_dump's `.dump`, and any of them inside an archive (`export.sql.zip`); any other `.zip`
+or `.tar.gz` there is a download offered on purpose. The
 file `archives_accepted` names, and every file under the directory it names with a trailing `/`,
 is counted as accepted in the finding's message instead of being named. Nothing about serving
 changes: health alone reads the key. It holds exact paths and directories, never `/` alone, so a

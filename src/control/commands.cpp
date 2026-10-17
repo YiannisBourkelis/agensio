@@ -1182,9 +1182,12 @@ ArchivesInRoot archives_in_root(const SiteConfig& site, std::size_t budget) {
     ArchivesInRoot r;
     if (site.root.empty()) return r;
     static const char* const kArchives[] = {".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".7z", ".rar"};
-    // Dumps compressed in any of the usual ways, and database files themselves (the alpha.96 report:
-    // a static site serves them as they are; the PHP presets refuse .sqlite, .sqlite3 and .db).
-    static const char* const kDumps[] = {".sql", ".sql.gz", ".sql.bz2", ".sql.xz", ".sql.zst", ".sqlite", ".sqlite3", ".db", ".dump"};
+    // Dumps and database files themselves (the alpha.96 report: a static site serves them as they are;
+    // the PHP presets refuse .sqlite, .sqlite3 and .db), and the same inside one archive or compression,
+    // which leaves them dumps (the alpha.97 report: phpMyAdmin's zipped export, export.sql.zip, and a
+    // backup.sql.tar.gz were taken for downloads on a static site).
+    static const char* const kDumps[] = {".sql", ".sqlite", ".sqlite3", ".db", ".dump"};
+    static const char* const kWrappers[] = {".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".7z", ".rar", ".gz", ".bz2", ".xz", ".zst"};
     r.dumps_only = site.app.empty() || site.app == "static";
     std::string root = site.root;
     while (root.size() > 1 && root.back() == '/') root.pop_back();
@@ -1213,11 +1216,15 @@ ArchivesInRoot archives_in_root(const SiteConfig& site, std::size_t budget) {
         ++r.seen;
         std::string lower = name;
         for (char& c : lower) c = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
-        const auto ends = [&](const char* e) {
-            const std::size_t n = std::strlen(e);
-            return lower.size() > n && lower.compare(lower.size() - n, n, e) == 0;
+        const auto ends_in = [](std::string_view n, const char* e) {
+            const std::size_t k = std::strlen(e);
+            return n.size() > k && n.compare(n.size() - k, k, e) == 0;
         };
-        const bool dump = std::any_of(std::begin(kDumps), std::end(kDumps), ends);
+        const auto ends = [&](const char* e) { return ends_in(lower, e); };
+        const auto a_dump = [&](std::string_view n) { return std::any_of(std::begin(kDumps), std::end(kDumps), [&](const char* e) { return ends_in(n, e); }); };
+        const bool dump = a_dump(lower) || std::any_of(std::begin(kWrappers), std::end(kWrappers), [&](const char* w) {
+                              return ends(w) && a_dump(std::string_view(lower).substr(0, lower.size() - std::strlen(w)));
+                          });
         if (!dump && (r.dumps_only || !std::any_of(std::begin(kArchives), std::end(kArchives), ends))) continue;
         if (lower == "thumbs.db") continue;  // Windows' thumbnail cache, uploaded with the pictures
         if (application_schema(it->path(), lower)) continue;
