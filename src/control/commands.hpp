@@ -125,6 +125,7 @@ struct ArchivesInRoot {
     std::string example;         // the file
     std::string example_served;  // its path as served from the root, the form archives_accepted takes
     std::uint64_t example_bytes = 0;
+    std::vector<std::string> unslashed;  // entries that name a directory without the "/" that covers what is below it
 };
 ArchivesInRoot archives_in_root(const SiteConfig& site, std::size_t budget);
 

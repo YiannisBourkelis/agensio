@@ -723,8 +723,8 @@ std::vector<AdminPath> preset_admin_paths(const std::string& app);
 // A `login_paths` entry: "/"-rooted, plain characters, no "..", no "//", at most 255; "" or why not.
 std::string check_login_path(const std::string& path);
 // An `archives_accepted` entry: a path as served from the site's root ("/downloads/world.sql.gz") or
-// a directory ending in "/", any character but a control one, no empty, "." or ".." segment, not "/"
-// alone, at most 1024 bytes; "" or why not.
+// a directory ending in "/", any character but a control one or a wildcard ('*', '?', '['), no empty,
+// "." or ".." segment, not "/" alone, at most 1024 bytes; "" or why not.
 std::string check_accepted_path(const std::string& path);
 // Where the preset's application keeps what users upload, relative to the served root
 // ("/wp-content/uploads"); "" when the preset has no such place.

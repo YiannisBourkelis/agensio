@@ -135,8 +135,9 @@ archives_accepted = ["/downloads/world-cities.sql.gz", "/datasets/"]   # publish
 ```
 
 Health counts those as accepted, in the finding's message, instead of naming them; the key serves,
-refuses and moves nothing, and holds exact paths and directories only (never `/` alone, at most
-64), so a dump that lands elsewhere by mistake is still named. It works on any site: on a PHP site
+refuses and moves nothing, and holds exact paths and directories only (no wildcards, `*`, `?` or
+`[`, never `/` alone, at most 64), so a dump that lands elsewhere by mistake is still named; a
+directory written without its `/` (`/db`) accepts nothing below it, and the finding says so. It works on any site: on a PHP site
 it accepts an archive kept on purpose. Managed: `site_update`'s field of the same name, `agensio
 ctl site-update NAME --archive-accepted /downloads/world-cities.sql.gz` (repeatable, the list
 replaced; `--no-archives-accepted` clears it).

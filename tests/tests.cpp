@@ -6667,6 +6667,10 @@ static void test_archives_in_root() {
     CHECK(refused("archives_accepted = [\"/a/../b.sql\"]\n", "segment"));
     CHECK(refused("archives_accepted = [\"/a//b.sql\"]\n", "segment"));
     CHECK(refused("archives_accepted = \"/a.sql\"\n", "must be a list"));
+    // An entry that can never match (the alpha.97 report: "/db/*.sql" loaded and accepted nothing).
+    CHECK(refused("archives_accepted = [\"/db/*.sql\"]\n", "no wildcards"));
+    CHECK(refused("archives_accepted = [\"/db/dump?.sql\"]\n", "no wildcards"));
+    CHECK(refused("archives_accepted = [\"/db/[ab].sql\"]\n", "no wildcards"));
     {
         std::string many = "archives_accepted = [";
         for (int i = 0; i < 65; ++i) many += (i ? ", " : "") + std::string("\"/f") + std::to_string(i) + ".sql\"";
@@ -6680,6 +6684,14 @@ static void test_archives_in_root() {
         CHECK(f != hf.end() && f->severity == "warn" && f->site == "data.test" && f->message.find("served as they stand") != std::string::npos &&
               f->message.find("4 more accepted") != std::string::npos && f->message.find("(served as /") != std::string::npos &&
               f->fix.find("archives_accepted") != std::string::npos);
+    }
+    {
+        // A directory written without its "/" accepts nothing below it: the finding says how to write it.
+        const Config cfg = load("app = \"static\"\narchives_accepted = [\"/db\"]\n");
+        const auto hf = control::health_findings(cfg, cfg, false, std::time(nullptr));
+        const auto f = std::find_if(hf.begin(), hf.end(), [](const control::Finding& x) { return x.code == "archives_in_root"; });
+        CHECK(f != hf.end() && f->message.find("'/db' is a directory: write '/db/'") != std::string::npos &&
+              f->message.find("more accepted") == std::string::npos);
     }
     // On a managed site: the list taken whole and checked, carried in the spec and the file.
     {
@@ -6704,6 +6716,10 @@ static void test_archives_in_root() {
         err.clear();
         control::apply_request(body, cfg, back, err);
         CHECK(err.find("archives_accepted") != std::string::npos && err.find("must start with '/'") != std::string::npos);
+        CHECK(json::parse(R"J({"archives_accepted": ["/db/*.sql"]})J", body, err));
+        err.clear();
+        control::apply_request(body, cfg, back, err);
+        CHECK(err.find("no wildcards") != std::string::npos);
         CHECK(json::parse(R"J({"archives_accepted": []})J", body, err));
         err.clear();
         CHECK(control::apply_request(body, cfg, spec, err).empty() && spec.archives_accepted.empty() &&

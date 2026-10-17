@@ -4332,6 +4332,8 @@ std::string check_accepted_path(const std::string& p) {
     if (p.size() > 1024) return shown + " is longer than 1024 characters";
     for (const unsigned char c : p)
         if (c < 0x20 || c == 0x7f) return shown + " holds a control character";
+    // No pattern ever matches (the alpha.97 report: "/db/*.sql" loaded and accepted nothing).
+    if (p.find_first_of("*?[") != std::string::npos) return shown + ": exact paths and directories only, no wildcards ('*', '?', '['); a directory ending in '/' accepts all below it";
     std::string_view rest(p);
     rest.remove_prefix(1);
     if (rest.ends_with('/')) rest.remove_suffix(1);  // a directory: all below it

@@ -19,6 +19,13 @@
   `DEFAULT`, a generated column, a plain view and a partial index's `WHERE` stay definitions. Unit
   cases failing on alpha.97, a new seed for `fuzz_sql_scan` and ten minutes of it on every core;
   the MCP text of `health_check` and `docs/configuration.md` 4c.
+- **An `archives_accepted` entry that can never match is refused or named** (the same report).
+  `["/db/*.sql"]` loaded and accepted nothing, the dump still named; `["/db"]`, a directory, did the
+  same, since only `/db/` covers what is below it. `*`, `?` and `[` are refused at load ("exact paths
+  and directories only, no wildcards"), on a site file and through `site_update` alike, and the
+  finding names an entry that is a directory on disk without its `/` ("'/db' is a directory: write
+  '/db/'"). Unit tests failing on alpha.97; the reference row, `docs/keys.md`, the MCP field's text and
+  `docs/configuration.md` 1.
 
 ## 0.1.0-alpha.97 (2026-10-17)
 

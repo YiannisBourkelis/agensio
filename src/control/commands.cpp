@@ -1196,6 +1196,12 @@ ArchivesInRoot archives_in_root(const SiteConfig& site, std::size_t budget) {
             if (a.back() == '/' ? served.starts_with(a) : served == a) return true;
         return false;
     };
+    // "/db" for a directory accepts nothing below it, only "/db/" does (the alpha.97 report): the
+    // finding says how to write it.
+    for (const auto& a : site.archives_accepted) {
+        std::error_code dec;
+        if (a.back() != '/' && fs::is_directory(root + a, dec)) r.unslashed.push_back(a);
+    }
     std::error_code ec;
     if (!fs::is_directory(site.root, ec)) return r;
     // Directories the preset never answers (Grav's backup/, logs/) are not one path away
@@ -1244,6 +1250,17 @@ ArchivesInRoot archives_in_root(const SiteConfig& site, std::size_t budget) {
     }
     return r;
 }
+
+namespace {
+
+// archives_accepted entries that name a directory without its "/", for the finding's message.
+std::string unslashed_note(const std::vector<std::string>& dirs) {
+    std::string out;
+    for (const auto& d : dirs) out += "; '" + d + "' is a directory: write '" + d + "/' in archives_accepted for all below it";
+    return out;
+}
+
+}  // namespace
 
 // The pm the pool file on disk says: php-fpm runs that one until `agensio pools` and a
 // reload, whatever the configuration means to (2026-09-23 live report: two pools still
@@ -1667,7 +1684,7 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
                           : std::to_string(a.count) + " archive(s) or database dump(s) under the document root") +
                 ", e.g. " + a.example + " (served as " + a.example_served + ", " + size + ")" +
                 (a.accepted ? ", " + std::to_string(a.accepted) + " more accepted (archives_accepted)" : "") +
-                (a.seen >= 2000 ? ", the first 2000 files looked at" : ""),
+                (a.seen >= 2000 ? ", the first 2000 files looked at" : "") + unslashed_note(a.unslashed),
             "move backups and dumps out of the document root (a backup plugin's directory too) and delete stale ones; nothing served should hold a copy of the "
             "site. One the owner serves on purpose is named in the site's archives_accepted, as served: [" + json::Value(a.example_served).dump() +
                 "], a directory ending in / for all below it (a managed site: site_update archives_accepted, agensio ctl site-update " + name +
