@@ -2415,7 +2415,8 @@ nothing there and says why on stderr, so `> file` never catches an error. A file
 with `--out FILE`, never with `>` (section 18).
 
 **Changes** (`POST` with a JSON body; every one needs `"confirm": true`, takes a
-`"reason"` that goes to the audit log, and answers 428 without the confirmation):
+`"reason"` that goes to the audit log, and answers 428 without the confirmation; `site-create` and
+`site-update` answer 400 for a field they do not read, naming the nearest):
 
 | command | role | what it does |
 |---|---|---|

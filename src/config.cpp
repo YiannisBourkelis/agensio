@@ -132,15 +132,8 @@ void check_keys(const toml::table& t, std::initializer_list<std::string_view> ta
     for (const auto& [k, v] : t) {
         const std::string_view key = k.str();
         if (std::find(keys.begin(), keys.end(), key) != keys.end()) continue;
-        std::string_view nearest;
-        std::size_t best = key.size();
-        for (const auto known : keys)
-            if (const std::size_t d = edit_distance(key, known); d < best) {
-                best = d;
-                nearest = known;
-            }
         std::string msg = where + ": unknown key '" + std::string(key) + "'";
-        if (!nearest.empty() && best <= std::max<std::size_t>(2, key.size() / 3)) msg += " (did you mean '" + std::string(nearest) + "'?)";
+        if (const std::string nearest = nearest_name(key, keys); !nearest.empty()) msg += " (did you mean '" + nearest + "'?)";
         if (!hint.empty()) msg += "; " + std::string(hint);
         if (const auto top = by_table.find("top level"); top != by_table.end() && std::find(tables.begin(), tables.end(), "top level") == tables.end() &&
                                                          std::find(top->second.begin(), top->second.end(), key) != top->second.end())
@@ -4613,6 +4606,17 @@ std::string load_response_header_rules(const json::Value& rules, SiteConfig& sit
         return e.what();
     }
     return "";
+}
+
+std::string nearest_name(std::string_view key, const std::vector<std::string_view>& known) {
+    std::string_view nearest;
+    std::size_t best = key.size();
+    for (const auto k : known)
+        if (const std::size_t d = edit_distance(key, k); d < best) {
+            best = d;
+            nearest = k;
+        }
+    return !nearest.empty() && best <= std::max<std::size_t>(2, key.size() / 3) ? std::string(nearest) : std::string();
 }
 
 }  // namespace agensio

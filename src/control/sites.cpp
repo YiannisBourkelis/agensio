@@ -644,8 +644,27 @@ std::vector<AccessNotice> access_notices_for(const SiteSpec& spec, const Config&
     return access_notices(view);
 }
 
+const std::vector<std::string_view>& site_request_fields() {
+    static const std::vector<std::string_view> fields = {
+        "domain", "aliases", "canonical", "https", "redirect_http", "hsts", "encoded_slashes", "app", "root", "upstream", "project", "entry", "user",
+        "no_user", "group", "php_socket", "php_children", "php_version", "settings", "rules", "redirects", "response_headers",
+        "response_headers_baseline", "response_headers_offer_declined", "login_paths", "public_archives", "trusted_proxies", "access_log",
+        "listen_plain", "listen_tls", "confirm", "reason", "dry_run"};
+    return fields;
+}
+
 std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, SiteSpec& spec, std::string& error) {
     std::vector<Decision> needs;
+    // A field nobody reads is refused, naming the nearest (the alpha.98 report: "public_archive" and the
+    // old "archives_accepted" were dropped and the change answered ok).
+    for (const auto& [key, value] : body.members()) {
+        const auto& fields = site_request_fields();
+        if (std::find(fields.begin(), fields.end(), key) != fields.end()) continue;
+        const std::string nearest = nearest_name(key, fields);
+        error = "unknown field '" + key + "'" + (nearest.empty() ? std::string() : " (did you mean '" + nearest + "'?)") + "; the fields are";
+        for (std::size_t i = 0; i < fields.size(); ++i) error += (i ? ", " : " ") + std::string(fields[i]);
+        return needs;
+    }
     if (has_key(body, "domain")) spec.domain = body.get("domain");
     if (!valid_domain(spec.domain)) {
         error = "domain must be a host name such as example.com (lower-case letters, digits, hyphens, dots)";

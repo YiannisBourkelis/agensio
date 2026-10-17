@@ -111,6 +111,9 @@ std::string check_rules(const json::Value& given, const SiteSpec& spec, json::Va
 
 // Applies `body` onto `spec` (fields present win; absent ones keep what spec had) and
 // lists the decisions still open. `error` names a value that is wrong outright.
+// The fields site_create and site_update read; any other is refused, naming the nearest (the alpha.98
+// report). The MCP bridge's site_create and site_update schemas list the same.
+const std::vector<std::string_view>& site_request_fields();
 std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, SiteSpec& spec, std::string& error);
 
 // The TOML for the spec, with the managed header that carries the spec as JSON.

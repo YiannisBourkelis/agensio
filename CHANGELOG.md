@@ -18,6 +18,19 @@
   In a site file and through `site_update` and `path_check`'s preview alike (one parse). Unit tests
   failing on alpha.98; `docs/headers.md` 2.5 and 2.6, `docs/configuration.md` 14c, the MCP text of
   the `response_headers` field.
+- **An unknown tool argument or site field is refused, naming the nearest** (the alpha.98 report).
+  MCP `site_update` with `"bogus_field"`, a misspelt `"public_archive"` or the old
+  `"archives_accepted"` answered ok and wrote nothing, so an agent told the user the change was made;
+  `site_show` and `health_check` took any argument too. Every tool's schema is closed
+  (`additionalProperties: false`), and the bridge refuses an argument the schema does not list
+  ("unknown argument 'public_archive' (did you mean 'public_archives'?) ... Nothing was done."), with
+  `user_confirmed` and `client` (the bridge's after the user's answer) and an agent's password `hash`
+  refused for what they are, where they were dropped before. The control API's `site-create` and
+  `site-update` answer 400 for a field they do not read (`control::site_request_fields`), so `agensio
+  ctl` and any other client meet the same; the loader's "did you mean" is the one `nearest_name`.
+  Unit tests failing on alpha.98 (the bridge driven over a pipe, `apply_request`); integration checks
+  through MCP and the socket; the dialog check now expects an agent's `user_confirmed` refused;
+  `docs/mcp.md`, `docs/configuration.md` 15.
 
 ## 0.1.0-alpha.98 (2026-10-17)
 

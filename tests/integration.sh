@@ -872,6 +872,26 @@ print(has("site_create"), has("site_update"))
 p.stdin.close(); p.wait()
 PYT
 )"
+# An argument a tool does not list, or a field the control API does not read, is refused naming the
+# nearest (the alpha.98 report: "public_archive" and the old "archives_accepted" were dropped, ok).
+check "MCP refuses an unknown argument naming the nearest, nothing written; the control API refuses an unknown field the same way" "yes yes yes 400 yes no" "$(python3 - "$BIN" "$CS" <<'PYT'
+import json, subprocess, sys
+p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+def call(i, name, args):
+    p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": i, "method": "tools/call", "params": {"name": name, "arguments": args}}) + "\n"); p.stdin.flush()
+    r = json.loads(p.stdout.readline())
+    return r["result"].get("isError", False), " ".join(c["text"] for c in r["result"]["content"])
+p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}}) + "\n"); p.stdin.flush()
+p.stdout.readline()
+e1, t1 = call(2, "site_update", {"name": "created.test", "public_archive": ["/db/"], "confirm": True, "reason": "t"})
+e2, t2 = call(3, "site_update", {"name": "created.test", "archives_accepted": ["/db/"], "confirm": True, "reason": "t"})
+e3, t3 = call(4, "health_check", {"verbose": True})
+print("yes" if e1 and "did you mean 'public_archives'" in t1 and "Nothing was done" in t1 else t1[:200],
+      "yes" if e2 and "unknown argument 'archives_accepted'" in t2 else t2[:200],
+      "yes" if e3 and "unknown argument 'verbose'" in t3 else t3[:200])
+p.stdin.close(); p.wait()
+PYT
+) $(curl -sS -o bench/tmp/unknown-field.json -w '%{http_code}' --unix-socket $CS -X POST -d '{"public_archive":["/db/"],"confirm":true,"reason":"t"}' http://control/v1/sites/created.test) $(grep -q "unknown field 'public_archive' (did you mean 'public_archives'?)" bench/tmp/unknown-field.json && echo yes || echo no) $(grep -q '^public_archives' bench/tmp/sites.d/created.test.toml && echo yes || echo no)"
 # A dump on a static site is downloadable as it stands (the alpha.96 report: health said nothing about
 # it): health names it with its path as served, a zip there is a download and is not named, and
 # public_archives through site-update records it as served on purpose; cleared, it is named again.
@@ -1034,7 +1054,7 @@ check "root additions: the site stays managed (site_update works, the additions 
 check "root additions: a disabled site leaves an orphan the load keeps with a warning; health says so with the fix; enabling brings it back" "200 yes yes 200 0" "$(cpost /v1/sites/frag.test/disable '{"confirm":true,"reason":"ra"}') $(curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); f=[x for x in d["findings"] if x["code"] == "root_additions_orphan"]; print("yes" if len(f) == 1 and f[0]["site"] == "frag.test" and "disabled" in f[0]["message"] and "site-enable frag.test" in f[0]["fix"] else f)') $(t=$("$BIN" -t -c bench/tmp/agensio-test.toml 2>&1 >/dev/null); grep -q 'frag.test.root.toml holds root additions for site frag.test' <<< "$t" && echo yes) $(cpost /v1/sites/frag.test/enable '{"confirm":true,"reason":"ra"}') $(curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len([x for x in d["findings"] if x["code"] == "root_additions_orphan"]))')"
 check "root additions: a plain delete sets the file aside as .bak beside the site file's .bak, still there to rename back, names it in the answer; no orphan warning follows" "200 yes yes yes yes 0" "$(cpost /v1/sites/frag.test/delete '{"confirm":true,"reason":"ra"}') $([ -f $RA.bak ] && [ ! -e $RA ] && echo yes) $([ -f bench/tmp/sites.d/frag.test.toml.bak ] && echo yes) $(python3 -c "import json; d=json.load(open('bench/tmp/ctl-reply.json')); print('yes' if d['root_additions_set_aside'] == ['$ROOT/$RA.bak'] and 'rename both back' in d['root_additions_note'] else d)") $(grep -q "sites/frag.test/delete (ra): delete .*; root additions set aside: $ROOT/$RA -> $ROOT/$RA.bak" bench/tmp/audit.log && echo yes) $("$BIN" -t -c bench/tmp/agensio-test.toml 2>&1 >/dev/null | grep -c 'holds root additions')"
 rm -f $RA.bak
-check "mcp: pip_install asks the user in the client's dialog; no dialog, a decline or an unticked box is a refusal with the terminal command; an agent's user_confirmed is dropped; a message during the dialog waits its turn" "refused elicitation/create warn declined unticked 3 9 yes nodialog" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
+check "mcp: pip_install asks the user in the client's dialog; no dialog, a decline or an unticked box is a refusal with the terminal command; an agent's user_confirmed is refused; a message during the dialog waits its turn" "agentrefused refused elicitation/create warn declined unticked 3 9 yes nodialog" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
 import json, subprocess, sys
 def start(caps):
     p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
@@ -1045,10 +1065,14 @@ def send(p, m): p.stdin.write(json.dumps(m) + "\n"); p.stdin.flush()
 def read(p): return json.loads(p.stdout.readline())
 def text(r): return " ".join(c["text"] for c in r["result"]["content"])
 def call(i, **extra):
-    args = {"name": "dj.test", "task": "pip_install", "params": {"packages": "wagtail"}, "confirm": True, "reason": "t", "user_confirmed": "mcp"}
+    args = {"name": "dj.test", "task": "pip_install", "params": {"packages": "wagtail"}, "confirm": True, "reason": "t"}
     args.update(extra)
     return {"jsonrpc": "2.0", "id": i, "method": "tools/call", "params": {"name": "site_task", "arguments": args}}
 out = []
+p = start({"elicitation": {}})
+send(p, call(2, user_confirmed="mcp")); r = read(p)  # the agent cannot confirm for the user: refused, no dialog (until alpha.99 dropped)
+out.append("agentrefused" if r["id"] == 2 and r["result"]["isError"] and "the bridge's to set" in text(r) else r)
+p.stdin.close(); p.wait()
 p = start({})
 send(p, call(2)); r = read(p)
 out.append("refused" if r["result"]["isError"] and "cannot ask them" in text(r) and "agensio ctl site-task dj.test pip_install --param 'packages=wagtail' --yes" in text(r) else text(r)[:300])

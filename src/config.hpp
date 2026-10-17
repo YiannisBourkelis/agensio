@@ -720,6 +720,10 @@ struct AdminPath {
     bool login = false;
 };
 std::vector<AdminPath> preset_admin_paths(const std::string& app);
+// The name of `known` nearest to `key`, as the loader's "did you mean" names it (a few edits away, the
+// third of the key's length or 2 at least); "" when none is that near. Shared with the control API and
+// the MCP bridge, which refuse a field or an argument nobody reads (the alpha.98 report).
+std::string nearest_name(std::string_view key, const std::vector<std::string_view>& known);
 // A `login_paths` entry: "/"-rooted, plain characters, no "..", no "//", at most 255; "" or why not.
 std::string check_login_path(const std::string& path);
 // An `public_archives` entry: a path as served from the site's root ("/downloads/world.sql.gz") or

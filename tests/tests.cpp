@@ -9371,6 +9371,51 @@ static void test_site_notices() {
     }
 }
 
+// A tool argument or a site field nobody reads is refused, naming the nearest (the alpha.98 report: a
+// misspelt or renamed field, "public_archive" or the old "archives_accepted", was dropped and the change
+// answered ok, so the agent told the user it was made). Every tool's schema is closed.
+static void test_mcp_arguments() {
+    std::istringstream in(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"1\"}}}\n"
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n"
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"health_check\",\"arguments\":{\"verbose\":true}}}\n"
+        "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"site_show\",\"arguments\":{\"name\":\"a.test\",\"nmae\":\"x\"}}}\n");
+    std::ostringstream out;
+    run_mcp("/nonexistent/agensio-test.sock", in, out);
+    std::istringstream lines(out.str());
+    std::map<long, json::Value> replies;
+    for (std::string line; std::getline(lines, line);) {
+        json::Value v;
+        std::string err;
+        if (json::parse(line, v, err) && v["id"].type() == json::Value::Type::number) replies[static_cast<long>(v["id"].num())] = v;
+    }
+    bool closed = !replies[2]["result"]["tools"].items().empty();
+    for (const auto& t : replies[2]["result"]["tools"].items()) closed = closed && t["inputSchema"]["additionalProperties"].type() == json::Value::Type::boolean &&
+                                                                        !t["inputSchema"]["additionalProperties"].boolean();
+    CHECK(closed);
+    const auto text = [&](long id) { return std::string(replies[id]["result"]["content"].items().empty() ? "" : replies[id]["result"]["content"].items()[0].get("text")); };
+    CHECK(replies[3]["result"]["isError"].boolean() && text(3).find("unknown argument 'verbose'") != std::string::npos);
+    CHECK(replies[4]["result"]["isError"].boolean() && text(4).find("unknown argument 'nmae' (did you mean 'name'?)") != std::string::npos);
+
+    // The control API's site_create and site_update the same way, for ctl and any other client.
+    control::SiteSpec spec;
+    spec.domain = "m.test";
+    Config cfg;
+    json::Value body;
+    std::string err;
+    CHECK(json::parse(R"J({"public_archive": ["/db/"], "confirm": true})J", body, err));
+    control::apply_request(body, cfg, spec, err);
+    CHECK(err.find("unknown field 'public_archive' (did you mean 'public_archives'?)") != std::string::npos);
+    err.clear();
+    CHECK(json::parse(R"J({"bogus_field": 1})J", body, err));
+    control::apply_request(body, cfg, spec, err);
+    CHECK(err.find("unknown field 'bogus_field'") != std::string::npos);
+    err.clear();
+    CHECK(json::parse(R"J({"login_paths": ["/login"], "confirm": true, "reason": "r", "dry_run": true})J", body, err));
+    control::apply_request(body, cfg, spec, err);
+    CHECK(err.find("unknown field") == std::string::npos);
+}
+
 static void test_mcp_texts() {
     std::istringstream in("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\","
                           "\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"1\"}}}\n");
@@ -10586,6 +10631,7 @@ int main() {
     test_packaged_logrotate();
     test_site_notices();
     test_mcp_texts();
+    test_mcp_arguments();
     test_drupal_php_rule();
     test_refusal_finding();
     test_protection();

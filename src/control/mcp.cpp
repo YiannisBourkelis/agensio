@@ -42,7 +42,8 @@ json::Value schema(std::vector<std::pair<std::string, json::Value>> props, std::
     for (auto& [k, v] : props) p.set(k, std::move(v));
     json::Value req = json::Value::array();
     for (const auto& r : required) req.push(r);
-    return json::Value::object().set("type", "object").set("properties", std::move(p)).set("required", std::move(req));
+    // Closed (the alpha.98 report): an argument the tool does not list is refused, not dropped.
+    return json::Value::object().set("type", "object").set("properties", std::move(p)).set("required", std::move(req)).set("additionalProperties", false);
 }
 
 // The `app` values come from the preset table, so a new preset is a tool option at once.
@@ -559,6 +560,30 @@ private:
         if (!tool || tool->needs > role_) {
             error(id, -32602, "unknown tool: " + std::string(name));
             return;
+        }
+        // An argument the tool's schema does not list is refused, naming the nearest (the alpha.98 report:
+        // site_update dropped "public_archive" and the old "archives_accepted" and answered ok, so the agent
+        // told the user the change was made). The bridge's own arguments are named for what they are.
+        if (args.is_object()) {
+            std::vector<std::string_view> known;
+            for (const auto& [prop, _] : tool->schema["properties"].members()) known.push_back(prop);
+            for (const auto& [key, _] : args.members()) {
+                if (std::find(known.begin(), known.end(), key) != known.end()) continue;
+                if (key == "user_confirmed" || key == "client") {
+                    tool_error(id, "'" + key + "' is the bridge's to set, after the user's own answer in the client's dialog, never an argument");
+                    return;
+                }
+                if (key == "hash" && name == "site_auth_user_set") {
+                    tool_error(id, "a password hash comes from agensio ctl site-auth-user-set --prompt on the user's terminal, never through the agent");
+                    return;
+                }
+                const std::string nearest = nearest_name(key, known);
+                std::string msg = "unknown argument '" + key + "'" + (nearest.empty() ? std::string() : " (did you mean '" + nearest + "'?)") + " for " +
+                                  std::string(name) + "; its arguments are";
+                for (std::size_t i = 0; i < known.size(); ++i) msg += (i ? ", " : " ") + std::string(known[i]);
+                tool_error(id, msg + ". Nothing was done.");
+                return;
+            }
         }
         std::string path = tool->path;
         std::string path_arg;  // the argument that fills the path: a site name or an upload name
