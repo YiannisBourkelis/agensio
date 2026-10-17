@@ -165,6 +165,41 @@ devbox): the one-call paths and each refusal.
 
 ## Sanitizer and fuzz record
 
+2026-10-17, the release check of 0.1.0-alpha.97 (97cef77), run after the tag. Two hours of fuzzing
+with `scripts/fuzz-all.sh -t 600`, twelve rounds of ten minutes on one corpus that grew from round to
+round, every target at once (twenty-one, one process each on 24 cores), the container capped at 13 GB
+(8.2 GB used): 15.1 G runs, no finding, no timeout, no sanitizer line in any log, the coverage still
+growing in the second hour (`fuzz_response_headers` 2,955 to 3,049 edges, `fuzz_archive` 642 to 660,
+`fuzz_h2_conn` 11,293 to 11,341). The unit tests, the integration suite (737 checks) and the Pebble
+suite on the sanitizer build (`build-asan`, GCC 14): clean, no report in the suite's output or any
+server's own. The release build: unit, reload (24), auth (48), pools (26), control (27) and Pebble
+(21) pass; the builds without OpenSSL and without libxcrypt link and pass their unit tests. The A/B
+against alpha.96 (`ab-20261017-002309.md`, `ab-20261017-003454.md` for HTTP/3): flat.
+
+| target | runs | edges | result |
+|---|---|---|---|
+| fuzz_archive | 477.93 M | 660 | clean |
+| fuzz_auth_users | 635.06 M | 499 | clean |
+| fuzz_chunked | 1,936.66 M | 63 | clean |
+| fuzz_fcgi | 1,686.63 M | 96 | clean |
+| fuzz_fields | 356.23 M | 579 | clean |
+| fuzz_h2_conn | 13.20 M | 11,341 | clean |
+| fuzz_hpack | 60.12 M | 530 | clean |
+| fuzz_hpack_roundtrip | 9.13 M | 466 | clean |
+| fuzz_http_head | 1,664.31 M | 152 | clean |
+| fuzz_json | 357.94 M | 557 | clean |
+| fuzz_log_line | 184.28 M | 753 | clean |
+| fuzz_parser | 1,487.91 M | 240 | clean |
+| fuzz_path | 559.68 M | 236 | clean |
+| fuzz_qpack | 189.00 M | 647 | clean |
+| fuzz_quic_conn | 12.24 M | 1,581 | clean |
+| fuzz_quic_packet | 969.92 M | 217 | clean |
+| fuzz_redirect | 166.23 M | 1,230 | clean |
+| fuzz_refuse | 97.48 M | 875 | clean |
+| fuzz_response_headers | 7.92 M | 3,049 | clean |
+| fuzz_sql_scan | 209.78 M | 129 | clean |
+| fuzz_transport_params | 4,024.47 M | 211 | clean |
+
 2026-10-16, the release check of 0.1.0-alpha.96 (4819aab), which also covers alpha.94 and alpha.95:
 both were tagged with no run recorded here. Every target five minutes on its corpus
 (`scripts/fuzz-all.sh -t 300`, ASan and UBSan, clang), twenty targets: no finding, no timeout, no
