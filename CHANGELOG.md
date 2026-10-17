@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.98
+## 0.1.0-alpha.98 (2026-10-17)
 
 - **`public_archives`, and every found archive judged by what a request for it gets** (the alpha.97
   report's Grav probe, and the discussion after it). Health warned the same way about a dump anyone
