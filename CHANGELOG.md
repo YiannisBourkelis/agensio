@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.97
+## 0.1.0-alpha.97 (2026-10-17)
 
 - **A flag's value is never the next flag, nor empty** (the alpha.96 report from the test host).
   `agensio ctl protection --jail --out --nft` exited 0 and wrote the jail into a file named `--nft`,
