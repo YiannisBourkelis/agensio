@@ -1205,6 +1205,27 @@ json::Value protection_report(const ProtectionInput& in, const ProtectionProbe& 
     return r;
 }
 
+std::vector<std::string> protection_steps(const ProtectionInput& in, const ProtectionFiles& files) {
+    std::vector<std::string> out;
+    if (files.installed_jail && std::string_view(compare_installed(*files.installed_jail, render_jail(in))) == "stale") {
+        // A filter of an older build installed beside it goes first (alpha.44 report); one whose
+        // comments alone differ matches as this build's and needs no install.
+        bool filters_stale = false;
+        for (std::size_t i = 0; i < shipped_filters().size() && i < files.installed_filters.size(); ++i)
+            if (files.installed_filters[i] && std::string_view(compare_installed(*files.installed_filters[i], shipped_filters()[i].text)) == "stale")
+                filters_stale = true;
+        out.push_back("the fail2ban jail on disk differs from this host's rendering in its jails (the sites' login paths, logs or ports, an upgrade, or an "
+                      "edit by hand): until root renders it again a new path is not counted; as root: " +
+                      (filters_stale ? filter_install_command() + " && " : std::string()) + "agensio ctl protection --jail --out " + std::string(kJailFile) +
+                      " && fail2ban-client reload (rendering again replaces the file; settings and notes of your own in it go into "
+                      "/etc/fail2ban/jail.d/agensio.local first)");
+    }
+    if (files.firewall_file && std::string_view(compare_installed(*files.firewall_file, render_nft(in))) == "stale")
+        out.push_back("the firewall ruleset on disk differs from this host's rendering (the public ports): as root: agensio ctl protection --nft --out " +
+                      in.firewall_file + " && nft -f " + in.firewall_file);
+    return out;
+}
+
 std::vector<Finding> protection_findings(const ProtectionInput& in, const ProtectionProbe& probe, const ProtectionFiles& files) {
     std::vector<Finding> out;
     if (!in.exposed || in.host_protection == "off") return out;

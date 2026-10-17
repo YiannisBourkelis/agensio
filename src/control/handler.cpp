@@ -876,24 +876,16 @@ void ControlHandler::protection_show(Stream& s, std::function<void()> done) {
 
 // 2026-10-02 alpha.43 addendum: a login path added through site_update was not counted until
 // root rendered the jail again, and the answer said nothing. Only files root installed are
-// judged: the jail at /etc/fail2ban/jail.d/agensio.conf against the rendering for the sites as
-// they are now, the kept ruleset <config dir>/firewall.nft against its rendering (a new
-// public port); a host without them hears it from health instead.
+// judged (the jail at /etc/fail2ban/jail.d/agensio.conf, its filters, the kept ruleset <config
+// dir>/firewall.nft), as health judges them (control::protection_steps); a host without them hears
+// it from health instead.
 std::vector<std::string> ControlHandler::protection_steps() {
-    std::vector<std::string> out;
     const control::ProtectionInput in = control::protection_input(backend_->running());
-    if (const auto jail = read_whole_file(std::string(control::kJailFile)); jail && *jail != control::render_jail(in)) {
-        // A filter of an older build installed beside it goes first (alpha.44 report).
-        bool filters_differ = false;
-        const auto paths = control::installed_filter_paths();
-        for (std::size_t i = 0; i < paths.size(); ++i)
-            if (const auto text = read_whole_file(paths[i]); text && *text != control::protection_filters()[i].text) filters_differ = true;
-        out.push_back("the fail2ban jail on disk is older than this change (the sites' login paths, logs or ports): until root renders it again the new paths are not counted; as root: " +
-                      (filters_differ ? control::filter_install_command() + " && " : std::string()) + "agensio ctl protection --jail --out " + std::string(control::kJailFile) + " && fail2ban-client reload");
-    }
-    if (const auto nft = read_whole_file(in.firewall_file); nft && *nft != control::render_nft(in))
-        out.push_back("the firewall ruleset on disk is older than this change (the public ports): as root: agensio ctl protection --nft --out " + in.firewall_file + " && nft -f " + in.firewall_file);
-    return out;
+    control::ProtectionFiles files;
+    files.firewall_file = read_whole_file(in.firewall_file);
+    files.installed_jail = read_whole_file(std::string(control::kJailFile));
+    for (const auto& f : control::installed_filter_paths()) files.installed_filters.push_back(read_whole_file(f));
+    return control::protection_steps(in, files);
 }
 
 void ControlHandler::trash_list(Stream& s, std::function<void()> done) {

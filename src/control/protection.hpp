@@ -211,5 +211,10 @@ json::Value protection_report(const ProtectionInput& in, const ProtectionProbe& 
 // Health's findings: nothing for a host without a public listener or with host_protection =
 // "off"; with "external" the missing pieces are informational.
 std::vector<Finding> protection_findings(const ProtectionInput& in, const ProtectionProbe& probe, const ProtectionFiles& files);
+// What a site change hands root in next_steps (2026-10-02 alpha.43 addendum): the files root installed
+// judged as health judges them (comment lines aside: the alpha.97 report), a step for each whose rules
+// differ from the rendering for the sites as they are now; none for a file that is absent (health says
+// that) or differs in comments only.
+std::vector<std::string> protection_steps(const ProtectionInput& in, const ProtectionFiles& files);
 
 }  // namespace agensio::control

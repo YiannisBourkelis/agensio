@@ -49,6 +49,15 @@
   on another site, a larger file of that name and any other archive in `user/data/` still are. Unit
   test failing on alpha.97; the MCP text of `health_check` (never tell the user to delete it) and
   `docs/configuration.md` 4c.
+- **A site change's next steps judge the jail as health does** (the same report). With the installed
+  jail differing from the rendering in comment lines only (`installed_jail: comments`), `agensio ctl
+  site-update ag4.edoc.gr --set pm=ondemand` answered that the jail was "older than this change",
+  with the re-render and reload line, for a change of the PHP process manager. alpha.96 taught health
+  and `protection_show` the comment-blind comparison and missed this third reader. The step is now
+  `control::protection_steps`, a pure function over the installed files that compares them as health
+  does: a step only when the jail's (or the ruleset's) rules differ, a filter install line only when a
+  filter's rules do, and the note that rendering replaces the file and an administrator's own lines go
+  into `jail.d/agensio.local`. Unit test; the MCP text of `site_update`.
 
 ## 0.1.0-alpha.97 (2026-10-17)
 

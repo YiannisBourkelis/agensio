@@ -5665,6 +5665,25 @@ static void test_protection() {
         CHECK(protection_report(in, probe, fw)["firewall"].get("file_state") == "comments" && codes(in, probe, fw).empty());
         fw.firewall_file = render_nft(in) + "add table inet other\n";
         CHECK(protection_report(in, probe, fw)["firewall"].get("file_state") == "stale");
+        // site_update's next_steps judge the installed files the same way (the alpha.97 report: a jail
+        // that differed in comments only was called older than a change of the PHP process manager).
+        CHECK(protection_steps(in, files).empty() && protection_steps(in, cj).empty());
+        ProtectionFiles cfw = files;
+        cfw.firewall_file = reworded(render_nft(in));
+        CHECK(protection_steps(in, cfw).empty() && protection_steps(in, cf).empty());
+        const auto st = protection_steps(in, off);
+        CHECK(st.size() == 1 && st[0].find("agensio ctl protection --jail --out /etc/fail2ban/jail.d/agensio.conf && fail2ban-client reload") != npos &&
+              st[0].find("install -m 644") == npos && st[0].find("/etc/fail2ban/jail.d/agensio.local") != npos);
+        ProtectionFiles both = off;
+        both.installed_filters[0] = "[Definition]\nfailregex = old\n";
+        CHECK(protection_steps(in, both).size() == 1 && protection_steps(in, both)[0].find("install -m 644") != npos);
+        ProtectionFiles commented_filter = off;
+        commented_filter.installed_filters[2] = reworded(*commented_filter.installed_filters[2]);
+        CHECK(protection_steps(in, commented_filter)[0].find("install -m 644") == npos);  // a filter's comments alone need no install
+        const auto sfw = protection_steps(in, fw);
+        CHECK(sfw.size() == 1 && sfw[0].find("agensio ctl protection --nft --out") != npos && sfw[0].find("nft -f") != npos);
+        ProtectionFiles none_installed;
+        CHECK(protection_steps(in, none_installed).empty());  // nothing root installed: health says it instead
     }
     // Failed passwords ([[site.auth]], 2026-10-08): a site with one and no jail on the error log
     // (the installed jail an older build's); the jail in place; the agensio-auth filter of
