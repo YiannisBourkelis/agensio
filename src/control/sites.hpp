@@ -62,6 +62,9 @@ struct SiteSpec {
     // preset's known paths (2026-10-02): the rendered fail2ban jail counts attempts there;
     // nothing is served or refused by it. Plain paths (check_login_path), at most 16.
     std::vector<std::string> login_paths;
+    // Archives and dumps the site serves on purpose (2026-10-17): health's archives_in_root counts them
+    // as accepted. Paths as served (check_accepted_path), a directory ending in "/", at most 64.
+    std::vector<std::string> archives_accepted;
     std::string access_log;  // a site with a user gets its own (rule: nothing shared between users)
     std::string listen_plain = "0.0.0.0:80";
     std::string listen_tls = "0.0.0.0:443";

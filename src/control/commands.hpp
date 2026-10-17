@@ -113,11 +113,17 @@ std::vector<std::string> restart_needed(const Config& fresh, const Config& runni
 // when the file exists and the setting is absent or 0; `file` names it.
 bool php_fpm_hard_reload(const Config& cfg, std::string& file);
 
-// Backup archives and database dumps found under a document root (health, archives_in_root).
+// Backup archives and database dumps found under a document root (health, archives_in_root). A
+// static site or one without app is searched for dumps only (dumps_only): it serves everything as it
+// stands, so an archive there is a download offered on purpose. What the site's archives_accepted
+// names is counted apart, in accepted.
 struct ArchivesInRoot {
     std::size_t seen = 0;
     std::size_t count = 0;
-    std::string example;
+    std::size_t accepted = 0;
+    bool dumps_only = false;
+    std::string example;         // the file
+    std::string example_served;  // its path as served from the root, the form archives_accepted takes
     std::uint64_t example_bytes = 0;
 };
 ArchivesInRoot archives_in_root(const SiteConfig& site, std::size_t budget);

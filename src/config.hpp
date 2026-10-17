@@ -358,6 +358,10 @@ struct SiteConfig {
     // (preset_login_paths): what the rendered fail2ban jail counts attempts on. Never read
     // when serving; a site without a preset of its own names them here.
     std::vector<std::string> login_paths;
+    // Archives and database dumps the site serves on purpose (`archives_accepted`, 2026-10-17): paths
+    // as served from the root, a directory ending in "/" covering all below it, which health's
+    // archives_in_root counts as accepted, not as a finding. Never read when serving.
+    std::vector<std::string> archives_accepted;
     std::string access_log;    // absolute path, or "" for no access log (site `access_log`, default [log] access)
     int access_log_sink = -1;  // set by the Server: index into its log registry
     // [[site.access]], longest path first (an exact rule before a prefix of the same path);
@@ -718,6 +722,10 @@ struct AdminPath {
 std::vector<AdminPath> preset_admin_paths(const std::string& app);
 // A `login_paths` entry: "/"-rooted, plain characters, no "..", no "//", at most 255; "" or why not.
 std::string check_login_path(const std::string& path);
+// An `archives_accepted` entry: a path as served from the site's root ("/downloads/world.sql.gz") or
+// a directory ending in "/", any character but a control one, no empty, "." or ".." segment, not "/"
+// alone, at most 1024 bytes; "" or why not.
+std::string check_accepted_path(const std::string& path);
 // Where the preset's application keeps what users upload, relative to the served root
 // ("/wp-content/uploads"); "" when the preset has no such place.
 std::string preset_uploads(const std::string& app);

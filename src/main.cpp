@@ -79,6 +79,7 @@ void usage(std::ostream& out = std::cout) {
                  "                           site-task-output NAME [--offset N] [--length N] [--raw] (admin)\n"
                  "                      site-update NAME --set KEY=VALUE ... (settings [NAME] lists the keys and ceilings)\n"
                  "                      site-update NAME --login-path /login ... (where the fail2ban jail counts attempts)\n"
+                 "                      site-update NAME --archive-accepted /data/world.sql.gz ... (a dump served on purpose)\n"
                  "                      site-update NAME --redirect \"/blog /news 301\" --gone /old ... (path redirects)\n"
                  "                      site-update NAME --response-header \"/ set X-Frame-Options=SAMEORIGIN\" ...\n"
                  "                           [--response-header-remove \"/ X-Powered-By\"] [--response-headers-file F.json]\n"
@@ -362,6 +363,10 @@ int main(int argc, char** argv) {
                              "        --login-path PATH (site-create and site-update, repeatable): where the application posts\n"
                              "                    credentials, on top of the preset's known paths; the fail2ban jail counts attempts there;\n"
                              "                    given together they replace the site's list; --no-login-paths clears\n"
+                             "        --archive-accepted PATH (site-create and site-update, repeatable): an archive or a database\n"
+                             "                    dump the site serves on purpose, as served from its root (a directory ending in /\n"
+                             "                    for all below it); health's archives_in_root accepts it; given together they\n"
+                             "                    replace the site's list; --no-archives-accepted clears\n"
                              "        --trusted-proxy ENTRY (site-create and site-update, repeatable): an address, a range or an\n"
                              "                    @set of [server] trusted_proxies that speaks for this site (a CDN in front of it);\n"
                              "                    given together they replace the site's list; --no-trusted-proxies believes none\n"
@@ -626,6 +631,12 @@ int main(int argc, char** argv) {
                     list.push(v);
                     body.set("login_paths", list);
                 } else if (b == "--no-login-paths") body.set("login_paths", agensio::json::Value::array());
+                else if (b == "--archive-accepted") {  // served on purpose; given together they replace the list
+                    std::string v; value(v);
+                    agensio::json::Value list = body["archives_accepted"].is_array() ? body["archives_accepted"] : agensio::json::Value::array();
+                    list.push(v);
+                    body.set("archives_accepted", list);
+                } else if (b == "--no-archives-accepted") body.set("archives_accepted", agensio::json::Value::array());
                 else if (b == "--redirect" || b == "--redirect-exact" || b == "--gone") {
                     // Path redirects (docs/redirects.md 5): "FROM TO STATUS", the target and the status the
                     // last two words (a path may hold '=', a target ':'); --gone FROM is a 410.

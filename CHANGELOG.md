@@ -45,6 +45,25 @@
   on an upgraded host health names the jail's comments once, as information. The MCP texts of
   `protection_show` and `health_check` tell the agent to ask about the user's own lines before giving
   root the render; `docs/fail2ban.md` and `docs/configuration.md` 18. Unit test, failing on alpha.96.
+- **Dumps on static sites, the other dump formats, and `archives_accepted`** (the alpha.96 report:
+  on a static site and one without `app`, a `db/dump.sql` with a password hash, a `.sql.gz` and a
+  backup `.zip` were all downloadable and health said nothing, while a PHP site, which refuses
+  `.sql`, got the finding). `archives_in_root` now searches static sites and sites without `app`
+  for database dumps, and its message says they are served as they stand; archives there (`.zip`,
+  `.tar.gz`, ...) are downloads offered on purpose and are not named. The dumps it knows grow from
+  `.sql` and `.sql.gz` to `.sql.bz2`, `.sql.xz`, `.sql.zst`, `.sqlite`, `.sqlite3`, `.db` (not
+  Windows' `Thumbs.db`) and pg_dump's `.dump`, on every site. The new site key `archives_accepted`
+  records what the owner publishes on purpose, by its path as served (a directory ending in `/` for
+  all below it; never `/` alone, at most 64): health counts those as accepted in the message instead
+  of naming them, and nothing about serving changes. Every finding names its example with the path
+  as served, the form the key takes. Managed: `site_update` `archives_accepted`, `agensio ctl
+  site-update NAME --archive-accepted PATH` (repeatable, the list replaced) and
+  `--no-archives-accepted`; the MCP texts tell the agent to set it only after the user confirmed the
+  file is meant for anyone. `docs/configuration.md` 1 (dumps served as they stand) and 4c, the
+  reference row and `docs/keys.md`, and a cookbook recipe (a dataset or a sample database offered for
+  download). Unit tests (the three kinds of site, the new endings, the accepted paths, the key's
+  refusals, the managed field) and an integration check (a managed static site's dump named, accepted
+  through `site-update`, named again once cleared), failing on alpha.96.
 
 ## 0.1.0-alpha.96 (2026-10-16)
 

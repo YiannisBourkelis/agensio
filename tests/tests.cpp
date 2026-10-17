@@ -6576,6 +6576,7 @@ static void test_archives_in_root() {
     };
     SiteConfig site;
     site.root = dir.string();
+    site.app = "php";  // archives and dumps both counted; a static site below
     // An application's own SQL: none counted.
     put("typo3/sysext/extbase/ext_emconf.php", "<?php\n");
     put("typo3/sysext/extbase/ext_tables.sql", "CREATE TABLE tx_extbase_domain_model_category (\n\tuid int(11) NOT NULL\n);\n");
@@ -6603,8 +6604,100 @@ static void test_archives_in_root() {
     put("db/user.sql", "CREATE USER 'wp'@'localhost' IDENTIFIED BY 'secret';\n");
     put("db/nodata-dump.sql", "/*!40101 SET NAMES utf8mb4 */;\nCREATE TABLE t (a int);\n");  // MySQL's executable comment is code
     put("db/unterminated.sql", "CREATE TABLE t (a text DEFAULT 'x);\n");  // ends inside a quote
+    CHECK(control::archives_in_root(site, 2000).count == 14);
+    // The dumps beyond .sql (the alpha.96 report: compressed dumps and database files were not counted,
+    // and a static site serves them as they are); Windows' thumbnail cache is no dump.
+    put("dumps/site.sql.bz2", "BZh");
+    put("dumps/site.sql.xz", "\xfd" "7zXZ");
+    put("dumps/site.sql.zst", "\x28\xb5\x2f\xfd");
+    put("dumps/app.sqlite", "SQLite format 3");
+    put("dumps/app.sqlite3", "SQLite format 3");
+    put("dumps/app.db", "SQLite format 3");
+    put("dumps/pg.dump", "PGDMP");
+    put("images/Thumbs.db", "x");
+    put("downloads/manual.tar.gz", "\x1f\x8b");
     const control::ArchivesInRoot a = control::archives_in_root(site, 2000);
-    CHECK(a.count == 14 && a.seen == 21);
+    CHECK(a.count == 22 && a.seen == 30 && a.accepted == 0 && !a.dumps_only);
+    // A static site, or one without app, serves everything as it stands: its dumps are counted, its
+    // archives are downloads offered on purpose and are not (2026-10-17, the alpha.96 report).
+    SiteConfig plain = site;
+    plain.app = "static";
+    const control::ArchivesInRoot st = control::archives_in_root(plain, 2000);
+    CHECK(st.count == 20 && st.seen == 30 && st.dumps_only);
+    plain.app.clear();
+    CHECK(control::archives_in_root(plain, 2000).count == 20);
+    // archives_accepted: what the owner serves on purpose, files or a directory as served from the root;
+    // only what would be counted is counted as accepted, and the example names the path as served.
+    site.archives_accepted = {"/db/", "/site.zip", "/big.sql"};
+    plain.archives_accepted = site.archives_accepted;
+    const control::ArchivesInRoot pa = control::archives_in_root(site, 2000), sa = control::archives_in_root(plain, 2000);
+    CHECK(pa.count == 16 && pa.accepted == 6 && sa.count == 15 && sa.accepted == 5);
+    CHECK(sa.example_served.starts_with("/") && sa.example.ends_with(sa.example_served) && !sa.example_served.starts_with("/db/"));
+
+    // The key in a site file, refused when it is not a path as served; health's finding on a static site.
+    const fs::path cdir = fs::temp_directory_path() / ("agensio-archives-cfg-" + std::to_string(::getpid()));
+    fs::create_directories(cdir);
+    auto load = [&](const std::string& site_keys) {
+        std::ofstream(cdir / "agensio.toml") << "[[site]]\nserver_name = [\"data.test\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"" + dir.string() +
+                                                   "\"\n" + site_keys;
+        return load_config(cdir / "agensio.toml");
+    };
+    auto refused = [&](const std::string& keys, const char* needle) {
+        try {
+            load(keys);
+            return false;
+        } catch (const std::exception& e) {
+            return std::string(e.what()).find(needle) != std::string::npos;
+        }
+    };
+    CHECK(refused("archives_accepted = [\"db/x.sql\"]\n", "must start with '/'"));
+    CHECK(refused("archives_accepted = [\"/\"]\n", "whole site"));
+    CHECK(refused("archives_accepted = [\"/a/../b.sql\"]\n", "segment"));
+    CHECK(refused("archives_accepted = [\"/a//b.sql\"]\n", "segment"));
+    CHECK(refused("archives_accepted = \"/a.sql\"\n", "must be a list"));
+    {
+        std::string many = "archives_accepted = [";
+        for (int i = 0; i < 65; ++i) many += (i ? ", " : "") + std::string("\"/f") + std::to_string(i) + ".sql\"";
+        CHECK(refused(many + "]\n", "at most 64"));
+    }
+    {
+        const Config cfg = load("app = \"static\"\narchives_accepted = [\"/db/\", \"/db/\", \"/dumps/my file+1.sql\"]\n");
+        CHECK(cfg.sites[0].archives_accepted == (std::vector<std::string>{"/db/", "/dumps/my file+1.sql"}));
+        const auto hf = control::health_findings(cfg, cfg, false, std::time(nullptr));
+        const auto f = std::find_if(hf.begin(), hf.end(), [](const control::Finding& x) { return x.code == "archives_in_root"; });
+        CHECK(f != hf.end() && f->severity == "warn" && f->site == "data.test" && f->message.find("served as they stand") != std::string::npos &&
+              f->message.find("4 more accepted") != std::string::npos && f->message.find("(served as /") != std::string::npos &&
+              f->fix.find("archives_accepted") != std::string::npos);
+    }
+    // On a managed site: the list taken whole and checked, carried in the spec and the file.
+    {
+        control::SiteSpec spec;
+        spec.domain = "m.test";
+        spec.https = "none";
+        spec.app = "static";
+        spec.root = dir.string();
+        spec.no_user = true;
+        spec.user_decided = true;
+        Config cfg;
+        cfg.config_path = cdir / "agensio.toml";
+        json::Value body;
+        std::string err;
+        CHECK(json::parse(R"J({"archives_accepted": ["/datasets/", "/world.sql.gz", "/world.sql.gz"]})J", body, err));
+        CHECK(control::apply_request(body, cfg, spec, err).empty() && err.empty() &&
+              spec.archives_accepted == (std::vector<std::string>{"/datasets/", "/world.sql.gz"}));
+        control::SiteSpec back;
+        CHECK(control::SiteSpec::from_json(spec.to_json(), back) && back.archives_accepted == spec.archives_accepted);
+        CHECK(control::render_site(spec, "x").find("\narchives_accepted = [\"/datasets/\", \"/world.sql.gz\"]") != std::string::npos);
+        CHECK(json::parse(R"J({"archives_accepted": ["world.sql.gz"]})J", body, err));
+        err.clear();
+        control::apply_request(body, cfg, back, err);
+        CHECK(err.find("archives_accepted") != std::string::npos && err.find("must start with '/'") != std::string::npos);
+        CHECK(json::parse(R"J({"archives_accepted": []})J", body, err));
+        err.clear();
+        CHECK(control::apply_request(body, cfg, spec, err).empty() && spec.archives_accepted.empty() &&
+              control::render_site(spec, "x").find("archives_accepted") == std::string::npos);
+    }
+    fs::remove_all(cdir);
     fs::remove_all(dir);
 }
 

@@ -1070,3 +1070,48 @@ curl -sI https://example.com/assets/app.3f9a1c2b.js | grep -i content-encoding  
 
 **Reference:** [Static site](../configuration.md#1-static-site) (pre-compressed files),
 [keys](../keys.md#cache).
+
+## A dataset or a sample database offered for download
+
+**When:** a static site publishes a database dump or a database file on purpose (an open dataset,
+the sample database of a tutorial), and health names it as a dump anyone can download.
+
+```toml
+# /etc/agensio/sites.d/data.example.com.toml
+[[site]]
+server_name = ["data.example.com"]
+listen = ["0.0.0.0:80"]
+root = "/var/www/data.example.com/web"
+app = "static"
+archives_accepted = ["/downloads/world-cities.sql.gz", "/datasets/"]   # published on purpose
+```
+
+**What it does.** Health's `archives_in_root` searches every served tree for backups and dumps.
+On a static site, or one without `app`, it names database dumps alone, since the site serves them
+as they stand: a `.sql` that holds data, `.sql.gz` and the other compressed dumps, `.sqlite`,
+`.db`, pg_dump's `.dump`; a `.zip` or a `.tar.gz` there is a download offered on purpose. The
+file `archives_accepted` names, and every file under the directory it names with a trailing `/`,
+is counted as accepted in the finding's message instead of being named. Nothing about serving
+changes: health alone reads the key. It holds exact paths and directories, never `/` alone, so a
+dump that lands anywhere else by mistake is still named. The finding gives each file's path as
+served, the form the key takes.
+
+**Check it.**
+
+```sh
+agensio -t -c /etc/agensio/agensio.toml && agensio reload
+agensio ctl health | grep -A3 archives_in_root        # nothing, or only what is not accepted
+```
+
+**On a managed site.** The flag is repeatable; given together they replace the list, and
+`--no-archives-accepted` clears it:
+
+```sh
+agensio ctl site-update data.example.com --archive-accepted /downloads/world-cities.sql.gz --archive-accepted /datasets/ --yes --reason "published on purpose"
+```
+
+**MCP:** `site_update` with `archives_accepted` `["/downloads/world-cities.sql.gz", "/datasets/"]`,
+once the user has confirmed that each file is meant to be downloaded by anyone.
+
+**Reference:** [Static site](../configuration.md#1-static-site) (dumps served as they stand),
+[keys](../keys.md) (`archives_accepted`).

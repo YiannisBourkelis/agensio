@@ -2196,6 +2196,17 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
         }
         if (site.login_paths.size() > 16) fail(where + ".login_paths: at most 16 paths");
     }
+    // The archives and dumps served on purpose (2026-10-17): health's archives_in_root counts them as
+    // accepted; never read when serving.
+    if (t.contains("archives_accepted")) {
+        if (!t["archives_accepted"].is_array())
+            fail(where + ".archives_accepted must be a list of paths as served from the site's root ([\"/downloads/world.sql.gz\"], a directory ending in \"/\")");
+        for (const auto& p : string_list(t["archives_accepted"], (where + ".archives_accepted").c_str())) {
+            if (const std::string why = check_accepted_path(p); !why.empty()) fail(where + ".archives_accepted: " + why);
+            if (std::find(site.archives_accepted.begin(), site.archives_accepted.end(), p) == site.archives_accepted.end()) site.archives_accepted.push_back(p);
+        }
+        if (site.archives_accepted.size() > 64) fail(where + ".archives_accepted: at most 64 paths");
+    }
     const std::string root_given = site.root;  // the project directory (open_basedir starts there)
     site.project_root = root_given;
     if (const PhpPreset* preset = php_preset(site.app)) {
@@ -2683,6 +2694,7 @@ void explain_config(const Config& cfg, std::ostream& out) {
             << (site.symlinks_deny ? "deny" : "allow") << "\"\n";
         out << "access_log = \"" << (site.access_log.empty() ? "off" : site.access_log) << "\"\n";
         if (!site.login_paths.empty()) print_list(out, "login_paths", site.login_paths);
+        if (!site.archives_accepted.empty()) print_list(out, "archives_accepted", site.archives_accepted);
         if (!site.refuse.empty()) {
             std::vector<std::string> texts;
             for (const auto& p : site.refuse.patterns) texts.push_back(p.text);
@@ -4311,6 +4323,26 @@ std::vector<std::string> preset_login_paths(const std::string& app) {
         out.emplace_back("/django-admin/login/");
     }
     return out;
+}
+
+std::string check_accepted_path(const std::string& p) {
+    const std::string shown = "'" + p.substr(0, 80) + (p.size() > 80 ? "...'" : "'");
+    if (p.empty() || p[0] != '/') return shown + " must start with '/' (a path as served from the site's root)";
+    if (p == "/") return "'/' would accept the whole site: name the files, or a directory ending in '/'";
+    if (p.size() > 1024) return shown + " is longer than 1024 characters";
+    for (const unsigned char c : p)
+        if (c < 0x20 || c == 0x7f) return shown + " holds a control character";
+    std::string_view rest(p);
+    rest.remove_prefix(1);
+    if (rest.ends_with('/')) rest.remove_suffix(1);  // a directory: all below it
+    while (true) {
+        const std::size_t slash = rest.find('/');
+        const std::string_view seg = rest.substr(0, slash);
+        if (seg.empty() || seg == "." || seg == "..") return shown + " has an empty, '.' or '..' segment: a normalised path as served";
+        if (slash == std::string_view::npos) break;
+        rest.remove_prefix(slash + 1);
+    }
+    return {};
 }
 
 std::string check_login_path(const std::string& p) {

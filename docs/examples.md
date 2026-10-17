@@ -64,6 +64,7 @@ start them and the warning goes. What a key needs (a reload, a restart, root) is
 - [An access log per site, and JSON logs](examples/basics.md#an-access-log-per-site-and-json-logs): `access_log`, `[log] format`, log rotation, and why JSON costs you fail2ban.
 - [Larger uploads for one site](examples/basics.md#larger-uploads-for-one-site): a site's own `max_body_size`, the 413 and its error-log line, and the PHP pool's upload limits.
 - [Pre-compressed files for clients that accept them](examples/basics.md#pre-compressed-files-for-clients-that-accept-them): `.br` and `.gz` copies beside a file, and `[cache] precompressed`.
+- [A dataset or a sample database offered for download](examples/basics.md#a-dataset-or-a-sample-database-offered-for-download): health names a dump on a static site, and `archives_accepted` records the ones published on purpose.
 
 ## PHP applications
 

@@ -1181,7 +1181,18 @@ bool sql_without_rows(const fs::path& file) {
 ArchivesInRoot archives_in_root(const SiteConfig& site, std::size_t budget) {
     ArchivesInRoot r;
     if (site.root.empty()) return r;
-    static const char* const kEndings[] = {".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".7z", ".rar", ".sql", ".sql.gz"};
+    static const char* const kArchives[] = {".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".7z", ".rar"};
+    // Dumps compressed in any of the usual ways, and database files themselves (the alpha.96 report:
+    // a static site serves them as they are; the PHP presets refuse .sqlite, .sqlite3 and .db).
+    static const char* const kDumps[] = {".sql", ".sql.gz", ".sql.bz2", ".sql.xz", ".sql.zst", ".sqlite", ".sqlite3", ".db", ".dump"};
+    r.dumps_only = site.app.empty() || site.app == "static";
+    std::string root = site.root;
+    while (root.size() > 1 && root.back() == '/') root.pop_back();
+    const auto accepted = [&](std::string_view served) {
+        for (const auto& a : site.archives_accepted)
+            if (a.back() == '/' ? served.starts_with(a) : served == a) return true;
+        return false;
+    };
     std::error_code ec;
     if (!fs::is_directory(site.root, ec)) return r;
     // Directories the preset never answers (Grav's backup/, logs/) are not one path away
@@ -1202,17 +1213,25 @@ ArchivesInRoot archives_in_root(const SiteConfig& site, std::size_t budget) {
         ++r.seen;
         std::string lower = name;
         for (char& c : lower) c = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
-        bool hit = false;
-        for (const char* e : kEndings) {
+        const auto ends = [&](const char* e) {
             const std::size_t n = std::strlen(e);
-            if (lower.size() > n && lower.compare(lower.size() - n, n, e) == 0) { hit = true; break; }
-        }
-        if (!hit) continue;
+            return lower.size() > n && lower.compare(lower.size() - n, n, e) == 0;
+        };
+        const bool dump = std::any_of(std::begin(kDumps), std::end(kDumps), ends);
+        if (!dump && (r.dumps_only || !std::any_of(std::begin(kArchives), std::end(kArchives), ends))) continue;
+        if (lower == "thumbs.db") continue;  // Windows' thumbnail cache, uploaded with the pictures
         if (application_schema(it->path(), lower)) continue;
         if (lower.ends_with(".sql") && sql_without_rows(it->path())) continue;
+        const std::string path = it->path().string();
+        const std::string served = path.size() > root.size() && path.compare(0, root.size(), root) == 0 ? path.substr(root.size()) : "/" + name;
+        if (accepted(served)) {
+            ++r.accepted;
+            continue;
+        }
         const std::uintmax_t size = it->file_size(ec);
         if (r.count++ == 0) {
-            r.example = it->path().string();
+            r.example = path;
+            r.example_served = served;
             r.example_bytes = ec ? 0 : static_cast<std::uint64_t>(size);
         }
     }
@@ -1626,16 +1645,26 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
     }
     // Backup archives and database dumps inside a served tree are one path or one preset
     // away from being public, whatever the preset refuses today.
+    // A static site and one without app too, for its dumps alone: it serves them as they stand (the
+    // alpha.96 report: a dump was downloadable there and health said nothing). What the owner serves on
+    // purpose is named in archives_accepted.
     for (const auto& s : running.sites) {
-        if (s.root.empty() || s.redirects_all || s.app.empty() || s.app == "static" || proxy_app(s.app)) continue;
+        if (s.root.empty() || s.redirects_all || proxy_app(s.app)) continue;
         const ArchivesInRoot a = archives_in_root(s, 2000);
         if (a.count == 0) continue;
         const std::string size = a.example_bytes >= 1024 * 1024 ? std::to_string((a.example_bytes + 512 * 1024) / (1024 * 1024)) + " MB"
                                                                 : std::to_string((a.example_bytes + 512) / 1024) + " KB";
-        add("warn", "archives_in_root", s.server_names.front(),
-            std::to_string(a.count) + " archive(s) or database dump(s) under the document root, e.g. " + a.example + " (" + size + ")" +
+        const std::string name = s.server_names.empty() ? std::string("*") : s.server_names.front();
+        add("warn", "archives_in_root", name,
+            (a.dumps_only ? std::to_string(a.count) + " database dump(s) under the document root, served as they stand: anyone can download them"
+                          : std::to_string(a.count) + " archive(s) or database dump(s) under the document root") +
+                ", e.g. " + a.example + " (served as " + a.example_served + ", " + size + ")" +
+                (a.accepted ? ", " + std::to_string(a.accepted) + " more accepted (archives_accepted)" : "") +
                 (a.seen >= 2000 ? ", the first 2000 files looked at" : ""),
-            "move backups and dumps out of the document root (a backup plugin's directory too) and delete stale ones; nothing served should hold a copy of the site");
+            "move backups and dumps out of the document root (a backup plugin's directory too) and delete stale ones; nothing served should hold a copy of the "
+            "site. One the owner serves on purpose is named in the site's archives_accepted, as served: [" + json::Value(a.example_served).dump() +
+                "], a directory ending in / for all below it (a managed site: site_update archives_accepted, agensio ctl site-update " + name +
+                " --archive-accepted PATH; otherwise the site file's key)");
     }
     // A server that trusts several proxies (two or more named sets: CDNs in front of different
     // sites): a site naming none of its own believes them all, so the customers of one CDN can name

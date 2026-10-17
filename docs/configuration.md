@@ -115,6 +115,30 @@ app = "php"
 encoded_slashes = "allow"      # the application encodes slashes inside path segments
 ```
 
+**Dumps served as they stand.** A static site serves every file of its root, so a database dump
+left there is a download anyone can make. Health's `archives_in_root` (section 4c) searches a
+static site and one without `app` for dumps: a `.sql` file that holds data (one whose statements
+all define tables does not count), `.sql.gz`, `.sql.bz2`, `.sql.xz`, `.sql.zst`, `.sqlite`,
+`.sqlite3`, `.db` (not Windows' `Thumbs.db`) and pg_dump's `.dump`; the message says they are
+served as they stand and names each with its path as served. Archives (`.zip`, `.tar.gz`, ...)
+are not named there: on a static site they are downloads offered on purpose. A dump the owner
+publishes on purpose (an open dataset, a tutorial's sample database) is recorded in
+`archives_accepted`, by its path as served or a directory ending in `/` for all below it:
+
+```toml
+[[site]]
+server_name = ["data.example.com"]
+app = "static"
+archives_accepted = ["/downloads/world-cities.sql.gz", "/datasets/"]   # published on purpose
+```
+
+Health counts those as accepted, in the finding's message, instead of naming them; the key serves,
+refuses and moves nothing, and holds exact paths and directories only (never `/` alone, at most
+64), so a dump that lands elsewhere by mistake is still named. It works on any site: on a PHP site
+it accepts an archive kept on purpose. Managed: `site_update`'s field of the same name, `agensio
+ctl site-update NAME --archive-accepted /downloads/world-cities.sql.gz` (repeatable, the list
+replaced; `--no-archives-accepted` clears it).
+
 ## 1b. Which site answers a request
 
 A site answers the names in its `server_name`, compared case-insensitively and without
@@ -460,9 +484,11 @@ signing salt inside (2026-09-23, a live host). `health` reports such a site as
 `preset_mismatch` with the application it detected (`bin/grav` and `system/defines.php`
 for Grav, `artisan`, `core/lib/Drupal.php`, `wp-config.php`) and the `app` to set;
 `site-create` warns the same way when the directory already holds files. Backup
-archives and database dumps under any served tree (`.zip`, `.tar.gz`, `.7z`, `.sql`,
-...) are reported as `archives_in_root`, whatever the preset refuses today: nothing
-served should hold a copy of the site. The SQL an application ships with its code is not
+archives and database dumps under any served tree (`.zip`, `.tar.gz`, `.7z`, `.sql`, `.sql.gz`
+and the other compressed dumps, `.sqlite`, `.db`, `.dump`, ...) are reported as
+`archives_in_root`, whatever the preset refuses today: nothing served should hold a copy of the
+site. A static site and one without `app` are searched for the dumps alone (section 1, where
+`archives_accepted` records the files served on purpose). The SQL an application ships with its code is not
 counted: TYPO3's `ext_tables.sql` and `ext_tables_static+adt.sql` in an extension's directory
 (beside its `ext_emconf.php` or `composer.json`), and an uncompressed `.sql` file of up to 64 KB
 whose statements all define tables (`CREATE TABLE`, `CREATE INDEX`, `CREATE VIEW`, `ALTER TABLE`,
