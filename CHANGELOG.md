@@ -40,6 +40,15 @@
   command, is no value when it starts with `-`: "WHO: FLAG needs a value", exit 2; a file so named is
   written `./-name`. Other values may still start with one (`--set k=-1`, a `--note`). Integration
   check, failing on alpha.97.
+- **Grav's exposure probe is the application's own** (the same report). On the live Grav site health
+  warned about `user/data/grav-security-probe.zip`, 32 bytes, which Grav's API plugin writes (with
+  `.dat`, `.json` and `.txt` siblings) to check that `user/data/` is not public, and writes again when
+  deleted: health had the owner delete it on 2026-10-16, and Grav's next update put it back. It was
+  never served (the preset answers 404 there). On an `app = "grav"` site that path, up to 1 KB, is not
+  counted (`kProbeFiles` in `control/commands.cpp`, by preset, path as served and size); the same name
+  on another site, a larger file of that name and any other archive in `user/data/` still are. Unit
+  test failing on alpha.97; the MCP text of `health_check` (never tell the user to delete it) and
+  `docs/configuration.md` 4c.
 
 ## 0.1.0-alpha.97 (2026-10-17)
 

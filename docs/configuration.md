@@ -492,7 +492,10 @@ archives and database dumps under any served tree (`.zip`, `.tar.gz`, `.7z`, `.s
 and the other compressed dumps, `.sqlite`, `.db`, `.dump`, ...) are reported as
 `archives_in_root`, whatever the preset refuses today: nothing served should hold a copy of the
 site. A static site and one without `app` are searched for the dumps alone (section 1, where
-`archives_accepted` records the files served on purpose). The SQL an application ships with its code is not
+`archives_accepted` records the files served on purpose). A file an application writes itself is
+not counted either: on a Grav site the API plugin's `user/data/grav-security-probe.zip` (32 bytes,
+up to 1 KB taken), which it writes to check that `user/data/` stays private and writes again when
+it is deleted; a larger file of that name, or any other archive there, still is. The SQL an application ships with its code is not
 counted: TYPO3's `ext_tables.sql` and `ext_tables_static+adt.sql` in an extension's directory
 (beside its `ext_emconf.php` or `composer.json`), and an uncompressed `.sql` file of up to 64 KB
 whose statements all define tables (`CREATE TABLE`, `CREATE INDEX`, `CREATE VIEW`, `ALTER TABLE`,

@@ -6758,6 +6758,27 @@ static void test_archives_in_root() {
     wrapped.app = "php";
     CHECK(control::archives_in_root(wrapped, 2000).count == 11);
     fs::remove_all(wdir);
+
+    // Grav's API plugin writes user/data/grav-security-probe.zip (32 bytes) to check that user/data is
+    // not public, and writes it again when it is deleted (the alpha.97 report): on a grav site that file,
+    // small, is the application's own; the same name elsewhere, a large one there, or another archive
+    // beside it is still counted.
+    const fs::path gdir = fs::temp_directory_path() / ("agensio-archives-grav-" + std::to_string(::getpid()));
+    fs::remove_all(gdir);
+    fs::create_directories(gdir / "user" / "data");
+    std::ofstream(gdir / "user" / "data" / "grav-security-probe.zip") << std::string(32, 'p');
+    SiteConfig grav;
+    grav.root = gdir.string();
+    grav.app = "grav";
+    CHECK(control::archives_in_root(grav, 2000).count == 0);
+    grav.app = "php";
+    CHECK(control::archives_in_root(grav, 2000).count == 1);
+    grav.app = "grav";
+    std::ofstream(gdir / "user" / "data" / "backup.zip") << "PK";
+    CHECK(control::archives_in_root(grav, 2000).count == 1);
+    std::ofstream(gdir / "user" / "data" / "grav-security-probe.zip") << std::string(2048, 'p');
+    CHECK(control::archives_in_root(grav, 2000).count == 2);
+    fs::remove_all(gdir);
 }
 
 // Files root loads or runs, written by agensio itself (the alpha.94 report): whole or not at all, with

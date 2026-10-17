@@ -1148,6 +1148,26 @@ UnreadableFiles unreadable_files(const SiteConfig& site, const std::vector<std::
 
 namespace {
 
+// Files an application writes under its own tree with an archive's ending and nothing of the site in
+// them, by preset, path as served and a size no real archive fits in: Grav's API plugin writes
+// user/data/grav-security-probe.zip (32 bytes, with .dat, .json and .txt siblings) to check that
+// user/data is not public, and writes it again when it is deleted (the alpha.97 report: health told
+// the owner to delete it, and Grav's next update put it back).
+struct ProbeFile {
+    const char* app;
+    const char* served;
+    std::uintmax_t max_bytes;
+};
+constexpr ProbeFile kProbeFiles[] = {
+    {"grav", "/user/data/grav-security-probe.zip", 1024},
+};
+
+bool application_probe(const SiteConfig& site, std::string_view served, std::uintmax_t bytes) {
+    for (const ProbeFile& p : kProbeFiles)
+        if (site.app == p.app && served == p.served && bytes <= p.max_bytes) return true;
+    return false;
+}
+
 // SQL an application ships with its code, which holds no copy of the site (the alpha.95 report: TYPO3's
 // typo3/sysext/extbase/ext_tables.sql named as a dump). The names TYPO3 reserves in an extension's
 // directory for its tables and their static rows count only there, beside the extension's
@@ -1240,6 +1260,7 @@ ArchivesInRoot archives_in_root(const SiteConfig& site, std::size_t budget) {
         if (lower.ends_with(".sql") && sql_without_rows(it->path())) continue;
         const std::string path = it->path().string();
         const std::string served = path.size() > root.size() && path.compare(0, root.size(), root) == 0 ? path.substr(root.size()) : "/" + name;
+        if (std::error_code sec; application_probe(site, served, it->file_size(sec)) && !sec) continue;
         if (accepted(served)) {
             ++r.accepted;
             continue;
