@@ -93,6 +93,12 @@ path = "/private/health"
 match = "exact"
 open = true
 
+# The fields another origin's page needs to call /private with its password (the CORS protocol): a
+# preflight, which never carries credentials (Fetch 3.3.5), must get them with an ok status (4.8).
+[[site.response_headers]]
+path = "/private"
+set = { "Access-Control-Allow-Origin" = "https://app.example", "Access-Control-Allow-Headers" = "Authorization", "Access-Control-Allow-Methods" = "GET" }
+
 [[site.auth]]
 path = "/office"
 users = "$T/users"
@@ -178,6 +184,20 @@ verifications() { curl -sS --unix-socket "$T/control.sock" http://control/v1/sta
 curl -sS -D "$T/h401" -o "$T/b401" $B/private/doc.html
 check "no credentials: 401 with a Basic challenge naming the realm, charset UTF-8, not stored" "401|Basic realm=\"Private\", charset=\"UTF-8\"|no-store" \
   "$(head -1 "$T/h401" | cut -d' ' -f2)|$(grep -i '^www-authenticate:' "$T/h401" | tr -d '\r' | cut -d' ' -f2-)|$(grep -i '^cache-control:' "$T/h401" | tr -d '\r' | cut -d' ' -f2)"
+# A CORS preflight (OPTIONS with Origin and Access-Control-Request-Method, Fetch 4.8) never carries
+# credentials (3.3.5): on a path agensio serves itself it is answered 204 with Allow and the site's
+# CORS fields before the password (the review of 2026-10-14, D7), so another origin's page can then
+# send its request with the password; that request, a plain OPTIONS and a preflight on an
+# application's path behind the password (which an application could answer with the page) are asked.
+pf() {  # path [extra curl options]: status, Access-Control-Allow-Origin, Allow, and whether a challenge came
+  curl -sS -D - -o /dev/null -X OPTIONS -H 'Origin: https://app.example' -H 'Access-Control-Request-Method: GET' -H 'Access-Control-Request-Headers: authorization' "${@:2}" "$B$1" |
+    tr -d '\r' | awk 'NR==1{c=$2} tolower($1)=="access-control-allow-origin:"{o=$2} tolower($1)=="allow:"{sub(/^[^ ]* /,""); a=$0} tolower($1)=="www-authenticate:"{w="challenge"} END{print c, o, a, w}'
+}
+check "a CORS preflight on a password-protected file: 204 with Allow and the site's CORS fields, no challenge; on a path without a file the same" \
+  "204 https://app.example GET, HEAD, OPTIONS  ; 204 https://app.example GET, HEAD, OPTIONS " "$(pf /private/doc.html) ; $(pf /private/nothing-here.json)"
+check "still asked: a plain OPTIONS, one with Origin only, a GET from that origin, a preflight to the proxied application behind the password" \
+  "401 401 401 401" \
+  "$(code -X OPTIONS $B/private/doc.html) $(code -X OPTIONS -H 'Origin: https://app.example' $B/private/doc.html) $(code -H 'Origin: https://app.example' $B/private/doc.html) $(code -X OPTIONS -H 'Origin: https://app.example' -H 'Access-Control-Request-Method: GET' $B/private/app/x)"
 check "the right password: 200 and the page; a wrong one and an unknown user: 401, the same page" "200 private doc|401 401 same" \
   "$(curl -sS -u anna:secret -w '%{http_code}' -o "$T/ok" $B/private/doc.html) $(cat "$T/ok")|$(code -u anna:wrong $B/private/doc.html) $(code -u nobody:secret $B/private/doc.html) $(cmp -s <(curl -sS -u anna:wrong $B/private/doc.html) <(curl -sS -u nobody:secret $B/private/doc.html) && echo same || echo differ)"
 

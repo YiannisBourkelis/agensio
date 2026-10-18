@@ -3465,7 +3465,11 @@ upgrade, check with `agensio -t --explain` that the rules are listed.
 
 A password in front of a path: a staging site, an admin area, a tool without a login of its
 own. The rules sit beside the access rules and are matched the same way, before any location
-is chosen; an exact rule on a script covers it run with path info too (section 19).
+is chosen; an exact rule on a script covers it run with path info too (section 19). Every
+method is asked but a CORS preflight on a path agensio serves itself (0.1.0-alpha.101): an
+`OPTIONS` with `Origin` and `Access-Control-Request-Method` never carries credentials, so it gets
+`204`, `Allow` and the site's response-header fields (the CORS fields among them) without the
+password; on an application's path it is asked ([auth.md](auth.md) 5.1).
 
 ```toml
 [addresses]

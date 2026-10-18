@@ -458,6 +458,16 @@ const std::string* listed_name(const SiteConfig& site, std::string_view name) {
 
 }  // namespace
 
+namespace {
+
+// A CORS preflight: OPTIONS with Origin and Access-Control-Request-Method (Fetch 4.8); headers read
+// only for an OPTIONS.
+bool cors_preflight(const Request& req) noexcept {
+    return req.method == Method::options && !req.headers.get("origin").empty() && !req.headers.get("access-control-request-method").empty();
+}
+
+}  // namespace
+
 // A path rule for this request (docs/redirects.md 5), or null: none on a path `refuse` answers (a
 // refused path is never redirected; the route checks it itself before the rules' own step).
 const RedirectRule* Dispatcher::path_rule(const SiteConfig& site, Stream& s, WorkerState& ws, bool check_refuse) {
@@ -669,8 +679,13 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
             return nullptr;
         }
     if (!site->access.empty() && !admit(s, *site, ws.path, ws)) return nullptr;
-    // [[site.auth]] after the address rules, before any location is chosen.
-    if (!site->auth.empty())
+    // [[site.auth]] after the address rules, before any location is chosen. A CORS preflight (OPTIONS
+    // with Origin and Access-Control-Request-Method, Fetch 4.8) never carries credentials (3.3.5) and
+    // fails the real request on any status but 2xx; on a path agensio answers itself it gets the
+    // OPTIONS answer below without the password: Allow and the site's fields, the same whether a
+    // file is there or not (the review of 2026-10-14, D7). An application's path keeps asking: one
+    // that does not look at the method would answer an OPTIONS with the protected page.
+    if (!site->auth.empty() && !(cors_preflight(req) && Router::location(*site, ws.path).kind == HandlerKind::static_))
         if (const AuthRule* rule = protecting_rule(*site, ws.path, ws.access_scratch)) switch (check_auth(s, *site, *rule, ws)) {
                 case AuthOutcome::allowed: break;
                 case AuthOutcome::answered: return nullptr;

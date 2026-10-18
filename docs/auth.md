@@ -132,7 +132,18 @@ the same readings the access rules judge. Each internal redirect (`try_files` fa
 front controller) and a directory's index file is checked again, so `/private/` serving
 `/private/index.php`, a fallback to `/index.php`, or a `.php` location cannot step around a
 rule (nginx's per-location `auth_basic` does not hold for a regex `.php` location; agensio's
-rules are not attached to locations at all). Every method is covered, OPTIONS and TRACE too.
+rules are not attached to locations at all). Every method is covered, OPTIONS and TRACE too,
+with one exception: a CORS preflight (an `OPTIONS` with `Origin` and
+`Access-Control-Request-Method`, which a browser sends before another origin's page may call the
+path) never carries credentials (Fetch 3.3.5) and blocks the call unless it gets a `2xx` (4.8).
+On a path agensio serves itself it gets the `OPTIONS` answer without the password: `204`, `Allow`
+and the site's `[[site.response_headers]]` (where the CORS fields come from), the same whether a
+file is there or not (0.1.0-alpha.101, the review's D7); the call that follows carries
+the password and is asked as any request. On an application's path (PHP, a proxied application,
+CGI) a preflight is asked like the rest: an application that does not look at the method would
+answer an `OPTIONS` with the protected page, which is what Apache's common `<LimitExcept OPTIONS>`
+recipe exposes. A cross-origin API behind a password answers its preflights itself only once a
+typed `cors` setting exists (not built).
 
 An exact rule covers its path and every request agensio runs as that same script: a PHP
 location with path info runs `/wp-login.php/x` as `/wp-login.php`, a CGI location runs
@@ -363,6 +374,7 @@ server.
 | `/private/` whose index file lives under another rule | the index is routed as its own request and decided by its own rule |
 | a `.php` location or a `try_files` fallback to `/index.php` | checked on every hop, so a fallback cannot step from an open path into a protected one |
 | HEAD, OPTIONS, TRACE, POST | all asked; the rules come before the method policy |
+| a CORS preflight (OPTIONS with `Origin` and `Access-Control-Request-Method`) | on a path agensio serves itself, `204` with `Allow` and the site's response-header fields, without the password (a preflight never carries one, Fetch 3.3.5); on an application's path, asked |
 | plain HTTP from another host | `403` and a page saying to use https, unless `plain_http = "allow"`; loopback and trusted https-forwarding proxies are asked |
 | a tunnel or TLS terminator on this host (in `trusted_proxies`) relaying a remote client's plain HTTP | `403`: the proxy's `X-Forwarded-Proto` and the client it names decide, not its own loopback address; with `X-Forwarded-Proto: https` the client is asked (before 0.1.0-alpha.61 it was asked either way) |
 | behind a CDN or a proxy | `skip_for` judges the client `X-Forwarded-For` names only when the proxy is in `trusted_proxies`; otherwise the proxy's address |

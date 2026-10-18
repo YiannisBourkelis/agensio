@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.0-alpha.101
+
+- **A CORS preflight on a password-protected file is answered** (the review of the redirects, HSTS and
+  response-header work, 2026-10-14, defect D7). A preflight, the `OPTIONS` with `Origin` and
+  `Access-Control-Request-Method` a browser sends before another origin's page may call a path, never
+  carries credentials (Fetch 3.3.5) and blocks the call on any status but `2xx` (4.8); agensio asked it
+  for the password, so a page on another origin could not call a protected path at all. On a path
+  agensio serves itself the preflight now gets the `OPTIONS` answer before the password: `204`,
+  `Allow` and the site's `[[site.response_headers]]`, the same whether a file is there or not; the
+  call that follows is asked as before. A plain `OPTIONS` and a preflight on an application's path
+  (PHP, a proxied application, CGI) are still asked: an application that does not look at the method
+  would answer an `OPTIONS` with the protected page (Apache's common `<LimitExcept OPTIONS>` recipe
+  lets it through). The password suite's checks failing before; `docs/auth.md` 5.1 and 9,
+  `docs/configuration.md` 19b.
+
 ## 0.1.0-alpha.100 (2026-10-18)
 
 - **Content types: root's `[mime_types]` and a site's `mime_types`** (`docs/configuration.md` 6c; the
