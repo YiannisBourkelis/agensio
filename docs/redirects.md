@@ -423,6 +423,21 @@ publish.
 `-t` and health list the other sites of this server that it binds, and warn about any of them
 without TLS: they would become unreachable.
 
+Subdomains on other servers are not seen, and a mistake binds them for the whole lifetime, so
+`includeSubDomains` is best raised in stages, each run for its whole lifetime before the next
+(hstspreload.org's deployment advice): five minutes, a week, a month, then a year or more. On a
+managed site the spec records since when the current lifetime has been sent (`hsts_since`), and
+health's `hsts_ramp` (info) names the next stage once a stage has run its lifetime with no
+certificate finding, with the `site_update` and `agensio ctl` lines for it, so the agent asks the
+user whether anything broke before raising it (0.1.0-alpha.102). Turning `subdomains` on with more
+than five minutes says so in the answer's `hsts_note`. A site file written before that has no date,
+and gets the finding once its next change of `hsts` records one. A host-only lifetime has no finding
+of its own: a week first when unsure, then a year, is the advice of the texts (4.1).
+
+```toml
+hsts = { max_age = "5m", subdomains = true }    # then "1w", "30d", "1y", each after the one before ran out
+```
+
 ### 4.5 Turning it off
 
 Browsers keep HSTS for its `max-age`, counted from the last answer that carried the field; an

@@ -4092,6 +4092,22 @@ static void test_control_sites() {
         SiteSpec ap0 = base;
         (void)at(R"({"hsts":"1y"})", ap0, t0);
         CHECK(at(R"({"hsts":0})", ap0, t0 + 50, app).first.empty() && ap0.hsts == "0" && ap0.hsts_held_until == t0 + 50 + 2 * year);
+        // The ramp (docs/redirects.md 4.4): since when the lifetime sent now has been sent; the same
+        // value again (another spelling of it too) or another field keeps the date; turning
+        // includeSubDomains on with more than five minutes says the usual stages.
+        SiteSpec rp = base;
+        auto [e4, n4] = at(R"({"hsts":{"max_age":"5m","subdomains":true}})", rp, t0);
+        CHECK(e4.empty() && rp.hsts_since == t0 && n4.empty());
+        CHECK(at(R"({"hsts":{"max_age":"1w","subdomains":true}})", rp, t0 + 400).second.empty() && rp.hsts_since == t0 + 400);
+        CHECK(at(R"({"hsts":{"max_age":604800,"subdomains":true}})", rp, t0 + 500).first.empty() && rp.hsts_since == t0 + 400);
+        CHECK(at(R"({"canonical":"shop.test"})", rp, t0 + 550).first.empty() && rp.hsts_since == t0 + 400);
+        CHECK(at(R"({"hsts":"1w"})", rp, t0 + 600).first.empty() && rp.hsts_since == t0 + 600);  // includeSubDomains dropped: another value
+        SiteSpec rp_back;
+        CHECK(SiteSpec::from_json(rp.to_json(), rp_back) && rp_back.hsts_since == t0 + 600);
+        auto [e5, n5] = at(R"({"hsts":{"max_age":"2y","subdomains":true}})", rp, t0 + 700);
+        CHECK(e5.empty() && rp.hsts_since == t0 + 700 && n5.find("\"5m\" first") != npos && n5.find("hsts_ramp") != npos);
+        CHECK(at(R"({"hsts":false})", rp, t0 + 800).first.empty() && rp.hsts == "0" && rp.hsts_since == 0);  // clearing
+        CHECK(at(R"({"hsts":"1w"})", rp, t0 + 900).first.empty() && rp.hsts_since == t0 + 900);
     }
     CHECK(text.find("user = \"shop\"") != std::string::npos && text.find("tls = \"auto\"") != std::string::npos);
     CHECK(text.find("\nhsts = \"1y\"   # Strict-Transport-Security: max-age=31536000 on every HTTPS answer") != std::string::npos && text.find("server_name = [\"shop.test\", \"www.shop.test\"]") != std::string::npos);
@@ -7488,6 +7504,46 @@ static void test_hsts_clearing_health() {
         const Finding* e = find(findings, "certificate_expiring");
         CHECK(!find(findings, "hsts_clearing") && !find(findings, "hsts_cleared") && e && e->severity == "error");
     }
+    // The ramp of includeSubDomains (docs/redirects.md 4.4): a stage that has run its whole lifetime
+    // with no certificate finding is followed by the next one, named with its value and the command.
+    cfg.sites[0].tls_fields.hsts = "max-age=300; includeSubDomains";
+    facts.served[tls.cert.string() + '\n' + tls.key.string()].not_after = now + 50 * day;
+    facts.served[tls.cert.string() + '\n' + tls.key.string()].days_left = 50;
+    spec.hsts = "5m";
+    spec.hsts_subdomains = true;
+    spec.hsts_held_until = 0;
+    spec.hsts_since = now - 301;
+    CHECK(control::write_site_file(control::site_file(cfg, "c.test"), control::render_site(spec, "2026-10-19"), err));
+    {
+        const auto findings = control::health_findings(cfg, cfg, false, now, &facts);  // kept: find points into it
+        const Finding* r = find(findings, "hsts_ramp");
+        CHECK(r && r->severity == "info" && r->message.find("max-age=300; includeSubDomains since " + control::utc_minute(now - 301)) != npos &&
+              r->message.find("max-age=604800") != npos && r->fix.find("hsts: {\"max_age\": \"1w\", \"subdomains\": true}") != npos &&
+              r->fix.find("agensio ctl site-update c.test --hsts 1w --hsts-subdomains") != npos && r->fix.find("(hsts: 300)") != npos &&
+              !find(findings, "hsts_clearing") && !find(findings, "hsts_cleared"));
+    }
+    spec.hsts_since = now - 100;  // the stage has not run its lifetime yet
+    CHECK(control::write_site_file(control::site_file(cfg, "c.test"), control::render_site(spec, "2026-10-19"), err));
+    CHECK(!find(control::health_findings(cfg, cfg, false, now, &facts), "hsts_ramp"));
+    spec.hsts_since = 0;  // a spec older than the date: unknown
+    CHECK(control::write_site_file(control::site_file(cfg, "c.test"), control::render_site(spec, "2026-10-19"), err));
+    CHECK(!find(control::health_findings(cfg, cfg, false, now, &facts), "hsts_ramp"));
+    spec.hsts_since = now - 40 * day;
+    CHECK(control::write_site_file(control::site_file(cfg, "c.test"), control::render_site(spec, "2026-10-19"), err));
+    cfg.sites[0].tls_fields.hsts = "max-age=2592000; includeSubDomains";  // a month: then a year
+    {
+        const auto findings = control::health_findings(cfg, cfg, false, now, &facts);  // kept: find points into it
+        const Finding* r = find(findings, "hsts_ramp");
+        CHECK(r && r->message.find("max-age=31536000") != npos && r->fix.find("--hsts 1y --hsts-subdomains") != npos);
+    }
+    cfg.sites[0].tls_fields.hsts = "max-age=31536000; includeSubDomains";  // a year: the ramp is done
+    CHECK(!find(control::health_findings(cfg, cfg, false, now, &facts), "hsts_ramp"));
+    cfg.sites[0].tls_fields.hsts = "max-age=300";  // host only: the texts say it, no finding
+    CHECK(!find(control::health_findings(cfg, cfg, false, now, &facts), "hsts_ramp"));
+    cfg.sites[0].tls_fields.hsts = "max-age=300; includeSubDomains";
+    facts.served[tls.cert.string() + '\n' + tls.key.string()].days_left = 3;  // a certificate finding holds it back
+    facts.served[tls.cert.string() + '\n' + tls.key.string()].not_after = now + 3 * day;
+    CHECK(!find(control::health_findings(cfg, cfg, false, now, &facts), "hsts_ramp"));
     fs::remove_all(dir);
 }
 

@@ -269,6 +269,7 @@ mistaken for one in service.
 | `hsts_narrows_application` | warn | the application sends a stronger `Strict-Transport-Security` than the site's `hsts` (a longer max-age, `includeSubDomains`, `preload`), and the site's replaces it | the site's `hsts` set to the value meant, or `hsts = false` to let the application's through |
 | `hsts_clearing` | info | a managed site turned `hsts` off and sends `max-age=0` until the date named, the end of the longest lifetime it sent | nothing until then, and keep HTTPS working; after it, `--no-hsts` again (2.7) |
 | `hsts_cleared` | info | that date has passed: no browser enforces the site's HSTS any more | `agensio ctl site-update NAME --no-hsts` stops sending the field |
+| `hsts_ramp` | info | a managed site with `subdomains` has sent its lifetime for the whole of it with no certificate finding | when nothing broke (subdomains on other servers too), the next stage it names: `5m`, `1w`, `30d`, `1y` ([redirects.md](redirects.md) 4.4) |
 | `proxy_scheme_missing` | warn | a trusted proxy sent requests without `X-Forwarded-Proto` to a site that redirects plain HTTP: its HTTPS visitors loop | the proxy sends `X-Forwarded-Proto`, or reaches the site over TLS ([redirects.md](redirects.md) 2.4) |
 | `app_redirects_elsewhere` | warn | a site with `canonical` whose application redirects its canonical home page to another of the site's names: a redirect loop | the application's own address set to the canonical name (the fix names the setting) |
 

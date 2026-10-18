@@ -35,6 +35,9 @@ struct SiteSpec {
     // hsts raises it to the change's time plus the lifetime sent until then); while hsts is "0" the
     // site is clearing until then, and a second false is refused (docs/redirects.md 4.5).
     std::int64_t hsts_held_until = 0;
+    // When the site began sending the lifetime it sends now (its value and includeSubDomains), for
+    // health's hsts_ramp (docs/redirects.md 4.4); 0 when it sends none, or the spec is older than that.
+    std::int64_t hsts_since = 0;
     std::string encoded_slashes;  // "" (deny, the default) | "allow": a %2F or %5C in the path decoded and looked up (2026-10-02)
     std::string canonical;        // the domain or an alias the other names redirect to (docs/redirects.md 3); "" none
     // The proxies that speak for this site (2026-10-13, docs/redirects.md 2.4): entries as written,

@@ -74,6 +74,7 @@ json::Value SiteSpec::to_json() const {
     if (!hsts.empty()) v.set("hsts", hsts);
     if (hsts_subdomains) v.set("hsts_subdomains", true);
     if (hsts_held_until > 0) v.set("hsts_held_until", static_cast<double>(hsts_held_until));
+    if (hsts_since > 0) v.set("hsts_since", static_cast<double>(hsts_since));
     v.set("hsts_decided", hsts_decided).set("user", user).set("no_user", user.empty()).set("group", group);
     if (encoded_slashes == "allow") v.set("encoded_slashes", encoded_slashes);
     if (!canonical.empty()) v.set("canonical", canonical);
@@ -113,6 +114,8 @@ bool SiteSpec::from_json(const json::Value& v, SiteSpec& out) {
     out.hsts_subdomains = v["hsts_subdomains"].boolean();
     if (v["hsts_held_until"].type() == json::Value::Type::number && v["hsts_held_until"].num() > 0 && v["hsts_held_until"].num() < 1e15)
         out.hsts_held_until = static_cast<std::int64_t>(v["hsts_held_until"].num());
+    if (v["hsts_since"].type() == json::Value::Type::number && v["hsts_since"].num() > 0 && v["hsts_since"].num() < 1e15)
+        out.hsts_since = static_cast<std::int64_t>(v["hsts_since"].num());
     out.hsts_decided = v["hsts_decided"].boolean() || !out.hsts.empty();
     out.encoded_slashes = v.get("encoded_slashes") == "allow" ? "allow" : "";
     out.canonical = v.get("canonical");
@@ -775,6 +778,7 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
             spec.hsts_subdomains = false;
             spec.hsts_decided = true;  // a no is kept as a no (docs/redirects.md 4.2)
             spec.hsts_unnamed = false;
+            spec.hsts_since = 0;
         };
         if (h.type() == json::Value::Type::boolean) {
             if (h.boolean()) {
@@ -795,6 +799,7 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
                 spec.hsts_subdomains = false;
                 spec.hsts_decided = true;
                 spec.hsts_unnamed = false;
+                spec.hsts_since = 0;
                 ctx.note = "every HTTPS answer of the site now carries Strict-Transport-Security: max-age=0, so each browser that visits forgets "
                            "its HSTS (RFC 6797 6.1.1); one that saw it may hold it until " + utc_minute(spec.hsts_held_until) +
                            ", the end of the lifetime it was sent. After that date hsts: false turns it off (health says hsts_cleared); "
@@ -833,10 +838,20 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
                 return needs;
             }
             hold();
+            // The ramp (docs/redirects.md 4.4): since when this lifetime has been sent; the same value
+            // given again (another spelling of it included) keeps the date.
+            const bool same = !spec.hsts.empty() && !spec.hsts_unnamed && now_sent == seconds && spec.hsts_subdomains == sub;
+            const bool subdomains_new = sub && (!spec.hsts_subdomains || spec.hsts.empty() || clearing);
+            if (!same) spec.hsts_since = seconds > 0 ? ctx.now : 0;
             spec.hsts = text;
             spec.hsts_subdomains = sub;
             spec.hsts_decided = true;
             spec.hsts_unnamed = false;
+            if (subdomains_new && seconds > 300)
+                ctx.note = "includeSubDomains binds every subdomain of " + spec.domain + ", on this server or another, to HTTPS for the whole "
+                           "lifetime, in every browser that saw it: the usual way is a ramp, \"5m\" first, then a week, a month and a year, "
+                           "each once the stage before has run its whole lifetime with nothing broken (hstspreload.org); health's hsts_ramp "
+                           "names each next stage";
             if (seconds == 0 && spec.hsts_held_until > ctx.now)
                 ctx.note = "every HTTPS answer of the site now carries Strict-Transport-Security: max-age=0, so each browser that visits forgets "
                            "its HSTS (RFC 6797 6.1.1); one that saw it may hold it until " + utc_minute(spec.hsts_held_until) +

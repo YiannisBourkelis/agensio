@@ -598,7 +598,8 @@ application sends itself, and never on a plain-HTTP answer. It is never on by de
 browser has seen it, it refuses plain http for that host until `max-age` runs out, so add it when
 https is known to work. The value is that lifetime, seconds or a duration (`"1w"` for a first try,
 `"1y"`, `"2y"`; `true`, which named none, is refused); `hsts = { max_age = "2y", subdomains = true }`
-adds `includeSubDomains`, only when every subdomain has https too. Removing the line later does not
+adds `includeSubDomains`, only when every subdomain has https too, best raised in stages from `"5m"`
+([redirects 4.4](../redirects.md#44-subdomains)). Removing the line later does not
 undo it for browsers that saw it: `hsts = 0` tells each returning browser to forget it, and stays
 until the old lifetime has run out (on a managed site `--no-hsts` does that by itself and names the
 date, [redirects 4.5](../redirects.md#45-turning-it-off)). A location's `add_headers`

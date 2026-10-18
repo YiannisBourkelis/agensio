@@ -50,17 +50,19 @@ rm -rf bench/tmp/sites.d; mkdir -p bench/tmp/sites.d bench/tmp/sites/created.tes
 sed -i '1i include = ["sites.d/*.toml"]' bench/tmp/agensio-test.toml
 # Locations (A4) on the plain site: an SPA fallback, an aliased root, an exact match and a
 # try_files status. Inserted after the site's `default = true` line.
+# The suite's certificates live in bench/tmp across runs and are made again a week before they
+# expire: a kept 30-day one ran out on 2026-10-19 and the origin verification check got 502.
 mkdir -p bench/tmp/certs-b
-[ -f bench/tmp/certs-b/cert.pem ] || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout bench/tmp/certs-b/key.pem -out bench/tmp/certs-b/cert.pem -days 30 -subj "/CN=b.test" >/dev/null 2>&1
+openssl x509 -checkend 604800 -noout -in bench/tmp/certs-b/cert.pem >/dev/null 2>&1 || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout bench/tmp/certs-b/key.pem -out bench/tmp/certs-b/cert.pem -days 30 -subj "/CN=b.test" >/dev/null 2>&1
 # The stalled WebSocket client's site (ws.test): a TLS connection is authoritative only for the
 # names of its certificate, so with localhost's the request is 421 and the client never sees a frame.
 mkdir -p bench/tmp/certs-ws
-[ -f bench/tmp/certs-ws/cert.pem ] || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout bench/tmp/certs-ws/key.pem -out bench/tmp/certs-ws/cert.pem -days 30 -subj "/CN=ws.test" >/dev/null 2>&1
+openssl x509 -checkend 604800 -noout -in bench/tmp/certs-ws/cert.pem >/dev/null 2>&1 || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout bench/tmp/certs-ws/key.pem -out bench/tmp/certs-ws/cert.pem -days 30 -subj "/CN=ws.test" >/dev/null 2>&1
 # A SAN certificate covering a.test and b.test (connection coalescing), a wildcard one, and
 # a copy of b's to swap back after the renewal-during-a-connection check.
 mkdir -p bench/tmp/certs-ab bench/tmp/certs-wild bench/tmp/certs-live
-[ -f bench/tmp/certs-ab/cert.pem ] || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout bench/tmp/certs-ab/key.pem -out bench/tmp/certs-ab/cert.pem -days 30 -subj "/CN=a.test" -addext "subjectAltName=DNS:a.test,DNS:b.test" >/dev/null 2>&1
-[ -f bench/tmp/certs-wild/cert.pem ] || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout bench/tmp/certs-wild/key.pem -out bench/tmp/certs-wild/cert.pem -days 30 -subj "/CN=*.wild.test" -addext "subjectAltName=DNS:*.wild.test" >/dev/null 2>&1
+openssl x509 -checkend 604800 -noout -in bench/tmp/certs-ab/cert.pem >/dev/null 2>&1 || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout bench/tmp/certs-ab/key.pem -out bench/tmp/certs-ab/cert.pem -days 30 -subj "/CN=a.test" -addext "subjectAltName=DNS:a.test,DNS:b.test" >/dev/null 2>&1
+openssl x509 -checkend 604800 -noout -in bench/tmp/certs-wild/cert.pem >/dev/null 2>&1 || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout bench/tmp/certs-wild/key.pem -out bench/tmp/certs-wild/cert.pem -days 30 -subj "/CN=*.wild.test" -addext "subjectAltName=DNS:*.wild.test" >/dev/null 2>&1
 cp bench/tmp/certs-b/cert.pem bench/tmp/certs-b/key.pem bench/tmp/certs-live/
 # The HttpArena benchmark handler is a build option: its site and checks run only when this
 # binary accepts handler = "httparena" (a three-item dataset stands in for the arena's).

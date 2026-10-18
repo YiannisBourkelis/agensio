@@ -2119,7 +2119,9 @@ hsts = false                                   # decided off
 ```
 
 `subdomains` (`includeSubDomains`) makes every subdomain HTTPS-only in browsers that saw it,
-including ones on other servers; a subdomain without TLS becomes unreachable. Preload is not
+including ones on other servers; a subdomain without TLS becomes unreachable. Raise it in stages
+(`"5m"`, `"1w"`, `"30d"`, `"1y"`, each after the one before ran its whole lifetime); on a managed site
+health's `hsts_ramp` names each next stage ([redirects.md](redirects.md) 4.4). Preload is not
 offered. A location's `add_headers` cannot carry `Strict-Transport-Security` (refused at load):
 until 0.1.0-alpha.75 it did, and reached neither the PHP pages nor the error answers. A managed
 site sets it with `site_update` `hsts: "1y"` (`agensio ctl site-update NAME --hsts 1y`, `--hsts-subdomains`

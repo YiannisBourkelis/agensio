@@ -1515,8 +1515,9 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
         // the last browser that saw a lifetime may hold it; past then nothing enforces it. A hand-written
         // hsts = 0 has no history, so nothing is said of it.
         SiteSpec managed;
-        const bool zero = s.hsts == SiteConfig::Hsts::on && parse_hsts(s.tls_fields.hsts).max_age == 0;
-        const bool clearing_file = zero && read_managed(site_file(running, name), managed);
+        const bool hsts_managed = s.hsts == SiteConfig::Hsts::on && read_managed(site_file(running, name), managed);
+        const HstsValue hsts_sent = parse_hsts(s.tls_fields.hsts);
+        const bool clearing_file = hsts_managed && hsts_sent.max_age == 0;
         const bool cleared = clearing_file && now >= managed.hsts_held_until;
         // With hsts on a visitor cannot click past a certificate error: the findings that lead to
         // one rise a level and say so (docs/redirects.md 4.2).
@@ -1644,6 +1645,23 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
                 "when the user agrees, the lifetime browsers commit to, in the site file: hsts = \"1y\" (site_update with hsts: \"1y\" on a managed "
                 "site; \"1w\" first for a site the user is less sure of); {\"max_age\": \"1y\", \"subdomains\": true} binds every subdomain too, only "
                 "once each has HTTPS; hsts = false records a decided no and silences this");
+        // The ramp of includeSubDomains (docs/redirects.md 4.4, hstspreload.org's deployment stages):
+        // a stage that has run its whole lifetime with no certificate finding here is followed by the
+        // next; a host-only site's lifetime is the user's to raise, said in the texts, never a finding.
+        static constexpr std::pair<std::uint64_t, std::string_view> kRamp[] = {{300, "5m"}, {604800, "1w"}, {2592000, "30d"}, {31536000, "1y"}};
+        const auto next = std::find_if(std::begin(kRamp), std::end(kRamp), [&](const auto& r) { return r.first > hsts_sent.max_age; });
+        if (hsts_managed && hsts_sent.subdomains && hsts_sent.max_age > 0 && managed.hsts_since > 0 && !cert_trouble && next != std::end(kRamp) &&
+            now - managed.hsts_since >= static_cast<std::time_t>(hsts_sent.max_age)) {
+            const std::string step = std::string(next->second);
+            add("info", "hsts_ramp", name,
+                "the site has sent Strict-Transport-Security: max-age=" + std::to_string(hsts_sent.max_age) + "; includeSubDomains since " +
+                    utc_minute(managed.hsts_since) + ", the whole of that lifetime, with no certificate finding here: the next stage of the "
+                    "ramp (hstspreload.org's: five minutes, a week, a month, then a year or more) is max-age=" + std::to_string(next->first),
+                "ask the user whether anything broke meanwhile: a subdomain without HTTPS (on this server or another: includeSubDomains binds "
+                "them all), a page with plain-HTTP parts, a certificate warning; when nothing did, site_update with hsts: {\"max_age\": \"" + step +
+                    "\", \"subdomains\": true} (agensio ctl site-update " + name + " --hsts " + step + " --hsts-subdomains); when something "
+                    "did, fix it first, or leave the subdomains out (hsts: " + std::to_string(hsts_sent.max_age) + ")");
+        }
         if (clearing_file && !cleared)
             add("info", "hsts_clearing", name,
                 "every HTTPS answer carries Strict-Transport-Security: max-age=0, so each browser that visits forgets the site's HSTS (RFC 6797 "

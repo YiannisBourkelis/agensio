@@ -2,6 +2,18 @@
 
 ## 0.1.0-alpha.102
 
+- **`includeSubDomains` in stages: health names the next one** (hstspreload.org's deployment advice:
+  five minutes, a week, a month, then a year or more, each run for its whole lifetime, since a mistake
+  binds every subdomain, on other servers too, for as long as the lifetime). A managed site's spec
+  records since when its current lifetime has been sent (`hsts_since`; the same value given again, in
+  any spelling, keeps the date), and health's `hsts_ramp` (info) names the next stage once a site with
+  `subdomains` has sent its stage for the whole of it with no certificate finding, with the
+  `site_update` and `agensio ctl` lines; the agent asks the user whether anything broke first. Turning
+  `subdomains` on with more than five minutes says the stages in the answer's `hsts_note`. A site file
+  from before has no date and gets the finding after its next change of `hsts`; a host-only lifetime
+  has no finding (the texts advise a week first, then a year). Unit tests failing before;
+  `docs/redirects.md` 4.4, `docs/configuration.md` 14, `docs/tls.md` 5, the cookbook, the MCP texts,
+  `agensio ctl`'s help.
 - **Turning HSTS off on a managed site clears it first** (RFC 6797 6.1.1 and 8.1: browsers keep a
   lifetime from the last answer that carried it, and an answer without the field changes nothing, so
   `hsts = false` left every visitor who had seen it enforcing it until their lifetime ran out, with no
