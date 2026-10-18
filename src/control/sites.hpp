@@ -20,8 +20,15 @@ struct SiteSpec {
     std::string https;  // "auto" | "none" | "manual"
     std::string cert, key;  // manual
     bool redirect_http = true;
-    bool hsts = false;
-    bool hsts_decided = false;  // hsts given at all: false is then rendered as a decided no (health stops suggesting it)
+    // HSTS (docs/redirects.md 4): the lifetime as given ("1y", "604800", "0" to clear; empty: none),
+    // at most two years on a managed site, with includeSubDomains when hsts_subdomains; hsts_decided
+    // records a no (false), rendered as hsts = false so health stops suggesting it.
+    std::string hsts;
+    bool hsts_subdomains = false;
+    bool hsts_decided = false;
+    // Read from a spec an earlier version wrote with hsts: true (a year, never named; refused since
+    // alpha.101): every change names the lifetime, or false, so none renders the site without HSTS.
+    bool hsts_unnamed = false;
     std::string encoded_slashes;  // "" (deny, the default) | "allow": a %2F or %5C in the path decoded and looked up (2026-10-02)
     std::string canonical;        // the domain or an alias the other names redirect to (docs/redirects.md 3); "" none
     // The proxies that speak for this site (2026-10-13, docs/redirects.md 2.4): entries as written,

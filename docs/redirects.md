@@ -159,7 +159,7 @@ canonical = "example2.com"
 listen = ["0.0.0.0:443"]
 root = "/var/www/example2.com/web"
 tls = "auto"                     # its own http = "redirect" also listens on port 80
-hsts = true
+hsts = "1y"
 ```
 
 | request on port 80 | from | answer |
@@ -346,8 +346,15 @@ answer it (built in alpha.84). A site that does not answer gives no finding here
 ### 4.1 On
 
 ```toml
-hsts = true        # Strict-Transport-Security: max-age=31536000 (a year), this host only
+hsts = "1y"        # Strict-Transport-Security: max-age=31536000 (a year), this host only
 ```
+
+The value is the lifetime itself, the commitment browsers make (RFC 6797 11.2 asks that a deployer
+set it willfully, never by default): a duration (`"5m"`, `"1w"`, `"1y"`, `"2y"`; s, m, h, d, w, y)
+or seconds (`604800`, the form applications publish), at most ten years in a site file and two
+through the control plane; `hsts = 0` has browsers forget it (4.5); a table adds subdomains (4.4).
+`hsts = true`, which named no lifetime and meant a year, is refused since 0.1.0-alpha.101, naming
+the form to write.
 
 The field goes on every answer the site gives over HTTPS: pages, files, PHP, a proxied
 application, errors and redirects. It is never sent over plain HTTP, where browsers must ignore it
@@ -366,14 +373,15 @@ health suggests it once HTTPS has proven itself:
 
 - **`hsts_suggested`** (info): a TLS site with no `hsts` line, not `http = "serve"`, that has served
   a real certificate (not the startup placeholder) for at least 7 days with no certificate finding
-  open. The fix is `hsts = true` (`site_update` with `hsts: true` for a managed site), with what it
+  open. The fix is `hsts = "1y"` (`site_update` with `hsts: "1y"` for a managed site, `"1w"` first when
+  the user is less sure), with what it
   commits to. Not raised for a site without TLS of its own (a proxy in front may set HSTS itself).
 - **An application that sends its own** (Kanboard's `ENABLE_HSTS`, Rails' `force_ssl`, Mastodon):
   on a site with no `hsts` line its field goes out as it is, and once one answer has carried it,
   health says so instead of the suggestion (`hsts_from_application`, info, with the value; built in
   alpha.87, the alpha.86 report). When no answer has carried it since the start, health asks the
   site once for its home page, by its canonical name, off the workers (alpha.91, the alpha.87/88
-  report's note), so the first health call after a start already knows. `hsts = true` would replace it, and with a weaker one when the
+  report's note), so the first health call after a start already knows. `hsts = "1y"` would replace it, and with a weaker one when the
   application's commits to more, which `hsts_narrows_application` would then report; the fix says
   `hsts = false` records that the application's is the one, or gives the `{ max_age, subdomains }`
   that matches it.
@@ -390,7 +398,7 @@ The agent never turns HSTS on by itself; it asks the user.
 A host records HSTS only from its own HTTPS answers. With `hsts` on, a plain request for a name
 that is not canonical therefore goes to HTTPS on the same name first:
 
-| request (`canonical = "www.example.com"`, `hsts = true`) | answer |
+| request (`canonical = "www.example.com"`, `hsts = "1y"`) | answer |
 |---|---|
 | `http://example.com/x` | `308 → https://example.com/x` |
 | `https://example.com/x` | `308 → https://www.example.com/x`, with HSTS |
@@ -421,7 +429,7 @@ Browsers keep HSTS for its `max-age`. Removing `hsts` therefore changes nothing 
 have it; to tell them to forget it, send `max_age = 0` for a while first (RFC 6797 6.1.1):
 
 ```toml
-hsts = { max_age = 0 }   # "forget this host's HSTS": keep it for as long as the old max-age, then remove
+hsts = 0   # "forget this host's HSTS": keep it for as long as the old max-age, then remove
 ```
 
 ### 4.6 Preload is not offered
@@ -824,7 +832,7 @@ root = "/var/www/example.com/web"
 app = "wordpress"
 user = "example"
 tls = "auto"
-hsts = true
+hsts = "1y"
 ```
 
 | request | answer |
@@ -863,7 +871,7 @@ root = "/var/www/example.com/web"
 app = "wordpress"
 user = "example"
 http = "redirect"
-hsts = true                        # sent on the answers the proxy marks https
+hsts = "1y"                        # sent on the answers the proxy marks https
 ```
 
 A WordPress multisite on subdomains has a host name per site: it keeps its names in
@@ -879,7 +887,7 @@ root = "/var/www/app.example.com"
 app = "laravel"
 user = "app"
 tls = "auto"
-hsts = true
+hsts = "1y"
 ```
 
 - **Laravel:** `APP_URL=https://app.example.com`. `URL::forceScheme('https')` and the
@@ -898,7 +906,7 @@ server_name = ["notes.example.com", "www.notes.example.com"]
 canonical = "notes.example.com"
 listen = ["0.0.0.0:443"]
 tls = "auto"
-hsts = true
+hsts = "1y"
 app = "node"
 root = "/var/www/notes.example.com/app"
 entry = "server.js"
@@ -935,7 +943,7 @@ the proxy.
 server_name = ["tracker.example.com"]
 listen = ["0.0.0.0:443"]
 tls = "auto"
-hsts = true
+hsts = "1y"
 app = "redmine"
 root = "/var/www/tracker.example.com/redmine"
 user = "tracker"
@@ -956,7 +964,7 @@ server_name = ["example.org", "www.example.org"]
 canonical = "example.org"
 listen = ["0.0.0.0:443"]
 tls = "auto"
-hsts = true
+hsts = "1y"
 app = "wagtail"
 project = "mysite"
 root = "/var/www/example.org/mysite"
@@ -979,7 +987,7 @@ listen = ["0.0.0.0:443"]
 root = "/var/www/example.net/public"
 app = "static"
 tls = "auto"
-hsts = true
+hsts = "1y"
 
 [[site.redirect]]
 from = "/old-landing.html"
@@ -1087,7 +1095,7 @@ design and `docs/headers.md` (notes, with every directive verbatim and its sourc
    certificate tool writing into the root, or Nextcloud's catch-all for `/.well-known/` copied as a
    redirect, would have sent the CA elsewhere.
 3. **`hsts` replaces the application's own and health names a stronger one** (4.1): eight of the
-   proxied applications can send HSTS, and four send more than `hsts = true` does.
+   proxied applications can send HSTS, and four send more than a year for this host does.
 4. **`max_age` takes plain seconds** (4.4): Mattermost, Paperless-ngx, Jellyfin and n8n publish
    theirs that way.
 5. **An exact rule matches its own path only**, so exact `/x` to `/x/` is legal (5.1): Grafana,

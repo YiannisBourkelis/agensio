@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -69,7 +70,10 @@ json::Value SiteSpec::to_json() const {
     json::Value v = json::Value::object();
     v.set("domain", domain).set("aliases", strings(aliases)).set("https", https);
     if (https == "manual") v.set("cert", cert).set("key", key);
-    v.set("redirect_http", redirect_http).set("hsts", hsts).set("hsts_decided", hsts_decided).set("user", user).set("no_user", user.empty()).set("group", group);
+    v.set("redirect_http", redirect_http);
+    if (!hsts.empty()) v.set("hsts", hsts);
+    if (hsts_subdomains) v.set("hsts_subdomains", true);
+    v.set("hsts_decided", hsts_decided).set("user", user).set("no_user", user.empty()).set("group", group);
     if (encoded_slashes == "allow") v.set("encoded_slashes", encoded_slashes);
     if (!canonical.empty()) v.set("canonical", canonical);
     if (own_trusted_proxies) v.set("trusted_proxies", strings(trusted_proxies));
@@ -103,8 +107,10 @@ bool SiteSpec::from_json(const json::Value& v, SiteSpec& out) {
     out.cert = v.get("cert");
     out.key = v.get("key");
     if (has_key(v, "redirect_http")) out.redirect_http = v["redirect_http"].boolean();
-    if (has_key(v, "hsts")) out.hsts = v["hsts"].boolean();
-    out.hsts_decided = v["hsts_decided"].boolean() || out.hsts;
+    if (v["hsts"].is_string()) out.hsts = v.get("hsts");  // the lifetime as given
+    out.hsts_unnamed = v["hsts"].type() == json::Value::Type::boolean && v["hsts"].boolean();  // an earlier version's true
+    out.hsts_subdomains = v["hsts_subdomains"].boolean();
+    out.hsts_decided = v["hsts_decided"].boolean() || !out.hsts.empty();
     out.encoded_slashes = v.get("encoded_slashes") == "allow" ? "allow" : "";
     out.canonical = v.get("canonical");
     out.own_trusted_proxies = has_key(v, "trusted_proxies");
@@ -720,9 +726,59 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
         }
     }
     if (has_key(body, "redirect_http")) spec.redirect_http = body["redirect_http"].boolean();
+    // hsts: the lifetime itself (RFC 6797 11.2: set willfully, never by default): a duration ("1w",
+    // "1y") or seconds, 0 to have browsers forget it, a {max_age, subdomains} object for
+    // includeSubDomains, or false, a decided no (docs/redirects.md 4.2). At most two years here, what
+    // applications publish and hstspreload's longest step; true, which named no lifetime, is refused.
     if (has_key(body, "hsts")) {
-        spec.hsts = body["hsts"].boolean();
-        spec.hsts_decided = true;  // a no is kept as a no (docs/redirects.md 4.2)
+        const json::Value& h = body["hsts"];
+        const std::string forms = "hsts is the lifetime browsers commit to: \"1w\" or \"1y\" (s, m, h, d, w, y; or seconds, 604800), 0 to have browsers "
+                                  "forget it, {\"max_age\": \"2y\", \"subdomains\": true} for every subdomain too, or false (decided off)";
+        json::Value age = h;
+        bool sub = false;
+        if (h.type() == json::Value::Type::boolean) {
+            if (h.boolean()) {
+                error = "hsts: true named no lifetime (it meant a year): give the lifetime, \"1y\" (or \"1w\" first); " + forms;
+                return needs;
+            }
+            spec.hsts.clear();
+            spec.hsts_subdomains = false;
+            spec.hsts_decided = true;  // a no is kept as a no (docs/redirects.md 4.2)
+            spec.hsts_unnamed = false;
+        } else {
+            if (h.is_object()) {
+                for (const auto& [k, _] : h.members())
+                    if (k != "max_age" && k != "subdomains") {
+                        error = "hsts: an object takes max_age and subdomains, not '" + k + "'; " + forms;
+                        return needs;
+                    }
+                if (!h["subdomains"].is_null() && h["subdomains"].type() != json::Value::Type::boolean) {
+                    error = "hsts.subdomains is true or false";
+                    return needs;
+                }
+                age = h["max_age"];
+                sub = h["subdomains"].type() == json::Value::Type::boolean && h["subdomains"].boolean();
+            }
+            std::string text;
+            if (age.type() == json::Value::Type::number && age.num() >= 0 && age.num() < 1e15 && age.num() == std::floor(age.num()))
+                text = std::to_string(static_cast<std::uint64_t>(age.num()));
+            else if (age.is_string())
+                text = age.str();
+            std::uint64_t seconds = 0;
+            if (text.empty() || !hsts_duration(text, 63072000, seconds)) {
+                error = "hsts: '" + (text.empty() ? std::string("?") : text) + "' is no lifetime of at most two years; " + forms;
+                return needs;
+            }
+            spec.hsts = text;
+            spec.hsts_subdomains = sub;
+            spec.hsts_decided = true;
+            spec.hsts_unnamed = false;
+        }
+    }
+    if (spec.hsts_unnamed) {  // rendered again without a lifetime, the site would drop the HSTS browsers hold
+        error = "this site's file says hsts = true, an earlier version's form that named no lifetime (it meant a year), refused since "
+                "0.1.0-alpha.101: name it with this change, hsts: \"1y\" (agensio ctl --hsts 1y) to keep what browsers were told, or hsts: false";
+        return needs;
     }
     if (has_key(body, "encoded_slashes")) {
         const std::string_view es = body.get("encoded_slashes");
@@ -1032,7 +1088,9 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
         error = "https as a table needs cert and key";
         return needs;
     }
-    if (spec.https != "none" && spec.hsts && !spec.redirect_http) {  // http = "serve" with hsts, refused at load too
+    std::uint64_t hsts_seconds = 0;
+    if (spec.https != "none" && !spec.hsts.empty() && hsts_duration(spec.hsts, 63072000, hsts_seconds) && hsts_seconds > 0 &&
+        !spec.redirect_http) {  // http = "serve" with hsts, refused at load too
         error = "hsts with redirect_http false: HSTS tells browsers to use only HTTPS, which contradicts serving plain HTTP on purpose; drop one of them";
         return needs;
     }
@@ -1210,8 +1268,17 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
             out += "http = { listen = " + toml_list({spec.listen_plain}) + (spec.redirect_http ? "" : ", mode = \"serve\"") + " }\n";
         else if (!spec.redirect_http)
             out += "http = \"serve\"\n";
-        if (spec.hsts) out += "hsts = true   # Strict-Transport-Security on every HTTPS answer, a year (docs/redirects.md 4)\n";
-        else if (spec.hsts_decided) out += "hsts = false   # decided off: health no longer suggests it (docs/redirects.md 4.2)\n";
+        if (!spec.hsts.empty()) {
+            std::uint64_t secs = 0;
+            (void)hsts_duration(spec.hsts, 63072000, secs);
+            const bool digits = spec.hsts.find_first_not_of("0123456789") == std::string::npos;
+            const std::string age = digits ? spec.hsts : toml_string(spec.hsts);
+            out += (spec.hsts_subdomains ? "hsts = { max_age = " + age + ", subdomains = true }" : "hsts = " + age) +
+                   "   # Strict-Transport-Security: max-age=" + std::to_string(secs) + (spec.hsts_subdomains ? "; includeSubDomains" : "") +
+                   " on every HTTPS answer (docs/redirects.md 4)\n";
+        } else if (spec.hsts_decided) {
+            out += "hsts = false   # decided off: health no longer suggests it (docs/redirects.md 4.2)\n";
+        }
     }
     if (spec.response_headers_baseline && !*spec.response_headers_baseline)
         out += "response_headers_baseline = false   # the preset's baseline of response fields off (docs/headers.md 4)\n";

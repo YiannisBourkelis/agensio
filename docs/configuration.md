@@ -853,7 +853,7 @@ cannot see what agensio does at the edge, so the file silences `security.W008` (
 redirect of plain http) when the site redirects to https and `security.W004`
 (Strict-Transport-Security) when the site has `hsts`, and nothing else: a warning left
 means something (on a TLS site without `hsts`, W004 stays until `site_update` with
-`hsts: true` sends the header on every answer; `check_deploy` sees the change at once). It
+`hsts: "1y"` sends the header on every answer; `check_deploy` sees the change at once). It
 holds no secret and names no host, so a new alias needs no new file, only a new unit.
 Running `django_settings` again replaces agensio's own earlier version of the file (it
 starts with `# Written by agensio (site task django_settings)`), keeping it as
@@ -978,8 +978,8 @@ A preset never overrides what the site writes itself:
 - A `[[site.location]]` that sets nothing but `path` (a prefix) and `add_headers` joins
   the location the preset, or the implicit `/`, makes at that path: its fields are added,
   a field of the same name replacing the preset's value, and everything else of the
-  preset's location stays. This is how `hsts = true` on a managed site reaches every
-  answer (its file carries such a `/` location). Before 0.1.0-alpha.36 it replaced the
+  preset's location stays. This is how an `add_headers` at `/` reaches every answer
+  the preset's locations give. Before 0.1.0-alpha.36 it replaced the
   preset's location: a proxy preset's site (`proxy`, `rails`, `redmine`, `django`,
   `wagtail`) with `hsts` served its `root` from disk instead of the application, source
   files included, and a PHP preset's site lost its front controller.
@@ -1990,7 +1990,7 @@ server_name = ["example.com", "www.example.com"]
 listen = ["0.0.0.0:443"]
 root = "/var/www/example/public"
 tls = "auto"
-hsts = true
+hsts = "1y"
 ```
 
 **Plain HTTP is the site's `http` key** (0.1.0-alpha.76, [redirects.md](redirects.md) 2), so one
@@ -2098,7 +2098,7 @@ status = 301
 Until 0.1.0-alpha.82 this was the string key `redirect = "https://www.example.org"`, refused now
 with the rule to write.
 
-**HSTS.** `hsts = true` sends `Strict-Transport-Security: max-age=31536000` (a year, this host
+**HSTS.** `hsts = "1y"` sends `Strict-Transport-Security: max-age=31536000` (a year, this host
 only) on every answer the site gives over HTTPS: pages, files, PHP, a proxied application, error
 pages and redirects. An application's own copy is replaced, so browsers see one; one that commits
 browsers to more (a longer `max-age`, `includeSubDomains`, `preload`) is noted in the error log and by
@@ -2106,11 +2106,15 @@ health (`hsts_narrows_application`, 0.1.0-alpha.86), and `hsts = false` lets it 
 answer never carries it (RFC 6797 7.2); behind a proxy that ends TLS, an answer the proxy marks
 `X-Forwarded-Proto: https` from `trusted_proxies` does. It is deliberately not automatic: once a
 browser has seen it, it refuses plain http for that host until `max-age` expires, so set it when
-the https site is known to work. The table form sets the rest:
+the https site is known to work. The value is the lifetime itself, the commitment browsers make
+(RFC 6797 11.2: set willfully, never by default); `hsts = true`, which named none and meant a year,
+is refused since 0.1.0-alpha.101, naming the form:
 
 ```toml
-hsts = { max_age = "2y", subdomains = true }   # seconds, or s m h d w y; at most ten years
-hsts = { max_age = 0 }                         # tells browsers to forget it: keep it for as long as the old max_age
+hsts = "1w"                                    # a duration: s, m, h, d, w, y ("1y", "2y"); at most ten years
+hsts = 604800                                  # or seconds, the form applications publish
+hsts = { max_age = "2y", subdomains = true }   # every subdomain too (includeSubDomains)
+hsts = 0                                       # tells browsers to forget it: keep it for as long as the old lifetime
 hsts = false                                   # decided off
 ```
 
@@ -2118,10 +2122,11 @@ hsts = false                                   # decided off
 including ones on other servers; a subdomain without TLS becomes unreachable. Preload is not
 offered. A location's `add_headers` cannot carry `Strict-Transport-Security` (refused at load):
 until 0.1.0-alpha.75 it did, and reached neither the PHP pages nor the error answers. A managed
-site sets it with `site_update` `hsts: true` (`agensio ctl site-update NAME --hsts`). Health suggests
+site sets it with `site_update` `hsts: "1y"` (`agensio ctl site-update NAME --hsts 1y`, `--hsts-subdomains`
+for `includeSubDomains`; at most two years there). Health suggests
 it (`hsts_suggested`, info) once the site has served a real certificate for a week with no
 certificate finding, or says the application already sends its own (`hsts_from_application`, with
-its value, which `hsts = true` would replace); `hsts = false` (`hsts: false`, `--no-hsts`) records a
+its value, which `hsts = "1y"` would replace, and the value that matches it); `hsts = false` (`hsts: false`, `--no-hsts`) records a
 decided no and silences that, and with `hsts` on the certificate findings `certificate_expiring` and `acme_renewal_failed`
 are errors ([redirects.md](redirects.md) 4.2).
 

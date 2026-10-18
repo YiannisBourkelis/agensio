@@ -176,6 +176,16 @@ if [ $ACCESS = 1 ]; then
   # A TLS site on 8449 that sends HSTS on the 1 KB answer: the site's hsts key (0.1.0-alpha.75 on),
   # or for a base before it the / location's add_headers, the same field on that answer; each
   # side gets the form its binary loads (start below).
+  # The lifetime named (0.1.0-alpha.101); a base before it takes hsts = true, one before alpha.75 add_headers.
+  cat > "$BENCH/tmp/ab-hsts-life.toml" <<HSTS_LIFE
+
+[[site]]
+server_name = ["*"]
+listen = ["127.0.0.1:8449"]
+root = "$BENCH/www"
+tls = { cert = "$BENCH/certs/cert.pem", key = "$BENCH/certs/key.pem" }
+hsts = "1y"
+HSTS_LIFE
   cat > "$BENCH/tmp/ab-hsts-key.toml" <<HSTS_KEY
 
 [[site]]
@@ -289,7 +299,7 @@ start() {  # binary
   fi
   if [ $ACCESS = 1 ]; then  # the HSTS site in the form this side loads
     local f
-    for f in ab-hsts-key.toml ab-hsts-loc.toml; do
+    for f in ab-hsts-life.toml ab-hsts-key.toml ab-hsts-loc.toml; do
       cat "$cfg" "$BENCH/tmp/$f" > "$BENCH/tmp/ab-side.toml"
       if "$1" -t -c "$BENCH/tmp/ab-side.toml" >/dev/null 2>&1; then cfg="$BENCH/tmp/ab-side.toml"; echo "  (hsts row: ${f#ab-hsts-})"; break; fi
     done

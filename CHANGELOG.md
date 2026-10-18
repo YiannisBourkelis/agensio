@@ -2,6 +2,20 @@
 
 ## 0.1.0-alpha.101
 
+- **`hsts` is a lifetime; `hsts = true` is refused** (RFC 6797 11.2: the lifetime is the site's
+  commitment, set willfully). `true` named none and meant a year, the commitment browsers keep for
+  that year with no way for a user to click past a certificate error (12.1), chosen without anyone
+  writing it. The site key is now the lifetime: seconds (`hsts = 604800`, the form applications
+  publish) or a duration (`"300s"`, `"1w"`, `"1y"`, `"2y"`; at most ten years), `0` to make browsers
+  forget it (6.1.1), `false` off and decided, or `{ max_age, subdomains }` for `includeSubDomains`;
+  `true` is refused at load with the form to write. A managed site takes the same through
+  `site_update`'s `hsts` (a string, seconds, `false`, or `{max_age, subdomains}`; `true` refused; at
+  most two years, the longest a preload list asks) and `agensio ctl --hsts LIFETIME
+  [--hsts-subdomains]`, rendered as written. Health's `hsts_suggested` fix names `"1y"`, `"1w"` first
+  when unsure; `hsts_from_application`'s names the value that matches the application's, with a note
+  when that is above the managed cap. RFC 6797 in `docs/rfc/`. Unit tests failing before, integration
+  checks through `-t` and `agensio ctl`; `docs/redirects.md` 4, `docs/configuration.md` 14,
+  `docs/tls.md` 2.7, the cookbook, the MCP texts, `agensio ctl`'s help.
 - **A long lifetime where a single-page fallback answers is noted** (the review of 2026-10-14, D8's
   second part: `docs/headers.md` 3.5 and 7 promised it). On a site whose `try_files` falls back to a
   file agensio serves (an application's shell, `/index.html`), a `[[site.response_headers]]` rule

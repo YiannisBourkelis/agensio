@@ -2459,7 +2459,7 @@ static void test_tasks() {
               hr.add_headers.size() == 1 && hr.add_headers[0].first == "X-Robots-Tag");
         CHECK(!app_context(hc, hc.sites[0]).hsts && !app_context(hc, hc.sites[0]).https_redirect);
         write("hh.toml", "[[site]]\nserver_name = [\"h.test\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"app\"\napp = \"django\"\nproject = \"blog\"\n"
-                         "upstream = \"http://127.0.0.1:3009\"\nhsts = true\nhttp = \"redirect\"\n");  // behind a proxy that holds the certificate
+                         "upstream = \"http://127.0.0.1:3009\"\nhsts = \"1y\"\nhttp = \"redirect\"\n");  // behind a proxy that holds the certificate
         const Config hh = load_config(dir / "hh.toml");
         CHECK(app_context(hh, hh.sites[0]).hsts && app_context(hh, hh.sites[0]).https_redirect);  // the site's keys tell Django's settings (security.W004)
         write("hr.toml", rails + hsts_loc);
@@ -2484,7 +2484,7 @@ static void test_tasks() {
             hs.cert = (dir / "c" / "c.pem").string();
             hs.key = (dir / "c" / "k.pem").string();
             hs.redirect_http = true;
-            hs.hsts = true;
+            hs.hsts = "1y";
             hs.user_decided = true;
             hs.app = "django";
             hs.project = "blog";
@@ -2493,7 +2493,7 @@ static void test_tasks() {
             hs.listen_plain = "127.0.0.1:1";
             hs.listen_tls = "127.0.0.1:2";
             const std::string file = control::render_site(hs, "x");
-            CHECK(file.find("\nhsts = true") != npos && file.find("add_headers = { \"Strict-Transport-Security\"") == npos);
+            CHECK(file.find("\nhsts = \"1y\"") != npos && file.find("add_headers = { \"Strict-Transport-Security\"") == npos);
         }
         // The unit: PATH names each directory once (alpha.35 report, P4 d).
         write("p.toml", wag);
@@ -3435,14 +3435,14 @@ static void test_acme() {
             CHECK_EQ(up(v), std::string("kept"));
         const Config d = load_one(acme + "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:8443\"]\n" + root + "http = { listen = [\"8080\"], mode = \"serve\" }\n");
         CHECK(d.sites[0].http == SiteConfig::Http::serve && !d.sites[0].http_redirect && d.sites[0].http_listen == std::vector<std::string>({"0.0.0.0:8080"}));
-        const Config e = load_one(acme + "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:443\"]\n" + root + "http = \"off\"\nhsts = true\n");
+        const Config e = load_one(acme + "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:443\"]\n" + root + "http = \"off\"\nhsts = \"1y\"\n");
         CHECK(e.sites[0].http == SiteConfig::Http::off && e.sites[0].http_listen.empty() && e.sites[0].http_given);
     }
     const std::string on443 = acme + "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:443\"]\n" + root;
     const std::string on8443 = acme + "[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:8443\"]\n" + root;
     CHECK(refused(on8443 + "http = \"redirect\"\n", "listens on no port 443: name the plain addresses, http = { listen"));
     CHECK(refused(on8443 + "http = \"serve\"\n", "mode = \"serve\" }"));
-    CHECK(refused(on443 + "http = \"serve\"\nhsts = true\n", "contradicts serving plain HTTP on purpose"));
+    CHECK(refused(on443 + "http = \"serve\"\nhsts = \"1y\"\n", "contradicts serving plain HTTP on purpose"));
     CHECK(refused(on443 + "http = \"sometimes\"\n", ".http must be \"redirect\", \"serve\", \"off\""));
     CHECK(refused(on443 + "http = { listen = [\"127.0.0.1:443\"] }\n", "is one of the site's TLS addresses"));
     CHECK(refused(on443 + "http = { listen = [] }\n", "http.listen names the plain addresses"));
@@ -3450,9 +3450,9 @@ static void test_acme() {
     CHECK(refused(on443 + "http = { listen = [\"127.0.0.1:80\"], port = 80 }\n", "port"));
     CHECK(refused(plain + "root = \"" + dir.string() + "\"\nhttp = \"off\"\n", "leaves it nothing to answer"));
     CHECK(refused(plain + "root = \"" + dir.string() + "\"\nhttp = { listen = [\"127.0.0.1:81\"] }\n", "answers plain HTTP on its own listen addresses"));
-    CHECK(refused(plain + "root = \"" + dir.string() + "\"\nhsts = true\n", "(behind a proxy that holds the certificate: http = \"redirect\")"));
+    CHECK(refused(plain + "root = \"" + dir.string() + "\"\nhsts = \"1y\"\n", "(behind a proxy that holds the certificate: http = \"redirect\")"));
     {   // without TLS: served, or redirected when a proxy in front holds the certificate
-        const Config c = load_one(plain + "root = \"" + dir.string() + "\"\nhttp = \"redirect\"\nhsts = true\n");
+        const Config c = load_one(plain + "root = \"" + dir.string() + "\"\nhttp = \"redirect\"\nhsts = \"1y\"\n");
         CHECK(c.sites[0].http_redirect && c.sites[0].http_listen.empty());
     }
     // Port 80 beside 443 meets the other sites there as a plain site: a name once per address, one
@@ -3929,7 +3929,7 @@ static void test_control_sites() {
     spec.aliases = {"www.shop.test"};
     spec.app = "laravel";  // the "weird" probe left its value behind
     // Rendering: HTTPS-only with the redirect site, the managed header round-trips.
-    spec.hsts = true;
+    spec.hsts = "1y";
     const std::string text = render_site(spec, "2026-09-18");
     CHECK(text.starts_with(kManagedMarker));
     CHECK(text.find("redirect = ") == std::string::npos && text.find("\nhttp =") == std::string::npos);  // one block, port 80 beside 443 by default
@@ -3944,10 +3944,10 @@ static void test_control_sites() {
         CHECK(render_site(other, "x").find("http = { listen = [\"127.0.0.1:8452\"], mode = \"serve\" }\n") != std::string::npos);
         SiteSpec serve = spec;
         serve.redirect_http = false;
-        serve.hsts = false;
+        serve.hsts.clear();
         CHECK(render_site(serve, "x").find("\nhttp = \"serve\"\n") != std::string::npos);
         std::string e;
-        CHECK(json::parse(R"({"redirect_http":false,"hsts":true})", body, err));
+        CHECK(json::parse(R"({"redirect_http":false,"hsts":"1y"})", body, err));
         (void)apply_request(body, cfg, serve, e);
         CHECK(e.find("hsts with redirect_http false") != std::string::npos);
         // canonical: the domain or an alias, rendered as the key; an alias removed under it is refused
@@ -3991,22 +3991,56 @@ static void test_control_sites() {
         CHECK(re.empty() && rd.redirects.items().empty() && render_site(rd, "x").find("[[site.redirect]]") == std::string::npos);
         // hsts: false given is a decided no, rendered so health stops suggesting it (alpha.84)
         SiteSpec no_hsts = rd;
-        no_hsts.hsts = false;
+        no_hsts.hsts.clear();
         no_hsts.hsts_decided = false;
         CHECK(render_site(no_hsts, "x").find("\nhsts") == std::string::npos);
         CHECK(json::parse(R"({"hsts":false})", body, err));
         (void)apply_request(body, cfg, no_hsts, re);
         CHECK(no_hsts.hsts_decided && render_site(no_hsts, "x").find("\nhsts = false") != std::string::npos);
         SiteSpec no_back;
-        CHECK(SiteSpec::from_json(no_hsts.to_json(), no_back) && no_back.hsts_decided && !no_back.hsts);
+        CHECK(SiteSpec::from_json(no_hsts.to_json(), no_back) && no_back.hsts_decided && no_back.hsts.empty());
+        // The lifetime itself (0.1.0-alpha.101, RFC 6797 11.2): a duration or seconds, 0, an object with
+        // subdomains; at most two years on a managed site; true named none and is refused.
+        auto hsts = [&](const char* text, SiteSpec& sp) {
+            std::string e;
+            json::Value b;
+            CHECK(json::parse(text, b, err));
+            (void)apply_request(b, cfg, sp, e);
+            return e;
+        };
+        constexpr auto npos = std::string::npos;
+        SiteSpec hs = rd;
+        CHECK(hsts(R"({"hsts":"1w"})", hs).empty() && hs.hsts == "1w" && !hs.hsts_subdomains &&
+              render_site(hs, "x").find("\nhsts = \"1w\"   # Strict-Transport-Security: max-age=604800 on every HTTPS answer") != npos);
+        CHECK(hsts(R"({"hsts":604800})", hs).empty() && hs.hsts == "604800" && render_site(hs, "x").find("\nhsts = 604800   #") != npos);
+        CHECK(hsts(R"({"hsts":0})", hs).empty() && hs.hsts == "0" && render_site(hs, "x").find("\nhsts = 0   # Strict-Transport-Security: max-age=0") != npos);
+        CHECK(hsts(R"({"hsts":{"max_age":"2y","subdomains":true}})", hs).empty() && hs.hsts == "2y" && hs.hsts_subdomains &&
+              render_site(hs, "x").find("\nhsts = { max_age = \"2y\", subdomains = true }   # Strict-Transport-Security: max-age=63072000; includeSubDomains") != npos);
+        SiteSpec hs_back;
+        CHECK(SiteSpec::from_json(hs.to_json(), hs_back) && hs_back.hsts == "2y" && hs_back.hsts_subdomains);
+        CHECK(hsts(R"({"hsts":true})", hs).find("named no lifetime") != npos && hs.hsts == "2y");  // refused, the site unchanged
+        CHECK(hsts(R"({"hsts":"3y"})", hs).find("at most two years") != npos && hsts(R"({"hsts":"soon"})", hs).find("no lifetime") != npos);
+        CHECK(hsts(R"({"hsts":{"max_age":"1y","sub":true}})", hs).find("takes max_age and subdomains") != npos);
+        CHECK(hsts(R"({"hsts":{"subdomains":true}})", hs).find("no lifetime") != npos);
+        CHECK(hsts(R"({"hsts":false})", hs).empty() && hs.hsts.empty() && hs.hsts_decided && !hs.hsts_subdomains);
+        // A spec an earlier version wrote with hsts: true (a year, never named): no change renders it
+        // without HSTS; every change names the lifetime, or false, until it does.
+        json::Value old_spec = rd.to_json();
+        old_spec.set("hsts", true).set("hsts_decided", true);
+        SiteSpec old;
+        CHECK(SiteSpec::from_json(old_spec, old) && old.hsts.empty() && old.hsts_unnamed);
+        SiteSpec kept = old;
+        CHECK(hsts(R"({"redirect_http":true})", kept).find("hsts: \"1y\"") != npos);
+        CHECK(hsts(R"({"hsts":"1y"})", (kept = old)).empty() && kept.hsts == "1y" && !kept.hsts_unnamed);
+        CHECK(hsts(R"({"hsts":false})", (kept = old)).empty() && kept.hsts.empty() && kept.hsts_decided && !kept.hsts_unnamed);
     }
     CHECK(text.find("user = \"shop\"") != std::string::npos && text.find("tls = \"auto\"") != std::string::npos);
-    CHECK(text.find("\nhsts = true") != std::string::npos && text.find("server_name = [\"shop.test\", \"www.shop.test\"]") != std::string::npos);
+    CHECK(text.find("\nhsts = \"1y\"   # Strict-Transport-Security: max-age=31536000 on every HTTPS answer") != std::string::npos && text.find("server_name = [\"shop.test\", \"www.shop.test\"]") != std::string::npos);
     std::filesystem::create_directories(dir / "sites.d");
     err.clear();
     CHECK(write_site_file(site_file(cfg, "shop.test"), text, err) && err.empty());
     SiteSpec back;
-    CHECK(read_managed(site_file(cfg, "shop.test"), back) && back.domain == "shop.test" && back.user == "shop" && back.user_decided && back.hsts && back.aliases.size() == 1);
+    CHECK(read_managed(site_file(cfg, "shop.test"), back) && back.domain == "shop.test" && back.user == "shop" && back.user_decided && back.hsts == "1y" && back.aliases.size() == 1);
     {   // a managed file the configuration set aside, found by its domain or an alias (alpha.78: site_update renders it again)
         Config held = cfg;
         held.held_back.push_back({site_file(cfg, "shop.test").string(), "refused"});
@@ -7150,7 +7184,12 @@ static void test_hsts_key() {
             return std::string("refused: ") + e.what();
         }
     };
-    CHECK_EQ(value("hsts = true\n"), std::string("max-age=31536000"));
+    // The lifetime itself (0.1.0-alpha.101, RFC 6797 11.2: set willfully): a duration or seconds, as a string too.
+    CHECK_EQ(value("hsts = \"1y\"\n"), std::string("max-age=31536000"));
+    CHECK_EQ(value("hsts = \"1w\"\n"), std::string("max-age=604800"));
+    CHECK_EQ(value("hsts = 604800\n"), std::string("max-age=604800"));
+    CHECK_EQ(value("hsts = \"300\"\n"), std::string("max-age=300"));
+    CHECK_EQ(value("hsts = 0\n"), std::string("max-age=0"));  // browsers forget it (6.1.1)
     CHECK_EQ(value("hsts = { max_age = \"2y\", subdomains = true }\n"), std::string("max-age=63072000; includeSubDomains"));
     CHECK_EQ(value("hsts = { max_age = 63072000 }\n"), std::string("max-age=63072000"));
     CHECK_EQ(value("hsts = { max_age = \"1d\" }\n"), std::string("max-age=86400"));
@@ -7158,7 +7197,7 @@ static void test_hsts_key() {
     CHECK_EQ(value("hsts = { max_age = 315360000 }\n"), std::string("max-age=315360000"));
     CHECK_EQ(value("hsts = false\n"), std::string());
     CHECK_EQ(value(""), std::string());
-    site("hsts = true\n");
+    site("hsts = \"1y\"\n");
     CHECK(load_config(dir / "h.toml").sites[0].tls_fields.h1 == "Strict-Transport-Security: max-age=31536000\r\n");
     site("hsts = false\n");
     CHECK(load_config(dir / "h.toml").sites[0].hsts == SiteConfig::Hsts::off);
@@ -7173,9 +7212,12 @@ static void test_hsts_key() {
     CHECK(refused("hsts = { max_age = \"11y\" }\n", "at most ten years"));
     CHECK(refused("hsts = { max_age = \"2x\" }\n", ".hsts.max_age must be seconds"));
     CHECK(refused("hsts = { max_age = -1 }\n", ".hsts.max_age must be seconds"));
-    CHECK(refused("hsts = { subdomains = \"yes\" }\n", ".hsts.subdomains must be true or false"));
-    CHECK(refused("hsts = { preload = true }\n", "unknown key 'preload'"));
-    CHECK(refused("hsts = \"on\"\n", ".hsts must be true, false or a table"));
+    CHECK(refused("hsts = { max_age = \"1y\", subdomains = \"yes\" }\n", ".hsts.subdomains must be true or false"));
+    CHECK(refused("hsts = { max_age = \"1y\", preload = true }\n", "unknown key 'preload'"));
+    CHECK(refused("hsts = \"on\"\n", ".hsts must be a lifetime at most ten years"));
+    // true named no lifetime (it meant a year): refused, naming the form (no old forms are kept).
+    CHECK(refused("hsts = true\n", "hsts = true named no lifetime") && refused("hsts = true\n", "hsts = \"1y\""));
+    CHECK(refused("hsts = { subdomains = true }\n", "name max_age") && refused("hsts = \"11y\"\n", "at most ten years"));
     CHECK(refused("[[site.location]]\npath = \"/\"\nadd_headers = { \"Strict-Transport-Security\" = \"max-age=31536000\" }\n",
                   "Strict-Transport-Security is the site's hsts key"));
     fs::remove_all(dir);
@@ -7397,7 +7439,8 @@ static void test_served_certificates() {
     {
         const auto findings = control::health_findings(cfg, cfg, false, now, &facts);  // kept: find points into it
         const Finding* h = find(findings, "hsts_suggested");
-        CHECK(h && h->severity == "info" && h->fix.find("hsts: true") != npos && h->fix.find("hsts = false records a decided no") != npos);
+        CHECK(h && h->severity == "info" && h->fix.find("site_update with hsts: \"1y\"") != npos && h->fix.find("hsts = \"1y\"") != npos &&
+              h->fix.find("hsts = false records a decided no") != npos);
     }
     facts.served[pair].not_before = now - 3 * day;  // renewed three days ago: a week is not up
     CHECK(!find(control::health_findings(cfg, cfg, false, now, &facts), "hsts_suggested"));
@@ -7419,14 +7462,14 @@ static void test_served_certificates() {
         const auto f = control::health_findings(cfg, cfg, false, now, &facts);
         const Finding* a = find(f, "hsts_from_application");
         CHECK(!find(f, "hsts_suggested") && a && a->severity == "info" && a->message.find("max-age=63072000; includeSubDomains") != npos &&
-              a->fix.find("hsts = false records") != npos && a->fix.find("weaker") != npos &&
-              a->fix.find("hsts = { max_age = 63072000, subdomains = true }") != npos);
+              a->fix.find("hsts = false records") != npos && a->fix.find("narrow the application's") != npos &&
+              a->fix.find("hsts = { max_age = 63072000, subdomains = true }") != npos && a->fix.find("hsts: {\"max_age\": 63072000, \"subdomains\": true}") != npos);
     }
     facts.application_hsts[site_name] = {"max-age=31536000", now - 600};  // the same as a year: no warning of a weaker one
     {
         const auto findings = control::health_findings(cfg, cfg, false, now, &facts);  // kept: find points into it
         const Finding* a = find(findings, "hsts_from_application");
-        CHECK(a && a->fix.find("weaker") == npos && a->fix.find("replacing the application's") != npos);
+        CHECK(a && a->fix.find("narrow") == npos && a->fix.find("hsts = 31536000 (site_update with hsts: 31536000)") != npos);
     }
     cfg.sites[0].hsts = SiteConfig::Hsts::off;  // decided: nothing said either way
     {

@@ -511,7 +511,7 @@ void parse_location(const toml::table& t, const fs::path& base_dir, SiteConfig& 
     else if (t.contains("add_headers")) fail(where + ": 'add_headers' must be a table");
     for (const auto& h : loc.add_headers)  // one way to send HSTS (2026-10-13, docs/redirects.md 4)
         if (Headers::iequals(h.first, "Strict-Transport-Security"))
-            fail(where + ".add_headers: Strict-Transport-Security is the site's hsts key (hsts = true, or hsts = { max_age = \"2y\", "
+            fail(where + ".add_headers: Strict-Transport-Security is the site's hsts key (hsts = \"1y\", or hsts = { max_age = \"2y\", "
                          "subdomains = true }), which sends it on every HTTPS answer of the site; a location's add_headers reached "
                          "neither the PHP pages nor the error answers");
     {
@@ -1431,7 +1431,7 @@ constexpr OwnedField kOwnedFields[] = {
      "agensio's own redirects carry it (a directory without its slash, a [[site.redirect]] answer), and without it a 301 has no target; a redirect is changed with "
      "[[site.redirect]] (docs/redirects.md 5)"},
     {"refresh", false, "a redirect is a [[site.redirect]] rule (docs/redirects.md 5)"},
-    {"strict-transport-security", true, "hsts on the site (hsts = true, or a table) sends it on every HTTPS answer, once, with a checked value; remove is accepted, to strip an application's own"},
+    {"strict-transport-security", true, "hsts on the site (hsts = \"1y\", or a table) sends it on every HTTPS answer, once, with a checked value; remove is accepted, to strip an application's own"},
     // A remove did nothing while path_check said "removed" (D2): the field is agensio's own.
     {"server", false, "the Server field is [server] server_header",
      "the Server field is agensio's own, on every answer whatever a rule says: [server] server_header = \"\" sends none (root's main file)"},
@@ -1882,53 +1882,73 @@ void parse_auth(const toml::node_view<const toml::node>& n, Config& cfg, SiteCon
 #endif
 }
 
-// hsts's max_age: seconds (63072000), or a number with s, m, h, d, w or y ("2y"); at most ten years,
-// the longest any application guide reviewed publishes (n8n, Jellyfin: 315360000).
-bool hsts_age(const toml::node_view<const toml::node>& n, std::uint64_t& out) {
-    constexpr std::uint64_t kMax = 315360000;
-    if (auto i = n.value<std::int64_t>()) {
-        if (*i < 0 || static_cast<std::uint64_t>(*i) > kMax) return false;
-        out = static_cast<std::uint64_t>(*i);
-        return true;
-    }
-    auto text = n.value<std::string>();
-    if (!text || text->size() < 2) return false;
-    std::uint64_t unit = 0;
-    switch (text->back()) {
+// hsts's lifetime: seconds (63072000, also written "63072000"), or a number with s, m, h, d, w or y
+// ("2y"); at most `max` seconds (ten years in a site file, the longest any application guide reviewed
+// publishes: n8n, Jellyfin; two years through the control plane).
+bool duration_seconds(std::string_view text, std::uint64_t max, std::uint64_t& out) {
+    if (text.empty()) return false;
+    std::uint64_t unit = 1;
+    switch (text.back()) {
         case 's': unit = 1; break;
         case 'm': unit = 60; break;
         case 'h': unit = 3600; break;
         case 'd': unit = 86400; break;
         case 'w': unit = 7 * 86400; break;
         case 'y': unit = 365 * 86400; break;
-        default: return false;
+        default: unit = 0;  // digits alone: seconds
     }
+    const std::string_view digits = unit ? text.substr(0, text.size() - 1) : text;
+    if (!unit) unit = 1;
+    if (digits.empty()) return false;
     std::uint64_t v = 0;
-    for (std::size_t i = 0; i + 1 < text->size(); ++i) {
-        const char c = (*text)[i];
-        if (c < '0' || c > '9' || v > kMax) return false;
+    for (const char c : digits) {
+        if (c < '0' || c > '9' || v > max) return false;
         v = v * 10 + static_cast<std::uint64_t>(c - '0');
     }
-    if (v > kMax / unit) return false;
+    if (v > max / unit) return false;
     out = v * unit;
     return true;
 }
 
-// hsts (2026-10-13, docs/redirects.md 4): true is a year for this host; a table names max_age and
-// subdomains; false decides it off. The value is built once here, for the writers.
+constexpr std::uint64_t kHstsMax = 315360000;  // ten years, a site file's
+
+bool hsts_age(const toml::node_view<const toml::node>& n, std::uint64_t& out) {
+    if (auto i = n.value<std::int64_t>()) {
+        if (*i < 0 || static_cast<std::uint64_t>(*i) > kHstsMax) return false;
+        out = static_cast<std::uint64_t>(*i);
+        return true;
+    }
+    const auto text = n.value<std::string>();
+    return text && duration_seconds(*text, kHstsMax, out);
+}
+
+// hsts (docs/redirects.md 4): the lifetime itself, written where it is decided (RFC 6797 11.2: a
+// deployer sets max-age willfully, never by default): a duration ("1y", "1w") or seconds, 0 telling
+// browsers to forget the host's HSTS (6.1.1); a table adds subdomains (includeSubDomains, 6.1.2) and
+// names max_age; false decides it off. true, which named no lifetime and meant a year, is refused
+// since 0.1.0-alpha.101. The value is built once here, for the writers.
 void parse_hsts(const toml::node_view<const toml::node>& n, SiteConfig& site, const std::string& where) {
-    if (auto b = n.value<bool>()) {
-        site.hsts = *b ? SiteConfig::Hsts::on : SiteConfig::Hsts::off;
+    const std::string forms = "hsts = \"1y\" (a duration: s, m, h, d, w, y; or seconds, 31536000), hsts = { max_age = \"2y\", subdomains = true }, "
+                              "hsts = 0 to have browsers forget it, or hsts = false";
+    if (n.is_boolean()) {  // tested by type: toml++'s value<bool>() would take 604800 for true
+        if (*n.value<bool>())
+            fail(where + ".hsts = true named no lifetime (it meant a year): write the lifetime browsers commit to, hsts = \"1y\" (or \"1w\" first; "
+                         "RFC 6797 11.2), or " + forms);
+        site.hsts = SiteConfig::Hsts::off;
+    } else if (n.is_integer() || n.is_string()) {
+        if (!hsts_age(n, site.hsts_max_age)) fail(where + ".hsts must be a lifetime at most ten years: " + forms);
+        site.hsts = SiteConfig::Hsts::on;
     } else if (const toml::table* t = n.as_table()) {
         check_keys(*t, {"hsts = {}"}, {}, where + ".hsts");
-        site.hsts = SiteConfig::Hsts::on;
-        if (t->contains("max_age") && !hsts_age((*t)["max_age"], site.hsts_max_age))
+        if (!t->contains("max_age")) fail(where + ".hsts: name max_age, the lifetime browsers commit to: hsts = { max_age = \"2y\", subdomains = true }");
+        if (!hsts_age((*t)["max_age"], site.hsts_max_age))
             fail(where + ".hsts.max_age must be seconds (63072000) or a number with s, m, h, d, w or y (\"2y\"), at most ten years; "
                          "0 tells browsers to forget the host's HSTS");
+        site.hsts = SiteConfig::Hsts::on;
         if (auto sd = (*t)["subdomains"].value<bool>()) site.hsts_subdomains = *sd;
         else if (t->contains("subdomains")) fail(where + ".hsts.subdomains must be true or false");
     } else {
-        fail(where + ".hsts must be true, false or a table: hsts = { max_age = \"2y\", subdomains = true }");
+        fail(where + ".hsts must be " + forms);
     }
     if (site.hsts != SiteConfig::Hsts::on) return;
     site.tls_fields.hsts = "max-age=" + std::to_string(site.hsts_max_age) + (site.hsts_subdomains ? "; includeSubDomains" : "");
@@ -4528,6 +4548,8 @@ std::string check_public_archive(const std::string& p) {
     }
     return {};
 }
+
+bool hsts_duration(std::string_view text, std::uint64_t max, std::uint64_t& out) { return duration_seconds(text, max, out); }
 
 // mime_types (0.1.0-alpha.100, docs/configuration.md 6c).
 std::string mime_key(const std::string& key) {

@@ -1605,7 +1605,7 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
         for (std::size_t i = findings_before; i < out.size(); ++i)
             cert_trouble = cert_trouble || out[i].code.starts_with("certificate_") || out[i].code.starts_with("acme_renewal");
         // An application that sends its own (Kanboard's ENABLE_HSTS, Rails' force_ssl) is said instead:
-        // hsts = true would replace its field, and with a weaker one when it commits to more (the
+        // hsts = "1y" would replace its field, and with a weaker one when it commits to more (the
         // alpha.86 report).
         const auto sent = tls ? tls->application_hsts.find(name) : decltype(tls->application_hsts)::const_iterator{};
         const bool app_sends = tls && sent != tls->application_hsts.end();
@@ -1616,14 +1616,15 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
             const std::string decided = "nothing is needed; hsts = false records that the application's field is the one and silences this "
                                         "(site_update with hsts: false on a managed site)";
             std::string fix;
-            if (hsts_stronger(value, "max-age=31536000"))
-                fix = decided + "; hsts = true would replace it with a weaker one (a year, this host only), which hsts_narrows_application then reports. "
-                      "For agensio to send it on every answer, error pages and files included, match it in a hand-written site file: hsts = { max_age = " +
-                      std::to_string(v.max_age) + (v.subdomains ? ", subdomains = true" : "") + " }" +
-                      (v.preload ? " (preload, which agensio does not send, stays the application's alone: keep hsts = false for it)" : "");
-            else
-                fix = decided + "; hsts = true makes agensio send max-age=31536000 on every answer instead, error pages and files included, replacing "
-                      "the application's";
+            // The application's own value, as agensio would send it on every answer, error pages and files
+            // included (the review's section 3: match the application, never narrow it unasked).
+            const std::string same = v.subdomains ? "hsts = { max_age = " + std::to_string(v.max_age) + ", subdomains = true }"
+                                                  : "hsts = " + std::to_string(v.max_age);
+            const std::string managed = v.subdomains ? "{\"max_age\": " + std::to_string(v.max_age) + ", \"subdomains\": true}" : std::to_string(v.max_age);
+            fix = decided + "; for agensio to send the same on every answer, error pages and files included, " + same + " (site_update with hsts: " +
+                  managed + (v.max_age > 63072000 ? ", which a managed site caps at two years" : "") + ")" +
+                  (v.preload ? "; preload, which agensio does not send, stays the application's alone: keep hsts = false for it" : "") +
+                  (hsts_stronger(value, "max-age=31536000") ? "; a shorter lifetime would narrow the application's, which hsts_narrows_application then reports" : "");
             add("info", "hsts_from_application", name,
                 "the application sends Strict-Transport-Security: " + value + " itself (seen " + date(sent->second.second) +
                     ") and agensio passes it on, so browsers that see it already keep to HTTPS for this site",
@@ -1633,8 +1634,9 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
             add("info", "hsts_suggested", name,
                 "HTTPS has served a real certificate since " + date(st.not_before) + " with nothing to report: hsts would tell browsers to use only HTTPS "
                 "for this site from their first visit on, and to refuse it on a certificate error rather than let a visitor click past it",
-                "when the user agrees: hsts = true in the site file (site_update with hsts: true on a managed site), a year; hsts = false records a "
-                "decided no and silences this");
+                "when the user agrees, the lifetime browsers commit to, in the site file: hsts = \"1y\" (site_update with hsts: \"1y\" on a managed "
+                "site; \"1w\" first for a site the user is less sure of); {\"max_age\": \"1y\", \"subdomains\": true} binds every subdomain too, only "
+                "once each has HTTPS; hsts = false records a decided no and silences this");
     }
     // The watch of the certificate files (step T3) late by more than one run: a certificate another
     // tool renews (certbot) waits until cert-renew. Said once, for the server; never with nothing served.

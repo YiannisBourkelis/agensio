@@ -308,7 +308,7 @@ and host together), kept by browsers for a day so a wrong choice is undone withi
 once: search engines treat the two as separate hosts and rank neither higher, but changing the
 choice later costs months of settling and logs every visitor out (cookies belong to a host). Tell
 the application the same address (WordPress `home` and `siteurl`, Laravel `APP_URL`, Drupal
-`$base_url`), or it redirects back and the two loop. With `hsts = true` a plain request for the
+`$base_url`), or it redirects back and the two loop. With `hsts` a plain request for the
 bare name goes to its own HTTPS first and then to `www`, so the bare name learns HSTS too. A domain
 you moved away from entirely is another site with one rule from `/` to the new host (the recipe
 below).
@@ -584,7 +584,7 @@ server_name = ["example.com", "www.example.com"]
 listen = ["0.0.0.0:443"]
 root = "/var/www/example.com/web"
 tls = "auto"
-hsts = true                    # Strict-Transport-Security, a year, on every HTTPS answer of the site
+hsts = "1y"                    # Strict-Transport-Security: max-age=31536000 on every HTTPS answer of the site
 
 [[site.response_headers]]
 path = "/assets/"
@@ -596,8 +596,9 @@ set = { "Cache-Control" = "public, max-age=31536000, immutable" }
 HTTPS (pages, files, PHP, a proxied application, error pages and redirects), replacing one the
 application sends itself, and never on a plain-HTTP answer. It is never on by default: once a
 browser has seen it, it refuses plain http for that host until `max-age` runs out, so add it when
-https is known to work; `hsts = { max_age = "2y", subdomains = true }` sets the lifetime and
-`includeSubDomains`, the latter only when every subdomain has https too. A location's `add_headers`
+https is known to work. The value is that lifetime, seconds or a duration (`"1w"` for a first try,
+`"1y"`, `"2y"`; `true`, which named none, is refused); `hsts = { max_age = "2y", subdomains = true }`
+adds `includeSubDomains`, only when every subdomain has https too. A location's `add_headers`
 cannot send HSTS (until 0.1.0-alpha.75 that was the way, and it reached neither the PHP pages nor
 the errors). The `Cache-Control` rule is on every successful answer under `/assets/`, a `304`
 revalidation included, whichever location serves it, and replaces a lifetime the application or a
@@ -618,17 +619,18 @@ curl -sI https://example.com/assets/app.3f9a1c2b.js | grep -i -e cache-control -
 agensio ctl site example.com                          # every location with the headers it adds
 ```
 
-**On a managed site.** `--hsts` writes `hsts = true` as above; `--cache` makes a
+**On a managed site.** `--hsts 1y` writes `hsts = "1y"` as above (`--hsts-subdomains` adds
+`includeSubDomains`; at most two years); `--cache` makes a
 directory served from disk with `Cache-Control: public, max-age=N`, where nothing runs, and
 `,immutable` after the seconds adds `immutable` (0.1.0-alpha.101) for a directory whose names
 change with their content. Each flag replaces its own part of the site's rules and keeps the others
 (passwords, address rules, refused paths; before 0.1.0-alpha.61 `--cache` alone dropped them):
 
 ```sh
-agensio ctl site-update example.com --hsts --cache /assets/=31536000,immutable --yes --reason "long-lived assets, HSTS"
+agensio ctl site-update example.com --hsts 1y --cache /assets/=31536000,immutable --yes --reason "long-lived assets, HSTS"
 ```
 
-**MCP:** `site_update` with `hsts` true and `rules` = the site's current rules from `site_show`
+**MCP:** `site_update` with `hsts: "1y"` and `rules` = the site's current rules from `site_show`
 with `"cache": [{"path": "/assets/", "max_age": 31536000, "immutable": true}]` added: the tool
 replaces the whole rules object, so a part left out is removed. Another field on one path (a
 lifetime on every answer of the path, not only the files agensio serves, or a field that is not a

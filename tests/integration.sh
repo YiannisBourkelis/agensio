@@ -1528,7 +1528,7 @@ listen = ["127.0.0.1:8467"]
 http = { listen = ["127.0.0.1:8468"] }
 root = "$ROOT/bench/www"
 tls = { cert = "$ROOT/bench/tmp/certs-wild/cert.pem", key = "$ROOT/bench/tmp/certs-wild/key.pem" }
-hsts = true
+hsts = "1y"
 
 [[site]]
 server_name = ["e.wild.test", "e2.wild.test"]
@@ -1834,7 +1834,7 @@ if [ -n "$PHPFPM" ]; then
   # alpha.75 `hsts: true` was rendered as a / location with add_headers, which reached neither the PHP
   # pages (another location) nor any error answer. One field each, an application's own replaced
   # (hsts-own.php sends max-age=5), none over plain HTTP (the site's plain block redirects).
-  cpost /v1/sites "{\"domain\":\"hsts.wild.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-wild/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-wild/key.pem\"},\"hsts\":true,\"user\":null,\"app\":\"wordpress\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"root\":\"$ROOT/tests/wordpress\",\"listen_plain\":\"127.0.0.1:8452\",\"listen_tls\":\"127.0.0.1:8451\",\"confirm\":true,\"reason\":\"hsts\"}" > /dev/null
+  cpost /v1/sites "{\"domain\":\"hsts.wild.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-wild/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-wild/key.pem\"},\"hsts\":\"1y\",\"user\":null,\"app\":\"wordpress\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"root\":\"$ROOT/tests/wordpress\",\"listen_plain\":\"127.0.0.1:8452\",\"listen_tls\":\"127.0.0.1:8451\",\"confirm\":true,\"reason\":\"hsts\"}" > /dev/null
   sts() { curl -sk ${2:-} -D - -o /dev/null --resolve hsts.wild.test:8451:127.0.0.1 "https://hsts.wild.test:8451$1" | tr -d '\r' | grep -i '^strict-transport-security:' | sed 's/^[^:]*: //' | paste -sd'|'; }
   check "hsts: one Strict-Transport-Security on a managed site's PHP page, login page, static file, 404 and over an application's own; none over plain HTTP; HTTP/2 too" \
     "max-age=31536000 max-age=31536000 max-age=31536000 max-age=31536000 max-age=31536000 0 max-age=31536000" \
@@ -1849,6 +1849,11 @@ if [ -n "$PHPFPM" ]; then
   check "hsts_narrows_application: a weaker application value is not named; a stronger one is replaced and named by health with its value, and in the error log" \
     "none max-age=31536000 yes yes" \
     "$(hfind) $(sts /hsts-strong.php) $(hfind) $(grep -q 'hsts.wild.test: the application sent Strict-Transport-Security: max-age=63072000; includeSubDomains' bench/tmp/error.log && echo yes || echo no)"
+  # The lifetime named (0.1.0-alpha.101, RFC 6797 11.2): ctl --hsts LIFETIME and --hsts-subdomains
+  # write it and the site sends it at once; true (which named none) and more than two years are refused.
+  check "hsts: ctl --hsts 1w --hsts-subdomains writes the lifetime with includeSubDomains, served at once; hsts true and 3y refused over the socket" \
+    "1 max-age=604800; includeSubDomains 400 400 1 max-age=31536000" \
+    "$("$BIN" ctl site-update hsts.wild.test --hsts 1w --hsts-subdomains --yes --reason hsts --socket $CS > /dev/null; grep -c '^hsts = { max_age = "1w", subdomains = true }' bench/tmp/sites.d/hsts.wild.test.toml) $(sts /) $(cpost /v1/sites/hsts.wild.test '{"hsts":true,"confirm":true,"reason":"hsts"}') $(cpost /v1/sites/hsts.wild.test '{"hsts":"3y","confirm":true,"reason":"hsts"}') $("$BIN" ctl site-update hsts.wild.test --hsts 1y --yes --reason hsts --socket $CS > /dev/null; grep -c '^hsts = "1y"' bench/tmp/sites.d/hsts.wild.test.toml) $(sts /)"
   # A no is recorded (alpha.84, docs/redirects.md 4.2): hsts = false in the file silences health's
   # hsts_suggested; the answers lose the field.
   check "hsts: ctl --no-hsts records a decided no in the managed file, and the pages lose the field; the application's own then goes out, and health no longer names it" "1 none max-age=63072000; includeSubDomains none" \
@@ -2250,6 +2255,10 @@ check "response_headers endings at load: php on a PHP site (PHP runs it) and an 
   "$(hq "$(printf '[[site.response_headers]]\npath = "/"\nendings = ["php"]\nset = { "X-A" = "1" }\n')" 'PHP runs them' 'app = "php"
 php = { socket = "unix:/run/php/x.sock" }') $(hq "$(printf '[[site.response_headers]]\npath = "/"\nendings = ["inc"]\nset = { "X-A" = "1" }\n')" 'answers 404' 'app = "php"
 php = { socket = "unix:/run/php/x.sock" }') $(hq "$(printf '[[site.response_headers]]\npath = "/"\nendings = ["svg"]\nset = { "X-A" = "1" }\n[[site.response_headers]]\npath = "/"\nendings = ["pdf", "svg"]\nset = { "X-A" = "2" }\n')" 'a second rule') $(hq "$(printf '[[site.response_headers]]\npath = "/"\nendings = [".SVG"]\nset = { "X-A" = "1" }\n')" 'is OK')"
+check "hsts at load: true, which named no lifetime, is refused naming the form; a duration and seconds load" "yes yes yes" \
+  "$(hq '' 'hsts = true named no lifetime' 'hsts = true') $(hq '' 'is OK' 'http = "redirect"
+hsts = "1w"') $(hq '' 'is OK' 'http = "redirect"
+hsts = 604800')"
 check "response_headers at load: a year on a path a single-page fallback answers is noted (the shell kept under the asked address), not with the directory's own try_files" \
   "yes no yes" \
   "$(hq "$(printf '[[site.response_headers]]\npath = "/assets/"\nwhen = "success"\nset = { "Cache-Control" = "public, max-age=31536000, immutable" }\n')" 'answered with /index.html (try_files)' 'try_files = ["$uri", "$uri/", "/index.html"]') $(hq "$(printf '[[site.response_headers]]\npath = "/assets/"\nwhen = "success"\nset = { "Cache-Control" = "public, max-age=31536000, immutable" }\n\n[[site.location]]\npath = "/assets/"\ntry_files = ["$uri", "=404"]\n')" 'answered with /index.html' 'try_files = ["$uri", "$uri/", "/index.html"]') $(hq "$(printf '[[site.response_headers]]\npath = "/assets/"\nwhen = "success"\nset = { "Cache-Control" = "public, max-age=31536000, immutable" }\n')" 'is OK' 'try_files = ["$uri", "$uri/", "/index.html"]')"

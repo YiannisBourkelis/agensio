@@ -113,13 +113,16 @@ acme` once, which only root edits.
 
 ### 2.7 HSTS, once HTTPS works
 
-`hsts = true` on the site (`agensio ctl site-update example.com --hsts`, MCP `site_update` with
-`hsts: true`) tells browsers to use only HTTPS for the host for a year: every answer the site gives
-over HTTPS carries `Strict-Transport-Security`, PHP pages and errors included. Turn it on only once
-the certificate has renewed at least once without trouble: from then on an expired or wrong
-certificate is a hard error in those browsers, with no way to click past it, until it is fixed.
-`docs/configuration.md` 14 has the other forms (a longer `max_age`, subdomains, `max_age = 0` to make
-browsers forget it). Health suggests it (`hsts_suggested`, section 5) once a site has served a real
+`hsts = "1y"` on the site (`agensio ctl site-update example.com --hsts 1y`, MCP `site_update` with
+`hsts: "1y"`) tells browsers to use only HTTPS for the host for a year: every answer the site gives
+over HTTPS carries `Strict-Transport-Security`, PHP pages and errors included. The value is that
+lifetime, written by you (RFC 6797 11.2): seconds or a duration (`"1w"`, `"2y"`; at most two years
+on a managed site, ten in a site file), so a first try can be `"1w"`, raised once nothing broke.
+Turn it on only once the certificate has renewed at least once without trouble: from then on an
+expired or wrong certificate is a hard error in those browsers, with no way to click past it, until
+it is fixed, for as long as the lifetime runs. `docs/configuration.md` 14 has the other forms
+(`subdomains`, `hsts = 0` to make browsers forget it); `hsts = true`, which named no lifetime, is
+refused since 0.1.0-alpha.101. Health suggests it (`hsts_suggested`, section 5) once a site has served a real
 certificate for a week with no certificate finding; `hsts = false` (MCP `site_update` with `hsts:
 false`, `agensio ctl site-update NAME --no-hsts`) records that you decided against it and silences the suggestion. With `hsts` on,
 `certificate_expiring` and `acme_renewal_failed` are errors, not warnings.
@@ -258,8 +261,8 @@ mistaken for one in service.
 | `tls_key_unreadable` | warn | the server's account cannot read a certificate or key after the start | root runs the lines given (3.2) |
 | `site_file_held_back` | error | a site's file is set aside; a certificate that did not load is one reason, named in the message | the message's error |
 | `no_http_redirect` | info | a TLS site on a port other than 443, without `http`: plain HTTP is not redirected | `http = { listen = ["0.0.0.0:80"] }`, the redirect keeps the TLS port |
-| `hsts_suggested` | info | a TLS site with no `hsts` line has served a real certificate for 7 days with no certificate finding | `hsts = true` once you accept what it commits to (2.7); `hsts = false` records a no and silences it |
-| `hsts_from_application` | info | in place of `hsts_suggested`: the application sends its own `Strict-Transport-Security` (named, with its value), which agensio passes on; seen on its answers, or on health's own request for `/` when none came since the start | nothing; `hsts = false` records it; `hsts = true` would replace it, with a weaker one when the application's commits to more (the fix gives the matching table) |
+| `hsts_suggested` | info | a TLS site with no `hsts` line has served a real certificate for 7 days with no certificate finding | `hsts = "1y"` once you accept what it commits to (2.7), `"1w"` first when unsure; `hsts = false` records a no and silences it |
+| `hsts_from_application` | info | in place of `hsts_suggested`: the application sends its own `Strict-Transport-Security` (named, with its value), which agensio passes on; seen on its answers, or on health's own request for `/` when none came since the start | nothing; `hsts = false` records it; an `hsts` of the site would replace it, so the fix gives the value that matches the application's |
 | `hsts_narrows_application` | warn | the application sends a stronger `Strict-Transport-Security` than the site's `hsts` (a longer max-age, `includeSubDomains`, `preload`), and the site's replaces it | the site's `hsts` set to the value meant, or `hsts = false` to let the application's through |
 | `proxy_scheme_missing` | warn | a trusted proxy sent requests without `X-Forwarded-Proto` to a site that redirects plain HTTP: its HTTPS visitors loop | the proxy sends `X-Forwarded-Proto`, or reaches the site over TLS ([redirects.md](redirects.md) 2.4) |
 | `app_redirects_elsewhere` | warn | a site with `canonical` whose application redirects its canonical home page to another of the site's names: a redirect loop | the application's own address set to the canonical name (the fix names the setting) |

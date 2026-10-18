@@ -754,6 +754,9 @@ std::string check_login_path(const std::string& path);
 // a directory ending in "/", any character but a control one or a wildcard ('*', '?', '['), no empty,
 // "." or ".." segment, not "/" alone, at most 1024 bytes; "" or why not.
 std::string check_public_archive(const std::string& path);
+// hsts's lifetime as written ("1y", "1w", "604800", "0"; docs/redirects.md 4): seconds into `out`, at
+// most `max`; false when it is not one (the control plane caps a managed site at two years).
+bool hsts_duration(std::string_view text, std::uint64_t max, std::uint64_t& out);
 // mime_types (docs/configuration.md 6c, 0.1.0-alpha.100). An entry's key as stored: an ending
 // lower-cased without a leading dot ("SH" and ".sh" are "sh"), a path as written; "" when it is
 // neither (mime_entry_problem says why).
