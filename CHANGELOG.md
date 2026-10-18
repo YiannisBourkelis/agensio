@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.99
+## 0.1.0-alpha.99 (2026-10-18)
 
 - **Response-header rules refuse what can only break or mislead** (the review of the redirects,
   HSTS and response-header work, 2026-10-14, defects D1 to D3):
