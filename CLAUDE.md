@@ -257,8 +257,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-one, each seeded fr
   name 56, QPACK sends the default value as static entry 56; the upstream loop drops the
   application's own. `add_headers` refuses the field. HTTP/1 sets `conn.tls` at construction
   (the rest of its connection info is filled on need, after routing).
-- **MIME**: static extension table compiled in (nginx `mime.types` equivalent), overridable
-  from config.
+- **MIME**: static extension table compiled in (nginx `mime.types` equivalent), with an encoding
+  column for files stored compressed (`mime_info`: `.svgz` is `gzip`, sent with `Content-Encoding`, no
+  `Vary`, no twin; alpha.100, D6).
 - **Config**: TOML (vendored toml++). `[server]`, `[cache]`, `[[site]]` with `server_name`,
   `listen`, `root`, `index`, `try_files`, `tls`, `default`, and `[[site.location]]` blocks
   (`path`, `match = "prefix" | "exact"`, per-location `root` or `alias`/`index`/`try_files`/
@@ -540,7 +541,7 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-one, each seeded fr
   `add_security_baseline` in `config.cpp` appends rules at `/` marked `HeaderRule::baseline`, which
   `build_response_headers` resolves below every written rule at their path (endings included):
   `Referrer-Policy` and `nosniff` as defaults, `X-Powered-By` removed, a static site's `no-cache` on
-  `.html`/`.htm`; `nosniff` is `own_only`, skipped by `keep_upstream`/`append_upstream` and by
+  `.html`/`.htm`, `Content-Security-Policy: script-src 'none'` on `.svg`/`.svgz` (alpha.100, D6); `nosniff` is `own_only`, skipped by `keep_upstream`/`append_upstream` and by
   `path_check` for an application's answer; the managed renderer writes `app = "static"`.
   Managed (alpha.94, headers.md 6): `SiteSpec::response_headers` (rules as JSON, judged by
   `load_response_header_rules` in `apply_request`, rendered as tables) and `response_headers_baseline`;

@@ -1698,6 +1698,14 @@ void add_security_baseline(SiteConfig& site, const std::string& where) {
         html.fallback = {{"Cache-Control", "no-cache"}};
         add.push_back(std::move(html));
     }
+    // An SVG opened alone, or framed with <object> or <iframe>, is a document that runs its scripts
+    // on the site's origin; in <img> it never does. So the SVG files agensio serves run none (the
+    // review of 2026-10-14, D6, with .svgz served so browsers render it): a stored-XSS path closed for
+    // an application that lets visitors upload one, as its CSP recipe does (docs/headers.md 3.3).
+    HeaderRule svg;
+    svg.endings = {"svg", "svgz"};
+    svg.fallback = {{"Content-Security-Policy", "script-src 'none'"}};
+    add.push_back(std::move(svg));
     // At most 64 field names with the written rules': the presence test of a resolved set is a bitmask.
     std::vector<std::string> names;
     auto note = [&](const HeaderRule& r) {
@@ -2752,6 +2760,7 @@ void explain_config(const Config& cfg, std::ostream& out) {
                 << "): Referrer-Policy: strict-origin-when-cross-origin where the answer has none, X-Content-Type-Options: nosniff on the files and "
                    "error pages agensio serves, X-Powered-By removed"
                 << (site.app.empty() || site.app == "static" ? ", Cache-Control: no-cache on the HTML files it serves" : "")
+                << ", Content-Security-Policy: script-src 'none' on the .svg and .svgz files it serves"
                 << "; a [[site.response_headers]] rule naming one of them decides instead\n";
         for (const auto& r : site.response_headers.rules) {
             if (r.baseline) continue;

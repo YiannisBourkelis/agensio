@@ -155,7 +155,7 @@ void StaticHandler::serve_entry(Stream& s, EntryPtr e) {
         r.status = 304;
         r.headers.add("ETag", e->etag);
         r.headers.add("Last-Modified", e->last_modified);
-        if (!e->coding_headers.empty()) r.headers.add("Vary", "Accept-Encoding");
+        if (e->vary) r.headers.add("Vary", "Accept-Encoding");
         r.entry = std::move(e);  // keeps the views above alive
         return;
     }
@@ -177,7 +177,7 @@ void StaticHandler::serve_entry(Stream& s, EntryPtr e) {
     r.prebuilt_h3 = e->h3_block;
     r.content_type = e->content_type;
     r.content_encoding = e->content_encoding;
-    r.vary = !e->coding_headers.empty();
+    r.vary = e->vary;
     if (e->descriptor_only) r.body = FileBody{&e->fd, e->size, 0};  // streamed from the cached descriptor
     else r.body = MemoryBody{std::string_view(e->data.data(), e->data.size())};
     r.entry = std::move(e);
@@ -188,11 +188,18 @@ void StaticHandler::fill_entry(CacheEntry& entry, const FileInfo& fi, std::strin
     static constexpr std::string_view kVary = "Vary: Accept-Encoding\r\n";
     static constexpr std::string_view kBr = "Content-Encoding: br\r\nVary: Accept-Encoding\r\n";
     static constexpr std::string_view kGzip = "Content-Encoding: gzip\r\nVary: Accept-Encoding\r\n";
+    // A file stored compressed (.svgz): its one representation, nothing negotiated, so no Vary.
+    static constexpr std::string_view kBrStored = "Content-Encoding: br\r\n";
+    static constexpr std::string_view kGzipStored = "Content-Encoding: gzip\r\n";
     entry.file_path = path;
     entry.content_type = content_type;
     entry.mtime = fi.mtime;
     entry.size = fi.size;
-    entry.coding_headers = coding == Encoding::br ? kBr : coding == Encoding::gzip ? kGzip : vary ? kVary : std::string_view{};
+    entry.vary = vary;
+    entry.coding_headers = coding == Encoding::br     ? (vary ? kBr : kBrStored)
+                           : coding == Encoding::gzip ? (vary ? kGzip : kGzipStored)
+                           : vary                     ? kVary
+                                                      : std::string_view{};
     entry.content_encoding = coding == Encoding::br ? std::string_view("br") : coding == Encoding::gzip ? std::string_view("gzip") : std::string_view{};
     make_etag(fi.mtime, fi.size, entry.etag);
     entry.last_modified.resize(kHttpDateLength);
@@ -299,8 +306,11 @@ void StaticHandler::serve_file(Stream& s, File&& f, const FileInfo& fi, WorkerSt
         return;
     }
     std::uint64_t first = 0, length = 0;
-    switch (apply_range(s, fi.size, mime_for_path(ws.fs_path), etag, std::string_view(lm, kHttpDateLength), first,
-                        length)) {
+    const MimeInfo mi = mime_info(ws.fs_path);
+    const std::string_view coding = stored_coding(mi.encoding) == Encoding::br     ? "Content-Encoding: br\r\n"
+                                    : stored_coding(mi.encoding) == Encoding::gzip ? "Content-Encoding: gzip\r\n"
+                                                                                   : "";
+    switch (apply_range(s, fi.size, mi.type, etag, std::string_view(lm, kHttpDateLength), first, length, coding)) {
         case RangeOutcome::done: return;
         case RangeOutcome::partial:
             r.owned_file = std::move(f);
@@ -309,13 +319,15 @@ void StaticHandler::serve_file(Stream& s, File&& f, const FileInfo& fi, WorkerSt
         case RangeOutcome::whole: break;
     }
     r.status = 200;
-    r.scratch.assign("Content-Type: ").append(mime_for_path(ws.fs_path)).append("\r\nContent-Length: ");
+    r.scratch.assign("Content-Type: ").append(mi.type).append("\r\nContent-Length: ");
     append_number(r.scratch, fi.size);
     r.scratch.append("\r\nLast-Modified: ")
         .append(lm, kHttpDateLength)
         .append("\r\nETag: ")
         .append(etag)
-        .append("\r\nAccept-Ranges: bytes\r\n\r\n");
+        .append("\r\n")
+        .append(coding)
+        .append("Accept-Ranges: bytes\r\n\r\n");
     r.prebuilt_headers = r.scratch;
     r.prebuilt_terminated = true;
     r.owned_file = std::move(f);
@@ -529,7 +541,7 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
             static_cast<std::int64_t>(cfg_.cache_revalidate_s)) {
         FileInfo fi;
         bool same = stat_path(raw->file_path.c_str(), fi) && fi.is_regular && fi.mtime == raw->mtime && fi.size == raw->size;
-        if (same && cfg_.cache_precompressed && !raw->descriptor_only) same = twins_unchanged(*raw, ws);
+        if (same && cfg_.cache_precompressed && !raw->descriptor_only && raw->content_encoding.empty()) same = twins_unchanged(*raw, ws);
         if (!same) {
             cache_.erase(key, raw);
             ws.local.erase(key);
@@ -578,10 +590,11 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
         }
         if (cfg_.cache_sendfile_min_size > 0 && fi.size >= cfg_.cache_sendfile_min_size) entry->fd = std::move(f);
         else f.close();
-        const std::string_view type = mime_for_path(ws.fs_path);
-        entry->content_type = type;
-        if (cfg_.cache_precompressed) load_variants(*entry, fi, loc, ws, now);
-        fill_entry(*entry, fi, ws.fs_path, type, Encoding::identity, entry->has_variants(), now);
+        // A file stored compressed (.svgz) gets its coding and no twin: a second coding would be gzip, br.
+        const MimeInfo mi = mime_info(ws.fs_path);
+        entry->content_type = mi.type;
+        if (cfg_.cache_precompressed && mi.encoding.empty()) load_variants(*entry, fi, loc, ws, now);
+        fill_entry(*entry, fi, ws.fs_path, mi.type, stored_coding(mi.encoding), entry->has_variants(), now);
 
         EntryPtr canonical = cache_.insert(key, entry);
         if (canonical) ws.local.insert(key, canonical);
@@ -600,7 +613,8 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
         auto entry = std::make_shared<CacheEntry>();
         entry->descriptor_only = true;
         entry->fd = std::move(f);
-        fill_entry(*entry, fi, ws.fs_path, mime_for_path(ws.fs_path), Encoding::identity, false, now);
+        const MimeInfo mi = mime_info(ws.fs_path);
+        fill_entry(*entry, fi, ws.fs_path, mi.type, stored_coding(mi.encoding), false, now);
         EntryPtr canonical = cache_.insert(key, entry);
         if (canonical) {
             ws.local.insert(key, canonical);

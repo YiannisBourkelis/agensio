@@ -11,6 +11,12 @@ namespace agensio {
 
 enum class Encoding : std::uint8_t { identity, gzip, br };
 
+// The coding a file is stored with, from the type table's encoding column (mime_info: "gzip" for
+// .svgz), identity for every other file.
+inline Encoding stored_coding(std::string_view encoding) noexcept {
+    return encoding == "gzip" ? Encoding::gzip : encoding == "br" ? Encoding::br : Encoding::identity;
+}
+
 namespace encoding_detail {
 
 inline std::string_view trim_ws(std::string_view s) noexcept {

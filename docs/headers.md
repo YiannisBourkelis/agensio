@@ -271,12 +271,16 @@ default = { "Content-Security-Policy" = "frame-ancestors 'self' https://partner.
 
 An SVG file can hold JavaScript, and an uploaded one opened directly would run it as the site.
 Shopware, Joomla and FreshRSS ship this field on every SVG for that reason; PrestaShop, TYPO3 and
-Craft let other origins load the fonts:
+Craft let other origins load the fonts. On a site with `app` the baseline already sends it on the
+`.svg` and `.svgz` files agensio serves (section 4.1); a rule like the first one below is for a
+site without `app`, or to send more than the baseline does. Name `svgz` beside `svg`: an ending
+rule for `svg` does not reach `logo.svgz` (2.1), and since 0.1.0-alpha.100 a browser renders a
+`.svgz` like any SVG (its `Content-Encoding: gzip` is sent):
 
 ```toml
 [[site.response_headers]]
 path = "/"
-endings = ["svg"]
+endings = ["svg", "svgz"]
 set = { "Content-Security-Policy" = "script-src 'none'" }
 
 [[site.response_headers]]
@@ -371,13 +375,14 @@ then, once the browser's console stays clean, the same value as `Content-Securit
 ### 4.1 What it holds, and what it leaves to the owner
 
 The baseline holds only what is safe to add without asking: **nothing in it can break a page that
-works today**. Three things meet that bar:
+works today**. Four things meet that bar:
 
 | field | on which answers | why it cannot break a page |
 |---|---|---|
 | `Referrer-Policy: strict-origin-when-cross-origin`, as `default` | every answer | it is what browsers do without the field (Chrome and Edge since 85, Firefox since 87, Safari since 15), so a current browser behaves as before; older browsers and scanners are told the same; an application's stricter value (Django's `same-origin`) wins |
 | `X-Content-Type-Options: nosniff` | agensio's own answers only: the files it serves and its error pages | agensio set their `Content-Type` itself, from a table that knows `.js`, `.mjs`, `.css`, `.wasm`; Drupal's and TYPO3's own `.htaccess` files add the same field to every file Apache serves |
 | `X-Powered-By` removed | the application's answers | no client reads it; PHP's own is already off in the pools agensio writes (`php_admin_flag[expose_php] = off`), so what is left is a framework's (`Express`, `Statamic`) |
+| `Content-Security-Policy: script-src 'none'`, as `default` | the `.svg` and `.svgz` files agensio serves (0.1.0-alpha.100, the review of 2026-10-14, D6) | an SVG in `<img>` or a CSS background never runs a script, so pages look the same; only an SVG opened alone, or framed with `<object>` or `<iframe>`, loses its scripts, and that is the stored-XSS path when visitors can upload one (an upload filter that blocks `.svg` but not `.svgz` included). An interactive, scripted SVG is rare; its site turns this off with its own rule for the field (any value, or `remove`) |
 
 On `app = "static"`, where agensio serves every page itself, the baseline also sends
 `Cache-Control: no-cache` on the HTML files it serves (an `.html` file, a directory's

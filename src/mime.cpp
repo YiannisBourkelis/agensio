@@ -13,6 +13,7 @@ namespace {
 struct Entry {
     const char* ext;
     const char* type;
+    const char* encoding = "";  // the content coding the file is stored with (RFC 9110 8.4)
 };
 
 constexpr Entry kTable[] = {
@@ -66,7 +67,10 @@ constexpr Entry kTable[] = {
     {"webp", "image/webp"},
     {"avif", "image/avif"},
     {"svg", "image/svg+xml"},
-    {"svgz", "image/svg+xml"},
+    // gzip-compressed SVG (SVG 1.1 1.2; the review of 2026-10-14, D6): nginx's mime.types gives the
+    // type alone, so a browser gets gzip bytes it must not render (SVG 1.1 G.8); Apache sites add
+    // AddEncoding gzip svgz in their .htaccess (Nextcloud, Drupal, TYPO3).
+    {"svgz", "image/svg+xml", "gzip"},
     {"ico", "image/x-icon"},
     {"bmp", "image/bmp"},
     {"tif", "image/tiff"},
@@ -115,8 +119,8 @@ constexpr MimeTable kSorted{};
 
 }  // namespace
 
-std::string_view mime_for_path(std::string_view path) noexcept {
-    static constexpr std::string_view kDefault = "application/octet-stream";
+MimeInfo mime_info(std::string_view path) noexcept {
+    static constexpr MimeInfo kDefault{"application/octet-stream", {}};
     auto slash = path.rfind('/');
     std::string_view name = slash == std::string_view::npos ? path : slice(path, slash + 1);
     auto dot = name.rfind('.');
@@ -129,7 +133,10 @@ std::string_view mime_for_path(std::string_view path) noexcept {
     const std::string_view key(lower, ext.size());
     auto it = std::lower_bound(kSorted.entries.begin(), kSorted.entries.end(), key,
                                [](const Entry& e, std::string_view k) { return std::string_view(e.ext) < k; });
-    return (it != kSorted.entries.end() && std::string_view(it->ext) == key) ? std::string_view(it->type) : kDefault;
+    if (it == kSorted.entries.end() || std::string_view(it->ext) != key) return kDefault;
+    return {it->type, it->encoding};
 }
+
+std::string_view mime_for_path(std::string_view path) noexcept { return mime_info(path).type; }
 
 }  // namespace agensio

@@ -2069,6 +2069,10 @@ print(" ".join(f["text"] for f in d.get("response_headers", []) if f["field"] ==
 p.stdin.close(); p.wait()
 PYT
 )"
+  # .svgz beside a site's own svg rule (D6): the rule decides .svg, the baseline .svgz.
+  check ".svgz on a site whose own rule names svg: the rule's CSP on .svg, the baseline's on .svgz" \
+    "content-security-policy=script-src 'none'|content-type=image/svg+xml ; content-encoding=gzip|content-security-policy=script-src 'none'|content-type=image/svg+xml" \
+    "$(curl -s -D - -o /dev/null --resolve h.wild.test:8483:127.0.0.1 http://h.wild.test:8483/logo.svg | tr -d '\r' | awk -F': ' 'tolower($1) ~ /^(content-type|content-encoding|content-security-policy|vary)$/ {print tolower($1) "=" $2}' | sort | paste -sd'|') ; $(curl -s -D - -o /dev/null --resolve h.wild.test:8483:127.0.0.1 http://h.wild.test:8483/logo.svgz | tr -d '\r' | awk -F': ' 'tolower($1) ~ /^(content-type|content-encoding|content-security-policy|vary)$/ {print tolower($1) "=" $2}' | sort | paste -sd'|')"
   rm -f bench/tmp/sites.d/hdr.toml
   cpost /v1/reload '{"confirm":true,"reason":"headers"}' > /dev/null
 fi
@@ -2134,6 +2138,23 @@ check "security baseline over HTTP/2: the same fields on the static site's page 
   "$(bh bp.wild.test /app.php) ; $(bh bp.wild.test /plain.php) ; $(bh bp.wild.test /logo.svg) ; $(bh bp.wild.test /nope.svg)"
 [ -n "$UP_PID" ] && check "security baseline, app = proxy: the default on a proxied answer, the origin's X-Powered-By removed, no nosniff" \
   "$BRP ; $BRP" "$(bh bx.wild.test /json) ; $(bh bx.wild.test /redirect)"
+# .svgz (the review of 2026-10-14, D6): gzip-compressed SVG (SVG 1.1 1.2), so it carries
+# Content-Encoding: gzip (RFC 9110 8.4; a viewer must not render it without, SVG 1.1 G.8), with no
+# Vary and no pre-compressed twin; and the baseline's script-src 'none' on the .svg and .svgz files
+# agensio serves on a site with app, so an SVG opened alone runs no script (a site's own rule decides
+# first: h.wild.test's svg rule, which leaves .svgz to the baseline).
+sv() {  # host path [curl options]: the type, coding, CSP and Vary of a file over plain HTTP, sorted
+  curl -sk -D - -o /dev/null --resolve "$1:8489:127.0.0.1" "${@:3}" "http://$1:8489$2" | tr -d '\r' |
+    awk -F': ' 'tolower($1) ~ /^(content-type|content-encoding|content-security-policy|vary)$/ {print tolower($1) "=" $2}' | sort | paste -sd'|'
+}
+svt() {  # the same over TLS with a curl protocol option
+  curl -sk -D - -o /dev/null --resolve "$1:8488:127.0.0.1" "$3" "https://$1:8488$2" | tr -d '\r' |
+    awk -F': ' 'tolower($1) ~ /^(content-type|content-encoding|content-security-policy|vary)$/ {print tolower($1) "=" $2}' | sort | paste -sd'|'
+}
+SVGCSP="content-security-policy=script-src 'none'"
+[ -n "$PHPFPM" ] && check ".svgz: Content-Encoding gzip, no Vary, the baseline's script-src 'none' on it and on .svg, the body decoding to the SVG; over HTTP/2 the same" \
+  "content-encoding=gzip|$SVGCSP|content-type=image/svg+xml ; $SVGCSP|content-type=image/svg+xml ; yes ; content-encoding=gzip|$SVGCSP|content-type=image/svg+xml" \
+  "$(sv bp.wild.test /logo.svgz) ; $(sv bp.wild.test /logo.svg) ; $(cmp -s <(curl -s --compressed --resolve bp.wild.test:8489:127.0.0.1 http://bp.wild.test:8489/logo.svgz) tests/headers/logo.svg && echo yes || echo no) ; $(svt bp.wild.test /logo.svgz --http2)"
 # proxy.hide before the rules (the review after D4): a hidden field never answered a default, so with
 # both on one field neither went out (a hidden X-Frame-Options and a default SAMEORIGIN: none at all).
 up_port() {  # every copy of X-Upstream-Port on host's /json, over HTTP/1 or (with --http2) TLS

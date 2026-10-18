@@ -304,6 +304,11 @@ static void test_mime() {
     CHECK_EQ(mime_for_path("/a.b/noext"), "application/octet-stream");
     CHECK_EQ(mime_for_path("/x.unknownext"), "application/octet-stream");
     CHECK_EQ(mime_for_path("/x."), "application/octet-stream");
+    // A file stored compressed carries its coding (D6): .svgz is gzip-compressed SVG (SVG 1.1 1.2).
+    CHECK(mime_info("/a/logo.svgz").type == "image/svg+xml" && mime_info("/a/logo.svgz").encoding == "gzip");
+    CHECK(mime_info("/a/LOGO.SVGZ").encoding == "gzip" && mime_info("/a/logo.svg").encoding.empty() && mime_info("/a/x.gz").encoding.empty());
+    CHECK(mime_info("/a/x.gz").type == "application/gzip" && mime_info("/a/noext").encoding.empty());
+    CHECK(stored_coding("gzip") == Encoding::gzip && stored_coding("br") == Encoding::br && stored_coding("") == Encoding::identity);
 }
 
 static void test_size() {
@@ -6224,6 +6229,12 @@ static void test_security_baseline() {
         CHECK(html && decided(html->success) == RP + " " + XPB + " " + NS + " Cache-Control=default:no-cache");
         CHECK(html && decided(html->other) == RP + " " + XPB + " " + NS);  // success only
         CHECK(response_rules::ending_sets(*n, "/srv/www/page.htm") && !response_rules::ending_sets(*n, "/srv/www/style.css"));
+        // The SVG files it serves run no script (D6), on every answer of theirs.
+        const std::string CSP = "Content-Security-Policy=default:script-src 'none'";
+        for (const char* f : {"/srv/www/logo.svg", "/srv/www/Logo.SVGZ"}) {
+            const EndingSets* svg = response_rules::ending_sets(*n, f);
+            CHECK(svg && decided(svg->success) == RP + " " + XPB + " " + NS + " " + CSP && decided(svg->other) == RP + " " + XPB + " " + NS + " " + CSP);
+        }
         // An application's answer (a proxy location on such a site): its own nosniff passes, none is
         // added; X-Powered-By goes; Referrer-Policy fills a gap only.
         response_fields::Upstream present;
@@ -6269,7 +6280,10 @@ static void test_security_baseline() {
         std::ofstream(dir / "www" / "index.php") << "<?php echo 1;";
         const Config c = load("app = \"php\"\nphp = { socket = \"unix:/nonexistent/fpm.sock\" }\n");
         const ResponseRules& rr = c.sites[0].response_headers;
-        CHECK(rr.lookup("/index.php") && !rr.endings && decided(rr.lookup("/index.php")->success) == RP + " " + XPB + " " + NS);
+        CHECK(rr.lookup("/index.php") && rr.endings && decided(rr.lookup("/index.php")->success) == RP + " " + XPB + " " + NS);
+        const EndingSets* svg = response_rules::ending_sets(*rr.lookup("/"), "/srv/www/a.svg");
+        CHECK(svg && decided(svg->success) == RP + " " + XPB + " " + NS + " Content-Security-Policy=default:script-src 'none'");
+        CHECK(!response_rules::ending_sets(*rr.lookup("/"), "/srv/www/index.html"));  // no HTML lifetime
         std::string error;
         const json::Value pc = control::path_check(c, c.sites[0], "/index.php", error);
         std::string texts;
@@ -6310,17 +6324,17 @@ static void test_security_baseline() {
         CHECK(rr.lookup("/docs/a") && decided(rr.lookup("/docs/a")->success) ==
                                           "Cache-Control=set:no-store Referrer-Policy=default:same-origin X-Content-Type-Options=remove " + XPB);
     }
-    // At most 64 field names with the baseline's: 60 written and the static baseline's 4 load, 61 do not.
+    // At most 64 field names with the baseline's: 59 written and the static baseline's 5 load, 60 do not.
     auto many = [](int n) {
         std::string r = "[[site.response_headers]]\npath = \"/\"\nset = {";
         for (int i = 0; i < n; ++i) r += (i ? ", " : " ") + std::string("\"X-F") + std::to_string(i) + "\" = \"1\"";
         return r + " }\n";
     };
-    CHECK(load("app = \"static\"\n", many(60)).sites[0].response_headers.lookup("/"));
+    CHECK(load("app = \"static\"\n", many(59)).sites[0].response_headers.lookup("/"));
     {
         bool refused = false;
         try {
-            load("app = \"static\"\n", many(61));
+            load("app = \"static\"\n", many(60));
         } catch (const std::exception& e) {
             refused = std::string_view(e.what()).find("response_headers_baseline = false") != std::string_view::npos;
         }

@@ -2293,6 +2293,7 @@ without a rule, only what cannot break a page that works today:
 | `X-Content-Type-Options: nosniff`, as a `default` | the files and error pages agensio serves, whose type it set itself; never an application's answer, where a script sent with the wrong type would stop working |
 | `X-Powered-By` removed | every answer: no client reads it (a framework's, as `Express` or `Statamic`; PHP's own is off in the pools agensio writes) |
 | `Cache-Control: no-cache`, as a `default`, success only | on `app = "static"`: the `.html` and `.htm` files it serves (a page, a directory's index, a single-page application's shell), so a deploy shows at once; browsers revalidate and get a `304` when nothing changed |
+| `Content-Security-Policy: script-src 'none'`, as a `default` | the `.svg` and `.svgz` files agensio serves (0.1.0-alpha.100): an SVG opened alone or framed runs no script on the site's origin, the stored-XSS path of an uploaded one; in `<img>` an SVG never runs one, so pages look the same |
 
 ```toml
 [[site]]

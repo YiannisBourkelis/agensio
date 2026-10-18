@@ -2,6 +2,25 @@
 
 ## 0.1.0-alpha.100
 
+- **`.svgz` is served so browsers render it, and the SVG files agensio serves run no script** (the
+  review of the redirects, HSTS and response-header work, 2026-10-14, defect D6). A `.svgz` is
+  gzip-compressed SVG (SVG 1.1 1.2); agensio sent it as `image/svg+xml` with no `Content-Encoding`, as
+  nginx's `mime.types` does, so browsers got gzip bytes they must not render (SVG 1.1 G.8) and the
+  `.svgz` images of Nextcloud, Drupal and TYPO3 (whose `.htaccess` says `AddEncoding gzip svgz`) were
+  broken; no rule could fix it, `Content-Encoding` being the representation's (RFC 9110 8.4). The type
+  table gains an encoding column (`mime_info`), `gzip` for `svgz`: the line goes into the cache entry's
+  block for HTTP/1, HTTP/2 and HTTP/3, the file's one representation, so no `Vary` and no
+  pre-compressed twin (a second coding would be `gzip, br`); a client refusing gzip outright still
+  gets it, as from Apache, there being no other form. Once it renders, a `.svgz` opened alone runs its
+  scripts on the site's origin as a `.svg` does, and an `svg` ending rule does not reach it; so the
+  security baseline of every site with `app` now sends `Content-Security-Policy: script-src 'none'`
+  (a default) on the `.svg` and `.svgz` files agensio serves: in `<img>` an SVG never runs one, so pages
+  look the same; an SVG opened alone or framed with `<object>` or `<iframe>` loses its scripts, which
+  closes the stored-XSS path of an uploaded one (an upload filter that blocks `.svg` but not `.svgz`
+  included). A site's own rule for the field decides instead. Integration checks over HTTP/1 and
+  HTTP/2 (the coding, no `Vary`, the CSP on both, the body decoding to the SVG; a site whose rule
+  names only `svg`) failing before; unit tests; `docs/headers.md` 3.3 and 4.1,
+  `docs/configuration.md` 14c, the MCP text, `-t --explain`.
 - **A tool without arguments says so when given one** (the alpha.99 report). MCP `health_check`
   with `{"verbose": true}` answered "unknown argument 'verbose' for health_check; its arguments are.
   Nothing was done.", a sentence that stops; it now ends "for health_check, which takes no arguments.
