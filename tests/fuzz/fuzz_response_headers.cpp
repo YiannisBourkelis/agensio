@@ -15,9 +15,11 @@
 //     block is never replaced, removed or doubled;
 //   - HTTP/1's prebuilt lines equal what the general path writes for an answer with nothing to look at;
 //   - an application's answer keeps the restrictions of its Cache-Control (no-store, private,
-//     no-cache) and of each field only shared caches read, whatever a rule sets or removes, and
-//     one that is one user's (Set-Cookie, a request with Authorization) gets no line from a rule
-//     that lets a shared cache keep it (docs/headers.md 2.4);
+//     no-cache) and of each field only shared caches read, whatever a rule sets or removes; a
+//     rule's CDN field or Expires never comes over a restriction in any of its CDN fields (or, for
+//     one it lacks and for Expires, in its Cache-Control); and one that is one user's (Set-Cookie,
+//     Vary naming Cookie or Authorization or "*", a request with Authorization) gets no line from
+//     a rule that lets a shared cache keep it (docs/headers.md 2.4);
 //   - the node's decisions agree with a scan of every rule for the most specific one naming a field,
 //     the security baseline's (docs/headers.md 4: the site is php, static or without app by the
 //     input's length) below the written ones at its path, its nosniff leaving an application's
@@ -343,8 +345,30 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
                     const std::uint8_t app_field = bits(fields, n, app_has), out_field = bits(out, n, out_has);
                     assert(covers(out_field, app_has ? app_field : app_bits));
                 }
+            // A rule's CDN field or Expires never over a restriction in any of the application's CDN
+            // fields or, for a CDN field it lacks and for Expires, its Cache-Control (the alpha.99 report).
+            std::uint8_t cdn = 0;
+            for (const auto& [n, v] : fields)
+                if (shared_only_field(n)) cdn |= restrictions(v, true);
+            for (std::size_t i = from_rules; i < out.size(); ++i) {
+                const auto& [n, v] = out[i];
+                if (shared_only_field(n)) {
+                    bool app_has = false;
+                    (void)bits(fields, n, app_has);
+                    assert(covers(restrictions(v, true), static_cast<std::uint8_t>(cdn | (app_has ? 0 : app_bits))));
+                }
+                if (Headers::iequals(n, "expires")) assert((app_bits | cdn) == 0);
+            }
+            // One user's answer: it sets a cookie, varies on Cookie or Authorization (or is Vary: *),
+            // or answers a request with Authorization.
             bool cookie = credentials;
-            for (const auto& [n, _] : fields) cookie = cookie || Headers::iequals(n, "set-cookie");
+            for (const auto& [n, v] : fields) {
+                cookie = cookie || Headers::iequals(n, "set-cookie");
+                if (Headers::iequals(n, "vary"))
+                    for_each_directive(v, [&](std::string_view m) {
+                        cookie = cookie || m == "*" || Headers::iequals(m, "cookie") || Headers::iequals(m, "authorization");
+                    });
+            }
             if (cookie)
                 for (std::size_t i = from_rules; i < out.size(); ++i) {
                     const auto& [n, v] = out[i];

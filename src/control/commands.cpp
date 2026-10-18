@@ -594,12 +594,22 @@ void header_fields(json::Value& v, const SiteConfig& site, const HeaderNode* nod
             text += (r.baseline ? " (baseline " + baseline : " (rule " + r.path + (r.exact ? " exact" : "")) + (r.success_only ? ", success only" : "") +
                     (files.empty() ? "" : ", " + files + " files") + (d.own_only ? ", on the files and error pages agensio serves" : "") + ")";
             // What gives way on an application's answer (docs/headers.md 2.4, the review's D4).
-            if (app && d.cache_field && d.verb != FieldDecision::Verb::fallback && !(d.restricts & private_cache::kNoStore))
+            if (app && d.cache_control && d.verb != FieldDecision::Verb::fallback && !(d.restricts & private_cache::kNoStore))
                 text += d.verb == FieldDecision::Verb::remove ? "; not where the application's says no-store, private or no-cache, which stands"
                                                               : "; where the application's says no-store, private or no-cache that this value does not, its own stands";
+            // A CDN field or Expires also gives way to a restriction in any of the application's CDN fields (the alpha.99 report).
+            if (app && (d.expires || (d.cache_field && !d.cache_control)) && !(d.restricts & private_cache::kNoStore))
+                text += d.expires ? std::string("; not where the application's Cache-Control or one of its CDN fields says no-store, private or no-cache")
+                        : d.verb == FieldDecision::Verb::remove
+                            ? std::string("; not where one of the application's CDN fields says no-store, private or no-cache")
+                            : "; not where one of the application's CDN fields says no-store, private or no-cache, nor where it sends no " + d.name +
+                                  " and its Cache-Control says so";
             if (app && d.lifetime)
-                text += d.cache_control ? "; an answer that sets a cookie or answers a request with Authorization gets " + d.private_value
-                                        : std::string("; none on an answer that sets a cookie or answers a request with Authorization");
+                text += d.cache_control ? "; an answer that is one user's (it sets a cookie or varies on Cookie, or answers a request with Authorization) gets " +
+                                              d.private_value
+                                        : std::string("; none on an answer that is one user's (it sets a cookie or varies on Cookie, or answers a request with Authorization)");
+            if (app && d.cache_control && d.verb == FieldDecision::Verb::remove)
+                text += "; an answer that is one user's is left with Cache-Control: private";
             json::Value item = json::Value::object().set("field", d.name).set("verb", verb);
             if (d.verb != FieldDecision::Verb::remove) item.set("value", d.value);
             out.push(item.set("rule", std::move(rule)).set("text", text));

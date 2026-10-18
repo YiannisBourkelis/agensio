@@ -48,6 +48,7 @@ struct FieldDecision {
     // field only shared caches read without a restriction, Expires), never on an answer that is one
     // user's; and for Cache-Control the private value such an answer gets in its place.
     bool cache_control = false;
+    bool expires = false;
     std::uint8_t restricts = 0;
     bool lifetime = false;
     std::string private_value;
@@ -60,7 +61,7 @@ struct FieldDecision {
 struct HeaderSet {
     std::vector<FieldDecision> fields;
     std::string h1;
-    bool cache_watch = false;  // a decision on a cache field or with a lifetime: the upstream loop reads the answer's first
+    bool cache_watch = false;  // a decision on a cache field, Expires or with a lifetime: the upstream loop reads the answer's first
     bool empty() const noexcept { return fields.empty(); }
 };
 

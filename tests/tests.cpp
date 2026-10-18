@@ -9004,6 +9004,8 @@ static void test_rule_cache_fields() {
                                      "[[site.response_headers]]\npath = \"/revalidate\"\nset = { \"Cache-Control\" = \"no-cache\" }\n"
                                      "[[site.response_headers]]\npath = \"/bare\"\nremove = [\"Cache-Control\"]\n"
                                      "[[site.response_headers]]\npath = \"/bare/cdn\"\nwhen = \"success\"\nset = { \"CDN-Cache-Control\" = \"max-age=60\" }\n"
+                                     "[[site.response_headers]]\npath = \"/sur\"\nwhen = \"success\"\nset = { \"Surrogate-Control\" = \"max-age=600\", "
+                                     "\"Expires\" = \"Thu, 01 Jan 2099 00:00:00 GMT\" }\n"
                                      "[[site.response_headers]]\npath = \"/cdn\"\nwhen = \"success\"\ndefault = { \"CDN-Cache-Control\" = \"max-age=86400\" }\n";
     const Config c = load_config(dir / "h.toml");
     fs::remove_all(dir);
@@ -9068,13 +9070,41 @@ static void test_rule_cache_fields() {
     CHECK_EQ(answer("/bare/cdn/a", {{"Set-Cookie", "a=b"}, {"Cache-Control", "max-age=5"}}), std::string("Set-Cookie: a=b\r\nCache-Control: private\r\n"));
     // Defaults: the application's own answers them; a cookie's answer gets the lifetime private and no Expires.
     CHECK_EQ(answer("/def/a", {}), std::string("Cache-Control: max-age=600\r\nExpires: Thu, 01 Dec 2033 16:00:00 GMT\r\n"));
-    CHECK_EQ(answer("/def/a", {{"Cache-Control", "no-cache"}}), std::string("Cache-Control: no-cache\r\nExpires: Thu, 01 Dec 2033 16:00:00 GMT\r\n"));
+    // ... but not its Expires over the application's restriction (the alpha.99 report).
+    CHECK_EQ(answer("/def/a", {{"Cache-Control", "no-cache"}}), std::string("Cache-Control: no-cache\r\n"));
+    CHECK_EQ(answer("/def/a", {{"Cache-Control", "max-age=60"}}), std::string("Cache-Control: max-age=60\r\nExpires: Thu, 01 Dec 2033 16:00:00 GMT\r\n"));
     CHECK_EQ(answer("/def/a", {{"Set-Cookie", "a=b"}}), std::string("Set-Cookie: a=b\r\nCache-Control: private, max-age=600\r\n"));
     // A CDN default: where the application restricts, none; on a cookie's answer none, and private.
     CHECK_EQ(answer("/cdn/a", {}), std::string("CDN-Cache-Control: max-age=86400\r\n"));
     CHECK_EQ(answer("/cdn/a", {{"Cache-Control", "private"}}), std::string("Cache-Control: private\r\n"));
     CHECK_EQ(answer("/cdn/a", {{"Set-Cookie", "a=b"}}), std::string("Set-Cookie: a=b\r\nCache-Control: private\r\n"));
     CHECK_EQ(answer("/cdn/a", {{"Set-Cookie", "a=b"}, {"Cache-Control", "max-age=60"}}), std::string("Set-Cookie: a=b\r\nCache-Control: max-age=60\r\n"));
+    // The alpha.99 report. Vary naming Cookie or Authorization, or Vary: *, is one user's answer like
+    // a cookie's (RFC 9110 12.5.5, RFC 9111 4.1: Django's session pages); Accept-Encoding is not.
+    for (const char* v : {"Cookie", "accept-encoding, cookie", "Authorization", "*", "Accept-Language,*"})
+        CHECK_EQ(answer("/pub/a", {{"Vary", v}}), "Vary: " + std::string(v) + "\r\nCache-Control: private, max-age=3600, immutable\r\n");
+    CHECK_EQ(answer("/pub/a", {{"Vary", "Accept-Encoding"}}),
+             std::string("Vary: Accept-Encoding\r\nCDN-Cache-Control: max-age=86400\r\nCache-Control: public, max-age=3600, immutable\r\n"));
+    CHECK_EQ(answer("/pub/a", {{"Vary", "X-Cookie-Consent"}}),
+             std::string("Vary: X-Cookie-Consent\r\nCDN-Cache-Control: max-age=86400\r\nCache-Control: public, max-age=3600, immutable\r\n"));
+    // A cookie's answer a rule's remove leaves without Cache-Control says private (RFC 9111 4.2.2:
+    // without one a 200 is heuristically cacheable), the application's Cache-Control there or not.
+    CHECK_EQ(answer("/bare/a", {{"Set-Cookie", "a=b"}, {"Cache-Control", "public, max-age=60"}}), std::string("Set-Cookie: a=b\r\nCache-Control: private\r\n"));
+    CHECK_EQ(answer("/bare/a", {{"Set-Cookie", "a=b"}}), std::string("Set-Cookie: a=b\r\nCache-Control: private\r\n"));
+    CHECK_EQ(answer("/bare/a", {}, true), std::string("Cache-Control: private\r\n"));
+    CHECK_EQ(answer("/bare/a", {{"Cache-Control", "public, max-age=60"}}), std::string());  // not one user's: removed, as asked
+    // A rule's Surrogate-Control and Expires over a restriction in Cache-Control or in any CDN field:
+    // Fastly and Varnish read Surrogate-Control, not CDN-Cache-Control (RFC 9213 2.2: a CDN reads its
+    // own list), and a bare private would get the rule's date as a lifetime.
+    CHECK_EQ(answer("/sur/a", {}), std::string("Expires: Thu, 01 Jan 2099 00:00:00 GMT\r\nSurrogate-Control: max-age=600\r\n"));
+    CHECK_EQ(answer("/sur/a", {{"Cache-Control", "private"}}), std::string("Cache-Control: private\r\n"));
+    CHECK_EQ(answer("/sur/a", {{"CDN-Cache-Control", "no-store"}}), std::string("CDN-Cache-Control: no-store\r\n"));
+    CHECK_EQ(answer("/sur/a", {{"Cache-Control", "public, max-age=60"}, {"CDN-Cache-Control", "private"}}),
+             std::string("Cache-Control: public, max-age=60\r\nCDN-Cache-Control: private\r\n"));
+    CHECK_EQ(answer("/sur/a", {{"Expires", "Thu, 19 Nov 1981 08:52:00 GMT"}, {"Cache-Control", "no-store"}}),
+             std::string("Expires: Thu, 19 Nov 1981 08:52:00 GMT\r\nCache-Control: no-store\r\n"));  // PHP's session: its own Expires stands
+    CHECK_EQ(answer("/sur/a", {{"Cache-Control", "max-age=60"}}),
+             std::string("Cache-Control: max-age=60\r\nExpires: Thu, 01 Jan 2099 00:00:00 GMT\r\nSurrogate-Control: max-age=600\r\n"));
 }
 
 // Exact rules and the script that runs (2026-10-09, the alpha.58 report, finding 1): an exact rule

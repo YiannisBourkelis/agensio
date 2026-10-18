@@ -158,20 +158,44 @@ answer (PHP, a proxied application, CGI):
   out as they are and the rule's line is left out. So `set = { "Cache-Control" = "no-store" }` still
   replaces an application's `private, max-age=600`, while `public, max-age=3600` leaves PHP's session
   answer (`no-store, no-cache, must-revalidate`) and WordPress's signed-in pages (`no-cache,
-  must-revalidate, max-age=0, no-store, private`) as they are. The same holds for the fields only
-  shared caches read (`CDN-Cache-Control` and its vendor forms, `Surrogate-Control`,
-  `Edge-Control`): a CDN that follows one ignores `Cache-Control` (RFC 9213 2.2), so a rule's
-  lifetime there is left out where the answer has no such field and its `Cache-Control` restricts,
-  and an application's own `CDN-Cache-Control: no-store` stands.
+  must-revalidate, max-age=0, no-store, private`) as they are.
+  - **The fields only shared caches read** (`CDN-Cache-Control` and its vendor forms,
+    `Surrogate-Control`, `Edge-Control`): a CDN reads the first such field on its own list and then
+    ignores `Cache-Control` and the others (RFC 9213 2.2). Lists differ: Cloudflare reads its own
+    field and `CDN-Cache-Control`, Fastly and Varnish read `Surrogate-Control` (Varnish's built-in
+    rules no longer look for `private` in `Cache-Control` once it is there), Akamai `Edge-Control`. So
+    the application's restriction in any one of them holds for all of them: a rule's lifetime in such
+    a field is left out where any of the application's says `no-store`, `private` or `no-cache`
+    (`CDN-Cache-Control: no-store` stops a rule's `Surrogate-Control`), and, where the application
+    sends none of the rule's field, where its `Cache-Control` restricts (0.1.0-alpha.100, the alpha.99
+    report; before, each field was judged alone).
+  - **`Expires`**: a rule's is left out wherever the application's `Cache-Control` or one of its CDN
+    fields restricts. Its `max-age` or `s-maxage` overrides `Expires` anyway (5.3), and `no-store` and
+    `no-cache` leave it no say; but over a bare `private` a rule's date gave the browser a lifetime the
+    application did not give (alpha.100). Akamai's own "honor origin" mode ignores `Expires` in the same
+    cases.
 - **An answer that is one user's gets no shared lifetime from a rule.** `Set-Cookie` does not stop a
   cache (RFC 9111 7.3): a CDN that keeps the answer hands the cookie, a session, to the next visitor.
-  An answer that sets a cookie, or answers a request with `Authorization` (which a shared cache may
-  reuse only when the answer says `public`, `s-maxage` or `must-revalidate`, 3.5), gets a rule's `Cache-Control` lifetime as
-  `private` with the browser's directives kept (`public, max-age=3600, immutable` goes out as
-  `private, max-age=3600, immutable`, the password guard's form), and no rule's `Expires` or lifetime
-  in a field only shared caches read; where that leaves it without `Cache-Control` (a rule's `remove`
-  of it included), it carries `Cache-Control: private`. A lifetime is `public`, a shared freshness above 0 (`s-maxage`, else
-  `max-age`) or `stale-while-revalidate` / `stale-if-error` above 0 (RFC 5861), in a value without
+  One user's answer is one that:
+  - sets a cookie;
+  - varies on `Cookie` or `Authorization`, or is `Vary: *` (alpha.100, the alpha.99 report): the
+    application says the answer depends on who asks (RFC 9110 12.5.5), or that no cache can reuse it
+    (RFC 9111 4.1). Django's session middleware sends `Vary: Cookie` and no `Cache-Control` on every
+    page that read the session; a CDN that does not key its cache on `Cookie` would hand a signed-in
+    page to the next visitor (Cloudflare honours `Vary` per field as its cache rules configure it,
+    and never caches `Vary: *`; neither does Varnish);
+  - answers a request with `Authorization`, which a shared cache may reuse only when the answer says
+    `public`, `s-maxage` or `must-revalidate` (3.5).
+
+  Such an answer gets a rule's `Cache-Control` lifetime as `private` with the browser's directives kept
+  (`public, max-age=3600, immutable` goes out as `private, max-age=3600, immutable`, the password guard's
+  form), and no rule's `Expires` or lifetime in a field only shared caches read. Where the rules leave
+  it without `Cache-Control`, by leaving a lifetime out or by a `remove` of the application's (whether
+  it sent one or not), it carries `Cache-Control: private`: without one a `200` is heuristically
+  cacheable (4.2.2), and 7.3 asks the server to say what such an answer may become (the `remove` case
+  since alpha.100). Varnish and Fastly do not cache an answer with `Set-Cookie` by default either; this
+  holds where the cache in front does. A lifetime is `public`, a shared freshness above 0 (`s-maxage`,
+  else `max-age`) or `stale-while-revalidate` / `stale-if-error` above 0 (RFC 5861), in a value without
   `no-store`, `private` or `no-cache`; any value of a field only shared caches read without those
   three counts as one.
 

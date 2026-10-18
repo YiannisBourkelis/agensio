@@ -1,0 +1,11 @@
+/cache	s	set	Cache-Control	public, max-age=3600
+/cache	s	set	Surrogate-Control	max-age=600
+/cache	s	set	Expires	Thu, 01 Jan 2099 00:00:00 GMT
+/bare		remove	Cache-Control
+
+/cache/a	d		u	Vary:Accept-Encoding, Cookie
+/cache/a	d		u	Vary:*
+/cache/a	d		u	CDN-Cache-Control:no-store
+/cache/a	d		u	Cache-Control:private
+/bare/a	d		u	Set-Cookie:a=b	Cache-Control:public, max-age=60
+/bare/a	d		u	Set-Cookie:a=b

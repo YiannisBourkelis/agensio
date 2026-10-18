@@ -1975,6 +1975,19 @@ when = "success"
 set = { "Cache-Control" = "public, max-age=3600" }
 
 [[site.response_headers]]
+path = "/cache/bare/"
+remove = ["Cache-Control"]
+
+[[site.response_headers]]
+path = "/cache/exp/"
+remove = ["Cache-Control"]
+
+[[site.response_headers]]
+path = "/cache/exp/"
+when = "success"
+set = { "Expires" = "Thu, 01 Jan 2099 00:00:00 GMT", "Surrogate-Control" = "max-age=600" }
+
+[[site.response_headers]]
 path = "/"
 endings = ["svg"]
 set = { "Content-Security-Policy" = "script-src 'none'" }
@@ -2015,6 +2028,19 @@ HDR
   check "response_headers and caches over HTTP/2: the session's no-store stands, the cookie's answer goes private" \
     "cache-control=no-store, no-cache, must-revalidate|$RP|$NS|$XF ; cache-control=private, max-age=3600|$RP|$NS|$XF" \
     "$(hd https://h.wild.test:8484/cache/session.php --http2) ; $(hd https://h.wild.test:8484/cache/cookie.php --http2)"
+  # The alpha.99 report (docs/headers.md 2.4): an answer that varies on Cookie, or is Vary: *, is one
+  # user's like a cookie's; a cookie's answer a rule leaves without Cache-Control says private; a
+  # rule's Expires and CDN lifetime stay out where the application restricts in Cache-Control or in
+  # any CDN field (Fastly and Varnish read Surrogate-Control, not CDN-Cache-Control).
+  hc() {  # every cache field of one answer, "name=value" sorted and joined: hc URL [curl options]
+    curl -sk -D - -o /dev/null --resolve h.wild.test:8483:127.0.0.1 "${@:2}" "$1" | tr -d '\r' | awk -F': ' 'tolower($1) ~ /^(cache-control|cdn-cache-control|surrogate-control|expires)$/ {print tolower($1) "=" $2}' | sort | paste -sd'|'
+  }
+  check "response_headers and caches: Vary: Cookie and Vary: * go private like a cookie's answer; a cookie's answer under a remove of Cache-Control says private" \
+    "cache-control=private, max-age=3600 ; cache-control=private, max-age=3600 ; cache-control=private" \
+    "$(hc http://h.wild.test:8483/cache/vary.php) ; $(hc http://h.wild.test:8483/cache/varystar.php) ; $(hc http://h.wild.test:8483/cache/bare/cookie.php)"
+  check "response_headers and caches: a rule's Expires and Surrogate-Control stay out over the application's private and over its CDN-Cache-Control: no-store" \
+    "cache-control=private ; cdn-cache-control=no-store" \
+    "$(hc http://h.wild.test:8483/cache/exp/private.php) ; $(hc http://h.wild.test:8483/cache/exp/cdn.php)"
   # endings (alpha.90, docs/headers.md 2.1): the file agensio serves, a directory's index included;
   # at one path the endings rule decides, a deeper path's rule still wins; never an application's
   # answer or a missing file's 404.

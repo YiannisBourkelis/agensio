@@ -553,9 +553,12 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-one, each seeded fr
   Cache guards (alpha.99, the review's D4, headers.md 2.4): a set holding a cache decision
   (`HeaderSet::cache_watch`) has the upstream loop read the answer first (`response_fields::note_cache`,
   `settle`): the application's `no-store`, `private`, `no-cache` stand over a rule's cache field whose
-  value does not hold them (`private_cache::restrictions`, `covers`; `Upstream::stands`), and an answer
-  with `Set-Cookie` or to a request with `Authorization` gets no rule's shared lifetime
-  (`FieldDecision::lifetime`, `private_value`); `header_cache_set` notes a lifetime `set` over an app.
+  value does not hold them (`private_cache::restrictions`, `covers`; `Upstream::stands`), a restriction
+  in any of its CDN fields (`Upstream::cdn`) holds for every CDN field and `Expires` a rule adds
+  (alpha.100), and an answer with `Set-Cookie`, a `Vary` naming `Cookie`, `Authorization` or `*`, or to a
+  request with `Authorization` gets no rule's shared lifetime (`FieldDecision::lifetime`, `private_value`)
+  and `Cache-Control: private` where the rules leave it none; `header_cache_set` notes a lifetime `set`
+  over an app.
   Gate: `bench/ab.sh <ref> -A` (rows `headers` and `baseline`), `-P` with `-A` (rows `proxy-hdr` and
   `proxy-cache`, the latter with a `Cache-Control` set: the read before the loop).
 - **Automatic certificates** (H3, `src/services/acme.*`, `services/json.hpp`): `tls = "auto"`

@@ -2254,10 +2254,12 @@ set = { "Content-Security-Policy" = "script-src 'none'" }
   agensio writes on its own 401, 403 and 503 (`no-store`, `Retry-After`) stand. On an application's
   answer (0.1.0-alpha.99, [headers.md](headers.md) 2.4): its `Cache-Control` saying `no-store`,
   `private` or `no-cache` stands over a rule's `set` or `remove` whose value does not say them too
-  (`no-store` says all three), and a rule's lifetime in `CDN-Cache-Control` and the other CDN fields
-  is left out over it; an answer that sets a cookie or answers a request with `Authorization` gets a
-  rule's `Cache-Control` lifetime as `private` (`private, max-age=3600` for `public, max-age=3600`)
-  and no rule's `Expires` or CDN lifetime (RFC 9111 7.3, 3.5). A `set` of a lifetime over an
+  (`no-store` says all three), and a rule's `Expires` and lifetime in `CDN-Cache-Control` and the
+  other CDN fields are left out over it or over such a word in any of its CDN fields (alpha.100); an
+  answer that is one user's (it sets a cookie, varies on `Cookie` or `Authorization` or is `Vary: *`
+  (alpha.100), or answers a request with `Authorization`) gets a rule's `Cache-Control` lifetime as
+  `private` (`private, max-age=3600` for `public, max-age=3600`), no rule's `Expires` or CDN lifetime,
+  and `Cache-Control: private` where the rules leave it none, a `remove` included (RFC 9111 7.3, 3.5). A `set` of a lifetime over an
   application site is noted by `-t`: `default` keeps the application's own value, and a page it marks
   with nothing is kept by a CDN whatever it shows.
 - **Refused at load, naming what to use instead:** the framing fields (`Connection`,

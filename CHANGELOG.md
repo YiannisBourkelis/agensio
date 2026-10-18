@@ -2,6 +2,28 @@
 
 ## 0.1.0-alpha.100
 
+- **The cache guards of alpha.99 hold for `Vary`, a removed `Cache-Control`, `Expires` and every CDN
+  field** (the alpha.99 report; `docs/headers.md` 2.4). With a rule's `set` of `Cache-Control: public,
+  max-age=3600`, `CDN-Cache-Control`, `Surrogate-Control` and `Expires`:
+  - an answer with `Vary: Cookie` (Django's session pages, which send no `Cache-Control`) or `Vary: *`
+    went out `public`: an answer that varies on `Cookie` or `Authorization`, or is `Vary: *`, is now one
+    user's like a cookie's (RFC 9110 12.5.5, RFC 9111 4.1), so it gets the lifetime as `private` and no
+    rule's CDN fields or `Expires`;
+  - a cookie's answer under `remove = ["Cache-Control"]` went out with none, which a cache may keep by
+    heuristic (4.2.2): where the rules leave one user's answer without `Cache-Control`, by a `remove`
+    as by a lifetime left out, it says `private`, as the alpha.99 entry promised;
+  - a rule's `Expires` was sent over the application's restriction (over a bare `private` a date in 2099
+    became the browser's lifetime), and a rule's `Surrogate-Control` over the application's
+    `CDN-Cache-Control: no-store`, though Fastly and Varnish read `Surrogate-Control`, not
+    `CDN-Cache-Control` (RFC 9213 2.2: a CDN reads the first field of its own list): a restriction in
+    any of the application's CDN fields now holds for every CDN field a rule adds, and a rule's
+    `Expires` gives way to any restriction in `Cache-Control` or a CDN field, as Akamai's own "honor
+    origin" mode ignores `Expires` there.
+  `path_check` says each. Checked against the RFCs and against what Varnish (its built-in rules),
+  Fastly, Akamai and Cloudflare do; unit tests, `fuzz_response_headers` invariants (a rule's CDN field
+  or `Expires` never over a restriction; `Vary` in what is one user's) with a seed, integration checks
+  with PHP fixtures failing before; `docs/headers.md` 2.4, `docs/configuration.md` 14c, the MCP
+  texts.
 - **A directory asked for without its slash is redirected as every other redirect is** (the review
   of the redirects, HSTS and response-header work, 2026-10-14, defect D5). The static handler's 301
   wrote the decoded path as it was, so a directory `My Files` gave `Location: /My Files/` (no URL), `a#b`

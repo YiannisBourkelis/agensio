@@ -4518,6 +4518,7 @@ void build_response_headers(SiteConfig& site, const std::string& where) {
                                 d->verb = verb;
                                 d->value = value;
                                 d->cache_control = Headers::iequals(name, "cache-control");
+                                d->expires = Headers::iequals(name, "expires");
                                 d->cache_field = d->cache_control || private_cache::shared_only_field(name);
                                 d->own_only = own_only;
                                 // What the value says to caches (docs/headers.md 2.4): a field only shared
@@ -4527,7 +4528,7 @@ void build_response_headers(SiteConfig& site, const std::string& where) {
                                 d->lifetime = verb != FieldDecision::Verb::remove &&
                                               (d->cache_control ? private_cache::shared_lifetime(value)
                                                : d->cache_field ? d->restricts == 0
-                                                                : Headers::iequals(name, "expires") && value != "0");
+                                                                : d->expires && value != "0");
                                 d->private_value.clear();
                                 if (d->lifetime && d->cache_control) {
                                     std::string kept;
@@ -4543,7 +4544,7 @@ void build_response_headers(SiteConfig& site, const std::string& where) {
                     }
             bool any_origin = false, credentials = false;
             for (const auto& f : hs.fields) {
-                hs.cache_watch = hs.cache_watch || f.cache_field || f.lifetime;
+                hs.cache_watch = hs.cache_watch || f.cache_field || f.expires || f.lifetime;
                 if (f.verb == FieldDecision::Verb::remove) continue;
                 hs.h1.append(f.name).append(": ").append(f.value).append("\r\n");
                 any_origin = any_origin || (Headers::iequals(f.name, "access-control-allow-origin") && f.value == "*");

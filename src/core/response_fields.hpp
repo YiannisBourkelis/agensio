@@ -97,55 +97,69 @@ struct Upstream {
     // Read before the loop on a set with cache decisions (HeaderSet::cache_watch; note_cache, then
     // settle), never behind a password, whose guard decides the cache fields:
     std::uint64_t carried = 0;                 // the cache decisions whose field the answer carries
-    std::uint64_t no_store = 0, priv = 0, no_cache = 0;  // per decision, the restrictions of its copies
     std::uint8_t cache_control = 0;            // the restrictions of the answer's Cache-Control
+    std::uint8_t cdn = 0;                      // of its fields only shared caches read, all of them together
     bool has_cache_control = false;
-    bool personal = false;                     // one user's: it sets a cookie, or answers a request with Authorization
+    bool personal = false;                     // one user's: it sets a cookie, varies on Cookie or Authorization
+                                               // (or is Vary: *), or answers a request with Authorization
     std::uint64_t stands = 0;                  // cache decisions that give way: the application's copies stay, the rule's line goes
     bool cache_control_kept = false;           // the application's Cache-Control goes out
 };
 
 // Before the loop, each field the answer will carry (the application's, then a location's
-// add_headers).
+// add_headers). Vary naming Cookie or Authorization says the answer depends on who asks, and
+// Vary: * that no cache can reuse it (RFC 9110 12.5.5, RFC 9111 4.1); a CDN that does not key its
+// cache on them would hand it to the next visitor, so it is one user's answer like a cookie's.
 inline void note_cache(const HeaderSet& hs, std::string_view name, std::string_view value, Upstream& u) noexcept {
     if (Headers::iequals(name, "set-cookie")) {
         u.personal = true;
         return;
     }
-    const bool cc = Headers::iequals(name, "cache-control");
-    if (!cc && !private_cache::shared_only_field(name)) return;
-    const std::uint8_t bits = private_cache::restrictions(value, true);
-    if (cc) {
-        u.has_cache_control = true;
-        u.cache_control |= bits;
+    if (Headers::iequals(name, "vary")) {
+        private_cache::for_each_directive(value, [&](std::string_view member) {
+            if (member == "*" || Headers::iequals(member, "cookie") || Headers::iequals(member, "authorization")) u.personal = true;
+        });
+        return;
     }
-    const int i = find(hs, name);
-    if (i < 0) return;
-    const std::uint64_t b = bit(static_cast<std::size_t>(i));
-    u.carried |= b;
-    if (bits & private_cache::kNoStore) u.no_store |= b;
-    if (bits & private_cache::kPrivate) u.priv |= b;
-    if (bits & private_cache::kNoCache) u.no_cache |= b;
+    const bool cc = Headers::iequals(name, "cache-control");
+    const bool shared = !cc && private_cache::shared_only_field(name);
+    if (cc || shared) {
+        const std::uint8_t bits = private_cache::restrictions(value, true);
+        if (cc) {
+            u.has_cache_control = true;
+            u.cache_control |= bits;
+        } else {
+            u.cdn |= bits;
+        }
+    } else if (!Headers::iequals(name, "expires")) {
+        return;
+    }
+    if (const int i = find(hs, name); i >= 0) u.carried |= bit(static_cast<std::size_t>(i));
 }
 
-// Then which cache decisions give way (docs/headers.md 2.4): a rule's set or remove whose value does
-// not hold the restrictions of the application's copies (RFC 9111 5.2.2), and a rule's field
-// only shared caches read where the answer has none and its Cache-Control restricts, since a CDN
-// follows that field in place of Cache-Control (RFC 9213 2.2).
+// Then which cache decisions give way (docs/headers.md 2.4):
+// - a rule's Cache-Control set or remove whose value does not hold the restrictions of the
+//   application's (RFC 9111 5.2.2);
+// - a rule's field only shared caches read, set or default, over a restriction in any of the
+//   application's such fields or, where it has none of the rule's, in its Cache-Control: a CDN
+//   reads the first field of its own list and ignores the others and Cache-Control (RFC 9213 2.2;
+//   Fastly and Varnish read Surrogate-Control, and Varnish then no longer looks for private), so
+//   the application's word to one CDN holds for every CDN field a rule adds;
+// - a rule's Expires over any of those restrictions: the application's max-age or s-maxage
+//   overrides it anyway (RFC 9111 5.3), and over a bare private it would give a lifetime the
+//   application did not give.
 inline void settle(const HeaderSet& hs, Upstream& u) noexcept {
     bool cc_decided = false;
     for (std::size_t i = 0; i < hs.fields.size(); ++i) {
         const FieldDecision& d = hs.fields[i];
-        if (!d.cache_field || d.own_only) continue;
+        if (!(d.cache_field || d.expires) || d.own_only) continue;
         const std::uint64_t b = bit(i);
         const bool carried = u.carried & b;
         if (d.verb == FieldDecision::Verb::fallback && carried) continue;  // the application's copy answers it
         if (d.verb == FieldDecision::Verb::remove && !carried) continue;
-        std::uint8_t app = d.cache_control ? u.cache_control : 0;
-        if (!d.cache_control)
-            app = carried ? static_cast<std::uint8_t>(((u.no_store & b) ? private_cache::kNoStore : 0) | ((u.priv & b) ? private_cache::kPrivate : 0) |
-                                                      ((u.no_cache & b) ? private_cache::kNoCache : 0))
-                          : u.cache_control;
+        const std::uint8_t app = d.cache_control ? u.cache_control
+                                 : d.expires    ? static_cast<std::uint8_t>(u.cache_control | u.cdn)
+                                                : static_cast<std::uint8_t>(u.cdn | (carried ? 0 : u.cache_control));
         if (app && !private_cache::covers(d.restricts, app)) u.stands |= b;
         if (d.cache_control) cc_decided = d.verb != FieldDecision::Verb::fallback && !(u.stands & b);
     }
@@ -169,17 +183,19 @@ inline bool keep_upstream(const HeaderSet& hs, std::string_view name, bool guard
 
 // Then the rules' own lines, into the answer's text block. On an answer that is one user's, a
 // lifetime decision is left out, a Cache-Control one sent private in its place (RFC 9111 7.3, 3.5),
-// and where that leaves the answer no Cache-Control at all (a rule's remove of it included) it gets
-// Cache-Control: private.
+// and where the rules leave it no Cache-Control at all, by leaving a lifetime out or by a remove of
+// the application's, it gets Cache-Control: private: without one a 200 is heuristically cacheable
+// (4.2.2), and 7.3 asks a server to say what a cookie's answer may become.
 inline void append_upstream(std::string& out, const HeaderSet& hs, bool guarded, const Upstream& u) {
-    bool left_out = false, cc_sent = false;
+    bool needs_private = false, cc_sent = false;  // a lifetime left out, or the application's Cache-Control removed
     for (std::size_t i = 0; i < hs.fields.size(); ++i) {
         const FieldDecision& d = hs.fields[i];
+        if (d.verb == FieldDecision::Verb::remove && d.cache_control && !guarded && !(u.stands & bit(i))) needs_private = true;
         if (d.verb == FieldDecision::Verb::remove || (guarded && d.cache_field) || d.own_only || (u.stands & bit(i))) continue;
         if (d.verb == FieldDecision::Verb::fallback && (u.present & bit(i))) continue;
         if (u.personal && d.lifetime) {
             if (!d.cache_control) {
-                left_out = true;
+                needs_private = true;
                 continue;
             }
             out.append(d.name).append(": ").append(d.private_value).append("\r\n");
@@ -189,7 +205,7 @@ inline void append_upstream(std::string& out, const HeaderSet& hs, bool guarded,
         cc_sent = cc_sent || d.cache_control;
         out.append(d.name).append(": ").append(d.value).append("\r\n");
     }
-    if (left_out && !cc_sent && !u.cache_control_kept) out.append("Cache-Control: private\r\n");
+    if (u.personal && needs_private && !cc_sent && !u.cache_control_kept) out.append("Cache-Control: private\r\n");
 }
 
 }  // namespace agensio::response_fields
