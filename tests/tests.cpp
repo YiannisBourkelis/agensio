@@ -6989,6 +6989,20 @@ static void test_redirect_rules() {
     CHECK_EQ(loc(blog, "/blog/", ""), std::string("/news/"));
     CHECK_EQ(loc(blog, "/blog/2024/post", "x=1"), std::string("/news/2024/post?x=1"));
     CHECK_EQ(loc(blog, "/blog/a b?#\\%", "q=\001a b#"), std::string("/news/a%20b%3F%23%5C%25?q=%01a%20b%23"));
+    // A directory asked for without its slash (the review's D5): written the same way, the query kept,
+    // and never "/\\" at the start (a directory named "\\evil.example" gave "/\\evil.example/").
+    auto slash = [](std::string_view path, std::string_view query) {
+        std::string out = "stale";
+        directory_location(out, path, query);
+        return out;
+    };
+    CHECK_EQ(slash("/docs", ""), std::string("/docs/"));
+    CHECK_EQ(slash("/My Files", "page=2&q=a%20b"), std::string("/My%20Files/?page=2&q=a%20b"));
+    CHECK_EQ(slash("/a#b/x?y", "q=#1 2"), std::string("/a%23b/x%3Fy/?q=%231%202"));
+    CHECK_EQ(slash("/\\evil.example", ""), std::string("/%5Cevil.example/"));
+    CHECK_EQ(slash("/\xCE\xA6\xCF\x89", ""), std::string("/%CE%A6%CF%89/"));
+    CHECK_EQ(slash("/100%", "x=%zz"), std::string("/100%25/?x=%25zz"));
+    CHECK(query_of("/a?b=1?c") == "b=1?c" && query_of("/a").empty() && query_of("/a?").empty());
     CHECK_EQ(loc(rule("/old/", false, "/"), "/old/x", ""), std::string("/x"));
     CHECK_EQ(loc(rule("/old", false, "/"), "/old/x", ""), std::string("/x"));
     CHECK_EQ(loc(rule("/old/", false, "/new"), "/old/x", ""), std::string("/new/x"));
@@ -7087,6 +7101,11 @@ static void test_redirect_rules() {
     CHECK(control::path_check(pc, preview, "/blogger", perr).get("redirect_location") == "/b");
     CHECK(json::parse(R"([{"from":"/x","to":"/x/y","status":301}])", proposed, perr));
     CHECK(load_redirect_rules(proposed, preview).find("redirect in a circle") != std::string::npos);
+    // A directory asked for without its slash (D5): path_check writes the Location as the handler does.
+    fs::create_directories(dir / "www" / "My Files");
+    pv = control::path_check(pc, pc.sites[0], "/My%20Files?page=2", perr);
+    CHECK(pv.get("decision") == "redirect" && pv["status"].num() == 301 && pv.get("redirect_location") == "/My%20Files/?page=2" &&
+          std::string(pv.get("summary")).find("(max-age=86400)") != std::string::npos);
     fs::remove_all(dir);
 }
 

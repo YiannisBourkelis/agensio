@@ -309,6 +309,28 @@ inline void write_location(std::string& out, const RedirectRule& r, std::string_
     }
 }
 
+// The query of a request target, "" without one.
+inline std::string_view query_of(std::string_view target) noexcept {
+    const std::size_t q = target.find('?');
+    return q == std::string_view::npos ? std::string_view() : target.substr(q + 1);
+}
+
+// The Location of a directory asked for without its slash (the static handler's 301; the review of
+// 2026-10-14, D5): the decoded, normalised path encoded again with its slash, then the client's
+// query, as every other redirect writes them; nginx escapes there since 1.21.0 and keeps the query,
+// as Apache, Caddy and h2o do. Relative, and never "//" or "/\" at the start: the path is normalised
+// and a backslash is escaped (before, a directory named "\evil.example" gave "/\evil.example/",
+// another host to a browser).
+inline void directory_location(std::string& out, std::string_view path, std::string_view query) {
+    out.clear();
+    append_path(out, path);
+    out.push_back('/');
+    if (!query.empty()) {
+        out.push_back('?');
+        append_query(out, query);
+    }
+}
+
 // The target as a path of this site (decoded) and its query, for the load checks that follow a
 // rule's target through the other rules; false for a target on another host.
 inline bool target_on_site(const RedirectRule& r, const std::vector<std::string>& names, std::string& path, std::string& query) {

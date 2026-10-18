@@ -456,11 +456,6 @@ const std::string* listed_name(const SiteConfig& site, std::string_view name) {
     return nullptr;
 }
 
-std::string_view query_of(std::string_view target) noexcept {
-    const std::size_t q = target.find('?');
-    return q == std::string_view::npos ? std::string_view() : target.substr(q + 1);
-}
-
 }  // namespace
 
 // A path rule for this request (docs/redirects.md 5), or null: none on a path `refuse` answers (a
@@ -468,7 +463,7 @@ std::string_view query_of(std::string_view target) noexcept {
 const RedirectRule* Dispatcher::path_rule(const SiteConfig& site, Stream& s, WorkerState& ws, bool check_refuse) {
     if (site.redirects.empty()) return nullptr;
     if (check_refuse && !site.refuse.empty() && refuse::decide(site.refuse, ws.path, ws.access_scratch)) return nullptr;
-    return redirect::match(site.redirects, ws.path, query_of(s.request.target), ws.encoded_separator);
+    return redirect::match(site.redirects, ws.path, redirect::query_of(s.request.target), ws.encoded_separator);
 }
 
 // A rule's answer: 410 Gone, or its status with the Location core/redirect.hpp writes (`origin`
@@ -478,7 +473,7 @@ void Dispatcher::answer_rule(Stream& s, const RedirectRule& r, std::string_view 
         static_.error(s, 410, s.request.keep_alive);
         return;
     }
-    redirect::write_location(s.response.scratch, r, path, query_of(s.request.target), origin);
+    redirect::write_location(s.response.scratch, r, path, redirect::query_of(s.request.target), origin);
     redirect_answer(s, r.status, s.response.scratch, r.cache_control);
 }
 
@@ -669,7 +664,7 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
     // redirect reveals no content, and its target meets its own rules); certificate validation over
     // plain HTTP is answered before any rule (1). One test of an empty set for a site without rules.
     if (!site->redirects.empty() && !(!s.conn.tls && !s.conn.forwarded_https && certificate_validation(ws.path)))
-        if (const RedirectRule* rule = redirect::match(site->redirects, ws.path, query_of(req.target), ws.encoded_separator)) {
+        if (const RedirectRule* rule = redirect::match(site->redirects, ws.path, redirect::query_of(req.target), ws.encoded_separator)) {
             answer_rule(s, *rule, ws.path, "");
             return nullptr;
         }

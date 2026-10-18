@@ -1,0 +1,9 @@
+
+/docs
+/docs?a=1&b=%20
+/My%20Files?page=2
+/a%23b
+/x%3Fy?q=#1 2
+/\evil.example
+/%CE%A6%CF%89%CF%84%CE%BF
+/100%25?x=%zz

@@ -1697,6 +1697,37 @@ rtq() {  # yes when -t's answer for the rules holds the text (matched in the she
 check "redirect rules at load: a rule under its own target loops, two rules in a circle, the same from twice, the old string key: each refused, naming why; a chain is noted" \
   "yes yes yes yes yes" \
   "$(rtq "$(printf '[[site.redirect]]\nfrom = "/a"\nto = "/a/b"\nstatus = 301\n')" 'redirect in a circle') $(rtq "$(printf '[[site.redirect]]\nfrom = "/x"\nmatch = "exact"\nto = "/y"\nstatus = 301\n[[site.redirect]]\nfrom = "/y"\nmatch = "exact"\nto = "/x"\nstatus = 301\n')" 'redirect in a circle') $(rtq "$(printf '[[site.redirect]]\nfrom = "/x"\nto = "/y"\nstatus = 301\n[[site.redirect]]\nfrom = "/x"\nto = "/z"\nstatus = 302\n')" 'two [[site.redirect]] rules') $(rtq 'redirect = "https://new.test"' 'is gone (alpha.82)') $(rtq "$(printf '[[site.redirect]]\nfrom = "/x"\nmatch = "exact"\nto = "/y"\nstatus = 301\n[[site.redirect]]\nfrom = "/y"\nmatch = "exact"\nto = "/z"\nstatus = 301\n')" 'redirects again')"
+# A directory asked for without its slash (the review of 2026-10-14, D5): the 301 is written as every
+# other redirect is (core/redirect.hpp): the decoded path encoded again, so a space, '#', '?', a
+# backslash or a Greek name reach the Location as escapes (nginx's fix of 1.21.0), the query kept
+# (nginx, Apache, Caddy and h2o keep it), and a day's lifetime, so a directory that later becomes a
+# page stops redirecting (Chromium keeps a 301 without one forever); also through try_files' $uri/.
+# The names live under bench/tmp only: '#', '?' and '\' do not belong in the repository.
+SL=bench/tmp/slash-www
+rm -rf "$SL"; mkdir -p "$SL/docs" "$SL/My Files" "$SL/a#b" "$SL/x?y" "$SL/Φωτογραφίες" "$SL/\\evil.example" "$SL/tf/My Files"
+cat > bench/tmp/sites.d/slash.toml <<SLASH
+[[site]]
+server_name = ["slash.test"]
+listen = ["127.0.0.1:8106"]
+root = "$ROOT/$SL"
+
+[[site.location]]
+path = "/tf/"
+try_files = ["\$uri", "\$uri/", "=404"]
+SLASH
+cpost /v1/reload '{"confirm":true,"reason":"slash"}' > /dev/null
+dl() {  # status, Location and Cache-Control of a raw target on slash.test
+  curl -sS --path-as-is -D - -o /dev/null -H 'Host: slash.test' "http://127.0.0.1:8106$1" | tr -d '\r' |
+    awk 'NR==1{c=$2} tolower($1)=="location:"{l=$2} tolower($1)=="cache-control:"{h=$2} END{print c, l, h}'
+}
+check "directory redirect: the path encoded again, the query kept, a day's lifetime" \
+  "301 /docs/ max-age=86400 ; 301 /docs/?a=1&b=%20 max-age=86400 ; 301 /My%20Files/?page=2 max-age=86400 ; 301 /a%23b/ max-age=86400 ; 301 /x%3Fy/?q=1 max-age=86400 ; 301 /%CE%A6%CF%89%CF%84%CE%BF%CE%B3%CF%81%CE%B1%CF%86%CE%AF%CE%B5%CF%82/ max-age=86400" \
+  "$(dl /docs) ; $(dl '/docs?a=1&b=%20') ; $(dl '/My%20Files?page=2') ; $(dl /a%23b) ; $(dl '/x%3Fy?q=1') ; $(dl /%CE%A6%CF%89%CF%84%CE%BF%CE%B3%CF%81%CE%B1%CF%86%CE%AF%CE%B5%CF%82)"
+check "directory redirect: a directory named with a leading backslash never gives a Location another host's (/\\ is // to a browser); try_files \$uri/ the same" \
+  "301 /%5Cevil.example/ max-age=86400 ; 301 /tf/My%20Files/?x=1 max-age=86400" \
+  "$(printf 'GET /\\evil.example HTTP/1.1\r\nHost: slash.test\r\nConnection: close\r\n\r\n' | ncq 127.0.0.1 8106 | tr -d '\r' | awk 'NR==1{c=$2} tolower($1)=="location:"{l=$2} tolower($1)=="cache-control:"{h=$2} END{print c, l, h}') ; $(dl '/tf/My%20Files?x=1')"
+rm -f bench/tmp/sites.d/slash.toml
+cpost /v1/reload '{"confirm":true,"reason":"slash"}' > /dev/null
 # A managed file in a form this version refuses (alpha.78): set aside like any file that does not
 # load, and site-update reaches it by its domain, renders it again from its first line and serves the
 # site; health names the command. Before, site-update answered 404 (no such site) and root edited

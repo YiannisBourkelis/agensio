@@ -720,6 +720,15 @@ json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_vi
         struct stat st {};
         return ::stat(f.c_str(), &st) == 0 && (dir ? S_ISDIR(st.st_mode) : S_ISREG(st.st_mode));
     };
+    // A directory asked for without its slash: the static handler's 301, written as it writes it
+    // (redirect::directory_location: the path encoded again, the query kept, a day; D5).
+    auto directory_redirect = [&]() {
+        const std::size_t qm = raw_path.find('?');
+        std::string loc;
+        redirect::directory_location(loc, path, qm == std::string_view::npos ? std::string_view() : raw_path.substr(qm + 1));
+        v.set("redirect_location", loc);
+        return finish("redirect", 301, "301 to " + loc + ": a directory, which browsers keep (max-age=86400)");
+    };
     std::string scratch;
     for (int hop = 0; hop <= StaticHandler::kMaxInternalRedirects; ++hop) {
         if (const RefusePattern* p = refuse::decide(site.refuse, path, scratch)) {
@@ -875,7 +884,7 @@ json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_vi
                 v.set("file", file);
                 return finish("static", 200, "200: the file " + file + " (" + describe(loc) + ")", file);
             }
-            if (stat_is(file, true)) return finish("redirect", 301, "301 to " + path + "/: a directory");
+            if (stat_is(file, true)) return directory_redirect();
             return finish("not_found", 404, "404: no file " + file);
         }
         for (const TryStep& step : loc.try_files) {
@@ -895,7 +904,7 @@ json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_vi
                         }
                         if (r == 2) next = true;
                     } else if (stat_is(fs_of(path), true)) {
-                        return finish("redirect", 301, "301 to " + path + "/: a directory");
+                        return directory_redirect();
                     }
                     break;
                 case TryStep::Kind::status:

@@ -491,7 +491,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-one, each seeded fr
   writes the Location; `parse_redirects` and `check_redirects` in `config.cpp` (circles followed
   on the site's names and ports, duplicates, refuse-unreachable, notes through `access_notices`);
   `Dispatcher::route` after `refuse`, and `redirect_https`/`redirect_host` take a matching rule
-  into the same hop; `fuzz_redirect`. The string key `redirect` is gone; `redirects_all` (a rule
+  into the same hop; `fuzz_redirect`. The static handler's 301 for a directory without its slash
+  goes through the same writer (`redirect::directory_location`: path encoded, query kept, a day;
+  alpha.100, the review's D5). The string key `redirect` is gone; `redirects_all` (a rule
   from `/`) needs no root. Managed (alpha.83): `SiteSpec::redirects` judged by
   `load_redirect_rules` (the loader's parse and checks on JSON rules), rendered as tables; `ctl
   --redirect / --redirect-exact / --gone / --redirects-file`; `path_check` names the rule and takes

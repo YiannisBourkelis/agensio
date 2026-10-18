@@ -5,7 +5,9 @@
 // takes, its Location must hold no control character, space or backslash, a relative one must
 // start with one '/' (never "//" or "/\", another host to a browser), and an absolute one must
 // start with exactly the target's origin and then '/', so no path or query can change the host.
-// The indexed lookup must agree with a scan of every rule for the most specific one.
+// The indexed lookup must agree with a scan of every rule for the most specific one. A directory's
+// slash redirect (redirect::directory_location) is held to the relative rules for every target, and
+// its path must decode back to the request's with the slash.
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -64,8 +66,15 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
         const std::string_view target = next_line(in, pos);
         bool encoded = false;
         if (!agensio::normalize_target(target, path, &encoded)) continue;
-        const std::size_t q = target.find('?');
-        const std::string_view query = q == std::string_view::npos ? std::string_view() : target.substr(q + 1);
+        const std::string_view query = agensio::redirect::query_of(target);
+        // A directory asked for without its slash (the static handler's 301): the same guarantees, and
+        // its path decodes back to the request's with the slash.
+        if (path.back() != '/') {
+            agensio::redirect::directory_location(loc, path, query);
+            check_location(loc, "");
+            std::string back;
+            assert(agensio::redirect::decode(loc.substr(0, loc.find('?')), back) && back == path + "/");
+        }
         const agensio::RedirectRule* hit = agensio::redirect::match(set, path, query, encoded);
         // The scan: an exact rule of the path whose parameters are there (the most parameters), else
         // the longest prefix that covers it; the index must find a rule exactly when the scan does.

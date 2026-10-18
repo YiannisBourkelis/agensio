@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.0-alpha.100
+
+- **A directory asked for without its slash is redirected as every other redirect is** (the review
+  of the redirects, HSTS and response-header work, 2026-10-14, defect D5). The static handler's 301
+  wrote the decoded path as it was, so a directory `My Files` gave `Location: /My Files/` (no URL), `a#b`
+  gave `/a#b/` (a fragment: the browser went to `/a`), a Greek name raw UTF-8, and a directory named
+  `\evil.example` gave `/\evil.example/`, which browsers read as `//evil.example/`, another host (the
+  class of Tomcat's CVE-2018-11784; the directory must exist under the root). The query was dropped
+  (`/docs?page=2` to `/docs/`) and there was no lifetime, so Chromium kept the 301 for good and a
+  directory later turned into a page kept redirecting. Now `redirect::directory_location` writes it
+  with the rules' writer: the path encoded again (`/My%20Files/`, `/a%23b/`, `/%5Cevil.example/`), the
+  query kept, relative, and `Cache-Control: max-age=86400`, the lifetime of agensio's other permanent
+  redirects; status 301 as before. nginx, Apache, Caddy and h2o keep the query, nginx escapes there
+  since 1.21.0 (the same bug), Caddy only non-ASCII bytes; none of them sends a lifetime. `path_check`
+  names the Location (`redirect_location`) and the lifetime. Unit test, a `fuzz_redirect` invariant
+  for every target (relative, never `//` or `/\`, decoding back to the path with its slash) and a
+  seed, integration checks over the default lookup and `try_files`' `$uri/`, failing on alpha.99;
+  `docs/configuration.md` 1, `docs/redirects.md` 1, the MCP text of `path_check`.
+
 ## 0.1.0-alpha.99 (2026-10-18)
 
 - **Response-header rules refuse what can only break or mislead** (the review of the redirects,

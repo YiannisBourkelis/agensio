@@ -12,6 +12,7 @@
 
 #include "core/access.hpp"
 #include "core/private_cache.hpp"
+#include "core/redirect.hpp"
 #include "core/strings.hpp"
 #include "http_date.hpp"
 #include "mime.hpp"
@@ -321,13 +322,17 @@ void StaticHandler::serve_file(Stream& s, File&& f, const FileInfo& fi, WorkerSt
     r.body = FileBody{&r.owned_file, fi.size, 0};
 }
 
+// A directory asked for without its slash: 301 to the slash form, written as every other redirect
+// is (core/redirect.hpp: the path encoded again, the query kept) and with their day's lifetime, so a
+// directory that later becomes a page stops redirecting (Chromium keeps a 301 without one forever).
 void StaticHandler::redirect_slash(Stream& s, WorkerState& ws) {
     Response& r = s.response;
     const ErrorPage& page = error_page(301);
     r.status = 301;
     r.head = s.request.method == Method::head;
-    r.scratch.assign(ws.path).push_back('/');
+    redirect::directory_location(r.scratch, ws.path, redirect::query_of(s.request.target));
     r.headers.add("Location", r.scratch);
+    r.headers.add("Cache-Control", "max-age=86400");
     r.prebuilt_headers = page.headers;
     r.prebuilt_h2 = page.h2_headers;
     r.prebuilt_h3 = page.h3_headers;

@@ -47,7 +47,9 @@ that name learns HSTS too; with `hsts` off there is nothing to learn, and one ho
 **What a redirect answer carries.** The status, a `Location` that agensio writes byte by byte
 (section 5.3), `Cache-Control: max-age=86400` on the permanent ones unless the rule says otherwise
 (section 7), HSTS when it goes out over HTTPS and `hsts` is on, and a short HTML body naming the
-target. The access log records it like any answer.
+target. The access log records it like any answer. The static handler's `301` for a directory
+asked for without its slash is written the same way, the query kept and a day's lifetime
+(0.1.0-alpha.100; before, the decoded path went out as it was, without the query or a lifetime).
 
 ## 2. HTTPS for a site: `http`
 

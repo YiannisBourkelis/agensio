@@ -75,6 +75,14 @@ redirect, routed again through the locations; a `?$query_string` suffix is accep
 ignored for static files). Without `try_files` the rule is: file, directory index (403 if
 there is none), 301 to the slash form for a directory, else 404.
 
+The redirect to the slash form (`/docs` to `/docs/`) is written as every other redirect is
+([redirects.md](redirects.md) 5.3): the path encoded again (`/My%20Files/`, `/a%23b/`, a Greek
+name as `%CE%A6...`, a backslash as `%5C`, so no directory name can make it point at another
+host), the query kept (`/docs/?page=2`, as nginx, Apache, Caddy and h2o keep it), relative, and
+with `Cache-Control: max-age=86400` (0.1.0-alpha.100), so a directory that later becomes a page
+stops redirecting within a day; Chromium keeps a 301 without a lifetime for good, and nginx and
+Apache send none.
+
 A directory's index is a file the site would answer by name. When another location owns it
 (a `.php` that runs) it runs there. When the site refuses it by name (a `refuse` pattern, a
 `deny` location, a refused ending, a dotfile, a backup of a protected name) it is passed over
