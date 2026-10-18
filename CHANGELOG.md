@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.100
+## 0.1.0-alpha.100 (2026-10-18)
 
 - **Content types: root's `[mime_types]` and a site's `mime_types`** (`docs/configuration.md` 6c; the
   review's gap 8, designed with the owner on 2026-10-18). The `Content-Type` of the files agensio
