@@ -1074,6 +1074,73 @@ curl -sI https://example.com/assets/app.3f9a1c2b.js | grep -i content-encoding  
 **Reference:** [Static site](../configuration.md#1-static-site) (pre-compressed files),
 [keys](../keys.md#cache).
 
+## Content types the built-in table gets wrong
+
+**When:** a file the site serves comes with the wrong `Content-Type`: a file without an ending (an
+app's `/.well-known/apple-app-site-association`), a format the built-in table does not know, or
+what an application's `.htaccess` sets with `AddType` and `AddEncoding` (TYPO3's compressed
+`.js.gzip` and `.css.gzip` files), which agensio does not read.
+
+```toml
+# /etc/agensio/agensio.toml: the main file, root's (once per host)
+include = ["sites.d/*.toml"]
+
+[server]
+acme = { email = "admin@example.com" }
+
+[mime_types]                   # for every site, over the built-in table
+"jxl" = "image/jxl"
+```
+
+```toml
+# /etc/agensio/sites.d/example.com.toml
+[[site]]
+server_name = ["example.com", "www.example.com"]
+listen = ["0.0.0.0:443"]
+root = "/var/www/example.com/web"
+tls = "auto"
+
+[site.mime_types]              # this site's, over [mime_types]
+"/.well-known/apple-app-site-association" = "application/json"
+"js.gzip" = { type = "text/javascript; charset=utf-8", encoding = "gzip" }
+"css.gzip" = { type = "text/css; charset=utf-8", encoding = "gzip" }
+"sh" = "text/plain; charset=utf-8"
+```
+
+**What it does.** Each layer adds to the one below and overrides only what it names: the site's
+table, then root's `[mime_types]`, then the built-in table (nginx's `mime.types`). An ending is
+matched in any case and the longest one of a file's name decides, so `app.js.gzip` takes `js.gzip`;
+an exact path names one file, a directory's index by its own name. `encoding` is for a file stored
+compressed: it goes out as `Content-Encoding`, with no `Vary`, and the browser decodes it. Quote an
+ending with a dot, or TOML reads it as a table. Two things are refused, both silent elsewhere: a
+site giving an ending a type browsers run scripts in when its built-in type is not one (`txt` as
+`text/html` would make every uploaded `.txt` a page on the site), and an encoding on an archive's
+ending (`gz`, `zip`, `tar.gz`: the browser would unpack the download). Only the files agensio serves
+are touched; PHP and a proxied application keep the type they send.
+
+**Check it.**
+
+```sh
+agensio ctl path-check example.com /assets/app.js.gzip     # content_type, content_encoding, and which table gave them
+curl -sI https://example.com/.well-known/apple-app-site-association | grep -i content-type    # application/json
+```
+
+**On a managed site.** `--mime-type` takes `ENDING=TYPE` or `PATH=TYPE`, `; encoding=gzip` after
+the type for a file stored compressed; given together they replace the site's table, and
+`--no-mime-types` clears it:
+
+```sh
+agensio ctl site-update example.com --mime-type '/.well-known/apple-app-site-association=application/json' \
+  --mime-type 'js.gzip=text/javascript; charset=utf-8; encoding=gzip' --yes --reason "types the application's .htaccess sets"
+```
+
+An agent sends the same as `site_update`'s `mime_types` (`{"js.gzip": {"type": "text/javascript;
+charset=utf-8", "encoding": "gzip"}}`), takes the current table from `site_show` first, and checks
+with `path_check`. Root's `[mime_types]` is in the main file only.
+
+**Reference:** [Content types](../configuration.md#6c-content-types-mime_types),
+[keys](../keys.md#top-level).
+
 ## Dumps and archives under a site's root: published, or kept private
 
 **When:** health names a database dump or an archive under a site's root (`archives_in_root`), and

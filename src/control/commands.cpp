@@ -730,6 +730,18 @@ json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_vi
         struct stat st {};
         return ::stat(f.c_str(), &st) == 0 && (dir ? S_ISDIR(st.st_mode) : S_ISREG(st.st_mode));
     };
+    // The type a file is served with, and from which table (docs/configuration.md 6c): the static
+    // handler's own lookup (StaticHandler::type_of), the path of the file as served, an index named.
+    auto typed = [&](const LocationConfig& l, const std::string& file) {
+        std::string at = path;
+        if (!at.empty() && at.back() == '/') at += file.substr(file.rfind('/') + 1);
+        const ServedType t = served_type(l.mime_types.get(), at, file);
+        v.set("content_type", std::string(t.type));
+        if (!t.encoding.empty()) v.set("content_encoding", std::string(t.encoding));
+        v.set("content_type_from", t.from == MimeType::From::builtin  ? "the built-in table"
+                                   : t.from == MimeType::From::server ? "[mime_types] in the main file"
+                                                                      : "the site's mime_types");
+    };
     // A directory asked for without its slash: the static handler's 301, written as it writes it
     // (redirect::directory_location: the path encoded again, the query kept, a day; D5).
     auto directory_redirect = [&]() {
@@ -883,6 +895,7 @@ json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_vi
                 const int r = index_of(file);
                 if (r == 1) {
                     v.set("file", file);
+                    typed(loc, file);
                     return finish("static", 200, "200: the index " + file + " (" + describe(loc) + ")", file);
                 }
                 if (r == 2) continue;
@@ -892,6 +905,7 @@ json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_vi
             file = fs_of(path);
             if (stat_is(file, false)) {
                 v.set("file", file);
+                typed(loc, file);
                 return finish("static", 200, "200: the file " + file + " (" + describe(loc) + ")", file);
             }
             if (stat_is(file, true)) return directory_redirect();
@@ -902,6 +916,7 @@ json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_vi
                 case TryStep::Kind::uri:
                     if (!dir_uri && stat_is(fs_of(path), false)) {
                         v.set("file", fs_of(path));
+                        typed(loc, fs_of(path));
                         return finish("static", 200, "200: the file " + fs_of(path) + " (" + describe(loc) + ")", fs_of(path));
                     }
                     break;
@@ -910,6 +925,7 @@ json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_vi
                         const int r = index_of(file);
                         if (r == 1) {
                             v.set("file", file);
+                            typed(loc, file);
                             return finish("static", 200, "200: the index " + file + " (" + describe(loc) + ")", file);
                         }
                         if (r == 2) next = true;
@@ -955,6 +971,7 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now, const 
     // The archives and dumps served on purpose, so an agent changing the list sees what it replaces
     // (the alpha.97 report).
     if (!s.public_archives.empty()) v.set("public_archives", strings(s.public_archives));
+    if (!s.mime_types.empty()) v.set("mime_types", mime_types_json(s.mime_types));
     // The locations a managed site's rules render are hand-written to the loader; labelled
     // "rules" here, beside preset:<app> and root:<file>, so an agent can tell them apart
     // (2026-10-02 report: 17 of a Kanboard site's 19 locations said nothing).
@@ -1818,6 +1835,7 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
         else if (n.code == "php_keep_conn_exceeds_children") fix = "remove keep_conn from the site's php table (off by default when the pool has fewer children than workers), or raise children to max_connections x workers";
         else if (n.code == "php_keep_conn_ondemand") fix = "remove keep_conn from the site's php table (off by default with pm = \"ondemand\"), or set pm to \"dynamic\" or \"static\" to keep it";
         else if (n.code == "auth_users_mixed_methods") fix = "give every user of the file one method and cost: agensio passwd NAME writes yescrypt (a managed site's tools always do), then reload";
+        else if (n.code == "mime_type_scriptable") fix = "root's main file: take the entry out of [mime_types], or keep it only when no site lets visitors upload a file of that ending; a site that needs it for its own files can rename them to an ending that has the type built in (docs/configuration.md 6c)";
         add(n.severity == "warning" ? "warn" : "info", n.code, n.site, n.text, fix);
     }
     for (auto& f : auth_findings(running, now)) out.push_back(std::move(f));

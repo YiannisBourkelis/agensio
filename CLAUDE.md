@@ -259,7 +259,11 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-one, each seeded fr
   (the rest of its connection info is filled on need, after routing).
 - **MIME**: static extension table compiled in (nginx `mime.types` equivalent), with an encoding
   column for files stored compressed (`mime_info`: `.svgz` is `gzip`, sent with `Content-Encoding`, no
-  `Vary`, no twin; alpha.100, D6).
+  `Vary`, no twin; alpha.100, D6); overridable from config (alpha.100, `docs/configuration.md` 6c):
+  root's `[mime_types]` and a site's `mime_types` (`MimeTypes`, by ending or exact path, a type and a
+  coding; `mime_entry_problem`: a site gets no script type an ending lacks, no coding on an
+  archive), merged per site into `LocationConfig::mime_types` at load and read at cache fill
+  (`served_type`, `StaticHandler::type_of`), so a hit pays nothing; `path_check` names the layer.
 - **Config**: TOML (vendored toml++). `[server]`, `[cache]`, `[[site]]` with `server_name`,
   `listen`, `root`, `index`, `try_files`, `tls`, `default`, and `[[site.location]]` blocks
   (`path`, `match = "prefix" | "exact"`, per-location `root` or `alias`/`index`/`try_files`/

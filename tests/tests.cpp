@@ -8986,6 +8986,192 @@ static void test_private_cache() {
     for (const char* f : {"Cache-Control", "-cache-control", "Expires", "Vary", "Content-Type", "X-Control"}) CHECK(!private_cache::shared_only_field(f));
 }
 
+// Content types (0.1.0-alpha.100, docs/configuration.md 6c): root's [mime_types] and a site's
+// mime_types over the built-in table, by ending (any case, the longest first) or exact path; what
+// either may hold; a site may not make a file browsers run scripts in; managed sites the same.
+static void test_mime_types() {
+    namespace fs = std::filesystem;
+    auto bad = [](const std::string& key, const std::string& type, const std::string& enc, bool site, std::string_view text) {
+        MimeType t;
+        t.type = type;
+        t.encoding = enc;
+        const std::string why = mime_entry_problem(key, t, site);
+        if (why.find(text) == std::string::npos) std::printf("mime_entry_problem(%s = %s): \"%s\", wanted \"%.*s\"\n", key.c_str(), type.c_str(), why.c_str(),
+                                                             static_cast<int>(text.size()), text.data());
+        return !why.empty() && why.find(text) != std::string::npos;
+    };
+    auto good = [](const std::string& key, const std::string& type, const std::string& enc, bool site) {
+        MimeType t;
+        t.type = type;
+        t.encoding = enc;
+        const std::string why = mime_entry_problem(key, t, site);
+        if (!why.empty()) std::printf("mime_entry_problem(%s = %s): %s\n", key.c_str(), type.c_str(), why.c_str());
+        return why.empty();
+    };
+    CHECK(mime_key(".SH") == "sh" && mime_key("Js.Gzip") == "js.gzip" && mime_key("/A/b") == "/A/b");
+    CHECK(good("sh", "text/plain; charset=utf-8", "", true) && good(".JXL", "image/jxl", "", true) && good("js.gzip", "text/javascript; charset=utf-8", "gzip", false));
+    CHECK(good("/.well-known/apple-app-site-association", "application/json", "", true) && good("svgz", "image/svg+xml", "gzip", true));
+    CHECK(good("html", "text/plain; charset=utf-8", "", true) && good("shtml", "text/html", "", true) && good("rss", "application/xml", "", true));
+    CHECK(bad("", "text/plain", "", true, "an ending") && bad("a/b", "text/plain", "", true, "letters, digits") && bad("a..b", "text/plain", "", true, "between its parts"));
+    CHECK(bad(std::string(33, 'a'), "text/plain", "", true, "at most 32") && bad("x y", "text/plain", "", true, "letters, digits"));
+    CHECK(bad("/a//b", "text/plain", "", true, "normalised") && bad("/a/", "text/plain", "", true, "directory") && bad("/a?b", "text/plain", "", true, "URL characters"));
+    CHECK(bad("/a%41", "text/plain", "", true, "URL characters") && bad("/a\"b", "text/plain", "", true, "URL characters"));
+    CHECK(bad("sh", "text", "", true, "media type") && bad("sh", "text/plain; q=1", "", true, "media type") && bad("sh", "text/plain; charset=", "", true, "media type"));
+    CHECK(bad("sh", "text/pl ain", "", true, "media type") && bad("sh", "text/\"plain\"", "", true, "media type") && bad("sh", "text/" + std::string(130, 'p'), "", true, "media type"));
+    CHECK(bad("sh", "text/plain", "deflate", true, "\"gzip\" or \"br\"") && bad("gz", "application/gzip", "gzip", false, "unpack the download"));
+    CHECK(bad("tar.gz", "application/gzip", "gzip", true, "unpack") && bad("tgz", "application/gzip", "gzip", true, "unpack") && bad("zip", "application/zip", "br", true, "unpack"));
+    CHECK(bad("br", "text/html", "br", false, "unpack") && bad("backup.tar.zst", "application/zstd", "gzip", false, "unpack") && bad("x.zip", "text/plain", "gzip", true, "unpack"));
+    CHECK(good("txt.gz", "text/plain; charset=utf-8", "gzip", true) && good("css.br", "text/css", "br", true));  // stored compressed on purpose
+    // A type browsers run scripts in: a site only where the ending has one built in; root may.
+    CHECK(bad("txt", "text/html", "", true, "run the scripts") && good("txt", "text/html", "", false));
+    // A file stored compressed is judged by its ending without the coding's: TYPO3's .js.gzip is JavaScript.
+    CHECK(good("js.gzip", "text/javascript; charset=utf-8", "gzip", true) && good("html.br", "text/html", "br", true));
+    CHECK(bad("js.gzip", "text/javascript", "", true, "run the scripts") && bad("txt.gzip", "text/html", "gzip", true, "run the scripts"));
+    CHECK(bad("json", "text/javascript", "", true, "run the scripts") && bad("jpg", "image/svg+xml", "", true, "run the scripts"));
+    CHECK(bad("/feed", "application/rss+xml", "", true, "run the scripts") && bad("dat", "application/xml; charset=utf-8", "", true, "run the scripts"));
+    CHECK(scriptable_type("Text/HTML; charset=utf-8") && scriptable_type("application/atom+xml") && !scriptable_type("application/json") && !scriptable_type("text/plain"));
+
+    const fs::path dir = fs::temp_directory_path() / ("agensio-mime-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "sites.d");
+    fs::create_directories(dir / "www" / "docs");
+    std::ofstream(dir / "www" / "run.sh") << "echo";
+    std::ofstream(dir / "www" / "docs" / "index.html") << "<p>";
+    auto write_main = [&](const std::string& head, const std::string& sites) {
+        std::ofstream(dir / "agensio.toml") << head << "\n[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:18751\"]\nroot = \"www\"\n" << sites
+                                            << "\n[[site]]\nserver_name = [\"b.test\"]\nlisten = [\"127.0.0.1:18751\"]\nroot = \"www\"\n";
+        return dir / "agensio.toml";
+    };
+    auto refused = [&](const std::string& head, const std::string& sites, std::string_view text) {
+        try {
+            load_config(write_main(head, sites));
+        } catch (const std::exception& e) {
+            if (std::string_view(e.what()).find(text) != std::string_view::npos) return true;
+            std::printf("mime_types: refused, but not for \"%.*s\": %s\n", static_cast<int>(text.size()), text.data(), e.what());
+            return false;
+        }
+        std::printf("mime_types: loaded, expected refused for \"%.*s\"\n", static_cast<int>(text.size()), text.data());
+        return false;
+    };
+    {
+        const Config c = load_config(write_main("[mime_types]\n\"jxl\" = \"image/jxl\"\n\"SH\" = \"application/x-sh\"\n",
+                                                "[site.mime_types]\n\"sh\" = \"text/plain; charset=utf-8\"\n\"js.gzip\" = { type = \"text/javascript; charset=utf-8\", encoding = \"gzip\" }\n"
+                                                "\"/.well-known/apple-app-site-association\" = \"application/json\"\n\"/docs/index.html\" = \"text/plain\"\n"));
+        CHECK(c.mime_types.endings.size() == 2 && c.sites.size() == 2 && c.sites[0].mime_types.endings.size() == 2 && c.sites[0].mime_types.paths.size() == 2);
+        const MimeTypes* a = c.sites[0].locations.back().mime_types.get();
+        const MimeTypes* b = c.sites[1].locations.back().mime_types.get();
+        CHECK(a && b && a != b);
+        using From = MimeType::From;
+        auto st = [](const MimeTypes* t, std::string_view at, std::string_view file, std::string_view type, std::string_view enc, From from) {
+            const ServedType r = served_type(t, at, file);
+            if (r.type != type || r.encoding != enc || r.from != from)
+                std::printf("served_type(%.*s): %.*s / %.*s / %d\n", static_cast<int>(file.size()), file.data(), static_cast<int>(r.type.size()), r.type.data(),
+                            static_cast<int>(r.encoding.size()), r.encoding.data(), static_cast<int>(r.from));
+            return r.type == type && r.encoding == enc && r.from == from;
+        };
+        CHECK(st(a, "/run.sh", "/srv/run.sh", "text/plain; charset=utf-8", "", From::site) && st(b, "/run.sh", "/srv/run.sh", "application/x-sh", "", From::server));
+        CHECK(st(a, "/x.JXL", "/srv/x.JXL", "image/jxl", "", From::server) && st(b, "/x.jxl", "/srv/x.jxl", "image/jxl", "", From::server));
+        CHECK(st(a, "/a/app.JS.GZIP", "/srv/a/app.JS.GZIP", "text/javascript; charset=utf-8", "gzip", From::site));  // the longest ending first
+        CHECK(st(a, "/x.gzip", "/srv/x.gzip", "application/octet-stream", "", From::builtin) && st(a, "/s.css", "/srv/s.css", "text/css; charset=utf-8", "", From::builtin));
+        CHECK(st(a, "/.well-known/apple-app-site-association", "/srv/.well-known/apple-app-site-association", "application/json", "", From::site));
+        CHECK(st(b, "/.well-known/apple-app-site-association", "/srv/.well-known/apple-app-site-association", "application/octet-stream", "", From::builtin));
+        CHECK(st(a, "/logo.svgz", "/srv/logo.svgz", "image/svg+xml", "gzip", From::builtin) && st(nullptr, "/run.sh", "/srv/run.sh", mime_for_path("/x.sh"), "", From::builtin));
+        CHECK(st(a, "/.sh", "/srv/.sh", mime_for_path("/.sh"), "", From::builtin));  // a leading dot is no ending
+        // A hashed build file's long name: its ending still decides.
+        const std::string hashed = "/srv/assets/vendor.3f9a1c2b4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e.chunk.JS.gzip";
+        CHECK(st(a, "/assets/x", hashed, "text/javascript; charset=utf-8", "gzip", From::site));
+        CHECK(st(a, "/x", "/srv/" + std::string(40, 'a') + "." + std::string(40, 'b'), "application/octet-stream", "", From::builtin));
+        // The static handler's own reading: a directory's index by its own name.
+        WorkerState ws;
+        ws.path = "/docs/";
+        ws.fs_path = "/srv/docs/index.html";
+        CHECK(StaticHandler::type_of(c.sites[0].locations.back(), ws).type == "text/plain");
+        // explain prints both layers; path_check names the type and its layer.
+        std::ostringstream ex;
+        explain_config(c, ex);
+        CHECK(ex.str().find("mime_types = { \"jxl\" = \"image/jxl\", \"sh\" = \"application/x-sh\" }   # over the built-in table, for every site\n") != std::string::npos);
+        CHECK(ex.str().find("mime_types = { \"js.gzip\" = { type = \"text/javascript; charset=utf-8\", encoding = \"gzip\" }, \"sh\" = \"text/plain; charset=utf-8\", "
+                            "\"/.well-known/apple-app-site-association\" = \"application/json\", \"/docs/index.html\" = \"text/plain\" }") != std::string::npos);
+        std::string err;
+        json::Value pc = control::path_check(c, c.sites[0], "/run.sh", err);
+        CHECK(err.empty() && pc.get("content_type") == "text/plain; charset=utf-8" && pc.get("content_type_from") == "the site's mime_types");
+        pc = control::path_check(c, c.sites[1], "/run.sh", err);
+        CHECK(pc.get("content_type") == "application/x-sh" && pc.get("content_type_from") == "[mime_types] in the main file");
+        pc = control::path_check(c, c.sites[0], "/docs/", err);
+        CHECK(pc.get("content_type") == "text/plain" && pc.get("content_type_from") == "the site's mime_types");
+        CHECK(control::site(c, c.sites[0], 0, nullptr)["mime_types"]["js.gzip"].get("encoding") == "gzip");
+        CHECK(access_notices(c).empty());
+    }
+    {   // Neither layer: the built-in table alone, no table to look in.
+        const Config c = load_config(write_main("", ""));
+        CHECK(!c.sites[0].locations.back().mime_types && c.sites[0].mime_types.empty());
+    }
+    // Root may give an ending a type browsers run scripts in; it is noted. A site may not.
+    {
+        const Config c = load_config(write_main("[mime_types]\n\"txt\" = \"text/html\"\n", ""));
+        const auto notes = access_notices(c);
+        CHECK(notes.size() == 1 && notes[0].code == "mime_type_scriptable" && notes[0].text.find("txt") != std::string::npos);
+    }
+    CHECK(refused("", "mime_types = { \"txt\" = \"text/html\" }\n", "run the scripts"));
+    CHECK(refused("", "mime_types = { js.gzip = \"text/javascript\" }\n", "written quoted"));
+    CHECK(refused("", "mime_types = { \"SH\" = \"text/plain\", \"sh\" = \"text/x-sh\" }\n", "named twice"));
+    CHECK(refused("", "mime_types = { \"sh\" = { type = \"text/plain\", charset = \"x\" } }\n", "takes type and encoding"));
+    CHECK(refused("", "mime_types = \"text/plain\"\n", "must be a table"));
+    CHECK(refused("[mime_types]\n\"gz\" = { type = \"application/gzip\", encoding = \"gzip\" }\n", "", "unpack"));
+    {
+        std::string many = "[site.mime_types]\n";
+        for (int i = 0; i < 65; ++i) many += "\"e" + std::to_string(i) + "\" = \"text/plain\"\n";
+        CHECK(refused("", many, "at most 64"));
+    }
+    // An included file holds sites only: [mime_types] is root's main file's.
+    {
+        std::ofstream(dir / "sites.d" / "c.toml") << "[mime_types]\n\"sh\" = \"text/plain\"\n\n[[site]]\nserver_name = [\"c.test\"]\nlisten = [\"127.0.0.1:18751\"]\nroot = \"../www\"\n";
+        std::ofstream(dir / "agensio.toml") << "include = [\"sites.d/*.toml\"]\n\n[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:18751\"]\nroot = \"www\"\n";
+        const Config c = load_config(dir / "agensio.toml");
+        CHECK(c.held_back.size() == 1 && c.held_back[0].error.find("[mime_types] belong in the main file") != std::string::npos);
+        fs::remove(dir / "sites.d" / "c.toml");
+    }
+    // A managed site: the table taken whole and judged by the same checks, carried in the spec and
+    // rendered as one inline table that loads back.
+    {
+        control::SiteSpec spec;
+        spec.domain = "m.test";
+        spec.https = "none";
+        spec.app = "static";
+        spec.root = (dir / "www").string();
+        spec.no_user = true;
+        spec.user_decided = true;
+        spec.listen_plain = "127.0.0.1:18751";
+        Config cfg;
+        cfg.config_path = dir / "agensio.toml";
+        json::Value body;
+        std::string err;
+        CHECK(json::parse(R"J({"mime_types": {".SH": "text/plain; charset=utf-8", "js.gzip": {"type": "text/javascript; charset=utf-8", "encoding": "gzip"}}})J", body, err));
+        CHECK(control::apply_request(body, cfg, spec, err).empty() && err.empty() && spec.mime_types.endings.size() == 2 && spec.mime_types.endings.count("sh"));
+        control::SiteSpec back;
+        CHECK(control::SiteSpec::from_json(spec.to_json(), back) && back.mime_types.endings.size() == 2 && back.mime_types.endings["js.gzip"].encoding == "gzip");
+        const std::string file = control::render_site(spec, "x");
+        CHECK(file.find("\nmime_types = { \"js.gzip\" = { type = \"text/javascript; charset=utf-8\", encoding = \"gzip\" }, \"sh\" = \"text/plain; charset=utf-8\" }") != std::string::npos);
+        std::ofstream(dir / "sites.d" / "m.test.toml") << file;
+        std::ofstream(dir / "agensio.toml") << "include = [\"sites.d/*.toml\"]\n";
+        const Config loaded = load_config(dir / "agensio.toml");
+        CHECK(loaded.held_back.empty() && loaded.sites.size() == 1 && loaded.sites[0].mime_types.endings.size() == 2);
+        fs::remove(dir / "sites.d" / "m.test.toml");
+        CHECK(json::parse(R"J({"mime_types": {"txt": "text/html"}})J", body, err));
+        err.clear();
+        control::apply_request(body, cfg, back, err);
+        CHECK(err.find("run the scripts") != std::string::npos && back.mime_types.endings.size() == 2);
+        CHECK(json::parse(R"J({"mime_types": ["sh"]})J", body, err));
+        err.clear();
+        control::apply_request(body, cfg, back, err);
+        CHECK(err.find("an object of endings or paths") != std::string::npos);
+        CHECK(json::parse(R"J({"mime_types": null})J", body, err));
+        err.clear();
+        CHECK(control::apply_request(body, cfg, spec, err).empty() && spec.mime_types.empty() && control::render_site(spec, "x").find("mime_types") == std::string::npos);
+        CHECK(std::find(control::site_request_fields().begin(), control::site_request_fields().end(), "mime_types") != control::site_request_fields().end());
+    }
+    fs::remove_all(dir);
+}
+
 // What a response-header rule may change in an application's answer for caches (2026-10-17, the
 // review's D4, docs/headers.md 2.4): its no-store, private and no-cache stand over a rule's value
 // that drops them (RFC 9111 5.2.2), and an answer that is one user's (Set-Cookie, 7.3; a request
@@ -10777,6 +10963,7 @@ int main() {
     test_redirect_rules();
     test_response_headers();
     test_rule_cache_fields();
+    test_mime_types();
     test_security_baseline();
     test_managed_response_headers();
     test_header_suggestions();

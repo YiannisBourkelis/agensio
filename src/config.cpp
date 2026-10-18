@@ -1,4 +1,5 @@
 #include "config.hpp"
+#include "mime.hpp"
 
 #include "control/reference.hpp"
 
@@ -2163,6 +2164,49 @@ std::string trusted_entry(const std::string& text, const Config& cfg, std::vecto
 }
 
 
+// mime_types as written in TOML (docs/configuration.md 6c): root's [mime_types] or a site's table.
+MimeTypes parse_mime_table(const toml::node_view<const toml::node>& n, const std::string& where, bool site) {
+    const toml::table* tbl = n.as_table();
+    if (!tbl) fail(where + " must be a table of endings or paths and types: mime_types = { \"sh\" = \"text/plain; charset=utf-8\" }");
+    MimeTypes out;
+    std::size_t count = 0;
+    for (const auto& [k, v] : *tbl) {
+        const std::string key(k.str());
+        MimeType t;
+        t.from = site ? MimeType::From::site : MimeType::From::server;
+        if (const auto str = v.value<std::string>()) {
+            t.type = *str;
+        } else if (const toml::table* e = v.as_table()) {
+            // A dotted ending written bare is a TOML table: js.gzip = "..." is js = { gzip = "..." }.
+            if (!e->contains("type"))
+                fail(where + "." + key + ": a type, or a table { type, encoding }; an ending with a dot is written quoted (\"js.gzip\" = \"...\"), "
+                     "else TOML reads it as a table");
+            for (const auto& [f, _] : *e)
+                if (f.str() != "type" && f.str() != "encoding") fail(where + "." + key + ": an entry takes type and encoding, not '" + std::string(f.str()) + "'");
+            t.type = (*e)["type"].value_or(std::string());
+            t.encoding = (*e)["encoding"].value_or(std::string());
+        } else {
+            fail(where + "." + key + ": a type (\"text/plain; charset=utf-8\") or { type = \"image/svg+xml\", encoding = \"gzip\" }");
+        }
+        if (const std::string why = mime_entry_problem(key, t, site); !why.empty()) fail(where + ": " + why);
+        const std::string stored = mime_key(key);
+        auto& table = stored[0] == '/' ? out.paths : out.endings;
+        if (table.count(stored)) fail(where + ": " + stored + " is named twice (endings are matched in any case, a leading dot dropped)");
+        table.emplace(stored, std::move(t));
+        if (++count > (site ? 64u : 256u)) fail(where + ": at most " + std::string(site ? "64 entries a site" : "256 entries"));
+    }
+    return out;
+}
+
+// The table a site's locations read: root's, the site's own entries over it; null when neither has any.
+std::shared_ptr<const MimeTypes> merged_mime_types(const MimeTypes& server, const MimeTypes& site) {
+    if (server.empty() && site.empty()) return nullptr;
+    auto m = std::make_shared<MimeTypes>(server);
+    for (const auto& [k, v] : site.endings) m->endings[k] = v;
+    for (const auto& [k, v] : site.paths) m->paths[k] = v;
+    return m;
+}
+
 void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, const std::string& where, std::vector<RootAdditions>* root_adds = nullptr) {
     check_keys(t, {"[[site]]"}, {"auth", "access", "redirect", "response_headers"}, where);
     SiteConfig site;
@@ -2223,6 +2267,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     }
     // The archives and dumps served on purpose (2026-10-17): health's archives_in_root counts them as
     // accepted; never read when serving.
+    if (t.contains("mime_types")) site.mime_types = parse_mime_table(t["mime_types"], where + ".mime_types", true);
     if (t.contains("public_archives")) {
         if (!t["public_archives"].is_array())
             fail(where + ".public_archives must be a list of paths as served from the site's root ([\"/downloads/world.sql.gz\"], a directory ending in \"/\")");
@@ -2450,6 +2495,10 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     finalize_site(site);
     for (const auto& add : for_root)
         if (LocationConfig* into = find_at("/")) merge_into(*into, add);
+    if (auto types = merged_mime_types(cfg.mime_types, site.mime_types)) {  // every location serves files with them
+        for (auto& loc : site.locations) loc.mime_types = types;
+        site.validation.mime_types = types;
+    }
     check_refuse_conflicts(site, where);
     check_redirects(site, where);
     check_header_endings(site, where);
@@ -2676,8 +2725,29 @@ void print_fcgi(std::ostream& out, const char* key, const FcgiConfig& f) {
 }
 }  // namespace
 
+std::string mime_types_toml(const MimeTypes& t) {
+    std::string out = "{";
+    bool first = true;
+    for (const auto* table : {&t.endings, &t.paths})
+        for (const auto& [key, m] : *table) {  // keys and types hold no '"' or '\\' (mime_entry_problem)
+            out += (first ? " \"" : ", \"") + key + "\" = ";
+            out += m.encoding.empty() ? "\"" + m.type + "\"" : "{ type = \"" + m.type + "\", encoding = \"" + m.encoding + "\" }";
+            first = false;
+        }
+    return out + (first ? "}" : " }");
+}
+
+json::Value mime_types_json(const MimeTypes& t) {
+    json::Value out = json::Value::object();
+    for (const auto* table : {&t.endings, &t.paths})
+        for (const auto& [key, m] : *table)
+            out.set(key, m.encoding.empty() ? json::Value(m.type) : json::Value::object().set("type", m.type).set("encoding", m.encoding));
+    return out;
+}
+
 void explain_config(const Config& cfg, std::ostream& out) {
     out << "# effective configuration of " << cfg.config_path.string() << " (presets expanded)\n";
+    if (!cfg.mime_types.empty()) out << "mime_types = " << mime_types_toml(cfg.mime_types) << "   # over the built-in table, for every site\n";
     out << "\n[server]\n";
     print_list(out, "protocols", cfg.protocols);
     out << "http2 = { max_concurrent_streams = " << cfg.http2.max_concurrent_streams << " }\n";
@@ -2720,6 +2790,7 @@ void explain_config(const Config& cfg, std::ostream& out) {
         out << "access_log = \"" << (site.access_log.empty() ? "off" : site.access_log) << "\"\n";
         if (!site.login_paths.empty()) print_list(out, "login_paths", site.login_paths);
         if (!site.public_archives.empty()) print_list(out, "public_archives", site.public_archives);
+        if (!site.mime_types.empty()) out << "mime_types = " << mime_types_toml(site.mime_types) << "   # over [mime_types] and the built-in table\n";
         if (!site.refuse.empty()) {
             std::vector<std::string> texts;
             for (const auto& p : site.refuse.patterns) texts.push_back(p.text);
@@ -2963,6 +3034,15 @@ std::vector<AccessNotice> access_notices(const Config& cfg) {
     // alpha.61 report's finding 2): the note's index and the sites that read the file.
     std::map<std::string, std::pair<std::size_t, std::vector<std::string>>> mixed;
 #endif
+    // Root's [mime_types] may give an ending a type browsers run scripts in, which a site may not
+    // (mime_entry_problem): said, since an uploaded file of that ending becomes a page or a script.
+    for (const auto* table : {&cfg.mime_types.endings, &cfg.mime_types.paths})
+        for (const auto& [key, t] : *table)
+            if (scriptable_type(t.type) && !scriptable_type(mime_for_path(key[0] == '/' ? key : "/x." + key)))
+                out.push_back({"mime_type_scriptable", "warning", "",
+                               "[mime_types] gives " + key + " the type " + t.type + ", which browsers run scripts in: a file of that " +
+                                   (key[0] == '/' ? std::string("path") : std::string("ending")) +
+                                   " a visitor can upload becomes a page or a script on the site's origin; keep it to files the sites' owners write"});
     for (const auto& site : cfg.sites) {
         const std::string& name = site.server_names.front();
         // A path listed as public that the site's own refuse pattern answers 404 (2026-10-17): the two
@@ -3935,6 +4015,8 @@ Config load_config(const fs::path& path, const Config* running, bool use_record)
     } else if (root.contains("addresses")) {
         fail("'addresses' must be a table: [addresses] office = [\"203.0.113.7\", \"2001:db8:5::/64\"]");
     }
+    // [mime_types] (0.1.0-alpha.100): root's content types for every site's files, before the sites read them.
+    if (root.contains("mime_types")) cfg.mime_types = parse_mime_table(root["mime_types"], "mime_types", false);
     for (const auto& text : cfg.trusted_proxies_text)
         if (const std::string why = trusted_entry(text, cfg, cfg.trusted_proxies); !why.empty()) fail("server.trusted_proxies: " + why);
     parse_sites_from(root, base_dir, cfg, path.filename().string(), &additions, cfg.config_path.string());
@@ -3945,7 +4027,7 @@ Config load_config(const fs::path& path, const Config* running, bool use_record)
         const std::size_t before = cfg.sites.size();
         try {
             check_keys(sub, {}, {"site"}, file.filename().string(),
-                       "an included file holds [[site]] tables; [server], [cache], [log], [control], include and [addresses] belong in the main file");
+                       "an included file holds [[site]] tables; [server], [cache], [log], [control], include, [addresses] and [mime_types] belong in the main file");
             parse_sites_from(sub, file.parent_path(), cfg, file.filename().string(), &additions, file.string());
             for (std::size_t i = before; i < cfg.sites.size(); ++i)
                 if (auto f = failed_additions.find(cfg.sites[i].server_names.front()); f != failed_additions.end()) {
@@ -4379,6 +4461,162 @@ std::string check_public_archive(const std::string& p) {
         rest.remove_prefix(slash + 1);
     }
     return {};
+}
+
+// mime_types (0.1.0-alpha.100, docs/configuration.md 6c).
+std::string mime_key(const std::string& key) {
+    if (!key.empty() && key[0] == '/') return key;
+    std::string k = to_lower(key);
+    if (!k.empty() && k[0] == '.') k.erase(0, 1);
+    return k;
+}
+
+namespace {
+std::string_view trim_ows(std::string_view s) {
+    while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) s.remove_prefix(1);
+    while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.remove_suffix(1);
+    return s;
+}
+}  // namespace
+
+bool scriptable_type(std::string_view type) {
+    const std::string t = to_lower(std::string(trim_ows(type.substr(0, type.find(';')))));
+    return t == "text/html" || t == "application/xhtml+xml" || t == "image/svg+xml" || t == "text/xml" || t == "application/xml" || t.ends_with("+xml") ||
+           t == "text/javascript" || t == "application/javascript" || t == "application/x-javascript" || t == "text/ecmascript" ||
+           t == "application/ecmascript";
+}
+
+namespace {
+
+bool tchar(char c) {  // RFC 9110 5.6.2
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || std::string_view("!#$&'*+-.^_`|~").find(c) != std::string_view::npos;
+}
+
+bool token(std::string_view s) {
+    if (s.empty()) return false;
+    for (const char c : s)
+        if (!tchar(c)) return false;
+    return true;
+}
+
+// type "/" subtype, then at most a charset parameter (RFC 9110 8.3.1: media-type).
+bool media_type(std::string_view v) {
+    const std::size_t semi = v.find(';');
+    const std::string_view main = trim_ows(v.substr(0, semi));
+    const std::size_t slash = main.find('/');
+    if (slash == std::string_view::npos || !token(main.substr(0, slash)) || !token(main.substr(slash + 1))) return false;
+    if (semi == std::string_view::npos) return true;
+    const std::string_view param = trim_ows(v.substr(semi + 1));
+    const std::size_t eq = param.find('=');
+    return eq != std::string_view::npos && to_lower(std::string(trim_ows(param.substr(0, eq)))) == "charset" && token(trim_ows(param.substr(eq + 1)));
+}
+
+// Endings whose file is an archive or a compressed download: a coding there would have the browser
+// unpack what the visitor meant to save (Apache's AddEncoding x-gzip .gz over every .gz, .tar.gz
+// downloads included, the classic trap). A two-part ending naming what is inside ("js.gzip",
+// "html.br", "txt.gz") is a file stored compressed on purpose, unless that is a tar.
+bool archive_ending(std::string_view e) {
+    const std::size_t dot = e.rfind('.');
+    const std::string_view last = dot == std::string_view::npos ? e : e.substr(dot + 1);
+    auto any_of = [&](std::initializer_list<std::string_view> list) { return std::find(list.begin(), list.end(), last) != list.end(); };
+    if (any_of({"zip", "7z", "rar", "tar", "tgz", "tbz", "tbz2", "txz", "tzst", "tlz"})) return true;  // containers, whatever is before
+    if (!any_of({"gz", "br", "zst", "bz2", "xz", "lz4", "lzma", "lz", "z"})) return false;
+    if (dot == std::string_view::npos) return true;  // a bare compressed file: a download
+    const std::string_view head = e.substr(0, dot);
+    return head == "tar" || head.ends_with(".tar");
+}
+
+}  // namespace
+
+std::string mime_entry_problem(const std::string& written, const MimeType& t, bool site) {
+    const std::string key = mime_key(written);
+    const std::string shown = "'" + written.substr(0, 80) + "'";
+    if (key.empty()) return shown + ": an ending (\"sh\", \"js.gzip\") or a path as served (\"/.well-known/apple-app-site-association\")";
+    if (key[0] == '/') {
+        if (key.size() > 256) return shown + ": a path is at most 256 characters";
+        if (key.back() == '/') return shown + " names a directory: an entry names the path a file is served at";
+        for (const char c : key)
+            if (!redirect::path_char(static_cast<unsigned char>(c)) && c != '/') return shown + ": a path of URL characters (letters, digits, - . _ ~ ! $ & ' ( ) * + , ; = : @ /), written as it reads decoded";
+        if (key.find("//") != std::string::npos || key.find("/./") != std::string::npos || key.find("/../") != std::string::npos || key.ends_with("/.") ||
+            key.ends_with("/.."))
+            return shown + " must be a normalised path: no '//', no '.' or '..' segments";
+    } else {
+        if (key.size() > 32) return shown + ": an ending is at most 32 characters";
+        if (key.front() == '.' || key.back() == '.' || key.find("..") != std::string::npos)
+            return shown + ": an ending's dots go between its parts (\"js.gzip\")";
+        for (const char c : key)
+            if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '+' || c == '-' || c == '_'))
+                return shown + ": an ending of letters, digits, '+', '-', '_' and dots between its parts";
+    }
+    if (t.type.empty() || t.type.size() > 128 || !media_type(t.type))
+        return shown + " = '" + t.type.substr(0, 80) + "': a media type, type/subtype with at most a charset (\"text/plain; charset=utf-8\"), at most 128";
+    if (!t.encoding.empty() && t.encoding != "gzip" && t.encoding != "br")
+        return shown + ": encoding is \"gzip\" or \"br\", the codings a file is stored with that browsers decode";
+    if (!t.encoding.empty() && key[0] != '/' && archive_ending(key))
+        return shown + ": no encoding on an archive's ending: a browser would unpack the download and save its contents under the archive's name; "
+                       "an archive is served as it is";
+    if (site && scriptable_type(t.type)) {
+        // A file stored compressed is judged by its ending without the coding's ("js.gzip" by js).
+        std::string probe = key[0] == '/' ? key : "/x." + key;
+        if (!t.encoding.empty() && key[0] != '/' && key.find('.') != std::string::npos) probe = "/x." + key.substr(0, key.rfind('.'));
+        if (!scriptable_type(mime_for_path(probe)))
+            return shown + " = '" + t.type + "' would have browsers run the scripts in such a file on the site's origin (an uploaded file of that name "
+                           "becomes a page or a script): a site gives an HTML, XML, SVG or JavaScript type only to an ending that has one already "
+                           "(html, xhtml, svg, xml, js); root's [mime_types] in the main file can, with a warning";
+    }
+    return "";
+}
+
+std::string load_mime_types(const json::Value& v, MimeTypes& out, bool site) {
+    out = MimeTypes{};
+    if (v.type() != json::Value::Type::object)
+        return "mime_types is an object of endings or paths and types: {\"sh\": \"text/plain; charset=utf-8\", \"svgz\": {\"type\": \"image/svg+xml\", \"encoding\": \"gzip\"}} ({} clears it)";
+    if (v.members().size() > 64) return "mime_types: at most 64 entries a site";
+    for (const auto& [k, e] : v.members()) {
+        MimeType t;
+        t.from = site ? MimeType::From::site : MimeType::From::server;
+        if (e.type() == json::Value::Type::string) {
+            t.type = std::string(e.str());
+        } else if (e.type() == json::Value::Type::object) {
+            for (const auto& [f, _] : e.members())
+                if (f != "type" && f != "encoding") return "mime_types." + k + ": an entry takes type and encoding";
+            t.type = std::string(e.get("type"));
+            t.encoding = std::string(e.get("encoding"));
+        } else {
+            return "mime_types." + k + ": a type (\"text/plain; charset=utf-8\") or {\"type\": ..., \"encoding\": \"gzip\"}";
+        }
+        if (const std::string why = mime_entry_problem(k, t, site); !why.empty()) return "mime_types: " + why;
+        const std::string key = mime_key(k);
+        auto& table = key[0] == '/' ? out.paths : out.endings;
+        if (table.count(key)) return "mime_types: " + key + " is named twice (endings are matched in any case, a leading dot dropped)";
+        table.emplace(key, std::move(t));
+    }
+    return "";
+}
+
+ServedType served_type(const MimeTypes* table, std::string_view site_path, std::string_view fs_path) noexcept {
+    if (table) {
+        if (!table->paths.empty())
+            if (const auto it = table->paths.find(site_path); it != table->paths.end()) return {it->second.type, it->second.encoding, it->second.from};
+        if (!table->endings.empty()) {
+            const std::size_t slash = fs_path.rfind('/');
+            const std::string_view name = slash == std::string_view::npos ? fs_path : fs_path.substr(slash + 1);
+            // An ending is at most 32 characters, so the name's last 33 hold every one (a hashed build
+            // file's long name included); a dot that starts the name is none (a hidden file).
+            constexpr std::size_t kTail = 33;
+            const bool whole = name.size() <= kTail;
+            const std::string_view tail = whole ? name : name.substr(name.size() - kTail);
+            char lower[kTail];
+            for (std::size_t i = 0; i < tail.size(); ++i) lower[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(tail[i])));
+            const std::string_view l(lower, tail.size());
+            // The longest ending first: "a.js.gzip" asks js.gzip, then gzip.
+            for (std::size_t dot = l.find('.', whole ? 1 : 0); dot != std::string_view::npos; dot = l.find('.', dot + 1))
+                if (const auto it = table->endings.find(l.substr(dot + 1)); it != table->endings.end())
+                    return {it->second.type, it->second.encoding, it->second.from};
+        }
+    }
+    const MimeInfo b = mime_info(fs_path);
+    return {b.type, b.encoding, MimeType::From::builtin};
 }
 
 std::string check_login_path(const std::string& p) {

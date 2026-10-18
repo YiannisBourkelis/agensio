@@ -503,6 +503,10 @@ allow = ["10.0.0.0/8"]
 
 [addresses]
 loop = ["127.0.0.1", "::1"]
+
+[mime_types]   # root's, for every site (docs/configuration.md 6c)
+"agensio-test" = "text/x-agensio-test; charset=utf-8"
+"sh" = "application/x-sh"
 """
 open(path, "w").write(text)
 PY
@@ -1111,7 +1115,7 @@ check "cookbook: every recipe of docs/examples.md loads and names what exists (t
 # One broken site file never stops the others (design section 26; tests/isolation.sh, its own server).
 check "isolation: a site file that does not load is set aside, the other sites serve (tests/isolation.sh)" "0" \
   "$(tests/isolation.sh "$BIN" > bench/tmp/isolation.out 2>&1; echo $?)"
-check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 208 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
+check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 210 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
 check "secrets: the presets catalogue lists each preset's credential files" "/wp-config.php /sites/default/settings.php" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["wordpress"]["secrets"][0], p["drupal"]["secrets"][0])')"
 check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$("$BIN" ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; "$BIN" ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
@@ -1728,6 +1732,58 @@ check "directory redirect: a directory named with a leading backslash never give
   "$(printf 'GET /\\evil.example HTTP/1.1\r\nHost: slash.test\r\nConnection: close\r\n\r\n' | ncq 127.0.0.1 8106 | tr -d '\r' | awk 'NR==1{c=$2} tolower($1)=="location:"{l=$2} tolower($1)=="cache-control:"{h=$2} END{print c, l, h}') ; $(dl '/tf/My%20Files?x=1')"
 rm -f bench/tmp/sites.d/slash.toml
 cpost /v1/reload '{"confirm":true,"reason":"slash"}' > /dev/null
+# Content types (0.1.0-alpha.100, docs/configuration.md 6c): the site's mime_types over root's
+# [mime_types] over the built-in table; by ending (the longest first) or exact path, a directory's
+# index by its own name; a file stored compressed with its coding; HTTP/2 the same; path_check
+# names the layer; a type browsers run scripts in refused for a site; the managed way through ctl.
+MW=bench/tmp/mime-www
+rm -rf "$MW"; mkdir -p "$MW/.well-known" "$MW/docs" "$MW/other"
+echo 'echo hi' > "$MW/run.sh"; echo t > "$MW/x.agensio-test"; echo '{}' > "$MW/.well-known/apple-app-site-association"; echo '<p>docs</p>' > "$MW/docs/index.html"
+printf 'console.log(1);\n' | gzip -9 -n > "$MW/app.js.gzip"; echo 'echo other' > "$MW/other/run.sh"
+cat > bench/tmp/sites.d/mime.toml <<MIME
+[[site]]
+server_name = ["mime.test"]
+listen = ["127.0.0.1:8107"]
+root = "$ROOT/$MW"
+
+[site.mime_types]
+"sh" = "text/plain; charset=utf-8"
+"js.gzip" = { type = "text/javascript; charset=utf-8", encoding = "gzip" }
+"/.well-known/apple-app-site-association" = "application/json"
+"/docs/index.html" = "text/plain"
+
+[[site]]
+server_name = ["plain-mime.test"]
+listen = ["127.0.0.1:8107"]
+root = "$ROOT/$MW"
+MIME
+cpost /v1/reload '{"confirm":true,"reason":"mime"}' > /dev/null
+ct() {  # host path [curl options]: Content-Type and Content-Encoding of a file, "type|coding"
+  curl -sS -D - -o /dev/null -H "Host: $1" "${@:3}" "http://127.0.0.1:8107$2" | tr -d '\r' |
+    awk -F': ' 'tolower($1)=="content-type"{t=$2} tolower($1)=="content-encoding"{e=$2} END{print t "|" e}'
+}
+check "mime_types: the site's over root's over the built-in table, by ending (the longest first) and exact path, a directory's index by its name, a coding sent" \
+  "text/plain; charset=utf-8| ; application/x-sh| ; text/x-agensio-test; charset=utf-8| ; text/javascript; charset=utf-8|gzip ; application/json| ; text/plain| ; text/html; charset=utf-8| ; yes" \
+  "$(ct mime.test /run.sh) ; $(ct plain-mime.test /run.sh) ; $(ct mime.test /x.agensio-test) ; $(ct mime.test /app.js.gzip) ; $(ct mime.test /.well-known/apple-app-site-association) ; $(ct mime.test /docs/) ; $(ct plain-mime.test /docs/) ; $(curl -sS --compressed -H 'Host: mime.test' http://127.0.0.1:8107/app.js.gzip | grep -q 'console.log' && echo yes || echo no)"
+check "mime_types over HTTP/2 (h2c): the coding and the site's type" "text/javascript; charset=utf-8|gzip ; text/plain; charset=utf-8|" \
+  "$(ct mime.test /app.js.gzip --http2-prior-knowledge) ; $(ct mime.test /run.sh --http2-prior-knowledge)"
+check "mime_types: path_check names the type and the table it came from" "text/plain; charset=utf-8|the site's mime_types ; application/x-sh|[mime_types] in the main file ; text/javascript; charset=utf-8|gzip" \
+  "$(curl -sS --unix-socket $CS -G http://control/v1/sites/mime.test/path --data-urlencode path=/run.sh | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["content_type"] + "|" + d["content_type_from"])') ; $(curl -sS --unix-socket $CS -G http://control/v1/sites/plain-mime.test/path --data-urlencode path=/run.sh | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["content_type"] + "|" + d["content_type_from"])') ; $(curl -sS --unix-socket $CS -G http://control/v1/sites/mime.test/path --data-urlencode path=/app.js.gzip | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["content_type"] + "|" + d.get("content_encoding", ""))')"
+rm -f bench/tmp/sites.d/mime.toml
+cpost /v1/reload '{"confirm":true,"reason":"mime"}' > /dev/null
+mt() {  # yes when -t's answer for a site with these keys holds the text: mt KEYS TEXT
+  printf '[[site]]\nserver_name = ["t.test"]\nlisten = ["127.0.0.1:18099"]\nroot = "%s/bench/www"\n%s\n' "$ROOT" "$1" > bench/tmp/mime-t.toml
+  case "$("$BIN" -t -c bench/tmp/mime-t.toml 2>&1 | tr '\n' ' ')" in *"$2"*) echo yes ;; *) echo no ;; esac
+}
+check "mime_types at load: a type browsers run scripts in refused for a site's .txt, a coding on .gz, a bare dotted ending; root's .txt to HTML noted by -t" \
+  "yes yes yes yes" \
+  "$(mt 'mime_types = { "txt" = "text/html" }' 'run the scripts') $(mt 'mime_types = { "gz" = { type = "application/gzip", encoding = "gzip" } }' 'unpack the download') $(mt 'mime_types = { js.gzip = "text/javascript" }' 'written quoted') $(printf '[mime_types]\n"txt" = "text/html"\n\n[[site]]\nlisten = ["127.0.0.1:18099"]\nroot = "%s/bench/www"\n' "$ROOT" > bench/tmp/mime-t.toml; case "$("$BIN" -t -c bench/tmp/mime-t.toml 2>&1 | tr '\n' ' ')" in *"warning: [mime_types] gives txt the type text/html"*"is OK"*) echo yes ;; *) echo no ;; esac)"
+# The managed way: agensio ctl's --mime-type writes the site's table, which the site then serves.
+cpost /v1/sites "{\"domain\":\"mm.test\",\"https\":\"none\",\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/$MW\",\"listen_plain\":\"127.0.0.1:8108\",\"confirm\":true,\"reason\":\"mime\"}" > /dev/null
+check "mime_types on a managed site: ctl --mime-type writes the table (a coding after '; encoding='), site_show lists it, the site serves it; a script type refused; --no-mime-types clears" \
+  "0 1 text/plain; charset=utf-8 gzip 1 application/x-sh" \
+  "$("$BIN" ctl site-update mm.test --mime-type 'sh=text/plain; charset=utf-8' --mime-type 'js.gzip=text/javascript; charset=utf-8; encoding=gzip' --yes --reason mime --socket $CS > /dev/null 2>&1; echo -n "$? "; grep -c '^mime_types = { "js.gzip" = { type = "text/javascript; charset=utf-8", encoding = "gzip" }, "sh" = "text/plain; charset=utf-8" }' bench/tmp/sites.d/mm.test.toml) $(curl -sS -D - -o /dev/null -H 'Host: mm.test' http://127.0.0.1:8108/run.sh | tr -d '\r' | sed -n 's/^Content-Type: //p') $(curl -sS --unix-socket $CS http://control/v1/sites/mm.test | python3 -c 'import json,sys; print(json.load(sys.stdin)["mime_types"]["js.gzip"]["encoding"])') $("$BIN" ctl site-update mm.test --mime-type 'txt=text/html' --yes --reason mime --socket $CS 2>&1 | grep -c 'run the scripts') $("$BIN" ctl site-update mm.test --no-mime-types --yes --reason mime --socket $CS > /dev/null 2>&1; curl -sS -D - -o /dev/null -H 'Host: mm.test' http://127.0.0.1:8108/run.sh | tr -d '\r' | sed -n 's/^Content-Type: //p')"
+cpost /v1/sites/mm.test/delete '{"confirm":true,"reason":"mime"}' > /dev/null
 # A managed file in a form this version refuses (alpha.78): set aside like any file that does not
 # load, and site-update reaches it by its domain, renders it again from its first line and serves the
 # site; health names the command. Before, site-update answered 404 (no such site) and root edited

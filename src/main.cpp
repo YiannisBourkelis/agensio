@@ -369,6 +369,12 @@ int main(int argc, char** argv) {
                              "                    dump the site serves on purpose, as served from its root (a directory ending in /\n"
                              "                    for all below it); health's archives_in_root accepts it; given together they\n"
                              "                    replace the site's list; --no-public-archives clears\n"
+                             "        --mime-type ENDING=TYPE or PATH=TYPE (site-create and site-update, repeatable): the\n"
+                             "                    Content-Type of the files the site serves with that ending (sh, js.gzip) or at that\n"
+                             "                    path (/.well-known/apple-app-site-association), over [mime_types] and the built-in\n"
+                             "                    table; '; encoding=gzip' (or br) after the type for a file stored compressed:\n"
+                             "                    --mime-type 'js.gzip=text/javascript; charset=utf-8; encoding=gzip'; given together\n"
+                             "                    they replace the site's table; --no-mime-types clears\n"
                              "        --trusted-proxy ENTRY (site-create and site-update, repeatable): an address, a range or an\n"
                              "                    @set of [server] trusted_proxies that speaks for this site (a CDN in front of it);\n"
                              "                    given together they replace the site's list; --no-trusted-proxies believes none\n"
@@ -639,6 +645,23 @@ int main(int argc, char** argv) {
                     list.push(v);
                     body.set("public_archives", list);
                 } else if (b == "--no-public-archives") body.set("public_archives", agensio::json::Value::array());
+                else if (b == "--mime-type") {  // KEY=TYPE[; encoding=gzip]; given together they replace the table
+                    std::string v; value(v);
+                    const std::size_t eq = v.find('=');
+                    if (eq == std::string::npos || eq == 0) {
+                        std::cerr << "ctl: --mime-type takes ENDING=TYPE or PATH=TYPE (sh=text/plain; charset=utf-8)\n";
+                        return 2;
+                    }
+                    std::string type = v.substr(eq + 1), encoding;
+                    if (const std::size_t at = type.find("; encoding="); at != std::string::npos) {
+                        encoding = type.substr(at + 11);
+                        type.erase(at);
+                    }
+                    agensio::json::Value table = body["mime_types"].type() == agensio::json::Value::Type::object ? body["mime_types"] : agensio::json::Value::object();
+                    if (encoding.empty()) table.set(v.substr(0, eq), type);
+                    else table.set(v.substr(0, eq), agensio::json::Value::object().set("type", type).set("encoding", encoding));
+                    body.set("mime_types", table);
+                } else if (b == "--no-mime-types") body.set("mime_types", agensio::json::Value::object());
                 else if (b == "--redirect" || b == "--redirect-exact" || b == "--gone") {
                     // Path redirects (docs/redirects.md 5): "FROM TO STATUS", the target and the status the
                     // last two words (a path may hold '=', a target ':'); --gone FROM is a 410.

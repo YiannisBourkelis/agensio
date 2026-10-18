@@ -1097,6 +1097,70 @@ On a managed site the same list is `rules.refuse` (section 15), and `path-check`
 A server older than 0.1.0-alpha.54 ignores `refuse` without a word: after an upgrade, check
 with `agensio -t --explain` that the patterns are listed.
 
+## 6c. Content types: `mime_types`
+
+0.1.0-alpha.100. The `Content-Type` of the files agensio serves comes from three layers, the most
+specific first:
+
+1. a site's own `mime_types` (its site file, or the managed `site_update` field);
+2. root's `[mime_types]` in the main file, for every site;
+3. the built-in table, nginx's `mime.types` with `charset=utf-8` on text, and `.svgz` sent with
+   `Content-Encoding: gzip` (it is gzip-compressed SVG; section 14c and [headers.md](headers.md) 4.1).
+
+Each layer only adds and overrides entries; none replaces the table below it (an nginx `types`
+block in a nested level does, and every type it does not list is lost).
+
+```toml
+# the main file, root's: for every site
+[mime_types]
+"webmanifest" = "application/manifest+json; charset=utf-8"
+"jxl" = "image/jxl"
+
+[[site]]
+server_name = ["example.com"]
+listen = ["0.0.0.0:443"]
+root = "/var/www/example.com/web"
+tls = "auto"
+
+[site.mime_types]                                               # this site's, over [mime_types]
+"sh" = "text/plain; charset=utf-8"                              # an ending
+"/.well-known/apple-app-site-association" = "application/json"  # an exact path, for a file without an ending
+"js.gzip" = { type = "text/javascript; charset=utf-8", encoding = "gzip" }  # a file stored compressed (TYPO3)
+```
+
+`[site.mime_types]` is the table of the `[[site]]` above it; a short one fits on the site's own line
+(`mime_types = { "sh" = "text/plain; charset=utf-8" }`: TOML keeps an inline table on one line).
+
+- **A key** is an ending (`sh`, `js.gzip`; matched in any case, a leading dot dropped, the longest
+  ending of the file's name first, so `app.js.gzip` takes `js.gzip` before `gzip`) or the exact path
+  a file is served at (`/` first, decoded, normalised; a directory's index by its own name,
+  `/docs/index.html`). Quote an ending with a dot: TOML reads `js.gzip = ...` bare as a table.
+- **A value** is a media type, `type/subtype` with at most a `charset` (RFC 9110 8.3.1), or a table
+  `{ type, encoding }` for a file stored compressed, `encoding` being `gzip` or `br` (sent as
+  `Content-Encoding`, with no `Vary` and no pre-compressed twin). No encoding on a bare compressed
+  or archive ending (`gz`, `br`, `zip`, `tgz`, `tar.gz`...): a browser would unpack the download and
+  save its contents under the archive's name, the trap of Apache's `AddEncoding x-gzip .gz`, which
+  reaches every `.tar.gz`. A two-part ending that names what is inside (`js.gzip`, `html.br`,
+  `txt.gz`) is a file stored compressed on purpose, and is judged by that inner ending for the rule
+  below.
+- **What a site may not do**: give an ending or a path a type browsers run scripts in (`text/html`,
+  XHTML, SVG, any XML, JavaScript) unless the built-in table already gives its ending one; `txt`
+  mapped to `text/html` would turn every uploaded `.txt` into a page on the site's origin. Mapping
+  the other way (`html` to `text/plain`) is accepted. Root's `[mime_types]` may, and `-t`, the error
+  log and health note it (`mime_type_scriptable`).
+- **What it reaches**: the files agensio serves from disk, a directory's index and a `try_files`
+  target included; an application's answers (PHP, a proxied application, CGI) keep the type they
+  send.
+- At most 64 entries a site and 256 in `[mime_types]`; an included site file cannot hold
+  `[mime_types]` (root's main file only). A reload applies both: a site's cached files take their
+  new type at once, since each load's locations cache apart.
+
+On a managed site: `agensio ctl site-update example.com --mime-type 'sh=text/plain; charset=utf-8'
+--mime-type 'js.gzip=text/javascript; charset=utf-8; encoding=gzip' --yes --reason "types"` (given
+together they replace the table; `--no-mime-types` clears it), or MCP `site_update` with
+`mime_types`; `site_show` lists it. `path_check` (MCP `path_check`) names the type a file is served
+with and which layer gave it (`content_type`, `content_encoding`, `content_type_from`).
+
 ## 7. PHP and FastCGI options
 
 `php = { ... }` on the site is the default for its FastCGI locations; `fastcgi = { ... }`

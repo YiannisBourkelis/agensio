@@ -65,6 +65,9 @@ struct SiteSpec {
     // Archives and dumps the site serves on purpose (2026-10-17): health's archives_in_root counts them
     // as accepted. Paths as served (check_public_archive), a directory ending in "/", at most 64.
     std::vector<std::string> public_archives;
+    // The Content-Type of its files by ending or path, over [mime_types] and the built-in table
+    // (0.1.0-alpha.100, docs/configuration.md 6c): judged by load_mime_types, at most 64.
+    MimeTypes mime_types;
     std::string access_log;  // a site with a user gets its own (rule: nothing shared between users)
     std::string listen_plain = "0.0.0.0:80";
     std::string listen_tls = "0.0.0.0:443";

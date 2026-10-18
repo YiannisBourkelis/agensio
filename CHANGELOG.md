@@ -2,6 +2,26 @@
 
 ## 0.1.0-alpha.100
 
+- **Content types: root's `[mime_types]` and a site's `mime_types`** (`docs/configuration.md` 6c; the
+  review's gap 8, designed with the owner on 2026-10-18). The `Content-Type` of the files agensio
+  serves came from a compiled table no one could change (CLAUDE.md said "overridable from config";
+  it was not): a file without an ending (`/.well-known/apple-app-site-association`), a format the
+  table does not know, or what an application's `.htaccess` sets with `AddType` and `AddEncoding`
+  (TYPO3's `.js.gzip`) came out wrong. Now three layers, each adding and overriding entries, never
+  replacing the table below (an nginx `types` block in a nested level does): a site's `mime_types`
+  (its file, or `site_update` and `agensio ctl --mime-type`), root's `[mime_types]` in the main file,
+  the built-in table. An entry is by ending (any case, the longest of a file's name first) or exact
+  path, a type with at most a `charset`, and `encoding` (`gzip`, `br`) for a file stored compressed.
+  Refused: a site giving an ending a type browsers run scripts in (HTML, XML, SVG, JavaScript) when
+  its built-in type is not one (`txt` as `text/html` makes every upload a page; a compressed file is
+  judged by its inner ending, so `js.gzip` is JavaScript), which root's table may do with a note
+  (`mime_type_scriptable`); an encoding on a bare compressed or archive ending (`gz`, `zip`,
+  `tar.gz`: the browser would unpack the download, Apache's `AddEncoding x-gzip .gz` trap); a
+  `[mime_types]` in an included file. Resolved once per site at load and read at cache fill, so a hit
+  pays nothing and a reload applies it; an application's answers keep their own type. `path_check`
+  names the type and its layer (`content_type`, `content_encoding`, `content_type_from`),
+  `site_show` lists the table, `-t --explain` prints both layers. Unit tests, integration checks
+  over HTTP/1 and HTTP/2 and through `agensio ctl`, a cookbook recipe.
 - **`.svgz` is served so browsers render it, and the SVG files agensio serves run no script** (the
   review of the redirects, HSTS and response-header work, 2026-10-14, defect D6). A `.svgz` is
   gzip-compressed SVG (SVG 1.1 1.2); agensio sent it as `image/svg+xml` with no `Content-Encoding`, as

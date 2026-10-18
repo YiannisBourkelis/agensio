@@ -88,6 +88,7 @@ json::Value SiteSpec::to_json() const {
     if (!response_headers_offer_declined.empty()) v.set("response_headers_offer_declined", strings(response_headers_offer_declined));
     if (!login_paths.empty()) v.set("login_paths", strings(login_paths));
     if (!public_archives.empty()) v.set("public_archives", strings(public_archives));
+    if (!mime_types.empty()) v.set("mime_types", mime_types_json(mime_types));
     if (!access_log.empty()) v.set("access_log", access_log);
     v.set("listen_plain", listen_plain).set("listen_tls", listen_tls);
     return v;
@@ -128,6 +129,7 @@ bool SiteSpec::from_json(const json::Value& v, SiteSpec& out) {
     out.response_headers_offer_declined = string_list(v["response_headers_offer_declined"]);
     out.login_paths = string_list(v["login_paths"]);
     out.public_archives = string_list(v["public_archives"]);
+    if (v["mime_types"].type() == json::Value::Type::object) (void)load_mime_types(v["mime_types"], out.mime_types, true);  // the TOML below is judged by the load
     if (out.settings["children"].type() == json::Value::Type::number) out.php_children = static_cast<int>(out.settings["children"].num());
     out.access_log = v.get("access_log");
     if (has_key(v, "listen_plain")) out.listen_plain = v.get("listen_plain");
@@ -648,7 +650,7 @@ const std::vector<std::string_view>& site_request_fields() {
     static const std::vector<std::string_view> fields = {
         "domain", "aliases", "canonical", "https", "redirect_http", "hsts", "encoded_slashes", "app", "root", "upstream", "project", "entry", "user",
         "no_user", "group", "php_socket", "php_children", "php_version", "settings", "rules", "redirects", "response_headers",
-        "response_headers_baseline", "response_headers_offer_declined", "login_paths", "public_archives", "trusted_proxies", "access_log",
+        "response_headers_baseline", "response_headers_offer_declined", "login_paths", "public_archives", "mime_types", "trusted_proxies", "access_log",
         "listen_plain", "listen_tls", "confirm", "reason", "dry_run"};
     return fields;
 }
@@ -875,6 +877,18 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
         }
         spec.public_archives = aa;
     }
+    // The site's content types (0.1.0-alpha.100, docs/configuration.md 6c): given whole, judged as the
+    // load judges a site file's (load_mime_types: a type a browser runs scripts in only for an ending
+    // that has one already); {} or null clears them.
+    if (given(body, "mime_types") && body["mime_types"].is_null()) spec.mime_types = MimeTypes{};
+    else if (has_key(body, "mime_types")) {
+        MimeTypes t;
+        if (const std::string why = load_mime_types(body["mime_types"], t, true); !why.empty()) {
+            error = why;
+            return needs;
+        }
+        spec.mime_types = std::move(t);
+    }
     // The proxies that speak for this site (2026-10-13, docs/redirects.md 2.4): given whole, each an
     // address, a range or an [addresses] set within [server] trusted_proxies (checked here as the load
     // does), at most 32; [] believes no proxy, null goes back to the server's list.
@@ -1066,6 +1080,8 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
         if (!spec.login_paths.empty()) s += "login_paths = " + toml_list(spec.login_paths) + "   # fail2ban counts login attempts here (agensio ctl protection)\n";
         if (!spec.public_archives.empty())
             s += "public_archives = " + toml_list(spec.public_archives) + "   # served on purpose: health's archives_in_root accepts them\n";
+        if (!spec.mime_types.empty())
+            s += "mime_types = " + mime_types_toml(spec.mime_types) + "   # over [mime_types] and the built-in table (docs/configuration.md 6c)\n";
         if (spec.encoded_slashes == "allow") s += "encoded_slashes = \"allow\"   # a %2F in the path is decoded and looked up (Apache's NoDecode), not 404\n";
         if (spec.own_trusted_proxies) s += "trusted_proxies = " + toml_list(spec.trusted_proxies) + "   # the proxies that speak for this site, within [server] trusted_proxies\n";
         if (spec.rules.is_object() && !spec.rules["refuse"].items().empty()) {

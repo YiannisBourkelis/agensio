@@ -70,6 +70,24 @@ struct ProtectedName {
     std::size_t dir_len = 0;
 };
 
+// The content types the server sends for the files it serves (docs/configuration.md 6c, 0.1.0-alpha.100),
+// over the built-in table (mime.cpp): root's [mime_types] in the main file for every site, and a
+// site's own mime_types over it. An entry is by ending (lower case, no leading dot, "sh",
+// "js.gzip": the longest ending of the file's name decides) or by the exact path a file is served at
+// ("/.well-known/apple-app-site-association"), and gives the type and, for a file stored
+// compressed, its coding ("gzip", "br"). Checked at load (mime_entry_problem); merged per site
+// into one table its locations share, resolved at cache fill, so a hit pays nothing.
+struct MimeType {
+    std::string type;
+    std::string encoding;            // "", "gzip" or "br"
+    enum class From : std::uint8_t { builtin, server, site } from = From::server;  // the layer that decided (path_check)
+};
+struct MimeTypes {
+    std::map<std::string, MimeType, std::less<>> endings;
+    std::map<std::string, MimeType, std::less<>> paths;
+    bool empty() const noexcept { return endings.empty() && paths.empty(); }
+};
+
 // A [[site.location]] block, fully resolved: every field has the site's value unless the
 // block set its own. The site always ends with an implicit "/" prefix location.
 struct LocationConfig {
@@ -108,6 +126,7 @@ struct LocationConfig {
     std::shared_ptr<const HttparenaDataset> httparena;  // handler = "httparena" (AGENSIO_HTTPARENA builds only): `httparena = { dataset }`
     bool priority = false;                     // may use the pool slots reserved by priority_reserve
     std::uint64_t id = 0;  // unique for the process's life (cache key scope); set by finalize_site
+    std::shared_ptr<const MimeTypes> mime_types;  // the site's, root's under it; null when neither has any (the built-in table alone)
     MethodSet methods = kStaticMethods;      // what the handler serves here (`methods = [...]` narrows it)
     std::string allow = "GET, HEAD, OPTIONS";  // Allow header for 405 and OPTIONS
 };
@@ -362,6 +381,9 @@ struct SiteConfig {
     // as served from the root, a directory ending in "/" covering all below it, which health's
     // archives_in_root counts as accepted, not as a finding. Never read when serving.
     std::vector<std::string> public_archives;
+    // The site's own mime_types, as written (render, site_show); its locations share the table merged
+    // with root's (LocationConfig::mime_types).
+    MimeTypes mime_types;
     std::string access_log;    // absolute path, or "" for no access log (site `access_log`, default [log] access)
     int access_log_sink = -1;  // set by the Server: index into its log registry
     // [[site.access]], longest path first (an exact rule before a prefix of the same path);
@@ -491,6 +513,8 @@ struct Config {
     // [addresses] (2026-10-07): named address sets the sites' access rules name as "@name", so
     // one edit reaches every site that uses them; checked and expanded at load.
     std::map<std::string, std::vector<std::string>> address_sets;
+    // [mime_types] (0.1.0-alpha.100, docs/configuration.md 6c): root's content types for every site's files.
+    MimeTypes mime_types;
     // The user files of the sites' [[site.auth]] rules, each read and checked once per load.
     std::map<std::string, std::shared_ptr<const AuthUserFile>> auth_files;
     // Hosting (C3b): the group agensio runs as (pool sockets grant it access; "" = the
@@ -730,6 +754,37 @@ std::string check_login_path(const std::string& path);
 // a directory ending in "/", any character but a control one or a wildcard ('*', '?', '['), no empty,
 // "." or ".." segment, not "/" alone, at most 1024 bytes; "" or why not.
 std::string check_public_archive(const std::string& path);
+// mime_types (docs/configuration.md 6c, 0.1.0-alpha.100). An entry's key as stored: an ending
+// lower-cased without a leading dot ("SH" and ".sh" are "sh"), a path as written; "" when it is
+// neither (mime_entry_problem says why).
+std::string mime_key(const std::string& key);
+// "" when an entry may stand, else why not: an ending of letters, digits, '+', '-', '_' and inner
+// dots, at most 32, or a normalised path ("/" first, no "//", "." or "..") of URL characters
+// without '%', '?' or '#', at most 256; a media type ("type/subtype", charset its one parameter,
+// RFC 9110 8.3.1) at most 128; a coding "gzip" or "br", never on an archive's ending (a browser
+// would unpack the download). `site`: the per-site layer, which may not give a key a type
+// browsers run scripts in (scriptable_type) unless the built-in table already gives its ending
+// one; root's layer may, with a note (access_notices: mime_type_scriptable).
+std::string mime_entry_problem(const std::string& key, const MimeType& t, bool site);
+// A type browsers run scripts in, as a page or a script: text/html, XHTML, SVG and any XML, JavaScript.
+bool scriptable_type(std::string_view type);
+// One table as JSON ({ending or path: type | {type, encoding}}), judged as the loader judges a
+// site file's: "" and `out` filled, or why not (managed sites, site_update's mime_types).
+std::string load_mime_types(const json::Value& v, MimeTypes& out, bool site);
+// The type of a file served at `site_path` (the path of the file as served: a directory's index
+// named) from `fs_path`: an exact path entry, then the longest ending of the file's name, of the
+// location's table (null: none), then the built-in table by the last ending.
+struct ServedType {
+    std::string_view type;
+    std::string_view encoding;
+    MimeType::From from = MimeType::From::builtin;
+};
+ServedType served_type(const MimeTypes* table, std::string_view site_path, std::string_view fs_path) noexcept;
+// A table as a TOML inline table, every key quoted (an ending with a dot is no dotted key):
+// { "sh" = "text/plain; charset=utf-8", "svgz" = { type = "image/svg+xml", encoding = "gzip" } }.
+std::string mime_types_toml(const MimeTypes& t);
+// The same as JSON, the form site_update takes: {"sh": "text/plain; charset=utf-8", "svgz": {"type": ..., "encoding": "gzip"}}.
+json::Value mime_types_json(const MimeTypes& t);
 // Where the preset's application keeps what users upload, relative to the served root
 // ("/wp-content/uploads"); "" when the preset has no such place.
 std::string preset_uploads(const std::string& app);

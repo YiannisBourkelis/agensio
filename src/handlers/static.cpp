@@ -288,7 +288,18 @@ bool StaticHandler::twins_unchanged(const CacheEntry& e, WorkerState& ws) {
     return true;
 }
 
-void StaticHandler::serve_file(Stream& s, File&& f, const FileInfo& fi, WorkerState& ws) {
+// The type and coding of the file at ws.fs_path, served at ws.path (a directory's index by its own
+// name): the location's mime_types, then the built-in table (docs/configuration.md 6c). Read at
+// cache fill and for an uncached stream, never on a hit.
+ServedType StaticHandler::type_of(const LocationConfig& loc, const WorkerState& ws) {
+    if (!loc.mime_types || loc.mime_types->paths.empty() || ws.path.empty() || ws.path.back() != '/')
+        return served_type(loc.mime_types.get(), ws.path, ws.fs_path);
+    const std::size_t slash = ws.fs_path.rfind('/');
+    const std::string named = ws.path + ws.fs_path.substr(slash == std::string::npos ? 0 : slash + 1);
+    return served_type(loc.mime_types.get(), named, ws.fs_path);
+}
+
+void StaticHandler::serve_file(Stream& s, File&& f, const FileInfo& fi, const ServedType& mi) {
     Response& r = s.response;
     r.head = s.request.method == Method::head;
     std::string etag;
@@ -306,7 +317,6 @@ void StaticHandler::serve_file(Stream& s, File&& f, const FileInfo& fi, WorkerSt
         return;
     }
     std::uint64_t first = 0, length = 0;
-    const MimeInfo mi = mime_info(ws.fs_path);
     const std::string_view coding = stored_coding(mi.encoding) == Encoding::br     ? "Content-Encoding: br\r\n"
                                     : stored_coding(mi.encoding) == Encoding::gzip ? "Content-Encoding: gzip\r\n"
                                                                                    : "";
@@ -591,7 +601,7 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
         if (cfg_.cache_sendfile_min_size > 0 && fi.size >= cfg_.cache_sendfile_min_size) entry->fd = std::move(f);
         else f.close();
         // A file stored compressed (.svgz) gets its coding and no twin: a second coding would be gzip, br.
-        const MimeInfo mi = mime_info(ws.fs_path);
+        const ServedType mi = type_of(loc, ws);
         entry->content_type = mi.type;
         if (cfg_.cache_precompressed && mi.encoding.empty()) load_variants(*entry, fi, loc, ws, now);
         fill_entry(*entry, fi, ws.fs_path, mi.type, stored_coding(mi.encoding), entry->has_variants(), now);
@@ -613,7 +623,7 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
         auto entry = std::make_shared<CacheEntry>();
         entry->descriptor_only = true;
         entry->fd = std::move(f);
-        const MimeInfo mi = mime_info(ws.fs_path);
+        const ServedType mi = type_of(loc, ws);
         fill_entry(*entry, fi, ws.fs_path, mi.type, stored_coding(mi.encoding), false, now);
         EntryPtr canonical = cache_.insert(key, entry);
         if (canonical) {
@@ -626,7 +636,7 @@ StaticHandler::Outcome StaticHandler::serve_location(Stream& s, const LocationCo
         f = std::move(entry->fd);  // store refused it: serve once from the open file
     }
     response_fields::served_file(s, ws.fs_path);
-    serve_file(s, std::move(f), fi, ws);
+    serve_file(s, std::move(f), fi, type_of(loc, ws));
     add_headers(s, loc, ws.path);
     return Outcome::done;
 }

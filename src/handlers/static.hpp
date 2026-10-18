@@ -134,6 +134,9 @@ public:
 
     static constexpr int kMaxInternalRedirects = 8;  // try_files fallbacks per request (nginx: 10)
 
+    // The type and coding the file at ws.fs_path is served with (docs/configuration.md 6c).
+    static ServedType type_of(const LocationConfig& loc, const WorkerState& ws);
+
 private:
     enum class Lookup { found, responded, redirect };
 
@@ -152,7 +155,7 @@ private:
     void load_variants(CacheEntry& parent, const FileInfo& fi, const LocationConfig& loc, WorkerState& ws,
                        std::time_t now);
     bool twins_unchanged(const CacheEntry& e, WorkerState& ws);
-    void serve_file(Stream& s, File&& f, const FileInfo& fi, WorkerState& ws);
+    void serve_file(Stream& s, File&& f, const FileInfo& fi, const ServedType& type);
     void redirect_slash(Stream& s, WorkerState& ws);
     static bool not_modified(const Request& req, std::string_view etag, std::string_view last_modified) noexcept;
 
