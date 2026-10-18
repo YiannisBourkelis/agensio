@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.101
+## 0.1.0-alpha.101 (2026-10-19)
 
 - **`hsts` is a lifetime; `hsts = true` is refused** (RFC 6797 11.2: the lifetime is the site's
   commitment, set willfully). `true` named none and meant a year, the commitment browsers keep for
