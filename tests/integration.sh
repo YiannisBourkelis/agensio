@@ -1444,6 +1444,13 @@ check "trusted_proxies on a managed site: --trusted-proxy writes it, one outside
 check "access: ctl --cache and --private given alone keep the site's address rules and refused paths" "cache private refuse restricted" \
   "$("$BIN" ctl site-update acc.test --restrict /admin=127.0.0.1 --refuse /secret/ --yes --reason acc --socket $CS > /dev/null; "$BIN" ctl site-update acc.test --cache /assets/=60 --yes --reason acc --socket $CS > /dev/null; "$BIN" ctl site-update acc.test --private /private/ --yes --reason acc --socket $CS > /dev/null; "$BIN" ctl site acc.test --socket $CS | python3 -c 'import json,sys; print(" ".join(sorted(json.load(sys.stdin).get("rules") or {})))')"
 "$BIN" ctl site-update acc.test --no-rules --yes --reason acc --socket $CS > /dev/null
+# rules.cache's immutable (0.1.0-alpha.101, RFC 8246; the review's D8): written, served; refused without
+# a lifetime; a misspelt field refused naming it (it was dropped before, the file carrying nothing).
+mkdir -p bench/tmp/sites/acc.test/www/build; echo 'x' > bench/tmp/sites/acc.test/www/build/app.3f9a1c.js
+check "rules.cache immutable: ctl --cache PATH=SECONDS,immutable writes and serves it; max_age 0 and an unknown field are refused, naming it" \
+  "1 public, max-age=31536000, immutable 400 fresh 400 yes" \
+  "$("$BIN" ctl site-update acc.test --cache /build/=31536000,immutable --yes --reason acc --socket $CS > /dev/null; grep -c '"Cache-Control" = "public, max-age=31536000, immutable"' bench/tmp/sites.d/acc.test.toml) $(curl -sS -D - -o /dev/null -H 'Host: acc.test' http://127.0.0.1:8096/build/app.3f9a1c.js | tr -d '\r' | sed -n 's/^Cache-Control: //p') $(cpost /v1/sites/acc.test '{"rules":{"cache":[{"path":"/build/","max_age":0,"immutable":true}]},"confirm":true,"reason":"acc"}') $(grep -o 'fresh' bench/tmp/ctl-reply.json | head -1) $(cpost /v1/sites/acc.test '{"rules":{"cache":[{"path":"/build/","max_age":60,"imutable":true}]},"confirm":true,"reason":"acc"}') $(grep -q "did you mean 'immutable'" bench/tmp/ctl-reply.json && echo yes || echo no)"
+"$BIN" ctl site-update acc.test --no-rules --yes --reason acc --socket $CS > /dev/null
 check "mcp: access_check is a read-only viewer tool and answers the decision; the instructions' map sends the agent to site_update, whose description and the new_site prompt tell it about rules.restricted" "True refused /wp-admin yes yes yes" "$(python3 - "$BIN" "$ROOT/bench/tmp/control.sock" <<'PYT'
 import json, subprocess, sys
 p = subprocess.Popen([sys.argv[1], "mcp", "--socket", sys.argv[2]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)

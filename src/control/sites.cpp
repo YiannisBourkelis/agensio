@@ -552,9 +552,27 @@ std::string check_rules(const json::Value& given, const SiteSpec& spec, json::Va
             const json::Value& age = c["max_age"];
             if (age.type() != json::Value::Type::number || age.num() < 0 || age.num() > 31536000 || age.num() != static_cast<double>(static_cast<long>(age.num())))
                 return "rules.cache: max_age for " + p + " must be a whole number of seconds, 0 to 31536000";
+            // A field nobody reads is refused, naming the nearest (before 0.1.0-alpha.101 it was dropped:
+            // "immutable" answered ok and the file carried no such thing).
+            for (const auto& [k, _] : c.members())
+                if (k != "path" && k != "max_age" && k != "immutable") {
+                    const std::string near = nearest_name(k, {"path", "max_age", "immutable"});
+                    return "rules.cache: an entry takes path, max_age and immutable, not '" + k + "'" + (near.empty() ? std::string() : " (did you mean '" + near + "'?)");
+                }
+            // immutable (RFC 8246): no revalidation while the answer is fresh, so a browser's reload asks
+            // nothing (Firefox, Safari); only for names that change with their content (1), and only
+            // with a lifetime, the one time it holds (2).
+            const json::Value& imm = c["immutable"];
+            if (!imm.is_null() && imm.type() != json::Value::Type::boolean) return "rules.cache: immutable for " + p + " is true or false";
+            const bool immutable = imm.type() == json::Value::Type::boolean && imm.boolean();
+            if (immutable && age.num() == 0)
+                return "rules.cache: immutable for " + p + " needs a max_age: it holds only while the answer is fresh (RFC 8246 2), so with 0 a browser "
+                       "revalidates as before";
             for (const auto& pr : priv)
                 if (p == pr || (pr.back() == '/' && p.starts_with(pr))) return "rules: the cached directory " + p + " lies under the private path " + pr;
-            cache.push(json::Value::object().set("path", p).set("max_age", age.num()));
+            json::Value entry = json::Value::object().set("path", p).set("max_age", age.num());
+            if (immutable) entry.set("immutable", true);
+            cache.push(std::move(entry));
         }
     }
     std::string front;
@@ -614,7 +632,9 @@ std::vector<RuleLocation> rule_locations(const SiteSpec& spec) {
     for (const auto& p : r["private"].items()) out.push_back({RuleLocation::Kind::private_, std::string(p.str()), p.str().back() != '/', false, 0});
     for (const auto& e : r["entry_points"].items()) out.push_back({RuleLocation::Kind::entry, std::string(e.str()), true, false, 0});
     if (!r["entry_points"].items().empty()) out.push_back({RuleLocation::Kind::no_other_php, ".php", false, true, 0});
-    for (const auto& c : r["cache"].items()) out.push_back({RuleLocation::Kind::cache, std::string(c.get("path")), false, false, static_cast<long>(c["max_age"].num())});
+    for (const auto& c : r["cache"].items())
+        out.push_back({RuleLocation::Kind::cache, std::string(c.get("path")), false, false, static_cast<long>(c["max_age"].num()),
+                       c["immutable"].type() == json::Value::Type::boolean && c["immutable"].boolean()});
     return out;
 }
 
@@ -1132,7 +1152,7 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
                     for (const auto& b : source_backup_suffixes())
                         if (std::find(deny.begin(), deny.end(), b) == deny.end()) deny.push_back(b);
                     s += "\n[[site.location]]   # rules: cached, nothing runs here\npath = " + toml_string(rl.path) + "\nfinal = true\ndeny_suffixes = " + toml_list(deny) +
-                         "\nadd_headers = { \"Cache-Control\" = \"public, max-age=" + std::to_string(rl.max_age) + "\" }\n";
+                         "\nadd_headers = { \"Cache-Control\" = \"public, max-age=" + std::to_string(rl.max_age) + (rl.immutable ? ", immutable" : "") + "\" }\n";
                     break;
                 }
             }

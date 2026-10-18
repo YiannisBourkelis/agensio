@@ -379,11 +379,12 @@ int main(int argc, char** argv) {
                              "                    @set of [server] trusted_proxies that speaks for this site (a CDN in front of it);\n"
                              "                    given together they replace the site's list; --no-trusted-proxies believes none\n"
                              "                    (visitors connect directly), --trusted-proxies-default goes back to the server's list\n"
-                             "        --private PATH, --entry-point /x.php, --cache PATH=SECONDS, --front-controller /x.php\n"
+                             "        --private PATH, --entry-point /x.php, --cache PATH=SECONDS[,immutable], --front-controller /x.php\n"
                              "                    (site-create and site-update, repeatable): an application's own rules, which only\n"
                              "                    make the site serve less; each replaces its own part (the private paths, the entry\n"
                              "                    points, the cached directories, the front controller) and keeps the site's other\n"
-                             "                    rules; --no-rules clears them all\n"
+                             "                    rules; --no-rules clears them all; ',immutable' after the seconds (/build/=31536000,immutable)\n"
+                             "                    only for a directory whose file names change with their content (RFC 8246)\n"
                              "        --restrict PATH=ADDR[,ADDR...], --restrict-exact PATH=ADDR[,...] (site-update, repeatable): only\n"
                              "                    those clients reach PATH and everything below it (or PATH alone); ADDR is an address,\n"
                              "                    a range (203.0.113.0/24, 2001:db8:5::/64), a set root named in [addresses] (@office),\n"
@@ -558,10 +559,15 @@ int main(int argc, char** argv) {
                     std::string v; value(v);
                     app_rules_given = true;
                     const std::size_t eq = v.find('=');
-                    if (eq == std::string::npos || eq == 0) { std::cerr << "ctl: --cache needs PATH=SECONDS\n"; return 2; }
+                    if (eq == std::string::npos || eq == 0) { std::cerr << "ctl: --cache needs PATH=SECONDS[,immutable]\n"; return 2; }
+                    std::string age = v.substr(eq + 1);
+                    const bool immutable = age.ends_with(",immutable");  // RFC 8246: for names that change with their content
+                    if (immutable) age.resize(age.size() - 10);
                     agensio::json::Value rules = body["rules"].is_object() ? body["rules"] : agensio::json::Value::object();
                     agensio::json::Value list = rules["cache"].is_array() ? rules["cache"] : agensio::json::Value::array();
-                    list.push(agensio::json::Value::object().set("path", v.substr(0, eq)).set("max_age", static_cast<double>(std::atol(v.c_str() + eq + 1))));
+                    agensio::json::Value entry = agensio::json::Value::object().set("path", v.substr(0, eq)).set("max_age", static_cast<double>(std::atol(age.c_str())));
+                    if (immutable) entry.set("immutable", true);
+                    list.push(entry);
                     rules.set("cache", list);
                     body.set("rules", rules);
                 } else if (b == "--front-controller") {

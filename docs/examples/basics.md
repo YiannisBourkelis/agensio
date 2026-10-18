@@ -619,22 +619,25 @@ agensio ctl site example.com                          # every location with the 
 ```
 
 **On a managed site.** `--hsts` writes `hsts = true` as above; `--cache` makes a
-directory served from disk with `Cache-Control: public, max-age=N` (no `immutable`), where
-nothing runs. Each flag replaces its own part of the site's rules and keeps the others
+directory served from disk with `Cache-Control: public, max-age=N`, where nothing runs, and
+`,immutable` after the seconds adds `immutable` (0.1.0-alpha.101) for a directory whose names
+change with their content. Each flag replaces its own part of the site's rules and keeps the others
 (passwords, address rules, refused paths; before 0.1.0-alpha.61 `--cache` alone dropped them):
 
 ```sh
-agensio ctl site-update example.com --hsts --cache /assets/=31536000 --yes --reason "long-lived assets, HSTS"
+agensio ctl site-update example.com --hsts --cache /assets/=31536000,immutable --yes --reason "long-lived assets, HSTS"
 ```
 
 **MCP:** `site_update` with `hsts` true and `rules` = the site's current rules from `site_show`
-with `"cache": [{"path": "/assets/", "max_age": 31536000}]` added: the tool replaces the whole
-rules object, so a part left out is removed. A field no flag covers (`immutable`, another header
-on one path) goes into the site's root additions file, root's.
+with `"cache": [{"path": "/assets/", "max_age": 31536000, "immutable": true}]` added: the tool
+replaces the whole rules object, so a part left out is removed. Another field on one path (a
+lifetime on every answer of the path, not only the files agensio serves, or a field that is not a
+cache one) is a rule in `site_update`'s `response_headers`, the same `[[site.response_headers]]` as
+above ([response headers](#security-fields-by-path)).
 
 **Reference:** [Response headers](../configuration.md#14c-response-headers-siteresponse_headers),
 [Locations](../configuration.md#6-locations-the-reference),
-[HTTPS only](../configuration.md#https-only), [root additions](../configuration.md#15-control-socket).
+[HTTPS only](../configuration.md#https-only), [application rules](../configuration.md#15-control-socket) (`rules.cache`).
 
 ## The security baseline a preset site gets
 

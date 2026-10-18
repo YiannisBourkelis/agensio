@@ -2533,7 +2533,7 @@ hand-written location or root edit is needed:
 "rules": {
   "private": ["/app/", "/data/", "/libs/", "/vendor/", "/cli", "/web.config"],
   "entry_points": ["/index.php", "/jsonrpc.php", "/healthcheck.php"],
-  "cache": [{"path": "/assets/", "max_age": 604800}],
+  "cache": [{"path": "/assets/", "max_age": 604800}, {"path": "/build/", "max_age": 31536000, "immutable": true}],
   "front_controller": "/index.php"
 }
 ```
@@ -2545,7 +2545,13 @@ the root is 404, never served as source (the preset's `.php` suffix location is 
 by a denying one). `cache` (PHP and static sites) names directories served straight from
 disk with `Cache-Control: public, max-age=N` (0 to a year), where nothing runs and no
 source backup is served (`deny_suffixes` = the PHP endings plus `.inc`, `.bak`, `~`,
-`.log`, `.sql`, `.sqlite`, `.sqlite3`, `.db`). `front_controller` (one of
+`.log`, `.sql`, `.sqlite`, `.sqlite3`, `.db`). `immutable: true` (0.1.0-alpha.101) adds
+`immutable` (RFC 8246): while the lifetime lasts a browser's reload asks nothing, which Firefox
+and Safari honour over HTTPS (Chrome no longer revalidates on a reload anyway). It is for a
+directory whose file names change with their content (a build's `app.3f9a1c.js`), since a file
+that keeps its name would stay old for the whole lifetime; it needs `max_age` above 0, the one
+time it holds. An entry takes `path`, `max_age` and `immutable` only; another field is refused,
+naming the nearest (before alpha.101 it was dropped). `front_controller` (one of
 `entry_points`) makes a path the site has nothing to serve for (no file, and no directory
 with an index it serves: a directory whose `index.php` is not an entry point included) reach
 that script with the query string (Kanboard's nice URLs, TYPO3's `/typo3/`). Every rule only narrows what the bare preset serves: a path under a private
@@ -2557,7 +2563,7 @@ archive's own `.htaccess` files deny whole (`Require all denied`, `Deny from all
 `<Files>` blocks) as `facts.htaccess_denied` and suggests the matching `private` rule in
 its next steps; agensio never reads `.htaccess` when serving and never applies the rule
 on its own. On the command line: `--private PATH`, `--entry-point /x.php`, `--cache
-PATH=SECONDS` (repeatable), `--front-controller /x.php`, `--no-rules`. Each flag replaces its own
+PATH=SECONDS` or `--cache PATH=SECONDS,immutable` (repeatable), `--front-controller /x.php`, `--no-rules`. Each flag replaces its own
 part and `agensio ctl` sends the site's other rules back with it, so `--cache` alone keeps the
 address rules, passwords and refused paths (before 0.1.0-alpha.61 those four flags given alone
 dropped them); `--no-rules` clears every rule.

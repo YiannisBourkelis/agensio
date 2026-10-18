@@ -130,6 +130,7 @@ struct RuleLocation {
     std::string path;
     bool exact = false, suffix = false;
     long max_age = 0;  // cache only
+    bool immutable = false;  // cache only: Cache-Control's immutable (RFC 8246), for names that change with their content
 };
 std::vector<RuleLocation> rule_locations(const SiteSpec& spec);
 // rules.admin expanded into restricted-shaped rules ({path, allow, match?, mode?}): the preset's

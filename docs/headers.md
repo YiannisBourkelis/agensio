@@ -321,9 +321,11 @@ set = { "Cache-Control" = "public, max-age=31536000, immutable" }
 ```
 
 Only for files whose names change with their content (`app.3f9a1c.js`); otherwise a browser keeps
-the old file for a year. A managed site has this as `rules.cache` with `immutable: true`
-(`docs/configuration.md` 15). The same by kind of file, for themes and plugins whose names do not
-change, with a shorter lifetime:
+the old file for a year. `immutable` (RFC 8246) only holds while the answer is fresh, and browsers
+honour it over HTTPS only. A managed site has this as `rules.cache` with `immutable: true`
+(`docs/configuration.md` 15, since 0.1.0-alpha.101), or as the same rule through `site_update`'s
+`response_headers`. The same by kind of file, for themes and plugins whose names do not change, with
+a shorter lifetime:
 
 ```toml
 [[site.response_headers]]
@@ -622,7 +624,7 @@ files) read every response-field directive too; the notes are in
    the served-file reading does by itself.
 2. **`no-cache` on HTML in the `static` baseline** (4.1): 12.1 % of `_headers` files; Vite,
    VitePress and Gatsby ask for it; Netlify and Cloudflare do it by default.
-3. **`immutable` in `rules.cache`** (3.5).
+3. **`immutable` in `rules.cache`** (3.5; built in 0.1.0-alpha.101).
 4. **`hsts` over a stronger application value** (section 5).
 5. **The agent's offers follow the application's documentation** where it configures a field on
    every answer: eight of the PHP applications' configurations send `nosniff`, five a frame field

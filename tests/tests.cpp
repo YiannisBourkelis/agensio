@@ -4229,6 +4229,14 @@ static void test_control_sites() {
                                     R"({"private":["/static/"],"cache":[{"path":"/static/js/","max_age":1}]})"})
                 if (rules(bad).empty()) std::printf("rules accepted %s\n", bad);
             CHECK(!rules(R"({"private":["/"]})").empty() && !rules(R"({"entry_points":["/x.php"],"front_controller":"/index.php"})").empty());
+            // immutable (RFC 8246, the review's D8): kept and rendered; meaningless without a lifetime,
+            // since it holds only while the answer is fresh (2); an unknown field refused (it was dropped,
+            // so the agent was told of a lifetime the file did not carry).
+            CHECK(rules(R"({"cache":[{"path":"/assets/","max_age":31536000,"immutable":true}]})").empty() && n["cache"].items()[0]["immutable"].boolean());
+            CHECK(rules(R"({"cache":[{"path":"/assets/","max_age":60,"immutable":false}]})").empty() && n["cache"].items()[0]["immutable"].is_null());
+            CHECK(rules(R"({"cache":[{"path":"/assets/","max_age":0,"immutable":true}]})").find("fresh") != npos);
+            CHECK(rules(R"({"cache":[{"path":"/assets/","max_age":60,"immutable":"yes"}]})").find("true or false") != npos);
+            CHECK(rules(R"({"cache":[{"path":"/assets/","max_age":60,"imutable":true}]})").find("did you mean 'immutable'") != npos);
             // Only PHP presets name entry points and a front controller; only PHP and static ones cache a directory from disk.
             SiteSpec sst = ok;
             sst.app = "static";
@@ -4262,13 +4270,13 @@ static void test_control_sites() {
             full.https = "none";
             full.root = (dir / "kb").string();
             std::filesystem::create_directories(dir / "kb");
-            CHECK(apply(R"({"rules":{"private":["/app/","/data/","/cli","/web.config"],"entry_points":["/index.php","/jsonrpc.php"],"cache":[{"path":"/assets/","max_age":604800}],"front_controller":"/index.php"}})", full).empty());
+            CHECK(apply(R"({"rules":{"private":["/app/","/data/","/cli","/web.config"],"entry_points":["/index.php","/jsonrpc.php"],"cache":[{"path":"/assets/","max_age":604800},{"path":"/build/","max_age":31536000,"immutable":true}],"front_controller":"/index.php"}})", full).empty());
             const std::string text = render_site(full, "x");
             CHECK(text.find("handler = \"deny\"") != npos && text.find("try_files = [\"$uri\", \"$uri/\", \"/index.php?$query_string\"]") != npos &&
                   text.find("path = \".php\"\nmatch = \"suffix\"\nhandler = \"deny\"") != npos && text.find("max-age=604800") != npos);
             std::ofstream(dir / "kb.toml") << text;
             SiteSpec back;
-            CHECK(read_managed(dir / "kb.toml", back) && back.rules["entry_points"].items().size() == 2 && back.rules["cache"].items().size() == 1);
+            CHECK(read_managed(dir / "kb.toml", back) && back.rules["entry_points"].items().size() == 2 && back.rules["cache"].items().size() == 2);
             const Config kc = load_config(dir / "kb.toml");
             const SiteConfig& ks = kc.sites[0];
             CHECK(Router::location(ks, "/app/Core/Base.php").handler == "deny" && Router::location(ks, "/data/db.sqlite").handler == "deny" &&
@@ -4279,6 +4287,8 @@ static void test_control_sites() {
             CHECK(ca.kind == HandlerKind::static_ && ca.final && ca.add_headers.size() == 1 && ca.add_headers[0].second == "public, max-age=604800" &&
                   refused_suffix("/assets/x.php", ca.deny_suffixes) && refused_suffix("/assets/x.phtml", ca.deny_suffixes) && refused_suffix("/assets/x.bak", ca.deny_suffixes) &&
                   !refused_suffix("/assets/app.css", ca.deny_suffixes));
+            const LocationConfig& im = Router::location(ks, "/build/app.3f9a1c.js");
+            CHECK(im.final && im.add_headers.size() == 1 && im.add_headers[0].second == "public, max-age=31536000, immutable");
             const LocationConfig& root = Router::location(ks, "/board/1");
             CHECK(root.try_files.size() == 3 && root.try_files[2].kind == TryStep::Kind::fallback && root.try_files[2].target == "/index.php");
             std::ostringstream ex;
@@ -4287,8 +4297,9 @@ static void test_control_sites() {
             // The rule-made locations as the loader sees them, and site_show's "rules" label on
             // exactly those (2026-10-02 report), a managed file in sites.d standing for the site.
             const std::vector<RuleLocation> rl = rule_locations(full);
-            CHECK(rl.size() == 8 && rl[0].kind == RuleLocation::Kind::private_ && !rl[0].exact && rl[2].path == "/cli" && rl[2].exact && rl[4].kind == RuleLocation::Kind::entry && rl[4].exact &&
-                  rl[6].kind == RuleLocation::Kind::no_other_php && rl[6].suffix && rl[6].path == ".php" && rl[7].kind == RuleLocation::Kind::cache && rl[7].max_age == 604800);
+            CHECK(rl.size() == 9 && rl[0].kind == RuleLocation::Kind::private_ && !rl[0].exact && rl[2].path == "/cli" && rl[2].exact && rl[4].kind == RuleLocation::Kind::entry && rl[4].exact &&
+                  rl[6].kind == RuleLocation::Kind::no_other_php && rl[6].suffix && rl[6].path == ".php" && rl[7].kind == RuleLocation::Kind::cache && rl[7].max_age == 604800 &&
+                  !rl[7].immutable && rl[8].immutable);
             std::ofstream(dir / "sites.d" / "kb.test.toml") << text;
             const json::Value shown = control::site(kc, ks, std::time(nullptr));
             std::filesystem::remove(dir / "sites.d" / "kb.test.toml");
@@ -4297,7 +4308,7 @@ static void test_control_sites() {
                 if (l.get("from") == "rules") ++ruled;
                 if (l["from"].is_null()) ++unlabelled;
             }
-            CHECK(ruled == 8 && unlabelled == 0);  // "/" is the php preset's front controller (preset:php): every location says where it is from
+            CHECK(ruled == 9 && unlabelled == 0);  // "/" is the php preset's front controller (preset:php): every location says where it is from
             if (ruled != 8 || unlabelled != 0) {
                 std::printf("rules label: ruled %zu unlabelled %zu of %zu\n", ruled, unlabelled, shown["locations"].items().size());
                 for (const auto& l : shown["locations"].items()) std::printf("  %s %s from=%s\n", std::string(l.get("path")).c_str(), std::string(l.get("match")).c_str(), std::string(l.get("from")).c_str());

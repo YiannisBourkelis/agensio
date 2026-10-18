@@ -2,6 +2,17 @@
 
 ## 0.1.0-alpha.101
 
+- **`immutable` in a managed site's `rules.cache`** (the review of 2026-10-14, defect D8: `docs/headers.md`
+  3.5 and 11.2 promised it, decided 2026-10-13 and never built). An entry takes `"immutable": true`,
+  rendered as `public, max-age=N, immutable` (RFC 8246: while the lifetime lasts a browser's reload asks
+  nothing; Firefox and Safari honour it over HTTPS), and `agensio ctl --cache PATH=SECONDS,immutable`.
+  For a directory whose names change with their content; refused with `max_age` 0, the extension holding
+  only while the answer is fresh (RFC 8246 2). An entry's other fields are refused, naming the nearest:
+  `immutable` was dropped before, so the control API answered ok for a lifetime the file did not carry.
+  The cookbook's advice to put `immutable` into root's additions file, wrong since managed sites take
+  `response_headers` (alpha.94), now names `rules.cache` and `site_update`'s `response_headers`. RFC
+  8246 in `docs/rfc/`. Unit tests failing before; `docs/configuration.md` 15, `docs/headers.md` 3.5,
+  the cookbook, the MCP text of `rules.cache`, `agensio ctl`'s help.
 - **A CORS preflight on a password-protected file is answered** (the review of the redirects, HSTS and
   response-header work, 2026-10-14, defect D7). A preflight, the `OPTIONS` with `Origin` and
   `Access-Control-Request-Method` a browser sends before another origin's page may call a path, never
