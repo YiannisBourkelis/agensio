@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.102
+## 0.1.0-alpha.102 (2026-10-19)
 
 - **`includeSubDomains` in stages: health names the next one** (hstspreload.org's deployment advice:
   five minutes, a week, a month, then a year or more, each run for its whole lifetime, since a mistake
