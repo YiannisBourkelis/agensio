@@ -2323,7 +2323,12 @@ set = { "Content-Security-Policy" = "script-src 'none'" }
   answer that is one user's (it sets a cookie, varies on `Cookie` or `Authorization` or is `Vary: *`
   (alpha.100), or answers a request with `Authorization`) gets a rule's `Cache-Control` lifetime as
   `private` (`private, max-age=3600` for `public, max-age=3600`), no rule's `Expires` or CDN lifetime,
-  and `Cache-Control: private` where the rules leave it none, a `remove` included (RFC 9111 7.3, 3.5). A `set` of a lifetime over an
+  and `Cache-Control: private` where the rules leave it none, a `remove` included (RFC 9111 7.3, 3.5).
+  A lifetime of a day or more, or `immutable`, on a path whose location falls back to a file agensio
+  serves (a single-page application's `try_files = ["$uri", "$uri/", "/index.html"]`) is noted by
+  `-t` (`header_cache_over_fallback`, alpha.101): a path there that is no file gets the shell, which
+  browsers and CDNs would keep under that address; give the directory its own location with
+  `try_files = ["$uri", "=404"]`. A `set` of a lifetime over an
   application site is noted by `-t`: `default` keeps the application's own value, and a page it marks
   with nothing is kept by a CDN whatever it shows.
 - **Refused at load, naming what to use instead:** the framing fields (`Connection`,

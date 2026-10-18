@@ -2,6 +2,18 @@
 
 ## 0.1.0-alpha.101
 
+- **A long lifetime where a single-page fallback answers is noted** (the review of 2026-10-14, D8's
+  second part: `docs/headers.md` 3.5 and 7 promised it). On a site whose `try_files` falls back to a
+  file agensio serves (an application's shell, `/index.html`), a `[[site.response_headers]]` rule
+  giving a path there a day or more, or `immutable`, without `no-store` or `no-cache` reaches the
+  shell's answer for a path that is no file (a mistyped or removed bundle), which browsers and CDNs
+  then keep as HTML under the bundle's address; so does a location's `add_headers` where that location
+  answers its own fallback. `-t`, the error log and health note it (`header_cache_over_fallback`),
+  naming the fix: the directory's own location with `try_files = ["$uri", "=404"]`, as the cookbook's
+  single-page application recipe has it. An ending rule counts only for the shell's ending, a
+  fallback to an application (PHP) not at all. `path_check`'s preview notes it the same way. Unit
+  test failing before, an integration check through `-t`; `docs/headers.md` 3.5 and 7,
+  `docs/configuration.md` 14c, the cookbook, the MCP text.
 - **`immutable` in a managed site's `rules.cache`** (the review of 2026-10-14, defect D8: `docs/headers.md`
   3.5 and 11.2 promised it, decided 2026-10-13 and never built). An entry takes `"immutable": true`,
   rendered as `public, max-age=N, immutable` (RFC 8246: while the lifetime lasts a browser's reload asks

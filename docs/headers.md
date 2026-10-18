@@ -336,8 +336,11 @@ set = { "Cache-Control" = "public, max-age=2592000" }
 ```
 
 On a single-page application, keep the year-long rule off the paths its fallback answers: a route
-that falls back to the shell under `/assets/` would cache the shell for a year. `-t` warns about
-such a rule (section 7).
+that falls back to the shell under `/assets/` would cache the shell for a year. `-t` notes such a
+rule (`header_cache_over_fallback`, section 7, since 0.1.0-alpha.101): a lifetime of a day or more,
+or `immutable`, without `no-store` or `no-cache`, on a path whose location falls back to a file
+agensio serves; the fix is the directory's own location with `try_files = ["$uri", "=404"]`, as the
+cookbook's single-page application recipe has it.
 
 ### 3.6 What an application discloses
 
@@ -490,9 +493,10 @@ application's value once per site and health reports `hsts_narrows_application`.
   application may send its own: use `default`); a `set` of a `Cache-Control` lifetime on such a site
   (`header_cache_set`: the guards of 2.4 keep the application's restrictions and a cookie's answer,
   not a page it marks with nothing; use `default`, on public pages' paths); `X-XSS-Protection` other
-  than `0`; a year-long
-  `Cache-Control` on a path the site's single-page fallback can answer (the shell would be kept
-  under an asset's address for a year).
+  than `0`; a lifetime of a day or more (or `immutable`) on a path the site's single-page fallback
+  can answer (`header_cache_over_fallback`, alpha.101: the shell would be kept under an asset's
+  address for that long), from a rule, or from a location's `add_headers` where it answers its own
+  fallback.
 - **`path_check`** lists every field the site decides for the path, with its value and where the
   decision came from: `referrer-policy: strict-origin-when-cross-origin (baseline wordpress,
   default: the application's own wins)`, `x-content-type-options: nosniff (baseline, on the files

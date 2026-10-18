@@ -8997,6 +8997,55 @@ static void test_private_cache() {
     for (const char* f : {"Cache-Control", "-cache-control", "Expires", "Vary", "Content-Type", "X-Control"}) CHECK(!private_cache::shared_only_field(f));
 }
 
+// A long lifetime where a single-page fallback answers (the review of 2026-10-14, D8; docs/headers.md
+// 3.5 and 7): a path under the rule that is no file gets the shell, which browsers and CDNs would keep
+// under that address for the rule's lifetime; noted at load, never refused.
+static void test_cache_over_fallback() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-spa-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "www" / "assets");
+    std::ofstream(dir / "www" / "index.html") << "<p>shell";
+    auto notes = [&](const std::string& keys, const std::string& rest) {
+        std::ofstream(dir / "s.toml") << "[[site]]\nserver_name = [\"spa.test\"]\nlisten = [\"127.0.0.1:18761\"]\nroot = \"www\"\n" << keys << rest;
+        std::string out;
+        const Config c = load_config(dir / "s.toml");  // held: a range-for over a temporary's member would dangle
+        for (const auto& [code, text] : c.sites[0].header_notes)
+            if (code == "header_cache_over_fallback") out += text + "\n";
+        return out;
+    };
+    const std::string spa = "try_files = [\"$uri\", \"$uri/\", \"/index.html\"]\n";
+    auto rule = [](const std::string& path, const std::string& value, const std::string& extra = "") {
+        return "[[site.response_headers]]\npath = \"" + path + "\"\nwhen = \"success\"\n" + extra + "set = { \"Cache-Control\" = \"" + value + "\" }\n";
+    };
+    const std::string year = "public, max-age=31536000, immutable";
+    std::string n = notes(spa, rule("/assets/", year));
+    CHECK(n.find("the rule for /assets") != std::string::npos && n.find("/index.html") != std::string::npos && n.find("try_files = [\"$uri\", \"=404\"]") != std::string::npos);
+    CHECK(!notes(spa, rule("/", "public, max-age=86400")).empty() && !notes(spa, rule("/assets/", "max-age=600, immutable")).empty());  // a day, or immutable
+    CHECK(!notes(spa, rule("/assets/app.js", year, "match = \"exact\"\n")).empty() && !notes(spa, rule("/", year, "endings = [\"html\"]\n")).empty());
+    // Nothing to note: a short lifetime, no-store or no-cache, an ending the shell is not, the directory's
+    // own try_files without the fallback (the cookbook's recipe), a site without a fallback, a
+    // fallback to an application (its answer keeps its own fields).
+    CHECK(notes(spa, rule("/assets/", "public, max-age=600")).empty() && notes(spa, rule("/assets/", "no-cache, max-age=31536000")).empty());
+    CHECK(notes(spa, rule("/assets/", year, "endings = [\"js\", \"css\"]\n")).empty() && notes("", rule("/assets/", year)).empty());
+    CHECK(notes(spa, rule("/assets/", year) + "[[site.location]]\npath = \"/assets/\"\ntry_files = [\"$uri\", \"=404\"]\n").empty());
+    CHECK(notes("app = \"php\"\nphp = { socket = \"unix:/nonexistent/fpm.sock\" }\n", rule("/assets/", year)).empty());
+    // A location's own add_headers reach the shell where that location answers its own fallback.
+    CHECK(!notes(spa, "[[site.location]]\npath = \"/\"\nadd_headers = { \"Cache-Control\" = \"public, max-age=31536000\" }\n").empty());
+    CHECK(notes(spa, "[[site.location]]\npath = \"/assets/\"\nadd_headers = { \"Cache-Control\" = \"public, max-age=31536000\" }\n").empty());  // the shell is \"/\"'s answer
+    // path_check's preview of proposed rules notes it the same way.
+    {
+        std::ofstream(dir / "s.toml") << "[[site]]\nserver_name = [\"spa.test\"]\nlisten = [\"127.0.0.1:18761\"]\nroot = \"www\"\n" << spa;
+        SiteConfig copy = load_config(dir / "s.toml").sites[0];
+        json::Value proposed;
+        std::string err;
+        CHECK(json::parse(R"([{"path": "/assets/", "when": "success", "set": {"Cache-Control": "public, max-age=31536000, immutable"}}])", proposed, err));
+        CHECK(load_response_header_rules(proposed, copy).empty() && std::any_of(copy.header_notes.begin(), copy.header_notes.end(), [](const auto& h) {
+                  return h.first == "header_cache_over_fallback";
+              }));
+    }
+    fs::remove_all(dir);
+}
+
 // Content types (0.1.0-alpha.100, docs/configuration.md 6c): root's [mime_types] and a site's
 // mime_types over the built-in table, by ending (any case, the longest first) or exact path; what
 // either may hold; a site may not make a file browsers run scripts in; managed sites the same.
@@ -10975,6 +11024,7 @@ int main() {
     test_response_headers();
     test_rule_cache_fields();
     test_mime_types();
+    test_cache_over_fallback();
     test_security_baseline();
     test_managed_response_headers();
     test_header_suggestions();

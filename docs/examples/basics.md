@@ -893,7 +893,9 @@ add_headers = { "Cache-Control" = "public, max-age=31536000, immutable" }
 `200`, and the script draws the route. Without the `/assets/` location a missing or
 mistyped bundle would get the shell too, HTML where the browser expects JavaScript, which
 fails in the browser with a confusing error instead of a 404. The location gives `/assets/`
-its own `try_files`, so a file missing there is `404`. Plain HTTP on port 80 redirects to
+its own `try_files`, so a file missing there is `404`; with a year's lifetime there that matters
+twice, since the shell would be kept a year under the bundle's address, and `-t` notes a long
+lifetime on a path the fallback answers (`header_cache_over_fallback`). Plain HTTP on port 80 redirects to
 https by itself (the second recipe).
 
 **Check it.**

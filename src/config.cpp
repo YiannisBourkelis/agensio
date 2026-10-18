@@ -2207,6 +2207,71 @@ std::shared_ptr<const MimeTypes> merged_mime_types(const MimeTypes& server, cons
     return m;
 }
 
+// A lifetime of a day or more, or immutable, without no-store or no-cache: what a single-page fallback's
+// shell must never get under another address (docs/headers.md 3.5).
+bool long_lifetime(std::string_view value) {
+    if (private_cache::restrictions(value, false) & (private_cache::kNoStore | private_cache::kNoCache)) return false;
+    bool lasting = false;
+    private_cache::for_each_directive(value, [&](std::string_view d) {
+        const std::size_t eq = d.find('=');
+        const std::string_view name = d.substr(0, eq);
+        if (private_cache::iequal(name, "immutable")) lasting = true;
+        if ((private_cache::iequal(name, "max-age") || private_cache::iequal(name, "s-maxage")) && eq != std::string_view::npos) {
+            std::string_view arg = d.substr(eq + 1);
+            if (arg.size() >= 2 && arg.front() == '"' && arg.back() == '"') arg = arg.substr(1, arg.size() - 2);
+            std::uint64_t n = 0;
+            const auto [ptr, ec] = std::from_chars(arg.data(), arg.data() + arg.size(), n);
+            if (ec == std::errc() && ptr == arg.data() + arg.size() && n >= 86400) lasting = true;
+            if (ec == std::errc::result_out_of_range) lasting = true;
+        }
+    });
+    return lasting;
+}
+
+// The review of 2026-10-14, D8 (docs/headers.md 3.5 and 7): on a site whose try_files falls back to a
+// file agensio serves (a single-page application's shell), a long lifetime that reaches a path the
+// fallback answers would have browsers and CDNs keep the shell under that address (a mistyped or
+// removed bundle, /assets/app.old.js, kept as HTML for a year). A rule matches the path asked for, so
+// it reaches the shell's answer under its own path; a location's add_headers only where that location
+// answers its own fallback. Noted, never refused: the lifetime may be meant.
+void note_cache_over_fallback(SiteConfig& site) {
+    if (site.locations.empty()) return;  // a rules-only copy (apply_request's check): the reloaded site's own load notes it
+    auto shell = [&](const LocationConfig& loc) -> const TryStep* {  // its fallback to a file agensio serves
+        for (const TryStep& st : loc.try_files)
+            if (st.kind == TryStep::Kind::fallback && Router::location(site, st.target).kind == HandlerKind::static_) return &st;
+        return nullptr;
+    };
+    auto lasting = [](const std::vector<std::pair<std::string, std::string>>& fields) -> const std::string* {
+        for (const auto& [n, v] : fields)
+            if ((Headers::iequals(n, "cache-control") || private_cache::shared_only_field(n)) && long_lifetime(v)) return &v;
+        return nullptr;
+    };
+    const std::string fix = "give the directory a location of its own with try_files = [\"$uri\", \"=404\"], so a file missing there is a 404 and "
+                            "never the shell (the single-page application recipe), or keep the lifetime to a directory that has one";
+    for (const HeaderRule& r : site.response_headers.rules) {
+        if (r.baseline) continue;
+        const std::string* value = lasting(r.set);
+        if (!value) value = lasting(r.fallback);
+        if (!value) continue;
+        const std::string probe = r.exact ? r.path : (r.path == "/" ? std::string("/x") : r.path + "/x");
+        const TryStep* fb = shell(Router::location(site, probe));
+        if (!fb) continue;
+        if (!r.endings.empty()) {
+            const std::string name = to_lower(fb->target.substr(fb->target.rfind('/') + 1));
+            if (std::none_of(r.endings.begin(), r.endings.end(), [&](const std::string& e) { return name.ends_with("." + e); })) continue;
+        }
+        site.header_notes.emplace_back("header_cache_over_fallback", "the rule for " + r.path + " sends " + *value + ", and a path there that is no file is answered with " +
+                                                                         fb->target + " (try_files): browsers and CDNs would keep that page under the asked address for the rule's lifetime; " + fix);
+    }
+    for (const LocationConfig& loc : site.locations) {
+        const std::string* value = lasting(loc.add_headers);
+        const TryStep* fb = value ? shell(loc) : nullptr;
+        if (!fb || &Router::location(site, fb->target) != &loc) continue;
+        site.header_notes.emplace_back("header_cache_over_fallback", "the location " + loc.path + " sends " + *value + " (add_headers), and a path there that is no file is answered with " +
+                                                                         fb->target + " from the same location (try_files): browsers and CDNs would keep that page under the asked address; " + fix);
+    }
+}
+
 void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, const std::string& where, std::vector<RootAdditions>* root_adds = nullptr) {
     check_keys(t, {"[[site]]"}, {"auth", "access", "redirect", "response_headers"}, where);
     SiteConfig site;
@@ -2503,6 +2568,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
     check_redirects(site, where);
     check_header_endings(site, where);
     add_security_baseline(site, where);
+    note_cache_over_fallback(site);
     cfg.sites.push_back(std::move(site));
 }
 
@@ -4876,6 +4942,7 @@ std::string load_response_header_rules(const json::Value& rules, SiteConfig& sit
         parse_response_headers(rules_table["response_headers"], site, "response_headers");
         check_header_endings(site, "response_headers");
         add_security_baseline(site, "response_headers");
+        note_cache_over_fallback(site);
     } catch (const std::exception& e) {
         return e.what();
     }
