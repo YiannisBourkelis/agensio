@@ -1511,9 +1511,16 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
         if (!s.tls) continue;
         const std::string name = s.server_names.front();
         const std::size_t findings_before = out.size();
+        // The way back (docs/redirects.md 4.5): a managed site sending max-age=0 clears its HSTS until
+        // the last browser that saw a lifetime may hold it; past then nothing enforces it. A hand-written
+        // hsts = 0 has no history, so nothing is said of it.
+        SiteSpec managed;
+        const bool zero = s.hsts == SiteConfig::Hsts::on && parse_hsts(s.tls_fields.hsts).max_age == 0;
+        const bool clearing_file = zero && read_managed(site_file(running, name), managed);
+        const bool cleared = clearing_file && now >= managed.hsts_held_until;
         // With hsts on a visitor cannot click past a certificate error: the findings that lead to
         // one rise a level and say so (docs/redirects.md 4.2).
-        const bool hsts = s.hsts == SiteConfig::Hsts::on;
+        const bool hsts = s.hsts == SiteConfig::Hsts::on && !cleared;
         const std::string hsts_why = hsts ? "; hsts is on, so browsers that saw it refuse the site with a hard error once the certificate expires, "
                                             "with no way past it"
                                           : "";
@@ -1637,6 +1644,19 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
                 "when the user agrees, the lifetime browsers commit to, in the site file: hsts = \"1y\" (site_update with hsts: \"1y\" on a managed "
                 "site; \"1w\" first for a site the user is less sure of); {\"max_age\": \"1y\", \"subdomains\": true} binds every subdomain too, only "
                 "once each has HTTPS; hsts = false records a decided no and silences this");
+        if (clearing_file && !cleared)
+            add("info", "hsts_clearing", name,
+                "every HTTPS answer carries Strict-Transport-Security: max-age=0, so each browser that visits forgets the site's HSTS (RFC 6797 "
+                "6.1.1); one that saw a lifetime and has not come back may hold it until " + utc_minute(managed.hsts_held_until) +
+                    ", the end of the lifetime it was sent",
+                "nothing until then, and keep HTTPS working: those browsers still refuse the site on a certificate error; after that date "
+                "site_update with hsts: false (agensio ctl site-update " + name + " --no-hsts) turns it off; a lifetime sends one again");
+        else if (cleared)
+            add("info", "hsts_cleared", name,
+                "the site sends Strict-Transport-Security: max-age=0 and every lifetime it sent has ended" +
+                    (managed.hsts_held_until > 0 ? " (" + utc_minute(managed.hsts_held_until) + ")" : std::string()) +
+                    ": no browser enforces its HSTS any more",
+                "site_update with hsts: false (agensio ctl site-update " + name + " --no-hsts) stops sending the field and records the decided no");
     }
     // The watch of the certificate files (step T3) late by more than one run: a certificate another
     // tool renews (certbot) waits until cert-renew. Said once, for the server; never with nothing served.

@@ -4022,7 +4022,7 @@ static void test_control_sites() {
         CHECK(hsts(R"({"hsts":"3y"})", hs).find("at most two years") != npos && hsts(R"({"hsts":"soon"})", hs).find("no lifetime") != npos);
         CHECK(hsts(R"({"hsts":{"max_age":"1y","sub":true}})", hs).find("takes max_age and subdomains") != npos);
         CHECK(hsts(R"({"hsts":{"subdomains":true}})", hs).find("no lifetime") != npos);
-        CHECK(hsts(R"({"hsts":false})", hs).empty() && hs.hsts.empty() && hs.hsts_decided && !hs.hsts_subdomains);
+        CHECK(hsts(R"({"hsts":false})", hs).empty() && hs.hsts == "0" && hs.hsts_decided && !hs.hsts_subdomains);  // clearing first (4.5)
         // A spec an earlier version wrote with hsts: true (a year, never named): no change renders it
         // without HSTS; every change names the lifetime, or false, until it does.
         json::Value old_spec = rd.to_json();
@@ -4032,7 +4032,66 @@ static void test_control_sites() {
         SiteSpec kept = old;
         CHECK(hsts(R"({"redirect_http":true})", kept).find("hsts: \"1y\"") != npos);
         CHECK(hsts(R"({"hsts":"1y"})", (kept = old)).empty() && kept.hsts == "1y" && !kept.hsts_unnamed);
-        CHECK(hsts(R"({"hsts":false})", (kept = old)).empty() && kept.hsts.empty() && kept.hsts_decided && !kept.hsts_unnamed);
+        CHECK(hsts(R"({"hsts":false})", (kept = old)).empty() && kept.hsts == "0" && kept.hsts_decided && !kept.hsts_unnamed);  // it sent a year
+        // The way back (RFC 6797 6.1.1, docs/redirects.md 4.5): false on a site that sends HSTS sends
+        // max-age=0 first, until the last browser that saw a lifetime may hold it; a second false
+        // before then is refused with the date, after it turns HSTS off. An application that sends
+        // its own takes over at once.
+        constexpr std::time_t t0 = 1000000000;  // 2001-09-09 01:46:40 UTC
+        constexpr std::int64_t year = 31536000, week = 604800;
+        auto at = [&](const char* text, SiteSpec& sp, std::time_t now, ApplyContext ctx = {}) {
+            std::string e;
+            json::Value b;
+            CHECK(json::parse(text, b, err));
+            ctx.now = now;
+            (void)apply_request(b, cfg, sp, e, ctx);
+            return std::make_pair(e, ctx.note);
+        };
+        SiteSpec base = rd;  // sending nothing yet
+        base.hsts.clear();
+        base.hsts_subdomains = false;
+        base.hsts_held_until = 0;
+        SiteSpec cl = base;
+        CHECK(at(R"({"hsts":"1y"})", cl, t0).first.empty() && cl.hsts_held_until == 0);
+        auto [e1, n1] = at(R"({"hsts":false})", cl, t0 + 100);
+        CHECK(e1.empty() && cl.hsts == "0" && cl.hsts_decided && cl.hsts_held_until == t0 + 100 + year &&
+              n1.find("max-age=0") != npos && n1.find("2002-09-09 01:48 UTC") != npos);
+        CHECK(render_site(cl, "x").find("\nhsts = 0   # Strict-Transport-Security: max-age=0 on every HTTPS answer") != npos &&
+              render_site(cl, "x").find("2002-09-09 01:48 UTC") != npos);
+        SiteSpec cl_back;
+        CHECK(SiteSpec::from_json(cl.to_json(), cl_back) && cl_back.hsts == "0" && cl_back.hsts_held_until == t0 + 100 + year);
+        CHECK(at(R"({"hsts":false})", cl, t0 + 200).first.find("until 2002-09-09 01:48 UTC") != npos && cl.hsts == "0");  // early: refused
+        CHECK(at(R"({"canonical":"shop.test"})", cl, t0 + 300).first.empty() && cl.hsts == "0");  // another change keeps the clearing
+        auto [e2, n2] = at(R"({"hsts":false})", cl, t0 + 100 + year);
+        CHECK(e2.empty() && cl.hsts.empty() && cl.hsts_decided && render_site(cl, "x").find("\nhsts = false") != npos);
+        // A shorter lifetime first: the browsers that saw the year still hold it.
+        SiteSpec lo = base;
+        (void)at(R"({"hsts":"1y"})", lo, t0);
+        CHECK(at(R"({"hsts":"1w"})", lo, t0 + 10).first.empty() && lo.hsts_held_until == t0 + 10 + year);
+        CHECK(at(R"({"hsts":false})", lo, t0 + 20).first.empty() && lo.hsts == "0" && lo.hsts_held_until == t0 + 10 + year);
+        CHECK(at(R"({"hsts":"1w"})", lo, t0 + 30).first.empty() && lo.hsts == "1w");  // a lifetime again ends the clearing
+        CHECK(at(R"({"hsts":false})", lo, t0 + 40).first.empty() && lo.hsts == "0" && lo.hsts_held_until == t0 + 10 + year);
+        // hsts: 0 given is the same clearing; nothing sent before: off at once.
+        SiteSpec z = base;
+        (void)at(R"({"hsts":"1w"})", z, t0);
+        CHECK(at(R"({"hsts":0})", z, t0 + 5).first.empty() && z.hsts == "0" && z.hsts_held_until == t0 + 5 + week);
+        SiteSpec none = base;
+        CHECK(at(R"({"hsts":false})", none, t0).first.empty() && none.hsts.empty() && none.hsts_decided && none.hsts_held_until == 0);
+        // An earlier version's true meant a year, which browsers hold.
+        SiteSpec ot = old;
+        CHECK(at(R"({"hsts":false})", ot, t0).first.empty() && ot.hsts == "0" && ot.hsts_held_until == t0 + year && !ot.hsts_unnamed);
+        // The application sends its own: false hands over, its lifetime counted for a later clearing.
+        SiteSpec ap = base;
+        (void)at(R"({"hsts":"1y"})", ap, t0);
+        ApplyContext app;
+        app.application_hsts = "max-age=63072000; includeSubDomains";
+        app.application_until = t0 + 50 + 2 * year;
+        auto [e3, n3] = at(R"({"hsts":false})", ap, t0 + 50, app);
+        CHECK(e3.empty() && ap.hsts.empty() && ap.hsts_decided && ap.hsts_held_until == t0 + 50 + 2 * year &&
+              n3.find("max-age=63072000; includeSubDomains") != npos && n3.find("the application's") != npos);
+        SiteSpec ap0 = base;
+        (void)at(R"({"hsts":"1y"})", ap0, t0);
+        CHECK(at(R"({"hsts":0})", ap0, t0 + 50, app).first.empty() && ap0.hsts == "0" && ap0.hsts_held_until == t0 + 50 + 2 * year);
     }
     CHECK(text.find("user = \"shop\"") != std::string::npos && text.find("tls = \"auto\"") != std::string::npos);
     CHECK(text.find("\nhsts = \"1y\"   # Strict-Transport-Security: max-age=31536000 on every HTTPS answer") != std::string::npos && text.find("server_name = [\"shop.test\", \"www.shop.test\"]") != std::string::npos);
@@ -7353,6 +7412,85 @@ static void test_unknown_keys() {
 // Health judges the certificate served (the certificate work, step T2), on described facts: the
 // served one's expiry wins over the file's; an automatic renewal is overdue a day after a third of
 // the lifetime is left, with the manager's last failure, and a failure before that is a warning.
+// The way back in health (docs/redirects.md 4.5): a managed site clearing its HSTS is said with the
+// date the last browser may still hold it; once past it, that false now turns it off. Until then the
+// certificate findings stay errors, since browsers may still refuse a click past them.
+static void test_hsts_clearing_health() {
+    using control::Finding;
+    namespace fs = std::filesystem;
+    constexpr auto npos = std::string::npos;
+    const std::time_t now = std::time(nullptr);
+    const std::time_t day = 86400;
+    auto find = [](const std::vector<Finding>& f, const char* code) -> const Finding* {
+        for (const auto& x : f)
+            if (x.code == code) return &x;
+        return nullptr;
+    };
+    const fs::path dir = fs::temp_directory_path() / ("agensio-hsts-clear-" + std::to_string(::getpid()));
+    fs::remove_all(dir);
+    fs::create_directories(dir / "sites.d");
+    Config cfg;
+    cfg.config_path = dir / "agensio.toml";
+    SiteConfig site;
+    site.server_names = {"c.test"};
+    site.listen = {"127.0.0.1:443"};
+    TlsConfig tls;
+    tls.cert = dir / "cert.pem";
+    tls.key = dir / "key.pem";
+    site.tls = tls;
+    site.hsts = SiteConfig::Hsts::on;
+    site.http = SiteConfig::Http::redirect;
+    site.tls_fields.hsts = "max-age=0";
+    cfg.sites.push_back(site);
+    control::TlsFacts facts;
+    control::CertificateState served;
+    served.present = true;
+    served.issuer = "R11";
+    served.fingerprint = "aa";
+    served.not_before = now - 40 * day;
+    served.not_after = now + 3 * day + 3600;
+    served.days_left = 3;
+    facts.served[tls.cert.string() + '\n' + tls.key.string()] = served;
+    control::SiteSpec spec;
+    spec.domain = "c.test";
+    spec.https = "manual";
+    spec.cert = tls.cert.string();
+    spec.key = tls.key.string();
+    spec.app = "static";
+    spec.root = "/var/www/c";
+    spec.hsts = "0";
+    spec.hsts_decided = true;
+    spec.hsts_held_until = now + 3 * day;
+    std::string err;
+    CHECK(control::write_site_file(control::site_file(cfg, "c.test"), control::render_site(spec, "2026-10-19"), err));
+    {
+        const auto findings = control::health_findings(cfg, cfg, false, now, &facts);  // kept: find points into it
+        const Finding* c = find(findings, "hsts_clearing");
+        const Finding* e = find(findings, "certificate_expiring");
+        CHECK(c && c->severity == "info" && c->site == "c.test" && c->message.find("max-age=0") != npos &&
+              c->message.find(control::utc_minute(now + 3 * day)) != npos && c->fix.find("hsts: false") != npos && !find(findings, "hsts_cleared"));
+        CHECK(e && e->severity == "error");
+    }
+    spec.hsts_held_until = now - 60;
+    CHECK(control::write_site_file(control::site_file(cfg, "c.test"), control::render_site(spec, "2026-10-19"), err));
+    {
+        const auto findings = control::health_findings(cfg, cfg, false, now, &facts);  // kept: find points into it
+        const Finding* c = find(findings, "hsts_cleared");
+        const Finding* e = find(findings, "certificate_expiring");
+        CHECK(c && c->severity == "info" && c->fix.find("site_update with hsts: false") != npos && c->fix.find("--no-hsts") != npos &&
+              !find(findings, "hsts_clearing"));
+        CHECK(e && e->severity == "warn");  // nothing enforces HSTS any more
+    }
+    // A hand-written hsts = 0 has no history: neither is said, and the certificate findings stay errors.
+    fs::remove(control::site_file(cfg, "c.test"));
+    {
+        const auto findings = control::health_findings(cfg, cfg, false, now, &facts);  // kept: find points into it
+        const Finding* e = find(findings, "certificate_expiring");
+        CHECK(!find(findings, "hsts_clearing") && !find(findings, "hsts_cleared") && e && e->severity == "error");
+    }
+    fs::remove_all(dir);
+}
+
 static void test_served_certificates() {
     using control::Finding;
     constexpr auto npos = std::string::npos;
@@ -11078,6 +11216,7 @@ int main() {
     test_hosting_isolation();
     test_tls_read();
     test_served_certificates();
+    test_hsts_clearing_health();
     test_config_reference();
     test_config_reference_defaults();
     test_forwarded_lines();

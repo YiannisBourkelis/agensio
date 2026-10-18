@@ -118,9 +118,10 @@ void note_hsts_narrowed(const SiteFields& f, std::string_view app, ErrorLog* log
                   "), which replaced it; set the site's hsts to the value meant, or hsts = false to let the application's through (docs/redirects.md 4.1)");
 }
 
-// A site with no hsts line (docs/redirects.md 4.2): the HSTS its application sends goes out as it is,
-// and is noted once per generation of the site, so health says the application already sends it
-// (hsts_from_application) rather than suggesting the site's own over it.
+// The HSTS a site's application sends, noted once per generation of the site. With no hsts line
+// (docs/redirects.md 4.2) it goes out as it is, and health says the application already sends it
+// (hsts_from_application) rather than suggesting the site's own over it; with one it is replaced, and
+// a managed site's false then hands over to it rather than clearing (4.5).
 void note_application_hsts(const SiteFields& f, std::string_view app) {
     if (!f.application_noted.done.exchange(true, std::memory_order_relaxed))
         site_notices().note("hsts_from_application", f.site, app, std::time(nullptr));
@@ -210,6 +211,8 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
         if (proxied && hidden(h.name, loc)) continue;
         if (site_hsts && Headers::iequals(h.name, "strict-transport-security")) {
             if (h.value != s.fields->hsts && !s.fields->hsts_noted.done.load(std::memory_order_relaxed)) note_hsts_narrowed(*s.fields, h.value, log);
+            // Replaced, but known: false hands over to it rather than clearing (docs/redirects.md 4.5).
+            if (!s.fields->application_noted.done.load(std::memory_order_relaxed)) note_application_hsts(*s.fields, h.value);
             continue;
         }
         if (rules && !response_fields::keep_upstream(*rules, h.name, guarded, seen)) continue;

@@ -2128,7 +2128,11 @@ it (`hsts_suggested`, info) once the site has served a real certificate for a we
 certificate finding, or says the application already sends its own (`hsts_from_application`, with
 its value, which `hsts = "1y"` would replace, and the value that matches it); `hsts = false` (`hsts: false`, `--no-hsts`) records a
 decided no and silences that, and with `hsts` on the certificate findings `certificate_expiring` and `acme_renewal_failed`
-are errors ([redirects.md](redirects.md) 4.2).
+are errors ([redirects.md](redirects.md) 4.2). On a managed site that sends a lifetime, `false` first
+renders `hsts = 0` until the last lifetime it sent has ended (the answer's `hsts_note`, the file's
+comment and health's `hsts_clearing` name the date; `hsts_cleared` after it), refuses a second `false`
+before that date and writes `hsts = false` after it; when its application sends its own HSTS, `false`
+hands over to it at once ([redirects.md](redirects.md) 4.5, 0.1.0-alpha.102).
 
 Rules checked by `agensio -t`: `tls = "auto"` needs `[server] acme`; `server_name` must
 list real host names (no `*`, no wildcards: those need DNS-01, which is not in this

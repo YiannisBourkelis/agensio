@@ -26,6 +26,8 @@
 #include "control/settings.hpp"
 #include "control/sites.hpp"
 #include "core/body.hpp"
+#include "core/site_fields.hpp"
+#include "core/site_notices.hpp"
 #include "services/appenv.hpp"
 #ifdef AGENSIO_HAS_AUTH
 #include "services/authusers.hpp"
@@ -1607,7 +1609,19 @@ void ControlHandler::site_update(Stream& s, std::string_view name, const json::V
         return;
     }
     std::string error;
-    const auto needs = control::apply_request(body, cfg, spec, error);
+    // The clock, and the HSTS the site's application sent since the start (the request path's notes):
+    // false hands over to it rather than clearing, and its lifetime counts for a clearing (4.5).
+    control::ApplyContext ctx;
+    ctx.now = std::time(nullptr);
+    for (const auto& n : site_notices().snapshot()) {
+        if (n.site != spec.domain || (n.code != "hsts_from_application" && n.code != "hsts_narrows_application")) continue;
+        const std::time_t until = n.last + static_cast<std::time_t>(std::min<std::uint64_t>(parse_hsts(n.subject).max_age, 315360000));
+        if (ctx.application_hsts.empty() || until > ctx.application_until) {
+            ctx.application_hsts = n.subject;
+            ctx.application_until = until;
+        }
+    }
+    const auto needs = control::apply_request(body, cfg, spec, error, ctx);
     if (!error.empty()) {
         reply(s, 400, json::Value::object().set("error", error));
         return;
@@ -1630,7 +1644,8 @@ void ControlHandler::site_update(Stream& s, std::string_view name, const json::V
     if (body["dry_run"].boolean()) {
         reply(s, 200, json::Value::object().set("ok", !blocking).set("dry_run", true).set("file", file.string())
                           .set("would_write", control::render_site(spec, now_stamp())).set("problems", problems_json(problems))
-                          .set("run_as_root", commands_of(problems, false)).set("spec", spec.to_json()).set("warnings", warnings));
+                          .set("run_as_root", commands_of(problems, false)).set("spec", spec.to_json()).set("warnings", warnings)
+                          .set("hsts_note", ctx.note.empty() ? json::Value() : json::Value(ctx.note)));
         return;
     }
     json::Value done = json::Value::array();
@@ -1681,6 +1696,7 @@ void ControlHandler::site_update(Stream& s, std::string_view name, const json::V
     for (const auto& p : protection_steps()) steps.push_back(p);
     json::Value answer = json::Value::object().set("ok", true).set("file", file.string()).set("spec", spec.to_json())
                              .set("done", done_now).set("next_steps", strings(steps)).set("warnings", warnings);
+    if (!ctx.note.empty()) answer.set("hsts_note", ctx.note);  // what the change did to the HSTS browsers hold (4.5)
     add_redirect_notes(answer, backend_->running(), spec.domain);
     reply(s, 200, answer);
 }

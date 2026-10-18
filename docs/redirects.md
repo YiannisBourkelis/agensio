@@ -425,12 +425,37 @@ without TLS: they would become unreachable.
 
 ### 4.5 Turning it off
 
-Browsers keep HSTS for its `max-age`. Removing `hsts` therefore changes nothing for visitors who
-have it; to tell them to forget it, send `max_age = 0` for a while first (RFC 6797 6.1.1):
+Browsers keep HSTS for its `max-age`, counted from the last answer that carried the field; an
+answer without it changes nothing (RFC 6797 8.1). Removing `hsts` therefore changes nothing for visitors who have it: they
+keep refusing plain HTTP and any certificate problem until their lifetime ends, and a site that
+stops sending the field has no way left to end it sooner. To tell them to forget it, send `max-age=0`
+(6.1.1, 8.1): a browser that sees it drops the host at once. Keep sending it for as long as the longest
+lifetime sent before, so that every browser that comes back in that time gets it; one that never
+comes back forgets the host when its own lifetime ends.
 
 ```toml
-hsts = 0   # "forget this host's HSTS": keep it for as long as the old max-age, then remove
+hsts = 0   # "forget this host's HSTS": keep it for as long as the old max-age, then hsts = false
 ```
+
+**A managed site does this by itself** (0.1.0-alpha.102). `false` (`site_update` with `hsts: false`,
+`agensio ctl site-update NAME --no-hsts`) on a site that sends a lifetime renders `hsts = 0` instead,
+and the site file's first line records the latest moment a browser may still hold what the site
+sent: each change of `hsts` raises it to the change's time plus the lifetime sent until then, so a
+site that went from `"1y"` to `"1w"` last month still waits for the year. The answer's `hsts_note`
+names that date, the file's comment repeats it, and health says `hsts_clearing` until then and
+`hsts_cleared` after it. A second `false` before the date is refused, naming it: turned off early,
+nothing would end the HSTS of the browsers that have not come back. After the date `false` writes
+`hsts = false`. A lifetime given during the clearing sends one again and ends it. Until the date the
+certificate findings stay errors (4.2), since those browsers still refuse a click past a certificate
+error; after it they are warnings again.
+
+When the site's application sends its own `Strict-Transport-Security` (seen on its answers since the
+server started: Rails' `force_ssl`, Kanboard's `ENABLE_HSTS`), `false` hands over to it at once
+instead: the application's field goes out unchanged, `hsts_note` says so, and its lifetime counts for
+a later clearing. Ending HSTS for such a site is the application's setting first, then `hsts = 0`.
+
+A hand-written `hsts = 0` has no history: agensio sends it for as long as the file says, and health
+says nothing about it.
 
 ### 4.6 Preload is not offered
 

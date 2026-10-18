@@ -3,6 +3,8 @@
 // <config dir>/sites.d. Pure functions, unit tested; the handler calls them.
 #pragma once
 
+#include <cstdint>
+#include <ctime>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -29,6 +31,10 @@ struct SiteSpec {
     // Read from a spec an earlier version wrote with hsts: true (a year, never named; refused since
     // alpha.101): every change names the lifetime, or false, so none renders the site without HSTS.
     bool hsts_unnamed = false;
+    // The latest moment a browser may still hold a lifetime the site no longer sends (each change of
+    // hsts raises it to the change's time plus the lifetime sent until then); while hsts is "0" the
+    // site is clearing until then, and a second false is refused (docs/redirects.md 4.5).
+    std::int64_t hsts_held_until = 0;
     std::string encoded_slashes;  // "" (deny, the default) | "allow": a %2F or %5C in the path decoded and looked up (2026-10-02)
     std::string canonical;        // the domain or an alias the other names redirect to (docs/redirects.md 3); "" none
     // The proxies that speak for this site (2026-10-13, docs/redirects.md 2.4): entries as written,
@@ -125,6 +131,18 @@ std::string check_rules(const json::Value& given, const SiteSpec& spec, json::Va
 // report). The MCP bridge's site_create and site_update schemas list the same.
 const std::vector<std::string_view>& site_request_fields();
 std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, SiteSpec& spec, std::string& error);
+// What a change needs from outside the request (docs/redirects.md 4.5): the clock, and the latest
+// Strict-Transport-Security the site's application sent, with the moment the last browser that saw it
+// may still hold it (the control handler reads both from the server's notices). `note` comes back
+// with what the change does to the HSTS browsers hold, for the answer.
+struct ApplyContext {
+    std::time_t now = 0;
+    std::string application_hsts;
+    std::time_t application_until = 0;
+    std::string note;
+};
+std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, SiteSpec& spec, std::string& error, ApplyContext& ctx);
+std::string utc_minute(std::time_t t);  // "2026-10-19 01:35 UTC"
 
 // The TOML for the spec, with the managed header that carries the spec as JSON.
 constexpr std::string_view kManagedMarker = "# agensio:managed ";

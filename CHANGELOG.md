@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.0-alpha.102
+
+- **Turning HSTS off on a managed site clears it first** (RFC 6797 6.1.1 and 8.1: browsers keep a
+  lifetime from the last answer that carried it, and an answer without the field changes nothing, so
+  `hsts = false` left every visitor who had seen it enforcing it until their lifetime ran out, with no
+  way left to end it). `false` (`site_update`, `--no-hsts`) on a site that sends a lifetime now renders
+  `hsts = 0`, sent as `max-age=0`, which each returning browser takes as "forget this host", until the
+  latest moment a browser may still hold what the site sent: the spec keeps it across changes
+  (`hsts_held_until`, raised at each change of `hsts` to the change's time plus the lifetime sent until
+  then, so a site that went from a year to a week still waits for the year). The answer's `hsts_note`,
+  the file's comment and health's `hsts_clearing` name the date, `hsts_cleared` says when it has
+  passed; a second `false` before it is refused naming it, after it writes `hsts = false`; a lifetime
+  given meanwhile ends the clearing. The certificate findings stay errors until the date and are
+  warnings after it. When the site's application sends its own HSTS (noted on its answers since the
+  start, now on sites with `hsts` too), `false` hands over to it at once and says so; its lifetime
+  counts for a later clearing. A hand-written `hsts = 0` is unchanged and unnamed by health. Unit tests
+  failing before (an injected clock), an integration check through a five-second lifetime;
+  `docs/redirects.md` 4.5, `docs/configuration.md` 14, `docs/tls.md` 2.7 and 5, the cookbook, the MCP
+  texts, `agensio ctl`'s help.
+
 ## 0.1.0-alpha.101 (2026-10-19)
 
 - **`hsts` is a lifetime; `hsts = true` is refused** (RFC 6797 11.2: the lifetime is the site's

@@ -1822,6 +1822,17 @@ check "site-update: a hand-written file set aside is named, not managed, with th
   "$(cpost /v1/sites/hand.wild.test '{"confirm":true,"reason":"hand"}') $(python3 -c 'import json; d=json.load(open("bench/tmp/ctl-reply.json")); print("yes" if "not managed" in d.get("error", "") and d.get("file", "").endswith("hand.wild.test.toml") else d)') $(grep -q 'is gone' bench/tmp/ctl-reply.json && echo yes || echo no)"
 rm -f bench/tmp/sites.d/hand.wild.test.toml
 cpost /v1/reload '{"confirm":true,"reason":"old"}' > /dev/null
+# The way back (docs/redirects.md 4.5, RFC 6797 6.1.1): false on a site that sends HSTS sends
+# max-age=0 first, until the last lifetime it sent has ended; a second false before then is refused
+# naming the date, health says clearing and then cleared, and false then turns HSTS off. A five-second
+# lifetime keeps the wait short.
+cpost /v1/sites "{\"domain\":\"clear.wild.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-wild/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-wild/key.pem\"},\"hsts\":\"5s\",\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/bench/www\",\"listen_plain\":\"127.0.0.1:8493\",\"listen_tls\":\"127.0.0.1:8494\",\"confirm\":true,\"reason\":\"clear\"}" > /dev/null
+cst() { v=$(curl -sk -D - -o /dev/null --resolve clear.wild.test:8494:127.0.0.1 https://clear.wild.test:8494/ | tr -d '\r' | sed -n 's/^[Ss]trict-[Tt]ransport-[Ss]ecurity: //p'); echo "${v:-none}"; }
+chealth() { curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); print("+".join(sorted(f["code"] for f in d["findings"] if f.get("site") == "clear.wild.test" and f["code"].startswith("hsts_"))) or "none")'; }
+check "hsts: the way back: false sends max-age=0 first and names the date, a second false before it is refused naming it, health says clearing then cleared, and false then turns HSTS off" \
+  "max-age=5 1 max-age=0 yes 400 yes hsts_clearing hsts_cleared 1 none" \
+  "$(cst) $("$BIN" ctl site-update clear.wild.test --no-hsts --yes --reason clear --socket $CS > bench/tmp/clear-reply.txt 2>&1; grep -c '^hsts = 0   # Strict-Transport-Security: max-age=0 on every HTTPS answer: browsers that visit forget' bench/tmp/sites.d/clear.wild.test.toml) $(cst) $(grep -q 'max-age=0, so each browser that visits forgets' bench/tmp/clear-reply.txt && echo yes || echo no) $(cpost /v1/sites/clear.wild.test '{"hsts":false,"confirm":true,"reason":"clear"}') $(grep -q 'may hold it until 20' bench/tmp/ctl-reply.json && echo yes || echo no) $(chealth) $(sleep 6; chealth) $(cpost /v1/sites/clear.wild.test '{"hsts":false,"confirm":true,"reason":"clear"}' > /dev/null; grep -c '^hsts = false' bench/tmp/sites.d/clear.wild.test.toml) $(cst)"
+cpost /v1/sites/clear.wild.test/delete '{"confirm":true,"reason":"clear"}' > /dev/null
 # rules.admin on a managed WordPress site (2026-10-07): the admin paths in one field, the
 # login page only on request, what the public site needs below /wp-admin kept open.
 if [ -n "$PHPFPM" ]; then
@@ -1855,9 +1866,10 @@ if [ -n "$PHPFPM" ]; then
     "1 max-age=604800; includeSubDomains 400 400 1 max-age=31536000" \
     "$("$BIN" ctl site-update hsts.wild.test --hsts 1w --hsts-subdomains --yes --reason hsts --socket $CS > /dev/null; grep -c '^hsts = { max_age = "1w", subdomains = true }' bench/tmp/sites.d/hsts.wild.test.toml) $(sts /) $(cpost /v1/sites/hsts.wild.test '{"hsts":true,"confirm":true,"reason":"hsts"}') $(cpost /v1/sites/hsts.wild.test '{"hsts":"3y","confirm":true,"reason":"hsts"}') $("$BIN" ctl site-update hsts.wild.test --hsts 1y --yes --reason hsts --socket $CS > /dev/null; grep -c '^hsts = "1y"' bench/tmp/sites.d/hsts.wild.test.toml) $(sts /)"
   # A no is recorded (alpha.84, docs/redirects.md 4.2): hsts = false in the file silences health's
-  # hsts_suggested; the answers lose the field.
-  check "hsts: ctl --no-hsts records a decided no in the managed file, and the pages lose the field; the application's own then goes out, and health no longer names it" "1 none max-age=63072000; includeSubDomains none" \
-    "$("$BIN" ctl site-update hsts.wild.test --no-hsts --yes --reason hsts --socket $CS > /dev/null; grep -c '^hsts = false' bench/tmp/sites.d/hsts.wild.test.toml) $(v=$(sts /); echo "${v:-none}") $(sts /hsts-strong.php) $(hfind)"
+  # hsts_suggested; the answers lose the field. This site's application sends its own HSTS, so the
+  # no hands over to it at once instead of clearing (4.5), and the answer says so.
+  check "hsts: ctl --no-hsts on a site whose application sends its own hands over at once: a decided no in the managed file, the pages lose the field, the application's goes out, health no longer names it" "1 yes none max-age=63072000; includeSubDomains none" \
+    "$("$BIN" ctl site-update hsts.wild.test --no-hsts --yes --reason hsts --socket $CS > bench/tmp/hsts-off.txt 2>&1; grep -c '^hsts = false' bench/tmp/sites.d/hsts.wild.test.toml) $(grep -q "the application's own Strict-Transport-Security: max-age=63072000; includeSubDomains now goes out unchanged" bench/tmp/hsts-off.txt && echo yes || echo no) $(v=$(sts /); echo "${v:-none}") $(sts /hsts-strong.php) $(hfind)"
   cpost /v1/sites/hsts.wild.test/delete '{"confirm":true,"reason":"hsts"}' > /dev/null
   # The validation prefixes over plain HTTP on a PHP site (alpha.77, the alpha.76 report): a token
   # file is served, anything else there is a 404 with nothing run, where before the front
