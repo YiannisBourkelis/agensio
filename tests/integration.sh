@@ -2052,7 +2052,9 @@ cpost /v1/reload '{"confirm":true,"reason":"bighead"}' > /dev/null
   printf '[[site]]\nserver_name = ["bo.wild.test"]\nlisten = ["127.0.0.1:8488"]\nhttp = { listen = ["127.0.0.1:8489"], mode = "serve" }\nroot = "%s/bench/www"\napp = "static"\nresponse_headers_baseline = false\ntls = { cert = "%s/bench/tmp/certs-wild/cert.pem", key = "%s/bench/tmp/certs-wild/key.pem" }\n\n' "$ROOT" "$ROOT" "$ROOT"
   printf '[[site]]\nserver_name = ["bn.wild.test"]\nlisten = ["127.0.0.1:8488"]\nhttp = { listen = ["127.0.0.1:8489"], mode = "serve" }\nroot = "%s/bench/www"\ntls = { cert = "%s/bench/tmp/certs-wild/cert.pem", key = "%s/bench/tmp/certs-wild/key.pem" }\n\n' "$ROOT" "$ROOT" "$ROOT"
   [ -n "$PHPFPM" ] && printf '[[site]]\nserver_name = ["bp.wild.test"]\nlisten = ["127.0.0.1:8488"]\nhttp = { listen = ["127.0.0.1:8489"], mode = "serve" }\nroot = "%s/tests/headers"\napp = "php"\nphp = { socket = "unix:%s/bench/tmp/php/fpm.sock" }\ntls = { cert = "%s/bench/tmp/certs-wild/cert.pem", key = "%s/bench/tmp/certs-wild/key.pem" }\n\n' "$ROOT" "$ROOT" "$ROOT" "$ROOT"
-  [ -n "$UP_PID" ] && printf '[[site]]\nserver_name = ["bx.wild.test"]\nlisten = ["127.0.0.1:8488"]\nhttp = { listen = ["127.0.0.1:8489"], mode = "serve" }\napp = "proxy"\nupstream = "http://127.0.0.1:9107"\nproxy = { idle_timeout = 1 }\ntls = { cert = "%s/bench/tmp/certs-wild/cert.pem", key = "%s/bench/tmp/certs-wild/key.pem" }\n' "$ROOT" "$ROOT"
+  [ -n "$UP_PID" ] && printf '[[site]]\nserver_name = ["bx.wild.test"]\nlisten = ["127.0.0.1:8488"]\nhttp = { listen = ["127.0.0.1:8489"], mode = "serve" }\napp = "proxy"\nupstream = "http://127.0.0.1:9107"\nproxy = { idle_timeout = 1 }\ntls = { cert = "%s/bench/tmp/certs-wild/cert.pem", key = "%s/bench/tmp/certs-wild/key.pem" }\n\n' "$ROOT" "$ROOT"
+  # A field the proxy hides is not the application's copy: a rule's default fills its place.
+  [ -n "$UP_PID" ] && printf '[[site]]\nserver_name = ["bh.wild.test"]\nlisten = ["127.0.0.1:8488"]\nhttp = { listen = ["127.0.0.1:8489"], mode = "serve" }\napp = "proxy"\nupstream = "http://127.0.0.1:9107"\nproxy = { idle_timeout = 1, hide = ["X-Upstream-Port"] }\ntls = { cert = "%s/bench/tmp/certs-wild/cert.pem", key = "%s/bench/tmp/certs-wild/key.pem" }\n\n[[site.response_headers]]\npath = "/"\ndefault = { "X-Upstream-Port" = "hidden" }\n' "$ROOT" "$ROOT"
 } > bench/tmp/sites.d/base.toml
 cpost /v1/reload '{"confirm":true,"reason":"baseline"}' > /dev/null
 bh() {  # host path [curl options]: the baseline's fields of one answer over plain HTTP, every copy, "name=value" sorted
@@ -2075,6 +2077,17 @@ check "security baseline over HTTP/2: the same fields on the static site's page 
   "$(bh bp.wild.test /app.php) ; $(bh bp.wild.test /plain.php) ; $(bh bp.wild.test /logo.svg) ; $(bh bp.wild.test /nope.svg)"
 [ -n "$UP_PID" ] && check "security baseline, app = proxy: the default on a proxied answer, the origin's X-Powered-By removed, no nosniff" \
   "$BRP ; $BRP" "$(bh bx.wild.test /json) ; $(bh bx.wild.test /redirect)"
+# proxy.hide before the rules (the review after D4): a hidden field never answered a default, so with
+# both on one field neither went out (a hidden X-Frame-Options and a default SAMEORIGIN: none at all).
+up_port() {  # every copy of X-Upstream-Port on host's /json, over HTTP/1 or (with --http2) TLS
+  if [ "${2:-}" = --http2 ]; then
+    curl -sk -D - -o /dev/null --http2 --resolve "$1:8488:127.0.0.1" "https://$1:8488/json"
+  else
+    curl -s -D - -o /dev/null --resolve "$1:8489:127.0.0.1" "http://$1:8489/json"
+  fi | tr -d '\r' | awk -F': ' 'tolower($1) == "x-upstream-port" {print $2}' | paste -sd'|'
+}
+[ -n "$UP_PID" ] && check "response_headers and proxy.hide: the origin's hidden field gives way to the rule's default, once, over HTTP/1 and HTTP/2; the origin's own where nothing hides it" \
+  "hidden ; hidden ; 9107" "$(up_port bh.wild.test) ; $(up_port bh.wild.test --http2) ; $(up_port bx.wild.test)"
 check "security baseline: path_check names it as the source; -t --explain says it in a comment" \
   "referrer-policy: strict-origin-when-cross-origin unless the answer has its own (baseline static) ; yes" \
   "$(curl -sS --unix-socket $CS -G "http://control/v1/sites/bs.wild.test/path" --data-urlencode "path=/style.css" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(" ".join(f["text"] for f in d["response_headers"] if f["field"] == "Referrer-Policy"))') ; $(t=$("$BIN" -t --explain -c bench/tmp/agensio-test.toml 2>/dev/null); grep -q '# security baseline (app = "static"; response_headers_baseline = false turns it off)' <<< "$t" && echo yes || echo no)"

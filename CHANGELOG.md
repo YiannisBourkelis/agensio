@@ -42,6 +42,14 @@
   restrictions are never lost; one user's answer gets no rule's lifetime), integration checks over
   HTTP/1 and HTTP/2 with PHP's session answer, a cookie and `Authorization`, failing on the commit
   before; `docs/headers.md` 2.4, 7 and 9, `docs/configuration.md` 14c, the MCP texts.
+- **A field a proxy location hides gives way to a rule's `default`** (found reviewing D4). The upstream
+  loop asked the response-header rules about each of the origin's fields before `proxy = { hide }`
+  dropped it, so a hidden field counted as the application's copy and a `default` for it was not sent:
+  with `hide = ["X-Frame-Options"]` and `default = { "X-Frame-Options" = "SAMEORIGIN" }` the answer
+  carried neither, a page any site could frame. `hide` now runs first, so a hidden field is gone
+  before the rules, the password guard's `Cache-Control` and the HSTS notes read it (a hidden HSTS was
+  noted as the application's own). Integration check over HTTP/1 and HTTP/2 failing before;
+  `docs/configuration.md` 12, `docs/headers.md` 2.3.
 - **An unknown tool argument or site field is refused, naming the nearest** (the alpha.98 report).
   MCP `site_update` with `"bogus_field"`, a misspelt `"public_archive"` or the old
   `"archives_accepted"` answered ok and wrote nothing, so an agent told the user the change was made;

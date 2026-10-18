@@ -204,6 +204,10 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
             Headers::iequals(h.name, "connection") || Headers::iequals(h.name, "keep-alive") ||
             Headers::iequals(h.name, "server") || Headers::iequals(h.name, "date"))
             continue;
+        // A field the proxy hides is gone before anything looks at it: no rule's default takes it for
+        // the application's copy (before 2026-10-18 a hidden field and a default on it sent neither),
+        // and neither the password guard nor the HSTS notes read it.
+        if (proxied && hidden(h.name, loc)) continue;
         if (site_hsts && Headers::iequals(h.name, "strict-transport-security")) {
             if (h.value != s.fields->hsts && !s.fields->hsts_noted.done.load(std::memory_order_relaxed)) note_hsts_narrowed(*s.fields, h.value, log);
             continue;
@@ -217,7 +221,6 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
             }
             if (private_cache::shared_only_field(h.name)) continue;
         }
-        if (proxied && hidden(h.name, loc)) continue;
         // A Location naming the origin is the site's (proxy.redirects); one naming the site over
         // http:// on a site whose plain HTTP redirects is https:// (docs/redirects.md 2.5).
         if ((rewrite || s.https_site) && Headers::iequals(h.name, "location")) {

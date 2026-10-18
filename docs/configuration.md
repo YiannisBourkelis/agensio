@@ -1546,7 +1546,7 @@ on a location.
 | `host` | `"pass"` | `"pass"` the client's Host, `"upstream"` the origin's address, or a literal name |
 | `forwarded` | `"x-forwarded"` | `"x-forwarded"`, `"forwarded"` (RFC 7239), `"both"`, `"off"` |
 | `request_headers` | none | fields set toward the origin, `{ "X-Gateway" = "$host" }`; `""` removes (`"X-Real-IP" = ""` stops agensio's own); a field agensio writes itself (`Host`, `X-Forwarded-*`, `Forwarded`) named here replaces agensio's line, sent once |
-| `hide` | none | fields dropped from the origin's answer, `["X-Powered-By"]` |
+| `hide` | none | fields dropped from the origin's answer, `["X-Powered-By"]`; before the response-header rules see it, so a rule's `default` for the field fills its place (14c) |
 | `redirects` | `"rewrite"` | Location pointing at the origin (its address, or the name given as `host`) rewritten to this site, or `"pass"`. Apart from it, on a site whose plain HTTP redirects (`http`, section 14) an `http://` Location naming the site goes out as `https://` |
 | `upgrade` | `true` | forward Upgrade requests and tunnel after a 101 (WebSocket) |
 | `tunnel_timeout` | 0 | seconds a tunnel may stay idle in both directions; 0 = no limit |

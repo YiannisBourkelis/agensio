@@ -127,7 +127,7 @@ names that rule (section 7).
   `X-Frame-Options` or two `Access-Control-Allow-Origin`, the duplicates every server that only
   appends produces when the application sends the field too.
 - **`default`** sends the field only when, after the application's fields and agensio's own are in
-  place, the answer has no copy of it. The application's own value wins. This is the verb for a
+  place, the answer has no copy of it (a copy a proxy location's `hide` drops is none). The application's own value wins. This is the verb for a
   site-wide policy over an application that may know better on some pages: WordPress's admin sends
   its own `X-Frame-Options`, Django its own `Referrer-Policy`.
 
