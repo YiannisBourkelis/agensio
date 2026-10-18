@@ -9554,6 +9554,9 @@ static void test_mcp_arguments() {
     CHECK(closed);
     const auto text = [&](long id) { return std::string(replies[id]["result"]["content"].items().empty() ? "" : replies[id]["result"]["content"].items()[0].get("text")); };
     CHECK(replies[3]["result"]["isError"].boolean() && text(3).find("unknown argument 'verbose'") != std::string::npos);
+    // A tool without arguments says so (the alpha.99 report: "its arguments are. Nothing was done.").
+    CHECK(text(3).find("for health_check, which takes no arguments. Nothing was done.") != std::string::npos &&
+          text(3).find("arguments are.") == std::string::npos);
     CHECK(replies[4]["result"]["isError"].boolean() && text(4).find("unknown argument 'nmae' (did you mean 'name'?)") != std::string::npos);
 
     // The control API's site_create and site_update the same way, for ctl and any other client.

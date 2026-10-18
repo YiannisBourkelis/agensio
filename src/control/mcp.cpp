@@ -579,7 +579,7 @@ private:
                 }
                 const std::string nearest = nearest_name(key, known);
                 std::string msg = "unknown argument '" + key + "'" + (nearest.empty() ? std::string() : " (did you mean '" + nearest + "'?)") + " for " +
-                                  std::string(name) + "; its arguments are";
+                                  std::string(name) + (known.empty() ? ", which takes no arguments" : "; its arguments are");
                 for (std::size_t i = 0; i < known.size(); ++i) msg += (i ? ", " : " ") + std::string(known[i]);
                 tool_error(id, msg + ". Nothing was done.");
                 return;

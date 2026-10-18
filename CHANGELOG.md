@@ -2,6 +2,10 @@
 
 ## 0.1.0-alpha.100
 
+- **A tool without arguments says so when given one** (the alpha.99 report). MCP `health_check`
+  with `{"verbose": true}` answered "unknown argument 'verbose' for health_check; its arguments are.
+  Nothing was done.", a sentence that stops; it now ends "for health_check, which takes no arguments.
+  Nothing was done.". Unit test failing before.
 - **The cache guards of alpha.99 hold for `Vary`, a removed `Cache-Control`, `Expires` and every CDN
   field** (the alpha.99 report; `docs/headers.md` 2.4). With a rule's `set` of `Cache-Control: public,
   max-age=3600`, `CDN-Cache-Control`, `Surrogate-Control` and `Expires`:
