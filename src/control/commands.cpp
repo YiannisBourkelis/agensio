@@ -950,6 +950,30 @@ json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_vi
     return finish("error", 500, "500: more than " + std::to_string(StaticHandler::kMaxInternalRedirects) + " internal redirects");
 }
 
+// HSTS as a site holds it (docs/redirects.md 4, the alpha.101 and .102 reports): the field it sends
+// over HTTPS, and for a managed site the lifetime as written, since when it is sent, and the date
+// until which browsers may hold a longer one it sent before (a clearing's end); the application's own
+// when one was seen since the start.
+static json::Value hsts_json(const SiteConfig& s, const SiteSpec* managed, std::time_t now, const TlsFacts* tls) {
+    json::Value h = json::Value::object();
+    if (s.hsts == SiteConfig::Hsts::off) h.set("state", "off");
+    else if (s.hsts == SiteConfig::Hsts::unset) h.set("state", "none");
+    else {
+        const HstsValue sent = parse_hsts(s.tls_fields.hsts);
+        h.set("state", sent.max_age > 0 ? "on" : managed && managed->hsts_held_until <= now ? "cleared" : "clearing");
+        h.set("field", s.tls_fields.hsts).set("max_age", static_cast<double>(sent.max_age)).set("subdomains", sent.subdomains);
+        if (managed) {
+            h.set("lifetime", managed->hsts);
+            if (managed->hsts_since > 0) h.set("since", utc_minute(managed->hsts_since));
+            if (managed->hsts_held_until > now + static_cast<std::int64_t>(std::min<std::uint64_t>(sent.max_age, 315360000)))
+                h.set(sent.max_age == 0 ? "until" : "held_until", utc_minute(managed->hsts_held_until));
+        }
+    }
+    if (tls && !s.server_names.empty())
+        if (const auto a = tls->application_hsts.find(s.server_names.front()); a != tls->application_hsts.end()) h.set("application", a->second.first);
+    return h;
+}
+
 json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now, const TlsFacts* tls) {
     json::Value v = site_summary(s, now, tls);
     v.set("index", strings(s.index));
@@ -979,6 +1003,7 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now, const 
     SiteSpec managed;
     const bool is_managed = read_managed(site_file(cfg, s.server_names.front()), managed);
     if (is_managed) ruled = rule_locations(managed);
+    if (s.tls || s.hsts != SiteConfig::Hsts::unset) v.set("hsts", hsts_json(s, is_managed ? &managed : nullptr, now, tls));
     json::Value locs = json::Value::array();
     for (const auto& l : s.locations) {
         json::Value loc = json::Value::object().set("path", l.path);

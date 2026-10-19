@@ -360,6 +360,12 @@ does not load, and every change to it is refused until the change names a lifeti
 --hsts 1y --yes` (`site_update` with `hsts: "1y"`), which writes the file in this version's form and
 serves the site again.
 
+`site_show` (`agensio ctl site NAME`) shows a site's `hsts`: its `state` (`on`, `clearing`, `cleared`,
+`off` for a decided no, `none` for no line), the field it sends with `max_age` and `subdomains`, and on
+a managed site the `lifetime` as written, `since` when it has been sent (4.4), and `until`, a clearing's
+end (4.5), or `held_until`, the end of a longer lifetime browsers may still hold after it was lowered;
+`application` is the application's own field when one was seen since the start (0.1.0-alpha.103).
+
 The field goes on every answer the site gives over HTTPS: pages, files, PHP, a proxied
 application, errors and redirects. It is never sent over plain HTTP, where browsers must ignore it
 anyway (RFC 6797 7.2, 8.1). An application that sends its own is replaced, so the browser never

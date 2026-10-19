@@ -7572,6 +7572,50 @@ static void test_hsts_clearing_health() {
         const Finding* p = find(plain, "site_file_held_back");
         CHECK(p && p->fix.find("agensio ctl site-update old.test --yes") != npos && p->fix.find("--hsts") == npos);
     }
+    // site_show's hsts (the alpha.101 and .102 reports): what the site sends and, for a managed site,
+    // the lifetime as written, since when it is sent, and a clearing's date; the application's own
+    // when one was seen.
+    {
+        facts.served[tls.cert.string() + '\n' + tls.key.string()].days_left = 50;
+        auto shown = [&] { return control::site(cfg, cfg.sites[0], now, &facts)["hsts"]; };
+        auto managed = [&] { CHECK(control::write_site_file(control::site_file(cfg, "c.test"), control::render_site(spec, "2026-10-19"), err)); };
+        cfg.sites[0].hsts = SiteConfig::Hsts::on;
+        cfg.sites[0].tls_fields.hsts = "max-age=300; includeSubDomains";
+        spec.hsts = "5m";
+        spec.hsts_subdomains = true;
+        spec.hsts_since = now - 60;
+        spec.hsts_held_until = 0;
+        managed();
+        json::Value h = shown();
+        CHECK(h.get("state") == "on" && h.get("field") == "max-age=300; includeSubDomains" && h["max_age"].num() == 300 && h["subdomains"].boolean() &&
+              h.get("lifetime") == "5m" && h.get("since") == control::utc_minute(now - 60) && h["until"].is_null() && h["held_until"].is_null());
+        spec.hsts_held_until = now + day;  // lowered from a day: browsers may hold the longer one
+        managed();
+        CHECK(shown().get("held_until") == control::utc_minute(now + day));
+        spec.hsts = "0";
+        spec.hsts_subdomains = false;
+        spec.hsts_since = 0;
+        spec.hsts_held_until = now + 3 * day;
+        managed();
+        cfg.sites[0].tls_fields.hsts = "max-age=0";
+        h = shown();
+        CHECK(h.get("state") == "clearing" && h["max_age"].num() == 0 && h.get("until") == control::utc_minute(now + 3 * day) && h.get("lifetime") == "0");
+        spec.hsts_held_until = now - 60;
+        managed();
+        CHECK(shown().get("state") == "cleared");
+        facts.application_hsts["c.test"] = {"max-age=63072000; includeSubDomains", now - 30};
+        CHECK(shown().get("application") == "max-age=63072000; includeSubDomains");
+        cfg.sites[0].hsts = SiteConfig::Hsts::off;
+        cfg.sites[0].tls_fields.hsts.clear();
+        CHECK(shown().get("state") == "off" && shown()["field"].is_null());
+        cfg.sites[0].hsts = SiteConfig::Hsts::unset;
+        CHECK(shown().get("state") == "none" && shown().get("application") == "max-age=63072000; includeSubDomains");
+        fs::remove(control::site_file(cfg, "c.test"));  // hand-written: what it sends, no history
+        cfg.sites[0].hsts = SiteConfig::Hsts::on;
+        cfg.sites[0].tls_fields.hsts = "max-age=31536000";
+        h = shown();
+        CHECK(h.get("state") == "on" && h["max_age"].num() == 31536000 && !h["subdomains"].boolean() && h["lifetime"].is_null() && h["since"].is_null());
+    }
     fs::remove_all(dir);
 }
 

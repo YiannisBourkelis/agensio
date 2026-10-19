@@ -2,6 +2,13 @@
 
 ## 0.1.0-alpha.103
 
+- **`site_show` shows `hsts`** (the alpha.101 and .102 reports: an agent could not see what a site
+  commits browsers to before proposing a change). `site_show` and `agensio ctl site NAME` carry `hsts`:
+  `state` (`on`, `clearing`, `cleared`, `off` for a decided no, `none`), the field sent with `max_age`
+  and `subdomains`, on a managed site the `lifetime` as written, `since`, and `until` (a clearing's end)
+  or `held_until` (a longer lifetime browsers may still hold), and `application`, the application's own
+  when seen. The ramp of alpha.102 gets its integration check with it. Unit test failing before;
+  `docs/redirects.md` 4.1, `docs/mcp.md`, the MCP text of `site_show`.
 - **Health's fix for a managed file written with `hsts = true` names the lifetime** (the alpha.101 and
   .102 reports). Such a file is set aside (old forms are not read), and health's `site_file_held_back`
   said that a bare `agensio ctl site-update NAME --yes` renders it again, which the control plane then

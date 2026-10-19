@@ -1855,6 +1855,16 @@ check "hsts: the way back: false sends max-age=0 first and names the date, a sec
   "max-age=5 1 max-age=0 yes 400 yes hsts_clearing hsts_cleared 1 none" \
   "$(cst) $("$BIN" ctl site-update clear.wild.test --no-hsts --yes --reason clear --socket $CS > bench/tmp/clear-reply.txt 2>&1; grep -c '^hsts = 0   # Strict-Transport-Security: max-age=0 on every HTTPS answer: browsers that visit forget' bench/tmp/sites.d/clear.wild.test.toml) $(cst) $(grep -q 'max-age=0, so each browser that visits forgets' bench/tmp/clear-reply.txt && echo yes || echo no) $(cpost /v1/sites/clear.wild.test '{"hsts":false,"confirm":true,"reason":"clear"}') $(grep -q 'may hold it until 20' bench/tmp/ctl-reply.json && echo yes || echo no) $(chealth) $(sleep 6; chealth) $(cpost /v1/sites/clear.wild.test '{"hsts":false,"confirm":true,"reason":"clear"}' > /dev/null; grep -c '^hsts = false' bench/tmp/sites.d/clear.wild.test.toml) $(cst)"
 cpost /v1/sites/clear.wild.test/delete '{"confirm":true,"reason":"clear"}' > /dev/null
+# The ramp of includeSubDomains (alpha.102, docs/redirects.md 4.4) and site_show's hsts (the alpha.101
+# and .102 reports): the date a lifetime began is recorded and shown, and health names the next stage
+# once the stage has run its whole lifetime (one second here: then five minutes).
+cpost /v1/sites "{\"domain\":\"ramp.wild.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-wild/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-wild/key.pem\"},\"hsts\":{\"max_age\":\"1s\",\"subdomains\":true},\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/bench/www\",\"listen_plain\":\"127.0.0.1:8499\",\"listen_tls\":\"127.0.0.1:8492\",\"confirm\":true,\"reason\":\"ramp\"}" > /dev/null
+rshow() { curl -sS --unix-socket $CS http://control/v1/sites/ramp.wild.test | python3 -c 'import json,sys; h=json.load(sys.stdin).get("hsts", {}); print(h.get("state"), h.get("field"), h.get("lifetime"), "since" if h.get("since", "").endswith(" UTC") else "nosince")'; }
+rhealth() { curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); f=[x for x in d["findings"] if x.get("site") == "ramp.wild.test" and x["code"] == "hsts_ramp"]; print("ramp:" + ("yes" if f and "max-age=300" in f[0]["message"] and "--hsts 5m --hsts-subdomains" in f[0]["fix"] else "no") if f else "none")'; }
+check "hsts: site_show shows the lifetime sent, as written, and since when; health's hsts_ramp names the next stage once the stage has run its lifetime" \
+  "on max-age=1; includeSubDomains 1s since ramp:yes" \
+  "$(rshow) $(sleep 2; rhealth)"
+cpost /v1/sites/ramp.wild.test/delete '{"confirm":true,"reason":"ramp"}' > /dev/null
 # rules.admin on a managed WordPress site (2026-10-07): the admin paths in one field, the
 # login page only on request, what the public site needs below /wp-admin kept open.
 if [ -n "$PHPFPM" ]; then
