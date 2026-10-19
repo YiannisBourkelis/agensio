@@ -4,6 +4,9 @@
 #include <cstring>
 #include <thread>
 
+#include "core/headers.hpp"
+#include "core/site_notices.hpp"
+
 #ifndef _WIN32
 #include <netdb.h>
 #include <poll.h>
@@ -225,6 +228,33 @@ std::vector<CanonicalProbe> hsts_probes(const Config& cfg, const TlsFacts& tls, 
     return out;
 }
 
+std::string hsts_in_head(std::string_view head) {
+    if (!head.starts_with("HTTP/1.")) return {};
+    for (std::size_t at = head.find("\r\n"); at != std::string_view::npos && at + 2 < head.size(); at = head.find("\r\n", at + 2)) {
+        const std::size_t end = head.find("\r\n", at + 2);
+        const std::string_view line = head.substr(at + 2, end == std::string_view::npos ? std::string_view::npos : end - at - 2);
+        if (line.empty()) break;  // the head ends here
+        const std::size_t colon = line.find(':');
+        if (colon == std::string_view::npos || !Headers::iequals(line.substr(0, colon), "strict-transport-security")) continue;
+        std::string_view v = line.substr(colon + 1);
+        while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.remove_prefix(1);
+        while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.remove_suffix(1);
+        return std::string(v);
+    }
+    return {};
+}
+
+namespace {
+
+// Where the application's own field reaches the answer, what the probe read of it is noted as the
+// request path notes it elsewhere (core/site_notices.hpp), so health and site_show find it.
+void note_answer_hsts(const CanonicalProbe& p, std::string_view head) {
+    if (!p.note_hsts) return;
+    if (const std::string v = hsts_in_head(head); !v.empty()) site_notices().note("hsts_from_application", p.site, v, std::time(nullptr));
+}
+
+}  // namespace
+
 std::optional<CanonicalProbe> application_hsts_probe(const SiteConfig& s) {
 #ifdef AGENSIO_HAS_TLS
     if (!s.tls || s.app.empty() || s.app == "static" || s.listen.empty() || s.server_names.empty() || s.server_names.front() == "*") return std::nullopt;
@@ -234,6 +264,7 @@ std::optional<CanonicalProbe> application_hsts_probe(const SiteConfig& s) {
     p.app = s.app;
     p.names = s.server_names;
     p.tls = true;
+    p.note_hsts = s.hsts == SiteConfig::Hsts::unset || s.hsts == SiteConfig::Hsts::application;  // the field goes out: read it there
     probe_address(s, p);
     return p;
 #else
@@ -244,7 +275,8 @@ std::optional<CanonicalProbe> application_hsts_probe(const SiteConfig& s) {
 
 void run_hsts_probes(const std::vector<CanonicalProbe>& probes, int timeout_ms) {
 #ifndef _WIN32
-    (void)fetch_heads(probes, timeout_ms);  // the answers went through the request path, which noted the fields
+    const std::vector<std::string> heads = fetch_heads(probes, timeout_ms);
+    for (std::size_t n = 0; n < probes.size(); ++n) note_answer_hsts(probes[n], heads[n]);
 #else
     (void)probes;
     (void)timeout_ms;
@@ -268,6 +300,7 @@ std::vector<CanonicalProbe> header_probes(const Config& cfg, const TlsFacts& tls
         p.names = s.server_names;
         p.tls = true;
         p.declined = s.response_headers_offer_declined;
+        p.note_hsts = s.hsts == SiteConfig::Hsts::unset || s.hsts == SiteConfig::Hsts::application;
         probe_address(s, p);
         out.push_back(std::move(p));
     }
@@ -319,6 +352,7 @@ std::vector<Finding> run_header_probes(const std::vector<CanonicalProbe>& probes
     for (std::size_t n = 0; n < probes.size(); ++n) {
         const std::string& head = heads[n];
         if (!head.starts_with("HTTP/1.")) continue;  // no answer: health has its own findings for that
+        note_answer_hsts(probes[n], head);  // so a site asked here needs no HSTS probe of its own
         const std::size_t sp = head.find(' ');
         const int status = sp == std::string::npos ? 0 : std::atoi(head.c_str() + sp + 1);
         std::vector<std::pair<std::string, std::string>> fields;

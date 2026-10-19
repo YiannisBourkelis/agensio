@@ -3989,14 +3989,14 @@ static void test_control_sites() {
         CHECK(json::parse(R"({"redirects":[]})", body, err));
         (void)apply_request(body, cfg, rd, re);
         CHECK(re.empty() && rd.redirects.items().empty() && render_site(rd, "x").find("[[site.redirect]]") == std::string::npos);
-        // hsts: false given is a decided no, rendered so health stops suggesting it (alpha.84)
+        // hsts: "none" given is a decided no, rendered so health stops suggesting it (alpha.84, .104)
         SiteSpec no_hsts = rd;
         no_hsts.hsts.clear();
         no_hsts.hsts_decided = false;
         CHECK(render_site(no_hsts, "x").find("\nhsts") == std::string::npos);
-        CHECK(json::parse(R"({"hsts":false})", body, err));
+        CHECK(json::parse(R"({"hsts":"none"})", body, err));
         (void)apply_request(body, cfg, no_hsts, re);
-        CHECK(no_hsts.hsts_decided && render_site(no_hsts, "x").find("\nhsts = false") != std::string::npos);
+        CHECK(no_hsts.hsts_decided && render_site(no_hsts, "x").find("\nhsts = \"none\"") != std::string::npos);
         SiteSpec no_back;
         CHECK(SiteSpec::from_json(no_hsts.to_json(), no_back) && no_back.hsts_decided && no_back.hsts.empty());
         // The lifetime itself (0.1.0-alpha.101, RFC 6797 11.2): a duration or seconds, 0, an object with
@@ -4022,7 +4022,7 @@ static void test_control_sites() {
         CHECK(hsts(R"({"hsts":"3y"})", hs).find("at most two years") != npos && hsts(R"({"hsts":"soon"})", hs).find("no lifetime") != npos);
         CHECK(hsts(R"({"hsts":{"max_age":"1y","sub":true}})", hs).find("takes max_age and subdomains") != npos);
         CHECK(hsts(R"({"hsts":{"subdomains":true}})", hs).find("no lifetime") != npos);
-        CHECK(hsts(R"({"hsts":false})", hs).empty() && hs.hsts == "0" && hs.hsts_decided && !hs.hsts_subdomains);  // clearing first (4.5)
+        CHECK(hsts(R"({"hsts":"none"})", hs).empty() && hs.hsts == "0" && hs.hsts_decided && !hs.hsts_subdomains);  // clearing first (4.5)
         // A spec an earlier version wrote with hsts: true (a year, never named): no change renders it
         // without HSTS; every change names the lifetime, or false, until it does.
         json::Value old_spec = rd.to_json();
@@ -4032,7 +4032,7 @@ static void test_control_sites() {
         SiteSpec kept = old;
         CHECK(hsts(R"({"redirect_http":true})", kept).find("hsts: \"1y\"") != npos);
         CHECK(hsts(R"({"hsts":"1y"})", (kept = old)).empty() && kept.hsts == "1y" && !kept.hsts_unnamed);
-        CHECK(hsts(R"({"hsts":false})", (kept = old)).empty() && kept.hsts == "0" && kept.hsts_decided && !kept.hsts_unnamed);  // it sent a year
+        CHECK(hsts(R"({"hsts":"none"})", (kept = old)).empty() && kept.hsts == "0" && kept.hsts_decided && !kept.hsts_unnamed);  // it sent a year
         // The way back (RFC 6797 6.1.1, docs/redirects.md 4.5): false on a site that sends HSTS sends
         // max-age=0 first, until the last browser that saw a lifetime may hold it; a second false
         // before then is refused with the date, after it turns HSTS off. An application that sends
@@ -4053,53 +4053,89 @@ static void test_control_sites() {
         base.hsts_held_until = 0;
         SiteSpec cl = base;
         CHECK(at(R"({"hsts":"1y"})", cl, t0).first.empty() && cl.hsts_held_until == 0);
-        auto [e1, n1] = at(R"({"hsts":false})", cl, t0 + 100);
+        auto [e1, n1] = at(R"({"hsts":"none"})", cl, t0 + 100);
         CHECK(e1.empty() && cl.hsts == "0" && cl.hsts_decided && cl.hsts_held_until == t0 + 100 + year &&
               n1.find("max-age=0") != npos && n1.find("2002-09-09 01:48 UTC") != npos);
         CHECK(render_site(cl, "x").find("\nhsts = 0   # Strict-Transport-Security: max-age=0 on every HTTPS answer") != npos &&
               render_site(cl, "x").find("2002-09-09 01:48 UTC") != npos);
         SiteSpec cl_back;
         CHECK(SiteSpec::from_json(cl.to_json(), cl_back) && cl_back.hsts == "0" && cl_back.hsts_held_until == t0 + 100 + year);
-        CHECK(at(R"({"hsts":false})", cl, t0 + 200).first.find("until 2002-09-09 01:48 UTC") != npos && cl.hsts == "0");  // early: refused
+        CHECK(at(R"({"hsts":"none"})", cl, t0 + 200).first.find("until 2002-09-09 01:48 UTC") != npos && cl.hsts == "0");  // early: refused
         CHECK(at(R"({"canonical":"shop.test"})", cl, t0 + 300).first.empty() && cl.hsts == "0");  // another change keeps the clearing
-        auto [e2, n2] = at(R"({"hsts":false})", cl, t0 + 100 + year);
-        CHECK(e2.empty() && cl.hsts.empty() && cl.hsts_decided && render_site(cl, "x").find("\nhsts = false") != npos);
+        auto [e2, n2] = at(R"({"hsts":"none"})", cl, t0 + 100 + year);
+        CHECK(e2.empty() && cl.hsts.empty() && cl.hsts_decided && render_site(cl, "x").find("\nhsts = \"none\"") != npos);
         // A shorter lifetime first: the browsers that saw the year still hold it.
         SiteSpec lo = base;
         (void)at(R"({"hsts":"1y"})", lo, t0);
         CHECK(at(R"({"hsts":"1w"})", lo, t0 + 10).first.empty() && lo.hsts_held_until == t0 + 10 + year);
-        CHECK(at(R"({"hsts":false})", lo, t0 + 20).first.empty() && lo.hsts == "0" && lo.hsts_held_until == t0 + 10 + year);
+        CHECK(at(R"({"hsts":"none"})", lo, t0 + 20).first.empty() && lo.hsts == "0" && lo.hsts_held_until == t0 + 10 + year);
         CHECK(at(R"({"hsts":"1w"})", lo, t0 + 30).first.empty() && lo.hsts == "1w");  // a lifetime again ends the clearing
-        CHECK(at(R"({"hsts":false})", lo, t0 + 40).first.empty() && lo.hsts == "0" && lo.hsts_held_until == t0 + 10 + year);
+        CHECK(at(R"({"hsts":"none"})", lo, t0 + 40).first.empty() && lo.hsts == "0" && lo.hsts_held_until == t0 + 10 + year);
         // hsts: 0 given is the same clearing; nothing sent before: off at once.
         SiteSpec z = base;
         (void)at(R"({"hsts":"1w"})", z, t0);
         CHECK(at(R"({"hsts":0})", z, t0 + 5).first.empty() && z.hsts == "0" && z.hsts_held_until == t0 + 5 + week);
         SiteSpec none = base;
-        CHECK(at(R"({"hsts":false})", none, t0).first.empty() && none.hsts.empty() && none.hsts_decided && none.hsts_held_until == 0);
+        CHECK(at(R"({"hsts":"none"})", none, t0).first.empty() && none.hsts.empty() && none.hsts_decided && none.hsts_held_until == 0);
         // An earlier version's true meant a year, which browsers hold.
         SiteSpec ot = old;
-        CHECK(at(R"({"hsts":false})", ot, t0).first.empty() && ot.hsts == "0" && ot.hsts_held_until == t0 + year && !ot.hsts_unnamed);
-        // The application sends its own: false hands over, its lifetime counted for a later clearing.
+        CHECK(at(R"({"hsts":"none"})", ot, t0).first.empty() && ot.hsts == "0" && ot.hsts_held_until == t0 + year && !ot.hsts_unnamed);
+        // The application sends its own (0.1.0-alpha.104, docs/redirects.md 4.2): "application" hands
+        // over at once, its lifetime counted for a later clearing; false, no HSTS at all, clears the
+        // application's too, since browsers hold it.
         SiteSpec ap = base;
         (void)at(R"({"hsts":"1y"})", ap, t0);
         ApplyContext app;
         app.application_hsts = "max-age=63072000; includeSubDomains";
         app.application_until = t0 + 50 + 2 * year;
-        auto [e3, n3] = at(R"({"hsts":false})", ap, t0 + 50, app);
-        CHECK(e3.empty() && ap.hsts.empty() && ap.hsts_decided && ap.hsts_held_until == t0 + 50 + 2 * year &&
-              n3.find("max-age=63072000; includeSubDomains") != npos && n3.find("the application's") != npos);
+        auto [e3, n3] = at(R"({"hsts":"application"})", ap, t0 + 50, app);
+        CHECK(e3.empty() && ap.hsts.empty() && ap.hsts_application && ap.hsts_decided && ap.hsts_held_until == t0 + 50 + 2 * year &&
+              n3.find("max-age=63072000; includeSubDomains now goes out unchanged") != npos);
+        CHECK(render_site(ap, "x").find("\nhsts = \"application\"   # ") != npos);
+        SiteSpec ap_back;
+        CHECK(SiteSpec::from_json(ap.to_json(), ap_back) && ap_back.hsts_application && ap_back.hsts.empty() && ap_back.hsts_decided);
+        auto [e7, n7] = at(R"({"hsts":"none"})", ap, t0 + 60, app);  // the application's answers carry HSTS: cleared first
+        CHECK(e7.empty() && ap.hsts == "0" && !ap.hsts_application && ap.hsts_held_until == t0 + 50 + 2 * year && n7.find("max-age=0") != npos);
+        SiteSpec ah = base;  // "application" and the application sends none: browsers keep the site's lifetime, said
+        (void)at(R"({"hsts":"1w"})", ah, t0);
+        auto [e8, n8] = at(R"({"hsts":"application"})", ah, t0 + 5);
+        CHECK(e8.empty() && ah.hsts_application && ah.hsts_held_until == t0 + 5 + week && n8.find("sends no Strict-Transport-Security") != npos &&
+              n8.find(utc_minute(t0 + 5 + week)) != npos && n8.find("hsts: 0") != npos);
+        CHECK(at(R"({"hsts":"none"})", ah, t0 + 6).first.empty() && ah.hsts == "0");  // the week it sent: cleared first
+        SiteSpec an = base;  // nothing sent anywhere: false is none at once, the application's field removed from then on
+        (void)at(R"({"hsts":"application"})", an, t0);
+        CHECK(at(R"({"hsts":"none"})", an, t0 + 1).first.empty() && an.hsts.empty() && !an.hsts_application && an.hsts_decided &&
+              render_site(an, "x").find("\nhsts = \"none\"   # no Strict-Transport-Security on any answer") != npos);
+        // false is gone (0.1.0-alpha.104): refused, naming what it did ("application") and "none"; a decided no
+        // an earlier version wrote let the application's field through, so it reads as "application".
+        CHECK(at(R"({"hsts":false})", an, t0 + 3).first.find("which is now hsts: \"application\"") != npos);
+        json::Value before = rd.to_json();
+        before.set("hsts", false).set("hsts_decided", true);
+        SiteSpec was_no;
+        CHECK(SiteSpec::from_json(before, was_no) && was_no.hsts_application && was_no.hsts.empty() && !was_no.hsts_unnamed &&
+              render_site(was_no, "x").find("\nhsts = \"application\"") != npos);
+        json::Value unset = rd.to_json();
+        unset.set("hsts_decided", false);
+        json::Value bare = json::Value::object();
+        for (const auto& [k, val] : unset.members())
+            if (k != "hsts") bare.set(k, val);
+        SiteSpec undecided_spec;
+        CHECK(SiteSpec::from_json(bare, undecided_spec) && !undecided_spec.hsts_application && !undecided_spec.hsts_decided);
+        SiteSpec none_back;
+        CHECK(SiteSpec::from_json(an.to_json(), none_back) && none_back.hsts.empty() && !none_back.hsts_application && none_back.hsts_decided);
+        CHECK(at(R"({"hsts":"applicaton"})", an, t0 + 2).first.find("\"application\"") != npos);  // a misspelling named
         SiteSpec ap0 = base;
         (void)at(R"({"hsts":"1y"})", ap0, t0);
         CHECK(at(R"({"hsts":0})", ap0, t0 + 50, app).first.empty() && ap0.hsts == "0" && ap0.hsts_held_until == t0 + 50 + 2 * year);
-        // Seen only once the clearing had begun (the alpha.102 report: after a restart nothing was
-        // noted, so false cleared and then refused the hand-over health named): false hands over at
-        // once, however early, since the application's own field keeps browsers to HTTPS.
+        // Seen only once the clearing had begun (the alpha.102 report): "application" hands over at once,
+        // however early, since the application's own field keeps browsers to HTTPS; false is refused
+        // until the date, as for any clearing.
         SiteSpec late = base;
         (void)at(R"({"hsts":"1w"})", late, t0);
-        CHECK(at(R"({"hsts":false})", late, t0 + 10).first.empty() && late.hsts == "0");  // nothing seen: clearing
-        auto [e6, n6] = at(R"({"hsts":false})", late, t0 + 20, app);
-        CHECK(e6.empty() && late.hsts.empty() && late.hsts_decided && late.hsts_held_until == t0 + 50 + 2 * year &&
+        CHECK(at(R"({"hsts":"none"})", late, t0 + 10).first.empty() && late.hsts == "0");  // nothing seen: clearing
+        CHECK(at(R"({"hsts":"none"})", late, t0 + 15, app).first.find("until") != npos && late.hsts == "0");
+        auto [e6, n6] = at(R"({"hsts":"application"})", late, t0 + 20, app);
+        CHECK(e6.empty() && late.hsts.empty() && late.hsts_application && late.hsts_held_until == t0 + 50 + 2 * year &&
               n6.find("max-age=63072000; includeSubDomains now goes out unchanged") != npos);
         // The ramp (docs/redirects.md 4.4): since when the lifetime sent now has been sent; the same
         // value again (another spelling of it too) or another field keeps the date; turning
@@ -4115,7 +4151,7 @@ static void test_control_sites() {
         CHECK(SiteSpec::from_json(rp.to_json(), rp_back) && rp_back.hsts_since == t0 + 600);
         auto [e5, n5] = at(R"({"hsts":{"max_age":"2y","subdomains":true}})", rp, t0 + 700);
         CHECK(e5.empty() && rp.hsts_since == t0 + 700 && n5.find("\"5m\" first") != npos && n5.find("hsts_ramp") != npos);
-        CHECK(at(R"({"hsts":false})", rp, t0 + 800).first.empty() && rp.hsts == "0" && rp.hsts_since == 0);  // clearing
+        CHECK(at(R"({"hsts":"none"})", rp, t0 + 800).first.empty() && rp.hsts == "0" && rp.hsts_since == 0);  // clearing
         CHECK(at(R"({"hsts":"1w"})", rp, t0 + 900).first.empty() && rp.hsts_since == t0 + 900);
     }
     CHECK(text.find("user = \"shop\"") != std::string::npos && text.find("tls = \"auto\"") != std::string::npos);
@@ -7279,14 +7315,24 @@ static void test_hsts_key() {
     CHECK_EQ(value("hsts = { max_age = \"1d\" }\n"), std::string("max-age=86400"));
     CHECK_EQ(value("hsts = { max_age = 0 }\n"), std::string("max-age=0"));  // tells browsers to forget it
     CHECK_EQ(value("hsts = { max_age = 315360000 }\n"), std::string("max-age=315360000"));
-    CHECK_EQ(value("hsts = false\n"), std::string());
+    CHECK_EQ(value("hsts = \"none\"\n"), std::string());
     CHECK_EQ(value(""), std::string());
     site("hsts = \"1y\"\n");
     CHECK(load_config(dir / "h.toml").sites[0].tls_fields.h1 == "Strict-Transport-Security: max-age=31536000\r\n");
-    site("hsts = false\n");
-    CHECK(load_config(dir / "h.toml").sites[0].hsts == SiteConfig::Hsts::off);
+    // "none" is no HSTS on any answer, the application's own removed; "application" leaves it to the
+    // application, its field going out unchanged (0.1.0-alpha.104). Neither sends one of agensio's.
+    site("hsts = \"none\"\n");
+    {
+        const Config c = load_config(dir / "h.toml");
+        CHECK(c.sites[0].hsts == SiteConfig::Hsts::none && c.sites[0].tls_fields.strip_hsts && c.sites[0].tls_fields.h1.empty() && !c.sites[0].tls_fields.empty());
+    }
+    site("hsts = \"application\"\n");
+    {
+        const Config c = load_config(dir / "h.toml");
+        CHECK(c.sites[0].hsts == SiteConfig::Hsts::application && !c.sites[0].tls_fields.strip_hsts && c.sites[0].tls_fields.empty());
+    }
     site("");
-    CHECK(load_config(dir / "h.toml").sites[0].hsts == SiteConfig::Hsts::unset);
+    CHECK(load_config(dir / "h.toml").sites[0].hsts == SiteConfig::Hsts::unset && load_config(dir / "h.toml").sites[0].tls_fields.empty());
     auto refused = [&](const std::string& extra, const char* needle) {
         const std::string v = value(extra);
         const bool hit = v.starts_with("refused: ") && v.find(needle) != std::string::npos;
@@ -7298,7 +7344,10 @@ static void test_hsts_key() {
     CHECK(refused("hsts = { max_age = -1 }\n", ".hsts.max_age must be seconds"));
     CHECK(refused("hsts = { max_age = \"1y\", subdomains = \"yes\" }\n", ".hsts.subdomains must be true or false"));
     CHECK(refused("hsts = { max_age = \"1y\", preload = true }\n", "unknown key 'preload'"));
-    CHECK(refused("hsts = \"on\"\n", ".hsts must be a lifetime at most ten years"));
+    CHECK(refused("hsts = \"on\"\n", ".hsts must be a lifetime at most ten years") && refused("hsts = \"on\"\n", "hsts = \"application\""));
+    CHECK(refused("hsts = false\n", "hsts = false is gone") && refused("hsts = false\n", "which is now hsts = \"application\"") &&
+          refused("hsts = false\n", "hsts = \"none\""));
+    CHECK(refused("hsts = { max_age = \"application\" }\n", ".hsts.max_age must be seconds"));
     // true named no lifetime (it meant a year): refused, naming the form (no old forms are kept).
     CHECK(refused("hsts = true\n", "hsts = true named no lifetime") && refused("hsts = true\n", "hsts = \"1y\""));
     CHECK(refused("hsts = { subdomains = true }\n", "name max_age") && refused("hsts = \"11y\"\n", "at most ten years"));
@@ -7493,7 +7542,7 @@ static void test_hsts_clearing_health() {
         const Finding* c = find(findings, "hsts_clearing");
         const Finding* e = find(findings, "certificate_expiring");
         CHECK(c && c->severity == "info" && c->site == "c.test" && c->message.find("max-age=0") != npos &&
-              c->message.find(control::utc_minute(now + 3 * day)) != npos && c->fix.find("hsts: false") != npos && !find(findings, "hsts_cleared"));
+              c->message.find(control::utc_minute(now + 3 * day)) != npos && c->fix.find("hsts: \"none\"") != npos && !find(findings, "hsts_cleared"));
         CHECK(e && e->severity == "error");
     }
     spec.hsts_held_until = now - 60;
@@ -7502,7 +7551,7 @@ static void test_hsts_clearing_health() {
         const auto findings = control::health_findings(cfg, cfg, false, now, &facts);  // kept: find points into it
         const Finding* c = find(findings, "hsts_cleared");
         const Finding* e = find(findings, "certificate_expiring");
-        CHECK(c && c->severity == "info" && c->fix.find("site_update with hsts: false") != npos && c->fix.find("--no-hsts") != npos &&
+        CHECK(c && c->severity == "info" && c->fix.find("site_update with hsts: \"none\"") != npos && c->fix.find("--no-hsts") != npos &&
               !find(findings, "hsts_clearing"));
         CHECK(e && e->severity == "warn");  // nothing enforces HSTS any more
     }
@@ -7565,7 +7614,7 @@ static void test_hsts_clearing_health() {
         const auto findings = control::health_findings(held, held, false, now, &facts);  // kept: find points into it
         const Finding* h = find(findings, "site_file_held_back");
         CHECK(h && h->site == "old.test" && h->fix.find("agensio ctl site-update old.test --hsts 1y --yes") != npos &&
-              h->fix.find("hsts: \"1y\"") != npos && h->fix.find("hsts: false") != npos);
+              h->fix.find("hsts: \"1y\"") != npos && h->fix.find("hsts: \"none\"") != npos);
         std::ofstream(old_file) << control::kManagedMarker << R"({"domain":"old.test","aliases":[],"https":"auto","redirect_http":true,"hsts":"1y","hsts_decided":true,"user":"","no_user":true,"group":"","app":"static","root":"/var/www/old"})"
                                 << "\n\n[[site]]\nredirect = \"https\"\n";
         const auto plain = control::health_findings(held, held, false, now, &facts);  // kept: find points into it
@@ -7605,11 +7654,13 @@ static void test_hsts_clearing_health() {
         CHECK(shown().get("state") == "cleared");
         facts.application_hsts["c.test"] = {"max-age=63072000; includeSubDomains", now - 30};
         CHECK(shown().get("application") == "max-age=63072000; includeSubDomains");
-        cfg.sites[0].hsts = SiteConfig::Hsts::off;
+        cfg.sites[0].hsts = SiteConfig::Hsts::none;
         cfg.sites[0].tls_fields.hsts.clear();
-        CHECK(shown().get("state") == "off" && shown()["field"].is_null());
+        CHECK(shown().get("state") == "none" && shown()["field"].is_null());
+        cfg.sites[0].hsts = SiteConfig::Hsts::application;  // the application decides: what it was seen sending
+        CHECK(shown().get("state") == "application" && shown()["field"].is_null() && shown().get("application") == "max-age=63072000; includeSubDomains");
         cfg.sites[0].hsts = SiteConfig::Hsts::unset;
-        CHECK(shown().get("state") == "none" && shown().get("application") == "max-age=63072000; includeSubDomains");
+        CHECK(shown().get("state") == "undecided" && shown().get("application") == "max-age=63072000; includeSubDomains");
         fs::remove(control::site_file(cfg, "c.test"));  // hand-written: what it sends, no history
         cfg.sites[0].hsts = SiteConfig::Hsts::on;
         cfg.sites[0].tls_fields.hsts = "max-age=31536000";
@@ -7809,12 +7860,14 @@ static void test_served_certificates() {
         const auto findings = control::health_findings(cfg, cfg, false, now, &facts);  // kept: find points into it
         const Finding* h = find(findings, "hsts_suggested");
         CHECK(h && h->severity == "info" && h->fix.find("site_update with hsts: \"1y\"") != npos && h->fix.find("hsts = \"1y\"") != npos &&
-              h->fix.find("hsts = false records a decided no") != npos);
+              h->fix.find("hsts = \"none\": none on any answer") != npos && h->fix.find("hsts = \"application\"") != npos);
     }
     facts.served[pair].not_before = now - 3 * day;  // renewed three days ago: a week is not up
     CHECK(!find(control::health_findings(cfg, cfg, false, now, &facts), "hsts_suggested"));
     facts.served[pair].not_before = now - 40 * day;
-    cfg.sites[0].hsts = SiteConfig::Hsts::off;  // decided
+    cfg.sites[0].hsts = SiteConfig::Hsts::none;  // decided
+    CHECK(!find(control::health_findings(cfg, cfg, false, now, &facts), "hsts_suggested"));
+    cfg.sites[0].hsts = SiteConfig::Hsts::application;  // decided: the application's
     CHECK(!find(control::health_findings(cfg, cfg, false, now, &facts), "hsts_suggested"));
     cfg.sites[0].hsts = SiteConfig::Hsts::unset;
     cfg.sites[0].http = SiteConfig::Http::serve;  // plain HTTP served on purpose
@@ -7831,7 +7884,7 @@ static void test_served_certificates() {
         const auto f = control::health_findings(cfg, cfg, false, now, &facts);
         const Finding* a = find(f, "hsts_from_application");
         CHECK(!find(f, "hsts_suggested") && a && a->severity == "info" && a->message.find("max-age=63072000; includeSubDomains") != npos &&
-              a->fix.find("hsts = false records") != npos && a->fix.find("narrow the application's") != npos &&
+              a->fix.find("hsts = \"application\" records") != npos && a->fix.find("narrow the application's") != npos &&
               a->fix.find("hsts = { max_age = 63072000, subdomains = true }") != npos && a->fix.find("hsts: {\"max_age\": 63072000, \"subdomains\": true}") != npos);
     }
     facts.application_hsts[site_name] = {"max-age=31536000", now - 600};  // the same as a year: no warning of a weaker one
@@ -7840,7 +7893,7 @@ static void test_served_certificates() {
         const Finding* a = find(findings, "hsts_from_application");
         CHECK(a && a->fix.find("narrow") == npos && a->fix.find("hsts = 31536000 (site_update with hsts: 31536000)") != npos);
     }
-    cfg.sites[0].hsts = SiteConfig::Hsts::off;  // decided: nothing said either way
+    cfg.sites[0].hsts = SiteConfig::Hsts::application;  // decided: nothing said either way
     {
         const auto f = control::health_findings(cfg, cfg, false, now, &facts);
         CHECK(!find(f, "hsts_from_application") && !find(f, "hsts_suggested"));
@@ -7937,7 +7990,7 @@ static void test_served_certificates() {
         hc.sites.push_back(b);
         SiteConfig c = a;  // hsts decided
         c.server_names = {"decided.test"};
-        c.hsts = SiteConfig::Hsts::off;
+        c.hsts = SiteConfig::Hsts::none;
         hc.sites.push_back(c);
         SiteConfig d = a;  // already noted
         d.server_names = {"noted.test"};
@@ -7956,6 +8009,19 @@ static void test_served_certificates() {
         SiteConfig plain = a;
         plain.tls.reset();
         CHECK(!control::application_hsts_probe(plain));
+        // Where the application's field reaches the answer (no hsts line, "application"), the probe reads
+        // it from there; where agensio replaces or removes it (a lifetime, false), the request path
+        // notes it on the way (0.1.0-alpha.104: no site watches it per answer any more).
+        CHECK(!ap->note_hsts && control::application_hsts_probe(a)->note_hsts);
+        SiteConfig handed = a;
+        handed.hsts = SiteConfig::Hsts::application;
+        CHECK(control::application_hsts_probe(handed)->note_hsts);
+        handed.hsts = SiteConfig::Hsts::on;
+        CHECK(!control::application_hsts_probe(handed)->note_hsts && hp[0].note_hsts);
+        CHECK(control::hsts_in_head("HTTP/1.1 302 Found\r\nLocation: /login\r\nstrict-transport-security:  max-age=63072000; includeSubDomains\r\n\r\n") ==
+                  "max-age=63072000; includeSubDomains" &&
+              control::hsts_in_head("HTTP/1.1 200 OK\r\nX-Strict-Transport-Security: max-age=1\r\n\r\nStrict-Transport-Security: max-age=2\r\n").empty() &&
+              control::hsts_in_head("garbage").empty());
     }
 #endif
 }
@@ -10207,7 +10273,7 @@ static void test_site_notices() {
         CHECK(found[0].code == "proxy_scheme_missing" && found[0].site == "a.test" && found[0].message.find("10.1.2.3") != std::string::npos &&
               found[0].fix.find("X-Forwarded-Proto") != std::string::npos && found[0].severity == "warn");
         CHECK(found[1].code == "hsts_narrows_application" && found[1].message.find("max-age=63072000; includeSubDomains") != std::string::npos &&
-              found[1].message.find("max-age=31536000") != std::string::npos && found[1].fix.find("hsts: false") != std::string::npos);
+              found[1].message.find("max-age=31536000") != std::string::npos && found[1].fix.find("hsts: \"application\"") != std::string::npos);
     }
 }
 

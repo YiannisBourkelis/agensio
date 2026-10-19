@@ -31,11 +31,13 @@ struct SiteFields {
     // hsts_narrows_application (docs/redirects.md 4.1): set once this generation of the site has
     // noted an application's stronger HSTS, so a later answer carrying it costs one load.
     NoteOnce hsts_noted;
-    // A site with no hsts line (4.2): the HSTS its application sends itself is noted, once per
-    // generation, so health tells the user so instead of suggesting the site's own over it.
-    bool watch_application = false;
+    // The HSTS an application sends where agensio replaces or removes it (a lifetime, 0, false),
+    // noted once per generation on the way, for a managed site's next change (4.5) and site_show;
+    // where it goes out (no hsts line, "application") health's own request reads it instead.
     NoteOnce application_noted;
-    bool empty() const noexcept { return h1.empty(); }
+    // hsts = false (0.1.0-alpha.104): no Strict-Transport-Security on any answer, an application's own removed.
+    bool strip_hsts = false;
+    bool empty() const noexcept { return h1.empty() && !strip_hsts; }
 };
 
 // A Strict-Transport-Security value as RFC 6797 6.1 reads it: directives separated by ';', names

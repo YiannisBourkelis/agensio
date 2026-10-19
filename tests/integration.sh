@@ -1860,9 +1860,9 @@ cpost /v1/reload '{"confirm":true,"reason":"old"}' > /dev/null
 cpost /v1/sites "{\"domain\":\"clear.wild.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-wild/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-wild/key.pem\"},\"hsts\":\"5s\",\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/bench/www\",\"listen_plain\":\"127.0.0.1:8493\",\"listen_tls\":\"127.0.0.1:8494\",\"confirm\":true,\"reason\":\"clear\"}" > /dev/null
 cst() { v=$(curl -sk -D - -o /dev/null --resolve clear.wild.test:8494:127.0.0.1 https://clear.wild.test:8494/ | tr -d '\r' | sed -n 's/^[Ss]trict-[Tt]ransport-[Ss]ecurity: //p'); echo "${v:-none}"; }
 chealth() { curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); print("+".join(sorted(f["code"] for f in d["findings"] if f.get("site") == "clear.wild.test" and f["code"].startswith("hsts_"))) or "none")'; }
-check "hsts: the way back: false sends max-age=0 first and names the date, a second false before it is refused naming it, health says clearing then cleared, and false then turns HSTS off" \
+check "hsts: the way back: none sends max-age=0 first and names the date, a second none before it is refused naming it, health says clearing then cleared, and none then turns HSTS off" \
   "max-age=5 1 max-age=0 yes 400 yes hsts_clearing hsts_cleared 1 none" \
-  "$(cst) $("$BIN" ctl site-update clear.wild.test --no-hsts --yes --reason clear --socket $CS > bench/tmp/clear-reply.txt 2>&1; grep -c '^hsts = 0   # Strict-Transport-Security: max-age=0 on every HTTPS answer: browsers that visit forget' bench/tmp/sites.d/clear.wild.test.toml) $(cst) $(grep -q 'max-age=0, so each browser that visits forgets' bench/tmp/clear-reply.txt && echo yes || echo no) $(cpost /v1/sites/clear.wild.test '{"hsts":false,"confirm":true,"reason":"clear"}') $(grep -q 'may hold it until 20' bench/tmp/ctl-reply.json && echo yes || echo no) $(chealth) $(sleep 6; chealth) $(cpost /v1/sites/clear.wild.test '{"hsts":false,"confirm":true,"reason":"clear"}' > /dev/null; grep -c '^hsts = false' bench/tmp/sites.d/clear.wild.test.toml) $(cst)"
+  "$(cst) $("$BIN" ctl site-update clear.wild.test --no-hsts --yes --reason clear --socket $CS > bench/tmp/clear-reply.txt 2>&1; grep -c '^hsts = 0   # Strict-Transport-Security: max-age=0 on every HTTPS answer: browsers that visit forget' bench/tmp/sites.d/clear.wild.test.toml) $(cst) $(grep -q 'max-age=0, so each browser that visits forgets' bench/tmp/clear-reply.txt && echo yes || echo no) $(cpost /v1/sites/clear.wild.test '{"hsts":"none","confirm":true,"reason":"clear"}') $(grep -q 'may hold it until 20' bench/tmp/ctl-reply.json && echo yes || echo no) $(chealth) $(sleep 6; chealth) $(cpost /v1/sites/clear.wild.test '{"hsts":"none","confirm":true,"reason":"clear"}' > /dev/null; grep -c '^hsts = "none"' bench/tmp/sites.d/clear.wild.test.toml) $(cst)"
 cpost /v1/sites/clear.wild.test/delete '{"confirm":true,"reason":"clear"}' > /dev/null
 # The ramp of includeSubDomains (alpha.102, docs/redirects.md 4.4) and site_show's hsts (the alpha.101
 # and .102 reports): the date a lifetime began is recorded and shown, and health names the next stage
@@ -1906,11 +1906,13 @@ if [ -n "$PHPFPM" ]; then
   check "hsts: ctl --hsts 1w --hsts-subdomains writes the lifetime with includeSubDomains, served at once; hsts true and 3y refused over the socket" \
     "1 max-age=604800; includeSubDomains 400 400 1 max-age=31536000" \
     "$("$BIN" ctl site-update hsts.wild.test --hsts 1w --hsts-subdomains --yes --reason hsts --socket $CS > /dev/null; grep -c '^hsts = { max_age = "1w", subdomains = true }' bench/tmp/sites.d/hsts.wild.test.toml) $(sts /) $(cpost /v1/sites/hsts.wild.test '{"hsts":true,"confirm":true,"reason":"hsts"}') $(cpost /v1/sites/hsts.wild.test '{"hsts":"3y","confirm":true,"reason":"hsts"}') $("$BIN" ctl site-update hsts.wild.test --hsts 1y --yes --reason hsts --socket $CS > /dev/null; grep -c '^hsts = "1y"' bench/tmp/sites.d/hsts.wild.test.toml) $(sts /)"
-  # A no is recorded (alpha.84, docs/redirects.md 4.2): hsts = false in the file silences health's
-  # hsts_suggested; the answers lose the field. This site's application sends its own HSTS, so the
-  # no hands over to it at once instead of clearing (4.5), and the answer says so.
-  check "hsts: ctl --no-hsts on a site whose application sends its own hands over at once: a decided no in the managed file, the pages lose the field, the application's goes out, health no longer names it" "1 yes none max-age=63072000; includeSubDomains none" \
-    "$("$BIN" ctl site-update hsts.wild.test --no-hsts --yes --reason hsts --socket $CS > bench/tmp/hsts-off.txt 2>&1; grep -c '^hsts = false' bench/tmp/sites.d/hsts.wild.test.toml) $(grep -q "the application's own Strict-Transport-Security: max-age=63072000; includeSubDomains now goes out unchanged" bench/tmp/hsts-off.txt && echo yes || echo no) $(v=$(sts /); echo "${v:-none}") $(sts /hsts-strong.php) $(hfind)"
+  # The application decides (0.1.0-alpha.104, docs/redirects.md 4.2): hsts = "application" in the file
+  # records the decision; agensio's field goes, the application's goes out as it sent it, and the
+  # answer says so. false then means none on any answer: the application's field is known, so what
+  # browsers hold is cleared first, max-age=0 replacing the application's too (4.5).
+  check "hsts: ctl --hsts application hands over at once: the decision in the managed file, the pages lose agensio's field, the application's goes out, health no longer names it; --no-hsts then clears the application's too" \
+    "1 yes none max-age=63072000; includeSubDomains none 1 max-age=0" \
+    "$("$BIN" ctl site-update hsts.wild.test --hsts application --yes --reason hsts --socket $CS > bench/tmp/hsts-off.txt 2>&1; grep -c '^hsts = "application"' bench/tmp/sites.d/hsts.wild.test.toml) $(grep -q "the application's own Strict-Transport-Security: max-age=63072000; includeSubDomains now goes out unchanged" bench/tmp/hsts-off.txt && echo yes || echo no) $(v=$(sts /); echo "${v:-none}") $(sts /hsts-strong.php) $(hfind) $("$BIN" ctl site-update hsts.wild.test --no-hsts --yes --reason hsts --socket $CS > /dev/null 2>&1; grep -c '^hsts = 0' bench/tmp/sites.d/hsts.wild.test.toml) $(sts /hsts-strong.php)"
   cpost /v1/sites/hsts.wild.test/delete '{"confirm":true,"reason":"hsts"}' > /dev/null
   # The validation prefixes over plain HTTP on a PHP site (alpha.77, the alpha.76 report): a token
   # file is served, anything else there is a 404 with nothing run, where before the front
@@ -1948,36 +1950,48 @@ if [ -n "$PHPFPM" ]; then
     "$(curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); print("yes" if [f for f in d["findings"] if f["code"] == "app_redirects_elsewhere" and f.get("site") == "cw.wild.test" and "wp option update home https://cw.wild.test" in f.get("fix", "")] else [f["code"] for f in d["findings"]])')"
   cpost /v1/sites/cw.wild.test/delete '{"confirm":true,"reason":"canon"}' > /dev/null
   # An application's own HSTS on a site with no hsts line (alpha.87, docs/redirects.md 4.2, the
-  # alpha.86 report): health suggests the site's until the application's field has gone out, then says
-  # the application sends it, with its value and the hsts table that would match it. The certificate
-  # is dated a month back, so the suggestion's week is up.
+  # alpha.86 report): health reads it from its own request for / (0.1.0-alpha.104: no answer is watched
+  # for it any more), so a field the application sends on another path only is not seen, and health
+  # goes on suggesting. The certificate is dated a month back, so the suggestion's week is up.
   mkdir -p bench/tmp/certs-old
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout bench/tmp/certs-old/key.pem -out bench/tmp/certs-old/cert.pem \
     -not_before "$(date -u -d '30 days ago' +%Y%m%d%H%M%SZ)" -not_after "$(date -u -d '60 days' +%Y%m%d%H%M%SZ)" \
     -subj "/CN=*.old.test" -addext "subjectAltName=DNS:*.old.test" >/dev/null 2>&1
   cpost /v1/sites "{\"domain\":\"ah.old.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-old/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-old/key.pem\"},\"user\":null,\"app\":\"wordpress\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"root\":\"$ROOT/tests/wordpress\",\"listen_plain\":\"127.0.0.1:8482\",\"listen_tls\":\"127.0.0.1:8481\",\"confirm\":true,\"reason\":\"apphsts\"}" > /dev/null
   hcodes() { curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); print(",".join(sorted(f["code"] for f in d["findings"] if f.get("site") == "ah.old.test" and f["code"].startswith("hsts_"))) or "none")'; }
-  check "hsts_from_application: a site without an hsts line is suggested HSTS until its application's own goes out, then told the application sends it, with the value and the table that matches it" \
-    "hsts_suggested max-age=63072000; includeSubDomains hsts_from_application yes" \
-    "$(hcodes) $(curl -sk -D - -o /dev/null --resolve ah.old.test:8481:127.0.0.1 https://ah.old.test:8481/hsts-strong.php | tr -d '\r' | grep -i '^strict-transport-security:' | sed 's/^[^:]*: //') $(hcodes) $(curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); f=[f for f in d["findings"] if f["code"] == "hsts_from_application" and f.get("site") == "ah.old.test"]; print("yes" if f and "max-age=63072000; includeSubDomains" in f[0]["message"] and "hsts = { max_age = 63072000, subdomains = true }" in f[0]["fix"] else f)')"
+  check "hsts_suggested: health reads the application's HSTS from its own request for /, so a field the application sends on another path only leaves the suggestion standing" \
+    "hsts_suggested max-age=63072000; includeSubDomains hsts_suggested" \
+    "$(hcodes) $(curl -sk -D - -o /dev/null --resolve ah.old.test:8481:127.0.0.1 https://ah.old.test:8481/hsts-strong.php | tr -d '\r' | grep -i '^strict-transport-security:' | sed 's/^[^:]*: //') $(hcodes)"
   cpost /v1/sites/ah.old.test/delete '{"confirm":true,"reason":"apphsts"}' > /dev/null
   # Before any visitor (alpha.91, the alpha.87/88 report's note): until an application's own HSTS had
   # gone out once since the start, health suggested the site's over it; now health asks such a site
   # once for / (off the workers), so the first health call already knows.
   cpost /v1/sites "{\"domain\":\"ap.old.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-old/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-old/key.pem\"},\"user\":null,\"app\":\"php\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"root\":\"$ROOT/tests/hstsapp\",\"listen_plain\":\"127.0.0.1:8486\",\"listen_tls\":\"127.0.0.1:8485\",\"confirm\":true,\"reason\":\"probe\"}" > /dev/null
-  check "hsts_from_application before any visitor: health's own request for / finds the application's field, so the first health call does not suggest the site's" \
-    "hsts_from_application" \
-    "$(curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); print(",".join(sorted(f["code"] for f in d["findings"] if f.get("site") == "ap.old.test" and f["code"].startswith("hsts_"))) or "none")')"
+  check "hsts_from_application before any visitor: health's own request for / finds the application's field, so the first health call does not suggest the site's; it names the value and the table that matches it" \
+    "hsts_from_application yes" \
+    "$(curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); f=[f for f in d["findings"] if f.get("site") == "ap.old.test" and f["code"].startswith("hsts_")]; print(",".join(sorted(x["code"] for x in f)) or "none", "yes" if f and "max-age=63072000; includeSubDomains" in f[0]["message"] and "hsts = { max_age = 63072000, subdomains = true }" in f[0]["fix"] else f)')"
   cpost /v1/sites/ap.old.test/delete '{"confirm":true,"reason":"probe"}' > /dev/null
-  # The way back on an application that sends its own HSTS, before any visitor (the alpha.102 report:
-  # after a restart nothing was noted, so false cleared, and max-age=0 replaced the application's
-  # two-year field on every answer): the control plane asks the application for / first, off the
-  # workers, and hands over.
+  # Handing over to an application that sends its own HSTS, before any visitor (the alpha.102 report:
+  # after a restart nothing was noted): the control plane asks the application for / first, off the
+  # workers, and "application" says what it sends.
   cpost /v1/sites "{\"domain\":\"hstsoff.wild.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-wild/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-wild/key.pem\"},\"hsts\":\"1w\",\"user\":null,\"app\":\"php\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"root\":\"$ROOT/tests/hstsapp\",\"listen_plain\":\"127.0.0.1:8495\",\"listen_tls\":\"127.0.0.1:8496\",\"confirm\":true,\"reason\":\"handover\"}" > /dev/null
-  check "hsts: false on a site whose application sends its own, before any visitor: the application is asked first and handed over to, never cleared" \
+  check "hsts: application on a site whose application sends its own, before any visitor: the application is asked first and handed over to" \
     "1 yes max-age=63072000; includeSubDomains" \
-    "$("$BIN" ctl site-update hstsoff.wild.test --no-hsts --yes --reason handover --socket $CS > bench/tmp/hstsoff.txt 2>&1; grep -c '^hsts = false' bench/tmp/sites.d/hstsoff.wild.test.toml) $(grep -q "the application's own Strict-Transport-Security: max-age=63072000; includeSubDomains now goes out unchanged" bench/tmp/hstsoff.txt && echo yes || echo no) $(curl -sk -D - -o /dev/null --resolve hstsoff.wild.test:8496:127.0.0.1 https://hstsoff.wild.test:8496/ | tr -d '\r' | sed -n 's/^[Ss]trict-[Tt]ransport-[Ss]ecurity: //p')"
+    "$("$BIN" ctl site-update hstsoff.wild.test --hsts application --yes --reason handover --socket $CS > bench/tmp/hstsoff.txt 2>&1; grep -c '^hsts = "application"' bench/tmp/sites.d/hstsoff.wild.test.toml) $(grep -q "the application's own Strict-Transport-Security: max-age=63072000; includeSubDomains now goes out unchanged" bench/tmp/hstsoff.txt && echo yes || echo no) $(curl -sk -D - -o /dev/null --resolve hstsoff.wild.test:8496:127.0.0.1 https://hstsoff.wild.test:8496/ | tr -d '\r' | sed -n 's/^[Ss]trict-[Tt]ransport-[Ss]ecurity: //p')"
   cpost /v1/sites/hstsoff.wild.test/delete '{"confirm":true,"reason":"handover"}' > /dev/null
+  # "none" and "application" on the request path (0.1.0-alpha.104, docs/redirects.md 4.2): none on any
+  # answer, the application's own removed, over HTTP/1 and HTTP/2; or the application's as it sent it.
+  # A new site has nothing for browsers to forget, so "none" applies at once.
+  for d in strip:none:8500:8501 pass:application:8502:8503; do
+    IFS=: read -r n v pl pt <<< "$d"
+    hv="\"$v\""
+    cpost /v1/sites "{\"domain\":\"$n.wild.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-wild/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-wild/key.pem\"},\"hsts\":$hv,\"user\":null,\"app\":\"php\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"root\":\"$ROOT/tests/hstsapp\",\"listen_plain\":\"127.0.0.1:$pl\",\"listen_tls\":\"127.0.0.1:$pt\",\"confirm\":true,\"reason\":\"strip\"}" > /dev/null
+  done
+  hs2() { v=$(curl -sk ${3:-} -D - -o /dev/null --resolve $1.wild.test:$2:127.0.0.1 https://$1.wild.test:$2/ | tr -d '\r' | grep -i '^strict-transport-security:' | sed 's/^[^:]*: //'); echo "${v:-none}"; }
+  check "hsts: none removes the application's own field on every answer, HTTP/1 and HTTP/2; application passes it as sent; site_show says which; false is refused naming application" \
+    "1 none none 1 max-age=63072000; includeSubDomains none application 400 yes" \
+    "$(grep -c '^hsts = "none"   # no Strict-Transport-Security on any answer' bench/tmp/sites.d/strip.wild.test.toml) $(hs2 strip 8501) $(hs2 strip 8501 --http2) $(grep -c '^hsts = "application"' bench/tmp/sites.d/pass.wild.test.toml) $(hs2 pass 8503) $(for n in strip pass; do curl -sS --unix-socket $CS http://control/v1/sites/$n.wild.test | python3 -c 'import json,sys; print(json.load(sys.stdin)["hsts"]["state"])'; done | paste -sd' ') $(cpost /v1/sites/pass.wild.test '{"hsts":false,"confirm":true,"reason":"strip"}') $(grep -q 'which is now hsts: \\"application\\"' bench/tmp/ctl-reply.json && echo yes || echo no)"
+  for n in strip pass; do cpost /v1/sites/$n.wild.test/delete '{"confirm":true,"reason":"strip"}' > /dev/null; done
   # response_headers_suggested (alpha.94, docs/headers.md 7): health asks a live HTTPS site's home page
   # (a certificate a month old) and names the offered fields it goes without; a rule that sends one
   # takes it off, response_headers_offer_declined records a no, which path_check's offer honours too;
@@ -2317,10 +2331,10 @@ check "response_headers endings at load: php on a PHP site (PHP runs it) and an 
   "$(hq "$(printf '[[site.response_headers]]\npath = "/"\nendings = ["php"]\nset = { "X-A" = "1" }\n')" 'PHP runs them' 'app = "php"
 php = { socket = "unix:/run/php/x.sock" }') $(hq "$(printf '[[site.response_headers]]\npath = "/"\nendings = ["inc"]\nset = { "X-A" = "1" }\n')" 'answers 404' 'app = "php"
 php = { socket = "unix:/run/php/x.sock" }') $(hq "$(printf '[[site.response_headers]]\npath = "/"\nendings = ["svg"]\nset = { "X-A" = "1" }\n[[site.response_headers]]\npath = "/"\nendings = ["pdf", "svg"]\nset = { "X-A" = "2" }\n')" 'a second rule') $(hq "$(printf '[[site.response_headers]]\npath = "/"\nendings = [".SVG"]\nset = { "X-A" = "1" }\n')" 'is OK')"
-check "hsts at load: true, which named no lifetime, is refused naming the form; a duration and seconds load" "yes yes yes" \
-  "$(hq '' 'hsts = true named no lifetime' 'hsts = true') $(hq '' 'is OK' 'http = "redirect"
+check "hsts at load: true, which named no lifetime, is refused naming the form; false is refused naming application, what it did; a duration, seconds, application and none load" "yes yes yes yes yes yes" \
+  "$(hq '' 'hsts = true named no lifetime' 'hsts = true') $(hq '' 'which is now hsts = "application"' 'hsts = false') $(hq '' 'is OK' 'http = "redirect"
 hsts = "1w"') $(hq '' 'is OK' 'http = "redirect"
-hsts = 604800')"
+hsts = 604800') $(hq '' 'is OK' 'hsts = "application"') $(hq '' 'is OK' 'hsts = "none"')"
 check "response_headers at load: a year on a path a single-page fallback answers is noted (the shell kept under the asked address), not with the directory's own try_files" \
   "yes no yes" \
   "$(hq "$(printf '[[site.response_headers]]\npath = "/assets/"\nwhen = "success"\nset = { "Cache-Control" = "public, max-age=31536000, immutable" }\n')" 'answered with /index.html (try_files)' 'try_files = ["$uri", "$uri/", "/index.html"]') $(hq "$(printf '[[site.response_headers]]\npath = "/assets/"\nwhen = "success"\nset = { "Cache-Control" = "public, max-age=31536000, immutable" }\n\n[[site.location]]\npath = "/assets/"\ntry_files = ["$uri", "=404"]\n')" 'answered with /index.html' 'try_files = ["$uri", "$uri/", "/index.html"]') $(hq "$(printf '[[site.response_headers]]\npath = "/assets/"\nwhen = "success"\nset = { "Cache-Control" = "public, max-age=31536000, immutable" }\n')" 'is OK' 'try_files = ["$uri", "$uri/", "/index.html"]')"

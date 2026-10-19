@@ -115,13 +115,12 @@ void note_hsts_narrowed(const SiteFields& f, std::string_view app, ErrorLog* log
     if (!hsts_stronger(app, f.hsts) || f.hsts_noted.done.exchange(true, std::memory_order_relaxed)) return;
     if (site_notices().note("hsts_narrows_application", f.site, app, std::time(nullptr)) && log && log->enabled(LogLevel::warn))
         log->warn(f.site + ": the application sent Strict-Transport-Security: " + std::string(app) + ", stronger than the site's hsts (" + f.hsts +
-                  "), which replaced it; set the site's hsts to the value meant, or hsts = false to let the application's through (docs/redirects.md 4.1)");
+                  "), which replaced it; set the site's hsts to the value meant, or hsts = \"application\" to let the application's through (docs/redirects.md 4.1)");
 }
 
-// The HSTS a site's application sends, noted once per generation of the site. With no hsts line
-// (docs/redirects.md 4.2) it goes out as it is, and health says the application already sends it
-// (hsts_from_application) rather than suggesting the site's own over it; with one it is replaced, and
-// a managed site's false then hands over to it rather than clearing (4.5).
+// The HSTS a site's application sends where agensio replaces or removes it, noted once per generation
+// of the site: a managed site's next change of hsts counts it (docs/redirects.md 4.5) and site_show
+// names it. Where it goes out unchanged, health's own request reads it (control/probe.hpp).
 void note_application_hsts(const SiteFields& f, std::string_view app) {
     if (!f.application_noted.done.exchange(true, std::memory_order_relaxed))
         site_notices().note("hsts_from_application", f.site, app, std::time(nullptr));
@@ -170,8 +169,9 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
     // A password-protected path (core/private_cache.hpp): the answer is never one a shared cache
     // may keep, whatever the application said; an open path pays one test per field.
     const bool guarded = s.auth.protected_path;
-    // The site's hsts replaces the application's own (docs/redirects.md 4.1): one field, the site's.
-    const bool site_hsts = s.fields && !s.fields->hsts.empty();
+    // The site's hsts replaces the application's own (docs/redirects.md 4.1): one field, the site's;
+    // hsts = "none" removes it (4.2).
+    const bool site_hsts = s.fields && (!s.fields->hsts.empty() || s.fields->strip_hsts);
     // The site's [[site.response_headers]] for the path (docs/headers.md 2), decided here, in the loop
     // that reads every field the application sent: set and remove drop its copies, a copy answers a
     // default, then the rules' own lines, then the guards. Never on a 1xx.
@@ -195,8 +195,6 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
         response_fields::settle(*rules, seen);
     }
     r.fields_decided = true;
-    // Without one, until this generation of the site has seen its application's: one test per field.
-    const SiteFields* watch = s.watch_fields && !s.watch_fields->application_noted.done.load(std::memory_order_relaxed) ? s.watch_fields : nullptr;
     const bool rewrite = proxied && loc.proxy.rewrite_redirects;
     std::string kept;  // the application's Cache-Control directives a protected answer keeps
     r.scratch.reserve(res.head.size() + 64);
@@ -210,13 +208,13 @@ void apply_upstream_result(Stream& s, UpstreamResult& res, std::unique_ptr<Strea
         // and neither the password guard nor the HSTS notes read it.
         if (proxied && hidden(h.name, loc)) continue;
         if (site_hsts && Headers::iequals(h.name, "strict-transport-security")) {
-            if (h.value != s.fields->hsts && !s.fields->hsts_noted.done.load(std::memory_order_relaxed)) note_hsts_narrowed(*s.fields, h.value, log);
-            // Replaced, but known: false hands over to it rather than clearing (docs/redirects.md 4.5).
+            if (!s.fields->hsts.empty() && h.value != s.fields->hsts && !s.fields->hsts_noted.done.load(std::memory_order_relaxed))
+                note_hsts_narrowed(*s.fields, h.value, log);
+            // Replaced or removed, but known: a managed site's next change counts it (docs/redirects.md 4.5).
             if (!s.fields->application_noted.done.load(std::memory_order_relaxed)) note_application_hsts(*s.fields, h.value);
             continue;
         }
         if (rules && !response_fields::keep_upstream(*rules, h.name, guarded, seen)) continue;
-        if (watch && Headers::iequals(h.name, "strict-transport-security")) note_application_hsts(*watch, h.value);
         if (guarded) {
             if (Headers::iequals(h.name, "cache-control")) {
                 private_cache::keep_directives(h.value, kept);

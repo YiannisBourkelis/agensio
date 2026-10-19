@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.1.0-alpha.104
+
+- **`hsts = "none"` is none on any answer; `hsts = "application"` leaves HSTS to the application;
+  `hsts = false` is gone** (the alpha.103 report, item 1, and the owner's review of what each value
+  means). `false` meant only "agensio adds none": an application's own field went out unchanged, so a
+  site that said `false`, and whose `site_show` said `off`, could commit browsers to two years with
+  every subdomain (Writebook on the test host). Now:
+  - no `hsts` line: not decided, the application's own field goes out unchanged; health suggests HSTS,
+    or says the application sends one; `site_show` says `undecided`;
+  - `hsts = "application"` (`site_update` with `hsts: "application"`, `agensio ctl --hsts application`):
+    the same on the wire, decided, which silences the suggestion; on a managed site it hands over at
+    once, during a clearing too, and the answer's `hsts_note` says what the application sends, or that it
+    sends none and browsers keep the site's old lifetime until its date;
+  - `hsts = "none"` (`hsts: "none"`, `--no-hsts`, `--hsts none`): no HSTS on any answer, an
+    application's own removed, for a site that must stay reachable over plain HTTP or whose application
+    would add one unasked; on a managed site whose answers carry HSTS (agensio's, or the application's)
+    it clears first, `max-age=0` replacing the application's field too, until the last lifetime has run
+    out;
+  - `hsts = false` is refused, at load and through the control plane, naming `"application"`, which is
+    what it did, and `"none"`. A managed site that decided no before is read as `"application"`, so its
+    next rendering writes that; on an upgrade its file, which still says `false`, is set aside until
+    `agensio ctl site-update NAME --yes` (health's repair) writes it again.
+  The application's field is no longer watched on every answer of a site with no line: health reads it
+  from its own request for `/`, off the workers (a field sent on other pages only is not seen), so such
+  a site costs nothing per answer; `"none"` costs one header-name compare per application header, as a
+  lifetime always did to replace it. Health's `hsts_suggested`, `hsts_from_application` and
+  `hsts_narrows_application` fixes name the two values. Unit tests failing before; integration checks
+  for the removal (HTTP/1 and HTTP/2), the pass-through, the hand-over, the clearing of an application's
+  field and the refusal of `false`; `docs/redirects.md` 4.2 and 4.5, `docs/configuration.md` 14,
+  `docs/tls.md` 2.7 and 5, the cookbook, the MCP texts, `agensio ctl`'s help, the reference
+  (`docs/keys.md`).
+
 ## 0.1.0-alpha.103 (2026-10-19)
 
 - **`logs_query` and health's `recent_errors` read the rotated logs** (the alpha.101 report). They read

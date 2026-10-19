@@ -28,6 +28,7 @@ struct SiteSpec {
     std::string hsts;
     bool hsts_subdomains = false;
     bool hsts_decided = false;
+    bool hsts_application = false;
     // Read from a spec an earlier version wrote with hsts: true (a year, never named; refused since
     // alpha.101): every change names the lifetime, or false, so none renders the site without HSTS.
     bool hsts_unnamed = false;

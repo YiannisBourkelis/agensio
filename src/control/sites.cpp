@@ -72,6 +72,8 @@ json::Value SiteSpec::to_json() const {
     if (https == "manual") v.set("cert", cert).set("key", key);
     v.set("redirect_http", redirect_http);
     if (!hsts.empty()) v.set("hsts", hsts);
+    else if (hsts_application) v.set("hsts", "application");
+    else if (hsts_decided) v.set("hsts", "none");
     if (hsts_subdomains) v.set("hsts_subdomains", true);
     if (hsts_held_until > 0) v.set("hsts_held_until", static_cast<double>(hsts_held_until));
     if (hsts_since > 0) v.set("hsts_since", static_cast<double>(hsts_since));
@@ -109,14 +111,22 @@ bool SiteSpec::from_json(const json::Value& v, SiteSpec& out) {
     out.cert = v.get("cert");
     out.key = v.get("key");
     if (has_key(v, "redirect_http")) out.redirect_http = v["redirect_http"].boolean();
-    if (v["hsts"].is_string()) out.hsts = v.get("hsts");  // the lifetime as given
+    if (v["hsts"].is_string()) {  // the lifetime as given, or one of the two decisions without one
+        const std::string_view given = v.get("hsts");
+        if (given == "application") out.hsts_application = true;
+        else if (given != "none") out.hsts = given;
+    }
     out.hsts_unnamed = v["hsts"].type() == json::Value::Type::boolean && v["hsts"].boolean();  // an earlier version's true
     out.hsts_subdomains = v["hsts_subdomains"].boolean();
     if (v["hsts_held_until"].type() == json::Value::Type::number && v["hsts_held_until"].num() > 0 && v["hsts_held_until"].num() < 1e15)
         out.hsts_held_until = static_cast<std::int64_t>(v["hsts_held_until"].num());
     if (v["hsts_since"].type() == json::Value::Type::number && v["hsts_since"].num() > 0 && v["hsts_since"].num() < 1e15)
         out.hsts_since = static_cast<std::int64_t>(v["hsts_since"].num());
-    out.hsts_decided = v["hsts_decided"].boolean() || !out.hsts.empty();
+    out.hsts_decided = v["hsts_decided"].boolean() || v["hsts"].is_string();
+    // A decided no an earlier version wrote (hsts false, or none written beside hsts_decided) let the
+    // application's own field through: that is "application" now (0.1.0-alpha.104), so the next
+    // rendering, health's repair of a file set aside included, writes what the site did.
+    if (out.hsts_decided && !v["hsts"].is_string() && !out.hsts_unnamed) out.hsts_application = true;
     out.encoded_slashes = v.get("encoded_slashes") == "allow" ? "allow" : "";
     out.canonical = v.get("canonical");
     out.own_trusted_proxies = has_key(v, "trusted_proxies");
@@ -760,7 +770,8 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
     if (has_key(body, "hsts")) {
         const json::Value& h = body["hsts"];
         const std::string forms = "hsts is the lifetime browsers commit to: \"1w\" or \"1y\" (s, m, h, d, w, y; or seconds, 604800), 0 to have browsers "
-                                  "forget it, {\"max_age\": \"2y\", \"subdomains\": true} for every subdomain too, or false (decided off)";
+                                  "forget it, {\"max_age\": \"2y\", \"subdomains\": true} for every subdomain too, \"application\" to leave it to the "
+                                  "application (its own field goes out unchanged), or \"none\" for none on any answer (an application's own removed)";
         json::Value age = h;
         bool sub = false;
         // The way back (docs/redirects.md 4.5, RFC 6797 6.1.1): a browser keeps a lifetime it saw until
@@ -773,10 +784,11 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
         std::uint64_t now_sent = 1;  // what the spec gives from here on; 0 while clearing
         if (!spec.hsts.empty() && !spec.hsts_unnamed) (void)hsts_duration(spec.hsts, 315360000, now_sent);
         const bool clearing = !spec.hsts.empty() && !spec.hsts_unnamed && now_sent == 0;
-        auto off = [&] {
+        auto off = [&] {  // agensio sends none; "none" keeps it so (hsts_application false), "application" sets it after
             spec.hsts.clear();
             spec.hsts_subdomains = false;
-            spec.hsts_decided = true;  // a no is kept as a no (docs/redirects.md 4.2)
+            spec.hsts_decided = true;  // a decision is kept (docs/redirects.md 4.2)
+            spec.hsts_application = false;
             spec.hsts_unnamed = false;
             spec.hsts_since = 0;
         };
@@ -785,40 +797,52 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
                 error = "hsts: true named no lifetime (it meant a year): give the lifetime, \"1y\" (or \"1w\" first); " + forms;
                 return needs;
             }
-            if (clearing && !ctx.application_hsts.empty()) {  // seen once the clearing had begun: hand over now
-                hold();
-                ctx.note = "the application's own Strict-Transport-Security: " + ctx.application_hsts + " now goes out unchanged, so browsers "
-                           "keep to HTTPS for its lifetime; to end HSTS for the site, the application's own setting changes too, then hsts: 0 "
-                           "has browsers forget it";
-                off();
-            } else if (clearing) {
+            error = "hsts: false is gone: it sent none of agensio's and let the application's own through, which is now hsts: \"application\"; "
+                    "hsts: \"none\" removes the application's too, for none on any answer";
+            return needs;
+        } else if (h.is_string() && h.str() == "none") {
+            // None on any answer, an application's own removed (0.1.0-alpha.104). What browsers hold,
+            // agensio's or the application's, is cleared first with max-age=0, which replaces the
+            // application's field too; a site already at none stays so.
+            const bool none_already = spec.hsts.empty() && spec.hsts_decided && !spec.hsts_application && !spec.hsts_unnamed;
+            if (clearing) {
                 if (ctx.now < spec.hsts_held_until) {
                     error = "hsts: the site sends max-age=0 so that each browser that visits forgets its HSTS, and one that saw a lifetime may hold it "
                             "until " + utc_minute(spec.hsts_held_until) + ": turned off before then, nothing would end it for the browsers that "
-                            "have not come back; hsts: false turns it off after that date (health says hsts_cleared), a lifetime sends one again";
+                            "have not come back; hsts: \"none\" turns it off after that date (health says hsts_cleared), a lifetime sends one again, "
+                            "hsts: \"application\" leaves it to the application at once";
                     return needs;
                 }
                 off();
-            } else if (sent > 0 && ctx.application_hsts.empty()) {
+            } else if (!none_already && (sent > 0 || !ctx.application_hsts.empty() || spec.hsts_held_until > ctx.now)) {
                 hold();
                 spec.hsts = "0";
                 spec.hsts_subdomains = false;
                 spec.hsts_decided = true;
+                spec.hsts_application = false;
                 spec.hsts_unnamed = false;
                 spec.hsts_since = 0;
-                ctx.note = "every HTTPS answer of the site now carries Strict-Transport-Security: max-age=0, so each browser that visits forgets "
-                           "its HSTS (RFC 6797 6.1.1); one that saw it may hold it until " + utc_minute(spec.hsts_held_until) +
-                           ", the end of the lifetime it was sent. After that date hsts: false turns it off (health says hsts_cleared); "
-                           "before it, false is refused";
+                ctx.note = "every HTTPS answer of the site now carries Strict-Transport-Security: max-age=0" +
+                           (ctx.application_hsts.empty() ? std::string() : ", the application's own " + ctx.application_hsts + " replaced too") +
+                           ", so each browser that visits forgets its HSTS (RFC 6797 6.1.1); one that saw it may hold it until " +
+                           utc_minute(spec.hsts_held_until) + ", the end of the lifetime it was sent. After that date hsts: \"none\" turns it off, "
+                           "none on any answer (health says hsts_cleared); before it, it is refused";
             } else {
-                if (sent > 0) {  // the application's own goes out from now on, in place of the site's
-                    hold();
-                    ctx.note = "the application's own Strict-Transport-Security: " + ctx.application_hsts + " now goes out unchanged, so browsers "
-                               "keep to HTTPS for its lifetime; to end HSTS for the site, the application's own setting changes too, then hsts: 0 "
-                               "has browsers forget it";
-                }
                 off();
             }
+        } else if (h.is_string() && h.str() == "application") {
+            // The application decides (0.1.0-alpha.104): agensio sends none of its own and passes the
+            // application's on, at once, during a clearing too, since its own field keeps browsers to HTTPS.
+            hold();
+            if (sent > 0 || clearing)
+                ctx.note = ctx.application_hsts.empty()
+                               ? "the application sends no Strict-Transport-Security (its answer to / was asked): browsers that saw the site's keep it "
+                                 "until " + utc_minute(spec.hsts_held_until) + ", with nothing renewing it; hsts: 0 has them forget it sooner"
+                               : "the application's own Strict-Transport-Security: " + ctx.application_hsts + " now goes out unchanged, so browsers "
+                                 "keep to HTTPS for its lifetime; to end HSTS for the site, the application's own setting changes too, then "
+                                 "hsts: \"none\" clears what browsers hold";
+            off();
+            spec.hsts_application = true;
         } else {
             if (h.is_object()) {
                 for (const auto& [k, _] : h.members())
@@ -852,6 +876,7 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
             spec.hsts = text;
             spec.hsts_subdomains = sub;
             spec.hsts_decided = true;
+            spec.hsts_application = false;
             spec.hsts_unnamed = false;
             if (subdomains_new && seconds > 300)
                 ctx.note = "includeSubDomains binds every subdomain of " + spec.domain + ", on this server or another, to HTTPS for the whole "
@@ -861,12 +886,12 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
             if (seconds == 0 && spec.hsts_held_until > ctx.now)
                 ctx.note = "every HTTPS answer of the site now carries Strict-Transport-Security: max-age=0, so each browser that visits forgets "
                            "its HSTS (RFC 6797 6.1.1); one that saw it may hold it until " + utc_minute(spec.hsts_held_until) +
-                           ". After that date hsts: false turns it off (health says hsts_cleared)";
+                           ". After that date hsts: \"none\" turns it off (health says hsts_cleared)";
         }
     }
     if (spec.hsts_unnamed) {  // rendered again without a lifetime, the site would drop the HSTS browsers hold
         error = "this site's file says hsts = true, an earlier version's form that named no lifetime (it meant a year), refused since "
-                "0.1.0-alpha.101: name it with this change, hsts: \"1y\" (agensio ctl --hsts 1y) to keep what browsers were told, or hsts: false";
+                "0.1.0-alpha.101: name it with this change, hsts: \"1y\" (agensio ctl --hsts 1y) to keep what browsers were told, or hsts: \"none\"";
         return needs;
     }
     if (has_key(body, "encoded_slashes")) {
@@ -986,7 +1011,7 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
             const std::string name = e.is_string() ? offered_response_field(e.str()) : std::string();
             if (name.empty()) {
                 error = "response_headers_offer_declined: '" + (e.is_string() ? e.str() : std::string("?")) + "' is not one of the fields offered (" +
-                        std::string(kOfferedResponseFields) + "); HSTS is declined with hsts: false";
+                        std::string(kOfferedResponseFields) + "); HSTS is declined with hsts: \"application\" or \"none\"";
                 return needs;
             }
             if (std::find(names.begin(), names.end(), name) == names.end()) names.push_back(name);
@@ -1367,10 +1392,13 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
                    " on every HTTPS answer" +
                    (secs == 0 && spec.hsts_held_until > 0
                         ? ": browsers that visit forget the site's HSTS; one may hold it until " + utc_minute(spec.hsts_held_until) +
-                              ", then hsts = false (docs/redirects.md 4.5)\n"
+                              ", then hsts = \"none\" (docs/redirects.md 4.5)\n"
                         : std::string(" (docs/redirects.md 4)\n"));
+        } else if (spec.hsts_application) {
+            out += "hsts = \"application\"   # agensio sends no Strict-Transport-Security of its own; the application's goes out unchanged "
+                   "(docs/redirects.md 4.2)\n";
         } else if (spec.hsts_decided) {
-            out += "hsts = false   # decided off: health no longer suggests it (docs/redirects.md 4.2)\n";
+            out += "hsts = \"none\"   # no Strict-Transport-Security on any answer: an application's own is removed (docs/redirects.md 4.2)\n";
         }
     }
     if (spec.response_headers_baseline && !*spec.response_headers_baseline)

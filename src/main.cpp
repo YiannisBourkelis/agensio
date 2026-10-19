@@ -356,9 +356,11 @@ int main(int argc, char** argv) {
                              "                    [--php-children N] [--php-version V] [--no-redirect] [--canonical NAME] [--listen-plain A] [--listen-tls A]\n"
                              "                    [--hsts LIFETIME [--hsts-subdomains] | --no-hsts] (HSTS for the lifetime browsers commit to: 1w, 1y,\n"
                              "                    seconds, at most 2y; 0 has browsers forget it; --hsts-subdomains adds includeSubDomains, best\n"
-                             "                    started at 5m and raised as health's hsts_ramp names each stage; --no-hsts\n"
-                             "                    records a decided no, which silences health's hsts_suggested; on a site that sends HSTS it sends\n"
-                             "                    max-age=0 first, until the last lifetime sent has ended, and is refused again before that date)\n"
+                             "                    started at 5m and raised as health's hsts_ramp names each stage; --hsts application:\n"
+                             "                    agensio sends none, the application's own goes out unchanged; --no-hsts (--hsts none): none on\n"
+                             "                    any answer, an application's own removed; either silences health's hsts_suggested; on a site whose\n"
+                             "                    answers carry HSTS --no-hsts sends max-age=0 first, until the last lifetime sent has ended, and is\n"
+                             "                    refused again before that date)\n"
                              "                    [--canonical NAME | --no-canonical] (the domain or an alias the site's other names redirect to)\n"
                              "                    [--encoded-slashes deny|allow] (allow: a %2F in the path is decoded and looked up, Apache's NoDecode,\n"
                              "                    for an application that encodes a slash inside a path segment; deny, the default, answers 404)\n"
@@ -791,7 +793,7 @@ int main(int argc, char** argv) {
                     }
                     if (obj["subdomains"].is_null()) body.set("hsts", obj["max_age"]);
                     else body.set("hsts", obj);
-                } else if (b == "--no-hsts") body.set("hsts", false);
+                } else if (b == "--no-hsts") body.set("hsts", "none");
                 else if (b == "--encoded-slashes") field("encoded_slashes");
                 else if (b == "--canonical") field("canonical");
                 else if (b == "--no-canonical") body.set("canonical", "");

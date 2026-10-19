@@ -25,6 +25,7 @@ struct CanonicalProbe {
     std::string host, port;          // the site's listener, a wildcard address asked over loopback
     bool tls = false;
     std::vector<std::string> declined;  // header probes: the offered fields the owner declined
+    bool note_hsts = false;
 };
 
 // One probe per site whose other names redirect to its canonical one, copied out of the
@@ -48,6 +49,7 @@ void run_hsts_probes(const std::vector<CanonicalProbe>& probes, int timeout_ms =
 // request path then notes) is handed over to rather than cleared; none for a site without TLS or an
 // application.
 std::optional<CanonicalProbe> application_hsts_probe(const SiteConfig& s);
+std::string hsts_in_head(std::string_view head);
 
 // response_headers_suggested (docs/headers.md 7, alpha.94): the fields the baseline leaves to the owner
 // (4.1: a frame field, a CSP, Permissions-Policy, nosniff) a live HTTPS site's home page goes without,

@@ -638,11 +638,8 @@ const LocationConfig* Dispatcher::route(Stream& s, const Router& router, WorkerS
     if (!site->response_headers.empty()) s.header_node = site->response_headers.lookup(ws.path);
     // The site's fields for an HTTPS answer (its hsts, docs/redirects.md 4): from here on every answer
     // carries them, the error pages and redirects below included; a plain one never does (RFC 6797 7.2).
-    // A site with no hsts line watches what its application sends instead (4.2), for health.
-    if (s.conn.tls || s.conn.forwarded_https) {
-        if (!site->tls_fields.empty()) s.fields = &site->tls_fields;
-        else if (site->tls_fields.watch_application) s.watch_fields = &site->tls_fields;
-    }
+    // hsts = "none" points here too, with no line: an application's own field is removed (4.2).
+    if ((s.conn.tls || s.conn.forwarded_https) && !site->tls_fields.empty()) s.fields = &site->tls_fields;
     // http = "redirect" (docs/redirects.md 2): plain HTTP, or a request a trusted proxy did not mark
     // https, goes to HTTPS; certificate validation gets the site's files there and nothing else
     // (its validation location, below). canonical (3): another of the site's names goes to the

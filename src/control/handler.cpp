@@ -1627,11 +1627,12 @@ bool ControlHandler::site_update(Stream& s, std::string_view name, const json::V
             ctx.application_until = until;
         }
     }
-    // false on a site that sends HSTS, with nothing of its application's seen since the start (the
-    // alpha.102 report: after every restart): its application is asked for / first, off the workers,
-    // so one that sends its own is handed over to, never cleared with max-age=0 over its field.
-    if (!probed && finish && existing && ctx.application_hsts.empty() && body["hsts"].type() == json::Value::Type::boolean &&
-        !body["hsts"].boolean() && (!spec.hsts.empty() || spec.hsts_unnamed)) {
+    // "none" or "application" with nothing of the application's seen since the start (the alpha.102
+    // report: after every restart): its application is asked for / first, off the workers, so "none"
+    // clears an HSTS it sends and "application" says whether it sends one (docs/redirects.md 4.5).
+    const json::Value& hb = body["hsts"];
+    const bool hsts_decision = hb.is_string() && (hb.str() == "none" || hb.str() == "application");
+    if (!probed && finish && existing && ctx.application_hsts.empty() && hsts_decision) {
         if (std::optional<control::CanonicalProbe> probe = control::application_hsts_probe(*existing)) {
             backend_->probe_async({std::move(*probe)}, [this, &s, name = std::string(name), body, what = std::string(what), finish] {
                 site_update(s, name, body, what, nullptr, true);

@@ -349,9 +349,10 @@ struct SiteConfig {
     std::vector<Cidr> trusted_proxies;
     std::vector<std::string> trusted_proxies_text;  // as written
     // hsts (2026-10-13, docs/redirects.md 4): Strict-Transport-Security on every HTTPS answer of the
-    // site, PHP, proxied and errors included, replacing an application's own. Not written is off and
-    // undecided (health may suggest it later); false is decided off.
-    enum class Hsts : std::uint8_t { unset, off, on };
+    // site, PHP, proxied and errors included, replacing an application's own. Not written is none and
+    // undecided (health may suggest it later), the application's own field going out unchanged;
+    // "application" decides the same; "none" is none on any answer, an application's own removed (4.2).
+    enum class Hsts : std::uint8_t { unset, none, on, application };
     Hsts hsts = Hsts::unset;
     std::uint64_t hsts_max_age = 31536000;  // a year
     bool hsts_subdomains = false;

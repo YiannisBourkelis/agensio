@@ -2113,7 +2113,7 @@ with the rule to write.
 only) on every answer the site gives over HTTPS: pages, files, PHP, a proxied application, error
 pages and redirects. An application's own copy is replaced, so browsers see one; one that commits
 browsers to more (a longer `max-age`, `includeSubDomains`, `preload`) is noted in the error log and by
-health (`hsts_narrows_application`, 0.1.0-alpha.86), and `hsts = false` lets it through. A plain-HTTP
+health (`hsts_narrows_application`, 0.1.0-alpha.86), and `hsts = "application"` lets it through. A plain-HTTP
 answer never carries it (RFC 6797 7.2); behind a proxy that ends TLS, an answer the proxy marks
 `X-Forwarded-Proto: https` from `trusted_proxies` does. It is deliberately not automatic: once a
 browser has seen it, it refuses plain http for that host until `max-age` expires, so set it when
@@ -2126,7 +2126,8 @@ hsts = "1w"                                    # a duration: s, m, h, d, w, y ("
 hsts = 604800                                  # or seconds, the form applications publish
 hsts = { max_age = "2y", subdomains = true }   # every subdomain too (includeSubDomains)
 hsts = 0                                       # tells browsers to forget it: keep it for as long as the old lifetime
-hsts = false                                   # decided off
+hsts = "application"                           # agensio sends none; the application's own goes out unchanged
+hsts = "none"                                  # none on any answer: an application's own is removed
 ```
 
 `subdomains` (`includeSubDomains`) makes every subdomain HTTPS-only in browsers that saw it,
@@ -2139,14 +2140,16 @@ site sets it with `site_update` `hsts: "1y"` (`agensio ctl site-update NAME --hs
 for `includeSubDomains`; at most two years there). Health suggests
 it (`hsts_suggested`, info) once the site has served a real certificate for a week with no
 certificate finding, or says the application already sends its own (`hsts_from_application`, with
-its value, which `hsts = "1y"` would replace, and the value that matches it); `hsts = false` (`hsts: false`, `--no-hsts`) records a
-decided no and silences that, and with `hsts` on the certificate findings `certificate_expiring` and `acme_renewal_failed`
+its value, which `hsts = "1y"` would replace, and the value that matches it); `hsts = "application"` (`hsts:
+"application"`, `--hsts application`: the application decides) and `hsts = "none"` (`hsts: "none"`, `--no-hsts`: none,
+guaranteed) each record the decision and silence that (0.1.0-alpha.104; `hsts = false`, which meant what `"application"`
+does, is refused naming it), and with `hsts` on the certificate findings `certificate_expiring` and `acme_renewal_failed`
 are errors ([redirects.md](redirects.md) 4.2). On a managed site that sends a lifetime, `false` first
 renders `hsts = 0` until the last lifetime it sent has ended (the answer's `hsts_note`, the file's
 comment and health's `hsts_clearing` name the date; `hsts_cleared` after it), refuses a second `false`
-before that date and writes `hsts = false` after it; when its application sends its own HSTS, `false`
-hands over to it at once, the application asked for `/` first when none of its answers was seen since
-the start ([redirects.md](redirects.md) 4.5, 0.1.0-alpha.102 and .103).
+before that date and writes `hsts = "none"` after it, the application's field cleared too when it sends
+one; `"application"` hands over to the application at once, the application asked for `/` first when
+none of its answers was seen since the start ([redirects.md](redirects.md) 4.5, 0.1.0-alpha.102 to .104).
 
 Rules checked by `agensio -t`: `tls = "auto"` needs `[server] acme`; `server_name` must
 list real host names (no `*`, no wildcards: those need DNS-01, which is not in this
@@ -2447,7 +2450,7 @@ judged. What the owner decided against goes in the site key `response_headers_of
 response_headers_offer_declined = ["X-Frame-Options"]   # other sites embed its pages
 ```
 
-It names only those four fields (any case; HSTS is declined with `hsts = false`), sends and removes
+It names only those four fields (any case; HSTS is declined with `hsts = "application"` or `hsts = "none"`), sends and removes
 nothing, and the finding and `path_check`'s offer leave them out; managed: `site_update`'s field of
 the same name, `agensio ctl site-update NAME --decline-response-header X-Frame-Options`
 (`--no-declined-response-headers` clears the list). `hsts`

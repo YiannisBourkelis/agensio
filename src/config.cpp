@@ -1929,12 +1929,20 @@ bool hsts_age(const toml::node_view<const toml::node>& n, std::uint64_t& out) {
 // since 0.1.0-alpha.101. The value is built once here, for the writers.
 void parse_hsts(const toml::node_view<const toml::node>& n, SiteConfig& site, const std::string& where) {
     const std::string forms = "hsts = \"1y\" (a duration: s, m, h, d, w, y; or seconds, 31536000), hsts = { max_age = \"2y\", subdomains = true }, "
-                              "hsts = 0 to have browsers forget it, or hsts = false";
+                              "hsts = 0 to have browsers forget it, hsts = \"application\" to leave it to the application (its own field goes out "
+                              "unchanged), or hsts = \"none\" for none on any answer (an application's own removed)";
     if (n.is_boolean()) {  // tested by type: toml++'s value<bool>() would take 604800 for true
         if (*n.value<bool>())
             fail(where + ".hsts = true named no lifetime (it meant a year): write the lifetime browsers commit to, hsts = \"1y\" (or \"1w\" first; "
                          "RFC 6797 11.2), or " + forms);
-        site.hsts = SiteConfig::Hsts::off;
+        // false read as a promise of none and left the application's own field through (0.1.0-alpha.104).
+        fail(where + ".hsts = false is gone: it sent none of agensio's and let the application's own through, which is now hsts = \"application\"; "
+                     "hsts = \"none\" removes the application's too, for none on any answer");
+    } else if (n.is_string() && *n.value<std::string>() == "application") {
+        site.hsts = SiteConfig::Hsts::application;
+    } else if (n.is_string() && *n.value<std::string>() == "none") {
+        site.hsts = SiteConfig::Hsts::none;  // none on any answer: an application's own is removed too
+        site.tls_fields.strip_hsts = true;
     } else if (n.is_integer() || n.is_string()) {
         if (!hsts_age(n, site.hsts_max_age)) fail(where + ".hsts must be a lifetime at most ten years: " + forms);
         site.hsts = SiteConfig::Hsts::on;
@@ -2508,7 +2516,7 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
             const std::string name = v ? offered_response_field(*v) : std::string();
             if (name.empty())
                 fail(where + ".response_headers_offer_declined: '" + (v ? *v : std::string("?")) + "' is not one of the fields offered (" +
-                     std::string(kOfferedResponseFields) + "); HSTS is declined with hsts = false");
+                     std::string(kOfferedResponseFields) + "); HSTS is declined with hsts = \"application\" or \"none\"");
             auto& d = site.response_headers_offer_declined;
             if (std::find(d.begin(), d.end(), name) == d.end()) d.push_back(name);
         }
@@ -3341,7 +3349,6 @@ constexpr WordPressOpening kWordPressOpenings[] = {
 
 void finalize_site(SiteConfig& site) {
     if (!site.server_names.empty()) site.tls_fields.site = site.server_names.front();  // what its answers note names it by
-    site.tls_fields.watch_application = site.hsts == SiteConfig::Hsts::unset;           // its application's own HSTS is noted (4.2)
     bool has_root_prefix = false;
     for (const auto& loc : site.locations)
         if (!loc.exact && loc.path == "/") has_root_prefix = true;

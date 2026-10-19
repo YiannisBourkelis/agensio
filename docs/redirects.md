@@ -361,7 +361,7 @@ does not load, and every change to it is refused until the change names a lifeti
 serves the site again.
 
 `site_show` (`agensio ctl site NAME`) shows a site's `hsts`: its `state` (`on`, `clearing`, `cleared`,
-`off` for a decided no, `none` for no line), the field it sends with `max_age` and `subdomains`, and on
+`application`, `none`, `undecided` for no line; 4.2), the field it sends with `max_age` and `subdomains`, and on
 a managed site the `lifetime` as written, `since` when it has been sent (4.4), and `until`, a clearing's
 end (4.5), or `held_until`, the end of a longer lifetime browsers may still hold after it was lowered;
 `application` is the application's own field when one was seen since the start (0.1.0-alpha.103).
@@ -375,7 +375,7 @@ clear it. When the server replaces an application's value that was stronger, it 
 once per site, and health reports `hsts_narrows_application` with it, so nobody weakens it
 unknowingly.
 
-### 4.2 When health suggests it, and what `false` means
+### 4.2 When health suggests it, and the two decisions without a lifetime
 
 HSTS is a commitment: for its whole `max-age`, browsers that saw it refuse plain HTTP and refuse a
 certificate problem with a hard error and no "continue anyway". So it is off until written, and
@@ -387,17 +387,30 @@ health suggests it once HTTPS has proven itself:
   the user is less sure), with what it
   commits to. Not raised for a site without TLS of its own (a proxy in front may set HSTS itself).
 - **An application that sends its own** (Kanboard's `ENABLE_HSTS`, Rails' `force_ssl`, Mastodon):
-  on a site with no `hsts` line its field goes out as it is, and once one answer has carried it,
-  health says so instead of the suggestion (`hsts_from_application`, info, with the value; built in
-  alpha.87, the alpha.86 report). When no answer has carried it since the start, health asks the
-  site once for its home page, by its canonical name, off the workers (alpha.91, the alpha.87/88
-  report's note), so the first health call after a start already knows. `hsts = "1y"` would replace it, and with a weaker one when the
-  application's commits to more, which `hsts_narrows_application` would then report; the fix says
-  `hsts = false` records that the application's is the one, or gives the `{ max_age, subdomains }`
-  that matches it.
-- **No line means "not decided", `hsts = false` means "decided: off"**: health stays quiet about a
-  site that says `false`. The agent writes it when the user declines, so the suggestion does not
-  come back.
+  on a site with no `hsts` line its field goes out as it is, and health says so instead of the
+  suggestion (`hsts_from_application`, info, with the value; built in alpha.87, the alpha.86 report).
+  Health learns it from its own request for the site's home page, by its canonical name, off the
+  workers (alpha.91, the alpha.87/88 report's note): since 0.1.0-alpha.104 no answer is watched for it,
+  so a field the application sends on other pages only is not seen. `hsts = "1y"` would replace it,
+  and with a weaker one when the application's commits to more, which `hsts_narrows_application` would
+  then report; the fix says `hsts = "application"` records that the application's is the one, or
+  gives the `{ max_age, subdomains }` that matches it.
+- **No line and the two decisions without a lifetime** (0.1.0-alpha.104). No line is not decided: the
+  application's own field goes out unchanged (`site_show` says `undecided`) and health suggests HSTS.
+  Health stays quiet about a site that says either decision:
+
+  | Value | agensio sends | The application's own field | For |
+  |---|---|---|---|
+  | `hsts = "application"` | nothing | goes out unchanged, not looked at | an application that sets HSTS itself: Rails' `force_ssl`, Kanboard's `ENABLE_HSTS`, Writebook |
+  | `hsts = "none"` | nothing | removed, on every answer | no HSTS, guaranteed: a site that must stay reachable over plain HTTP (a staging copy, an intranet name), or whose application would add one unasked (Rails' `force_ssl` turns it on by default) |
+
+  The agent writes one of them when the user declines, so the suggestion does not come back.
+  Removing the application's field costs `"none"` sites one header-name compare per application
+  header, as replacing it costs a site with a lifetime; no line and `"application"` cost nothing.
+  `hsts = false` is refused since 0.1.0-alpha.104, naming `"application"`: it sent none of agensio's
+  and let the application's field through, which read as a promise of none at all. A managed site
+  that decided no before is read as `"application"`, so its next rendering, or health's repair of its
+  file set aside (`agensio ctl site-update NAME --yes`), writes what it did.
 - **With `hsts` on, certificate findings rise one level** (`certificate_expiring`,
   `acme_renewal_failed`), and say why: a visitor can no longer click past an expired certificate.
 
@@ -459,30 +472,34 @@ lifetime sent before, so that every browser that comes back in that time gets it
 comes back forgets the host when its own lifetime ends.
 
 ```toml
-hsts = 0   # "forget this host's HSTS": keep it for as long as the old max-age, then hsts = false
+hsts = 0   # "forget this host's HSTS": keep it for as long as the old max-age, then hsts = "none" or "application"
 ```
 
-**A managed site does this by itself** (0.1.0-alpha.102). `false` (`site_update` with `hsts: false`,
-`agensio ctl site-update NAME --no-hsts`) on a site that sends a lifetime renders `hsts = 0` instead,
+**A managed site does this by itself** (0.1.0-alpha.102). `"none"` (`site_update` with `hsts: "none"`,
+`agensio ctl site-update NAME --no-hsts`; `false` before 0.1.0-alpha.104) on a site whose answers carry HSTS, agensio's own lifetime or
+(since 0.1.0-alpha.104) the application's, renders `hsts = 0` instead, which replaces the application's
+field too,
 and the site file's first line records the latest moment a browser may still hold what the site
 sent: each change of `hsts` raises it to the change's time plus the lifetime sent until then, so a
 site that went from `"1y"` to `"1w"` last month still waits for the year. The answer's `hsts_note`
 names that date, the file's comment repeats it, and health says `hsts_clearing` until then and
-`hsts_cleared` after it. A second `false` before the date is refused, naming it: turned off early,
-nothing would end the HSTS of the browsers that have not come back. After the date `false` writes
-`hsts = false`. A lifetime given during the clearing sends one again and ends it. Until the date the
+`hsts_cleared` after it. A second `"none"` before the date is refused, naming it: turned off early,
+nothing would end the HSTS of the browsers that have not come back. After the date `"none"` writes
+`hsts = "none"`, none on any answer. A lifetime given during the clearing sends one again and ends it;
+`"application"` ends it too, at once. Until the date the
 certificate findings stay errors (4.2), since those browsers still refuse a click past a certificate
 error; after it they are warnings again.
 
-When the site's application sends its own `Strict-Transport-Security` (Rails' `force_ssl`, Kanboard's
-`ENABLE_HSTS`), `false` hands over to it at once instead: the application's field goes out unchanged,
-`hsts_note` says so, and its lifetime counts for a later clearing. agensio knows from the application's
-answers since the server started; when none carried the field (after every restart), the control
-plane first asks the application for `/` through the site's own listener, off the workers, as health's
-probe does (0.1.0-alpha.103, the alpha.102 report: until then `false` cleared, and `max-age=0` replaced
-the application's two-year field on every answer). An application seen sending its own only once a
-clearing has begun is handed over to by the next `false`, whatever the date. Ending HSTS for such a
-site is the application's setting first, then `hsts = 0`.
+Handing over to an application that sends its own `Strict-Transport-Security` (Rails' `force_ssl`,
+Kanboard's `ENABLE_HSTS`) is `hsts = "application"` (`site_update` with `hsts: "application"`, `agensio
+ctl site-update NAME --hsts application`), at once, during a clearing too: the application's field goes
+out unchanged, `hsts_note` says what it sends, and its lifetime counts for a later clearing. When the
+application sends none, the note says that browsers keep the site's old lifetime until its date, with
+nothing renewing it, and that `hsts: 0` ends it sooner. agensio knows the application's field from what
+the request path saw where it replaced or removed it, or, when nothing was seen since the start (after
+every restart), from the control plane's own request for `/` through the site's listener, off the
+workers, as health's probe does (0.1.0-alpha.103, the alpha.102 report). Before 0.1.0-alpha.104 the
+hand-over was `false`'s; `false` is refused now, naming `"application"`, what it did (4.2).
 
 A hand-written `hsts = 0` has no history: agensio sends it for as long as the file says, and health
 says nothing about it.

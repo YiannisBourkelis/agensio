@@ -126,8 +126,10 @@ refused since 0.1.0-alpha.101. Turning it off is not instant: browsers keep it u
 ends, so on a managed site `--no-hsts` first sends `max-age=0`, which each returning browser takes as
 "forget it", until the last lifetime the site sent has run out, and names that date; a second
 `--no-hsts` after it turns the field off ([redirects.md](redirects.md) 4.5). Health suggests it (`hsts_suggested`, section 5) once a site has served a real
-certificate for a week with no certificate finding; `hsts = false` (MCP `site_update` with `hsts:
-false`, `agensio ctl site-update NAME --no-hsts`) records that you decided against it and silences the suggestion. With `hsts` on,
+certificate for a week with no certificate finding. Deciding against it is one of two values, each of
+which silences the suggestion: `hsts = "application"` (`--hsts application`) when the application sets
+HSTS itself, its own field going out unchanged; `hsts = "none"` (`--no-hsts`) for none on any answer, an
+application's own removed (0.1.0-alpha.104; [redirects.md](redirects.md) 4.2). With `hsts` on,
 `certificate_expiring` and `acme_renewal_failed` are errors, not warnings.
 
 ## 3. Your own certificate files
@@ -264,11 +266,11 @@ mistaken for one in service.
 | `tls_key_unreadable` | warn | the server's account cannot read a certificate or key after the start | root runs the lines given (3.2) |
 | `site_file_held_back` | error | a site's file is set aside; a certificate that did not load is one reason, named in the message | the message's error |
 | `no_http_redirect` | info | a TLS site on a port other than 443, without `http`: plain HTTP is not redirected | `http = { listen = ["0.0.0.0:80"] }`, the redirect keeps the TLS port |
-| `hsts_suggested` | info | a TLS site with no `hsts` line has served a real certificate for 7 days with no certificate finding | `hsts = "1y"` once you accept what it commits to (2.7), `"1w"` first when unsure; `hsts = false` records a no and silences it |
-| `hsts_from_application` | info | in place of `hsts_suggested`: the application sends its own `Strict-Transport-Security` (named, with its value), which agensio passes on; seen on its answers, or on health's own request for `/` when none came since the start | nothing; `hsts = false` records it; an `hsts` of the site would replace it, so the fix gives the value that matches the application's |
-| `hsts_narrows_application` | warn | the application sends a stronger `Strict-Transport-Security` than the site's `hsts` (a longer max-age, `includeSubDomains`, `preload`), and the site's replaces it | the site's `hsts` set to the value meant, or `hsts = false` to let the application's through |
+| `hsts_suggested` | info | a TLS site with no `hsts` line has served a real certificate for 7 days with no certificate finding | `hsts = "1y"` once you accept what it commits to (2.7), `"1w"` first when unsure; `hsts = "application"` or `hsts = "none"` records a no and silences it |
+| `hsts_from_application` | info | in place of `hsts_suggested`: the application sends its own `Strict-Transport-Security` (named, with its value), which agensio passes on; seen on its answers, or on health's own request for `/` when none came since the start | nothing; `hsts = "application"` records it; an `hsts` of the site would replace it, so the fix gives the value that matches the application's |
+| `hsts_narrows_application` | warn | the application sends a stronger `Strict-Transport-Security` than the site's `hsts` (a longer max-age, `includeSubDomains`, `preload`), and the site's replaces it | the site's `hsts` set to the value meant, or `hsts = "application"` to let the application's through |
 | `hsts_clearing` | info | a managed site turned `hsts` off and sends `max-age=0` until the date named, the end of the longest lifetime it sent | nothing until then, and keep HTTPS working; after it, `--no-hsts` again (2.7) |
-| `hsts_cleared` | info | that date has passed: no browser enforces the site's HSTS any more | `agensio ctl site-update NAME --no-hsts` stops sending the field |
+| `hsts_cleared` | info | that date has passed: no browser enforces the site's HSTS any more | `agensio ctl site-update NAME --no-hsts` stops sending the field (none on any answer); `--hsts application` leaves it to the application instead |
 | `hsts_ramp` | info | a managed site with `subdomains` has sent its lifetime for the whole of it with no certificate finding | when nothing broke (subdomains on other servers too), the next stage it names: `5m`, `1w`, `30d`, `1y` ([redirects.md](redirects.md) 4.4) |
 | `proxy_scheme_missing` | warn | a trusted proxy sent requests without `X-Forwarded-Proto` to a site that redirects plain HTTP: its HTTPS visitors loop | the proxy sends `X-Forwarded-Proto`, or reaches the site over TLS ([redirects.md](redirects.md) 2.4) |
 | `app_redirects_elsewhere` | warn | a site with `canonical` whose application redirects its canonical home page to another of the site's names: a redirect loop | the application's own address set to the canonical name (the fix names the setting) |

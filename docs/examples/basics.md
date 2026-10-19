@@ -602,7 +602,10 @@ adds `includeSubDomains`, only when every subdomain has https too, best raised i
 ([redirects 4.4](../redirects.md#44-subdomains)). Removing the line later does not
 undo it for browsers that saw it: `hsts = 0` tells each returning browser to forget it, and stays
 until the old lifetime has run out (on a managed site `--no-hsts` does that by itself and names the
-date, [redirects 4.5](../redirects.md#45-turning-it-off)). A location's `add_headers`
+date, [redirects 4.5](../redirects.md#45-turning-it-off)). Deciding against it is `hsts = "application"`
+when the application sets HSTS itself (its field goes out unchanged), or `hsts = "none"` for none on any
+answer, an application's own removed ([redirects 4.2](../redirects.md#42-when-health-suggests-it-and-the-two-decisions-without-a-lifetime)).
+A location's `add_headers`
 cannot send HSTS (until 0.1.0-alpha.75 that was the way, and it reached neither the PHP pages nor
 the errors). The `Cache-Control` rule is on every successful answer under `/assets/`, a `304`
 revalidation included, whichever location serves it, and replaces a lifetime the application or a

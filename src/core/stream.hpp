@@ -94,9 +94,6 @@ struct Stream {
     // application's own http:// Location for the site's names goes out as https://
     // (handlers/upstream_common.cpp). Set only for such a site.
     const SiteConfig* https_site = nullptr;
-    // An HTTPS request to a site with no hsts line (docs/redirects.md 4.2): the HSTS its application
-    // sends is noted for health (handlers/upstream_common.cpp). Null otherwise.
-    const SiteFields* watch_fields = nullptr;
     // The site's [[site.response_headers]] for the path asked for (core/response_rules.hpp), found
     // once the site is known; null for a site without rules or a path none covers.
     const HeaderNode* header_node = nullptr;
@@ -110,7 +107,6 @@ struct Stream {
         auth.reset();
         fields = nullptr;
         https_site = nullptr;
-        watch_fields = nullptr;
         header_node = nullptr;
         header_ending = nullptr;
     }

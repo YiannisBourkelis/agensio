@@ -536,7 +536,7 @@ std::vector<Finding> notice_findings(const Config& cfg, const std::vector<SiteNo
                                "), which commits browsers to more than the site's hsts (" + site->tls_fields.hsts +
                                "); the site's replaces it, so visitors get the weaker one",
                            "if the application's value is meant: the site's hsts set to match (hsts = { max_age = \"2y\", subdomains = true } in "
-                           "a hand-written site file), or hsts = false (site_update with hsts: false on a managed site) to let the application's "
+                           "a hand-written site file), or hsts = \"application\" (site_update with hsts: \"application\" on a managed site) to let the application's "
                            "through unchanged; if the site's is meant, nothing to do (docs/redirects.md 4.1)"});
         }
     }
@@ -814,7 +814,7 @@ void header_fields(json::Value& v, const SiteConfig& site, const HeaderNode* nod
         add("X-Content-Type-Options", app ? "a script the application sends with the wrong type (JavaScript printed under text/html, JSONP as "
                                             "application/json) stops working; on the application's answers only when its scripts carry their types"
                                           : "nothing on the files agensio serves, whose type it sets itself: the baseline sends it (response_headers_baseline)");
-    if (site.tls && site.tls_fields.hsts.empty() && site.hsts != SiteConfig::Hsts::off)
+    if (site.tls && site.hsts == SiteConfig::Hsts::unset)  // a decided false or "application" is not offered again
         add("Strict-Transport-Security", "plain HTTP, and clicking past a certificate warning, for its whole max-age; the site's hsts field, never a rule");
     if (!offer.items().empty()) v.set("response_headers_offer", std::move(offer));
     if (!declined.empty()) {
@@ -1109,8 +1109,9 @@ json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_vi
 // when one was seen since the start.
 static json::Value hsts_json(const SiteConfig& s, const SiteSpec* managed, std::time_t now, const TlsFacts* tls) {
     json::Value h = json::Value::object();
-    if (s.hsts == SiteConfig::Hsts::off) h.set("state", "off");
-    else if (s.hsts == SiteConfig::Hsts::unset) h.set("state", "none");
+    if (s.hsts == SiteConfig::Hsts::none) h.set("state", "none");  // none on any answer, an application's own removed
+    else if (s.hsts == SiteConfig::Hsts::application) h.set("state", "application");  // its own field goes out unchanged
+    else if (s.hsts == SiteConfig::Hsts::unset) h.set("state", "undecided");  // no line: the application's own goes out too
     else {
         const HstsValue sent = parse_hsts(s.tls_fields.hsts);
         h.set("state", sent.max_age > 0 ? "on" : managed && managed->hsts_held_until <= now ? "cleared" : "clearing");
@@ -1594,7 +1595,7 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
                 spec.hsts_unnamed  // a bare update is refused until the change names a lifetime (the alpha.101 and .102 reports)
                     ? "agensio ctl site-update " + spec.domain + " --hsts 1y --yes (MCP site_update with hsts: \"1y\") renders it again from its "
                       "first line with this version: the file says hsts = true, which named no lifetime and meant a year, so the change names "
-                      "it; \"1y\" keeps what browsers were told, hsts: false clears it instead (docs/redirects.md 4.5)"
+                      "it; \"1y\" keeps what browsers were told, hsts: \"none\" clears it instead (docs/redirects.md 4.5)"
                     : "agensio ctl site-update " + spec.domain + " --yes (MCP site_update) renders it again from its first line with this "
                       "version, which repairs a form an earlier version wrote; if the error remains, it names what to change through site-update");
         else
@@ -1803,8 +1804,8 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
             st.not_before > 0 && now - st.not_before >= 7 * 86400 && app_sends) {
             const std::string& value = sent->second.first;
             const HstsValue v = parse_hsts(value);
-            const std::string decided = "nothing is needed; hsts = false records that the application's field is the one and silences this "
-                                        "(site_update with hsts: false on a managed site)";
+            const std::string decided = "nothing is needed; hsts = \"application\" records that the application's field is the one and silences "
+                                        "this (site_update with hsts: \"application\" on a managed site)";
             std::string fix;
             // The application's own value, as agensio would send it on every answer, error pages and files
             // included (the review's section 3: match the application, never narrow it unasked).
@@ -1813,7 +1814,7 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
             const std::string managed = v.subdomains ? "{\"max_age\": " + std::to_string(v.max_age) + ", \"subdomains\": true}" : std::to_string(v.max_age);
             fix = decided + "; for agensio to send the same on every answer, error pages and files included, " + same + " (site_update with hsts: " +
                   managed + (v.max_age > 63072000 ? ", which a managed site caps at two years" : "") + ")" +
-                  (v.preload ? "; preload, which agensio does not send, stays the application's alone: keep hsts = false for it" : "") +
+                  (v.preload ? "; preload, which agensio does not send, stays the application's alone: keep hsts = \"application\" for it" : "") +
                   (hsts_stronger(value, "max-age=31536000") ? "; a shorter lifetime would narrow the application's, which hsts_narrows_application then reports" : "");
             add("info", "hsts_from_application", name,
                 "the application sends Strict-Transport-Security: " + value + " itself (seen " + date(sent->second.second) +
@@ -1826,7 +1827,8 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
                 "for this site from their first visit on, and to refuse it on a certificate error rather than let a visitor click past it",
                 "when the user agrees, the lifetime browsers commit to, in the site file: hsts = \"1y\" (site_update with hsts: \"1y\" on a managed "
                 "site; \"1w\" first for a site the user is less sure of); {\"max_age\": \"1y\", \"subdomains\": true} binds every subdomain too, only "
-                "once each has HTTPS; hsts = false records a decided no and silences this");
+                "once each has HTTPS; hsts = \"application\" leaves HSTS to the application, hsts = \"none\": none on any answer (an application's "
+                "own removed); either records the decision and silences this");
         // The ramp of includeSubDomains (docs/redirects.md 4.4, hstspreload.org's deployment stages):
         // a stage that has run its whole lifetime with no certificate finding here is followed by the
         // next; a host-only site's lifetime is the user's to raise, said in the texts, never a finding.
@@ -1850,13 +1852,14 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
                 "6.1.1); one that saw a lifetime and has not come back may hold it until " + utc_minute(managed.hsts_held_until) +
                     ", the end of the lifetime it was sent",
                 "nothing until then, and keep HTTPS working: those browsers still refuse the site on a certificate error; after that date "
-                "site_update with hsts: false (agensio ctl site-update " + name + " --no-hsts) turns it off; a lifetime sends one again");
+                "site_update with hsts: \"none\" (agensio ctl site-update " + name + " --no-hsts) turns it off; a lifetime sends one again");
         else if (cleared)
             add("info", "hsts_cleared", name,
                 "the site sends Strict-Transport-Security: max-age=0 and every lifetime it sent has ended" +
                     (managed.hsts_held_until > 0 ? " (" + utc_minute(managed.hsts_held_until) + ")" : std::string()) +
                     ": no browser enforces its HSTS any more",
-                "site_update with hsts: false (agensio ctl site-update " + name + " --no-hsts) stops sending the field and records the decided no");
+                "site_update with hsts: \"none\" (agensio ctl site-update " + name + " --no-hsts) stops sending the field: none on any answer from then "
+                "on, an application's own removed; hsts: \"application\" leaves it to the application instead");
     }
     // The watch of the certificate files (step T3) late by more than one run: a certificate another
     // tool renews (certbot) waits until cert-renew. Said once, for the server; never with nothing served.
