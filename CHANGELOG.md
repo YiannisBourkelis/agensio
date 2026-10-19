@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.104
+## 0.1.0-alpha.104 (2026-10-20)
 
 - **`hsts = "none"` is none on any answer; `hsts = "application"` leaves HSTS to the application;
   `hsts = false` is gone** (the alpha.103 report, item 1, and the owner's review of what each value
