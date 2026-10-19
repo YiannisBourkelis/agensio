@@ -354,7 +354,11 @@ set it willfully, never by default): a duration (`"5m"`, `"1w"`, `"1y"`, `"2y"`;
 or seconds (`604800`, the form applications publish), at most ten years in a site file and two
 through the control plane; `hsts = 0` has browsers forget it (4.5); a table adds subdomains (4.4).
 `hsts = true`, which named no lifetime and meant a year, is refused since 0.1.0-alpha.101, naming
-the form to write.
+the form to write. A managed file an earlier version wrote with it is set aside like any file that
+does not load, and every change to it is refused until the change names a lifetime; health's
+`site_file_held_back` names the one that keeps what browsers were told, `agensio ctl site-update NAME
+--hsts 1y --yes` (`site_update` with `hsts: "1y"`), which writes the file in this version's form and
+serves the site again.
 
 The field goes on every answer the site gives over HTTPS: pages, files, PHP, a proxied
 application, errors and redirects. It is never sent over plain HTTP, where browsers must ignore it

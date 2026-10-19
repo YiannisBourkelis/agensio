@@ -7553,6 +7553,25 @@ static void test_hsts_clearing_health() {
     facts.served[tls.cert.string() + '\n' + tls.key.string()].days_left = 3;  // a certificate finding holds it back
     facts.served[tls.cert.string() + '\n' + tls.key.string()].not_after = now + 3 * day;
     CHECK(!find(control::health_findings(cfg, cfg, false, now, &facts), "hsts_ramp"));
+    // A managed file an earlier version wrote with hsts = true, set aside (the alpha.101 and .102
+    // reports): a bare site-update is refused until the change names a lifetime, so the fix names the
+    // year it meant; another managed file keeps the bare command.
+    {
+        Config held = cfg;
+        const fs::path old_file = dir / "sites.d" / "old.test.toml";
+        std::ofstream(old_file) << control::kManagedMarker << R"({"domain":"old.test","aliases":[],"https":"auto","redirect_http":true,"hsts":true,"hsts_decided":true,"user":"","no_user":true,"group":"","app":"static","root":"/var/www/old"})"
+                                << "\n\n[[site]]\nhsts = true\n";
+        held.held_back.push_back({old_file.string(), "hsts = true named no lifetime (it meant a year)"});
+        const auto findings = control::health_findings(held, held, false, now, &facts);  // kept: find points into it
+        const Finding* h = find(findings, "site_file_held_back");
+        CHECK(h && h->site == "old.test" && h->fix.find("agensio ctl site-update old.test --hsts 1y --yes") != npos &&
+              h->fix.find("hsts: \"1y\"") != npos && h->fix.find("hsts: false") != npos);
+        std::ofstream(old_file) << control::kManagedMarker << R"({"domain":"old.test","aliases":[],"https":"auto","redirect_http":true,"hsts":"1y","hsts_decided":true,"user":"","no_user":true,"group":"","app":"static","root":"/var/www/old"})"
+                                << "\n\n[[site]]\nredirect = \"https\"\n";
+        const auto plain = control::health_findings(held, held, false, now, &facts);  // kept: find points into it
+        const Finding* p = find(plain, "site_file_held_back");
+        CHECK(p && p->fix.find("agensio ctl site-update old.test --yes") != npos && p->fix.find("--hsts") == npos);
+    }
     fs::remove_all(dir);
 }
 

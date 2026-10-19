@@ -2,6 +2,13 @@
 
 ## 0.1.0-alpha.103
 
+- **Health's fix for a managed file written with `hsts = true` names the lifetime** (the alpha.101 and
+  .102 reports). Such a file is set aside (old forms are not read), and health's `site_file_held_back`
+  said that a bare `agensio ctl site-update NAME --yes` renders it again, which the control plane then
+  refused until the change named a lifetime. For such a file the fix is now `agensio ctl site-update
+  NAME --hsts 1y --yes` (`site_update` with `hsts: "1y"`, the year `true` meant; `hsts: false` clears it
+  instead), and `site_update`'s MCP text says so. Unit test failing before, an integration check
+  through the whole repair; `docs/redirects.md` 4.1.
 - **`false` on a site whose application sends its own HSTS hands over after a restart too** (the
   alpha.102 report). agensio knew an application's `Strict-Transport-Security` only from its answers
   since the start, so after every restart, upgrades included, `false` (`site_update`, `--no-hsts`) on a

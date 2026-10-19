@@ -1816,6 +1816,26 @@ check "site-update: a managed file in a form this version refuses is set aside; 
   "$(code -H 'Host: old.wild.test' http://127.0.0.1:8459/ 2>/dev/null) $(curl -sS --unix-socket $CS http://control/v1/health | grep -q 'agensio ctl site-update old.wild.test --yes' && echo yes || echo no) $(cpost /v1/sites/old.wild.test '{"confirm":true,"reason":"old"}') $(code -H 'Host: old.wild.test' http://127.0.0.1:8459/) $(grep -q 'redirect = ' bench/tmp/sites.d/old.wild.test.toml && echo yes || echo no)"
 cpost /v1/sites/old.wild.test/delete '{"confirm":true,"reason":"old"}' > /dev/null
 rm -f bench/tmp/sites.d/old.wild.test.toml bench/tmp/sites.d/old.wild.test.toml.bak
+# A managed file as alpha.99 wrote it, with hsts = true (the alpha.101 and .102 reports): set aside,
+# and a bare site-update is refused until the change names a lifetime, so health's fix names the
+# one that keeps what browsers were told, --hsts 1y, which serves the site again.
+cpost /v1/sites "{\"domain\":\"oldhsts.wild.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-wild/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-wild/key.pem\"},\"hsts\":\"1y\",\"user\":null,\"app\":\"static\",\"root\":\"$ROOT/bench/www\",\"listen_plain\":\"127.0.0.1:8498\",\"listen_tls\":\"127.0.0.1:8497\",\"dry_run\":true,\"confirm\":true,\"reason\":\"old\"}" > /dev/null
+python3 - "$ROOT" <<'PYT'
+import json, re, sys
+root = sys.argv[1]
+text = json.load(open(f"{root}/bench/tmp/ctl-reply.json"))["would_write"]
+first, rest = text.split("\n", 1)
+first = re.sub(r',"hsts_(since|held_until)":[0-9.e+]+', "", first.replace('"hsts":"1y"', '"hsts":true'))
+rest = re.sub(r'(?m)^hsts = "1y".*$', "hsts = true   # Strict-Transport-Security on every HTTPS answer, a year (docs/redirects.md 4)", rest)
+open(f"{root}/bench/tmp/sites.d/oldhsts.wild.test.toml", "w").write(first + "\n" + rest)
+PYT
+cpost /v1/reload '{"confirm":true,"reason":"old"}' > /dev/null
+ohs() { curl -sk -o /dev/null -w '%{http_code}' --resolve oldhsts.wild.test:8497:127.0.0.1 https://oldhsts.wild.test:8497/ 2>/dev/null; }
+check "site-update: a managed file written with hsts = true is set aside; health names --hsts 1y, the change a bare site-update asks for, which serves the site with the year it meant" \
+  "000 yes 400 200 200 max-age=31536000 1" \
+  "$(ohs) $(curl -sS --unix-socket $CS http://control/v1/health | grep -q 'agensio ctl site-update oldhsts.wild.test --hsts 1y --yes' && echo yes || echo no) $(cpost /v1/sites/oldhsts.wild.test '{"confirm":true,"reason":"old"}') $(cpost /v1/sites/oldhsts.wild.test '{"hsts":"1y","confirm":true,"reason":"old"}') $(ohs) $(curl -sk -D - -o /dev/null --resolve oldhsts.wild.test:8497:127.0.0.1 https://oldhsts.wild.test:8497/ | tr -d '\r' | sed -n 's/^[Ss]trict-[Tt]ransport-[Ss]ecurity: //p') $(grep -c '^hsts = "1y"' bench/tmp/sites.d/oldhsts.wild.test.toml)"
+cpost /v1/sites/oldhsts.wild.test/delete '{"confirm":true,"reason":"old"}' > /dev/null
+rm -f bench/tmp/sites.d/oldhsts.wild.test.toml bench/tmp/sites.d/oldhsts.wild.test.toml.bak
 # A hand-written file set aside (alpha.80, the alpha.78 report's note): site-update says why it
 # cannot help, naming the file and the loader's error, where it answered "no such site".
 printf '[[site]]\nserver_name = ["hand.wild.test"]\nlisten = ["127.0.0.1:8464"]\nredirect = "https"\n' > bench/tmp/sites.d/hand.wild.test.toml
