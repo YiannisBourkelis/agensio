@@ -215,14 +215,7 @@ std::vector<CanonicalProbe> hsts_probes(const Config& cfg, const TlsFacts& tls, 
         const auto st = tls.served.find(s.tls->cert.string() + '\n' + s.tls->key.string());
         if (st == tls.served.end() || !st->second.present || st->second.placeholder || st->second.not_before <= 0 || now - st->second.not_before < 7 * 86400)
             continue;
-        CanonicalProbe p;
-        p.site = name;
-        p.canonical = s.canonical_redirect ? s.canonical : name;  // another name is redirected before the application sees it
-        p.app = s.app;
-        p.names = s.server_names;
-        p.tls = true;
-        probe_address(s, p);
-        out.push_back(std::move(p));
+        if (auto p = application_hsts_probe(s)) out.push_back(std::move(*p));
     }
 #else
     (void)cfg;
@@ -230,6 +223,23 @@ std::vector<CanonicalProbe> hsts_probes(const Config& cfg, const TlsFacts& tls, 
     (void)now;
 #endif
     return out;
+}
+
+std::optional<CanonicalProbe> application_hsts_probe(const SiteConfig& s) {
+#ifdef AGENSIO_HAS_TLS
+    if (!s.tls || s.app.empty() || s.app == "static" || s.listen.empty() || s.server_names.empty() || s.server_names.front() == "*") return std::nullopt;
+    CanonicalProbe p;
+    p.site = s.server_names.front();
+    p.canonical = s.canonical_redirect ? s.canonical : p.site;  // another name is redirected before the application sees it
+    p.app = s.app;
+    p.names = s.server_names;
+    p.tls = true;
+    probe_address(s, p);
+    return p;
+#else
+    (void)s;
+    return std::nullopt;
+#endif
 }
 
 void run_hsts_probes(const std::vector<CanonicalProbe>& probes, int timeout_ms) {

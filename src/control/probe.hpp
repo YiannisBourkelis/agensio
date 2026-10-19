@@ -43,6 +43,11 @@ std::vector<Finding> run_canonical_probes(const std::vector<CanonicalProbe>& pro
 // week, nothing noted yet) once for its home page; the server's own request path notes the field.
 std::vector<CanonicalProbe> hsts_probes(const Config& cfg, const TlsFacts& tls, std::time_t now);
 void run_hsts_probes(const std::vector<CanonicalProbe>& probes, int timeout_ms = 3000);
+// The way back (docs/redirects.md 4.5, the alpha.102 report): before a managed site's false clears
+// its HSTS, its application is asked for its home page once, so one that sends its own (which the
+// request path then notes) is handed over to rather than cleared; none for a site without TLS or an
+// application.
+std::optional<CanonicalProbe> application_hsts_probe(const SiteConfig& s);
 
 // response_headers_suggested (docs/headers.md 7, alpha.94): the fields the baseline leaves to the owner
 // (4.1: a frame field, a CSP, Permissions-Policy, nosniff) a live HTTPS site's home page goes without,

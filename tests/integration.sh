@@ -1930,6 +1930,15 @@ if [ -n "$PHPFPM" ]; then
     "hsts_from_application" \
     "$(curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); print(",".join(sorted(f["code"] for f in d["findings"] if f.get("site") == "ap.old.test" and f["code"].startswith("hsts_"))) or "none")')"
   cpost /v1/sites/ap.old.test/delete '{"confirm":true,"reason":"probe"}' > /dev/null
+  # The way back on an application that sends its own HSTS, before any visitor (the alpha.102 report:
+  # after a restart nothing was noted, so false cleared, and max-age=0 replaced the application's
+  # two-year field on every answer): the control plane asks the application for / first, off the
+  # workers, and hands over.
+  cpost /v1/sites "{\"domain\":\"hstsoff.wild.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-wild/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-wild/key.pem\"},\"hsts\":\"1w\",\"user\":null,\"app\":\"php\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"root\":\"$ROOT/tests/hstsapp\",\"listen_plain\":\"127.0.0.1:8495\",\"listen_tls\":\"127.0.0.1:8496\",\"confirm\":true,\"reason\":\"handover\"}" > /dev/null
+  check "hsts: false on a site whose application sends its own, before any visitor: the application is asked first and handed over to, never cleared" \
+    "1 yes max-age=63072000; includeSubDomains" \
+    "$("$BIN" ctl site-update hstsoff.wild.test --no-hsts --yes --reason handover --socket $CS > bench/tmp/hstsoff.txt 2>&1; grep -c '^hsts = false' bench/tmp/sites.d/hstsoff.wild.test.toml) $(grep -q "the application's own Strict-Transport-Security: max-age=63072000; includeSubDomains now goes out unchanged" bench/tmp/hstsoff.txt && echo yes || echo no) $(curl -sk -D - -o /dev/null --resolve hstsoff.wild.test:8496:127.0.0.1 https://hstsoff.wild.test:8496/ | tr -d '\r' | sed -n 's/^[Ss]trict-[Tt]ransport-[Ss]ecurity: //p')"
+  cpost /v1/sites/hstsoff.wild.test/delete '{"confirm":true,"reason":"handover"}' > /dev/null
   # response_headers_suggested (alpha.94, docs/headers.md 7): health asks a live HTTPS site's home page
   # (a certificate a month old) and names the offered fields it goes without; a rule that sends one
   # takes it off, response_headers_offer_declined records a no, which path_check's offer honours too;

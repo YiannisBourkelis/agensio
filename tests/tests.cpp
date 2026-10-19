@@ -4092,6 +4092,15 @@ static void test_control_sites() {
         SiteSpec ap0 = base;
         (void)at(R"({"hsts":"1y"})", ap0, t0);
         CHECK(at(R"({"hsts":0})", ap0, t0 + 50, app).first.empty() && ap0.hsts == "0" && ap0.hsts_held_until == t0 + 50 + 2 * year);
+        // Seen only once the clearing had begun (the alpha.102 report: after a restart nothing was
+        // noted, so false cleared and then refused the hand-over health named): false hands over at
+        // once, however early, since the application's own field keeps browsers to HTTPS.
+        SiteSpec late = base;
+        (void)at(R"({"hsts":"1w"})", late, t0);
+        CHECK(at(R"({"hsts":false})", late, t0 + 10).first.empty() && late.hsts == "0");  // nothing seen: clearing
+        auto [e6, n6] = at(R"({"hsts":false})", late, t0 + 20, app);
+        CHECK(e6.empty() && late.hsts.empty() && late.hsts_decided && late.hsts_held_until == t0 + 50 + 2 * year &&
+              n6.find("max-age=63072000; includeSubDomains now goes out unchanged") != npos);
         // The ramp (docs/redirects.md 4.4): since when the lifetime sent now has been sent; the same
         // value again (another spelling of it too) or another field keeps the date; turning
         // includeSubDomains on with more than five minutes says the usual stages.
@@ -7772,6 +7781,15 @@ static void test_served_certificates() {
         CHECK(hp.size() == 1 && hp[0].site == "app.test" && hp[0].canonical == "www.app.test" && hp[0].tls && hp[0].host == "127.0.0.1");
         tf.served["/c.pem\n/k.pem"].not_before = t - 3 * 86400;  // a week is not up
         CHECK(control::hsts_probes(hc, tf, t).empty());
+        // Before a managed site's false clears its HSTS (docs/redirects.md 4.5): its application is
+        // asked for its home page by the name it answers, whatever its certificate's age or hsts line;
+        // a static site has none to ask, nor a site without TLS.
+        const auto ap = control::application_hsts_probe(c);
+        CHECK(ap && ap->site == "decided.test" && ap->canonical == "www.app.test" && ap->tls && ap->host == "127.0.0.1" && ap->port == "443");
+        CHECK(!control::application_hsts_probe(b));
+        SiteConfig plain = a;
+        plain.tls.reset();
+        CHECK(!control::application_hsts_probe(plain));
     }
 #endif
 }

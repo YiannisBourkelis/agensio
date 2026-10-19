@@ -464,10 +464,15 @@ nothing would end the HSTS of the browsers that have not come back. After the da
 certificate findings stay errors (4.2), since those browsers still refuse a click past a certificate
 error; after it they are warnings again.
 
-When the site's application sends its own `Strict-Transport-Security` (seen on its answers since the
-server started: Rails' `force_ssl`, Kanboard's `ENABLE_HSTS`), `false` hands over to it at once
-instead: the application's field goes out unchanged, `hsts_note` says so, and its lifetime counts for
-a later clearing. Ending HSTS for such a site is the application's setting first, then `hsts = 0`.
+When the site's application sends its own `Strict-Transport-Security` (Rails' `force_ssl`, Kanboard's
+`ENABLE_HSTS`), `false` hands over to it at once instead: the application's field goes out unchanged,
+`hsts_note` says so, and its lifetime counts for a later clearing. agensio knows from the application's
+answers since the server started; when none carried the field (after every restart), the control
+plane first asks the application for `/` through the site's own listener, off the workers, as health's
+probe does (0.1.0-alpha.103, the alpha.102 report: until then `false` cleared, and `max-age=0` replaced
+the application's two-year field on every answer). An application seen sending its own only once a
+clearing has begun is handed over to by the next `false`, whatever the date. Ending HSTS for such a
+site is the application's setting first, then `hsts = 0`.
 
 A hand-written `hsts = 0` has no history: agensio sends it for as long as the file says, and health
 says nothing about it.

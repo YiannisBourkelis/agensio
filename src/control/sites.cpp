@@ -785,7 +785,13 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
                 error = "hsts: true named no lifetime (it meant a year): give the lifetime, \"1y\" (or \"1w\" first); " + forms;
                 return needs;
             }
-            if (clearing) {
+            if (clearing && !ctx.application_hsts.empty()) {  // seen once the clearing had begun: hand over now
+                hold();
+                ctx.note = "the application's own Strict-Transport-Security: " + ctx.application_hsts + " now goes out unchanged, so browsers "
+                           "keep to HTTPS for its lifetime; to end HSTS for the site, the application's own setting changes too, then hsts: 0 "
+                           "has browsers forget it";
+                off();
+            } else if (clearing) {
                 if (ctx.now < spec.hsts_held_until) {
                     error = "hsts: the site sends max-age=0 so that each browser that visits forgets its HSTS, and one that saw a lifetime may hold it "
                             "until " + utc_minute(spec.hsts_held_until) + ": turned off before then, nothing would end it for the browsers that "

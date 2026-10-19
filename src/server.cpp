@@ -916,6 +916,15 @@ void Server::health_async(std::function<void(json::Value)> done) {
     }).detach();
 }
 
+// A managed site's false asks its application first (docs/redirects.md 4.5): the same requests,
+// off the workers, the continuation posted back to worker 0, where the control socket lives.
+void Server::probe_async(std::vector<control::CanonicalProbe> probes, std::function<void()> done) {
+    std::thread([this, probes = std::move(probes), done = std::move(done)] {
+        control::run_hsts_probes(probes);
+        asio::post(workers_[0]->ctx, done);
+    }).detach();
+}
+
 json::Value Server::health_with(const std::vector<control::Finding>& more) {
 #ifdef _WIN32
     const bool as_root = false;

@@ -705,10 +705,7 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
         upload_delete(s, name, what);
         return false;
     }
-    if (action.empty()) {
-        site_update(s, name, body, what);
-        return false;
-    }
+    if (action.empty()) return site_update(s, name, body, what, done);
     if (action == "renew") {
         std::string error, message;
         const bool ok = backend_->renew_certificate(name, error, message);
@@ -1583,7 +1580,8 @@ void ControlHandler::finish_pool(Stream& s, const control::SiteSpec& spec, const
     (void)cfg;
 }
 
-void ControlHandler::site_update(Stream& s, std::string_view name, const json::Value& body, std::string_view what) {
+bool ControlHandler::site_update(Stream& s, std::string_view name, const json::Value& body, std::string_view what, std::function<void()> finish,
+                                 bool probed) {
     const Config& cfg = backend_->running();
     const SiteConfig* existing = control::find_site(cfg, name);
     // A managed file the running configuration set aside (an earlier version wrote a form this one
@@ -1594,10 +1592,10 @@ void ControlHandler::site_update(Stream& s, std::string_view name, const json::V
         if (const Config::HeldBack* h = control::held_back_named(cfg, name)) {
             reply(s, 409, json::Value::object().set("error", "the site's file is set aside and not managed by agensio ctl: fix it by hand (agensio -t names the error), then reload")
                               .set("file", h->file).set("detail", h->error));
-            return;
+            return false;
         }
         reply(s, 404, json::Value::object().set("error", "no such site").set("site", std::string(name)));
-        return;
+        return false;
     }
     control::SiteSpec spec;
     const auto file = existing ? control::site_file(cfg, existing->server_names.front()) : held;
@@ -1606,7 +1604,7 @@ void ControlHandler::site_update(Stream& s, std::string_view name, const json::V
                           .set("file", file.string())
                           .set("hint", "edit the file by hand and reload; a site the tools manage takes root's extra locations in " +
                                            std::string(kRootAdditionsSuffix) + " beside its file instead (site_show: root_additions), so it stays managed"));
-        return;
+        return false;
     }
     std::string error;
     // The clock, and the HSTS the site's application sent since the start (the request path's notes):
@@ -1621,19 +1619,32 @@ void ControlHandler::site_update(Stream& s, std::string_view name, const json::V
             ctx.application_until = until;
         }
     }
+    // false on a site that sends HSTS, with nothing of its application's seen since the start (the
+    // alpha.102 report: after every restart): its application is asked for / first, off the workers,
+    // so one that sends its own is handed over to, never cleared with max-age=0 over its field.
+    if (!probed && finish && existing && ctx.application_hsts.empty() && body["hsts"].type() == json::Value::Type::boolean &&
+        !body["hsts"].boolean() && (!spec.hsts.empty() || spec.hsts_unnamed)) {
+        if (std::optional<control::CanonicalProbe> probe = control::application_hsts_probe(*existing)) {
+            backend_->probe_async({std::move(*probe)}, [this, &s, name = std::string(name), body, what = std::string(what), finish] {
+                site_update(s, name, body, what, nullptr, true);
+                finish();
+            });
+            return true;
+        }
+    }
     const auto needs = control::apply_request(body, cfg, spec, error, ctx);
     if (!error.empty()) {
         reply(s, 400, json::Value::object().set("error", error));
-        return;
+        return false;
     }
     if (!needs.empty()) {
         reply(s, 422, json::Value::object().set("error", "decisions needed").set("needs", decisions_json(needs)).set("spec", spec.to_json()));
-        return;
+        return false;
     }
     json::Value warnings = json::Value::array();
     if (json::Value refusal = auth_users_needed(spec, cfg, backend_->provision_available(), warnings); !refusal.is_null()) {
         reply(s, 409, refusal);
-        return;
+        return false;
     }
     const auto problems = control::preflight(spec, cfg, backend_->privileged());
     bool blocking = false;
@@ -1646,7 +1657,7 @@ void ControlHandler::site_update(Stream& s, std::string_view name, const json::V
                           .set("would_write", control::render_site(spec, now_stamp())).set("problems", problems_json(problems))
                           .set("run_as_root", commands_of(problems, false)).set("spec", spec.to_json()).set("warnings", warnings)
                           .set("hsts_note", ctx.note.empty() ? json::Value() : json::Value(ctx.note)));
-        return;
+        return false;
     }
     json::Value done = json::Value::array();
     std::vector<control::Problem> remaining;
@@ -1674,18 +1685,18 @@ void ControlHandler::site_update(Stream& s, std::string_view name, const json::V
     if (blocking) {
         reply(s, 409, json::Value::object().set("error", "prerequisites missing").set("waiting", true)
                           .set("problems", problems_json(remaining)).set("run_as_root", commands_of(remaining, true)).set("done", done));
-        return;
+        return false;
     }
     if (!control::write_site_file(file, control::render_site(spec, now_stamp()), error)) {
         reply(s, 500, json::Value::object().set("error", error));
-        return;
+        return false;
     }
     if (!backend_->reload_now(error, file.string())) {  // refused too when the changed file would be set aside
         std::error_code ec;
         std::filesystem::rename(file.string() + ".bak", file, ec);
         audit_peer(s, what, "refused: " + error);
         reply(s, 409, json::Value::object().set("error", "the change did not validate; previous file restored").set("detail", error));
-        return;
+        return false;
     }
     audit_peer(s, what, "updated " + file.string());
     json::Value done_now = done;
@@ -1699,6 +1710,7 @@ void ControlHandler::site_update(Stream& s, std::string_view name, const json::V
     if (!ctx.note.empty()) answer.set("hsts_note", ctx.note);  // what the change did to the HSTS browsers hold (4.5)
     add_redirect_notes(answer, backend_->running(), spec.domain);
     reply(s, 200, answer);
+    return false;
 }
 
 void ControlHandler::site_toggle(Stream& s, std::string_view name, std::string_view action, std::string_view what) {

@@ -11,6 +11,7 @@
 #include <string_view>
 
 #include "config.hpp"
+#include "control/probe.hpp"
 #include "control/roles.hpp"
 #include "control/sites.hpp"
 #include "core/stream.hpp"
@@ -32,6 +33,10 @@ struct ControlBackend {
     // Health with what only a request to the sites shows (control/probe.hpp): the requests on a thread
     // of their own, the answer posted back to the control socket's worker.
     virtual void health_async(std::function<void(json::Value)> done) = 0;
+    // The home pages of `probes` asked the same way, on a thread of their own; `done` then runs on
+    // worker 0. What the answers carry is noted by the request path (an application's own HSTS,
+    // docs/redirects.md 4.5), which the caller reads afterwards.
+    virtual void probe_async(std::vector<control::CanonicalProbe> probes, std::function<void()> done) = 0;
     // Mutations (F3). Each returns false with `error` when refused; nothing changed then.
     // `must_load`: the site file the change wrote; the reload is refused if that file would be
     // set aside (docs/design-site-operations.md 26), so a change is never reported done for a
@@ -114,7 +119,10 @@ private:
     bool require(Stream& s, Role needed, std::string_view command);
     bool mutate(Stream& s, WorkerState& ws, std::string_view path, std::function<void()>& done);
     void site_create(Stream& s, const json::Value& body, std::string_view reason);
-    void site_update(Stream& s, std::string_view name, const json::Value& body, std::string_view reason);
+    // True when the reply comes later, after which `finish` runs (an application asked first, 4.5);
+    // `probed` when it was asked already.
+    bool site_update(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> finish,
+                     bool probed = false);
     void site_toggle(Stream& s, std::string_view name, std::string_view action, std::string_view reason);
     void site_install(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> done);
     void site_copy(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> done);

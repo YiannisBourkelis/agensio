@@ -2134,7 +2134,8 @@ are errors ([redirects.md](redirects.md) 4.2). On a managed site that sends a li
 renders `hsts = 0` until the last lifetime it sent has ended (the answer's `hsts_note`, the file's
 comment and health's `hsts_clearing` name the date; `hsts_cleared` after it), refuses a second `false`
 before that date and writes `hsts = false` after it; when its application sends its own HSTS, `false`
-hands over to it at once ([redirects.md](redirects.md) 4.5, 0.1.0-alpha.102).
+hands over to it at once, the application asked for `/` first when none of its answers was seen since
+the start ([redirects.md](redirects.md) 4.5, 0.1.0-alpha.102 and .103).
 
 Rules checked by `agensio -t`: `tls = "auto"` needs `[server] acme`; `server_name` must
 list real host names (no `*`, no wildcards: those need DNS-01, which is not in this

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.0-alpha.103
+
+- **`false` on a site whose application sends its own HSTS hands over after a restart too** (the
+  alpha.102 report). agensio knew an application's `Strict-Transport-Security` only from its answers
+  since the start, so after every restart, upgrades included, `false` (`site_update`, `--no-hsts`) on a
+  managed application site that sends HSTS began a clearing, and `max-age=0` replaced the application's
+  own field on every answer, so each returning browser forgot an HSTS the application still meant; a
+  second `false` was then refused although health's `hsts_narrows_application` named it as the fix.
+  When nothing of the application's was seen since the start, the control plane now asks it for `/`
+  through the site's own listener first, on a thread as health's probe does (the request path notes the
+  field), and hands over when it sends one; an application seen only once a clearing has begun is handed
+  over to by the next `false`, whatever the date. The integration check fails before (`hsts = 0`,
+  `max-age=0` served) and passes; unit tests for the hand-over during a clearing and the probe;
+  `docs/redirects.md` 4.5, `docs/configuration.md` 14, the MCP text.
+
 ## 0.1.0-alpha.102 (2026-10-19)
 
 - **`includeSubDomains` in stages: health names the next one** (hstspreload.org's deployment advice:
