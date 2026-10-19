@@ -2,6 +2,17 @@
 
 ## 0.1.0-alpha.103
 
+- **`logs_query` and health's `recent_errors` read the rotated logs** (the alpha.101 report). They read
+  only the current files, so after the nightly rotation (`daily`, `delaycompress`) a window reaching
+  back before it held only the hours since, with `truncated: false` and nothing said: `since: "12h"` at
+  08:13 gave lines from 00:51 on, and health's "errors in the last 24 hours" counted since midnight. A
+  query now reads on into `FILE.1`, then `FILE.2.gz` and older (through zlib), newest first, until
+  `since` or the line limit, up to 8 MB of text and 64 MB inflated per log, on a thread rather than
+  worker 0; `files` lists every file read, each source its `rotated` ones, and `incomplete` says from
+  when the lines go back and why when that is later than asked (nothing older kept, the read limit, no
+  zlib in the build). `recent_errors` reads the `.1` (plain, on the worker). Unit test and integration
+  check failing before; `docs/configuration.md` 8, `docs/mcp.md`, the MCP text of `logs_query`.
+
 - **`site_show` shows `hsts`** (the alpha.101 and .102 reports: an agent could not see what a site
   commits browsers to before proposing a change). `site_show` and `agensio ctl site NAME` carry `hsts`:
   `state` (`on`, `clearing`, `cleared`, `off` for a decided no, `none`), the field sent with `max_age`

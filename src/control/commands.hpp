@@ -30,11 +30,26 @@ struct LogQuery {
     int status_min = 500;          // access logs: lines with this status or above (0 = all)
     std::size_t limit = 200;       // lines returned (the newest)
     std::size_t max_bytes = 2 * 1024 * 1024;  // read per file, from the end
+    // The rotated files read on when `since` reaches past the current file's first line (the
+    // alpha.101 report): FILE.1 to FILE.N, plain or .gz as logrotate leaves them; `inflate` false
+    // reads no .gz (health, on the worker).
+    int rotated_files = 14;
+    bool inflate = true;
 };
 
-// The newest matching lines of `file`, chronological. `truncated` when the byte cap hit.
-void scan_log(const std::filesystem::path& file, std::string_view source, const LogQuery& q,
-              std::vector<LogLine>& out, bool& truncated);
+// What one log's reading covered: complete when `since` (or the line limit) was reached, else from
+// when its lines go back (`oldest`) and why no further (`reason`); the rotated files read.
+struct LogCoverage {
+    bool complete = true;
+    std::time_t oldest = 0;
+    std::string reason;
+    std::vector<std::string> rotated;
+};
+
+// The newest matching lines of `file` and of its rotated files, chronological. `truncated` when
+// the byte cap of the current file hit.
+LogCoverage scan_log(const std::filesystem::path& file, std::string_view source, const LogQuery& q,
+                     std::vector<LogLine>& out, bool& truncated);
 json::Value logs(const Config& cfg, const LogQuery& q);
 // The access-log status filter of a logs query: "all", a class ("5xx", "4xx": that class and
 // above), or a status ("404": that status and above); "" leaves `min` as it is. False for a

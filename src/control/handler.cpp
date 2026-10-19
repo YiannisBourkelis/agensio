@@ -421,8 +421,16 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
             reply(s, 400, json::Value::object()
                               .set("error", "status must be 5xx (the default), another class such as 4xx (that class and above), all, or a status such as 404 (that status and above)")
                               .set("status", status));
-        else
+        else if (!done)
             reply(s, 200, backend_->logs(req.target));
+        else {
+            // On a thread: a window across the rotation reads the rotated files (the alpha.101 report).
+            backend_->logs_async(std::string(req.target), [this, &s, done](json::Value v) {
+                reply(s, 200, v);
+                done();
+            });
+            return true;
+        }
     } else if (path == "/v1/presets") {
         reply(s, 200, preset_catalog());
     } else if (path == "/v1/uploads") {

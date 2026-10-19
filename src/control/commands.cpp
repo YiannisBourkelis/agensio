@@ -27,6 +27,10 @@
 #include <set>
 #include <sstream>
 
+#ifdef AGENSIO_HAS_ZLIB
+#include <zlib.h>
+#endif
+
 #include "services/acme.hpp"
 #include "services/appenv.hpp"
 #include "services/certificates.hpp"
@@ -46,31 +50,79 @@ std::string lower(std::string_view s) {
 
 }  // namespace
 
-void scan_log(const fs::path& file, std::string_view source, const LogQuery& q, std::vector<LogLine>& out,
-              bool& truncated) {
+namespace {
+
+// One file's newest `max` bytes, the partial first line dropped when it was cut; false when it
+// cannot be opened.
+bool read_tail(const fs::path& file, std::size_t max, std::string& buf, bool& cut) {
+    cut = false;
     std::ifstream in(file, std::ios::binary);
-    if (!in) return;
+    if (!in) return false;
     in.seekg(0, std::ios::end);
     const std::streamoff size = in.tellg();
     std::streamoff start = 0;
-    if (size > static_cast<std::streamoff>(q.max_bytes)) {
-        start = size - static_cast<std::streamoff>(q.max_bytes);
-        truncated = true;
+    if (size > static_cast<std::streamoff>(max)) {
+        start = size - static_cast<std::streamoff>(max);
+        cut = true;
     }
     in.seekg(start);
-    std::string buf(static_cast<std::size_t>(size - start), '\0');
+    buf.assign(static_cast<std::size_t>(size - start), '\0');
     in.read(buf.data(), static_cast<std::streamsize>(buf.size()));
     buf.resize(static_cast<std::size_t>(in.gcount()));
-    std::size_t end = buf.size();
-    if (start > 0) {  // drop the partial first line
+    if (cut) {
         const std::size_t nl = buf.find('\n');
-        if (nl == std::string::npos) return;
-        buf.erase(0, nl + 1);
-        end = buf.size();
+        buf.erase(0, nl == std::string::npos ? buf.size() : nl + 1);
     }
-    std::vector<LogLine> found;
+    return true;
+}
+
+#ifdef AGENSIO_HAS_ZLIB
+// A rotated file logrotate compressed: inflated from its start, its newest `keep` bytes kept, at
+// most `budget` bytes inflated in all (counted down); a file the budget does not reach the end of
+// is given up whole, since its newest part, the one next to the newer file, would be missing.
+enum class Inflated { whole, cut, budget, failed };
+Inflated read_gz_tail(const fs::path& file, std::size_t keep, std::size_t& budget, std::string& buf) {
+    gzFile f = gzopen(file.c_str(), "rb");
+    if (!f) return Inflated::failed;
+    std::string tail;
+    char chunk[65536];
+    Inflated result = Inflated::whole;
+    for (;;) {
+        if (budget == 0) {
+            result = Inflated::budget;
+            break;
+        }
+        const int n = gzread(f, chunk, static_cast<unsigned>(std::min<std::size_t>(sizeof chunk, budget)));
+        if (n < 0) {
+            result = Inflated::failed;
+            break;
+        }
+        if (n == 0) break;
+        budget -= static_cast<std::size_t>(n);
+        tail.append(chunk, static_cast<std::size_t>(n));
+        if (tail.size() > 2 * keep) tail.erase(0, tail.size() - keep);
+    }
+    gzclose(f);
+    if (result != Inflated::whole) return result;
+    if (tail.size() > keep) {
+        tail.erase(0, tail.size() - keep);
+        const std::size_t nl = tail.find('\n');
+        tail.erase(0, nl == std::string::npos ? tail.size() : nl + 1);
+        result = Inflated::cut;
+    }
+    buf = std::move(tail);
+    return result;
+}
+#endif
+
+// The matching lines of one file's text, newest first, at most `room`; `reached` once a line older
+// than `since` was met, `oldest` the oldest line's time.
+std::size_t scan_text(std::string_view buf, std::string_view source, const LogQuery& q, std::size_t room, std::vector<LogLine>& found,
+                      bool& reached, std::time_t& oldest) {
+    std::size_t added = 0;
+    std::size_t end = buf.size();
     int older = 0;
-    while (end > 0 && found.size() < q.limit) {
+    while (end > 0 && added < room) {
         if (buf[end - 1] == '\n') {  // the terminator of the line before
             --end;
             continue;
@@ -81,7 +133,9 @@ void scan_log(const fs::path& file, std::string_view source, const LogQuery& q, 
         end = begin;
         LogLine l;
         if (line.empty() || !parse_log_line(line, l)) continue;
+        if (oldest == 0 || l.time < oldest) oldest = l.time;
         if (q.since && l.time < q.since) {  // buffers of several workers may interleave a little
+            reached = true;
             if (++older > 50) break;
             continue;
         }
@@ -95,9 +149,92 @@ void scan_log(const fs::path& file, std::string_view source, const LogQuery& q, 
         }
         l.text = utf8_escaped(l.text);  // older files and the error log may hold a client's raw bytes
         found.push_back(std::move(l));
+        ++added;
+    }
+    return added;
+}
+
+// What the rotated files of one log may hold in all (the alpha.101 report): the text kept for
+// reading, and the bytes inflated to get it.
+constexpr std::size_t kRotatedKeep = 8 * 1024 * 1024;
+[[maybe_unused]] constexpr std::size_t kRotatedInflate = 64 * 1024 * 1024;
+
+}  // namespace
+
+LogCoverage scan_log(const fs::path& file, std::string_view source, const LogQuery& q, std::vector<LogLine>& out, bool& truncated) {
+    LogCoverage cov;
+    std::string buf;
+    bool cut = false;
+    if (!read_tail(file, q.max_bytes, buf, cut)) return cov;
+    truncated = truncated || cut;
+    std::vector<LogLine> found;  // newest first, across the files
+    bool reached = false;
+    std::time_t oldest = 0;
+    std::size_t total = scan_text(buf, source, q, q.limit, found, reached, oldest);
+    // On into the rotated files, newest first, while `since` lies further back than every line read
+    // (the alpha.101 report: a window across the nightly rotation was cut with nothing said).
+    std::string reason;
+    if (!reached && total < q.limit && q.since) {
+        if (cut) reason = "the read limit: the newest " + std::to_string(q.max_bytes / (1024 * 1024)) + " MB of the file";
+        std::size_t keep = kRotatedKeep;
+        [[maybe_unused]] std::size_t inflate = kRotatedInflate;
+        for (int i = 1; reason.empty(); ++i) {
+            if (i > q.rotated_files) {
+                reason = "older rotated files are not read here";
+                break;
+            }
+            const std::string plain = file.string() + "." + std::to_string(i);
+            const std::string gz = plain + ".gz";
+            std::error_code ec;
+            std::string text;
+            bool part = false;
+            std::string read;
+            if (fs::is_regular_file(plain, ec)) {
+                if (!read_tail(plain, std::min(keep, q.max_bytes), text, part)) {
+                    reason = plain + " could not be read";
+                    break;
+                }
+                read = plain;
+            } else if (fs::is_regular_file(gz, ec)) {
+                if (!q.inflate) {
+                    reason = "older lines are in " + gz + ", compressed, which is not read here";
+                    break;
+                }
+#ifdef AGENSIO_HAS_ZLIB
+                const Inflated r = read_gz_tail(gz, std::min(keep, q.max_bytes), inflate, text);
+                if (r == Inflated::failed) {
+                    reason = gz + " could not be read";
+                    break;
+                }
+                if (r == Inflated::budget) {
+                    reason = "the read limit: " + std::to_string(kRotatedInflate / (1024 * 1024)) + " MB of compressed logs inflated";
+                    break;
+                }
+                part = r == Inflated::cut;
+                read = gz;
+#else
+                reason = "older lines are in " + gz + ", compressed, and this build has no zlib";
+                break;
+#endif
+            } else {
+                reason = "nothing older is kept";
+                break;
+            }
+            cov.rotated.push_back(read);
+            keep -= std::min(keep, text.size());
+            total += scan_text(text, source, q, q.limit - total, found, reached, oldest);
+            if (reached || total >= q.limit) break;
+            if (part || keep == 0) reason = "the read limit: " + std::to_string(kRotatedKeep / (1024 * 1024)) + " MB of rotated logs";
+        }
+        if (!reached && total < q.limit && (oldest != 0 || cut)) {  // nothing ever logged is no gap
+            cov.complete = false;
+            cov.oldest = oldest;
+            cov.reason = reason;
+        }
     }
     std::reverse(found.begin(), found.end());
     out.insert(out.end(), found.begin(), found.end());
+    return cov;
 }
 
 // alpha.72 report: "5xx", the documented default given explicitly, went to atoi as 5, so every line
@@ -124,6 +261,21 @@ json::Value logs(const Config& cfg, const LogQuery& q) {
     json::Value files = json::Value::array();
     json::Value sources = json::Value::array();
     std::vector<std::string> seen;
+    std::string incomplete;  // the logs whose lines go back less far than `since` (the alpha.101 report)
+    auto covered = [&](const std::string& path, const LogCoverage& c, json::Value* src) {
+        for (const auto& r : c.rotated) files.push(r);
+        if (src && !c.rotated.empty()) {
+            json::Value rotated = json::Value::array();
+            for (const auto& r : c.rotated) rotated.push(r);
+            src->set("rotated", std::move(rotated));
+        }
+        if (c.complete) return;
+        if (src) {
+            if (c.oldest) src->set("from", static_cast<double>(c.oldest));
+            src->set("incomplete", c.reason);
+        }
+        incomplete += (incomplete.empty() ? "" : "; ") + path + (c.oldest ? ": lines from " + utc_minute(c.oldest) + " on: " : ": no line read: ") + c.reason;
+    };
     // Who writes into which access log. The [log] access default is the server-wide file:
     // every site without an access_log of its own writes there (the catch-all, the redirects,
     // scanners hitting the bare address), so its lines carry the source "access", never a
@@ -158,8 +310,8 @@ json::Value logs(const Config& cfg, const LogQuery& q) {
             for (const auto& n : *w) names.push(n);
             src.set("sites", std::move(names));
         }
+        covered(path, scan_log(path, source, q, lines, truncated), &src);
         sources.push(std::move(src));
-        scan_log(path, source, q, lines, truncated);
     };
     json::Value out = json::Value::object();
     if (q.site.empty()) {
@@ -207,7 +359,7 @@ json::Value logs(const Config& cfg, const LogQuery& q) {
             std::vector<LogLine> err;
             if (!cfg.log.error.empty() && cfg.log.error != "stderr") {
                 files.push(cfg.log.error);
-                scan_log(cfg.log.error, "error", q, err, truncated);
+                covered(cfg.log.error, scan_log(cfg.log.error, "error", q, err, truncated), nullptr);
             }
             for (auto& l : err)
                 if (l.text.find(s->server_names.front()) != std::string::npos) lines.push_back(std::move(l));
@@ -219,6 +371,7 @@ json::Value logs(const Config& cfg, const LogQuery& q) {
     out.set("sources", std::move(sources));
     out.set("since", static_cast<double>(q.since));
     out.set("truncated", truncated);
+    if (!incomplete.empty()) out.set("incomplete", incomplete);
     json::Value arr = json::Value::array();
     for (const auto& l : lines) {
         json::Value v = json::Value::object();
@@ -1954,6 +2107,8 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
     q.level = "error";
     q.since = now - 24 * 3600;
     q.limit = 1000;
+    q.rotated_files = 1;  // the .1 holds the day before the rotation (alpha.101 report); no inflating on the worker
+    q.inflate = false;
     std::vector<LogLine> lines;
     bool truncated = false;
     if (!running.log.error.empty() && running.log.error != "stderr") scan_log(running.log.error, "error", q, lines, truncated);

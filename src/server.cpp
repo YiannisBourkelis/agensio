@@ -872,7 +872,8 @@ json::Value Server::site(std::string_view name, bool& found) {
 
 json::Value Server::validate() { return control::validate(cfg_.config_path, cfg_, &gen_->cfg); }
 
-json::Value Server::logs(std::string_view target) {
+// The query of a logs request (the request target with its query string).
+static control::LogQuery log_query(std::string_view target) {
     control::LogQuery q;
     const std::time_t now = std::time(nullptr);
     q.site = control::query_value(target, "site");
@@ -883,7 +884,18 @@ json::Value Server::logs(std::string_view target) {
     control::status_filter(control::query_value(target, "status"), q.status_min);
     const std::string limit = control::query_value(target, "limit");
     if (!limit.empty()) q.limit = static_cast<std::size_t>(std::clamp(std::atol(limit.c_str()), 1L, 5000L));
-    return control::logs(gen_->cfg, q);
+    return q;
+}
+
+json::Value Server::logs(std::string_view target) { return control::logs(gen_->cfg, log_query(target)); }
+
+// Off the workers (the alpha.101 report): the generation is held for the thread, so a reload
+// meanwhile changes nothing it reads; the answer is posted back to worker 0.
+void Server::logs_async(std::string target, std::function<void(json::Value)> done) {
+    std::thread([this, gen = gen_, q = log_query(target), done = std::move(done)] {
+        json::Value v = control::logs(gen->cfg, q);
+        asio::post(workers_[0]->ctx, [v = std::move(v), done] { done(v); });
+    }).detach();
 }
 
 json::Value Server::health() { return health_with({}); }

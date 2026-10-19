@@ -7619,6 +7619,109 @@ static void test_hsts_clearing_health() {
     fs::remove_all(dir);
 }
 
+// A window across the nightly rotation (the alpha.101 report: logs_query read the current files only,
+// so a since before 00:51 was cut with truncated false and nothing said): the rotated files are read
+// on, .1 plain and .N.gz compressed, newest first, and an answer covering less than asked says from
+// when and why. Health's recent_errors reads the .1 too, so its 24 hours are 24 hours.
+static void test_rotated_logs() {
+    using namespace control;
+    namespace fs = std::filesystem;
+    constexpr auto npos = std::string::npos;
+    const std::time_t now = std::time(nullptr);
+    const fs::path dir = fs::temp_directory_path() / ("agensio-rotated-" + std::to_string(::getpid()));
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    auto stamp = [](std::time_t t) {  // the error log's own form, local time
+        std::tm tm{};
+        localtime_r(&t, &tm);
+        char b[32];
+        std::strftime(b, sizeof b, "%Y/%m/%d %H:%M:%S", &tm);
+        return std::string(b);
+    };
+    const fs::path log = dir / "error.log";
+    std::ofstream(log) << stamp(now - 3600) << " [error] current one\n";
+    std::ofstream(dir / "error.log.1") << stamp(now - 20 * 3600) << " [error] rotated one\n";
+#ifdef AGENSIO_HAS_ZLIB
+    {
+        gzFile g = gzopen((dir / "error.log.2.gz").c_str(), "wb");
+        const std::string t = stamp(now - 40 * 3600) + " [error] compressed one\n";
+        gzwrite(g, t.data(), static_cast<unsigned>(t.size()));
+        gzclose(g);
+    }
+#else
+    std::ofstream(dir / "error.log.2.gz") << "not read without zlib";
+#endif
+    auto scan = [&](LogQuery q, std::vector<LogLine>& out) {
+        bool truncated = false;
+        return scan_log(log, "error", q, out, truncated);
+    };
+    LogQuery q;
+    q.level = "error";
+    q.since = now - 2 * 86400;
+    {
+        std::vector<LogLine> out;
+        const LogCoverage c = scan(q, out);
+#ifdef AGENSIO_HAS_ZLIB
+        CHECK(out.size() == 3 && out[0].text.ends_with("compressed one") && out[1].text.ends_with("rotated one") && out[2].text.ends_with("current one"));
+        CHECK(c.rotated.size() == 2 && c.rotated[0].ends_with("error.log.1") && c.rotated[1].ends_with("error.log.2.gz") && !c.complete &&
+              c.oldest == now - 40 * 3600 && c.reason.find("nothing older is kept") != npos);
+#else
+        CHECK(out.size() == 2 && !c.complete && c.reason.find("zlib") != npos);
+#endif
+    }
+    q.since = now - 12 * 3600;  // within the current file and the .1's first line: complete, one line
+    {
+        std::vector<LogLine> out;
+        const LogCoverage c = scan(q, out);
+        CHECK(out.size() == 1 && out[0].text.ends_with("current one") && c.complete);
+    }
+#ifdef AGENSIO_HAS_ZLIB
+    q.since = now - 30 * 3600;  // reached inside the .2.gz
+    {
+        std::vector<LogLine> out;
+        const LogCoverage c = scan(q, out);
+        CHECK(out.size() == 2 && out[0].text.ends_with("rotated one") && c.complete);
+    }
+#endif
+    q.since = now - 2 * 86400;
+    q.rotated_files = 1;  // health's reading: the .1 only
+    {
+        std::vector<LogLine> out;
+        const LogCoverage c = scan(q, out);
+        CHECK(out.size() == 2 && !c.complete && c.oldest == now - 20 * 3600 && c.reason.find("not read here") != npos);
+    }
+    q.rotated_files = 14;
+    q.max_bytes = 20;  // the current file cut: the rest of it is a gap, so nothing older is read
+    {
+        std::vector<LogLine> out;
+        bool truncated = false;
+        const LogCoverage c = scan_log(log, "error", q, out, truncated);
+        CHECK(truncated && !c.complete && c.rotated.empty() && c.reason.find("read limit") != npos);
+    }
+    // logs() says it: the files read, and from when the error log's lines go back.
+    {
+        std::ofstream(dir / "r.toml") << "[log]\nerror = \"" << log.string() << "\"\naccess = \"off\"\n[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:8080\"]\nroot = \""
+                                      << dir.string() << "\"\n";
+        const Config cfg = load_config(dir / "r.toml");
+        LogQuery all;
+        all.level = "error";
+        all.since = now - 7 * 86400;
+        const json::Value r = logs(cfg, all);
+        bool listed = false;
+        for (const auto& f : r["files"].items()) listed = listed || f.str().ends_with("error.log.1");
+        const std::string inc = std::string(r.get("incomplete"));
+        CHECK(listed && inc.find("error.log: lines from ") != npos && inc.find(" UTC on") != npos);
+        CHECK(r["sources"].items().size() == 1 && r["sources"].items()[0]["from"].num() > 0 && !r["sources"].items()[0].get("incomplete").empty());
+        all.since = now - 6 * 3600;
+        CHECK(logs(cfg, all)["incomplete"].is_null());
+        // recent_errors: the last 24 hours reach into the .1
+        const auto f = health_findings(cfg, cfg, false, now);
+        const auto e = std::find_if(f.begin(), f.end(), [](const Finding& x) { return x.code == "recent_errors"; });
+        CHECK(e != f.end() && e->message.starts_with("2 error(s) in the last 24 hours"));
+    }
+    fs::remove_all(dir);
+}
+
 static void test_served_certificates() {
     using control::Finding;
     constexpr auto npos = std::string::npos;
@@ -11354,6 +11457,7 @@ int main() {
     test_tls_read();
     test_served_certificates();
     test_hsts_clearing_health();
+    test_rotated_logs();
     test_config_reference();
     test_config_reference_defaults();
     test_forwarded_lines();

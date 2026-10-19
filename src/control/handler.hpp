@@ -29,6 +29,9 @@ struct ControlBackend {
     virtual json::Value site(std::string_view name, bool& found) = 0;
     virtual json::Value validate() = 0;
     virtual json::Value logs(std::string_view target) = 0;  // the request target with its query
+    // The same on a thread of its own, `done` on worker 0: a window across the rotation reads and
+    // inflates the rotated files (the alpha.101 report), which must not hold up a worker.
+    virtual void logs_async(std::string target, std::function<void(json::Value)> done) = 0;
     virtual json::Value health() = 0;
     // Health with what only a request to the sites shows (control/probe.hpp): the requests on a thread
     // of their own, the answer posted back to the control socket's worker.

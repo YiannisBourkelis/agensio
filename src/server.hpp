@@ -296,6 +296,7 @@ private:
     json::Value health() override;
     void health_async(std::function<void(json::Value)> done) override;
     void probe_async(std::vector<control::CanonicalProbe> probes, std::function<void()> done) override;
+    void logs_async(std::string target, std::function<void(json::Value)> done) override;
     json::Value health_with(const std::vector<control::Finding>& more);
     bool reload_now(std::string& error, std::string_view must_load = {}) override { return reload(error, must_load); }
     std::vector<std::string> restart_pending() override { return control::restart_needed(gen_->cfg, cfg_); }
