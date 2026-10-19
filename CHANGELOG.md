@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.103
+## 0.1.0-alpha.103 (2026-10-19)
 
 - **`logs_query` and health's `recent_errors` read the rotated logs** (the alpha.101 report). They read
   only the current files, so after the nightly rotation (`daily`, `delaycompress`) a window reaching
