@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.105
+## 0.1.0-alpha.105 (2026-10-20)
 
 - **A clearing waits for what browsers received** (the alpha.104 report, item 1; RFC 6797 8.1: a browser
   holds the field it received last over HTTPS, for its `max-age` from then). The date until which a
