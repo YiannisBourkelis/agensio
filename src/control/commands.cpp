@@ -1950,6 +1950,70 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
                     "systemctl enable --now " + r->unit + " (root's; agensio does not start services)");
             }
         }
+        // What each site's application needs of its version (docs/design-php-versions.md 7, 9): the preset's
+        // table and what the installed release declares, against what that version's php-fpm loads.
+        {
+            const php::Exec exec = php::system_exec();
+            std::map<std::string, php::Loaded> loaded;
+            std::map<std::string, std::vector<std::string>> on_version;
+            for (const auto& s : running.sites) {
+                const php::Runtime* r = pool_runtime(runtimes, s.pool);
+                if (!r) continue;
+                const std::string name = s.server_names.front();
+                on_version[r->version].push_back(name);
+                auto it = loaded.find(r->version);
+                if (it == loaded.end()) it = loaded.emplace(r->version, php::loaded(*r, exec)).first;
+                const php::Loaded& l = it->second;
+                std::vector<std::string> dirs;
+                if (!s.project_root.empty()) dirs.push_back(s.project_root);
+                if (s.root != s.project_root) dirs.push_back(s.root);
+                const php::AppRequirements* table = php::app_requirements(s.app);
+                const php::Declared declared = php::declared_on_disk(dirs);
+                const std::string version = l.exact.empty() ? r->version : l.exact;
+                const php::RequirementCheck c = php::check_requirements(table, declared, version, l.modules, l.known);
+                if (!c.judged) continue;
+                const std::string what = s.app.empty() ? std::string("its application") : s.app;
+                auto list = [](const std::vector<std::string>& v) {
+                    std::string out;
+                    for (const auto& e : v) out += (out.empty() ? "" : ", ") + e;
+                    return out;
+                };
+                if (c.outside)
+                    add("warn", "php_version_unsupported_by_app", name, "site " + name + "'s " + what + " needs PHP " + c.range + ", and the site runs " + version,
+                        "site-update " + name + " --php-version with a version php_versions lists within it (the switch keeps the site up)");
+                if (!c.missing.empty())
+                    add("error", "php_extensions_missing", name,
+                        "site " + name + "'s " + what + " requires the PHP extension" + (c.missing.size() == 1 ? " " : "s ") + list(c.missing) +
+                            ", which PHP " + r->version + "'s php-fpm does not load: the pages that use " + (c.missing.size() == 1 ? "it" : "them") + " fail",
+                        "root installs " + std::string(c.missing.size() == 1 ? "it" : "them") + " for PHP " + r->version + " and reloads its php-fpm (" +
+                            reload_command(*r) + "), or the site moves to a version that loads " + (c.missing.size() == 1 ? "it" : "them") + " (php_versions)");
+                // Recommended only: the site runs without them, so said, never a warning that stays.
+                if (!c.missing_recommended.empty())
+                    add("info", "php_extensions_missing", name,
+                        "site " + name + "'s " + what + " recommends the PHP extension" + (c.missing_recommended.size() == 1 ? " " : "s ") + list(c.missing_recommended) +
+                            ", which PHP " + r->version + "'s php-fpm does not load",
+                        "root installs " + std::string(c.missing_recommended.size() == 1 ? "it" : "them") + " for PHP " + r->version + " and reloads its php-fpm (" +
+                            reload_command(*r) + ")");
+            }
+            // PHP's own support for each version that runs sites (php.net's release table, step 1): past
+            // active support info, past security support a warning, more than a year past it an error.
+            for (const auto& [v, names] : on_version) {
+                const std::string status = php::support_status(v, now);
+                const php::Release* rel = php::release(v);
+                if (!rel || (status != "security" && status != "eol")) continue;
+                std::tm until{};
+                std::sscanf(rel->security_until, "%d-%d-%d", &until.tm_year, &until.tm_mon, &until.tm_mday);
+                until.tm_year -= 1900;
+                until.tm_mon -= 1;
+                const bool long_past = status == "eol" && now - timegm(&until) > 365 * 86400;
+                std::string sites;
+                for (const auto& n : names) sites += (sites.empty() ? "" : ", ") + n;
+                add(status == "security" ? "info" : long_past ? "error" : "warn", "php_version_eol", "",
+                    status == "security" ? "PHP " + v + " gets security fixes only, until " + rel->security_until + " (" + sites + ")"
+                                         : "PHP " + v + " has had no security fixes since " + std::string(rel->security_until) + " (" + sites + ")",
+                    "move the sites to a supported version php_versions lists (site-update NAME --php-version; the switch keeps each site up)");
+            }
+        }
         // The sites that follow the newest installed version: a newer PHP installed moves them at the
         // next reload, a step better taken on purpose.
         if (running.php_version.empty() && !running.php_newest.empty()) {

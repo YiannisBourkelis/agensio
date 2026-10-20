@@ -61,12 +61,12 @@ void usage(std::ostream& out = std::cout) {
                  "                      site-create --domain D [--alias A]... [--https auto|none] [--cert F --key F]\n"
                  "                           [--user U|--no-user] [--group G] [--app static|php|laravel|drupal|wordpress|grav|proxy|rails|redmine|django|wagtail|node]\n"
                  "                           [--root DIR] [--upstream URL] [--project NAME] [--entry FILE] [--php-socket S] [--php-children N]\n"
-                 "                           [--php-version V] [--cut-requests]\n"
+                 "                           [--php-version V] [--cut-requests] [--ignore-requirements]\n"
                  "                           [--no-redirect] [--hsts LIFETIME [--hsts-subdomains]|--no-hsts] [--canonical NAME] [--listen-plain A] [--listen-tls A]\n"
                  "                      site-update NAME (same flags) | site-disable NAME | site-enable NAME |\n"
                  "                      site-delete NAME [--files] | site-restore ENTRY | trash-delete ENTRY | trash | cert-renew NAME |\n"
                  "                      site-install NAME [--url https://... | --file UPLOAD | --version V] [--sha256 H]\n"
-                 "                           [--path SUB] [--create-path] [--strip 0|1] [--dry-run]\n"
+                 "                           [--path SUB] [--create-path] [--strip 0|1] [--dry-run] [--ignore-requirements]\n"
                  "                      site-copy NAME --from SUB --to SUB [--overwrite] [--dry-run]\n"
                  "                      site-task NAME TASK [--param KEY=VALUE]... [--dry-run] (site-tasks NAME lists them)\n"
                  "                      site-env-set NAME [--set KEY=VALUE]... [--unset KEY]... [--generate KEY]...\n"
@@ -370,6 +370,9 @@ int main(int argc, char** argv) {
                              "        --cut-requests (site-create, site-update, reload): a site moving to another PHP version goes ahead\n"
                              "                    though a version's php-fpm.conf lacks process_control_timeout, so its reload cuts the PHP\n"
                              "                    requests in flight on that version's sites; without it such a switch is refused with the line\n"
+                             "        --ignore-requirements (site-create, site-update, site-install, reload): go ahead though the PHP\n"
+                             "                    version lacks what the application requires (its range, a required extension), once\n"
+                             "                    the user agreed; without it a site's switch or install is refused, naming what is missing\n"
                              "        site-update NAME (same options as site-create); --dry-run on either checks and shows the\n"
                              "                    file without writing, listing every problem at once; it writes the file in this\n"
                              "                    version's form, with or without options, also when the server set the file aside\n"
@@ -458,7 +461,10 @@ int main(int argc, char** argv) {
                              "                    [--path SUB] [--create-path] [--strip 0|1] [--dry-run]: puts an application's files\n"
                              "                    into the site's (empty) directory as the site's account; no source = the preset's\n"
                              "                    official archive. A plugin or theme: --path wp-content/plugins/NAME --create-path\n"
-                             "                    makes the missing directories (as the site's account, below the site's directory)\n"
+                             "                    makes the missing directories (as the site's account, below the site's directory).\n"
+                             "                    On a PHP site a release the site's PHP cannot run (outside the range its composer.json\n"
+                             "                    or version.php declares, a required extension missing) is refused and taken out again;\n"
+                             "                    --ignore-requirements installs it anyway\n"
                              "        site-copy NAME --from SUB --to SUB [--overwrite] [--dry-run]: copies one of the site's files\n"
                              "                    to another path of the same site, as the site's account (drop-ins such as\n"
                              "                    wp-content/db.php from a plugin's db.copy); the destination's directory must exist\n"
@@ -552,6 +558,7 @@ int main(int argc, char** argv) {
                 else if (b == "--no-user") body.set("no_user", true);
                 else if (b == "--dry-run") body.set("dry_run", true);
                 else if (b == "--cut-requests") body.set("cut_requests", true);
+                else if (b == "--ignore-requirements") body.set("ignore_requirements", true);
                 else if (b == "--group") field("group");
                 else if (b == "--app") field("app");
                 else if (b == "--root") field("root");

@@ -9,7 +9,9 @@ as three lines, from, to and flags, an empty line, then request targets; `respon
 one per line, path, flags, verb, name, value and endings separated by tabs, an empty line, then
 probes, path, a status byte, the served file, flags and the answer's own fields; the input's length
 modulo 3 makes the site php, static or without app, the first two with the security baseline;
-`sql_scan/`: a .sql file's text, a TYPO3 schema, a mysqldump, a pg_dump and loose statements), and the
+`sql_scan/`: a .sql file's text, a TYPO3 schema, a mysqldump, a pg_dump and loose statements;
+`php_constraint/`: a PHP version on the first line, then a Composer constraint, a composer.json or
+WordPress's version.php), and the
 fuzzers' most interesting corpus entries live here.
 
 Rule: any input that crashes, hangs, or violates an invariant in a fuzzer or in production

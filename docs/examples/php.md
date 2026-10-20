@@ -625,10 +625,13 @@ sites in 8.4's. One account may run each of its sites on another version, and ea
 are its own. Each version keeps one compiled-code cache (opcache) for all of its pools, so a second
 version costs one more cache, not one per site.
 
-What is easy to get wrong: the version must be installed with the extensions the application needs
-(`apt install php8.5-fpm php8.5-mbstring php8.5-xml php8.5-gd php8.5-curl php8.5-zip` on Debian,
-from Ondřej Surý's repository when the distribution has no 8.5; `php_versions` says what each
-version loads and what the repositories offer). A version that is not installed keeps the site
+What is easy to get wrong: the version must be installed with the extensions the application needs.
+`php_versions` says per installed version which presets it fits and which required extensions it
+lacks, named as `php-fpm -m` prints them; finding the package is yours (on Debian with Ondřej Surý's
+repository, Grav's on 8.5: `apt install php8.5-fpm php8.5-curl php8.5-gd php8.5-xml php8.5-zip
+php8.5-mbstring`). A move to a version without one of Grav's required extensions, or outside the range
+its `composer.json` declares, is refused, naming what is missing; `--ignore-requirements` goes ahead
+once you accept it. A version that is not installed keeps the site
 loaded but its PHP answers 502, and health reports `php_version_missing`. Without `php_version` in
 `[server]`, the sites that name no version follow the newest installed, so installing 8.5 would
 move all of them at the next reload (health's `php_default_unpinned`).
@@ -646,7 +649,7 @@ process_control_timeout = 10s
 **Check it.**
 
 ```sh
-agensio ctl php                                             # the versions installed, their extensions and support dates
+agensio ctl php                                             # the versions installed, their extensions, support dates and which presets each fits
 agensio pools -c /etc/agensio/agensio.toml                  # writes each pool into its version's directory, tests it
 systemctl reload php8.5-fpm                                 # the reloads it prints
 agensio ctl site grav.example.com | grep -A4 '"php"'        # version 8.5, version_from site
@@ -661,9 +664,10 @@ a missing `process_control_timeout`, cutting the requests in flight.
 agensio ctl site-update grav.example.com --php-version 8.5 --yes --reason "Grav on PHP 8.5"
 ```
 
-**MCP:** `php_versions` for what is installed and installable, then `site_update` with
-`php_version` = `"8.5"` (and `cut_requests` only when the user accepts cut requests); `site_show` says
-which version a site runs and why.
+**MCP:** `php_versions` for what is installed and installable and which presets each version fits,
+then `site_update` with `php_version` = `"8.5"` (`cut_requests` or `ignore_requirements` only when the
+user accepts what the refusal named); `site_show` says which version a site runs and why;
+`presets_list` shows each preset's `php_requirements`.
 
 **Reference:** [PHP versions](../configuration.md#7b-php-versions).
 

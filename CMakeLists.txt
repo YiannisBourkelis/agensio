@@ -133,6 +133,7 @@ set(AGENSIO_CORE_SOURCES
   src/core/router.cpp
   src/services/log.cpp
   src/services/pools.cpp
+  src/services/php_requirements.cpp
   src/services/php_runtimes.cpp
   src/control/php.cpp
   src/services/certificates.cpp
@@ -244,9 +245,9 @@ target_link_libraries(agensio_upstream PRIVATE asio Threads::Threads)
 
 # ---------------------------------------------------------------- fuzzers (parsers only, no asio)
 if(AGENSIO_FUZZ)
-  foreach(t parser path chunked fcgi http_head json archive hpack hpack_roundtrip quic_packet transport_params qpack refuse fields log_line redirect sql_scan)
+  foreach(t parser path chunked fcgi http_head json archive hpack hpack_roundtrip quic_packet transport_params qpack refuse fields log_line redirect sql_scan php_constraint)
     add_executable(fuzz_${t} tests/fuzz/fuzz_${t}.cpp src/http1/parser.cpp src/path.cpp src/services/archive.cpp src/http2/hpack.cpp
-                   src/http/field_codec.cpp src/http3/qpack.cpp src/control/loglines.cpp)
+                   src/http/field_codec.cpp src/http3/qpack.cpp src/control/loglines.cpp src/services/php_requirements.cpp)
     target_include_directories(fuzz_${t} PRIVATE src)
     target_link_libraries(fuzz_${t} PRIVATE asio)
     target_compile_features(fuzz_${t} PRIVATE cxx_std_20)

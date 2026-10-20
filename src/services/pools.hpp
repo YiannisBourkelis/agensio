@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "config.hpp"
+#include "services/php_requirements.hpp"
 #include "services/php_runtimes.hpp"
 
 namespace agensio {
@@ -161,6 +162,8 @@ void restore_pools(const PoolsOutcome& o, const std::string& version, std::ostre
 struct PoolSwitch {
     std::string site, from, to;
     bool moving = false;
+    std::string app;                // the site's preset, for its requirements
+    std::vector<std::string> dirs;  // where its files declare their PHP (the project, the served root)
 };
 std::vector<PoolSwitch> pool_switches(const Config& running, const Config& fresh);
 // What the preflight reads, behind functions so the unit tests describe a machine.
@@ -168,14 +171,25 @@ struct PreflightFacts {
     std::function<std::string(const php::Runtime&)> unit_state;  // systemd's ActiveState of its unit, "" unknown
     std::function<bool(const php::Runtime&)> hard_reload;         // its php-fpm.conf sets no process_control_timeout
     std::function<bool(const php::Runtime&)> running;             // its master runs (php::master_running), for a version without a unit
+    // What the application needs (docs/design-php-versions.md 7): its preset's table (php::app_requirements
+    // when unset), what the version's FPM loads, and what the site's installed release declares.
+    std::function<const php::AppRequirements*(std::string_view app)> table;
+    std::function<php::Loaded(const php::Runtime&)> loaded;
+    std::function<php::Declared(const PoolSwitch&)> declared;
 };
 // Why a switch must not go ahead: the target version not installed; for a site moving between
 // versions also its service or master not running (`run_as_root` the line), or a php-fpm.conf
 // without process_control_timeout, whose reload cuts the requests in flight (`cut_requests`: the
 // caller may go ahead anyway). A new site is asked only for the version: nothing of it serves yet.
+// What the application needs of the target version comes as `requirements` (outside its range, a
+// required extension missing: the caller may go ahead with ignore_requirements) or as a `warning`
+// (a recommended extension, a version newer than it was tested on, an extension the current version
+// loads and the target does not, and for a new site everything): said, never refused.
 struct PreflightProblem {
     std::string site, message, run_as_root;
     bool cut_requests = false;
+    bool requirements = false;
+    bool warning = false;
 };
 std::vector<PreflightProblem> switch_preflight(const std::vector<PoolSwitch>& switches, const std::vector<php::Runtime>& runtimes, const PreflightFacts& facts);
 // The versions that run generated pools while their service is neither active nor unknown (health's php_fpm_inactive).

@@ -1,5 +1,7 @@
 #include "services/install.hpp"
 
+#include "services/php_requirements.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -378,6 +380,31 @@ std::string open_failure(int parent_fd, const std::string& name, const std::stri
 // installed it (2026-09-27 Writebook report): a Gemfile, the Ruby a .ruby-version pins, and
 // whether Rails credentials came with it (without them the application reads
 // SECRET_KEY_BASE from its environment, which the control handler then generates).
+namespace {
+
+// A small file of the installed tree, read as the installing account without following a symlink:
+// "" when missing, not a regular file or larger than 512 KB (composer.json, WordPress's version.php).
+std::string read_small(int dir_fd, const char* rel) {
+    std::string text;
+    const int fd = ::openat(dir_fd, rel, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) return text;
+    struct stat st {};
+    if (::fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size <= 512 * 1024) {
+        char buf[16384];
+        for (ssize_t n; (n = ::read(fd, buf, sizeof buf)) > 0 && text.size() <= 512 * 1024;) text.append(buf, static_cast<std::size_t>(n));
+    }
+    ::close(fd);
+    return text;
+}
+
+json::Value strings_of(const std::vector<std::string>& v) {
+    json::Value a = json::Value::array();
+    for (const auto& x : v) a.push(x);
+    return a;
+}
+
+}  // namespace
+
 json::Value app_facts(int dir_fd, const std::string& ruby, const std::string& node) {
     auto regular = [&](const char* rel) {
         struct stat st {};
@@ -742,7 +769,36 @@ json::Value execute(const Request& req) {
         secured.push(req.target + "/" + rel);
     }
     result.set("secured", secured);
-    if (sub.empty()) result.set("facts", app_facts(dir_fd, req.ruby, req.node));
+    if (sub.empty()) {
+        json::Value facts = app_facts(dir_fd, req.ruby, req.node);
+        // The PHP the site runs against what this release needs (docs/design-php-versions.md 7).
+        if (!req.php_version.empty()) {
+            std::string composer = read_small(dir_fd, "composer.json");  // Drupal's project declares nothing, its core/ does
+            if (const php::Declared c = php::parse_composer(composer); c.php.empty() && c.ext.empty()) composer = read_small(dir_fd, "core/composer.json");
+            const php::Declared declared = php::declared_from(composer, read_small(dir_fd, "wp-includes/version.php"));
+            const php::RequirementCheck c = php::check_requirements(php::app_requirements(req.php_app), declared, req.php_version, req.php_modules, req.php_modules_known);
+            json::Value p = json::Value::object().set("version", req.php_version);
+            if (!declared.from.empty()) p.set("declared", json::Value::object().set("php", declared.php).set("from", declared.from).set("ext", strings_of(declared.ext)));
+            if (c.judged) {
+                p.set("range", c.range).set("outside", c.outside).set("untested", c.untested).set("missing", strings_of(c.missing))
+                    .set("missing_recommended", strings_of(c.missing_recommended));
+                if (!req.php_modules_known) p.set("extensions_unknown", true);
+            }
+            facts.set("php", p);
+            if (c.blocks() && !req.ignore_requirements) {
+                std::string why = c.outside ? "it needs PHP " + c.range + " and the site runs " + req.php_version : std::string();
+                if (!c.missing.empty()) {
+                    std::string list;
+                    for (const auto& e : c.missing) list += (list.empty() ? "" : ", ") + e;
+                    why += (why.empty() ? "" : "; ") + std::string("it requires the PHP extension") + (c.missing.size() == 1 ? " " : "s ") + list +
+                           ", which the site's PHP " + req.php_version + " does not load";
+                }
+                return fail_install("this release cannot run on the site's PHP: " + why + "; nothing installed (switch the site to a version php_versions lists "
+                                    "that meets it, or have root install what is missing; ignore_requirements installs it anyway)");
+            }
+        }
+        result.set("facts", facts);
+    }
     ::close(dir_fd);
     return result;
 }

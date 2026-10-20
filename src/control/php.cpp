@@ -103,6 +103,22 @@ json::Value php_versions_json(const Config& cfg, const PhpInventory& inv, std::t
             support.set("security_until", rel->security_until);
         }
         v.set("support", std::move(support));
+        // Which presets this version can run (docs/design-php-versions.md 7): their range and required
+        // extensions against what this version's php-fpm loads; what the installed release of a site
+        // declares is judged per site, by site_install, the switch and health.
+        if (!f.exact.empty()) {
+            json::Value fits = json::Value::array();
+            for (const auto& req : php::app_requirement_table()) {
+                const php::RequirementCheck c = php::check_requirements(&req, {}, f.exact, f.modules, !f.modules.empty());
+                json::Value e = json::Value::object().set("app", req.app).set("fits", !c.blocks()).set("range", c.range);
+                if (c.outside) e.set("outside", true);
+                if (c.untested) e.set("untested", true);
+                if (!c.missing.empty()) e.set("missing", strings_json(c.missing));
+                if (!c.missing_recommended.empty()) e.set("missing_recommended", strings_json(c.missing_recommended));
+                fits.push(std::move(e));
+            }
+            v.set("presets", std::move(fits));
+        }
         // The pools its directory holds now, and the sites that run this version (a pool per site).
         const std::vector<std::string> pools = i < inv.pools.size() ? inv.pools[i] : std::vector<std::string>{};
         json::Value sites = json::Value::array();

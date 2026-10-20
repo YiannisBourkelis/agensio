@@ -37,12 +37,23 @@ struct Request {
     // The node of [control] runtimes, likewise: asked for its version when package.json names
     // engines.node (2026-09-28).
     std::string node;
+    // The site's PHP (docs/design-php-versions.md 7), filled by the caller from the version's own
+    // php-fpm: for an install into site_root, what the release declares (composer.json, WordPress's
+    // version.php) and the preset's table are judged against it after extraction; a release it
+    // cannot run (outside its range, a required extension missing) is taken out again unless
+    // ignore_requirements, and facts.php says what was judged. Nothing judged without php_version.
+    std::string php_app;
+    std::string php_version;  // the exact version the site's php-fpm runs ("8.4.24")
+    std::vector<std::string> php_modules;
+    bool php_modules_known = false;
+    bool ignore_requirements = false;
 };
 
 // {"ok": bool, "error"?, "as", "files", "directories", "bytes", "downloaded", "sha256", "unwrapped"?,
 //  "created": [{"path", "owner", "mode"}], "secured": [paths made 0600], and for an install
 //  into site_root itself "facts": {"gemfile", "credentials" (Rails'), "ruby_version"?,
-//  "runtime_ruby"? (what req.ruby says it is) | "runtime_ruby_error"?}};
+//  "runtime_ruby"? (what req.ruby says it is) | "runtime_ruby_error"?, "php"?: what the release
+//  declares and how the site's PHP meets it}};
 //  a dry run answers {"ok", "dry_run": true, "as", "would_create": [...]}.
 // The walk from site_root to the target opens every component without following symlinks
 // and requires each existing one to belong to the executing account; a refusal at any

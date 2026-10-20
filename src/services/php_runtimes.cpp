@@ -10,6 +10,7 @@
 
 #ifndef _WIN32
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -288,6 +289,49 @@ std::string first_program(std::initializer_list<const char*> candidates) {
     (void)candidates;
 #endif
     return {};
+}
+
+Loaded loaded(const Runtime& r, const Exec& exec) {
+    Loaded l;
+    std::string out;
+    if (exec(r.fpm, {"-v"}, out) != 0) return l;
+    l.exact = parse_version(out);
+    out.clear();
+    if (exec(r.fpm, {"-m"}, out) != 0) return l;
+    l.modules = parse_modules(out);
+    l.known = !l.exact.empty() && !l.modules.empty();
+    return l;
+}
+
+Declared declared_on_disk(const std::vector<std::string>& dirs) {
+    auto read = [](const std::string& path) {
+        std::string text;
+#ifndef _WIN32
+        const int fd = ::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+        if (fd < 0) return text;
+        struct stat st {};
+        if (::fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size <= 512 * 1024) {
+            char buf[16384];
+            for (ssize_t n; (n = ::read(fd, buf, sizeof buf)) > 0 && text.size() <= 512 * 1024;) text.append(buf, static_cast<std::size_t>(n));
+        }
+        ::close(fd);
+#else
+        (void)path;
+#endif
+        return text;
+    };
+    // The first composer.json that declares something: the project's, the served root's, Drupal's
+    // core/composer.json (its project's declares no PHP).
+    std::string composer, wp;
+    for (const auto& d : dirs)
+        for (const char* rel : {"/composer.json", "/core/composer.json"}) {
+            if (!composer.empty()) break;
+            std::string text = read(d + rel);
+            if (const Declared c = parse_composer(text); !c.php.empty() || !c.ext.empty()) composer = std::move(text);
+        }
+    for (const auto& d : dirs)
+        if (wp.empty()) wp = read(d + "/wp-includes/version.php");
+    return declared_from(composer, wp);
 }
 
 std::string systemctl() {

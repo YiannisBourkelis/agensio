@@ -1324,6 +1324,51 @@ Clients that connect meanwhile wait in the backlog. This covers what no reload s
 A start whose files already match changes nothing, and the error log says `php-fpm pools at start:
 up to date`.
 
+**What an application needs.** Each PHP preset carries its application's published requirements,
+read from the application's own pages for its current stable line (checked 2026-10-21):
+
+| preset | PHP | recommended | supported up to | required extensions | recommended extensions | source |
+|---|---|---|---|---|---|---|
+| `wordpress` | 7.4 (6.9 and older: 7.2.24) | 8.3 | 8.5 | hash, json | curl, dom, exif, fileinfo, igbinary, imagick, intl, mbstring, mysqli, openssl, xml, zip | [requirements](https://wordpress.org/about/requirements/), [hosting handbook](https://make.wordpress.org/hosting/handbook/server-environment/), [PHP compatibility](https://make.wordpress.org/core/handbook/references/php-compatibility-and-wordpress-versions/), `wp-includes/version.php` |
+| `drupal` | 8.3.0 (10.x: 8.1.0) | 8.4 | 8.5 | date, dom, filter, gd, hash, json, pcre, pdo, session, simplexml, spl, tokenizer, xml, zlib | openssl | [PHP requirements](https://www.drupal.org/docs/getting-started/system-requirements/php-requirements), `core/composer.json` |
+| `laravel` | 8.2 (13.x: 8.3) | | 8.5 | ctype, filter, hash, mbstring, openssl, session, tokenizer | curl, dom, fileinfo, pdo, xml | [deployment](https://laravel.com/docs/12.x/deployment#server-requirements), laravel/framework's `composer.json` |
+| `grav` | 8.3 (1.7: 7.3.6) | | | ctype, curl, dom, fileinfo, gd, json, libxml, openssl, session, zip | iconv, intl, mbstring, simplexml | [requirements](https://learn.getgrav.org/2/basics/requirements), `composer.json` |
+
+- **Required** is only what the application enforces. For Drupal, Laravel and Grav that is the
+  `require` of their `composer.json` (Composer refuses to install without it). WordPress ships none,
+  so its own `wp-includes/version.php` decides (`$required_php_extensions`). `mysqli` is therefore
+  recommended, not required: a WordPress site on SQLite runs without it.
+- **Recommended** is what the pages ask for beyond that. Cache back ends (apcu, memcached, redis)
+  and what a page calls optional are neither, and an application's own run-time checks are never
+  read: Grav's code asks whether redis is loaded, and Grav runs fine without it.
+- **The installed release wins**: its `composer.json` `require.php` and `ext-*` (the project's, or
+  Drupal's `core/composer.json`), or WordPress's `$required_php_version`. A WordPress 6.9 site is
+  judged by 7.2.24, a Grav 1.7 site by `^7.3.6 || ^8.0`. Extensions are named as `php-fpm -m`
+  prints them (the FPM side, not the command line); which package provides one is the
+  administrator's, and the agent's, to find.
+
+Where it is judged, and what happens:
+- **Moving a site to another version** (the switch above): a version outside the range, or one that
+  does not load a required extension, is refused, naming what is missing; `ignore_requirements: true`
+  (`--ignore-requirements`) goes ahead once the user agreed. These come as warnings in the answer,
+  never refusals:
+  - a missing recommended extension;
+  - a version newer than the application says it supports;
+  - an extension the old version loads and the new one does not (a plugin may use it).
+- **A new site** (`site_create`): only warnings. Nothing is installed to break yet.
+- **`site_install`** of the application into a PHP site: after unpacking, the release's own
+  declaration and the preset's table are judged against the site's PHP. A release the site's PHP
+  cannot run is taken out again, the directory left empty, unless `ignore_requirements`. The
+  answer's `facts.php` says what the release declares and how the site's version meets it.
+- **Health**:
+  - `php_extensions_missing`: an error for a required extension, info for a recommended one;
+  - `php_version_unsupported_by_app` (warning): the site's version is outside its application's
+    range;
+  - `php_version_eol`: from PHP's own release table. Info past active support, a warning past
+    security support, an error more than a year after that.
+- **`php_versions`** lists, per installed version, which presets it fits (`presets`). **`presets_list`**
+  shows each preset's requirements with the page and the date.
+
 `server.pools`, the one pool directory of earlier versions, is gone: each version has its own,
 discovered or named in `[php.runtimes."X.Y"]`.
 

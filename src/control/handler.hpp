@@ -21,12 +21,21 @@
 
 namespace agensio {
 
+// What a reload with the PHP pools around it may go past (docs/design-php-versions.md 6.1, 7):
+// a version's reload cutting the requests in flight, and what the application needs of a version.
+struct ReloadOptions {
+    bool cut_requests = false;
+    bool ignore_requirements = false;
+};
+
 // What a reload with the PHP pools around it did (docs/design-php-versions.md 6.1).
 struct ReloadOutcome {
     bool ok = false;
     std::string error;
-    // A preflight's refusal: {"problems": [{site, message, run_as_root, cut_requests}], "run_as_root": [...],
-    // "cut_requests": true when cut_requests would let it go ahead}; null otherwise.
+    std::vector<std::string> warnings;  // what the preflight said and nothing refused
+    // A preflight's refusal: {"problems": [{site, message, run_as_root, cut_requests, requirements}],
+    // "run_as_root": [...], "cut_requests" / "ignore_requirements": true when that option would let it go
+    // ahead}; null otherwise.
     json::Value refusal;
     // The helper's answers for the phases that ran: {"up": ..., "full": ...}; null without the helper.
     json::Value pools;
@@ -61,9 +70,9 @@ struct ControlBackend {
     virtual bool reload_now(std::string& error, std::string_view must_load = {}) = 0;
     // The same with the PHP pools around it (docs/design-php-versions.md 6.1): a site's new pool comes up
     // before agensio sends it there, the pools no site has any more go after; the phases run off the
-    // workers and `done` runs on worker 0. `cut_requests`: go ahead though a version's reload would cut
-    // the requests in flight (no process_control_timeout).
-    virtual void reload_async(std::string must_load, bool cut_requests, std::function<void(ReloadOutcome)> done) = 0;
+    // workers and `done` runs on worker 0. `opts`: go ahead though a version's reload would cut the
+    // requests in flight (no process_control_timeout), or though the application's requirements are not met.
+    virtual void reload_async(std::string must_load, ReloadOptions opts, std::function<void(ReloadOutcome)> done) = 0;
     // An automatic certificate: an order started (`message` says so). A site with its own files
     // (step T3): they are loaded now, `message` saying what happened; false when they could not be.
     virtual bool renew_certificate(std::string_view site, std::string& error, std::string& message) = 0;
@@ -178,7 +187,7 @@ private:
     // The reload of a change (docs/design-php-versions.md 6.1): with a caller that can wait, the PHP pools
     // around it off the workers (backend reload_async); without, the plain reload and the pools applied
     // after it. `then` runs on worker 0 either way.
-    void reload_then(std::string must_load, bool cut_requests, bool can_wait, std::function<void(ReloadOutcome)> then);
+    void reload_then(std::string must_load, ReloadOptions opts, bool can_wait, std::function<void(ReloadOutcome)> then);
     // The answer for a refused reload: `message`, the reload's error, and a preflight's problems, root's
     // lines and whether cut_requests would let it go ahead.
     static json::Value refused_reload(std::string_view message, const ReloadOutcome& o);

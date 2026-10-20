@@ -4426,6 +4426,15 @@ json::Value preset_catalog() {
                   .set("root", "the document root").set("php", "none"));
     for (const auto& p : kPhpPresets) {
         json::Value v = json::Value::object().set("app", p.name).set("summary", p.summary);
+        // What the application needs of its PHP (docs/design-php-versions.md 7), from its own page.
+        if (const php::AppRequirements* r = php::app_requirements(p.name)) {
+            json::Value req = json::Value::object().set("min", r->min).set("recommended", r->recommended).set("tested", r->tested);
+            json::Value need = json::Value::array(), advise = json::Value::array();
+            for (const auto& e : r->required) need.push(e);
+            for (const auto& e : r->recommended_ext) advise.push(e);
+            req.set("required_extensions", std::move(need)).set("recommended_extensions", std::move(advise)).set("source", r->source).set("checked", r->checked);
+            v.set("php_requirements", std::move(req));
+        }
         v.set("root", *p.subdir ? std::string("the project directory; its ") + p.subdir + "/ is served" + (p.subdir_required ? "" : " when it holds index.php")
                                  : std::string("the document root"));
         if (!p.any_php) v.set("php", "only /index.php runs; any other .php is refused (404)");

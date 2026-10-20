@@ -21,6 +21,7 @@
 #include "http1/chunked.hpp"
 #include "config.hpp"
 #include "control/php.hpp"
+#include "services/php_requirements.hpp"
 #include "services/php_runtimes.hpp"
 #include "services/pools.hpp"
 #include "upstream/http_head.hpp"
@@ -1829,6 +1830,43 @@ static void test_pools() {
         write("m2.toml", server + shop + "php = { version = \"7.0\" }\n");
         const auto gone = switch_preflight(pool_switches(cfg, load_config(dir / "m2.toml")), with_units, pf);
         CHECK(gone.size() == 1 && gone[0].site == "shop" && gone[0].message.find("PHP 7.0, which is not installed") != std::string::npos);
+        // What the application needs (docs/design-php-versions.md 7): blog is WordPress; with a table that
+        // requires mysqli and recommends imagick, and 9.9 loading neither, its move is refused for mysqli
+        // unless the caller ignores the requirements, imagick is a warning, and an extension 9.8 loads and
+        // 9.9 does not (redis, which no table names) is a warning too. A new site only gets warnings.
+        php::AppRequirements wp;
+        wp.app = "wordpress";
+        wp.min = "7.2.24";
+        wp.tested = "9.8";
+        wp.required = {"mysqli"};
+        wp.recommended_ext = {"imagick"};
+        pf.table = [&](std::string_view app) { return app == "wordpress" ? &wp : nullptr; };
+        std::map<std::string, php::Loaded> loaded{{"9.8", {"9.8.3", {"core", "mysqli", "imagick", "redis"}, true}}, {"9.9", {"9.9.1", {"core"}, true}}};
+        pf.loaded = [&](const php::Runtime& r) { return loaded[r.version]; };
+        pf.declared = [](const PoolSwitch&) { return php::Declared{}; };
+        const auto needs = switch_preflight(sw, rts, pf);
+        auto has = [&](const std::vector<PreflightProblem>& ps, auto pred) { return std::any_of(ps.begin(), ps.end(), pred); };
+        CHECK(has(needs, [](const PreflightProblem& p) { return p.requirements && !p.warning && p.message.find("mysqli") != std::string::npos; }));
+        CHECK(has(needs, [](const PreflightProblem& p) { return p.warning && p.message.find("imagick") != std::string::npos; }));
+        CHECK(has(needs, [](const PreflightProblem& p) { return p.warning && p.message.find("redis") != std::string::npos && p.message.find("9.8") != std::string::npos; }));
+        CHECK(has(needs, [](const PreflightProblem& p) { return p.warning && p.message.find("newer than") != std::string::npos; }));  // 9.9 past its tested 9.8
+        // The release's own declaration wins: ^9.9 lets 9.9.1 through, ^10.0 refuses it as outside.
+        pf.declared = [](const PoolSwitch&) { return php::Declared{"^9.9", {}, "composer.json"}; };
+        loaded["9.9"].modules = {"core", "mysqli", "imagick", "redis"};
+        const auto within = switch_preflight(sw, rts, pf);
+        CHECK(std::none_of(within.begin(), within.end(), [](const PreflightProblem& p) { return !p.warning; }));
+        pf.declared = [](const PoolSwitch&) { return php::Declared{"^10.0", {}, "composer.json"}; };
+        CHECK(has(switch_preflight(sw, rts, pf), [](const PreflightProblem& p) {
+            return p.requirements && !p.warning && p.message.find("^10.0 (composer.json)") != std::string::npos;
+        }));
+        // A new site: what a move would refuse is a warning (nothing of it is installed to break yet).
+        pf.declared = [](const PoolSwitch&) { return php::Declared{}; };
+        loaded["9.8"].modules = {"core"};
+        const auto created = switch_preflight(fresh, with_units, pf);
+        CHECK(!created.empty() && std::all_of(created.begin(), created.end(), [](const PreflightProblem& p) { return p.warning; }));
+        pf.table = {};
+        pf.loaded = {};
+        pf.declared = {};
         // health's php_fpm_inactive: the versions whose service is down while they run sites.
         state["9.9"] = "failed";
         CHECK(inactive_versions(cfg, with_units, pf.unit_state) == std::vector<std::string>{"9.9"});
@@ -1985,6 +2023,35 @@ static void test_pools() {
     const auto fl = std::find_if(hand.sites[0].locations.begin(), hand.sites[0].locations.end(), [](const LocationConfig& l) { return l.kind == HandlerKind::fastcgi; });
     CHECK(hand.sites[0].pool.generated && fl != hand.sites[0].locations.end() && fl->fastcgi.address.key == "unix:" + d + "/run/agensio-web1-c4ba2f20-9.9.sock");
     CHECK(refused("proxykeys.toml", server + "[[site]]\nserver_name = [\"rails\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"rails\"\nuser = \"ag5\"\napp = \"proxy\"\nupstream = \"http://127.0.0.1:3000\"\nphp = { children = 4 }\n", "need a PHP handler"));
+    // What a site's application needs of its version, in health (docs/design-php-versions.md 7, 9): a
+    // php-fpm 8.1 that loads core alone (a script answering -v and -m), a site whose composer.json asks
+    // ^8.2 and ext-mbstring: outside its range (a warning), mbstring missing (an error), and 8.1 past its
+    // security support (a warning within a year of its end, 2025-12-31; an error after).
+    {
+        fs::create_directories(dir / "app81");
+        std::ofstream(dir / "fpm81") << "#!/bin/sh\ncase \"$1\" in -v) echo 'PHP 8.1.30 (fpm-fcgi) (built: Jan 1 2026)';; -m) printf '[PHP Modules]\\nCore\\n\\n[Zend Modules]\\n';; esac\n";
+        fs::permissions(dir / "fpm81", static_cast<fs::perms>(0755));
+        std::ofstream(dir / "app81" / "composer.json") << R"({"require": {"php": "^8.2", "ext-mbstring": "*", "ext-core": "*"}})";
+        write("r81.toml", server_keys + "[php.runtimes.\"8.1\"]\nfpm = \"" + d + "/fpm81\"\nconf = \"" + d + "/fpm81.conf\"\npools = \"" + d + "/pool.d\"\n" +
+                              "[[site]]\nserver_name = [\"old.test\"]\nlisten = [\"127.0.0.1:18090\"]\nroot = \"app81\"\nuser = \"web1\"\napp = \"php\"\nphp = { version = \"8.1\" }\n");
+        const Config old81 = load_config(dir / "r81.toml");
+        std::tm tm{};
+        tm.tm_year = 2026 - 1900;
+        tm.tm_mon = 9;
+        tm.tm_mday = 21;
+        tm.tm_hour = 12;
+        const std::time_t oct = timegm(&tm);
+        auto find = [](const std::vector<control::Finding>& hf, const char* code) {
+            const auto it = std::find_if(hf.begin(), hf.end(), [&](const control::Finding& f) { return f.code == code; });
+            return it == hf.end() ? control::Finding{} : *it;
+        };
+        const auto hf = control::health_findings(old81, old81, false, oct);
+        const control::Finding out = find(hf, "php_version_unsupported_by_app"), ext = find(hf, "php_extensions_missing"), eol = find(hf, "php_version_eol");
+        CHECK(out.severity == "warn" && out.site == "old.test" && out.message.find("^8.2 (composer.json)") != std::string::npos && out.message.find("8.1.30") != std::string::npos);
+        CHECK(ext.severity == "error" && ext.message.find("mbstring") != std::string::npos && ext.message.find(" core") == std::string::npos);
+        CHECK(eol.severity == "warn" && eol.message.find("since 2025-12-31") != std::string::npos && eol.message.find("old.test") != std::string::npos);
+        CHECK(find(control::health_findings(old81, old81, false, oct + 300 * 86400), "php_version_eol").severity == "error");
+    }
     fs::remove_all(dir);
 }
 
@@ -7987,6 +8054,90 @@ static void test_rotated_logs() {
 // The PHP versions installed (docs/design-php-versions.md 4): found from the distributions' layouts on
 // a described machine, root's [php.runtimes] over them; their facts read from their own programs'
 // output; PHP's support table; what the repositories can install.
+// What a PHP application needs (docs/design-php-versions.md 7): Composer's constraints as applications
+// write them, the declarations of composer.json and WordPress's version.php, and the judgement of one
+// version and its extensions against a table and a declaration.
+static void test_php_requirements() {
+    auto allows = [](const char* c, const char* v) {
+        bool known = false;
+        const bool a = php::constraint_allows(c, v, known);
+        return known ? (a ? 1 : 0) : -1;
+    };
+    CHECK(allows("^8.2", "8.2") == 1 && allows("^8.2", "8.4.24") == 1 && allows("^8.2", "8.1.30") == 0 && allows("^8.2", "9.0") == 0);
+    CHECK(allows(">=7.2.24", "7.2.24") == 1 && allows(">=7.2.24", "7.2.23") == 0 && allows(">=7.2.24", "8.5") == 1);
+    CHECK(allows(">=8.1 <8.5", "8.4.9") == 1 && allows(">=8.1 <8.5", "8.5") == 0 && allows(">= 8.1, < 8.5", "8.3") == 1);
+    CHECK(allows("^8.1 || ^9.0", "9.1") == 1 && allows("^7.4|^8.0", "7.4.33") == 1 && allows("^7.4|^8.0", "7.3") == 0);
+    CHECK(allows("8.2.*", "8.2.30") == 1 && allows("8.2.*", "8.3") == 0 && allows("8.*", "8.5") == 1 && allows("~8.2", "8.9") == 1 &&
+          allows("~8.2", "9.0") == 0 && allows("~8.2.3", "8.2.9") == 1 && allows("~8.2.3", "8.3") == 0);
+    CHECK(allows("8.1 - 8.3", "8.3.20") == 1 && allows("8.1 - 8.3", "8.4") == 0 && allows("8.1 - 8.3.5", "8.3.6") == 0);
+    CHECK(allows("^8.2@dev", "8.3") == 1 && allows("v8.2.*", "8.2.1") == 1 && allows("*", "5.6") == 1 && allows("8.3", "8.3.11") == 1 && allows("8.3", "8.4") == 0);
+    CHECK(allows("dev-main", "8.4") == -1 && allows("", "8.4") == -1 && allows(">=", "8.4") == -1 && allows("^8.2", "eight") == -1);
+    CHECK(php::compare_versions("8.4", "8.4.0") == 0 && php::compare_versions("8.10", "8.9") == 1 && php::compare_versions("7.2.24", "7.2.3") == 1);
+    // The declarations.
+    const php::Declared c = php::parse_composer(R"({"name": "laravel/laravel", "require": {"php": "^8.2", "ext-mbstring": "*", "ext-PDO": "*", "laravel/framework": "^12.0", "ext-": "*"}})");
+    CHECK(c.php == "^8.2" && c.from == "composer.json" && c.ext == std::vector<std::string>({"mbstring", "pdo"}));
+    CHECK(php::parse_composer("[1]").from.empty() && php::parse_composer(R"({"require": {"php": 8}})").php.empty() && php::parse_composer("not json").from.empty());
+    CHECK(php::parse_wp_required("<?php\n$wp_version = '6.9';\n$required_php_version = '7.2.24';\n") == "7.2.24" &&
+          php::parse_wp_required("$required_php_version = \"7.4\";") == "7.4" && php::parse_wp_required("$required_php_version = '7.x';").empty() &&
+          php::parse_wp_required("nothing").empty());
+    // The judgement: the declaration's range wins over the table's minimum, its ext-* join the
+    // required ones; recommended ones apart; newer than the newest tested is a warning, not outside;
+    // opcache is "Zend OPcache" in php -m.
+    php::AppRequirements t;
+    t.app = "demo";
+    t.min = "8.1";
+    t.tested = "8.4";
+    t.required = {"mbstring", "xml"};
+    t.recommended_ext = {"opcache", "intl"};
+    const std::vector<std::string> mods = {"core", "mbstring", "pdo", "xml", "zend opcache"};
+    php::RequirementCheck r = php::check_requirements(&t, {}, "8.4.24", mods);
+    CHECK(r.judged && !r.outside && !r.untested && r.missing.empty() && r.missing_recommended == std::vector<std::string>{"intl"} && !r.blocks());
+    r = php::check_requirements(&t, {}, "8.0.30", mods);
+    CHECK(r.outside && r.blocks() && r.range == ">= 8.1 (demo's requirements)");
+    r = php::check_requirements(&t, {}, "8.5", {"core"});
+    CHECK(r.untested && !r.outside && r.missing == std::vector<std::string>({"mbstring", "xml"}) && r.blocks());
+    r = php::check_requirements(&t, c, "8.1.2", mods);
+    CHECK(r.outside && r.range == "^8.2 (composer.json)" && r.missing.empty());
+    r = php::check_requirements(nullptr, c, "8.3", {"core", "mbstring"});
+    CHECK(r.judged && !r.outside && r.missing == std::vector<std::string>{"pdo"});
+    CHECK(!php::check_requirements(nullptr, {}, "8.3", {}).judged);
+    CHECK(php::check_requirements(&t, {}, "8.4", {}, false).missing.empty());  // extensions unknown: not judged
+    // The table of the presets (docs/configuration.md 7b): each row with its page and the date read; no
+    // cache back end and nothing optional required or recommended (an application runs without them,
+    // and its own run-time checks are never read); WordPress requires only what its version.php names
+    // (a site on SQLite runs without mysqli); the plain php and static presets need nothing.
+    const std::vector<std::string> never = {"apcu", "memcache", "memcached", "redis", "opcache", "yaml"};
+    const std::vector<std::string> presets = app_presets();
+    for (const auto& row : php::app_requirement_table()) {
+        CHECK(!row.source.empty() && row.source.starts_with("https://") && row.checked.size() == 10 && !row.min.empty());
+        CHECK(std::find(presets.begin(), presets.end(), row.app) != presets.end());
+        for (const auto* list : {&row.required, &row.recommended_ext})
+            for (const auto& e : *list) CHECK(e == php::parse_modules("[PHP Modules]\n" + e + "\n").front() && std::find(never.begin(), never.end(), e) == never.end());
+    }
+    const php::AppRequirements* wpr = php::app_requirements("wordpress");
+    CHECK(wpr && wpr->required == std::vector<std::string>({"hash", "json"}) &&
+          std::find(wpr->recommended_ext.begin(), wpr->recommended_ext.end(), "mysqli") != wpr->recommended_ext.end());
+    CHECK(!php::app_requirements("php") && !php::app_requirements("static") && php::app_requirements("drupal") && php::app_requirements("laravel") &&
+          php::app_requirements("grav"));
+    // On disk: Drupal's project composer.json declares nothing, its core/composer.json does; WordPress's
+    // version.php when there is no composer.json.
+    {
+        namespace fs = std::filesystem;
+        const fs::path dir = fs::temp_directory_path() / ("agensio-declared-" + std::to_string(::getpid()));
+        fs::create_directories(dir / "web" / "core");
+        fs::create_directories(dir / "wp" / "wp-includes");
+        std::ofstream(dir / "composer.json") << R"({"require": {"drupal/core-recommended": "^11.4"}})";
+        std::ofstream(dir / "web" / "core" / "composer.json") << R"({"require": {"php": ">=8.3.0", "ext-gd": "*"}})";
+        std::ofstream(dir / "wp" / "wp-includes" / "version.php") << "<?php\n$required_php_version = '7.4';\n";
+        const php::Declared dr = php::declared_on_disk({dir.string(), (dir / "web").string()});
+        CHECK(dr.php == ">=8.3.0" && dr.ext == std::vector<std::string>{"gd"} && dr.from == "composer.json");
+        const php::Declared wd = php::declared_on_disk({(dir / "wp").string()});
+        CHECK(wd.php == ">=7.4" && wd.from == "wp-includes/version.php");
+        CHECK(php::declared_on_disk({(dir / "none").string()}).from.empty());
+        fs::remove_all(dir);
+    }
+}
+
 static void test_php_runtimes() {
     namespace fs = std::filesystem;
     std::set<std::string> files, dirs;
@@ -11908,6 +12059,7 @@ int main() {
     test_served_certificates();
     test_hsts_clearing_health();
     test_rotated_logs();
+    test_php_requirements();
     test_php_runtimes();
     test_config_reference();
     test_config_reference_defaults();

@@ -1,6 +1,6 @@
 # Design: PHP versions per site
 
-Status: decided 2026-10-20 (sections 3 and 14 with the owner); being built in the steps of section 13 (steps 1 to 3 built 2026-10-20). The owner's requirements: several PHP versions served
+Status: decided 2026-10-20 (sections 3 and 14 with the owner); being built in the steps of section 13 (steps 1 to 3 built 2026-10-20, step 4 2026-10-21). The owner's requirements: several PHP versions served
 at once, each site on the version it names, switching a site's version without downtime, the
 control plane and the MCP bridge able to say which versions are installed and installable, and
 an agent able to pick, or ask about, the version an application needs. No migration: only the
@@ -274,7 +274,7 @@ one no requirement lists.
 |---|---|---|
 | `php_version_missing` | error | a site or the server's default names a version no runtime has: its pool cannot be written |
 | `php_fpm_inactive` | error | the unit of a runtime that serves sites is not running |
-| `php_extensions_missing` | error, warn | a site's runtime lacks an extension its preset requires (error) or recommends (warn) |
+| `php_extensions_missing` | error, info | a site's runtime lacks an extension its preset requires (error) or recommends (info: it runs without it) |
 | `php_version_unsupported_by_app` | warn | a site's version is outside the range its application declares |
 | `php_version_eol` | warn, error | a site's version is past active support (info), past security support (warn), long past it (error) |
 | `php_fpm_hard_reload` | info | today's finding, per runtime that runs pools: no `process_control_timeout`, so a reload or a switch cuts requests in flight |
@@ -337,8 +337,14 @@ cookbook recipe, as every key does.
    and `php_fpm_hard_reload` per runtime.
 3. **The switch** of section 6, through every path, with its docs and recipe (built 2026-10-20,
    section 6.1; with the start of 6.2, and health's `php_fpm_inactive`).
-4. **Application requirements**: the presets' table, the archive's declaration, the preflight's
-   extension checks, the MCP procedure for choosing a version.
+4. **Application requirements** (built 2026-10-21): the presets' table, the archive's declaration, the
+   preflight's extension checks, the MCP procedure for choosing a version. Decided with the owner:
+   agensio names extensions as `php-fpm -m` prints them and never maps them to packages (the agent's
+   and root's); a move or an install that does not meet the requirements is refused with
+   `ignore_requirements` past it, a new site only warned; only what an application enforces is
+   required (never a cache back end, never its own run-time checks: Grav asks for redis and runs
+   without it); a missing recommended extension is info in health; "long past" support is more than
+   a year after security support ended.
 
 Each step: tests first, the reference, the docs and the MCP texts in the same change, and
 migration lines for the test host where a step changes what it runs (step 2 renames every pool).

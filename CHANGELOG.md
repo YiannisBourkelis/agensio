@@ -2,6 +2,34 @@
 
 ## 0.1.0-alpha.107
 
+- **What an application needs of its PHP is checked** (the fourth step of `docs/design-php-versions.md`).
+  - **The table.** Each PHP preset carries its application's published requirements: PHP minimum,
+    recommended and newest supported, required and recommended extensions. They were read 2026-10-21 from
+    WordPress's, Drupal's, Laravel's and Grav's own pages, and each row keeps its link and date
+    (`docs/configuration.md` 7b).
+  - **Required is only what the application enforces**: `composer.json`'s `require`, or for WordPress its
+    `version.php`. Cache back ends and an application's own run-time checks never count: Grav asks for
+    redis and runs without it. So WordPress requires hash and json, and mysqli is recommended (a site on
+    SQLite runs without it).
+  - **The installed release's own declaration wins**: `composer.json`'s `require.php` and `ext-*` (Drupal's
+    `core/composer.json` too), or WordPress's `$required_php_version`. Composer's constraints are read by
+    a new parser, fuzzed by `fuzz_php_constraint`.
+  - **Extensions** are those the version's php-fpm loads (`php-fpm -m`), named as it prints them; finding
+    the package is the administrator's or the agent's.
+  - **A site moving to another version** is refused when the version is outside the range or does not
+    load a required extension; the new `ignore_requirements` (`--ignore-requirements`) goes ahead. A
+    missing recommended extension, a version newer than the application supports, and an extension the
+    old version loads and the new does not are warnings. A new site only gets warnings.
+  - **`site_install`** judges the release after unpacking and takes it out again when the site's PHP
+    cannot run it, unless `ignore_requirements`; `facts.php` says what the release declares.
+  - **Health**: `php_extensions_missing` (an error for a required extension, info for a recommended one),
+    `php_version_unsupported_by_app` (warning), `php_version_eol` (info past active support, a warning
+    past security support, an error a year after).
+  - **`php_versions`** says which presets each version fits; **`presets_list`** shows each preset's
+    requirements.
+  - **Tests**: unit tests (constraints, declarations, the judgement, the table, the preflight, health with
+    a fake php-fpm) and `tests/provision.sh` (a refused move and its override, an install refused and taken
+    out, then installed with the override). Security page row 46.
 - **A site's PHP version switches without downtime, and a start puts the pools in step** (the third step
   of `docs/design-php-versions.md`, and its section 6.2 agreed today). Every reload that gives a site a
   new pool socket now runs one ordered switch off the workers: a preflight, the new pool up, agensio's

@@ -205,7 +205,7 @@ public:
     // on worker 0; with the helper, the preflight and the new pools' up phase off the workers, the switch
     // back on worker 0, then the full phase off them again. One at a time: another is refused while it
     // runs. `done` runs on worker 0.
-    void reload_async(std::string must_load, bool cut_requests, std::function<void(ReloadOutcome)> done) override;
+    void reload_async(std::string must_load, ReloadOptions opts, std::function<void(ReloadOutcome)> done) override;
 
     const std::vector<Listener>& listeners() const noexcept { return gen_->listeners; }
     unsigned worker_count() const noexcept { return static_cast<unsigned>(workers_.size()); }

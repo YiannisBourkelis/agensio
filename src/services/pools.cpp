@@ -709,7 +709,9 @@ std::vector<PoolSwitch> pool_switches(const Config& running, const Config& fresh
     std::vector<PoolSwitch> out;
     for (const auto& s : fresh.sites) {
         if (!s.pool.generated || sockets.count(s.pool.socket)) continue;
-        PoolSwitch w{s.server_names.front(), "", s.pool.version, false};
+        PoolSwitch w{s.server_names.front(), "", s.pool.version, false, s.app, {}};
+        if (!s.project_root.empty()) w.dirs.push_back(s.project_root);
+        if (s.root != s.project_root) w.dirs.push_back(s.root);
         for (const auto& r : running.sites)
             if (r.pool.generated && r.server_names.front() == w.site) {
                 w.from = r.pool.version;
@@ -729,6 +731,46 @@ std::vector<PreflightProblem> switch_preflight(const std::vector<PoolSwitch>& sw
                                        "; php_versions lists what is and what the repositories offer",
                            "", false});
             continue;
+        }
+        // What the application needs of the target (docs/design-php-versions.md 7), when the version's
+        // FPM said what it loads: a moving site's live release refuses, a new site's is told.
+        if (facts.loaded) {
+            const php::Loaded to_loaded = facts.loaded(*to);
+            const php::AppRequirements* table = facts.table ? facts.table(w.app) : php::app_requirements(w.app);
+            const php::Declared declared = facts.declared ? facts.declared(w) : php::Declared{};
+            const php::RequirementCheck c = php::check_requirements(table, declared, to_loaded.exact.empty() ? w.to : to_loaded.exact, to_loaded.modules, to_loaded.known);
+            auto list = [](const std::vector<std::string>& v) {
+                std::string out;
+                for (const auto& e : v) out += (out.empty() ? "" : ", ") + e;
+                return out;
+            };
+            const std::string what = w.app.empty() ? std::string("its application") : w.app;
+            if (c.outside)
+                out.push_back({w.site, "site " + w.site + "'s " + what + " needs PHP " + c.range + ", and " + w.to + " is " +
+                                           (to_loaded.exact.empty() ? w.to : to_loaded.exact) + "; choose a version php_versions lists within it",
+                               "", false, w.moving, !w.moving});
+            if (!c.missing.empty())
+                out.push_back({w.site, "site " + w.site + "'s " + what + " requires the PHP extension" + (c.missing.size() == 1 ? " " : "s ") + list(c.missing) +
+                                           ", which PHP " + w.to + "'s php-fpm does not load (php_versions lists what each version loads)",
+                               "", false, w.moving, !w.moving});
+            if (!c.missing_recommended.empty())
+                out.push_back({w.site, "site " + w.site + "'s " + what + " recommends the PHP extension" + (c.missing_recommended.size() == 1 ? " " : "s ") +
+                                           list(c.missing_recommended) + ", which PHP " + w.to + " does not load",
+                               "", false, false, true});
+            if (c.untested && table)
+                out.push_back({w.site, "PHP " + w.to + " is newer than " + table->app + " says it supports (" + table->tested + ")", "", false, false, true});
+            // What the version it leaves loads and the target does not: a plugin may need one no requirement names.
+            if (w.moving)
+                if (const php::Runtime* from = w.from.empty() ? nullptr : php::find(runtimes, w.from); from && from != to && to_loaded.known) {
+                    const php::Loaded from_loaded = facts.loaded(*from);
+                    std::vector<std::string> lost;
+                    for (const auto& m : from_loaded.modules)
+                        if (std::find(to_loaded.modules.begin(), to_loaded.modules.end(), m) == to_loaded.modules.end()) lost.push_back(m);
+                    if (!lost.empty())
+                        out.push_back({w.site, "PHP " + w.from + " loads " + list(lost) + ", which " + w.to +
+                                                   " does not: the site's plugins or code may use " + (lost.size() == 1 ? "it" : "them"),
+                                       "", false, false, true});
+                }
         }
         if (!w.moving) continue;  // a new site: its pool is read when the master starts
         const std::string state = !to->unit.empty() && facts.unit_state ? facts.unit_state(*to) : std::string();

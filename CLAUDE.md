@@ -183,7 +183,7 @@ Source map (`src/`, files move into subdirectories as they are touched, see the 
   fuzzed), `http_client` (`HttpRequest`: HTTP/1.1 framing both ways, keep-alive rules).
 - top level, not yet moved: `config`, `path`, `mime`, `http_date`, `file`, `cache`,
   `response` (status lines, error pages), `tls_stream.hpp`, `server`, `main`.
-Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-one, each seeded from
+Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-two, each seeded from
 `tests/fuzz/regressions/<name>/`, all run by `scripts/fuzz-all.sh`).
 
 ## Architecture (as implemented)
@@ -463,7 +463,17 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-one, each seeded fr
   its `php-fpm.conf`'s pid file (`php::pid_file`, exe checked in `/proc`); a stopped master is a note
   for a new pool, a refusal for a moving site (`php::master_running`, `php::unit_state`). At a start
   (design 6.2) `Server::run` asks phase `start` (full plus the wait) before accepting. Health
-  `php_fpm_inactive` (`inactive_versions`).
+  `php_fpm_inactive` (`inactive_versions`). Step 4, what an application needs (design 7,
+  `services/php_requirements.*`): `app_requirement_table` per preset from the application's own pages
+  (required only what it enforces: composer.json's require, WordPress's version.php; never cache back
+  ends or its run-time checks), what the installed release declares (`declared_from`: composer.json,
+  Drupal's core/composer.json, WordPress's `$required_php_version`; `constraint_allows` reads Composer
+  constraints, `fuzz_php_constraint`), judged by `check_requirements` against `php::loaded` (php-fpm
+  -v, -m) in the switch's preflight (a moving site refused, `ignore_requirements` / `ReloadOptions`
+  past it; recommended, untested and extensions lost are warnings; a new site only warnings), in the
+  installer after extraction (taken out again unless `ignore_requirements`, `facts.php`), in health
+  (`php_extensions_missing` error or info, `php_version_unsupported_by_app`, `php_version_eol`), in
+  `php_versions` (`presets`) and `presets_list` (`php_requirements`).
 - **Proxy test beds** (D6): `bench/redmine/` (Rails, `docker compose`, admin / admin,
   agensio on 8075) and `bench/uptime-kuma/` (Node, Socket.IO over WebSockets, agensio on
   8076); `setup.sh` starts each, `tests/redmine.sh` and `tests/uptime-kuma.sh` run the

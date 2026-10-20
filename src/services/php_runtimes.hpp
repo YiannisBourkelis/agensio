@@ -11,6 +11,8 @@
 #include <string_view>
 #include <vector>
 
+#include "services/php_requirements.hpp"
+
 namespace agensio {
 struct Config;
 }
@@ -68,6 +70,19 @@ Exec system_exec();  // fork and execve, safe in a threaded process; output capp
 std::string unit_state(const Runtime& r, const Exec& exec, const std::string& systemctl);
 // The first of `candidates` that exists and may be run, or "" (systemctl, apt-cache).
 std::string first_program(std::initializer_list<const char*> candidates);
+// What a runtime's FPM side runs: its exact version (php-fpm -v) and the extensions it loads (-m);
+// `known` false when the programs did not answer.
+struct Loaded {
+    std::string exact;
+    std::vector<std::string> modules;
+    bool known = false;
+};
+Loaded loaded(const Runtime& r, const Exec& exec);
+
+// What a site's installed release declares of its PHP (composer.json in the first of `dirs` that has
+// one, else WordPress's wp-includes/version.php), read without following a final symlink, 512 KB at most.
+Declared declared_on_disk(const std::vector<std::string>& dirs);
+
 // systemctl when systemd runs this system (its /run/systemd/system, as sd_booted tests), else "": a
 // container ships the binary without systemd, where every systemctl call fails.
 std::string systemctl();

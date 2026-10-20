@@ -694,7 +694,7 @@ const std::vector<std::string_view>& site_request_fields() {
         "domain", "aliases", "canonical", "https", "redirect_http", "hsts", "encoded_slashes", "app", "root", "upstream", "project", "entry", "user",
         "no_user", "group", "php_socket", "php_children", "php_version", "settings", "rules", "redirects", "response_headers",
         "response_headers_baseline", "response_headers_offer_declined", "login_paths", "public_archives", "mime_types", "trusted_proxies", "access_log",
-        "listen_plain", "listen_tls", "confirm", "reason", "dry_run", "cut_requests"};
+        "listen_plain", "listen_tls", "confirm", "reason", "dry_run", "cut_requests", "ignore_requirements"};
     return fields;
 }
 

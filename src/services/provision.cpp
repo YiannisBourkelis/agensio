@@ -121,8 +121,14 @@ std::string validate(const json::Value& req, const Config& cfg) {
         if (!control::safe_path(site_root, why)) return "app_install: site_root " + why;
         if (!under(site_root, sites_root(cfg)) || site_root == sites_root(cfg)) return "app_install: " + site_root + " is not below " + sites_root(cfg);
         if (!under(target, site_root)) return "app_install: " + target + " is not below the site's directory " + site_root;
-        for (const char* flag : {"create_path", "dry_run", "ruby_check", "node_check"})
+        for (const char* flag : {"create_path", "dry_run", "ruby_check", "node_check", "ignore_requirements"})
             if (!req[flag].is_null() && req[flag].type() != json::Value::Type::boolean) return std::string("app_install: ") + flag + " must be a boolean";
+        // The site's PHP version and preset, for judging what the release needs: names, never paths
+        // (the version's programs come from the helper's own discovery).
+        const std::string php_version(req.get("php_version")), php_app(req.get("php_app"));
+        if (!php_version.empty() && (php_version.size() > 8 || php_version.find_first_not_of("0123456789.") != std::string::npos))
+            return "app_install: php_version must be a PHP version as major.minor";
+        if (php_app.size() > 32 || php_app.find_first_not_of("abcdefghijklmnopqrstuvwxyz") != std::string::npos) return "app_install: php_app must be a preset's name";
         if (!user.empty() && !control::valid_account(user, why)) return "app_install: user " + why;
         if (url.empty() == upload.empty()) return "app_install: exactly one of url and upload";
         std::string h, p, path;
@@ -498,8 +504,26 @@ json::Value app_install(const json::Value& req, const Config& cfg, int helper_fd
         upload_fd = ::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
         if (upload_fd < 0) return reply.set("ok", false).set("error", "upload " + upload + ": " + std::strerror(errno));
     }
+    // The site's PHP as its own php-fpm runs it (docs/design-php-versions.md 7), asked here as root before
+    // the child drops to the account: the version from the helper's own discovery, never a caller's path.
+    php::Loaded php_loaded;
+    if (const std::string v(req.get("php_version")); !v.empty()) {
+        try {
+            const Config fresh = load_config(cfg.config_path);
+            if (const php::Runtime* rt = php::find(php::discover(fresh, php::system_fs()), v))
+                php_loaded = php::loaded(*rt, [&](const std::string& path, const std::vector<std::string>& args, std::string& o) { return run(path.c_str(), args, o, 64 * 1024); });
+            if (php_loaded.exact.empty()) php_loaded.exact = v;
+        } catch (const std::exception&) {
+            php_loaded.exact = v;
+        }
+    }
     return run_as_account(uid, gid, helper_fd, upload_fd, [&] {
         install::Request r;
+        r.php_app = std::string(req.get("php_app"));
+        r.php_version = php_loaded.exact;
+        r.php_modules = php_loaded.modules;
+        r.php_modules_known = php_loaded.known;
+        r.ignore_requirements = req["ignore_requirements"].boolean();
         r.site_root = site_root;
         r.target = target;
         r.create_path = req["create_path"].boolean();

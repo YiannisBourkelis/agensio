@@ -698,7 +698,7 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
             reply(s, 200, answer);
             if (done) done();
         };
-        reload_then({}, body["cut_requests"].boolean(), can_wait, std::move(after));
+        reload_then({}, ReloadOptions{body["cut_requests"].boolean(), body["ignore_requirements"].boolean()}, can_wait, std::move(after));
         return can_wait;
     }
     if (path == "/v1/logs/reopen") {
@@ -830,7 +830,7 @@ void ControlHandler::site_trash(Stream& s, std::string_view name, std::string_vi
         std::filesystem::remove(file.string() + ".disabled", ec);
         // The reload with the PHP pools around it (docs/design-php-versions.md 6.1): the site's pool goes
         // after the switch, in the answer.
-        backend_->reload_async({}, false, [this, &s, what, key, r, site_file, done](ReloadOutcome o) {
+        backend_->reload_async({}, ReloadOptions{}, [this, &s, what, key, r, site_file, done](ReloadOutcome o) {
             if (!o.ok) {
                 // Put the file back and the files with it, so nothing is half done.
                 if (!site_file.empty()) {
@@ -952,7 +952,7 @@ void ControlHandler::trash_restore(Stream& s, std::string_view entry, std::strin
         // with the PHP pools around it (docs/design-php-versions.md 6.1): the site's pool is up before it is
         // served again.
         const std::string must = control::site_file(backend_->running(), r.get("site")).string();
-        backend_->reload_async(must, false, [this, &s, what, r, done](ReloadOutcome o) mutable {
+        backend_->reload_async(must, ReloadOptions{}, [this, &s, what, r, done](ReloadOutcome o) mutable {
             std::string back;
             for (const auto& p : r["restored"].items()) back += (back.empty() ? "" : ", ") + std::string(p.get("path"));
             audit_peer(s, what, "restored " + std::string(r.get("site")) + ": " + back + (o.ok ? "" : "; reload refused: " + o.error));
@@ -1214,6 +1214,10 @@ void ControlHandler::site_install(Stream& s, std::string_view name, const json::
     if (!body["strip"].is_null()) req.set("strip", body["strip"]);
     if (rails_app(app) && target == site_root) req.set("ruby_check", true);  // the pinned Ruby against the runtime's (next steps)
     if (node_app(app) && target == site_root) req.set("node_check", true);   // engines.node against the runtime's node
+    // The application itself into a PHP site with its own pool: what the release declares is judged
+    // against the site's PHP (docs/design-php-versions.md 7), whose php-fpm the installing side asks.
+    if (target == site_root && site->pool.generated && !site->pool.version.empty())
+        req.set("php_app", app).set("php_version", site->pool.version).set("ignore_requirements", body["ignore_requirements"].boolean());
     const std::string source = url.empty() ? "upload " + file : url;
     if (!dry_run) audit_peer(s, what, "installing " + source + " into " + target + (create_path ? " (create_path)" : ""));
     const std::vector<std::string> before = dry_run ? std::vector<std::string>{} : validation_errors(*backend_);
@@ -1590,19 +1594,20 @@ bool ControlHandler::site_create(Stream& s, const json::Value& body, std::string
         }
         pool_report(s, o, spec.domain, what, done, steps);
         for (const auto& p : protection_steps()) steps.push_back(p);
+        for (const auto& w : o.warnings) warnings.push(w);  // what the preflight said (design 7: a new site is told, never refused)
         json::Value answer = json::Value::object().set("ok", true).set("file", file.string()).set("spec", spec.to_json())
                                  .set("done", done).set("next_steps", strings(steps)).set("warnings", warnings);
         add_redirect_notes(answer, backend_->running(), spec.domain);
         reply(s, 201, answer);
         if (finish) finish();
     };
-    reload_then(file.string(), body["cut_requests"].boolean(), static_cast<bool>(finish), std::move(after));
+    reload_then(file.string(), ReloadOptions{body["cut_requests"].boolean(), body["ignore_requirements"].boolean()}, static_cast<bool>(finish), std::move(after));
     return static_cast<bool>(finish);
 }
 
-void ControlHandler::reload_then(std::string must_load, bool cut_requests, bool can_wait, std::function<void(ReloadOutcome)> then) {
+void ControlHandler::reload_then(std::string must_load, ReloadOptions opts, bool can_wait, std::function<void(ReloadOutcome)> then) {
     if (can_wait) {
-        backend_->reload_async(std::move(must_load), cut_requests, std::move(then));
+        backend_->reload_async(std::move(must_load), opts, std::move(then));
         return;
     }
     ReloadOutcome o;
@@ -1616,9 +1621,14 @@ json::Value ControlHandler::refused_reload(std::string_view message, const Reloa
     json::Value v = json::Value::object().set("error", std::string(message)).set("detail", o.error);
     if (!o.refusal.is_null()) {
         v.set("problems", o.refusal["problems"]).set("run_as_root", o.refusal["run_as_root"]).set("waiting", !o.refusal["run_as_root"].items().empty());
+        std::string hint;
         if (o.refusal["cut_requests"].boolean())
-            v.set("hint", "a php-fpm reload without process_control_timeout cuts the PHP requests in flight on every site of that version: the line in the "
-                          "problem makes it graceful (root's); cut_requests: true goes ahead and cuts them");
+            hint = "a php-fpm reload without process_control_timeout cuts the PHP requests in flight on every site of that version: the line in the "
+                   "problem makes it graceful (root's); cut_requests: true goes ahead and cuts them";
+        if (o.refusal["ignore_requirements"].boolean())
+            hint += std::string(hint.empty() ? "" : "; ") + "the application's requirements are not met by that version: choose one php_versions lists that meets "
+                    "them, or have root install what is missing; ignore_requirements: true goes ahead anyway, once the user agreed";
+        if (!hint.empty()) v.set("hint", hint);
     }
     if (!o.pools.is_null()) v.set("pools", o.pools);
     return v;
@@ -1799,14 +1809,16 @@ bool ControlHandler::site_update(Stream& s, std::string_view name, const json::V
         std::vector<std::string> steps = control::next_steps(spec, backend_->running());
         pool_report(s, o, spec.domain, what, done_now, steps);
         for (const auto& p : protection_steps()) steps.push_back(p);
+        json::Value all_warnings = warnings;
+        for (const auto& w : o.warnings) all_warnings.push(w);  // what the preflight said and nothing refused
         json::Value answer = json::Value::object().set("ok", true).set("file", file.string()).set("spec", spec.to_json())
-                                 .set("done", done_now).set("next_steps", strings(steps)).set("warnings", warnings);
+                                 .set("done", done_now).set("next_steps", strings(steps)).set("warnings", all_warnings);
         if (!note.empty()) answer.set("hsts_note", note);  // what the change did to the HSTS browsers hold (4.5)
         add_redirect_notes(answer, backend_->running(), spec.domain);
         reply(s, 200, answer);
         if (finish) finish();
     };
-    reload_then(file.string(), body["cut_requests"].boolean(), static_cast<bool>(finish), std::move(after));
+    reload_then(file.string(), ReloadOptions{body["cut_requests"].boolean(), body["ignore_requirements"].boolean()}, static_cast<bool>(finish), std::move(after));
     return static_cast<bool>(finish);
 }
 
@@ -1919,7 +1931,7 @@ bool ControlHandler::site_toggle(Stream& s, std::string_view name, std::string_v
         reply(s, 200, body);
         if (finish) finish();
     };
-    reload_then(action == "enable" ? file.string() : std::string{}, false, static_cast<bool>(finish), std::move(after));
+    reload_then(action == "enable" ? file.string() : std::string{}, ReloadOptions{}, static_cast<bool>(finish), std::move(after));
     return static_cast<bool>(finish);
 }
 

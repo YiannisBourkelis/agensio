@@ -15,7 +15,7 @@ POOLD=$T/pool.d   # the version's pool directory, root's [php.runtimes] (docs/co
 P9() { ls $POOLD/agensio-t9-*.conf; }   # a pool per site: agensio-<user>-<8 hex of the domain>
 pass=0; fail=0
 check() { if [ "$3" = "$2" ]; then echo "ok   $1"; pass=$((pass+1)); else echo "FAIL $1: expected [$2] got [$3]"; fail=$((fail+1)); fi; }
-cleanup() { [ -f "$T/agensio.pid" ] && kill "$(cat "$T/agensio.pid")" 2>/dev/null; for f in $T/fpm.pid $T/fpm99.pid; do [ -f $f ] && kill "$(cat $f)" 2>/dev/null; done; for u in t9 t8 t7 t6; do userdel $u 2>/dev/null; done; rm -rf "$T"; }
+cleanup() { [ -f "$T/agensio.pid" ] && kill "$(cat "$T/agensio.pid")" 2>/dev/null; for f in $T/fpm.pid $T/fpm99.pid; do [ -f $f ] && kill "$(cat $f)" 2>/dev/null; done; for u in t9 t8 t7 t6 t5; do userdel $u 2>/dev/null; done; rm -rf "$T"; }
 trap cleanup EXIT
 id -u agensio >/dev/null 2>&1 || useradd -r -M -s /usr/sbin/nologin agensio
 mkdir -p $T/sites.d $T/logs $T/run $T/state $T/www $POOLD $T/pool99.d; chown agensio:agensio $T/sites.d $T/logs $T/state; chmod 751 $T/state
@@ -164,7 +164,10 @@ check "health: a missing PHP private directory is an error finding with the fix;
 sleep 1.3
 check "the site's log is readable by t9 without a restart" "agensio t9 640" "$(stat -c '%U %G %a' $T/logs/sites/t9.test.log)"
 h=$("$BIN" ctl health --socket $T/run/control.sock)
-check "health has no error and no log finding" "yes 0 no" "$(echo "$h" | grep -q '"ok":' && echo -n yes) $(echo "$h" | grep -o '"severity":"error"' | wc -l | tr -d ' ') $(echo "$h" | grep -q log_not_readable && echo yes || echo no)"
+# The devbox's php-fpm loads no dom, gd, SimpleXML or xml, which Drupal requires (docs/configuration.md 7b):
+# t6's one error, naming them; nothing else is an error.
+check "health: the Drupal site's missing required extensions are its error, naming them; no other error and no log finding" "yes yes 0 no" \
+  "$(echo "$h" | grep -q '"ok":' && echo -n yes) $(echo "$h" | python3 -c 'import json,sys; f=[x for x in json.load(sys.stdin)["findings"] if x["code"]=="php_extensions_missing" and x["severity"]=="error"]; print("yes" if len(f)==1 and f[0]["site"]=="t6.test" and all(e in f[0]["message"] for e in ("dom", "gd", "simplexml", "xml")) else f)') $(echo "$h" | python3 -c 'import json,sys; print(len([x for x in json.load(sys.stdin)["findings"] if x["severity"]=="error" and x["code"]!="php_extensions_missing"]))') $(echo "$h" | grep -q log_not_readable && echo yes || echo no)"
 check "every helper action is in the audit log" "yes yes yes" "$(grep -q 'provisioned missing_account' $T/logs/audit.log && echo yes) $(grep -q 'provisioned root_missing' $T/logs/audit.log && echo yes) $(grep -q 'sites (provision): created' $T/logs/audit.log && echo yes)"
 
 # A managed site's users through the helper (2026-10-09, design section 25, step 4b): root's file,
@@ -224,6 +227,30 @@ out=$("$BIN" ctl site-update t9.test --php-version $PHPV --yes --reason "back" -
 sleep 0.3; unload
 check "php switch back under load: every answer a 200, the last from $PHPV's master; agensio pools finds nothing to do" "yes 0 yes 0" \
   "$(echo "$out" | grep -q '"ok":true' && echo yes) $(grep -vc '^200 [0-9]*$' $T/load.all) $([ "$(tail -1 $T/load.4 | cut -d' ' -f2)" = "$(cat $T/fpm.pid)" ] && echo yes) $(rc=0; "$BIN" pools -c $T/agensio.toml > /dev/null 2>&1 || rc=$?; echo $rc)"
+# What the site's application needs (docs/design-php-versions.md 7): t9's composer.json requires an
+# extension no version loads; its move is refused naming it, nothing changes, and --ignore-requirements
+# moves it with a warning.
+printf '{"require": {"ext-nosuch": "*"}}' > $T/www/t9.test/web/composer.json; chown t9:agensio $T/www/t9.test/web/composer.json; chmod 640 $T/www/t9.test/web/composer.json
+out=$("$BIN" ctl site-update t9.test --php-version 9.9 --yes --reason "requirements" --socket $CS)
+check "requirements: a move to a version without what composer.json requires is refused, naming it and ignore_requirements; nothing changed" "yes yes $PHPV" \
+  "$(echo "$out" | grep -q 'requires the PHP extension nosuch' && echo yes) $(echo "$out" | grep -q 'ignore_requirements' && echo yes) $(curl -sS --unix-socket $CS http://control/v1/sites/t9.test | python3 -c 'import json,sys; print(json.load(sys.stdin)["php"]["version"])')"
+out=$("$BIN" ctl site-update t9.test --php-version 9.9 --ignore-requirements --yes --reason "requirements" --socket $CS)
+check "requirements: --ignore-requirements moves it, the answer's warnings naming the extension" "yes yes 9.9" \
+  "$(echo "$out" | grep -q '"ok":true' && echo yes) $(echo "$out" | python3 -c 'import json,sys; print("yes" if any("nosuch" in w for w in json.load(sys.stdin)["warnings"]) else "no")') $(curl -sS --unix-socket $CS http://control/v1/sites/t9.test | python3 -c 'import json,sys; print(json.load(sys.stdin)["php"]["version"])')"
+"$BIN" ctl site-update t9.test --php-version $PHPV --ignore-requirements --yes --reason "back" --socket $CS > /dev/null
+rm -f $T/www/t9.test/web/composer.json
+# A release the site's PHP cannot run: an archive whose composer.json asks PHP >= 99.0 is refused and taken
+# out again; with --ignore-requirements it is installed, facts.php saying what it declares.
+"$BIN" ctl site-create --domain t5.test --app php --root "$T/www/t5.test/web" --user t5 --https none --listen-plain 127.0.0.1:18198 --yes --reason requirements --socket $CS > /dev/null
+mkdir -p $T/rel/app; printf '{"require": {"php": ">=99.0"}}' > $T/rel/app/composer.json; echo '<?php echo "new";' > $T/rel/app/index.php; tar czf $T/rel.tgz -C $T/rel app
+"$BIN" ctl upload rel.tgz $T/rel.tgz --socket $CS > /dev/null
+out=$("$BIN" ctl site-install t5.test --file rel.tgz --yes --reason requirements --socket $CS)
+check "requirements: site-install of a release that needs PHP >= 99.0 is refused and leaves the directory empty" "yes 0" \
+  "$(echo "$out" | grep -q 'cannot run on the site.s PHP: it needs PHP >=99.0 (composer.json)' && echo yes) $(ls -A $T/www/t5.test/web | wc -l)"
+out=$("$BIN" ctl site-install t5.test --file rel.tgz --ignore-requirements --yes --reason requirements --socket $CS)
+check "requirements: --ignore-requirements installs it, facts.php naming the declaration and the version outside it" "True >=99.0 True" \
+  "$(echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); p=d["facts"]["php"]; print(d["ok"], p["declared"]["php"], p["outside"])')"
+
 # At a start (docs/design-php-versions.md 6.2): the pool files no longer match (t9's gone and its master
 # reloaded without it, as after an upgrade that renamed the pools); the start writes it back and reloads
 # php-fpm before the listeners accept, so the first request is answered; a start that finds them in step

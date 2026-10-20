@@ -1448,10 +1448,10 @@ void Server::run() {
     std::function<void(const asio::error_code&, int)> on_hup;
     on_hup = [this, &hup, &on_hup](const asio::error_code& ec, int) {
         if (ec) return;
-        // The ordered switch (docs/design-php-versions.md 6.1); nobody is there to agree to cut requests,
-        // so a version without process_control_timeout is a warning in the error log.
+        // The ordered switch (docs/design-php-versions.md 6.1); nobody is there to agree to cut requests
+        // or to an application's unmet requirements, so both are warnings in the error log.
         if (reloading_) reload_again_ = true;
-        else reload_async({}, true, [](ReloadOutcome) {});
+        else reload_async({}, {true, true}, [](ReloadOutcome) {});
         hup.async_wait(on_hup);
     };
     hup.async_wait(on_hup);
@@ -1584,6 +1584,16 @@ void Server::install_async(const json::Value& req, std::function<void(json::Valu
                 if (tasks::trusted_program(node_dir + "/node", provision::sites_root(cfg_), canonical, missing).empty()) ir.node = canonical;
             }
             for (const auto& sec : req["secrets"].items()) ir.secrets.push_back(sec.str());
+            // The site's PHP as its own php-fpm runs it (docs/design-php-versions.md 7).
+            if (const std::string v(req.get("php_version")); !v.empty()) {
+                php::Loaded l;
+                if (const php::Runtime* rt = php::find(php::discover(cfg_, php::system_fs()), v)) l = php::loaded(*rt, php::system_exec());
+                ir.php_app = std::string(req.get("php_app"));
+                ir.php_version = l.exact.empty() ? v : l.exact;
+                ir.php_modules = l.modules;
+                ir.php_modules_known = l.known;
+                ir.ignore_requirements = req["ignore_requirements"].boolean();
+            }
             if (!ir.url.empty() && !cfg_.control.install) {
                 r = json::Value::object().set("ok", false).set("error", "downloads are off ([control] install = false); upload the archive instead");
             } else {
@@ -2136,7 +2146,7 @@ void Server::pools_after(bool had_pools, std::function<void(json::Value)> done) 
     }).detach();
 }
 
-void Server::reload_async(std::string must_load, bool cut_requests, std::function<void(ReloadOutcome)> done) {
+void Server::reload_async(std::string must_load, ReloadOptions opts, std::function<void(ReloadOutcome)> done) {
     ReloadOutcome first;
     if (reloading_) {
         first.error = "another reload is switching PHP pools; try again in a moment";
@@ -2157,7 +2167,7 @@ void Server::reload_async(std::string must_load, bool cut_requests, std::functio
     reloading_ = true;
     const std::vector<PoolSwitch> switches = pool_switches(gen_->cfg, gen->cfg);
     const std::shared_ptr<const Generation> base = gen_;
-    std::thread([this, gen, base, switches, cut_requests, must_load = std::move(must_load), done = std::move(done)]() mutable {
+    std::thread([this, gen, base, switches, opts, must_load = std::move(must_load), done = std::move(done)]() mutable {
         // The preflight (docs/design-php-versions.md 6.1), off the workers: it reads each version's
         // php-fpm.conf and asks systemd for its service's state. Then the new pools up.
         json::Value refusal, up;
@@ -2170,31 +2180,44 @@ void Server::reload_async(std::string must_load, bool cut_requests, std::functio
             facts.unit_state = [&](const php::Runtime& r) { return php::unit_state(r, exec, systemctl); };
             facts.hard_reload = [](const php::Runtime& r) { return control::php_fpm_hard_reload(r); };
             facts.running = [](const php::Runtime& r) { return php::master_running(r); };
+            // What the application needs (design 7): each version's php-fpm asked once, the site's files read.
+            std::map<std::string, php::Loaded> loaded;
+            facts.loaded = [&](const php::Runtime& r) {
+                auto it = loaded.find(r.version);
+                if (it == loaded.end()) it = loaded.emplace(r.version, php::loaded(r, exec)).first;
+                return it->second;
+            };
+            facts.declared = [](const PoolSwitch& w) { return php::declared_on_disk(w.dirs); };
             json::Value problems = json::Value::array(), lines = json::Value::array();
-            bool blocking = false, cuts = false;
+            bool blocking = false, cuts = false, needs = false;
             for (const auto& p : switch_preflight(switches, runtimes, facts)) {
-                if (p.cut_requests && cut_requests) {  // the caller goes ahead knowing it
+                // Said, not refused: a warning, and what the caller agreed to go past.
+                if (p.warning || (p.cut_requests && opts.cut_requests) || (p.requirements && opts.ignore_requirements)) {
                     warnings.push_back(p.message);
                     continue;
                 }
                 blocking = true;
                 cuts = cuts || p.cut_requests;
+                needs = needs || p.requirements;
                 problems.push(json::Value::object().set("site", p.site).set("message", p.message).set("cut_requests", p.cut_requests)
-                                  .set("run_as_root", p.run_as_root.empty() ? json::Value() : json::Value(p.run_as_root)));
+                                  .set("requirements", p.requirements).set("run_as_root", p.run_as_root.empty() ? json::Value() : json::Value(p.run_as_root)));
                 if (!p.run_as_root.empty()) lines.push(p.run_as_root);
             }
-            if (blocking) refusal = json::Value::object().set("problems", std::move(problems)).set("run_as_root", std::move(lines)).set("cut_requests", cuts);
+            if (blocking)
+                refusal = json::Value::object().set("problems", std::move(problems)).set("run_as_root", std::move(lines)).set("cut_requests", cuts)
+                              .set("ignore_requirements", needs);
             else up = provisioner_.request(json::Value::object().set("op", "pools_apply").set("phase", "up"));
         }
         asio::post(workers_[0]->ctx, [this, gen, base, refusal, up, warnings, must_load, done]() mutable {
             ReloadOutcome out;
+            out.warnings = warnings;
             for (const auto& w : warnings) error_log_.warn("php switch: " + w);
             auto finish = [this](std::function<void(ReloadOutcome)>& d, ReloadOutcome o) {
                 reloading_ = false;
                 d(std::move(o));
                 if (reload_again_) {  // a SIGHUP came while this one switched
                     reload_again_ = false;
-                    reload_async({}, true, [](ReloadOutcome) {});
+                    reload_async({}, {true, true}, [](ReloadOutcome) {});
                 }
             };
             if (!refusal.is_null()) {
