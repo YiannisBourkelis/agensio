@@ -148,7 +148,7 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
     const bool read_command = path == "/v1/status" || path == "/v1/sites" || path.starts_with("/v1/sites/") ||
                               path == "/v1/config/validate" || path == "/v1/logs" || path == "/v1/health" ||
                               path == "/v1/presets" || path == "/v1/uploads" || path == "/v1/settings" || path == "/v1/config/reference" ||
-                              path == "/v1/trash" || path == "/v1/protection";
+                              path == "/v1/trash" || path == "/v1/protection" || path == "/v1/php";
     if (!read_command) {
         reply(s, 404, json::Value::object().set("error", "unknown command").set("path", std::string(path)));
         return false;
@@ -207,6 +207,19 @@ bool ControlHandler::handle_deferred(Stream& s, WorkerState& ws, std::function<v
             return false;
         }
         protection_show(s, done);
+        return true;
+    }
+    if (path == "/v1/php") {
+        // The PHP versions installed and installable (docs/configuration.md 7b): viewer, read-only;
+        // their programs run off the workers, through the helper as root when there is one.
+        if (!done) {
+            reply(s, 503, json::Value::object().set("error", "php needs an asynchronous caller"));
+            return false;
+        }
+        backend_->php_versions_async([this, &s, done](json::Value v) {
+            reply(s, 200, v);
+            done();
+        });
         return true;
     }
     if (path == "/v1/trash") {

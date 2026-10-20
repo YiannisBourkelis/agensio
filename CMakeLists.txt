@@ -133,6 +133,8 @@ set(AGENSIO_CORE_SOURCES
   src/core/router.cpp
   src/services/log.cpp
   src/services/pools.cpp
+  src/services/php_runtimes.cpp
+  src/control/php.cpp
   src/services/certificates.cpp
   src/services/acme.cpp
   src/services/provision.cpp

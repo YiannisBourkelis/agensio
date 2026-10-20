@@ -20,6 +20,8 @@
 #include "cache.hpp"
 #include "http1/chunked.hpp"
 #include "config.hpp"
+#include "control/php.hpp"
+#include "services/php_runtimes.hpp"
 #include "services/pools.hpp"
 #include "upstream/http_head.hpp"
 #include "http1/range.hpp"
@@ -7806,6 +7808,172 @@ static void test_rotated_logs() {
     fs::remove_all(dir);
 }
 
+// The PHP versions installed (docs/design-php-versions.md 4): found from the distributions' layouts on
+// a described machine, root's [php.runtimes] over them; their facts read from their own programs'
+// output; PHP's support table; what the repositories can install.
+static void test_php_runtimes() {
+    namespace fs = std::filesystem;
+    std::set<std::string> files, dirs;
+    php::Fs f;
+    f.is_file = [&](const std::string& p) { return files.count(p) > 0; };
+    f.is_dir = [&](const std::string& p) { return dirs.count(p) > 0; };
+    f.list = [&](const std::string& dir) {
+        std::set<std::string> out;
+        for (const auto& p : files)
+            if (p.starts_with(dir + "/")) out.insert(p.substr(dir.size() + 1, p.find('/', dir.size() + 1) - dir.size() - 1));
+        return std::vector<std::string>(out.begin(), out.end());
+    };
+    // Debian with 8.4 and sury's 8.5 and 8.10, a 7.4 left without its FPM binary, a stray directory.
+    for (const char* v : {"8.4", "8.5", "8.10"}) {
+        files.insert(std::string("/etc/php/") + v + "/fpm/php-fpm.conf");
+        files.insert(std::string("/usr/sbin/php-fpm") + v);
+    }
+    files.insert("/usr/bin/php8.5");
+    files.insert("/etc/php/7.4/fpm/php-fpm.conf");
+    files.insert("/etc/php/mods/x");
+    // Alpine's 8.3 and Remi's 8.2 on the same (imaginary) machine.
+    files.insert("/etc/php83/php-fpm.conf");
+    files.insert("/usr/sbin/php-fpm83");
+    files.insert("/etc/opt/remi/php82/php-fpm.conf");
+    files.insert("/opt/remi/php82/root/usr/sbin/php-fpm");
+    Config cfg;
+    auto rt = php::discover(cfg, f);
+    std::string order;
+    for (const auto& r : rt) order += r.version + " ";
+    CHECK(order == "8.2 8.3 8.4 8.5 8.10 ");
+    const php::Runtime* d = php::find(rt, "8.5");
+    CHECK(d && d->fpm == "/usr/sbin/php-fpm8.5" && d->conf == "/etc/php/8.5/fpm/php-fpm.conf" && d->pools == "/etc/php/8.5/fpm/pool.d" &&
+          d->unit == "php8.5-fpm" && d->cli == "/usr/bin/php8.5" && !d->configured);
+    CHECK(php::find(rt, "8.4")->cli.empty() && !php::find(rt, "7.4"));
+    CHECK(php::find(rt, "8.2")->unit == "php82-php-fpm" && php::find(rt, "8.2")->pools == "/etc/opt/remi/php82/php-fpm.d");
+    CHECK(php::find(rt, "8.3")->unit.empty() && php::find(rt, "8.3")->fpm == "/usr/sbin/php-fpm83");
+    // Root's own replaces the discovered 8.5 and adds 9.9.
+    cfg.php_runtimes.push_back({"8.5", "/opt/php85/sbin/php-fpm", "/opt/php85/etc/php-fpm.conf", "/opt/php85/etc/php-fpm.d", "php85-fpm", ""});
+    cfg.php_runtimes.push_back({"9.9", "/opt/t/php-fpm", "/opt/t/php-fpm.conf", "/opt/t/pool.d", "", ""});
+    rt = php::discover(cfg, f);
+    CHECK(rt.size() == 6 && rt.back().version == "9.9" && rt.back().configured && php::find(rt, "8.5")->fpm == "/opt/php85/sbin/php-fpm");
+    // The programs' output, as php-fpm 8.4 prints it.
+    CHECK(php::parse_version("PHP 8.4.24 (fpm-fcgi) (built: Jul 31 2026 05:11:11) (NTS)\nCopyright (c) The PHP Group\n") == "8.4.24");
+    CHECK(php::parse_version("garbage").empty());
+    const auto mods = php::parse_modules("[PHP Modules]\ncalendar\nCore\nZend OPcache\nzlib\n\n[Zend Modules]\nZend OPcache\n\n");
+    CHECK(mods.size() == 4 && mods[0] == "calendar" && mods[1] == "core" && mods[2] == "zend opcache" && mods[3] == "zlib");
+    const std::string info = "opcache.enable => On => On\nopcache.enable_cli => Off => Off\nopcache.memory_consumption => 128 => 128\n"
+                             "opcache.validate_permission => Off => Off\n";
+    CHECK(php::ini_value(info, "opcache.enable") == "On" && php::ini_value(info, "opcache.memory_consumption") == "128" &&
+          php::ini_value(info, "opcache.validate_root").empty());
+    php::Facts ft;
+    php::parse_fpm_test("[20-Oct-2026 18:05:12] NOTICE: [global]\n[20-Oct-2026 18:05:12] NOTICE: \tprocess_control_timeout = 0s\n"
+                        "[20-Oct-2026 18:05:12] NOTICE: configuration file /etc/php/8.4/fpm/php-fpm.conf test is successful\n",
+                        ft);
+    CHECK(ft.tested && ft.config_ok && ft.control_timeout == "0s" && ft.config_error.empty());
+    php::Facts bad;
+    php::parse_fpm_test("[20-Oct-2026 18:05:02] ERROR: [pool x] unknown entry 'listn'\n[20-Oct-2026 18:05:02] ERROR: FPM initialization failed\n", bad);
+    CHECK(!bad.config_ok && bad.config_error.find("unknown entry 'listn'") != std::string::npos);
+    // gather over a fake runner: what each program answers, and that the test runs as root only.
+    std::vector<std::string> ran;
+    php::Exec fake = [&](const std::string& path, const std::vector<std::string>& args, std::string& out) {
+        ran.push_back(path + " " + (args.empty() ? "" : args[0]));
+        if (args[0] == "-v") out = "PHP 8.5.1 (fpm-fcgi)\n";
+        else if (args[0] == "-m") out = "[PHP Modules]\nmbstring\ngd\n";
+        else if (args[0] == "-i") out = info;
+        else if (args[0] == "-tt") out = "NOTICE: \tprocess_control_timeout = 10s\nNOTICE: configuration file x test is successful\n";
+        else if (args[0] == "show") out = "ActiveState=active\nUnitFileState=enabled\n";
+        return 0;
+    };
+    const php::Facts g = php::gather(*php::find(rt, "8.4"), fake, true, "/usr/bin/systemctl");
+    CHECK(g.exact == "8.5.1" && g.modules.size() == 2 && g.opcache && g.opcache_memory == "128" && !g.validate_permission && g.config_ok &&
+          g.control_timeout == "10s" && g.unit_active == "active" && g.unit_enabled == "enabled");
+    ran.clear();
+    const php::Facts plain = php::gather(*php::find(rt, "8.4"), fake, false, "");
+    CHECK(!plain.tested && plain.control_timeout.empty() && plain.unit_active.empty() &&
+          std::none_of(ran.begin(), ran.end(), [](const std::string& r) { return r.ends_with("-tt"); }));
+    // PHP's support table (php.net, 2026-10-20): 8.4 in active support until its last day.
+    auto at = [](const char* day) {
+        std::tm tm{};
+        std::sscanf(day, "%d-%d-%d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday);
+        tm.tm_year -= 1900;
+        tm.tm_mon -= 1;
+        tm.tm_hour = 12;
+        return timegm(&tm);
+    };
+    CHECK(php::support_status("8.4", at("2026-10-20")) == "active" && php::support_status("8.4", at("2026-12-31")) == "active" &&
+          php::support_status("8.4", at("2027-01-01")) == "security" && php::support_status("8.4", at("2029-01-01")) == "eol");
+    CHECK(php::support_status("8.1", at("2026-10-20")) == "eol" && php::support_status("8.2", at("2026-10-20")) == "security");
+    CHECK(php::support_status("9.1", at("2026-10-20")) == "unknown" && php::support_status("5.6", at("2026-10-20")) == "eol");
+    CHECK(php::release("8.5") && std::string(php::release("8.5")->security_until) == "2029-12-31");
+    // apt-cache policy: a candidate means installable; an unknown package prints nothing.
+    CHECK(php::apt_candidate("php8.5-fpm:\n  Installed: (none)\n  Candidate: 8.5.3-1+0~20261001\n  Version table:\n") == "8.5.3-1+0~20261001");
+    CHECK(php::apt_candidate("php8.4-fpm:\n  Installed: 8.4.24-1~deb13u1\n  Candidate: 8.4.24-1~deb13u1\n") == "8.4.24-1~deb13u1");
+    CHECK(php::apt_candidate("").empty() && php::apt_candidate("php9-fpm:\n  Installed: (none)\n  Candidate: (none)\n").empty());
+    php::Exec apt = [](const std::string&, const std::vector<std::string>& args, std::string& out) {
+        if (args[1] == "php8.5-fpm") out = "php8.5-fpm:\n  Installed: (none)\n  Candidate: 8.5.3-1\n";
+        return 0;
+    };
+    const auto inst = php::installable(apt, php::discover(Config{}, f), "/usr/bin/apt-cache");
+    CHECK(inst.empty());  // 8.5 is installed on this machine
+    std::vector<php::Runtime> only84 = {*php::find(rt, "8.4")};
+    const auto offer = php::installable(apt, only84, "/usr/bin/apt-cache");
+    CHECK(offer.size() == 1 && offer[0] == "8.5" && php::installable(apt, only84, "").empty());
+    // [php.runtimes] in the main file: the keys of a runtime, paths absolute, refused in an included file.
+    const fs::path dir = fs::temp_directory_path() / ("agensio-phprt-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "www");
+    fs::create_directories(dir / "sites.d");
+    auto load = [&](const std::string& extra) {
+        std::ofstream(dir / "a.toml") << extra << "[[site]]\nserver_name = [\"p.test\"]\nlisten = [\"127.0.0.1:18713\"]\nroot = \"www\"\n";
+        try {
+            return std::string(load_config(dir / "a.toml").php_runtimes.size() == 1 ? "ok" : "none");
+        } catch (const std::exception& e) {
+            return std::string("refused: ") + e.what();
+        }
+    };
+    CHECK(load("[php.runtimes.\"8.5\"]\nfpm = \"/opt/p/php-fpm\"\nconf = \"/opt/p/php-fpm.conf\"\npools = \"/opt/p/pool.d\"\nunit = \"php85-fpm\"\n") == "ok");
+    CHECK(load("[php.runtimes.\"8.5\"]\nfpm = \"/opt/p/php-fpm\"\nconf = \"/opt/p/php-fpm.conf\"\n").find("'pools' is required") != std::string::npos);
+    CHECK(load("[php.runtimes.\"8.5\"]\nfpm = \"opt/p\"\nconf = \"/c\"\npools = \"/p\"\n").find("absolute path") != std::string::npos);
+    CHECK(load("[php.runtimes.\"8.5\"]\nfpm = \"/f\"\nconf = \"/c\"\npools = \"/p\"\nunit = \"x; rm\"\n").find("systemd unit") != std::string::npos);
+    CHECK(load("[php.runtimes.\"latest\"]\nfpm = \"/f\"\nconf = \"/c\"\npools = \"/p\"\n").find("is no version") != std::string::npos);
+    CHECK(load("[php.runtimes.\"8.5\"]\nfpm = \"/f\"\nconf = \"/c\"\npools = \"/p\"\nbinary = \"/b\"\n").find("unknown key 'binary'") != std::string::npos);
+    CHECK(load("[php]\nversions = []\n").find("unknown key 'versions'") != std::string::npos);
+    std::ofstream(dir / "sites.d" / "x.toml") << "[php.runtimes.\"8.5\"]\nfpm = \"/f\"\nconf = \"/c\"\npools = \"/p\"\n";
+    std::ofstream(dir / "b.toml") << "include = [\"sites.d/*.toml\"]\n[[site]]\nserver_name = [\"p.test\"]\nlisten = [\"127.0.0.1:18713\"]\nroot = \"www\"\n";
+    const Config inc = load_config(dir / "b.toml");
+    CHECK(inc.php_runtimes.empty() && !inc.held_back.empty() && inc.held_back[0].error.find("[php] belong in the main file") != std::string::npos);
+    fs::remove_all(dir);
+    // The answer of php_versions (docs/configuration.md 7b) from an inventory gathered elsewhere.
+    {
+        control::PhpInventory inv;
+        inv.runtimes = {*php::find(rt, "8.4"), *php::find(rt, "8.5")};
+        php::Facts a = g;  // 8.4: tested as root, 10 s
+        php::Facts b;
+        b.exact = "8.5.0";
+        b.modules = {"core"};
+        inv.facts = {a, b};
+        Config c;
+        SiteConfig wp;
+        wp.server_names = {"wp.test"};
+        wp.pool.generated = true;
+        wp.pool.name = "agensio-wp";
+        c.sites.push_back(wp);
+        inv.pools = {{"agensio-wp"}, {}};
+        inv.installable = {"8.3"};
+        inv.apt = true;
+        inv.as_root = true;
+        inv.distro = "debian";
+        const json::Value v = control::php_versions_json(c, inv, at("2026-10-20"));
+        const auto& r = v["runtimes"].items();
+        CHECK(r.size() == 2 && r[0].get("version") == "8.4" && r[0].get("exact") == "8.5.1" && r[0]["config_test"]["ok"].boolean() &&
+              r[0].get("process_control_timeout") == "10s" && !r[0]["reload_cuts_requests"].boolean() && r[0]["sites"].items().size() == 1 &&
+              r[0]["sites"].items()[0].str() == "wp.test" && r[0]["support"].get("status") == "active" && r[0]["service"].get("active") == "active");
+        CHECK(r[1]["config_test"].is_null() && r[1]["sites"].items().empty() && r[1]["support"].get("security_until") == "2029-12-31");
+        CHECK(v["installable"].items().size() == 1 && v["installable"].items()[0].get("install") == "as root: apt install php8.3-fpm");
+        CHECK(v["not_offered"]["versions"].items().size() == 1 && v["not_offered"]["versions"].items()[0].str() == "8.2" &&
+              v["not_offered"].get("how").find("packages.sury.org") != std::string::npos && v["note"].is_null());
+        inv.as_root = false;
+        inv.distro = "ubuntu";
+        const json::Value u = control::php_versions_json(c, inv, at("2026-10-20"));
+        CHECK(u.get("note").find("needs root") != std::string::npos && u["not_offered"].get("how").find("ppa:ondrej/php") != std::string::npos);
+    }
+}
+
 static void test_served_certificates() {
     using control::Finding;
     constexpr auto npos = std::string::npos;
@@ -9707,7 +9875,7 @@ static void test_mime_types() {
         std::ofstream(dir / "sites.d" / "c.toml") << "[mime_types]\n\"sh\" = \"text/plain\"\n\n[[site]]\nserver_name = [\"c.test\"]\nlisten = [\"127.0.0.1:18751\"]\nroot = \"../www\"\n";
         std::ofstream(dir / "agensio.toml") << "include = [\"sites.d/*.toml\"]\n\n[[site]]\nserver_name = [\"a.test\"]\nlisten = [\"127.0.0.1:18751\"]\nroot = \"www\"\n";
         const Config c = load_config(dir / "agensio.toml");
-        CHECK(c.held_back.size() == 1 && c.held_back[0].error.find("[mime_types] belong in the main file") != std::string::npos);
+        CHECK(c.held_back.size() == 1 && c.held_back[0].error.find("[mime_types] and [php] belong in the main file") != std::string::npos);
         fs::remove(dir / "sites.d" / "c.toml");
     }
     // A managed site: the table taken whole and judged by the same checks, carried in the spec and
@@ -11557,6 +11725,7 @@ int main() {
     test_served_certificates();
     test_hsts_clearing_health();
     test_rotated_logs();
+    test_php_runtimes();
     test_config_reference();
     test_config_reference_defaults();
     test_forwarded_lines();

@@ -86,6 +86,25 @@ section of `docs/configuration.md` that explains the key.
 |---|---|---|---|---|---|---|
 | `include` | list of globs | [] | Further configuration files, relative to this one: include = ["sites.d/*.toml"] is what site-create needs. | reload | file | 15 |
 | `mime_types` | table: ending or path = type \| { type, encoding } | {} (the built-in table alone) | Root's Content-Type for the files every site serves, over the built-in table (nginx's mime.types): mime_types = { "sh" = "text/plain; charset=utf-8", "js.gzip" = { type = "text/javascript; charset=utf-8", encoding = "gzip" } }, by ending (any case, the longest of a file's name first; quote one with a dot) or by exact path; a site's own mime_types decide over it. A type browsers run scripts in (HTML, XML, SVG, JavaScript) for an ending that has none built in is noted (mime_type_scriptable). An application's answers keep their own type. At most 256. | reload | file | 6c |
+| `php` | table: runtimes | {} (the versions discovered) | Root's table for the PHP versions agensio gives pools to: [php.runtimes."X.Y"] for one its discovery of the distributions' layouts does not find (Debian and Ubuntu /etc/php/X.Y, Remi, Alpine, Homebrew). php_versions lists what is installed. | reload | file | 7b |
+## `[php]`
+
+| key | type | default | meaning | applies | via | doc |
+|---|---|---|---|---|---|---|
+| `runtimes` | table: version = { fpm, conf, pools, unit, cli } | {} | A PHP version by its major.minor, quoted ([php.runtimes."8.5"]), with its php-fpm's files: a build under /opt, a second instance; it replaces a discovered version of the same number. | reload | file | 7b |
+## `[php.runtimes.VERSION]`
+
+| key | type | default | meaning | applies | via | doc |
+|---|---|---|---|---|---|---|
+| `fpm` | absolute path | (required) | The version's FPM binary (php-fpm -v, -m, -i and, as root, -tt are run on it). | reload | file | 7b |
+| `conf` | absolute path | (required) | Its php-fpm.conf (process_control_timeout is read from it). | reload | file | 7b |
+| `pools` | absolute path | (required) | The directory its php-fpm.conf includes pool files from. | reload | file | 7b |
+| `unit` | systemd unit name | none | Its service, for its state and its reload (php8.5-fpm); none for one systemd does not start. | reload | file | 7b |
+| `cli` | absolute path | none | Its command-line binary, for site tasks. | reload | file | 7b |
+## `top level`
+
+| key | type | default | meaning | applies | via | doc |
+|---|---|---|---|---|---|---|
 | `addresses` | table of address lists | {} | Named address sets: [addresses] office = ["203.0.113.7", "2001:db8:5::/64"], named "@office" in the sites' access rules, so one edit reaches every site that names it. Addresses and ranges only, at most 64 a set. | reload | file | 19 |
 ## `[cache]`
 

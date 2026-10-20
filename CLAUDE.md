@@ -437,6 +437,14 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-one, each seeded fr
   logs `agensio:<site group> 0640`, then drop privileges. `tests/pools.sh` runs the whole
   thing with two real users in a root devbox (`docker run --user root ... agensio-devbox
   tests/pools.sh build/agensio`).
+- **PHP versions** (alpha.107, step 1 of `docs/design-php-versions.md`): `services/php_runtimes.*`
+  finds every installed php-fpm (Debian and Ubuntu `/etc/php/X.Y/fpm`, Remi, Alpine, Homebrew, root's
+  `[php.runtimes."X.Y"]`) and reads each one's facts from its own programs with fixed arguments (`-v`,
+  `-m`, `-i`, as root `-tt`, `systemctl show`), plus `apt-cache policy` for what is installable and
+  PHP's compiled release table for the support status; `control/php.*` builds `php_versions` (MCP,
+  `ctl php`, `GET /v1/php`), gathered off the workers through the helper's `php_runtimes` as root, else
+  as the server's account without the configuration test. Pools are still per account in one
+  directory; a pool per site on its own version and the switch without downtime are steps 2 and 3.
 - **Proxy test beds** (D6): `bench/redmine/` (Rails, `docker compose`, admin / admin,
   agensio on 8075) and `bench/uptime-kuma/` (Node, Socket.IO over WebSockets, agensio on
   8076); `setup.sh` starts each, `tests/redmine.sh` and `tests/uptime-kuma.sh` run the
@@ -593,7 +601,7 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-one, each seeded fr
   through it and reports `done`; `[control] provision = false` hands commands back
   instead. Its threat analysis is in `docs/security-control-plane.md`; every change to it
   updates that section. `tests/provision.sh` runs it as root in the devbox.
-  `agensio mcp` (F5, `control/mcp.*`): stdio JSON-RPC MCP server, 38 tools with
+  `agensio mcp` (F5, `control/mcp.*`): stdio JSON-RPC MCP server, 39 tools with
   annotations gated by the caller's role, prompts, meant to be spawned over SSH by the
   agent host (`docs/mcp.md`). `agensio ctl` (F6) is the same client for shells.
 - **Site tasks** (F13, `src/services/tasks.*`, design `docs/design-site-operations.md`

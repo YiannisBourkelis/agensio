@@ -326,6 +326,8 @@ int main(int argc, char** argv) {
             auto ctl_usage = [] {
                 std::cout << "usage: agensio ctl <command> [options] [--socket PATH] [-c config.toml]\n"
                              "read:   status | sites | site NAME | validate | health | presets | uploads | settings [NAME] | reference | trash |\n"
+                             "        php (the PHP versions installed, their extensions, service and support status, and those the system's\n"
+                             "                    repositories can install; installing is root's) |\n"
                              "        protection [--nft | --jail | --unit | --filter NAME] [--out FILE] (the firewall ruleset and the fail2ban jails rendered\n"
                              "                    for this host's listeners, logs and login paths, the root commands that try, keep and remove\n"
                              "                    them, and what the kernel and fail2ban do now; one file alone with --nft, --jail, --unit or\n"
@@ -869,7 +871,8 @@ int main(int argc, char** argv) {
                                    command != "site-service" && command != "site-service-logs" && command != "site-task-output") ||
                                   command == "cert-renew" || command == "uploads-delete" || command == "trash-delete" || command == "trash-expire";
             const bool upload = command == "upload";
-            if (command == "status" || command == "sites" || command == "health" || command == "presets" || command == "uploads" || command == "trash" || command == "protection")
+            if (command == "status" || command == "sites" || command == "health" || command == "presets" || command == "uploads" || command == "trash" || command == "protection" ||
+                command == "php")
                 path = "/v1/" + command;
             else if (command == "site-restore" && !site_name.empty()) path = "/v1/trash/" + site_name + "/restore";
             else if (command == "trash-delete" && !site_name.empty()) path = "/v1/trash/" + site_name + "/delete";

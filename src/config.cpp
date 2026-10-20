@@ -1963,6 +1963,46 @@ void parse_hsts(const toml::node_view<const toml::node>& n, SiteConfig& site, co
     site.tls_fields.h1 = "Strict-Transport-Security: " + site.tls_fields.hsts + "\r\n";
 }
 
+// [php.runtimes."X.Y"] (docs/design-php-versions.md 4): a PHP version discovery does not find, named by
+// root with its php-fpm's files. Paths absolute; the unit a systemd unit's name (passed to systemctl
+// as one argument, never through a shell).
+void parse_php_runtimes(const toml::node_view<const toml::node>& n, Config& cfg) {
+    const toml::table* php = n.as_table();
+    if (!php) fail("'php' must be a table: [php.runtimes.\"8.5\"] fpm = \"/opt/php85/sbin/php-fpm\", conf = ..., pools = ...");
+    check_keys(*php, {"[php]"}, {}, "php");
+    if (!php->contains("runtimes")) return;
+    const toml::table* runtimes = (*php)["runtimes"].as_table();
+    if (!runtimes) fail("php.runtimes must be a table of versions: [php.runtimes.\"8.5\"]");
+    for (const auto& [k, v] : *runtimes) {
+        const std::string version(k.str());
+        const std::size_t dot = version.find('.');
+        const bool ok = dot != std::string::npos && dot > 0 && dot + 1 < version.size() && version.find('.', dot + 1) == std::string::npos &&
+                        std::all_of(version.begin(), version.end(), [](char c) { return c == '.' || (c >= '0' && c <= '9'); });
+        if (!ok) fail("php.runtimes: '" + version + "' is no version: major.minor, quoted ([php.runtimes.\"8.5\"])");
+        const toml::table* t = v.as_table();
+        const std::string where = "php.runtimes." + version;
+        if (!t) fail(where + " must be a table: fpm, conf, pools, unit, cli");
+        check_keys(*t, {"[php.runtimes.VERSION]"}, {}, where);
+        auto path = [&](const char* key, bool required) {
+            const std::string p = (*t)[key].value_or(std::string());
+            if (p.empty() && required) fail(where + ": '" + key + "' is required");
+            if (!p.empty() && (p.front() != '/' || p.find("/../") != std::string::npos || p.ends_with("/..")))
+                fail(where + "." + key + " must be an absolute path without '..'");
+            return p;
+        };
+        Config::PhpRuntimeConfig r;
+        r.version = version;
+        r.fpm = path("fpm", true);
+        r.conf = path("conf", true);
+        r.pools = path("pools", true);
+        r.cli = path("cli", false);
+        r.unit = (*t)["unit"].value_or(std::string());
+        if (!std::all_of(r.unit.begin(), r.unit.end(), [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '@' || c == '.' || c == '_' || c == '-'; }))
+            fail(where + ".unit must be a systemd unit's name (letters, digits, @ . _ -)");
+        cfg.php_runtimes.push_back(std::move(r));
+    }
+}
+
 // [[site.redirect]] (docs/redirects.md 5, alpha.82): each rule compiled as it is read; the checks
 // across a site's rules wait for check_redirects, once its refuse, access and password rules are in.
 void parse_redirects(const toml::array& arr, SiteConfig& site, const std::string& where) {
@@ -4115,6 +4155,8 @@ Config load_config(const fs::path& path, const Config* running, bool use_record)
     }
     // [mime_types] (0.1.0-alpha.100): root's content types for every site's files, before the sites read them.
     if (root.contains("mime_types")) cfg.mime_types = parse_mime_table(root["mime_types"], "mime_types", false);
+    // [php.runtimes."X.Y"] (docs/design-php-versions.md 4): PHP versions that discovery does not find.
+    if (root.contains("php")) parse_php_runtimes(root["php"], cfg);
     for (const auto& text : cfg.trusted_proxies_text)
         if (const std::string why = trusted_entry(text, cfg, cfg.trusted_proxies); !why.empty()) fail("server.trusted_proxies: " + why);
     parse_sites_from(root, base_dir, cfg, path.filename().string(), &additions, cfg.config_path.string());
@@ -4125,7 +4167,7 @@ Config load_config(const fs::path& path, const Config* running, bool use_record)
         const std::size_t before = cfg.sites.size();
         try {
             check_keys(sub, {}, {"site"}, file.filename().string(),
-                       "an included file holds [[site]] tables; [server], [cache], [log], [control], include, [addresses] and [mime_types] belong in the main file");
+                       "an included file holds [[site]] tables; [server], [cache], [log], [control], include, [addresses], [mime_types] and [php] belong in the main file");
             parse_sites_from(sub, file.parent_path(), cfg, file.filename().string(), &additions, file.string());
             for (std::size_t i = before; i < cfg.sites.size(); ++i)
                 if (auto f = failed_additions.find(cfg.sites[i].server_names.front()); f != failed_additions.end()) {

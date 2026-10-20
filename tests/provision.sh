@@ -58,6 +58,10 @@ printf '[global]\npid = %s/fpm.pid\nerror_log = %s/fpm.log\ninclude = %s/agensio
 $FPM -y $T/fpm.conf -D; for _ in $(seq 1 50); do [ -S $T/run/agensio-t9.sock ] && break; sleep 0.1; done
 printf '<?php echo "as=", posix_getpwuid(posix_geteuid())["name"];' > $T/www/t9.test/web/index.php; chown t9:agensio $T/www/t9.test/web/index.php; chmod 640 $T/www/t9.test/web/index.php
 check "PHP runs as t9 through the pool the helper wrote" "as=t9" "$(curl -sS -H 'Host: t9.test' http://127.0.0.1:18198/index.php)"
+# The PHP versions through the helper (docs/configuration.md 7b): as root, php-fpm's configuration test
+# runs, and its process_control_timeout says whether a reload cuts requests in flight.
+check "php: through the helper the configuration test runs as root, and the reload's cost is read from it" "True 0s True" \
+  "$(curl -sS --unix-socket $T/run/control.sock http://control/v1/php | python3 -c 'import json,sys; d=json.load(sys.stdin); r=[x for x in d["runtimes"] if x["version"] == "8.4"][0]; print(r.get("config_test", {}).get("ok"), r.get("process_control_timeout"), r.get("reload_cuts_requests"))')"
 # A file upload through the generated pool (2026-09-20 report): the body limit accepting a
 # body is not the upload working. PHP must land the file in the pool's private tmp, inside
 # open_basedir, and the response after a large multipart body must arrive complete.

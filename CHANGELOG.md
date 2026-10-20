@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.0-alpha.107
+
+- **`php_versions`: the PHP versions installed, and those the repositories can install** (the first step
+  of PHP versions per site, `docs/design-php-versions.md`). agensio finds every installed php-fpm from the
+  distributions' layouts (Debian and Ubuntu `/etc/php/X.Y/fpm`, Remi's `/etc/opt/remi/phpXY`, Alpine
+  `/etc/phpXY`, Homebrew), or from root's new `[php.runtimes."X.Y"]` (`fpm`, `conf`, `pools`, `unit`, `cli`)
+  for one it does not, and reads each one's facts from its own programs, off the workers: the exact
+  version (`php-fpm -v`), the extensions its FPM side loads (`-m`), its opcache settings (`-i`), its
+  service's state (`systemctl show`), and, through the provisioning helper as root, its configuration test
+  and `process_control_timeout` (`-tt`), with `reload_cuts_requests` when a reload would cut requests in
+  flight. Each carries its support status from PHP's release table (php.net, checked 2026-10-20), the
+  agensio pools its directory holds and their sites. The versions the configured repositories offer come
+  from `apt-cache policy` (read-only), each with root's install line; supported ones they do not, with
+  where root gets them (Ondřej Surý's repository on Debian, the ondrej/php PPA on Ubuntu). Installing stays
+  root's. MCP `php_versions` (viewer), `agensio ctl php`, `GET /v1/php`. Nothing about pools changes yet.
+  Unit tests (discovery on described machines, the programs' output, the support table, apt-cache, the
+  configuration table, the answer), an integration check through `ctl`; `docs/configuration.md` 7b, the
+  reference (`docs/keys.md`), `docs/mcp.md`.
+
 ## 0.1.0-alpha.106 (2026-10-20)
 
 - **`--hsts false` is told what replaces it; `hsts = "application"` is refused on a static site** (the

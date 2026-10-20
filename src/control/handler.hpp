@@ -40,6 +40,9 @@ struct ControlBackend {
     // worker 0. What the answers carry is noted by the request path (an application's own HSTS,
     // docs/redirects.md 4.5), which the caller reads afterwards.
     virtual void probe_async(std::vector<control::CanonicalProbe> probes, std::function<void()> done) = 0;
+    // php_versions (docs/configuration.md 7b): the PHP versions installed and installable, gathered
+    // on a thread (their programs run), through the helper as root when it is free; on worker 0 after.
+    virtual void php_versions_async(std::function<void(json::Value)> done) = 0;
     // Mutations (F3). Each returns false with `error` when refused; nothing changed then.
     // `must_load`: the site file the change wrote; the reload is refused if that file would be
     // set aside (docs/design-site-operations.md 26), so a change is never reported done for a

@@ -7,6 +7,7 @@
 
 #include "core/cpus.hpp"
 #include "control/commands.hpp"
+#include "control/php.hpp"
 #include "control/peer.hpp"
 #include "control/probe.hpp"
 #include "control/protection.hpp"
@@ -888,6 +889,22 @@ static control::LogQuery log_query(std::string_view target) {
 }
 
 json::Value Server::logs(std::string_view target) { return control::logs(gen_->cfg, log_query(target)); }
+
+// The PHP versions (docs/configuration.md 7b): the helper's answer as root when it is free (its
+// configuration test needs root), else this process's own, without that test.
+void Server::php_versions_async(std::function<void(json::Value)> done) {
+    std::thread([this, gen = gen_, done = std::move(done)] {
+        json::Value v;
+        if (provisioner_.available()) v = provisioner_.try_request(json::Value::object().set("op", "php_runtimes"));
+        if (!v["ok"].boolean()) {
+            const std::string why = provisioner_.available() ? std::string(v.get("error")) : std::string();
+            v = control::php_versions_json(gen->cfg, control::php_inventory(gen->cfg, php::system_exec(), false), std::time(nullptr));
+            if (!why.empty()) v.set("helper", "the provisioning helper did not answer (" + why + "): gathered without root");
+        }
+        v.set("ok", true);
+        asio::post(workers_[0]->ctx, [v = std::move(v), done] { done(v); });
+    }).detach();
+}
 
 // Off the workers (the alpha.101 report): the generation is held for the thread, so a reload
 // meanwhile changes nothing it reads; the answer is posted back to worker 0.

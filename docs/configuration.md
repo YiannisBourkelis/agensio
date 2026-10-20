@@ -1197,6 +1197,42 @@ Failures are logged with a reason and a fix hint (socket owner/group/mode agains
 agensio's uid, the script php-fpm could not open, bytes seen before a child closed) and
 appear in the JSON access log as `upstream`.
 
+## 7b. PHP versions
+
+Several PHP versions can be installed side by side, each its own php-fpm with its own
+configuration, extensions and pool directory: `php8.4-fpm` and `php8.5-fpm` on Debian and Ubuntu.
+agensio finds them on its own (Debian and Ubuntu `/etc/php/X.Y/fpm`, RHEL with Remi's repository
+`/etc/opt/remi/phpXY`, Alpine `/etc/phpXY`, Homebrew `<prefix>/etc/php/X.Y`), counting a version
+only when its FPM binary and its `php-fpm.conf` are both there. Root names one it does not find
+(a build under `/opt`, a second instance) in the main file:
+
+```toml
+[php.runtimes."8.5"]
+fpm   = "/opt/php85/sbin/php-fpm"
+conf  = "/opt/php85/etc/php-fpm.conf"
+pools = "/opt/php85/etc/php-fpm.d"
+unit  = "php85-fpm"              # its systemd service, for its state and its reload; optional
+cli   = "/opt/php85/bin/php"     # optional, for site tasks
+```
+
+`php_versions` (MCP, viewer; `agensio ctl php`; `GET /v1/php`) answers, for each installed version:
+- the exact version and the extensions its FPM side loads (`php-fpm -m`, not the command line's,
+  whose `conf.d` may differ);
+- whether its configuration tests clean (`php-fpm -tt`, which needs root: through the provisioning
+  helper when agensio started as root, else not run);
+- its service's state, and its `process_control_timeout` (without it a php-fpm reload cuts the
+  requests in flight on every one of its pools);
+- its opcache settings;
+- its support status from PHP's own release table (`active`, `security` for security fixes only,
+  `eol` past its end of life, `unknown` for one newer than agensio's table), with the dates.
+
+It also lists the versions the system's repositories can install (Debian and Ubuntu: `apt-cache
+policy`, read-only), and, for one they do not offer, root's way to add the usual repository:
+Ondřej Surý's (packages.sury.org) on Debian, the ondrej/php PPA on Ubuntu. Installing a version is
+root's; agensio never installs packages. The design of the whole feature, per-site versions and
+switching a site's version without downtime included, is `docs/design-php-versions.md`; the
+sections below grow with each step of it.
+
 ## 8. Logging
 
 ```toml

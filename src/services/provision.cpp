@@ -24,6 +24,7 @@
 #include <sstream>
 
 #include "control/commands.hpp"
+#include "control/php.hpp"
 #include "control/protection.hpp"
 #include "control/sites.hpp"
 #include "services/appenv.hpp"
@@ -214,7 +215,7 @@ std::string validate(const json::Value& req, const Config& cfg) {
         return "";
     }
     if (op == "pools_apply" || op == "service_restart" || op == "ping" || op == "env_check" || op == "app_check" || op == "trash_list" ||
-        op == "trash_expire" || op == "host_protection")
+        op == "trash_expire" || op == "host_protection" || op == "php_runtimes")
         return "";
     return "unknown operation '" + op + "'";
 }
@@ -1703,6 +1704,19 @@ void helper_loop(int fd, const Config& cfg) {
                         else
                             reply.set("ok", false).set("error", file + ": " + std::strerror(errno));
                         ::close(f);
+                    }
+                } else if (op == "php_runtimes") {
+                    // The PHP versions as root (docs/configuration.md 7b): php-fpm's configuration test
+                    // opens its own log; every program by absolute path from discovery or root's file.
+                    try {
+                        const Config fresh = load_config(cfg.config_path, nullptr, true);
+                        const php::Exec exec = [](const std::string& path, const std::vector<std::string>& args, std::string& out) {
+                            return run(path.c_str(), args, out, 512 * 1024);
+                        };
+                        reply = control::php_versions_json(fresh, control::php_inventory(fresh, exec, true), std::time(nullptr));
+                        reply.set("ok", true);
+                    } catch (const std::exception& e) {
+                        reply.set("ok", false).set("error", e.what());
                     }
                 } else if (op == "pools_apply") {
                     try {

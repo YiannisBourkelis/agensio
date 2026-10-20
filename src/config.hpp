@@ -514,6 +514,13 @@ struct Config {
     // [addresses] (2026-10-07): named address sets the sites' access rules name as "@name", so
     // one edit reaches every site that uses them; checked and expanded at load.
     std::map<std::string, std::vector<std::string>> address_sets;
+    // [php.runtimes."X.Y"] (docs/design-php-versions.md 4): PHP versions discovery does not find
+    // (a build under /opt, a second instance for the tests), each with its php-fpm's files.
+    struct PhpRuntimeConfig {
+        std::string version;  // major.minor
+        std::string fpm, conf, pools, unit, cli;
+    };
+    std::vector<PhpRuntimeConfig> php_runtimes;
     // [mime_types] (0.1.0-alpha.100, docs/configuration.md 6c): root's content types for every site's files.
     MimeTypes mime_types;
     // The user files of the sites' [[site.auth]] rules, each read and checked once per load.
