@@ -1395,14 +1395,16 @@ way when they read, so older files are answered as valid text as well.
 
 A query whose `since` reaches back past the first line of the current file reads on into the
 rotated files as the shipped logrotate configuration leaves them (`packaging/agensio.logrotate`:
-daily, 14 kept, `delaycompress`): `FILE.1` as it is, then `FILE.2.gz` and older, newest first, until
+daily, 14 kept, `delaycompress`, `nodateext` so that the names are numbered on RHEL and Fedora too,
+whose `/etc/logrotate.conf` turns `dateext` on for every program): `FILE.1` as it is, then `FILE.2.gz` and older, newest first, until
 `since` or the line limit is reached (0.1.0-alpha.103; before, only the current files were read, so
 in the morning a day's window held the hours since the rotation and said nothing). The rotated files
 of one log are read up to 8 MB of text and 64 MB inflated, off the workers. The answer lists every
 file read in `files`, each source's rotated ones under `rotated`, and when the lines go back less far
 than asked, `incomplete` says from when and why: nothing older is kept, the read limit, or the older
 files are compressed in a build without zlib. Health's `recent_errors` reads the `.1` too, so its
-"last 24 hours" are 24 hours. Rotated files named by date (`dateext`) are not read.
+"last 24 hours" are 24 hours. Rotated files named by date (`dateext` set by hand on agensio's logs)
+are not read.
 
 ## 9. php-fpm in a container
 

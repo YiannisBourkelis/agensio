@@ -2,6 +2,11 @@
 
 ## 0.1.0-alpha.107
 
+- **The packaged logrotate configuration numbers its rotations on every system** (`nodateext`). RHEL's,
+  Fedora's and Rocky's `/etc/logrotate.conf` turn `dateext` on for every program, so agensio's rotated
+  logs were named `access.log-20261021.gz` there. The log queries read only the numbered names, so
+  `logs_query` and health's `recent_errors` saw only the current file and said "nothing older is kept".
+  Debian and Ubuntu number them already. The unit test holds every block of the file to it.
 - **What an application needs of its PHP is checked** (the fourth step of `docs/design-php-versions.md`).
   - **The table.** Each PHP preset carries its application's published requirements: PHP minimum,
     recommended and newest supported, required and recommended extensions. They were read 2026-10-21 from

@@ -10905,6 +10905,7 @@ static void test_packaged_logrotate() {
     struct Stanza {
         std::vector<std::string> patterns;
         std::string create;
+        bool nodateext = false;
     };
     std::vector<Stanza> stanzas;
     bool inside = false;
@@ -10919,6 +10920,7 @@ static void test_packaged_logrotate() {
             inside = true;
         } else if (inside && line == "}") inside = false;
         else if (inside && line.rfind("create", 0) == 0) stanzas.back().create = line;
+        else if (inside && line == "nodateext") stanzas.back().nodateext = true;
     }
     auto stanza_for = [&](const char* path) -> const Stanza* {
         for (const auto& st : stanzas)
@@ -10932,6 +10934,10 @@ static void test_packaged_logrotate() {
     CHECK(managed && managed->create == "create 0640");  // the owner and group kept: agensio, the site's group
     CHECK(written && written->create == "create 0640");
     CHECK(own && own->create == "create 0640 agensio agensio");
+    // Numbered rotations on every system (FILE.1, FILE.2.gz), the names the log queries read: RHEL's,
+    // Fedora's and Rocky's /etc/logrotate.conf turn dateext on for everything, which would name them
+    // FILE-20261021 and leave every rotated line out of logs_query and health.
+    for (const auto& st : stanzas) CHECK(st.nodateext);
 }
 
 static void test_packaged_docs() {

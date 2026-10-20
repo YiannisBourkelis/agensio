@@ -1,6 +1,9 @@
+# Numbered rotations (access.log.1, access.log.2.gz) on every system, the names agensio's log queries
+# read: RHEL's, Fedora's and Rocky's /etc/logrotate.conf turn dateext on for every program.
 /var/log/agensio/*.log {
     daily
     rotate 14
+    nodateext
     compress
     delaycompress
     missingok
@@ -18,6 +21,7 @@
 /var/log/agensio/sites/*.log /var/log/agensio/sites/*/*.log {
     daily
     rotate 14
+    nodateext
     compress
     delaycompress
     missingok
