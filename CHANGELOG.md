@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.106
+## 0.1.0-alpha.106 (2026-10-20)
 
 - **`--hsts false` is told what replaces it; `hsts = "application"` is refused on a static site** (the
   alpha.104 and .105 reports). `agensio ctl` sends `--hsts`'s value as text, so `--hsts false` reached the
