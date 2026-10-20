@@ -1625,18 +1625,14 @@ std::vector<std::string> prerequisites(const SiteSpec& spec, const Config& cfg) 
     return cmds;
 }
 
-// The php-fpm unit that reads the pool directory `agensio pools` writes into: Debian's
-// php8.4-fpm, RHEL's php-fpm, brew's php service.
+// How the master of a PHP version rereads the pools `agensio pools` wrote: "systemctl reload
+// php8.4-fpm" on Debian. `version` "" is the server's default (php_version, else the newest installed).
 std::string php_fpm_reload_command(const Config& cfg, const std::string& version) {
-    const fs::path dir = pools_dir(cfg, version);
-    const std::string d = dir.string();
-    if (d.empty()) return "systemctl reload php-fpm   # (pool directory not found: set server.pools)";
-    if (d.starts_with("/etc/php/")) {  // /etc/php/8.4/fpm/pool.d
-        const std::string v = d.substr(9, d.find('/', 9) - 9);
-        return "systemctl reload php" + v + "-fpm";
-    }
-    if (d.starts_with("/opt/homebrew/") || d.starts_with("/usr/local/")) return "brew services restart php";
-    return "systemctl reload php-fpm";
+    const std::string v = !version.empty() ? version : !cfg.php_version.empty() ? cfg.php_version : cfg.php_newest;
+    const auto runtimes = php::discover(cfg, php::system_fs());
+    if (const php::Runtime* r = v.empty() ? nullptr : php::find(runtimes, v)) return reload_command(*r);
+    return "systemctl reload php" + (v.empty() ? std::string("X.Y") : v) + "-fpm   # (PHP " + (v.empty() ? std::string("X.Y") : v) +
+           " is not installed: php_versions lists what is)";
 }
 
 json::Value service_unit(const SiteConfig& site, const Config& cfg) {

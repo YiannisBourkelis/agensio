@@ -13,11 +13,13 @@ BIN=${1:-build/agensio}
 [ -x "$BIN" ] || { echo "pools.sh: $BIN missing"; exit 1; }
 FPM=$(ls /usr/sbin/php-fpm* | head -1)
 PHPV=$(basename "$FPM" | sed 's/php-fpm//')
-POOLD=/etc/php/$PHPV/fpm/pool.d
 T=$(mktemp -d /tmp/agensio-pools.XXXXXX); chmod 755 "$T"  # mktemp gives 0700: nobody could traverse it
+POOLD=$T/pool.d   # the version's pool directory, root's [php.runtimes] (docs/configuration.md 7b): nothing goes into /etc
+# A pool per site: agensio-<user>-<8 hex of the domain>, its socket with the version (FNV-1a of "one", "two").
+S1=$T/run/agensio-web1-ba2719ef-$PHPV.sock; S2=$T/run/agensio-web2-be248829-$PHPV.sock
 pass=0; fail=0
 check() { if [ "$2" = "$3" ]; then echo "ok   $1"; pass=$((pass+1)); else echo "FAIL $1: expected [$3] got [$2]"; fail=$((fail+1)); fi; }
-cleanup() { pkill -f "^$BIN -c $T/" 2>/dev/null || true; pkill -f "php-fpm: master process ($T" 2>/dev/null || true; rm -f $POOLD/agensio-web*.conf; rm -rf "$T"; }
+cleanup() { pkill -f "^$BIN -c $T/" 2>/dev/null || true; pkill -f "php-fpm: master process ($T" 2>/dev/null || true; rm -rf "$T"; }
 trap cleanup EXIT
 
 for u in web1 web2 agensio; do id -u $u >/dev/null 2>&1 || useradd -r -M -s /usr/sbin/nologin $u; done
@@ -42,6 +44,10 @@ state_dir = "$T/state"
 [log]
 access = "$T/logs/access.log"
 error = "$T/logs/error.log"
+[php.runtimes."$PHPV"]
+fpm = "$FPM"
+conf = "$T/fpm.conf"
+pools = "$POOLD"
 [[site]]
 server_name = ["one"]
 listen = ["127.0.0.1:18095"]
@@ -60,16 +66,16 @@ php = { children = 2 }
 access_log = "$T/logs/two.log"
 EOF
 
-# Pools: written into the distro directory, php-fpm started with a private config that
-# includes them (so the test does not depend on the system's php-fpm service).
-rc=0; "$BIN" pools -c $T/agensio.toml --out $POOLD > $T/pools.out || rc=$?
-check "agensio pools writes two files (exit 3)" "$rc $(ls $POOLD | grep -c '^agensio-web')" "3 2"
-check "state directories owned by the user" "$(stat -c '%U %a' $T/state/web1/sessions)" "web1 700"
-rc=0; "$BIN" pools -c $T/agensio.toml --out $POOLD > /dev/null || rc=$?; check "second run changes nothing (exit 0)" "$rc" "0"
-printf '[global]\npid = %s/fpm.pid\nerror_log = %s/fpm.log\ninclude = %s/agensio-web*.conf\n' $T $T $POOLD > $T/fpm.conf
+# Pools: written into the version's pool directory and tested there by its own php-fpm (as root),
+# php-fpm started with that private config (so the test does not depend on the system's service).
+printf '[global]\npid = %s/fpm.pid\nerror_log = %s/fpm.log\ninclude = %s/agensio-*.conf\n' $T $T $POOLD > $T/fpm.conf
+rc=0; "$BIN" pools -c $T/agensio.toml > $T/pools.out || rc=$?
+check "agensio pools writes two files, one per site (exit 3), and tests them" "$rc $(ls $POOLD | grep -c '^agensio-web') $(grep -c 'error' $T/pools.out)" "3 2 0"
+check "state directories owned by the user, the site's own below the account's" "$(stat -c '%U %a' $T/state/web1/php/one/sessions) $(stat -c '%U %a' $T/state/web1)" "web1 700 web1 700"
+rc=0; "$BIN" pools -c $T/agensio.toml > /dev/null || rc=$?; check "second run changes nothing (exit 0)" "$rc" "0"
 $FPM -y $T/fpm.conf -D
-for i in $(seq 1 50); do [ -S $T/run/agensio-web1.sock ] && [ -S $T/run/agensio-web2.sock ] && break; sleep 0.1; done
-check "sockets owned by the user, group agensio, 0660" "$(stat -c '%U %G %a' $T/run/agensio-web1.sock)" "web1 agensio 660"
+for i in $(seq 1 50); do [ -S $S1 ] && [ -S $S2 ] && break; sleep 0.1; done
+check "sockets owned by the user, group agensio, 0660" "$(stat -c '%U %G %a' $S1)" "web1 agensio 660"
 
 # The rules: a clean layout passes, each violation is named.
 rc=0; "$BIN" -t -c $T/agensio.toml > $T/t.out 2>&1 || rc=$?; check "-t passes on the clean layout" "$rc" "0"
@@ -77,10 +83,10 @@ chmod 644 $T/web1/site/public/.env
 "$BIN" -t -c $T/agensio.toml > $T/t.out 2>&1 || true
 check "-t refuses a world-readable .env" "$(grep -c 'site one: .*/.env is readable by other users' $T/t.out)" "1"
 chmod 640 $T/web1/site/public/.env
-chgrp web2 $T/run/agensio-web2.sock
+chgrp web2 $S2
 "$BIN" -t -c $T/agensio.toml > $T/t.out 2>&1 || true
 check "-t refuses a socket with the wrong group" "$(grep -c 'site two: socket .* expected group agensio' $T/t.out)" "1"
-chgrp agensio $T/run/agensio-web2.sock
+chgrp agensio $S2
 rc=0; "$BIN" -t -c $T/agensio.toml > $T/t2.out 2>&1 || rc=$?; check "-t passes again" "$rc $(grep -c 'configuration error' $T/t2.out || true)" "0 0"
 chown web1:web1 $T/web1/site/public
 "$BIN" -t -c $T/agensio.toml > $T/t.out 2>&1 || true
@@ -98,8 +104,8 @@ check "site one answers 200" "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host:
 check "site one runs PHP as web1" "$(echo "$one" | grep -o '"user":"[^"]*"')" '"user":"web1"'
 check "site two runs PHP as web2" "$(echo "$two" | grep -o '"user":"[^"]*"')" '"user":"web2"'
 check "open_basedir keeps web1 out of web2's .env" "$(echo "$one" | grep -o '"other":"[^"]*"')" '"other":"denied"'
-check "sessions in the private directory" "$(echo "$one" | grep -o "\"session\":\"[^\"]*\"")" "\"session\":\"$T/state/web1/sessions\""
-check "session files written there as web1" "$([ "$(ls -l $T/state/web1/sessions | grep -c ' web1 ')" -ge 1 ] && echo yes)" "yes"
+check "sessions in the site's private directory" "$(echo "$one" | grep -o "\"session\":\"[^\"]*\"")" "\"session\":\"$T/state/web1/php/one/sessions\""
+check "session files written there as web1" "$([ "$(ls -l $T/state/web1/php/one/sessions | grep -c ' web1 ')" -ge 1 ] && echo yes)" "yes"
 sleep 1.2  # access log flush timer
 check "site log owned by agensio, group web1, 0640" "$(stat -c '%U %G %a' $T/logs/one.log)" "agensio web1 640"
 check "site log has the requests" "$(grep -c 'GET / ' $T/logs/one.log)" "2"
@@ -171,6 +177,10 @@ state_dir = "$B/state"
 [log]
 access = "off"
 error = "$T/logs/burst-error.log"
+[php.runtimes."$PHPV"]
+fpm = "$FPM"
+conf = "$B/fpm.conf"
+pools = "$B/pool.d"
 [[site]]
 server_name = ["ondemand.test"]
 listen = ["127.0.0.1:18097"]
@@ -186,10 +196,10 @@ user = "web4"
 app = "php"
 php = { pm = "dynamic", read_timeout = 5 }
 EOF
-"$BIN" pools -c $B/agensio.toml --out $B/pool.d > /dev/null || true
 printf '[global]\npid = %s/fpm.pid\nerror_log = %s/fpm.log\ninclude = %s/pool.d/*.conf\n' $B $B $B > $B/fpm.conf
+"$BIN" pools -c $B/agensio.toml > /dev/null || true
 $FPM -y $B/fpm.conf -D
-for i in $(seq 1 50); do [ -S $B/run/agensio-web3.sock ] && [ -S $B/run/agensio-web4.sock ] && break; sleep 0.1; done
+for i in $(seq 1 50); do [ -S $B/run/agensio-web3-*.sock ] && [ -S $B/run/agensio-web4-*.sock ] && break; sleep 0.1; done
 "$BIN" -c $B/agensio.toml > $B/server.out 2>&1 & BS=$!
 for i in $(seq 1 50); do nc -z 127.0.0.1 18097 2>/dev/null && break; sleep 0.1; done
 cat > $B/burst.py <<'EOF'
@@ -236,6 +246,10 @@ state_dir = "$W/state"
 [log]
 access = "off"
 error = "$T/logs/wide-error.log"
+[php.runtimes."$PHPV"]
+fpm = "$FPM"
+conf = "$W/fpm.conf"
+pools = "$W/pool.d"
 [[site]]
 server_name = ["static.test"]
 listen = ["127.0.0.1:18098"]
@@ -251,10 +265,10 @@ user = "web6"
 app = "php"
 php = { pm = "dynamic", children = 2, read_timeout = 5 }
 EOF
-"$BIN" pools -c $W/agensio.toml --out $W/pool.d > /dev/null || true
 printf '[global]\npid = %s/fpm.pid\nerror_log = %s/fpm.log\ninclude = %s/pool.d/*.conf\n' $W $W $W > $W/fpm.conf
+"$BIN" pools -c $W/agensio.toml > /dev/null || true
 $FPM -y $W/fpm.conf -D
-for i in $(seq 1 50); do [ -S $W/run/agensio-web5.sock ] && [ -S $W/run/agensio-web6.sock ] && break; sleep 0.1; done
+for i in $(seq 1 50); do [ -S $W/run/agensio-web5-*.sock ] && [ -S $W/run/agensio-web6-*.sock ] && break; sleep 0.1; done
 "$BIN" -c $W/agensio.toml > $W/server.out 2>&1 & WS=$!
 for i in $(seq 1 50); do nc -z 127.0.0.1 18098 2>/dev/null && break; sleep 0.1; done
 cat > $W/burst.py <<'EOF'

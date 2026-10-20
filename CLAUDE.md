@@ -413,8 +413,9 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-one, each seeded fr
 - **Per-site users** (C3b-1, `src/services/pools.*`, design in
   `docs/design-per-site-users.md`): `user = "web1"` on a site that runs PHP (a PHP
   preset or a `fastcgi` location; a proxy or static site with a user gets no pool,
-  2026-09-26) derives a php-fpm pool
-  (socket `<pools_run>/agensio-web1.sock`, state dir, `open_basedir`, sizing from
+  2026-09-26) derives a php-fpm pool of the site's own
+  (socket `<pools_run>/agensio-web1-<8 hex of the domain>-<version>.sock`, state dir
+  `<state_dir>/web1/php/<domain>`, `open_basedir`, sizing from
   `php = { children, pm, ... }`; `pm` is `ondemand` by default since 2026-09-21 with a
   60 s child idle timeout, because static pools kept 150-200 MB resident per idle site,
   and `static` is what a PHP benchmark must set), sets `max_connections = children / workers`
@@ -428,9 +429,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-one, each seeded fr
   CPU per request, agensio 4.4 and php-fpm 6.5, and cuts p99 from 1.75 to 0.26 ms; health and
   `-t` warn `php_keep_conn_ondemand` for one set by hand), closes kept upstream connections after
   `idle_timeout` (30 s, from the pool tick), and `agensio pools`
-  writes the pool file into the distro's directory (exit 3 when php-fpm needs a reload).
-  `health` `php_pool_resident` reads `/proc` for what a static or dynamic pool keeps. Sites of one user share a pool and
-  must agree on it; different users never share a socket. `check_hosting` (C3b-2) runs
+  writes each pool file into its PHP version's directory (exit 3 when php-fpm needs a reload).
+  `health` `php_pool_resident` reads `/proc` for what a static or dynamic pool keeps. Each site
+  has its own pool (alpha.107), so one account's sites differ in any pool key; different users
+  never share a socket. `check_hosting` (C3b-2) runs
   the ownership rules (roots, secrets, sockets, logs, nothing shared between users) under
   `-t` and before every start, behind an injectable `HostFacts` so the unit tests describe
   a machine. `server.user` (C3b-3, H2 pulled forward): bind and open logs as root, site
@@ -443,8 +445,14 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-one, each seeded fr
   `-m`, `-i`, as root `-tt`, `systemctl show`), plus `apt-cache policy` for what is installable and
   PHP's compiled release table for the support status; `control/php.*` builds `php_versions` (MCP,
   `ctl php`, `GET /v1/php`), gathered off the workers through the helper's `php_runtimes` as root, else
-  as the server's account without the configuration test. Pools are still per account in one
-  directory; a pool per site on its own version and the switch without downtime are steps 2 and 3.
+  as the server's account without the configuration test. Step 2: a pool per site
+  (`PhpPool::version`, `version_from`: the site's `php.version`, `[server] php_version`, else
+  `Config::php_newest`, discovered at load), `write_pools` over the runtimes (each site's file in its
+  version's directory, every other generated file removed, each changed directory tested by its own
+  `php-fpm -t` before a reload and put back when refused; `PoolsOutcome::changed` names the versions
+  to reload), `server.pools` and `agensio pools --out` gone, health `php_version_missing`,
+  `php_default_unpinned`, `pools_stale` across runtimes, `php_fpm_hard_reload` per runtime. The
+  switch without downtime is step 3.
 - **Proxy test beds** (D6): `bench/redmine/` (Rails, `docker compose`, admin / admin,
   agensio on 8075) and `bench/uptime-kuma/` (Node, Socket.IO over WebSockets, agensio on
   8076); `setup.sh` starts each, `tests/redmine.sh` and `tests/uptime-kuma.sh` run the

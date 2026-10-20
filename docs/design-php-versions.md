@@ -1,6 +1,6 @@
 # Design: PHP versions per site
 
-Status: decided 2026-10-20 (sections 3 and 14 with the owner); being built in the steps of section 13. The owner's requirements: several PHP versions served
+Status: decided 2026-10-20 (sections 3 and 14 with the owner); being built in the steps of section 13 (steps 1 and 2 built 2026-10-20). The owner's requirements: several PHP versions served
 at once, each site on the version it names, switching a site's version without downtime, the
 control plane and the MCP bridge able to say which versions are installed and installable, and
 an agent able to pick, or ask about, the version an application needs. No migration: only the
@@ -121,7 +121,8 @@ would move such sites (the reason for the key).
   107 bytes on Linux, and a domain can be 253).
 - **Socket** `<pools_run>/agensio-<site id>-<version>.sock`: the version in the name lets the
   old and the new master listen for the same site during a switch (section 6).
-- **Per-site state**: `<state_dir>/<account>/php/<site>/{tmp,sessions}` with today's modes and
+- **Per-site state**: `<state_dir>/<account>/php/<site>/{tmp,sessions}` (a catch-all's `*` written
+  `_`) with today's modes and
   ownership; `open_basedir` the site's root, its state directory and what its preset adds.
 - **Every pool key is the site's own**: children, `pm`, limits, `extra`; the rule that an
   account's sites agree goes away.
@@ -159,7 +160,7 @@ server around its own reload: `site_update` with `php_version`, a site file edit
 
 A failure at step 2 removes the new pool, and the site never left 8.4. A failure at step 3 (the
 reload refused) removes the new pool as well. A failure at step 4 leaves a stale pool that serves
-nothing; health names it (`php_pool_stale`) and the next reconciliation removes it.
+nothing; health names it (`pools_stale`, with the file) and the next reconciliation removes it.
 
 The rest is honest about what it costs:
 - **Cold compiled code**: the first requests on 8.5 compile their scripts into its empty
@@ -229,8 +230,8 @@ one no requirement lists.
 | `php_extensions_missing` | error, warn | a site's runtime lacks an extension its preset requires (error) or recommends (warn) |
 | `php_version_unsupported_by_app` | warn | a site's version is outside the range its application declares |
 | `php_version_eol` | warn, error | a site's version is past active support (info), past security support (warn), long past it (error) |
-| `php_reload_unsafe` | warn | today's finding, per runtime: no `process_control_timeout`, so a reload or a switch cuts requests in flight |
-| `php_pool_stale` | warn | an `agensio-*.conf` in a pool directory the configuration no longer assigns there |
+| `php_fpm_hard_reload` | info | today's finding, per runtime that runs pools: no `process_control_timeout`, so a reload or a switch cuts requests in flight |
+| `pools_stale` | warn | today's finding, across runtimes: a pool file differs, or an `agensio-*.conf` sits in a pool directory the configuration no longer assigns it to; the message names each file |
 | `php_opcache_shared` | warn | a runtime serves pools of two accounts or more and its `php.ini` leaves `opcache.validate_permission` off, so one account's PHP may be served code cached from a file it cannot read |
 | `php_default_unpinned` | info | sites follow the newest installed version because `[server] php_version` is not set |
 
@@ -281,10 +282,12 @@ cookbook recipe, as every key does.
 
 ## 13. Steps
 
-1. **Runtimes**: discovery, the facts, `[php.runtimes]`, `[server] php_version`, `php_versions`
-   (MCP, `ctl`, API), the health findings that need only facts.
-2. **Pools per site**: naming, sockets with the version, per-site state, reconciliation across
-   runtimes, `server.pools` removed.
+1. **Runtimes** (built 2026-10-20): discovery, the facts, `[php.runtimes]`, `php_versions` (MCP,
+   `ctl`, API).
+2. **Pools per site** (built 2026-10-20): naming, sockets with the version, per-site state,
+   `[server] php_version`, reconciliation across runtimes with php-fpm's test before each reload,
+   `server.pools` removed; health's `php_version_missing`, `php_default_unpinned`, `pools_stale`
+   and `php_fpm_hard_reload` per runtime.
 3. **The switch** of section 6, through every path, with its docs and recipe.
 4. **Application requirements**: the presets' table, the archive's declaration, the preflight's
    extension checks, the MCP procedure for choosing a version.

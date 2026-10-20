@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cstdio>
 #include <fstream>
+#include <map>
+#include <set>
 #include <sstream>
 
 #ifndef _WIN32
@@ -85,49 +87,41 @@ std::string render_pool(const Config& cfg, const SiteConfig& site, const std::st
 
 std::vector<GeneratedPool> generated_pools(const Config& cfg, const std::string& agensio_group) {
     std::vector<GeneratedPool> out;
-    for (const auto& site : cfg.sites) {
-        if (!site.pool.generated) continue;
-        bool seen = false;
-        for (const auto& g : out) seen = seen || g.user == site.user;
-        if (seen) continue;  // the sites of a user agree (checked at load); the first renders
-        out.push_back({site.pool.name, site.user, site.group.empty() ? site.user : site.group, site.pool.state_dir,
-                       render_pool(cfg, site, agensio_group)});
-    }
+    for (const auto& site : cfg.sites)
+        if (site.pool.generated)
+            out.push_back({site.pool.name, site.server_names.front(), site.user, site.group.empty() ? site.user : site.group, site.pool.state_dir,
+                           site.pool.version, render_pool(cfg, site, agensio_group)});
     return out;
+}
+
+const php::Runtime* pool_runtime(const std::vector<php::Runtime>& runtimes, const PhpPool& pool) {
+    return pool.generated && !pool.version.empty() ? php::find(runtimes, pool.version) : nullptr;
+}
+
+std::string test_runtime(const php::Runtime& r, const php::Exec& exec) {
+    std::string out;
+    if (exec(r.fpm, {"-t", "-y", r.conf}, out) == 0) return {};
+    php::Facts f;
+    php::parse_fpm_test(out, f);
+    if (!f.config_error.empty()) return f.config_error;
+    while (!out.empty() && (out.back() == '\n' || out.back() == ' ')) out.pop_back();
+    return out.empty() ? r.fpm + " -t failed" : out;
+}
+
+std::string reload_command(const php::Runtime& r) {
+    if (!r.unit.empty()) return "systemctl reload " + r.unit;
+    if (r.fpm.starts_with("/opt/homebrew/") || r.fpm.starts_with("/usr/local/")) return "brew services restart php@" + r.version;
+    // Alpine's OpenRC: /usr/sbin/php-fpm84 with /etc/php84/php-fpm.conf (Debian's binary is php-fpm8.4).
+    std::string digits = r.version;
+    digits.erase(std::remove(digits.begin(), digits.end(), '.'), digits.end());
+    if (r.fpm == "/usr/sbin/php-fpm" + digits && r.conf == "/etc/php" + digits + "/php-fpm.conf") return "rc-service php-fpm" + digits + " reload";
+    return "kill -USR2 <the pid of " + r.fpm + "'s master>   # php-fpm rereads its pools on SIGUSR2";
 }
 
 std::string current_group_name() {
 #ifndef _WIN32
     if (const struct group* g = ::getgrgid(::getegid())) return g->gr_name;
 #endif
-    return {};
-}
-
-fs::path pools_dir(const Config& cfg, const std::string& version) {
-    if (!cfg.pools_dir.empty()) return cfg.pools_dir;
-    // Debian/Ubuntu: /etc/php/<version>/fpm/pool.d; brew: <prefix>/etc/php/<version>/php-fpm.d;
-    // RHEL/Fedora: /etc/php-fpm.d; Alpine: /etc/php<NN>/php-fpm.d. Newest version wins.
-    std::error_code ec;
-    for (const char* prefix : {"/etc/php", "/opt/homebrew/etc/php", "/usr/local/etc/php"}) {
-        const fs::path base(prefix);
-        if (!fs::is_directory(base, ec)) continue;
-        fs::path best;
-        for (const auto& entry : fs::directory_iterator(base, ec)) {
-            const std::string v = entry.path().filename().string();
-            if (!version.empty() && v != version) continue;
-            if (!fs::is_directory(entry.path() / "fpm" / "pool.d", ec) &&
-                !fs::is_directory(entry.path() / "php-fpm.d", ec))
-                continue;
-            if (best.empty() || v > best.filename().string()) best = entry.path();
-        }
-        if (best.empty()) continue;
-        return fs::is_directory(best / "fpm" / "pool.d", ec) ? best / "fpm" / "pool.d" : best / "php-fpm.d";
-    }
-    if (fs::is_directory("/etc/php-fpm.d", ec)) return "/etc/php-fpm.d";
-    for (const auto& entry : fs::directory_iterator("/etc", ec)) {
-        const std::string n = entry.path().filename().string();
-        if (n.starts_with("php") && fs::is_directory(entry.path() / "php-fpm.d", ec)) return entry.path() / "php-fpm.d";
-    }
     return {};
 }
 
@@ -513,31 +507,55 @@ std::vector<TlsReadProblem> tls_read_problems(const Config& cfg, const HostFacts
     return out;
 }
 
-int write_pools(const Config& cfg, const fs::path& out_dir, bool dry_run, std::ostream& out) {
+PoolsOutcome write_pools(const Config& cfg, const std::vector<php::Runtime>& runtimes, bool dry_run, std::ostream& out, const PoolTest& test) {
+    PoolsOutcome res;
 #ifdef _WIN32
     (void)cfg;
-    (void)out_dir;
+    (void)runtimes;
     (void)dry_run;
+    (void)test;
     out << "error: generated php-fpm pools are not supported on Windows\n";
-    return 1;
+    res.rc = 1;
+    return res;
 #else
     const std::string agensio_group = server_account(cfg, system_facts()).group;
     if (agensio_group.empty()) {
         out << "error: cannot determine the group the server runs as; set server.user or server.group\n";
-        return 1;
+        res.rc = 1;
+        return res;
     }
     std::error_code ec;
-    if (!fs::is_directory(out_dir, ec)) {
-        out << "error: pool directory " << out_dir.string() << " does not exist\n";
-        return 1;
-    }
     const auto pools = generated_pools(cfg, agensio_group);
-    bool changed = false;
+    bool failed = false;
     const char* verb = dry_run ? "would write" : "wrote";
+    // What each version's directory held before this run, put back when its php-fpm refuses the result.
+    struct Undo {
+        fs::path file;
+        std::string text;  // "" when the file did not exist
+    };
+    std::map<std::string, std::vector<Undo>> undo;
+    std::set<std::string> touched;  // versions whose pool directory changed
+    std::size_t placed = 0;
 
     for (const auto& p : pools) {
-        // State directories: 0700 and owned by the user; chown needs root, so without it
-        // the directories stay ours and one warning per user says what to fix.
+        const php::Runtime* rt = p.version.empty() ? nullptr : php::find(runtimes, p.version);
+        if (!rt) {
+            out << "error: site " << p.site
+                << (p.version.empty() ? std::string(" names no PHP version and none is installed")
+                                      : " runs PHP " + p.version + ", which is not installed (php_versions lists what is and what can be)")
+                << "; its pool " << p.name << " is not written\n";
+            failed = true;
+            continue;
+        }
+        const fs::path dir = rt->pools;
+        if (!fs::is_directory(dir, ec)) {
+            out << "error: PHP " << p.version << "'s pool directory " << dir.string() << " does not exist; site " << p.site << "'s pool is not written\n";
+            failed = true;
+            continue;
+        }
+        // State directories: the account's, its php/, the site's, then tmp/ and sessions/, each 0700 and
+        // the user's; chown needs root, so without it the directories stay ours and one warning per site
+        // says what to fix.
         const struct passwd* pw = ::getpwnam(p.user.c_str());
         const struct group* gr = ::getgrnam(p.group.c_str());
         bool own_warned = false;
@@ -557,28 +575,30 @@ int write_pools(const Config& cfg, const fs::path& out_dir, bool dry_run, std::o
         // (2026-09-20: every upload on every site with a user was 0640 user:user, unservable).
         // sessions/ stays the user's alone: nothing leaves it.
         const struct group* srv = ::getgrnam(agensio_group.c_str());
-        for (const char* sub : {"", "/tmp", "/sessions"}) {
-            const fs::path d = p.state_dir + sub;
-            const bool tmp = std::string_view(sub) == "/tmp";
+        const std::string account = cfg.state_dir + "/" + p.user;
+        bool dirs_failed = false;
+        for (const std::string& d : {account, account + "/php", p.state_dir, p.state_dir + "/tmp", p.state_dir + "/sessions"}) {
+            const bool tmp = d == p.state_dir + "/tmp";
             const mode_t mode = tmp ? 02750 : 0700;
             const gid_t gid = tmp && srv ? srv->gr_gid : (gr ? gr->gr_gid : 0);
             struct stat st {};
             if (fs::is_directory(d, ec)) {
-                // An existing tmp/ from an earlier layout (0700 user:user) is repaired here.
+                // An existing tmp/ of the wrong mode or group (made by hand) is repaired here.
                 if (tmp && pw && srv && ::stat(d.c_str(), &st) == 0 && ((st.st_mode & 07777) != mode || st.st_gid != gid) && ::geteuid() == 0) {
-                    if (dry_run) out << "would repair " << d.string() << " to 2750 " << p.user << ":" << agensio_group << "\n";
+                    if (dry_run) out << "would repair " << d << " to 2750 " << p.user << ":" << agensio_group << "\n";
                     else if (::chown(d.c_str(), pw->pw_uid, gid) == 0 && ::chmod(d.c_str(), mode) == 0)
-                        out << "repaired " << d.string() << " to 2750 " << p.user << ":" << agensio_group << " (uploads created there carry the server's group)\n";
+                        out << "repaired " << d << " to 2750 " << p.user << ":" << agensio_group << " (uploads created there carry the server's group)\n";
                 }
                 continue;
             }
             if (dry_run) {
-                out << "would create " << d.string() << "\n";
+                out << "would create " << d << "\n";
                 continue;
             }
-            if (!fs::create_directories(d, ec) && ec) {
-                out << "error: cannot create " << d.string() << ": " << ec.message() << "\n";
-                return 1;
+            if (!fs::create_directory(d, ec) && ec) {
+                out << "error: cannot create " << d << ": " << ec.message() << "; site " << p.site << "'s pool is not written\n";
+                failed = dirs_failed = true;
+                break;
             }
             const bool owned = pw && gr && (!tmp || srv) && ::chown(d.c_str(), pw->pw_uid, gid) == 0;
             ::chmod(d.c_str(), mode);
@@ -586,58 +606,87 @@ int write_pools(const Config& cfg, const fs::path& out_dir, bool dry_run, std::o
                 own_warned = true;
                 if (!pw || !gr) out << "warning: user " << p.user << " or group " << p.group << " does not exist; ";
                 else out << "warning: not root, cannot chown; ";
-                out << p.state_dir << " stays owned by us and PHP cannot write there until it is "
-                    << p.user << ":" << p.group << "\n";
+                out << p.state_dir << " stays owned by us and PHP cannot write there until it is " << p.user << ":" << p.group << "\n";
             }
-            out << "created " << d.string() << "\n";
+            out << "created " << d << "\n";
         }
-        const fs::path file = out_dir / (p.name + ".conf");
+        if (dirs_failed) continue;
+        const fs::path file = dir / (p.name + ".conf");
         std::string current;
         if (std::ifstream in(file); in) current.assign(std::istreambuf_iterator<char>(in), {});
+        if (!current.empty() && !current.starts_with(kHeader)) {
+            out << "error: " << file.string() << " exists and was not generated by agensio; remove it or rename the user\n";
+            failed = true;
+            continue;
+        }
+        ++placed;
         // php-fpm's master loads the pool as root: a file its group or anyone may write is rewritten
         // even when its text is current (an older version wrote it with the umask's mode).
         struct stat st {};
         const bool loose = !current.empty() && ::stat(file.c_str(), &st) == 0 && (st.st_mode & 022) != 0;
         if (current == p.text && !loose) continue;
-        if (!current.empty() && !current.starts_with(kHeader)) {
-            out << "error: " << file.string() << " exists and was not generated by agensio; remove it or rename the user\n";
-            return 1;
+        out << (current != p.text ? verb : dry_run ? "would fix the mode of" : "fixed the mode of") << " " << file.string()
+            << (current != p.text ? " (site " + p.site + ", PHP " + p.version + ")" : "") << "\n";
+        if (current != p.text) {  // a mode alone needs no php-fpm reload, and is not stale
+            touched.insert(p.version);
+            undo[p.version].push_back({file, current});
         }
-        if (current != p.text) changed = true;  // a mode alone needs no php-fpm reload, and is not stale
-        out << (current != p.text ? verb : dry_run ? "would fix the mode of" : "fixed the mode of") << " " << file.string() << "\n";
         if (dry_run) continue;
         // Whole or not at all, 0644 whatever the umask (the alpha.94 report): the file php-fpm reads is
         // the old one or the new one, never a half one.
         if (const std::string why = write_file_atomic(file.string(), p.text); !why.empty()) {
             out << "error: " << why << "\n";
-            return 1;
+            failed = true;
         }
     }
 
-    // Files we generated for users that are no longer configured. While a site file is set aside
-    // (design section 26) its sites are not in `cfg`, whether a running version of them serves or
-    // not, so no pool file is taken for stale: removing one would stop the PHP of a site that keeps
-    // its last good version.
+    // Files agensio generated that no site assigns to that directory: a site gone, renamed, or moved to
+    // another version. While a site file is set aside (design section 26) its sites are not in `cfg`,
+    // whether a running version of them serves or not, so no pool file is taken for stale: removing one
+    // would stop the PHP of a site that keeps its last good version.
     if (!cfg.held_back.empty())
         out << "kept every other pool: " << cfg.held_back.size() << " site file(s) set aside, their pools stay until they load\n";
-    for (const auto& entry : fs::directory_iterator(out_dir, ec)) {
-        if (!cfg.held_back.empty()) break;
-        const std::string name = entry.path().filename().string();
-        if (!name.starts_with("agensio-") || !name.ends_with(".conf")) continue;
-        bool wanted = false;
-        for (const auto& p : pools) wanted = wanted || name == p.name + ".conf";
-        if (wanted) continue;
-        std::string first;
-        std::ifstream in(entry.path());
-        std::getline(in, first);
-        if (!first.starts_with(kHeader)) continue;
-        changed = true;
-        out << (dry_run ? "would remove " : "removed ") << entry.path().string() << "\n";
-        if (!dry_run) fs::remove(entry.path(), ec);
+    else
+        for (const auto& rt : runtimes) {
+            if (!fs::is_directory(rt.pools, ec)) continue;
+            for (const auto& entry : fs::directory_iterator(rt.pools, ec)) {
+                const std::string name = entry.path().filename().string();
+                if (!name.starts_with("agensio-") || !name.ends_with(".conf")) continue;
+                const bool wanted = std::any_of(pools.begin(), pools.end(), [&](const GeneratedPool& p) { return p.version == rt.version && name == p.name + ".conf"; });
+                if (wanted) continue;
+                std::ifstream in(entry.path());
+                const std::string text((std::istreambuf_iterator<char>(in)), {});
+                if (!text.starts_with(kHeader)) continue;
+                touched.insert(rt.version);
+                undo[rt.version].push_back({entry.path(), text});
+                out << (dry_run ? "would remove " : "removed ") << entry.path().string() << "\n";
+                if (!dry_run) fs::remove(entry.path(), ec);
+            }
+        }
+
+    // Each directory that changed is tested by its own php-fpm before it may be reloaded; a refusal puts
+    // that directory back as it was, so a reload never meets a configuration that stops the master.
+    for (const auto& rt : runtimes) {
+        if (!touched.count(rt.version)) continue;
+        if (!dry_run && test)
+            if (const std::string why = test(rt); !why.empty()) {
+                for (auto it = undo[rt.version].rbegin(); it != undo[rt.version].rend(); ++it) {
+                    if (it->text.empty()) fs::remove(it->file, ec);
+                    else if (const std::string w = write_file_atomic(it->file.string(), it->text); !w.empty()) out << "error: " << w << "\n";
+                }
+                out << "error: php-fpm " << rt.version << " refuses its configuration with these pools (" << why
+                    << "); its pool files are put back as they were and it is not reloaded\n";
+                failed = true;
+                continue;
+            }
+        res.changed.push_back(rt.version);
     }
-    if (!changed) out << "pools up to date (" << pools.size() << ")\n";
-    else if (!dry_run) out << "reload php-fpm to apply\n";
-    return changed ? 3 : 0;
+    if (touched.empty() && !failed) out << "pools up to date (" << placed << ")\n";
+    else if (!dry_run)
+        for (const auto& v : res.changed)
+            if (const php::Runtime* rt = php::find(runtimes, v)) out << "reload PHP " << v << " to apply: " << reload_command(*rt) << "\n";
+    res.rc = failed ? 1 : touched.empty() ? 0 : 3;
+    return res;
 #endif
 }
 

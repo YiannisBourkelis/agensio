@@ -12,6 +12,7 @@
 
 #include "handlers/fastcgi.hpp"
 #include "path.hpp"
+#include "services/php_runtimes.hpp"
 #include "services/pools.hpp"
 #include "services/tasks.hpp"
 
@@ -1161,6 +1162,26 @@ bool runs_php(const toml::table& t, const SiteConfig& site) {
     return false;
 }
 
+// A PHP version as the runtimes name it: major.minor, digits only ("8.4", "8.10").
+bool php_version_text(std::string_view v) {
+    const std::size_t dot = v.find('.');
+    return dot != std::string_view::npos && dot > 0 && dot + 1 < v.size() && v.find('.', dot + 1) == std::string_view::npos &&
+           std::all_of(v.begin(), v.end(), [](char c) { return c == '.' || (c >= '0' && c <= '9'); });
+}
+
+// A pool's name: the account and 8 hex digits of the domain (FNV-1a, 32 bits), short and stable, as a
+// unix socket's path holds 107 bytes and a domain may have 253 (docs/design-php-versions.md 5).
+std::string pool_name(const std::string& user, std::string_view domain) {
+    std::uint32_t h = 0x811c9dc5u;
+    for (const char c : domain) {
+        h ^= static_cast<unsigned char>(c);
+        h *= 0x01000193u;
+    }
+    char hex[9];
+    std::snprintf(hex, sizeof hex, "%08x", static_cast<unsigned>(h));
+    return "agensio-" + user + "-" + hex;
+}
+
 // The pool keys of `php = { ... }` for a site with `user` (docs/design-per-site-users.md).
 // Without `php.socket` the pool is agensio's to generate: the socket, the state directory
 // and the FastCGI sizing follow from the user, which is what makes a site's isolation one
@@ -1194,6 +1215,9 @@ void parse_pool(const toml::table* php, const fs::path& base_dir, const Config& 
         count("max_execution_time", pool.max_execution_time, 0, 86400);
         count("max_input_time", pool.max_input_time, 0, 86400);
         pool.version = (*php)["version"].value_or(std::string());
+        if (!pool.version.empty() && !php_version_text(pool.version))
+            fail(w + ".version must be a PHP version as major.minor (\"8.4\"), not \"" + pool.version + "\"");
+        if (!pool.version.empty()) pool.version_from = "site";
         pool.memory_limit = (*php)["memory_limit"].value_or(pool.memory_limit);
         pool.pm = to_lower((*php)["pm"].value_or(pool.pm));
         if (pool.pm != "static" && pool.pm != "dynamic" && pool.pm != "ondemand")
@@ -1206,13 +1230,24 @@ void parse_pool(const toml::table* php, const fs::path& base_dir, const Config& 
             if (k.find_first_of("[]=\n") != std::string::npos || v.find('\n') != std::string::npos)
                 fail(w + ".extra: bad key or value '" + k + "'");
     }
-    pool.name = "agensio-" + site.user;
-    pool.state_dir = cfg.state_dir + "/" + site.user;
+    // A pool per site (docs/design-php-versions.md 3, 5): its name, its own tmp/ and sessions/, its version
+    // (the site's, else the server's default, else the newest installed) in its socket's name.
+    const std::string domain = site.server_names.empty() ? std::string() : site.server_names.front();
+    pool.name = pool_name(site.user, domain);
+    // A catch-all's or a wildcard's directory without the '*' a shell would expand: '_', which no host name holds.
+    pool.state_dir = cfg.state_dir + "/" + site.user + "/php/" + (domain.starts_with('*') ? "_" + domain.substr(1) : domain);
     if (pool.open_basedir.empty())
         pool.open_basedir = {project_root, pool.state_dir + "/tmp", pool.state_dir + "/sessions"};
     if (site.php.configured) return;  // an existing pool: nothing generated, the socket is theirs
+    if (pool.version.empty()) {
+        pool.version = cfg.php_version.empty() ? cfg.php_newest : cfg.php_version;
+        pool.version_from = pool.version.empty() ? "" : cfg.php_version.empty() ? "newest" : "server";
+    }
     pool.generated = true;
-    pool.socket = cfg.pools_run + "/" + pool.name + ".sock";
+    pool.socket = cfg.pools_run + "/" + pool.name + (pool.version.empty() ? "" : "-" + pool.version) + ".sock";
+    if (pool.socket.size() > 107)
+        fail(where + ": its php-fpm socket " + pool.socket + " is " + std::to_string(pool.socket.size()) +
+             " bytes, more than the 107 a unix socket's path holds; choose a shorter server.pools_run or account name");
     std::string err;
     if (!parse_fcgi_address("unix:" + pool.socket, site.php.address, err)) fail(where + ": " + err);
     site.php.addresses = {site.php.address};
@@ -1975,10 +2010,7 @@ void parse_php_runtimes(const toml::node_view<const toml::node>& n, Config& cfg)
     if (!runtimes) fail("php.runtimes must be a table of versions: [php.runtimes.\"8.5\"]");
     for (const auto& [k, v] : *runtimes) {
         const std::string version(k.str());
-        const std::size_t dot = version.find('.');
-        const bool ok = dot != std::string::npos && dot > 0 && dot + 1 < version.size() && version.find('.', dot + 1) == std::string::npos &&
-                        std::all_of(version.begin(), version.end(), [](char c) { return c == '.' || (c >= '0' && c <= '9'); });
-        if (!ok) fail("php.runtimes: '" + version + "' is no version: major.minor, quoted ([php.runtimes.\"8.5\"])");
+        if (!php_version_text(version)) fail("php.runtimes: '" + version + "' is no version: major.minor, quoted ([php.runtimes.\"8.5\"])");
         const toml::table* t = v.as_table();
         const std::string where = "php.runtimes." + version;
         if (!t) fail(where + " must be a table: fpm, conf, pools, unit, cli");
@@ -2920,7 +2952,8 @@ void explain_config(const Config& cfg, std::ostream& out) {
         if (!site.group.empty()) out << "group = \"" << site.group << "\"\n";
         if (site.php.configured) print_fcgi(out, "php", site.php);
         if (site.pool.generated) {
-            out << "# php-fpm pool " << site.pool.name << " (generated by `agensio pools`):\n";
+            out << "# php-fpm pool " << site.pool.name << (site.pool.version.empty() ? std::string() : " for PHP " + site.pool.version)
+                << " (generated by `agensio pools`):\n";
             std::istringstream ini(render_pool(cfg, site, cfg.group.empty() ? "<agensio group>" : cfg.group));
             for (std::string line; std::getline(ini, line);) out << "#   " << line << "\n";
         }
@@ -3597,8 +3630,9 @@ std::optional<SiteConflict> first_site_conflict(const Config& cfg) {
                                                   fs::path(sites[j].source).filename().string() + ", " + sites[i].server_names.front() + " in " +
                                                   fs::path(sites[i].source).filename().string() + "); an address has one" + why};
             }
-    // One user, one pool: sites of the same user share it and must size it alike; sites of
-    // different users never share a socket, whatever they say.
+    // A pool per site (docs/design-php-versions.md 3): its sizes and version are its own. Sites of
+    // different users never share a socket, whatever they say; two of one account whose domains give
+    // the same 8 hex digits (a chance of one in 66,000 for 360 sites of one account) would share a pool's name.
     for (std::size_t i = 0; i < sites.size(); ++i)
         for (std::size_t j = 0; j < i; ++j) {
             const SiteConfig& a = sites[j];
@@ -3610,18 +3644,8 @@ std::optional<SiteConflict> first_site_conflict(const Config& cfg) {
                     return SiteConflict{j, i, pair + " have different users but the same php socket " + a.php.address.key};
                 continue;
             }
-            if (!a.pool.generated || !b.pool.generated) continue;
-            const PhpPool& x = a.pool;
-            const PhpPool& y = b.pool;
-            const char* differs = x.children != y.children         ? "children"
-                                  : x.pm != y.pm                    ? "pm"
-                                  : x.max_requests != y.max_requests ? "max_requests"
-                                  : x.memory_limit != y.memory_limit ? "memory_limit"
-                                  : x.max_execution_time != y.max_execution_time ? "max_execution_time"
-                                  : x.version != y.version                       ? "version"
-                                  : x.extra != y.extra                           ? "extra"
-                                                                                 : nullptr;
-            if (differs) return SiteConflict{j, i, pair + " share user " + a.user + " but php." + differs + " differs"};
+            if (a.pool.generated && b.pool.generated && a.pool.name == b.pool.name)
+                return SiteConflict{j, i, pair + " would share the php-fpm pool name " + a.pool.name + "; give one of them another account"};
         }
     // The FastCGI pool is per upstream address (and worker), so every location on the same
     // socket must agree on the pool bounds; the first definition wins, a conflict is an error.
@@ -3945,7 +3969,12 @@ Config load_config(const fs::path& path, const Config* running, bool use_record)
     }
     const toml::table& root = tbl;
     check_keys(root, {"top level"}, {"server", "cache", "log", "control", "site"}, path.filename().string() + " (the main file)");
-    if (const auto* st = root["server"].as_table()) check_keys(*st, {"[server]"}, {"acme", "http2", "http3"}, "server");
+    if (const auto* st = root["server"].as_table()) {
+        if (st->contains("pools"))  // gone with the PHP versions (docs/design-php-versions.md 10)
+            fail("server.pools is gone: each PHP version's pool directory is its own (discovered, or root's [php.runtimes.\"X.Y\"] pools = \"...\"); "
+                 "php_versions lists them");
+        check_keys(*st, {"[server]"}, {"acme", "http2", "http3"}, "server");
+    }
 
     auto server = root["server"];
     if (auto w = server["workers"].value<std::int64_t>()) {
@@ -4005,7 +4034,12 @@ Config load_config(const fs::path& path, const Config* running, bool use_record)
     cfg.trusted_proxies_text = string_list(server["trusted_proxies"], "server.trusted_proxies");
     cfg.user = account_name(server["user"], "server.user");
     cfg.group = account_name(server["group"], "server.group");
-    if (auto d = server["pools"].value<std::string>()) cfg.pools_dir = resolve(base_dir, *d).string();
+    if (auto v = server["php_version"].value<std::string>()) {
+        if (!php_version_text(*v)) fail("server.php_version must be a PHP version as major.minor (\"8.4\"), not \"" + *v + "\"");
+        cfg.php_version = *v;
+    } else if (server["php_version"]) {
+        fail("server.php_version must be a string (\"8.4\")");
+    }
     cfg.pools_run = server["pools_run"].value_or(default_pools_run());
     if (cfg.pools_run.empty() || cfg.pools_run[0] != '/') fail("server.pools_run must be an absolute path");
     cfg.state_dir = server["state_dir"].value_or(cfg.state_dir);
@@ -4157,6 +4191,9 @@ Config load_config(const fs::path& path, const Config* running, bool use_record)
     if (root.contains("mime_types")) cfg.mime_types = parse_mime_table(root["mime_types"], "mime_types", false);
     // [php.runtimes."X.Y"] (docs/design-php-versions.md 4): PHP versions that discovery does not find.
     if (root.contains("php")) parse_php_runtimes(root["php"], cfg);
+    // The version of the sites that name none when root names none either: the newest installed now.
+    if (cfg.php_version.empty())
+        if (const auto rts = php::discover(cfg, php::system_fs()); !rts.empty()) cfg.php_newest = rts.back().version;
     for (const auto& text : cfg.trusted_proxies_text)
         if (const std::string why = trusted_entry(text, cfg, cfg.trusted_proxies); !why.empty()) fail("server.trusted_proxies: " + why);
     parse_sites_from(root, base_dir, cfg, path.filename().string(), &additions, cfg.config_path.string());

@@ -1589,11 +1589,15 @@ void ControlHandler::finish_pool(Stream& s, const control::SiteSpec& spec, const
     if (r["ok"].boolean()) {
         std::string text(r.get("output"));
         while (!text.empty() && (text.back() == '\n' || text.back() == ' ')) text.pop_back();
-        done.push("php-fpm pool agensio-" + spec.user + ": " + text);
+        // The site's own pool, as the reloaded configuration names it (a pool per site, with its version).
+        const SiteConfig* now = control::find_site(backend_->running(), spec.domain);
+        const std::string pool = now && now->pool.generated ? now->pool.name + (now->pool.version.empty() ? "" : " (PHP " + now->pool.version + ")") : "of " + spec.domain;
+        done.push("php-fpm pool " + pool + ": " + text);
         audit_peer(s, what, "pool applied: " + text);
         std::vector<std::string> rest;
         for (const auto& st : steps)
-            if (st != "agensio pools" && !st.starts_with("systemctl reload php") && !st.starts_with("brew services")) rest.push_back(st);
+            if (st != "agensio pools" && !st.starts_with("systemctl reload php") && !st.starts_with("brew services") && !st.starts_with("rc-service php"))
+                rest.push_back(st);
         steps = rest;
     } else {
         steps.insert(steps.begin(), "# the helper could not apply the pool (" + std::string(r.get("error")) + "); run: agensio pools");

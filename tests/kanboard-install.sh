@@ -25,7 +25,7 @@ PHPV=$(basename "$FPM" | sed 's/php-fpm//'); POOLD=/etc/php/$PHPV/fpm/pool.d
 T=$(mktemp -d /tmp/agensio-kanboard.XXXXXX); chmod 755 "$T"
 pass=0; fail=0
 check() { if [ "$3" = "$2" ]; then echo "ok   $1"; pass=$((pass+1)); else echo "FAIL $1: expected [$2] got [$3]"; fail=$((fail+1)); fi; }
-cleanup() { [ -f "$T/agensio.pid" ] && kill "$(cat "$T/agensio.pid")" 2>/dev/null; pkill -f "php-fpm: master process ($T" 2>/dev/null; sleep 0.3; rm -f $POOLD/agensio-kb.conf; pkill -9 -u kb 2>/dev/null; userdel kb 2>/dev/null; rm -rf "$T"; }
+cleanup() { [ -f "$T/agensio.pid" ] && kill "$(cat "$T/agensio.pid")" 2>/dev/null; pkill -f "php-fpm: master process ($T" 2>/dev/null; sleep 0.3; rm -f $POOLD/agensio-kb-*.conf; pkill -9 -u kb 2>/dev/null; userdel kb 2>/dev/null; rm -rf "$T"; }
 trap cleanup EXIT
 id -u agensio >/dev/null 2>&1 || useradd -r -M -s /usr/sbin/nologin agensio
 mkdir -p $T/sites.d $T/logs $T/run $T/state $T/www $T/default $T/certs; chown agensio:agensio $T/sites.d $T/logs $T/state; chmod 751 $T/state
@@ -61,12 +61,12 @@ APP=$T/www/kb.test/web
 H="--resolve kb.test:18743:127.0.0.1 -k"
 
 ctl site-create --domain kb.test --app php --root $APP --user kb --cert $T/certs/cert.pem --key $T/certs/key.pem --listen-plain 127.0.0.1:18780 --listen-tls 127.0.0.1:18743 --yes --reason live > $T/out
-check "site-create: app = php with its own account and a generated php-fpm pool" "True kb yes" "$(j 'd["ok"]') $(stat -c %U $APP) $([ -f $POOLD/agensio-kb.conf ] && echo yes)"
+check "site-create: app = php with its own account and a generated php-fpm pool" "True kb yes" "$(j 'd["ok"]') $(stat -c %U $APP) $([ -f $POOLD/agensio-kb-*.conf ] && echo yes)"
 # php-fpm with a private configuration that includes the generated pool (no systemd here).
-printf '[global]\npid = %s/fpm.pid\nerror_log = %s/fpm.log\ninclude = %s/agensio-kb.conf\n' $T $T $POOLD > $T/fpm.conf
+printf '[global]\npid = %s/fpm.pid\nerror_log = %s/fpm.log\ninclude = %s/agensio-kb-*.conf\n' $T $T $POOLD > $T/fpm.conf
 $FPM -y $T/fpm.conf -D
-for _ in $(seq 1 50); do [ -S $T/run/agensio-kb.sock ] && break; sleep 0.1; done
-check "the pool listens on the site's socket as kb" "kb" "$(stat -c %U $T/run/agensio-kb.sock)"
+for _ in $(seq 1 50); do [ -S $T/run/agensio-kb-*.sock ] && break; sleep 0.1; done
+check "the pool listens on the site's socket as kb" "kb" "$(stat -c %U $T/run/agensio-kb-*.sock)"
 ctl site-install kb.test --url https://github.com/kanboard/kanboard/archive/refs/tags/v$VERSION.tar.gz --yes --reason live > $T/out
 check "site-install from GitHub: the archive unpacked as kb; facts name the directories its .htaccess files deny; the first next step carries the matching rules" "True app,data yes yes" "$(j 'd["ok"]') $(j '",".join(d["facts"]["htaccess_denied"])') $([ -f $APP/jsonrpc.php ] && [ "$(stat -c %U $APP/jsonrpc.php)" = kb ] && echo yes) $(j '"yes" if "rules" in d["next_steps"][0] and "/app/" in d["next_steps"][0] and "/data/" in d["next_steps"][0] and ".htaccess" in d["next_steps"][0] else d["next_steps"]')"
 check "under the bare php preset: the login page is served (after Kanboard's redirect), SQLite files and web.config are refused, but a PHP file of the application's internals runs" "200 404 404 yes" "$(curl -sSL $H -o $T/home.html -w '%{http_code}' https://kb.test:18743/) $(curl -sS $H -o /dev/null -w '%{http_code}' https://kb.test:18743/data/db.sqlite) $(curl -sS $H -o /dev/null -w '%{http_code}' https://kb.test:18743/web.config) $(c=$(curl -sS $H -o /dev/null -w '%{http_code}' https://kb.test:18743/app/Core/Base.php); [ "$c" != 404 ] && echo yes || echo "no ($c)")"

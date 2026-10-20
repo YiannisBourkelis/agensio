@@ -80,6 +80,7 @@ start them and the warning goes. What a key needs (a reload, a restart, root) is
 - [Use a php-fpm pool you already run](examples/php.md#use-a-php-fpm-pool-you-already-run): `php = { socket }`, socket permissions, and pool keys that need a generated pool.
 - [php-fpm in a container](examples/php.md#php-fpm-in-a-container): `remote_root`, a port published on 127.0.0.1 only, and `keep_conn` kept off through Docker.
 - [Raise the upload and PHP limits of one site](examples/php.md#raise-the-upload-and-php-limits-of-one-site): `max_body_size`, the pool's PHP limits and `read_timeout`, or `--set` within `site_limits`.
+- [Run one site on another PHP version](examples/php.md#run-one-site-on-another-php-version): `php = { version }` beside `[server] php_version`, a pool per site in its version's php-fpm, `php_versions`.
 - [Send PHP's output as it is produced](examples/php.md#send-phps-output-as-it-is-produced): `buffering = false` and what it costs in PHP children.
 - [PHP in one directory of a static site](examples/php.md#php-in-one-directory-of-a-static-site): a final `/` and a `.php` suffix location, so scripts run under `/forms/` only.
 - [Add headers to a preset's directory without losing its shield](examples/php.md#add-headers-to-a-presets-directory-without-losing-its-shield): an `add_headers`-only location joins the preset's; one more key replaces it. Root additions on a managed site.

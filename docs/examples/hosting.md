@@ -133,14 +133,15 @@ php = { children = 6 }
 tls = "auto"
 ```
 
-**What it does.** For each account agensio derives a php-fpm pool: it runs as the site's
+**What it does.** For each site agensio derives a php-fpm pool of its own: it runs as the site's
 `user` (and `group`, by default the account's primary group), listens on
-`/run/php/agensio-<user>.sock`, owned by the account with the server's group and `0660`, so
-agensio connects and nobody else can, starts children on demand (`pm = "ondemand"`: nothing
-stays resident while a site is quiet), and keeps PHP's uploads, temp files and sessions in the
-account's own `/var/lib/agensio/<user>/tmp` and `sessions`, with `open_basedir` at the project
-directory plus those two. `agensio pools` writes the pool files into the distribution's
-php-fpm directory and creates the account's directories.
+`/run/php/agensio-<user>-<8 hex>-<version>.sock`, owned by the account with the server's group and
+`0660`, so agensio connects and nobody else can, starts children on demand (`pm = "ondemand"`:
+nothing stays resident while a site is quiet), and keeps PHP's uploads, temp files and sessions in
+the site's own `/var/lib/agensio/<user>/php/<domain>/tmp` and `sessions`, with `open_basedir` at
+the project directory plus those two. `agensio pools` writes each pool file into the php-fpm
+directory of the site's PHP version ([PHP versions](../configuration.md#7b-php-versions)) and creates the
+directories.
 
 The rules `agensio -t` holds every start, reload and control-plane change to, each refusal
 naming the path, its owner and mode and the fix:

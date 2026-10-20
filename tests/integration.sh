@@ -1247,8 +1247,8 @@ nv() {  # agensio's arguments: its exit status, the bytes on stdout, "said" for 
   ls -A $A | wc -l
 }
 check "a flag whose value is the next flag or empty: one line, needs a value, exit 2, nothing on stdout, no file (ctl, protection, pools, mcp, passwd)" \
-  "2 0 said 0 ; 2 0 said 0 ; 2 0 said 0 ; 2 0 said 0 ; 2 0 said 0 ; 2 0 said 0 ; 2 0 said 0 ; 2 0 said 0 ; 2 0 said 0 ; 2 0 said 0" \
-  "$(nv ctl protection --jail --socket $ACS --out --nft) ; $(nv ctl site-unit wp.test --socket $ACS --out --raw) ; $(nv ctl logs --socket $ACS --since --limit 3) ; $(nv ctl status --socket "") ; $(nv protection -c $ACF --jail --out) ; $(nv protection -c $ACF --jail --out --nft) ; $(nv pools -c $ACF --out) ; $(nv pools -c "" --dry-run) ; $(nv mcp --socket) ; $(nv passwd --method)"
+  "2 0 said 0 ; 2 0 said 0 ; 2 0 said 0 ; 2 0 said 0 ; 2 0 said 0 ; 2 0 said 0 ; 2 0 said 0 ; 2 0 said 0 ; 2 0 said 0" \
+  "$(nv ctl protection --jail --socket $ACS --out --nft) ; $(nv ctl site-unit wp.test --socket $ACS --out --raw) ; $(nv ctl logs --socket $ACS --since --limit 3) ; $(nv ctl status --socket "") ; $(nv protection -c $ACF --jail --out) ; $(nv protection -c $ACF --jail --out --nft) ; $(nv pools -c "" --dry-run) ; $(nv mcp --socket) ; $(nv passwd --method)"
 # A path's value is never a short flag either (the alpha.97 report: `agensio -c -t` took -t for the
 # configuration file); a file whose name starts with '-' is written ./-name.
 check "a path flag whose value starts with '-' has no value: -c, --config, --out, --socket on every command" \

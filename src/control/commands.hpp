@@ -14,6 +14,7 @@
 #include "core/site_notices.hpp"
 #include "control/loglines.hpp"
 #include "services/json.hpp"
+#include "services/php_runtimes.hpp"
 
 namespace agensio {
 struct HostFacts;
@@ -122,11 +123,10 @@ json::Value path_check(const Config& cfg, const SiteConfig& site, std::string_vi
 json::Value validate(const std::filesystem::path& path, const Config& running, const Config* current = nullptr);
 // The restart-only settings that differ between the file on disk and the running server.
 std::vector<std::string> restart_needed(const Config& fresh, const Config& running);
-// php-fpm's global file next to the pool directory (Debian: fpm/php-fpm.conf; RHEL:
-// /etc/php-fpm.conf), and whether it sets process_control_timeout, without which a
-// reload kills children mid-request (`site-create` and `agensio pools` reload). True
-// when the file exists and the setting is absent or 0; `file` names it.
-bool php_fpm_hard_reload(const Config& cfg, std::string& file);
+// Whether a PHP version's php-fpm.conf leaves process_control_timeout unset, without which its
+// reload kills children mid-request (`site-create` and `agensio pools` reload). True when the
+// file exists and the setting is absent or 0.
+bool php_fpm_hard_reload(const php::Runtime& r);
 
 // Backup archives and database dumps found under a document root (health, archives_in_root). A
 // static site or one without app is searched for dumps only (dumps_only): it serves everything as it

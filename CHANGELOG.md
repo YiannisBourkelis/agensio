@@ -2,6 +2,31 @@
 
 ## 0.1.0-alpha.107
 
+- **A php-fpm pool per site, in the php-fpm of the site's PHP version** (the second step of
+  `docs/design-php-versions.md`). Until now an account's sites shared one pool, so they had to agree on
+  every pool key, the version included, and all pools went into one directory (`server.pools` or the
+  newest found). Each site with a user now has its own pool, `agensio-<user>-<8 hex digits of the
+  domain>`, with its own limits, version, `open_basedir`, `tmp/` and `sessions/`
+  (`<state_dir>/<user>/php/<domain>/`), and a socket that carries the version
+  (`agensio-<user>-<8 hex>-<version>.sock`). A site's version is its `php = { version }`, else the new
+  `[server] php_version`, else the newest installed; `site_show` says which and why (`php.version`,
+  `php.version_from`). `agensio pools`, and the provisioning helper after `site_create` and
+  `site_update`, make every version's pool directory hold exactly its pools: each site's file written
+  into its version's directory, every other file agensio generated removed (a site moved to another
+  version included), each directory that changed tested by that version's own `php-fpm -t` as root and
+  put back as it was when php-fpm refuses it, and only the versions that changed reloaded (the helper),
+  or their reload lines printed (`agensio pools`). Health: `php_version_missing` (error: a version not
+  installed, the site's PHP answers 502), `php_default_unpinned` (info: sites follow the newest PHP
+  installed, so a newer one moves them), `pools_stale` across the versions naming each file, and
+  `php_fpm_hard_reload` per version. `server.pools` (refused, naming `[php.runtimes]`) and `agensio pools
+  --out` are gone; the trash takes a site's PHP state with it when its account serves other sites.
+  Unit tests (names, sockets, the versions' order, placement across two versions, a move, a refused test
+  put back, a missing version, health), `tests/pools.sh` and `tests/provision.sh` on a real php-fpm as
+  root through `[php.runtimes]`; `docs/configuration.md` 7b and 11, a cookbook recipe (Run one site on
+  another PHP version), the reference (`docs/keys.md`), security page row 44. **Every pool is renamed**:
+  after the upgrade run `agensio pools` as root and reload php-fpm (the PHP sites answer 502 until then),
+  and remove the old per-account `sessions/` under `<state_dir>/<user>/` (the account's `tmp/` stays: site
+  tasks use it); PHP sessions start anew, so users logged in through them log in again.
 - **`php_versions`: the PHP versions installed, and those the repositories can install** (the first step
   of PHP versions per site, `docs/design-php-versions.md`). agensio finds every installed php-fpm from the
   distributions' layouts (Debian and Ubuntu `/etc/php/X.Y/fpm`, Remi's `/etc/opt/remi/phpXY`, Alpine
@@ -14,7 +39,7 @@
   agensio pools its directory holds and their sites. The versions the configured repositories offer come
   from `apt-cache policy` (read-only), each with root's install line; supported ones they do not, with
   where root gets them (Ondřej Surý's repository on Debian, the ondrej/php PPA on Ubuntu). Installing stays
-  root's. MCP `php_versions` (viewer), `agensio ctl php`, `GET /v1/php`. Nothing about pools changes yet.
+  root's. MCP `php_versions` (viewer), `agensio ctl php`, `GET /v1/php`.
   Unit tests (discovery on described machines, the programs' output, the support table, apt-cache, the
   configuration table, the answer), an integration check through `ctl`; `docs/configuration.md` 7b, the
   reference (`docs/keys.md`), `docs/mcp.md`.

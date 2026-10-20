@@ -1134,7 +1134,11 @@ json::Value site(const Config& cfg, const SiteConfig& s, std::time_t now, const 
     v.set("settings", effective_settings(s, cfg));  // each with its value and where it comes from
     if (s.php.configured) {
         json::Value php = json::Value::object().set("socket", s.php.address.key);
-        if (s.pool.generated) php.set("pool", s.pool.name).set("state_dir", s.pool.state_dir);
+        // The version and where it comes from: "site" (its php.version), "server" ([server] php_version),
+        // "newest" (the newest installed, which a newer PHP installed moves).
+        if (s.pool.generated)
+            php.set("pool", s.pool.name).set("state_dir", s.pool.state_dir).set("version", s.pool.version.empty() ? json::Value() : json::Value(s.pool.version))
+                .set("version_from", s.pool.version_from.empty() ? json::Value() : json::Value(s.pool.version_from));
         v.set("php", std::move(php));
     }
     if (s.proxy.configured) v.set("upstream", upstream_json(s.proxy));
@@ -1301,14 +1305,10 @@ json::Value validate(const fs::path& path, const Config& running, const Config* 
     return v;
 }
 
-bool php_fpm_hard_reload(const Config& cfg, std::string& file) {
-    const fs::path dir = pools_dir(cfg, "");
-    if (dir.empty()) return false;
+bool php_fpm_hard_reload(const php::Runtime& r) {
     std::error_code ec;
-    for (const fs::path& candidate :
-         {dir.parent_path() / "php-fpm.conf", dir.parent_path().parent_path() / "php-fpm.conf"}) {
+    for (const fs::path& candidate : {fs::path(r.conf)}) {
         if (!fs::is_regular_file(candidate, ec)) continue;
-        file = candidate.string();
         std::ifstream in(candidate);
         std::string line;
         while (std::getline(in, line)) {
@@ -1533,10 +1533,10 @@ std::string unslashed_note(const std::vector<std::string>& dirs) {
 // The pm the pool file on disk says: php-fpm runs that one until `agensio pools` and a
 // reload, whatever the configuration means to (2026-09-23 live report: two pools still
 // static on disk held 681 MB while the configuration already said ondemand).
-std::string pool_file_pm(const Config& cfg, const PhpPool& pool) {
-    const fs::path dir = pools_dir(cfg, "");
-    if (dir.empty()) return {};
-    std::ifstream in(dir / (pool.name + ".conf"));
+std::string pool_file_pm(const std::vector<php::Runtime>& runtimes, const PhpPool& pool) {
+    const php::Runtime* r = pool_runtime(runtimes, pool);
+    if (!r) return {};
+    std::ifstream in(fs::path(r->pools) / (pool.name + ".conf"));
     for (std::string line; std::getline(in, line);) {
         if (line.rfind("pm = ", 0) == 0) return line.substr(5);
         if (line.rfind("pm=", 0) == 0) return line.substr(3);
@@ -1907,32 +1907,71 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
         add("info", "shared_account", "", std::to_string(without_user) + " application sites run under the server's own account",
             "give each site a user = \"...\" (docs/configuration.md section 11)");
 
-    // Stale generated pools.
+    // Generated pools (docs/design-php-versions.md 5, 9): each site's version installed, every version's
+    // pool directory holding what the configuration assigns to it.
     bool any_generated = false;
     for (const auto& s : running.sites) any_generated = any_generated || s.pool.generated;
+    const auto runtimes = any_generated ? php::discover(running, php::system_fs()) : std::vector<php::Runtime>{};
     if (any_generated) {
-        const fs::path dir = pools_dir(running, "");
-        if (dir.empty()) {
-            add("warn", "pools_dir_unknown", "", "no php-fpm pool directory found for the generated pools", "set [server] pools");
-        } else {
-            std::ostringstream sink;
-            if (write_pools(running, dir, true, sink) == 3)
-                add("warn", "pools_stale", "", "generated php-fpm pool files differ from the configuration",
-                    "run agensio pools, then reload php-fpm");
+        for (const auto& s : running.sites) {
+            if (!s.pool.generated || pool_runtime(runtimes, s.pool)) continue;
+            const std::string name = s.server_names.front();
+            const std::string from = s.pool.version_from == "site" ? "its own php.version" : s.pool.version_from == "server" ? "[server] php_version" : "";
+            add("error", "php_version_missing", name,
+                s.pool.version.empty() ? "site " + name + " runs PHP and no PHP version is installed: its php-fpm pool cannot be written, every PHP request answers 502"
+                                       : "site " + name + " runs PHP " + s.pool.version + " (" + from + "), which is not installed: its php-fpm pool cannot be written, "
+                                         "every PHP request answers 502",
+                "install it (php_versions lists what the repositories offer) or give the site an installed version (site-update " + name +
+                    " --php-version X.Y), then agensio pools");
+        }
+        std::ostringstream sink;
+        if (!write_pools(running, runtimes, true, sink).changed.empty()) {  // what would change, whatever else fails
+            // What a run would do, from its own lines: the files it would write or remove.
+            std::string what;
+            std::istringstream lines(sink.str());
+            for (std::string line; std::getline(lines, line);)
+                if (line.starts_with("would write ") || line.starts_with("would remove "))
+                    what += (what.empty() ? "" : "; ") + line.substr(6);
+            add("warn", "pools_stale", "", "the php-fpm pool files on disk differ from the configuration: agensio pools would " + what,
+                "run agensio pools as root, then reload the PHP versions it names");
+        }
+        // The sites that follow the newest installed version: a newer PHP installed moves them at the
+        // next reload, a step better taken on purpose.
+        if (running.php_version.empty() && !running.php_newest.empty()) {
+            std::size_t following = 0;
+            for (const auto& s : running.sites) following += s.pool.generated && s.pool.version_from == "newest";
+            if (following)
+                add("info", "php_default_unpinned", "",
+                    std::to_string(following) + " site(s) run the newest PHP installed (" + running.php_newest +
+                        ") because [server] php_version is not set: installing a newer PHP moves them to it at the next reload",
+                    "set php_version = \"" + running.php_newest + "\" in [server] of the main file, then agensio reload");
         }
         // PHP writes every upload to the pool's upload_tmp_dir and every session to its
         // save_path (tmp/ and sessions/ below the user's state directory) before an
         // application sees them; a missing or foreign directory fails both silently inside
-        // PHP (no 413, no 502, nothing in our logs; 2026-09-20 report). The user's directory
-        // is 0700, so the server can judge that directory, not what is inside it.
+        // PHP (no 413, no 502, nothing in our logs; 2026-09-20 report). The account's directory
+        // is 0700, so a server that is neither root nor the account judges that directory, not the
+        // site's below it (<account>/php/<domain>).
         const HostFacts facts = system_facts();
         for (const auto& s : running.sites) {
             if (!s.pool.generated) continue;
             unsigned uid = 0, gid = 0;
             const bool known = facts.user(s.user, uid, gid);
-            const std::string d = s.pool.state_dir;
+            std::string d = s.pool.state_dir;
             FileFacts f;
-            if (!facts.stat(d, f))
+            bool seen = facts.stat(d, f);
+            if (!seen) {
+                const std::string account = running.state_dir + "/" + s.user;
+                FileFacts a;
+                if (facts.stat(account, a) && ((known && a.uid != uid) || !a.is_dir)) {
+                    d = account;  // judged below as not the user's
+                    f = a;
+                    seen = true;
+                } else if (facts.stat(account, a) && ::access(account.c_str(), X_OK) != 0) {
+                    continue;  // the account's own and closed to the server: what is inside is not for it to see
+                }
+            }
+            if (!seen)
                 add("error", "php_tmp_missing", s.server_names.front(), "PHP's private directory " + d + " (upload_tmp_dir and session.save_path live below it) does not exist: uploads and sessions fail inside PHP with no error from the server",
                     "agensio pools (creates it as " + s.user + " with tmp/ and sessions/)");
             else if (known && (f.uid != uid || !f.is_dir))
@@ -1946,7 +1985,7 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
         for (const auto& s : running.sites) {
             if (!s.pool.generated || !pools_seen.insert(s.pool.name).second) continue;
             // What php-fpm runs is the pool file on disk, not the configuration's intent.
-            const std::string on_disk = pool_file_pm(running, s.pool);
+            const std::string on_disk = pool_file_pm(runtimes, s.pool);
             const std::string pm = on_disk.empty() ? s.pool.pm : on_disk;
             if (pm == "ondemand") continue;
             const bool stale = !on_disk.empty() && on_disk != s.pool.pm;
@@ -1962,10 +2001,15 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
                       : "site-update " + s.server_names.front() + " --set pm=ondemand (a child starts on the first request and exits after 60 s idle), or keep " +
                             pm + " for a site that must not pay a fork on its first request");
         }
-        std::string conf;
-        if (php_fpm_hard_reload(running, conf))
-            add("info", "php_fpm_hard_reload", "", "php-fpm.conf does not set process_control_timeout, so a php-fpm reload (site-create writing a pool, agensio pools) kills PHP requests in flight on every site",
-                "set process_control_timeout = 10s in " + conf + " and reload php-fpm once");
+        // Per version that runs pools: without process_control_timeout its reload kills requests in flight.
+        for (const auto& r : runtimes) {
+            const bool serves = std::any_of(running.sites.begin(), running.sites.end(), [&](const SiteConfig& s) { return pool_runtime(runtimes, s.pool) == &r; });
+            if (serves && php_fpm_hard_reload(r))
+                add("info", "php_fpm_hard_reload", "",
+                    "PHP " + r.version + "'s " + r.conf + " does not set process_control_timeout, so its reload (site-create writing a pool, agensio pools) "
+                    "kills PHP requests in flight on every site it runs",
+                    "set process_control_timeout = 10s in the [global] section of " + r.conf + " and run " + reload_command(r) + " once");
+        }
     }
 
     // A document root whose files belong to another application than the preset says: the
@@ -2124,9 +2168,9 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
         std::vector<std::string> files{std::string(kJailFile), protection_input(running).firewall_file, "/etc/systemd/system/" + std::string(kFirewallUnit)};
         for (const auto& s : running.sites)
             if (!s.user.empty() && service_app(s.app)) files.push_back("/etc/systemd/system/agensio-app-" + s.user + ".service");
-        if (const fs::path dir = pools_dir(running, ""); !dir.empty())
-            for (const auto& s : running.sites)
-                if (s.pool.generated) files.push_back((dir / (s.pool.name + ".conf")).string());
+        const auto runtimes = php::discover(running, php::system_fs());
+        for (const auto& s : running.sites)
+            if (const php::Runtime* r = pool_runtime(runtimes, s.pool)) files.push_back((fs::path(r->pools) / (s.pool.name + ".conf")).string());
         std::sort(files.begin(), files.end());
         files.erase(std::unique(files.begin(), files.end()), files.end());
         for (auto& f : root_file_findings(files, system_facts())) out.push_back(std::move(f));

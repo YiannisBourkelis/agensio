@@ -6,6 +6,12 @@ Status: accepted 2026-09-17 (every question below as proposed) and built the sam
 must reopen them after a SIGUSR1 once it has dropped privileges, and as owner it can;
 the customer still reads through their group.
 
+Changed since (2026-10-20, 0.1.0-alpha.107, `docs/design-php-versions.md` 3 and 5): a pool per site
+instead of per account, in the pool directory of the site's PHP version, named
+`agensio-<user>-<8 hex of the domain>` with the version in its socket's name and its state under
+`<state_dir>/<user>/php/<domain>`; `server.pools` and `agensio pools --out` are gone. The text below
+is the design as built in 2026-09.
+
 ## Goal
 
 `user = "web1"` on a site makes agensio responsible for the isolation that hosting

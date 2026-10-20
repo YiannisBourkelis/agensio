@@ -32,7 +32,7 @@ void usage(std::ostream& out = std::cout) {
     out << "agensio " AGENSIO_VERSION
                  " - a fast static web server built on Asio\n\n"
                  "usage: agensio [-c config.toml] [-t] [-v]\n"
-                 "       agensio pools [-c config.toml] [--out DIR] [--dry-run]\n"
+                 "       agensio pools [-c config.toml] [--dry-run]\n"
                  "       agensio reload [-c config.toml]\n"
                  "       agensio keys [--markdown]      every configuration key with type, default, meaning, reload or restart,\n"
                  "                                      and who may change it (docs/keys.md is this output)\n"
@@ -106,9 +106,10 @@ void usage(std::ostream& out = std::cout) {
                  "                      needed: --nft | --jail | --unit | --filter NAME print one file, --out FILE writes it\n"
                  "                      (whole, 0644); --defaults renders the packaged copies (ports 80 and 443) instead of\n"
                  "                      this configuration's listeners\n"
-                 "  pools               write the php-fpm pool of every site with `user` into the pool\n"
-                 "                      directory (server.pools or the distro's); exit 3 when files changed\n"
-                 "                      (reload php-fpm), 0 when up to date; --dry-run only reports\n";
+                 "  pools               write the php-fpm pool of every site with `user` into the pool directory\n"
+                 "                      of its PHP version, remove the ones no site has there, test each changed\n"
+                 "                      directory with its php-fpm (as root); exit 3 when files changed (reload\n"
+                 "                      the versions it names), 0 when up to date; --dry-run only reports\n";
 }
 
 // The value of the flag at argv[j], into `into` (the alpha.95 and alpha.96 reports). None when the flag is
@@ -175,7 +176,6 @@ int main(int argc, char** argv) {
     bool pools = false;
     bool reload = false;
     bool dry_run = false;
-    std::filesystem::path pools_out;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "-c" || a == "--config") {
@@ -1172,11 +1172,6 @@ int main(int argc, char** argv) {
             std::cout << reply.body;
             return reply.status < 300 ? 0 : 1;
         }
-        else if (pools && a == "--out") {  // an empty or missing one is not the distro's directory by default
-            std::string v;
-            if (!flag_value(argc, argv, i, v, "pools", true)) return 2;
-            pools_out = v;
-        }
         else if (pools && a == "--dry-run") dry_run = true;
         else if (a == "-v" || a == "--version") {
             std::cout << "agensio " AGENSIO_VERSION "\n";
@@ -1246,17 +1241,19 @@ int main(int argc, char** argv) {
 #endif
     }
     if (pools) {
-        if (pools_out.empty()) {
-            std::string version;
-            for (const auto& s : cfg.sites)
-                if (s.pool.generated && !s.pool.version.empty()) version = s.pool.version;
-            pools_out = agensio::pools_dir(cfg, version);
-            if (pools_out.empty()) {
-                std::cerr << "error: no php-fpm pool directory found; set server.pools or pass --out DIR\n";
-                return 1;
-            }
+        // Each pool into its PHP version's directory (docs/design-php-versions.md 5); php-fpm's own test
+        // of each directory that changed, which needs root, before the reload this prints.
+        const auto runtimes = agensio::php::discover(cfg, agensio::php::system_fs());
+        agensio::PoolTest test;
+#ifndef _WIN32
+        if (!dry_run && ::geteuid() == 0) {
+            const agensio::php::Exec exec = agensio::php::system_exec();
+            test = [exec](const agensio::php::Runtime& r) { return agensio::test_runtime(r, exec); };
+        } else if (!dry_run) {
+            std::cout << "note: not root, so php-fpm's configuration test is not run; run agensio pools as root before reloading php-fpm\n";
         }
-        const int rc = agensio::write_pools(cfg, pools_out, dry_run, std::cout);
+#endif
+        const int rc = agensio::write_pools(cfg, runtimes, dry_run, std::cout, test).rc;
         std::cout.flush();
         return rc;
     }

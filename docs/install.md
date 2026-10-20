@@ -45,11 +45,11 @@ are separate accounts (section 3).
 | server logs | `/var/log/agensio/access.log`, `/var/log/agensio/error.log` | agensio 0750 dir, files 0640 | planned default; today `logs/` next to the configuration file |
 | per-site logs | `/var/log/agensio/sites/<domain>/access.log` or the site's own `log/` (section 3) | agensio:<site group> 0640 | today via `access_log`; ownership set at start |
 | pid file | `/run/agensio.pid` | root 0644 | today |
-| php-fpm pool sockets | `/run/php/agensio-<user>.sock` (Debian, Ubuntu, Alpine), `/run/php-fpm/agensio-<user>.sock` (RHEL, Fedora) | <user>:agensio 0660 | today (`server.pools_run`) |
-| generated php-fpm pool files | `/etc/php/<version>/fpm/pool.d/agensio-<user>.conf` (Debian), `/etc/php-fpm.d/agensio-<user>.conf` (RHEL) | root 0644 | today (`agensio pools`, `server.pools`) |
+| php-fpm pool sockets, one per site | `/run/php/agensio-<user>-<8 hex>-<version>.sock` (Debian, Ubuntu, Alpine), `/run/php-fpm/...` (RHEL, Fedora) | <user>:agensio 0660 | today (`server.pools_run`) |
+| generated php-fpm pool files, one per site | the pool directory of the site's PHP version: `/etc/php/<version>/fpm/pool.d/agensio-<user>-<8 hex>.conf` (Debian), `/etc/opt/remi/php<XY>/php-fpm.d/` (Remi) | root 0644 | today (`agensio pools`; `[php.runtimes]` for a version not found) |
 | persistent state | `/var/lib/agensio/` | agensio 0751 (site users traverse to their own directory, cannot list others) | today (`server.state_dir`) |
 | certificates (automatic) | `/var/lib/agensio/acme/account.key`, `/var/lib/agensio/acme/<domain>/key.pem` (0600), `fullchain.pem` | agensio 0700 dir | today (`server.acme.storage`) |
-| per-user PHP state | `/var/lib/agensio/<user>/tmp/` (uploads are created here and renamed into the site, so it carries the server's group), `/var/lib/agensio/<user>/sessions/` | `tmp/` 2750 <user>:agensio, `sessions/` 0700 <user> | today (`agensio pools`) |
+| per-site PHP state | `/var/lib/agensio/<user>/php/<domain>/tmp/` (uploads are created here and renamed into the site, so it carries the server's group), `.../sessions/` | `tmp/` 2750 <user>:agensio, `sessions/` 0700 <user>, the directories above 0700 <user> | today (`agensio pools`) |
 | record of the site files served | `/var/lib/agensio/.server/served`: one line per site file served, a digest and its path; written after every start and reload, read at a start to decide a conflict between two site files as the last reload did (configuration.md 12c); no backup needed | agensio 0700 dir | today |
 | uploaded archives | `/var/lib/agensio/uploads/` (`agensio ctl upload NAME`, consumed by `site-install --file`) | agensio 0700 | today |
 | temporary spill files | the system temp directory, unlinked immediately (large upstream bodies and request bodies) | agensio | today |
@@ -70,7 +70,7 @@ removes it all.
 | configuration | `$PREFIX/etc/agensio/agensio.toml`, `$PREFIX/etc/agensio/sites.d/` | today (search path) |
 | logs | `$PREFIX/var/log/agensio/` | planned default; today `logs/` next to the configuration file |
 | pid file | `$PREFIX/var/run/agensio.pid` | today (`/usr/local/var/run/agensio.pid`; the `/opt/homebrew` form is planned) |
-| php-fpm pool sockets and files | `$PREFIX/var/run/agensio-<user>.sock`, `$PREFIX/etc/php/<version>/php-fpm.d/` | today (detected from `$PREFIX/etc/php`) |
+| php-fpm pool sockets and files | `$PREFIX/var/run/agensio-<user>-<8 hex>-<version>.sock`, `$PREFIX/etc/php/<version>/php-fpm.d/` | today (detected from `$PREFIX/etc/php`) |
 | state, certificates, per-user PHP state | `$PREFIX/var/lib/agensio/`, `.../acme/`, `.../<user>/` | planned default; today `/var/lib/agensio` unless `server.state_dir` is set |
 | site content | `$PREFIX/var/www/<domain>/` or `~/Sites/<domain>/` for a developer machine | convention |
 | service | `$PREFIX/etc/agensio/homebrew.mxcl.agensio.plist`, `brew services start agensio` | planned |
@@ -117,7 +117,8 @@ needs to write.
 ```
 
 The account's home is its state directory, `/var/lib/agensio/web35` (created by
-`agensio pools`, holding the private `tmp/` and `sessions/`), never the document root:
+`agensio pools`, holding each of its sites' private `tmp/` and `sessions/` under `php/<domain>/`),
+never the document root:
 `useradd --system --no-create-home --home-dir /var/lib/agensio/web35 --shell /usr/sbin/nologin web35`.
 `agensio ctl site-create` prints exactly these commands when the account or the
 directories are missing.
@@ -137,9 +138,9 @@ access_log = "/var/www/example.com/log/access.log"
 tls = "auto"
 ```
 
-What follows from `user = "web35"`: a php-fpm pool running as web35 on
-`/run/php/agensio-web35.sock`, `open_basedir` at the site root plus the user's private
-`tmp/` and `sessions/`, the log file owned `web35:agensio` mode 0640 so the customer can
+What follows from `user = "web35"`: the site's own php-fpm pool, run by PHP 8.3's php-fpm as web35
+on `/run/php/agensio-web35-431ceb26-8.3.sock`, `open_basedir` at the site root plus the site's
+private `tmp/` and `sessions/`, the log file owned `web35:agensio` mode 0640 so the customer can
 read it, and the rules `agensio -t` enforces: the root owned by web35 or root and not
 writable by others, secrets (`.env`, `wp-config.php`, `.git`) not readable by others, the
 `log/` directory owned by agensio and not writable by the site user (so no symlink can be

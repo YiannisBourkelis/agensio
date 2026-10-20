@@ -136,13 +136,15 @@ constexpr MethodSet kFcgiMethods = kStaticMethods | method_bit(Method::post) | m
                                    method_bit(Method::del) | method_bit(Method::patch);
 
 // The php-fpm pool agensio generates for a site with `user` and no `php.socket`
-// (C3b, docs/design-per-site-users.md): `agensio pools` writes it, `-t --explain` shows it.
+// (C3b, docs/design-per-site-users.md): one per site, in the pool directory of its PHP version
+// (docs/design-php-versions.md 5); `agensio pools` writes it, `-t --explain` shows it.
 struct PhpPool {
     bool generated = false;
-    std::string name;       // "agensio-<user>", also the pool file's stem
-    std::string socket;     // <server.pools_run>/agensio-<user>.sock
-    std::string state_dir;  // <server.state_dir>/<user>, holding tmp/ and sessions/
-    std::string version;    // php version for the pool directory ("" = newest installed)
+    std::string name;       // "agensio-<user>-<8 hex of the domain>", also the pool file's stem
+    std::string socket;     // <server.pools_run>/<name>-<version>.sock: two versions' masters may listen for one site
+    std::string state_dir;  // <server.state_dir>/<user>/php/<domain>, holding tmp/ and sessions/
+    std::string version;    // the PHP version whose runtime runs it ("" = none named and none installed)
+    std::string version_from;  // "site" (php.version), "server" ([server] php_version), "newest" (installed), ""
     std::string pm = "ondemand";  // ondemand (nothing resident while idle) | dynamic | static (benchmarks)
     unsigned children = 8;      // pm.max_children
     unsigned max_requests = 500;
@@ -526,12 +528,14 @@ struct Config {
     // The user files of the sites' [[site.auth]] rules, each read and checked once per load.
     std::map<std::string, std::shared_ptr<const AuthUserFile>> auth_files;
     // Hosting (C3b): the group agensio runs as (pool sockets grant it access; "" = the
-    // process's group), where `agensio pools` writes pool files ("" = detected per distro),
-    // where generated pools listen, and the per-user state directories.
+    // process's group), where generated pools listen, and the per-user state directories.
     std::string user;   // start as root, bind, open logs, then become this user (H2 pulled forward)
     std::string group;
-    std::string pools_dir;
     std::string pools_run;  // defaulted by the loader per platform
+    // [server] php_version: the PHP version of every site that names none; without it the newest
+    // installed when the configuration loaded (php_newest), which a newer PHP installed moves.
+    std::string php_version;
+    std::string php_newest;
     std::string state_dir = "/var/lib/agensio";
     bool strict_users = false;  // every site must name a user
     AcmeConfig acme;

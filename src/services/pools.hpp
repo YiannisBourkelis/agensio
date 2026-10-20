@@ -1,7 +1,8 @@
-// Generated php-fpm pools (C3b, docs/design-per-site-users.md): one pool per site user,
-// rendered from the site's `user` and `php = { ... }` keys, written by `agensio pools`
-// into the distro's pool directory for its php-fpm master to pick up on reload. agensio
-// never signals php-fpm; the caller reloads it when write_pools() reports a change.
+// Generated php-fpm pools (C3b, docs/design-per-site-users.md): one pool per site with a user
+// (docs/design-php-versions.md 5), rendered from the site's `user` and `php = { ... }` keys, written
+// by `agensio pools` into the pool directory of the site's PHP version for that version's php-fpm
+// master to pick up on reload. Writing never signals php-fpm; the caller reloads the versions
+// write_pools() reports changed.
 #pragma once
 
 #include <filesystem>
@@ -11,6 +12,7 @@
 #include <vector>
 
 #include "config.hpp"
+#include "services/php_runtimes.hpp"
 
 namespace agensio {
 
@@ -19,22 +21,23 @@ namespace agensio {
 std::string render_pool(const Config& cfg, const SiteConfig& site, const std::string& agensio_group);
 
 struct GeneratedPool {
-    std::string name;  // "agensio-<user>", the file is <name>.conf
+    std::string name;  // "agensio-<user>-<8 hex>", the file is <name>.conf
+    std::string site;  // the site's first name
     std::string user;
     std::string group;
-    std::string state_dir;
+    std::string state_dir;  // <state_dir>/<user>/php/<domain>
+    std::string version;    // whose pool directory holds it
     std::string text;
 };
 
-// One entry per user (the sites of a user were checked to agree at load time).
+// One entry per site with a generated pool.
 std::vector<GeneratedPool> generated_pools(const Config& cfg, const std::string& agensio_group);
 
 // The process's group name, or "" when unknown (Windows).
 std::string current_group_name();
 
-// Where the distro's php-fpm reads pool files: server.pools if set, else detected for
-// the given php version ("" = the newest installed). Empty when nothing was found.
-std::filesystem::path pools_dir(const Config& cfg, const std::string& version);
+// The runtime that runs a site's generated pool, or null: no version, or none installed by that name.
+const php::Runtime* pool_runtime(const std::vector<php::Runtime>& runtimes, const PhpPool& pool);
 
 // ---- ownership rules (C3b-2) ----
 // What the checks look at, behind functions so the unit tests can describe a machine
@@ -123,9 +126,23 @@ inline bool secret_exposed(unsigned mode, unsigned gid, unsigned site_gid) noexc
 // (Laravel's public/storage link) but never list it. A 2750 directory becomes 2710.
 constexpr unsigned secret_dir_mode(unsigned mode) noexcept { return (mode & 02010u) | 0700u; }
 
-// Writes the pool files into `out_dir`, creates each user's state directories, removes
-// generated files whose user is gone, and prints what it did. Returns 0 when nothing
-// changed, 3 when files were written or removed (reload php-fpm), 1 on error.
-int write_pools(const Config& cfg, const std::filesystem::path& out_dir, bool dry_run, std::ostream& out);
+// Makes every runtime's pool directory hold exactly the pools the configuration assigns to it
+// (docs/design-php-versions.md 5): writes each site's file into its version's directory, creates the
+// site's state directories, removes every other file agensio generated there, and prints what it
+// did. With `test` (php-fpm's own configuration test, which needs root), each directory that changed
+// is tested and, when php-fpm refuses it, put back as it was. `rc` is 0 when nothing changed, 3 when
+// files were written or removed, 1 when something could not be done (the rest is still done);
+// `changed` names the versions to reload, those tested clean among them.
+struct PoolsOutcome {
+    int rc = 0;
+    std::vector<std::string> changed;
+};
+// "" when the runtime's configuration tests clean, else php-fpm's own message.
+using PoolTest = std::function<std::string(const php::Runtime&)>;
+PoolsOutcome write_pools(const Config& cfg, const std::vector<php::Runtime>& runtimes, bool dry_run, std::ostream& out, const PoolTest& test = {});
+// php-fpm's test of a runtime's configuration, run as root (`php-fpm -t -y conf`): "" when clean.
+std::string test_runtime(const php::Runtime& r, const php::Exec& exec);
+// How a runtime's master rereads its pools: "systemctl reload php8.4-fpm", brew's restart, OpenRC's.
+std::string reload_command(const php::Runtime& r);
 
 }  // namespace agensio

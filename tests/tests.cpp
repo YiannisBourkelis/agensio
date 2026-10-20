@@ -1650,32 +1650,47 @@ static void test_security_regressions() {
     CHECK(json_files > 0);
 }
 
-// C3b-1: `user` on a site derives a php-fpm pool; `agensio pools` writes it.
+// C3b-1: `user` on a site derives a php-fpm pool; `agensio pools` writes it. A pool per site in the
+// pool directory of its PHP version (docs/design-php-versions.md 5).
 static void test_pools() {
     namespace fs = std::filesystem;
     const fs::path dir = fs::temp_directory_path() / ("agensio-pools-" + std::to_string(::getpid()));
     fs::create_directories(dir / "app" / "public");
     fs::create_directories(dir / "blog");
     fs::create_directories(dir / "pool.d");
+    fs::create_directories(dir / "pool98.d");
     auto write = [&](const char* name, const std::string& text) { std::ofstream(dir / name) << text; };
-    const std::string server = "[server]\nworkers = 2\ngroup = \"www\"\npools_run = \"" + dir.string() +
-                               "/run\"\nstate_dir = \"" + dir.string() + "/state\"\n";
+    const std::string d = dir.string();
+    const std::string server_keys = "[server]\nworkers = 2\ngroup = \"www\"\npools_run = \"" + d + "/run\"\nstate_dir = \"" + d + "/state\"\n";
+    // Two versions of root's own, newer than any a machine has, so "the newest installed" is 9.9 here.
+    const std::string runtimes = "[php.runtimes.\"9.8\"]\nfpm = \"" + d + "/fpm98\"\nconf = \"" + d + "/fpm98.conf\"\npools = \"" + d + "/pool98.d\"\n"
+                                 "[php.runtimes.\"9.9\"]\nfpm = \"" + d + "/fpm99\"\nconf = \"" + d + "/fpm99.conf\"\npools = \"" + d + "/pool.d\"\n";
+    const std::string server = server_keys + runtimes;
     const std::string shop = "[[site]]\nserver_name = [\"shop\"]\nlisten = [\"127.0.0.1:18090\"]\nroot = \"app\"\n"
                              "user = \"web1\"\napp = \"laravel\"\n";
-    write("a.toml", server + shop + "php = { children = 6, memory_limit = \"512M\", extra = { \"date.timezone\" = \"UTC\" } }\n"
-                    "[[site]]\nserver_name = [\"blog\"]\nlisten = [\"127.0.0.1:18090\"]\nroot = \"blog\"\n"
-                    "user = \"web2\"\ngroup = \"client2\"\napp = \"wordpress\"\nphp = { pm = \"dynamic\", keep_conn = false, max_connections = 5 }\n");
+    auto blog = [](const std::string& php) {
+        return "[[site]]\nserver_name = [\"blog\"]\nlisten = [\"127.0.0.1:18090\"]\nroot = \"blog\"\n"
+               "user = \"web2\"\ngroup = \"client2\"\napp = \"wordpress\"\nphp = { pm = \"dynamic\", keep_conn = false, max_connections = 5" + php + " }\n";
+    };
+    const std::string shop_php = "php = { children = 6, memory_limit = \"512M\", extra = { \"date.timezone\" = \"UTC\" } }\n";
+    write("a.toml", server + shop + shop_php + blog(", version = \"9.8\""));
     Config cfg = load_config(dir / "a.toml");
     const SiteConfig& a = cfg.sites[0];
     const SiteConfig& b = cfg.sites[1];
     // Derived socket, connections sized to children / workers, project root in open_basedir; no
     // keep-alive to an ondemand pool (the default pm): php-fpm forks a child per event on its socket
-    // and a child on a kept connection never takes another (the alpha.66 report).
-    CHECK(a.pool.generated && a.pool.name == "agensio-web1" &&
-          a.php.address.key == "unix:" + dir.string() + "/run/agensio-web1.sock");
+    // and a child on a kept connection never takes another (the alpha.66 report). The pool's name is
+    // the account and 8 hex digits of the domain (FNV-1a), its socket carries the version, so two
+    // versions' masters can listen for one site during a switch; shop names no version and follows the
+    // newest installed, blog names its own.
+    CHECK(a.pool.generated && a.pool.name == "agensio-web1-a847e0a9" && a.pool.version == "9.9" && a.pool.version_from == "newest" &&
+          a.php.address.key == "unix:" + d + "/run/agensio-web1-a847e0a9-9.9.sock");
+    CHECK(b.pool.name == "agensio-web2-60bcabf1" && b.pool.version == "9.8" && b.pool.version_from == "site" &&
+          b.php.address.key == "unix:" + d + "/run/agensio-web2-60bcabf1-9.8.sock");
     CHECK(!a.php.options.keep_conn && a.php.options.max_connections == 3);
-    CHECK(a.pool.open_basedir.size() == 3 && a.pool.open_basedir[0] == fs::canonical(dir / "app").string());
-    CHECK(a.pool.state_dir == dir.string() + "/state/web1");
+    CHECK(a.pool.open_basedir.size() == 3 && a.pool.open_basedir[0] == fs::canonical(dir / "app").string() &&
+          a.pool.open_basedir[1] == d + "/state/web1/php/shop/tmp");
+    CHECK(a.pool.state_dir == d + "/state/web1/php/shop");
     // Hand-written FastCGI options win over the pool's defaults.
     CHECK(!b.php.options.keep_conn && b.php.options.max_connections == 5 && b.group == "client2");
     // A static or dynamic pool keeps keep-alive; keep_conn set by hand on an ondemand pool is a
@@ -1686,7 +1701,8 @@ static void test_pools() {
                    "\"\napp = \"php\"\nphp = { " + php + " }\n";
         };
         // Two workers: a pool of one child gets no keep-alive (each worker holds a connection at least),
-        // and keep_conn set by hand where max_connections x workers exceeds the children is a warning.
+        // and keep_conn set by hand where max_connections x workers exceeds the children is a warning,
+        // once per pool: two sites of one account have a pool each.
         write("k.toml", server + php_site("d.test", "web4", "pm = \"dynamic\"") + php_site("k.test", "web5", "keep_conn = true") +
                             php_site("k2.test", "web5", "keep_conn = true") + php_site("s.test", "web6", "pm = \"static\", keep_conn = true") +
                             php_site("l.test", "web7", "pm = \"static\", children = 1") +
@@ -1698,7 +1714,7 @@ static void test_pools() {
         auto exceeds = [&](const char* site) {
             return std::any_of(notes.begin(), notes.end(), [&](const AccessNotice& n) { return n.code == "php_keep_conn_exceeds_children" && n.site == site; });
         };
-        CHECK(k.sites[0].php.options.keep_conn && k.sites[1].php.options.keep_conn && kept == 1);
+        CHECK(k.sites[0].php.options.keep_conn && k.sites[1].php.options.keep_conn && kept == 2);
         CHECK(!k.sites[4].php.options.keep_conn && k.sites[4].php.options.max_connections == 1 && !exceeds("l.test") && !exceeds("s.test") &&
               !exceeds("d.test"));
         CHECK(exceeds("h.test") && exceeds("m.test") &&
@@ -1708,7 +1724,9 @@ static void test_pools() {
         }));
     }
     const std::string ini = render_pool(cfg, a, "www");
-    for (const char* line : {"[agensio-web1]", "user = web1", "group = web1", "listen.group = www",
+    CHECK(ini.find("php_admin_value[session.save_path] = " + d + "/state/web1/php/shop/sessions\n") != std::string::npos &&
+          ini.find("listen = " + d + "/run/agensio-web1-a847e0a9-9.9.sock\n") != std::string::npos);
+    for (const char* line : {"[agensio-web1-a847e0a9]", "user = web1", "group = web1", "listen.group = www",
                              "listen.mode = 0660", "pm = ondemand", "pm.process_idle_timeout = 60s", "pm.max_children = 6", "clear_env = yes",
                              "php_admin_value[memory_limit] = 512M", "php_admin_value[date.timezone] = UTC",
                              "php_admin_value[upload_max_filesize] = 1M"})
@@ -1716,6 +1734,11 @@ static void test_pools() {
     CHECK(ini.find("php_admin_value[open_basedir] = " + a.pool.open_basedir[0] + ":") != std::string::npos);
     CHECK(render_pool(cfg, b, "www").find("pm.start_servers = 4\n") != std::string::npos);
     CHECK(generated_pools(cfg, "www").size() == 2);
+    // site_show: the version and where it comes from (the site, the server's default, the newest installed).
+    {
+        const json::Value sv = control::site(cfg, a, std::time(nullptr), nullptr);
+        CHECK(sv["php"].get("version") == "9.9" && sv["php"].get("version_from") == "newest" && sv["php"].get("pool") == "agensio-web1-a847e0a9");
+    }
     // health names the dynamic pool (what it keeps resident) and not the ondemand one.
     {
         using control::Finding;
@@ -1729,23 +1752,72 @@ static void test_pools() {
         CHECK(control::pool_residency("agensio-no-such-pool").processes == 0);
     }
 
-    // Writing: files appear, a rerun changes nothing, a dropped user's file is removed,
-    // a foreign file with our name is refused.
+    // Writing: each pool in its version's directory, a rerun changes nothing, a dropped site's file is
+    // removed, a foreign file with our name is refused. The runtimes are root's two only (none of the
+    // machine's).
+    php::Fs nothing;
+    nothing.is_file = nothing.is_dir = [](const std::string&) { return false; };
+    nothing.list = [](const std::string&) { return std::vector<std::string>{}; };
+    const auto rts = php::discover(cfg, nothing);
+    CHECK(rts.size() == 2);
+    const fs::path shop_pool = dir / "pool.d" / "agensio-web1-a847e0a9.conf", blog98 = dir / "pool98.d" / "agensio-web2-60bcabf1.conf",
+                   blog99 = dir / "pool.d" / "agensio-web2-60bcabf1.conf";
+    const std::vector<std::string> both{"9.8", "9.9"};
     std::ostringstream log;
-    CHECK(write_pools(cfg, dir / "pool.d", true, log) == 3 && !fs::exists(dir / "pool.d" / "agensio-web1.conf"));
-    CHECK(write_pools(cfg, dir / "pool.d", false, log) == 3);
-    CHECK(fs::is_regular_file(dir / "pool.d" / "agensio-web2.conf") && fs::is_directory(dir / "state" / "web2" / "sessions"));
-    CHECK(write_pools(cfg, dir / "pool.d", false, log) == 0);
+    PoolsOutcome w = write_pools(cfg, rts, true, log);
+    CHECK(w.rc == 3 && w.changed == both && !fs::exists(shop_pool));
+    w = write_pools(cfg, rts, false, log);
+    CHECK(w.rc == 3 && w.changed == both && fs::is_regular_file(shop_pool) && fs::is_regular_file(blog98) && !fs::exists(blog99));
+    CHECK(fs::is_directory(dir / "state" / "web2" / "php" / "blog" / "sessions") && fs::is_directory(dir / "state" / "web1" / "php" / "shop" / "tmp"));
+    CHECK(write_pools(cfg, rts, false, log).rc == 0);
+    // A site moving to another version: its pool leaves 9.8's directory for 9.9's, and both change.
+    write("moved.toml", server + shop + shop_php + blog(", version = \"9.9\""));
+    const Config moved = load_config(dir / "moved.toml");
+    std::ostringstream mv;
+    w = write_pools(moved, rts, false, mv);
+    CHECK(w.rc == 3 && w.changed == both && !fs::exists(blog98) && fs::is_regular_file(blog99));
+    // php-fpm's own test refuses 9.9's directory: what changed there is put back as it was and 9.9 is
+    // not to be reloaded; 9.8's change stands.
+    {
+        std::ostringstream tl;
+        std::vector<std::string> tested;
+        w = write_pools(cfg, rts, false, tl, [&](const php::Runtime& r) {
+            tested.push_back(r.version);
+            return r.version == "9.9" ? std::string("ERROR: [pool agensio-web2-60bcabf1] cannot get uid for user 'web2'") : std::string();
+        });
+        CHECK(w.rc == 1 && w.changed == std::vector<std::string>{"9.8"} && tested == both && fs::is_regular_file(blog98) && fs::is_regular_file(blog99));
+        CHECK(tl.str().find("cannot get uid for user 'web2'") != std::string::npos && tl.str().find("put back") != std::string::npos);
+        w = write_pools(cfg, rts, false, tl);
+        CHECK(w.rc == 3 && w.changed == std::vector<std::string>{"9.9"} && !fs::exists(blog99));
+    }
     // A pool file of a loose mode (the alpha.94 report: written under root's umask 0002) is set to 0644
     // even when its text is current, which needs no php-fpm reload; --dry-run says it would and leaves
     // it (the alpha.95 report: it said "fixing the mode of" and the file stayed 0664).
     {
-        const fs::path pool = dir / "pool.d" / "agensio-web2.conf";
+        const fs::path pool = blog98;
         const auto mode = [&] { return static_cast<unsigned>(fs::status(pool).permissions()) & 0777u; };
         fs::permissions(pool, static_cast<fs::perms>(0664));
         std::ostringstream dry, real;
-        CHECK(write_pools(cfg, dir / "pool.d", true, dry) == 0 && dry.str().find("would fix the mode of " + pool.string()) != std::string::npos && mode() == 0664);
-        CHECK(write_pools(cfg, dir / "pool.d", false, real) == 0 && real.str().find("fixed the mode of " + pool.string()) != std::string::npos && mode() == 0644);
+        w = write_pools(cfg, rts, true, dry);
+        CHECK(w.rc == 0 && w.changed.empty() && dry.str().find("would fix the mode of " + pool.string()) != std::string::npos && mode() == 0664);
+        w = write_pools(cfg, rts, false, real);
+        CHECK(w.rc == 0 && w.changed.empty() && real.str().find("fixed the mode of " + pool.string()) != std::string::npos && mode() == 0644);
+    }
+    // health: in step with the files, nothing; with blog moved on paper, its two files are named.
+    {
+        using control::Finding;
+        auto stale = [](const std::vector<Finding>& hf) {
+            const auto it = std::find_if(hf.begin(), hf.end(), [](const Finding& f) { return f.code == "pools_stale"; });
+            return it == hf.end() ? std::string() : it->message;
+        };
+        CHECK(stale(control::health_findings(cfg, cfg, false, std::time(nullptr))).empty());
+        const std::string m = stale(control::health_findings(moved, moved, false, std::time(nullptr)));
+        CHECK(m.find(blog98.string()) != std::string::npos && m.find(blog99.string()) != std::string::npos);
+        // shop follows the newest installed version: a newer PHP installed would move it.
+        const auto hf = control::health_findings(cfg, cfg, false, std::time(nullptr));
+        CHECK(std::any_of(hf.begin(), hf.end(), [](const Finding& f) {
+            return f.code == "php_default_unpinned" && f.severity == "info" && f.message.find("9.9") != std::string::npos && f.fix.find("php_version = \"9.9\"") != std::string::npos;
+        }));
     }
     write("b.toml", server + shop + "\n");
     Config one = load_config(dir / "b.toml");
@@ -1755,13 +1827,41 @@ static void test_pools() {
         Config held = one;
         held.held_back.push_back({(dir / "sites.d" / "blog.toml").string(), "unknown key 'refsue'", true});
         std::ostringstream kept;
-        CHECK(write_pools(held, dir / "pool.d", false, kept) != 1 && fs::exists(dir / "pool.d" / "agensio-web2.conf") &&
+        CHECK(write_pools(held, rts, false, kept).rc != 1 && fs::exists(blog98) &&
               kept.str().find("kept every other pool: 1 site file(s) set aside") != std::string::npos);
     }
-    CHECK(write_pools(one, dir / "pool.d", false, log) == 3 && !fs::exists(dir / "pool.d" / "agensio-web2.conf") &&
-          fs::exists(dir / "pool.d" / "agensio-web1.conf"));
-    write("pool.d/agensio-web1.conf", "[agensio-web1]\nuser = someone\n");
-    CHECK(write_pools(one, dir / "pool.d", false, log) == 1);
+    w = write_pools(one, rts, false, log);
+    CHECK(w.rc == 3 && w.changed == std::vector<std::string>{"9.8"} && !fs::exists(blog98) && fs::exists(shop_pool));
+    write("pool.d/agensio-web1-a847e0a9.conf", "[agensio-web1-a847e0a9]\nuser = someone\n");
+    CHECK(write_pools(one, rts, false, log).rc == 1);
+    // The server's default (root's [server] php_version) for every site that names none.
+    write("v.toml", server_keys + "php_version = \"9.8\"\n" + runtimes + shop);
+    const Config pinned = load_config(dir / "v.toml");
+    CHECK(pinned.php_version == "9.8" && pinned.sites[0].pool.version == "9.8" && pinned.sites[0].pool.version_from == "server");
+    {
+        const auto hf = control::health_findings(pinned, pinned, false, std::time(nullptr));
+        CHECK(std::none_of(hf.begin(), hf.end(), [](const control::Finding& f) { return f.code == "php_default_unpinned"; }));
+    }
+    // A version no runtime has loads (removing a PHP package must not stop the server), and the
+    // writer and health say why its pool is not there.
+    write("m.toml", server + shop + "php = { version = \"7.0\" }\n");
+    const Config missing = load_config(dir / "m.toml");
+    CHECK(missing.sites[0].pool.version == "7.0" && missing.sites[0].php.address.key.ends_with("-7.0.sock"));
+    {
+        std::ostringstream ml;
+        CHECK(write_pools(missing, rts, true, ml).rc == 1 && ml.str().find("PHP 7.0, which is not installed") != std::string::npos);
+        const auto hf = control::health_findings(missing, missing, false, std::time(nullptr));
+        CHECK(std::any_of(hf.begin(), hf.end(), [](const control::Finding& f) {
+            return f.code == "php_version_missing" && f.severity == "error" && f.site == "shop" && f.message.find("7.0") != std::string::npos;
+        }));
+        // A pool that cannot be written does not hide another version's stale file from health.
+        write("pool98.d/agensio-gone-00000000.conf", "; generated by agensio from x for user gone; do not edit, rerun `agensio pools`\n[agensio-gone-00000000]\n");
+        const auto hs = control::health_findings(missing, missing, false, std::time(nullptr));
+        CHECK(std::any_of(hs.begin(), hs.end(), [](const control::Finding& f) {
+            return f.code == "pools_stale" && f.message.find("agensio-gone-00000000.conf") != std::string::npos;
+        }));
+        fs::remove(dir / "pool98.d" / "agensio-gone-00000000.conf");
+    }
 
     // Refusals at load time.
     auto refused = [&](const char* name, const std::string& text, const char* needle) {
@@ -1788,7 +1888,18 @@ static void test_pools() {
     }
     std::string shop2 = shop;  // the same user under another name: one name per address (design section 26)
     shop2.replace(shop2.find("[\"shop\"]"), 8, "[\"shop2\"]");
-    CHECK(refused("differs.toml", server + shop + "php = { children = 6 }\n" + shop2 + "php = { children = 8 }\n", "php.children differs"));
+    // One account's sites have a pool each: their sizes and versions are their own.
+    write("differs.toml", server + shop + "php = { children = 6 }\n" + shop2 + "php = { children = 8, version = \"9.8\" }\n");
+    {
+        const Config two = load_config(dir / "differs.toml");
+        CHECK(two.sites[0].pool.children == 6 && two.sites[1].pool.children == 8 && two.sites[0].pool.version == "9.9" && two.sites[1].pool.version == "9.8" &&
+              two.sites[1].pool.name == "agensio-web1-84269401" && generated_pools(two, "www").size() == 2);
+    }
+    CHECK(refused("badversion.toml", server_keys + "php_version = \"8\"\n" + runtimes, "server.php_version"));
+    CHECK(refused("sitever.toml", server + shop + "php = { version = \"8.4.1\" }\n", "php.version"));
+    CHECK(refused("pools.toml", server_keys + "pools = \"/etc/php/8.4/fpm/pool.d\"\n" + runtimes, "[php.runtimes"));
+    // A unix socket's path holds 107 bytes on Linux: a pools_run that leaves no room is refused.
+    CHECK(refused("long.toml", "[server]\npools_run = \"/" + std::string(80, 'r') + "\"\nstate_dir = \"" + d + "/state\"\n" + runtimes + shop, "107"));
     CHECK(refused("shared.toml", server + "[[site]]\nserver_name = [\"x\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"blog\"\nuser = \"web1\"\napp = \"php\"\nphp = { socket = \"unix:/one.sock\" }\n"
                                      "[[site]]\nserver_name = [\"y\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"blog\"\nuser = \"web2\"\napp = \"php\"\nphp = { socket = \"unix:/one.sock\" }\n", "different users but the same php socket"));
     // An existing pool given by hand under a user is kept as is.
@@ -1807,13 +1918,13 @@ static void test_pools() {
     {
         using control::Finding;
         const auto hf = control::health_findings(rails, rails, false, std::time(nullptr));
-        CHECK(std::none_of(hf.begin(), hf.end(), [](const Finding& f) { return f.code == "php_tmp_missing" || f.code == "pools_stale" || f.code == "pools_dir_unknown"; }));
+        CHECK(std::none_of(hf.begin(), hf.end(), [](const Finding& f) { return f.code == "php_tmp_missing" || f.code == "pools_stale" || f.code == "php_version_missing"; }));
     }
     write("hand.toml", server + "[[site]]\nserver_name = [\"hand\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"blog\"\nuser = \"web1\"\n"
                                 "[[site.location]]\npath = \".php\"\nmatch = \"suffix\"\nhandler = \"fastcgi\"\n");
     Config hand = load_config(dir / "hand.toml");
     const auto fl = std::find_if(hand.sites[0].locations.begin(), hand.sites[0].locations.end(), [](const LocationConfig& l) { return l.kind == HandlerKind::fastcgi; });
-    CHECK(hand.sites[0].pool.generated && fl != hand.sites[0].locations.end() && fl->fastcgi.address.key == "unix:" + dir.string() + "/run/agensio-web1.sock");
+    CHECK(hand.sites[0].pool.generated && fl != hand.sites[0].locations.end() && fl->fastcgi.address.key == "unix:" + d + "/run/agensio-web1-c4ba2f20-9.9.sock");
     CHECK(refused("proxykeys.toml", server + "[[site]]\nserver_name = [\"rails\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"rails\"\nuser = \"ag5\"\napp = \"proxy\"\nupstream = \"http://127.0.0.1:3000\"\nphp = { children = 4 }\n", "need a PHP handler"));
     fs::remove_all(dir);
 }
@@ -2849,7 +2960,7 @@ static void test_hosting_rules() {
     fs::create_directories(dir / "app" / "public");
     fs::create_directories(dir / "blog");
     auto write = [&](const char* name, const std::string& text) { std::ofstream(dir / name) << text; };
-    const std::string server = "[server]\nworkers = 1\ngroup = \"agensio\"\npools_run = \"/run/php\"\nstate_dir = \"/var/lib/agensio\"\n[log]\naccess = \"/var/log/agensio/access.log\"\n";
+    const std::string server = "[server]\nworkers = 1\ngroup = \"agensio\"\npools_run = \"/run/php\"\nstate_dir = \"/var/lib/agensio\"\nphp_version = \"8.4\"\n[log]\naccess = \"/var/log/agensio/access.log\"\n";
     write("h.toml", server +
           "[[site]]\nserver_name = [\"shop\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"app\"\nuser = \"web1\"\napp = \"laravel\"\naccess_log = \"/var/log/agensio/shop.log\"\n"
           "[[site]]\nserver_name = [\"blog\"]\nlisten = [\"127.0.0.1:1\"]\nroot = \"blog\"\nuser = \"web2\"\napp = \"wordpress\"\naccess_log = \"/var/log/agensio/blog.log\"\n"
@@ -2892,7 +3003,7 @@ static void test_hosting_rules() {
     files[blog + "/wp-config.php"] = file(1002, 1002, 0640);
     files[docs] = file(1002, 1002, 0755, true);
     files[docs + "/sites/default/settings.php"] = file(1002, 1002, 0600);
-    files["/run/php/agensio-web1.sock"] = file(1001, 33, 0660);
+    files["/run/php/agensio-web1-a847e0a9-8.4.sock"] = file(1001, 33, 0660);
     files["/run/php"] = file(0, 0, 0755, true);
     files["/var/log/agensio"] = file(33, 33, 0750, true);
     files["/var/log/agensio/shop.log"] = file(33, 1001, 0640);
@@ -2935,11 +3046,11 @@ static void test_hosting_rules() {
         }
         CHECK(preset_secrets("wordpress") == std::vector<std::string>{"/wp-config.php"} && preset_secrets("drupal").size() == 3 && preset_secrets("static").empty());
     }
-    files["/run/php/agensio-web1.sock"] = file(1001, 1001, 0666);
+    files["/run/php/agensio-web1-a847e0a9-8.4.sock"] = file(1001, 1001, 0666);
     CHECK(count_with("expected group agensio") == 1 && count_with("any user could connect") == 1);
-    files["/run/php/agensio-web1.sock"] = file(1002, 33, 0660);
-    CHECK(count_with("socket /run/php/agensio-web1.sock is owned") == 1);
-    files["/run/php/agensio-web1.sock"] = file(1001, 33, 0660);
+    files["/run/php/agensio-web1-a847e0a9-8.4.sock"] = file(1002, 33, 0660);
+    CHECK(count_with("socket /run/php/agensio-web1-a847e0a9-8.4.sock is owned") == 1);
+    files["/run/php/agensio-web1-a847e0a9-8.4.sock"] = file(1001, 33, 0660);
     files["/var/log/agensio/shop.log"] = file(33, 33, 0644);
     CHECK(count_with("access log /var/log/agensio/shop.log is readable") == 1);
     files["/var/log/agensio/shop.log"] = file(33, 1001, 0640);
@@ -4377,7 +4488,8 @@ static void test_control_sites() {
         pooled.user = "shop";
         pooled.php_socket.clear();
         Config pool_cfg = loaded;
-        pool_cfg.pools_dir = "/etc/php-fpm.d";
+        pool_cfg.php_runtimes.push_back({"8.3", "/usr/sbin/php-fpm", "/etc/php-fpm.conf", "/etc/php-fpm.d", "php-fpm", ""});  // RHEL's own
+        pool_cfg.php_version = "8.3";
         const auto steps = next_steps(pooled, pool_cfg);
         CHECK(steps.size() >= 2 && steps[0] == "agensio pools" && steps[1] == "systemctl reload php-fpm");
         for (const auto& st : steps) CHECK(st.find("&&") == std::string::npos);
@@ -4650,11 +4762,15 @@ static void test_control_sites() {
             CHECK(step().find("Redmine is in place: site-task shop.test db_migrate after an upgrade") != std::string::npos);
             fs::remove_all(rr);
         }
+        // The reload of a version's master: its unit, OpenRC's service where systemd has none; the server's
+        // default for "", a note for a version not installed.
         Config php_cfg = loaded;
-        php_cfg.pools_dir = "/etc/php/8.4/fpm/pool.d";
+        php_cfg.php_runtimes.push_back({"8.4", "/usr/sbin/php-fpm8.4", "/etc/php/8.4/fpm/php-fpm.conf", "/etc/php/8.4/fpm/pool.d", "php8.4-fpm", ""});
+        php_cfg.php_runtimes.push_back({"8.3", "/usr/sbin/php-fpm83", "/etc/php83/php-fpm.conf", "/etc/php83/php-fpm.d", "", ""});
+        php_cfg.php_version = "8.4";
         CHECK(php_fpm_reload_command(php_cfg, "") == "systemctl reload php8.4-fpm");
-        php_cfg.pools_dir = "/etc/php-fpm.d";
-        CHECK(php_fpm_reload_command(php_cfg, "") == "systemctl reload php-fpm");
+        CHECK(php_fpm_reload_command(php_cfg, "8.3") == "rc-service php-fpm83 reload");
+        CHECK(php_fpm_reload_command(php_cfg, "7.0").find("PHP 7.0 is not installed") != std::string::npos);
         // A site with a user renders its own access log, in its one block.
         SiteSpec u = ok;
         u.user = "shop";
@@ -5069,16 +5185,17 @@ static void test_install() {
         // php-fpm's reload without process_control_timeout is a health finding.
         {
             fs::create_directories(dir / "fpm" / "pool.d");
-            Config pc;
-            pc.pools_dir = (dir / "fpm" / "pool.d").string();
-            std::string conf;
-            CHECK(!control::php_fpm_hard_reload(pc, conf));  // no php-fpm.conf: nothing to say
+            php::Runtime pr;
+            pr.version = "8.4";
+            pr.conf = (dir / "fpm" / "php-fpm.conf").string();
+            pr.pools = (dir / "fpm" / "pool.d").string();
+            CHECK(!control::php_fpm_hard_reload(pr));  // no php-fpm.conf: nothing to say
             write_file(dir / "fpm" / "php-fpm.conf", "[global]\npid = /run/php/php-fpm.pid\n;process_control_timeout = 10s\n");
-            CHECK(control::php_fpm_hard_reload(pc, conf) && conf == (dir / "fpm" / "php-fpm.conf").string());
+            CHECK(control::php_fpm_hard_reload(pr));
             write_file(dir / "fpm" / "php-fpm.conf", "[global]\nprocess_control_timeout = 0\n");
-            CHECK(control::php_fpm_hard_reload(pc, conf));
+            CHECK(control::php_fpm_hard_reload(pr));
             write_file(dir / "fpm" / "php-fpm.conf", "[global]\n process_control_timeout = 10s ; graceful\n");
-            CHECK(!control::php_fpm_hard_reload(pc, conf));
+            CHECK(!control::php_fpm_hard_reload(pr));
         }
         // site-copy (F9b): one file to another path of the same site, every refusal of the report.
         const fs::path site = dir / "target";
@@ -7952,6 +8069,7 @@ static void test_php_runtimes() {
         wp.server_names = {"wp.test"};
         wp.pool.generated = true;
         wp.pool.name = "agensio-wp";
+        wp.pool.version = "8.4";
         c.sites.push_back(wp);
         inv.pools = {{"agensio-wp"}, {}};
         inv.installable = {"8.3"};

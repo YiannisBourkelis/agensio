@@ -1229,9 +1229,55 @@ cli   = "/opt/php85/bin/php"     # optional, for site tasks
 It also lists the versions the system's repositories can install (Debian and Ubuntu: `apt-cache
 policy`, read-only), and, for one they do not offer, root's way to add the usual repository:
 Ondřej Surý's (packages.sury.org) on Debian, the ondrej/php PPA on Ubuntu. Installing a version is
-root's; agensio never installs packages. The design of the whole feature, per-site versions and
-switching a site's version without downtime included, is `docs/design-php-versions.md`; the
-sections below grow with each step of it.
+root's; agensio never installs packages. The design of the whole feature, switching a site's
+version without downtime included, is `docs/design-php-versions.md`; this section grows with each
+step of it.
+
+**A site's version.** Every site with its own user (section 11) has a php-fpm pool of its own, run
+by the php-fpm of its PHP version, so two sites of one account may run two versions:
+
+```toml
+[server]
+php_version = "8.4"              # every site that names none; without it, the newest installed
+
+[[site]]
+server_name = ["grav.example.com"]
+user = "ag4"
+app = "grav"
+php = { version = "8.5" }        # this site's own
+```
+
+- **Which version**: the site's `php = { version }`, else `[server] php_version`, else the newest
+  installed when the configuration loaded. `site_show` says which and why (`php.version`,
+  `php.version_from`: `site`, `server` or `newest`). A site that follows the newest moves to a
+  newer PHP installed at the next reload, a step better taken on purpose: health's
+  `php_default_unpinned` (info) says so and gives the `php_version` line.
+- **The pool**: named `agensio-<user>-<8 hex digits of the domain>` (short and stable: a unix
+  socket's path holds 107 bytes, a domain may have 253), its file `<name>.conf` in that version's
+  pool directory (`/etc/php/8.5/fpm/pool.d` on Debian), its socket
+  `<pools_run>/agensio-<user>-<8 hex>-<version>.sock`, the version in the name so that two
+  versions' php-fpm can listen for one site while it moves between them. Its `tmp/` and `sessions/`
+  are the site's own (section 11).
+- **`agensio pools`** makes every version's pool directory hold exactly the pools the configuration
+  gives it: it writes each site's file into its version's directory, removes every other file it
+  generated there (a site gone, or moved to another version), and, run as root, tests each
+  directory that changed with that version's own `php-fpm -t` before anything reloads it. A
+  directory php-fpm refuses is put back as it was, with php-fpm's message. It prints the reload of
+  each version it changed (`systemctl reload php8.5-fpm`); the provisioning helper, which runs it
+  after `site_create` and `site_update`, reloads them itself.
+- **A version that is not installed** does not stop the server: the site loads, its pool is not
+  written, its PHP answers 502, and health reports `php_version_missing` (error) with the fix:
+  install the version (`php_versions` gives root the line), or give the site an installed one.
+- **Changing a site's version** (`site_update` with `php_version`, `agensio ctl site-update NAME
+  --php-version 8.5`) writes its pool into the new version's directory, removes it from the old one
+  and reloads both. Until the ordered switch of the design arrives, the site's PHP requests answer
+  502 for the moment between agensio's reload and the new version's php-fpm reload.
+- Health's `php_fpm_hard_reload` is judged per version that runs pools: a version whose
+  `php-fpm.conf` lacks `process_control_timeout` cuts the requests in flight on its sites whenever
+  its pools are written.
+
+`server.pools`, the one pool directory of earlier versions, is gone: each version has its own,
+discovered or named in `[php.runtimes."X.Y"]`.
 
 ## 8. Logging
 
@@ -1357,9 +1403,9 @@ agensio generates. Nothing else is needed:
 [server]
 user = "agensio"             # the account the server serves as; its group reads the sites and the pool sockets
 # group = "agensio"          # default: the user's primary group
-# pools = "/etc/php/8.3/fpm/pool.d"   # where `agensio pools` writes (default: detected)
+# php_version = "8.4"                 # the PHP version of sites that name none (section 7b)
 # pools_run = "/run/php"              # where generated pools listen (default: per distro)
-# state_dir = "/var/lib/agensio"      # per-user tmp and session directories
+# state_dir = "/var/lib/agensio"      # per-site tmp and session directories
 # strict_users = true                 # refuse a site without `user` (one that only redirects needs none)
 
 [[site]]
@@ -1369,24 +1415,26 @@ root = "/var/www/clients/web1/shop"
 user = "web1"
 group = "client1"            # optional, default: the user's primary group
 app = "laravel"
-php = { children = 8 }       # no socket: it is derived, /run/php/agensio-web1.sock
+php = { children = 8 }       # no socket: it is derived, /run/php/agensio-web1-a0711666-8.4.sock
 ```
 
 Then, as root:
 
 ```sh
-agensio pools -c /etc/agensio/agensio.toml   # writes agensio-web1.conf, exit 3 when something changed
-systemctl reload php8.3-fpm
+agensio pools -c /etc/agensio/agensio.toml   # writes agensio-web1-a0711666.conf into 8.4's pool.d, tests it; exit 3 when something changed
+systemctl reload php8.4-fpm                  # the line it prints for each PHP version it changed
 ```
 
-What the pool gets: `user`/`group` of the site, socket `0660 web1:agensio`, `pm` and
-`children`, `pm.max_requests`, a private `tmp/` and `sessions/` under
-`state_dir/web1` (`tmp/` is `2750 web1:<server group>`, `sessions/` `0700 web1:web1`, see
-below), `open_basedir` at the project directory
-plus those two (`upload_tmp_dir` and `sys_temp_dir` at `<state_dir>/<user>/tmp`,
-`session.save_path` at `<state_dir>/<user>/sessions`, both created by `agensio pools` as
-the user and listed in `open_basedir`, so PHP's uploads and temp files land in the user's
-private space and never in `/tmp`. `tmp/` is `2750 <user>:<server group>`, like the
+Each site with a user has its own pool, in the php-fpm of its PHP version (section 7b); its name is
+the user and 8 hex digits of the domain. What the pool gets: `user`/`group` of the site, socket
+`0660 web1:agensio`, `pm` and `children`, `pm.max_requests`, a private `tmp/` and `sessions/` under
+`<state_dir>/web1/php/<domain>` (`tmp/` is `2750 web1:<server group>`, `sessions/` `0700
+web1:web1`, see below; the account's directory `<state_dir>/web1` and its `php/` are `0700
+web1:web1`), `open_basedir` at the project directory plus those two (`upload_tmp_dir` and
+`sys_temp_dir` at `<state_dir>/<user>/php/<domain>/tmp`, `session.save_path` at
+`<state_dir>/<user>/php/<domain>/sessions`, both created by `agensio pools` as the user and listed
+in `open_basedir`, so PHP's uploads and temp files land in the site's private space and never in
+`/tmp`, and one site's PHP does not reach another's sessions within the account. `tmp/` is `2750 <user>:<server group>`, like the
 document root: an uploaded file is created there, so it is born with the server's group,
 and `move_uploaded_file()` renames it into the document root with that group kept, where
 the server can read it; a set-gid document root alone would not do that, since rename
@@ -1420,7 +1468,7 @@ Pool keys in `php = { ... }`, all optional:
 | `memory_limit` | `"256M"` | `memory_limit` |
 | `max_execution_time` | 60 | seconds |
 | `max_input_time` | 60 | seconds, how long a request body may take to arrive |
-| `version` | newest installed | php version whose pool directory `agensio pools` writes to |
+| `version` | `[server] php_version`, else the newest installed | the site's PHP version (section 7b): its pool goes into that version's php-fpm |
 | `open_basedir` | project, tmp, sessions | replaces the default list |
 | `extra` | none | `{ "date.timezone" = "Europe/Athens" }` becomes `php_admin_value[...]` lines |
 
@@ -1449,8 +1497,8 @@ also settable through the control plane (`site-create` / `site-update` with `set
 section 15), within the ceilings `[control] site_limits` sets. `open_basedir` and `extra`
 are not: they change what a site may reach or run, and stay in this file, root's.
 
-Rules: two sites with the same `user` share one pool and must agree on these keys;
-sites with different users may never name the same socket; a site with `user` and an
+Rules: each site has its own pool, so two sites of one account may differ in every key above,
+the version included; sites with different users may never name the same socket; a site with `user` and an
 explicit `php.socket` keeps its own pool and gets no generated file. A site that runs
 no PHP (`app = "proxy"`, `app = "static"`, no `handler = "fastcgi"` location) derives no
 pool from its `user`: the account owns the files and, behind a proxy, runs the

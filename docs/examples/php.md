@@ -35,10 +35,13 @@ max_body_size = "64MB"           # media uploads: 413 above it; also the pool's 
 ```
 
 **What it does.** `user` gives the site a php-fpm pool of its own, which `agensio pools`
-writes: PHP runs as `blog` and listens on `/run/php/agensio-blog.sock` (`0660`, `blog` and the
-server's group, so only agensio connects), starts children on demand (8 at most, none kept while
-the site is quiet) and keeps uploads in progress, temporary files and sessions under
-`/var/lib/agensio/blog/`, with `open_basedir` at the site's directory and those two. The preset
+writes into the php-fpm of the site's PHP version (the newest installed here; [another
+version](#run-one-site-on-another-php-version) says how to choose): PHP runs as `blog` and listens
+on `/run/php/agensio-blog-44cb3f3e-8.4.sock` (`0660`, `blog` and the server's group, so only
+agensio connects), starts children on demand (8 at most, none kept while the site is quiet) and
+keeps uploads in progress, temporary files and sessions under
+`/var/lib/agensio/blog/php/blog.example.com/`, with `open_basedir` at the site's directory and
+those two. The preset
 decides what runs: any `.php` (`wp-login.php`, `wp-admin/`, `wp-cron.php`, plugin endpoints),
 and a path without a file reaches `/index.php` (permalinks). Nothing under
 `wp-content/uploads/` or `wp-includes/` ever runs or is sent as source, in any spelling
@@ -61,8 +64,8 @@ reload, refuses the configuration while it is open to others, naming the file. M
 
 ```sh
 agensio -t --explain -c /etc/agensio/agensio.toml | less      # the pool file and every location the preset adds
-agensio pools -c /etc/agensio/agensio.toml                    # writes agensio-blog.conf; exit 3 when something changed
-systemctl reload php8.4-fpm
+agensio pools -c /etc/agensio/agensio.toml                    # writes agensio-blog-44cb3f3e.conf; exit 3 when something changed
+systemctl reload php8.4-fpm                                   # the reload it prints
 agensio ctl path-check blog.example.com /wp-content/uploads/2026/10/shell.php   # 404: nothing under uploads runs
 agensio ctl path-check blog.example.com /wp-login.php                           # runs the script
 curl -sI https://blog.example.com/wp-config.php.bak | head -1                   # 404
@@ -587,6 +590,72 @@ agensio ctl site-update shop.example.com --set max_body_size=256MB --set memory_
 
 **Reference:** [Hosting: one user per site](../configuration.md#11-hosting-one-user-per-site)
 (the pool keys), [PHP and FastCGI options](../configuration.md#7-php-and-fastcgi-options).
+
+## Run one site on another PHP version
+
+**When:** most sites run the distribution's PHP, and one needs another: Grav or a new
+application on PHP 8.5, an old one held on 8.3 until it is updated.
+
+```toml
+# /etc/agensio/agensio.toml: the main file, root's
+include = ["sites.d/*.toml"]
+
+[server]
+user = "agensio"
+acme = { email = "admin@example.com" }
+php_version = "8.4"              # every site that names no version; pinned, so installing 8.5 moves nothing by itself
+```
+
+```toml
+# /etc/agensio/sites.d/grav.example.com.toml
+[[site]]
+server_name = ["grav.example.com"]
+listen = ["0.0.0.0:443"]
+root = "/var/www/grav.example.com/web"
+app = "grav"
+user = "grav"
+tls = "auto"
+php = { version = "8.5" }        # this site's own
+```
+
+**What it does.** Each site with a user has its own php-fpm pool, written into the pool directory
+of its version and run by that version's php-fpm: this one in `/etc/php/8.5/fpm/pool.d` as
+`agensio-grav-32ab1770.conf`, listening on `/run/php/agensio-grav-32ab1770-8.5.sock`; the other
+sites in 8.4's. One account may run each of its sites on another version, and each site's limits
+are its own. Each version keeps one compiled-code cache (opcache) for all of its pools, so a second
+version costs one more cache, not one per site.
+
+What is easy to get wrong: the version must be installed with the extensions the application needs
+(`apt install php8.5-fpm php8.5-mbstring php8.5-xml php8.5-gd php8.5-curl php8.5-zip` on Debian,
+from Ondřej Surý's repository when the distribution has no 8.5; `php_versions` says what each
+version loads and what the repositories offer). A version that is not installed keeps the site
+loaded but its PHP answers 502, and health reports `php_version_missing`. Without `php_version` in
+`[server]`, the sites that name no version follow the newest installed, so installing 8.5 would
+move all of them at the next reload (health's `php_default_unpinned`). Changing a live site's
+version gives its PHP requests 502 for the moment between agensio's reload and the new version's
+php-fpm reload.
+
+**Check it.**
+
+```sh
+agensio ctl php                                             # the versions installed, their extensions and support dates
+agensio pools -c /etc/agensio/agensio.toml                  # writes each pool into its version's directory, tests it
+systemctl reload php8.5-fpm                                 # the reloads it prints
+agensio ctl site grav.example.com | grep -A4 '"php"'        # version 8.5, version_from site
+```
+
+**On a managed site.** `site-update` with `--php-version` writes the site's pool into the new
+version's php-fpm, removes it from the old one and reloads both, and the answer's `done` names the
+pool and its version:
+
+```sh
+agensio ctl site-update grav.example.com --php-version 8.5 --yes --reason "Grav on PHP 8.5"
+```
+
+**MCP:** `php_versions` for what is installed and installable, then `site_update` with
+`php_version` = `"8.5"`; `site_show` says which version a site runs and why.
+
+**Reference:** [PHP versions](../configuration.md#7b-php-versions).
 
 ## Send PHP's output as it is produced
 

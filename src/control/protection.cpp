@@ -565,16 +565,16 @@ ProtectionInput protection_input(const Config& cfg, const UidLookup& uid_of, std
             // one selecting Drupal's lines); groups joined with "+", fail2ban's and journalctl's
             // "or" (docs/fail2ban-ref/filtersystemd.py, addJournalMatch). Never the identity
             // alone: any process may claim it (alpha.49 report). A site without an account, or
-            // whose account is not on this host, has no trusted field: listed, not read.
-            std::string unit;
-            if (t.app != "drupal") {
-                const std::string reload = php_fpm_reload_command(cfg, "");
-                if (const std::size_t at = reload.find("systemctl reload "); at != std::string::npos) {
-                    unit = reload.substr(at + 17);
-                    unit = unit.substr(0, unit.find(' '));
-                    if (!unit.empty()) unit = "_SYSTEMD_UNIT=" + unit + ".service";
-                }
-            }
+            // whose account is not on this host, has no trusted field: listed, not read. The php-fpm
+            // unit is the one of the site's own PHP version.
+            auto unit_of = [&](const SiteConfig& s) {
+                const std::string reload = php_fpm_reload_command(cfg, s.pool.version);
+                const std::size_t at = reload.find("systemctl reload ");
+                if (at == std::string::npos) return std::string();
+                std::string unit = reload.substr(at + 17);
+                unit = unit.substr(0, unit.find(' '));
+                return unit.empty() ? std::string() : "_SYSTEMD_UNIT=" + unit + ".service";
+            };
             std::vector<std::string> groups;
             for (const auto& s : cfg.sites) {
                 if (s.app != t.app || s.server_names.empty()) continue;
@@ -588,7 +588,7 @@ ProtectionInput protection_input(const Config& cfg, const UidLookup& uid_of, std
                     fj.unidentified.push_back(name + " (the account " + s.user + " does not exist on this host)");
                     continue;
                 }
-                std::string group = t.app == "drupal" ? std::string("SYSLOG_IDENTIFIER=drupal") : unit;
+                std::string group = t.app == "drupal" ? std::string("SYSLOG_IDENTIFIER=drupal") : unit_of(s);
                 group += (group.empty() ? "" : " ") + std::string("_UID=") + std::to_string(*uid);
                 add_unique(groups, group);
                 if (*uid >= 1000) fj.user_journals = true;

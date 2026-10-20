@@ -67,9 +67,9 @@ section of `docs/configuration.md` that explains the key.
 | `trusted_proxies` | list of addresses, ranges or @sets | [] (headers ignored) | Proxies or load balancers in front of agensio whose X-Forwarded-For and X-Forwarded-Proto are believed (a site narrows the list with its own trusted_proxies; the [addresses] sets are accepted, @cdn): the client address in logs and REMOTE_ADDR, and the scheme for PHP (HTTPS, REQUEST_SCHEME), come from them. Several X-Forwarded-For lines are one list read from the end of the last line (the rightmost hop not on this list is the client); an IPv4 client of a [::] listener is recorded as IPv4; zone ids are refused. The fail2ban jails agensio renders never ban them (ignoreip). | reload | file | 10 |
 | `user` | string | "" (stay the starting account) | Start as root, bind the ports and open the logs, then run as this account. Required for hosting with per-site users and for the provisioning helper. | restart | file | 11 |
 | `group` | string | the user's primary group | The group the server runs as; per-site sockets and directories grant it access. | restart | file | 11 |
-| `pools` | path | detected per distro (/etc/php/<v>/fpm/pool.d, /etc/php-fpm.d) | Where agensio pools writes the generated php-fpm pool files. | reload | file | 11 |
-| `pools_run` | path | /run/php (Linux) | Where the generated pools listen (agensio-<user>.sock). | reload | file | 11 |
-| `state_dir` | path | /var/lib/agensio | Per-user PHP state (<user>/tmp, <user>/sessions), the ACME storage, the uploads store, and .server/served: the record of the site files served, which a start ranks conflicts by. | reload | file | 11 |
+| `php_version` | string (major.minor) | the newest installed | The PHP version of every site that names none (php = { version }). Without it such sites follow the newest PHP installed, so installing a newer one moves them at the next reload; health's php_default_unpinned says so. | reload + agensio pools | file | 7b |
+| `pools_run` | path | /run/php (Linux) | Where the generated pools listen (agensio-<user>-<8 hex of the domain>-<version>.sock). | reload | file | 11 |
+| `state_dir` | path | /var/lib/agensio | Per-site PHP state (<user>/php/<domain>/tmp and sessions), the ACME storage, the uploads store, and .server/served: the record of the site files served, which a start ranks conflicts by. | reload | file | 11 |
 | `strict_users` | bool | false | Every site must name a user; a site without one is a configuration error, except one that only redirects. For hosts where isolation is mandatory. | reload | file | 11 |
 | `pid_file` | path | /run/agensio.pid (Linux) | Written at start; agensio reload signals it. "" disables it. | restart | file | 12b |
 ## `[server] acme`
@@ -220,7 +220,7 @@ section of `docs/configuration.md` that explains the key.
 | `memory_limit` | size | 256M | PHP memory_limit of the pool. | reload + php-fpm reload | settings | 7 |
 | `max_execution_time` | seconds | 60 | PHP max_execution_time of the pool. | reload + php-fpm reload | settings | 7 |
 | `max_input_time` | seconds | 60 | PHP max_input_time of the pool (how long an upload may take to arrive). | reload + php-fpm reload | settings | 7 |
-| `version` | string | newest installed | PHP version whose pool directory agensio pools writes to. | reload + php-fpm reload | site-create (php_version) | 7 |
+| `version` | string (major.minor) | [server] php_version, else the newest installed | The site's PHP version: agensio pools writes its pool into that version's pool directory, and its socket carries the version. php_versions lists the versions installed. | reload + agensio pools | site-create, site-update (php_version) | 7b |
 | `open_basedir` | list of paths | project, tmp, sessions | Replaces the pool's open_basedir. Root only: it changes what the site may reach. | reload + php-fpm reload | site file | 7 |
 | `extra` | table | {} | php_admin_value lines. Root only: arbitrary ini keys include code execution. | reload + php-fpm reload | site file | 7 |
 | `read_timeout` | seconds | 60 | Waiting for php-fpm's answer: 504 beyond. | reload | site file | 7 |

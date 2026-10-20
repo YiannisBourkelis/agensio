@@ -103,11 +103,11 @@ json::Value php_versions_json(const Config& cfg, const PhpInventory& inv, std::t
             support.set("security_until", rel->security_until);
         }
         v.set("support", std::move(support));
-        // The pools its directory holds now, and the sites they belong to.
+        // The pools its directory holds now, and the sites that run this version (a pool per site).
         const std::vector<std::string> pools = i < inv.pools.size() ? inv.pools[i] : std::vector<std::string>{};
         json::Value sites = json::Value::array();
         for (const auto& s : cfg.sites)
-            if (s.pool.generated && std::find(pools.begin(), pools.end(), s.pool.name) != pools.end()) sites.push(s.server_names.front());
+            if (s.pool.generated && s.pool.version == r.version) sites.push(s.server_names.front());
         v.set("pools", strings_json(pools)).set("sites", std::move(sites));
         if (!f.error.empty()) v.set("error", f.error);
         runtimes.push(std::move(v));

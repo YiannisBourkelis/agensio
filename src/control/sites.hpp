@@ -212,7 +212,8 @@ std::vector<std::string> next_steps(const SiteSpec& spec, const Config& cfg);
 // it is checked to be a plain path or name, so nothing can add a line to the unit.
 // {"ok", "site", "unit_name", "path", "unit", "run_as_root": [...], "hint"} or {"ok": false, "error"}.
 json::Value service_unit(const SiteConfig& site, const Config& cfg);
-// "systemctl reload php8.4-fpm" for the pool directory in use (Debian), "php-fpm" (RHEL), brew.
+// How a PHP version's master rereads its pools ("systemctl reload php8.4-fpm" on Debian); "" = the
+// server's default version. A version not installed gets the Debian line with a note.
 std::string php_fpm_reload_command(const Config& cfg, const std::string& version);
 
 }  // namespace agensio::control

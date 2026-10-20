@@ -1330,8 +1330,15 @@ json::Value site_trash(const json::Value& req, const Config& cfg) {
     if (!site->user.empty() && !fresh.state_dir.empty()) {
         const std::string state = fresh.state_dir + "/" + site->user;
         struct stat st {};
-        if (!account_shared && ::lstat(state.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) pieces.push_back({"state", state, "state"});
-        else if (const std::string venv = state + "/venvs/" + domain; ::lstat(venv.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) pieces.push_back({"venv", venv, "venv"});
+        if (!account_shared && ::lstat(state.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+            pieces.push_back({"state", state, "state"});
+        } else {
+            // The account serves other sites: the site's own pieces of it, its virtualenv and its PHP
+            // pool's tmp/ and sessions/ (a site created again under the name must not resume its sessions).
+            if (const std::string venv = state + "/venvs/" + domain; ::lstat(venv.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) pieces.push_back({"venv", venv, "venv"});
+            if (site->pool.generated && ::lstat(site->pool.state_dir.c_str(), &st) == 0 && S_ISDIR(st.st_mode))
+                pieces.push_back({"php", site->pool.state_dir, "php"});
+        }
     }
     if (!site->access_log.empty() && under_root(site->access_log, logs_root(fresh))) {
         const fs::path log = site->access_log;
@@ -1385,7 +1392,7 @@ json::Value site_trash(const json::Value& req, const Config& cfg) {
             if (!exdev) break;
             // A directory on another filesystem (the account's state directory, usually): a trash
             // beside it, <base>/.trash/<entry>/<name>, root's alone as well.
-            const std::string base = p.kind == "state" || p.kind == "venv" ? fresh.state_dir : logs_root(fresh);
+            const std::string base = p.kind == "state" || p.kind == "venv" || p.kind == "php" ? fresh.state_dir : logs_root(fresh);
             const std::string side = base + "/.trash";
             std::string w;
             const int sfd = open_private_dir(side, true, w);
@@ -1728,28 +1735,34 @@ void helper_loop(int fd, const Config& cfg) {
                         if (!errors.empty()) {
                             reply.set("ok", false).set("error", "hosting rules: " + errors.front());
                         } else {
-                            std::string version;
-                            for (const auto& s : fresh.sites)
-                                if (s.pool.generated && !s.pool.version.empty()) version = s.pool.version;
-                            const fs::path dir = pools_dir(fresh, version);
+                            // Every version's directory as the configuration assigns it, each that changed tested by
+                            // its own php-fpm (root's, as here) and reloaded alone; a refused one is put back.
+                            const auto runtimes = php::discover(fresh, php::system_fs());
+                            const php::Exec exec = [&](const std::string& path, const std::vector<std::string>& args, std::string& o) { return run(path.c_str(), args, o); };
                             std::ostringstream log;
-                            const int rc = dir.empty() ? 1 : write_pools(fresh, dir, false, log);
+                            const PoolsOutcome po = write_pools(fresh, runtimes, false, log, [&](const php::Runtime& r) { return test_runtime(r, exec); });
+                            const int rc = po.rc;
                             std::string text = log.str();
-                            if (rc == 3) {
-                                const std::string cmd = control::php_fpm_reload_command(fresh, version);  // "systemctl reload phpX-fpm"
-                                const std::size_t sp = cmd.rfind(' ');
-                                const std::string unit = sp == std::string::npos ? "" : cmd.substr(sp + 1);
-                                if (const char* systemctl = find_binary({"/usr/bin/systemctl", "/bin/systemctl"}); systemctl && !unit.empty()) {
+                            const char* systemctl = find_binary({"/usr/bin/systemctl", "/bin/systemctl"});
+                            for (const auto& v : po.changed) {
+                                const php::Runtime* r = php::find(runtimes, v);
+                                if (!r) continue;
+                                if (systemctl && !r->unit.empty()) {
                                     std::string o;
-                                    const int r = run(systemctl, {"reload", unit}, o);
-                                    text += (r == 0 ? "reloaded " + unit + " (a php-fpm reload cuts PHP requests in flight on every site unless php-fpm.conf sets process_control_timeout; health reports it)"
-                                                    : "could not reload " + unit + " (" + o + ")") + "\n";
+                                    const int code = run(systemctl, {"reload", r->unit}, o);
+                                    text += (code == 0 ? "reloaded " + r->unit + " (a php-fpm reload cuts PHP requests in flight on its pools unless its php-fpm.conf sets "
+                                                         "process_control_timeout; health reports it)"
+                                                       : "could not reload " + r->unit + " (" + o + ")") + "\n";
                                 } else {
-                                    text += "systemctl not available: reload php-fpm by hand\n";
+                                    text += "reload PHP " + v + " by hand: " + reload_command(*r) + "\n";
                                 }
                             }
                             reply.set("ok", rc == 0 || rc == 3).set("output", text);
-                            if (rc == 1) reply.set("error", "agensio pools failed");
+                            if (rc == 1) {  // the first thing that could not be done; the output has the rest
+                                const std::size_t at = text.find("error: ");
+                                reply.set("error", at == std::string::npos ? std::string("agensio pools failed")
+                                                                           : text.substr(at + 7, text.find('\n', at) - at - 7));
+                            }
                         }
                     } catch (const std::exception& e) {
                         reply.set("ok", false).set("error", e.what());
