@@ -1988,6 +1988,14 @@ if [ -n "$PHPFPM" ]; then
     "1 soon 1" \
     "$("$BIN" ctl site-update held.wild.test --no-hsts --yes --reason held --socket $CS > /dev/null 2>&1; grep -c '^hsts = 0' bench/tmp/sites.d/held.wild.test.toml) $(curl -sS --unix-socket $CS http://control/v1/sites/held.wild.test | python3 -c 'import json,sys,time,calendar; u=json.load(sys.stdin)["hsts"].get("until", ""); print("soon" if not u or calendar.timegm(time.strptime(u, "%Y-%m-%d %H:%M UTC")) < time.time() + 3600 else u)') $(sleep 3; "$BIN" ctl site-update held.wild.test --no-hsts --yes --reason held --socket $CS > /dev/null 2>&1; grep -c '^hsts = "none"' bench/tmp/sites.d/held.wild.test.toml)"
   cpost /v1/sites/held.wild.test/delete '{"confirm":true,"reason":"held"}' > /dev/null
+  # The other side of it (the alpha.105 report): at "application" the application's two years went out,
+  # and nothing watches them there, so the change to a lifetime asks the application for / first and
+  # records them; the clearing after it waits the two years, not agensio's week.
+  cpost /v1/sites "{\"domain\":\"app2y.wild.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-wild/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-wild/key.pem\"},\"hsts\":\"application\",\"user\":null,\"app\":\"php\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"root\":\"$ROOT/tests/hstsapp\",\"listen_plain\":\"127.0.0.1:8506\",\"listen_tls\":\"127.0.0.1:8507\",\"confirm\":true,\"reason\":\"app2y\"}" > /dev/null
+  check "hsts: application then a lifetime keeps the application's two years for a later clearing, the application asked when the lifetime replaces it" \
+    "1 1 years" \
+    "$("$BIN" ctl site-update app2y.wild.test --hsts 1w --yes --reason app2y --socket $CS > /dev/null 2>&1; grep -c '^hsts = "1w"' bench/tmp/sites.d/app2y.wild.test.toml) $("$BIN" ctl site-update app2y.wild.test --no-hsts --yes --reason app2y --socket $CS > /dev/null 2>&1; grep -c '^hsts = 0' bench/tmp/sites.d/app2y.wild.test.toml) $(curl -sS --unix-socket $CS http://control/v1/sites/app2y.wild.test | python3 -c 'import json,sys,time,calendar; u=json.load(sys.stdin)["hsts"].get("until", ""); print("years" if u and calendar.timegm(time.strptime(u, "%Y-%m-%d %H:%M UTC")) > time.time() + 365 * 86400 else u or "none")')"
+  cpost /v1/sites/app2y.wild.test/delete '{"confirm":true,"reason":"app2y"}' > /dev/null
   # "none" and "application" on the request path (0.1.0-alpha.104, docs/redirects.md 4.2): none on any
   # answer, the application's own removed, over HTTP/1 and HTTP/2; or the application's as it sent it.
   # A new site has nothing for browsers to forget, so "none" applies at once.

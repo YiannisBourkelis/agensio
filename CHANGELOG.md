@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.0-alpha.106
+
+- **A lifetime after `"application"` keeps the application's lifetime for a later clearing** (the
+  alpha.105 report, item 1). Where the application's field goes out (no `hsts` line, `"application"`)
+  nothing watches it, and the control plane asked the application for `/` only on a change to `"none"` or
+  `"application"`: so `"application"`, then `"1w"`, then `"none"` cleared for agensio's week, while
+  browsers that had received the application's two years before the change hold them for two years (RFC
+  6797 8.1). Any change of `hsts` with nothing of the application's seen since the start now asks it
+  first, so the change that ends such a period counts its field. The integration check fails before
+  (the clearing ended after a week) and passes; `docs/redirects.md` 4.5.
+
 ## 0.1.0-alpha.105 (2026-10-20)
 
 - **A clearing waits for what browsers received** (the alpha.104 report, item 1; RFC 6797 8.1: a browser

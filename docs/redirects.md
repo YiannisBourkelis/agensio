@@ -499,7 +499,10 @@ for that field's `max-age` from then on (RFC 6797 8.1): agensio's own lifetime u
 the application's only for the time its field went out (no line, `"application"`), counted from the
 change that ended it; behind agensio's own lifetime, or removed by `"none"`, the application's never
 reached a browser, and a field browsers ignore (no valid `max-age`) counts for nothing (0.1.0-alpha.105,
-the alpha.104 report: a site at `"2s"` whose application sent two years cleared for two years). When the
+the alpha.104 report: a site at `"2s"` whose application sent two years cleared for two years). Where
+the application's field goes out nothing watches it, so any change of `hsts` with nothing of the
+application's seen since the start asks the application for `/` first (0.1.0-alpha.106, the alpha.105
+report: `"application"` followed by `"1w"` lost the application's two years). When the
 application sends none, the note says that browsers keep the site's old lifetime until its date, with
 nothing renewing it, and that `hsts: 0` ends it sooner. agensio knows the application's field from what
 the request path saw where it replaced or removed it, or, when nothing was seen since the start (after
