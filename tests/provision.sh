@@ -19,10 +19,21 @@ cleanup() { [ -f "$T/agensio.pid" ] && kill "$(cat "$T/agensio.pid")" 2>/dev/nul
 trap cleanup EXIT
 id -u agensio >/dev/null 2>&1 || useradd -r -M -s /usr/sbin/nologin agensio
 mkdir -p $T/sites.d $T/logs $T/run $T/state $T/www $POOLD $T/pool99.d; chown agensio:agensio $T/sites.d $T/logs $T/state; chmod 751 $T/state
-# The version's php-fpm configuration exists before the first pool: the helper tests it before a reload.
-printf '[global]\npid = %s/fpm.pid\nerror_log = %s/fpm.log\ninclude = %s/agensio-*.conf\n' $T $T $POOLD > $T/fpm.conf
+# Each version's php-fpm runs before any site has a pool there, as a distribution's does with its www
+# pool: the helper tests a version's configuration and reloads its master itself (SIGUSR2 through the pid
+# file php-fpm.conf names: these masters have no systemd unit; docs/design-php-versions.md 6.1).
 # A second version standing in for 8.5 (docs/design-php-versions.md 12): the same binary, its own files.
-printf '[global]\npid = %s/fpm99.pid\nerror_log = %s/fpm99.log\ninclude = %s/pool99.d/agensio-*.conf\n' $T $T $T > $T/fpm99.conf
+fpmconf() {  # FILE PIDFILE POOLDIR PLACEHOLDER-SOCKET
+  printf '[global]\npid = %s\nerror_log = %s.log\n[placeholder]\nuser = nobody\ngroup = nogroup\nlisten = %s\npm = ondemand\npm.max_children = 1\ninclude = %s/agensio-*.conf\n' "$2" "$1" "$4" "$3" > "$1"
+}
+fpmconf $T/fpm.conf $T/fpm.pid $POOLD $T/run/placeholder.sock
+fpmconf $T/fpm99.conf $T/fpm99.pid $T/pool99.d $T/run/placeholder99.sock
+fpm_start() {  # CONF PIDFILE: a master, started and listening (its notes in CONF.start)
+  $FPM -y "$1" -D 2> "$1.start"; for _ in $(seq 1 50); do [ -s "$2" ] && break; sleep 0.1; done; sleep 0.2
+}
+fpm_restart() { local p; p=$(cat "$2" 2>/dev/null); [ -n "$p" ] && kill "$p" 2>/dev/null; for _ in $(seq 1 50); do [ -n "$p" ] && kill -0 "$p" 2>/dev/null || break; sleep 0.1; done; rm -f "$2"; fpm_start "$1" "$2"; }
+fpm_start $T/fpm.conf $T/fpm.pid
+fpm_start $T/fpm99.conf $T/fpm99.pid
 cat > $T/agensio.toml <<CFG
 include = ["sites.d/*.toml"]
 [server]
@@ -68,7 +79,7 @@ check "the account is a site account: system, nologin, home in the state directo
 check "the layout is t9:agensio 2750 from the domain directory down" "t9 agensio 2750 | t9 agensio 2750" "$(stat -c '%U %G %a' $T/www/t9.test) | $(stat -c '%U %G %a' $T/www/t9.test/web)"
 check "the pool file was written by the helper with the server's group, one per site, tested by its php-fpm" "yes 1" "$(grep -q '^listen.group = agensio' $(P9) && echo yes) $(ls $POOLD | grep -c '^agensio-t9-[0-9a-f]\{8\}\.conf$')"
 check "next steps no longer name agensio pools" "no" "$(echo "$out" | grep -q '"agensio pools"' && echo yes || echo no)"
-$FPM -y $T/fpm.conf -D; for _ in $(seq 1 50); do [ -S $T/run/agensio-t9-*-$PHPV.sock ] && break; sleep 0.1; done
+check "the helper reloaded $PHPV's running master itself, and t9's socket was up before the answer" "yes" "$([ -S $T/run/agensio-t9-*-$PHPV.sock ] && echo "$out" | grep -q 'up before agensio switched to it' && echo yes)"
 printf '<?php echo "as=", posix_getpwuid(posix_geteuid())["name"];' > $T/www/t9.test/web/index.php; chown t9:agensio $T/www/t9.test/web/index.php; chmod 640 $T/www/t9.test/web/index.php
 check "PHP runs as t9 through the pool the helper wrote" "as=t9" "$(curl -sS -H 'Host: t9.test' http://127.0.0.1:18198/index.php)"
 # The PHP versions through the helper (docs/configuration.md 7b): as root, php-fpm's configuration test
@@ -102,8 +113,7 @@ except Exception as e:
 }
 check "upload: a 100 KB file (in-memory body) lands in PHP's private tmp inside open_basedir, moved into the site; response complete" "200 yes 0 102400 yes yes" "$(upl_report "$(upl $T/small.bin)")"
 check "upload: 1.5 MB is refused up front while the site's limit is the server's 1 MB" "413" "$(upl $T/large.bin | cut -d' ' -f1)"
-out=$("$BIN" ctl site-update t9.test --set max_body_size=4MB --yes --reason uploads --socket $T/run/control.sock)
-kill "$(cat $T/fpm.pid)"; sleep 0.5; rm -f $T/run/agensio-t9-*.sock; $FPM -y $T/fpm.conf -D; for _ in $(seq 1 50); do [ -S $T/run/agensio-t9-*.sock ] && break; sleep 0.1; done; sleep 0.3
+out=$("$BIN" ctl site-update t9.test --set max_body_size=4MB --yes --reason uploads --socket $T/run/control.sock); sleep 0.3  # the helper reloaded the master
 check "upload: after site-update max_body_size the pool carries 4M and a 1.5 MB file (spilled body) arrives intact, response complete" "yes 200 yes 0 1572864 yes yes" "$(grep -q 'upload_max_filesize\] = 4M' $(P9) && echo -n "yes "; upl_report "$(upl $T/large.bin)")"
 check "upload: the same 1.5 MB upload again (php-fpm warm) and a 600 KB one" "200 0 1572864 | 200 0 614400" "$(r=$(upl $T/large.bin); echo -n "${r%% *} "; head -1 $T/upl.out | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["error"], d["size"], end="")' 2>/dev/null; head -c 614400 /dev/urandom > $T/mid.bin; r=$(upl $T/mid.bin); echo -n " | ${r%% *} "; head -1 $T/upl.out | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["error"], d["size"], end="")' 2>/dev/null)"
 check "upload: the moved file is byte-identical to what was sent last" "yes" "$(cmp -s $T/mid.bin $T/www/t9.test/web/moved.bin && echo yes)"
@@ -114,14 +124,13 @@ for pair in "t7 wordpress" "t6 drupal"; do set -- $pair; u=$1; app=$2
   cp $T/www/t9.test/web/upload.php $T/www/$u.test/upload.php; chown $u:agensio $T/www/$u.test/upload.php; chmod 640 $T/www/$u.test/upload.php
   "$BIN" ctl site-update $u.test --set max_body_size=4MB --yes --reason uploads --socket $T/run/control.sock > /dev/null
 done
-kill "$(cat $T/fpm.pid)"; sleep 0.5; rm -f $T/run/agensio-t*.sock; $FPM -y $T/fpm.conf -D; for _ in $(seq 1 50); do [ -S $T/run/agensio-t6-*.sock ] && break; sleep 0.1; done; sleep 0.3
+sleep 0.3
 # Idle cost (2026-09-21, a live host: 8 resident children per idle site): generated pools are
 # ondemand, so a pool that has not seen a request has no child; a static pool is named by
 # health with what it keeps, measured from /proc.
 check "pools: generated pools are ondemand with a 60 s child idle timeout; a pool without a request has no PHP process" "3 3 0" "$(grep -l '^pm = ondemand' $POOLD/agensio-t9-*.conf $POOLD/agensio-t7-*.conf $POOLD/agensio-t6-*.conf | wc -l | tr -d ' ') $(grep -l '^pm.process_idle_timeout = 60s' $POOLD/agensio-t*.conf | wc -l | tr -d ' ') $(pgrep -c -f 'php-fpm: pool agensio-t7' || true)"
 check "health: no resident finding for ondemand pools" "0" "$(curl -sS --unix-socket $T/run/control.sock http://control/v1/health | grep -o '"code":"php_pool_resident"' | wc -l | tr -d ' ')"
-"$BIN" ctl site-update t9.test --set pm=static --yes --reason resident --socket $T/run/control.sock > /dev/null
-kill "$(cat $T/fpm.pid)"; sleep 0.5; rm -f $T/run/agensio-t*.sock; $FPM -y $T/fpm.conf -D; for _ in $(seq 1 50); do [ -S $T/run/agensio-t6-*.sock ] && break; sleep 0.1; done; sleep 0.5
+"$BIN" ctl site-update t9.test --set pm=static --yes --reason resident --socket $T/run/control.sock > /dev/null; sleep 0.8  # reloaded by the helper: the static children start
 check "health: a static pool is named with its resident processes and memory (from /proc), the fix is pm=ondemand; the ondemand pools are not" "yes 2 yes no" "$(curl -sS --unix-socket $T/run/control.sock http://control/v1/health | python3 -c '
 import json,sys,re
 f=[x for x in json.load(sys.stdin)["findings"] if x["code"]=="php_pool_resident"]
@@ -129,13 +138,12 @@ t9=[x for x in f if x.get("site")=="t9.test"]
 print("yes" if len(t9)==1 and "pm = static: all 2 PHP processes" in t9[0]["message"] else t9, end=" ")
 m=re.search(r"now (\d+) processes, (\d+) MB RSS, (\d+) MB private", t9[0]["message"]) if t9 else None
 print(m.group(1) if m else "-", "yes" if m and int(m.group(2))>0 and "--set pm=ondemand" in t9[0]["fix"] else "no", "yes" if any(x.get("site") in ("t7.test","t6.test") for x in f) else "no")')"
-"$BIN" ctl site-update t9.test --set pm=ondemand --yes --reason resident --socket $T/run/control.sock > /dev/null
-kill "$(cat $T/fpm.pid)"; sleep 0.5; rm -f $T/run/agensio-t*.sock; $FPM -y $T/fpm.conf -D; for _ in $(seq 1 50); do [ -S $T/run/agensio-t6-*.sock ] && break; sleep 0.1; done; sleep 0.3
+"$BIN" ctl site-update t9.test --set pm=ondemand --yes --reason resident --socket $T/run/control.sock > /dev/null; sleep 0.3
 # The pool file on disk is what php-fpm runs (2026-09-23 live report: after the ondemand default
 # arrived, two pools still static on disk held 681 MB and health said nothing, because it judged
 # the configuration). t9's file goes back to static behind the configuration's back.
 sed -i 's/^pm = ondemand$/pm = static/' $(P9)
-kill "$(cat $T/fpm.pid)"; sleep 0.5; rm -f $T/run/agensio-t*.sock; $FPM -y $T/fpm.conf -D; for _ in $(seq 1 50); do [ -S $T/run/agensio-t6-*.sock ] && break; sleep 0.1; done; sleep 0.5
+fpm_restart $T/fpm.conf $T/fpm.pid; sleep 0.5
 check "health: a pool still static on disk while the configuration says ondemand is a warning naming both, with its resident processes; the fix is agensio pools" "warn yes 2 yes" "$(curl -sS --unix-socket $T/run/control.sock http://control/v1/health | python3 -c '
 import json,sys,re
 f=[x for x in json.load(sys.stdin)["findings"] if x["code"]=="php_pool_resident" and x.get("site")=="t9.test"]
@@ -143,7 +151,7 @@ m=re.search(r"now (\d+) processes", f[0]["message"]) if f else None
 print(f[0]["severity"] if f else "-", "yes" if f and "pm = static on disk (the configuration says ondemand; agensio pools has not run): all 2 PHP processes" in f[0]["message"] else f, m.group(1) if m else "-", "yes" if f and f[0]["fix"].startswith("run agensio pools, then reload php-fpm") else "no")')"
 "$BIN" pools -c $T/agensio.toml > /dev/null 2>&1 || true
 check "health: after agensio pools the file says ondemand again and the finding is gone" "ondemand 0" "$(grep '^pm = ' $(P9) | cut -d' ' -f3) $(curl -sS --unix-socket $T/run/control.sock http://control/v1/health | grep -o '"code":"php_pool_resident"' | wc -l | tr -d ' ')"
-kill "$(cat $T/fpm.pid)"; sleep 0.5; rm -f $T/run/agensio-t*.sock; $FPM -y $T/fpm.conf -D; for _ in $(seq 1 50); do [ -S $T/run/agensio-t6-*.sock ] && break; sleep 0.1; done; sleep 0.3
+fpm_restart $T/fpm.conf $T/fpm.pid  # agensio pools reloads nothing: it prints the line
 for pair in "t7 wordpress" "t6 drupal"; do set -- $pair; u=$1; app=$2
   # The same upload over HTTP/2 (prior knowledge): DATA frames to the pool's tmp, then served.
   check "upload over HTTP/2 ($app preset, user $u): a 600 KB multipart body reaches PHP and the file is served" "200 0 614400 | 200 614400" "$(r=$(curl -sS --http2-prior-knowledge -o $T/upl.out -w '%{http_code}' -H "Host: $u.test" -F "f=@$T/mid.bin" http://127.0.0.1:18198/upload.php); echo -n "$r "; head -1 $T/upl.out | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["error"], d["size"], end="")' 2>/dev/null; echo -n " | "; curl -sS --http2-prior-knowledge -o /dev/null -w '%{http_code} %{size_download}' -H "Host: $u.test" http://127.0.0.1:18198/moved.bin)"
@@ -175,24 +183,62 @@ out=$("$BIN" ctl site-auth-user-set '*' eve --generate --yes --reason auth --soc
 check "a hand-written site is refused; the audit log names the change and holds no hash" "yes yes 0" \
   "$(echo "$out" | grep -q 'not managed' && echo yes) $(grep -q 'auth-users.*anna: created with a generated password' $T/logs/audit.log && echo yes) $(grep -c '\$y\$' $T/logs/audit.log)"
 
-# A site's PHP version (docs/configuration.md 7b): t9 moves to the second version; its pool leaves
-# the first version's directory for 9.9's, each tested by its php-fpm as root, and 9.9's master
-# serves it on the socket that carries the version.
-out=$("$BIN" ctl site-update t9.test --php-version 9.9 --yes --reason "php version" --socket $T/run/control.sock)
-check "php version: site-update moves t9's pool to 9.9's directory, and done names the pool with its version" "0 1 yes" \
-  "$(ls $POOLD | grep -c '^agensio-t9-') $(ls $T/pool99.d | grep -c '^agensio-t9-[0-9a-f]\{8\}\.conf$') $(echo "$out" | grep -q 'php-fpm pool agensio-t9-[0-9a-f]\{8\} (PHP 9.9)' && echo yes)"
-$FPM -y $T/fpm99.conf -D; for _ in $(seq 1 50); do [ -S $T/run/agensio-t9-*-9.9.sock ] && break; sleep 0.1; done
-check "php version: 9.9's master runs t9's PHP; site_show says 9.9 from the site, php_versions lists t9 under 9.9" "as=t9 9.9 site t9.test" \
-  "$(curl -sS -H 'Host: t9.test' http://127.0.0.1:18198/index.php) $(curl -sS --unix-socket $T/run/control.sock http://control/v1/sites/t9.test | python3 -c 'import json,sys; d=json.load(sys.stdin)["php"]; print(d["version"], d["version_from"])') $(curl -sS --unix-socket $T/run/control.sock http://control/v1/php | python3 -c 'import json,sys; print(" ".join(x for r in json.load(sys.stdin)["runtimes"] if r["version"] == "9.9" for x in r["sites"]))')"
-# A configuration its php-fpm refuses is put back: t7 to 9.9 while 9.9's php-fpm.conf holds an unknown entry.
+# A site's PHP version switched without downtime (docs/configuration.md 7b, docs/design-php-versions.md 6.1).
+# First refused: neither php-fpm.conf sets process_control_timeout, so the reloads would cut requests in
+# flight; nothing changes and the answer gives the line and cut_requests.
+CS=$T/run/control.sock
+printf '<?php echo posix_getppid();' > $T/www/t9.test/web/who.php; chown t9:agensio $T/www/t9.test/web/who.php; chmod 640 $T/www/t9.test/web/who.php
+out=$("$BIN" ctl site-update t9.test --php-version 9.9 --yes --reason "php version" --socket $CS)
+check "php switch: refused while the php-fpm.conf files set no process_control_timeout; nothing changed, cut_requests named" "yes yes 0 $PHPV" \
+  "$(echo "$out" | grep -q 'process_control_timeout = 10s' && echo yes) $(echo "$out" | grep -q 'cut_requests' && echo yes) $(ls $T/pool99.d | grep -c '^agensio-t9-') $(curl -sS --unix-socket $CS http://control/v1/sites/t9.test | python3 -c 'import json,sys; print(json.load(sys.stdin)["php"]["version"])')"
+for c in $T/fpm.conf $T/fpm99.conf; do sed -i 's/^\[global\]$/[global]\nprocess_control_timeout = 10s/' $c; done
+fpm_restart $T/fpm.conf $T/fpm.pid; fpm_restart $T/fpm99.conf $T/fpm99.pid
+# Under load: four clients ask t9's PHP without a pause while it moves to 9.9; every answer is a 200,
+# the last ones from 9.9's master.
+load() {  # until $T/stop.load exists: the status and the master's pid of each answer
+  rm -f $T/stop.load $T/load.*; LOADP=""
+  for i in 1 2 3 4; do
+    ( while [ ! -e $T/stop.load ]; do curl -sS -o $T/load.body.$i -w '%{http_code} ' -H 'Host: t9.test' http://127.0.0.1:18198/who.php; cat $T/load.body.$i; echo; done ) > $T/load.$i 2>&1 &
+    LOADP="$LOADP $!"
+  done
+  sleep 0.3
+}
+unload() { touch $T/stop.load; for p in $LOADP; do wait $p; done; cat $T/load.[1-4] > $T/load.all; }  # the loops only, never the server
+load
+out=$("$BIN" ctl site-update t9.test --php-version 9.9 --yes --reason "php version" --socket $CS)
+sleep 0.3; unload
+check "php switch under load: t9 moves to 9.9; every answer during the switch is a 200 (more than 20 asked), the last from 9.9's master" "yes 0 yes yes" \
+  "$(echo "$out" | grep -q '"ok":true' && echo yes) $(grep -vc '^200 [0-9]*$' $T/load.all) $([ "$(wc -l < $T/load.all)" -gt 20 ] && echo yes) $([ "$(tail -1 $T/load.4 | cut -d' ' -f2)" = "$(cat $T/fpm99.pid)" ] && echo yes)"
+check "php switch: done names t9's pool up on 9.9 before agensio switched, then the old one gone from $PHPV's directory" "yes 0 1 9.9 site t9.test" \
+  "$(echo "$out" | grep -q 'php-fpm pool agensio-t9-[0-9a-f]\{8\} (PHP 9.9) up before agensio switched to it' && echo yes) $(ls $POOLD | grep -c '^agensio-t9-') $(ls $T/pool99.d | grep -c '^agensio-t9-[0-9a-f]\{8\}\.conf$') $(curl -sS --unix-socket $CS http://control/v1/sites/t9.test | python3 -c 'import json,sys; d=json.load(sys.stdin)["php"]; print(d["version"], d["version_from"])') $(curl -sS --unix-socket $CS http://control/v1/php | python3 -c 'import json,sys; print(" ".join(x for r in json.load(sys.stdin)["runtimes"] if r["version"] == "9.9" for x in r["sites"]))')"
+# A configuration its php-fpm refuses: t7 to 9.9 while 9.9's php-fpm.conf holds an unknown entry. The new
+# pool never comes up, the site never leaves its version, and the answer quotes php-fpm.
 cp $T/fpm99.conf $T/fpm99.good; printf 'no_such_entry = 1\n' >> $T/fpm99.conf
-out=$("$BIN" ctl site-update t7.test --php-version 9.9 --yes --reason "refused" --socket $T/run/control.sock)
-check "php version: 9.9's php-fpm refuses its configuration, t7's file there is put back and the answer quotes php-fpm" "0 1 yes" \
-  "$(ls $T/pool99.d | grep -c '^agensio-t7-') $(ls $T/pool99.d | grep -c '^agensio-t9-') $(echo "$out" | grep -q "refuses its configuration.*no_such_entry" && echo yes)"
+out=$("$BIN" ctl site-update t7.test --php-version 9.9 --yes --reason "refused" --socket $CS)
+check "php switch: 9.9's php-fpm refuses its configuration: refused, t7's file put back there, t7 still on $PHPV and answering" "yes 0 1 $PHPV 200" \
+  "$(echo "$out" | grep -q "refuses its configuration.*no_such_entry" && echo yes) $(ls $T/pool99.d | grep -c '^agensio-t7-') $(ls $POOLD | grep -c '^agensio-t7-') $(curl -sS --unix-socket $CS http://control/v1/sites/t7.test | python3 -c 'import json,sys; print(json.load(sys.stdin)["php"]["version"])') $(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: t7.test' http://127.0.0.1:18198/upload.php)"
 cp $T/fpm99.good $T/fpm99.conf
-"$BIN" ctl site-update t7.test --php-version $PHPV --yes --reason "back" --socket $T/run/control.sock > /dev/null
-check "php version: t7 back on $PHPV, its pool in that directory again; agensio pools finds nothing to do" "1 0" \
-  "$(ls $POOLD | grep -c '^agensio-t7-') $(rc=0; "$BIN" pools -c $T/agensio.toml > /dev/null 2>&1 || rc=$?; echo $rc)"
+# Switching back is the same switch in reverse, under load too.
+load
+out=$("$BIN" ctl site-update t9.test --php-version $PHPV --yes --reason "back" --socket $CS)
+sleep 0.3; unload
+check "php switch back under load: every answer a 200, the last from $PHPV's master; agensio pools finds nothing to do" "yes 0 yes 0" \
+  "$(echo "$out" | grep -q '"ok":true' && echo yes) $(grep -vc '^200 [0-9]*$' $T/load.all) $([ "$(tail -1 $T/load.4 | cut -d' ' -f2)" = "$(cat $T/fpm.pid)" ] && echo yes) $(rc=0; "$BIN" pools -c $T/agensio.toml > /dev/null 2>&1 || rc=$?; echo $rc)"
+# At a start (docs/design-php-versions.md 6.2): the pool files no longer match (t9's gone and its master
+# reloaded without it, as after an upgrade that renamed the pools); the start writes it back and reloads
+# php-fpm before the listeners accept, so the first request is answered; a start that finds them in step
+# changes nothing.
+srv_stop() { local p; p=$(cat $T/agensio.pid); kill -TERM $p; for _ in $(seq 1 100); do kill -0 $p 2>/dev/null || break; sleep 0.1; done; }
+srv_start() { "$BIN" -c $T/agensio.toml > $T/server.out 2>&1 & for _ in $(seq 1 100); do [ -S $CS ] && break; sleep 0.1; done; }
+srv_stop
+rm -f $POOLD/agensio-t9-*.conf $T/run/agensio-t9-*-$PHPV.sock; fpm_restart $T/fpm.conf $T/fpm.pid
+check "start: before, t9's pool is gone from php-fpm" "no" "$([ -S $T/run/agensio-t9-*-$PHPV.sock ] && echo yes || echo no)"
+srv_start
+check "start: the pool is written and php-fpm reloaded before the listeners accept; the first request is answered" "200 1 yes" \
+  "$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: t9.test' http://127.0.0.1:18198/who.php) $(ls $POOLD | grep -c '^agensio-t9-') $(grep -q 'php-fpm pools at start: wrote .*agensio-t9-' $T/logs/error.log && echo yes)"
+srv_stop; srv_start
+check "start: a start whose pool files match touches nothing" "1 200" \
+  "$(grep -c 'php-fpm pools at start: up to date' $T/logs/error.log) $(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: t9.test' http://127.0.0.1:18198/who.php)"
 
 # What the helper refuses.
 out=$("$BIN" ctl site-create --domain t8.test --app static --root "$T/www/t9.test/web" --user t8 --https none --listen-plain 127.0.0.1:18199 --yes --reason repro --socket $T/run/control.sock)

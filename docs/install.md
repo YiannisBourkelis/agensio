@@ -246,9 +246,11 @@ rollback.
    Then one file per site in `sites.d/` (section 3), and `sudo agensio -t` until it says
    the configuration is OK. `agensio -t --explain` shows what the presets expanded to.
 
-4. **PHP sites.** `sudo agensio pools` writes the generated pool files and the per-user
-   state directories; it exits 3 when php-fpm has to be reloaded
-   (`systemctl reload php8.3-fpm`).
+4. **PHP sites.** `sudo agensio pools` writes the generated pool files into each PHP version's
+   pool directory, and the per-site state directories. It exits 3 when php-fpm has to be reloaded,
+   printing the line for each version (`systemctl reload php8.4-fpm`). A server started as root
+   with its provisioning helper does this itself at every start and with every change of a site
+   (`docs/configuration.md` 7b).
 
 5. **Service.** systemd unit (shipped by the packages; to be added to the repository with
    the release):
@@ -311,7 +313,8 @@ from a console, PHP through a TCP php-fpm (or php-cgi) socket.
 1. Service user and the four directories (`/etc/agensio`, `/var/log/agensio`,
    `/var/lib/agensio`, `/var/www`) with the owners above.
 2. One site per file in `sites.d/`, following section 3.
-3. `agensio -t`, then `agensio pools` if PHP is involved, then start the service.
+3. `agensio -t`, then start the service: started as root, it writes the PHP sites' pools before it
+   accepts requests (without the helper, `agensio pools` first and the reload it prints).
 4. Watch `/var/log/agensio/error.log` for the certificate lines and the first
    `reloaded` message.
 5. Log rotation and a backup of `/etc/agensio` and `/var/lib/agensio/acme`.

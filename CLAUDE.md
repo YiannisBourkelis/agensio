@@ -451,8 +451,19 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-one, each seeded fr
   version's directory, every other generated file removed, each changed directory tested by its own
   `php-fpm -t` before a reload and put back when refused; `PoolsOutcome::changed` names the versions
   to reload), `server.pools` and `agensio pools --out` gone, health `php_version_missing`,
-  `php_default_unpinned`, `pools_stale` across runtimes, `php_fpm_hard_reload` per runtime. The
-  switch without downtime is step 3.
+  `php_default_unpinned`, `pools_stale` across runtimes, `php_fpm_hard_reload` per runtime. Step 3,
+  the switch without downtime (design 6.1): `Server::reload_async` (worker 0 loads with `prepare_reload`;
+  on a thread the preflight `switch_preflight` over `pool_switches`, then the helper's `pools_apply` phase
+  `up`: written without removing, tested, reloaded, sockets awaited, a version put back with
+  `restore_pools` when one does not come up; `commit_reload` back on worker 0; then phase `full` through
+  `pools_after`). SIGHUP and the control plane's site mutations use it (`ControlHandler::reload_then`,
+  `pool_report` in `done`, `refused_reload` with `problems`, `run_as_root` and the `cut_requests` hint);
+  the plain `reload()` runs `pools_after` behind it. `reloading_` allows one at a time; a SIGHUP
+  meanwhile sets `reload_again_`. A version without a unit or systemd is reloaded with SIGUSR2 through
+  its `php-fpm.conf`'s pid file (`php::pid_file`, exe checked in `/proc`); a stopped master is a note
+  for a new pool, a refusal for a moving site (`php::master_running`, `php::unit_state`). At a start
+  (design 6.2) `Server::run` asks phase `start` (full plus the wait) before accepting. Health
+  `php_fpm_inactive` (`inactive_versions`).
 - **Proxy test beds** (D6): `bench/redmine/` (Rails, `docker compose`, admin / admin,
   agensio on 8075) and `bench/uptime-kuma/` (Node, Socket.IO over WebSockets, agensio on
   8076); `setup.sh` starts each, `tests/redmine.sh` and `tests/uptime-kuma.sh` run the

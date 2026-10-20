@@ -1,6 +1,6 @@
 # Design: PHP versions per site
 
-Status: decided 2026-10-20 (sections 3 and 14 with the owner); being built in the steps of section 13 (steps 1 and 2 built 2026-10-20). The owner's requirements: several PHP versions served
+Status: decided 2026-10-20 (sections 3 and 14 with the owner); being built in the steps of section 13 (steps 1 to 3 built 2026-10-20). The owner's requirements: several PHP versions served
 at once, each site on the version it names, switching a site's version without downtime, the
 control plane and the MCP bridge able to say which versions are installed and installable, and
 an agent able to pick, or ask about, the version an application needs. No migration: only the
@@ -168,11 +168,58 @@ The rest is honest about what it costs:
 - **Sessions**: sessions written by 8.4 are read by 8.5; PHP's session format does not change
   between 8.x versions.
 - **Switching back** is the same switch in reverse.
-- **Changing the server's default** switches the sites that follow it one at a time, each as
-  above.
+- **Changing the server's default** switches the sites that follow it in the same reload: all of
+  their new pools come up, then agensio switches, then the old ones go.
 
 The docs (the PHP section of `docs/configuration.md` and a cookbook recipe) say all of this,
 including the one root line that makes it graceful.
+
+### 6.1 How it is built (2026-10-20)
+
+- **One switch for every reload.** The switch is the reload itself, whatever asked for it: the
+  control plane (`site_update`, `site_create`, enabling or restoring a site, `reload`), or SIGHUP
+  (`agensio reload`, a site file edited by hand). Worker 0 loads and checks the configuration as
+  before. When the helper is there, the rest runs off the workers: the preflight, the new pools up
+  (phase `up`: written, never removing, tested, their versions reloaded, their sockets awaited),
+  then the switch on worker 0, then every version's directory made to match (phase `full`). A
+  reload that brings no new socket skips the first phase. The control plane's answer waits for
+  both phases and says what each did and how long it took.
+- **One reload at a time.** While one is switching, a reload from the control plane is refused
+  ("try again in a moment"), and a SIGHUP is kept and runs after it. If a certificate refresh
+  switched the generation meanwhile, the configuration is loaded again before the switch.
+- **The preflight**, for each site whose pool socket is new:
+  - its version is installed;
+  - the version's service is active, when systemd runs it (otherwise root gets
+    `systemctl enable --now phpX.Y-fpm`);
+  - for a site moving between versions, both versions' `php-fpm.conf` set
+    `process_control_timeout`.
+  
+  A failed preflight refuses the reload and changes nothing. On the control plane a missing
+  `process_control_timeout` is a refusal that `cut_requests: true` overrides; on a SIGHUP it is a
+  warning in the error log, since nobody is there to answer.
+- **A version without a systemd unit** (Alpine, a build root named in `[php.runtimes]`, the test
+  beds) is reloaded by the helper with SIGUSR2 to its master. The pid is read from the pid file its
+  own `php-fpm.conf` names, and the helper checks that process is that version's binary before
+  signalling it.
+- **The wait**: each written pool's socket must accept a connection. php-fpm brings a new pool up
+  only after its running children finish, within `process_control_timeout`, so the wait is at most
+  30 s. A socket that does not come up puts that version's files back, reloads it again, and refuses
+  the reload.
+
+### 6.2 At a start
+
+When agensio starts as root with its helper, the helper reconciles every version's pool directory
+before the listeners accept requests (phase `start`: phase `full`, then the written pools' sockets
+awaited, at most 30 s). Clients connecting meanwhile wait in the listen backlog. A start whose pool
+files already match writes and reloads nothing. This covers the paths no reload sees:
+- an upgrade that changes or renames the pool files;
+- a restart after a site file was edited by hand;
+- a newer PHP installed for the sites that follow the newest;
+- a distribution upgrade that removed a version;
+- a configuration restored from a backup.
+
+The error log names what it did. Without the helper, health's `pools_stale` names what
+`agensio pools` would do.
 
 ## 7. What an application needs
 
@@ -288,7 +335,8 @@ cookbook recipe, as every key does.
    `[server] php_version`, reconciliation across runtimes with php-fpm's test before each reload,
    `server.pools` removed; health's `php_version_missing`, `php_default_unpinned`, `pools_stale`
    and `php_fpm_hard_reload` per runtime.
-3. **The switch** of section 6, through every path, with its docs and recipe.
+3. **The switch** of section 6, through every path, with its docs and recipe (built 2026-10-20,
+   section 6.1; with the start of 6.2, and health's `php_fpm_inactive`).
 4. **Application requirements**: the presets' table, the archive's declaration, the preflight's
    extension checks, the MCP procedure for choosing a version.
 

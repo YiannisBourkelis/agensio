@@ -201,6 +201,11 @@ public:
     // `must_load`: a site file that must load (the control plane's own change): its being set
     // aside refuses the reload; any other file set aside keeps its last good version.
     bool reload(std::string& error, std::string_view must_load = {});
+    // The reload with the PHP pools around it (docs/design-php-versions.md 6.1): loaded and checked here
+    // on worker 0; with the helper, the preflight and the new pools' up phase off the workers, the switch
+    // back on worker 0, then the full phase off them again. One at a time: another is refused while it
+    // runs. `done` runs on worker 0.
+    void reload_async(std::string must_load, bool cut_requests, std::function<void(ReloadOutcome)> done) override;
 
     const std::vector<Listener>& listeners() const noexcept { return gen_->listeners; }
     unsigned worker_count() const noexcept { return static_cast<unsigned>(workers_.size()); }
@@ -229,6 +234,15 @@ private:
     std::vector<std::string> load_certificates(Generation& gen, const Generation* previous);
     control::TlsFacts tls_facts();  // the certificates as served and the ACME failures, for health (T2)
     bool switch_to(const std::shared_ptr<Generation>& gen, std::string& error, std::size_t& bound, std::size_t& closed, bool logs);
+    // A reload's halves: the configuration loaded and its certificates (null with `error` when refused),
+    // and the switch to it with what a reload logs.
+    std::shared_ptr<Generation> prepare_reload(std::string& error, std::string_view must_load);
+    bool commit_reload(const std::shared_ptr<Generation>& gen, std::string& error);
+    // The helper's full phase on a thread (every version's pool directory as the configuration on disk
+    // assigns it), `done` on worker 0; nothing without the helper or generated pools.
+    void pools_after(bool had_pools, std::function<void(json::Value)> done);
+    bool reloading_ = false;     // a reload between its load and its last phase (worker 0 only)
+    bool reload_again_ = false;  // a SIGHUP came meanwhile: it runs once that reload is done
     void prepare_served_record();  // <state_dir>/server, the server's account's (alpha.63 report, finding 1)
     void record_served();          // after a start and a reload
     bool record_warned_ = false;

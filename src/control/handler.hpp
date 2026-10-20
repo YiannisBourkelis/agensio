@@ -21,6 +21,17 @@
 
 namespace agensio {
 
+// What a reload with the PHP pools around it did (docs/design-php-versions.md 6.1).
+struct ReloadOutcome {
+    bool ok = false;
+    std::string error;
+    // A preflight's refusal: {"problems": [{site, message, run_as_root, cut_requests}], "run_as_root": [...],
+    // "cut_requests": true when cut_requests would let it go ahead}; null otherwise.
+    json::Value refusal;
+    // The helper's answers for the phases that ran: {"up": ..., "full": ...}; null without the helper.
+    json::Value pools;
+};
+
 // What the server answers with; the handler never touches server internals itself.
 struct ControlBackend {
     virtual ~ControlBackend() = default;
@@ -48,6 +59,11 @@ struct ControlBackend {
     // set aside (docs/design-site-operations.md 26), so a change is never reported done for a
     // site that is not served. Other files set aside keep their last good version.
     virtual bool reload_now(std::string& error, std::string_view must_load = {}) = 0;
+    // The same with the PHP pools around it (docs/design-php-versions.md 6.1): a site's new pool comes up
+    // before agensio sends it there, the pools no site has any more go after; the phases run off the
+    // workers and `done` runs on worker 0. `cut_requests`: go ahead though a version's reload would cut
+    // the requests in flight (no process_control_timeout).
+    virtual void reload_async(std::string must_load, bool cut_requests, std::function<void(ReloadOutcome)> done) = 0;
     // An automatic certificate: an order started (`message` says so). A site with its own files
     // (step T3): they are loaded now, `message` saying what happened; false when they could not be.
     virtual bool renew_certificate(std::string_view site, std::string& error, std::string& message) = 0;
@@ -124,12 +140,13 @@ private:
     void reply(Stream& s, int status, const json::Value& body);
     bool require(Stream& s, Role needed, std::string_view command);
     bool mutate(Stream& s, WorkerState& ws, std::string_view path, std::function<void()>& done);
-    void site_create(Stream& s, const json::Value& body, std::string_view reason);
+    // True when the reply comes later (the reload switches PHP pools off the workers), after which `done` runs.
+    bool site_create(Stream& s, const json::Value& body, std::string_view reason, std::function<void()> done);
     // True when the reply comes later, after which `finish` runs (an application asked first, 4.5);
     // `probed` when it was asked already.
     bool site_update(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> finish,
                      bool probed = false);
-    void site_toggle(Stream& s, std::string_view name, std::string_view action, std::string_view reason);
+    bool site_toggle(Stream& s, std::string_view name, std::string_view action, std::string_view reason, std::function<void()> done);
     void site_install(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> done);
     void site_copy(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> done);
     void site_task(Stream& s, std::string_view name, const json::Value& body, std::string_view reason, std::function<void()> done);
@@ -158,9 +175,16 @@ private:
     void site_auth_user_change(Stream& s, std::string_view name, const json::Value& body, bool remove, std::string_view reason, std::function<void()> done);
     void upload_receive(Stream& s, std::string_view name, std::function<void()> done);
     json::Value uploads_list();
-    // The php-fpm pool after a site file changed: through the helper when there is one
-    // (reported under `done`), else as next steps. Shared by create and update.
-    void finish_pool(Stream& s, const control::SiteSpec& spec, const Config& cfg, std::string_view what, json::Value& done, std::vector<std::string>& steps);
+    // The reload of a change (docs/design-php-versions.md 6.1): with a caller that can wait, the PHP pools
+    // around it off the workers (backend reload_async); without, the plain reload and the pools applied
+    // after it. `then` runs on worker 0 either way.
+    void reload_then(std::string must_load, bool cut_requests, bool can_wait, std::function<void(ReloadOutcome)> then);
+    // The answer for a refused reload: `message`, the reload's error, and a preflight's problems, root's
+    // lines and whether cut_requests would let it go ahead.
+    static json::Value refused_reload(std::string_view message, const ReloadOutcome& o);
+    // What the PHP pools went through, under `done` (the site's own pool by name and version); a full
+    // phase that failed as a next step; the next steps the helper did taken out.
+    void pool_report(Stream& s, const ReloadOutcome& o, std::string_view site, std::string_view what, json::Value& done, std::vector<std::string>& steps);
     void upload_delete(Stream& s, std::string_view name, std::string_view reason);
     void audit_peer(const Stream& s, std::string_view what, std::string_view result);
     // A site environment's value others could read, reported by the helper under tightened:

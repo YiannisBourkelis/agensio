@@ -9,6 +9,7 @@
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -21,7 +22,9 @@
 #include <iterator>
 #include <ctime>
 #include <algorithm>
+#include <set>
 #include <sstream>
+#include <thread>
 
 #include "control/commands.hpp"
 #include "control/php.hpp"
@@ -214,7 +217,12 @@ std::string validate(const json::Value& req, const Config& cfg) {
         if (!valid_trash_entry(req.get("entry"))) return op + ": entry must be a trash entry's name (<domain>-<date>-<time>)";
         return "";
     }
-    if (op == "pools_apply" || op == "service_restart" || op == "ping" || op == "env_check" || op == "app_check" || op == "trash_list" ||
+    if (op == "pools_apply") {  // the phases of docs/design-php-versions.md 6.1 and 6.2; nothing else is taken
+        const std::string phase(req.get("phase"));
+        if (!phase.empty() && phase != "full" && phase != "up" && phase != "start") return "pools_apply: phase must be full, up or start";
+        return "";
+    }
+    if (op == "service_restart" || op == "ping" || op == "env_check" || op == "app_check" || op == "trash_list" ||
         op == "trash_expire" || op == "host_protection" || op == "php_runtimes")
         return "";
     return "unknown operation '" + op + "'";
@@ -508,6 +516,154 @@ json::Value app_install(const json::Value& req, const Config& cfg, int helper_fd
         for (const auto& sec : req["secrets"].items()) r.secrets.push_back(sec.str());
         return install::execute(r);
     });
+}
+
+// A PHP version's master rereads its pools (docs/design-php-versions.md 6.1): `systemctl reload` of its
+// unit; without one or without systemd (Alpine, a build root named, a container), SIGUSR2 to the master
+// whose pid file its own php-fpm.conf names, once /proc says that process runs this version's binary. A
+// master that is not running is not an error here: its pools are read when it starts (a switch of a live
+// site was refused by the preflight before it came to this).
+enum class Reload { sent, not_running, failed };
+Reload reload_runtime(const php::Runtime& r, std::string& why) {
+    const std::string sc = php::systemctl();
+    const char* systemctl = sc.empty() ? nullptr : sc.c_str();
+    if (!r.unit.empty() && systemctl) {
+        const php::Exec exec = [](const std::string& path, const std::vector<std::string>& args, std::string& o) { return run(path.c_str(), args, o); };
+        const std::string state = php::unit_state(r, exec, systemctl);
+        if (state == "inactive" || state == "failed" || state == "deactivating") {
+            why = r.unit + " is " + state;
+            return Reload::not_running;
+        }
+        std::string o;
+        if (run(systemctl, {"reload", r.unit}, o) == 0) return Reload::sent;
+        why = "could not reload " + r.unit + " (" + o + ")";
+        return Reload::failed;
+    }
+    std::ifstream conf(r.conf);
+    const std::string text((std::istreambuf_iterator<char>(conf)), {});
+    const std::string file = php::pid_file(text);
+    if (file.empty()) {
+        why = r.conf + " names no absolute pid file in [global], so its master cannot be found: " + reload_command(r);
+        return Reload::failed;
+    }
+    std::ifstream pf(file);
+    long pid = 0;
+    if (!(pf >> pid) || pid <= 1 || ::kill(static_cast<pid_t>(pid), 0) != 0) {
+        why = "no master in " + file;
+        return Reload::not_running;
+    }
+    std::error_code ec;
+    const fs::path exe = fs::read_symlink("/proc/" + std::to_string(pid) + "/exe", ec);
+    const fs::path want = fs::weakly_canonical(r.fpm, ec);
+    if (exe.empty() || exe != want) {
+        why = "pid " + std::to_string(pid) + " in " + file + " is not " + r.fpm + "; not signalled";
+        return Reload::failed;
+    }
+    if (::kill(static_cast<pid_t>(pid), SIGUSR2) != 0) {
+        why = "cannot signal php-fpm " + r.version + " (pid " + std::to_string(pid) + "): " + std::strerror(errno);
+        return Reload::failed;
+    }
+    return Reload::sent;
+}
+
+// Whether a pool's unix socket takes a connection: its master listens there.
+bool socket_accepts(const std::string& path) {
+    sockaddr_un a{};
+    if (path.size() >= sizeof a.sun_path) return false;
+    a.sun_family = AF_UNIX;
+    std::memcpy(a.sun_path, path.data(), path.size());
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return false;
+    const bool ok = ::connect(fd, reinterpret_cast<const sockaddr*>(&a), sizeof a) == 0;
+    ::close(fd);
+    return ok;
+}
+
+// pools_apply (docs/design-php-versions.md 5, 6.1, 6.2): the configuration on disk read again, the hosting
+// rules, then every version's pool directory as it assigns them, each changed one tested by its own php-fpm
+// and put back when refused, and the versions that changed reloaded. Phase "full" (the default) writes and
+// removes; "up" writes and removes nothing, then waits for each written pool's socket, and puts a
+// version's files back (and reloads it again) when one does not come up; "start" is "full" plus the wait.
+json::Value pools_apply(const json::Value& req, const Config& cfg) {
+    json::Value reply = json::Value::object();
+    const std::string phase = req.get("phase").empty() ? std::string("full") : std::string(req.get("phase"));
+    const auto t0 = std::chrono::steady_clock::now();
+    try {
+        // A site that breaks a hosting rule is left out (design section 26, C2) and write_pools keeps
+        // every pool while a file is set aside; the server's own account and the main file's sites still
+        // refuse it.
+        Config fresh = load_config(cfg.config_path, nullptr, true);  // as the server would start
+        const auto errors = isolate_hosting(fresh, system_facts(), nullptr);
+        if (!errors.empty()) return reply.set("ok", false).set("error", "hosting rules: " + errors.front());
+        const auto runtimes = php::discover(fresh, php::system_fs());
+        const php::Exec exec = [&](const std::string& path, const std::vector<std::string>& args, std::string& o) { return run(path.c_str(), args, o); };
+        std::ostringstream log;
+        PoolsOutcome po = write_pools(fresh, runtimes, false, log, [&](const php::Runtime& r) { return test_runtime(r, exec); }, phase != "up");
+        bool failed = po.rc == 1;
+        std::string text = log.str();
+        std::vector<std::string> reloaded;
+        for (const auto& v : po.changed) {
+            const php::Runtime* r = php::find(runtimes, v);
+            if (!r) continue;
+            std::string why;
+            switch (reload_runtime(*r, why)) {
+            case Reload::sent:
+                reloaded.push_back(v);
+                text += "reloaded PHP " + v + "'s php-fpm" + (r->unit.empty() ? std::string(" (SIGUSR2 to its master)") : " (" + r->unit + ")") + "\n";
+                break;
+            case Reload::not_running:
+                text += "PHP " + v + "'s php-fpm is not running (" + why + "): its pools are read when it starts" +
+                        (r->unit.empty() ? std::string() : "; as root: systemctl enable --now " + r->unit) + "\n";
+                break;
+            case Reload::failed:
+                text += "error: " + why + "\n";
+                failed = true;
+                break;
+            }
+        }
+        // The wait: a reload brings a new pool up once its master's children finished what they were
+        // doing (process_control_timeout), so at most 30 s for all of them.
+        json::Value waited = json::Value::array();
+        if (phase != "full") {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+            std::set<std::string> down;
+            for (const auto& [v, sock] : po.written) {
+                if (std::find(reloaded.begin(), reloaded.end(), v) == reloaded.end()) continue;
+                const auto w0 = std::chrono::steady_clock::now();
+                bool up = socket_accepts(sock);
+                while (!up && std::chrono::steady_clock::now() < deadline) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+                    up = socket_accepts(sock);
+                }
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - w0).count();
+                waited.push(json::Value::object().set("version", v).set("socket", sock).set("up", up).set("ms", ms));
+                if (!up) {
+                    text += "error: " + sock + " did not come up within 30 s of PHP " + v + "'s reload\n";
+                    down.insert(v);
+                    failed = true;
+                }
+            }
+            if (phase == "up")
+                for (const auto& v : down) {  // the site never leaves its old pool: this version as it was
+                    std::ostringstream back;
+                    restore_pools(po, v, back);
+                    text += back.str();
+                    std::string why;
+                    if (const php::Runtime* r = php::find(runtimes, v)) reload_runtime(*r, why);
+                }
+        }
+        json::Value versions = json::Value::array();
+        for (const auto& v : reloaded) versions.push(v);
+        const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        reply.set("ok", !failed).set("output", text).set("phase", phase).set("reloaded", std::move(versions)).set("waited", std::move(waited)).set("seconds", secs);
+        if (failed) {  // the first thing that could not be done; the output has the rest
+            const std::size_t at = text.find("error: ");
+            reply.set("error", at == std::string::npos ? std::string("agensio pools failed") : text.substr(at + 7, text.find('\n', at) - at - 7));
+        }
+    } catch (const std::exception& e) {
+        reply.set("ok", false).set("error", e.what());
+    }
+    return reply;
 }
 
 // file_copy (F9b): the site's account copies one of the site's files to another path of
@@ -1726,47 +1882,7 @@ void helper_loop(int fd, const Config& cfg) {
                         reply.set("ok", false).set("error", e.what());
                     }
                 } else if (op == "pools_apply") {
-                    try {
-                        // A site that breaks a hosting rule is left out (design section 26, C2) and
-                        // write_pools keeps every pool while a file is set aside; the server's own
-                        // account and the main file's sites still refuse it.
-                        Config fresh = load_config(cfg.config_path, nullptr, true);  // as the server would start
-                        const auto errors = isolate_hosting(fresh, system_facts(), nullptr);
-                        if (!errors.empty()) {
-                            reply.set("ok", false).set("error", "hosting rules: " + errors.front());
-                        } else {
-                            // Every version's directory as the configuration assigns it, each that changed tested by
-                            // its own php-fpm (root's, as here) and reloaded alone; a refused one is put back.
-                            const auto runtimes = php::discover(fresh, php::system_fs());
-                            const php::Exec exec = [&](const std::string& path, const std::vector<std::string>& args, std::string& o) { return run(path.c_str(), args, o); };
-                            std::ostringstream log;
-                            const PoolsOutcome po = write_pools(fresh, runtimes, false, log, [&](const php::Runtime& r) { return test_runtime(r, exec); });
-                            const int rc = po.rc;
-                            std::string text = log.str();
-                            const char* systemctl = find_binary({"/usr/bin/systemctl", "/bin/systemctl"});
-                            for (const auto& v : po.changed) {
-                                const php::Runtime* r = php::find(runtimes, v);
-                                if (!r) continue;
-                                if (systemctl && !r->unit.empty()) {
-                                    std::string o;
-                                    const int code = run(systemctl, {"reload", r->unit}, o);
-                                    text += (code == 0 ? "reloaded " + r->unit + " (a php-fpm reload cuts PHP requests in flight on its pools unless its php-fpm.conf sets "
-                                                         "process_control_timeout; health reports it)"
-                                                       : "could not reload " + r->unit + " (" + o + ")") + "\n";
-                                } else {
-                                    text += "reload PHP " + v + " by hand: " + reload_command(*r) + "\n";
-                                }
-                            }
-                            reply.set("ok", rc == 0 || rc == 3).set("output", text);
-                            if (rc == 1) {  // the first thing that could not be done; the output has the rest
-                                const std::size_t at = text.find("error: ");
-                                reply.set("error", at == std::string::npos ? std::string("agensio pools failed")
-                                                                           : text.substr(at + 7, text.find('\n', at) - at - 7));
-                            }
-                        }
-                    } catch (const std::exception& e) {
-                        reply.set("ok", false).set("error", e.what());
-                    }
+                    reply = pools_apply(req, cfg);
                 } else if (op == "app_install") {
                     reply = app_install(req, cfg, fd);
                 } else if (op == "file_copy") {

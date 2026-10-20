@@ -61,6 +61,7 @@ void usage(std::ostream& out = std::cout) {
                  "                      site-create --domain D [--alias A]... [--https auto|none] [--cert F --key F]\n"
                  "                           [--user U|--no-user] [--group G] [--app static|php|laravel|drupal|wordpress|grav|proxy|rails|redmine|django|wagtail|node]\n"
                  "                           [--root DIR] [--upstream URL] [--project NAME] [--entry FILE] [--php-socket S] [--php-children N]\n"
+                 "                           [--php-version V] [--cut-requests]\n"
                  "                           [--no-redirect] [--hsts LIFETIME [--hsts-subdomains]|--no-hsts] [--canonical NAME] [--listen-plain A] [--listen-tls A]\n"
                  "                      site-update NAME (same flags) | site-disable NAME | site-enable NAME |\n"
                  "                      site-delete NAME [--files] | site-restore ENTRY | trash-delete ENTRY | trash | cert-renew NAME |\n"
@@ -366,6 +367,9 @@ int main(int argc, char** argv) {
                              "                    [--canonical NAME | --no-canonical] (the domain or an alias the site's other names redirect to)\n"
                              "                    [--encoded-slashes deny|allow] (allow: a %2F in the path is decoded and looked up, Apache's NoDecode,\n"
                              "                    for an application that encodes a slash inside a path segment; deny, the default, answers 404)\n"
+                             "        --cut-requests (site-create, site-update, reload): a site moving to another PHP version goes ahead\n"
+                             "                    though a version's php-fpm.conf lacks process_control_timeout, so its reload cuts the PHP\n"
+                             "                    requests in flight on that version's sites; without it such a switch is refused with the line\n"
                              "        site-update NAME (same options as site-create); --dry-run on either checks and shows the\n"
                              "                    file without writing, listing every problem at once; it writes the file in this\n"
                              "                    version's form, with or without options, also when the server set the file aside\n"
@@ -547,6 +551,7 @@ int main(int argc, char** argv) {
                 } else if (b == "--user") field("user");
                 else if (b == "--no-user") body.set("no_user", true);
                 else if (b == "--dry-run") body.set("dry_run", true);
+                else if (b == "--cut-requests") body.set("cut_requests", true);
                 else if (b == "--group") field("group");
                 else if (b == "--app") field("app");
                 else if (b == "--root") field("root");

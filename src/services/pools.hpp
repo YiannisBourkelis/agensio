@@ -27,6 +27,7 @@ struct GeneratedPool {
     std::string group;
     std::string state_dir;  // <state_dir>/<user>/php/<domain>
     std::string version;    // whose pool directory holds it
+    std::string socket;     // where it listens
     std::string text;
 };
 
@@ -132,14 +133,54 @@ constexpr unsigned secret_dir_mode(unsigned mode) noexcept { return (mode & 0201
 // did. With `test` (php-fpm's own configuration test, which needs root), each directory that changed
 // is tested and, when php-fpm refuses it, put back as it was. `rc` is 0 when nothing changed, 3 when
 // files were written or removed, 1 when something could not be done (the rest is still done);
-// `changed` names the versions to reload, those tested clean among them.
+// `changed` names the versions to reload, those tested clean among them. `remove_others` false is
+// the switch's up phase (docs/design-php-versions.md 6.1): the pools the configuration gives each
+// version are written and nothing is removed, so the old pool of a site moving to another version
+// keeps serving until agensio has switched.
 struct PoolsOutcome {
     int rc = 0;
     std::vector<std::string> changed;
+    std::vector<std::pair<std::string, std::string>> written;  // version and socket of each pool whose file was written
+    struct Before {
+        std::string version;
+        std::filesystem::path file;
+        std::string text;  // "" when the file did not exist
+    };
+    std::vector<Before> before;  // what each file written or removed held, for restore_pools
 };
 // "" when the runtime's configuration tests clean, else php-fpm's own message.
 using PoolTest = std::function<std::string(const php::Runtime&)>;
-PoolsOutcome write_pools(const Config& cfg, const std::vector<php::Runtime>& runtimes, bool dry_run, std::ostream& out, const PoolTest& test = {});
+PoolsOutcome write_pools(const Config& cfg, const std::vector<php::Runtime>& runtimes, bool dry_run, std::ostream& out, const PoolTest& test = {},
+                         bool remove_others = true);
+// Puts back what `o` changed in one version's directory: the up phase's socket that did not come up.
+void restore_pools(const PoolsOutcome& o, const std::string& version, std::ostream& out);
+
+// The switch around a reload (docs/design-php-versions.md 6, 6.1). A site of `fresh` whose generated
+// pool listens on a socket no pool of `running` has: a new site (`from` ""), or one moving to another
+// version or account (`moving`), whose new pool must come up before agensio sends it there.
+struct PoolSwitch {
+    std::string site, from, to;
+    bool moving = false;
+};
+std::vector<PoolSwitch> pool_switches(const Config& running, const Config& fresh);
+// What the preflight reads, behind functions so the unit tests describe a machine.
+struct PreflightFacts {
+    std::function<std::string(const php::Runtime&)> unit_state;  // systemd's ActiveState of its unit, "" unknown
+    std::function<bool(const php::Runtime&)> hard_reload;         // its php-fpm.conf sets no process_control_timeout
+    std::function<bool(const php::Runtime&)> running;             // its master runs (php::master_running), for a version without a unit
+};
+// Why a switch must not go ahead: the target version not installed; for a site moving between
+// versions also its service or master not running (`run_as_root` the line), or a php-fpm.conf
+// without process_control_timeout, whose reload cuts the requests in flight (`cut_requests`: the
+// caller may go ahead anyway). A new site is asked only for the version: nothing of it serves yet.
+struct PreflightProblem {
+    std::string site, message, run_as_root;
+    bool cut_requests = false;
+};
+std::vector<PreflightProblem> switch_preflight(const std::vector<PoolSwitch>& switches, const std::vector<php::Runtime>& runtimes, const PreflightFacts& facts);
+// The versions that run generated pools while their service is neither active nor unknown (health's php_fpm_inactive).
+std::vector<std::string> inactive_versions(const Config& cfg, const std::vector<php::Runtime>& runtimes,
+                                           const std::function<std::string(const php::Runtime&)>& unit_state);
 // php-fpm's test of a runtime's configuration, run as root (`php-fpm -t -y conf`): "" when clean.
 std::string test_runtime(const php::Runtime& r, const php::Exec& exec);
 // How a runtime's master rereads its pools: "systemctl reload php8.4-fpm", brew's restart, OpenRC's.

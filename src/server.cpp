@@ -1361,6 +1361,12 @@ void Server::start_accept(std::size_t index) {
         });
 }
 
+namespace {
+bool any_generated_pool(const Config& cfg) {
+    return std::any_of(cfg.sites.begin(), cfg.sites.end(), [](const SiteConfig& s) { return s.pool.generated; });
+}
+}  // namespace
+
 void Server::run() {
     fd_limit_ = raise_open_file_limit();
     max_connections_.store(connection_ceiling(gen_->cfg, fd_limit_, static_cast<unsigned>(workers_.size())), std::memory_order_relaxed);
@@ -1391,6 +1397,17 @@ void Server::run() {
     if (cfg_.control.enabled && cfg_.control.provision) provisioner_.start(gen_->cfg, error_log_);
     drop_privileges();  // ports are bound and logs open: nothing else needs root
     record_served();    // as the server's account, which every reload writes it as
+    // At a start (docs/design-php-versions.md 6.2): every version's pool directory made what the
+    // configuration assigns, and the written pools' sockets awaited, before the listeners accept (a
+    // client connecting meanwhile waits in the backlog); a start whose files match changes nothing.
+    // Covers what no reload sees: an upgrade that changed the pool files, an edit before a restart.
+    if (provisioner_.available() && any_generated_pool(gen_->cfg)) {
+        const json::Value r = provisioner_.request(json::Value::object().set("op", "pools_apply").set("phase", "start"));
+        const std::string out(r.get("output"));
+        if (!r["ok"].boolean()) error_log_.error("php-fpm pools at start: " + std::string(r.get("error")) + (out.empty() ? "" : " (" + out + ")"));
+        else if (out.find("pools up to date") != std::string::npos) error_log_.info("php-fpm pools at start: up to date");
+        else error_log_.warn("php-fpm pools at start: " + out);
+    }
     for (auto& w : workers_) w->gen = gen_;
     arm_trash_expiry();
     arm_certificate_watch();
@@ -1431,7 +1448,10 @@ void Server::run() {
     std::function<void(const asio::error_code&, int)> on_hup;
     on_hup = [this, &hup, &on_hup](const asio::error_code& ec, int) {
         if (ec) return;
-        reload();
+        // The ordered switch (docs/design-php-versions.md 6.1); nobody is there to agree to cut requests,
+        // so a version without process_control_timeout is a warning in the error log.
+        if (reloading_) reload_again_ = true;
+        else reload_async({}, true, [](ReloadOutcome) {});
         hup.async_wait(on_hup);
     };
     hup.async_wait(on_hup);
@@ -2017,11 +2037,11 @@ void Server::arm_certificate_watch() {
 #endif
 }
 
-bool Server::reload(std::string& error, std::string_view must_load) {
-    auto refuse = [&](const std::string& why) {
+std::shared_ptr<Generation> Server::prepare_reload(std::string& error, std::string_view must_load) {
+    auto refuse = [&](const std::string& why) -> std::shared_ptr<Generation> {
         error = why;
         error_log_.error("reload refused: " + why);
-        return false;
+        return nullptr;
     };
     Config fresh;
     try {
@@ -2058,16 +2078,24 @@ bool Server::reload(std::string& error, std::string_view must_load) {
         error_log_.error(h.file + " set aside: " + h.error +
                          (h.carried ? " (the version loaded before keeps serving its sites)" : " (its sites are not served)"));
     for (const auto& k : kept_certificates) error_log_.warn(k);
+    return gen;
+}
+
+bool Server::commit_reload(const std::shared_ptr<Generation>& gen, std::string& error) {
     // Restart-only settings stay what they were; say which, when the file changed them
     // (control::restart_needed, the same list validate and health report).
-    if (const auto kept = control::restart_needed(loaded, cfg_); !kept.empty()) {
+    if (const auto kept = control::restart_needed(gen->cfg, cfg_); !kept.empty()) {
         std::string keys;
         for (const auto& k : kept) keys += (keys.empty() ? "" : ", ") + k;
         error_log_.warn("reload: " + keys + " changed on disk and take effect at a restart (systemctl restart agensio); the running values are kept");
     }
     std::size_t bound = 0, closed = 0;
     std::string err;
-    if (!switch_to(gen, err, bound, closed, true)) return refuse(err);
+    if (!switch_to(gen, err, bound, closed, true)) {
+        error = err;
+        error_log_.error("reload refused: " + err);
+        return false;
+    }
     record_served();
     error_log_.warn("reloaded " + cfg_.config_path.string() + ": " + std::to_string(gen->cfg.sites.size()) +
                     " site(s), " + std::to_string(gen->listeners.size()) + " listener(s), " +
@@ -2077,6 +2105,133 @@ bool Server::reload(std::string& error, std::string_view must_load) {
     for (const auto& n : access_notices(gen->cfg))  // the notes at level info (alpha.61 report, finding 2)
         n.severity == "warning" ? error_log_.warn(n.text) : error_log_.info(n.text);
     return true;
+}
+
+bool Server::reload(std::string& error, std::string_view must_load) {
+    if (reloading_) {  // one at a time (docs/design-php-versions.md 6.1)
+        error = "another reload is switching PHP pools; try again in a moment";
+        error_log_.error("reload refused: " + error);
+        return false;
+    }
+    const bool had_pools = any_generated_pool(gen_->cfg);
+    auto gen = prepare_reload(error, must_load);
+    if (!gen || !commit_reload(gen, error)) return false;
+    pools_after(had_pools, nullptr);  // the pools follow, off the workers
+    return true;
+}
+
+void Server::pools_after(bool had_pools, std::function<void(json::Value)> done) {
+    if (!provisioner_.available() || (!had_pools && !any_generated_pool(gen_->cfg))) {
+        if (done) done(json::Value());
+        return;
+    }
+    std::thread([this, done = std::move(done)] {
+        const json::Value r = provisioner_.request(json::Value::object().set("op", "pools_apply").set("phase", "full"));
+        asio::post(workers_[0]->ctx, [this, done, r] {
+            const std::string out(r.get("output"));
+            if (!r["ok"].boolean()) error_log_.error("php-fpm pools: " + std::string(r.get("error")));
+            else if (out.find("pools up to date") == std::string::npos) error_log_.info("php-fpm pools: " + out);
+            if (done) done(r);
+        });
+    }).detach();
+}
+
+void Server::reload_async(std::string must_load, bool cut_requests, std::function<void(ReloadOutcome)> done) {
+    ReloadOutcome first;
+    if (reloading_) {
+        first.error = "another reload is switching PHP pools; try again in a moment";
+        done(first);
+        return;
+    }
+    const bool had_pools = any_generated_pool(gen_->cfg);
+    std::shared_ptr<Generation> gen = prepare_reload(first.error, must_load);
+    if (!gen) {
+        done(first);
+        return;
+    }
+    if (!provisioner_.available() || (!had_pools && !any_generated_pool(gen->cfg))) {
+        first.ok = commit_reload(gen, first.error);
+        done(first);
+        return;
+    }
+    reloading_ = true;
+    const std::vector<PoolSwitch> switches = pool_switches(gen_->cfg, gen->cfg);
+    const std::shared_ptr<const Generation> base = gen_;
+    std::thread([this, gen, base, switches, cut_requests, must_load = std::move(must_load), done = std::move(done)]() mutable {
+        // The preflight (docs/design-php-versions.md 6.1), off the workers: it reads each version's
+        // php-fpm.conf and asks systemd for its service's state. Then the new pools up.
+        json::Value refusal, up;
+        std::vector<std::string> warnings;
+        if (!switches.empty()) {
+            const auto runtimes = php::discover(gen->cfg, php::system_fs());
+            const php::Exec exec = php::system_exec();
+            const std::string systemctl = php::systemctl();
+            PreflightFacts facts;
+            facts.unit_state = [&](const php::Runtime& r) { return php::unit_state(r, exec, systemctl); };
+            facts.hard_reload = [](const php::Runtime& r) { return control::php_fpm_hard_reload(r); };
+            facts.running = [](const php::Runtime& r) { return php::master_running(r); };
+            json::Value problems = json::Value::array(), lines = json::Value::array();
+            bool blocking = false, cuts = false;
+            for (const auto& p : switch_preflight(switches, runtimes, facts)) {
+                if (p.cut_requests && cut_requests) {  // the caller goes ahead knowing it
+                    warnings.push_back(p.message);
+                    continue;
+                }
+                blocking = true;
+                cuts = cuts || p.cut_requests;
+                problems.push(json::Value::object().set("site", p.site).set("message", p.message).set("cut_requests", p.cut_requests)
+                                  .set("run_as_root", p.run_as_root.empty() ? json::Value() : json::Value(p.run_as_root)));
+                if (!p.run_as_root.empty()) lines.push(p.run_as_root);
+            }
+            if (blocking) refusal = json::Value::object().set("problems", std::move(problems)).set("run_as_root", std::move(lines)).set("cut_requests", cuts);
+            else up = provisioner_.request(json::Value::object().set("op", "pools_apply").set("phase", "up"));
+        }
+        asio::post(workers_[0]->ctx, [this, gen, base, refusal, up, warnings, must_load, done]() mutable {
+            ReloadOutcome out;
+            for (const auto& w : warnings) error_log_.warn("php switch: " + w);
+            auto finish = [this](std::function<void(ReloadOutcome)>& d, ReloadOutcome o) {
+                reloading_ = false;
+                d(std::move(o));
+                if (reload_again_) {  // a SIGHUP came while this one switched
+                    reload_again_ = false;
+                    reload_async({}, true, [](ReloadOutcome) {});
+                }
+            };
+            if (!refusal.is_null()) {
+                std::string why;
+                for (const auto& p : refusal["problems"].items()) why += (why.empty() ? "" : "; ") + std::string(p.get("message"));
+                out.error = why;
+                out.refusal = refusal;
+                error_log_.error("reload refused: " + why);
+                finish(done, std::move(out));
+                return;
+            }
+            json::Value pools = json::Value::object();
+            if (!up.is_null()) pools.set("up", up);
+            if (!up.is_null() && !up["ok"].boolean()) {  // the helper put that version's files back
+                out.error = "the new PHP pools did not come up: " + std::string(up.get("error"));
+                out.pools = pools;
+                error_log_.error("reload refused: " + out.error);
+                finish(done, std::move(out));
+                pools_after(true, nullptr);  // whatever the up phase left, as the configuration on disk says
+                return;
+            }
+            std::shared_ptr<Generation> g = gen;
+            if (gen_ != base) g = prepare_reload(out.error, must_load);  // a certificate refresh switched meanwhile
+            if (!g || !commit_reload(g, out.error)) {
+                out.pools = pools;
+                finish(done, std::move(out));  // the caller puts its file back first
+                pools_after(true, nullptr);    // then the new pools go again
+                return;
+            }
+            pools_after(true, [this, out, pools, done, finish](json::Value full) mutable {
+                if (!full.is_null()) pools.set("full", full);
+                out.ok = true;
+                out.pools = pools;
+                finish(done, std::move(out));
+            });
+        });
+    }).detach();
 }
 
 bool Server::renew_certificate(std::string_view site, std::string& error, std::string& message) {

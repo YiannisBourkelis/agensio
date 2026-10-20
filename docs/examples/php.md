@@ -631,9 +631,17 @@ from Ondřej Surý's repository when the distribution has no 8.5; `php_versions`
 version loads and what the repositories offer). A version that is not installed keeps the site
 loaded but its PHP answers 502, and health reports `php_version_missing`. Without `php_version` in
 `[server]`, the sites that name no version follow the newest installed, so installing 8.5 would
-move all of them at the next reload (health's `php_default_unpinned`). Changing a live site's
-version gives its PHP requests 502 for the moment between agensio's reload and the new version's
-php-fpm reload.
+move all of them at the next reload (health's `php_default_unpinned`).
+
+Moving a live site to another version is a switch without downtime: its pool comes up in 8.5's
+php-fpm first, then agensio sends the site there, then the 8.4 pool goes. It is refused, with
+nothing changed, while 8.5's php-fpm is stopped or a version's `php-fpm.conf` lacks
+`process_control_timeout`, without which every php-fpm reload cuts the requests in flight on its
+sites. The one line root adds, in the `[global]` section of each version's `php-fpm.conf`:
+
+```ini
+process_control_timeout = 10s
+```
 
 **Check it.**
 
@@ -644,16 +652,18 @@ systemctl reload php8.5-fpm                                 # the reloads it pri
 agensio ctl site grav.example.com | grep -A4 '"php"'        # version 8.5, version_from site
 ```
 
-**On a managed site.** `site-update` with `--php-version` writes the site's pool into the new
-version's php-fpm, removes it from the old one and reloads both, and the answer's `done` names the
-pool and its version:
+**On a managed site.** `site-update` with `--php-version` runs the switch: the answer's `done`
+names the pool with its version, up before agensio switched to it, and how long each phase took.
+A refusal lists the problems and root's line. `--cut-requests` goes ahead when the only problem is
+a missing `process_control_timeout`, cutting the requests in flight.
 
 ```sh
 agensio ctl site-update grav.example.com --php-version 8.5 --yes --reason "Grav on PHP 8.5"
 ```
 
 **MCP:** `php_versions` for what is installed and installable, then `site_update` with
-`php_version` = `"8.5"`; `site_show` says which version a site runs and why.
+`php_version` = `"8.5"` (and `cut_requests` only when the user accepts cut requests); `site_show` says
+which version a site runs and why.
 
 **Reference:** [PHP versions](../configuration.md#7b-php-versions).
 

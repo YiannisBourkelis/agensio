@@ -1770,12 +1770,71 @@ static void test_pools() {
     CHECK(w.rc == 3 && w.changed == both && fs::is_regular_file(shop_pool) && fs::is_regular_file(blog98) && !fs::exists(blog99));
     CHECK(fs::is_directory(dir / "state" / "web2" / "php" / "blog" / "sessions") && fs::is_directory(dir / "state" / "web1" / "php" / "shop" / "tmp"));
     CHECK(write_pools(cfg, rts, false, log).rc == 0);
-    // A site moving to another version: its pool leaves 9.8's directory for 9.9's, and both change.
+    // A site moving to another version (docs/design-php-versions.md 6.1): the up phase first, its pool in
+    // 9.9's directory beside the old one, nothing removed, its new socket named for the wait; a socket that
+    // never comes up puts that version's files back; then the full phase removes the old one.
     write("moved.toml", server + shop + shop_php + blog(", version = \"9.9\""));
     const Config moved = load_config(dir / "moved.toml");
     std::ostringstream mv;
+    w = write_pools(moved, rts, false, mv, {}, false);
+    // (shop's file is written too: its first line names the main file, another one here)
+    CHECK(w.rc == 3 && w.changed == std::vector<std::string>{"9.9"} && fs::exists(blog98) && fs::is_regular_file(blog99) && w.written.size() == 2 &&
+          std::count(w.written.begin(), w.written.end(), std::pair<std::string, std::string>{"9.9", d + "/run/agensio-web2-60bcabf1-9.9.sock"}) == 1);
+    restore_pools(w, "9.9", mv);
+    CHECK(!fs::exists(blog99) && fs::exists(blog98) && mv.str().find("put back " + blog99.string()) != std::string::npos);
+    CHECK(write_pools(moved, rts, false, mv, {}, false).rc == 3 && fs::is_regular_file(blog99));
     w = write_pools(moved, rts, false, mv);
-    CHECK(w.rc == 3 && w.changed == both && !fs::exists(blog98) && fs::is_regular_file(blog99));
+    CHECK(w.rc == 3 && w.changed == std::vector<std::string>{"9.8"} && !fs::exists(blog98) && fs::is_regular_file(blog99) && w.written.empty());
+    // Which sites a reload gives a socket the running configuration does not have: blog moving from 9.8,
+    // every site of a first configuration as new ones.
+    {
+        const auto sw = pool_switches(cfg, moved);
+        CHECK(sw.size() == 1 && sw[0].site == "blog" && sw[0].from == "9.8" && sw[0].to == "9.9" && sw[0].moving);
+        CHECK(pool_switches(cfg, cfg).empty());
+        const auto fresh = pool_switches(Config{}, cfg);
+        CHECK(fresh.size() == 2 && !fresh[0].moving && fresh[0].from.empty() && fresh[1].to == "9.8");
+        // The preflight, for a site moving between versions: the target's service inactive is root's line
+        // (without systemd, its master not running); a version without process_control_timeout on either
+        // side is refused unless the caller cuts requests; a version not installed. A new site is asked
+        // for none of these but the version: nothing of it serves yet, its pool waits for the master.
+        auto with_units = rts;
+        for (auto& r : with_units) r.unit = "php" + r.version + "-fpm";
+        std::map<std::string, std::string> state{{"9.8", "active"}, {"9.9", "inactive"}};
+        std::set<std::string> hard{"9.8"};
+        PreflightFacts pf;
+        pf.unit_state = [&](const php::Runtime& r) { return state[r.version]; };
+        pf.hard_reload = [&](const php::Runtime& r) { return hard.count(r.version) > 0; };
+        auto pre = switch_preflight(sw, with_units, pf);
+        CHECK(pre.size() == 2 && std::any_of(pre.begin(), pre.end(), [](const PreflightProblem& p) {
+                  return p.site == "blog" && !p.cut_requests && p.run_as_root == "systemctl enable --now php9.9-fpm";
+              }));
+        CHECK(std::any_of(pre.begin(), pre.end(), [&](const PreflightProblem& p) {
+            return p.cut_requests && p.message.find("process_control_timeout") != std::string::npos && p.message.find(d + "/fpm98.conf") != std::string::npos;
+        }));
+        state["9.9"] = "active";
+        hard.clear();
+        CHECK(switch_preflight(sw, with_units, pf).empty());
+        hard = {"9.8", "9.9"};
+        state["9.9"] = "inactive";
+        CHECK(switch_preflight(fresh, with_units, pf).empty());  // new sites: nothing of theirs is cut or stopped
+        state["9.9"] = "active";
+        CHECK(switch_preflight(sw, rts, pf).size() == 1);         // no unit: the service's state is not known, the timeout is
+        bool running = false;
+        pf.running = [&](const php::Runtime&) { return running; };
+        hard.clear();
+        const auto stopped = switch_preflight(sw, rts, pf);
+        CHECK(stopped.size() == 1 && stopped[0].message.find("not running") != std::string::npos && stopped[0].run_as_root == d + "/fpm99 -y " + d + "/fpm99.conf");
+        running = true;
+        CHECK(switch_preflight(sw, rts, pf).empty());
+        write("m2.toml", server + shop + "php = { version = \"7.0\" }\n");
+        const auto gone = switch_preflight(pool_switches(cfg, load_config(dir / "m2.toml")), with_units, pf);
+        CHECK(gone.size() == 1 && gone[0].site == "shop" && gone[0].message.find("PHP 7.0, which is not installed") != std::string::npos);
+        // health's php_fpm_inactive: the versions whose service is down while they run sites.
+        state["9.9"] = "failed";
+        CHECK(inactive_versions(cfg, with_units, pf.unit_state) == std::vector<std::string>{"9.9"});
+        state["9.9"] = "";  // unknown (no systemd): not judged
+        CHECK(inactive_versions(cfg, with_units, pf.unit_state).empty());
+    }
     // php-fpm's own test refuses 9.9's directory: what changed there is put back as it was and 9.9 is
     // not to be reloaded; 9.8's change stands.
     {
@@ -7972,6 +8031,12 @@ static void test_php_runtimes() {
     // The programs' output, as php-fpm 8.4 prints it.
     CHECK(php::parse_version("PHP 8.4.24 (fpm-fcgi) (built: Jul 31 2026 05:11:11) (NTS)\nCopyright (c) The PHP Group\n") == "8.4.24");
     CHECK(php::parse_version("garbage").empty());
+    // The pid file a version's php-fpm.conf names in [global], which the helper signals a version without a
+    // systemd unit through (docs/design-php-versions.md 6.1): absolute only, never a pool's line or a comment.
+    CHECK(php::pid_file("[global]\npid = /run/php/php8.4-fpm.pid\nerror_log = /var/log/x.log\n[www]\nuser = www-data\n") == "/run/php/php8.4-fpm.pid");
+    CHECK(php::pid_file("; a comment\npid=/run/a.pid ; the master's\n") == "/run/a.pid");
+    CHECK(php::pid_file("[global]\n;pid = /run/x.pid\n").empty() && php::pid_file("[global]\npid = run/x.pid\n").empty() &&
+          php::pid_file("[www]\npid = /x.pid\n").empty() && php::pid_file("[global]\npid = /a/../b.pid\n").empty());
     const auto mods = php::parse_modules("[PHP Modules]\ncalendar\nCore\nZend OPcache\nzlib\n\n[Zend Modules]\nZend OPcache\n\n");
     CHECK(mods.size() == 4 && mods[0] == "calendar" && mods[1] == "core" && mods[2] == "zend opcache" && mods[3] == "zlib");
     const std::string info = "opcache.enable => On => On\nopcache.enable_cli => Off => Off\nopcache.memory_consumption => 128 => 128\n"

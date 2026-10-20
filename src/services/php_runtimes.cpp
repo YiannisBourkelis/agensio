@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <map>
 
 #ifndef _WIN32
@@ -147,6 +148,44 @@ const Runtime* find(const std::vector<Runtime>& runtimes, std::string_view versi
     return nullptr;
 }
 
+std::string pid_file(std::string_view conf_text) {
+    bool global = true;  // before any section: php-fpm reads it as [global]
+    std::string found;
+    lines(conf_text, [&](std::string_view line) {
+        const std::size_t a = line.find_first_not_of(" \t");
+        if (a == std::string_view::npos) return;
+        line.remove_prefix(a);
+        if (line.front() == ';' || line.front() == '#') return;
+        if (line.front() == '[') {
+            global = line.starts_with("[global]");
+            return;
+        }
+        if (!global || !line.starts_with("pid")) return;
+        std::string_view rest = line.substr(3);
+        rest.remove_prefix(std::min(rest.find_first_not_of(" \t"), rest.size()));
+        if (rest.empty() || rest.front() != '=') return;
+        rest.remove_prefix(1);
+        rest.remove_prefix(std::min(rest.find_first_not_of(" \t"), rest.size()));
+        rest = rest.substr(0, rest.find_first_of(" \t;\r"));
+        found = std::string(rest);
+    });
+    if (found.empty() || found.front() != '/' || found.find("/../") != std::string::npos || found.ends_with("/..")) return {};
+    return found;
+}
+
+bool master_running(const Runtime& r) {
+    std::ifstream conf(r.conf);
+    const std::string file = pid_file(std::string((std::istreambuf_iterator<char>(conf)), {}));
+    if (file.empty()) return false;
+    std::ifstream pf(file);
+    long pid = 0;
+    if (!(pf >> pid) || pid <= 1) return false;
+    std::ifstream cmd("/proc/" + std::to_string(pid) + "/cmdline");
+    std::string title;
+    std::getline(cmd, title, '\0');
+    return title.starts_with("php-fpm: master process");
+}
+
 std::string parse_version(std::string_view v_output) {
     // "PHP 8.4.24 (fpm-fcgi) (built: ...)"
     const std::size_t at = v_output.find("PHP ");
@@ -229,6 +268,32 @@ Facts gather(const Runtime& r, const Exec& exec, bool as_root, const std::string
             });
     }
     return f;
+}
+
+std::string unit_state(const Runtime& r, const Exec& exec, const std::string& systemctl) {
+    if (systemctl.empty() || r.unit.empty()) return {};
+    std::string out, state;
+    if (exec(systemctl, {"show", r.unit + ".service", "--property=ActiveState"}, out) != 0) return {};
+    lines(out, [&](std::string_view line) {
+        if (line.starts_with("ActiveState=")) state = std::string(trim(line.substr(12)));
+    });
+    return state;
+}
+
+std::string first_program(std::initializer_list<const char*> candidates) {
+#ifndef _WIN32
+    for (const char* c : candidates)
+        if (::access(c, X_OK) == 0) return c;
+#else
+    (void)candidates;
+#endif
+    return {};
+}
+
+std::string systemctl() {
+    std::error_code ec;
+    if (!fs::is_directory("/run/systemd/system", ec)) return {};
+    return first_program({"/usr/bin/systemctl", "/bin/systemctl"});
 }
 
 Exec system_exec() {

@@ -659,35 +659,47 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
         return false;
     }
     if (path == "/v1/reload") {
-        std::string error;
-        const bool ok = backend_->reload_now(error);
-        if (!ok) {
-            audit_peer(s, what, error);
-            reply(s, 409, json::Value::object().set("ok", false).set("error", error));
-            return false;
-        }
-        // Site files set aside (design section 26): the reload applied the rest; say which and why.
-        // Restart-only keys changed on disk keep their running values: say which (the alpha.61
-        // report's finding 3; before, only the error log, validate and health named them).
-        json::Value held = json::Value::array();
-        std::string note, message = "configuration reloaded";
-        for (const auto& h : backend_->running().held_back) {
-            held.push(json::Value::object().set("file", h.file).set("error", h.error).set("keeps_running_version", h.carried)
-                          .set("hosting_rule", h.hosting).set("certificate", h.certificate));
-            note += "; set aside: " + h.file + ": " + h.error;
-        }
-        if (!held.items().empty()) message += "; site files set aside, see held_back";
-        const std::vector<std::string> restart = backend_->restart_pending();
-        if (!restart.empty()) {
-            std::string keys;
-            for (const auto& k : restart) keys += (keys.empty() ? "" : ", ") + k;
-            message += "; " + keys + " changed on disk and take effect at a restart (systemctl restart agensio), see restart_needed";
-            note += "; restart needed for " + keys;
-        }
-        audit_peer(s, what, "ok" + note);
-        reply(s, 200, json::Value::object().set("ok", true).set("message", message).set("held_back", std::move(held))
-                          .set("restart_needed", strings(restart)));
-        return false;
+        // The reload with the PHP pools around it (docs/design-php-versions.md 6.1), the answer waiting for
+        // them when the caller can.
+        const bool can_wait = static_cast<bool>(done);
+        auto after = [this, &s, what, done](ReloadOutcome o) {
+            if (!o.ok) {
+                audit_peer(s, what, o.error);
+                reply(s, 409, refused_reload(o.error, o).set("ok", false));
+                if (done) done();
+                return;
+            }
+            // Site files set aside (design section 26): the reload applied the rest; say which and why.
+            // Restart-only keys changed on disk keep their running values: say which (the alpha.61
+            // report's finding 3; before, only the error log, validate and health named them).
+            json::Value held = json::Value::array();
+            std::string note, message = "configuration reloaded";
+            for (const auto& h : backend_->running().held_back) {
+                held.push(json::Value::object().set("file", h.file).set("error", h.error).set("keeps_running_version", h.carried)
+                              .set("hosting_rule", h.hosting).set("certificate", h.certificate));
+                note += "; set aside: " + h.file + ": " + h.error;
+            }
+            if (!held.items().empty()) message += "; site files set aside, see held_back";
+            const std::vector<std::string> restart = backend_->restart_pending();
+            if (!restart.empty()) {
+                std::string keys;
+                for (const auto& k : restart) keys += (keys.empty() ? "" : ", ") + k;
+                message += "; " + keys + " changed on disk and take effect at a restart (systemctl restart agensio), see restart_needed";
+                note += "; restart needed for " + keys;
+            }
+            audit_peer(s, what, "ok" + note);
+            json::Value answer = json::Value::object().set("ok", true).set("message", message).set("held_back", std::move(held))
+                                     .set("restart_needed", strings(restart));
+            json::Value pools_done = json::Value::array();
+            std::vector<std::string> steps;
+            pool_report(s, o, {}, what, pools_done, steps);
+            if (!pools_done.items().empty()) answer.set("done", pools_done);
+            if (!steps.empty()) answer.set("next_steps", strings(steps));
+            reply(s, 200, answer);
+            if (done) done();
+        };
+        reload_then({}, body["cut_requests"].boolean(), can_wait, std::move(after));
+        return can_wait;
     }
     if (path == "/v1/logs/reopen") {
         backend_->reopen_logs();
@@ -718,10 +730,7 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
         else trash_delete(s, name, what, std::move(done));
         return true;
     }
-    if (path == "/v1/sites") {
-        site_create(s, body, what);
-        return false;
-    }
+    if (path == "/v1/sites") return site_create(s, body, what, done);
     if (upload_path) {
         upload_delete(s, name, what);
         return false;
@@ -767,8 +776,7 @@ bool ControlHandler::mutate(Stream& s, WorkerState& ws, std::string_view path, s
         site_trash(s, name, what, std::move(done));
         return true;
     }
-    site_toggle(s, name, action, what);
-    return false;
+    return site_toggle(s, name, action, what, done);
 }
 
 // ---- the trash (F12b) ----
@@ -807,9 +815,8 @@ void ControlHandler::site_trash(Stream& s, std::string_view name, std::string_vi
     }
     const std::string key = site->server_names.front();
     const std::filesystem::path file = control::site_file(cfg, key);
-    const bool php_pool = php_app(site->app) && !site->user.empty() && site->pool.generated;
     audit_peer(s, what, "moving the site's files into the trash");
-    backend_->provision_async(json::Value::object().set("op", "site_trash").set("site", key), [this, &s, what = std::string(what), key, file, php_pool, done](json::Value r) {
+    backend_->provision_async(json::Value::object().set("op", "site_trash").set("site", key), [this, &s, what = std::string(what), key, file, done](json::Value r) {
         if (!r["ok"].boolean()) {
             audit_peer(s, what, "refused: " + std::string(r.get("error")));
             reply(s, 409, r);
@@ -821,46 +828,44 @@ void ControlHandler::site_trash(Stream& s, std::string_view name, std::string_vi
         const std::string site_file(r.get("site_file"));
         std::filesystem::remove(file, ec);
         std::filesystem::remove(file.string() + ".disabled", ec);
-        std::string error;
-        if (!backend_->reload_now(error)) {
-            // Put the file back and the files with it, so nothing is half done.
-            if (!site_file.empty()) {
-                std::ofstream out(site_file, std::ios::trunc);
-                out << std::string(r.get("site_file_text"));
+        // The reload with the PHP pools around it (docs/design-php-versions.md 6.1): the site's pool goes
+        // after the switch, in the answer.
+        backend_->reload_async({}, false, [this, &s, what, key, r, site_file, done](ReloadOutcome o) {
+            if (!o.ok) {
+                // Put the file back and the files with it, so nothing is half done.
+                if (!site_file.empty()) {
+                    std::ofstream out(site_file, std::ios::trunc);
+                    out << std::string(r.get("site_file_text"));
+                }
+                const std::string entry(r.get("entry"));
+                const json::Value back = backend_->provision(json::Value::object().set("op", "site_restore").set("entry", entry));
+                audit_peer(s, what, "reload refused (" + o.error + "); files " + (back["ok"].boolean() ? "restored" : "NOT restored: " + std::string(back.get("error"))));
+                reply(s, 409, refused_reload("reload refused; the site and its files were put back", o).set("ok", false).set("files_restored", back["ok"].boolean()));
+                done();
+                return;
             }
-            const std::string entry(r.get("entry"));
-            const json::Value back = backend_->provision(json::Value::object().set("op", "site_restore").set("entry", entry));
-            audit_peer(s, what, "reload refused (" + error + "); files " + (back["ok"].boolean() ? "restored" : "NOT restored: " + std::string(back.get("error"))));
-            reply(s, 409, json::Value::object().set("ok", false).set("error", "reload refused; the site and its files were put back").set("detail", error)
-                              .set("files_restored", back["ok"].boolean()));
+            std::string moved;
+            for (const auto& p : r["pieces"].items()) moved += (moved.empty() ? "" : ", ") + std::string(p.get("from"));
+            audit_peer(s, what, "deleted with its files: " + moved + " -> " + std::string(r.get("directory")) + "; the account " +
+                                    (r.get("account").empty() ? std::string("(none)") : std::string(r.get("account")) + " kept"));
+            json::Value body = json::Value::object().set("ok", true).set("action", "delete").set("files", true).set("site", key).set("entry", r["entry"])
+                                   .set("trash", r["directory"]).set("pieces", r["pieces"]).set("deleted_at", r["deleted_at"]).set("expires_at", r["expires_at"]);
+            std::vector<std::string> steps;
+            steps.push_back("site_restore " + std::string(r.get("entry")) + " brings the site and every file back, into an empty place only; trash_list shows what the trash holds");
+            if (r["expires_at"].is_null()) steps.push_back("the entry stays until trash_delete removes it ([control] trash_keep = 0)");
+            else steps.push_back("the entry is removed on " + std::string(r.get("expires_at")) + " ([control] trash_keep); trash_delete removes it sooner");
+            if (!r.get("account").empty())
+                steps.push_back("the account " + std::string(r.get("account")) + " is kept (a restore needs its uid); once the entry is gone" +
+                                (r["account_shared"].boolean() ? ", other sites still use it" : ", root may remove it: userdel " + std::string(r.get("account"))));
+            json::Value done_now = json::Value::array();
+            pool_report(s, o, {}, what, done_now, steps);
+            if (!r["run_as_root"].items().empty()) body.set("run_as_root", r["run_as_root"]);
+            for (const auto& p : protection_steps()) steps.push_back(p);
+            body.set("next_steps", strings(steps));
+            if (!done_now.items().empty()) body.set("done", done_now);
+            reply(s, 200, body);
             done();
-            return;
-        }
-        std::string moved;
-        for (const auto& p : r["pieces"].items()) moved += (moved.empty() ? "" : ", ") + std::string(p.get("from"));
-        audit_peer(s, what, "deleted with its files: " + moved + " -> " + std::string(r.get("directory")) + "; the account " +
-                                (r.get("account").empty() ? std::string("(none)") : std::string(r.get("account")) + " kept"));
-        json::Value body = json::Value::object().set("ok", true).set("action", "delete").set("files", true).set("site", key).set("entry", r["entry"])
-                               .set("trash", r["directory"]).set("pieces", r["pieces"]).set("deleted_at", r["deleted_at"]).set("expires_at", r["expires_at"]);
-        json::Value steps = json::Value::array();
-        steps.push("site_restore " + std::string(r.get("entry")) + " brings the site and every file back, into an empty place only; trash_list shows what the trash holds");
-        if (r["expires_at"].is_null()) steps.push("the entry stays until trash_delete removes it ([control] trash_keep = 0)");
-        else steps.push("the entry is removed on " + std::string(r.get("expires_at")) + " ([control] trash_keep); trash_delete removes it sooner");
-        if (!r.get("account").empty())
-            steps.push("the account " + std::string(r.get("account")) + " is kept (a restore needs its uid); once the entry is gone" +
-                       (r["account_shared"].boolean() ? ", other sites still use it" : ", root may remove it: userdel " + std::string(r.get("account"))));
-        json::Value done_now = json::Value::array();
-        if (php_pool) {
-            const json::Value pool = backend_->provision(json::Value::object().set("op", "pools_apply"));
-            if (pool["ok"].boolean()) done_now.push("php-fpm pools: " + std::string(pool.get("output")));
-            else steps.push("# the helper could not apply the pools (" + std::string(pool.get("error")) + "); run: agensio pools");
-        }
-        if (!r["run_as_root"].items().empty()) body.set("run_as_root", r["run_as_root"]);
-        for (const auto& p : protection_steps()) steps.push(p);
-        body.set("next_steps", steps);
-        if (!done_now.items().empty()) body.set("done", done_now);
-        reply(s, 200, body);
-        done();
+        });
     });
 }
 
@@ -943,26 +948,31 @@ void ControlHandler::trash_restore(Stream& s, std::string_view entry, std::strin
             done();
             return;
         }
-        std::string error;
-        // The restored site file must load: set aside, the answer says the reload was refused.
-        const bool reloaded = backend_->reload_now(error, control::site_file(backend_->running(), r.get("site")).string());
-        std::string back;
-        for (const auto& p : r["restored"].items()) back += (back.empty() ? "" : ", ") + std::string(p.get("path"));
-        audit_peer(s, what, "restored " + std::string(r.get("site")) + ": " + back + (reloaded ? "" : "; reload refused: " + error));
-        json::Value steps = json::Value::array();
-        if (php_app(r.get("app")) && !r.get("account").empty() && backend_->provision_available()) {
-            const json::Value pool = backend_->provision(json::Value::object().set("op", "pools_apply"));
-            if (!pool["ok"].boolean()) steps.push("# the helper could not apply the pools (" + std::string(pool.get("error")) + "); run: agensio pools");
-        }
-        if (service_app(r.get("app")) && !r.get("account").empty())
-            steps.push("the application's service was removed with the site: site_service_unit " + std::string(r.get("site")) + " renders it again for root");
-        for (const auto& p : protection_steps()) steps.push(p);
-        r.set("next_steps", steps);
-        if (!reloaded)
-            reply(s, 409, r.set("ok", false).set("error", "the files and the site file are back, but the reload was refused; health lists what to fix").set("detail", error));
-        else
-            reply(s, 200, r);
-        done();
+        // The restored site file must load: set aside, the answer says the reload was refused. The reload
+        // with the PHP pools around it (docs/design-php-versions.md 6.1): the site's pool is up before it is
+        // served again.
+        const std::string must = control::site_file(backend_->running(), r.get("site")).string();
+        backend_->reload_async(must, false, [this, &s, what, r, done](ReloadOutcome o) mutable {
+            std::string back;
+            for (const auto& p : r["restored"].items()) back += (back.empty() ? "" : ", ") + std::string(p.get("path"));
+            audit_peer(s, what, "restored " + std::string(r.get("site")) + ": " + back + (o.ok ? "" : "; reload refused: " + o.error));
+            std::vector<std::string> steps;
+            json::Value done_now = json::Value::array();
+            if (o.ok) pool_report(s, o, r.get("site"), what, done_now, steps);
+            if (service_app(r.get("app")) && !r.get("account").empty())
+                steps.push_back("the application's service was removed with the site: site_service_unit " + std::string(r.get("site")) + " renders it again for root");
+            for (const auto& p : protection_steps()) steps.push_back(p);
+            r.set("next_steps", strings(steps));
+            if (!done_now.items().empty()) r.set("done", done_now);
+            if (!o.ok) {
+                json::Value v = refused_reload("the files and the site file are back, but the reload was refused; health lists what to fix", o);
+                for (const auto& [k, val] : v.members()) r.set(k, val);
+                reply(s, 409, r.set("ok", false));
+            } else {
+                reply(s, 200, r);
+            }
+            done();
+        });
     });
 }
 
@@ -1414,29 +1424,29 @@ void ControlHandler::site_install(Stream& s, std::string_view name, const json::
     });
 }
 
-void ControlHandler::site_create(Stream& s, const json::Value& body, std::string_view what) {
+bool ControlHandler::site_create(Stream& s, const json::Value& body, std::string_view what, std::function<void()> finish) {
     const Config& cfg = backend_->running();
     control::SiteSpec spec;
     std::string error;
     const auto needs = control::apply_request(body, cfg, spec, error);
     if (!error.empty()) {
         reply(s, 400, json::Value::object().set("error", error));
-        return;
+        return false;
     }
     if (!needs.empty()) {
         reply(s, 422, json::Value::object().set("error", "decisions needed")
                           .set("hint", "ask the user each question, then send the command again with every field")
                           .set("needs", decisions_json(needs)).set("spec", spec.to_json()));
-        return;
+        return false;
     }
     if (!control::sites_dir_included(cfg)) {
         reply(s, 409, json::Value::object().set("error", "the main configuration does not include sites.d")
                           .set("fix", "add include = [\"sites.d/*.toml\"] at the top of " + cfg.config_path.string() + " and reload"));
-        return;
+        return false;
     }
     if (control::find_site(cfg, spec.domain)) {
         reply(s, 409, json::Value::object().set("error", "a site already serves " + spec.domain).set("hint", "use site-update"));
-        return;
+        return false;
     }
     // A password rule comes after the site's first user (2026-10-09): the users file is the site's,
     // and an old one left under the name must not come into force unseen.
@@ -1444,7 +1454,7 @@ void ControlHandler::site_create(Stream& s, const json::Value& body, std::string
         reply(s, 400, json::Value::object().set("error", "rules.auth on a new site: a site gets its password rule after its first user")
                           .set("next_steps", json::Value::array().push("site_create without rules.auth").push("site_auth_user_set " + spec.domain + " USER with generate: true")
                                                  .push("site_update " + spec.domain + " with rules.auth")));
-        return;
+        return false;
     }
     // Every problem at once, so the caller fixes all of them and retries once.
     const auto problems = control::preflight(spec, cfg, backend_->privileged());
@@ -1510,19 +1520,19 @@ void ControlHandler::site_create(Stream& s, const json::Value& body, std::string
                           .set("would_write", rendered).set("problems", problems_json(problems))
                           .set("run_as_root", commands_of(problems, false)).set("spec", spec.to_json())
                           .set("next_steps", strings(control::next_steps(spec, cfg))).set("warnings", warnings));
-        return;
+        return false;
     }
     if (blocking) {
         reply(s, 409, json::Value::object().set("error", "prerequisites missing").set("waiting", true)
                           .set("hint", "show every command to the user to run as root, then send the same command again")
                           .set("problems", problems_json(remaining)).set("run_as_root", commands_of(remaining, true))
                           .set("done", done).set("spec", spec.to_json()));
-        return;
+        return false;
     }
     if (!control::write_site_file(file, rendered, error)) {
         audit_peer(s, what, error);
         reply(s, 500, json::Value::object().set("error", error));
-        return;
+        return false;
     }
     if (restart) {
         // The file must still be a valid configuration; the listener is bound at the restart.
@@ -1537,7 +1547,7 @@ void ControlHandler::site_create(Stream& s, const json::Value& body, std::string
             std::string detail;  // one text, as every other refusal's (the alpha.66 report)
             for (const auto& e : check["errors"].items()) detail += (detail.empty() ? "" : "; ") + std::string(e.str());
             reply(s, 409, json::Value::object().set("error", "the new site did not validate; file removed").set("detail", detail));
-            return;
+            return false;
         }
         audit_peer(s, what, "created " + file.string() + " (restart needed for a privileged port)");
         const bool helper = backend_->provision_available();
@@ -1547,62 +1557,113 @@ void ControlHandler::site_create(Stream& s, const json::Value& body, std::string
                           .set("hint", helper ? "the site file is written and valid; the service restarts in a moment and serves it"
                                               : "the site file is written and valid; it is served once the service restarts")
                           .set("done", done).set("spec", spec.to_json()).set("next_steps", strings(control::next_steps(spec, cfg))).set("warnings", warnings));
-        return;
+        return false;
     }
-    if (!backend_->reload_now(error, file.string())) {  // refused too when the new file would be set aside
-        std::error_code ec;
-        std::filesystem::remove(file, ec);
-        audit_peer(s, what, "refused: " + error);
-        reply(s, 409, json::Value::object().set("error", "the new site did not validate; file removed").set("detail", error));
-        return;
-    }
-    audit_peer(s, what, "created " + file.string());
-    done.push("site file " + file.string() + " written, agensio reloaded");
-    // The rest of the root work, when the helper is there: the site's log to its group, the
-    // php-fpm pool written and reloaded. next_steps then holds only what remains.
-    std::vector<std::string> steps = control::next_steps(spec, cfg);
-    if (backend_->provision_available() && !spec.user.empty() && !spec.access_log.empty()) {
-        const std::string group = spec.group.empty() ? spec.user : spec.group;
-        const json::Value r = backend_->provision(json::Value::object().set("op", "log_own").set("file", spec.access_log).set("group", group));
-        // What is claimed under done was seen on disk, not inferred from the helper's reply.
-        const HostFacts facts = system_facts();
-        FileFacts f;
-        unsigned gid = 0;
-        const bool handed = r["ok"].boolean() && facts.stat(spec.access_log, f) && facts.group(group, gid) && f.gid == gid && (f.mode & 0040);
-        if (handed) done.push("log " + spec.access_log + " readable by " + spec.user + " (group " + group + ", 0640)");
-        else warnings.push("the site's log " + spec.access_log + " is not readable by " + spec.user + (r["ok"].boolean() ? "" : " (the helper refused: " + std::string(r.get("error")) + ")") +
-                           "; as root: chown " + std::string(cfg.user.empty() ? "agensio" : cfg.user) + ":" + group + " " + spec.access_log + " && chmod 0640 " + spec.access_log);
-    }
-    finish_pool(s, spec, cfg, what, done, steps);
-    for (const auto& p : protection_steps()) steps.push_back(p);
-    json::Value answer = json::Value::object().set("ok", true).set("file", file.string()).set("spec", spec.to_json())
-                             .set("done", done).set("next_steps", strings(steps)).set("warnings", warnings);
-    add_redirect_notes(answer, backend_->running(), spec.domain);
-    reply(s, 201, answer);
+    // The reload with the PHP pools around it (docs/design-php-versions.md 6.1): the new site's pool is up
+    // before agensio sends it requests; the answer waits when the caller can.
+    auto after = [this, &s, file, what = std::string(what), done, spec, warnings, finish](ReloadOutcome o) mutable {
+        if (!o.ok) {  // refused too when the new file would be set aside, or its pool could not come up
+            std::error_code ec;
+            std::filesystem::remove(file, ec);
+            audit_peer(s, what, "refused: " + o.error);
+            reply(s, 409, refused_reload("the new site did not validate; file removed", o));
+            if (finish) finish();
+            return;
+        }
+        audit_peer(s, what, "created " + file.string());
+        done.push("site file " + file.string() + " written, agensio reloaded");
+        // The rest of the root work, when the helper is there: the site's log to its group. The php-fpm
+        // pool came with the reload. next_steps then holds only what remains.
+        const Config& cfg = backend_->running();
+        std::vector<std::string> steps = control::next_steps(spec, cfg);
+        if (backend_->provision_available() && !spec.user.empty() && !spec.access_log.empty()) {
+            const std::string group = spec.group.empty() ? spec.user : spec.group;
+            const json::Value r = backend_->provision(json::Value::object().set("op", "log_own").set("file", spec.access_log).set("group", group));
+            // What is claimed under done was seen on disk, not inferred from the helper's reply.
+            const HostFacts facts = system_facts();
+            FileFacts f;
+            unsigned gid = 0;
+            const bool handed = r["ok"].boolean() && facts.stat(spec.access_log, f) && facts.group(group, gid) && f.gid == gid && (f.mode & 0040);
+            if (handed) done.push("log " + spec.access_log + " readable by " + spec.user + " (group " + group + ", 0640)");
+            else warnings.push("the site's log " + spec.access_log + " is not readable by " + spec.user + (r["ok"].boolean() ? "" : " (the helper refused: " + std::string(r.get("error")) + ")") +
+                               "; as root: chown " + std::string(cfg.user.empty() ? "agensio" : cfg.user) + ":" + group + " " + spec.access_log + " && chmod 0640 " + spec.access_log);
+        }
+        pool_report(s, o, spec.domain, what, done, steps);
+        for (const auto& p : protection_steps()) steps.push_back(p);
+        json::Value answer = json::Value::object().set("ok", true).set("file", file.string()).set("spec", spec.to_json())
+                                 .set("done", done).set("next_steps", strings(steps)).set("warnings", warnings);
+        add_redirect_notes(answer, backend_->running(), spec.domain);
+        reply(s, 201, answer);
+        if (finish) finish();
+    };
+    reload_then(file.string(), body["cut_requests"].boolean(), static_cast<bool>(finish), std::move(after));
+    return static_cast<bool>(finish);
 }
 
-void ControlHandler::finish_pool(Stream& s, const control::SiteSpec& spec, const Config& cfg, std::string_view what, json::Value& done, std::vector<std::string>& steps) {
-    const bool php = php_app(spec.app);
-    if (!(php && !spec.user.empty() && spec.php_socket.empty())) return;
-    if (!backend_->provision_available()) return;  // next_steps already name agensio pools and the reload
-    const json::Value r = backend_->provision(json::Value::object().set("op", "pools_apply"));
-    if (r["ok"].boolean()) {
-        std::string text(r.get("output"));
-        while (!text.empty() && (text.back() == '\n' || text.back() == ' ')) text.pop_back();
-        // The site's own pool, as the reloaded configuration names it (a pool per site, with its version).
-        const SiteConfig* now = control::find_site(backend_->running(), spec.domain);
-        const std::string pool = now && now->pool.generated ? now->pool.name + (now->pool.version.empty() ? "" : " (PHP " + now->pool.version + ")") : "of " + spec.domain;
-        done.push("php-fpm pool " + pool + ": " + text);
-        audit_peer(s, what, "pool applied: " + text);
-        std::vector<std::string> rest;
-        for (const auto& st : steps)
-            if (st != "agensio pools" && !st.starts_with("systemctl reload php") && !st.starts_with("brew services") && !st.starts_with("rc-service php"))
-                rest.push_back(st);
-        steps = rest;
-    } else {
-        steps.insert(steps.begin(), "# the helper could not apply the pool (" + std::string(r.get("error")) + "); run: agensio pools");
+void ControlHandler::reload_then(std::string must_load, bool cut_requests, bool can_wait, std::function<void(ReloadOutcome)> then) {
+    if (can_wait) {
+        backend_->reload_async(std::move(must_load), cut_requests, std::move(then));
+        return;
     }
-    (void)cfg;
+    ReloadOutcome o;
+    o.ok = backend_->reload_now(o.error, must_load);
+    if (o.ok && backend_->provision_available())
+        o.pools = json::Value::object().set("full", backend_->provision(json::Value::object().set("op", "pools_apply").set("phase", "full")));
+    then(std::move(o));
+}
+
+json::Value ControlHandler::refused_reload(std::string_view message, const ReloadOutcome& o) {
+    json::Value v = json::Value::object().set("error", std::string(message)).set("detail", o.error);
+    if (!o.refusal.is_null()) {
+        v.set("problems", o.refusal["problems"]).set("run_as_root", o.refusal["run_as_root"]).set("waiting", !o.refusal["run_as_root"].items().empty());
+        if (o.refusal["cut_requests"].boolean())
+            v.set("hint", "a php-fpm reload without process_control_timeout cuts the PHP requests in flight on every site of that version: the line in the "
+                          "problem makes it graceful (root's); cut_requests: true goes ahead and cuts them");
+    }
+    if (!o.pools.is_null()) v.set("pools", o.pools);
+    return v;
+}
+
+void ControlHandler::pool_report(Stream& s, const ReloadOutcome& o, std::string_view site, std::string_view what, json::Value& done, std::vector<std::string>& steps) {
+    const json::Value& up = o.pools["up"];
+    const json::Value& full = o.pools["full"];
+    if (up.is_null() && full.is_null()) return;  // no helper: next_steps name agensio pools and the reload
+    auto text = [](const json::Value& r) {
+        std::string t(r.get("output"));
+        while (!t.empty() && (t.back() == '\n' || t.back() == ' ')) t.pop_back();
+        for (auto& c : t)
+            if (c == '\n') c = ';';
+        return t;
+    };
+    // The site's own pool, as the reloaded configuration names it (a pool per site, with its version).
+    const SiteConfig* now = site.empty() ? nullptr : control::find_site(backend_->running(), site);
+    const std::string pool = now && now->pool.generated ? "php-fpm pool " + now->pool.name + (now->pool.version.empty() ? "" : " (PHP " + now->pool.version + ")")
+                                                        : std::string("php-fpm pools");
+    char secs[32];
+    if (!up.is_null()) {
+        std::snprintf(secs, sizeof secs, "%.1f", up["seconds"].num());
+        done.push(pool + " up before agensio switched to it (" + secs + " s): " + text(up));
+    }
+    bool applied = !up.is_null();
+    if (!full.is_null()) {
+        if (!full["ok"].boolean()) {
+            steps.insert(steps.begin(), "# the helper could not apply the pools after the switch (" + std::string(full.get("error")) + "); run: agensio pools");
+        } else {
+            applied = true;
+            const std::string t = text(full);
+            std::snprintf(secs, sizeof secs, "%.1f", full["seconds"].num());
+            if (t.find("pools up to date") == std::string::npos)
+                done.push(pool + (up.is_null() ? std::string(" (") : std::string(", after the switch (")) + secs + " s): " + t);
+        }
+    }
+    audit_peer(s, what, "pools: " + (up.is_null() ? std::string() : "up " + text(up) + "; ") + (full.is_null() ? std::string() : text(full)));
+    if (!applied) return;
+    std::vector<std::string> rest;
+    for (const auto& st : steps)
+        if (st != "agensio pools" && !st.starts_with("systemctl reload php") && !st.starts_with("brew services") && !st.starts_with("rc-service php") &&
+            !st.starts_with("kill -USR2"))
+            rest.push_back(st);
+    steps = rest;
 }
 
 bool ControlHandler::site_update(Stream& s, std::string_view name, const json::Value& body, std::string_view what, std::function<void()> finish,
@@ -1720,29 +1781,37 @@ bool ControlHandler::site_update(Stream& s, std::string_view name, const json::V
         reply(s, 500, json::Value::object().set("error", error));
         return false;
     }
-    if (!backend_->reload_now(error, file.string())) {  // refused too when the changed file would be set aside
-        std::error_code ec;
-        std::filesystem::rename(file.string() + ".bak", file, ec);
-        audit_peer(s, what, "refused: " + error);
-        reply(s, 409, json::Value::object().set("error", "the change did not validate; previous file restored").set("detail", error));
-        return false;
-    }
-    audit_peer(s, what, "updated " + file.string());
-    json::Value done_now = done;
-    if (!held.empty()) done_now.push("the site's file was set aside; rendered again from its first line with this version");
-    done_now.push("site file " + file.string() + " written, agensio reloaded");
-    std::vector<std::string> steps = control::next_steps(spec, cfg);
-    finish_pool(s, spec, cfg, what, done_now, steps);
-    for (const auto& p : protection_steps()) steps.push_back(p);
-    json::Value answer = json::Value::object().set("ok", true).set("file", file.string()).set("spec", spec.to_json())
-                             .set("done", done_now).set("next_steps", strings(steps)).set("warnings", warnings);
-    if (!ctx.note.empty()) answer.set("hsts_note", ctx.note);  // what the change did to the HSTS browsers hold (4.5)
-    add_redirect_notes(answer, backend_->running(), spec.domain);
-    reply(s, 200, answer);
-    return false;
+    // The reload with the PHP pools around it (docs/design-php-versions.md 6.1): a site moving to another
+    // version comes up there before agensio sends it there; the answer waits when the caller can.
+    auto after = [this, &s, file, what = std::string(what), done, held_now = !held.empty(), spec, warnings, note = ctx.note, finish](ReloadOutcome o) {
+        if (!o.ok) {  // refused too when the changed file would be set aside, or a new pool could not come up
+            std::error_code ec;
+            std::filesystem::rename(file.string() + ".bak", file, ec);
+            audit_peer(s, what, "refused: " + o.error);
+            reply(s, 409, refused_reload("the change did not validate; previous file restored", o));
+            if (finish) finish();
+            return;
+        }
+        audit_peer(s, what, "updated " + file.string());
+        json::Value done_now = done;
+        if (held_now) done_now.push("the site's file was set aside; rendered again from its first line with this version");
+        done_now.push("site file " + file.string() + " written, agensio reloaded");
+        std::vector<std::string> steps = control::next_steps(spec, backend_->running());
+        pool_report(s, o, spec.domain, what, done_now, steps);
+        for (const auto& p : protection_steps()) steps.push_back(p);
+        json::Value answer = json::Value::object().set("ok", true).set("file", file.string()).set("spec", spec.to_json())
+                                 .set("done", done_now).set("next_steps", strings(steps)).set("warnings", warnings);
+        if (!note.empty()) answer.set("hsts_note", note);  // what the change did to the HSTS browsers hold (4.5)
+        add_redirect_notes(answer, backend_->running(), spec.domain);
+        reply(s, 200, answer);
+        if (finish) finish();
+    };
+    reload_then(file.string(), body["cut_requests"].boolean(), static_cast<bool>(finish), std::move(after));
+    return static_cast<bool>(finish);
 }
 
-void ControlHandler::site_toggle(Stream& s, std::string_view name, std::string_view action, std::string_view what) {
+bool ControlHandler::site_toggle(Stream& s, std::string_view name, std::string_view action_view, std::string_view what_view, std::function<void()> finish) {
+    const std::string action(action_view), what(what_view);
     const Config& cfg = backend_->running();
     // An application site's environment file, named in a delete's answer; the path is taken
     // now, as the reload below replaces the configuration `cfg` refers to.
@@ -1772,19 +1841,19 @@ void ControlHandler::site_toggle(Stream& s, std::string_view name, std::string_v
     if (action == "disable") {
         if (!std::filesystem::exists(file, ec)) {
             reply(s, 404, json::Value::object().set("error", "no site file " + file.string()));
-            return;
+            return false;
         }
         std::filesystem::rename(file, disabled, ec);
     } else if (action == "enable") {
         if (!std::filesystem::exists(disabled, ec)) {
             reply(s, 404, json::Value::object().set("error", "no disabled site file " + disabled.string()));
-            return;
+            return false;
         }
         std::filesystem::rename(disabled, file, ec);
     } else {  // delete: the file goes, a .bak stays; the root and the account are never touched
         if (!std::filesystem::exists(file, ec) && !std::filesystem::exists(disabled, ec)) {
             reply(s, 404, json::Value::object().set("error", "no site file for " + std::string(name)));
-            return;
+            return false;
         }
         if (std::filesystem::exists(file, ec)) std::filesystem::rename(file, file.string() + ".bak", ec);
         std::filesystem::remove(disabled, ec);
@@ -1793,50 +1862,65 @@ void ControlHandler::site_toggle(Stream& s, std::string_view name, std::string_v
     }
     if (ec) {
         reply(s, 500, json::Value::object().set("error", ec.message()));
-        return;
+        return false;
     }
-    // An enabled file that would be set aside is refused and disabled again.
-    if (!backend_->reload_now(error, action == "enable" ? file.string() : std::string{})) {
-        if (action == "disable") std::filesystem::rename(disabled, file, ec);
-        else if (action == "enable") std::filesystem::rename(file, disabled, ec);
-        else {
-            std::filesystem::rename(file.string() + ".bak", file, ec);
-            for (const auto& f : set_aside) std::filesystem::rename(f + ".bak", f, ec);
+    // An enabled file that would be set aside is refused and disabled again. The reload with the PHP
+    // pools around it (docs/design-php-versions.md 6.1): an enabled site's pool is up before it is served,
+    // a disabled or deleted one's goes after; the answer waits when the caller can.
+    auto after = [this, &s, file, disabled, set_aside, action, what, env_file, env_state, env_exposed, finish](ReloadOutcome o) {
+        std::error_code ec;
+        if (!o.ok) {
+            if (action == "disable") std::filesystem::rename(disabled, file, ec);
+            else if (action == "enable") std::filesystem::rename(file, disabled, ec);
+            else {
+                std::filesystem::rename(file.string() + ".bak", file, ec);
+                for (const auto& f : set_aside) std::filesystem::rename(f + ".bak", f, ec);
+            }
+            audit_peer(s, what, "refused: " + o.error);
+            reply(s, 409, refused_reload("reload refused; file restored", o));
+            if (finish) finish();
+            return;
         }
-        audit_peer(s, what, "refused: " + error);
-        reply(s, 409, json::Value::object().set("error", "reload refused; file restored").set("detail", error));
-        return;
-    }
-    std::string aside_note;
-    for (const auto& f : set_aside) aside_note += (aside_note.empty() ? "" : ", ") + f + " -> " + f + ".bak";
-    audit_peer(s, what, std::string(action) + " " + file.string() + (aside_note.empty() ? "" : "; root additions set aside: " + aside_note));
-    json::Value body = json::Value::object().set("ok", true).set("file", file.string()).set("action", std::string(action));
-    if (const auto ps = protection_steps(); !ps.empty()) body.set("next_steps", strings(ps));
-    if (!set_aside.empty()) {
-        std::vector<std::string> baks;
-        for (const auto& f : set_aside) baks.push_back(f + ".bak");
-        body.set("root_additions_set_aside", strings(baks))
-            .set("root_additions_note", "root's additions to the site were renamed .bak beside the site file's .bak, still root's; rename both back to bring the site back with them, or remove them once the site is gone for good");
-    }
-    // A deleted application site's environment stays, as its files do (2026-09-27 report: it
-    // holds secrets and nothing said so). The server cannot look inside root's directory.
-    // Named when it exists (the helper says; 2026-09-27 report), said as "if it has one" only
-    // when the helper was busy and could not tell, and not at all when there is none.
-    if (env_file && env_state != 0) {
-        const std::string& env = *env_file;
-        body.set("kept", json::Value::array().push("the site's environment " + env + (env_state == 1 ? "" : ", if it has one (the helper was busy and could not tell)") +
-                                                    ": its secrets (SECRET_KEY_BASE and the like), kept as the site's directory and account are"))
-            .set("run_as_root", json::Value::array().push("rm -f " + env));
-        std::string names;
-        for (const auto& n : env_exposed) names += (names.empty() ? "" : ", ") + n;
-        const bool one = env_exposed.size() == 1;
-        body.set("hint", names.empty() ? "run_as_root removes the environment file once the site is gone for good; keep it to bring the site back with the same secrets"
-                                       : names + " in it " + (one ? "was" : "were") + " readable by others and never rotated: bringing the site back with this file brings " +
-                                             (one ? "that value" : "those values") + " back, so rotate " + (one ? "it" : "them") +
-                                             " then (site_env_set), or remove the file with run_as_root once the site is gone for good");
-        if (!names.empty()) body.set("exposed", strings(env_exposed));
-    }
-    reply(s, 200, body);
+        std::string aside_note;
+        for (const auto& f : set_aside) aside_note += (aside_note.empty() ? "" : ", ") + f + " -> " + f + ".bak";
+        audit_peer(s, what, std::string(action) + " " + file.string() + (aside_note.empty() ? "" : "; root additions set aside: " + aside_note));
+        json::Value body = json::Value::object().set("ok", true).set("file", file.string()).set("action", std::string(action));
+        if (!set_aside.empty()) {
+            std::vector<std::string> baks;
+            for (const auto& f : set_aside) baks.push_back(f + ".bak");
+            body.set("root_additions_set_aside", strings(baks))
+                .set("root_additions_note", "root's additions to the site were renamed .bak beside the site file's .bak, still root's; rename both back to bring the site back with them, or remove them once the site is gone for good");
+        }
+        // A deleted application site's environment stays, as its files do (2026-09-27 report: it
+        // holds secrets and nothing said so). The server cannot look inside root's directory.
+        // Named when it exists (the helper says; 2026-09-27 report), said as "if it has one" only
+        // when the helper was busy and could not tell, and not at all when there is none.
+        if (env_file && env_state != 0) {
+            const std::string& env = *env_file;
+            body.set("kept", json::Value::array().push("the site's environment " + env + (env_state == 1 ? "" : ", if it has one (the helper was busy and could not tell)") +
+                                                        ": its secrets (SECRET_KEY_BASE and the like), kept as the site's directory and account are"))
+                .set("run_as_root", json::Value::array().push("rm -f " + env));
+            std::string names;
+            for (const auto& n : env_exposed) names += (names.empty() ? "" : ", ") + n;
+            const bool one = env_exposed.size() == 1;
+            body.set("hint", names.empty() ? "run_as_root removes the environment file once the site is gone for good; keep it to bring the site back with the same secrets"
+                                           : names + " in it " + (one ? "was" : "were") + " readable by others and never rotated: bringing the site back with this file brings " +
+                                                 (one ? "that value" : "those values") + " back, so rotate " + (one ? "it" : "them") +
+                                                 " then (site_env_set), or remove the file with run_as_root once the site is gone for good");
+            if (!names.empty()) body.set("exposed", strings(env_exposed));
+        }
+        json::Value pools_done = json::Value::array();
+        std::vector<std::string> steps;
+        const std::string domain = action == "enable" ? file.stem().string() : std::string();
+        pool_report(s, o, domain, what, pools_done, steps);
+        for (const auto& p : protection_steps()) steps.push_back(p);
+        if (!pools_done.items().empty()) body.set("done", pools_done);
+        if (!steps.empty()) body.set("next_steps", strings(steps));
+        reply(s, 200, body);
+        if (finish) finish();
+    };
+    reload_then(action == "enable" ? file.string() : std::string{}, false, static_cast<bool>(finish), std::move(after));
+    return static_cast<bool>(finish);
 }
 
 // One of the site's files copied to another path of the same site (F9b): the drop-in

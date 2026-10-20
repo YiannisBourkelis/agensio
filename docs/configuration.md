@@ -1268,13 +1268,61 @@ php = { version = "8.5" }        # this site's own
 - **A version that is not installed** does not stop the server: the site loads, its pool is not
   written, its PHP answers 502, and health reports `php_version_missing` (error) with the fix:
   install the version (`php_versions` gives root the line), or give the site an installed one.
-- **Changing a site's version** (`site_update` with `php_version`, `agensio ctl site-update NAME
-  --php-version 8.5`) writes its pool into the new version's directory, removes it from the old one
-  and reloads both. Until the ordered switch of the design arrives, the site's PHP requests answer
-  502 for the moment between agensio's reload and the new version's php-fpm reload.
 - Health's `php_fpm_hard_reload` is judged per version that runs pools: a version whose
   `php-fpm.conf` lacks `process_control_timeout` cuts the requests in flight on its sites whenever
-  its pools are written.
+  its pools are written. `php_fpm_inactive` (error) names a version whose service is down while it
+  runs sites.
+
+**Changing a site's version without downtime.** `site_update` with `php_version` (`agensio ctl
+site-update NAME --php-version 8.5`) or a site file edited by hand followed by `agensio reload`:
+every reload that gives a site a new pool socket runs one ordered switch, with the provisioning
+helper (agensio started as root):
+
+1. **Preflight**, before anything changes, for a site moving from 8.4 to 8.5:
+   - 8.5 is installed;
+   - its php-fpm runs (systemd's state of `php8.5-fpm`; without systemd, the master in the pid file
+     its `php-fpm.conf` names);
+   - both versions' `php-fpm.conf` set `process_control_timeout`.
+
+   A failed preflight changes nothing and says why. It gives root `systemctl enable --now php8.5-fpm`
+   for a stopped php-fpm, or the line to add to `php-fpm.conf`. On the control plane a missing
+   `process_control_timeout` is a refusal that `cut_requests: true` (`--cut-requests`) overrides; on
+   a SIGHUP it is a warning in the error log.
+2. **The new pool comes up beside the old one**: written into 8.5's directory, tested with
+   `php-fpm8.5 -t`, 8.5 reloaded, its socket awaited (at most 30 s; php-fpm brings a new pool up once
+   the children it has finish what they are doing). A test that fails, or a socket that does not
+   come up, puts 8.5's files back, and the site never leaves 8.4.
+3. **agensio switches**: its new configuration sends the site to the 8.5 socket. Requests already
+   running finish on 8.4.
+4. **The old pool goes**: removed from 8.4's directory, 8.4 reloaded, its requests in flight finishing
+   within `process_control_timeout`.
+
+The answer lists what each phase did and how long it took. Switching back is the same switch.
+Changing `[server] php_version` moves every site that follows it in one switch. Two things are slower
+for a moment, never failed: the first requests on 8.5 compile their scripts into its empty opcache,
+and php-fpm holds new requests in its socket's backlog while it reloads. Sessions carry over: PHP's
+session format is the same across 8.x. The one line that makes every reload graceful is root's, in
+the `[global]` section of each version's `php-fpm.conf`:
+
+```ini
+process_control_timeout = 10s
+```
+
+A version without a systemd unit (Alpine, a build named in `[php.runtimes]`, a container) is reloaded
+with SIGUSR2 to its master, found through the pid file its `php-fpm.conf` names and checked to be that
+version's binary. A new site, or a pool written while its php-fpm is stopped, is not an error: its
+pool is read when the master starts.
+
+**At a start.** When agensio starts as root, the helper first makes every version's pool directory
+match the configuration, and reloads and awaits what changed before the listeners accept requests.
+Clients that connect meanwhile wait in the backlog. This covers what no reload sees:
+- an upgrade that changed or renamed the pool files;
+- a site file edited before a restart;
+- a newer PHP installed for the sites that follow the newest;
+- a configuration restored from a backup.
+
+A start whose files already match changes nothing, and the error log says `php-fpm pools at start:
+up to date`.
 
 `server.pools`, the one pool directory of earlier versions, is gone: each version has its own,
 discovered or named in `[php.runtimes."X.Y"]`.
@@ -2997,11 +3045,11 @@ follows php-fpm's umask, not agensio's; `health` reports it as `hosting_rule` wi
 fix.
 
 **php-fpm reloads.** Writing a pool (`site-create` with a user, `agensio pools`) reloads
-php-fpm. Unless the global `php-fpm.conf` sets `process_control_timeout` (php-fpm's
+that PHP version's php-fpm. Unless its `php-fpm.conf` sets `process_control_timeout` (php-fpm's
 default is 0), the master kills its children at once and every PHP request in flight on
-every site of that php-fpm answers 502. `health` reports `php_fpm_hard_reload` with the
-one-line fix (`process_control_timeout = 10s`), and `site-create`'s `done` entry says
-the reload happened. Downloads are `https://` only, with the
+every site of that version answers 502. `health` reports `php_fpm_hard_reload` with the
+one-line fix (`process_control_timeout = 10s`), a switch between versions is refused without it
+unless `cut_requests` (section 7b), and `site-create`'s `done` entry says the reload happened. Downloads are `https://` only, with the
 certificate and host name verified (the system store, or `install_ca`); every address of
 every hop, redirects included, is checked against the private-address fence (loopback,
 link-local, RFC 1918, ULA, shared 100.64/10, multicast, the IPv4-mapped forms) unless

@@ -1935,6 +1935,21 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
             add("warn", "pools_stale", "", "the php-fpm pool files on disk differ from the configuration: agensio pools would " + what,
                 "run agensio pools as root, then reload the PHP versions it names");
         }
+        // A version's service down while it runs sites (design 9): their PHP answers 502, and a switch to it is
+        // refused until root starts it; agensio never starts services.
+        if (const std::string systemctl = php::systemctl(); !systemctl.empty()) {
+            const php::Exec exec = php::system_exec();
+            std::map<std::string, std::string> states;
+            const auto state_of = [&](const php::Runtime& r) { return states[r.version] = php::unit_state(r, exec, systemctl); };
+            for (const auto& v : inactive_versions(running, runtimes, state_of)) {
+                const php::Runtime* r = php::find(runtimes, v);
+                std::size_t n = 0;
+                for (const auto& s : running.sites) n += s.pool.generated && s.pool.version == v;
+                add("error", "php_fpm_inactive", "",
+                    "PHP " + v + "'s php-fpm (" + r->unit + ") is " + states[v] + ": the PHP of " + std::to_string(n) + " site(s) on it answers 502",
+                    "systemctl enable --now " + r->unit + " (root's; agensio does not start services)");
+            }
+        }
         // The sites that follow the newest installed version: a newer PHP installed moves them at the
         // next reload, a step better taken on purpose.
         if (running.php_version.empty() && !running.php_newest.empty()) {

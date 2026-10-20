@@ -2,6 +2,32 @@
 
 ## 0.1.0-alpha.107
 
+- **A site's PHP version switches without downtime, and a start puts the pools in step** (the third step
+  of `docs/design-php-versions.md`, and its section 6.2 agreed today). Every reload that gives a site a
+  new pool socket now runs one ordered switch off the workers: a preflight, the new pool up, agensio's
+  switch, the old pool gone. This covers `site_update` with `php_version`, `site_create`, enabling or
+  restoring a site, `reload`, and SIGHUP after a hand edit.
+  - The preflight: the version installed; for a moving site, its php-fpm running and
+    `process_control_timeout` in both versions' `php-fpm.conf`. A failed one changes nothing and gives
+    root's line. On the control plane a missing timeout is a refusal that the new `cut_requests: true`
+    (`--cut-requests`) overrides; on SIGHUP it is a warning.
+  - The new pool: written beside the old one, tested by its own php-fpm, the version reloaded and the
+    socket awaited (at most 30 s). A failure puts the files back, and the site never leaves its version.
+  - The answer's `done` lists each phase with its time. Until now the site's PHP answered 502 between
+    agensio's reload and php-fpm's.
+  - A version without a systemd unit, or a host without systemd, is reloaded with SIGUSR2 to the master
+    named by its own `php-fpm.conf`'s pid file, checked through `/proc` to be that version's binary. A
+    stopped php-fpm is a note for a new pool: it is read when the master starts.
+  - At a start as root, the helper first makes every version's pool directory match the configuration,
+    reloads what changed and waits for the sockets, before the listeners accept requests. This covers an
+    upgrade that renamed or changed pools, an edit before a restart, and a newer PHP for the sites that
+    follow the newest. A start whose files match changes nothing.
+  - One reload at a time: another is refused while one switches, and a SIGHUP runs after it.
+  - New health finding `php_fpm_inactive` (error): a version whose service is down while it runs sites.
+  - Unit tests (the switches, the preflight, the up phase and its put-back, the pid file); `tests/provision.sh`
+    on two real masters: a switch and its way back under load with no failed request, the refusals, the
+    start. `docs/configuration.md` 7b, the cookbook recipe, the MCP texts and `docs/mcp.md`, security
+    page row 45.
 - **A php-fpm pool per site, in the php-fpm of the site's PHP version** (the second step of
   `docs/design-php-versions.md`). Until now an account's sites shared one pool, so they had to agree on
   every pool key, the version included, and all pools went into one directory (`server.pools` or the

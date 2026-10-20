@@ -90,7 +90,7 @@ std::vector<GeneratedPool> generated_pools(const Config& cfg, const std::string&
     for (const auto& site : cfg.sites)
         if (site.pool.generated)
             out.push_back({site.pool.name, site.server_names.front(), site.user, site.group.empty() ? site.user : site.group, site.pool.state_dir,
-                           site.pool.version, render_pool(cfg, site, agensio_group)});
+                           site.pool.version, site.pool.socket, render_pool(cfg, site, agensio_group)});
     return out;
 }
 
@@ -507,13 +507,15 @@ std::vector<TlsReadProblem> tls_read_problems(const Config& cfg, const HostFacts
     return out;
 }
 
-PoolsOutcome write_pools(const Config& cfg, const std::vector<php::Runtime>& runtimes, bool dry_run, std::ostream& out, const PoolTest& test) {
+PoolsOutcome write_pools(const Config& cfg, const std::vector<php::Runtime>& runtimes, bool dry_run, std::ostream& out, const PoolTest& test,
+                         bool remove_others) {
     PoolsOutcome res;
 #ifdef _WIN32
     (void)cfg;
     (void)runtimes;
     (void)dry_run;
     (void)test;
+    (void)remove_others;
     out << "error: generated php-fpm pools are not supported on Windows\n";
     res.rc = 1;
     return res;
@@ -528,12 +530,8 @@ PoolsOutcome write_pools(const Config& cfg, const std::vector<php::Runtime>& run
     const auto pools = generated_pools(cfg, agensio_group);
     bool failed = false;
     const char* verb = dry_run ? "would write" : "wrote";
-    // What each version's directory held before this run, put back when its php-fpm refuses the result.
-    struct Undo {
-        fs::path file;
-        std::string text;  // "" when the file did not exist
-    };
-    std::map<std::string, std::vector<Undo>> undo;
+    // What each version's directory held before this run is res.before: put back when its php-fpm
+    // refuses the result, or by the caller when a written pool's socket does not come up.
     std::set<std::string> touched;  // versions whose pool directory changed
     std::size_t placed = 0;
 
@@ -629,7 +627,8 @@ PoolsOutcome write_pools(const Config& cfg, const std::vector<php::Runtime>& run
             << (current != p.text ? " (site " + p.site + ", PHP " + p.version + ")" : "") << "\n";
         if (current != p.text) {  // a mode alone needs no php-fpm reload, and is not stale
             touched.insert(p.version);
-            undo[p.version].push_back({file, current});
+            res.before.push_back({p.version, file, current});
+            res.written.emplace_back(p.version, p.socket);
         }
         if (dry_run) continue;
         // Whole or not at all, 0644 whatever the umask (the alpha.94 report): the file php-fpm reads is
@@ -644,9 +643,10 @@ PoolsOutcome write_pools(const Config& cfg, const std::vector<php::Runtime>& run
     // another version. While a site file is set aside (design section 26) its sites are not in `cfg`,
     // whether a running version of them serves or not, so no pool file is taken for stale: removing one
     // would stop the PHP of a site that keeps its last good version.
-    if (!cfg.held_back.empty())
+    if (!remove_others) {
+    } else if (!cfg.held_back.empty()) {
         out << "kept every other pool: " << cfg.held_back.size() << " site file(s) set aside, their pools stay until they load\n";
-    else
+    } else {
         for (const auto& rt : runtimes) {
             if (!fs::is_directory(rt.pools, ec)) continue;
             for (const auto& entry : fs::directory_iterator(rt.pools, ec)) {
@@ -658,11 +658,12 @@ PoolsOutcome write_pools(const Config& cfg, const std::vector<php::Runtime>& run
                 const std::string text((std::istreambuf_iterator<char>(in)), {});
                 if (!text.starts_with(kHeader)) continue;
                 touched.insert(rt.version);
-                undo[rt.version].push_back({entry.path(), text});
+                res.before.push_back({rt.version, entry.path(), text});
                 out << (dry_run ? "would remove " : "removed ") << entry.path().string() << "\n";
                 if (!dry_run) fs::remove(entry.path(), ec);
             }
         }
+    }
 
     // Each directory that changed is tested by its own php-fpm before it may be reloaded; a refusal puts
     // that directory back as it was, so a reload never meets a configuration that stops the master.
@@ -670,10 +671,8 @@ PoolsOutcome write_pools(const Config& cfg, const std::vector<php::Runtime>& run
         if (!touched.count(rt.version)) continue;
         if (!dry_run && test)
             if (const std::string why = test(rt); !why.empty()) {
-                for (auto it = undo[rt.version].rbegin(); it != undo[rt.version].rend(); ++it) {
-                    if (it->text.empty()) fs::remove(it->file, ec);
-                    else if (const std::string w = write_file_atomic(it->file.string(), it->text); !w.empty()) out << "error: " << w << "\n";
-                }
+                restore_pools(res, rt.version, out);
+                std::erase_if(res.written, [&](const auto& w) { return w.first == rt.version; });
                 out << "error: php-fpm " << rt.version << " refuses its configuration with these pools (" << why
                     << "); its pool files are put back as they were and it is not reloaded\n";
                 failed = true;
@@ -688,6 +687,93 @@ PoolsOutcome write_pools(const Config& cfg, const std::vector<php::Runtime>& run
     res.rc = failed ? 1 : touched.empty() ? 0 : 3;
     return res;
 #endif
+}
+
+void restore_pools(const PoolsOutcome& o, const std::string& version, std::ostream& out) {
+    std::error_code ec;
+    for (auto it = o.before.rbegin(); it != o.before.rend(); ++it) {
+        if (it->version != version) continue;
+        if (it->text.empty()) fs::remove(it->file, ec);
+        else if (const std::string w = write_file_atomic(it->file.string(), it->text); !w.empty()) {
+            out << "error: " << w << "\n";
+            continue;
+        }
+        out << "put back " << it->file.string() << (it->text.empty() ? " (removed: it was new)" : "") << "\n";
+    }
+}
+
+std::vector<PoolSwitch> pool_switches(const Config& running, const Config& fresh) {
+    std::set<std::string> sockets;
+    for (const auto& s : running.sites)
+        if (s.pool.generated) sockets.insert(s.pool.socket);
+    std::vector<PoolSwitch> out;
+    for (const auto& s : fresh.sites) {
+        if (!s.pool.generated || sockets.count(s.pool.socket)) continue;
+        PoolSwitch w{s.server_names.front(), "", s.pool.version, false};
+        for (const auto& r : running.sites)
+            if (r.pool.generated && r.server_names.front() == w.site) {
+                w.from = r.pool.version;
+                w.moving = true;
+            }
+        out.push_back(std::move(w));
+    }
+    return out;
+}
+
+std::vector<PreflightProblem> switch_preflight(const std::vector<PoolSwitch>& switches, const std::vector<php::Runtime>& runtimes, const PreflightFacts& facts) {
+    std::vector<PreflightProblem> out;
+    for (const auto& w : switches) {
+        const php::Runtime* to = w.to.empty() ? nullptr : php::find(runtimes, w.to);
+        if (!to) {
+            out.push_back({w.site, "site " + w.site + (w.to.empty() ? std::string(" runs PHP and no PHP version is installed") : " would run PHP " + w.to + ", which is not installed") +
+                                       "; php_versions lists what is and what the repositories offer",
+                           "", false});
+            continue;
+        }
+        if (!w.moving) continue;  // a new site: its pool is read when the master starts
+        const std::string state = !to->unit.empty() && facts.unit_state ? facts.unit_state(*to) : std::string();
+        if (!state.empty()) {
+            if (state != "active" && state != "reloading")
+                out.push_back({w.site, "PHP " + w.to + "'s php-fpm (" + to->unit + ") is " + state + ", so site " + w.site +
+                                           "'s new pool cannot come up; agensio does not start services",
+                               "systemctl enable --now " + to->unit, false});
+        } else if (facts.running && !facts.running(*to)) {
+            out.push_back({w.site, "PHP " + w.to + "'s php-fpm is not running (no master in the pid file " + to->conf +
+                                       " names), so site " + w.site + "'s new pool cannot come up; agensio does not start it",
+                           to->unit.empty() ? to->fpm + " -y " + to->conf : "systemctl enable --now " + to->unit, false});
+        }
+        // A move reloads both versions' masters: without process_control_timeout each reload cuts the
+        // requests in flight on every site it runs, the moving site's last ones on the old version too.
+        if (facts.hard_reload) {
+            std::vector<std::string> confs;
+            for (const std::string& v : {w.from, w.to})
+                if (const php::Runtime* r = v.empty() ? nullptr : php::find(runtimes, v); r && facts.hard_reload(*r) && std::find(confs.begin(), confs.end(), r->conf) == confs.end())
+                    confs.push_back(r->conf);
+            if (!confs.empty()) {
+                std::string list;
+                for (std::size_t i = 0; i < confs.size(); ++i) list += (i ? " and " : "") + confs[i];
+                out.push_back({w.site, "moving site " + w.site + " from PHP " + w.from + " to " + w.to + " reloads " + (w.from == w.to ? "its" : "both versions'") +
+                                           " php-fpm, and " + list + (confs.size() == 1 ? " sets" : " set") +
+                                           " no process_control_timeout, so a reload cuts the PHP requests in flight on every site it runs: add "
+                                           "process_control_timeout = 10s to the [global] section of " + list + " and reload once, or switch anyway with cut_requests",
+                               "", true});
+            }
+        }
+    }
+    return out;
+}
+
+std::vector<std::string> inactive_versions(const Config& cfg, const std::vector<php::Runtime>& runtimes,
+                                           const std::function<std::string(const php::Runtime&)>& unit_state) {
+    std::vector<std::string> out;
+    for (const auto& r : runtimes) {
+        if (r.unit.empty() || !unit_state) continue;
+        const bool serves = std::any_of(cfg.sites.begin(), cfg.sites.end(), [&](const SiteConfig& s) { return s.pool.generated && s.pool.version == r.version; });
+        if (!serves) continue;
+        const std::string state = unit_state(r);
+        if (!state.empty() && state != "active" && state != "reloading" && state != "activating") out.push_back(r.version);
+    }
+    return out;
 }
 
 }  // namespace agensio

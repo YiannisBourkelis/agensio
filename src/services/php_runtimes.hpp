@@ -63,12 +63,27 @@ using Exec = std::function<int(const std::string& path, const std::vector<std::s
 // `as_root` runs php-fpm's configuration test too; `systemctl`, when found, the unit's state.
 Facts gather(const Runtime& r, const Exec& exec, bool as_root, const std::string& systemctl);
 Exec system_exec();  // fork and execve, safe in a threaded process; output capped at 512 KB (php-fpm -i)
+// systemd's ActiveState of the runtime's unit ("active", "inactive", "failed"): "" when it has no unit,
+// there is no systemctl, or systemd does not answer. For the switch's preflight and health.
+std::string unit_state(const Runtime& r, const Exec& exec, const std::string& systemctl);
+// The first of `candidates` that exists and may be run, or "" (systemctl, apt-cache).
+std::string first_program(std::initializer_list<const char*> candidates);
+// systemctl when systemd runs this system (its /run/systemd/system, as sd_booted tests), else "": a
+// container ships the binary without systemd, where every systemctl call fails.
+std::string systemctl();
 
 // The pieces of gather, for the unit tests.
 std::string parse_version(std::string_view v_output);                      // "PHP 8.4.24 (fpm-fcgi) ..." -> "8.4.24"
 std::vector<std::string> parse_modules(std::string_view m_output);         // both sections, lower case, sorted, once each
 std::string ini_value(std::string_view i_output, std::string_view name);   // "name => local => master": the local value
 void parse_fpm_test(std::string_view tt_output, Facts& f);                 // process_control_timeout, the result, ERROR lines
+// The pid file a php-fpm.conf names in its [global] section (or before any section): where its master
+// writes its pid, which the helper signals a version without a systemd unit through. "" when none, or
+// not an absolute path without "..".
+std::string pid_file(std::string_view conf_text);
+// Whether the runtime's master runs: the pid its pid file holds is a process whose title is php-fpm's
+// master's (/proc, readable by any account; Linux). False when unknown.
+bool master_running(const Runtime& r);
 
 // PHP's releases (php.net/supported-versions): active support, then security fixes until, both
 // the last day (YYYY-MM-DD). Updated with each PHP release.
