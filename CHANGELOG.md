@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.107
+## 0.1.0-alpha.107 (2026-10-21)
 
 - **The packaged logrotate configuration numbers its rotations on every system** (`nodateext`). RHEL's,
   Fedora's and Rocky's `/etc/logrotate.conf` turn `dateext` on for every program, so agensio's rotated
