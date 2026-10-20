@@ -15,17 +15,17 @@ result off those lists. Services change; this list was checked on 2026-10-12.
 
 | question | service | the agensio side |
 |---|---|---|
-| Is HTTPS set up well (certificate chain, protocol versions, HSTS)? | [SSL Labs](#ssl-labs-ssl-server-test) | `tls`, `docs/tls.md` |
+| Is HTTPS set up well (certificate chain, protocol versions, HSTS)? | [SSL Labs](#ssl-labs-ssl-server-test) | `tls`, `hsts`, `docs/tls.md` |
 | Why will my certificate not issue or renew? | [Let's Debug](#lets-debug) | `tls = "auto"`, health's `acme_renewal_failed` |
 | Which certificates were issued for my names? | [crt.sh](#crtsh) | `tls`, `server_name` |
-| Which security headers does the site send? | [securityheaders.com](#securityheaderscom), [MDN HTTP Observatory](#mdn-http-observatory) | `hsts`, `add_headers`, `server_header` |
-| Is my Content-Security-Policy any good? | [CSP Evaluator](#csp-evaluator) | the header, set by the application or the site |
-| Is my domain on the HSTS preload list? | [hstspreload.org](#hstspreloadorg) | `hsts` (agensio does not offer preload) |
-| Where do my redirects go, hop by hop? | [httpstatus.io](#httpstatusio) | `redirect`, `path_check` |
+| Which security headers does the site send? | [securityheaders.com](#securityheaderscom), [MDN HTTP Observatory](#mdn-http-observatory) | `[[site.response_headers]]` and `response_headers_baseline`; `hsts` (a lifetime, or `"application"` when the application sends its own, `"none"` for none); `[server] server_header`; health's `response_headers_suggested` |
+| Is my Content-Security-Policy any good? | [CSP Evaluator](#csp-evaluator) | the application's own, or the site's `[[site.response_headers]]` |
+| Is my domain on the HSTS preload list? | [hstspreload.org](#hstspreloadorg) | `hsts` (agensio sends no `preload`, so a domain does not qualify through it) |
+| Where do my redirects go, hop by hop? | [httpstatus.io](#httpstatusio) | `[[site.redirect]]`, `canonical`, `http`, `path_check` |
 | Does HTTP/3 work? | [http3check.net](#http3checknet) | `[server] protocols = [..., "h3"]` |
 | IPv6, DNSSEC, HTTPS and headers together? | [internet.nl](#internetnl) | `listen`, `tls`, `hsts` |
 | Is DNSSEC set up right? | [DNSViz](#dnsviz) | (your DNS provider) |
-| How fast is the page, and does it follow browser best practices? | [PageSpeed Insights](#pagespeed-insights) | caching (`cache`), `protocols` |
+| How fast is the page, and does it follow browser best practices? | [PageSpeed Insights](#pagespeed-insights) | a managed site's `rules.cache`, `Cache-Control` in `[[site.response_headers]]`, `protocols` |
 
 ## TLS and certificates
 
