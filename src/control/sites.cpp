@@ -2,6 +2,7 @@
 
 #include "core/access.hpp"
 #include "core/refuse.hpp"
+#include "core/site_fields.hpp"
 
 #include "control/commands.hpp"
 
@@ -774,12 +775,19 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
                                   "application (its own field goes out unchanged), or \"none\" for none on any answer (an application's own removed)";
         json::Value age = h;
         bool sub = false;
-        // The way back (docs/redirects.md 4.5, RFC 6797 6.1.1): a browser keeps a lifetime it saw until
-        // it ends, whatever the site sends later, so the latest moment one may still hold what was sent
-        // until now (or what the application sent) is kept across changes.
+        // The way back (docs/redirects.md 4.5): a browser holds the field it received last over HTTPS,
+        // its max-age counted from that answer (RFC 6797 8.1, 6.1.1), until it ends, so the latest moment
+        // one may still hold what the site sent until now is kept across changes. That is agensio's own
+        // lifetime, and the application's only where its field went out (no hsts line, "application"):
+        // behind agensio's lifetime, or removed by "none", no browser received it (the alpha.104 report).
+        // A field browsers ignore (no valid max-age, 8.1) counts for nothing.
+        const bool app_passed = spec.hsts.empty() && !spec.hsts_unnamed && (!spec.hsts_decided || spec.hsts_application);
+        std::uint64_t app_sent = 0;
+        if (app_passed && !ctx.application_hsts.empty())
+            if (const HstsValue v = parse_hsts(ctx.application_hsts); v.valid) app_sent = std::min<std::uint64_t>(v.max_age, 315360000);
         auto hold = [&] {
             if (sent > 0) spec.hsts_held_until = std::max<std::int64_t>(spec.hsts_held_until, ctx.now + static_cast<std::int64_t>(sent));
-            if (!ctx.application_hsts.empty()) spec.hsts_held_until = std::max<std::int64_t>(spec.hsts_held_until, ctx.application_until);
+            if (app_sent > 0) spec.hsts_held_until = std::max<std::int64_t>(spec.hsts_held_until, ctx.now + static_cast<std::int64_t>(app_sent));
         };
         std::uint64_t now_sent = 1;  // what the spec gives from here on; 0 while clearing
         if (!spec.hsts.empty() && !spec.hsts_unnamed) (void)hsts_duration(spec.hsts, 315360000, now_sent);
@@ -814,7 +822,7 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
                     return needs;
                 }
                 off();
-            } else if (!none_already && (sent > 0 || !ctx.application_hsts.empty() || spec.hsts_held_until > ctx.now)) {
+            } else if (!none_already && (sent > 0 || app_sent > 0 || spec.hsts_held_until > ctx.now)) {
                 hold();
                 spec.hsts = "0";
                 spec.hsts_subdomains = false;

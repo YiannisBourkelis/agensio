@@ -1615,16 +1615,19 @@ bool ControlHandler::site_update(Stream& s, std::string_view name, const json::V
         return false;
     }
     std::string error;
-    // The clock, and the HSTS the site's application sent since the start (the request path's notes):
-    // false hands over to it rather than clearing, and its lifetime counts for a clearing (4.5).
+    // The clock, and the longest HSTS the site's application was seen sending since the start (the
+    // request path's and the probes' notes; an application may send another on other pages): what the
+    // hand-over says, and, where it went out, what a clearing waits for (4.5).
     control::ApplyContext ctx;
     ctx.now = std::time(nullptr);
+    std::uint64_t longest = 0;
     for (const auto& n : site_notices().snapshot()) {
         if (n.site != spec.domain || (n.code != "hsts_from_application" && n.code != "hsts_narrows_application")) continue;
-        const std::time_t until = n.last + static_cast<std::time_t>(std::min<std::uint64_t>(parse_hsts(n.subject).max_age, 315360000));
-        if (ctx.application_hsts.empty() || until > ctx.application_until) {
+        const HstsValue v = parse_hsts(n.subject);
+        const std::uint64_t age = v.valid ? v.max_age : 0;
+        if (ctx.application_hsts.empty() || age > longest) {
             ctx.application_hsts = n.subject;
-            ctx.application_until = until;
+            longest = age;
         }
     }
     // "none" or "application" with nothing of the application's seen since the start (the alpha.102

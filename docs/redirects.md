@@ -493,7 +493,13 @@ error; after it they are warnings again.
 Handing over to an application that sends its own `Strict-Transport-Security` (Rails' `force_ssl`,
 Kanboard's `ENABLE_HSTS`) is `hsts = "application"` (`site_update` with `hsts: "application"`, `agensio
 ctl site-update NAME --hsts application`), at once, during a clearing too: the application's field goes
-out unchanged, `hsts_note` says what it sends, and its lifetime counts for a later clearing. When the
+out unchanged, `hsts_note` says what it sends, and from then on its lifetime counts for a later
+clearing. A clearing waits for what browsers received, each holding the field it got last over HTTPS
+for that field's `max-age` from then on (RFC 6797 8.1): agensio's own lifetime up to the change, and
+the application's only for the time its field went out (no line, `"application"`), counted from the
+change that ended it; behind agensio's own lifetime, or removed by `"none"`, the application's never
+reached a browser, and a field browsers ignore (no valid `max-age`) counts for nothing (0.1.0-alpha.105,
+the alpha.104 report: a site at `"2s"` whose application sent two years cleared for two years). When the
 application sends none, the note says that browsers keep the site's old lifetime until its date, with
 nothing renewing it, and that `hsts: 0` ends it sooner. agensio knows the application's field from what
 the request path saw where it replaced or removed it, or, when nothing was seen since the start (after

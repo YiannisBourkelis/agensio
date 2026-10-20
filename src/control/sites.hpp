@@ -136,13 +136,11 @@ std::string check_rules(const json::Value& given, const SiteSpec& spec, json::Va
 const std::vector<std::string_view>& site_request_fields();
 std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, SiteSpec& spec, std::string& error);
 // What a change needs from outside the request (docs/redirects.md 4.5): the clock, and the latest
-// Strict-Transport-Security the site's application sent, with the moment the last browser that saw it
-// may still hold it (the control handler reads both from the server's notices). `note` comes back
-// with what the change does to the HSTS browsers hold, for the answer.
+// Strict-Transport-Security the site's application sent (the control handler reads it from the
+// server's notices). `note` comes back with what the change does to the HSTS browsers hold.
 struct ApplyContext {
     std::time_t now = 0;
     std::string application_hsts;
-    std::time_t application_until = 0;
     std::string note;
 };
 std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, SiteSpec& spec, std::string& error, ApplyContext& ctx);

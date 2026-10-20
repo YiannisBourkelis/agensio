@@ -1979,6 +1979,15 @@ if [ -n "$PHPFPM" ]; then
     "1 yes max-age=63072000; includeSubDomains" \
     "$("$BIN" ctl site-update hstsoff.wild.test --hsts application --yes --reason handover --socket $CS > bench/tmp/hstsoff.txt 2>&1; grep -c '^hsts = "application"' bench/tmp/sites.d/hstsoff.wild.test.toml) $(grep -q "the application's own Strict-Transport-Security: max-age=63072000; includeSubDomains now goes out unchanged" bench/tmp/hstsoff.txt && echo yes || echo no) $(curl -sk -D - -o /dev/null --resolve hstsoff.wild.test:8496:127.0.0.1 https://hstsoff.wild.test:8496/ | tr -d '\r' | sed -n 's/^[Ss]trict-[Tt]ransport-[Ss]ecurity: //p')"
   cpost /v1/sites/hstsoff.wild.test/delete '{"confirm":true,"reason":"handover"}' > /dev/null
+  # What a clearing waits for is what browsers received (RFC 6797 8.1; the alpha.104 report): behind the
+  # site's own two seconds the application's two years never went out, so --no-hsts clears for two
+  # seconds, the application having been asked for / first (its field noted on the way), and then
+  # writes none.
+  cpost /v1/sites "{\"domain\":\"held.wild.test\",\"https\":{\"cert\":\"$ROOT/bench/tmp/certs-wild/cert.pem\",\"key\":\"$ROOT/bench/tmp/certs-wild/key.pem\"},\"hsts\":\"2s\",\"user\":null,\"app\":\"php\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"root\":\"$ROOT/tests/hstsapp\",\"listen_plain\":\"127.0.0.1:8504\",\"listen_tls\":\"127.0.0.1:8505\",\"confirm\":true,\"reason\":\"held\"}" > /dev/null
+  check "hsts: a clearing behind the site's own lifetime waits for that lifetime, not the application's, which no browser received" \
+    "1 soon 1" \
+    "$("$BIN" ctl site-update held.wild.test --no-hsts --yes --reason held --socket $CS > /dev/null 2>&1; grep -c '^hsts = 0' bench/tmp/sites.d/held.wild.test.toml) $(curl -sS --unix-socket $CS http://control/v1/sites/held.wild.test | python3 -c 'import json,sys,time,calendar; u=json.load(sys.stdin)["hsts"].get("until", ""); print("soon" if not u or calendar.timegm(time.strptime(u, "%Y-%m-%d %H:%M UTC")) < time.time() + 3600 else u)') $(sleep 3; "$BIN" ctl site-update held.wild.test --no-hsts --yes --reason held --socket $CS > /dev/null 2>&1; grep -c '^hsts = "none"' bench/tmp/sites.d/held.wild.test.toml)"
+  cpost /v1/sites/held.wild.test/delete '{"confirm":true,"reason":"held"}' > /dev/null
   # "none" and "application" on the request path (0.1.0-alpha.104, docs/redirects.md 4.2): none on any
   # answer, the application's own removed, over HTTP/1 and HTTP/2; or the application's as it sent it.
   # A new site has nothing for browsers to forget, so "none" applies at once.

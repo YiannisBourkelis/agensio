@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.0-alpha.105
+
+- **A clearing waits for what browsers received** (the alpha.104 report, item 1; RFC 6797 8.1: a browser
+  holds the field it received last over HTTPS, for its `max-age` from then). The date until which a
+  managed site sends `max-age=0` counted the application's lifetime whenever its field had been seen,
+  also where agensio's own lifetime had replaced it on every answer, so no browser ever received it: a
+  site at `"2s"` whose application sent two years cleared for two years, `"none"` was refused that long
+  and the certificate findings stayed errors. The application's lifetime now counts only for the time its
+  field went out (no `hsts` line, `"application"`), from the change that ended it; a field browsers ignore
+  (no valid `max-age`) counts for nothing. Unit tests failing before, an integration check through the
+  report's case; `docs/redirects.md` 4.5.
 ## 0.1.0-alpha.104 (2026-10-20)
 
 - **`hsts = "none"` is none on any answer; `hsts = "application"` leaves HSTS to the application;

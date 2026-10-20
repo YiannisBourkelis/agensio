@@ -4087,15 +4087,35 @@ static void test_control_sites() {
         (void)at(R"({"hsts":"1y"})", ap, t0);
         ApplyContext app;
         app.application_hsts = "max-age=63072000; includeSubDomains";
-        app.application_until = t0 + 50 + 2 * year;
-        auto [e3, n3] = at(R"({"hsts":"application"})", ap, t0 + 50, app);
-        CHECK(e3.empty() && ap.hsts.empty() && ap.hsts_application && ap.hsts_decided && ap.hsts_held_until == t0 + 50 + 2 * year &&
+        auto [e3, n3] = at(R"({"hsts":"application"})", ap, t0 + 50, app);  // agensio's year replaced the application's until now
+        CHECK(e3.empty() && ap.hsts.empty() && ap.hsts_application && ap.hsts_decided && ap.hsts_held_until == t0 + 50 + year &&
               n3.find("max-age=63072000; includeSubDomains now goes out unchanged") != npos);
         CHECK(render_site(ap, "x").find("\nhsts = \"application\"   # ") != npos);
         SiteSpec ap_back;
         CHECK(SiteSpec::from_json(ap.to_json(), ap_back) && ap_back.hsts_application && ap_back.hsts.empty() && ap_back.hsts_decided);
-        auto [e7, n7] = at(R"({"hsts":"none"})", ap, t0 + 60, app);  // the application's answers carry HSTS: cleared first
-        CHECK(e7.empty() && ap.hsts == "0" && !ap.hsts_application && ap.hsts_held_until == t0 + 50 + 2 * year && n7.find("max-age=0") != npos);
+        auto [e7, n7] = at(R"({"hsts":"none"})", ap, t0 + 60, app);  // its two years went out from t0 + 50: cleared until now + 2y
+        CHECK(e7.empty() && ap.hsts == "0" && !ap.hsts_application && ap.hsts_held_until == t0 + 60 + 2 * year && n7.find("max-age=0") != npos);
+        // What browsers hold is what they received (RFC 6797 8.1; the alpha.104 report): behind agensio's
+        // own lifetime the application's field never went out, so only agensio's counts; an application
+        // period before a lifetime still counts, from the change that ended it; a field browsers ignore
+        // (no max-age, 8.1) counts for nothing.
+        SiteSpec two = base;
+        (void)at(R"({"hsts":"2s"})", two, t0);
+        CHECK(at(R"({"hsts":"none"})", two, t0 + 1, app).first.empty() && two.hsts == "0" && two.hsts_held_until == t0 + 3);
+        CHECK(at(R"({"hsts":"none"})", two, t0 + 4, app).first.empty() && two.hsts.empty() && !two.hsts_application);  // past it: none
+        SiteSpec wk = base;
+        (void)at(R"({"hsts":"1w"})", wk, t0);
+        CHECK(at(R"({"hsts":"none"})", wk, t0 + 1, app).first.empty() && wk.hsts_held_until == t0 + 1 + week);
+        SiteSpec was_app = base;
+        (void)at(R"({"hsts":"application"})", was_app, t0, app);  // undecided until now: the application's went out
+        CHECK(was_app.hsts_held_until == t0 + 2 * year);
+        (void)at(R"({"hsts":"1y"})", was_app, t0 + 10, app);  // its period ends now: counted to here
+        CHECK(was_app.hsts_held_until == t0 + 10 + 2 * year);
+        CHECK(at(R"({"hsts":"none"})", was_app, t0 + 20, app).first.empty() && was_app.hsts_held_until == t0 + 10 + 2 * year);
+        SiteSpec bogus = base;
+        ApplyContext ignored;
+        ignored.application_hsts = "includeSubDomains";  // no max-age: a field browsers ignore
+        CHECK(at(R"({"hsts":"none"})", bogus, t0, ignored).first.empty() && bogus.hsts.empty() && bogus.hsts_held_until == 0);
         SiteSpec ah = base;  // "application" and the application sends none: browsers keep the site's lifetime, said
         (void)at(R"({"hsts":"1w"})", ah, t0);
         auto [e8, n8] = at(R"({"hsts":"application"})", ah, t0 + 5);
@@ -4126,7 +4146,7 @@ static void test_control_sites() {
         CHECK(at(R"({"hsts":"applicaton"})", an, t0 + 2).first.find("\"application\"") != npos);  // a misspelling named
         SiteSpec ap0 = base;
         (void)at(R"({"hsts":"1y"})", ap0, t0);
-        CHECK(at(R"({"hsts":0})", ap0, t0 + 50, app).first.empty() && ap0.hsts == "0" && ap0.hsts_held_until == t0 + 50 + 2 * year);
+        CHECK(at(R"({"hsts":0})", ap0, t0 + 50, app).first.empty() && ap0.hsts == "0" && ap0.hsts_held_until == t0 + 50 + year);
         // Seen only once the clearing had begun (the alpha.102 report): "application" hands over at once,
         // however early, since the application's own field keeps browsers to HTTPS; false is refused
         // until the date, as for any clearing.
@@ -4135,7 +4155,7 @@ static void test_control_sites() {
         CHECK(at(R"({"hsts":"none"})", late, t0 + 10).first.empty() && late.hsts == "0");  // nothing seen: clearing
         CHECK(at(R"({"hsts":"none"})", late, t0 + 15, app).first.find("until") != npos && late.hsts == "0");
         auto [e6, n6] = at(R"({"hsts":"application"})", late, t0 + 20, app);
-        CHECK(e6.empty() && late.hsts.empty() && late.hsts_application && late.hsts_held_until == t0 + 50 + 2 * year &&
+        CHECK(e6.empty() && late.hsts.empty() && late.hsts_application && late.hsts_held_until == t0 + 10 + week &&
               n6.find("max-age=63072000; includeSubDomains now goes out unchanged") != npos);
         // The ramp (docs/redirects.md 4.4): since when the lifetime sent now has been sent; the same
         // value again (another spelling of it too) or another field keeps the date; turning
