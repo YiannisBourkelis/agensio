@@ -2,6 +2,14 @@
 
 ## 0.1.0-alpha.106
 
+- **`--hsts false` is told what replaces it; `hsts = "application"` is refused on a static site** (the
+  alpha.104 and .105 reports). `agensio ctl` sends `--hsts`'s value as text, so `--hsts false` reached the
+  lifetime parser and got "'false' is no lifetime", where the loader and MCP say that `false` is gone and
+  what replaces it; the texts `"false"` and `"true"` now get the same answers as the booleans. And
+  `"application"` on an `app = "static"` site, which has no application, silenced health's suggestion and
+  showed `application` in `site_show` while nothing sent HSTS; it is refused there, at load and through
+  the control plane, naming `"none"`. Unit tests failing before, an integration check through `ctl`;
+  `docs/redirects.md` 4.2, the MCP text.
 - **A lifetime after `"application"` keeps the application's lifetime for a later clearing** (the
   alpha.105 report, item 1). Where the application's field goes out (no `hsts` line, `"application"`)
   nothing watches it, and the control plane asked the application for `/` only on a change to `"none"` or

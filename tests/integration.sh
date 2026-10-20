@@ -1873,6 +1873,10 @@ rhealth() { curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'im
 check "hsts: site_show shows the lifetime sent, as written, and since when; health's hsts_ramp names the next stage once the stage has run its lifetime" \
   "on max-age=1; includeSubDomains 1s since ramp:yes" \
   "$(rshow) $(sleep 2; rhealth)"
+# ctl sends --hsts's value as text (the alpha.104 and .105 reports): --hsts false gets the answer the
+# boolean gets; "application" on a static site, which has no application, is refused naming "none".
+check "hsts: ctl --hsts false is told it is gone and what replaces it; --hsts application is refused on a static site" "yes yes" \
+  "$("$BIN" ctl site-update ramp.wild.test --hsts false --yes --reason ramp --socket $CS > bench/tmp/hsts-word.txt 2>&1; grep -q 'false is gone' bench/tmp/hsts-word.txt && echo yes || echo no) $("$BIN" ctl site-update ramp.wild.test --hsts application --yes --reason ramp --socket $CS > bench/tmp/hsts-static.txt 2>&1; grep -q 'a static site has no application' bench/tmp/hsts-static.txt && echo yes || echo no)"
 cpost /v1/sites/ramp.wild.test/delete '{"confirm":true,"reason":"ramp"}' > /dev/null
 # rules.admin on a managed WordPress site (2026-10-07): the admin paths in one field, the
 # login page only on request, what the public site needs below /wp-admin kept open.

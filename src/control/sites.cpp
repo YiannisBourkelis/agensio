@@ -800,8 +800,16 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
             spec.hsts_unnamed = false;
             spec.hsts_since = 0;
         };
-        if (h.type() == json::Value::Type::boolean) {
-            if (h.boolean()) {
+        // agensio ctl sends --hsts's value as text (the alpha.104 and .105 reports): "true" and "false"
+        // get the answers the booleans get.
+        auto word = [&](std::string_view w) {
+            if (!h.is_string() || h.str().size() != w.size()) return false;
+            for (std::size_t i = 0; i < w.size(); ++i)
+                if (std::tolower(static_cast<unsigned char>(h.str()[i])) != w[i]) return false;
+            return true;
+        };
+        if (h.type() == json::Value::Type::boolean || word("true") || word("false")) {
+            if (h.type() == json::Value::Type::boolean ? h.boolean() : word("true")) {
                 error = "hsts: true named no lifetime (it meant a year): give the lifetime, \"1y\" (or \"1w\" first); " + forms;
                 return needs;
             }
@@ -1211,6 +1219,11 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
         return needs;
     }
     std::uint64_t hsts_seconds = 0;
+    if (spec.hsts_application && spec.app == "static") {  // nothing would send it (the alpha.104 report), refused at load too
+        error = "hsts: \"application\" leaves HSTS to the site's application, and a static site has no application: nothing would send it; "
+                "hsts: \"none\" is the decided no here, or a lifetime (\"1y\")";
+        return needs;
+    }
     if (spec.https != "none" && !spec.hsts.empty() && hsts_duration(spec.hsts, 63072000, hsts_seconds) && hsts_seconds > 0 &&
         !spec.redirect_http) {  // http = "serve" with hsts, refused at load too
         error = "hsts with redirect_http false: HSTS tells browsers to use only HTTPS, which contradicts serving plain HTTP on purpose; drop one of them";

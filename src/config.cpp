@@ -2476,6 +2476,11 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
         }
     }
     if (t.contains("hsts")) parse_hsts(t["hsts"], site, where);
+    // A static site has no application to leave HSTS to (the alpha.104 report): "application" would
+    // silence health's suggestion while nothing sends any; a hand-written site without app may proxy.
+    if (site.hsts == SiteConfig::Hsts::application && site.app == "static")
+        fail(where + ".hsts = \"application\" leaves HSTS to the site's application, and an app = \"static\" site has no application: nothing would send "
+                     "it; hsts = \"none\" is the decided no here, or a lifetime (hsts = \"1y\")");
     parse_http(t, site, where);
     // canonical (docs/redirects.md 3): one of the site's own exact names; it never points elsewhere.
     if (auto c = t["canonical"].value<std::string>()) {

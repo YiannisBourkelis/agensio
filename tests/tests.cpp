@@ -4144,6 +4144,17 @@ static void test_control_sites() {
         SiteSpec none_back;
         CHECK(SiteSpec::from_json(an.to_json(), none_back) && none_back.hsts.empty() && !none_back.hsts_application && none_back.hsts_decided);
         CHECK(at(R"({"hsts":"applicaton"})", an, t0 + 2).first.find("\"application\"") != npos);  // a misspelling named
+        // agensio ctl sends --hsts's value as text: "false" and "true" get the answers the booleans get
+        // (the alpha.104 and .105 reports), in any case.
+        CHECK(at(R"({"hsts":"false"})", an, t0 + 2).first.find("hsts: false is gone") != npos &&
+              at(R"({"hsts":"False"})", an, t0 + 2).first.find("which is now hsts: \"application\"") != npos);
+        CHECK(at(R"({"hsts":"true"})", an, t0 + 2).first.find("hsts: true named no lifetime") != npos);
+        // A static site has no application to leave HSTS to: "none" is its decided no (the alpha.104 report).
+        SiteSpec st = base;
+        st.app = "static";
+        CHECK(at(R"({"hsts":"application"})", st, t0).first.find("no application") != npos &&
+              at(R"({"hsts":"application"})", st, t0).first.find("\"none\"") != npos);
+        CHECK(at(R"({"hsts":"none"})", st, t0).first.empty() && st.hsts_decided && !st.hsts_application);
         SiteSpec ap0 = base;
         (void)at(R"({"hsts":"1y"})", ap0, t0);
         CHECK(at(R"({"hsts":0})", ap0, t0 + 50, app).first.empty() && ap0.hsts == "0" && ap0.hsts_held_until == t0 + 50 + year);
@@ -7365,6 +7376,8 @@ static void test_hsts_key() {
     CHECK(refused("hsts = { max_age = \"1y\", subdomains = \"yes\" }\n", ".hsts.subdomains must be true or false"));
     CHECK(refused("hsts = { max_age = \"1y\", preload = true }\n", "unknown key 'preload'"));
     CHECK(refused("hsts = \"on\"\n", ".hsts must be a lifetime at most ten years") && refused("hsts = \"on\"\n", "hsts = \"application\""));
+    CHECK(refused("app = \"static\"\nhsts = \"application\"\n", "no application") && refused("app = \"static\"\nhsts = \"application\"\n", "hsts = \"none\""));
+    CHECK(value("app = \"static\"\nhsts = \"none\"\n").empty());
     CHECK(refused("hsts = false\n", "hsts = false is gone") && refused("hsts = false\n", "which is now hsts = \"application\"") &&
           refused("hsts = false\n", "hsts = \"none\""));
     CHECK(refused("hsts = { max_age = \"application\" }\n", ".hsts.max_age must be seconds"));

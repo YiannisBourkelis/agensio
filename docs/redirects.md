@@ -401,7 +401,7 @@ health suggests it once HTTPS has proven itself:
 
   | Value | agensio sends | The application's own field | For |
   |---|---|---|---|
-  | `hsts = "application"` | nothing | goes out unchanged, not looked at | an application that sets HSTS itself: Rails' `force_ssl`, Kanboard's `ENABLE_HSTS`, Writebook |
+  | `hsts = "application"` | nothing | goes out unchanged, not looked at | an application that sets HSTS itself: Rails' `force_ssl`, Kanboard's `ENABLE_HSTS`, Writebook; refused on `app = "static"`, which has no application (0.1.0-alpha.106) |
   | `hsts = "none"` | nothing | removed, on every answer | no HSTS, guaranteed: a site that must stay reachable over plain HTTP (a staging copy, an intranet name), or whose application would add one unasked (Rails' `force_ssl` turns it on by default) |
 
   The agent writes one of them when the user declines, so the suggestion does not come back.
