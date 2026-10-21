@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.108
+## 0.1.0-alpha.108 (2026-10-21)
 
 - **The MCP texts say that moving a site to another PHP version is a tool call** (the test host,
   2026-10-21: an agent read `php_versions`' "installing or removing a PHP version is root's" as covering
