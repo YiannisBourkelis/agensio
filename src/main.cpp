@@ -60,7 +60,7 @@ void usage(std::ostream& out = std::cout) {
                  "                      Change (need --yes, take --reason TEXT): reload | logs-reopen |\n"
                  "                      site-create --domain D [--alias A]... [--https auto|none] [--cert F --key F]\n"
                  "                           [--user U|--no-user] [--group G] [--app static|php|laravel|drupal|wordpress|grav|proxy|rails|redmine|django|wagtail|node]\n"
-                 "                           [--root DIR] [--upstream URL] [--project NAME] [--entry FILE] [--php-socket S] [--php-children N]\n"
+                 "                           [--root DIR] [--served-dir DIR] [--upstream URL] [--project NAME] [--entry FILE] [--php-socket S] [--php-children N]\n"
                  "                           [--php-version V] [--cut-requests] [--ignore-requirements]\n"
                  "                           [--no-redirect] [--hsts LIFETIME [--hsts-subdomains]|--no-hsts] [--canonical NAME] [--listen-plain A] [--listen-tls A]\n"
                  "                      site-update NAME (same flags) | site-disable NAME | site-enable NAME |\n"
@@ -355,7 +355,7 @@ int main(int argc, char** argv) {
                              "                    for [control] trash_keep days; the account is kept\n"
                              "        site-restore ENTRY | trash-delete ENTRY | trash-expire (the trash's entries: `trash` lists them)\n"
                              "        site-create --domain D [--alias A]... [--https auto|none] [--cert F --key F] [--user U|--no-user]\n"
-                             "                    [--group G] [--app NAME] [--root DIR] [--upstream URL] [--project NAME] [--entry FILE] [--php-socket S]\n"
+                             "                    [--group G] [--app NAME] [--root DIR] [--served-dir DIR] [--upstream URL] [--project NAME] [--entry FILE] [--php-socket S]\n"
                              "                    [--php-children N] [--php-version V] [--no-redirect] [--canonical NAME] [--listen-plain A] [--listen-tls A]\n"
                              "                    [--hsts LIFETIME [--hsts-subdomains] | --no-hsts] (HSTS for the lifetime browsers commit to: 1w, 1y,\n"
                              "                    seconds, at most 2y; 0 has browsers forget it; --hsts-subdomains adds includeSubDomains, best\n"
@@ -565,6 +565,7 @@ int main(int argc, char** argv) {
                 else if (b == "--upstream") field("upstream");
                 else if (b == "--project") field("project");
                 else if (b == "--entry") field("entry");
+                else if (b == "--served-dir") field("served_dir");
                 else if (b == "--files") body.set("files", true);
                 else if (b == "--private" || b == "--entry-point") {
                     std::string v; value(v);

@@ -2454,6 +2454,27 @@ void parse_site(const toml::table& t, const fs::path& base_dir, Config& cfg, con
         }
         site.index = preset->index;
     }
+    // A plain PHP application that keeps its public files in a directory of the project
+    // (2026-10-22): that directory is served, the project stays open_basedir and the install's
+    // target, and the directory may be missing until the install fills the project (health:
+    // served_dir_missing). One that exists must stay inside the project once resolved.
+    if (auto sd = t["served_dir"].value<std::string>()) {
+        if (site.app != "php")
+            fail(where + ".served_dir names the project's directory that is served: it goes with app = \"php\" (the other PHP presets know their own)");
+        if (const std::string why = check_served_dir(*sd); !why.empty()) fail(where + ".served_dir: " + why);
+        site.served_dir = *sd;
+        const fs::path served = fs::path(root_given) / *sd;
+        std::error_code ec;
+        if (fs::symlink_status(served, ec).type() == fs::file_type::not_found) {
+            site.root = served.string();
+        } else {
+            site.root = resolve_root(base_dir, served.string(), where + ".served_dir");
+            if (!site.root.starts_with(root_given == "/" ? root_given : root_given + "/"))
+                fail(where + ".served_dir '" + *sd + "' leaves the project directory " + root_given + " (it resolves to " + site.root + ")");
+        }
+    } else if (t.contains("served_dir")) {
+        fail(where + ".served_dir must be a string");
+    }
 
     if (t.contains("index")) site.index = index_list(t["index"], where);
     if (t.contains("try_files")) site.try_files = try_files_of(t["try_files"], where);
@@ -2768,6 +2789,18 @@ std::string check_entry(std::string_view e) {
     if (e.find("//") != std::string_view::npos || e.find("/.") != std::string_view::npos || e.back() == '/')
         return "entry '" + std::string(e) + "' must be a plain path: no '//', no segment starting with '.'";
     if (!e.ends_with(".js") && !e.ends_with(".mjs") && !e.ends_with(".cjs")) return "entry '" + std::string(e) + "' must be a .js, .mjs or .cjs file";
+    return "";
+}
+
+std::string check_served_dir(std::string_view p) {
+    const std::string q(p);
+    if (p.empty() || p.size() > 255) return "served_dir is 1 to 255 characters";
+    if (p.front() == '/' || p.front() == '.' || p.front() == '-')
+        return "served_dir '" + q + "' must be a directory relative to the project directory (public, web/public)";
+    if (p.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/") != std::string_view::npos)
+        return "served_dir '" + q + "' holds a character that is not a letter, digit, '.', '_', '-' or '/'";
+    if (p.find("//") != std::string_view::npos || p.find("/.") != std::string_view::npos || p.back() == '/')
+        return "served_dir '" + q + "' must be a plain path: no '//', no segment starting with '.', no '/' at the end";
     return "";
 }
 

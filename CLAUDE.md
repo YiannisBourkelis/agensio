@@ -391,7 +391,11 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-two, each seeded fr
   `handlers/static.hpp`, shared with `path_check`): another location's index is routed there, a
   refused one is passed over as if missing so `try_files` goes on to the front controller
   (alpha.55; TYPO3 13's `/typo3/` reaches `/index.php`); before alpha.54 `/sub/` served
-  `sub/index.php` as source on drupal, laravel and grav. `agensio -t --explain` prints the effective configuration;
+  `sub/index.php` as source on drupal, laravel and grav. `served_dir` (alpha.109, `app = "php"` only,
+  `check_served_dir`): the project's directory served, `root` and `SiteConfig::project_root` stay the project
+  (open_basedir, the install's target, the project's `.env`/`.git` in `secret_paths`); a missing one loads
+  lexically (health `served_dir_missing`), an existing one must resolve inside the project; health
+  `php_any_script_runs` (info) while every `.php` of a php site runs. `agensio -t --explain` prints the effective configuration;
   `docs/configuration.md` documents each preset's expansion and every option (keep it
   current when a key or preset changes);
   `-t` connects to every FastCGI upstream once and warns, with the reason, if it cannot.

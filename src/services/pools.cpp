@@ -239,6 +239,10 @@ std::vector<std::string> secret_paths(const SiteConfig& site) {
         for (const char* rel : {"/.env", "/config", "/storage", "/.git"}) out.push_back(project + rel);
     } else {
         out.push_back(site.root + "/.env");
+        // A plain PHP application served from a directory of its project (served_dir) keeps its
+        // configuration in the project, as Laravel does.
+        if (!site.served_dir.empty())
+            for (const char* rel : {"/.env", "/.git"}) out.push_back(project + rel);
     }
     for (const auto& rel : preset_secrets(site.app)) out.push_back(site.root + rel);
     return out;

@@ -2069,6 +2069,127 @@ static void test_pools() {
     fs::remove_all(dir);
 }
 
+// served_dir (2026-10-22): a plain PHP site whose application keeps its public files in a
+// directory of the project (public/, web/). That directory is served, PHP stays confined to the
+// project, which the install fills, so the served directory may be missing until then.
+static void test_served_dir() {
+    namespace fs = std::filesystem;
+    const std::size_t npos = std::string::npos;
+    const fs::path dir = fs::temp_directory_path() / ("agensio-served-" + std::to_string(::getpid()));
+    fs::remove_all(dir);
+    fs::create_directories(dir / "proj" / "public");
+    fs::create_directories(dir / "proj" / "src");
+    fs::create_directories(dir / "empty");
+    fs::create_directories(dir / "outside");
+    fs::create_directories(dir / "pool.d");
+    fs::create_symlink("../outside", dir / "proj" / "away");
+    auto write = [&](const char* name, const std::string& text) { std::ofstream(dir / name) << text; };
+    auto refused = [&](const std::string& text, const char* needle) {
+        write("bad.toml", text);
+        try {
+            load_config(dir / "bad.toml");
+            return false;
+        } catch (const std::exception& e) {
+            if (std::string(e.what()).find(needle) == npos) std::printf("served_dir: '%s' not in: %s\n", needle, e.what());
+            return std::string(e.what()).find(needle) != npos;
+        }
+    };
+    const std::string d = dir.string();
+    const std::string server = "[server]\nworkers = 1\ngroup = \"www\"\npools_run = \"" + d + "/run\"\nstate_dir = \"" + d + "/state\"\n"
+                               "[php.runtimes.\"9.9\"]\nfpm = \"" + d + "/fpm99\"\nconf = \"" + d + "/fpm99.conf\"\npools = \"" + d + "/pool.d\"\n";
+    auto site = [](const char* name, const char* root, const char* app, const std::string& extra) {
+        return std::string("[[site]]\nserver_name = [\"") + name + "\"]\nlisten = [\"127.0.0.1:18090\"]\nroot = \"" + root + "\"\nuser = \"web1\"\napp = \"" +
+               app + "\"\n" + extra;
+    };
+    const std::string project = fs::canonical(dir / "proj").string();
+    write("a.toml", server + site("app.test", "proj", "php", "served_dir = \"public\"\n") + site("later.test", "empty", "php", "served_dir = \"web/public\"\n"));
+    const Config cfg = load_config(dir / "a.toml");
+    const SiteConfig& a = cfg.sites[0];
+    const SiteConfig& later = cfg.sites[1];
+    // Served from public/, the install's target and PHP's open_basedir the project directory.
+    CHECK(a.served_dir == "public" && a.root == project + "/public" && a.project_root == project && !a.pool.open_basedir.empty() &&
+          a.pool.open_basedir[0] == project);
+    CHECK(Router::location(a, "/index.php").kind == HandlerKind::fastcgi && Router::location(a, "/index.php").root == project + "/public");
+    // The project's credentials are the site's too, above the served directory as below it.
+    const auto secrets = secret_paths(a);
+    for (const std::string& p : {project + "/.env", project + "/.git", project + "/public/.env", project + "/public/.git"})
+        CHECK(std::find(secrets.begin(), secrets.end(), p) != secrets.end());
+    // A served directory the install has not made yet: the site loads, health says what is missing.
+    CHECK(later.root == fs::canonical(dir / "empty").string() + "/web/public" && later.project_root == fs::canonical(dir / "empty").string());
+    // site_show names both directories.
+    const json::Value sv = control::site(cfg, a, std::time(nullptr), nullptr);
+    CHECK(sv.get("served_dir") == "public" && sv.get("project_directory") == project && sv.get("root") == project + "/public");
+    CHECK(control::site(cfg, cfg.sites[1], std::time(nullptr), nullptr).get("served_dir") == "web/public");
+    {
+        const auto hf = control::health_findings(cfg, cfg, false, std::time(nullptr));
+        auto finding = [&](const char* code, const char* host) {
+            return std::find_if(hf.begin(), hf.end(), [&](const control::Finding& f) { return f.code == code && f.site == host; });
+        };
+        const auto missing = finding("served_dir_missing", "later.test");
+        CHECK(missing != hf.end() && missing->severity == "warn" && missing->message.find("/web/public") != npos &&
+              missing->fix.find("site_install") != npos && finding("served_dir_missing", "app.test") == hf.end());
+        // Every .php of the served directory runs on app = "php", one uploaded into it included: said
+        // once per site as information, with the rule that narrows it.
+        const auto any = finding("php_any_script_runs", "app.test");
+        CHECK(any != hf.end() && any->severity == "info" && any->fix.find("entry_points") != npos && any->fix.find("refuse") != npos);
+    }
+    // The rules' narrowing silences it: entry points (the .php ending denied but for them), or a refused
+    // .php pattern (PHP refused where the application writes).
+    write("e.toml", server + site("e.test", "proj", "php", "served_dir = \"public\"\n") +
+                        "[[site.location]]\npath = \"/index.php\"\nmatch = \"exact\"\nhandler = \"fastcgi\"\n"
+                        "[[site.location]]\npath = \".php\"\nmatch = \"suffix\"\nhandler = \"deny\"\n" +
+                        site("r.test", "proj", "php", "refuse = [\"/uploads/**/*.php\"]\n") + site("w.test", "proj", "wordpress", ""));
+    {
+        const Config ec = load_config(dir / "e.toml");
+        const auto hf = control::health_findings(ec, ec, false, std::time(nullptr));
+        CHECK(std::none_of(hf.begin(), hf.end(), [](const control::Finding& f) { return f.code == "php_any_script_runs"; }));
+    }
+    // Refused: a path that leaves the project or is not plain, and served_dir on another preset.
+    const std::string php = "php = { socket = \"unix:/run/php/x.sock\" }\n";
+    auto plain = [&](const char* app, const std::string& extra) {
+        return std::string("[[site]]\nserver_name = [\"x.test\"]\nlisten = [\"127.0.0.1:18090\"]\nroot = \"proj\"\napp = \"") + app + "\"\n" + php + extra;
+    };
+    CHECK(refused(plain("php", "served_dir = \"../outside\"\n"), "served_dir") && refused(plain("php", "served_dir = \"/srv/x\"\n"), "relative to the project") &&
+          refused(plain("php", "served_dir = \"public/\"\n"), "plain path") && refused(plain("php", "served_dir = \"./public\"\n"), "relative to the project") &&
+          refused(plain("php", "served_dir = \"a/../b\"\n"), "plain path") && refused(plain("php", "served_dir = \"pub lic\"\n"), "character") &&
+          refused(plain("php", "served_dir = \"\"\n"), "1 to 255") && refused(plain("php", "served_dir = 3\n"), "must be a string") &&
+          refused(plain("php", "served_dir = \"away\"\n"), "leaves the project directory") &&
+          refused(plain("laravel", "served_dir = \"public\"\n"), "app = \"php\"") && refused(plain("static", "served_dir = \"public\"\n"), "app = \"php\""));
+    // Managed: the field checked, kept on the spec's line, rendered, loaded back.
+    {
+        control::SiteSpec spec;
+        spec.domain = "m.test";
+        spec.https = "none";
+        spec.user_decided = true;
+        spec.app = "php";
+        spec.php_socket = "unix:/run/php/x.sock";
+        spec.root = (dir / "proj").string();
+        spec.listen_plain = "127.0.0.1:18091";
+        Config none;
+        none.config_path = dir / "agensio.toml";
+        std::string err;
+        json::Value b;
+        auto apply = [&](const char* text) {
+            err.clear();
+            CHECK(json::parse(text, b, err));
+            (void)control::apply_request(b, none, spec, err);
+            return err;
+        };
+        CHECK(apply(R"({"served_dir":"../x"})").find("served_dir") != npos && apply(R"({"served_dir":"public"})").empty() && spec.served_dir == "public");
+        CHECK(apply(R"({"app":"laravel"})").find("app = \"php\"") != npos);
+        spec.app = "php";
+        control::SiteSpec back;
+        CHECK(control::SiteSpec::from_json(spec.to_json(), back) && back.served_dir == "public");
+        const std::string text = control::render_site(spec, "x");
+        CHECK(text.find("\nserved_dir = \"public\"") != npos);
+        write("m.toml", text);
+        const Config mc = load_config(dir / "m.toml");
+        CHECK(mc.sites[0].root == project + "/public" && mc.sites[0].project_root == project);
+        CHECK(apply(R"({"served_dir":""})").empty() && spec.served_dir.empty() && control::render_site(spec, "x").find("served_dir") == npos);
+    }
+    fs::remove_all(dir);
+}
+
 // F13: site tasks. The table, the parameter checks, the plan (argv and environment
 // exactly), the output capture, the text cleaning, the interpreter rule, the runner and the
 // sweep on real processes and files (as the test's own account), execute's refusals, the
@@ -12048,6 +12169,7 @@ int main() {
     test_log_format();
     test_fcgi_codec();
     test_pools();
+    test_served_dir();
     test_tasks();
     test_appenv();
     test_hosting_rules();

@@ -285,6 +285,15 @@ your agreement, does it apply the rules, and it runs the same checks once more.
 > agent shows you the one line (`refused by the site's refuse pattern '/typo3conf/ext/*/'`,
 > say, a pattern too wide) and proposes the narrower one the documentation meant.
 
+An application of your own whose project keeps `index.php` and its assets in `public/`, with
+`src/`, `vendor/` and `.env` beside it, gets `app = "php"` with `root` the project directory and
+`served_dir: "public"`: only `public/` has URLs, PHP may read the whole project, and
+`site_install` unpacks the release into the project, whose `public/` may be missing until then
+(health: `served_dir_missing`). On `app = "php"` every `.php` under the served directory runs, so
+for an application that takes uploads the agent also sets `rules.entry_points` (health says
+`php_any_script_runs` until it does) and checks with `path_check` that `/index.php` runs and
+another `.php` does not.
+
 When you ask for what no field covers (a header on one path, an alias outside the root, a
 second upstream, CGI), the agent does not edit the site's file, which would unmanage it. It
 hands you the exact `[[location]]` block for the site's root additions file,

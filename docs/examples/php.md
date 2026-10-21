@@ -432,6 +432,86 @@ one path each rule must refuse and on the paths that must still work, before and
 [Control socket](../configuration.md#15-control-socket) (application rules),
 [Refuse what an application never serves](protection.md#refuse-what-an-application-never-serves).
 
+## A PHP application with a public/ directory
+
+**When:** a PHP application without a preset whose project is split in two: `public/` holds
+`index.php` and the assets, and beside it `src/`, `vendor/`, `config/` and `.env` must never be
+served, though `public/index.php` loads them (`require __DIR__ . '/../vendor/autoload.php'`).
+Slim, Mezzio, a Symfony application and most applications built on Composer are laid out this
+way.
+
+```toml
+# /etc/agensio/agensio.toml: the main file, root's (once per host)
+include = ["sites.d/*.toml"]
+
+[server]
+acme = { email = "admin@example.com" }
+```
+
+```toml
+# /etc/agensio/sites.d/app.example.com.toml
+[[site]]
+server_name = ["app.example.com"]
+listen = ["0.0.0.0:443"]
+root = "/var/www/app.example.com/app"   # the project directory
+served_dir = "public"                   # the directory of it that is served
+app = "php"
+user = "app"
+tls = "auto"
+try_files = ["$uri", "$uri/", "/index.php?$query_string"]   # nice URLs reach the front controller
+
+[[site.location]]            # the only script that runs
+path = "/index.php"
+match = "exact"
+handler = "fastcgi"
+
+[[site.location]]            # every other .php is 404, one uploaded into public/ included
+path = ".php"
+match = "suffix"
+handler = "deny"
+```
+
+**What it does.** Requests are answered from `public/` only: no URL names `src/`, `vendor/` or
+`.env`, so nothing has to be refused for them. `root` stays the project directory: PHP's
+`open_basedir` starts there (with the pool's own temporary and session directories), so the
+`require` above works, and `site-install` unpacks the release there. The project's `.env` and
+`.git` are held to the hosting rules like Laravel's (`0600`, or `0640` with the site's own
+group). The served directory may be missing until the install fills the project; health says
+`served_dir_missing` meanwhile, and every request is 404. `served_dir` is a plain path inside
+the project (`web/public` works too); one that leaves it, through `..` or a symlink, is refused.
+
+What is easy to get wrong: on `app = "php"` every `.php` under the served directory runs. For an
+application that lets its users upload files (avatars, attachments), that includes a script one
+of them disguises as a picture, so name the scripts that run, as above; health says
+`php_any_script_runs` until a site does, or refuses `.php` where uploads go
+(`refuse = ["/uploads/**/*.php"]`).
+
+**Check it.**
+
+```sh
+agensio ctl site app.example.com                             # served_dir and project_directory
+agensio ctl path-check app.example.com /index.php            # runs public/index.php
+agensio ctl path-check app.example.com /uploads/avatar.php   # 404, the .php location that denies
+```
+
+**On a managed site.** The site, the release unpacked into its project directory, then its
+entry point and front controller as `rules`:
+
+```sh
+agensio ctl site-create --domain app.example.com --app php --root /var/www/app.example.com/app --served-dir public --user app --https auto --yes --reason "the shop's application"
+agensio ctl site-install app.example.com --url https://example.com/releases/app-1.0.tar.gz --yes --reason "first release"
+agensio ctl site-update app.example.com --entry-point /index.php --front-controller /index.php --yes --reason "only the front controller runs"
+```
+
+**MCP:** `site_create` with `app: "php"`, `root` the project directory and `served_dir: "public"`,
+`site_install` into it, then `site_update` with `rules` = `{"entry_points": ["/index.php"],
+"front_controller": "/index.php"}` and `path_check` on `/index.php` and on a `.php` that must not
+run.
+
+**Reference:** [Plain PHP](../configuration.md#2-plain-php-app--php),
+[Locations](../configuration.md#6-locations-the-reference),
+[Hosting: one user per site](../configuration.md#11-hosting-one-user-per-site).
+
 ## Use a php-fpm pool you already run
 
 **When:** a single-tenant server whose php-fpm pool exists already (the distribution's `www`

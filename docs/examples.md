@@ -77,6 +77,7 @@ start them and the warning goes. What a key needs (a reload, a restart, root) is
 - [Old addresses with /index.php/ in them](examples/php.md#old-addresses-with-indexphp-in-them): one rule from `/index.php/` to `/`, so old links move to the clean addresses while `/index.php` itself, which forms post to, runs as before.
 - [Grav](examples/php.md#grav): only `index.php` runs, Grav's private directories, and why the preset must be the application's.
 - [A PHP application without a preset, from its own rules](examples/php.md#a-php-application-without-a-preset-from-its-own-rules): `app = "php"` narrowed to Kanboard's entry points, front controller, cached assets and `refuse` patterns, or the same as `rules`.
+- [A PHP application with a public/ directory](examples/php.md#a-php-application-with-a-public-directory): `served_dir` serves `public/` while `root` stays the project, which PHP may read and `site-install` fills; its one entry point, so an uploaded `.php` never runs.
 - [Use a php-fpm pool you already run](examples/php.md#use-a-php-fpm-pool-you-already-run): `php = { socket }`, socket permissions, and pool keys that need a generated pool.
 - [php-fpm in a container](examples/php.md#php-fpm-in-a-container): `remote_root`, a port published on 127.0.0.1 only, and `keep_conn` kept off through Docker.
 - [Raise the upload and PHP limits of one site](examples/php.md#raise-the-upload-and-php-limits-of-one-site): `max_body_size`, the pool's PHP limits and `read_timeout`, or `--set` within `site_limits`.

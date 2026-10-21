@@ -86,6 +86,7 @@ json::Value SiteSpec::to_json() const {
     if (!upstream.empty()) v.set("upstream", upstream);
     if (!project.empty()) v.set("project", project);
     if (!entry.empty()) v.set("entry", entry);
+    if (!served_dir.empty()) v.set("served_dir", served_dir);
     if (!php_socket.empty()) v.set("php_socket", php_socket);
     if (php_children) v.set("php_children", php_children);
     if (!php_version.empty()) v.set("php_version", php_version);
@@ -141,6 +142,7 @@ bool SiteSpec::from_json(const json::Value& v, SiteSpec& out) {
     out.upstream = v.get("upstream");
     out.project = v.get("project");
     out.entry = v.get("entry");
+    out.served_dir = v.get("served_dir");
     out.php_socket = v.get("php_socket");
     out.php_children = static_cast<int>(v["php_children"].num());
     out.php_version = v.get("php_version");
@@ -691,7 +693,7 @@ std::vector<AccessNotice> access_notices_for(const SiteSpec& spec, const Config&
 
 const std::vector<std::string_view>& site_request_fields() {
     static const std::vector<std::string_view> fields = {
-        "domain", "aliases", "canonical", "https", "redirect_http", "hsts", "encoded_slashes", "app", "root", "upstream", "project", "entry", "user",
+        "domain", "aliases", "canonical", "https", "redirect_http", "hsts", "encoded_slashes", "app", "root", "served_dir", "upstream", "project", "entry", "user",
         "no_user", "group", "php_socket", "php_children", "php_version", "settings", "rules", "redirects", "response_headers",
         "response_headers_baseline", "response_headers_offer_declined", "login_paths", "public_archives", "mime_types", "trusted_proxies", "access_log",
         "listen_plain", "listen_tls", "confirm", "reason", "dry_run", "cut_requests", "ignore_requirements"};
@@ -923,6 +925,7 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
     if (has_key(body, "upstream")) spec.upstream = body.get("upstream");
     if (has_key(body, "project")) spec.project = body.get("project");
     if (has_key(body, "entry")) spec.entry = body.get("entry");
+    if (has_key(body, "served_dir")) spec.served_dir = body.get("served_dir");
     if (has_key(body, "group")) spec.group = body.get("group");
     if (has_key(body, "php_socket")) spec.php_socket = body.get("php_socket");
     if (has_key(body, "php_children")) spec.php_children = static_cast<int>(body["php_children"].num());
@@ -1186,6 +1189,17 @@ std::vector<Decision> apply_request(const json::Value& body, const Config& cfg, 
             return needs;
         }
     }
+    if (!spec.served_dir.empty()) {
+        if (spec.app != "php" && !spec.app.empty()) {
+            error = "served_dir names the project's directory that is served: it goes with app = \"php\" (the other PHP presets know their own); "
+                    "send served_dir: \"\" with the change of app";
+            return needs;
+        }
+        if (const std::string bad = check_served_dir(spec.served_dir); !bad.empty()) {
+            error = bad;
+            return needs;
+        }
+    }
     for (const auto& f : {spec.cert, spec.key})
         if (!f.empty() && !safe_path(f, why)) {
             error = "https cert/key: " + why;
@@ -1283,6 +1297,7 @@ std::string render_site(const SiteSpec& spec, std::string_view stamp) {
             if (node_app(spec.app) && !spec.entry.empty()) s += "entry = " + toml_string(spec.entry) + "\n";
         } else {
             s += "root = " + toml_string(spec.root) + "\n";
+            if (spec.app == "php" && !spec.served_dir.empty()) s += "served_dir = " + toml_string(spec.served_dir) + "   # served; root is the project directory\n";
             // Named for a static site too (alpha.94): a site with app gets its preset's security
             // baseline (docs/headers.md 4), which a file without the line would not.
             s += "app = " + toml_string(spec.app.empty() ? std::string("static") : spec.app) + "\n";

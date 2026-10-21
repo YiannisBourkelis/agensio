@@ -473,6 +473,10 @@ json::Value site_summary(const SiteConfig& s, std::time_t now, const TlsFacts* t
     json::Value v = json::Value::object();
     v.set("server_name", strings(s.server_names)).set("listen", strings(s.listen));
     v.set("root", s.root).set("app", s.app).set("user", s.user).set("group", s.group);
+    // The project directory when the served root is a directory of it (a preset's public/ or web/,
+    // served_dir): site_install fills it, PHP's open_basedir starts there.
+    if (!s.served_dir.empty()) v.set("served_dir", s.served_dir);
+    if (!s.project_root.empty() && s.project_root != s.root) v.set("project_directory", s.project_root);
     v.set("encoded_slashes", s.encoded_slashes_allow ? "allow" : "deny");
     v.set("trusted_proxies", s.own_trusted_proxies ? strings(s.trusted_proxies_text) : json::Value(nullptr));  // null: [server]'s list
     v.set("http", http_mode(s)).set("http_listen", strings(s.http_listen));  // what plain HTTP gets, and where (docs/redirects.md 2)
@@ -2103,6 +2107,33 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
                 "), but app = \"" + s.app + "\": the " + s.app + " preset's refusals do not fit them, and what " + detected +
                 "'s own .htaccess would protect may be served",
             "set app = \"" + detected + "\" (site-update " + s.server_names.front() + " with app: " + detected + " for a managed site)");
+    }
+    // A plain PHP site served from a directory of its project that is not there (2026-10-22): every
+    // request is 404 until site_install fills the project or served_dir names the right directory.
+    for (const auto& s : running.sites) {
+        std::error_code ec;
+        if (s.served_dir.empty() || fs::symlink_status(s.root, ec).type() != fs::file_type::not_found) continue;
+        add("warn", "served_dir_missing", s.server_names.front(),
+            "the site serves " + s.root + " (served_dir \"" + s.served_dir + "\" of " + s.project_root + "), which does not exist: every request is 404",
+            "fill the project with site_install (an archive or upload whose tree holds " + s.served_dir +
+                "/), or set served_dir to the directory the application serves (site_update; \"\" serves the project directory itself)");
+    }
+    // Every .php of a plain PHP site runs wherever it sits (2026-10-22), one an upload form put into a
+    // directory of the site included: information until the owner narrows it, with entry points (the
+    // only .php that run) or a refused .php pattern where the application writes.
+    for (const auto& s : running.sites) {
+        if (s.app != "php" || s.redirects_all) continue;
+        const bool any = std::any_of(s.locations.begin(), s.locations.end(), [](const LocationConfig& l) {
+            return l.suffix && l.path == ".php" && l.kind == HandlerKind::fastcgi && l.script_dir.empty();
+        });
+        const bool php_refused = std::any_of(s.refuse.patterns.begin(), s.refuse.patterns.end(), [](const RefusePattern& p) {
+            return p.text.size() >= 4 && Headers::iequals(std::string_view(p.text).substr(p.text.size() - 4), ".php");
+        });
+        if (!any || php_refused) continue;
+        add("info", "php_any_script_runs", s.server_names.front(),
+            "every .php file under " + s.root + " runs, wherever it sits: one a user manages to upload into a directory of the site would run too",
+            "name the scripts that run in rules.entry_points (site_update; at most 16, the front controller among them), or refuse PHP where the "
+            "application stores uploads (rules.refuse, \"/uploads/**/*.php\"); an application that lets nobody write under its served directory needs neither");
     }
     // Backup archives and database dumps inside a served tree, each judged by what a request for it gets
     // today (2026-10-17, the alpha.97 discussion): served to anyone, a warning; kept by the preset's

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.1.0-alpha.109
+
+- **A plain PHP site can serve a directory of its project: `served_dir`** (a report from the test host,
+  2026-10-22: an application keeping `index.php` in `public/` and its code in `src/` beside it could not be
+  hosted on `app = "php"`. With `root` set to `public/`, PHP's `open_basedir` left out the `src/` that
+  `index.php` requires. With `root` set to the project, `src/` and `.env` had URLs. And a managed site could
+  not be created before `public/` existed, though `site_install` only fills an empty directory.)
+  - `served_dir = "public"` on an `app = "php"` site serves that directory of the project. `root` stays the
+    project directory: PHP's `open_basedir`, `site_install`'s target, the `composer.json` health reads.
+  - The project's `.env` and `.git` are held to the hosting rules as credentials, as Laravel's are.
+  - A plain relative path, refused when it leaves the project (through `..`, or a symlink once resolved)
+    and on any other preset. A served directory that does not exist yet loads and answers 404; health says
+    `served_dir_missing` (a warning) until it is there.
+  - Managed: `site_create` and `site_update` take `served_dir` (`agensio ctl --served-dir DIR`), and
+    `site_show` gives `served_dir` and `project_directory`.
+  - Health's new `php_any_script_runs` (information): on `app = "php"` every `.php` under the served
+    directory runs, one a user uploaded included. It stays until the site names its scripts
+    (`rules.entry_points`, or a `.php` location that denies) or refuses `.php` where uploads go. The MCP
+    texts tell the agent to set the entry points for an application that takes uploads.
+  - Docs: `docs/configuration.md` 2, the cookbook recipe "A PHP application with a public/ directory",
+    `docs/mcp.md`.
+
 ## 0.1.0-alpha.108 (2026-10-21)
 
 - **The MCP texts say that moving a site to another PHP version is a tool call** (the test host,

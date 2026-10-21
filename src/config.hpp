@@ -322,6 +322,9 @@ struct SiteConfig {
     LocationConfig validation;
     std::string root;                       // absolute document root, no trailing slash
     std::string project_root;               // the root as given, before a preset appended its public/ or web/ (site-install's target)
+    // app = "php": the project's directory served ("public", "web/public"), relative to the root as given;
+    // "" serves the root itself (2026-10-22). PHP's open_basedir and the install stay on the project.
+    std::string served_dir;
     // app = "django" | "wagtail": the project's Python package (NAME/settings, NAME/wsgi.py),
     // which the tasks and the rendered unit load (2026-09-28, the owner's decision: a site
     // field given at site_create, not a parameter of every task).
@@ -710,6 +713,8 @@ bool node_app(std::string_view app) noexcept;
 // An entry `entry = "..."` takes: a relative path inside the project directory ending in .js,
 // .mjs or .cjs, of letters, digits and . _ - /, no "..", no "//". "" or why.
 std::string check_entry(std::string_view entry);
+// served_dir: a plain directory path relative to the project (public, web/public); "" when it is one.
+std::string check_served_dir(std::string_view dir);
 // A preset whose application service agensio renders and watches (site_service_unit,
 // site_service_status, health): the Rails and the Django presets.
 bool service_app(std::string_view app) noexcept;

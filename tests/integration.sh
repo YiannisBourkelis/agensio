@@ -1117,7 +1117,7 @@ check "cookbook: every recipe of docs/examples.md loads and names what exists (t
 # One broken site file never stops the others (design section 26; tests/isolation.sh, its own server).
 check "isolation: a site file that does not load is set aside, the other sites serve (tests/isolation.sh)" "0" \
   "$(tests/isolation.sh "$BIN" > bench/tmp/isolation.out 2>&1; echo $?)"
-check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 217 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
+check "reference: docs/keys.md is what the binary prints, and the socket serves the table with running values" "same 218 0 restart file" "$(diff -q <("$BIN" keys --markdown) docs/keys.md > /dev/null && echo -n same || echo -n differ; curl -sS --unix-socket $CS http://control/v1/config/reference | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[k for k in d["keys"] if k["key"]=="workers" and k["table"]=="[server]"][0]; print("", len(d["keys"]), w["running"], w["applies"], w["via"])')"
 check "secrets: the presets catalogue lists each preset's credential files" "/wp-config.php /sites/default/settings.php" "$(curl -sS --unix-socket $CS http://control/v1/presets | python3 -c 'import json,sys; p={x["app"]:x for x in json.load(sys.stdin)["presets"]}; print(p["wordpress"]["secrets"][0], p["drupal"]["secrets"][0])')"
 check "install: uploads-delete removes the file; the list is empty" "0 no 0" "$("$BIN" ctl uploads-delete wp.tgz --yes --reason done --socket $CS > /dev/null; echo -n "$? "; [ -e bench/tmp/state/uploads/wp.tgz ] && echo -n yes || echo -n no; echo -n " "; "$BIN" ctl uploads --socket $CS | grep -o '"file":' | wc -l | tr -d ' ')"
 check "install: every step is in the audit log" "yes yes yes" "$(grep -q 'uploads/wp.tgz: stored' bench/tmp/audit.log && echo yes) $(grep -q 'sites/inst.test/install (t): installed' bench/tmp/audit.log && echo yes) $(grep -q 'uploads/wp.tgz/delete (done): deleted' bench/tmp/audit.log && echo yes)"
@@ -2111,6 +2111,23 @@ print(" ".join(out))
 PYT
 )"
   cpost /v1/sites/typo3.test/delete '{"confirm":true,"reason":"typo3"}' > /dev/null
+  # served_dir (2026-10-22): a plain PHP project whose public/ is served while the src/ beside it is
+  # what index.php requires; nothing outside public/ has a URL. A second project, created before its
+  # public/ exists (the install brings it), loads, answers 404 and is named by health.
+  rm -rf bench/tmp/served bench/tmp/served-later
+  mkdir -p bench/tmp/served/public bench/tmp/served/src bench/tmp/served-later
+  printf '<?php require __DIR__ . "/../src/lib.php"; echo greet(), " ", basename($_SERVER["DOCUMENT_ROOT"]), "\\n";\n' > bench/tmp/served/public/index.php
+  printf '<?php function greet() { return "served-dir-ok"; }\n' > bench/tmp/served/src/lib.php
+  printf 'SECRET=served-dir-canary\n' > bench/tmp/served/.env
+  chmod 600 bench/tmp/served/.env
+  sd_create() { cpost /v1/sites "{\"domain\":\"$1\",\"https\":\"none\",\"user\":null,\"app\":\"php\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"root\":\"$ROOT/bench/tmp/$2\",\"served_dir\":\"public\",\"listen_plain\":\"127.0.0.1:8096\",\"confirm\":true,\"reason\":\"served\"}"; }
+  sd_get() { curl -sS -H "Host: $1" "http://127.0.0.1:8096$2"; }
+  sd_code() { code -H "Host: $1" "http://127.0.0.1:8096$2"; }
+  check "served_dir: public/ is served and requires the src/ beside it; src/, .env and the project's other files have no URL (a path climbing out of the root is 400); site_show names both directories; a project without public/ yet is created, answers 404 and health names it" \
+    "201 served-dir-ok public 404 404 400 404 public:served 201 404 served_dir_missing" \
+    "$(sd_create served.test served) $(sd_get served.test /) $(sd_code served.test /src/lib.php) $(sd_code served.test /.env) $(code --path-as-is -H "Host: served.test" "http://127.0.0.1:8096/../src/lib.php") $(sd_code served.test /public/index.php) $(curl -sS --unix-socket $CS http://control/v1/sites/served.test | python3 -c 'import json,sys,os; d=json.load(sys.stdin); print(d.get("served_dir") + ":" + os.path.basename(d.get("project_directory", "")))') $(sd_create later.test served-later) $(sd_code later.test /) $(curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; print(" ".join(x["code"] for x in json.load(sys.stdin)["findings"] if x.get("site") == "later.test" and x["code"] == "served_dir_missing") or "none")')"
+  cpost /v1/sites/served.test/delete '{"confirm":true,"reason":"served"}' > /dev/null
+  cpost /v1/sites/later.test/delete '{"confirm":true,"reason":"served"}' > /dev/null
   # [[site.response_headers]] (alpha.89, docs/headers.md 2): per field the most specific rule naming
   # it decides; set replaces every copy (the application's too), default only fills a gap, remove
   # deletes; on every answer, static, PHP and agensio's own 404 and 403 alike, over HTTP/1, HTTP/2 and

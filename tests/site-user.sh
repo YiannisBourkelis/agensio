@@ -87,6 +87,22 @@ sleep 1.2
 check "the site's own log exists, agensio:t1 0640" "agensio t1 640" "$(stat -c '%U %G %a' $T/logs/sites/t1.test.log 2>/dev/null)"
 check "site show returns the content site" "php" "$("$BIN" ctl site t1.test --socket $T/run/control.sock | sed -n 's/.*"app":"\([a-z]*\)".*/\1/p' | head -1)"
 check "validate through the socket agrees with -t" "yes" "$("$BIN" ctl validate --socket $T/run/control.sock | grep -q '"ok":true' && echo yes)"
+
+# 4. served_dir (2026-10-22): the project's public/ served, its src/ required by PHP; the pool's
+# open_basedir is the project already, so the pool stays as it was and PHP still reads nothing
+# outside the project.
+install -d -o t1 -g agensio -m 2750 $T/www/t1.test/web/public $T/www/t1.test/web/src
+printf '<?php require __DIR__ . "/../src/lib.php"; echo lib(), " outside=", @file_get_contents("/etc/hostname") === false ? "blocked" : "READ", " docroot=", basename($_SERVER["DOCUMENT_ROOT"]);' > $T/www/t1.test/web/public/index.php
+printf '<?php function lib() { return "lib=ok"; }' > $T/www/t1.test/web/src/lib.php
+chown t1:agensio $T/www/t1.test/web/public/index.php $T/www/t1.test/web/src/lib.php; chmod 640 $T/www/t1.test/web/public/index.php $T/www/t1.test/web/src/lib.php
+rc=0; "$BIN" ctl site-update t1.test --served-dir public --yes --reason "served_dir" --socket $T/run/control.sock > $T/sd.out 2>&1 || rc=$?
+prc=0; "$BIN" pools -c $T/agensio.toml > /dev/null 2>&1 || prc=$?
+check "site-update --served-dir public applies; the pool file is unchanged (agensio pools exits 0)" "0 0 public" "$rc $prc $("$BIN" ctl site t1.test --socket $T/run/control.sock | sed -n 's/.*"served_dir":"\([a-z]*\)".*/\1/p')"
+[ $rc = 0 ] || cat $T/sd.out
+check "public/index.php requires the project's src/, open_basedir keeps PHP inside the project" "lib=ok outside=blocked docroot=public" "$(curl -sS -H 'Host: t1.test' http://127.0.0.1:18098/index.php)"
+check "the project's other files have no URL: the old s.txt and src/lib.php are 404" "404 404" "$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: t1.test' http://127.0.0.1:18098/s.txt) $(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: t1.test' http://127.0.0.1:18098/src/lib.php)"
+health=$("$BIN" ctl health --socket $T/run/control.sock)
+check "health has no error finding and names the any-script note for the php site" "0 yes" "$(echo "$health" | grep -o '"severity":"error"' | wc -l | tr -d ' ') $(echo "$health" | grep -q '"code":"php_any_script_runs","site":"t1.test"' && echo yes)"
 echo "site-user: $pass passed, $fail failed"
 [ $fail = 0 ] || { echo "--- error.log"; cat $T/logs/error.log; echo "--- server.out"; cat $T/server.out; echo "--- health"; echo "$health"; }
 [ $fail = 0 ]

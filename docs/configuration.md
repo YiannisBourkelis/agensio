@@ -246,6 +246,41 @@ match = "suffix"
 handler = "fastcgi"
 ```
 
+Every `.php` under the root runs, wherever it sits. For an application that lets its users
+upload files, name the scripts that run (exact `fastcgi` locations and a `.php` suffix location
+with `handler = "deny"`, or `rules.entry_points` on a managed site; section 15), or refuse
+`.php` where the uploads go (`refuse = ["/uploads/**/*.php"]`, section 6b): health says
+`php_any_script_runs` (information) until a site does one or the other.
+
+**The project's public directory: `served_dir`.** An application that keeps `index.php` and
+its assets in `public/` and its code, `vendor/` and `.env` beside it names the project as `root`
+and the served directory in `served_dir`:
+
+```toml
+[[site]]
+server_name = ["app.example.com"]
+listen = ["0.0.0.0:443"]
+root = "/var/www/app.example.com/app"   # the project directory
+served_dir = "public"
+app = "php"
+user = "app"
+tls = "auto"
+```
+
+Requests are answered from `/var/www/app.example.com/app/public` (`DOCUMENT_ROOT`, the scripts'
+paths), and nothing outside it has a URL. The project stays the site's directory: PHP's
+`open_basedir` starts there, so `require __DIR__ . '/../src/Kernel.php'` works, `site-install`
+unpacks into it, health reads its `composer.json` for the PHP the application needs (section
+7b), and its `.env` and `.git` are held to the hosting rules as credentials (section 11).
+`served_dir` is a plain relative path at any depth, up to 255 characters (`public`,
+`web/public`, `apps/shop/public`: no `..`, no segment starting with `.`, no `/` at either end) and only for `app = "php"`, since the other PHP presets know
+their own directory; one that exists must stay inside the project once its symlinks are
+resolved. A served directory that does not exist yet loads (the install brings it) and answers
+404, and health says `served_dir_missing` until it is there. Managed: `served_dir` of
+`site_create` and `site_update` (`agensio ctl --served-dir DIR`, `""` to serve the root itself);
+`site_show` gives both directories (`served_dir`, `project_directory`). The cookbook recipe:
+[A PHP application with a public/ directory](examples/php.md#a-php-application-with-a-public-directory).
+
 ## 3. Laravel: `app = "laravel"`
 
 `root` is the project directory; the preset serves its `public/`.
