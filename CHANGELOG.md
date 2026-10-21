@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.0-alpha.108
+
+- **An error-log entry is one line** (the alpha.107 upgrade on the test host). A message holding a
+  program's output kept its line breaks, so the start's "php-fpm pools at start: ..." spread over lines
+  with no time or prefix: a grep for the entry showed its first line ("created /var/lib/agensio/ag1/php")
+  and not the pools written and removed, and `logs_query` read the rest as other entries. The writer
+  now turns a message's line breaks into "; " (trailing ones dropped), for every entry, so no text
+  inside one can start a line of its own either (fail2ban's `agensio-auth` filter reads the error log
+  by line). A unit test failing before, `tests/provision.sh`'s start check holding the whole output to
+  the entry's line.
+
 ## 0.1.0-alpha.107 (2026-10-21)
 
 - **The packaged logrotate configuration numbers its rotations on every system** (`nodateext`). RHEL's,

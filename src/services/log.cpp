@@ -314,7 +314,19 @@ void ErrorLog::log(LogLevel level, std::string_view message) noexcept {
     line.reserve(n + message.size() + 16);
     line.append(stamp, n);
     line.append(level == LogLevel::error ? " [error] " : level == LogLevel::warn ? " [warn] " : " [info] ");
-    line.append(message);
+    // One entry, one line (2026-10-21): a message's line breaks (a program's output, php-fpm's or the
+    // helper's) become "; ", so a grep for the entry shows all of it, logs_query and fail2ban's
+    // agensio-auth filter read entries as lines, and no text inside one can start a line of its own.
+    while (!message.empty() && (message.back() == '\n' || message.back() == '\r')) message.remove_suffix(1);
+    for (std::size_t i = 0; i < message.size(); ++i) {
+        const char c = message[i];
+        if (c != '\n' && c != '\r') {
+            line.push_back(c);
+            continue;
+        }
+        while (i + 1 < message.size() && (message[i + 1] == '\n' || message[i + 1] == '\r')) ++i;
+        line.append("; ");
+    }
     line.push_back('\n');
     registry_->sink(sink_).write(line);
 }

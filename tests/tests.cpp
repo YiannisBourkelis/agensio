@@ -1174,6 +1174,20 @@ static void test_log_format() {
     std::getline(in2, l2);
     CHECK(l1.find("\"GET /a") != std::string::npos);
     CHECK(l2.find("\"GET /a") != std::string::npos);  // after reopen the new file gets the line
+    // An error-log entry is one line whatever its message holds (2026-10-21, the alpha.107 upgrade: the
+    // start's pool output spread over lines without the entry's time and prefix, so a grep for the entry
+    // showed its first line and logs_query read the rest as other entries); line breaks become "; ".
+    {
+        ErrorLog el;
+        el.configure(&reg, 1, LogLevel::info);
+        el.warn("php-fpm pools at start: created /var/lib/agensio/ag1/php\nwrote /etc/php/8.4/fpm/pool.d/agensio-ag1-cd8c3518.conf\r\nreloaded PHP 8.4's php-fpm\n\n");
+        std::ifstream b(dir / "b.log");
+        std::vector<std::string> lines;
+        for (std::string l; std::getline(b, l);) lines.push_back(l);
+        CHECK(lines.size() == 1 && lines[0].find(" [warn] php-fpm pools at start: created /var/lib/agensio/ag1/php; wrote /etc/php/8.4/fpm/pool.d/agensio-ag1-cd8c3518.conf; "
+                                                 "reloaded PHP 8.4's php-fpm") != std::string::npos &&
+              lines[0].ends_with("php-fpm"));
+    }
     fs::remove_all(dir);
 }
 

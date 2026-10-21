@@ -262,7 +262,7 @@ rm -f $POOLD/agensio-t9-*.conf $T/run/agensio-t9-*-$PHPV.sock; fpm_restart $T/fp
 check "start: before, t9's pool is gone from php-fpm" "no" "$([ -S $T/run/agensio-t9-*-$PHPV.sock ] && echo yes || echo no)"
 srv_start
 check "start: the pool is written and php-fpm reloaded before the listeners accept; the first request is answered" "200 1 yes" \
-  "$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: t9.test' http://127.0.0.1:18198/who.php) $(ls $POOLD | grep -c '^agensio-t9-') $(grep -q 'php-fpm pools at start: wrote .*agensio-t9-' $T/logs/error.log && echo yes)"
+  "$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: t9.test' http://127.0.0.1:18198/who.php) $(ls $POOLD | grep -c '^agensio-t9-') $(grep -q 'php-fpm pools at start: .*wrote .*agensio-t9-.*; reloaded PHP' $T/logs/error.log && echo yes)"  # one line: the whole output on the entry's line
 srv_stop; srv_start
 check "start: a start whose pool files match touches nothing" "1 200" \
   "$(grep -c 'php-fpm pools at start: up to date' $T/logs/error.log) $(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: t9.test' http://127.0.0.1:18198/who.php)"
