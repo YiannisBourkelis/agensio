@@ -149,7 +149,8 @@ json::Value php_versions_json(const Config& cfg, const PhpInventory& inv, std::t
     if (!inv.as_root)
         out.set("note", "php-fpm's configuration test (and process_control_timeout, read through it) needs root: run by the provisioning helper when "
                         "agensio starts as root with [control] provision, so not shown here");
-    out.set("installing", "installing or removing a PHP version is root's; agensio gives the lines and never runs them");
+    out.set("installing", "installing or removing a PHP version is root's; agensio gives the lines and never runs them. But moving a site to an installed version is "
+                          "site_update's php_version, which the server runs itself: no root, no terminal");
     return out;
 }
 

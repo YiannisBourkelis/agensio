@@ -10892,13 +10892,26 @@ static void test_mcp_texts() {
     if (texts.instructions.size() > 2048) std::printf("MCP instructions: %zu characters, a host shows 2048\n", texts.instructions.size());
     CHECK(texts.instructions.size() <= 2048);
     std::set<std::string> names;
-    std::string update;
+    std::string update, php_versions;
     for (const auto& [name, description] : texts.tools) {
         names.insert(name);
         if (name == "site_update") update = description;
+        if (name == "php_versions") php_versions = description;
         if (description.size() > 16384) std::printf("MCP tool %s: %zu characters, a host shows 16384\n", name.c_str(), description.size());
         CHECK(description.size() <= 16384 && description.find("server instructions") == std::string::npos);
         CHECK(description.find("(a redirect,") == std::string::npos);
+    }
+    // A site's PHP version is a tool call (2026-10-21, the test host: an agent read php_versions' "installing
+    // ... is root's" as covering the switch, and handed the user `agensio ctl site-update ... --php-version`
+    // to run as root): the instructions name it under site_update, php_versions says the switch is never
+    // root's, and so does the answer's own installing field.
+    CHECK(texts.instructions.find("site_update (HTTPS, PHP versions,") != std::string::npos);
+    CHECK(php_versions.find("never root's work or a terminal's: call site_update with php_version") != std::string::npos &&
+          php_versions.find("Only installing or removing a version is root's") != std::string::npos);
+    {
+        control::PhpInventory none;
+        const std::string installing(control::php_versions_json(Config{}, none, 0).get("installing"));
+        CHECK(installing.find("moving a site to an installed version is site_update's php_version") != std::string::npos);
     }
     const std::string& ins = texts.instructions;
     for (std::size_t i = 0; i < ins.size();) {  // every tool the map names exists

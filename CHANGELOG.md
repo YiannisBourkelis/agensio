@@ -2,6 +2,13 @@
 
 ## 0.1.0-alpha.108
 
+- **The MCP texts say that moving a site to another PHP version is a tool call** (the test host,
+  2026-10-21: an agent read `php_versions`' "installing or removing a PHP version is root's" as covering
+  the switch, and handed the user `agensio ctl site-update ... --php-version 8.5` to run as root, while
+  `site_update` would have done it). The server instructions name PHP versions under `site_update`;
+  `php_versions` says that moving a site to a version it lists is never root's or a terminal's work, and
+  that only installing or removing one is; the `installing` field of its answer says the same; and
+  `site_update`'s `php_version` says the call is the switch. `test_mcp_texts` holds all four.
 - **An error-log entry is one line** (the alpha.107 upgrade on the test host). A message holding a
   program's output kept its line breaks, so the start's "php-fpm pools at start: ..." spread over lines
   with no time or prefix: a grep for the entry showed its first line ("created /var/lib/agensio/ag1/php")
