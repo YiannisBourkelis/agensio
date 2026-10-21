@@ -93,6 +93,10 @@ struct MimeTypes {
 struct LocationConfig {
     std::string path;  // prefix ("/", "/static/"), the whole path (exact) or an ending (suffix, ".php")
     bool exact = false;
+    // Exact, for a .php script with no ".php/" before its end (set by finalize_site): it also takes
+    // the script's path-info form, "/x.php/rest", which FastCGI runs as /x.php (core/script_split.hpp),
+    // so a refused script never runs through a suffix location and an entry point keeps PATH_INFO.
+    bool script_exact = false;
     bool suffix = false;
     bool final = false;  // prefix only (nginx ^~): when it is the longest prefix match, suffix locations are skipped
     // Suffix only: the script (the path up to the ending) must sit directly in this directory,

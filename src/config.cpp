@@ -3577,6 +3577,12 @@ void finalize_site(SiteConfig& site) {
     site.exact_rules = std::any_of(site.access.begin(), site.access.end(), [](const AccessRule& r) { return r.exact && !r.any; }) ||
                        std::any_of(site.auth.begin(), site.auth.end(), [](const AuthRule& r) { return r.exact && !r.open; });
     site.cgi_locations = std::any_of(site.locations.begin(), site.locations.end(), [](const LocationConfig& l) { return l.kind == HandlerKind::cgi; });
+    // An exact .php location decides its script's path-info form too (2026-10-22): FastCGI cuts a
+    // path at its first ".php/" (script_split::php_end), so "/x.php/rest" names the script "/x.php"
+    // whichever location runs it. Before, an exact deny held only for its literal path, and the .php
+    // suffix location ran the script it refused (/wp-content/db.php/x, a rules.private /install.php).
+    for (auto& l : site.locations)
+        l.script_exact = l.exact && l.path.ends_with(".php") && l.path.find(".php/") == std::string::npos;
     // Exact matches first, then suffixes, then prefixes; within a kind the longest first.
     auto rank = [](const LocationConfig& l) { return l.exact ? 0 : l.suffix ? 1 : 2; };
     std::stable_sort(site.locations.begin(), site.locations.end(),

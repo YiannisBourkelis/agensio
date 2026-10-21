@@ -2,6 +2,23 @@
 
 ## 0.1.0-alpha.109
 
+- **An exact `.php` location decides its script's path-info form too** (found while building
+  `served_dir`, 2026-10-22). PHP runs `/install.php/x` as `/install.php` with `PATH_INFO=/x`, but an exact
+  location matched its literal path only.
+  - On a site whose `.php` suffix location runs any script (`app = "php"`, `wordpress`), the path-info
+    form of a script an exact location refuses reached that suffix location and ran. This covered a
+    `rules.private` `.php` file, a hand-written exact `deny`, and WordPress's `wp-content/db.php`,
+    `advanced-cache.php`, `object-cache.php` and `wp-config.php`. Shown on php-fpm: `/install.php` 404,
+    `/install.php/x` ran it.
+  - An entry point's path-info URLs (`/index.php/old/link` on a site with `rules.entry_points`) were 404
+    there, or went round `try_files` without their `PATH_INFO` (Laravel).
+  - Now the exact location takes them: a denied script is 404 however it is spelled, an entry point
+    runs with its `PATH_INFO`. A longer exact location naming the whole path still wins, and an exact
+    path with `.php/` inside takes only itself.
+  - The access and password rules judged the script already (alpha.59).
+  - nginx has the same trap: `location = /install.php { deny all; }` beside `location ~ [^/]\.php(/|$)`.
+  - `bench/ab.sh -A` gains the row `exact`: sixteen exact locations before a cached file.
+
 - **A plain PHP site can serve a directory of its project: `served_dir`** (a report from the test host,
   2026-10-22: an application keeping `index.php` in `public/` and its code in `src/` beside it could not be
   hosted on `app = "php"`. With `root` set to `public/`, PHP's `open_basedir` left out the `src/` that

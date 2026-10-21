@@ -46,6 +46,9 @@
 #             app = "static" serving its cached 1 KB index.html, the same file on both sides: from
 #             0.1.0-alpha.94 its security baseline, three fields through a node at / with the html
 #             ending, against none before: what a static site pays for the baseline on upgrading).
+#             And "exact:/sub/index.html:64" (127.0.0.1:8088, sixteen exact .php locations that deny,
+#             a long rules.private, before a cached file: the router's pass over exact locations,
+#             from 0.1.0-alpha.109 also asking whether the path is one's path-info form).
 #             With -P also "proxy-hdr:/json:64" (127.0.0.1:8091, the benchmark
 #             upstream behind a site with set, default and remove rules: the upstream loop's half)
 #             and "proxy-cache:/json:64" (127.0.0.1:8089, the same site with a success-only
@@ -125,7 +128,7 @@ sed "s#@WORKERS@#$WORKERS#g; s#@BENCH@#$BENCH#g; s#@SENDFILE_MIN@#${SENDFILE_MIN
 sed "s#@WORKERS@#$WORKERS#g; s#@BENCH@#$BENCH#g; s#@SENDFILE_MIN@#${SENDFILE_MIN:-48KB}#g; s#@ACCESS_LOG@#${ACCESS_LOG:-off}#g; s#@H3@#, \"h3\"#g" "$BENCH/agensio.toml" > "$BENCH/tmp/ab-agensio-h3.toml"
 # The access gate's two sites go into every config (before the proxy one is built from it).
 if [ $ACCESS = 1 ]; then
-  SPECS+=("access:/:64" "access-all:/:64" "refuse:/sub/index.html:64" "hsts:/:64" "redir-miss:/:64" "redir-hit:/x:64" "headers:/sub/index.html:64" "baseline:/:64")
+  SPECS+=("access:/:64" "access-all:/:64" "refuse:/sub/index.html:64" "hsts:/:64" "redir-miss:/:64" "redir-hit:/x:64" "headers:/sub/index.html:64" "baseline:/:64" "exact:/sub/index.html:64")
   # Response headers (0.1.0-alpha.89, docs/headers.md 9): a rule at / and a deeper one, a file under
   # the deeper one; a base before them gets the same site without rules. With -P, a proxied answer
   # through set, default and remove rules, the base the same proxy site without them.
@@ -269,6 +272,14 @@ path = "/"
 users = "$BENCH/tmp/ab-users"
 AUTH_SITES
     fi
+    # Sixteen exact .php locations that deny, what a long rules.private renders, in front of a
+    # cached file every request walks past them to (0.1.0-alpha.109): the router's pass over exact
+    # locations, which since then also asks whether the path is one's path-info form.
+    { printf '\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8088"]\nroot = "%s/www"\n' "$BENCH"
+      for p in /install.php /setup.php /config.php /update.php /upgrade.php /cron.php /backup.php /phpinfo.php \
+               /test.php /debug.php /admin/install.php /admin/setup.php /lib/config.php /scripts/migrate.php /tools/reset.php /old/index.php; do
+        printf '\n[[site.location]]\npath = "%s"\nmatch = "exact"\nhandler = "deny"\n' "$p"
+      done; } >> "$BENCH/tmp/$f"
   done
 fi
 # The proxy gate adds a site that forwards 127.0.0.1:8093 to the upstream; a side whose
@@ -283,7 +294,7 @@ fi
 
 PID=""; SIDE_PROXY=0; SIDE_H2=0; SIDE_H3=0
 start() {  # binary
-  for port in 8080 8443 8091 8092 8093 8094 8095 8449 8098 8099; do
+  for port in 8080 8443 8088 8091 8092 8093 8094 8095 8449 8098 8099; do
     nc -z 127.0.0.1 "$port" 2>/dev/null && { echo "port $port is busy; stop the running server first"; exit 1; }
   done
   local cfg="$BENCH/tmp/ab-agensio.toml"
@@ -369,6 +380,7 @@ measure() {  # side round -> appends "side round spec cpu_us rps" lines to $RAW/
       redir-hit) url="http://127.0.0.1:8099$path" ;;
       headers) url="http://127.0.0.1:8092$path" ;;
       baseline) url="http://127.0.0.1:8090$path" ;;
+      exact) url="http://127.0.0.1:8088$path" ;;
       proxy-hdr) [ $SIDE_PROXY = 1 ] || continue; url="http://127.0.0.1:8091$path" ;;
       proxy-cache) [ $SIDE_PROXY = 1 ] || continue; url="http://127.0.0.1:8089$path" ;;
       auth) url="http://127.0.0.1:8096$path" ;;

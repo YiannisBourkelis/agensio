@@ -1305,6 +1305,39 @@ static void test_presets() {
     CHECK(Router::location(wcfg2.sites[0], "/readme.html").try_files[0].status == 404 && Router::location(wcfg2.sites[0], "/license.txt").try_files[0].status == 404);
     for (const char* dropin : {"/wp-content/db.php", "/wp-content/advanced-cache.php", "/wp-content/object-cache.php"})
         CHECK(Router::location(wcfg2.sites[0], dropin).try_files[0].status == 404);
+    // An exact .php location decides its script's path-info form too (2026-10-22): FastCGI cuts
+    // "/x.php/rest" at the first ".php/" (core/script_split.hpp), so the location that decides
+    // "/x.php" decides "/x.php/rest". Before, an exact deny was only its literal path, and the
+    // .php suffix location ran the refused script with PATH_INFO; an entry point's path-info URLs
+    // went the long way round its try_files and lost their PATH_INFO.
+    {
+        fs::create_directories(dir / "pi");
+        write("pi.toml", "[[site]]\nlisten = [\"127.0.0.1:18080\"]\nroot = \"pi\"\napp = \"php\"\nphp = { socket = \"unix:/run/php/fpm.sock\" }\n"
+                         "[[site.location]]\npath = \"/install.php\"\nmatch = \"exact\"\nhandler = \"deny\"\n"
+                         "[[site.location]]\npath = \"/install.php/help\"\nmatch = \"exact\"\nhandler = \"deny\"\n"
+                         "[[site.location]]\npath = \"/run.php\"\nmatch = \"exact\"\nhandler = \"fastcgi\"\n"
+                         "[[site.location]]\npath = \"/a.php/b.php\"\nmatch = \"exact\"\nhandler = \"deny\"\n"
+                         "[[site.location]]\npath = \"/robots.txt\"\nmatch = \"exact\"\nhandler = \"deny\"\n");
+        const Config pic = load_config(dir / "pi.toml");
+        const SiteConfig& ps = pic.sites[0];
+        auto at = [&](const char* path) -> const LocationConfig& { return Router::location(ps, path); };
+        CHECK(at("/install.php").handler == "deny" && at("/install.php/x").handler == "deny" && at("/install.php/x").path == "/install.php" &&
+              at("/install.php/a/b.php").path == "/install.php");
+        // A longer exact location naming the whole path still wins; one that names it only up to a
+        // segment does not.
+        CHECK(at("/install.php/help").path == "/install.php/help" && at("/install.php/help/x").path == "/install.php");
+        CHECK(at("/run.php/old/link").exact && at("/run.php/old/link").path == "/run.php" && at("/run.php/old/link").kind == HandlerKind::fastcgi);
+        // The script is the path up to its first ".php/": "/a.php/b.php/c" runs /a.php, so the exact
+        // "/a.php/b.php" never claims it; nor does an exact non-.php location claim a longer path.
+        CHECK(at("/a.php/b.php").path == "/a.php/b.php" && at("/a.php/b.php/c").path != "/a.php/b.php" && at("/a.php/b.php/c").suffix);
+        CHECK(at("/robots.txt/x").path == "/" && at("/install.phpx/y").path == "/" && at("/other.php/x").suffix &&
+              at("/other.php/x").kind == HandlerKind::fastcgi);
+        // The presets' own: WordPress's credentials and drop-ins stay refused with path info, and
+        // Laravel's front controller takes its path-info form itself.
+        const SiteConfig& wp = wcfg2.sites[0];
+        CHECK(Router::location(wp, "/wp-config.php/x").handler == "deny" && Router::location(wp, "/wp-content/db.php/x").handler == "deny");
+        CHECK(Router::location(s, "/index.php/extra").exact && Router::location(s, "/index.php/extra").kind == HandlerKind::fastcgi);
+    }
     // Every PHP preset either runs .php through FastCGI or refuses it on every static
     // location: a preset that lets a .php reach the static handler cannot ship.
     for (const Config* c : {&cfg, &pcfg, &dcfg, &wcfg2}) {

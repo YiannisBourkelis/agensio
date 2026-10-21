@@ -460,7 +460,7 @@ user = "app"
 tls = "auto"
 try_files = ["$uri", "$uri/", "/index.php?$query_string"]   # nice URLs reach the front controller
 
-[[site.location]]            # the only script that runs
+[[site.location]]            # the only script that runs, also as /index.php/old/link (PATH_INFO)
 path = "/index.php"
 match = "exact"
 handler = "fastcgi"
@@ -484,7 +484,9 @@ What is easy to get wrong: on `app = "php"` every `.php` under the served direct
 application that lets its users upload files (avatars, attachments), that includes a script one
 of them disguises as a picture, so name the scripts that run, as above; health says
 `php_any_script_runs` until a site does, or refuses `.php` where uploads go
-(`refuse = ["/uploads/**/*.php"]`).
+(`refuse = ["/uploads/**/*.php"]`). Old links of the form `/index.php/old/link` run the front
+controller with `PATH_INFO = /old/link`, since an exact `.php` location takes its path-info form;
+to move them to clean addresses, see [Old addresses with /index.php/ in them](#old-addresses-with-indexphp-in-them).
 
 **Check it.**
 

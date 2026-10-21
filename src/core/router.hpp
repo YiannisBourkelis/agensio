@@ -41,6 +41,10 @@ public:
         for (const LocationConfig& loc : site.locations) {
             if (loc.exact) {
                 if (path == loc.path) return loc;
+                // A script's path-info form ("/install.php/x"), which FastCGI runs as the script:
+                // decided here, not by a suffix location. Exact locations come longest first, so one
+                // naming the whole path has already won.
+                if (loc.script_exact && path.size() > loc.path.size() && path[loc.path.size()] == '/' && path.starts_with(loc.path)) return loc;
             } else if (loc.suffix) {
                 if (!suffix && suffix_hit(path, loc.path) && (loc.script_dir.empty() || script_in(path, loc.path, loc.script_dir))) suffix = &loc;
             } else if (path.starts_with(loc.path)) {

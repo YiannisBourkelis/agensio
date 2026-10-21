@@ -781,7 +781,9 @@ check "laravel: project files outside public/ unreachable" "400" "$(code --path-
 check "laravel: a .php that does not exist is refused, not routed" "404" "$(code http://127.0.0.1:8090/anything.php)"
 # The regression: a second .php under public/ was served as a download with its source.
 check "laravel: an existing second .php is refused (404), never executed, never disclosed" "404 no-source" "$(code http://127.0.0.1:8090/admin.php) $(curl -sS http://127.0.0.1:8090/admin.php | grep -q '<?php\|hunter2\|second-entry' && echo LEAK || echo no-source)"
-check "laravel: /index.php/extra also lands in the front controller" "laravel /index.php/extra /index.php -" "$(curl -sS 'http://127.0.0.1:8090/index.php/extra')"
+# The front controller's exact location takes its path-info form itself (2026-10-22), as Laravel's own
+# nginx configuration does; before, the path went round try_files and arrived without PATH_INFO.
+check "laravel: /index.php/extra runs the front controller with PATH_INFO /extra" "laravel /index.php/extra /index.php /extra" "$(curl -sS 'http://127.0.0.1:8090/index.php/extra')"
 shield_check "laravel build/" http://127.0.0.1:8090/build tests/laravel/public/build
 shield_check "laravel root" http://127.0.0.1:8090 tests/laravel/public
 fi
@@ -2128,6 +2130,15 @@ PYT
     "$(sd_create served.test served) $(sd_get served.test /) $(sd_code served.test /src/lib.php) $(sd_code served.test /.env) $(code --path-as-is -H "Host: served.test" "http://127.0.0.1:8096/../src/lib.php") $(sd_code served.test /public/index.php) $(curl -sS --unix-socket $CS http://control/v1/sites/served.test | python3 -c 'import json,sys,os; d=json.load(sys.stdin); print(d.get("served_dir") + ":" + os.path.basename(d.get("project_directory", "")))') $(sd_create later.test served-later) $(sd_code later.test /) $(curl -sS --unix-socket $CS http://control/v1/health | python3 -c 'import json,sys; print(" ".join(x["code"] for x in json.load(sys.stdin)["findings"] if x.get("site") == "later.test" and x["code"] == "served_dir_missing") or "none")')"
   cpost /v1/sites/served.test/delete '{"confirm":true,"reason":"served"}' > /dev/null
   cpost /v1/sites/later.test/delete '{"confirm":true,"reason":"served"}' > /dev/null
+  # rules.private on a .php file holds for its path-info form too (2026-10-22): before, /install.php/x
+  # reached the .php suffix location and ran the script the rule refuses.
+  rm -rf bench/tmp/private-php; mkdir -p bench/tmp/private-php
+  printf '<?php echo "install-ran";' > bench/tmp/private-php/install.php
+  printf '<?php echo "index ", $_SERVER["PATH_INFO"] ?? "-";' > bench/tmp/private-php/index.php
+  check "rules.private on a .php file: the file and its path-info forms are 404 and never run; another script with path info runs with its PATH_INFO" \
+    "201 404 404 404 no-run index /x" \
+    "$(cpost /v1/sites "{\"domain\":\"private.test\",\"https\":\"none\",\"user\":null,\"app\":\"php\",\"php_socket\":\"unix:$ROOT/bench/tmp/php/fpm.sock\",\"root\":\"$ROOT/bench/tmp/private-php\",\"rules\":{\"private\":[\"/install.php\"]},\"listen_plain\":\"127.0.0.1:8096\",\"confirm\":true,\"reason\":\"private\"}") $(sd_code private.test /install.php) $(sd_code private.test /install.php/x) $(sd_code private.test /install.php/a/b) $(sd_get private.test /install.php/x | grep -q install-ran && echo RAN || echo no-run) $(sd_get private.test /index.php/x)"
+  cpost /v1/sites/private.test/delete '{"confirm":true,"reason":"private"}' > /dev/null
   # [[site.response_headers]] (alpha.89, docs/headers.md 2): per field the most specific rule naming
   # it decides; set replaces every copy (the application's too), default only fills a gap, remove
   # deletes; on every answer, static, PHP and agensio's own 404 and 403 alike, over HTTP/1, HTTP/2 and
@@ -2558,6 +2569,9 @@ print(len(deny), n404, readme[0]["handler"] if readme else "-")')"
   check "wordpress: wp-login.php executes, no source" "wp-login ok no-source" "$(curl -sS $W/wp-login.php) $(no_source $W/wp-login.php)"
   check "wordpress: every real entry point executes (xmlrpc, cron, admin-ajax, comments, signup, activate, trackback)" "7 0" "$(for f in xmlrpc.php wp-cron.php wp-admin/admin-ajax.php wp-comments-post.php wp-signup.php wp-activate.php wp-trackback.php; do curl -sS $W/$f; echo; done | grep -c 'entry ok') $(for f in xmlrpc.php wp-cron.php wp-admin/admin-ajax.php wp-comments-post.php wp-signup.php wp-activate.php wp-trackback.php; do curl -sS $W/$f; done | grep -c '<?php')"
   check "wordpress: wp-config.php is a 404, never shown" "404 no-source" "$(code $W/wp-config.php) $(no_source $W/wp-config.php)"
+  # With path info too (2026-10-22): before, /wp-content/db.php/x missed the exact location that
+  # refuses the drop-in and the .php suffix location ran it.
+  check "wordpress: wp-config.php and a drop-in with path info are 404 and never run" "404 404 no-run" "$(code $W/wp-config.php/x) $(code $W/wp-content/db.php/x) $(curl -sS $W/wp-content/db.php/x | grep -q 'drop-in ran' && echo RAN || echo no-run)"
   check "wordpress: readme.html and license.txt (the version fingerprint) are 404 although present" "404 404 yes" "$(code $W/readme.html) $(code $W/license.txt) $([ -f tests/wordpress/readme.html ] && echo yes)"
   check "wordpress: the wp-content drop-ins (db.php, advanced-cache.php, object-cache.php) are 404, never executed; the SQLite file is hidden" "404 404 404 404 no" "$(code $W/wp-content/db.php) $(code $W/wp-content/advanced-cache.php) $(code $W/wp-content/object-cache.php) $(code $W/wp-content/database/.ht.sqlite) $(curl -sS $W/wp-content/db.php | grep -q 'drop-in ran' && echo yes || echo no)"
   check "wordpress: PHP under uploads and wp-includes refused, assets served" "404 404 200" "$(code $W/wp-content/uploads/shell.php) $(code $W/wp-includes/x.php) $(code $W/wp-includes/wp.js)"

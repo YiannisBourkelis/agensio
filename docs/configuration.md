@@ -305,8 +305,8 @@ index = ["index.php"]
 try_files = ["$uri", "$uri/", "/index.php?$query_string"]
 php = { socket = "unix:/run/php/php8.4-fpm.sock" }
 
-[[site.location]]        # the front controller is the only script that ever runs
-path = "/index.php"
+[[site.location]]        # the front controller is the only script that ever runs (also
+path = "/index.php"      # /index.php/extra, with PATH_INFO /extra: section 6)
 match = "exact"
 handler = "fastcgi"
 
@@ -1050,6 +1050,19 @@ Precedence: `exact` matches first, then `suffix` locations (an ending such as `.
 matched at the end of the path or before a `/`), then the longest `prefix`; an implicit
 `/` prefix with the site's settings always exists. A prefix location with `final = true`
 (nginx `^~`) that is the longest prefix match shields its subtree from suffix locations.
+
+An exact location for a `.php` file also takes that script's path-info form: `/install.php/x`
+and `/install.php/a/b` are decided by the exact `/install.php`, because PHP runs them as
+`/install.php` (FastCGI cuts the path at its first `.php/`, the rest is `PATH_INFO`). A
+denied script stays denied however it is spelled, and an entry point runs its path-info URLs
+(`/index.php/old/link`, `PATH_INFO = /old/link`). A longer exact location naming the whole path
+still wins (`/install.php/help`), and an exact path with `.php/` inside it
+(`/a.php/b.php`) takes only itself, since PHP would run `/a.php`. Before 0.1.0-alpha.109 an exact
+location matched its literal path only: on a site whose `.php` suffix location runs any script
+(`app = "php"`, `wordpress`), `/install.php/x` reached that location and ran the script an exact
+deny refused (a `rules.private` file, WordPress's `wp-content/db.php`, `wp-config.php`), and an
+entry point's path-info URLs went round `try_files` and lost their `PATH_INFO`. nginx has the same
+trap: `location = /install.php { deny all; }` beside `location ~ [^/]\.php(/|$)`.
 
 | key | meaning |
 |---|---|
@@ -2784,8 +2797,10 @@ hand-written location or root edit is needed:
 ```
 
 `private` paths (a directory with a trailing `/`, or one file) answer 404 whatever exists
-there, before any suffix location (`final = true`, `handler = "deny"`). `entry_points`
-(PHP presets only) are the only `.php` files that run; every other `.php` anywhere under
+there, before any suffix location (`final = true`, `handler = "deny"`); a private `.php` file
+with path info too (`/install.php/x`, section 6). `entry_points`
+(PHP presets only) are the only `.php` files that run, with their path-info URLs
+(`/index.php/old/link`); every other `.php` anywhere under
 the root is 404, never served as source (the preset's `.php` suffix location is replaced
 by a denying one). `cache` (PHP and static sites) names directories served straight from
 disk with `Cache-Control: public, max-age=N` (0 to a year), where nothing runs and no

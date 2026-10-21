@@ -159,8 +159,9 @@ Source map (`src/`, files move into subdirectories as they are touched, see the 
   fields, `Body`), `body.hpp` (`MemoryBody`, `FileBody`, `StreamBody` for later phases),
   `stream.hpp` (one request/response exchange), `worker_state.hpp`, `strings.hpp`,
   `router.hpp/.cpp` (`Router`: site by Host, then `Router::location`: exact before
-  prefix, longest prefix first, implicit `/` last; `try_files` fallbacks re-enter it,
-  at most 8 hops).
+  prefix, longest prefix first, implicit `/` last; an exact `.php` location also takes its
+  script's path-info form, `LocationConfig::script_exact`, alpha.109; `try_files` fallbacks
+  re-enter it, at most 8 hops).
 - `http1/`: `parser` (request head into `Request`), `connection.hpp` (`Http1Connection`,
   the I/O loop: reads, parses, drives one `Stream`, keep-alive/pipelining/timer),
   `writer.hpp` (`Http1Writer`: `Response` to bytes, owns the writev/TLS-coalescing/
