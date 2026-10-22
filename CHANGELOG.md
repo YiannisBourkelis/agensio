@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.111
+## 0.1.0-alpha.111 (2026-10-23)
 
 - **Docs: a file counts as still being written for one to two seconds, not one** (the test host's
   report on alpha.110). The guard of alpha.110 compares modification times in whole seconds, so a file
