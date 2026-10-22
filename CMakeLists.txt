@@ -94,6 +94,8 @@ endif()
 # Our own QUIC transport over OpenSSL 3.5's QUIC TLS API (SSL_set_quic_tls_cbs) and its
 # primitives; the UDP endpoint uses recvmmsg, sendmmsg, UDP_GRO and UDP_SEGMENT, so it is
 # Linux for now. Without the API the build has TLS, HTTP/1 and HTTP/2 and refuses "h3".
+# 3.5.1 at least: 3.5.0 cleared the transport parameters when the SNI callback switched the
+# SSL_CTX (OpenSSL PR 27706), which agensio's certificate selection does on every TLS listener.
 set(AGENSIO_HAS_QUIC OFF)
 option(AGENSIO_QUIC_TRACE "Print every QUIC packet and event to stderr (development only)" OFF)
 if(AGENSIO_HAS_TLS AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -101,11 +103,19 @@ if(AGENSIO_HAS_TLS AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set(CMAKE_REQUIRED_INCLUDES ${OPENSSL_INCLUDE_DIR})
   set(CMAKE_REQUIRED_LIBRARIES OpenSSL::SSL OpenSSL::Crypto)
   check_symbol_exists(SSL_set_quic_tls_cbs "openssl/ssl.h" AGENSIO_OPENSSL_QUIC_TLS)
+  include(CheckCXXSourceCompiles)
+  check_cxx_source_compiles("#include <openssl/opensslv.h>
+#if OPENSSL_VERSION_NUMBER < 0x30500010L
+#error OpenSSL before 3.5.1
+#endif
+int main(void) { return 0; }" AGENSIO_OPENSSL_351)
   unset(CMAKE_REQUIRED_INCLUDES)
   unset(CMAKE_REQUIRED_LIBRARIES)
-  if(AGENSIO_OPENSSL_QUIC_TLS)
+  if(AGENSIO_OPENSSL_QUIC_TLS AND AGENSIO_OPENSSL_351)
     set(AGENSIO_HAS_QUIC ON)
     message(STATUS "HTTP/3 enabled (OpenSSL QUIC TLS API)")
+  elseif(AGENSIO_OPENSSL_QUIC_TLS)
+    message(STATUS "HTTP/3 disabled: OpenSSL ${OPENSSL_VERSION} drops the QUIC transport parameters when SNI switches the context (3.5.1 or later needed)")
   else()
     message(STATUS "HTTP/3 disabled: OpenSSL ${OPENSSL_VERSION} has no QUIC TLS API (3.5 or later needed)")
   endif()
@@ -348,6 +358,13 @@ set(CPACK_RESOURCE_FILE_LICENSE ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE)
 set(CPACK_GENERATOR "DEB;RPM")
 # Debian: a pre-release sorts before the release with a tilde.
 string(REPLACE "-" "~" AGENSIO_DEB_VERSION ${AGENSIO_VERSION_STRING})
+# A build for one distribution release names it in its version (the release workflow's Debian 13
+# job: -DAGENSIO_DEB_SUFFIX=deb13 gives 0.1.0~alpha.110+deb13), so the two .deb files of a release
+# differ; a plus sorts after the plain version and before the next release.
+set(AGENSIO_DEB_SUFFIX "" CACHE STRING "Suffix for the Debian package version (+SUFFIX), empty for the build that runs everywhere")
+if(AGENSIO_DEB_SUFFIX)
+  string(APPEND AGENSIO_DEB_VERSION "+${AGENSIO_DEB_SUFFIX}")
+endif()
 set(CPACK_DEBIAN_PACKAGE_VERSION ${AGENSIO_DEB_VERSION})
 set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
 set(CPACK_DEBIAN_PACKAGE_SECTION httpd)

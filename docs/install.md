@@ -172,7 +172,14 @@ rollback.
    **Debian 12+, Ubuntu 22.04+, from the release page.** Pick the `.deb` of the release
    at https://github.com/YiannisBourkelis/agensio/releases (GitHub shows the version's
    tilde as a dot in the file name; the package inside is unaffected) and let `apt`
-   install it, which also pulls the dependencies:
+   install it, which also pulls the dependencies. Each release has two:
+
+   - `agensio_<version>_amd64.deb`, built on Ubuntu 22.04: Debian 12 and later, Ubuntu 22.04
+     and later, without HTTP/3 (their OpenSSL 3.0 has no QUIC API; HTTP/1, HTTP/2 and TLS as
+     everywhere);
+   - the file with `deb13` in its name, built on Debian 13 against its OpenSSL 3.5: Debian 13 and
+     later only, with HTTP/3 (`docs/configuration.md` 17). On Debian 12 `apt` refuses it for
+     its dependencies.
 
    ```sh
    wget https://github.com/YiannisBourkelis/agensio/releases/download/v0.1.0-alpha.3/agensio_0.1.0.alpha.3_amd64.deb
@@ -187,7 +194,10 @@ rollback.
    `sudo apt purge agensio` also removes `/etc/agensio` and `/var/log/agensio`.
 
    **Debian, Ubuntu, from the APT repository** (available once the release signing key is
-   set up, then `apt update` follows new releases by itself):
+   set up, then `apt update` follows new releases by itself). It carries the build for Debian 12
+   and later, without HTTP/3; on Debian 13 a `deb13` file installed from the release page would
+   be replaced by it at the next upgrade, so for HTTP/3 install from the release page and leave the
+   repository out:
 
    ```sh
    curl -fsSL https://yiannisbourkelis.github.io/agensio/agensio.gpg | sudo tee /usr/share/keyrings/agensio.gpg >/dev/null
@@ -207,7 +217,8 @@ rollback.
 
    or, once published in the AUR, `yay -S agensio` (`packaging/arch/PKGBUILD`).
 
-1. **Binary.** `.deb` and `.rpm` packages, a static tarball, or a source build:
+1. **Binary.** `.deb` and `.rpm` packages, or a source build (HTTP/3 needs OpenSSL 3.5.1 or later:
+   Debian 13, Ubuntu 26.04, RHEL 9.7 or 10.1, Fedora 43, Arch):
 
    ```
    cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release

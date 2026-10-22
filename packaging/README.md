@@ -21,7 +21,10 @@
 - `arch/`: `PKGBUILD` and install hooks; the release workflow's `arch` job builds the binary
   `.pkg.tar.zst` from it in an Arch container and attaches it to the release
   (`sudo pacman -U ./agensio-*.pkg.tar.zst`); the same file is what the AUR will publish.
-- `.github/workflows/release.yml` builds the `.deb` and `.rpm` on every `v*` tag, attaches them to the GitHub release, and publishes the APT repository to GitHub Pages when the `APT_GPG_PRIVATE_KEY` secret exists (`docs/install.md`).
+- `.github/workflows/release.yml` builds the `.deb` and `.rpm` on every `v*` tag, attaches them to the GitHub release, and publishes the APT repository to GitHub Pages when the `APT_GPG_PRIVATE_KEY` secret exists (`docs/install.md`). Two `.deb` files, built by two jobs that run in parallel, neither waiting for the other:
+  - `packages`, on Ubuntu 22.04: `agensio_<version>_amd64.deb` (and the `.rpm`) for Debian 12, Ubuntu 22.04 and later, without HTTP/3 (OpenSSL 3.0 has no QUIC TLS API). It feeds the APT repository and the `fedora` smoke test.
+  - `debian13`, in a `debian:trixie` container: `agensio_<version>+deb13_amd64.deb` (`-DAGENSIO_DEB_SUFFIX=deb13`), against Debian 13's OpenSSL 3.5, with HTTP/3, which the job proves by loading a configuration with `"h3"`; Debian 13 and later only.
+  - Whichever finishes first creates the release (`release-upload.sh`, which also takes the version's section of `CHANGELOG.md` as the notes), and the other attaches its files to it.
 
 Version strings: the tag is `v0.1.0-alpha.1`; Debian gets `0.1.0~alpha.1` (a tilde sorts
 before the release), RPM `0.1.0-0.1.alpha.1`, Arch `0.1.0alpha1-1`.

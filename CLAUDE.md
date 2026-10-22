@@ -146,6 +146,7 @@ cmake -S . -B build -DAGENSIO_HTTPARENA=ON  # adds the HttpArena benchmark handl
 cmake -S . -B build-notls -G Ninja -DCMAKE_BUILD_TYPE=Release -DAGENSIO_TLS=OFF   # without OpenSSL: no TLS, no passwords
 cmake -S . -B build-noauth -G Ninja -DCMAKE_BUILD_TYPE=Release -DXCRYPT_LIBRARY=/nonexistent  # as without libxcrypt: no passwords
 (cd build && cpack -G DEB)                 # the .deb (packaging/, tests/package.sh runs it in the root devbox)
+cmake -S . -B build -DAGENSIO_DEB_SUFFIX=deb13  # the release's Debian 13 .deb (version +deb13; HTTP/3 needs OpenSSL >= 3.5.1)
 bench/run.sh                               # 5 s per case; -d 15s for publishable numbers
 scripts/lint.sh && scripts/format.sh       # clang-tidy / clang-format
 cmake -B build-fuzz -DAGENSIO_FUZZ=ON -DAGENSIO_TESTS=OFF -DAGENSIO_TLS=OFF \

@@ -53,16 +53,9 @@ jobs:
       - name: create the release if the tag has none, then attach the packages
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          # The version's section of CHANGELOG.md becomes the release notes.
-          awk -v v="$version" '$0 ~ "^## " v " " {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md
-          [ -s notes.md ] || echo "See CHANGELOG.md." > notes.md
-          if ! gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            pre=""; case "$version" in *-*) pre="--prerelease";; esac
-            gh release create "$GITHUB_REF_NAME" $pre --title "$version" --notes-file notes.md -R "$GITHUB_REPOSITORY"
-          fi
-          gh release upload "$GITHUB_REF_NAME" build/*.deb build/*.rpm --clobber -R "$GITHUB_REPOSITORY"
+        # The version's section of CHANGELOG.md becomes the release notes; the debian13 job, which
+        # runs beside this one, creates the release instead if it finishes first.
+        run: packaging/release-upload.sh build/*.deb build/*.rpm
       - name: build the APT repository
         if: ${{ env.HAVE_APT_KEY == 'true' }}
         env:
@@ -93,6 +86,52 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./site
           keep_files: true
+
+  debian13:
+    # The .deb built on Debian 13 against its own OpenSSL 3.5, so it serves HTTP/3; the packages
+    # job's, built on Ubuntu 22.04 to install on Debian 12 and Ubuntu 22.04 and later, has none
+    # (their OpenSSL 3.0 has no QUIC TLS API). Its version carries +deb13
+    # (agensio_<version>+deb13_amd64.deb), so the release's two files differ; it installs on
+    # Debian 13 and later only. It runs beside the packages job, which never waits for it:
+    # whichever finishes first creates the release (packaging/release-upload.sh).
+    runs-on: ubuntu-24.04
+    container: debian:trixie
+    steps:
+      - name: dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git cmake ninja-build g++ libssl-dev zlib1g-dev libcrypt-dev dpkg-dev file gh openssl
+      - uses: actions/checkout@v4
+      - name: configure and build
+        # asio is fetched by CMake (asio-1-38-2): Debian 13's libasio-dev is older than the project needs.
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DAGENSIO_DEB_SUFFIX=deb13 && cmake --build build
+      - name: unit tests
+        run: build/agensio_tests
+      - name: version matches the tag, and the build serves HTTP/3
+        run: |
+          tag="${GITHUB_REF_NAME#v}"; ver="$(build/agensio -v | awk '{print $2}')"
+          [ "$tag" = "$ver" ] || { echo "tag $tag but binary says $ver: set AGENSIO_VERSION_STRING"; exit 1; }
+          # A build without the QUIC TLS API refuses "h3" in protocols; this one must load it.
+          d=$(mktemp -d); mkdir "$d/www"
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 -subj /CN=localhost -keyout "$d/key.pem" -out "$d/cert.pem" 2>/dev/null
+          printf '[server]\nprotocols = ["h3", "h2", "h1"]\n[log]\naccess = "off"\n[[site]]\nserver_name = ["localhost"]\nlisten = ["127.0.0.1:8443"]\nroot = "%s/www"\ntls = { cert = "%s/cert.pem", key = "%s/key.pem" }\n' "$d" "$d" "$d" > "$d/h3.toml"
+          build/agensio -t -c "$d/h3.toml"
+      - name: package
+        run: cd build && cpack -G DEB && ls -la *.deb
+      - name: smoke-install the .deb
+        run: |
+          apt-get install -y ./build/agensio_*+deb13_amd64.deb
+          id agensio
+          test -f /etc/agensio/agensio.toml && test -f /etc/agensio/sites.d/default.toml
+          /usr/sbin/agensio -t -c /etc/agensio/agensio.toml
+          /usr/sbin/agensio -v
+      - name: attach to the release (creating it if the packages job has not yet)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # In the container the checkout belongs to another uid and git refuses to read it.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          packaging/release-upload.sh build/agensio_*+deb13_amd64.deb
 
   arch:
     # A binary pacman package from packaging/arch/PKGBUILD, built in an Arch container and

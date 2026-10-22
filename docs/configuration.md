@@ -3292,6 +3292,14 @@ switch on their next connection:
 protocols = ["h2", "h1", "h3"]   # h2 and h1 over TCP through ALPN, h3 over QUIC on the same ports
 ```
 
+**Which builds have it.** HTTP/3 needs OpenSSL 3.5.1 or later (the QUIC TLS API; 3.5.0 dropped the
+transport parameters when the SNI callback switched the certificate's context) and Linux; a build
+without it serves TLS, HTTP/1 and HTTP/2 and refuses `"h3"` naming why. Each release carries two
+`.deb` files: the one with `deb13` in its name is built on Debian 13 against its OpenSSL 3.5 and has
+HTTP/3 (it installs on Debian 13 and later); the other is built on Ubuntu 22.04 for Debian 12, Ubuntu
+22.04 and later, whose OpenSSL 3.0 has no QUIC API, and has none. The Arch package and a source build
+on Debian 13, Ubuntu 26.04, RHEL 9.7 or 10.1, Fedora 43 and later have it too (`docs/install.md`).
+
 What it needs from the host: UDP open on the listener's port in the firewall (the TCP
 port alone gives a client nothing to reach), a build with OpenSSL 3.5 or later on Linux
 (`-t` refuses `"h3"` on any other, so a configuration file moves between hosts

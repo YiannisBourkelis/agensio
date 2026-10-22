@@ -2,6 +2,22 @@
 
 ## 0.1.0-alpha.110
 
+- **Each release carries a Debian 13 `.deb` with HTTP/3.** The release packages were built on Ubuntu
+  22.04, whose OpenSSL 3.0 has no QUIC TLS API, so no released `.deb` or `.rpm` had HTTP/3, not even
+  on Debian 13.
+  - A new `debian13` job builds `agensio_<version>+deb13_amd64.deb` in a `debian:trixie` container
+    against Debian 13's OpenSSL 3.5, proves that the build loads `"h3"`, and smoke-installs it. It
+    installs on Debian 13 and later only.
+  - The Debian 12-compatible `.deb` is built as before. The two jobs run in parallel, neither
+    waiting for the other: whichever finishes first creates the release
+    (`packaging/release-upload.sh`).
+  - The APT repository still carries the Debian 12-compatible build.
+  - HTTP/3 is built only with OpenSSL 3.5.1 or later. In 3.5.0 the QUIC transport parameters were lost
+    when the SNI callback switched the context, which agensio's certificate selection does.
+  - In CMake, `-DAGENSIO_DEB_SUFFIX=NAME` gives the Debian package the version suffix `+NAME`.
+  - `docs/install.md` names the two files, and no longer mentions a static tarball, which no
+    workflow builds.
+
 - **`[server] server_header` follows a reload, as the reference says** (the test host's report on
   alpha.109).
   - What happened: after `server_header = ""` or `"web"` and a reload, `config_reference` showed the
