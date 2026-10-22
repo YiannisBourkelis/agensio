@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.109
+## 0.1.0-alpha.109 (2026-10-22)
 
 - **An exact `.php` location decides its script's path-info form too** (found while building
   `served_dir`, 2026-10-22). PHP runs `/install.php/x` as `/install.php` with `PATH_INFO=/x`, but an exact
