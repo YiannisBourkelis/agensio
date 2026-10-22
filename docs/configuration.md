@@ -59,11 +59,13 @@ revalidated with it, so a twin added, replaced or removed shows within
 `cache.revalidate_interval`. Files above `cache.max_file_size` are served as stored.
 `[cache] precompressed = false` turns the lookup off.
 
-**Files still being written.** A file modified within the last second, or one whose size or
-modification time changed while agensio read it, is served once as it was read, with
-`Cache-Control: no-store` and none of the location's lifetimes (no rule's cache field either),
-and is not cached; a twin still being written is passed over. Once the file is a second old it is
-cached as usual. An update made in place (`npm run build` into `public/build`, an unzip over the
+**Files still being written.** A file modified in the current second or the one before (agensio
+compares modification times in whole seconds, so for one to two seconds after its last write), or
+one whose size or modification time changed while agensio read it, is served once as it was read,
+with `Cache-Control: no-store` and none of the location's lifetimes (no rule's cache field either),
+and is not cached; a twin still being written is passed over. From the second after that it is
+cached as usual: a file written at 12:00:00.9 is still `no-store` at 12:00:01.9 and gets its
+lifetime from 12:00:02.0. An update made in place (`npm run build` into `public/build`, an unzip over the
 root) is served while it writes, and before 0.1.0-alpha.110 a partial copy read then was cached
 for a second and could carry a year's `immutable` (Laravel's `/build/`) into every browser that
 fetched it. nginx serves such a file per request as it stands, with whatever lifetime its

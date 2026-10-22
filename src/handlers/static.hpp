@@ -25,8 +25,9 @@ namespace agensio {
 // (Django's ManifestStaticFilesStorage: base.85e6f9d19e42.css), a name that changes with its content.
 bool content_hashed(std::string_view path) noexcept;
 
-// Whether a file read on a cache miss is settled enough to be cached (2026-10-22): not modified
-// within the last second, and unchanged while it was read (`after`: the descriptor's fstat once the
+// Whether a file read on a cache miss is settled enough to be cached (2026-10-22): not modified in
+// the current second or the one before (whole seconds, so one to two seconds after its last write),
+// and unchanged while it was read (`after`: the descriptor's fstat once the
 // bytes are in; `before` again when nothing was read). An in-place update (`npm run build` into
 // public/build) is served while it writes, and a prefix cached then went to every client for a
 // second with the location's lifetime (Laravel's /build/: immutable for a year). An mtime more than

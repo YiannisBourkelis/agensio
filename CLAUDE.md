@@ -247,10 +247,11 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-two, each seeded fr
   rules) only when the entry has twins, so a file without them pays two pointer tests; a
   twin older than the file is ignored, revalidation stats the twins with the file, and
   `cache.precompressed = false` switches the lookup off. Only memory entries have twins.
-  A file still being written (alpha.110, `file_settled` in `handlers/static.hpp`: modified within a
-  second of now, or changed during the read, one `fstat` of the open descriptor on a miss) is served
-  once uncached with `no-store` (`Response::unsettled_file`, which add_headers and the rules' cache
-  fields give way to), and a twin still being written is passed over.
+  A file still being written (alpha.110, `file_settled` in `handlers/static.hpp`: modified in the
+  current second or the one before, so one to two seconds after the last write, or changed during
+  the read, one `fstat` of the open descriptor on a miss) is served once uncached with `no-store`
+  (`Response::unsettled_file`, which add_headers and the rules' cache fields give way to), and a
+  twin still being written is passed over.
 - **Response**: prebuilt header fragments; `Date:` refreshed once per second per worker;
   one `async_write` with a `std::array<const_buffer, N>` of header + body; a memory body beyond
   that write and one 64 KB piece goes on in 64 KB pieces, each refreshing the idle clock

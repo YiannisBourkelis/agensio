@@ -777,7 +777,7 @@ check "laravel: any route reaches the front controller" "laravel /some/route?x=1
 check "laravel: root goes to index.php" "laravel / /index.php -" "$(curl -sS http://127.0.0.1:8090/)"
 check "laravel: static asset served from public/ with immutable caching" "console.log(\"app\"); public, max-age=31536000, immutable" "$(curl -sS http://127.0.0.1:8090/build/app.js | tr -d '\n') $(curl -sSI http://127.0.0.1:8090/build/app.js | tr -d '\r' | awk '/^Cache-Control:/{sub(/^Cache-Control: /,""); print}')"
 # A file still being written (2026-10-22): an in-place `npm run build` writes into public/build while it
-# is served. Fresh from its writer (modified within the last second) a file is served once with
+# is served. Fresh from its writer (modified in this second or the one before) a file is served once with
 # no-store and not cached, so neither agensio's cache nor a browser keeps a partial copy for the year
 # the location gives built assets; settled, it gets that lifetime. A twin still being written is
 # passed over until it settles.

@@ -537,7 +537,7 @@ static void test_precompressed() {
     write("a.css.gz", gz);
     write("b.css", css);
     write("b.css.br", br);
-    // Built a minute ago: a file modified within the last second is one still being written, and is
+    // Built a minute ago: a file modified in this second or the one before is one still being written, and is
     // not cached (file_settled, checked at the end).
     for (const char* name : {"a.css", "a.css.br", "a.css.gz", "b.css", "b.css.br"})
         fs::last_write_time(dir / "www" / name, fs::file_time_type::clock::now() - std::chrono::seconds(60));
@@ -2901,7 +2901,7 @@ static void test_tasks() {
               !content_hashed("/static/admin/css/base.css") && !content_hashed("/static/jquery.min.js") && !content_hashed("/static/a.0123ABCD.js") &&
               !content_hashed("/static/a.0123abc.js") && !content_hashed("/static/.0123abcd.js") && !content_hashed("/static/a.0123abcd.") &&
               !content_hashed("/static/0123abcd.js") && !content_hashed(""));
-        // A file still being written is not cached (2026-10-22): modified within a second of now, or
+        // A file still being written is not cached (2026-10-22): modified in this second or the one before, or
         // changed while it was read; an mtime more than a second ahead is no writer at work.
         {
             const std::int64_t now = 1'800'000'000;

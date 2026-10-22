@@ -2,6 +2,13 @@
 
 ## 0.1.0-alpha.111
 
+- **Docs: a file counts as still being written for one to two seconds, not one** (the test host's
+  report on alpha.110). The guard of alpha.110 compares modification times in whole seconds, so a file
+  written in second N gets `no-store` through second N+1 and its lifetime from N+2. A file first asked
+  for 1.2 s after its write was still `no-store`. This is the safe direction, one answer more without
+  a lifetime, so the code stays. `docs/configuration.md` 1 and the code's comment now say so, with an
+  example.
+
 - **A reload that turns HTTP/3 on at 443 no longer ends the server** (the test host's report on
   alpha.110).
   - What happened: root added `"h3"` to `[server] protocols` on the live host, which was started as
