@@ -587,6 +587,18 @@ struct Config {
         bool certificate = false;  // set aside because its certificate and key did not load (services/certificates.hpp)
     };
     std::vector<HeldBack> held_back;
+    // Credential files the hosting rules find readable by others or by a group not the site's
+    // (services/pools.hpp isolate_hosting, 2026-10-22). They set no site aside, since a site stopped
+    // makes no file private again: the helper tightens them as the site's account at a start and on
+    // reload, and health names what is left. Mode and owner as stat gave them.
+    struct ExposedCredential {
+        std::string site;  // the site's first name
+        std::string path;
+        bool dir = false;  // a credential directory (.git, Laravel's storage/)
+        unsigned mode = 0, uid = 0, gid = 0;
+        std::string message;  // the rule's own words, with the fix
+    };
+    std::vector<ExposedCredential> exposed_credentials;
     // A digest of each loaded file's text: a reload tells a file it already runs unchanged from
     // a newcomer when two of them conflict (the running one keeps its place).
     std::map<std::string, std::size_t> file_digests;

@@ -8961,6 +8961,32 @@ static void test_hosting_isolation() {
         CHECK(host.empty() && find(c, "b.test") && find(c, "b.test")->carried && find(c, "b.test")->root == rb && h && h->carried);
     }
     write("sites.d/b.toml", site("b.test", "18722", "b", "web2"));
+    // A credential an update left readable (2026-10-22: `cp .env.example .env` gives 0644): the site is
+    // set aside neither at a start nor on reload, since stopping it makes the file no more private; the
+    // file is listed with its mode for the helper to tighten and for health. Readable by the server's
+    // group through a group of its own counts the same; the site's own group does not.
+    files[rb + "/.env"] = FileFacts{false, 1002, 33, 0644};
+    for (const Config* r : {static_cast<const Config*>(nullptr), &running}) {
+        const Config c = load(r, host);
+        CHECK(host.empty() && find(c, "b.test") && !c.held(file("b.toml")) && c.exposed_credentials.size() == 1 &&
+              c.exposed_credentials[0].site == "b.test" && c.exposed_credentials[0].path == rb + "/.env" && c.exposed_credentials[0].mode == 0644 &&
+              c.exposed_credentials[0].message.find("readable by other users") != npos);
+    }
+    files[rb + "/.env"] = FileFacts{false, 1002, 33, 0640};
+    CHECK(load(&running, host).exposed_credentials.size() == 1 && host.empty());
+    files[rb + "/.env"] = FileFacts{false, 1002, 1002, 0640};
+    CHECK(load(&running, host).exposed_credentials.empty());
+    // A main file's site the same: before, its readable credential refused the whole configuration.
+    write("agensio.toml", main_head + site("m.test", "18724", "m", "web1"));
+    files[fs::canonical(dir / "m").string()] = FileFacts{true, 1001, 1001, 0755};
+    files[fs::canonical(dir / "m").string() + "/.env"] = FileFacts{false, 1001, 1001, 0644};
+    {
+        const Config c = load(&running, host);
+        CHECK(host.empty() && find(c, "m.test") && c.exposed_credentials.size() == 1 && c.exposed_credentials[0].site == "m.test");
+    }
+    write("agensio.toml", main_head);
+    files.erase(fs::canonical(dir / "m").string() + "/.env");
+    files.erase(rb + "/.env");
     // Two users with nested roots (c's own, inside a's): the newcomer yields though it loads first,
     // the served one keeps its place.
     files[fs::canonical(dir / "a" / "sub").string()] = FileFacts{true, 1002, 1002, 0755};

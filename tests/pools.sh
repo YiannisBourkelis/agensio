@@ -80,8 +80,10 @@ check "sockets owned by the user, group agensio, 0660" "$(stat -c '%U %G %a' $S1
 # The rules: a clean layout passes, each violation is named.
 rc=0; "$BIN" -t -c $T/agensio.toml > $T/t.out 2>&1 || rc=$?; check "-t passes on the clean layout" "$rc" "0"
 chmod 644 $T/web1/site/public/.env
-"$BIN" -t -c $T/agensio.toml > $T/t.out 2>&1 || true
-check "-t refuses a world-readable .env" "$(grep -c 'site one: .*/.env is readable by other users' $T/t.out)" "1"
+rc=0; "$BIN" -t -c $T/agensio.toml > $T/t.out 2>&1 || rc=$?
+# Named as a warning and the site served (2026-10-22): a site set aside makes the file no more private;
+# a start or reload made as root has the helper tighten it (tests/provision.sh).
+check "-t names a world-readable .env as a warning and passes" "$rc $(grep -c 'warning: site one: .*/.env is readable by other users' $T/t.out)" "0 1"
 chmod 640 $T/web1/site/public/.env
 chgrp web2 $S2
 "$BIN" -t -c $T/agensio.toml > $T/t.out 2>&1 || true

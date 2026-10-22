@@ -285,7 +285,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-two, each seeded fr
   to `reload_now` and undoes a change it would set aside; `tests/isolation.sh`. The hosting rules
   the same way (C2, `isolate_hosting` in `services/pools.*` over `set_aside_until_clean`): a site
   breaking one is set aside, kept in its running version only when that version passes them now
-  (a root opened to others takes the site down at the next reload); health `hosting_rule`;
+  (a root opened to others takes the site down at the next reload); health `hosting_rule`; a
+  credential file readable by others sets nothing aside (alpha.110, `Config::exposed_credentials`): the
+  helper's `credentials_tighten` makes it private as the account at a start and on reload (`Server::
+  tighten_credentials`), health `credential_exposed` for what is left;
   `write_pools` removes no pool while a file is set aside. The certificates the same way (C3,
   `Server::load_certificates`, `Generation::certificates`): each pair loaded once before the
   listeners, whose contexts copy the material; a pair that does not load sets the site aside, a

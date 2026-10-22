@@ -168,6 +168,19 @@ h=$("$BIN" ctl health --socket $T/run/control.sock)
 # t6's one error, naming them; nothing else is an error.
 check "health: the Drupal site's missing required extensions are its error, naming them; no other error and no log finding" "yes yes 0 no" \
   "$(echo "$h" | grep -q '"ok":' && echo -n yes) $(echo "$h" | python3 -c 'import json,sys; f=[x for x in json.load(sys.stdin)["findings"] if x["code"]=="php_extensions_missing" and x["severity"]=="error"]; print("yes" if len(f)==1 and f[0]["site"]=="t6.test" and all(e in f[0]["message"] for e in ("dom", "gd", "simplexml", "xml")) else f)') $(echo "$h" | python3 -c 'import json,sys; print(len([x for x in json.load(sys.stdin)["findings"] if x["severity"]=="error" and x["code"]!="php_extensions_missing"]))') $(echo "$h" | grep -q log_not_readable && echo yes || echo no)"
+# A credential an update loosened (2026-10-22): `cp .env.example .env` leaves it 0644, readable by the
+# server's group. Before, the next reload (any site's change) set t9 aside, though stopping the site
+# made the file no more private; now the reload keeps t9 serving and the helper, as t9, gives the file
+# the installer's 0600, saying so in the error and audit logs. One t9 cannot change (root's) stays as
+# it is, the site serving, and health names it as an error.
+printf 'APP_KEY=x\n' > $T/www/t9.test/web/.env; chown t9:agensio $T/www/t9.test/web/.env; chmod 0644 $T/www/t9.test/web/.env
+check "a credential an update left readable: the next reload keeps the site serving and the helper makes it 0600 as t9, in both logs" "200 t9 600 yes yes" \
+  "$("$BIN" ctl reload --yes --reason loosened --socket $T/run/control.sock > /dev/null 2>&1; curl -sS -o /dev/null -w '%{http_code}' -H 'Host: t9.test' http://127.0.0.1:18198/index.php) $(stat -c '%U %a' $T/www/t9.test/web/.env) $(grep -q "tightened $T/www/t9.test/web/.env" $T/logs/error.log && echo yes) $(grep -q "tightened $T/www/t9.test/web/.env" $T/logs/audit.log && echo yes)"
+chown root:agensio $T/www/t9.test/web/.env; chmod 0644 $T/www/t9.test/web/.env
+check "a credential the site's account cannot change: the site keeps serving, health names it as an error with the fix" "200 error yes" \
+  "$("$BIN" ctl reload --yes --reason loosened --socket $T/run/control.sock > /dev/null 2>&1; curl -sS -o /dev/null -w '%{http_code}' -H 'Host: t9.test' http://127.0.0.1:18198/index.php) $("$BIN" ctl health --socket $T/run/control.sock | python3 -c 'import json,sys; f=[x for x in json.load(sys.stdin)["findings"] if x["code"]=="credential_exposed" and x.get("site")=="t9.test"]; print(f[0]["severity"], "yes" if f and "chmod 600" in f[0]["fix"] else "no") if f else print("none")')"
+rm -f $T/www/t9.test/web/.env
+"$BIN" ctl reload --yes --reason loosened --socket $T/run/control.sock > /dev/null 2>&1
 check "every helper action is in the audit log" "yes yes yes" "$(grep -q 'provisioned missing_account' $T/logs/audit.log && echo yes) $(grep -q 'provisioned root_missing' $T/logs/audit.log && echo yes) $(grep -q 'sites (provision): created' $T/logs/audit.log && echo yes)"
 
 # A managed site's users through the helper (2026-10-09, design section 25, step 4b): root's file,

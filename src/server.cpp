@@ -1408,6 +1408,8 @@ void Server::run() {
         else if (out.find("pools up to date") != std::string::npos) error_log_.info("php-fpm pools at start: up to date");
         else error_log_.warn("php-fpm pools at start: " + out);
     }
+    // A credential left readable while the server was down (2026-10-22): made private before accepting.
+    if (provisioner_.available() && !gen_->cfg.exposed_credentials.empty()) log_tightened(gen_->cfg, tighten_credentials(gen_->cfg), "start");
     for (auto& w : workers_) w->gen = gen_;
     arm_trash_expiry();
     arm_certificate_watch();
@@ -2127,7 +2129,47 @@ bool Server::reload(std::string& error, std::string_view must_load) {
     auto gen = prepare_reload(error, must_load);
     if (!gen || !commit_reload(gen, error)) return false;
     pools_after(had_pools, nullptr);  // the pools follow, off the workers
+    if (provisioner_.available() && !gen->cfg.exposed_credentials.empty())  // and the credentials, off the workers too
+        std::thread([this, gen] {
+            json::Value r = tighten_credentials(gen->cfg);
+            asio::post(workers_[0]->ctx, [this, gen, r] { log_tightened(gen->cfg, r, "reload"); });
+        }).detach();
     return true;
+}
+
+json::Value Server::tighten_credentials(const Config& cfg) {
+    json::Value results = json::Value::array();
+    if (!provisioner_.available()) return results;
+    std::vector<std::string> sites;
+    for (const auto& x : cfg.exposed_credentials)
+        if (!x.site.empty() && std::find(sites.begin(), sites.end(), x.site) == sites.end()) sites.push_back(x.site);
+    for (const auto& name : sites) results.push(provisioner_.request(json::Value::object().set("op", "credentials_tighten").set("site", name)));
+    return results;
+}
+
+void Server::log_tightened(const Config& cfg, const json::Value& results, std::string_view when) {
+    const std::string tag = "credentials (" + std::string(when) + ")";
+    for (const auto& r : results.items()) {
+        if (!r["ok"].boolean()) {
+            error_log_.error(tag + ": " + std::string(r.get("site")) + ": " + std::string(r.get("error")) + "; health names what is left");
+            continue;
+        }
+        for (const auto& p : r["secured"].items()) {
+            std::string from;
+            for (const auto& x : cfg.exposed_credentials)
+                if (x.path == p.str()) {
+                    char m[8];
+                    std::snprintf(m, sizeof m, "%04o", x.mode);
+                    from = std::string(" from ") + m;
+                }
+            const std::string line = "tightened " + std::string(p.str()) + from + " as " + std::string(r.get("account")) + " (site " +
+                                     std::string(r.get("site")) + "): it was readable by the server's group or by other users";
+            error_log_.warn(tag + ": " + line);
+            control_handler_.audit(static_cast<long>(::geteuid()), static_cast<long>(::getegid()), Role::admin, tag, line);
+        }
+        for (const auto& e : r["exposed"].items())
+            error_log_.error(tag + ": could not make " + std::string(e.str()) + " private; the site keeps serving, health names the fix");
+    }
 }
 
 void Server::pools_after(bool had_pools, std::function<void(json::Value)> done) {
@@ -2159,7 +2201,8 @@ void Server::reload_async(std::string must_load, ReloadOptions opts, std::functi
         done(first);
         return;
     }
-    if (!provisioner_.available() || (!had_pools && !any_generated_pool(gen->cfg))) {
+    const bool tighten = provisioner_.available() && !gen->cfg.exposed_credentials.empty();
+    if (!provisioner_.available() || (!had_pools && !any_generated_pool(gen->cfg) && !tighten)) {
         first.ok = commit_reload(gen, first.error);
         done(first);
         return;
@@ -2167,7 +2210,10 @@ void Server::reload_async(std::string must_load, ReloadOptions opts, std::functi
     reloading_ = true;
     const std::vector<PoolSwitch> switches = pool_switches(gen_->cfg, gen->cfg);
     const std::shared_ptr<const Generation> base = gen_;
-    std::thread([this, gen, base, switches, opts, must_load = std::move(must_load), done = std::move(done)]() mutable {
+    std::thread([this, gen, base, switches, opts, tighten, must_load = std::move(must_load), done = std::move(done)]() mutable {
+        // A credential an update left readable (2026-10-22): made private before the switch, whatever
+        // the reload's outcome, since the file is on disk either way.
+        const json::Value tightened = tighten ? tighten_credentials(gen->cfg) : json::Value::array();
         // The preflight (docs/design-php-versions.md 6.1), off the workers: it reads each version's
         // php-fpm.conf and asks systemd for its service's state. Then the new pools up.
         json::Value refusal, up;
@@ -2208,7 +2254,8 @@ void Server::reload_async(std::string must_load, ReloadOptions opts, std::functi
                               .set("ignore_requirements", needs);
             else up = provisioner_.request(json::Value::object().set("op", "pools_apply").set("phase", "up"));
         }
-        asio::post(workers_[0]->ctx, [this, gen, base, refusal, up, warnings, must_load, done]() mutable {
+        asio::post(workers_[0]->ctx, [this, gen, base, refusal, up, warnings, tightened, must_load, done]() mutable {
+            log_tightened(gen->cfg, tightened, "reload");
             ReloadOutcome out;
             out.warnings = warnings;
             for (const auto& w : warnings) error_log_.warn("php switch: " + w);

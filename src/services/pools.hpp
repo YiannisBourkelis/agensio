@@ -88,15 +88,20 @@ std::vector<std::string> check_hosting(const Config& cfg, const HostFacts& facts
 struct HostingError {
     std::string message;
     std::vector<std::size_t> sites;
+    // A credential file readable by others or by a group not the site's: its path and what stat
+    // gave; "" for every other rule. isolate_hosting sets no site aside for it (2026-10-22).
+    std::string credential;
+    FileFacts facts;
 };
 std::vector<HostingError> hosting_errors(const Config& cfg, const HostFacts& facts);
 // The hosting rules applied the way site files load (docs/design-site-operations.md 26, step
 // C2): a site that breaks one is set aside with its file (set_aside_until_clean), the other
 // sites load; with `running` (a reload) a served site keeps its running version only when that
 // version passes every rule now, so a root opened to others takes the site down at the next
-// reload while an edit that breaks a rule keeps the version that passes. Returns what refuses
-// the whole configuration: the server's own account, and a rule only the main file's sites
-// break (the main file is all or nothing).
+// reload while an edit that breaks a rule keeps the version that passes. A credential file
+// readable by others sets nothing aside: it goes into cfg.exposed_credentials (2026-10-22).
+// Returns what refuses the whole configuration: the server's own account, and a rule only the
+// main file's sites break (the main file is all or nothing).
 std::vector<std::string> isolate_hosting(Config& cfg, const HostFacts& facts, const Config* running);
 
 // Whether the account the server runs as after the start can read `path` (the certificate work,

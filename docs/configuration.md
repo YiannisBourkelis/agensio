@@ -1663,7 +1663,8 @@ mode, and what was expected (what a refusal does follows the list):
   `settings.local.php` and `services.yml` for Drupal), `.env` and `.git` under the root,
   and for Laravel the project's `.env`, `config/`, `storage/` and `.git` (make them
   `0600`, or `0640 user:<the site's own group>`; `site-install` and `site-copy` create
-  them `0600`, the same list, so what they write always passes);
+  them `0600`, the same list, so what they write always passes). This rule sets no site
+  aside; see below;
 - the pool socket is not owned by the user, not in the server's group (owner = site user,
   group = server group, `0660`: the server connects through the group bit, nobody else
   can), or has mode bits for others; or its directory is world-writable;
@@ -1686,6 +1687,28 @@ breaks, refuse the start or the reload as a whole. Before 0.1.0-alpha.62 any rul
 refused it as a whole: one tenant's `chmod` stopped every site at the next boot and blocked
 every reload. `agensio pools` is not held to the rules (writing the pools is how a socket rule
 is fixed) and, while a site file is set aside, keeps the pool files of every account.
+
+**A credential file readable by others sets nothing aside** (0.1.0-alpha.110). An update made in
+place is how one loosens: `cp .env.example .env` leaves `0644`, Laravel's common advice `chmod -R
+775 storage` gives `storage/` to the server's group, `rsync -a` and `tar x` put an archive's modes
+back. Before, the next reload, whatever caused it (another site's change through the control plane,
+a SIGHUP), set such a site aside, and a site stopped makes the file no more private. Now the site
+keeps serving, and:
+
+- at a start and at every reload made by a server started as root, the provisioning helper makes
+  each such file private as the site's account, with the installer's modes: a file `0600`, a
+  directory without its group's read and write and nothing for others (`2750` becomes `2710`).
+  It never follows a link, never changes another account's file, and touches only what the rule
+  flags (a `0640` file of the site's own group stays). The error log and the audit log say
+  `tightened PATH from 0644 as USER`;
+- what is left (another account's file, a link, a server not started as root) is a health error,
+  `credential_exposed`, with the `chmod` or the `chown` to run; `agensio -t` prints it as a
+  warning and passes; `validate` lists it under `credentials_exposed`.
+
+nginx and php-fpm check no file mode at all. Apache's suEXEC refuses a script, per request,
+when it or its directory is writable by others: the rules above stay fail-closed for what someone
+else could write (a root or an `open_basedir` directory of another account, or writable by others),
+and tighten what someone else could read.
 
 The account's home is its state directory, `<state_dir>/<user>`. For a PHP site `agensio
 pools` creates it with `tmp/` and `sessions/`; for an account without a PHP pool (a Rails
@@ -1952,7 +1975,8 @@ What sets a file aside:
   protect it), or a users file of a `[[site.auth]]` rule (19b). An additions file that does
   not load and names no site is named itself;
 - a hosting rule its site breaks (section 11: a root others can write into, a socket of
-  another account, a credential file readable by others, ...). A site is served only by a
+  another account, ...; a credential file readable by others sets nothing aside, the helper
+  makes it private). A site is served only by a
   version that passes every rule now, so on reload the version that runs is kept only when it
   passes: an edit that breaks a rule keeps it, a root opened to others while the site serves
   takes the site down;

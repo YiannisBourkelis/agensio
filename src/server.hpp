@@ -241,6 +241,12 @@ private:
     // The helper's full phase on a thread (every version's pool directory as the configuration on disk
     // assigns it), `done` on worker 0; nothing without the helper or generated pools.
     void pools_after(bool had_pools, std::function<void(json::Value)> done);
+    // The credential files the hosting rules found readable (Config::exposed_credentials, 2026-10-22):
+    // the helper makes each site's private as its account, one request per site; blocking, so at a
+    // start before the listeners accept and on a reload's thread, never on a worker. Nothing without
+    // the helper. log_tightened says what it did in the error and audit logs.
+    json::Value tighten_credentials(const Config& cfg);
+    void log_tightened(const Config& cfg, const json::Value& results, std::string_view when);
     bool reloading_ = false;     // a reload between its load and its last phase (worker 0 only)
     bool reload_again_ = false;  // a SIGHUP came meanwhile: it runs once that reload is done
     void prepare_served_record();  // <state_dir>/server, the server's account's (alpha.63 report, finding 1)

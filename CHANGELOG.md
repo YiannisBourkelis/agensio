@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.1.0-alpha.110
+
+- **A credential an update left readable no longer takes its site down.** An update made in place
+  loosens files:
+  - `cp .env.example .env` leaves `0644`;
+  - Laravel's common `chmod -R 775 storage` gives `storage/` to the server's group;
+  - `rsync -a` and `tar x` put an archive's modes back.
+
+  The hosting rules then set the site aside at the next reload, whatever caused that reload: another
+  site's change through the control plane, a SIGHUP. Shown as root in the devbox: after `ctl reload`
+  the site answered 421 and its `.env` stayed `0644`. A site stopped makes the file no more private.
+  - A credential file readable by others or by a group not the site's now sets nothing aside, at a
+    start or on reload, for the main file's sites too.
+  - The provisioning helper's new `credentials_tighten` makes it private as the site's account,
+    with the installer's modes (a file `0600`, a directory without its group's read and write). It
+    runs at a start and on every reload of a server started as root. It decides from the
+    configuration and files on disk, follows no link, changes no other account's file, and touches
+    only what the rule flags.
+  - The error and audit logs say `tightened PATH from 0644 as USER`.
+  - What is left is health's `credential_exposed` error with the `chmod` or `chown` to run. `-t`
+    warns and passes, and `validate` lists `credentials_exposed`.
+  - The rules for what another account could write (a root or `open_basedir` directory not the
+    site's, or writable by others) stay fail-closed.
+  - nginx and php-fpm check no file mode at all; Apache's suEXEC refuses a script writable by others.
+
 ## 0.1.0-alpha.109 (2026-10-22)
 
 - **An exact `.php` location decides its script's path-info form too** (found while building

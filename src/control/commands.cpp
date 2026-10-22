@@ -1305,6 +1305,10 @@ json::Value validate(const fs::path& path, const Config& running, const Config* 
         held.push(json::Value::object().set("file", h.file).set("error", h.error).set("keeps_running_version", h.carried).set("hosting_rule", h.hosting)
                       .set("certificate", h.certificate));
     v.set("held_back", std::move(held));
+    // Credential files readable by others (2026-10-22): served anyway, made private at the reload.
+    json::Value exposed = json::Value::array();
+    for (const auto& x : fresh.exposed_credentials) exposed.push(json::Value::object().set("site", x.site).set("path", x.path).set("message", x.message));
+    v.set("credentials_exposed", std::move(exposed));
     v.set("restart_needed", strings(restart_needed(fresh, running)));
     return v;
 }
@@ -1624,6 +1628,24 @@ std::vector<Finding> health_findings(const Config& running, const Config& boot, 
                 disk_held.push_back(h);
         for (const auto& e : hosting)
             add("error", "hosting_rule", "", e, "fix the ownership, then agensio -t");
+        // A credential file readable by others or by a group not the site's (2026-10-22): no site is set
+        // aside for it (stopped, the site makes the file no more private); a start or a reload has the
+        // helper make the site's account's own files private, so what is said here is what that has
+        // not done yet or cannot do: another account's file, a server not started as root.
+        for (const auto& x : fresh.exposed_credentials) {
+            const SiteConfig* site = find_site(fresh, x.site);
+            unsigned uid = 0, gid = 0;
+            const bool own = site && !site->user.empty() && system_facts().user(site->user, uid, gid) && uid == x.uid;
+            const std::string chmod = x.dir ? "chmod g-rw,o-rwx " + x.path : "chmod 600 " + x.path;
+            std::string fix;
+            if (!own)
+                fix = "as root: chown " + (site ? site->user : std::string("the site's account")) + " " + x.path + " && " + chmod +
+                      " (the helper changes only the site's account's own files)";
+            else
+                fix = "a reload (agensio ctl reload, MCP reload) makes it private as " + site->user + " when agensio was started as root (its "
+                      "helper does it); otherwise, or by hand: " + chmod + " as " + site->user;
+            add("error", "credential_exposed", x.site, x.message + "; the site keeps serving", std::move(fix));
+        }
         const auto restart = restart_needed(fresh, boot);
         if (!restart.empty()) {
             std::string keys;

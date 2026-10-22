@@ -252,7 +252,7 @@ std::vector<HostingError> hosting_errors(const Config& cfg, const HostFacts& fac
     std::vector<HostingError> errors;
     // The sites the rule being checked concerns (indexes into cfg.sites); none for the server's own.
     std::vector<std::size_t> scope;
-    auto add = [&](std::string message) { errors.push_back({std::move(message), scope}); };
+    auto add = [&](std::string message) { errors.push_back({std::move(message), scope, {}, {}}); };
     std::vector<SiteFacts> sites;
     bool any_user = false;
     for (const auto& site : cfg.sites) any_user = any_user || !site.user.empty();
@@ -323,9 +323,9 @@ std::vector<HostingError> hosting_errors(const Config& cfg, const HostFacts& fac
         FileFacts f;
         if (!facts.stat(path, f)) return;
         if (secret_exposed(f.mode, f.gid, sf.gid))
-            add(sf.name + ": " + path + " is readable by other users (" + describe(f) +
-                             "); make it 0600, or 0640 with the site's own group (" +
-                             (sf.site->group.empty() ? sf.site->user : sf.site->group) + "), never the server's");
+            errors.push_back({sf.name + ": " + path + " is readable by other users (" + describe(f) + "); make it 0600, or 0640 with the site's own group (" +
+                                  (sf.site->group.empty() ? sf.site->user : sf.site->group) + "), never the server's",
+                              scope, path, f});
     };
     for (const auto& sf : sites) {
         const SiteConfig& site = *sf.site;
@@ -413,7 +413,10 @@ std::vector<std::string> isolate_hosting(Config& cfg, const HostFacts& facts, co
     };
     set_aside_until_clean(cfg, running, [&](const Config& c) -> std::optional<SiteConflict> {
         for (auto& e : hosting_errors(c, facts)) {
-            if (host_wide(c, e)) continue;
+            // A credential readable by others sets nothing aside (2026-10-22): a site stopped makes the
+            // file no more private, and an update (`cp .env.example .env`) took the site down at the
+            // next reload, whatever caused it. It is listed below, for the helper and for health.
+            if (!e.credential.empty() || host_wide(c, e)) continue;
             // A pair with one of the main file's sites: the other one's file yields.
             std::vector<std::size_t> in_files;
             for (const std::size_t i : e.sites)
@@ -426,8 +429,15 @@ std::vector<std::string> isolate_hosting(Config& cfg, const HostFacts& facts, co
     for (auto& h : cfg.held_back)  // what this step set aside, so health gives the ownership fix
         if (auto b = before.find(h.file); b == before.end() || b->second != h.error) h.hosting = true;
     std::vector<std::string> out;
-    for (auto& e : hosting_errors(cfg, facts))
-        if (host_wide(cfg, e)) out.push_back(std::move(e.message));
+    cfg.exposed_credentials.clear();
+    for (auto& e : hosting_errors(cfg, facts)) {
+        if (!e.credential.empty()) {
+            const std::string site = e.sites.empty() ? std::string() : cfg.sites[e.sites[0]].server_names.front();
+            cfg.exposed_credentials.push_back({site, e.credential, e.facts.is_dir, e.facts.mode, e.facts.uid, e.facts.gid, std::move(e.message)});
+        } else if (host_wide(cfg, e)) {
+            out.push_back(std::move(e.message));
+        }
+    }
     if (cfg.sites.empty()) {
         std::string why;
         for (const auto& h : cfg.held_back) why += "\n  " + h.file + ": " + h.error;

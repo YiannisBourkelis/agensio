@@ -1219,6 +1219,11 @@ int main(int argc, char** argv) {
     }
     for (const auto& e : hosting_errors) std::cerr << "configuration error: " << e << "\n";
     if (!hosting_errors.empty() && !explain) return 1;
+    // A credential file readable by others sets no site aside (2026-10-22): said, and made private
+    // as the site's account by the helper at a start or a reload made as root.
+    if (test_only || explain || reload)
+        for (const auto& x : cfg.exposed_credentials)
+            std::cerr << "warning: " << x.message << "; the site is served, and a start or reload made as root makes the file private as the site's account\n";
     // Site files set aside (docs/design-site-operations.md 26): the other sites load, so -t passes
     // (the packaged unit's ExecStartPre runs it) unless --strict; a reload keeps their last good
     // version.

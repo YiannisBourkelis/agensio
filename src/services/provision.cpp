@@ -161,6 +161,11 @@ std::string validate(const json::Value& req, const Config& cfg) {
             if (!sec.is_string() || !archive::clean_path(sec.str(), clean, why) || clean != sec.str()) return "file_copy: secrets must be clean relative paths";
         return "";
     }
+    if (op == "credentials_tighten") {
+        // A site's name only: the helper finds the site and what its rule flags on disk.
+        if (!control::valid_domain(req.get("site"))) return "credentials_tighten: site must be a site's host name";
+        return "";
+    }
     if (op == "task_run") {
         // Names and parameters only: the helper looks the site up in the configuration on
         // disk and takes the command from the task table (task_run below).
@@ -1082,6 +1087,54 @@ json::Value app_op(const json::Value& req, const Config& cfg) {
 // task_limits, both read from that same file for every task (a reload changes them; only
 // root's main file can hold [control], included files carry sites alone), and the site's
 // environment from its root-owned file; the server sends names and parameters only.
+// The credential files of one site that the hosting rule finds readable by others or by a group not
+// the site's (2026-10-22: an update's `cp .env.example .env` leaves 0644), made private as the
+// site's account with the installer's modes: tasks::sweep, a file 0600, a directory secret_dir_mode,
+// never through a link, never another account's file (that one is answered under `exposed`). The
+// site and the rule's findings come from the configuration and the files on disk, never the server's
+// word; nothing the rule does not flag is touched (a 0640 file of the site's own group stays).
+json::Value credentials_tighten(const json::Value& req, const Config& cfg, int helper_fd) {
+    json::Value reply = json::Value::object();
+    auto fail = [&](std::string why) { return reply.set("ok", false).set("error", std::move(why)); };
+    Config fresh;
+    try {
+        fresh = load_config(cfg.config_path);
+    } catch (const std::exception& e) {
+        return fail(std::string("the configuration on disk does not load: ") + e.what());
+    }
+    const std::string name(req.get("site"));
+    const SiteConfig* site = control::find_site(fresh, name);
+    if (!site) return fail("no site " + name + " in the configuration on disk");
+    std::size_t index = fresh.sites.size();
+    for (std::size_t i = 0; i < fresh.sites.size(); ++i)
+        if (&fresh.sites[i] == site) index = i;
+    const std::string site_root = site->project_root.empty() ? site->root : site->project_root;
+    std::string why;
+    if (!control::safe_path(site_root, why)) return fail("the site's directory: " + why);
+    if (!provision::under_root(site_root, provision::sites_root(cfg)) || site_root == provision::sites_root(cfg))
+        return fail(site_root + " is not below " + provision::sites_root(cfg));
+    std::vector<std::string> rel;
+    for (const auto& e : hosting_errors(fresh, system_facts()))
+        if (!e.credential.empty() && std::find(e.sites.begin(), e.sites.end(), index) != e.sites.end() &&
+            provision::under_root(e.credential, site_root) && e.credential != site_root)
+            rel.push_back(e.credential.substr(site_root.size() + 1));
+    if (rel.empty()) return reply.set("ok", true).set("secured", json::Value::array()).set("exposed", json::Value::array());
+    uid_t uid = 0;
+    gid_t gid = 0;
+    if (!install_account(cfg, site_root, site->user, uid, gid, why)) return fail(why);
+    if (uid == 0) return fail("refusing to change a site's files as root");
+    const struct passwd* pw = ::getpwuid(uid);
+    const std::string account = pw ? pw->pw_name : std::to_string(uid);
+    json::Value out = run_as_account(uid, gid, helper_fd, -1, [&] {
+        const int fd = ::open(site_root.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (fd < 0) return json::Value::object().set("ok", false).set("error", site_root + ": " + std::strerror(errno));
+        json::Value r = tasks::sweep(fd, site_root, rel, {});
+        ::close(fd);
+        return r.set("ok", true);
+    }, std::chrono::seconds(30));
+    return out.set("account", account).set("site", site->server_names.front());
+}
+
 json::Value task_run(const json::Value& req, const Config& cfg, int helper_fd) {
     json::Value reply = json::Value::object();
     auto fail = [&](std::string why) { return reply.set("ok", false).set("error", std::move(why)); };
@@ -1913,6 +1966,8 @@ void helper_loop(int fd, const Config& cfg) {
                     reply = file_copy(req, cfg, fd);
                 } else if (op == "task_run") {
                     reply = task_run(req, cfg, fd);
+                } else if (op == "credentials_tighten") {
+                    reply = credentials_tighten(req, cfg, fd);
                 } else if (op == "env_read" || op == "env_write") {
                     reply = env_op(req, cfg);
 #ifdef AGENSIO_HAS_AUTH
