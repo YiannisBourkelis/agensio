@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.110
+## 0.1.0-alpha.110 (2026-10-23)
 
 - **`server_status` says which HTTP protocols this build serves** (the owner's request).
   - A `protocols` object gives:
