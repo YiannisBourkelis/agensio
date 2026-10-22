@@ -2,6 +2,20 @@
 
 ## 0.1.0-alpha.110
 
+- **`[server] server_header` follows a reload, as the reference says** (the test host's report on
+  alpha.109).
+  - What happened: after `server_header = ""` or `"web"` and a reload, `config_reference` showed the
+    new value, but every answer still carried `Server: agensio`: static, PHP, proxied, redirects,
+    404s, over HTTP/1, HTTP/2 and HTTP/3. Nothing named a restart. Only a fresh start changed it.
+  - Why: each worker built its `Server` line once at start, and HTTP/2 and HTTP/3 read the start's
+    configuration.
+  - Now each worker takes the value on its own loop at a start and at every reload's switch, with
+    its HTTP/1 line, its HTTP/2 insert and the HTTP/3 field. A connection's encoder keeps indexing
+    what it already sent, so each connection stays consistent, and new ones carry the new value.
+    Nothing per request changed.
+  - The connection ceiling's 503 said `Server: agensio` whatever the key said, even at a start with
+    `""`; it now carries the worker's field too.
+
 - **A static file still being written is never cached and never leaves with a lifetime.** An update
   made in place (`npm run build` into `public/build`, an unzip over the root) is served while it
   writes. On a cache miss agensio read the size `fstat` gave, so a file still growing was cached as a

@@ -30,7 +30,12 @@ struct WorkerState {
     DateCache date;
     LocalIndex local;
     std::time_t now = 0;      // wall clock read once per request by the connection
-    std::string server_line;  // "Server: agensio\r\n" or empty (set by Server)
+    // [server] server_header as this worker sends it (Server's apply_server_header, at a start and on
+    // every reload, on this worker's loop): the value for HTTP/2 and HTTP/3, the line for HTTP/1, and
+    // the connection ceiling's 503 (Server::refuse_connection) carrying the same field.
+    std::string server_value;
+    std::string server_line;  // "Server: agensio\r\n" or empty
+    std::string limit_answer;
     std::string prefix200;    // "HTTP/1.1 200 OK\r\nServer: ..\r\nDate: ..\r\n", refreshed per second
     std::time_t prefix200_time = 0;
     std::string h2_server_insert;  // HTTP/2: the server field as an inserting literal, built once (the encoder indexes it after)

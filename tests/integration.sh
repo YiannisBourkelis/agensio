@@ -3310,11 +3310,11 @@ check "body timeout: response served, then the server closes" "HTTP/1.1 200 OK c
 # fourth over TLS is closed before the handshake, a freed slot serves again; status, health
 # and the error log say what happened.
 mkdir -p bench/tmp/limit
-printf '[server]\nworkers = 1\nmax_connections = 3\n[log]\naccess = "off"\nerror = "%s/bench/tmp/limit/error.log"\nlevel = "info"\n[control]\nsocket = "%s/bench/tmp/limit/control.sock"\naudit = "%s/bench/tmp/limit/audit.log"\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8061"]\nroot = "%s/bench/www"\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8461"]\nroot = "%s/bench/www"\ntls = { cert = "%s/bench/certs/cert.pem", key = "%s/bench/certs/key.pem" }\n' "$ROOT" "$ROOT" "$ROOT" "$ROOT" "$ROOT" "$ROOT" "$ROOT" > bench/tmp/limit/agensio.toml
+printf '[server]\nworkers = 1\nmax_connections = 3\nserver_header = "web"\n[log]\naccess = "off"\nerror = "%s/bench/tmp/limit/error.log"\nlevel = "info"\n[control]\nsocket = "%s/bench/tmp/limit/control.sock"\naudit = "%s/bench/tmp/limit/audit.log"\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8061"]\nroot = "%s/bench/www"\n[[site]]\nserver_name = ["*"]\nlisten = ["127.0.0.1:8461"]\nroot = "%s/bench/www"\ntls = { cert = "%s/bench/certs/cert.pem", key = "%s/bench/certs/key.pem" }\n' "$ROOT" "$ROOT" "$ROOT" "$ROOT" "$ROOT" "$ROOT" "$ROOT" > bench/tmp/limit/agensio.toml
 rm -f bench/tmp/limit/error.log bench/tmp/limit/control.sock
 "$BIN" -c bench/tmp/limit/agensio.toml > bench/tmp/limit/server.out 2>&1 & LPID=$!
 for _ in $(seq 1 50); do nc -z 127.0.0.1 8061 2>/dev/null && [ -S bench/tmp/limit/control.sock ] && break; sleep 0.1; done
-check "connection ceiling: the fourth plain connection is answered 503 with Retry-After and closed, the fourth TLS connection is closed before the handshake, a freed slot serves again" "HTTP/1.1 503 Service Unavailable retry eof closed HTTP/1.1 200 OK" "$(python3 - <<'PY'
+check "connection ceiling: the fourth plain connection is answered 503 with Retry-After and the configured Server field (alpha.110: it said agensio whatever server_header said) and closed, the fourth TLS connection is closed before the handshake, a freed slot serves again" "HTTP/1.1 503 Service Unavailable retry web eof closed HTTP/1.1 200 OK" "$(python3 - <<'PY'
 import socket, ssl, time
 held = [socket.create_connection(("127.0.0.1", 8061)) for _ in range(3)]
 time.sleep(0.3)
@@ -3326,6 +3326,7 @@ while True:
     data += chunk
 first = data.split(b"\r\n")[0].decode()
 retry = "retry" if b"Retry-After: 2" in data and b"Connection: close" in data else "no-retry"
+server = next((l.split(b": ", 1)[1].decode() for l in data.split(b"\r\n") if l.lower().startswith(b"server: ")), "-")
 ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
 t = socket.create_connection(("127.0.0.1", 8461)); t.settimeout(3)
 try:
@@ -3336,7 +3337,7 @@ held[0].close(); time.sleep(0.4)
 s2 = socket.create_connection(("127.0.0.1", 8061)); s2.settimeout(3)
 s2.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
 ok = s2.recv(4096).split(b"\r\n")[0].decode()
-print(first, retry, "eof", tls, ok)
+print(first, retry, server, "eof", tls, ok)
 PY
 )"
 check "connection ceiling: status shows the ceiling, the two refusals and per worker who was refused where; health names the address and sends it to the firewall; the error log line carries the same context, once" "3 2 127.0.0.1 2 8061,8461 warn yes 1" "$(curl -sS --unix-socket bench/tmp/limit/control.sock http://control/v1/status | python3 -c 'import json,sys; d=json.load(sys.stdin); w=d["workers_detail"][0]; print(int(d["max_connections"]), int(d["connections_refused"]), w["refused_addresses"][0]["address"], int(w["refused_addresses"][0]["count"]), ",".join(sorted(l["address"].split(":")[1] for l in w["refused_listeners"])))') $(curl -sS --unix-socket bench/tmp/limit/control.sock http://control/v1/health | python3 -c 'import json,sys; d=json.load(sys.stdin); f=[x for x in d["findings"] if x["code"] == "connections_refused"]; print(f[0]["severity"] if f else "none", "yes" if f and f[0]["fix"].startswith("most refusals came from 127.0.0.1") and "firewall" in f[0]["fix"] and "2 connection(s) refused at the ceiling since start" in f[0]["message"] and "from 127.0.0.1 x2" in f[0]["message"] else f)') $(grep -c 'at its connection ceiling: 3 of 3 connections open, 0 idle 2 s or more; the first refusal, 1 since start, from 127.0.0.1 x1, on 127.0.0.1:8061 (' bench/tmp/limit/error.log)"

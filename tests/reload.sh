@@ -300,6 +300,17 @@ else
 echo "skip a listener that cannot bind refuses the reload (port 80 is not privileged here)"
 fi
 
+# [server] server_header on reload (the alpha.109 report): the reference says a reload applies it,
+# and before alpha.110 every answer kept the value the server started with. Each step over
+# HTTP/1, over HTTP/2 (h2c) and on a 404.
+server_of() { curl -sS -D - -o /dev/null "$@" | tr -d '\r' | awk 'tolower($1)=="server:"{v=$2} END{print v==""?"-":v}'; }
+servers() { echo "$(server_of $B/) $(server_of --http2-prior-knowledge $B/) $(server_of $B/nothing)"; }
+SERVER_EXTRA='server_header = ""' write_config "$T/v2"; "$BIN" reload -c "$T/agensio.toml" > /dev/null 2>&1; sleep 0.5; s1=$(servers)
+SERVER_EXTRA='server_header = "web"' write_config "$T/v2"; "$BIN" reload -c "$T/agensio.toml" > /dev/null 2>&1; sleep 0.5; s2=$(servers)
+write_config "$T/v2"; "$BIN" reload -c "$T/agensio.toml" > /dev/null 2>&1; sleep 0.5; s3=$(servers)
+check "server_header follows a reload: none, then web, then agensio again; HTTP/1, HTTP/2 and a 404 alike" \
+  "- - - | web web web | agensio agensio agensio" "$s1 | $s2 | $s3"
+
 # Load across reloads: wrk hammers 8097 while the configuration flips between v1 and v2
 # three times; every response is a 2xx and no socket error happens.
 write_config "$T/v2"

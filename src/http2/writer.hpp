@@ -603,8 +603,8 @@ private:
         encoder_.begin(h);
         hpack::append_status(h, r.status);
         if (!ws.server_line.empty()) {
-            if (ws.h2_server_insert.empty()) hpack::append_insert(ws.h2_server_insert, "server", cfg_.server_header);
-            encoder_.server(h, cfg_.server_header, ws.h2_server_insert);
+            if (ws.h2_server_insert.empty()) hpack::append_insert(ws.h2_server_insert, "server", ws.server_value);
+            encoder_.server(h, ws.server_value, ws.h2_server_insert);
         }
         if (ws.h2_date_time != ws.now) {  // the date's inserting literal, once per second per worker
             ws.h2_date_insert.clear();

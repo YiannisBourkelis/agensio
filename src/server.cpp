@@ -1166,13 +1166,35 @@ json::Value Server::status() {
     return v;
 }
 
+namespace {
+// What a plain client gets at the ceiling: one send, no connection object, no allocation (the text
+// is the worker's, built by apply_server_header with its Server field).
+constexpr std::string_view kConnectionLimitBody = "503 Service Unavailable: the server is at its connection limit, try again shortly\n";
+
+// The Server field a worker sends ([server] server_header, "" none), set at a start and on every
+// reload on the worker's own loop (the alpha.109 report: a reload left every answer, HTTP/1, HTTP/2
+// and HTTP/3, on the value the server started with, though the reference says reload). The HTTP/1
+// 200 prefix is rebuilt at its next answer and the HTTP/2 insert built again from the new value; a
+// connection's encoder keeps indexing what it already sent, so each connection stays consistent.
+void apply_server_header(WorkerState& ws, const std::string& value) {
+    if (value == ws.server_value && !ws.limit_answer.empty()) return;
+    ws.server_value = value;
+    ws.server_line = value.empty() ? std::string() : "Server: " + value + "\r\n";
+    ws.prefix200_time = 0;
+    ws.h2_server_insert.clear();
+    ws.limit_answer.assign("HTTP/1.1 503 Service Unavailable\r\n").append(ws.server_line);
+    ws.limit_answer.append("Content-Type: text/plain\r\nContent-Length: ").append(std::to_string(kConnectionLimitBody.size()));
+    ws.limit_answer.append("\r\nConnection: close\r\nRetry-After: 2\r\n\r\n").append(kConnectionLimitBody);
+}
+
+}  // namespace
+
 void Server::build_workers() {
     unsigned n = cfg_.workers ? cfg_.workers : available_cpus();  // the affinity mask: a container's cpuset counts
     if (n == 0) n = 1;
     for (unsigned i = 0; i < n; ++i)
         workers_.push_back(std::make_unique<Worker>(i));
-    for (auto& w : workers_)
-        if (!cfg_.server_header.empty()) w->state.server_line = "Server: " + cfg_.server_header + "\r\n";
+    for (auto& w : workers_) apply_server_header(w->state, cfg_.server_header);
 
     reuse_port_ = false;
     if (cfg_.reuse_port == "on") reuse_port_ = kHasReusePort;
@@ -1220,16 +1242,11 @@ void Server::open_acceptor_socket(Acceptor& acc, const Listener& listener, bool 
     if (ec) throw std::runtime_error("cannot listen on " + listener.address + ": " + ec.message());
 }
 
-namespace {
-// What a plain client gets at the ceiling: one send, no connection object, no allocation.
-constexpr std::string_view kConnectionLimitAnswer = "HTTP/1.1 503 Service Unavailable\r\nServer: agensio\r\nContent-Type: text/plain\r\nContent-Length: 82\r\nConnection: close\r\nRetry-After: 2\r\n\r\n503 Service Unavailable: the server is at its connection limit, try again shortly\n";
-}  // namespace
-
 void Server::refuse_connection(asio::ip::tcp::socket& sock, const asio::ip::tcp::endpoint& peer, const Listener& l, Worker& w) {
     asio::error_code ignored;
     if (!l.tls) {  // a TLS client is closed before the handshake: a flood must not buy CPU with it
         sock.non_blocking(true, ignored);
-        sock.send(asio::buffer(kConnectionLimitAnswer), 0, ignored);
+        sock.send(asio::buffer(w.state.limit_answer), 0, ignored);  // this handler runs on w's loop
     }
     sock.close(ignored);
     w.refused.fetch_add(1, std::memory_order_relaxed);
@@ -1896,7 +1913,11 @@ bool Server::switch_to(const std::shared_ptr<Generation>& gen, std::string& erro
          gen->cfg.control.viewers != previous->cfg.control.viewers))
         apply_control_groups(gen->cfg);
     max_connections_.store(connection_ceiling(gen->cfg, fd_limit_, static_cast<unsigned>(workers_.size())), std::memory_order_relaxed);
-    for (auto& w : workers_) asio::post(w->ctx, [w = w.get(), gen] { w->gen = gen; });
+    for (auto& w : workers_)
+        asio::post(w->ctx, [w = w.get(), gen] {
+            w->gen = gen;
+            apply_server_header(w->state, gen->cfg.server_header);  // the one key of every answer's head (alpha.110)
+        });
     reload_h3(gen->cfg);
     sync_h3(gen);
     for (std::size_t i : opened) asio::post(acceptors_[i]->owner->ctx, [this, i] { start_accept(i); });

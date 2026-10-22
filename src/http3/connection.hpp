@@ -628,7 +628,7 @@ private:
         sec.clear();
         encoder_.begin(s.qpack);
         qpack::append_status(sec, r.status);
-        if (!ws.server_line.empty()) encoder_.server(sec, cfg_.server_header);
+        if (!ws.server_line.empty()) encoder_.server(sec, ws.server_value);
         encoder_.date(sec, ws.now, ws.date.at(ws.now));
         if (s.stream.fields && !s.stream.fields->hsts.empty()) encoder_.hsts(sec, s.stream.fields->hsts);  // the site's hsts
         if (!r.prebuilt_h3.empty()) {
