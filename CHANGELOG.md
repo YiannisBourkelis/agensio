@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.1.0-alpha.111
+
+- **A reload that turns HTTP/3 on at 443 no longer ends the server** (the test host's report on
+  alpha.110).
+  - What happened: root added `"h3"` to `[server] protocols` on the live host, which was started as
+    root and runs as `server.user`. The reload aborted the server (`terminate called`), and systemd
+    restarted it, with a few seconds of refused connections. agensio's error log said nothing.
+  - Why: a reload opened the UDP sockets of a listener that gained `h3` after the switch. The
+    `agensio` account cannot bind a privileged port, and the failed bind was thrown out of worker 0's
+    loop. Reproduced in the devbox once low ports are privileged there
+    (`--sysctl net.ipv4.ip_unprivileged_port_start=1024`; Docker's default lets anyone bind them).
+  - Now the reload opens them before the switch, beside the new TCP addresses. One it cannot bind
+    keeps that listener's HTTP/3 off until a restart: it serves HTTP/2 and HTTP/1 and advertises no
+    `alt-svc`. Everything else in the reload applies.
+  - The reload's answer lists `h3 on udp ADDRESS` under `restart_needed`, the error log says why
+    ("Permission denied (a privileged port, and the server no longer runs as root)"), and health
+    gives `h3_waits_for_restart` (warning) until a restart binds it as root.
+  - An exception that ends a worker's loop is now written to the error log (`fatal: worker N stopped
+    by an exception: ...`) before agensio exits.
+  - `tests/provision.sh` holds the case: a reload turning h3 on at 443 as `server.user`, then a
+    restart. It runs with the sysctl above, and its usage line says so.
+
 ## 0.1.0-alpha.110 (2026-10-23)
 
 - **`server_status` says which HTTP protocols this build serves** (the owner's request).

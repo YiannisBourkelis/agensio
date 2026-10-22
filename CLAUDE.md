@@ -901,7 +901,10 @@ Tests in `tests/tests.cpp`, fuzzers in `tests/fuzz/` (twenty-two, each seeded fr
   the HTTP/1 writer's fast path and an HPACK memo, one index byte, over HTTP/2, never an
   extra field, which cost the ten-stream h2 row 9 %), and a reload that removes an h3 listener or its
   h3 sends GOAWAY and closes its connections with H3_NO_ERROR before closing its sockets,
-  while a listener that gains h3 opens them. `"h3"` in `protocols` opens it on every TLS listener's port over UDP; with `reuse_port` every
+  while a listener that gains h3 opens them before the switch (`Server::open_gained_h3`; one it cannot
+  bind, a privileged port after the privilege drop, keeps that listener's h3 and alt-svc off until a
+  restart, `restart_needed` and health `h3_waits_for_restart`; alpha.111: the bind thrown after the
+  switch had ended the server). `"h3"` in `protocols` opens it on every TLS listener's port over UDP; with `reuse_port` every
   worker has its own socket and a classic BPF program on the group (no privilege) delivers
   each packet to the worker named by the first byte of its destination connection id, the
   worker that issued it, so a connection never changes worker; the kernel's hash is the

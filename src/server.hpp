@@ -304,8 +304,16 @@ private:
     void open_h3();
     void start_h3();
     void reload_h3(const Config& cfg);
-    void open_h3_listener(const Listener& l, const Config& cfg, bool start);
-    void sync_h3(const std::shared_ptr<const Generation>& gen);
+    // False, with `error`, when a socket cannot be bound; nothing of the listener is kept then.
+    bool open_h3_listener(const Listener& l, const Config& cfg, bool start, std::string& error);
+    // A reload, before the switch: the sockets of every listener that gains h3. One that cannot be
+    // bound (a privileged port once the server dropped root; the alpha.110 report: the throw from
+    // after the switch ended the server) keeps h3 off in `gen`, no alt-svc, and waits for a restart.
+    void open_gained_h3(Generation& gen);
+    void sync_h3(const std::shared_ptr<const Generation>& gen);  // after the switch: closes what lost h3
+    // The h3 listeners a reload could not open, by address, with the bind's error: the reload's
+    // answer (restart_pending), its warning and health's h3_waits_for_restart name them (worker 0).
+    std::vector<std::pair<std::string, std::string>> h3_waiting_;
     void stop_h3();
     struct H3Endpoints;
     json::Value status() override;
@@ -320,7 +328,11 @@ private:
     void php_versions_async(std::function<void(json::Value)> done) override;
     json::Value health_with(const std::vector<control::Finding>& more);
     bool reload_now(std::string& error, std::string_view must_load = {}) override { return reload(error, must_load); }
-    std::vector<std::string> restart_pending() override { return control::restart_needed(gen_->cfg, cfg_); }
+    std::vector<std::string> restart_pending() override {
+        std::vector<std::string> keys = control::restart_needed(gen_->cfg, cfg_);
+        for (const auto& w : h3_waiting_) keys.push_back("h3 on udp " + w.first);
+        return keys;
+    }
     bool renew_certificate(std::string_view site, std::string& error, std::string& message) override;
     void reopen_logs() override { logs_.reopen_all(); }
     const Config& running() override { return gen_->cfg; }

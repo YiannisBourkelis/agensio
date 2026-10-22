@@ -3314,6 +3314,15 @@ never changes worker (design 6.1); where the kernel refuses the program the 4-tu
 routes each connection to one worker instead. Without `reuse_port` one socket on worker 0
 serves the listener.
 
+**Turning it on by a reload.** A reload opens the UDP sockets of a listener that gains `"h3"` before
+it switches, as it binds a new TCP address. On a privileged port (443) a server that started as root
+and dropped to `server.user` can no longer bind them: the reload then applies everything else,
+serves that listener over HTTP/2 and HTTP/1 without `alt-svc` (so no browser is sent to a port
+nothing answers), and says that HTTP/3 there waits for a restart, in its answer (`restart_needed`:
+`h3 on udp 0.0.0.0:443`), in the error log and as health's `h3_waits_for_restart`. A restart binds
+it as root. Before 0.1.0-alpha.111 that reload ended the server (the socket was opened after the
+switch, and the failed bind was thrown out of worker 0), and systemd restarted it.
+
 The sockets ask the kernel for 4 MB receive and send buffers. Linux grants at most
 `net.core.rmem_max` and `net.core.wmem_max`, 208 KB on an untuned host, and the startup
 line (and the error log) then says so: `receive buffer 208 KB (raise net.core.rmem_max

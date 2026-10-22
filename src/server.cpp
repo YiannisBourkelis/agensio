@@ -700,20 +700,22 @@ static quic::Limits h3_limits(const Config& cfg) {
 // (design-http3 6.1). Otherwise one endpoint on worker 0 serves the listener.
 void Server::open_h3() {
     h3_ = std::make_unique<H3Endpoints>();
+    std::string error;
     for (const Listener& l : gen_->listeners)
-        if (l.tls && l.h3) open_h3_listener(l, gen_->cfg, false);
+        if (l.tls && l.h3 && !open_h3_listener(l, gen_->cfg, false, error)) throw std::runtime_error(error);  // a start fails whole
 }
 
 // The endpoints of one h3 listener: one per worker with reuse_port (the group's members in
 // worker order, steered by connection id), else one on worker 0. `start` posts their
 // reads at once (a listener a reload added); at startup start_h3 does it for all.
-void Server::open_h3_listener(const Listener& l, const Config& cfg, bool start) {
+bool Server::open_h3_listener(const Listener& l, const Config& cfg, bool start, std::string& error) {
     const std::size_t count = reuse_port_ ? workers_.size() : 1;
     bool steering = true, gro = true;
     [[maybe_unused]] int rcvbuf = 0;  // the smallest receive buffer the kernel granted (the note is Linux-only)
+    using Endpoint = quic::Endpoint<h3::Http3Connection>;
+    std::vector<std::unique_ptr<Endpoint>> opened;  // kept only once every worker's socket is bound
     for (std::size_t i = 0; i < count; ++i) {
         Worker& w = *workers_[i];
-        using Endpoint = quic::Endpoint<h3::Http3Connection>;
         auto ep = std::make_unique<Endpoint>(
             w.ctx, static_cast<std::uint8_t>(w.id),
             [this, &w, address = l.address](Endpoint& e, const quic::PacketHeader& h, const quic::AcceptInfo& info,
@@ -728,15 +730,21 @@ void Server::open_h3_listener(const Listener& l, const Config& cfg, bool start) 
             for (const quic::Cid& cid : c->quic().our_cids()) e.add_cid(cid, c);
             return c;
         });
-        std::string error;
-        if (!ep->open(asio::ip::udp::endpoint(l.endpoint.address(), l.port), error, reuse_port_))
-            throw std::runtime_error("cannot bind udp " + l.address + " for h3: " + error);
+        std::string why;
+        if (!ep->open(asio::ip::udp::endpoint(l.endpoint.address(), l.port), why, reuse_port_)) {
+            error = "cannot bind udp " + l.address + " for h3: " + why;
+            return false;  // the sockets opened so far close with `opened`; none was started
+        }
         steering = steering && (!reuse_port_ || ep->steering());
         gro = gro && ep->gro();
         if (rcvbuf == 0 || ep->receive_buffer() < rcvbuf) rcvbuf = ep->receive_buffer();
         ep->retry = retry_mode(cfg);
-        if (start) asio::post(w.ctx, [e = ep.get()] { e->start(); });
-        h3_->list.push_back(std::move(ep));
+        opened.push_back(std::move(ep));
+    }
+    for (std::size_t i = 0; i < opened.size(); ++i) {
+        Worker& w = *workers_[i];
+        if (start) asio::post(w.ctx, [e = opened[i].get()] { e->start(); });
+        h3_->list.push_back(std::move(opened[i]));
         h3_->owners.push_back(&w);
         h3_->addresses.push_back(l.address);
     }
@@ -755,6 +763,32 @@ void Server::open_h3_listener(const Listener& l, const Config& cfg, bool start) 
 #endif
     error_log_.info("h3 (QUIC) on udp " + l.address + note);
     if (!start) std::cout << "  h3 on udp " << l.address << note << "\n";
+    return true;
+}
+
+void Server::open_gained_h3(Generation& gen) {
+    if (!h3_) h3_ = std::make_unique<H3Endpoints>();
+    std::vector<std::pair<std::string, std::string>> waiting;
+    std::size_t opened = 0;
+    for (Listener& l : gen.listeners) {
+        if (!l.tls || !l.h3) continue;
+        bool served = false;
+        for (const std::string& a : h3_->addresses) served = served || a == l.address;
+        if (served) continue;
+        std::string error;
+        if (open_h3_listener(l, gen.cfg, true, error)) {
+            ++opened;
+            continue;
+        }
+        // Served without h3 until a restart, which binds as root: no socket, so no alt-svc either,
+        // which would send browsers to a port nothing answers.
+        l.h3 = false;
+        l.alt_svc.clear();
+        l.alt_svc_line.clear();
+        waiting.emplace_back(l.address, error);
+    }
+    h3_waiting_ = std::move(waiting);
+    if (opened) error_log_.info("h3 endpoints opened by the reload: " + std::to_string(opened));
 }
 
 // A reload (design 6.9): an h3 listener that left the configuration, or lost h3, tells
@@ -763,7 +797,7 @@ void Server::open_h3_listener(const Listener& l, const Config& cfg, bool start) 
 // sockets and their connections, which take the new generation at their next request.
 void Server::sync_h3(const std::shared_ptr<const Generation>& gen) {
     if (!h3_) h3_ = std::make_unique<H3Endpoints>();
-    std::size_t closed = 0, opened = 0;
+    std::size_t closed = 0;
     for (std::size_t i = 0; i < h3_->list.size();) {
         const Listener* l = gen->find(h3_->addresses[i]);
         if (l && l->tls && l->h3) {
@@ -781,17 +815,7 @@ void Server::sync_h3(const std::shared_ptr<const Generation>& gen) {
         h3_->addresses.erase(h3_->addresses.begin() + static_cast<std::ptrdiff_t>(i));
         ++closed;
     }
-    for (const Listener& l : gen->listeners) {
-        if (!l.tls || !l.h3) continue;
-        bool served = false;
-        for (const std::string& a : h3_->addresses) served = served || a == l.address;
-        if (served) continue;
-        open_h3_listener(l, gen->cfg, true);
-        ++opened;
-    }
-    if (closed || opened)
-        error_log_.info("h3 endpoints after the reload: " + std::to_string(opened) + " opened, " +
-                        std::to_string(closed) + " closed");
+    if (closed) error_log_.info("h3 endpoints closed by the reload: " + std::to_string(closed));
 }
 
 void Server::start_h3() {
@@ -821,7 +845,8 @@ void Server::stop_h3() {
 #else
 struct Server::H3Endpoints {};
 void Server::open_h3() {}
-void Server::open_h3_listener(const Listener&, const Config&, bool) {}
+bool Server::open_h3_listener(const Listener&, const Config&, bool, std::string&) { return true; }
+void Server::open_gained_h3(Generation&) {}
 void Server::sync_h3(const std::shared_ptr<const Generation>&) {}
 void Server::start_h3() {}
 void Server::reload_h3(const Config&) {}
@@ -1012,6 +1037,12 @@ json::Value Server::health_with(const std::vector<control::Finding>& more) {
     const auto noticed = control::notice_findings(cfg, site_notices().snapshot(), std::time(nullptr));  // what requests saw
     extra.insert(extra.end(), noticed.begin(), noticed.end());
     if (auto f = control::http3_finding(control::build_facts(), cfg)) extra.push_back(std::move(*f));  // HTTP/3 the system could serve
+    for (const auto& [address, why] : h3_waiting_)  // h3 a reload could not open (the alpha.110 report)
+        extra.push_back({"warn", "h3_waits_for_restart", "",
+                         "HTTP/3 on udp " + address + " waits for a restart: " + why +
+                             (::geteuid() != 0 ? " (a privileged port, and the server no longer runs as root)" : "") +
+                             "; the listener serves HTTP/2 and HTTP/1 meanwhile and advertises no HTTP/3",
+                         "restart the service as root (systemctl restart agensio): a start binds the port before it drops root"});
     const control::TlsFacts tls = tls_facts();
     return control::health(cfg, cfg_, as_root, std::time(nullptr), extra, &tls);
 }
@@ -1490,11 +1521,25 @@ void Server::run() {
     reopen.async_wait(on_reopen);
 #endif
 
+    // A worker whose loop an exception leaves ends the server, as before, but says so in the error log
+    // first (the alpha.110 report: the reload's throw aborted it with nothing there, only the journal's
+    // "terminate called"). The request path throws nothing; this is the net for a bug.
+    auto run_worker = [this](Worker* w) {
+        try {
+            w->ctx.run();
+        } catch (const std::exception& e) {
+            error_log_.error("fatal: worker " + std::to_string(w->id) + " stopped by an exception: " + e.what() + "; agensio exits");
+            std::abort();
+        } catch (...) {
+            error_log_.error("fatal: worker " + std::to_string(w->id) + " stopped by an unknown exception; agensio exits");
+            std::abort();
+        }
+    };
     for (std::size_t i = 1; i < workers_.size(); ++i) {
         Worker* w = workers_[i].get();
-        threads_.emplace_back([w] { w->ctx.run(); });
+        threads_.emplace_back([run_worker, w] { run_worker(w); });
     }
-    workers_[0]->ctx.run();
+    run_worker(workers_[0].get());
     for (auto& t : threads_)
         t.join();
     threads_.clear();
@@ -1908,6 +1953,9 @@ bool Server::switch_to(const std::shared_ptr<Generation>& gen, std::string& erro
                 break;
             }
     }
+    // The h3 sockets a listener gains, bound before the switch like the TCP ones; one that cannot be
+    // bound keeps that listener's h3 off in this generation instead of refusing or ending anything.
+    open_gained_h3(*gen);
     // Switch: every worker takes the generation on its own loop; connections pick it up at
     // their next request, exchanges in flight keep the old one alive until they finish.
     const auto previous = gen_;
@@ -2134,6 +2182,10 @@ bool Server::commit_reload(const std::shared_ptr<Generation>& gen, std::string& 
         return false;
     }
     record_served();
+    for (const auto& [address, why] : h3_waiting_)
+        error_log_.warn("h3 on udp " + address + " is not served after this reload: " + why +
+                        (::geteuid() != 0 ? " (a privileged port, and the server no longer runs as root)" : "") +
+                        "; it opens at a restart (systemctl restart agensio). The listener serves HTTP/2 and HTTP/1 meanwhile and advertises no HTTP/3");
     error_log_.warn("reloaded " + cfg_.config_path.string() + ": " + std::to_string(gen->cfg.sites.size()) +
                     " site(s), " + std::to_string(gen->listeners.size()) + " listener(s), " +
                     std::to_string(bound) + " bound, " + std::to_string(closed) + " closed");
